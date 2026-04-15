@@ -315,20 +315,7 @@ class RandomRDMAFailoverTest(TestLvolHACluster):
         node_rpc_port = node_details[0]["rpc_port"]
 
         sleep_n_sec(120)
-        for node in self.sn_nodes_with_sec:
-            self.ssh_obj.dump_lvstore(node_ip=self.mgmt_nodes[0],
-                                      storage_node_id=node)
-        
-        for node in self.sn_nodes_with_sec:
-            cur_node_details = self.sbcli_utils.get_storage_node_details(node)
-            cur_node_ip = cur_node_details[0]["mgmt_ip"]
-            self.ssh_obj.fetch_distrib_logs(
-                storage_node_ip=cur_node_ip,
-                storage_node_id=node,
-                logs_path=self.docker_logs_path,
-                validate_async=True,
-                error_sink=self.dump_validation_errors
-            )
+        self.collect_outage_diagnostics(f"pre_outage_node_{self.current_outage_node}")
         self.outage_start_time = int(datetime.now().timestamp())
         self.logger.info(f"Performing {outage_type} on node {self.current_outage_node}.")
         self.log_outage_event(self.current_outage_node, outage_type, "Outage started")
@@ -603,9 +590,8 @@ class RandomRDMAFailoverTest(TestLvolHACluster):
             #     self.ssh_obj.exec_command(node=self.fio_node, command=connect)
             # sleep_n_sec(30)
 
-        for node in self.sn_nodes_with_sec:
-            self.ssh_obj.dump_lvstore(node_ip=self.mgmt_nodes[0],
-                                      storage_node_id=node)
+        self.collect_outage_diagnostics(f"post_recovery_node_{self.current_outage_node}")
+        self._log_block_sizes("post_recovery")
 
 
     def create_snapshots_and_clones(self):
@@ -787,7 +773,7 @@ class RandomRDMAFailoverTest(TestLvolHACluster):
             sleep_n_sec(10)
             self.sbcli_utils.resize_lvol(lvol_id=self.clone_mount_details[clone_name]["ID"],
                                          new_size=f"{self.int_lvol_size}G")
-            
+        self._log_block_sizes("after_resize")
 
     def delete_random_lvols(self, count):
         """Delete random lvols during an outage."""
@@ -901,16 +887,7 @@ class RandomRDMAFailoverTest(TestLvolHACluster):
         self.logger.info("Performing failover during outage.")
 
         # Randomly select a node and outage type for failover
-        for node in self.sn_nodes_with_sec:
-            cur_node_details = self.sbcli_utils.get_storage_node_details(node)
-            cur_node_ip = cur_node_details[0]["mgmt_ip"]
-            self.ssh_obj.fetch_distrib_logs(
-                storage_node_ip=cur_node_ip,
-                storage_node_id=node,
-                logs_path=self.docker_logs_path,
-                validate_async=True,
-                error_sink=self.dump_validation_errors
-            )
+        self.collect_outage_diagnostics(f"pre_outage_node_{self.current_outage_node}")
         outage_type = self.perform_random_outage()
         
         if not self.sbcli_utils.is_secondary_node(self.current_outage_node):
@@ -926,16 +903,7 @@ class RandomRDMAFailoverTest(TestLvolHACluster):
             else:
                 self.runner_k8s_log.restart_logging()
             self.logger.info("Creating 5 new lvols, clones, and snapshots.")
-            for node in self.sn_nodes_with_sec:
-                cur_node_details = self.sbcli_utils.get_storage_node_details(node)
-                cur_node_ip = cur_node_details[0]["mgmt_ip"]
-                self.ssh_obj.fetch_distrib_logs(
-                    storage_node_ip=cur_node_ip,
-                    storage_node_id=node,
-                    logs_path=self.docker_logs_path,
-                    validate_async=True,
-                    error_sink=self.dump_validation_errors
-                )
+            self.collect_outage_diagnostics(f"pre_outage_node_{self.current_outage_node}")
             self.create_lvols_with_fio(3)
             if not self.k8s_test:
                 for node in self.storage_nodes:
@@ -965,28 +933,10 @@ class RandomRDMAFailoverTest(TestLvolHACluster):
             sleep_n_sec(280)
 
         self.logger.info("Failover during outage completed.")
-        for node in self.sn_nodes_with_sec:
-            cur_node_details = self.sbcli_utils.get_storage_node_details(node)
-            cur_node_ip = cur_node_details[0]["mgmt_ip"]
-            self.ssh_obj.fetch_distrib_logs(
-                storage_node_ip=cur_node_ip,
-                storage_node_id=node,
-                logs_path=self.docker_logs_path,
-                validate_async=True,
-                error_sink=self.dump_validation_errors
-            )
+        self.collect_outage_diagnostics(f"pre_outage_node_{self.current_outage_node}")
         self.restart_nodes_after_failover(outage_type)
-        
-        for node in self.sn_nodes_with_sec:
-            cur_node_details = self.sbcli_utils.get_storage_node_details(node)
-            cur_node_ip = cur_node_details[0]["mgmt_ip"]
-            self.ssh_obj.fetch_distrib_logs(
-                storage_node_ip=cur_node_ip,
-                storage_node_id=node,
-                logs_path=self.docker_logs_path,
-                validate_async=True,
-                error_sink=self.dump_validation_errors
-            )
+
+        self.collect_outage_diagnostics(f"post_recovery_node_{self.current_outage_node}")
 
         return outage_type
     
@@ -1164,16 +1114,7 @@ class RandomRDMAFailoverTest(TestLvolHACluster):
                 else:
                     self.runner_k8s_log.restart_logging()
 
-                for node in self.sn_nodes_with_sec:
-                    cur_node_details = self.sbcli_utils.get_storage_node_details(node)
-                    cur_node_ip = cur_node_details[0]["mgmt_ip"]
-                    self.ssh_obj.fetch_distrib_logs(
-                        storage_node_ip=cur_node_ip,
-                        storage_node_id=node,
-                        logs_path=self.docker_logs_path,
-                        validate_async=True,
-                        error_sink=self.dump_validation_errors
-                    )
+                self.collect_outage_diagnostics(f"pre_outage_node_{self.current_outage_node}")
                 self.create_lvols_with_fio(5)
                 if not self.k8s_test:
                     for node in self.storage_nodes:
@@ -1200,27 +1141,9 @@ class RandomRDMAFailoverTest(TestLvolHACluster):
                 self.logger.info(f"Current outage node: {self.current_outage_node} is secondary node. Skipping delete and create")
             if outage_type != "partial_nw" or outage_type != "partial_nw_single_port":
                 sleep_n_sec(280)
-            for node in self.sn_nodes_with_sec:
-                cur_node_details = self.sbcli_utils.get_storage_node_details(node)
-                cur_node_ip = cur_node_details[0]["mgmt_ip"]
-                self.ssh_obj.fetch_distrib_logs(
-                    storage_node_ip=cur_node_ip,
-                    storage_node_id=node,
-                    logs_path=self.docker_logs_path,
-                    validate_async=True,
-                    error_sink=self.dump_validation_errors
-                )
+            self.collect_outage_diagnostics(f"pre_outage_node_{self.current_outage_node}")
             self.restart_nodes_after_failover(outage_type)
-            for node in self.sn_nodes_with_sec:
-                cur_node_details = self.sbcli_utils.get_storage_node_details(node)
-                cur_node_ip = cur_node_details[0]["mgmt_ip"]
-                self.ssh_obj.fetch_distrib_logs(
-                    storage_node_ip=cur_node_ip,
-                    storage_node_id=node,
-                    logs_path=self.docker_logs_path,
-                    validate_async=True,
-                    error_sink=self.dump_validation_errors
-                )
+            self.collect_outage_diagnostics(f"post_recovery_node_{self.current_outage_node}")
             self.logger.info("Waiting for fallback.")
             if outage_type != "partial_nw" or outage_type != "partial_nw_single_port":
                 sleep_n_sec(100)
@@ -1294,14 +1217,5 @@ class RandomRDMAFailoverTest(TestLvolHACluster):
                 self.ssh_obj.delete_files(clone_details["Client"], [f"{self.log_path}/{clone_name}_fio_iolog*"])
 
             self.logger.info(f"Failover iteration {iteration} complete.")
-            for node in self.sn_nodes_with_sec:
-                cur_node_details = self.sbcli_utils.get_storage_node_details(node)
-                cur_node_ip = cur_node_details[0]["mgmt_ip"]
-                self.ssh_obj.fetch_distrib_logs(
-                    storage_node_ip=cur_node_ip,
-                    storage_node_id=node,
-                    logs_path=self.docker_logs_path,
-                    validate_async=True,
-                    error_sink=self.dump_validation_errors
-                )
+            self.collect_outage_diagnostics("validation_checkpoint")
             iteration += 1

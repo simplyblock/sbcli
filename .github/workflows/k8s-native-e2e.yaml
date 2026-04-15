@@ -1,0 +1,457 @@
+name: K8s Native E2E Tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      simplyblock_csi_branch:
+        description: 'Branch for simplyblock-csi'
+        required: true
+        default: 'add_sbcli_operator_helm'
+      simplyblock_image:
+        description: 'Simplyblock image tag'
+        required: true
+        default: 'main'
+      spdk_image:
+        description: 'SPDK container image'
+        required: true
+        default: 'simplyblock/spdk:main-latest'
+      worker_nodes:
+        description: 'Comma-separated K8s worker node names'
+        required: true
+      mnodes:
+        description: 'Management node IPs (space-separated)'
+        required: true
+      mgmt_ifc:
+        description: 'Management network interface'
+        required: false
+        default: 'ens18'
+      data_nics:
+        description: 'Data network interface'
+        required: false
+        default: 'ens16'
+      testname:
+        description: 'Test to run'
+        required: false
+        default: 'K8sNativeFailoverTest'
+      send_slack_notification:
+        description: 'Send Slack notification?'
+        required: false
+        default: true
+        type: boolean
+      ndcs:
+        description: 'Number of data chunks'
+        required: false
+        default: 2
+      npcs:
+        description: 'Number of parity chunks'
+        required: false
+        default: 1
+      bs:
+        description: 'Block size'
+        required: false
+        default: 4096
+      chunk_bs:
+        description: 'Chunk block size'
+        required: false
+        default: 4096
+
+jobs:
+  k8s-native-e2e:
+    runs-on: self-hosted
+    concurrency:
+      group: ${{ github.workflow }}
+      cancel-in-progress: false
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - uses: actions/checkout@master
+        name: Checkout simplyblock-csi
+        with:
+          repository: simplyblock-io/simplyblock-csi
+          ref: refs/heads/${{ github.event.inputs.simplyblock_csi_branch || 'add_sbcli_operator_helm' }}
+          path: 'simplyblock-csi'
+
+      - name: Install Helm v3.15.4
+        run: |
+          if ! helm version 2>/dev/null | grep -q 'v3.15'; then
+            curl -L https://get.helm.sh/helm-v3.15.4-linux-amd64.tar.gz -o helm-v3.15.4-linux-amd64.tar.gz
+            tar -zxvf helm-v3.15.4-linux-amd64.tar.gz
+            sudo mv linux-amd64/helm /usr/local/bin/helm
+            rm -rf linux-amd64 helm-v3.15.4-linux-amd64.tar.gz
+          fi
+          helm version
+
+      - name: Install kubectl v1.31.0
+        run: |
+          if ! kubectl version --client 2>/dev/null | grep -q 'v1.31'; then
+            curl -LO "https://dl.k8s.io/release/v1.31.0/bin/linux/amd64/kubectl"
+            chmod +x kubectl
+            sudo mv kubectl /usr/local/bin/
+          fi
+          kubectl version --client
+
+      - name: Set parameters
+        run: |
+          echo "NDCS=${{ github.event.inputs.ndcs || 2 }}" >> $GITHUB_ENV
+          echo "NPCS=${{ github.event.inputs.npcs || 1 }}" >> $GITHUB_ENV
+          echo "BS=${{ github.event.inputs.bs || 4096 }}" >> $GITHUB_ENV
+          echo "CHUNK_BS=${{ github.event.inputs.chunk_bs || 4096 }}" >> $GITHUB_ENV
+
+      - name: Verify kubectl connectivity
+        run: kubectl get nodes
+
+      # ── Cleanup old deployment ──────────────────────────────────────────────
+
+      - name: Cleanup old CSI deployment
+        run: |
+          set +e
+          NAMESPACE=simplyblock
+
+          echo "=== Phase 1: Helm uninstall ==="
+          helm uninstall spdk-csi -n $NAMESPACE --wait 2>/dev/null || true
+          sleep 10
+
+          echo "=== Phase 2: Force delete namespace resources ==="
+          for RTYPE in pod pvc pv jobs service ds; do
+            kubectl -n $NAMESPACE delete $RTYPE --all --force --grace-period=0 2>/dev/null || true
+          done
+
+          echo "=== Phase 3: CR cleanup — remove finalizers and delete ==="
+          RESOURCES=(
+            "simplyblockpool.simplyblock.simplyblock.io simplyblock-pool"
+            "simplyblockpool.simplyblock.simplyblock.io simplyblock-pool2"
+            "simplyblocklvol.simplyblock.simplyblock.io simplyblock-lvol"
+            "simplyblocktask.simplyblock.simplyblock.io simplyblock-task"
+            "simplyblockdevices.simplyblock.simplyblock.io simplyblock-devices"
+            "simplyblockdevices.simplyblock.simplyblock.io simplyblock-device-action"
+            "simplyblockstoragenodes.simplyblock.simplyblock.io simplyblock-node"
+            "simplyblockstoragenodes.simplyblock.simplyblock.io simplyblock-node2"
+            "simplyblockstoragenodes.simplyblock.simplyblock.io simplyblock-node-action"
+            "simplyblockstorageclusters.simplyblock.simplyblock.io simplyblock-cluster"
+            "simplyblockstorageclusters.simplyblock.simplyblock.io simplyblock-cluster2"
+            "simplyblockstorageclusters.simplyblock.simplyblock.io simplyblock-cluster-activate"
+            "simplyblocksnapshotreplications.simplyblock.simplyblock.io simplyblock-snap-replication"
+            "simplyblocksnapshotreplications.simplyblock.simplyblock.io simplyblock-snap-replication-failback"
+          )
+
+          cr_cleanup() {
+            for item in "${RESOURCES[@]}"; do
+              KIND=$(echo "$item" | awk '{print $1}')
+              NAME=$(echo "$item" | awk '{print $2}')
+              kubectl -n $NAMESPACE patch "$KIND" "$NAME" \
+                --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
+              kubectl -n $NAMESPACE delete "$KIND" "$NAME" \
+                --ignore-not-found --wait=false 2>/dev/null || true
+            done
+          }
+
+          cr_cleanup
+
+          echo "=== Phase 4: Wait for namespace to be clean ==="
+          for i in $(seq 1 15); do
+            POD_COUNT=$(kubectl -n $NAMESPACE get pods --no-headers 2>/dev/null | wc -l)
+            if [ "$POD_COUNT" -eq 0 ] || [ -z "$POD_COUNT" ]; then
+              echo "Namespace $NAMESPACE is clean"
+              break
+            fi
+            echo "Still $POD_COUNT pods remaining, retrying cleanup ($i/15)..."
+            for RTYPE in pod pvc pv jobs service ds; do
+              kubectl -n $NAMESPACE delete $RTYPE --all --force --grace-period=0 2>/dev/null || true
+            done
+            cr_cleanup
+            sleep 15
+          done
+
+          echo "=== Cleanup complete ==="
+
+      # ── Label nodes ─────────────────────────────────────────────────────────
+
+      - name: Label worker nodes
+        run: |
+          IFS=',' read -ra NODES <<< "${{ github.event.inputs.worker_nodes }}"
+          for NODE in "${NODES[@]}"; do
+            echo "Labeling node $NODE with simplyblock.io/role=mgmt-plane"
+            kubectl label node "$NODE" simplyblock.io/role=mgmt-plane --overwrite
+          done
+
+      # ── Deploy CSI stack ────────────────────────────────────────────────────
+
+      - name: Install Helm Chart for simplyblock-csi
+        run: |
+          cd $GITHUB_WORKSPACE/simplyblock-csi/charts/spdk-csi/latest/spdk-csi/
+
+          # Build worker nodes JSON array for --set-json
+          IFS=',' read -ra NODES <<< "${{ github.event.inputs.worker_nodes }}"
+          WORKER_JSON=$(printf '%s\n' "${NODES[@]}" | jq -R . | jq -s .)
+          echo "Worker nodes JSON: $WORKER_JSON"
+
+          # Build data nics JSON array
+          DATA_NICS_JSON='["${{ github.event.inputs.data_nics }}"]'
+
+          helm upgrade --install spdk-csi ./ \
+            --namespace simplyblock \
+            --create-namespace \
+            --set controlplane.enabled=true \
+            --set operator.enabled=true \
+            --set autoClusterActivate=true \
+            --set controlplane.csiHostpathDriver.enabled=true \
+            --set controlplane.storageclass.name=local-hostpath \
+            --set storagenode.create=true \
+            --set operator.cluster.mgmtIfname="${{ github.event.inputs.mgmt_ifc }}" \
+            --set operator.cluster.enableNodeAffinity=true \
+            --set operator.cluster.fabric=tcp \
+            --set operator.cluster.isSingleNode=false \
+            --set operator.cluster.strictNodeAntiAffinity=false \
+            --set operator.cluster.warningThreshold.capacity=95 \
+            --set operator.cluster.criticalThreshold.capacity=97 \
+            --set operator.storageNodes.mgmtIfname="${{ github.event.inputs.mgmt_ifc }}" \
+            --set operator.storageNodes.skipKubeletConfiguration=true \
+            --set operator.storageNodes.enableCpuTopology=true \
+            --set operator.storageNodes.maxLogicalVolumeCount=30 \
+            --set operator.storageNodes.spdkImage="${{ github.event.inputs.spdk_image }}" \
+            --set operator.storageNodes.spdkDebug=false \
+            --set operator.storageNodes.coreIsolation=false \
+            --set image.simplyblock.tag="${{ github.event.inputs.simplyblock_image }}" \
+            --set-json "operator.storageNodes.workerNodes=${WORKER_JSON}" \
+            --set-json "operator.storageNodes.dataIfname=${DATA_NICS_JSON}" \
+            --set ingress.enabled=true \
+            --set 'ingress.controller.nodeSelector.simplyblock\.io/role=mgmt-plane' \
+            --set logicalVolume.distr_ndcs="${NDCS}" \
+            --set logicalVolume.distr_npcs="${NPCS}"
+        env:
+          NDCS: ${{ env.NDCS }}
+          NPCS: ${{ env.NPCS }}
+
+      # ── Wait for cluster readiness ──────────────────────────────────────────
+
+      - name: Wait for cluster to become active
+        timeout-minutes: 25
+        id: cluster_status
+        run: |
+          NAMESPACE=simplyblock
+          ADMIN_POD=""
+
+          echo "=== Waiting for admin pod to be ready ==="
+          for i in $(seq 1 60); do
+            ADMIN_POD=$(kubectl -n $NAMESPACE get pods \
+              -l app=simplyblock-admin-control \
+              -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) || true
+
+            if [ -n "$ADMIN_POD" ]; then
+              PHASE=$(kubectl -n $NAMESPACE get pod "$ADMIN_POD" \
+                -o jsonpath='{.status.phase}' 2>/dev/null) || true
+              if [ "$PHASE" = "Running" ]; then
+                echo "Admin pod $ADMIN_POD is Running"
+                break
+              fi
+              echo "Admin pod $ADMIN_POD phase=$PHASE ($i/60)"
+            else
+              echo "Admin pod not found yet ($i/60)"
+            fi
+            sleep 10
+          done
+
+          if [ -z "$ADMIN_POD" ]; then
+            echo "ERROR: Admin pod never appeared"
+            kubectl -n $NAMESPACE get pods
+            exit 1
+          fi
+
+          echo "=== Polling cluster status ==="
+          for i in $(seq 1 90); do
+            OUTPUT=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
+              sbctl cluster list 2>/dev/null) || true
+
+            if echo "$OUTPUT" | grep -qi "active"; then
+              echo "Cluster is active!"
+              echo "$OUTPUT"
+
+              # Extract cluster ID and secret
+              # sbctl cluster list outputs a table; parse the data row
+              CLUSTER_ID=$(echo "$OUTPUT" | awk 'NR==4{print $2}')
+              CLUSTER_SECRET=$(echo "$OUTPUT" | awk 'NR==4{print $NF}')
+
+              # Fallback: try JSON format if table parsing fails
+              if [ -z "$CLUSTER_ID" ] || [ "$CLUSTER_ID" = "+" ]; then
+                JSON_OUT=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
+                  sbctl cluster list --json 2>/dev/null) || true
+                CLUSTER_ID=$(echo "$JSON_OUT" | jq -r '.[0].id // .[0].uuid // empty')
+                CLUSTER_SECRET=$(echo "$JSON_OUT" | jq -r '.[0].secret // empty')
+              fi
+
+              echo "CLUSTER_ID=${CLUSTER_ID}" >> $GITHUB_ENV
+              echo "CLUSTER_SECRET=${CLUSTER_SECRET}" >> $GITHUB_ENV
+              exit 0
+            fi
+
+            echo "Cluster not active yet ($i/90)..."
+            sleep 10
+          done
+
+          echo "ERROR: Cluster did not become active within timeout"
+          kubectl -n $NAMESPACE get pods
+          kubectl -n $NAMESPACE exec "$ADMIN_POD" -- sbctl cluster list 2>/dev/null || true
+          exit 1
+
+      # ── Run tests ───────────────────────────────────────────────────────────
+
+      - name: Record Test Start Time
+        run: echo "TEST_START_TIME=$(date +%s)" >> $GITHUB_ENV
+
+      - name: Setup and Run Tests
+        timeout-minutes: 240
+        run: |
+          cd $GITHUB_WORKSPACE/e2e
+          python3 -m venv myenv
+          source myenv/bin/activate
+          python3 -m pip install -r requirements.txt
+
+          export CLUSTER_ID="${{ env.CLUSTER_ID }}"
+          export CLUSTER_SECRET="${{ env.CLUSTER_SECRET }}"
+          export K8S_LOCAL_KUBECTL=1
+          export MNODES="${{ github.event.inputs.mnodes }}"
+          export SBCLI_CMD=sbctl
+
+          TESTNAME=""
+          if [ -n "${{ github.event.inputs.testname }}" ]; then
+            TESTNAME="--testname ${{ github.event.inputs.testname }}"
+          fi
+
+          python3 e2e.py $TESTNAME \
+            --ndcs $NDCS --npcs $NPCS --bs $BS --chunk_bs $CHUNK_BS \
+            --run_k8s True
+        env:
+          NDCS: ${{ env.NDCS }}
+          NPCS: ${{ env.NPCS }}
+          BS: ${{ env.BS }}
+          CHUNK_BS: ${{ env.CHUNK_BS }}
+
+      # ── Post-test: timing, logs, notifications ──────────────────────────────
+
+      - name: Record Test End Time
+        if: always()
+        run: echo "TEST_END_TIME=$(date +%s)" >> $GITHUB_ENV
+
+      - name: Calculate Total Time Taken
+        if: always()
+        run: |
+          TEST_TIME=$(($TEST_END_TIME - $TEST_START_TIME))
+          TEST_TIME_HOURS=$(($TEST_TIME / 3600))
+          TEST_TIME_MINS=$((($TEST_TIME % 3600) / 60))
+          TEST_TIME_SECS=$(($TEST_TIME % 60))
+          echo "Test runtime: ${TEST_TIME_HOURS}h ${TEST_TIME_MINS}m ${TEST_TIME_SECS}s"
+          echo "TEST_TIME_HOURS=$TEST_TIME_HOURS" >> $GITHUB_ENV
+          echo "TEST_TIME_MINS=$TEST_TIME_MINS" >> $GITHUB_ENV
+          echo "TEST_TIME_SECS=$TEST_TIME_SECS" >> $GITHUB_ENV
+
+      - name: Upload automation logs to S3
+        if: always()
+        run: |
+          cd $GITHUB_WORKSPACE/e2e/logs
+          if [ -f upload_logs.sh ]; then
+            ./upload_logs.sh
+          fi
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          S3_BUCKET_NAME: "simplyblock-e2e-test-logs"
+          RUN_ID: ${{ github.run_id }}
+
+      - name: Parse test results
+        if: always() && env.send_slack_notification == 'true'
+        id: parse_results
+        run: |
+          cd $GITHUB_WORKSPACE/e2e/logs
+          echo "Looking for the latest non-empty log file..."
+          COUNTER=0
+          MAX_ATTEMPTS=10
+          while [ $COUNTER -lt $MAX_ATTEMPTS ]; do
+            LATEST_LOG=$(ls -t *.log 2>/dev/null | head -n 1)
+            if [ -n "$LATEST_LOG" ] && [ -s "$LATEST_LOG" ]; then
+              echo "Found non-empty log file: $LATEST_LOG"
+              break
+            fi
+            echo "Attempt $((COUNTER + 1)): No non-empty log file found. Retrying..."
+            COUNTER=$((COUNTER + 1))
+            sleep 1
+          done
+          if [ -z "$LATEST_LOG" ] || [ ! -s "$LATEST_LOG" ]; then
+            echo "No non-empty log file found after $MAX_ATTEMPTS attempts"
+            exit 0
+          fi
+
+          TOTAL_TESTS=$(grep -i "Number of Total Cases" "$LATEST_LOG" | awk '{print $NF}')
+          PASSED_TESTS=$(grep -i "Number of Passed Cases" "$LATEST_LOG" | awk '{print $NF}')
+          FAILED_TESTS=$(grep -i "Number of Failed Cases" "$LATEST_LOG" | awk '{print $NF}')
+          PASSED_CASES=$(grep "PASSED CASE" "$LATEST_LOG" | awk -F 'INFO - | FAILED CASE' '{print $2}')
+          FAILED_CASES=$(grep "FAILED CASE" "$LATEST_LOG" | awk -F 'INFO - | FAILED CASE' '{print $2}')
+
+          PASSED_CASES_BULLETS=$(echo "$PASSED_CASES" | awk '{printf "    \u2022 %s\n", $0}')
+          FAILED_CASES_BULLETS=$(echo "$FAILED_CASES" | awk '{printf "    \u2022 %s\n", $0}')
+
+          echo "PASSED_TESTS=${PASSED_TESTS}" >> $GITHUB_ENV
+          echo "FAILED_TESTS=${FAILED_TESTS}" >> $GITHUB_ENV
+          echo "TOTAL_TESTS=${TOTAL_TESTS}" >> $GITHUB_ENV
+          echo "PASSED_CASES<<EOF" >> $GITHUB_ENV
+          echo "${PASSED_CASES}" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+          echo "FAILED_CASES<<EOF" >> $GITHUB_ENV
+          echo "${FAILED_CASES}" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+          echo "PASSED_CASES_BULLETS<<EOF" >> $GITHUB_ENV
+          echo "${PASSED_CASES_BULLETS}" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+          echo "FAILED_CASES_BULLETS<<EOF" >> $GITHUB_ENV
+          echo "${FAILED_CASES_BULLETS}" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
+      - name: Set slack notification flag
+        if: always()
+        run: |
+          echo "send_slack_notification=${{ github.event.inputs.send_slack_notification || 'true' }}" >> $GITHUB_ENV
+
+      - name: Send Slack Notification
+        if: always() && env.send_slack_notification == 'true'
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          GITHUB_SERVER_URL: ${{ github.server_url }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          S3_BUCKET_NAME: "simplyblock-e2e-test-logs"
+          RUN_ID: ${{ github.run_id }}
+          PASSED_TESTS: ${{ env.PASSED_TESTS }}
+          FAILED_TESTS: ${{ env.FAILED_TESTS }}
+          TOTAL_TESTS: ${{ env.TOTAL_TESTS }}
+          PASSED_CASES_BULLETS: ${{ env.PASSED_CASES_BULLETS }}
+          FAILED_CASES_BULLETS: ${{ env.FAILED_CASES_BULLETS }}
+          BRANCH_NAME: ${{ github.ref_name }}
+          TEST_TIME_HOURS: ${{ env.TEST_TIME_HOURS }}
+          TEST_TIME_MINS: ${{ env.TEST_TIME_MINS }}
+          TEST_TIME_SECS: ${{ env.TEST_TIME_SECS }}
+          NDCS: ${{ env.NDCS }}
+          NPCS: ${{ env.NPCS }}
+          CHUNK_BS: ${{ env.CHUNK_BS }}
+          BS: ${{ env.BS }}
+        run: |
+          GITHUB_RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}"
+          AWS_LOGS_URL="https://s3.console.aws.amazon.com/s3/buckets/${S3_BUCKET_NAME}?prefix=${RUN_ID}/&region=us-east-2"
+          if [[ ${{ job.status }} == 'success' ]]; then
+            OVERALL_STATUS=":white_check_mark: Overall Status: SUCCESS"
+          else
+            OVERALL_STATUS=":x: Overall Status: FAILURE <!channel>"
+          fi
+
+          TIME_TAKEN="${TEST_TIME_HOURS}h ${TEST_TIME_MINS}m ${TEST_TIME_SECS}s"
+
+          MESSAGE="K8s Native E2E tests run triggered on branch *${BRANCH_NAME}*. \nCSI branch: *${{ github.event.inputs.simplyblock_csi_branch }}*\nTotal Time: ${TIME_TAKEN}\n\n${OVERALL_STATUS}\nGitHub Run: ${GITHUB_RUN_URL}\nAWS Logs: ${AWS_LOGS_URL}\n\n*Config*: NDCS: ${NDCS}, NPCS: ${NPCS}, BS: ${BS}, Chunk BS: ${CHUNK_BS}\n\nTotal Tests: *${TOTAL_TESTS}*, Passed: *${PASSED_TESTS}*, Failed: *${FAILED_TESTS}*\n\n-- Passed :white_check_mark:\n${PASSED_CASES_BULLETS}\n\n-- Failed :x:\n${FAILED_CASES_BULLETS}"
+
+          curl -X POST -H 'Content-type: application/json' \
+            --data "{\"text\":\"${MESSAGE}\"}" "$SLACK_WEBHOOK_URL"
+
+      - name: Cleanup build folder
+        if: always()
+        run: |
+          rm -rf ./* || true
+          rm -rf ./.??* || true
+          rm -rf $HOME/.kube
