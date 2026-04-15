@@ -1902,10 +1902,11 @@ def restart_storage_node(
         small_bufsize=0, large_bufsize=0,
         force=False, node_ip=None, reattach_volume=False, clear_data=False, new_ssd_pcie=[],
         force_lvol_recreate=False, spdk_proxy_image=None):
-    """Wrapper that guarantees the node is reset to OFFLINE if the restart
-    fails after the RESTARTING status has been set.  Without this, any
-    ``return False`` inside the inner logic leaves the node pinned in
-    STATUS_RESTARTING, which blocks all future restart attempts."""
+    """Restart a storage node without demoting failed restarts to OFFLINE.
+
+    A failed restart must stay quarantined in STATUS_RESTARTING so the
+    cluster-wide restart guard continues to block overlapping restarts.
+    """
     result = False
     try:
         result = _restart_storage_node_impl(
