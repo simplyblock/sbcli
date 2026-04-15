@@ -12,7 +12,6 @@ from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice, RemoteDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
-from simplyblock_core.snode_client import SNodeClient
 from simplyblock_core.controllers import device_controller
 
 logger = utils.get_logger(__name__)

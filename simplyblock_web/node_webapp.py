@@ -3,7 +3,7 @@
 import argparse
 import os
 
-from flask_openapi3 import OpenAPI
+from flask_openapi3 import OpenAPI, SecurityScheme
 from flask_httpauth import HTTPBasicAuth
 
 from simplyblock_core import constants
@@ -14,10 +14,11 @@ from simplyblock_web.api import internal as internal_api
 logger = core_utils.get_logger(__name__)
 
 security_schemes = {
-    "basicAuth": {
-        "type": "http",
-        "scheme": "basic"
-    }
+    "basicAuth": SecurityScheme(
+        type="http",
+        scheme="basic",
+        description="Standard HTTP Basic Authentication"
+    )
 }
 app = OpenAPI(__name__, security_schemes=security_schemes)
 app.url_map.strict_slashes = False

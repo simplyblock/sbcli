@@ -9,7 +9,6 @@ from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.prom_client import PromClient
 from simplyblock_core.rpc_client import RPCClient
-from simplyblock_core.snode_client import SNodeClient
 
 logger = logging.getLogger()
 
