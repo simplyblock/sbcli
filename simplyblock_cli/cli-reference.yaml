@@ -142,6 +142,11 @@ commands:
             required: false
             type: str
             default: "/etc/simplyblock/sn_config_file"
+          - name: "--format-4k"
+            help: "Force format nvme devices with 4K."
+            dest: format_4k
+            type: bool
+            action: store_true
 
       - name: add-node
         help: "Adds a storage node by its IP address."
