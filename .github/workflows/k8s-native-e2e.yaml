@@ -228,7 +228,9 @@ jobs:
             --set 'ingress.controller.nodeSelector.simplyblock\.io/role=mgmt-plane' \
             --set logicalVolume.distr_ndcs="${NDCS}" \
             --set logicalVolume.distr_npcs="${NPCS}" \
-            --set csiConfig.simplybk.ip="http://simplyblock-webappapi.simplyblock:5000"
+            --set csiConfig.simplybk.ip="http://simplyblock-webappapi.simplyblock:5000" \
+            --set prometheus.server.persistentVolume.storageClass=local-hostpath \
+            --set controlplane.observability.enabled=true
         env:
           NDCS: ${{ env.NDCS }}
           NPCS: ${{ env.NPCS }}
@@ -267,6 +269,25 @@ jobs:
             kubectl -n $NAMESPACE get pods
             exit 1
           fi
+
+          echo "=== Waiting for snode-spdk pods to be ready (max 30 min) ==="
+          for i in $(seq 1 180); do
+            TOTAL=$(kubectl -n $NAMESPACE get pods -l role=simplyblock-storage-node --no-headers 2>/dev/null | wc -l)
+            READY=$(kubectl -n $NAMESPACE get pods -l role=simplyblock-storage-node --no-headers 2>/dev/null | grep -c "Running" || true)
+
+            if [ "$TOTAL" -gt 0 ] && [ "$READY" -eq "$TOTAL" ]; then
+              echo "All $TOTAL snode-spdk pods are Running"
+              break
+            fi
+
+            echo "snode-spdk pods: $READY/$TOTAL Running ($i/180)"
+            if [ "$i" -eq 180 ]; then
+              echo "ERROR: snode-spdk pods did not become ready within 30 minutes"
+              kubectl -n $NAMESPACE get pods
+              exit 1
+            fi
+            sleep 10
+          done
 
           echo "=== Polling cluster status ==="
           for i in $(seq 1 90); do
