@@ -129,6 +129,130 @@ class TestPreRestartGuard(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# 1a. Post-commit event emission for the restart guard
+# ---------------------------------------------------------------------------
+
+class TestRestartGuardEventEmission(unittest.TestCase):
+    """Regression tests for the silent-DB-write bug: the restart guard
+    tx writes status=in_restart directly via ``tr[...] = ...`` and bypasses
+    set_node_status. The wrapper must emit the storage-event + peer
+    notification after the commit so the transition is observable.
+    """
+
+    def _make_node(self, uuid, status):
+        n = StorageNode()
+        n.uuid = uuid
+        n.cluster_id = "c1"
+        n.status = status
+        return n
+
+    def _prepare_db(self, pre_status, post_status):
+        """Build a DBController with get_storage_node_by_id returning a
+        pre-tx node first, then a post-tx node with updated status.
+        """
+        from simplyblock_core.db_controller import DBController
+        db = DBController.__new__(DBController)
+        db.kv_store = MagicMock()  # truthy so we don't short-circuit
+        pre = self._make_node("n1", pre_status)
+        post = self._make_node("n1", post_status)
+        db.get_storage_node_by_id = MagicMock(side_effect=[pre, post])
+        return db
+
+    @patch("simplyblock_core.distr_controller.send_node_status_event")
+    @patch("simplyblock_core.controllers.storage_events.snode_status_change")
+    @patch("simplyblock_core.db_controller.fdb.transactional", create=True)
+    def test_emits_events_on_offline_to_restarting(
+            self, mock_transactional, mock_status_change, mock_peer_event):
+        """Happy path: offline → in_restart. Both events must fire."""
+        # Pretend the tx commits successfully.
+        mock_transactional.return_value = MagicMock(return_value=(True, None))
+
+        db = self._prepare_db(
+            pre_status=StorageNode.STATUS_OFFLINE,
+            post_status=StorageNode.STATUS_RESTARTING,
+        )
+
+        acquired, reason = db.try_set_node_restarting("c1", "n1")
+
+        self.assertTrue(acquired)
+        self.assertIsNone(reason)
+        mock_status_change.assert_called_once()
+        mock_peer_event.assert_called_once()
+
+        # Old status must be captured (pre-tx snapshot), not None/unknown.
+        args, kwargs = mock_status_change.call_args
+        # signature: (snode, new_status, old_status, caused_by="...")
+        self.assertEqual(args[1], StorageNode.STATUS_RESTARTING)
+        self.assertEqual(args[2], StorageNode.STATUS_OFFLINE)
+        self.assertEqual(kwargs.get("caused_by"), "restart_guard")
+
+    @patch("simplyblock_core.distr_controller.send_node_status_event")
+    @patch("simplyblock_core.controllers.storage_events.snode_status_change")
+    @patch("simplyblock_core.db_controller.fdb.transactional", create=True)
+    def test_no_events_when_tx_blocked(
+            self, mock_transactional, mock_status_change, mock_peer_event):
+        """Guard rejected the claim — no events."""
+        mock_transactional.return_value = MagicMock(
+            return_value=(False, "Node n2 is in_restart"))
+
+        db = self._prepare_db(
+            pre_status=StorageNode.STATUS_OFFLINE,
+            post_status=StorageNode.STATUS_OFFLINE,
+        )
+
+        acquired, reason = db.try_set_node_restarting("c1", "n1")
+
+        self.assertFalse(acquired)
+        self.assertIn("in_restart", reason)
+        mock_status_change.assert_not_called()
+        mock_peer_event.assert_not_called()
+
+    @patch("simplyblock_core.distr_controller.send_node_status_event")
+    @patch("simplyblock_core.controllers.storage_events.snode_status_change")
+    @patch("simplyblock_core.db_controller.fdb.transactional", create=True)
+    def test_no_events_when_status_unchanged(
+            self, mock_transactional, mock_status_change, mock_peer_event):
+        """Force-restart on an already-RESTARTING node: tx succeeds but
+        status is the same on both sides. Avoid spurious
+        RESTARTING→RESTARTING change events.
+        """
+        mock_transactional.return_value = MagicMock(return_value=(True, None))
+
+        db = self._prepare_db(
+            pre_status=StorageNode.STATUS_RESTARTING,
+            post_status=StorageNode.STATUS_RESTARTING,
+        )
+
+        acquired, reason = db.try_set_node_restarting("c1", "n1")
+
+        self.assertTrue(acquired)
+        mock_status_change.assert_not_called()
+        mock_peer_event.assert_not_called()
+
+    @patch("simplyblock_core.distr_controller.send_node_status_event")
+    @patch("simplyblock_core.controllers.storage_events.snode_status_change")
+    @patch("simplyblock_core.db_controller.fdb.transactional", create=True)
+    def test_emission_failure_does_not_mask_commit(
+            self, mock_transactional, mock_status_change, mock_peer_event):
+        """If event emission raises, the function must still return the
+        acquisition result truthfully — the FDB state has already been
+        committed and cannot be rolled back.
+        """
+        mock_transactional.return_value = MagicMock(return_value=(True, None))
+        mock_status_change.side_effect = RuntimeError("broker down")
+
+        db = self._prepare_db(
+            pre_status=StorageNode.STATUS_OFFLINE,
+            post_status=StorageNode.STATUS_RESTARTING,
+        )
+
+        acquired, reason = db.try_set_node_restarting("c1", "n1")
+
+        self.assertTrue(acquired)
+        self.assertIsNone(reason)
+
+
+# ---------------------------------------------------------------------------
 # 2. restart_storage_node pre-restart integration
 # ---------------------------------------------------------------------------
 
