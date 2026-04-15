@@ -3240,7 +3240,7 @@ def generate_automated_deployment_config(max_lvol, max_prov, sockets_to_use, nod
     return True
 
 
-def deploy(ifname, isolate_cores=False, access_token="access_token"):
+def deploy(ifname, isolate_cores=False, access_token=None):
     if not ifname:
         ifname = "eth0"
 
@@ -3273,6 +3273,9 @@ def deploy(ifname, isolate_cores=False, access_token="access_token"):
 
     logger.info(f"Node IP: {dev_ip}")
     scripts.configure_docker(dev_ip)
+
+    if not access_token:
+        access_token = utils.generate_string(32)
 
     start_storage_node_api_container(dev_ip, access_token)
 
