@@ -372,7 +372,7 @@ def delete(snapshot_uuid, force_delete=False):
 
     # Block during restart Phase 5
     try:
-        snode = db_controller.get_storage_node_by_id(snap.node_id)
+        snode = db_controller.get_storage_node_by_id(snap.lvol.node_id)
         if snode.lvstore_status == "in_creation" and not force_delete:
             logger.error(f"Cannot delete snapshot {snapshot_uuid}: node LVStore restart in progress")
             return False
