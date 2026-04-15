@@ -2315,11 +2315,8 @@ def patch_cr_node_status(
         if not status_nodes:
             raise RuntimeError("CR has no status.nodes")
 
-        spec_worker_nodes = cr.get("spec", {}).get("workerNodes", [])
-
         found = False
         new_status_nodes = []
-        removed_hostname = None
 
         for node in status_nodes:
             match = (
@@ -2329,7 +2326,6 @@ def patch_cr_node_status(
 
             if match:
                 found = True
-                removed_hostname = node.get("hostname")
 
                 if remove:
                     continue
@@ -2342,24 +2338,6 @@ def patch_cr_node_status(
         if not found:
             raise RuntimeError(
                 f"Node not found (uuid={node_uuid}, mgmtIp={node_mgmt_ip})"
-            )
-
-        if remove and removed_hostname:
-            new_worker_nodes = [
-                n for n in spec_worker_nodes if n != removed_hostname
-            ]
-
-            api.patch_namespaced_custom_object(
-                group=group,
-                version=version,
-                namespace=namespace,
-                plural=plural,
-                name=name,
-                body={
-                    "spec": {
-                        "workerNodes": new_worker_nodes
-                    }
-                },
             )
 
         api.patch_namespaced_custom_object_status(
