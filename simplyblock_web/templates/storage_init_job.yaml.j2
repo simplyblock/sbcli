@@ -43,7 +43,9 @@ spec:
               echo "Detected node IP: $NODE_IP"
 
               echo "--- Sending config to $NODE_IP ---"
+              if [ "$OS_ID" != "talos" ]; then
               RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" -X POST http://$NODE_IP:5000/snode/apply_config -H "Content-Type: application/json" -d '{}')
+              fi
               echo "HTTP status: $RESPONSE"
               if [ "$RESPONSE" -lt 200 ] || [ "$RESPONSE" -ge 300 ]; then
                 echo "Failed to apply config"
