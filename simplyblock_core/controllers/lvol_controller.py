@@ -1216,7 +1216,7 @@ def delete_lvol(id_or_name, force_delete=False):
 
     elif lvol.ha_type == "ha":
         from simplyblock_core.storage_node_ops import (
-            find_leader_with_failover, check_non_leader_for_operation,
+            check_non_leader_for_operation,
             queue_for_restart_drain, execute_on_leader_with_failover,
         )
 
