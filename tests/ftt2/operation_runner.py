@@ -23,10 +23,9 @@ Architecture:
 """
 
 import threading
-import time
 import logging
-from typing import Callable, Optional, Any
-from dataclasses import dataclass, field
+from typing import Callable, Optional
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
@@ -288,7 +287,8 @@ def run_restart_with_concurrent_op(
         for p in patches:
             p.start()
         try:
-            restart_result[0] = storage_node_ops.restart_storage_node(node.uuid)
+            from simplyblock_core import storage_node_ops as _sno
+            restart_result[0] = _sno.restart_storage_node(node.uuid)
         except Exception as e:
             restart_error[0] = e
         finally:

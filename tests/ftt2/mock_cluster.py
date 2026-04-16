@@ -438,9 +438,9 @@ def _keyring_file_add_key(s, p):
 
 
 # Catch-all static mocks
-_STATIC_TRUE = lambda s, p: True
-_STATIC_EMPTY_LIST = lambda s, p: []
-_STATIC_EMPTY_DICT = lambda s, p: {}
+def _STATIC_TRUE(s, p): return True
+def _STATIC_EMPTY_LIST(s, p): return []
+def _STATIC_EMPTY_DICT(s, p): return {}
 
 
 # ---------------------------------------------------------------------------

@@ -8,7 +8,7 @@ Covers:
 """
 
 import unittest
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 import json
 
 from simplyblock_core.models.storage_node import StorageNode
@@ -114,7 +114,6 @@ class TestPreRestartGuard(unittest.TestCase):
 
         self.assertTrue(result)
         # Verify the written data has status=in_restart
-        written_key = tr.__setitem__.call_args[0][0]
         written_data = json.loads(tr.__setitem__.call_args[0][1])
         self.assertEqual(written_data["status"], StorageNode.STATUS_RESTARTING)
 

@@ -14,7 +14,7 @@ SPDK three-step sequence for secondary/tertiary:
 
 import unittest
 import uuid
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 from simplyblock_core.models.hublvol import HubLVol
 from simplyblock_core.models.iface import IFace

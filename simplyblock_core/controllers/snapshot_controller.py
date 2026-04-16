@@ -54,7 +54,7 @@ def add(lvol_id, snapshot_name, backup=False, lock=True):
     try:
         snode = db_controller.get_storage_node_by_id(lvol.node_id)
         if snode.lvstore_status == "in_creation":
-            msg = f"Cannot create snapshot: node LVStore restart in progress"
+            msg = "Cannot create snapshot: node LVStore restart in progress"
             logger.error(msg)
             return False, msg
     except KeyError:

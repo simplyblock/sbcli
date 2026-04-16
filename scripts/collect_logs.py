@@ -410,14 +410,14 @@ def opensearch_diagnose(session, os_url, from_iso, to_iso):
 
     # 2. Probe
     probe = _os_probe(session, os_url, index, from_ms, to_ms)
-    print(f"\n[D2] Detected field names:")
+    print("\n[D2] Detected field names:")
     print(f"     timestamp field    : {probe['ts_field']}")
     print(f"     container_name field: {probe['cname_field']}")
     print(f"\n[D3] Documents in requested time window: {probe['window_count']}")
 
     # 3. Sample document
     if probe["sample_doc"]:
-        print(f"\n[D4] Sample document fields and values:")
+        print("\n[D4] Sample document fields and values:")
         for k, v in sorted(probe["sample_doc"].items()):
             v_str = str(v)[:120]
             print(f"     {k:<35} = {v_str}")
@@ -425,7 +425,7 @@ def opensearch_diagnose(session, os_url, from_iso, to_iso):
         print("\n[D4] No sample document found (index may be empty).")
 
     # 4. Container names in window
-    print(f"\n[D5] Distinct container_name values in time window (up to 30):")
+    print("\n[D5] Distinct container_name values in time window (up to 30):")
     names = _os_sample_container_names(session, os_url, index,
                                         from_ms, to_ms,
                                         probe["ts_field"], probe["cname_field"])
@@ -858,7 +858,7 @@ def main():
 
         # ── 8. Storage-node logs ─────────────────────────────────────────────
 
-        print(f"\n[6] Collecting storage-node logs …")
+        print("\n[6] Collecting storage-node logs …")
         sn_root = log_root / "storage_nodes"
         sn_root.mkdir()
 
@@ -868,7 +868,7 @@ def main():
         # the management IP alone.  Collect ALL SNodeAPI logs once (no
         # source filter) into a shared file; each line contains src=<host>
         # so per-node filtering can be done with grep afterwards.
-        print(f"\n  SNodeAPI (all nodes combined) …")
+        print("\n  SNodeAPI (all nodes combined) …")
         snode_api_log = sn_root / "SNodeAPI_all_nodes.log"
         snode_api_count = fetch(
             gl_query='container_name:"SNodeAPI"',
@@ -878,7 +878,7 @@ def main():
             **fetch_kw,
         )
         print(f"  {'SNodeAPI (all nodes)':<42} {snode_api_count:>8,} lines")
-        print(f"  (filter by src=<ip> to isolate per-node logs)")
+        print("  (filter by src=<ip> to isolate per-node logs)")
 
         for node in sn_list:
             hostname = node.get("Hostname", "unknown")
@@ -911,7 +911,7 @@ def main():
 
         # ── 9. sbctl cluster / node snapshots ────────────────────────────────
 
-        print(f"\n[7] Collecting sbctl cluster / node info …")
+        print("\n[7] Collecting sbctl cluster / node info …")
         info_dir = log_root / "sbctl_info"
         info_dir.mkdir()
 
@@ -959,7 +959,7 @@ def main():
         )
 
         # 4. sn check <node_uuid>  – one file per storage node
-        print(f"  sbctl sn check  (per node) …")
+        print("  sbctl sn check  (per node) …")
         sn_check_dir = info_dir / "sn_check"
         sn_check_dir.mkdir()
         for node in sn_list:
@@ -1006,13 +1006,13 @@ def main():
 
         # ── 12. Pack into tarball ─────────────────────────────────────────────
 
-        print(f"\n[8] Creating tarball …")
+        print("\n[8] Creating tarball …")
         with tarfile.open(str(tarball_path), "w:gz") as tar:
             tar.add(str(log_root), arcname=bundle_name)
 
         size_mb = tarball_path.stat().st_size / 1_048_576
         print(f"\n{'=' * 64}")
-        print(f"  Done!")
+        print("  Done!")
         print(f"  Tarball : {tarball_path}")
         print(f"  Size    : {size_mb:.2f} MB")
         print(f"{'=' * 64}\n")

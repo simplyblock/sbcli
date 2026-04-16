@@ -17,12 +17,10 @@ import logging
 import random
 import threading
 import time
-from collections import defaultdict
-from dataclasses import dataclass, field
-from typing import List, Optional
+from dataclasses import dataclass
+from typing import List
 from unittest.mock import patch
 
-import pytest
 
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core import storage_node_ops
@@ -32,7 +30,6 @@ from tests.ftt2.conftest import (
     create_test_lvol,
     patch_externals,
 )
-from tests.ftt2.operation_runner import PhaseGate, OperationRunner
 
 logger = logging.getLogger(__name__)
 
@@ -140,7 +137,7 @@ class StressRunner:
         NOTE: patches must be started by the caller BEFORE spawning threads."""
         from simplyblock_core.db_controller import DBController
 
-        db = DBController()
+        DBController()
         created_lvols = []
 
         while not self._stop.is_set():

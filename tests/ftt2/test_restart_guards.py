@@ -5,9 +5,7 @@ Phase 5 operation blocking, and hublvol multipath verification.
 """
 
 import threading
-import time
 
-import pytest
 
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core import storage_node_ops
@@ -87,7 +85,6 @@ class TestRestartRestartOverlap:
         """Two nodes attempt restart simultaneously.
         Exactly one should succeed (transactional guard)."""
         env = ftt2_env
-        db = env['db']
 
         prepare_node_for_restart(env, 0)
         prepare_node_for_restart(env, 1)
@@ -201,7 +198,6 @@ class TestPhase5OperationBlocking:
 
     def test_volume_create_blocked_during_restart(self, ftt2_env):
         """add_lvol_ha must reject when target node has lvstore_status=in_creation."""
-        from simplyblock_core.controllers import lvol_controller
         env = ftt2_env
         db = env['db']
         node = env['nodes'][0]

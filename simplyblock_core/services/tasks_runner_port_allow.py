@@ -7,7 +7,6 @@ from simplyblock_core.controllers import tcp_ports_events, health_controller, ta
 from simplyblock_core.fw_api_client import FirewallClient
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.cluster import Cluster
-from simplyblock_core.models.nvme_device import NVMeDevice, RemoteDevice
 from simplyblock_core.models.storage_node import StorageNode
 
 logger = utils.get_logger(__name__)
@@ -73,7 +72,6 @@ def exec_port_allow_task(task):
 
     # check node ping
     logger.info("connect to remote devices")
-    nodes = db.get_storage_nodes_by_cluster_id(node.cluster_id)
     # connect to remote devs
     try:
         node_bdevs = node.rpc_client().get_bdevs()

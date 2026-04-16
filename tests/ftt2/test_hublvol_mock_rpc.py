@@ -17,7 +17,7 @@ Topology used:
 """
 
 import uuid as _uuid_mod
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 import pytest
 

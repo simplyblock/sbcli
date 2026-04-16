@@ -553,7 +553,7 @@ class SoakRunner:
             ]
             if unaffected_bad:
                 raise TestRunError(
-                    f"Unaffected nodes are not online: "
+                    "Unaffected nodes are not online: "
                     + ", ".join(f"{uuid}:{statuses[uuid]}" for uuid in unaffected_bad)
                 )
             if not offline and len(statuses) == expected:

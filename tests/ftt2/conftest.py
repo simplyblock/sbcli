@@ -26,7 +26,7 @@ Impact per outage:
 import os
 import time
 import uuid as _uuid_mod
-from typing import Dict, List
+from typing import List
 from unittest.mock import patch
 
 import pytest
@@ -34,7 +34,7 @@ import pytest
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.lvol_model import LVol
-from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
+from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.stats import ClusterStatObject
 

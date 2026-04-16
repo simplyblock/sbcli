@@ -24,9 +24,7 @@ Prerequisites:
 """
 
 import json
-import os
 import re
-import select
 import time
 from concurrent.futures import ThreadPoolExecutor
 
@@ -100,15 +98,15 @@ def ssh_exec(ip, cmds, get_output=False, check=False):
         if rc != 0:
             tail = (out + err).strip().splitlines()[-5:]
             print(f"  [{ip}] FAIL rc={rc}")
-            for l in tail:
-                print(f"    {l}")
+            for line in tail:
+                print(f"    {line}")
             if check:
                 ssh.close()
                 raise RuntimeError(f"rc={rc}: {cmd}")
         else:
-            for l in out.strip().splitlines()[-2:]:
-                if l.strip():
-                    print(f"    {l}")
+            for line in out.strip().splitlines()[-2:]:
+                if line.strip():
+                    print(f"    {line}")
     ssh.close()
     return results
 
@@ -313,7 +311,7 @@ def verify_multipath(mgmt_ip, expected_nics=2):
             f"sudo /usr/local/bin/sbctl -d sn check {uuid}"
         ], get_output=True)[0]
         # Count hublvol controller lines
-        hub_lines = [l for l in raw.splitlines() if "hublvol" in l.lower() or "controller" in l.lower()]
+        hub_lines = [ln for ln in raw.splitlines() if "hublvol" in ln.lower() or "controller" in ln.lower()]
         print(f"  {uuid}: hublvol-related lines: {len(hub_lines)}")
 
     # 3. Create a test volume, check connect output has multipath entries
@@ -328,8 +326,8 @@ def verify_multipath(mgmt_ip, expected_nics=2):
             connect_out = ssh_exec(mgmt_ip, [
                 f"sudo /usr/local/bin/sbctl -d lvol connect {vol_id}"
             ], get_output=True)[0]
-            connect_cmds = [l.strip() for l in connect_out.splitlines()
-                           if "nvme connect" in l]
+            connect_cmds = [ln.strip() for ln in connect_out.splitlines()
+                           if "nvme connect" in ln]
             print(f"  Volume {vol_id}: {len(connect_cmds)} connect commands")
             unique_ips = set()
             for cmd in connect_cmds:
@@ -390,7 +388,6 @@ def main():
     sn_pub_ips  = [i.public_ip_address for i in sn_instances]
     sn_priv_ips = [i.private_ip_address for i in sn_instances]
     client_pub_ips  = [i.public_ip_address for i in client_instances]
-    client_priv_ips = [i.private_ip_address for i in client_instances]
 
     print(f"  Mgmt:    {mgmt_ip}")
     for idx, (pub, priv) in enumerate(zip(sn_pub_ips, sn_priv_ips)):
@@ -614,7 +611,7 @@ def main():
     print(f"  SNs:      {', '.join(sn_pub_ips)}")
     print(f"  Clients:  {', '.join(client_pub_ips)}")
     print(f"  Data NICs: {', '.join(DATA_NICS)}")
-    print(f"  Metadata: cluster_metadata.json")
+    print("  Metadata: cluster_metadata.json")
     if verify_errors:
         print(f"  WARNING: {len(verify_errors)} verification issue(s) — check output above")
     else:

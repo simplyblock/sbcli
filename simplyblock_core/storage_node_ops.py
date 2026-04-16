@@ -4670,7 +4670,7 @@ def recreate_lvstore(snode, force=False, lvs_primary=None):
                 current_leader = sec_node
                 logger.info("Current leader for %s is %s", lvs_name, sec_node.get_id())
                 break
-        except Exception as e:
+        except Exception:
             rpc_result = _handle_rpc_failure_on_peer(snode, sec_node, lvs_jm_vuid, lvs_name=lvs_name)
             if rpc_result == "abort":
                 raise Exception(f"Abort restart: peer {sec_node.get_id()} fabric-connected but mgmt unresponsive")
@@ -4691,7 +4691,7 @@ def recreate_lvstore(snode, force=False, lvs_primary=None):
                 time.sleep(60)
                 jc_compression_is_active = current_leader.rpc_client().jc_compression_get_status(
                     current_leader.jm_vuid)
-        except Exception as e:
+        except Exception:
             rpc_result = _handle_rpc_failure_on_peer(snode, current_leader, lvs_jm_vuid, lvs_name=lvs_name)
             if rpc_result == "abort":
                 raise Exception(f"Abort restart: leader {current_leader.get_id()} fabric-connected but mgmt unresponsive")
@@ -4759,7 +4759,7 @@ def recreate_lvstore(snode, force=False, lvs_primary=None):
                 msg = f"JM replication task found on leader {current_leader.get_id()} for jm {lvs_jm_vuid}"
                 logger.error(msg)
                 storage_events.jm_repl_tasks_found(current_leader, lvs_jm_vuid)
-        except Exception as e:
+        except Exception:
             rpc_result = _handle_rpc_failure_on_peer(snode, current_leader, lvs_jm_vuid, lvs_name=lvs_name)
             if rpc_result == "abort":
                 raise Exception(f"Abort restart: leader {current_leader.get_id()} fabric-connected but mgmt unresponsive")
@@ -4805,7 +4805,7 @@ def recreate_lvstore(snode, force=False, lvs_primary=None):
                 else:
                     logger.error(
                         f"Timeout while checking for inflight IO after 10 seconds on node {sec_node.get_id()}")
-        except Exception as e:
+        except Exception:
             # RPC failed on connected peer — use hublvol disconnect check (Method 2)
             rpc_result = _handle_rpc_failure_on_peer(snode, sec_node, lvs_jm_vuid, lvs_name=lvs_name)
             if rpc_result == "abort":

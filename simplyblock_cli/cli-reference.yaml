@@ -242,7 +242,6 @@ commands:
             help: "HA JM count. Defaults to 4 for FT=2 clusters, otherwise 3."
             dest: ha_jm_count
             type: int
-            default: null
           - name: "--namespace"
             help: "The Kubernetes namespace to deploy on."
             dest: namespace
