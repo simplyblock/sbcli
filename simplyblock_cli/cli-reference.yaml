@@ -1012,14 +1012,6 @@ commands:
               Network interface name from client to use for logical volume connection.
             dest: client_data_nic
             type: str
-          - name: "--max-fault-tolerance"
-            help: "Maximum number of node failures tolerated (1=single secondary, 2=dual secondary). Default: `1`."
-            dest: max_fault_tolerance
-            type: int
-            default: 1
-            choices:
-              - 1
-              - 2
           - name: "--use-backup"
             help: "The path to JSON file with S3/MinIO backup configuration."
             dest: use_backup
@@ -1171,14 +1163,6 @@ commands:
               Network interface name from client to use for logical volume connection.
             dest: client_data_nic
             type: str
-          - name: "--max-fault-tolerance"
-            help: "Maximum number of node failures tolerated (1=single secondary, 2=dual secondary). Default: `1`."
-            dest: max_fault_tolerance
-            type: int
-            default: 1
-            choices:
-              - 1
-              - 2
           - name: "--use-backup"
             help: "The path to JSON file with S3/MinIO backup configuration."
             dest: use_backup

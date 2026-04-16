@@ -3868,7 +3868,7 @@ def wait_or_delay_for_restart_gate(node_id, lvs_name, timeout=30):
 
 # Per-node ordered queue for operations delayed during port block.
 # Key: (node_id, lvs_name), Value: list of (callable, description) in FIFO order.
-_restart_op_queues = {}
+_restart_op_queues: dict[tuple[str, str], list[tuple]] = {}
 _restart_op_queues_lock = threading.Lock()
 
 
