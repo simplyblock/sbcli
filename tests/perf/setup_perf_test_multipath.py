@@ -443,7 +443,6 @@ def main():
         "sudo /usr/local/bin/sbctl -d cluster create --enable-node-affinity"
         f" --data-chunks-per-stripe {DATA_CHUNKS}"
         f" --parity-chunks-per-stripe {PARITY_CHUNKS}"
-        f" --max-fault-tolerance {MAX_FT}"
     ], check=True)
 
     cluster_out = ssh_exec(mgmt_ip, [

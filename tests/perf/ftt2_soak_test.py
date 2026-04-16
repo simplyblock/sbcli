@@ -3,7 +3,7 @@
 ftt2_soak_test.py — FTT=2 soak test with overlapping node outages.
 
 Runs on the management node. Requires:
-  - Cluster deployed with --fault-tolerance 2, --parity-chunks-per-stripe 2, --ha-jm-count 4
+  - Cluster deployed with --parity-chunks-per-stripe 2 (FT=2 and HA journals=4 are auto-derived)
   - 4 storage nodes, 1 client node
   - sbctl available on PATH
 

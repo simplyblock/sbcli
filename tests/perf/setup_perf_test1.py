@@ -418,7 +418,6 @@ def main():
     ssh_exec(mgmt_ip, [
         "sudo /usr/local/bin/sbctl -d cluster create --enable-node-affinity"
         " --data-chunks-per-stripe 2 --parity-chunks-per-stripe 2"
-        " --max-fault-tolerance 2"
     ], check=True)
     print("Phase 2a: DONE - cluster created.")
 
