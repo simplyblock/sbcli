@@ -2433,19 +2433,12 @@ def list_storage_nodes(is_json, cluster_id=None):
         nodes = db_controller.get_storage_nodes()
     data = []
     output = ""
-    now = datetime.datetime.now(datetime.timezone.utc)
 
     for node in nodes:
         logger.debug(node)
         logger.debug("*" * 20)
         total_devices = len(node.nvme_devices)
         online_devices = 0
-        uptime = ""
-        if node.online_since and node.status == StorageNode.STATUS_ONLINE:
-            try:
-                uptime = utils.strfdelta((now - datetime.datetime.fromisoformat(node.online_since)))
-            except Exception:
-                pass
 
         for dev in node.nvme_devices:
             if dev.status == NVMeDevice.STATUS_ONLINE:
@@ -2459,7 +2452,7 @@ def list_storage_nodes(is_json, cluster_id=None):
             "LVols": f"{len(lvs)}",
             "Status": node.status,
             "Health": node.health_check,
-            "Up time": uptime,
+            "Up time": utils.strfdelta(uptime) if (uptime := node.uptime()) is not None else "",
             "CPU": f"{len(utils.hexa_to_cpu_list(node.spdk_cpu_mask))}",
             "MEM": utils.humanbytes(node.spdk_mem),
             "SPDK P": node.rpc_port,

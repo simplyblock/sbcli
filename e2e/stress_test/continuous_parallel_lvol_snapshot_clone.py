@@ -238,12 +238,10 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
         self.logger.warning(f"[max_lvols] Forced enqueue of {added} lvol tree deletes to recover from cluster max-lvol limit")
 
     def _api(self, op: str, ctx: dict, fn, retries: int = 10, interval: int = 5):
-        last_exc = None
         for attempt in range(1, retries + 1):
             try:
                 return fn()
             except Exception as e:
-                last_exc = e
                 api_err = self._extract_api_error(e)
                 if self._is_max_lvols_error(api_err):
                     self._inc("failures", op if op in self._metrics["failures"] else "unknown", 1)
