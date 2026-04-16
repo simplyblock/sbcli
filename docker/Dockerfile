@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-FROM simplyblock/simplyblock:base_image
+FROM simplyblock/simplyblock:base_image_ubi10
 
 WORKDIR /app
 
