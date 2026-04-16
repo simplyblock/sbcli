@@ -833,6 +833,7 @@ class SoakRunner:
                     "--direct=1 --rw=randrw --bs=4K --group_reporting --time_based "
                     f"--numjobs=4 --iodepth=4 --size=4G --runtime={self.args.runtime} "
                     "--ioengine=aiolib --max_latency=10s "
+                    "--verify=crc32c --verify_fatal=1 --verify_backlog=1024 "
                     f"--output={shlex.quote(volume['fio_log'])}; "
                     "rc=$?; "
                     f"echo $rc > {shlex.quote(volume['rc_file'])}"
