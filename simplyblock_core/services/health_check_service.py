@@ -51,8 +51,16 @@ def set_device_health_check(cluster_id, device, health_check_status):
 
 def check_node(snode):
 
-    snode = db.get_storage_node_by_id(snode.get_id())
+    try:
+        snode = db.get_storage_node_by_id(snode.get_id())
+    except KeyError:
+        return
+
     logger.info("Node: %s, status %s", snode.get_id(), snode.status)
+
+    if snode.status == StorageNode.STATUS_IN_CREATION:
+        logger.info(f"Node status is: {snode.status}, skipping")
+        return
 
     if snode.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_UNREACHABLE,
                             StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:

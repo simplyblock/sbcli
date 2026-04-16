@@ -35,19 +35,41 @@ spec:
               set -e
               MARKER="/var/simplyblock/.cpu_topology_applied"
               if [[ -f "$MARKER" ]]; then
-                  echo "[INFO] Node already configured. Skipping sleep and exiting..."
+                  echo "[INFO] Node already configured. Skipping."
                   exit 0
               fi
 
-              SHORT_ID=$(echo "{{ HOSTNAME }}" | rev | cut -d'-' -f1 | rev)
-              # Create the Machine config pool
-              cat <<EOF | kubectl apply -f -
+              # Generic resource names — shared across all storage nodes.
+              # Only the MCP nodeSelector hostname is unique per node.
+              MCP_NAME="simplyblock-storage-mcp"
+              MC_NAME="simplyblock-storage-mc"
+              KC_NAME="simplyblock-storage-kubelet"
+              KC_LABEL="simplyblock-storage-cpumanager"
+              HOSTNAME="{{ HOSTNAME }}"
+
+              # ---- MachineConfigPool ----------------------------------------
+              # If MCP already exists, patch only the nodeSelector hostname.
+              # If it does not exist, create it.
+              if kubectl get machineconfigpool "$MCP_NAME" > /dev/null 2>&1; then
+                echo "[INFO] MCP $MCP_NAME already exists — patching nodeSelector to $HOSTNAME"
+                kubectl patch machineconfigpool "$MCP_NAME" --type=merge -p "{
+                  \"spec\": {
+                    \"nodeSelector\": {
+                      \"matchLabels\": {
+                        \"kubernetes.io/hostname\": \"$HOSTNAME\"
+                      }
+                    }
+                  }
+                }"
+              else
+                echo "[INFO] Creating MCP $MCP_NAME for $HOSTNAME"
+                cat <<MCPEOF | kubectl apply -f -
               apiVersion: machineconfiguration.openshift.io/v1
               kind: MachineConfigPool
               metadata:
-                name: storage-$SHORT_ID
+                name: $MCP_NAME
                 labels:
-                  custom-kubelet: cpumanager-enabled-$SHORT_ID
+                  custom-kubelet: $KC_LABEL
               spec:
                 machineConfigSelector:
                   matchExpressions:
@@ -55,45 +77,60 @@ spec:
                       operator: In
                       values:
                         - worker
-                        - storage-$SHORT_ID
+                        - simplyblock-storage
                 nodeSelector:
                   matchLabels:
-                    kubernetes.io/hostname: {{ HOSTNAME }}
-              EOF
+                    kubernetes.io/hostname: $HOSTNAME
+                maxUnavailable: 1
+              MCPEOF
+              fi
 
-              # Create the Machine config
-              cat <<EOF | kubectl apply -f -
+              # ---- MachineConfig --------------------------------------------
+              # Shared across all nodes — only created once, never patched.
+              if kubectl get machineconfig "$MC_NAME" > /dev/null 2>&1; then
+                echo "[INFO] MC $MC_NAME already exists — skipping"
+              else
+                echo "[INFO] Creating MC $MC_NAME"
+                cat <<MCEOF | kubectl apply -f -
               apiVersion: machineconfiguration.openshift.io/v1
               kind: MachineConfig
               metadata:
-                name: 00-storage-$SHORT_ID
+                name: $MC_NAME
                 labels:
-                  machineconfiguration.openshift.io/role: storage-$SHORT_ID
+                  machineconfiguration.openshift.io/role: simplyblock-storage
               spec:
                 config:
                   ignition:
                     version: 3.2.0
-              EOF
+              MCEOF
+              fi
 
-              # Create the KubeletConfig to enable static CPU manager
-              cat <<EOF | kubectl apply -f -
+              # ---- KubeletConfig --------------------------------------------
+              # Shared across all nodes — only created once, never patched.
+              if kubectl get kubeletconfig "$KC_NAME" > /dev/null 2>&1; then
+                echo "[INFO] KubeletConfig $KC_NAME already exists — skipping"
+              else
+                echo "[INFO] Creating KubeletConfig $KC_NAME"
+                cat <<KCEOF | kubectl apply -f -
               apiVersion: machineconfiguration.openshift.io/v1
               kind: KubeletConfig
               metadata:
-                name: kubelet-storage-$SHORT_ID
+                name: $KC_NAME
               spec:
                 machineConfigPoolSelector:
                   matchLabels:
-                    custom-kubelet: cpumanager-enabled-$SHORT_ID
+                    custom-kubelet: $KC_LABEL
                 kubeletConfig:
                   cpuManagerPolicy: static
                   cpuManagerReconcilePeriod: 5s
                   topologyManagerPolicy: single-numa-node
                   reservedSystemCPUs: {{ RESERVED_SYSTEM_CPUS }}
-              EOF
+              KCEOF
+              fi
 
               echo "[INFO] Marking node as configured."
               touch "$MARKER"
 
               echo "[INFO] Node is updating the kubeletconfig"
-              sleep 300
+              sleep 900
+              
