@@ -689,7 +689,7 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
         if snode.lvstore and force_lvstore_create is False:
             logger.warning(f"Node {snode.get_id()} already has lvstore {snode.lvstore}")
             try:
-                ret = storage_node_ops.recreate_lvstore(snode)
+                ret = storage_node_ops.recreate_lvstore(snode, activation_mode=True)
             except Exception as e:
                 logger.error(e)
                 set_cluster_status(cl_id, ols_status)
@@ -713,22 +713,27 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
             set_cluster_status(cl_id, ols_status)
             raise ValueError("Failed to activate cluster")
 
+    # Pass 2: Recreate secondary/tertiary LVS on every node that participates
+    # as a non-leader for another node's LVS. In a ring topology (FTT=2 with
+    # 6 nodes) every node is both a primary AND a secondary/tertiary — the old
+    # is_secondary_node filter only matched dedicated secondary-only nodes,
+    # skipping the ring participants entirely.
     snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     for snode in snodes:
         if snode.status != StorageNode.STATUS_ONLINE:
             continue
 
-        if not snode.is_secondary_node:
+        primary_nodes = db_controller.get_primary_storage_nodes_by_secondary_node_id(snode.get_id())
+        if not primary_nodes:
             continue
 
-        logger.info(f"recreating secondary node {snode.get_id()}")
-        # During cluster activation, all primaries are online — always non-leader path
+        snode = db_controller.get_storage_node_by_id(snode.get_id())
+        logger.info(f"recreating secondary/tertiary LVS on node {snode.get_id()}")
         ret = True
-        primary_nodes = db_controller.get_primary_storage_nodes_by_secondary_node_id(snode.get_id())
         for primary_node in primary_nodes:
             primary_node.lvstore_status = "in_creation"
             primary_node.write_to_db()
-            r = storage_node_ops.recreate_lvstore_on_non_leader(snode, primary_node, primary_node)
+            r = storage_node_ops.recreate_lvstore_on_non_leader(snode, primary_node, primary_node, activation_mode=True)
             if not r:
                 ret = False
 
@@ -736,13 +741,62 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
         if ret:
             snode.lvstore_status = "ready"
             snode.write_to_db()
-
         else:
             snode.lvstore_status = "failed"
             snode.write_to_db()
             logger.error(f"Failed to restore lvstore on node {snode.get_id()}")
             set_cluster_status(cl_id, ols_status)
             raise ValueError("Failed to activate cluster")
+
+    # --- Pass 3: Create hublvols and cross-connections ---
+    # All lvstores (primary + secondary/tertiary) are now up. Safe to create
+    # hublvols and connect peers. This mirrors the logic in create_lvstore()
+    # lines 5350-5379 and must tolerate offline nodes (FTT=1 or FTT=2).
+    snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
+    for snode in snodes:
+        if snode.is_secondary_node:
+            continue
+        if snode.status != StorageNode.STATUS_ONLINE:
+            continue
+        snode = db_controller.get_storage_node_by_id(snode.get_id())
+
+        secondary_ids = []
+        if snode.secondary_node_id:
+            secondary_ids.append(snode.secondary_node_id)
+        if snode.tertiary_node_id:
+            secondary_ids.append(snode.tertiary_node_id)
+
+        if not secondary_ids:
+            continue
+
+        # Create hublvol on primary
+        try:
+            if not snode.recreate_hublvol():
+                logger.error("Failed to recreate hublvol on %s", snode.get_id())
+        except Exception as e:
+            logger.error("Error creating hublvol on %s: %s", snode.get_id(), e)
+
+        # Create secondary hublvol on sec_1 (for tertiary multipath failover)
+        sec1 = db_controller.get_storage_node_by_id(secondary_ids[0])
+        if sec1 and sec1.status == StorageNode.STATUS_ONLINE:
+            try:
+                snode = db_controller.get_storage_node_by_id(snode.get_id())
+                sec1.create_secondary_hublvol(snode, cluster.nqn)
+            except Exception as e:
+                logger.error("Error creating secondary hublvol on sec_1 %s: %s", sec1.get_id(), e)
+
+        # Connect each secondary/tertiary to primary's hublvol
+        for i, sec_node_id in enumerate(secondary_ids):
+            sec_node = db_controller.get_storage_node_by_id(sec_node_id)
+            if sec_node.status != StorageNode.STATUS_ONLINE:
+                continue
+            try:
+                time.sleep(1)
+                failover_node = sec1 if i >= 1 and sec1 and sec1.status == StorageNode.STATUS_ONLINE else None
+                sec_role = "tertiary" if i >= 1 else "secondary"
+                sec_node.connect_to_hublvol(snode, failover_node=failover_node, role=sec_role)
+            except Exception as e:
+                logger.error("Error connecting %s to hublvol on %s: %s", sec_node.get_id(), snode.get_id(), e)
 
     # reorder qos classes ids
     qos_classes = db_controller.get_qos(cl_id)
