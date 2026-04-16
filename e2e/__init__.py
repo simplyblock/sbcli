@@ -80,6 +80,10 @@ from e2e_tests.security.test_lvol_security import (
     TestLvolSecurityNegativeHostOps,
     TestLvolSecuritySnapshotClone,
     TestLvolSecurityRDMAv2,
+    TestLvolSecurityStorageNodeOutage,
+    TestLvolSecurityMgmtNodeReboot,
+    TestLvolSecurityHAFailover,
+    TestLvolSecurityNetworkInterrupt,
 )
 
 from e2e_tests.upgrade_tests.major_upgrade import TestMajorUpgrade, TestMajorUpgradeSingleNode
@@ -167,6 +171,11 @@ ALL_TESTS = [
     TestLvolSecurityNegativeHostOps,
     TestLvolSecuritySnapshotClone,
     TestLvolSecurityRDMAv2,
+    # Security outage tests
+    TestLvolSecurityStorageNodeOutage,
+    TestLvolSecurityMgmtNodeReboot,
+    TestLvolSecurityHAFailover,
+    TestLvolSecurityNetworkInterrupt,
     # Security stress tests
     RandomSecurityFailoverTest,
     RandomAllSecurityFailoverTest,
@@ -281,6 +290,11 @@ def get_security_tests():
         TestLvolSecurityNegativeHostOps,
         TestLvolSecuritySnapshotClone,
         TestLvolSecurityRDMAv2,
+        # Security outage tests — run last (involves node shutdown/restart)
+        TestLvolSecurityStorageNodeOutage,
+        TestLvolSecurityMgmtNodeReboot,
+        TestLvolSecurityHAFailover,
+        TestLvolSecurityNetworkInterrupt,
     ]
 
 
