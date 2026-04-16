@@ -1,43 +1,41 @@
 # syntax=docker/dockerfile:1
-FROM python:3.9-slim
+FROM redhat/ubi10:10.1
 
-RUN apt-get update ; apt-get upgrade -y
+LABEL name="simplyblock"
+LABEL vendor="Simplyblock"
+LABEL version="1.0.0"
+LABEL release="1"
+LABEL summary="Simplyblock controlplane plane component"
+LABEL description="Simplyblock controlplane plane container"
+LABEL maintainer="developers@simplyblock.io"
 
-RUN apt-get install -y \
-    wget libc6 inetutils-ping dmidecode nvme-cli open-iscsi iptables \
-    iproute2 pciutils sudo nano parted gdisk ssh ca-certificates curl kmod kubectl
 
+RUN dnf config-manager addrepo --from-repofile https://download.docker.com/linux/fedora/docker-ce.repo
 
-RUN install -m 0755 -d /etc/apt/keyrings
-RUN curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
-RUN chmod a+r /etc/apt/keyrings/docker.asc
-RUN echo \
-    "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian bookworm stable" | \
-    tee /etc/apt/sources.list.d/docker.list > /dev/null
-
-RUN apt-get update ; apt-get install docker-ce-cli -y
-RUN apt-get upgrade -y
-
-RUN rm -rf /var/lib/apt/lists/*
+RUN dnf install -y wget dmidecode nvme-cli iptables pciutils sudo nano parted gdisk ssh su pkg-config hostname\
+    ca-certificates curl kmod docker-ce-cli python3.13 python3-pip iputils iproute iscsi-initiator-utils
 
 ARG TARGETPLATFORM
 RUN if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
         echo "ARM64 version"; \
-        wget https://github.com/apple/foundationdb/releases/download/7.3.63/foundationdb-clients_7.3.63-1_aarch64.deb; \
-        dpkg -i foundationdb-clients_7* ; \
-        rm -f foundationdb-clients_7* ; \
+    	wget https://github.com/apple/foundationdb/releases/download/7.3.69/foundationdb-clients-7.3.69-1.el9.aarch64.rpm; \
+        rpm -ivh --nodigest --nofiledigest foundationdb-clients-7* ; \
     else \
         echo "AMD64 version"; \
-        wget https://github.com/apple/foundationdb/releases/download/7.3.56/foundationdb-clients_7.3.56-1_amd64.deb; \
-        dpkg -i foundationdb-clients_7* ; \
-        rm -f foundationdb-clients_7* ; \
+        wget https://github.com/apple/foundationdb/releases/download/7.3.69/foundationdb-clients-7.3.69-1.el7.x86_64.rpm; \
+        rpm -ivh --nodigest --nofiledigest foundationdb-clients-7* ; \
     fi
 
+COPY LICENSE /licenses/LICENSE
+
 WORKDIR /app
-
-RUN pip3 install --upgrade pip
-RUN pip3 install setuptools --upgrade
-
 COPY requirements.txt requirements.txt
-
+RUN pip3 install --upgrade pip setuptools
 RUN pip3 install -r requirements.txt
+
+RUN dnf clean all
+
+RUN useradd -ms /bin/bash simplyblock
+RUN echo "simplyblock  ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
+USER simplyblock
+
