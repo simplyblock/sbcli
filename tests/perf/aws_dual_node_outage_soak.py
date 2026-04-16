@@ -22,34 +22,12 @@ except ImportError:
 UUID_RE = re.compile(r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}")
 
 
-OUTAGE_METHODS = (
-    "graceful", "forced", "container_kill", "host_reboot",
-    "data_nics_short", "data_nics_long", "mgmt_nic_outage",
-)
-AUTO_RECOVER_METHODS = (
-    "container_kill", "host_reboot",
-    "data_nics_short", "data_nics_long", "mgmt_nic_outage",
-)
-# NIC-outage methods: the NIC is restored by a timer on the host,
-# not by sbctl restart. The CP should detect the node as unreachable
-# and recover once the NIC comes back.
-NIC_OUTAGE_DURATIONS = {
-    "data_nics_short": 25,
-    "data_nics_long": 120,
-    "mgmt_nic_outage": 120,
-}
-
-
 def parse_args():
     default_metadata = Path(__file__).with_name("cluster_metadata.json")
     default_log_dir = Path(__file__).parent
 
     parser = argparse.ArgumentParser(
-        description=(
-            "Run a long fio soak against a multipath AWS cluster while cycling "
-            "random two-node outages with mixed outage methods, plus independent "
-            "background single-NIC chaos."
-        )
+        description="Run a long fio soak against an AWS cluster while cycling random two-node outages."
     )
     parser.add_argument("--metadata", default=str(default_metadata), help="Path to cluster metadata JSON.")
     parser.add_argument("--pool", default="pool01", help="Pool name for volume creation.")
@@ -80,59 +58,7 @@ def parse_args():
         default="",
         help="Optional SSH private key path override for client connections.",
     )
-    parser.add_argument(
-        "--methods",
-        default=",".join(OUTAGE_METHODS),
-        help=(
-            "Comma-separated subset of outage methods to pick from per iteration. "
-            f"Choices: {','.join(OUTAGE_METHODS)}. "
-            "Each iteration picks 2 distinct methods at random."
-        ),
-    )
-    parser.add_argument(
-        "--auto-recover-wait",
-        type=int,
-        default=900,
-        help=(
-            "Seconds to wait for a node to return online after a container_kill "
-            "or host_reboot outage (no sbctl restart is issued)."
-        ),
-    )
-    parser.add_argument(
-        "--data-nics",
-        default="eth1,eth2",
-        help="Comma-separated data NIC names on storage nodes (default: eth1,eth2).",
-    )
-    parser.add_argument(
-        "--mgmt-nic",
-        default="eth0",
-        help="Management NIC name on storage nodes (default: eth0).",
-    )
-    parser.add_argument(
-        "--nic-chaos-interval",
-        type=int,
-        default=45,
-        help=(
-            "Mean interval in seconds between independent single-NIC chaos "
-            "events. Set to 0 to disable background NIC chaos. (default: 45)"
-        ),
-    )
-    parser.add_argument(
-        "--nic-chaos-duration",
-        type=int,
-        default=20,
-        help="Duration in seconds for each single-NIC chaos event (default: 20).",
-    )
-    args = parser.parse_args()
-    methods = [m.strip() for m in args.methods.split(",") if m.strip()]
-    bad = [m for m in methods if m not in OUTAGE_METHODS]
-    if bad:
-        parser.error(f"Unknown outage method(s): {bad}. Choices: {list(OUTAGE_METHODS)}")
-    if not methods:
-        parser.error("At least one outage method must be enabled")
-    args.methods = methods
-    args.data_nics = [n.strip() for n in args.data_nics.split(",") if n.strip()]
-    return args
+    return parser.parse_args()
 
 
 def load_metadata(path):
@@ -376,91 +302,10 @@ class SoakRunner:
         self.cluster_id = metadata.get("cluster_uuid") or ""
         self.fio_jobs = []
         self.created_volume_ids = []
-        # Mixed-outage state
-        self.methods = list(args.methods)
-        self.node_hosts = {}  # uuid -> RemoteHost (private_ip of storage node)
-        self.node_ip_map = self._build_node_ip_map()
-        # Build set of forbidden (primary, secondary) pairs from topology
-        self._forbidden_pairs = self._build_forbidden_pairs()
 
     def close(self):
         self.client.close()
         self.mgmt.close()
-        for host in self.node_hosts.values():
-            try:
-                host.close()
-            except Exception:
-                pass
-
-    def _build_forbidden_pairs(self):
-        """Build a set of frozensets {node_a, node_b} for every (primary, secondary)
-        relationship in the topology.  These pairs must NOT be outaged together
-        because tearing down both the primary and secondary paths simultaneously
-        is not an allowed failure scenario for multipath."""
-        forbidden = set()
-        topology = self.metadata.get("topology") or {}
-        # lvs_name -> {role -> node_uuid}
-        lvs_roles = {}
-        for node in topology.get("nodes", []):
-            uuid = node.get("uuid")
-            for lvs in node.get("lvs", []):
-                name = lvs.get("name")
-                role = lvs.get("role")
-                if name and role and uuid:
-                    lvs_roles.setdefault(name, {})[role] = uuid
-        for lvs_name, roles in lvs_roles.items():
-            pri = roles.get("primary")
-            sec = roles.get("secondary")
-            if pri and sec and pri != sec:
-                forbidden.add(frozenset([pri, sec]))
-        return forbidden
-
-    def _is_forbidden_pair(self, uuid_a, uuid_b):
-        """Return True if outaging both nodes simultaneously would tear down
-        a primary+secondary path pair."""
-        return frozenset([uuid_a, uuid_b]) in self._forbidden_pairs
-
-    def _build_node_ip_map(self):
-        """Return {uuid: private_ip} for every storage node we know about."""
-        ip_map = {}
-        topology = self.metadata.get("topology") or {}
-        for node in topology.get("nodes", []):
-            uuid = node.get("uuid")
-            ip = node.get("management_ip") or node.get("private_ip")
-            if uuid and ip:
-                ip_map[uuid] = ip
-        # Fallback: pair storage_nodes list with sbctl-returned UUIDs by mgmt IP,
-        # which is done lazily in _resolve_node_ip below.
-        return ip_map
-
-    def _resolve_node_ip(self, uuid):
-        """Return the private/mgmt IP for a storage node UUID, refreshing via
-        sbctl if we haven't seen it in metadata."""
-        ip = self.node_ip_map.get(uuid)
-        if ip:
-            return ip
-        # Try fetching via sbctl sn list JSON.
-        nodes = self.sbctl("sn list --json", json_output=True)
-        for node in nodes:
-            candidate_ip = (
-                node.get("Management IP")
-                or node.get("Mgmt IP")
-                or node.get("mgmt_ip")
-                or node.get("management_ip")
-            )
-            if node.get("UUID") == uuid and candidate_ip:
-                self.node_ip_map[uuid] = candidate_ip
-                return candidate_ip
-        raise TestRunError(f"Cannot resolve storage-node IP for UUID {uuid}")
-
-    def _node_host(self, uuid):
-        """Lazily create a RemoteHost for a storage node identified by UUID."""
-        if uuid in self.node_hosts:
-            return self.node_hosts[uuid]
-        ip = self._resolve_node_ip(uuid)
-        host = RemoteHost(ip, self.user, self.key_path, self.logger, f"sn[{ip}]")
-        self.node_hosts[uuid] = host
-        return host
 
     def sbctl(self, args, timeout=600, json_output=False):
         command = "sudo /usr/local/bin/sbctl -d " + args
@@ -575,7 +420,7 @@ class SoakRunner:
             ]
             if unaffected_bad:
                 raise TestRunError(
-                    f"Unaffected nodes are not online: "
+                    "Unaffected nodes are not online: "
                     + ", ".join(f"{uuid}:{statuses[uuid]}" for uuid in unaffected_bad)
                 )
             if not offline and len(statuses) == expected:
@@ -913,254 +758,21 @@ class SoakRunner:
         if finished_cleanly:
             raise TestRunError("fio completed before outage loop started")
 
-    # ----- outage methods ---------------------------------------------------
-
-    def _forced_shutdown(self, node_id):
-        """Shutdown with --force; still retry if blocked by migration."""
-        while True:
-            rc, stdout_text, stderr_text = self.sbctl_allow_failure(
-                f"sn shutdown {node_id} --force",
-                timeout=300,
-            )
-            if rc == 0:
-                return
-            output = f"{stdout_text}\n{stderr_text}".lower()
-            retry_markers = (
-                "migration", "migrat", "rebalanc",
-                "active task", "running task",
-                "in_progress", "in progress",
-            )
-            if any(m in output for m in retry_markers):
-                self.logger.log(
-                    f"Forced shutdown of {node_id} blocked by migration/task; retrying in 15s"
-                )
-                time.sleep(15)
-                continue
-            raise RemoteCommandError(
-                f"mgmt: command failed with rc={rc}: sbctl sn shutdown {node_id} --force"
-            )
-
-    def _container_kill(self, node_id):
-        """Kill the SPDK container on the storage node's host. Node is expected
-        to auto-recover; no sbctl restart is issued."""
-        host = self._node_host(node_id)
-        cmd = (
-            "set -euo pipefail; "
-            "cns=$(sudo docker ps --format '{{.Names}}' | grep -E '^spdk_[0-9]+$' || true); "
-            "if [ -z \"$cns\" ]; then echo 'no spdk_* container found' >&2; exit 0; fi; "
-            "for cn in $cns; do echo \"killing $cn\"; sudo docker kill \"$cn\" || true; done"
-        )
-        host.run(
-            f"bash -lc {shlex.quote(cmd)}",
-            timeout=120,
-            check=False,
-            label=f"container_kill {node_id}",
-        )
-
-    def _host_reboot(self, node_id):
-        """Reboot the storage node's host. Node is expected to auto-recover;
-        no sbctl restart is issued."""
-        host = self._node_host(node_id)
-        # nohup + background + sleep so the shell exit beats reboot cleanly
-        cmd = "sudo nohup bash -c 'sleep 2; reboot -f' >/dev/null 2>&1 &"
-        try:
-            host.run(
-                f"bash -lc {shlex.quote(cmd)}",
-                timeout=30,
-                check=False,
-                label=f"host_reboot {node_id}",
-            )
-        except RemoteCommandError as exc:
-            # SSH may drop as the host goes down — not fatal.
-            self.logger.log(f"host_reboot {node_id}: ssh terminated as expected: {exc}")
-        # Drop the cached SSH client; it's going to die anyway.
-        cached = self.node_hosts.pop(node_id, None)
-        if cached is not None:
-            try:
-                cached.close()
-            except Exception:
-                pass
-
-    def _nic_outage(self, node_id, nics, duration, label):
-        """Take one or more NICs down on a storage node for *duration* seconds.
-
-        The command is fire-and-forget (nohup + background) so SSH can drop
-        if the mgmt NIC is the one being downed.  The NICs are restored by
-        the timer running on the host.
-        """
-        host = self._node_host(node_id)
-        down_cmds = "; ".join(f"ip link set {n} down" for n in nics)
-        up_cmds   = "; ".join(f"ip link set {n} up"   for n in nics)
-        cmd = (
-            f"sudo nohup bash -c '"
-            f"{down_cmds}; sleep {duration}; {up_cmds}"
-            f"' >/dev/null 2>&1 &"
-        )
-        try:
-            host.run(
-                f"bash -lc {shlex.quote(cmd)}",
-                timeout=30,
-                check=False,
-                label=f"{label} {node_id} nics={nics} dur={duration}s",
-            )
-        except RemoteCommandError as exc:
-            # SSH may drop if mgmt NIC is being taken down — expected.
-            self.logger.log(f"{label} {node_id}: SSH dropped (expected): {exc}")
-
-        # If mgmt NIC was downed, the cached SSH connection is dead.
-        if self.args.mgmt_nic in nics:
-            cached = self.node_hosts.pop(node_id, None)
-            if cached is not None:
-                try:
-                    cached.close()
-                except Exception:
-                    pass
-
-    def _data_nics_short(self, node_id):
-        """Stop ALL data NICs for 25s. Management stays up."""
-        self._nic_outage(
-            node_id, self.args.data_nics,
-            NIC_OUTAGE_DURATIONS["data_nics_short"], "data_nics_short")
-
-    def _data_nics_long(self, node_id):
-        """Stop ALL data NICs for 120s. Management stays up."""
-        self._nic_outage(
-            node_id, self.args.data_nics,
-            NIC_OUTAGE_DURATIONS["data_nics_long"], "data_nics_long")
-
-    def _mgmt_nic_outage(self, node_id):
-        """Stop the management NIC for 120s. Data NICs stay up."""
-        self._nic_outage(
-            node_id, [self.args.mgmt_nic],
-            NIC_OUTAGE_DURATIONS["mgmt_nic_outage"], "mgmt_nic_outage")
-
-    def _apply_outage(self, node_id, method):
-        self.logger.log(f"Applying outage '{method}' on {node_id}")
-        if method == "graceful":
-            self.shutdown_with_migration_retry(node_id)
-        elif method == "forced":
-            self._forced_shutdown(node_id)
-        elif method == "container_kill":
-            self._container_kill(node_id)
-        elif method == "host_reboot":
-            self._host_reboot(node_id)
-        elif method == "data_nics_short":
-            self._data_nics_short(node_id)
-        elif method == "data_nics_long":
-            self._data_nics_long(node_id)
-        elif method == "mgmt_nic_outage":
-            self._mgmt_nic_outage(node_id)
-        else:
-            raise TestRunError(f"Unknown outage method: {method}")
-
-    def _needs_manual_restart(self, method):
-        return method not in AUTO_RECOVER_METHODS
-
-    def run_outage_pair(self, node1, node2, method1, method2):
-        self.logger.log(
-            f"Outage pair: {node1}={method1} and {node2}={method2}"
-        )
-        # Apply first outage, then optional gap, then second outage.
-        self._apply_outage(node1, method1)
+    def run_outage_pair(self, node1, node2):
+        self.logger.log(f"Outage pair: {node1} and {node2}")
+        self.shutdown_with_migration_retry(node1)
         if self.args.shutdown_gap:
             time.sleep(self.args.shutdown_gap)
-        self._apply_outage(node2, method2)
-
-        # Issue sbctl restart only for methods that leave the node in a
-        # "shutdown" state that the CP won't recover on its own.
-        # Retry with backoff: when the other node in the pair used an
-        # auto-recover method (container_kill / host_reboot), it may
-        # still be in_shutdown or in_restart when we try to restart the
-        # manually-recovered peer — the per-cluster guard rejects
-        # concurrent restarts. Retrying gives the auto-recovering node
-        # time to come back.
-        for node_id, method in [(node1, method1), (node2, method2)]:
-            if not self._needs_manual_restart(method):
-                continue
-            deadline = time.time() + self.args.restart_timeout
-            while True:
-                try:
-                    self.sbctl(f"sn restart {node_id}", timeout=300)
-                    break
-                except Exception as e:
-                    if time.time() >= deadline:
-                        raise
-                    self.logger.log(
-                        f"Restart of {node_id} failed ({e}), "
-                        f"retrying in 15s (peer may still be recovering)")
-                    time.sleep(15)
-
-        # For auto-recovery methods, allow a longer wait window since the host
-        # has to reboot / the container has to come back under its supervisor.
-        # For NIC-outage methods, wait at least the outage duration + buffer
-        # for the NIC to come back and CP to detect recovery.
-        wait_timeout = self.args.restart_timeout
-        if any(m in AUTO_RECOVER_METHODS for m in (method1, method2)):
-            wait_timeout = max(wait_timeout, self.args.auto_recover_wait)
-        for m in (method1, method2):
-            if m in NIC_OUTAGE_DURATIONS:
-                nic_wait = NIC_OUTAGE_DURATIONS[m] + 120  # duration + CP recovery buffer
-                wait_timeout = max(wait_timeout, nic_wait)
-
-        self.wait_for_all_online(
-            target_nodes={node1, node2}, timeout=wait_timeout
-        )
+        self.shutdown_with_migration_retry(node2)
+        self.sbctl(f"sn restart {node1}", timeout=300)
+        self.sbctl(f"sn restart {node2}", timeout=300)
+        self.wait_for_all_online(target_nodes={node1, node2}, timeout=self.args.restart_timeout)
         finished = self.check_fio()
         if finished:
             self.logger.log("fio workload completed successfully after outage cycle")
             return True
         self.wait_for_cluster_stable()
         return False
-
-    # ----- background NIC chaos -----------------------------------------------
-
-    def _nic_chaos_loop(self, stop_event):
-        """Background thread: periodically take down a SINGLE data NIC on a
-        random subset of storage nodes.
-
-        A single-NIC-down event on a multipath cluster must NOT produce any
-        IO errors — the surviving data NIC carries all traffic until the
-        downed NIC is restored.
-        """
-        self.logger.log(
-            f"NIC chaos thread started (interval ~{self.args.nic_chaos_interval}s, "
-            f"duration {self.args.nic_chaos_duration}s per event)"
-        )
-        while not stop_event.is_set():
-            # Jittered sleep between events
-            jitter = random.uniform(0.5, 1.5)
-            if stop_event.wait(self.args.nic_chaos_interval * jitter):
-                break  # stop_event was set
-
-            try:
-                current_nodes = self.ensure_expected_nodes()
-                online_uuids = [
-                    n["uuid"] for n in current_nodes if n["status"] == "online"
-                ]
-                if not online_uuids:
-                    continue
-
-                # Pick a random subset: 1, several, or all nodes
-                count = random.randint(1, len(online_uuids))
-                targets = random.sample(online_uuids, count)
-
-                for uuid in targets:
-                    nic = random.choice(self.args.data_nics)
-                    self.logger.log(
-                        f"NIC chaos: taking {nic} down on {uuid} "
-                        f"for {self.args.nic_chaos_duration}s"
-                    )
-                    try:
-                        self._nic_outage(
-                            uuid, [nic], self.args.nic_chaos_duration,
-                            "nic_chaos_single")
-                    except Exception as exc:
-                        self.logger.log(f"NIC chaos: error on {uuid}: {exc}")
-
-            except Exception as exc:
-                self.logger.log(f"NIC chaos: iteration error: {exc}")
-
-        self.logger.log("NIC chaos thread stopped")
 
     def run(self):
         self.ensure_prerequisites()
@@ -1172,67 +784,26 @@ class SoakRunner:
         self.connect_and_mount_volumes(volumes, mount_root)
         self.start_fio(volumes)
 
-        # Start background NIC chaos thread (independent of outage iterations)
-        nic_chaos_stop = threading.Event()
-        nic_chaos_thread = None
-        if self.args.nic_chaos_interval > 0 and self.args.data_nics:
-            nic_chaos_thread = threading.Thread(
-                target=self._nic_chaos_loop,
-                args=(nic_chaos_stop,),
-                daemon=True,
-                name="nic-chaos",
+        iteration = 0
+        while True:
+            iteration += 1
+            self.wait_for_cluster_stable()
+            self.wait_for_data_migration_complete(
+                f"starting outage iteration {iteration}"
             )
-            nic_chaos_thread.start()
-
-        try:
-            iteration = 0
-            while True:
-                iteration += 1
-                self.wait_for_cluster_stable()
-                self.wait_for_data_migration_complete(
-                    f"starting outage iteration {iteration}"
+            current_nodes = self.ensure_expected_nodes()
+            current_uuids = [node["uuid"] for node in current_nodes]
+            if any(node["status"] != "online" for node in current_nodes):
+                raise TestRunError(
+                    "Cluster not healthy before starting outage iteration: "
+                    + ", ".join(f"{node['uuid']}:{node['status']}" for node in current_nodes)
                 )
-                current_nodes = self.ensure_expected_nodes()
-                current_uuids = [node["uuid"] for node in current_nodes]
-                if any(node["status"] != "online" for node in current_nodes):
-                    raise TestRunError(
-                        "Cluster not healthy before starting outage iteration: "
-                        + ", ".join(
-                            f"{node['uuid']}:{node['status']}" for node in current_nodes
-                        )
-                    )
-                # Pick 2 nodes that are NOT a primary+secondary pair.
-                # With 6 nodes and ~6 forbidden pairs, there are plenty of
-                # valid combinations; a few resamples suffice.
-                for _attempt in range(50):
-                    node1, node2 = random.sample(current_uuids, 2)
-                    if not self._is_forbidden_pair(node1, node2):
-                        break
-                else:
-                    raise TestRunError(
-                        "Unable to find a valid (non primary+secondary) node pair "
-                        "after 50 attempts"
-                    )
-                # Pick 2 distinct outage methods (or fall back to same if only 1 enabled)
-                if len(self.methods) >= 2:
-                    method1, method2 = random.sample(self.methods, 2)
-                else:
-                    method1 = method2 = self.methods[0]
-                self.logger.log(
-                    f"Starting outage iteration {iteration}: "
-                    f"{node1}={method1}, {node2}={method2}"
-                )
-                done = self.run_outage_pair(node1, node2, method1, method2)
-                if done:
-                    self.logger.log(
-                        f"Test completed successfully after {iteration} outage iterations"
-                    )
-                    return
-        finally:
-            # Stop background NIC chaos on any exit
-            nic_chaos_stop.set()
-            if nic_chaos_thread is not None:
-                nic_chaos_thread.join(timeout=30)
+            node1, node2 = random.sample(current_uuids, 2)
+            self.logger.log(f"Starting outage iteration {iteration}")
+            done = self.run_outage_pair(node1, node2)
+            if done:
+                self.logger.log(f"Test completed successfully after {iteration} outage iterations")
+                return
 
 
 def main():

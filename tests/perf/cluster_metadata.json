@@ -1,248 +1,99 @@
 {
+    "provider": "aws",
+    "multipath": true,
+    "data_nics": [
+        "eth1",
+        "eth2"
+    ],
     "mgmt": {
-        "instance_id": "i-0da98b1f0b81c902e",
-        "public_ip": "3.94.81.201",
-        "private_ip": "172.31.33.32",
+        "instance_id": "i-0d3a18ea3570dee6a",
+        "public_ip": "52.45.23.98",
+        "private_ip": "172.31.34.134",
         "subnet_id": "subnet-0593459d6b931ee4c",
         "security_group_id": "sg-02e89a1372e9f39e9"
     },
     "storage_nodes": [
         {
-            "instance_id": "i-0d2cf4c147f9b3b42",
-            "private_ip": "172.31.45.254",
-            "public_ip": "98.86.106.147",
+            "instance_id": "i-0c111901688dea9db",
+            "private_ip": "172.31.43.72",
+            "public_ip": "34.192.87.77",
             "subnet_id": "subnet-0593459d6b931ee4c",
-            "security_group_id": "sg-02e89a1372e9f39e9"
+            "security_group_id": "sg-02e89a1372e9f39e9",
+            "data_nics": {
+                "eth1": "172.31.37.57",
+                "eth2": "172.31.43.139"
+            }
         },
         {
-            "instance_id": "i-0a8b4e31e92981269",
-            "private_ip": "172.31.40.63",
-            "public_ip": "98.81.10.187",
+            "instance_id": "i-07f31c6b985a5e74c",
+            "private_ip": "172.31.34.118",
+            "public_ip": "44.196.14.170",
             "subnet_id": "subnet-0593459d6b931ee4c",
-            "security_group_id": "sg-02e89a1372e9f39e9"
+            "security_group_id": "sg-02e89a1372e9f39e9",
+            "data_nics": {
+                "eth1": "172.31.36.36",
+                "eth2": "172.31.36.75"
+            }
         },
         {
-            "instance_id": "i-0991d1cc2a446ce07",
-            "private_ip": "172.31.32.91",
-            "public_ip": "18.209.32.116",
+            "instance_id": "i-04807b297c1546726",
+            "private_ip": "172.31.47.229",
+            "public_ip": "54.83.13.23",
             "subnet_id": "subnet-0593459d6b931ee4c",
-            "security_group_id": "sg-02e89a1372e9f39e9"
+            "security_group_id": "sg-02e89a1372e9f39e9",
+            "data_nics": {
+                "eth1": "172.31.35.194",
+                "eth2": "172.31.35.85"
+            }
         },
         {
-            "instance_id": "i-01d070b412fba4eb8",
-            "private_ip": "172.31.40.124",
-            "public_ip": "23.21.39.209",
+            "instance_id": "i-01c84b966bc6b5e33",
+            "private_ip": "172.31.35.242",
+            "public_ip": "98.88.212.135",
             "subnet_id": "subnet-0593459d6b931ee4c",
-            "security_group_id": "sg-02e89a1372e9f39e9"
+            "security_group_id": "sg-02e89a1372e9f39e9",
+            "data_nics": {
+                "eth1": "172.31.43.209",
+                "eth2": "172.31.45.178"
+            }
         },
         {
-            "instance_id": "i-0bb5f70de769458e8",
-            "private_ip": "172.31.46.37",
-            "public_ip": "34.226.206.215",
+            "instance_id": "i-0db3226776b9f4cca",
+            "private_ip": "172.31.32.123",
+            "public_ip": "54.235.164.207",
             "subnet_id": "subnet-0593459d6b931ee4c",
-            "security_group_id": "sg-02e89a1372e9f39e9"
+            "security_group_id": "sg-02e89a1372e9f39e9",
+            "data_nics": {
+                "eth1": "172.31.45.125",
+                "eth2": "172.31.37.238"
+            }
         },
         {
-            "instance_id": "i-0619f718d58229001",
-            "private_ip": "172.31.37.87",
-            "public_ip": "34.228.220.128",
+            "instance_id": "i-06b4e7f06252fb6a6",
+            "private_ip": "172.31.36.217",
+            "public_ip": "35.173.10.107",
             "subnet_id": "subnet-0593459d6b931ee4c",
-            "security_group_id": "sg-02e89a1372e9f39e9"
+            "security_group_id": "sg-02e89a1372e9f39e9",
+            "data_nics": {
+                "eth1": "172.31.41.251",
+                "eth2": "172.31.45.124"
+            }
         }
     ],
     "clients": [
         {
-            "instance_id": "i-0e843220d2533b2ed",
-            "public_ip": "54.87.207.211",
-            "private_ip": "172.31.34.82",
-            "security_group_id": "sg-02e89a1372e9f39e9"
+            "instance_id": "i-039d51e90411a98af",
+            "public_ip": "44.212.119.188",
+            "private_ip": "172.31.41.52",
+            "security_group_id": "sg-02e89a1372e9f39e9",
+            "data_nics": {
+                "eth1": "172.31.35.93",
+                "eth2": "172.31.32.104"
+            }
         }
     ],
     "subnet_id": "subnet-0593459d6b931ee4c",
-    "target_group": "sg-02e89a1372e9f39e9",
-    "cluster_uuid": "59ec3703-ca9e-4bcd-baba-8e583729e7b4",
-    "topology": {
-        "cluster_uuid": "59ec3703-ca9e-4bcd-baba-8e583729e7b4",
-        "cluster_nqn": "nqn.2023-02.io.simplyblock:59ec3703-ca9e-4bcd-baba-8e583729e7b4",
-        "nodes": [
-            {
-                "uuid": "73e54bad-7207-46de-a355-7506191a1312",
-                "hostname": "ip-172-31-45-254_8080",
-                "management_ip": "172.31.45.254",
-                "lvs": [
-                    {
-                        "name": "LVS_6135",
-                        "role": "primary"
-                    },
-                    {
-                        "name": "LVS_6835",
-                        "role": "secondary"
-                    },
-                    {
-                        "name": "LVS_5623",
-                        "role": "tertiary"
-                    }
-                ],
-                "lvs_display": [
-                    "LVS_6135 (primary)",
-                    "LVS_6835 (secondary)",
-                    "LVS_5623 (tertiary)"
-                ]
-            },
-            {
-                "uuid": "27a40a45-fe43-4a7f-a632-0c7b150d6c30",
-                "hostname": "ip-172-31-40-63_8081",
-                "management_ip": "172.31.40.63",
-                "lvs": [
-                    {
-                        "name": "LVS_9943",
-                        "role": "primary"
-                    },
-                    {
-                        "name": "LVS_6135",
-                        "role": "secondary"
-                    },
-                    {
-                        "name": "LVS_6835",
-                        "role": "tertiary"
-                    }
-                ],
-                "lvs_display": [
-                    "LVS_9943 (primary)",
-                    "LVS_6135 (secondary)",
-                    "LVS_6835 (tertiary)"
-                ]
-            },
-            {
-                "uuid": "199bbfc9-8490-4c25-9d2d-7ceb4310c178",
-                "hostname": "ip-172-31-32-91_8082",
-                "management_ip": "172.31.32.91",
-                "lvs": [
-                    {
-                        "name": "LVS_2139",
-                        "role": "primary"
-                    },
-                    {
-                        "name": "LVS_9943",
-                        "role": "secondary"
-                    },
-                    {
-                        "name": "LVS_6135",
-                        "role": "tertiary"
-                    }
-                ],
-                "lvs_display": [
-                    "LVS_2139 (primary)",
-                    "LVS_9943 (secondary)",
-                    "LVS_6135 (tertiary)"
-                ]
-            },
-            {
-                "uuid": "dda0da3c-4ad5-4f82-b508-0e7065686171",
-                "hostname": "ip-172-31-40-124_8083",
-                "management_ip": "172.31.40.124",
-                "lvs": [
-                    {
-                        "name": "LVS_178",
-                        "role": "primary"
-                    },
-                    {
-                        "name": "LVS_2139",
-                        "role": "secondary"
-                    },
-                    {
-                        "name": "LVS_9943",
-                        "role": "tertiary"
-                    }
-                ],
-                "lvs_display": [
-                    "LVS_178 (primary)",
-                    "LVS_2139 (secondary)",
-                    "LVS_9943 (tertiary)"
-                ]
-            },
-            {
-                "uuid": "4bc25506-d514-461c-b413-b833dd278619",
-                "hostname": "ip-172-31-46-37_8084",
-                "management_ip": "172.31.46.37",
-                "lvs": [
-                    {
-                        "name": "LVS_5623",
-                        "role": "primary"
-                    },
-                    {
-                        "name": "LVS_178",
-                        "role": "secondary"
-                    },
-                    {
-                        "name": "LVS_2139",
-                        "role": "tertiary"
-                    }
-                ],
-                "lvs_display": [
-                    "LVS_5623 (primary)",
-                    "LVS_178 (secondary)",
-                    "LVS_2139 (tertiary)"
-                ]
-            },
-            {
-                "uuid": "3843f1c4-c874-4927-b2a5-b12d25692900",
-                "hostname": "ip-172-31-37-87_8085",
-                "management_ip": "172.31.37.87",
-                "lvs": [
-                    {
-                        "name": "LVS_6835",
-                        "role": "primary"
-                    },
-                    {
-                        "name": "LVS_5623",
-                        "role": "secondary"
-                    },
-                    {
-                        "name": "LVS_178",
-                        "role": "tertiary"
-                    }
-                ],
-                "lvs_display": [
-                    "LVS_6835 (primary)",
-                    "LVS_5623 (secondary)",
-                    "LVS_178 (tertiary)"
-                ]
-            }
-        ],
-        "lvstores": {
-            "LVS_178": {
-                "hublvol_nqn": "nqn.2023-02.io.simplyblock:59ec3703-ca9e-4bcd-baba-8e583729e7b4:hublvol:LVS_178",
-                "client_port": 4432,
-                "hublvol_port": 4433
-            },
-            "LVS_2139": {
-                "hublvol_nqn": "nqn.2023-02.io.simplyblock:59ec3703-ca9e-4bcd-baba-8e583729e7b4:hublvol:LVS_2139",
-                "client_port": 4430,
-                "hublvol_port": 4431
-            },
-            "LVS_5623": {
-                "hublvol_nqn": "nqn.2023-02.io.simplyblock:59ec3703-ca9e-4bcd-baba-8e583729e7b4:hublvol:LVS_5623",
-                "client_port": 4434,
-                "hublvol_port": 4435
-            },
-            "LVS_6135": {
-                "hublvol_nqn": "nqn.2023-02.io.simplyblock:59ec3703-ca9e-4bcd-baba-8e583729e7b4:hublvol:LVS_6135",
-                "client_port": 4420,
-                "hublvol_port": 4427
-            },
-            "LVS_6835": {
-                "hublvol_nqn": "nqn.2023-02.io.simplyblock:59ec3703-ca9e-4bcd-baba-8e583729e7b4:hublvol:LVS_6835",
-                "client_port": 4436,
-                "hublvol_port": 4437
-            },
-            "LVS_9943": {
-                "hublvol_nqn": "nqn.2023-02.io.simplyblock:59ec3703-ca9e-4bcd-baba-8e583729e7b4:hublvol:LVS_9943",
-                "client_port": 4428,
-                "hublvol_port": 4429
-            }
-        }
-    },
+    "cluster_uuid": "cd03b42d-a34f-4a70-a1b0-2263661b843d",
     "user": "ec2-user",
     "key_path": "C:\\ssh\\mtes01.pem"
 }

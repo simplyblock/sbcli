@@ -143,25 +143,57 @@ def ssh_exec_stream(ip, cmd, check=False):
 
 # ──────────────────── AWS instance helpers ───────────────────────────────────
 
-def _build_nic_specs(num_nics, subnet, sg, public_ip_on_first=True):
-    """Build NetworkInterfaces list for create_instances (up to num_nics)."""
+def _build_nic_specs(num_nics, subnet, sg):
+    """Build NetworkInterfaces list for create_instances (up to num_nics).
+
+    AWS does not allow AssociatePublicIpAddress inside a NIC spec when
+    multiple network interfaces are present.  Public IPs are assigned
+    post-launch via Elastic IPs instead (see _assign_public_ips).
+    """
     specs = []
     for idx in range(num_nics):
-        spec = {
+        specs.append({
             "DeviceIndex": idx,
             "SubnetId": subnet,
             "Groups": [sg],
-        }
-        if idx == 0 and public_ip_on_first:
-            spec["AssociatePublicIpAddress"] = True
-        specs.append(spec)
+        })
     return specs
+
+
+def _assign_public_ips(instances):
+    """Allocate an EIP for each instance and associate it with eth0.
+
+    Required because AssociatePublicIpAddress cannot be used with
+    multiple network interfaces at launch time.  For multi-NIC instances
+    the association must target the primary ENI (DeviceIndex=0) by its
+    NetworkInterfaceId, not the InstanceId.
+    """
+    for inst in instances:
+        inst.wait_until_running()
+        inst.reload()
+        # Find the primary ENI (DeviceIndex 0)
+        primary_eni = None
+        for ni in inst.network_interfaces:
+            if ni.attachment and ni.attachment.get("DeviceIndex") == 0:
+                primary_eni = ni.id
+                break
+        if not primary_eni:
+            # Fallback: first NIC in the list
+            primary_eni = inst.network_interfaces[0].id if inst.network_interfaces else None
+        eip = ec2_client.allocate_address(Domain="vpc")
+        assoc_params = {"AllocationId": eip["AllocationId"]}
+        if primary_eni and len(inst.network_interfaces) > 1:
+            assoc_params["NetworkInterfaceId"] = primary_eni
+        else:
+            assoc_params["InstanceId"] = inst.id
+        ec2_client.associate_address(**assoc_params)
+        print(f"  {inst.id}: assigned EIP {eip['PublicIp']} (eni={primary_eni})")
 
 
 def launch_instances(count, instance_type, num_nics, tag_name, root_gb=30):
     """Launch EC2 instances with *num_nics* ENIs each."""
     print(f"  Launching {count}× {instance_type}  ({num_nics} NICs)  tag={tag_name}")
-    return ec2_resource.create_instances(
+    instances = ec2_resource.create_instances(
         ImageId=AMI_ID,
         InstanceType=instance_type,
         MinCount=count,
@@ -178,6 +210,8 @@ def launch_instances(count, instance_type, num_nics, tag_name, root_gb=30):
             "Tags": [{"Key": "Name", "Value": tag_name}],
         }],
     )
+    _assign_public_ips(instances)
+    return instances
 
 
 # ──────────────────── NIC configuration on instances ─────────────────────────
@@ -588,5 +622,51 @@ def main():
     print("=" * 60)
 
 
+def teardown(metadata_path="cluster_metadata.json"):
+    """Terminate all instances and release associated Elastic IPs.
+
+    Reads instance IDs from the metadata JSON written by main().
+    """
+    import pathlib
+    meta = json.loads(pathlib.Path(metadata_path).read_text())
+
+    all_ids = []
+    if "mgmt" in meta:
+        all_ids.append(meta["mgmt"]["instance_id"])
+    for sn in meta.get("storage_nodes", []):
+        all_ids.append(sn["instance_id"])
+    for cl in meta.get("clients", []):
+        all_ids.append(cl["instance_id"])
+
+    if not all_ids:
+        print("No instances found in metadata.")
+        return
+
+    # Release EIPs associated with any of these instances
+    print("Releasing Elastic IPs …")
+    addresses = ec2_client.describe_addresses().get("Addresses", [])
+    for addr in addresses:
+        if addr.get("InstanceId") in all_ids:
+            try:
+                if "AssociationId" in addr:
+                    ec2_client.disassociate_address(AssociationId=addr["AssociationId"])
+                ec2_client.release_address(AllocationId=addr["AllocationId"])
+                print(f"  Released EIP {addr['PublicIp']} (was on {addr['InstanceId']})")
+            except Exception as e:
+                print(f"  Warning: failed to release {addr.get('PublicIp')}: {e}")
+
+    # Terminate instances
+    print(f"Terminating {len(all_ids)} instances …")
+    ec2_client.terminate_instances(InstanceIds=all_ids)
+    for iid in all_ids:
+        print(f"  {iid}: terminating")
+    print("Done.")
+
+
 if __name__ == "__main__":
-    main()
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "teardown":
+        meta_path = sys.argv[2] if len(sys.argv) > 2 else "cluster_metadata.json"
+        teardown(meta_path)
+    else:
+        main()
