@@ -552,6 +552,10 @@ class K8sUtils:
             f"reclaimPolicy: Delete\n"
             f"volumeBindingMode: Immediate\n"
         )
+        # StorageClass parameters and volumeBindingMode are immutable —
+        # delete first to allow recreation with different parameters.
+        self.logger.info(f"[K8sUtils] Deleting existing StorageClass '{name}' (if any)")
+        self._exec_kubectl(f"kubectl delete storageclass {name} --ignore-not-found")
         self.logger.info(f"[K8sUtils] Creating StorageClass '{name}'")
         self.apply_yaml_cluster_scoped(yaml_content)
 
@@ -565,6 +569,8 @@ class K8sUtils:
             f"driver: csi.simplyblock.io\n"
             f"deletionPolicy: Delete\n"
         )
+        self.logger.info(f"[K8sUtils] Deleting existing VolumeSnapshotClass '{name}' (if any)")
+        self._exec_kubectl(f"kubectl delete volumesnapshotclass {name} --ignore-not-found")
         self.logger.info(f"[K8sUtils] Creating VolumeSnapshotClass '{name}'")
         self.apply_yaml_cluster_scoped(yaml_content)
 
