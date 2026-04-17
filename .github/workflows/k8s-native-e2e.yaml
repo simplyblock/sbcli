@@ -11,6 +11,10 @@ on:
         description: 'Simplyblock image tag'
         required: true
         default: 'main'
+      simplyblock_repository:
+        description: 'Simplyblock image repository'
+        required: false
+        default: 'public.ecr.aws/simply-block/simplyblock'
       spdk_image:
         description: 'SPDK container image'
         required: true
@@ -275,6 +279,7 @@ jobs:
             --set operator.storageNodes.spdkDebug=false \
             --set operator.storageNodes.coreIsolation=false \
             --set operator.storageNodes.numPartitions=0 \
+            --set image.simplyblock.repository="${{ github.event.inputs.simplyblock_repository || 'public.ecr.aws/simply-block/simplyblock' }}" \
             --set image.simplyblock.tag="${{ github.event.inputs.simplyblock_image }}" \
             --set-json "operator.storageNodes.workerNodes=${WORKER_JSON}" \
             --set-json "operator.storageNodes.dataIfname=${DATA_NICS_JSON}" \
