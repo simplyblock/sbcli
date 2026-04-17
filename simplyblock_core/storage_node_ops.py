@@ -4899,7 +4899,7 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
                 disconnected_peers.add(current_leader.get_id())
                 current_leader = None
 
-        if leader_port_blocked:
+        if leader_port_blocked and current_leader:
             # --- Inside port-blocked window: timeout=0.2s, retry=0, abort on failure ---
             leader_rpc = RPCClient(
                 current_leader.mgmt_ip, current_leader.rpc_port,
@@ -5011,7 +5011,7 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
                     _abort_restart_and_unblock(f"recreate_hublvol raised: {e.message}")
 
         ### 8b- unblock leader port immediately after hublvol success
-        if leader_port_blocked:
+        if leader_port_blocked and current_leader:
             try:
                 port_type = "tcp"
                 if current_leader.active_rdma:
