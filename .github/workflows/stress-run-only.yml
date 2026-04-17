@@ -1,5 +1,5 @@
 name: Stress Run on existing cluster Until Failure
-run-name: "Stress | ${{ github.ref_name }} | ${{ inputs.MNODES }}"
+run-name: "Stress | ${{ github.ref_name }} | ${{ inputs.MNODES }} | ${{ inputs.TEST_CLASS }} | NDCS:${{ inputs.BOOTSTRAP_DATA_CHUNKS }} NPCS:${{ inputs.BOOTSTRAP_PARITY_CHUNKS }}"
 
 on:
   workflow_dispatch:
@@ -26,11 +26,6 @@ on:
         description: "Management node(s) IPs (only remote ops; runner itself is not touched)"
         required: true
         default: "192.168.10.211"
-
-      SBCLI_CMD:
-        description: "sbcli command name"
-        required: true
-        default: "sbctl"
 
       CLUSTER_ID:
         description: "Cluster id to run test on"
@@ -100,7 +95,7 @@ jobs:
       BASTION_IP: ${{ inputs.BASTION_IP }}
       BASTION_SERVER: ${{ inputs.BASTION_IP }}
       MNODES: ${{ inputs.MNODES }}
-      SBCLI_CMD: ${{ inputs.SBCLI_CMD }}
+      SBCLI_CMD: 'sbctl'
 
       # SSH/client env
       SSH_USER: ${{ inputs.SSH_USER }}

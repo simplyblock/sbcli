@@ -1474,7 +1474,7 @@ def task_runner(task):
 
         elif phase == LVolMigration.PHASE_CLEANUP_TARGET:
             done, suspend, error = _handle_cleanup_target(migration, tgt_node, tgt_rpc)
-            next_phase = None  # terminal failure path
+            next_phase = ""  # terminal failure path
 
         else:
             _fail_task(task, migration, f"unknown phase: {phase}")

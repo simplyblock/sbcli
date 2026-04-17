@@ -22,9 +22,6 @@ on:
       GRAFANA_ENDPOINT:
         type: string
         default: "http://192.168.10.211/grafana"
-      SBCLI_CMD:
-        type: string
-        default: "sbctl"
       SBCLI_BRANCH:
         type: string
         default: "R25.10-Hotfix"
@@ -131,19 +128,13 @@ on:
         type: string
 
       CLUSTER_SECURITY:
-        description: |
-          Cluster setup mode.
-          'host-sec'        — writes dhchap JSON and passes --host-sec to cluster create.
-          'backup'          — writes s3-backup.json and passes --use-backup to cluster create.
-          'host-sec+backup' — applies both.
+        description: "Cluster setup mode. 'backup' writes s3-backup.json and passes --use-backup to cluster create."
         required: false
         type: choice
         default: "none"
         options:
           - none
-          - host-sec
           - backup
-          - host-sec+backup
 
       RUN_LABEL:
         description: "Optional label appended to artifact names to avoid collisions"
@@ -170,7 +161,7 @@ jobs:
       MNODES: ${{ inputs.MNODES || '192.168.10.211' }}
       NR_HUGEPAGES: ${{ inputs.NR_HUGEPAGES || '2048' }}
       GRAFANA_ENDPOINT: ${{ inputs.GRAFANA_ENDPOINT || 'http://192.168.10.211/grafana' }}
-      SBCLI_CMD: ${{ inputs.SBCLI_CMD || 'sbctl' }}
+      SBCLI_CMD: "sbctl"
       SBCLI_BRANCH: ${{ inputs.SBCLI_BRANCH || 'R25.10-Hotfix' }}
 
       # SSH/client env
@@ -683,18 +674,19 @@ jobs:
             exit 0
           fi
           mgmt_ip="$(echo "${MNODES}" | awk '{print $1}')"
-          if [[ "${CLUSTER_SECURITY}" == "host-sec" || "${CLUSTER_SECURITY}" == "host-sec+backup" ]]; then
-            echo "Writing /root/host-sec.json to ${mgmt_ip}..."
-            HOST_SEC_JSON='{"dhchap_digests":["sha256","sha384"],"dhchap_dhgroups":["ffdhe2048","ffdhe3072","ffdhe4096","ffdhe6144","ffdhe8192"]}'
-            sshpass -p "${SSH_PASSWORD}" ssh \
-              -o StrictHostKeyChecking=no \
-              -o UserKnownHostsFile=/dev/null \
-              "${SSH_USER}@${mgmt_ip}" \
-              "echo '${HOST_SEC_JSON}' > /root/host-sec.json && echo 'Written:' && cat /root/host-sec.json"
-            echo "EXTRA_CLUSTER_ARGS=${EXTRA_CLUSTER_ARGS} --host-sec /root/host-sec.json" >> "$GITHUB_ENV"
-            echo "Appended --host-sec /root/host-sec.json to EXTRA_CLUSTER_ARGS"
-          fi
-          if [[ "${CLUSTER_SECURITY}" == "backup" || "${CLUSTER_SECURITY}" == "host-sec+backup" ]]; then
+          # --- host-sec block commented out (kept for reference) ---
+          # if [[ "${CLUSTER_SECURITY}" == "host-sec" || "${CLUSTER_SECURITY}" == "host-sec+backup" ]]; then
+          #   echo "Writing /root/host-sec.json to ${mgmt_ip}..."
+          #   HOST_SEC_JSON='{"dhchap_digests":["sha256","sha384"],"dhchap_dhgroups":["ffdhe2048","ffdhe3072","ffdhe4096","ffdhe6144","ffdhe8192"]}'
+          #   sshpass -p "${SSH_PASSWORD}" ssh \
+          #     -o StrictHostKeyChecking=no \
+          #     -o UserKnownHostsFile=/dev/null \
+          #     "${SSH_USER}@${mgmt_ip}" \
+          #     "echo '${HOST_SEC_JSON}' > /root/host-sec.json && echo 'Written:' && cat /root/host-sec.json"
+          #   echo "EXTRA_CLUSTER_ARGS=${EXTRA_CLUSTER_ARGS} --host-sec /root/host-sec.json" >> "$GITHUB_ENV"
+          #   echo "Appended --host-sec /root/host-sec.json to EXTRA_CLUSTER_ARGS"
+          # fi
+          if [[ "${CLUSTER_SECURITY}" == "backup" ]]; then
             echo "Writing /root/s3-backup.json to ${mgmt_ip}..."
             S3_BACKUP_JSON='{"access_key_id":"minioadmin","secret_access_key":"minioadmin","local_endpoint":"http://192.168.10.164:9000","snapshot_backups":true,"with_compression":false,"secondary_target":0,"local_testing":true}'
             sshpass -p "${SSH_PASSWORD}" ssh \

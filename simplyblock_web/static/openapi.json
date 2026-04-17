@@ -529,6 +529,92 @@
         }
       }
     },
+    "/api/v2/clusters/{cluster_id}/addreplication": {
+      "post": {
+        "summary": "Clusters:Addreplication",
+        "operationId": "clusters_addreplication_api_v2_clusters__cluster_id__addreplication_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Cluster Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/_ReplicationParams"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/clusters/{cluster_id}/expand": {
+      "post": {
+        "summary": "Clusters:Expand",
+        "operationId": "clusters_expand_api_v2_clusters__cluster_id__expand_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Cluster Id"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v2/clusters/{cluster_id}/update": {
       "post": {
         "summary": "Clusters:Upgrade",
@@ -771,6 +857,16 @@
               "type": "boolean",
               "default": false,
               "title": "Force Migrate"
+            }
+          },
+          {
+            "name": "force_delete",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Force Delete"
             }
           }
         ],
@@ -1245,14 +1341,11 @@
           }
         ],
         "requestBody": {
+          "required": true,
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/_RestartParams",
-                "default": {
-                  "force": false,
-                  "reattach_volume": false
-                }
+                "$ref": "#/components/schemas/_RestartParams"
               }
             }
           }
@@ -1306,14 +1399,11 @@
           }
         ],
         "requestBody": {
+          "required": true,
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/_RestartParams",
-                "default": {
-                  "force": false,
-                  "reattach_volume": false
-                }
+                "$ref": "#/components/schemas/_RestartParams"
               }
             }
           }
@@ -1457,10 +1547,12 @@
             }
           }
         }
-      },
-      "delete": {
-        "summary": "Clusters:Storage Nodes:Devices:Delete",
-        "operationId": "clusters_storage_nodes_devices_delete_api_v2_clusters__cluster_id__storage_nodes__storage_node_id__devices__device_id___delete",
+      }
+    },
+    "/api/v2/clusters/{cluster_id}/storage-nodes/{storage_node_id}/devices/{device_id}/remove": {
+      "post": {
+        "summary": "Clusters:Storage Nodes:Devices:Remove",
+        "operationId": "clusters_storage_nodes_devices_remove_api_v2_clusters__cluster_id__storage_nodes__storage_node_id__devices__device_id__remove_post",
         "security": [
           {
             "HTTPBearer": []
@@ -1495,6 +1587,84 @@
               "type": "string",
               "format": "uuid",
               "title": "Device Id"
+            }
+          },
+          {
+            "name": "force",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Force"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/clusters/{cluster_id}/storage-nodes/{storage_node_id}/devices/{device_id}/restart": {
+      "post": {
+        "summary": "Clusters:Storage Nodes:Devices:Restart",
+        "operationId": "clusters_storage_nodes_devices_restart_api_v2_clusters__cluster_id__storage_nodes__storage_node_id__devices__device_id__restart_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Cluster Id"
+            }
+          },
+          {
+            "name": "storage_node_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Storage Node Id"
+            }
+          },
+          {
+            "name": "device_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Device Id"
+            }
+          },
+          {
+            "name": "force",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Force"
             }
           }
         ],
@@ -1717,6 +1887,110 @@
         "responses": {
           "204": {
             "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/clusters/{cluster_id}/tasks/": {
+      "get": {
+        "summary": "Clusters:Tasks:List",
+        "operationId": "clusters_tasks_list_api_v2_clusters__cluster_id__tasks__get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Cluster Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/TaskDTO"
+                  },
+                  "title": "Response Clusters Tasks List Api V2 Clusters  Cluster Id  Tasks  Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/clusters/{cluster_id}/tasks/{task_id}/": {
+      "get": {
+        "summary": "Clusters:Tasks:Detail",
+        "operationId": "clusters_tasks_detail_api_v2_clusters__cluster_id__tasks__task_id___get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Cluster Id"
+            }
+          },
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Task Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskDTO"
+                }
+              }
+            }
           },
           "422": {
             "description": "Validation Error",
@@ -2161,6 +2435,69 @@
         }
       }
     },
+    "/api/v2/clusters/{cluster_id}/storage-pools/{pool_id}/volumes/replicate_lvol_on_source_cluster": {
+      "post": {
+        "summary": "Clusters:Storage-Pools:Replicate Lvol On Source Cluster",
+        "operationId": "clusters_storage_pools_replicate_lvol_on_source_cluster_api_v2_clusters__cluster_id__storage_pools__pool_id__volumes_replicate_lvol_on_source_cluster_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Cluster Id"
+            }
+          },
+          {
+            "name": "pool_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Pool Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReplicateLVolParams"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v2/clusters/{cluster_id}/storage-pools/{pool_id}/volumes/{volume_id}/": {
       "get": {
         "summary": "Clusters:Storage-Pools:Volumes:Detail",
@@ -2348,10 +2685,396 @@
         }
       }
     },
+    "/api/v2/clusters/{cluster_id}/storage-pools/{pool_id}/volumes/{volume_id}/hosts": {
+      "post": {
+        "summary": "Clusters:Storage-Pools:Volumes:Add-Host",
+        "operationId": "clusters_storage_pools_volumes_add_host_api_v2_clusters__cluster_id__storage_pools__pool_id__volumes__volume_id__hosts_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Cluster Id"
+            }
+          },
+          {
+            "name": "pool_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Pool Id"
+            }
+          },
+          {
+            "name": "volume_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Volume Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/_AddHostParams"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/clusters/{cluster_id}/storage-pools/{pool_id}/volumes/{volume_id}/hosts/{host_nqn}/secret": {
+      "get": {
+        "summary": "Clusters:Storage-Pools:Volumes:Get-Host-Secret",
+        "operationId": "clusters_storage_pools_volumes_get_host_secret_api_v2_clusters__cluster_id__storage_pools__pool_id__volumes__volume_id__hosts__host_nqn__secret_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "host_nqn",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Host Nqn"
+            }
+          },
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Cluster Id"
+            }
+          },
+          {
+            "name": "pool_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Pool Id"
+            }
+          },
+          {
+            "name": "volume_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Volume Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/clusters/{cluster_id}/storage-pools/{pool_id}/volumes/{volume_id}/hosts/{host_nqn}": {
+      "delete": {
+        "summary": "Clusters:Storage-Pools:Volumes:Remove-Host",
+        "operationId": "clusters_storage_pools_volumes_remove_host_api_v2_clusters__cluster_id__storage_pools__pool_id__volumes__volume_id__hosts__host_nqn__delete",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "host_nqn",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Host Nqn"
+            }
+          },
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Cluster Id"
+            }
+          },
+          {
+            "name": "pool_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Pool Id"
+            }
+          },
+          {
+            "name": "volume_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Volume Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v2/clusters/{cluster_id}/storage-pools/{pool_id}/volumes/{volume_id}/inflate": {
       "post": {
         "summary": "Clusters:Storage-Pools:Volumes:Inflate",
         "operationId": "clusters_storage_pools_volumes_inflate_api_v2_clusters__cluster_id__storage_pools__pool_id__volumes__volume_id__inflate_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Cluster Id"
+            }
+          },
+          {
+            "name": "pool_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Pool Id"
+            }
+          },
+          {
+            "name": "volume_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Volume Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/clusters/{cluster_id}/storage-pools/{pool_id}/volumes/{volume_id}/replication_trigger": {
+      "post": {
+        "summary": "Clusters:Storage-Pools:Volumes:Replication Start",
+        "operationId": "clusters_storage_pools_volumes_replication_start_api_v2_clusters__cluster_id__storage_pools__pool_id__volumes__volume_id__replication_trigger_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Cluster Id"
+            }
+          },
+          {
+            "name": "pool_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Pool Id"
+            }
+          },
+          {
+            "name": "volume_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Volume Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/clusters/{cluster_id}/storage-pools/{pool_id}/volumes/{volume_id}/replication_start": {
+      "post": {
+        "summary": "Clusters:Storage-Pools:Volumes:Replication Start",
+        "operationId": "clusters_storage_pools_volumes_replication_start_api_v2_clusters__cluster_id__storage_pools__pool_id__volumes__volume_id__replication_start_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Cluster Id"
+            }
+          },
+          {
+            "name": "pool_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Pool Id"
+            }
+          },
+          {
+            "name": "volume_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Volume Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/clusters/{cluster_id}/storage-pools/{pool_id}/volumes/{volume_id}/replication_stop": {
+      "post": {
+        "summary": "Clusters:Storage-Pools:Volumes:Replication Stop",
+        "operationId": "clusters_storage_pools_volumes_replication_stop_api_v2_clusters__cluster_id__storage_pools__pool_id__volumes__volume_id__replication_stop_post",
         "security": [
           {
             "HTTPBearer": []
@@ -2762,6 +3485,345 @@
         }
       }
     },
+    "/api/v2/clusters/{cluster_id}/storage-pools/{pool_id}/volumes/{volume_id}/replicate_lvol": {
+      "post": {
+        "summary": "Clusters:Storage-Pools:Volumes:Replicate Lvol",
+        "operationId": "clusters_storage_pools_volumes_replicate_lvol_api_v2_clusters__cluster_id__storage_pools__pool_id__volumes__volume_id__replicate_lvol_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Cluster Id"
+            }
+          },
+          {
+            "name": "pool_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Pool Id"
+            }
+          },
+          {
+            "name": "volume_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Volume Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/clusters/{cluster_id}/storage-pools/{pool_id}/volumes/{volume_id}/list_replication_tasks": {
+      "get": {
+        "summary": "Clusters:Storage-Pools:Volumes:List Replication Tasks",
+        "operationId": "clusters_storage_pools_volumes_list_replication_tasks_api_v2_clusters__cluster_id__storage_pools__pool_id__volumes__volume_id__list_replication_tasks_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Cluster Id"
+            }
+          },
+          {
+            "name": "pool_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Pool Id"
+            }
+          },
+          {
+            "name": "volume_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Volume Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/TaskDTO"
+                  },
+                  "title": "Response Clusters Storage Pools Volumes List Replication Tasks Api V2 Clusters  Cluster Id  Storage Pools  Pool Id  Volumes  Volume Id  List Replication Tasks Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/clusters/{cluster_id}/storage-pools/{pool_id}/volumes/{volume_id}/suspend": {
+      "get": {
+        "summary": "Clusters:Storage-Pools:Volumes:Suspend",
+        "operationId": "clusters_storage_pools_volumes_suspend_api_v2_clusters__cluster_id__storage_pools__pool_id__volumes__volume_id__suspend_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Cluster Id"
+            }
+          },
+          {
+            "name": "pool_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Pool Id"
+            }
+          },
+          {
+            "name": "volume_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Volume Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "boolean",
+                  "title": "Response Clusters Storage Pools Volumes Suspend Api V2 Clusters  Cluster Id  Storage Pools  Pool Id  Volumes  Volume Id  Suspend Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/clusters/{cluster_id}/storage-pools/{pool_id}/volumes/{volume_id}/resume": {
+      "get": {
+        "summary": "Clusters:Storage-Pools:Volumes:Resume",
+        "operationId": "clusters_storage_pools_volumes_resume_api_v2_clusters__cluster_id__storage_pools__pool_id__volumes__volume_id__resume_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Cluster Id"
+            }
+          },
+          {
+            "name": "pool_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Pool Id"
+            }
+          },
+          {
+            "name": "volume_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Volume Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "boolean",
+                  "title": "Response Clusters Storage Pools Volumes Resume Api V2 Clusters  Cluster Id  Storage Pools  Pool Id  Volumes  Volume Id  Resume Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/clusters/{cluster_id}/storage-pools/{pool_id}/volumes/{volume_id}/clone": {
+      "get": {
+        "summary": "Clusters:Storage-Pools:Volumes:Clone",
+        "operationId": "clusters_storage_pools_volumes_clone_api_v2_clusters__cluster_id__storage_pools__pool_id__volumes__volume_id__clone_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Cluster Id"
+            }
+          },
+          {
+            "name": "pool_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Pool Id"
+            }
+          },
+          {
+            "name": "volume_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Volume Id"
+            }
+          },
+          {
+            "name": "clone_name",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Clone Name"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "boolean",
+                  "title": "Response Clusters Storage Pools Volumes Clone Api V2 Clusters  Cluster Id  Storage Pools  Pool Id  Volumes  Volume Id  Clone Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v2/clusters/{cluster_id}/storage-pools/{pool_id}/snapshots/": {
       "get": {
         "summary": "Clusters:Storage-Pools:Snapshots:List",
@@ -2942,6 +4004,727 @@
         }
       }
     },
+    "/api/v2/clusters/{cluster_id}/backups/": {
+      "get": {
+        "summary": "Clusters:Backups:List",
+        "operationId": "clusters_backups_list_api_v2_clusters__cluster_id__backups__get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Cluster Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/BackupDTO"
+                  },
+                  "title": "Response Clusters Backups List Api V2 Clusters  Cluster Id  Backups  Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Clusters:Backups:Create",
+        "operationId": "clusters_backups_create_api_v2_clusters__cluster_id__backups__post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Cluster Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/_BackupSnapshotParams"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/clusters/{cluster_id}/backups/restore": {
+      "post": {
+        "summary": "Clusters:Backups:Restore",
+        "operationId": "clusters_backups_restore_api_v2_clusters__cluster_id__backups_restore_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Cluster Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/_RestoreParams"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/clusters/{cluster_id}/backups/import": {
+      "post": {
+        "summary": "Clusters:Backups:Import",
+        "operationId": "clusters_backups_import_api_v2_clusters__cluster_id__backups_import_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cluster Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/_ImportParams"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/clusters/{cluster_id}/backups/{lvol_id}": {
+      "delete": {
+        "summary": "Clusters:Backups:Delete",
+        "operationId": "clusters_backups_delete_api_v2_clusters__cluster_id__backups__lvol_id__delete",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "lvol_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Lvol Id"
+            }
+          },
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Cluster Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/clusters/{cluster_id}/backups/backup-policies/": {
+      "get": {
+        "summary": "Clusters:Backup-Policies:List",
+        "operationId": "clusters_backup_policies_list_api_v2_clusters__cluster_id__backups_backup_policies__get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Cluster Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/BackupPolicyDTO"
+                  },
+                  "title": "Response Clusters Backup Policies List Api V2 Clusters  Cluster Id  Backups Backup Policies  Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Clusters:Backup-Policies:Create",
+        "operationId": "clusters_backup_policies_create_api_v2_clusters__cluster_id__backups_backup_policies__post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Cluster Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/_PolicyCreateParams"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/clusters/{cluster_id}/backups/backup-policies/{policy_id}": {
+      "delete": {
+        "summary": "Clusters:Backup-Policies:Delete",
+        "operationId": "clusters_backup_policies_delete_api_v2_clusters__cluster_id__backups_backup_policies__policy_id__delete",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "policy_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Policy Id"
+            }
+          },
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Cluster Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/clusters/{cluster_id}/backups/backup-policies/{policy_id}/attach": {
+      "post": {
+        "summary": "Clusters:Backup-Policies:Attach",
+        "operationId": "clusters_backup_policies_attach_api_v2_clusters__cluster_id__backups_backup_policies__policy_id__attach_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "policy_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Policy Id"
+            }
+          },
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Cluster Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/_AttachParams"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/clusters/{cluster_id}/backups/backup-policies/{policy_id}/detach": {
+      "post": {
+        "summary": "Clusters:Backup-Policies:Detach",
+        "operationId": "clusters_backup_policies_detach_api_v2_clusters__cluster_id__backups_backup_policies__policy_id__detach_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "policy_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Policy Id"
+            }
+          },
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Cluster Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/_AttachParams"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/clusters/{cluster_id}/migrations/": {
+      "get": {
+        "summary": "Clusters:Migrations:List",
+        "operationId": "clusters_migrations_list_api_v2_clusters__cluster_id__migrations__get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Cluster Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/MigrationDTO"
+                  },
+                  "title": "Response Clusters Migrations List Api V2 Clusters  Cluster Id  Migrations  Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Clusters:Migrations:Create",
+        "operationId": "clusters_migrations_create_api_v2_clusters__cluster_id__migrations__post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Cluster Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/_MigrateParams"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/clusters/{cluster_id}/migrations/{migration_id}/": {
+      "get": {
+        "summary": "Clusters:Migrations:Detail",
+        "operationId": "clusters_migrations_detail_api_v2_clusters__cluster_id__migrations__migration_id___get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "migration_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Migration Id"
+            }
+          },
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Cluster Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MigrationDTO"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/clusters/{cluster_id}/migrations/{migration_id}/cancel": {
+      "post": {
+        "summary": "Clusters:Migrations:Cancel",
+        "operationId": "clusters_migrations_cancel_api_v2_clusters__cluster_id__migrations__migration_id__cancel_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "migration_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Migration Id"
+            }
+          },
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Cluster Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v2/management-nodes/": {
       "get": {
         "summary": "Management Nodes:List",
@@ -3045,10 +4828,723 @@
           }
         }
       }
+    },
+    "/pool/{full_path}": {
+      "get": {
+        "summary": "Redirect Legacy",
+        "description": "Redirect legacy API routes to their corresponding v1 endpoints.\n\nArgs:\n    request: The incoming HTTP request\n    \nReturns:\n    RedirectResponse: A 308 Permanent Redirect to the v1 API endpoint",
+        "operationId": "redirect_legacy_pool__full_path__get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "summary": "Redirect Legacy",
+        "description": "Redirect legacy API routes to their corresponding v1 endpoints.\n\nArgs:\n    request: The incoming HTTP request\n    \nReturns:\n    RedirectResponse: A 308 Permanent Redirect to the v1 API endpoint",
+        "operationId": "redirect_legacy_pool__full_path__get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Redirect Legacy",
+        "description": "Redirect legacy API routes to their corresponding v1 endpoints.\n\nArgs:\n    request: The incoming HTTP request\n    \nReturns:\n    RedirectResponse: A 308 Permanent Redirect to the v1 API endpoint",
+        "operationId": "redirect_legacy_pool__full_path__get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "summary": "Redirect Legacy",
+        "description": "Redirect legacy API routes to their corresponding v1 endpoints.\n\nArgs:\n    request: The incoming HTTP request\n    \nReturns:\n    RedirectResponse: A 308 Permanent Redirect to the v1 API endpoint",
+        "operationId": "redirect_legacy_pool__full_path__get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/storagenode/{full_path}": {
+      "get": {
+        "summary": "Redirect Legacy",
+        "description": "Redirect legacy API routes to their corresponding v1 endpoints.\n\nArgs:\n    request: The incoming HTTP request\n    \nReturns:\n    RedirectResponse: A 308 Permanent Redirect to the v1 API endpoint",
+        "operationId": "redirect_legacy_storagenode__full_path__get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "summary": "Redirect Legacy",
+        "description": "Redirect legacy API routes to their corresponding v1 endpoints.\n\nArgs:\n    request: The incoming HTTP request\n    \nReturns:\n    RedirectResponse: A 308 Permanent Redirect to the v1 API endpoint",
+        "operationId": "redirect_legacy_storagenode__full_path__get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Redirect Legacy",
+        "description": "Redirect legacy API routes to their corresponding v1 endpoints.\n\nArgs:\n    request: The incoming HTTP request\n    \nReturns:\n    RedirectResponse: A 308 Permanent Redirect to the v1 API endpoint",
+        "operationId": "redirect_legacy_storagenode__full_path__get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "summary": "Redirect Legacy",
+        "description": "Redirect legacy API routes to their corresponding v1 endpoints.\n\nArgs:\n    request: The incoming HTTP request\n    \nReturns:\n    RedirectResponse: A 308 Permanent Redirect to the v1 API endpoint",
+        "operationId": "redirect_legacy_storagenode__full_path__get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/snapshot/{full_path}": {
+      "get": {
+        "summary": "Redirect Legacy",
+        "description": "Redirect legacy API routes to their corresponding v1 endpoints.\n\nArgs:\n    request: The incoming HTTP request\n    \nReturns:\n    RedirectResponse: A 308 Permanent Redirect to the v1 API endpoint",
+        "operationId": "redirect_legacy_snapshot__full_path__get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "summary": "Redirect Legacy",
+        "description": "Redirect legacy API routes to their corresponding v1 endpoints.\n\nArgs:\n    request: The incoming HTTP request\n    \nReturns:\n    RedirectResponse: A 308 Permanent Redirect to the v1 API endpoint",
+        "operationId": "redirect_legacy_snapshot__full_path__get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Redirect Legacy",
+        "description": "Redirect legacy API routes to their corresponding v1 endpoints.\n\nArgs:\n    request: The incoming HTTP request\n    \nReturns:\n    RedirectResponse: A 308 Permanent Redirect to the v1 API endpoint",
+        "operationId": "redirect_legacy_snapshot__full_path__get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "summary": "Redirect Legacy",
+        "description": "Redirect legacy API routes to their corresponding v1 endpoints.\n\nArgs:\n    request: The incoming HTTP request\n    \nReturns:\n    RedirectResponse: A 308 Permanent Redirect to the v1 API endpoint",
+        "operationId": "redirect_legacy_snapshot__full_path__get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/lvol/{full_path}": {
+      "get": {
+        "summary": "Redirect Legacy",
+        "description": "Redirect legacy API routes to their corresponding v1 endpoints.\n\nArgs:\n    request: The incoming HTTP request\n    \nReturns:\n    RedirectResponse: A 308 Permanent Redirect to the v1 API endpoint",
+        "operationId": "redirect_legacy_lvol__full_path__get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "summary": "Redirect Legacy",
+        "description": "Redirect legacy API routes to their corresponding v1 endpoints.\n\nArgs:\n    request: The incoming HTTP request\n    \nReturns:\n    RedirectResponse: A 308 Permanent Redirect to the v1 API endpoint",
+        "operationId": "redirect_legacy_lvol__full_path__get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Redirect Legacy",
+        "description": "Redirect legacy API routes to their corresponding v1 endpoints.\n\nArgs:\n    request: The incoming HTTP request\n    \nReturns:\n    RedirectResponse: A 308 Permanent Redirect to the v1 API endpoint",
+        "operationId": "redirect_legacy_lvol__full_path__get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "summary": "Redirect Legacy",
+        "description": "Redirect legacy API routes to their corresponding v1 endpoints.\n\nArgs:\n    request: The incoming HTTP request\n    \nReturns:\n    RedirectResponse: A 308 Permanent Redirect to the v1 API endpoint",
+        "operationId": "redirect_legacy_lvol__full_path__get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/device/{full_path}": {
+      "get": {
+        "summary": "Redirect Legacy",
+        "description": "Redirect legacy API routes to their corresponding v1 endpoints.\n\nArgs:\n    request: The incoming HTTP request\n    \nReturns:\n    RedirectResponse: A 308 Permanent Redirect to the v1 API endpoint",
+        "operationId": "redirect_legacy_device__full_path__get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "summary": "Redirect Legacy",
+        "description": "Redirect legacy API routes to their corresponding v1 endpoints.\n\nArgs:\n    request: The incoming HTTP request\n    \nReturns:\n    RedirectResponse: A 308 Permanent Redirect to the v1 API endpoint",
+        "operationId": "redirect_legacy_device__full_path__get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Redirect Legacy",
+        "description": "Redirect legacy API routes to their corresponding v1 endpoints.\n\nArgs:\n    request: The incoming HTTP request\n    \nReturns:\n    RedirectResponse: A 308 Permanent Redirect to the v1 API endpoint",
+        "operationId": "redirect_legacy_device__full_path__get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "summary": "Redirect Legacy",
+        "description": "Redirect legacy API routes to their corresponding v1 endpoints.\n\nArgs:\n    request: The incoming HTTP request\n    \nReturns:\n    RedirectResponse: A 308 Permanent Redirect to the v1 API endpoint",
+        "operationId": "redirect_legacy_device__full_path__get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/mgmtnode/{full_path}": {
+      "get": {
+        "summary": "Redirect Legacy",
+        "description": "Redirect legacy API routes to their corresponding v1 endpoints.\n\nArgs:\n    request: The incoming HTTP request\n    \nReturns:\n    RedirectResponse: A 308 Permanent Redirect to the v1 API endpoint",
+        "operationId": "redirect_legacy_mgmtnode__full_path__get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "summary": "Redirect Legacy",
+        "description": "Redirect legacy API routes to their corresponding v1 endpoints.\n\nArgs:\n    request: The incoming HTTP request\n    \nReturns:\n    RedirectResponse: A 308 Permanent Redirect to the v1 API endpoint",
+        "operationId": "redirect_legacy_mgmtnode__full_path__get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Redirect Legacy",
+        "description": "Redirect legacy API routes to their corresponding v1 endpoints.\n\nArgs:\n    request: The incoming HTTP request\n    \nReturns:\n    RedirectResponse: A 308 Permanent Redirect to the v1 API endpoint",
+        "operationId": "redirect_legacy_mgmtnode__full_path__get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "summary": "Redirect Legacy",
+        "description": "Redirect legacy API routes to their corresponding v1 endpoints.\n\nArgs:\n    request: The incoming HTTP request\n    \nReturns:\n    RedirectResponse: A 308 Permanent Redirect to the v1 API endpoint",
+        "operationId": "redirect_legacy_mgmtnode__full_path__get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/cluster/{full_path}": {
+      "get": {
+        "summary": "Redirect Legacy",
+        "description": "Redirect legacy API routes to their corresponding v1 endpoints.\n\nArgs:\n    request: The incoming HTTP request\n    \nReturns:\n    RedirectResponse: A 308 Permanent Redirect to the v1 API endpoint",
+        "operationId": "redirect_legacy_cluster__full_path__get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "summary": "Redirect Legacy",
+        "description": "Redirect legacy API routes to their corresponding v1 endpoints.\n\nArgs:\n    request: The incoming HTTP request\n    \nReturns:\n    RedirectResponse: A 308 Permanent Redirect to the v1 API endpoint",
+        "operationId": "redirect_legacy_cluster__full_path__get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Redirect Legacy",
+        "description": "Redirect legacy API routes to their corresponding v1 endpoints.\n\nArgs:\n    request: The incoming HTTP request\n    \nReturns:\n    RedirectResponse: A 308 Permanent Redirect to the v1 API endpoint",
+        "operationId": "redirect_legacy_cluster__full_path__get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "summary": "Redirect Legacy",
+        "description": "Redirect legacy API routes to their corresponding v1 endpoints.\n\nArgs:\n    request: The incoming HTTP request\n    \nReturns:\n    RedirectResponse: A 308 Permanent Redirect to the v1 API endpoint",
+        "operationId": "redirect_legacy_cluster__full_path__get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/": {
+      "get": {
+        "summary": "Redirect Legacy",
+        "description": "Redirect legacy API routes to their corresponding v1 endpoints.\n\nArgs:\n    request: The incoming HTTP request\n    \nReturns:\n    RedirectResponse: A 308 Permanent Redirect to the v1 API endpoint",
+        "operationId": "redirect_legacy__get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
     "schemas": {
+      "BackupConfigParams": {
+        "properties": {
+          "access_key_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Access Key Id"
+          },
+          "secret_access_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Secret Access Key"
+          },
+          "local_endpoint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Local Endpoint"
+          },
+          "bucket_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bucket Name"
+          },
+          "snapshot_backups": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Snapshot Backups"
+          },
+          "with_compression": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "With Compression"
+          },
+          "secondary_target": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Secondary Target"
+          },
+          "local_testing": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Local Testing"
+          },
+          "s3_thread_pool_size": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "S3 Thread Pool Size"
+          }
+        },
+        "type": "object",
+        "title": "BackupConfigParams"
+      },
+      "BackupDTO": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "s3_id": {
+            "type": "integer",
+            "title": "S3 Id"
+          },
+          "lvol_id": {
+            "type": "string",
+            "title": "Lvol Id"
+          },
+          "lvol_name": {
+            "type": "string",
+            "title": "Lvol Name"
+          },
+          "snapshot_id": {
+            "type": "string",
+            "title": "Snapshot Id"
+          },
+          "snapshot_name": {
+            "type": "string",
+            "title": "Snapshot Name"
+          },
+          "node_id": {
+            "type": "string",
+            "title": "Node Id"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "prev_backup_id": {
+            "type": "string",
+            "title": "Prev Backup Id"
+          },
+          "size": {
+            "type": "integer",
+            "title": "Size"
+          },
+          "allowed_hosts": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Allowed Hosts"
+          },
+          "created_at": {
+            "type": "integer",
+            "title": "Created At"
+          },
+          "completed_at": {
+            "type": "integer",
+            "title": "Completed At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "s3_id",
+          "lvol_id",
+          "lvol_name",
+          "snapshot_id",
+          "snapshot_name",
+          "node_id",
+          "status",
+          "prev_backup_id",
+          "size",
+          "allowed_hosts",
+          "created_at",
+          "completed_at"
+        ],
+        "title": "BackupDTO"
+      },
+      "BackupPolicyDTO": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "max_versions": {
+            "type": "integer",
+            "title": "Max Versions"
+          },
+          "max_age": {
+            "type": "string",
+            "title": "Max Age"
+          },
+          "backup_schedule": {
+            "type": "string",
+            "title": "Backup Schedule"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "max_versions",
+          "max_age",
+          "backup_schedule",
+          "status"
+        ],
+        "title": "BackupPolicyDTO"
+      },
+      "CapacityStatDTO": {
+        "properties": {
+          "date": {
+            "type": "integer",
+            "title": "Date"
+          },
+          "size_total": {
+            "type": "integer",
+            "title": "Size Total"
+          },
+          "size_prov": {
+            "type": "integer",
+            "title": "Size Prov"
+          },
+          "size_used": {
+            "type": "integer",
+            "title": "Size Used"
+          },
+          "size_free": {
+            "type": "integer",
+            "title": "Size Free"
+          },
+          "size_util": {
+            "type": "integer",
+            "title": "Size Util"
+          }
+        },
+        "type": "object",
+        "required": [
+          "date",
+          "size_total",
+          "size_prov",
+          "size_used",
+          "size_free",
+          "size_util"
+        ],
+        "title": "CapacityStatDTO"
+      },
       "ClusterDTO": {
         "properties": {
           "id": {
@@ -3085,30 +5581,22 @@
             ],
             "title": "Status"
           },
-          "rebalancing": {
+          "is_re_balancing": {
             "type": "boolean",
-            "title": "Rebalancing"
+            "title": "Is Re Balancing"
           },
           "block_size": {
             "type": "integer",
             "minimum": 0.0,
             "title": "Block Size"
           },
-          "coding": {
-            "prefixItems": [
-              {
-                "type": "integer",
-                "minimum": 0.0
-              },
-              {
-                "type": "integer",
-                "minimum": 0.0
-              }
-            ],
-            "type": "array",
-            "maxItems": 2,
-            "minItems": 2,
-            "title": "Coding"
+          "distr_ndcs": {
+            "type": "integer",
+            "title": "Distr Ndcs"
+          },
+          "distr_npcs": {
+            "type": "integer",
+            "title": "Distr Npcs"
           },
           "ha": {
             "type": "boolean",
@@ -3147,6 +5635,21 @@
           "secret": {
             "type": "string",
             "title": "Secret"
+          },
+          "tls_enabled": {
+            "type": "boolean",
+            "title": "Tls Enabled"
+          },
+          "max_fault_tolerance": {
+            "type": "integer",
+            "title": "Max Fault Tolerance"
+          },
+          "backup_enabled": {
+            "type": "boolean",
+            "title": "Backup Enabled"
+          },
+          "capacity": {
+            "$ref": "#/components/schemas/CapacityStatDTO"
           }
         },
         "type": "object",
@@ -3155,9 +5658,10 @@
           "name",
           "nqn",
           "status",
-          "rebalancing",
+          "is_re_balancing",
           "block_size",
-          "coding",
+          "distr_ndcs",
+          "distr_npcs",
           "ha",
           "utliziation_critical",
           "utilization_warning",
@@ -3165,22 +5669,20 @@
           "provisioned_cacacity_warning",
           "node_affinity",
           "anti_affinity",
-          "secret"
+          "secret",
+          "tls_enabled",
+          "max_fault_tolerance",
+          "backup_enabled",
+          "capacity"
         ],
         "title": "ClusterDTO"
       },
       "ClusterParams": {
         "properties": {
           "name": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Name"
+            "type": "string",
+            "title": "Name",
+            "default": ""
           },
           "blk_size": {
             "type": "integer",
@@ -3252,7 +5754,7 @@
               "ha"
             ],
             "title": "Ha Type",
-            "default": "single"
+            "default": "ha"
           },
           "qpair_count": {
             "type": "integer",
@@ -3279,10 +5781,75 @@
             "title": "Strict Node Anti Affinity",
             "default": false
           },
+          "is_single_node": {
+            "type": "boolean",
+            "title": "Is Single Node",
+            "default": false
+          },
+          "fabric": {
+            "type": "string",
+            "title": "Fabric",
+            "default": "tcp"
+          },
+          "cr_name": {
+            "type": "string",
+            "title": "Cr Name",
+            "default": ""
+          },
+          "cr_namespace": {
+            "type": "string",
+            "title": "Cr Namespace",
+            "default": ""
+          },
+          "cr_plural": {
+            "type": "string",
+            "title": "Cr Plural",
+            "default": ""
+          },
+          "cluster_ip": {
+            "type": "string",
+            "title": "Cluster Ip",
+            "default": ""
+          },
+          "grafana_secret": {
+            "type": "string",
+            "title": "Grafana Secret",
+            "default": ""
+          },
           "client_data_nic": {
             "type": "string",
             "title": "Client Data Nic",
             "default": ""
+          },
+          "max_fault_tolerance": {
+            "type": "integer",
+            "title": "Max Fault Tolerance",
+            "default": 1
+          },
+          "nvmf_base_port": {
+            "type": "integer",
+            "title": "Nvmf Base Port",
+            "default": 4420
+          },
+          "rpc_base_port": {
+            "type": "integer",
+            "title": "Rpc Base Port",
+            "default": 8080
+          },
+          "snode_api_port": {
+            "type": "integer",
+            "title": "Snode Api Port",
+            "default": 50001
+          },
+          "backup_config": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BackupConfigParams"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "type": "object",
@@ -3332,6 +5899,9 @@
             "type": "integer",
             "title": "Nvmf Port",
             "default": 0
+          },
+          "capacity": {
+            "$ref": "#/components/schemas/CapacityStatDTO"
           }
         },
         "type": "object",
@@ -3342,7 +5912,8 @@
           "size",
           "io_error",
           "is_partition",
-          "nvmf_ips"
+          "nvmf_ips",
+          "capacity"
         ],
         "title": "DeviceDTO"
       },
@@ -3389,6 +5960,97 @@
         ],
         "title": "ManagementNodeDTO"
       },
+      "MigrationDTO": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "lvol_id": {
+            "type": "string",
+            "title": "Lvol Id"
+          },
+          "source_node_id": {
+            "type": "string",
+            "title": "Source Node Id"
+          },
+          "target_node_id": {
+            "type": "string",
+            "title": "Target Node Id"
+          },
+          "phase": {
+            "type": "string",
+            "title": "Phase"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "snaps_total": {
+            "type": "integer",
+            "title": "Snaps Total"
+          },
+          "snaps_migrated": {
+            "type": "integer",
+            "title": "Snaps Migrated"
+          },
+          "retry_count": {
+            "type": "integer",
+            "title": "Retry Count"
+          },
+          "max_retries": {
+            "type": "integer",
+            "title": "Max Retries"
+          },
+          "error_message": {
+            "type": "string",
+            "title": "Error Message"
+          },
+          "started_at": {
+            "type": "integer",
+            "title": "Started At"
+          },
+          "completed_at": {
+            "type": "integer",
+            "title": "Completed At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "lvol_id",
+          "source_node_id",
+          "target_node_id",
+          "phase",
+          "status",
+          "snaps_total",
+          "snaps_migrated",
+          "retry_count",
+          "max_retries",
+          "error_message",
+          "started_at",
+          "completed_at"
+        ],
+        "title": "MigrationDTO"
+      },
+      "ReplicateLVolParams": {
+        "properties": {
+          "lvol_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lvol Id"
+          }
+        },
+        "type": "object",
+        "title": "ReplicateLVolParams"
+      },
       "RootModel_Union__CreateParams___CloneParams__": {
         "anyOf": [
           {
@@ -3429,6 +6091,10 @@
             "minimum": 0.0,
             "title": "Used Size"
           },
+          "migrating": {
+            "type": "boolean",
+            "title": "Migrating"
+          },
           "lvol": {
             "anyOf": [
               {
@@ -3449,6 +6115,7 @@
           "health_check",
           "size",
           "used_size",
+          "migrating",
           "lvol"
         ],
         "title": "SnapshotDTO"
@@ -3464,17 +6131,66 @@
             "type": "string",
             "title": "Status"
           },
-          "ip": {
+          "hostname": {
+            "type": "string",
+            "title": "Hostname"
+          },
+          "cpu": {
+            "type": "integer",
+            "title": "Cpu"
+          },
+          "spdk_mem": {
+            "type": "integer",
+            "title": "Spdk Mem"
+          },
+          "lvols": {
+            "type": "integer",
+            "title": "Lvols"
+          },
+          "rpc_port": {
+            "type": "integer",
+            "title": "Rpc Port"
+          },
+          "lvol_subsys_port": {
+            "type": "integer",
+            "title": "Lvol Subsys Port"
+          },
+          "nvmf_port": {
+            "type": "integer",
+            "title": "Nvmf Port"
+          },
+          "mgmt_ip": {
             "type": "string",
             "format": "ipv4",
-            "title": "Ip"
+            "title": "Mgmt Ip"
+          },
+          "health_check": {
+            "type": "boolean",
+            "title": "Health Check"
+          },
+          "online_devices": {
+            "type": "string",
+            "title": "Online Devices"
+          },
+          "capacity": {
+            "$ref": "#/components/schemas/CapacityStatDTO"
           }
         },
         "type": "object",
         "required": [
           "id",
           "status",
-          "ip"
+          "hostname",
+          "cpu",
+          "spdk_mem",
+          "lvols",
+          "rpc_port",
+          "lvol_subsys_port",
+          "nvmf_port",
+          "mgmt_ip",
+          "health_check",
+          "online_devices",
+          "capacity"
         ],
         "title": "StorageNodeDTO"
       },
@@ -3490,17 +6206,38 @@
             "title": "Interface Name"
           },
           "max_snapshots": {
-            "type": "integer",
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Max Snapshots",
             "default": 500
           },
           "ha_jm": {
-            "type": "boolean",
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Ha Jm",
             "default": true
           },
           "test_device": {
-            "type": "boolean",
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Test Device",
             "default": false
           },
@@ -3513,16 +6250,12 @@
                 "type": "null"
               }
             ],
-            "title": "Spdk Image"
+            "title": "Spdk Image",
+            "default": ""
           },
           "spdk_debug": {
             "type": "boolean",
             "title": "Spdk Debug",
-            "default": false
-          },
-          "full_page_unmap": {
-            "type": "boolean",
-            "title": "Full Page Unmap",
             "default": false
           },
           "data_nics": {
@@ -3537,6 +6270,18 @@
             "type": "string",
             "title": "Namespace",
             "default": "default"
+          },
+          "id_device_by_nqn": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Id Device By Nqn",
+            "default": false
           },
           "jm_percent": {
             "type": "integer",
@@ -3560,6 +6305,21 @@
             "title": "Iobuf Large Pool Count",
             "default": 0
           },
+          "cr_name": {
+            "type": "string",
+            "title": "Cr Name",
+            "default": ""
+          },
+          "cr_namespace": {
+            "type": "string",
+            "title": "Cr Namespace",
+            "default": ""
+          },
+          "cr_plural": {
+            "type": "string",
+            "title": "Cr Plural",
+            "default": ""
+          },
           "ha_jm_count": {
             "type": "integer",
             "title": "Ha Jm Count",
@@ -3569,12 +6329,22 @@
             "type": "boolean",
             "title": "Format 4K",
             "default": false
+          },
+          "spdk_proxy_image": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Spdk Proxy Image"
           }
         },
         "type": "object",
         "required": [
-          "interface_name",
-          "spdk_image"
+          "interface_name"
         ],
         "title": "StorageNodeParams"
       },
@@ -3626,6 +6396,15 @@
             "type": "integer",
             "minimum": 0.0,
             "title": "Max W Mbytes"
+          },
+          "capacity": {
+            "$ref": "#/components/schemas/CapacityStatDTO"
+          },
+          "sec_options": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Sec Options",
+            "default": {}
           }
         },
         "type": "object",
@@ -3638,7 +6417,8 @@
           "max_rw_iops",
           "max_rw_mbytes",
           "max_r_mbytes",
-          "max_w_mbytes"
+          "max_w_mbytes",
+          "capacity"
         ],
         "title": "StoragePoolDTO"
       },
@@ -3683,6 +6463,35 @@
             "minimum": 0.0,
             "title": "Max W Mbytes",
             "default": 0
+          },
+          "sec_options": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "boolean"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sec Options"
+          },
+          "cr_name": {
+            "type": "string",
+            "title": "Cr Name",
+            "default": ""
+          },
+          "cr_namespace": {
+            "type": "string",
+            "title": "Cr Namespace",
+            "default": ""
+          },
+          "cr_plural": {
+            "type": "string",
+            "title": "Cr Plural",
+            "default": ""
           }
         },
         "type": "object",
@@ -3690,6 +6499,57 @@
           "name"
         ],
         "title": "StoragePoolParams"
+      },
+      "TaskDTO": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "canceled": {
+            "type": "boolean",
+            "title": "Canceled"
+          },
+          "function_name": {
+            "type": "string",
+            "title": "Function Name"
+          },
+          "function_params": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Function Params"
+          },
+          "function_result": {
+            "type": "string",
+            "title": "Function Result"
+          },
+          "retry": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Retry"
+          },
+          "max_retry": {
+            "type": "integer",
+            "title": "Max Retry"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "status",
+          "canceled",
+          "function_name",
+          "function_params",
+          "function_result",
+          "retry",
+          "max_retry"
+        ],
+        "title": "TaskDTO"
       },
       "UpdatableClusterParameters": {
         "properties": {
@@ -3845,6 +6705,39 @@
               }
             ],
             "title": "Max W Mbytes"
+          },
+          "lvols_cr_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lvols Cr Name"
+          },
+          "lvols_cr_namespace": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lvols Cr Namespace"
+          },
+          "lvols_cr_plural": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lvols Cr Plural"
           }
         },
         "type": "object",
@@ -3873,13 +6766,6 @@
           "type": {
             "type": "string",
             "title": "Error Type"
-          },
-          "input": {
-            "title": "Input"
-          },
-          "ctx": {
-            "type": "object",
-            "title": "Context"
           }
         },
         "type": "object",
@@ -3909,9 +6795,21 @@
             "type": "boolean",
             "title": "Health Check"
           },
+          "migrating": {
+            "type": "boolean",
+            "title": "Migrating"
+          },
           "nqn": {
             "type": "string",
             "title": "Nqn"
+          },
+          "hostname": {
+            "type": "string",
+            "title": "Hostname"
+          },
+          "fabric": {
+            "type": "string",
+            "title": "Fabric"
           },
           "nodes": {
             "items": {
@@ -3930,6 +6828,40 @@
             "type": "integer",
             "minimum": 0.0,
             "title": "Size"
+          },
+          "ndcs": {
+            "type": "integer",
+            "title": "Ndcs"
+          },
+          "npcs": {
+            "type": "integer",
+            "title": "Npcs"
+          },
+          "pool_uuid": {
+            "type": "string",
+            "title": "Pool Uuid"
+          },
+          "pool_name": {
+            "type": "string",
+            "title": "Pool Name"
+          },
+          "pvc_name": {
+            "type": "string",
+            "title": "Pvc Name",
+            "default": ""
+          },
+          "snapshot_name": {
+            "type": "string",
+            "title": "Snapshot Name",
+            "default": ""
+          },
+          "blobid": {
+            "type": "integer",
+            "title": "Blobid"
+          },
+          "ns_id": {
+            "type": "integer",
+            "title": "Ns Id"
           },
           "cloned_from": {
             "anyOf": [
@@ -3967,6 +6899,20 @@
             "type": "boolean",
             "title": "High Availability"
           },
+          "lvol_priority_class": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Lvol Priority Class"
+          },
+          "do_replicate": {
+            "type": "boolean",
+            "title": "Do Replicate",
+            "default": false
+          },
+          "max_namespace_per_subsys": {
+            "type": "integer",
+            "title": "Max Namespace Per Subsys"
+          },
           "max_rw_iops": {
             "type": "integer",
             "minimum": 0.0,
@@ -3986,6 +6932,37 @@
             "type": "integer",
             "minimum": 0.0,
             "title": "Max W Mbytes"
+          },
+          "allowed_hosts": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Allowed Hosts"
+          },
+          "policy": {
+            "type": "string",
+            "title": "Policy"
+          },
+          "capacity": {
+            "$ref": "#/components/schemas/CapacityStatDTO"
+          },
+          "rep_info": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rep Info"
+          },
+          "from_source": {
+            "type": "boolean",
+            "title": "From Source",
+            "default": true
           }
         },
         "type": "object",
@@ -3994,19 +6971,77 @@
           "name",
           "status",
           "health_check",
+          "migrating",
           "nqn",
+          "hostname",
+          "fabric",
           "nodes",
           "port",
           "size",
+          "ndcs",
+          "npcs",
+          "pool_uuid",
+          "pool_name",
+          "blobid",
+          "ns_id",
           "cloned_from",
           "crypto_key",
           "high_availability",
+          "lvol_priority_class",
+          "max_namespace_per_subsys",
           "max_rw_iops",
           "max_rw_mbytes",
           "max_r_mbytes",
-          "max_w_mbytes"
+          "max_w_mbytes",
+          "allowed_hosts",
+          "policy",
+          "capacity"
         ],
         "title": "VolumeDTO"
+      },
+      "_AddHostParams": {
+        "properties": {
+          "host_nqn": {
+            "type": "string",
+            "title": "Host Nqn"
+          }
+        },
+        "type": "object",
+        "required": [
+          "host_nqn"
+        ],
+        "title": "_AddHostParams"
+      },
+      "_AttachParams": {
+        "properties": {
+          "target_type": {
+            "type": "string",
+            "title": "Target Type"
+          },
+          "target_id": {
+            "type": "string",
+            "title": "Target Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "target_type",
+          "target_id"
+        ],
+        "title": "_AttachParams"
+      },
+      "_BackupSnapshotParams": {
+        "properties": {
+          "snapshot_id": {
+            "type": "string",
+            "title": "Snapshot Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "snapshot_id"
+        ],
+        "title": "_BackupSnapshotParams"
       },
       "_CloneParams": {
         "properties": {
@@ -4164,6 +7199,46 @@
             "minimum": 0.0,
             "title": "Npcs",
             "default": 0
+          },
+          "allowed_hosts": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Allowed Hosts"
+          },
+          "fabric": {
+            "type": "string",
+            "title": "Fabric",
+            "default": "tcp"
+          },
+          "max_namespace_per_subsys": {
+            "type": "integer",
+            "title": "Max Namespace Per Subsys",
+            "default": 1
+          },
+          "do_replicate": {
+            "type": "boolean",
+            "title": "Do Replicate",
+            "default": false
+          },
+          "replication_cluster_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Replication Cluster Id"
           }
         },
         "type": "object",
@@ -4172,6 +7247,126 @@
           "size"
         ],
         "title": "_CreateParams"
+      },
+      "_ImportParams": {
+        "properties": {
+          "metadata": {
+            "items": {},
+            "type": "array",
+            "title": "Metadata"
+          }
+        },
+        "type": "object",
+        "required": [
+          "metadata"
+        ],
+        "title": "_ImportParams"
+      },
+      "_MigrateParams": {
+        "properties": {
+          "volume_id": {
+            "type": "string",
+            "title": "Volume Id"
+          },
+          "target_node_id": {
+            "type": "string",
+            "title": "Target Node Id"
+          },
+          "max_retries": {
+            "type": "integer",
+            "title": "Max Retries",
+            "default": 10
+          },
+          "deadline_seconds": {
+            "type": "integer",
+            "title": "Deadline Seconds",
+            "default": 14400
+          }
+        },
+        "type": "object",
+        "required": [
+          "volume_id",
+          "target_node_id"
+        ],
+        "title": "_MigrateParams"
+      },
+      "_PolicyCreateParams": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "versions": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Versions",
+            "default": 0
+          },
+          "age": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Age",
+            "default": ""
+          },
+          "schedule": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Schedule",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "title": "_PolicyCreateParams"
+      },
+      "_ReplicationParams": {
+        "properties": {
+          "snapshot_replication_target_cluster": {
+            "type": "string",
+            "title": "Snapshot Replication Target Cluster"
+          },
+          "snapshot_replication_timeout": {
+            "type": "integer",
+            "title": "Snapshot Replication Timeout",
+            "default": 0
+          },
+          "target_pool": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Pool"
+          }
+        },
+        "type": "object",
+        "required": [
+          "snapshot_replication_target_cluster"
+        ],
+        "title": "_ReplicationParams"
       },
       "_RestartParams": {
         "properties": {
@@ -4184,16 +7379,56 @@
             "type": "boolean",
             "title": "Reattach Volume",
             "default": false
+          },
+          "node_address": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Node Address"
           }
         },
         "type": "object",
         "title": "_RestartParams"
+      },
+      "_RestoreParams": {
+        "properties": {
+          "backup_id": {
+            "type": "string",
+            "title": "Backup Id"
+          },
+          "lvol_name": {
+            "type": "string",
+            "title": "Lvol Name"
+          },
+          "pool": {
+            "type": "string",
+            "title": "Pool"
+          }
+        },
+        "type": "object",
+        "required": [
+          "backup_id",
+          "lvol_name",
+          "pool"
+        ],
+        "title": "_RestoreParams"
       },
       "_SnapshotParams": {
         "properties": {
           "name": {
             "type": "string",
             "title": "Name"
+          },
+          "backup": {
+            "type": "boolean",
+            "title": "Backup",
+            "default": false
           }
         },
         "type": "object",

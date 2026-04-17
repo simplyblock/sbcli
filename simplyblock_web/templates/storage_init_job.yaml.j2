@@ -23,7 +23,7 @@ spec:
             path: /proc
       containers:
         - name: init-setup
-          image: simplyblock/ubuntu-tools:22.04
+          image: simplyblock/alpine-tools:3.21.3
           securityContext:
             privileged: true
           volumeMounts:
@@ -42,16 +42,18 @@ spec:
               NODE_IP=$(ip route get 1.1.1.1 | grep -oE 'src [0-9.]+' | awk '{print $2}')
               echo "Detected node IP: $NODE_IP"
 
-              echo "--- Sending config to $NODE_IP ---"
-              RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" -X POST http://$NODE_IP:5000/snode/apply_config -H "Content-Type: application/json" -d '{}')
-              echo "HTTP status: $RESPONSE"
-              if [ "$RESPONSE" -lt 200 ] || [ "$RESPONSE" -ge 300 ]; then
-                echo "Failed to apply config"
-                exit 1
-              fi
-              
               echo "--- Checking OS ---"
               OS_ID="$(cat /proc/version | awk '{print $3}' | awk -F'-' '{print $NF}')"
+
+              echo "--- Sending config to $NODE_IP ---"              
+              if [ "$OS_ID" != "talos" ]; then
+                RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" -X POST http://$NODE_IP:5000/snode/apply_config -H "Content-Type: application/json" -d '{}')
+                echo "HTTP status: $RESPONSE"
+                if [ "$RESPONSE" -lt 200 ] || [ "$RESPONSE" -ge 300 ]; then
+                  echo "Failed to apply config"
+                  exit 1
+                fi
+              fi
 
               if [ "$OS_ID" != "talos" ]; then
                 HUGEPAGES_AFTER=$(grep HugePages_Total /proc/meminfo | awk '{print $2}')
@@ -73,3 +75,4 @@ spec:
               fi
 
               echo "--- Init setup complete ---"
+              

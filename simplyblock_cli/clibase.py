@@ -140,7 +140,7 @@ class CLIWrapperBase:
         return True  # remove once CLI changed to exceptions
 
     def storage_node__clean_devices(self, sub_command, args):
-        storage_ops.clean_devices(args.config_path)
+        storage_ops.clean_devices(args.config_path, format_4k=args.format_4k)
         return True  # remove once CLI changed to exceptions
 
     def storage_node__add_node(self, sub_command, args):
@@ -153,7 +153,6 @@ class CLIWrapperBase:
 
         small_bufsize = args.small_bufsize
         large_bufsize = args.large_bufsize
-        num_partitions_per_dev = args.partitions
         jm_percent = args.jm_percent
 
         max_snap = args.max_snap
@@ -162,6 +161,19 @@ class CLIWrapperBase:
         namespace = args.namespace
         ha_jm_count = args.ha_jm_count
         format_4k = args.format_4k
+
+        if args.enable_journal_device:
+            num_partitions_per_dev = 0
+        else:
+            # Deprecated but still supported for backward compatibility.
+            if args.partitions is None:
+                num_partitions_per_dev = 1
+            elif args.partitions < 0 or args.partitions > 1:
+                self.parser.error("partitions must be either 0 or 1")
+            else:
+                print("WARNING: --journal-partition is deprecated, use --enable-journal-device instead")
+                num_partitions_per_dev = args.partitions
+
         try:
             out = storage_ops.add_node(
                 cluster_id=cluster_id,
@@ -512,6 +524,9 @@ class CLIWrapperBase:
         cluster_ops.cluster_expand(args.cluster_id)
         return True
 
+    def cluster__add_replication(self, sub_command, args):
+        return cluster_ops.add_replication(args.cluster_id, args.target_cluster_id, args.timeout, args.target_pool)
+
     def volume__add(self, sub_command, args):
         import json as _json
         name = args.name
@@ -529,8 +544,9 @@ class CLIWrapperBase:
         npcs = args.npcs
 
         allowed_hosts = None
-        if args.allowed_hosts:
-            with open(args.allowed_hosts, 'r') as f:
+        allowed_hosts_arg = getattr(args, 'allowed_hosts', None)
+        if allowed_hosts_arg:
+            with open(allowed_hosts_arg, 'r') as f:
                 allowed_hosts = _json.load(f)
             if not isinstance(allowed_hosts, list):
                 print("Error: --allowed-hosts JSON must be a list of host NQN strings")
@@ -550,38 +566,12 @@ class CLIWrapperBase:
             lvol_priority_class=lvol_priority_class,
             uid=args.uid, pvc_name=args.pvc_name, namespace=args.namespace,
             max_namespace_per_subsys=args.max_namespace_per_subsys, ndcs=ndcs, npcs=npcs, fabric=args.fabric,
-            allowed_hosts=allowed_hosts)
+            allowed_hosts=allowed_hosts,
+            do_replicate=args.replicate)
         if results:
             return results
         else:
             return error
-
-    def volume__add_host(self, sub_command, args):
-        import json as _json
-        result, error = lvol_controller.add_host_to_lvol(args.volume_id, args.host_nqn)
-        if error:
-            print(f"Error: {error}")
-            return False
-        print(_json.dumps(result, indent=2))
-        return True
-
-    def volume__remove_host(self, sub_command, args):
-        result, error = lvol_controller.remove_host_from_lvol(args.volume_id, args.host_nqn)
-        if not result:
-            print(f"Error: {error}")
-            return False
-        if error:
-            print(error)
-        return True
-
-    def volume__get_secret(self, sub_command, args):
-        import json as _json
-        result, error = lvol_controller.get_host_secret(args.volume_id, args.host_nqn)
-        if error:
-            print(f"Error: {error}")
-            return False
-        print(_json.dumps(result, indent=2))
-        return True
 
     def volume__qos_set(self, sub_command, args):
         return lvol_controller.set_lvol(
@@ -661,6 +651,24 @@ class CLIWrapperBase:
     def volume__inflate(self, sub_command, args):
         return lvol_controller.inflate_lvol(args.volume_id)
 
+    def volume__replication_start(self, sub_command, args):
+        return lvol_controller.replication_start(args.lvol_id, args.replication_cluster_id)
+
+    def volume__replication_stop(self, sub_command, args):
+        return lvol_controller.replication_stop(args.lvol_id)
+
+    def volume__replication_status(self, sub_command, args):
+        return snapshot_controller.list_replication_tasks(args.cluster_id)
+
+    def volume__replication_trigger(self, sub_command, args):
+        return lvol_controller.replication_trigger(args.lvol_id)
+
+    def volume__suspend(self, sub_command, args):
+        return lvol_controller.suspend_lvol(args.lvol_id)
+
+    def volume__resume(self, sub_command, args):
+        return lvol_controller.resume_lvol(args.lvol_id)
+
     def volume__clone_lvol(self, sub_command, args):
         return lvol_controller.clone_lvol(args.volume_id, args.clone_name)
 
@@ -704,11 +712,6 @@ class CLIWrapperBase:
         return mgmt_ops.remove_mgmt_node(args.node_id)
 
     def storage_pool__add(self, sub_command, args):
-        import json as _json
-        sec_options = None
-        if args.sec_options:
-            with open(args.sec_options, 'r') as f:
-                sec_options = _json.load(f)
         return pool_controller.add_pool(
             args.name,
             args.pool_max,
@@ -719,7 +722,7 @@ class CLIWrapperBase:
             args.max_w_mbytes,
             args.cluster_id,
             args.qos_host,
-            sec_options=sec_options,
+            dhchap=args.dhchap,
         )
 
     def storage_pool__set(self, sub_command, args):
@@ -757,6 +760,20 @@ class CLIWrapperBase:
     def storage_pool__get_io_stats(self, sub_command, args):
         return pool_controller.get_io_stats(args.pool_id, args.history, args.records)
 
+    def storage_pool__add_host(self, sub_command, args):
+        ok, err = pool_controller.add_host_to_pool(args.pool_id, args.host_nqn)
+        if not ok:
+            print(f"Error: {err}")
+            return False
+        return True
+
+    def storage_pool__remove_host(self, sub_command, args):
+        ok, err = pool_controller.remove_host_from_pool(args.pool_id, args.host_nqn)
+        if not ok:
+            print(f"Error: {err}")
+            return False
+        return True
+
     def snapshot__add(self, sub_command, args):
         backup = getattr(args, 'backup', False)
         snapshot_id, error = snapshot_controller.add(args.volume_id, args.name, backup=backup)
@@ -771,16 +788,31 @@ class CLIWrapperBase:
         return True
 
     def snapshot__list(self, sub_command, args):
-        return snapshot_controller.list(args.all)
+        return snapshot_controller.list(args.all, args.cluster_id, args.with_details)
 
     def snapshot__delete(self, sub_command, args):
         return snapshot_controller.delete(args.snapshot_id, args.force)
 
+    def snapshot__check(self, sub_command, args):
+        return health_controller.check_snap(args.snapshot_id)
+
     def snapshot__clone(self, sub_command, args):
         new_size = args.resize
 
-        success, details = snapshot_controller.clone(args.snapshot_id, args.lvol_name, new_size)
-        return details
+        clone_id, error = snapshot_controller.clone(args.snapshot_id, args.lvol_name, new_size)
+        return clone_id if not error else error
+
+    def snapshot__replication_status(self, sub_command, args):
+        return snapshot_controller.list_replication_tasks(args.cluster_id)
+
+    def snapshot__delete_replication_only(self, sub_command, args):
+        return snapshot_controller.delete_replicated(args.snapshot_id)
+
+    def snapshot__get(self, sub_command, args):
+        return snapshot_controller.get(args.snapshot_id)
+
+    def snapshot__set(self, sub_command, args):
+        return snapshot_controller.set_value(args.snapshot_id, args.attr_name, args.attr_value)
 
     def qos__add(self, sub_command, args):
         return qos_controller.add_class(args.name, args.weight, args.cluster_id)
@@ -1004,16 +1036,6 @@ class CLIWrapperBase:
         fabric = args.fabric
         client_data_nic = args.client_data_nic
 
-        nvmeof_tls_config = None
-        if args.host_sec:
-            with open(args.host_sec, 'r') as f:
-                nvmeof_tls_config = _json.load(f)
-            from simplyblock_core.utils import validate_tls_config
-            ok, err = validate_tls_config(nvmeof_tls_config)
-            if not ok:
-                print(f"Error: {err}")
-                return False
-
         max_fault_tolerance = args.max_fault_tolerance
 
         backup_config = None
@@ -1028,7 +1050,7 @@ class CLIWrapperBase:
             distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, mode, enable_node_affinity,
             qpair_count, client_qpair_count, max_queue_size, inflight_io_threshold, disable_monitoring,
             strict_node_anti_affinity, name, tls_secret, ingress_host_source, dns_name, fabric, is_single_node, client_data_nic,
-            nvmeof_tls_config=nvmeof_tls_config, max_fault_tolerance=max_fault_tolerance,
+            max_fault_tolerance=max_fault_tolerance,
             backup_config=backup_config,
             nvmf_base_port=args.nvmf_base_port, rpc_base_port=args.rpc_base_port, snode_api_port=args.snode_api_port)
 

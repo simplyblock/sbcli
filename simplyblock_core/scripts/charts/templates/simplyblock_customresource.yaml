@@ -1,0 +1,158 @@
+{{- if .Values.simplyblock.cluster }}
+apiVersion: storage.simplyblock.io/v1alpha1
+kind: StorageCluster
+metadata:
+  name: {{ .Values.simplyblock.cluster.clusterName }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  clusterName: {{ .Values.simplyblock.cluster.clusterName }}
+
+  {{- if .Values.simplyblock.cluster.mgmtIfname }}
+  mgmtIfname: {{ .Values.simplyblock.cluster.mgmtIfname }}
+  {{- end }}
+
+  {{- if .Values.simplyblock.cluster.fabric }}
+  fabric: {{ .Values.simplyblock.cluster.fabric }}
+  {{- end }}
+
+  {{- if hasKey .Values.simplyblock.cluster "isSingleNode" }}
+  isSingleNode: {{ .Values.simplyblock.cluster.isSingleNode }}
+  {{- end }}
+
+  {{- if hasKey .Values.simplyblock.cluster "enableNodeAffinity" }}
+  enableNodeAffinity: {{ .Values.simplyblock.cluster.enableNodeAffinity }}
+  {{- end }}
+
+  {{- if hasKey .Values.simplyblock.cluster "strictNodeAntiAffinity" }}
+  strictNodeAntiAffinity: {{ .Values.simplyblock.cluster.strictNodeAntiAffinity }}
+  {{- end }}
+
+  {{- if .Values.simplyblock.cluster.warningThreshold }}
+  warningThreshold:
+    {{- if .Values.simplyblock.cluster.warningThreshold.capacity }}
+    capacity: {{ .Values.simplyblock.cluster.warningThreshold.capacity }}
+    {{- end }}
+    {{- if .Values.simplyblock.cluster.warningThreshold.provisionedCapacity }}
+    provisionedCapacity: {{ .Values.simplyblock.cluster.warningThreshold.provisionedCapacity }}
+    {{- end }}
+  {{- end }}
+
+  {{- if .Values.simplyblock.cluster.criticalThreshold }}
+  criticalThreshold:
+    {{- if .Values.simplyblock.cluster.criticalThreshold.capacity }}
+    capacity: {{ .Values.simplyblock.cluster.criticalThreshold.capacity }}
+    {{- end }}
+    {{- if .Values.simplyblock.cluster.criticalThreshold.provisionedCapacity }}
+    provisionedCapacity: {{ .Values.simplyblock.cluster.criticalThreshold.provisionedCapacity }}
+    {{- end }}
+  {{- end }}
+
+{{- end }}
+
+---
+{{- if .Values.simplyblock.pool }}
+apiVersion: storage.simplyblock.io/v1alpha1
+kind: Pool
+metadata:
+  name: {{ .Values.simplyblock.pool.name }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  name: {{ .Values.simplyblock.pool.name }}
+  clusterName: {{ .Values.simplyblock.cluster.clusterName }}
+
+  {{- if .Values.simplyblock.pool.capacityLimit }}
+  capacityLimit: {{ .Values.simplyblock.pool.capacityLimit | quote }}
+  {{- end }}
+{{- end }}
+
+---
+{{- if .Values.simplyblock.lvol }}
+apiVersion: storage.simplyblock.io/v1alpha1
+kind: Lvol
+metadata:
+  name: {{ .Values.simplyblock.lvol.name }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  clusterName: {{ .Values.simplyblock.cluster.clusterName }}
+  poolName: {{ .Values.simplyblock.pool.name }}
+{{- end }}
+
+---
+{{- if .Values.simplyblock.storageNodes }}
+apiVersion: storage.simplyblock.io/v1alpha1
+kind: StorageNode
+metadata:
+  name: {{ .Values.simplyblock.storageNodes.name }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  clusterName: {{ .Values.simplyblock.cluster.clusterName }}
+
+  {{- if .Values.simplyblock.storageNodes.clusterImage }}
+  clusterImage: {{ .Values.simplyblock.storageNodes.clusterImage }}
+  {{- end }}
+
+  {{- if .Values.simplyblock.storageNodes.mgmtIfname }}
+  mgmtIfname: {{ .Values.simplyblock.storageNodes.mgmtIfname }}
+  {{- end }}
+
+  {{- if .Values.simplyblock.storageNodes.maxLogicalVolumeCount }}
+  maxLogicalVolumeCount: {{ .Values.simplyblock.storageNodes.maxLogicalVolumeCount }}
+  {{- end }}
+
+  {{- if .Values.simplyblock.storageNodes.maxSize }}
+  maxSize: {{ .Values.simplyblock.storageNodes.maxSize | quote }}
+  {{- end }}
+
+  {{- if hasKey .Values.simplyblock.storageNodes "partitions" }}
+  partitions: {{ .Values.simplyblock.storageNodes.partitions }}
+  {{- end }}
+
+  {{- if .Values.simplyblock.storageNodes.corePercentage }}
+  corePercentage: {{ .Values.simplyblock.storageNodes.corePercentage }}
+  {{- end }}
+
+  {{- if .Values.simplyblock.storageNodes.spdkImage }}
+  spdkImage: {{ .Values.simplyblock.storageNodes.spdkImage }}
+  {{- end }}
+
+  {{- if hasKey .Values.simplyblock.storageNodes "coreIsolation" }}
+  coreIsolation: {{ .Values.simplyblock.storageNodes.coreIsolation }}
+  {{- end }}
+
+  {{- if hasKey .Values.simplyblock.storageNodes "skipKubeletConfiguration" }}
+  skipKubeletConfiguration: {{ .Values.simplyblock.storageNodes.skipKubeletConfiguration }}
+  {{- end }}
+
+  {{- if hasKey .Values.simplyblock.storageNodes "enableCpuTopology" }}
+  enableCpuTopology: {{ .Values.simplyblock.storageNodes.enableCpuTopology }}
+  {{- end }}
+
+  {{- if .Values.simplyblock.storageNodes.workerNodes }}
+  workerNodes:
+  {{- range .Values.simplyblock.storageNodes.workerNodes }}
+    - {{ . }}
+  {{- end }}
+  {{- end }}
+{{- end }}
+
+---
+{{- if .Values.simplyblock.devices }}
+apiVersion: storage.simplyblock.io/v1alpha1
+kind: Device
+metadata:
+  name: {{ .Values.simplyblock.devices.name }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  clusterName: {{ .Values.simplyblock.cluster.clusterName }}
+{{- end }}
+
+---
+{{- if .Values.simplyblock.tasks }}
+apiVersion: storage.simplyblock.io/v1alpha1
+kind: Task
+metadata:
+  name: {{ .Values.simplyblock.tasks.name }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  clusterName: {{ .Values.simplyblock.cluster.clusterName }}
+{{- end }}

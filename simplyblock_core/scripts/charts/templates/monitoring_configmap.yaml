@@ -49,7 +49,7 @@ data:
     type: FILESYSTEM
     config:
       directory: /mnt/thanos
-{{- if .Values.monitoring.enabled }}
+{{- if .Values.observability.enabled }}
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -69,17 +69,6 @@ data:
       access: proxy
       uid: PBFA97CFB590B2093
       editable: true
-    - name: GRAYLOG
-      type: elasticsearch
-      url: http://opensearch-cluster-master:9200
-      isDefault: false
-      access: proxy
-      uid: graylog_uid
-      editable: true
-      jsonData:
-        index: '*'
-        interval: Hourly
-        timeField: 'timestamp'
 
 ---
 apiVersion: v1
@@ -833,7 +822,7 @@ data:
             type: slack
             settings:
               username: grafana_bot
-              url: '{{ .Values.grafana.contactPoint }}'
+              url: '{{ .Values.observability.grafana.contactPoint }}'
               title: |
                 '{{ "{{" }} template "slack.title" . {{ "}}" }}'
               text: |

@@ -2,7 +2,7 @@ from threading import Thread
 from typing import Annotated, List, Literal, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
 
 from simplyblock_core.db_controller import DBController
@@ -17,14 +17,31 @@ api = APIRouter(prefix='/clusters')
 db = DBController()
 
 
+class _ReplicationParams(BaseModel):
+    snapshot_replication_target_cluster: str
+    snapshot_replication_timeout: int = 0
+    target_pool: Optional[str] = None
+
 class _UpdateParams(BaseModel):
     management_image: Optional[str]
     spdk_image: Optional[str]
     restart: bool = Field(False)
 
 
+class BackupConfigParams(BaseModel):
+    access_key_id: Optional[str] = None
+    secret_access_key: Optional[str] = None
+    local_endpoint: Optional[str] = None
+    bucket_name: Optional[str] = None
+    snapshot_backups: Optional[bool] = None
+    with_compression: Optional[bool] = None
+    secondary_target: Optional[int] = Field(default=None, ge=0)
+    local_testing: Optional[bool] = None
+    s3_thread_pool_size: Optional[int] = Field(default=None, ge=0)
+
+
 class ClusterParams(BaseModel):
-    name: Optional[str] = None
+    name: str = ""
     blk_size: Literal[512, 4096] = 512
     page_size_in_blocks: int = Field(2097152, gt=0)
     cap_warn: util.Percent = 0
@@ -35,32 +52,50 @@ class ClusterParams(BaseModel):
     distr_npcs: int = 1
     distr_bs: int = 4096
     distr_chunk_bs: int = 4096
-    ha_type: Literal['single', 'ha'] = 'single'
+    ha_type: Literal['single', 'ha'] = 'ha'
     qpair_count: int = 256
     max_queue_size: int = 128
     inflight_io_threshold: int = 4
     enable_node_affinity: bool = False
     strict_node_anti_affinity: bool = False
+    is_single_node: bool = False
+    fabric: str = "tcp"
+    cr_name: str = ""
+    cr_namespace: str = ""
+    cr_plural: str = ""
+    cluster_ip: str = ""
+    grafana_secret: str = ""
     client_data_nic: str = ""
+    max_fault_tolerance: int = 1
+    nvmf_base_port: int = 4420
+    rpc_base_port: int = 8080
+    snode_api_port: int = 50001
+    backup_config: Optional[BackupConfigParams] = None
 
 
 @api.get('/', name='clusters:list')
 def list() -> List[ClusterDTO]:
-    return [
-        ClusterDTO.from_model(cluster)
-        for cluster
-        in db.get_clusters()
-    ]
+    data = []
+    for cluster in db.get_clusters():
+        stat_obj = None
+        ret = db.get_cluster_capacity(cluster, 1)
+        if ret:
+            stat_obj = ret[0]
+        data.append(ClusterDTO.from_model(cluster, stat_obj))
+    return data
 
 
 @api.post('/', name='clusters:create', status_code=201, responses={201: {"content": None}})
-def add(request: Request, parameters: ClusterParams):
-    cluster_id_or_false = cluster_ops.add_cluster(**parameters.model_dump())
+def add(parameters: ClusterParams):
+    try:
+        cluster_id_or_false = cluster_ops.add_cluster(**parameters.model_dump(exclude_none=True))
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
     if not cluster_id_or_false:
         raise ValueError('Failed to create cluster')
 
-    entity_url = request.app.url_path_for('get', cluster_id=cluster_id_or_false)
-    return Response(status_code=201, headers={'Location': entity_url})
+    cluster = db.get_cluster_by_id(cluster_id_or_false)
+    return ClusterDTO.from_model(cluster)
 
 
 instance_api = APIRouter(prefix='/{cluster_id}')
@@ -78,7 +113,11 @@ Cluster = Annotated[ClusterModel, Depends(_lookup_cluster)]
 
 @instance_api.get('/', name='clusters:detail')
 def get(cluster: Cluster) -> ClusterDTO:
-    return ClusterDTO.from_model(cluster)
+    stat_obj = None
+    ret = db.get_cluster_capacity(cluster, 1)
+    if ret:
+        stat_obj = ret[0]
+    return ClusterDTO.from_model(cluster, stat_obj)
 
 
 class UpdatableClusterParameters(BaseModel):
@@ -95,7 +134,10 @@ def update(cluster: Cluster, parameters: UpdatableClusterParameters):
 
 @instance_api.delete('/', name='clusters:delete', status_code=204, responses={204: {"content": None}})
 def delete(cluster: Cluster) -> Response:
-    cluster_ops.delete_cluster(cluster.get_id())
+    try:
+        cluster_ops.delete_cluster(cluster.get_id())
+    except ValueError as e:
+        raise HTTPException(409, str(e)) from e
     return Response(status_code=204)
 
 
@@ -155,6 +197,23 @@ def activate(cluster: Cluster) -> Response:
     ).start()
     return Response(status_code=202)  # FIXME: Provide URL for checking task status
 
+@instance_api.post('/addreplication', name='clusters:addreplication', status_code=202, responses={202: {"content": None}})
+def cluster_add_replication(cluster: Cluster, parameters: _ReplicationParams) -> Response:
+    cluster_ops.add_replication(
+        source_cl_id=cluster.get_id(),
+        target_cl_id=parameters.snapshot_replication_target_cluster,
+        timeout=parameters.snapshot_replication_timeout,
+        target_pool=parameters.target_pool
+    )
+    return Response(status_code=202)
+
+@instance_api.post('/expand', name='clusters:expand', status_code=202, responses={202: {"content": None}})
+def expand(cluster: Cluster) -> Response:
+    Thread(
+        target=cluster_ops.cluster_expand,
+        args=(cluster.get_id(),),
+    ).start()
+    return Response(status_code=202)  # FIXME: Provide URL for checking task status
 
 @instance_api.post('/update', name='clusters:upgrade', status_code=204, responses={204: {"content": None}})
 def update_cluster( cluster: Cluster, parameters: _UpdateParams) -> Response:

@@ -26,8 +26,7 @@ class MultipleExceptions(Exception):
                     messages.append(f"{case}: {exc}")
             else:
                 messages.append(f"{case}: {ex_info}")
-        # Join with ' || ' so all failures appear on one line — grep/CI can capture everything
-        return " || ".join(messages)
+        return " | ".join(messages)
 
 class LvolNotConnectException(Exception):
     def __init__(self, message) -> None:

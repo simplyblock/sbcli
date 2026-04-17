@@ -270,9 +270,7 @@ class RandomFailoverTest(TestLvolHACluster):
         node_rpc_port = node_details[0]["rpc_port"]
 
         sleep_n_sec(120)
-        for node in self.sn_nodes_with_sec:
-            self.ssh_obj.dump_lvstore(node_ip=self.mgmt_nodes[0],
-                                      storage_node_id=node)
+        self.collect_outage_diagnostics(f"pre_outage_node_{self.current_outage_node}")
 
         self.logger.info(f"Performing {outage_type} on node {self.current_outage_node}.")
         self.log_outage_event(self.current_outage_node, outage_type, "Outage started")
@@ -525,9 +523,8 @@ class RandomFailoverTest(TestLvolHACluster):
             #     self.ssh_obj.exec_command(node=self.fio_node, command=connect)
             # sleep_n_sec(30)
 
-        for node in self.sn_nodes_with_sec:
-            self.ssh_obj.dump_lvstore(node_ip=self.mgmt_nodes[0],
-                                      storage_node_id=node)
+        self.collect_outage_diagnostics(f"post_recovery_node_{self.current_outage_node}")
+        self._log_block_sizes("post_recovery")
 
 
     def create_snapshots_and_clones(self):
@@ -677,7 +674,7 @@ class RandomFailoverTest(TestLvolHACluster):
             sleep_n_sec(10)
             self.sbcli_utils.resize_lvol(lvol_id=self.clone_mount_details[clone_name]["ID"],
                                          new_size=f"{self.int_lvol_size}G")
-            
+        self._log_block_sizes("after_resize")
 
     def delete_random_lvols(self, count):
         """Delete random lvols during an outage."""

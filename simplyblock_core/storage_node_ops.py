@@ -2,7 +2,6 @@
 import datetime
 import json
 import math
-import os
 import platform
 import socket
 
@@ -38,6 +37,8 @@ from simplyblock_core.snode_client import SNodeClient, SNodeClientException
 from simplyblock_web import node_utils
 from simplyblock_core.utils import addNvmeDevices
 from simplyblock_core.utils import pull_docker_image_with_retry
+import os
+
 
 logger = utils.get_logger(__name__)
 
@@ -610,7 +611,7 @@ def _prepare_cluster_devices_partitions(snode, devices):
                 t = threading.Thread(
                     target=_create_device_partitions,
                     args=(snode.rpc_client(), nvme, snode, snode.num_partitions_per_dev,
-                          snode.jm_percent, snode.partition_size, index+1,))
+                          snode.jm_percent, snode.partition_size, index + 1,))
                 thread_list.append(t)
                 t.start()
 
@@ -1056,8 +1057,8 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
              max_snap, spdk_image=None, spdk_debug=False,
              small_bufsize=0, large_bufsize=0,
              num_partitions_per_dev=0, jm_percent=0, enable_test_device=False,
-             namespace=None, enable_ha_jm=False, id_device_by_nqn=False,
-             partition_size="", ha_jm_count=None, format_4k=False, spdk_proxy_image=None):
+             namespace=None, enable_ha_jm=False, cr_name=None, cr_namespace=None, cr_plural=None,
+             id_device_by_nqn=False, partition_size="", ha_jm_count=None, format_4k=False, spdk_proxy_image=None):
     snode_api = SNodeClient(node_addr)
     node_info, _ = snode_api.info()
     if node_info.get("nodes_config") and node_info["nodes_config"].get("nodes"):
@@ -1163,6 +1164,13 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
                     if node.api_endpoint == node_addr:
                         if ssd in node.ssd_pcie:
+                            if node.status == StorageNode.STATUS_IN_CREATION:
+                                logger.warning(
+                                    f"Node {node.get_id()} is in_creation status with SSD {ssd}, "
+                                    f"removing and deleting it")
+                                remove_storage_node(node.get_id(), force_remove=True)
+                                delete_storage_node(node.get_id(), force=True)
+                                break
                             logger.error(f"SSD is being used by other node, ssd: {ssd}, node: {node.get_id()}")
                             return False
 
@@ -1256,6 +1264,8 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             jc_singleton_core = new_distribution.get("jc_singleton_core")
             app_thread_core = new_distribution.get("app_thread_core")
             jm_cpu_core = new_distribution.get("jm_cpu_core")
+            lvol_poller_core = new_distribution.get("lvol_poller_core")
+            lvol_poller_mask = utils.generate_mask(lvol_poller_core)
         else:
             poller_cpu_cores = node_config.get("distribution").get("poller_cpu_cores")
             alceml_cpu_cores = node_config.get("distribution").get("alceml_cpu_cores")
@@ -1264,6 +1274,9 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             jc_singleton_core = node_config.get("distribution").get("jc_singleton_core")
             app_thread_core = node_config.get("distribution").get("app_thread_core")
             jm_cpu_core = node_config.get("distribution").get("jm_cpu_core")
+            lvol_poller_core =  node_config.get("distribution").get("lvol_poller_core")
+            lvol_poller_mask = utils.generate_mask(lvol_poller_core)
+
         number_of_distribs = node_config.get("number_of_distribs")
 
         pollers_mask = utils.generate_mask(poller_cpu_cores)
@@ -1326,6 +1339,9 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         snode.cloud_name = cloud_instance['cloud'] or ""
 
         snode.namespace = namespace
+        snode.cr_name = cr_name
+        snode.cr_namespace = cr_namespace
+        snode.cr_plural = cr_plural
         snode.ssd_pcie = ssd_pcie
         snode.hostname = hostname
         snode.host_nqn = subsystem_nqn
@@ -1369,6 +1385,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         snode.write_to_db(kv_store)
         snode.app_thread_mask = app_thread_mask or ""
         snode.pollers_mask = pollers_mask or ""
+        snode.lvol_poller_mask = lvol_poller_mask or ""
         snode.jm_cpu_mask = jm_cpu_mask
         snode.alceml_cpu_index = alceml_cpu_index
         snode.alceml_worker_cpu_index = alceml_worker_cpu_index
@@ -1433,7 +1450,11 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
 
         # 3- set nvme config
         if snode.pollers_mask:
-            ret = rpc_client.nvmf_set_config(snode.pollers_mask)
+            ret = rpc_client.nvmf_set_config(
+                snode.pollers_mask,
+                dhchap_digests=constants.DHCHAP_DIGESTS,
+                dhchap_dhgroups=[constants.DHCHAP_DHGROUP],
+            )
             if not ret:
                 logger.error("Failed to set pollers mask")
                 return False
@@ -1445,6 +1466,12 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             return False
 
         rpc_client.log_set_print_level("DEBUG")
+
+        if snode.lvol_poller_mask:
+            ret = rpc_client.bdev_lvol_create_poller_group(snode.lvol_poller_mask)
+            if not ret:
+                logger.error("Failed to set pollers mask")
+                return False
 
         # 5- set app_thread cpu mask
         if snode.app_thread_mask:
@@ -1462,12 +1489,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 return False
 
         # 6- set nvme bdev options
-        tls_cfg = cluster.tls_config if cluster.tls else {}
-        tls_params = tls_cfg.get("params", tls_cfg) if tls_cfg else {}
-        ret = rpc_client.bdev_nvme_set_options(
-            dhchap_digests=tls_params.get("dhchap_digests"),
-            dhchap_dhgroups=tls_params.get("dhchap_dhgroups"),
-        )
+        ret = rpc_client.bdev_nvme_set_options()
         if not ret:
             logger.error("Failed to set nvme options")
             return False
@@ -2045,7 +2067,11 @@ def restart_storage_node(
 
     # 3- set nvme config
     if snode.pollers_mask:
-        ret = rpc_client.nvmf_set_config(snode.pollers_mask)
+        ret = rpc_client.nvmf_set_config(
+            snode.pollers_mask,
+            dhchap_digests=constants.DHCHAP_DIGESTS,
+            dhchap_dhgroups=[constants.DHCHAP_DHGROUP],
+        )
         if not ret:
             logger.error("Failed to set pollers mask")
             return False
@@ -2057,6 +2083,12 @@ def restart_storage_node(
         return False
 
     rpc_client.log_set_print_level("DEBUG")
+
+    if snode.lvol_poller_mask:
+        ret = rpc_client.bdev_lvol_create_poller_group(snode.lvol_poller_mask)
+        if not ret:
+            logger.error("Failed to set pollers mask")
+            return False
 
     # 5- set app_thread cpu mask
     if snode.app_thread_mask:
@@ -2074,12 +2106,7 @@ def restart_storage_node(
             return False
 
     # 6- set nvme bdev options
-    tls_cfg = cluster.tls_config if cluster.tls else {}
-    tls_params = tls_cfg.get("params", tls_cfg) if tls_cfg else {}
-    ret = rpc_client.bdev_nvme_set_options(
-        dhchap_digests=tls_params.get("dhchap_digests"),
-        dhchap_dhgroups=tls_params.get("dhchap_dhgroups"),
-    )
+    ret = rpc_client.bdev_nvme_set_options()
     if not ret:
         logger.error("Failed to set nvme options")
         return False
@@ -2214,7 +2241,6 @@ def restart_storage_node(
         return False
     if snode.enable_ha_jm:
         snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
-    snode.health_check = True
     snode.lvstore_status = ""
     snode.write_to_db(db_controller.kv_store)
 
@@ -2267,6 +2293,17 @@ def restart_storage_node(
         logger.info("Setting node status to Online")
         set_node_status(node_id, StorageNode.STATUS_ONLINE, reconnect_on_online=False)
         _refresh_cluster_maps_after_node_recovery(snode)
+
+        online_devices_list = []
+        for dev in snode.nvme_devices:
+            if dev.status in [NVMeDevice.STATUS_ONLINE,
+                              NVMeDevice.STATUS_CANNOT_ALLOCATE,
+                              NVMeDevice.STATUS_FAILED_AND_MIGRATED]:
+                online_devices_list.append(dev.get_id())
+        if online_devices_list:
+            logger.info(f"Starting migration task for node {snode.get_id()}")
+            tasks_controller.add_device_mig_task_for_node(snode.get_id())
+
         return True
 
     else:
@@ -2396,19 +2433,12 @@ def list_storage_nodes(is_json, cluster_id=None):
         nodes = db_controller.get_storage_nodes()
     data = []
     output = ""
-    now = datetime.datetime.now(datetime.timezone.utc)
 
     for node in nodes:
         logger.debug(node)
         logger.debug("*" * 20)
         total_devices = len(node.nvme_devices)
         online_devices = 0
-        uptime = ""
-        if node.online_since and node.status == StorageNode.STATUS_ONLINE:
-            try:
-                uptime = utils.strfdelta((now - datetime.datetime.fromisoformat(node.online_since)))
-            except Exception:
-                pass
 
         for dev in node.nvme_devices:
             if dev.status == NVMeDevice.STATUS_ONLINE:
@@ -2422,7 +2452,7 @@ def list_storage_nodes(is_json, cluster_id=None):
             "LVols": f"{len(lvs)}",
             "Status": node.status,
             "Health": node.health_check,
-            "Up time": uptime,
+            "Up time": utils.strfdelta(uptime) if (uptime := node.uptime()) is not None else "",
             "CPU": f"{len(utils.hexa_to_cpu_list(node.spdk_cpu_mask))}",
             "MEM": utils.humanbytes(node.spdk_mem),
             "SPDK P": node.rpc_port,
@@ -2738,7 +2768,8 @@ def shutdown_storage_node(node_id, force=False):
         if force is False:
             return False
         for task in tasks:
-            if task.function_name != JobSchedule.FN_NODE_RESTART:
+            if task.function_name not in [
+                JobSchedule.FN_NODE_RESTART, JobSchedule.FN_SNAPSHOT_REPLICATION, JobSchedule.FN_LVOL_SYNC_DEL]:
                 tasks_controller.cancel_task(task.uuid)
 
     logger.info("Shutting down node")
@@ -3293,8 +3324,8 @@ def deploy_cleaner():
     scripts.deploy_cleaner()
 
 
-def clean_devices(config_path, format=True, force=False):
-    utils.clean_devices(config_path, format=format, force=force)
+def clean_devices(config_path, format=True, force=False, format_4k=False):
+    utils.clean_devices(config_path, format=format, force=force, format_4k=format_4k)
 
 
 def get_host_secret(node_id):
@@ -3482,7 +3513,6 @@ def set_node_status(node_id, status, reconnect_on_online=True):
             return False
         if snode.enable_ha_jm:
             snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
-        snode.health_check = True
         snode.write_to_db(db_controller.kv_store)
 
         # Send device status events to update peers on device availability
@@ -4057,7 +4087,7 @@ def add_lvol_thread(lvol, snode, lvol_ana_state="optimized"):
             logger.error(msg)
             return False, msg
 
-    logger.info("Add BDev to subsystem")
+    logger.info("Add BDev to subsystem "+f"{lvol.vuid:016X}")
     ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid, nsid=lvol.ns_id)
     # Use per-lvstore port for this lvol's lvstore
     listener_port = snode.get_lvol_subsys_port(lvol.lvs_name)
@@ -4395,6 +4425,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
                     logger.error("Error establishing hublvol: %s", e)
                     # return False
 
+    storage_events.node_ports_changed(snode)
     return True
 
 

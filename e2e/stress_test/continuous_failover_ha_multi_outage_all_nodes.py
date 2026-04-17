@@ -40,7 +40,10 @@ class RandomMultiClientMultiFailoverAllNodesTest(RandomMultiClientMultiFailoverT
         outage_nodes = random.sample(all_nodes, k)
         self.logger.info(f"Selected outage nodes (all-nodes mode): {outage_nodes}")
 
-        # ── Phase 1: pick types + pre-dump for ALL nodes ──────────────────────
+        # Collect diagnostics for ALL nodes before any outage is triggered
+        self.collect_outage_diagnostics(f"pre_outage_nodes_{'_'.join(outage_nodes[:3])}")
+
+        # ── Phase 1: pick types + collect node details for ALL nodes ─────────
         node_plans = []  # (node, outage_type, node_ip, node_rpc_port)
         outage_num = 0
         for node in outage_nodes:
@@ -56,17 +59,6 @@ class RandomMultiClientMultiFailoverAllNodesTest(RandomMultiClientMultiFailoverT
             node_details = self.sbcli_utils.get_storage_node_details(node)
             node_ip = node_details[0]["mgmt_ip"]
             node_rpc_port = node_details[0]["rpc_port"]
-
-            self.ssh_obj.dump_lvstore(node_ip=self.mgmt_nodes[0],
-                                      storage_node_id=node)
-
-            self.ssh_obj.fetch_distrib_logs(
-                storage_node_ip=node_ip,
-                storage_node_id=node,
-                logs_path=self.docker_logs_path,
-                validate_async=True,
-                error_sink=self.dump_validation_errors
-            )
 
             node_plans.append((node, outage_type, node_ip, node_rpc_port))
 

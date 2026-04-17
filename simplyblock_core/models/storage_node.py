@@ -1,6 +1,7 @@
 # coding=utf-8
 import time
-from typing import List
+from datetime import datetime, timedelta, timezone
+from typing import List, Optional
 from uuid import uuid4
 
 from simplyblock_core import utils
@@ -100,6 +101,9 @@ class StorageNode(BaseNodeObject):
     subsystem: str = ""
     system_uuid: str = ""
     lvstore_status: str = ""
+    cr_name: str = ""
+    cr_namespace: str = ""
+    cr_plural: str = ""
     nvmf_port: int = 4420
     physical_label: int = 0
     hublvol: HubLVol = None  # type: ignore[assignment]
@@ -107,6 +111,7 @@ class StorageNode(BaseNodeObject):
     active_rdma: bool = False
     socket: int = 0
     firewall_port: int = 5001
+    lvol_poller_mask: str = ""
     spdk_proxy_image: str = ""
 
     def get_lvol_subsys_port(self, lvs_name=None):
@@ -477,6 +482,13 @@ class StorageNode(BaseNodeObject):
                 logger.info(f"remove lvol_del_sync_lock from node: {self.get_id()}")
         time.sleep(0.250)
         return True
+
+    def uptime(self) -> Optional[timedelta]:
+        return (
+            datetime.now(timezone.utc) - datetime.fromisoformat(self.online_since)
+            if self.online_since and self.status == StorageNode.STATUS_ONLINE
+            else None
+        )
 
 
 class NodeLVolDelLock(BaseModel):
