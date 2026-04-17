@@ -172,12 +172,15 @@ class K8sNativeFailoverTest(TestClusterBase):
             self.logger.warning(f"Cleanup of old resources failed: {e}")
 
         # 6. Initialize K8sUtils
-        if self.mgmt_nodes:
-            self.k8s_utils = K8sUtils(
-                ssh_obj=self.ssh_obj,
-                mgmt_node=self.mgmt_nodes[0],
-            )
-            self.logger.info(f"[K8s] K8sUtils initialized for mgmt_node={self.mgmt_nodes[0]}")
+        # In local kubectl mode (K8S_LOCAL_KUBECTL=1), mgmt_nodes may be empty
+        # because MNODES env var is not set — K8sUtils doesn't need a real IP
+        # since it runs kubectl locally via subprocess.
+        mgmt_node = self.mgmt_nodes[0] if self.mgmt_nodes else ""
+        self.k8s_utils = K8sUtils(
+            ssh_obj=self.ssh_obj,
+            mgmt_node=mgmt_node,
+        )
+        self.logger.info(f"[K8s] K8sUtils initialized for mgmt_node={mgmt_node!r}")
 
         self.logger.info("K8sNativeFailoverTest.setup() complete (no SSH)")
 

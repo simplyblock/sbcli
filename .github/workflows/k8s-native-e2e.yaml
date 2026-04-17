@@ -50,7 +50,7 @@ on:
       ndcs:
         description: 'Number of data chunks'
         required: false
-        default: 2
+        default: 1
       npcs:
         description: 'Number of parity chunks'
         required: false
@@ -361,14 +361,53 @@ jobs:
             sleep 10
           done
 
+          echo "=== Re-resolving admin pod before cluster status polling ==="
+          ADMIN_POD=""
+          for i in $(seq 1 30); do
+            ADMIN_POD=$(kubectl -n $NAMESPACE get pods \
+              -l app=simplyblock-admin-control \
+              -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) || true
+            if [ -n "$ADMIN_POD" ]; then
+              PHASE=$(kubectl -n $NAMESPACE get pod "$ADMIN_POD" \
+                -o jsonpath='{.status.phase}' 2>/dev/null) || true
+              if [ "$PHASE" = "Running" ]; then
+                echo "Admin pod resolved: $ADMIN_POD (Running)"
+                break
+              fi
+              echo "Admin pod $ADMIN_POD phase=$PHASE, retrying ($i/30)..."
+              ADMIN_POD=""
+            else
+              echo "Admin pod not found, retrying ($i/30)..."
+            fi
+            sleep 10
+          done
+          if [ -z "$ADMIN_POD" ]; then
+            echo "ERROR: Could not find running admin pod before polling"
+            kubectl -n $NAMESPACE get pods
+            exit 1
+          fi
+
           echo "=== Polling cluster status ==="
           for i in $(seq 1 90); do
+            # Re-resolve admin pod each iteration in case it gets recreated
+            NEW_POD=$(kubectl -n $NAMESPACE get pods \
+              -l app=simplyblock-admin-control \
+              -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) || true
+            NEW_PHASE=$(kubectl -n $NAMESPACE get pod "$NEW_POD" \
+              -o jsonpath='{.status.phase}' 2>/dev/null) || true
+            if [ -n "$NEW_POD" ] && [ "$NEW_PHASE" = "Running" ] && [ "$NEW_POD" != "$ADMIN_POD" ]; then
+              echo "Admin pod changed: $ADMIN_POD -> $NEW_POD"
+              ADMIN_POD="$NEW_POD"
+            fi
+
+            echo "[poll $i/90] Using admin pod: $ADMIN_POD"
             OUTPUT=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
-              sbctl cluster list 2>/dev/null) || true
+              sbctl cluster list 2>&1) || true
+            echo "[poll $i/90] sbctl cluster list output:"
+            echo "$OUTPUT"
 
             if echo "$OUTPUT" | grep -qi "active"; then
               echo "Cluster is active!"
-              echo "$OUTPUT"
 
               # Extract cluster ID and secret
               # sbctl cluster list outputs a table; parse the data row
@@ -377,12 +416,15 @@ jobs:
 
               # Fallback: try JSON format if table parsing fails
               if [ -z "$CLUSTER_ID" ] || [ "$CLUSTER_ID" = "+" ]; then
+                echo "Table parsing failed (CLUSTER_ID=$CLUSTER_ID), trying JSON..."
                 JSON_OUT=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
-                  sbctl cluster list --json 2>/dev/null) || true
+                  sbctl cluster list --json 2>&1) || true
+                echo "JSON output: $JSON_OUT"
                 CLUSTER_ID=$(echo "$JSON_OUT" | jq -r '.[0].id // .[0].uuid // empty')
                 CLUSTER_SECRET=$(echo "$JSON_OUT" | jq -r '.[0].secret // empty')
               fi
 
+              echo "Parsed CLUSTER_ID=${CLUSTER_ID}"
               echo "CLUSTER_ID=${CLUSTER_ID}" >> $GITHUB_ENV
               echo "CLUSTER_SECRET=${CLUSTER_SECRET}" >> $GITHUB_ENV
               exit 0
@@ -394,7 +436,7 @@ jobs:
 
           echo "ERROR: Cluster did not become active within timeout"
           kubectl -n $NAMESPACE get pods
-          kubectl -n $NAMESPACE exec "$ADMIN_POD" -- sbctl cluster list 2>/dev/null || true
+          kubectl -n $NAMESPACE exec "$ADMIN_POD" -- sbctl cluster list 2>&1 || true
           exit 1
 
       # ── Run tests ───────────────────────────────────────────────────────────
