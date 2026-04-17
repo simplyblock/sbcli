@@ -15,6 +15,14 @@ on:
         description: 'Simplyblock image repository'
         required: false
         default: 'public.ecr.aws/simply-block/simplyblock'
+      operator_repository:
+        description: 'Operator image repository'
+        required: false
+        default: 'simplyblock/simplyblock-manager'
+      operator_tag:
+        description: 'Operator image tag'
+        required: false
+        default: 'main'
       spdk_image:
         description: 'SPDK container image'
         required: true
@@ -281,6 +289,8 @@ jobs:
             --set operator.storageNodes.numPartitions=0 \
             --set image.simplyblock.repository="${{ github.event.inputs.simplyblock_repository || 'public.ecr.aws/simply-block/simplyblock' }}" \
             --set image.simplyblock.tag="${{ github.event.inputs.simplyblock_image }}" \
+            --set image.operator.repository="${{ github.event.inputs.operator_repository || 'simplyblock/simplyblock-manager' }}" \
+            --set image.operator.tag="${{ github.event.inputs.operator_tag || 'main' }}" \
             --set-json "operator.storageNodes.workerNodes=${WORKER_JSON}" \
             --set-json "operator.storageNodes.dataIfname=${DATA_NICS_JSON}" \
             --set operator.stripe.dataChunks="${NDCS}" \
