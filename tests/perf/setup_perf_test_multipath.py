@@ -36,8 +36,18 @@ AMI_ID       = "ami-0dfc569a8686b9320"   # Rocky 9 us-east-1
 KEY_NAME     = "mtes01"
 KEY_PATH     = r"C:\ssh\mtes01.pem"
 AZ           = "us-east-1a"
-SUBNET_ID    = "subnet-0593459d6b931ee4c"
-STORAGE_SG   = "sg-02e89a1372e9f39e9"
+# eth0 stays on the mgmt subnet with the default/shared SG
+MGMT_SUBNET_ID = "subnet-0593459d6b931ee4c"
+MGMT_SG        = "sg-02e89a1372e9f39e9"
+# Each data NIC is in its own isolated subnet + SG — no cross-subnet routing,
+# forces inter-node data-plane traffic through the intended NIC.
+DATA1_SUBNET_ID = "subnet-0bc107204ccb6c2df"  # 172.31.96.0/24
+DATA1_SG        = "sg-007ad0bd943abbefd"      # allow only from 172.31.96.0/24
+DATA2_SUBNET_ID = "subnet-09dabfde67a5ae7a0"  # 172.31.97.0/24
+DATA2_SG        = "sg-069a5f96309b8dbdd"      # allow only from 172.31.97.0/24
+# Kept for backwards compat with any existing consumer of these names.
+SUBNET_ID      = MGMT_SUBNET_ID
+STORAGE_SG     = MGMT_SG
 BRANCH       = "test_FTT2"
 USER         = "ec2-user"
 MGMT_IFACE   = "eth0"
@@ -147,13 +157,23 @@ def _build_nic_specs(num_nics, subnet, sg):
     AWS does not allow AssociatePublicIpAddress inside a NIC spec when
     multiple network interfaces are present.  Public IPs are assigned
     post-launch via Elastic IPs instead (see _assign_public_ips).
+
+    Data NICs (eth1, eth2) are placed into their own isolated subnets/SGs
+    so inter-node data-plane traffic is forced through the intended NIC.
+    Single-NIC instances (mgmt) stay on the mgmt subnet/SG.
     """
+    nic_map = {
+        0: (subnet, sg),                      # eth0 mgmt
+        1: (DATA1_SUBNET_ID, DATA1_SG),       # eth1 isolated
+        2: (DATA2_SUBNET_ID, DATA2_SG),       # eth2 isolated
+    }
     specs = []
     for idx in range(num_nics):
+        nic_subnet, nic_sg = nic_map.get(idx, (subnet, sg))
         specs.append({
             "DeviceIndex": idx,
-            "SubnetId": subnet,
-            "Groups": [sg],
+            "SubnetId": nic_subnet,
+            "Groups": [nic_sg],
         })
     return specs
 

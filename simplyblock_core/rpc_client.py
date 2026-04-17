@@ -782,10 +782,15 @@ class RPCClient:
         }
         return self._request("bdev_passtest_delete", params)
 
-    def bdev_nvme_set_options(self):
+    def bdev_nvme_set_options(self, multipath=False):
+        # Multipath failover requires a non-zero bdev_retry_count per SPDK docs:
+        # https://spdk.io/doc/nvme_multipath.html
+        # Otherwise aborted IOs (e.g. from a NIC going down) are returned as
+        # errors to the caller instead of being retried on the alternate path.
+        bdev_retry = constants.BDEV_RETRY_MULTIPATH if multipath else constants.BDEV_RETRY
         params = {
             # "action_on_timeout": "abort",
-            "bdev_retry_count": constants.BDEV_RETRY,
+            "bdev_retry_count": bdev_retry,
             "transport_retry_count": constants.TRANSPORT_RETRY,
             "ctrlr_loss_timeout_sec": constants.CTRL_LOSS_TO,
             "fast_io_fail_timeout_sec" : constants.FAST_FAIL_TO,

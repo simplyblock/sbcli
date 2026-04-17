@@ -1677,7 +1677,8 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 return False
 
         # 6- set nvme bdev options
-        ret = rpc_client.bdev_nvme_set_options()
+        mp = bool(snode.data_nics and len(snode.data_nics) > 1)
+        ret = rpc_client.bdev_nvme_set_options(multipath=mp)
         if not ret:
             logger.error("Failed to set nvme options")
             return False
@@ -2328,7 +2329,8 @@ def _restart_storage_node_impl(
             return False
 
     # 6- set nvme bdev options
-    ret = rpc_client.bdev_nvme_set_options()
+    mp = bool(snode.data_nics and len(snode.data_nics) > 1)
+    ret = rpc_client.bdev_nvme_set_options(multipath=mp)
     if not ret:
         logger.error("Failed to set nvme options")
         return False

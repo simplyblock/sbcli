@@ -140,6 +140,11 @@ NVMF_MAX_SUBSYSTEMS=50000
 KATO=10000
 ACK_TO=11
 BDEV_RETRY=0
+# Used when the storage node has >1 data NIC (NVMe multipath active). Per the
+# SPDK NVMe multipath docs, bdev_retry_count must be non-zero so aborted IOs
+# from a failed path are retried on the alternate path instead of returning
+# as errors to the caller.
+BDEV_RETRY_MULTIPATH=3
 TRANSPORT_RETRY=3
 CTRL_LOSS_TO=1
 FAST_FAIL_TO=0
