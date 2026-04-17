@@ -13,7 +13,7 @@ without any IO errors or data corruption.
 
 Prerequisites:
     - Cluster deployed with multipath (2 data NICs per node)
-    - cluster_metadata.json with node IPs and data NIC info
+    - cluster_metadata_mp.json with node IPs and data NIC info
 """
 import argparse
 import json
@@ -39,7 +39,7 @@ UUID_RE = re.compile(r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}")
 
 
 def parse_args():
-    default_metadata = Path(__file__).with_name("cluster_metadata.json")
+    default_metadata = Path(__file__).with_name("cluster_metadata_mp.json")
     default_log_dir = Path(__file__).parent
 
     parser = argparse.ArgumentParser(

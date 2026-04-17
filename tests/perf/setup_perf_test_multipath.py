@@ -38,7 +38,7 @@ KEY_PATH     = r"C:\ssh\mtes01.pem"
 AZ           = "us-east-1a"
 SUBNET_ID    = "subnet-0593459d6b931ee4c"
 STORAGE_SG   = "sg-02e89a1372e9f39e9"
-BRANCH       = "test_ftt2"
+BRANCH       = "test_FTT2"
 USER         = "ec2-user"
 MGMT_IFACE   = "eth0"
 DATA_NICS    = ["eth1", "eth2"]          # Names the OS assigns to ENI index 1, 2
@@ -89,7 +89,7 @@ def ssh_exec(ip, cmds, get_output=False, check=False):
     results = []
     for cmd in cmds:
         print(f"  [{ip}] $ {cmd}")
-        stdin, stdout, stderr = ssh.exec_command(cmd, timeout=600)
+        stdin, stdout, stderr = ssh.exec_command(cmd, timeout=1200)
         out = stdout.read().decode()
         err = stderr.read().decode()
         rc = stdout.channel.recv_exit_status()
@@ -426,7 +426,7 @@ def main():
         "sudo dnf install git python3-pip nvme-cli -y",
         "sudo /usr/bin/python3 -m pip install --upgrade pip setuptools wheel",
         "sudo /usr/bin/python3 -m pip install ruamel.yaml",
-        f"sudo pip install git+https://github.com/simplyblock-io/sbcli@{BRANCH}"
+        f"sudo pip install git+https://github.com/simplyblock/sbcli@{BRANCH}"
         " --upgrade --force --ignore-installed requests",
         "echo 'export PATH=/usr/local/bin:$PATH' >> ~/.bashrc",
     ]
@@ -599,7 +599,7 @@ def main():
         "key_path": KEY_PATH,
     }
 
-    with open("cluster_metadata.json", "w") as f:
+    with open("cluster_metadata_mp.json", "w") as f:
         json.dump(final_metadata, f, indent=4)
 
     # ── Done ─────────────────────────────────────────────────────────────
@@ -610,7 +610,7 @@ def main():
     print(f"  SNs:      {', '.join(sn_pub_ips)}")
     print(f"  Clients:  {', '.join(client_pub_ips)}")
     print(f"  Data NICs: {', '.join(DATA_NICS)}")
-    print("  Metadata: cluster_metadata.json")
+    print("  Metadata: cluster_metadata_mp.json")
     if verify_errors:
         print(f"  WARNING: {len(verify_errors)} verification issue(s) — check output above")
     else:
@@ -618,7 +618,7 @@ def main():
     print("=" * 60)
 
 
-def teardown(metadata_path="cluster_metadata.json"):
+def teardown(metadata_path="cluster_metadata_mp.json"):
     """Terminate all instances and release associated Elastic IPs.
 
     Reads instance IDs from the metadata JSON written by main().
@@ -662,7 +662,7 @@ def teardown(metadata_path="cluster_metadata.json"):
 if __name__ == "__main__":
     import sys
     if len(sys.argv) > 1 and sys.argv[1] == "teardown":
-        meta_path = sys.argv[2] if len(sys.argv) > 2 else "cluster_metadata.json"
+        meta_path = sys.argv[2] if len(sys.argv) > 2 else "cluster_metadata_mp.json"
         teardown(meta_path)
     else:
         main()
