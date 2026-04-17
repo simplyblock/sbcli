@@ -2903,13 +2903,18 @@ class TestLvolDynamicHostManagement(SecurityTestBase):
         self.lvol_mount_details[lvol_name]["Mount"] = None
 
         # TC-NEW-011: remove host from pool
+        # Known behaviour: when pool has NO allowed hosts we still get a
+        # connect string but WITHOUT dhchap keys (issue #3).
         self.logger.info("TC-NEW-011: Removing host from pool …")
         self.ssh_obj.remove_host_from_pool(self.mgmt_nodes[0], pool_id, host_nqn)
         sleep_n_sec(3)
         connect_ls, err = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
-        assert not connect_ls or err, \
-            "Expected no connect string after removing host from pool"
-        self.logger.info("TC-NEW-011: Host removed – connect rejected PASSED")
+        assert connect_ls and not err, \
+            f"Expected connect string (without dhchap) after removing only host; err={err}"
+        connect_str = " ".join(connect_ls) if isinstance(connect_ls, list) else str(connect_ls)
+        assert "dhchap" not in connect_str.lower(), \
+            f"Expected no DHCHAP keys when pool has no allowed hosts; got: {connect_str}"
+        self.logger.info("TC-NEW-011: Host removed – connect string without DHCHAP PASSED")
 
         # TC-NEW-012: re-add host
         self.logger.info("TC-NEW-012: Re-adding host to pool …")
@@ -3133,7 +3138,9 @@ class TestLvolSecuritySnapshotClone(SecurityTestBase):
 
         lvol_device, _ = self._connect_and_get_device(lvol_name, lvol_id, host_nqn=host_nqn)
         mount_point = f"{self.mount_path}/{lvol_name}"
-        self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type=self._pick_fs_type())
+        # Use ext4 explicitly: xfs clones share the source UUID and cannot be
+        # connected on the same client as the source (known issue #2).
+        self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type="ext4")
         self.ssh_obj.mount_path(node=self.fio_node, device=lvol_device, mount_path=mount_point)
         self.lvol_mount_details[lvol_name]["Mount"] = mount_point
         log_file = f"{self.log_path}/{lvol_name}_w.log"
@@ -3799,9 +3806,9 @@ class TestLvolSecurityNegativeCreation(SecurityTestBase):
 
 class TestLvolSecurityNegativeConnect(SecurityTestBase):
     """
-    Tests rejection/absence of DHCHAP keys when host is not registered:
+    Tests connect behaviour for unregistered/wrong host NQNs:
 
-    TC-SEC-110  Unregistered NQN → connect string has no DHCHAP keys
+    TC-SEC-110  Unregistered NQN → connect rejected (pool has allowed hosts)
     TC-SEC-111  Tampered DHCHAP secret → nvme connect fails (no new device)
     TC-SEC-112  Connect without host-nqn → no DHCHAP keys
     TC-SEC-113  Delete lvol in DHCHAP pool → cleanup succeeds
@@ -3830,15 +3837,17 @@ class TestLvolSecurityNegativeConnect(SecurityTestBase):
         assert lvol_id
         self.lvol_mount_details[lvol_name] = {"ID": lvol_id, "Mount": None}
 
-        # TC-SEC-110: unregistered NQN → no DHCHAP keys
+        # TC-SEC-110: unregistered NQN → connect must FAIL
+        # Known behaviour: when pool HAS allowed hosts and a wrong/unregistered
+        # NQN is passed with --host-nqn, the connect command fails (issue #4).
         self.logger.info("TC-SEC-110: Connect with unregistered NQN …")
         wrong_nqn = f"nqn.2024-01.io.simplyblock:test:wrong-{_rand_suffix()}"
         connect_ls, cerr = self._get_connect_str_cli(lvol_id, host_nqn=wrong_nqn)
-        if connect_ls:
-            connect_str = " ".join(connect_ls) if isinstance(connect_ls, list) else str(connect_ls)
-            assert "dhchap" not in connect_str.lower(), \
-                f"Unregistered NQN should not get DHCHAP keys; got: {connect_str}"
-        self.logger.info("TC-SEC-110: No DHCHAP keys for unregistered NQN PASSED")
+        rejected = bool(cerr) or not connect_ls
+        assert rejected, (
+            f"Expected rejection for wrong NQN {wrong_nqn!r} when pool has "
+            f"allowed hosts, but got connect strings: {connect_ls}")
+        self.logger.info("TC-SEC-110: Wrong NQN rejected PASSED")
 
         # TC-SEC-111: tampered DHCHAP secret → no new device
         self.logger.info("TC-SEC-111: Tampered DHCHAP secret …")
@@ -3992,32 +4001,37 @@ class TestLvolSecurityDynamicModification(SecurityTestBase):
         assert "dhchap" in str_b.lower(), f"NQN_B should have DHCHAP; got: {str_b}"
         self.logger.info("TC-SEC-123: Both NQNs have DHCHAP PASSED")
 
-        # TC-SEC-124: remove NQN_A → NQN_B still has DHCHAP
+        # TC-SEC-124: remove NQN_A → NQN_B still has DHCHAP; NQN_A is rejected
+        # Known behaviour: pool still HAS allowed hosts (NQN_B), so connecting
+        # with removed NQN_A must FAIL (issue #4).
         self.logger.info("TC-SEC-124: Removing NQN_A …")
         self.ssh_obj.remove_host_from_pool(self.mgmt_nodes[0], pool_id, host_nqn)
         sleep_n_sec(3)
-        cs_a2, _ = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
+        cs_a2, err_a2 = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
+        rejected_a = bool(err_a2) or not cs_a2
+        assert rejected_a, (
+            f"NQN_A should be rejected when pool still has allowed hosts "
+            f"(NQN_B); got: cs={cs_a2}")
         cs_b2, _ = self._get_connect_str_cli(lvol_id, host_nqn=second_nqn)
-        if cs_a2:
-            str_a2 = " ".join(cs_a2) if isinstance(cs_a2, list) else str(cs_a2)
-            assert "dhchap" not in str_a2.lower(), \
-                f"NQN_A should not have DHCHAP after removal; got: {str_a2}"
         assert cs_b2, "NQN_B should still get connect string"
         str_b2 = " ".join(cs_b2) if isinstance(cs_b2, list) else str(cs_b2)
         assert "dhchap" in str_b2.lower(), f"NQN_B should still have DHCHAP; got: {str_b2}"
         self.logger.info("TC-SEC-124: PASSED")
 
-        # TC-SEC-125: remove NQN_B → neither has DHCHAP
+        # TC-SEC-125: remove NQN_B → pool has NO allowed hosts
+        # Known behaviour: connect string IS returned but without dhchap
+        # keys when pool has no allowed hosts (issue #3).
         self.logger.info("TC-SEC-125: Removing NQN_B …")
         self.ssh_obj.remove_host_from_pool(self.mgmt_nodes[0], pool_id, second_nqn)
         sleep_n_sec(3)
-        cs_a3, _ = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
-        cs_b3, _ = self._get_connect_str_cli(lvol_id, host_nqn=second_nqn)
-        for label, cs in [("NQN_A", cs_a3), ("NQN_B", cs_b3)]:
-            if cs:
-                s = " ".join(cs) if isinstance(cs, list) else str(cs)
-                assert "dhchap" not in s.lower(), \
-                    f"{label} should not have DHCHAP after all hosts removed; got: {s}"
+        cs_a3, err_a3 = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
+        cs_b3, err_b3 = self._get_connect_str_cli(lvol_id, host_nqn=second_nqn)
+        for label, cs, cerr in [("NQN_A", cs_a3, err_a3), ("NQN_B", cs_b3, err_b3)]:
+            assert cs and not cerr, \
+                f"{label} should still get connect string when pool has no allowed hosts; err={cerr}"
+            s = " ".join(cs) if isinstance(cs, list) else str(cs)
+            assert "dhchap" not in s.lower(), \
+                f"{label} should not have DHCHAP after all hosts removed; got: {s}"
         self.logger.info("TC-SEC-125: Neither NQN has DHCHAP PASSED")
 
         # TC-SEC-126: re-add NQN_A → reconnect + FIO
@@ -4082,16 +4096,19 @@ class TestLvolSecurityScaleAndRapidOps(SecurityTestBase):
             self.lvol_mount_details[lvol_name] = {"ID": lvol_id, "Mount": None}
         self.logger.info(f"TC-SEC-130: {self.VOLUME_COUNT} volumes created PASSED")
 
-        # TC-SEC-131: remove host → no DHCHAP
+        # TC-SEC-131: remove host → connect string returned without DHCHAP
+        # Known behaviour: pool has NO allowed hosts after removal, so connect
+        # string IS returned but without dhchap keys (issue #3).
         self.logger.info("TC-SEC-131: Removing host from pool …")
         self.ssh_obj.remove_host_from_pool(self.mgmt_nodes[0], pool_id, host_nqn)
         sleep_n_sec(3)
         for lvol_name, lvol_id in volumes:
-            cs, _ = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
-            if cs:
-                s = " ".join(cs) if isinstance(cs, list) else str(cs)
-                assert "dhchap" not in s.lower(), \
-                    f"{lvol_name}: should not have DHCHAP after host removal; got: {s}"
+            cs, cerr = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
+            assert cs and not cerr, \
+                f"{lvol_name}: should get connect string when pool has no allowed hosts; err={cerr}"
+            s = " ".join(cs) if isinstance(cs, list) else str(cs)
+            assert "dhchap" not in s.lower(), \
+                f"{lvol_name}: should not have DHCHAP after host removal; got: {s}"
         self.logger.info("TC-SEC-131: All volumes have no DHCHAP PASSED")
 
         # TC-SEC-132: re-add host → all have DHCHAP
@@ -4255,7 +4272,9 @@ class TestLvolSecurityWithBackup(SecurityTestBase):
 
         lvol_device, _ = self._connect_and_get_device(lvol_name, lvol_id, host_nqn=host_nqn)
         mount_point = f"{self.mount_path}/{lvol_name}"
-        self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type=self._pick_fs_type())
+        # Use ext4 explicitly: xfs restored volumes share the source UUID
+        # and cannot be connected on the same client as the source (known issue #2).
+        self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type="ext4")
         self.ssh_obj.mount_path(node=self.fio_node, device=lvol_device, mount_path=mount_point)
         self.lvol_mount_details[lvol_name]["Mount"] = mount_point
         log_file = f"{self.log_path}/{lvol_name}_w.log"
@@ -4348,7 +4367,7 @@ class TestLvolSecurityMultiClientConcurrent(SecurityTestBase):
 
     TC-SEC-160  Create DHCHAP pool, register NQN_A only, create lvol
     TC-SEC-161  Concurrently request connect strings for NQN_A and NQN_B
-    TC-SEC-162  NQN_A gets DHCHAP keys; NQN_B does not
+    TC-SEC-162  NQN_A gets DHCHAP keys; NQN_B is rejected (pool has allowed hosts)
     TC-SEC-163  Connect with NQN_A and run FIO
     """
 
@@ -4407,11 +4426,13 @@ class TestLvolSecurityMultiClientConcurrent(SecurityTestBase):
             f"Registered NQN should have DHCHAP keys; got: {good_str}"
         self.logger.info("TC-SEC-162: Registered NQN has DHCHAP PASSED")
 
-        if bad_cs:
-            bad_str = " ".join(bad_cs) if isinstance(bad_cs, list) else str(bad_cs)
-            assert "dhchap" not in bad_str.lower(), \
-                f"Unregistered NQN should not have DHCHAP; got: {bad_str}"
-        self.logger.info("TC-SEC-162: Unregistered NQN has no DHCHAP PASSED")
+        # Known behaviour: when pool HAS allowed hosts, a wrong/unregistered
+        # NQN is rejected entirely (issue #4).
+        bad_rejected = bool(bad_err) or not bad_cs
+        assert bad_rejected, (
+            f"Unregistered NQN should be rejected when pool has allowed hosts; "
+            f"got: cs={bad_cs}")
+        self.logger.info("TC-SEC-162: Unregistered NQN rejected PASSED")
 
         # TC-SEC-163: connect + FIO
         self.logger.info("TC-SEC-163: Connecting and running FIO …")
