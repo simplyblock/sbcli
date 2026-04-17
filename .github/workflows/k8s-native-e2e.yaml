@@ -227,16 +227,6 @@ jobs:
 
           echo "=== Cleanup complete ==="
 
-      # # ── Label nodes ─────────────────────────────────────────────────────────
-
-      # - name: Label worker nodes
-      #   run: |
-      #     IFS=',' read -ra NODES <<< "${{ github.event.inputs.worker_nodes }}"
-      #     for NODE in "${NODES[@]}"; do
-      #       echo "Labeling node $NODE with simplyblock.io/role=mgmt-plane"
-      #       kubectl label node "$NODE" simplyblock.io/role=mgmt-plane --overwrite
-      #     done
-
       # ── Prepare namespace ─────────────────────────────────────────────────
 
       - name: Create namespace and set pod-security labels
@@ -257,14 +247,6 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/simplyblock-csi/charts/spdk-csi/latest/spdk-csi/
 
-          # Build worker nodes JSON array for --set-json
-          IFS=',' read -ra NODES <<< "${{ github.event.inputs.worker_nodes }}"
-          WORKER_JSON=$(printf '%s\n' "${NODES[@]}" | jq -R . | jq -s .)
-          echo "Worker nodes JSON: $WORKER_JSON"
-
-          # Build data nics JSON array
-          DATA_NICS_JSON='["${{ github.event.inputs.data_nics }}"]'
-
           helm upgrade --install spdk-csi ./ \
             --namespace simplyblock \
             --create-namespace \
@@ -272,33 +254,110 @@ jobs:
             --set operator.enabled=true \
             --set controlplane.csiHostpathDriver.enabled=true \
             --set controlplane.storageclass.name=local-hostpath \
-            --set operator.cluster.mgmtIfname="${{ github.event.inputs.mgmt_ifc }}" \
-            --set operator.cluster.enableNodeAffinity=true \
-            --set operator.cluster.fabricType=tcp \
-            --set operator.cluster.isSingleNode=false \
-            --set operator.cluster.strictNodeAntiAffinity=false \
-            --set operator.cluster.warningThreshold.capacity=95 \
-            --set operator.cluster.criticalThreshold.capacity=97 \
-            --set operator.storageNodes.mgmtIfname="${{ github.event.inputs.mgmt_ifc }}" \
-            --set operator.storageNodes.skipKubeletConfiguration=true \
-            --set operator.storageNodes.enableCpuTopology=true \
-            --set operator.storageNodes.maxLogicalVolumeCount=30 \
-            --set operator.storageNodes.spdkImage="${{ github.event.inputs.spdk_image }}" \
-            --set operator.storageNodes.spdkDebug=false \
-            --set operator.storageNodes.coreIsolation=false \
-            --set operator.storageNodes.numPartitions=0 \
             --set image.simplyblock.repository="${{ github.event.inputs.simplyblock_repository || 'public.ecr.aws/simply-block/simplyblock' }}" \
             --set image.simplyblock.tag="${{ github.event.inputs.simplyblock_image }}" \
             --set image.operator.repository="${{ github.event.inputs.operator_repository || 'simplyblock/simplyblock-manager' }}" \
             --set image.operator.tag="${{ github.event.inputs.operator_tag || 'main' }}" \
-            --set-json "operator.storageNodes.workerNodes=${WORKER_JSON}" \
-            --set-json "operator.storageNodes.dataIfname=${DATA_NICS_JSON}" \
-            --set operator.stripe.dataChunks="${NDCS}" \
-            --set operator.stripe.parityChunks="${NPCS}" \
             --set csiConfig.simplybk.ip="http://simplyblock-webappapi.simplyblock:5000" \
             --set prometheus.server.persistentVolume.storageClass=local-hostpath \
             --set controlplane.observability.enabled=true \
             --set opensearch.persistence.storageClass=local-hostpath
+
+      # ── Apply custom resources ────────────────────────────────────────────
+
+      - name: Wait for operator pod to be ready
+        run: |
+          NAMESPACE=simplyblock
+          echo "=== Waiting for operator pod ==="
+          for i in $(seq 1 60); do
+            POD=$(kubectl -n $NAMESPACE get pods \
+              -l app=simplyblock-admin-control \
+              -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) || true
+            if [ -n "$POD" ]; then
+              PHASE=$(kubectl -n $NAMESPACE get pod "$POD" \
+                -o jsonpath='{.status.phase}' 2>/dev/null) || true
+              if [ "$PHASE" = "Running" ]; then
+                echo "Operator pod $POD is Running"
+                break
+              fi
+            fi
+            echo "Waiting for operator pod ($i/60)..."
+            sleep 10
+          done
+
+      - name: Apply operator custom resources
+        run: |
+          NAMESPACE=simplyblock
+          MGMT_IFC="${{ github.event.inputs.mgmt_ifc || 'ens18' }}"
+          SB_REPO="${{ github.event.inputs.simplyblock_repository || 'public.ecr.aws/simply-block/simplyblock' }}"
+          SB_TAG="${{ github.event.inputs.simplyblock_image }}"
+
+          # Build workerNodes YAML list from comma-separated input
+          WORKER_YAML=""
+          IFS=',' read -ra NODES <<< "${{ github.event.inputs.worker_nodes }}"
+          for NODE in "${NODES[@]}"; do
+            WORKER_YAML="${WORKER_YAML}    - ${NODE}"$'\n'
+          done
+
+          cat <<EOF | kubectl apply -f -
+          apiVersion: storage.simplyblock.io/v1alpha1
+          kind: StorageCluster
+          metadata:
+            name: simplyblock-cluster
+            namespace: ${NAMESPACE}
+          spec:
+            clusterName: simplyblock-cluster
+            mgmtIfname: ${MGMT_IFC}
+            fabricType: tcp
+            isSingleNode: false
+            enableNodeAffinity: false
+            strictNodeAntiAffinity: false
+            stripe:
+              dataChunks: ${NDCS}
+              parityChunks: ${NPCS}
+            warningThreshold:
+              capacity: 80
+              provisionedCapacity: 80
+            criticalThreshold:
+              capacity: 90
+              provisionedCapacity: 90
+          ---
+          apiVersion: storage.simplyblock.io/v1alpha1
+          kind: Pool
+          metadata:
+            name: simplyblock-pool
+            namespace: ${NAMESPACE}
+          spec:
+            name: simplyblock-pool
+            clusterName: simplyblock-cluster
+          ---
+          apiVersion: storage.simplyblock.io/v1alpha1
+          kind: StorageNode
+          metadata:
+            name: simplyblock-node
+            namespace: ${NAMESPACE}
+          spec:
+            clusterName: simplyblock-cluster
+            clusterImage: "${SB_REPO}:${SB_TAG}"
+            mgmtIfname: ${MGMT_IFC}
+            maxLogicalVolumeCount: 10
+            partitions: 1
+            corePercentage: 65
+            coreIsolation: false
+            journalManager:
+              count: 3
+              percentPerDevice: 3
+            skipKubeletConfiguration: false
+            enableCpuTopology: true
+            openShiftCluster: false
+            ubuntuHost: false
+            forceFormat4K: false
+            workerNodes:
+          ${WORKER_YAML}
+          EOF
+
+          echo "Custom resources applied"
+          sleep 10
         env:
           NDCS: ${{ env.NDCS }}
           NPCS: ${{ env.NPCS }}
@@ -438,6 +497,17 @@ jobs:
           kubectl -n $NAMESPACE get pods
           kubectl -n $NAMESPACE exec "$ADMIN_POD" -- sbctl cluster list 2>&1 || true
           exit 1
+
+      # ── Label nodes (after cluster is active) ───────────────────────────────
+
+      - name: Label worker nodes
+        run: |
+          IFS=',' read -ra NODES <<< "${{ github.event.inputs.worker_nodes }}"
+          for NODE in "${NODES[@]}"; do
+            echo "Labeling node $NODE"
+            kubectl label node "$NODE" topology.kubernetes.io/zone=default --overwrite
+            kubectl label node "$NODE" simplyblock.io/role=mgmt-plane --overwrite
+          done
 
       # ── Run tests ───────────────────────────────────────────────────────────
 

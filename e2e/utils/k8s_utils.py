@@ -560,7 +560,18 @@ class K8sUtils:
         self.apply_yaml_cluster_scoped(yaml_content)
 
     def create_volume_snapshot_class(self, name: str = "simplyblock-csi-snapshotclass"):
-        """Create a VolumeSnapshotClass for the simplyblock CSI driver."""
+        """Create a VolumeSnapshotClass for the simplyblock CSI driver.
+
+        If the class already exists (e.g. created by Helm), it is left as-is.
+        """
+        out, _ = self._exec_kubectl(
+            f"kubectl get volumesnapshotclass {name} --no-headers 2>/dev/null || true",
+            supress_logs=True,
+        )
+        if out.strip():
+            self.logger.info(f"[K8sUtils] VolumeSnapshotClass '{name}' already exists, skipping creation")
+            return
+
         yaml_content = (
             f"apiVersion: snapshot.storage.k8s.io/v1\n"
             f"kind: VolumeSnapshotClass\n"
@@ -569,8 +580,6 @@ class K8sUtils:
             f"driver: csi.simplyblock.io\n"
             f"deletionPolicy: Delete\n"
         )
-        self.logger.info(f"[K8sUtils] Deleting existing VolumeSnapshotClass '{name}' (if any)")
-        self._exec_kubectl(f"kubectl delete volumesnapshotclass {name} --ignore-not-found")
         self.logger.info(f"[K8sUtils] Creating VolumeSnapshotClass '{name}'")
         self.apply_yaml_cluster_scoped(yaml_content)
 
