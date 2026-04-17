@@ -412,6 +412,23 @@ class NicFailoverSoak:
 
     # ---- client / volume setup -----------------------------------------------
 
+    def cleanup_client(self):
+        """Kill stale fio, unmount old soak dirs, disconnect all NVMe-oF subsystems."""
+        self.logger.log("Cleaning up client: killing fio, unmounting, disconnecting NVMe")
+        self.client.run(
+            "sudo pkill -9 fio 2>/dev/null || true; sleep 1; "
+            "mount | grep -E 'soak_|outage_soak' | awk '{print $3}' | "
+            "  while read mp; do sudo umount -f \"$mp\" 2>/dev/null; done; "
+            "for nqn in $(sudo nvme list-subsys 2>/dev/null "
+            "  | grep 'NQN=nqn.2023-02.io.simplyblock' | sed 's/.*NQN=//'); do "
+            "  sudo nvme disconnect -n \"$nqn\" 2>/dev/null; "
+            "done; "
+            "sleep 3",
+            timeout=120,
+            check=False,
+            label="cleanup client stale connections",
+        )
+
     def prepare_client(self):
         mount_root = f"/mnt/soak_{self.run_id}"
         self.client.run(
@@ -421,6 +438,13 @@ class NicFailoverSoak:
             label="install client packages",
         )
         self.client.run("sudo modprobe nvme_tcp", timeout=30, label="load nvme_tcp")
+        self.cleanup_client()
+        self.client.run(
+            f"sudo mkdir -p {shlex.quote(mount_root)} && "
+            f"sudo chown {self.user}:{self.user} {shlex.quote(mount_root)}",
+            timeout=30,
+            label="prepare client workspace",
+        )
         return mount_root
 
     def create_volumes(self, nodes):
@@ -436,10 +460,14 @@ class NicFailoverSoak:
                 f"--host-id {node['uuid']}",
                 timeout=120,
             )
-            vol_uuid_match = UUID_RE.search(stdout)
-            if not vol_uuid_match:
+            vol_id = None
+            for line in reversed(stdout.splitlines()):
+                stripped = line.strip()
+                if UUID_RE.fullmatch(stripped):
+                    vol_id = stripped
+                    break
+            if not vol_id:
                 raise TestRunError(f"Failed to extract volume UUID from: {stdout}")
-            vol_id = vol_uuid_match.group()
             self.created_volume_ids.append(vol_id)
             self.logger.log(
                 f"Created volume {vol_name} ({vol_id}) on node {node['uuid']}"
@@ -464,19 +492,27 @@ class NicFailoverSoak:
                 self.client.run(cmd, timeout=60, check=False,
                                 label=f"connect {volume['volume_id']}")
 
-            mount_point = posixpath.join(mount_root, volume["volume_id"])
+            mount_point = posixpath.join(mount_root, f"vol{volume['index']}")
+            find_and_mount = (
+                "set -euo pipefail\n"
+                f"dev=$(readlink -f /dev/disk/by-id/*{volume['volume_id']}* | head -n 1)\n"
+                "if [ -z \"$dev\" ]; then\n"
+                f"  echo 'Failed to locate NVMe device for {volume['volume_id']}' >&2\n"
+                "  exit 1\n"
+                "fi\n"
+                f"sudo mkfs.xfs -f \"$dev\"\n"
+                f"sudo mkdir -p {shlex.quote(mount_point)}\n"
+                f"sudo mount \"$dev\" {shlex.quote(mount_point)}\n"
+                f"sudo chown {self.user}:{self.user} {shlex.quote(mount_point)}\n"
+            )
             self.client.run(
-                f"sudo mkdir -p {shlex.quote(mount_point)} && "
-                f"sleep 2 && "
-                f"DEV=$(lsblk -dpno NAME,SERIAL | grep {volume['volume_id'][:20]} | awk '{{print $1}}' | head -1) && "
-                f"sudo mkfs.xfs -f $DEV && "
-                f"sudo mount $DEV {shlex.quote(mount_point)}",
-                timeout=120,
+                f"bash -lc {shlex.quote(find_and_mount)}",
+                timeout=600,
                 label=f"format and mount {volume['volume_id']}",
             )
             volume["mount_point"] = mount_point
-            volume["fio_log"] = posixpath.join(mount_root, f"fio_vol{volume['index']}.log")
-            volume["rc_file"] = posixpath.join(mount_root, f"fio_vol{volume['index']}.rc")
+            volume["fio_log"] = posixpath.join(mount_point, "fio.log")
+            volume["rc_file"] = posixpath.join(mount_point, "fio.rc")
 
     def start_fio(self, volumes):
         self.logger.log("Starting fio on all mounted volumes in parallel")
@@ -492,13 +528,13 @@ class NicFailoverSoak:
                     f"fio --name={fio_name} --directory={shlex.quote(volume['mount_point'])} "
                     "--direct=1 --rw=randrw --bs=4K --group_reporting --time_based "
                     f"--numjobs=4 --iodepth=4 --size=4G --runtime={self.args.runtime} "
-                    "--ioengine=aiolib --max_latency=10s "
+                    "--ioengine=libaio --max_latency=10s "
                     "--verify=crc32c --verify_fatal=1 --verify_backlog=1024 "
                     f"--output={shlex.quote(volume['fio_log'])}; "
                     "rc=$?; "
                     f"echo $rc > {shlex.quote(volume['rc_file'])}"
                 )
-                + " >/dev/null 2>&1 & echo $!"
+                + f" >{shlex.quote(volume['fio_log'] + '.stderr')} 2>&1 & echo $!"
             )
             _, stdout_text, _ = self.client.run(
                 f"bash -lc {shlex.quote(start_script)}",
@@ -519,6 +555,7 @@ class NicFailoverSoak:
             )
             self.logger.log(f"Started fio for {volume['volume_name']} with pid {pid}")
         self.fio_jobs = fio_jobs
+        time.sleep(5)
         self.ensure_fio_running()
 
     def check_fio(self):
@@ -551,9 +588,17 @@ class NicFailoverSoak:
                 check=False,
                 label=f"tail fio log {job.volume_name}",
             )[1]
+            stderr_file = job.fio_log + ".stderr"
+            stderr_tail = self.client.run(
+                f"bash -lc {shlex.quote(f'tail -50 {shlex.quote(stderr_file)}')}",
+                timeout=30,
+                check=False,
+                label=f"tail fio stderr {job.volume_name}",
+            )[1]
             raise TestRunError(
                 f"fio job for {job.volume_name} stopped unexpectedly with status {status}. "
-                f"Last log lines:\n{tail}"
+                f"Last log lines:\n{tail}\n"
+                f"Stderr:\n{stderr_tail}"
             )
         return completed == len(self.fio_jobs)
 
@@ -561,6 +606,85 @@ class NicFailoverSoak:
         finished_cleanly = self.check_fio()
         if finished_cleanly:
             raise TestRunError("fio completed before NIC failover loop started")
+
+    # ---- SPDK path verification ------------------------------------------------
+
+    def verify_spdk_paths(self, iteration_label):
+        """Exec into every SPDK container and verify all remote NVMe controllers
+        are enabled with 2 paths (primary + alternate).  Also verify all NVMf
+        subsystem listeners are present.  Raises TestRunError on any failure."""
+        self.logger.log(f"{iteration_label}: verifying SPDK multipath state on all nodes")
+        nodes = self._get_sn_list()
+        all_ok = True
+        for node in nodes:
+            if node["status"] != "online":
+                self.logger.log(f"  {node['uuid'][:12]}: SKIP (status={node['status']})")
+                continue
+            host = self._node_host(node["uuid"])
+            # Find SPDK container and socket
+            try:
+                _, containers_out, _ = host.run(
+                    "sudo docker ps --format '{{.Names}}' | grep '^spdk_[0-9]'",
+                    timeout=15, check=False, label=f"find spdk container {node['uuid'][:12]}")
+                container = containers_out.strip().splitlines()[0] if containers_out.strip() else None
+                if not container:
+                    self.logger.log(f"  {node['uuid'][:12]}: FAIL - no SPDK container running")
+                    all_ok = False
+                    continue
+                sock = f"/mnt/ramdisk/{container}/spdk.sock"
+                rpc = f"python3 /root/spdk/scripts/rpc.py -s {sock}"
+
+                # Check remote NVMe controllers
+                _, ctrl_json, _ = host.run(
+                    f"sudo docker exec {container} bash -c '{rpc} bdev_nvme_get_controllers'",
+                    timeout=30, check=False,
+                    label=f"get controllers {node['uuid'][:12]}")
+                ctrls = json.loads(ctrl_json) if ctrl_json.strip() else []
+                for c in ctrls:
+                    name = c["name"]
+                    if not name.startswith("remote_"):
+                        continue
+                    for ct in c.get("ctrlrs", []):
+                        state = ct.get("state", "?")
+                        traddr = ct["trid"]["traddr"]
+                        alt_count = len(ct.get("alternate_trids", []))
+                        total_paths = 1 + alt_count
+                        if state != "enabled" or total_paths != 2:
+                            self.logger.log(
+                                f"  {node['uuid'][:12]}: FAIL - {name[:40]} "
+                                f"state={state} paths={total_paths} (primary={traddr})")
+                            all_ok = False
+                        else:
+                            pass  # OK, don't spam logs
+
+                # Check NVMf subsystem listeners
+                _, subs_json, _ = host.run(
+                    f"sudo docker exec {container} bash -c '{rpc} nvmf_get_subsystems'",
+                    timeout=30, check=False,
+                    label=f"get subsystems {node['uuid'][:12]}")
+                subs = json.loads(subs_json) if subs_json.strip() else []
+                for s in subs:
+                    nqn = s["nqn"]
+                    if "discovery" in nqn:
+                        continue
+                    listeners = s.get("listen_addresses", [])
+                    if len(listeners) != 2:
+                        short = nqn.split(":")[-1][:40]
+                        self.logger.log(
+                            f"  {node['uuid'][:12]}: FAIL - subsystem {short} "
+                            f"has {len(listeners)} listeners (expected 2)")
+                        all_ok = False
+
+                if all_ok:
+                    self.logger.log(f"  {node['uuid'][:12]}: OK - all controllers enabled, 2 paths each, 2 listeners each")
+
+            except Exception as exc:
+                self.logger.log(f"  {node['uuid'][:12]}: ERROR checking SPDK state: {exc}")
+                all_ok = False
+
+        if not all_ok:
+            raise TestRunError(f"{iteration_label}: SPDK multipath verification failed")
+        self.logger.log(f"{iteration_label}: all SPDK paths verified OK")
 
     # ---- NIC outage ----------------------------------------------------------
 
@@ -604,6 +728,9 @@ class NicFailoverSoak:
         )
         time.sleep(total_wait)
 
+        # Verify all SPDK paths reconnected on all nodes
+        self.verify_spdk_paths(f"Iteration {iteration}")
+
         # Check fio is still running and no verification errors
         self.logger.log(f"Iteration {iteration}: checking fio status")
         finished = self.check_fio()
@@ -629,6 +756,9 @@ class NicFailoverSoak:
         volumes = self.create_volumes(nodes)
         self.connect_and_mount_volumes(volumes, mount_root)
         self.start_fio(volumes)
+
+        # Baseline: verify all SPDK paths are healthy before any NIC outages
+        self.verify_spdk_paths("Baseline")
 
         iteration = 0
         while True:

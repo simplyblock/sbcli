@@ -252,6 +252,71 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names:
     return None
 
 
+def repair_multipath_controller(name: str, device, node: StorageNode):
+    """Check a multipath NVMe controller and re-attach any missing paths.
+
+    For a multipath device the controller should have one primary trid plus
+    one alternate_trid per additional data NIC.  If the controller exists but
+    has fewer paths than expected (e.g. a NIC went down and came back but the
+    path was not re-established), re-attach the missing IPs.
+
+    Returns True if all paths are healthy (or were repaired), False if repair
+    was not possible.
+    """
+    if not device.nvmf_multipath:
+        return True
+
+    expected_ips = set(ip.strip() for ip in device.nvmf_ip.split(",") if ip.strip())
+    if len(expected_ips) < 2:
+        return True  # not actually multipath
+
+    rpc_client = node.rpc_client()
+    ret = rpc_client.bdev_nvme_controller_list(name)
+    if not ret:
+        return True  # controller gone, connect_device will handle full reconnect
+
+    db_ctrl = DBController()
+    target_node = db_ctrl.get_storage_node_by_id(device.node_id)
+    if target_node.active_rdma:
+        tr_type = "RDMA"
+    elif target_node.active_tcp:
+        tr_type = "TCP"
+    else:
+        return False
+
+    for ctrl_entry in ret:
+        ctrlrs = ctrl_entry.get("ctrlrs", [])
+        for ct in ctrlrs:
+            state = ct.get("state", "")
+            if state != "enabled":
+                logger.warning("Controller %s path state=%s, skipping repair", name, state)
+                continue
+
+            # Collect all IPs currently attached (primary + alternates)
+            attached_ips = set()
+            attached_ips.add(ct["trid"]["traddr"])
+            for alt in ct.get("alternate_trids", []):
+                attached_ips.add(alt["traddr"])
+
+            missing_ips = expected_ips - attached_ips
+            if not missing_ips:
+                return True  # all paths present
+
+            logger.info("Controller %s has %d/%d paths, re-attaching: %s",
+                        name, len(attached_ips), len(expected_ips), missing_ips)
+            for ip in missing_ips:
+                try:
+                    rpc_client.bdev_nvme_attach_controller(
+                        name, device.nvmf_nqn, ip, device.nvmf_port,
+                        tr_type, multipath="multipath")
+                    logger.info("Re-attached path %s on controller %s", ip, name)
+                except Exception as e:
+                    logger.error("Failed to re-attach path %s on controller %s: %s", ip, name, e)
+                    return False
+
+    return True
+
+
 def get_next_cluster_device_order(db_controller, cluster_id):
     max_order = 0
     found = False

@@ -159,6 +159,14 @@ def check_node(snode):
             org_node = db.get_storage_node_by_id(remote_device.node_id)
             if org_dev.status == NVMeDevice.STATUS_ONLINE and org_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
                 if health_controller.check_bdev(remote_device.remote_bdev, bdev_names=node_bdev_names):
+                    # Bdev exists but multipath may be degraded — repair missing paths
+                    if org_dev.nvmf_multipath:
+                        ctrl_name = f"remote_{org_dev.alceml_bdev}" if org_dev.alceml_bdev else None
+                        if ctrl_name:
+                            try:
+                                storage_node_ops.repair_multipath_controller(ctrl_name, org_dev, snode)
+                            except Exception as e:
+                                logger.warning("Multipath repair failed for %s: %s", ctrl_name, e)
                     connected_devices.append(remote_device.get_id())
                     continue
 
@@ -192,6 +200,13 @@ def check_node(snode):
                 if remote_device.remote_bdev:
                     check = health_controller.check_bdev(remote_device.remote_bdev, bdev_names=node_bdev_names)
                     if check:
+                        # JM bdev exists but multipath may be degraded — repair missing paths
+                        if remote_device.nvmf_multipath:
+                            ctrl_name = remote_device.remote_bdev.replace("n1", "")
+                            try:
+                                storage_node_ops.repair_multipath_controller(ctrl_name, remote_device, snode)
+                            except Exception as e:
+                                logger.warning("Multipath repair failed for JM %s: %s", ctrl_name, e)
                         connected_jms.append(remote_device.get_id())
                     else:
                         node_remote_devices_check = False

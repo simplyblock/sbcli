@@ -355,6 +355,38 @@ def _check_sec_node_hublvol(node: StorageNode, node_bdev=None, node_lvols_nqns=N
             else:
                 node_bdev = []
 
+        # Repair degraded multipath on hublvol controller: each NIC should
+        # contribute one path.  If a NIC went down and came back, the path may
+        # not have been re-established.
+        if passed and auto_fix and ret:
+            ctrlrs = ret[0].get("ctrlrs", [])
+            for ct in ctrlrs:
+                if ct.get("state") != "enabled":
+                    continue
+                attached_ips = {ct["trid"]["traddr"]}
+                for alt in ct.get("alternate_trids", []):
+                    attached_ips.add(alt["traddr"])
+                # Check primary node's data NIC IPs
+                expected_ips = set()
+                for iface in primary_node.data_nics:
+                    if (primary_node.active_rdma and iface.trtype == "RDMA") or \
+                       (not primary_node.active_rdma and primary_node.active_tcp and iface.trtype == "TCP"):
+                        expected_ips.add(iface.ip4_address)
+                missing_ips = expected_ips - attached_ips
+                if missing_ips:
+                    logger.info("Hublvol %s on %s missing paths: %s, re-attaching",
+                                primary_node.hublvol.bdev_name, node.get_id(), missing_ips)
+                    tr_type = "RDMA" if primary_node.active_rdma else "TCP"
+                    for ip in missing_ips:
+                        try:
+                            rpc_client.bdev_nvme_attach_controller(
+                                primary_node.hublvol.bdev_name, primary_node.hublvol.nqn,
+                                ip, primary_node.hublvol.nvmf_port,
+                                tr_type, multipath="multipath")
+                            logger.info("Re-attached hublvol path %s on %s", ip, node.get_id())
+                        except Exception as e:
+                            logger.error("Failed to re-attach hublvol path %s: %s", ip, e)
+
         passed &= check_bdev(primary_node.hublvol.get_remote_bdev_name(), bdev_names=node_bdev)
         if not passed:
             return False
