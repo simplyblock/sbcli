@@ -34,10 +34,6 @@ spec:
             - |
               set -e
               MARKER="/var/simplyblock/.cpu_topology_applied"
-              if [[ -f "$MARKER" ]]; then
-                  echo "[INFO] Node already configured. Skipping."
-                  exit 0
-              fi
 
               # Generic resource names — shared across all storage nodes.
               # Only the MCP nodeSelector hostname is unique per node.
@@ -47,6 +43,20 @@ spec:
               KC_LABEL="simplyblock-storage-cpumanager"
               HOSTNAME="{{ HOSTNAME }}"
 
+              if [[ -f "$MARKER" ]]; then
+                  echo "[INFO] Node already configured. Releasing MCP nodeSelector."
+                  if kubectl get machineconfigpool "$MCP_NAME" > /dev/null 2>&1; then
+                    CUR=$(kubectl get machineconfigpool "$MCP_NAME" \
+                      -o jsonpath='{.spec.nodeSelector.matchLabels.kubernetes\.io/hostname}')
+                    if [[ "$CUR" != "" ]]; then
+                      echo "[INFO] Clearing MCP $MCP_NAME hostname (was $CUR)"
+                      kubectl patch machineconfigpool "$MCP_NAME" --type=merge -p \
+                        '{"spec":{"nodeSelector":{"matchLabels":{"kubernetes.io/hostname":""}}}}'
+                    fi
+                  fi
+                  exit 0
+              fi
+              
               # ---- MachineConfigPool ----------------------------------------
               # If MCP already exists, patch only the nodeSelector hostname.
               # If it does not exist, create it.
