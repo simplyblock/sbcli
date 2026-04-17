@@ -4334,11 +4334,12 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
 
     Per design: runs for secondary when primary is online, or for tertiary always.
     While snode examines its raid, the current leader must be quiesced:
-    block the leader's port, demote its lvs leadership (leader=False,
-    bs_nonleadership=True) + force distribs to non-leader, drain inflight
-    IO, then examine. Omitting this step allows JC replication writes from
-    the leader to corrupt the raid state snode is examining — the original
-    writer-conflict incident fixed in 09b4792b.
+    block the leader's port only, demote its lvs leadership, drain inflight
+    IO, then examine. Non-leader peers (siblings) are never port-blocked.
+
+    During the port-blocked window, all RPCs to the leader use timeout=0.2s
+    with no retries. Any RPC failure in this window triggers an abort: kill
+    the restarting SPDK, set node offline, unblock the leader port, raise.
 
     Args:
         snode: the restarting node (RPCs are executed here)
@@ -4411,104 +4412,94 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
     logger.info(f"[RESTART] Non-leader for {primary_node.lvstore} on {snode.get_id()[:8]}, "
                 f"leader={leader_node.get_id()[:8]}, is_tert={is_tertiary}")
 
-    ### 2b- port drop on restarting node for this LVS
-    snode_lvs_port = snode.get_lvol_subsys_port(primary_node.lvstore)
-    snode_pt = "udp" if snode.active_rdma else "tcp"
-    if not activation_mode:
-        try:
-            snode_fw = FirewallClient(snode, timeout=5, retry=2)
-            snode_fw.firewall_set_port(snode_lvs_port, snode_pt, "block", snode.rpc_port)
-            tcp_ports_events.port_deny(snode, snode_lvs_port)
-        except Exception as e:
-            logger.warning("Failed to block port on restarting node for %s: %s", primary_node.lvstore, e)
-
     # Set restart phase: blocked — sync deletes and registrations must be delayed until post_unblock
     _set_restart_phase(snode, primary_node.lvstore, StorageNode.RESTART_PHASE_BLOCKED, db_controller)
 
-    nodes_to_unblock = []
-
-    ### 3- briefly block peer ports while the non-leader LVS is examined
-    # Per design: use disconnect check, not node status
+    # --- Quorum check: determine which LVS peers are reachable ---
     lvs_peer_ids = [sid for sid in [primary_node.secondary_node_id, primary_node.tertiary_node_id] if sid]
-    if not activation_mode:
-        if not _check_peer_disconnected(leader_node, lvs_peer_ids=lvs_peer_ids):
+    leader_has_quorum = not _check_peer_disconnected(leader_node, lvs_peer_ids=lvs_peer_ids)
+
+    # Resolve the secondary node for tertiary→secondary hublvol fallback
+    secondary_node = None
+    if primary_node.secondary_node_id and primary_node.secondary_node_id != snode.get_id():
+        secondary_node = db_controller.get_storage_node_by_id(primary_node.secondary_node_id)
+
+    leader_port_blocked = False
+
+    def _abort_and_unblock(reason):
+        """Abort restart: kill SPDK on snode, set offline, unblock leader port, raise."""
+        logger.error("Aborting non-leader restart on %s for %s: %s",
+                     snode.get_id(), primary_node.lvstore, reason)
+        try:
+            storage_events.snode_restart_failed(snode)
+            snode_api = SNodeClient(snode.api_endpoint, timeout=5, retry=5)
+            snode_api.spdk_process_kill(snode.rpc_port, snode.cluster_id)
+        except Exception as ke:
+            logger.error("Failed to kill SPDK during abort: %s", ke)
+        set_node_status(snode.get_id(), StorageNode.STATUS_OFFLINE)
+        if leader_port_blocked:
             try:
                 fw_api = FirewallClient(leader_node, timeout=5, retry=2)
-                fw_api.firewall_set_port(leader_lvs_port, port_type, "block", leader_node.rpc_port)
-                tcp_ports_events.port_deny(leader_node, leader_lvs_port)
-                time.sleep(0.5)
+                fw_api.firewall_set_port(leader_lvs_port, port_type, "allow", leader_node.rpc_port)
+                tcp_ports_events.port_allowed(leader_node, leader_lvs_port)
+            except Exception as ue:
+                logger.error("Failed to unblock leader port during abort: %s", ue)
+        _set_restart_phase(snode, primary_node.lvstore, "", db_controller)
+        raise Exception(f"Abort non-leader restart: {reason}")
 
-                nodes_to_unblock.append(leader_node)
-            except Exception as e:
-                logger.warning("Skipping peer port block for leader %s on %s: %s",
-                               leader_node.get_id(), primary_node.lvstore, e)
-
-        # Block sibling (the other peer that is not snode or leader)
-        other_sec_ids = [sid for sid in [primary_node.secondary_node_id, primary_node.tertiary_node_id]
-                         if sid and sid != snode.get_id() and sid != leader_node.get_id()]
-        for other_sec_id in other_sec_ids:
-            other_sec = db_controller.get_storage_node_by_id(other_sec_id)
-            if not other_sec:
-                continue
-            if _check_peer_disconnected(other_sec, lvs_peer_ids=lvs_peer_ids):
-                continue
-            try:
-                other_fw = FirewallClient(other_sec, timeout=5, retry=2)
-                other_pt = "udp" if other_sec.active_rdma else "tcp"
-                other_fw.firewall_set_port(leader_lvs_port, other_pt, "block", other_sec.rpc_port)
-                tcp_ports_events.port_deny(other_sec, leader_lvs_port)
-                time.sleep(0.5)
-                nodes_to_unblock.append(other_sec)
-            except Exception as e:
-                logger.warning("Skipping peer port block for sibling %s on %s: %s",
-                               other_sec.get_id(), primary_node.lvstore, e)
-
-    ### 4- drop leadership on the current leader and drain inflight IO.
-    # Per design (restored from 09b4792b; dropped in the 9fa5a61c refactor
-    # and re-added here): once the leader's port is blocked, we must also
-    # demote the leader and wait for its inflight IO to drain so that the
-    # upcoming examine on snode sees a consistent raid state. Without this,
-    # JC replication writes from the leader continue to flow through the
-    # distribs while we examine them, producing a writer conflict
-    # (spdk_lvs_change_leader_state → block_port cascade that took down
-    # node 202 in production).
-    if not activation_mode and not _check_peer_disconnected(leader_node, lvs_peer_ids=lvs_peer_ids):
+    if not activation_mode and leader_has_quorum:
+        ### 3- block leader port ONLY (no siblings)
         try:
-            leader_rpc_client = RPCClient(
-                leader_node.mgmt_ip, leader_node.rpc_port,
-                leader_node.rpc_username, leader_node.rpc_password)
-            leader_rpc_client.bdev_lvol_set_leader(
-                primary_node.lvstore, leader=False, bs_nonleadership=True)
-            leader_rpc_client.bdev_distrib_force_to_non_leader(primary_node.jm_vuid)
+            fw_api = FirewallClient(leader_node, timeout=5, retry=2)
+            fw_api.firewall_set_port(leader_lvs_port, port_type, "block", leader_node.rpc_port)
+            tcp_ports_events.port_deny(leader_node, leader_lvs_port)
+            leader_port_blocked = True
+        except Exception as e:
+            logger.warning("Skipping port block for leader %s on %s: %s",
+                           leader_node.get_id(), primary_node.lvstore, e)
+
+    if not activation_mode and leader_port_blocked:
+        # --- Inside port-blocked window: timeout=0.2s, retry=0, abort on failure ---
+        leader_rpc = RPCClient(
+            leader_node.mgmt_ip, leader_node.rpc_port,
+            leader_node.rpc_username, leader_node.rpc_password,
+            timeout=0.2, retry=0)
+
+        ### 3a- drain inflight IO
+        try:
             logger.info("Checking for inflight IO on leader %s for %s",
                         leader_node.get_id(), primary_node.lvstore)
             for _ in range(100):
-                is_inflight = leader_rpc_client.bdev_distrib_check_inflight_io(primary_node.jm_vuid)
+                is_inflight = leader_rpc.bdev_distrib_check_inflight_io(primary_node.jm_vuid)
                 if is_inflight:
                     time.sleep(0.1)
                 else:
+                    logger.info("Inflight IO drained on leader %s", leader_node.get_id())
                     break
             else:
                 logger.error(
                     "Timeout waiting for inflight IO to drain on leader %s (%s)",
                     leader_node.get_id(), primary_node.lvstore)
         except Exception as e:
-            logger.warning("Failed to demote leader %s for %s: %s",
-                           leader_node.get_id(), primary_node.lvstore, e)
+            _abort_and_unblock(f"Failed inflight IO check on leader {leader_node.get_id()}: {e}")
 
-    ### 5- examine
+    elif not activation_mode and not leader_has_quorum:
+        # Leader has no quorum — skip port block entirely, force journal sync
+        logger.info("Leader %s has no quorum for %s, skipping port block",
+                    leader_node.get_id(), primary_node.lvstore)
+        snode_rpc_client.jc_explicit_synchronization(primary_node.jm_vuid)
+
+    ### 4- examine
     ret = snode_rpc_client.bdev_examine(primary_node.raid)
 
-    ### 6- wait for examine
+    ### 5- wait for examine
     ret = snode_rpc_client.bdev_wait_for_examine()
     if not ret:
         logger.warning("Failed to examine bdevs on non-leader node")
 
     if not activation_mode:
-        ### 6b- create hublvol on secondary (non-leader) for multipath failover
-        # Per design: secondary creates its own hublvol with non_optimized listeners
-        # so the tertiary can use it as a failover path.
-        # Only for secondary role, not tertiary.
+        ### 6- create hublvol on secondary (non-leader) for multipath failover
+        # Secondary creates its own hublvol so the tertiary can use it as a failover path.
         if not is_tertiary:
             try:
                 cluster = db_controller.get_cluster_by_id(snode.cluster_id)
@@ -4518,35 +4509,36 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
             except Exception as e:
                 logger.error("Error creating secondary hublvol on restarting node: %s", e)
 
-        ### 7- connect to leader's hublvol
+        ### 7- connect to leader's hublvol (with fallback to secondary for tertiary)
         try:
-            failover_node = None
-            if is_tertiary and primary_node.secondary_node_id:
-                try:
-                    sec1 = db_controller.get_storage_node_by_id(primary_node.secondary_node_id)
-                    if not _check_peer_disconnected(sec1, lvs_peer_ids=lvs_peer_ids):
-                        failover_node = sec1
-                except KeyError:
-                    pass
             sec_role = "tertiary" if is_tertiary else "secondary"
-            snode.connect_to_hublvol(leader_node, failover_node=failover_node, role=sec_role)
+            if is_tertiary:
+                # Tertiary: connect to leader's hublvol with secondary as failover.
+                # If leader is unreachable, fall back to connecting to secondary's hublvol.
+                failover_node = secondary_node if (secondary_node and
+                    not _check_peer_disconnected(secondary_node, lvs_peer_ids=lvs_peer_ids)) else None
+                connected = snode.connect_to_hublvol(leader_node, failover_node=failover_node, role=sec_role)
+                if not connected and secondary_node and secondary_node.hublvol:
+                    # Leader unreachable — connect to secondary's hublvol as primary path
+                    logger.info("Leader %s unreachable, connecting tertiary %s to secondary %s hublvol for %s",
+                                leader_node.get_id(), snode.get_id(),
+                                secondary_node.get_id(), primary_node.lvstore)
+                    snode.connect_to_hublvol(secondary_node, failover_node=None, role=sec_role)
+            else:
+                # Secondary: connect to leader (primary) hublvol
+                snode.connect_to_hublvol(leader_node, failover_node=None, role=sec_role)
         except Exception as e:
             logger.error("Error connecting to hublvol: %s", e)
 
-        ### 8- unblock ports (peers + restarting node)
-        for node_to_unblock in nodes_to_unblock:
-            fw_api = FirewallClient(node_to_unblock, timeout=5, retry=2)
-            upt = "udp" if node_to_unblock.active_rdma else "tcp"
-            fw_api.firewall_set_port(leader_lvs_port, upt, "allow", node_to_unblock.rpc_port)
-            tcp_ports_events.port_allowed(node_to_unblock, leader_lvs_port)
-
-        # Unblock restarting node's own port
-        try:
-            snode_fw = FirewallClient(snode, timeout=5, retry=2)
-            snode_fw.firewall_set_port(snode_lvs_port, snode_pt, "allow", snode.rpc_port)
-            tcp_ports_events.port_allowed(snode, snode_lvs_port)
-        except Exception as e:
-            logger.warning("Failed to unblock port on restarting node for %s: %s", primary_node.lvstore, e)
+        ### 8- unblock leader port
+        if leader_port_blocked:
+            try:
+                fw_api = FirewallClient(leader_node, timeout=5, retry=2)
+                fw_api.firewall_set_port(leader_lvs_port, port_type, "allow", leader_node.rpc_port)
+                tcp_ports_events.port_allowed(leader_node, leader_lvs_port)
+            except Exception as e:
+                logger.error("Failed to unblock leader port for %s: %s", primary_node.lvstore, e)
+            leader_port_blocked = False
 
     # Set restart phase: post_unblock — delayed sync deletes and registrations can now proceed
     _set_restart_phase(snode, primary_node.lvstore, StorageNode.RESTART_PHASE_POST_UNBLOCK, db_controller)
@@ -4559,10 +4551,6 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
 
     if not activation_mode:
         ### 10- add non-optimized path on tertiary to newly-restarted secondary's hublvol
-        # The secondary (snode) just created its secondary hublvol using the same NQN as the
-        # primary (leader_node). We attach snode's IPs to the tertiary's existing hublvoln1
-        # controller (which already holds the optimized path to leader_node) so the tertiary
-        # gains the non-optimized failover path without needing snode.hublvol to be set.
         if not is_tertiary and primary_node.tertiary_node_id and leader_node.hublvol:
             tert_id = primary_node.tertiary_node_id
             if tert_id != snode.get_id() and tert_id != leader_node.get_id():
@@ -4833,7 +4821,48 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
     # Phase transition: blocked — sync deletes and registrations must be delayed
     _set_restart_phase(snode, lvs_name, StorageNode.RESTART_PHASE_BLOCKED, db_controller)
 
+    leader_port_blocked = False
+
+    def _kill_app():
+        storage_events.snode_restart_failed(snode)
+        snode_api = SNodeClient(snode.api_endpoint, timeout=5, retry=5)
+        snode_api.spdk_process_kill(snode.rpc_port, snode.cluster_id)
+        set_node_status(snode.get_id(), StorageNode.STATUS_OFFLINE)
+
+    def _abort_restart_and_unblock(reason):
+        """Abort: kill SPDK, set offline, unblock leader port, raise."""
+        logger.error("Aborting recreate_lvstore on %s for %s: %s",
+                     snode.get_id(), lvs_name, reason)
+        _kill_app()
+        if leader_port_blocked and current_leader:
+            try:
+                _fw = FirewallClient(current_leader, timeout=5, retry=2)
+                _pt = "udp" if current_leader.active_rdma else "tcp"
+                _fw.firewall_set_port(snode_lvs_port, _pt, "allow", current_leader.rpc_port)
+                tcp_ports_events.port_allowed(current_leader, snode_lvs_port)
+            except Exception as ue:
+                logger.error("Failed to unblock leader port %s on %s during abort: %s",
+                             snode_lvs_port, current_leader.get_id(), ue)
+        raise Exception(f"Abort restart: {reason}")
+
     if not activation_mode:
+        # Quorum check: verify the current leader is reachable before any port block.
+        # If no quorum, skip ALL leader operations: port block, leadership drop,
+        # IO drain, hublvol create/connect on that node.
+        if current_leader and _check_peer_disconnected(current_leader, lvs_peer_ids=lvs_peer_ids):
+            logger.info("Leader %s has no quorum for %s, skipping all leader operations",
+                        current_leader.get_id(), lvs_name)
+            disconnected_peers.add(current_leader.get_id())
+            current_leader = None
+
+        # Also quorum-check each sec_node; mark disconnected ones to skip hublvol connect later
+        for sec_node in sec_nodes:
+            if sec_node.get_id() not in disconnected_peers:
+                if _check_peer_disconnected(sec_node, lvs_peer_ids=lvs_peer_ids):
+                    logger.info("Peer %s has no quorum for %s, skipping",
+                                sec_node.get_id(), lvs_name)
+                    disconnected_peers.add(sec_node.get_id())
+
         # Wait for replication to finish on the current leader only
         if current_leader and current_leader.get_id() not in disconnected_peers:
             try:
@@ -4847,53 +4876,61 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
                 if rpc_result == "abort":
                     raise Exception(f"Abort restart: leader {current_leader.get_id()} fabric-connected but mgmt unresponsive")
                 disconnected_peers.add(current_leader.get_id())
+                current_leader = None
 
-        for sec_node in sec_nodes:
-            if sec_node.get_id() in disconnected_peers:
-                # Peer is disconnected — skip all RPCs on this peer
-                continue
-            # Peer is connected — proceed with port blocking and leadership drop
+        ### 3- block leader port ONLY (no siblings/non-leaders)
+        if current_leader and current_leader.get_id() not in disconnected_peers:
             try:
-                sec_rpc_client = RPCClient(sec_node.mgmt_ip, sec_node.rpc_port, sec_node.rpc_username,
-                                           sec_node.rpc_password)
-                sec_node.lvstore_status = "in_creation"
-                sec_node.write_to_db()
+                current_leader.lvstore_status = "in_creation"
+                current_leader.write_to_db()
                 time.sleep(3)
 
-                fw_api = FirewallClient(sec_node, timeout=5, retry=2)
-
-                ### 3- block secondary port
                 port_type = "tcp"
-                if sec_node.active_rdma:
+                if current_leader.active_rdma:
                     port_type = "udp"
-
-                fw_api.firewall_set_port(snode_lvs_port, port_type, "block", sec_node.rpc_port)
-                tcp_ports_events.port_deny(sec_node, snode_lvs_port)
-
-                time.sleep(0.5)
-                if current_leader and sec_node.get_id() == current_leader.get_id():
-                    ### 4- set leadership to false
-                    sec_rpc_client.bdev_lvol_set_leader(lvs_name, leader=False, bs_nonleadership=True)
-                    sec_rpc_client.bdev_distrib_force_to_non_leader(lvs_jm_vuid)
-                    ### 4-1 check for inflight IO
-                    logger.info(f"Checking for inflight IO from leader node: {sec_node.get_id()}")
-                    for i in range(100):
-                        is_inflight = sec_rpc_client.bdev_distrib_check_inflight_io(lvs_jm_vuid)
-                        if is_inflight:
-                            logger.info("Inflight IO found, retry in 100ms")
-                            time.sleep(0.1)
-                        else:
-                            logger.info("Inflight IO NOT found, continuing")
-                            break
-                    else:
-                        logger.error(
-                            f"Timeout while checking for inflight IO after 10 seconds on node {sec_node.get_id()}")
+                fw_api = FirewallClient(current_leader, timeout=5, retry=2)
+                fw_api.firewall_set_port(snode_lvs_port, port_type, "block", current_leader.rpc_port)
+                tcp_ports_events.port_deny(current_leader, snode_lvs_port)
+                leader_port_blocked = True
             except Exception:
-                # RPC failed on connected peer — use hublvol disconnect check (Method 2)
-                rpc_result = _handle_rpc_failure_on_peer(snode, sec_node, lvs_jm_vuid, lvs_name=lvs_name)
+                rpc_result = _handle_rpc_failure_on_peer(snode, current_leader, lvs_jm_vuid, lvs_name=lvs_name)
                 if rpc_result == "abort":
-                    raise Exception(f"Abort restart: peer {sec_node.get_id()} fabric-connected but mgmt unresponsive")
-                disconnected_peers.add(sec_node.get_id())
+                    raise Exception(f"Abort restart: leader {current_leader.get_id()} fabric-connected but mgmt unresponsive")
+                disconnected_peers.add(current_leader.get_id())
+                current_leader = None
+
+        if leader_port_blocked:
+            # --- Inside port-blocked window: timeout=0.2s, retry=0, abort on failure ---
+            leader_rpc = RPCClient(
+                current_leader.mgmt_ip, current_leader.rpc_port,
+                current_leader.rpc_username, current_leader.rpc_password,
+                timeout=0.2, retry=0)
+
+            time.sleep(0.5)
+
+            ### 4- drop leadership on current leader
+            try:
+                leader_rpc.bdev_lvol_set_leader(lvs_name, leader=False, bs_nonleadership=True)
+                leader_rpc.bdev_distrib_force_to_non_leader(lvs_jm_vuid)
+            except Exception as e:
+                _abort_restart_and_unblock(f"Failed to demote leader {current_leader.get_id()}: {e}")
+
+            ### 4-1 drain inflight IO
+            try:
+                logger.info(f"Checking for inflight IO from leader node: {current_leader.get_id()}")
+                for i in range(100):
+                    is_inflight = leader_rpc.bdev_distrib_check_inflight_io(lvs_jm_vuid)
+                    if is_inflight:
+                        logger.info("Inflight IO found, retry in 100ms")
+                        time.sleep(0.1)
+                    else:
+                        logger.info("Inflight IO NOT found, continuing")
+                        break
+                else:
+                    logger.error(
+                        f"Timeout while checking for inflight IO after 10 seconds on node {current_leader.get_id()}")
+            except Exception as e:
+                _abort_restart_and_unblock(f"Failed inflight IO check on leader {current_leader.get_id()}: {e}")
 
         if disconnected_peers:
             logger.info(f"Peers disconnected {disconnected_peers}, forcing journal replication on node: {snode.get_id()}")
@@ -4906,19 +4943,12 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
     ### 6- wait for examine
     ret = rpc_client.bdev_wait_for_examine()
 
-    def _kill_app():
-        storage_events.snode_restart_failed(snode)
-        snode_api = SNodeClient(snode.api_endpoint, timeout=5, retry=5)
-        snode_api.spdk_process_kill(snode.rpc_port, snode.cluster_id)
-        set_node_status(snode.get_id(), StorageNode.STATUS_OFFLINE)
-
     # Validate lvstore recovery
     ret = rpc_client.bdev_lvol_get_lvstores(lvs_name)
     if not ret:
         logger.error(f"Failed to recover lvstore: {lvs_name} on node: {snode.get_id()}")
         if not force:
-            _kill_app()
-            raise Exception("Failed to recover lvstore")
+            _abort_restart_and_unblock("Failed to recover lvstore")
 
     # Validate all bdev recovery
     ret = rpc_client.get_bdevs()
@@ -4935,8 +4965,7 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
         if not passed:
             logger.error(f"Failed to recover BDev: {bdev_name} on node: {snode.get_id()}")
             if not force:
-                _kill_app()
-                raise Exception("Failed to recover lvstore")
+                _abort_restart_and_unblock("Failed to recover lvstore")
 
     ### 7- take leadership
     ret = rpc_client.bdev_lvol_set_lvs_opts(
@@ -4959,45 +4988,10 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
     if not leader_restored:
         logger.error("Failed to restore leadership for %s on node %s", lvs_name, snode.get_id())
         if not force:
-            _kill_app()
-            raise Exception(f"Failed to restore leadership for {lvs_name}")
-
-    def _abort_restart_and_unblock(reason):
-        """Abort the primary restart when a hublvol step fails.
-
-        Ordering required by design (see recreate_lvstore / hublvol
-        IO-isolation invariant):
-          a) kill SPDK on the restarting primary (snode)
-          b) flip snode status back to OFFLINE
-          c) only then unblock the secondary port(s) that were blocked
-             during this restart, so client IO can resume on the
-             secondary once ANA re-promotes it.
-
-        (a) and (b) are handled by _kill_app() above. This helper then
-        performs (c) for every connected secondary/tertiary whose port
-        was blocked in the earlier ``### 3- block secondary port`` step,
-        and finally raises to bail out of recreate_lvstore before any
-        further forward progress (lvols, leadership) can happen on an
-        inconsistent state.
-        """
-        logger.error("Aborting recreate_lvstore on %s for %s: %s",
-                     snode.get_id(), lvs_name, reason)
-        _kill_app()
-        for _sn in sec_nodes:
-            if _sn.get_id() in disconnected_peers:
-                continue
-            try:
-                _fw = FirewallClient(_sn, timeout=5, retry=2)
-                _pt = "udp" if _sn.active_rdma else "tcp"
-                _fw.firewall_set_port(snode_lvs_port, _pt, "allow", _sn.rpc_port)
-                tcp_ports_events.port_allowed(_sn, snode_lvs_port)
-            except Exception as ue:
-                logger.error("Failed to unblock port %s on %s during abort: %s",
-                             snode_lvs_port, _sn.get_id(), ue)
-        raise Exception(f"Abort restart: {reason}")
+            _abort_restart_and_unblock(f"Failed to restore leadership for {lvs_name}")
 
     if not activation_mode:
-        ### 8- create hublvol and expose via subsystem with listeners (per data NICs)
+        ### 8- create hublvol and expose via subsystem with listeners
         if sec_nodes:
             if is_takeover:
                 try:
@@ -5016,6 +5010,19 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
                     logger.error("Error creating hublvol: %s", e.message)
                     _abort_restart_and_unblock(f"recreate_hublvol raised: {e.message}")
 
+        ### 8b- unblock leader port immediately after hublvol success
+        if leader_port_blocked:
+            try:
+                port_type = "tcp"
+                if current_leader.active_rdma:
+                    port_type = "udp"
+                fw_api = FirewallClient(current_leader, timeout=5, retry=2)
+                fw_api.firewall_set_port(snode_lvs_port, port_type, "allow", current_leader.rpc_port)
+                tcp_ports_events.port_allowed(current_leader, snode_lvs_port)
+            except Exception as e:
+                logger.error("Failed to unblock leader port for %s: %s", lvs_name, e)
+            leader_port_blocked = False
+
     ### 9- add lvols to subsystems
     executor = ThreadPoolExecutor(max_workers=50)
     for lvol in lvol_list:
@@ -5023,43 +5030,28 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
     executor.shutdown(wait=True)
 
     if not activation_mode:
-        # Connect non-disconnected peers to hublvol and unblock ports
-        if not is_takeover:
-            cluster = db_controller.get_cluster_by_id(snode.cluster_id)
-            sec1 = sec_nodes[0] if sec_nodes else None
-            if sec1 and sec1.get_id() not in disconnected_peers:
-                try:
-                    if sec1.create_secondary_hublvol(snode, cluster.nqn) is None:
-                        _abort_restart_and_unblock(
-                            f"create_secondary_hublvol on {sec1.get_id()} returned None")
-                except Exception as e:
-                    logger.error("Error creating secondary hublvol on sec_1: %s", e)
-                    _abort_restart_and_unblock(
-                        f"create_secondary_hublvol on {sec1.get_id()} raised: {e}")
+        # Connect peers to hublvol
+        cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+        sec1 = sec_nodes[0] if sec_nodes else None
+        if sec1 and sec1.get_id() not in disconnected_peers:
+            try:
+                sec1.create_secondary_hublvol(snode, cluster.nqn)
+            except Exception as e:
+                logger.error("Error creating secondary hublvol on sec_1: %s", e)
+                _abort_restart_and_unblock(
+                    f"create_secondary_hublvol on {sec1.get_id()} raised: {e}")
 
         for i, sec_node in enumerate(sec_nodes):
             if sec_node.get_id() in disconnected_peers:
                 continue
-            if not is_takeover:
-                sec1 = sec_nodes[0] if sec_nodes else None
-                failover_node = sec1 if i >= 1 and sec1 and sec1.get_id() not in disconnected_peers else None
-                try:
-                    sec_role = "tertiary" if i >= 1 else "secondary"
-                    if not sec_node.connect_to_hublvol(snode, failover_node=failover_node, role=sec_role):
-                        _abort_restart_and_unblock(
-                            f"connect_to_hublvol failed for {sec_node.get_id()}")
-                except Exception as e:
-                    logger.error("Error establishing hublvol: %s", e)
-                    _abort_restart_and_unblock(
-                        f"connect_to_hublvol raised for {sec_node.get_id()}: {e}")
-
-            ### 10- allow secondary port (only if all hublvol steps succeeded)
-            fw_api = FirewallClient(sec_node, timeout=5, retry=2)
-            port_type = "tcp"
-            if sec_node.active_rdma:
-                port_type = "udp"
-            fw_api.firewall_set_port(snode_lvs_port, port_type, "allow", sec_node.rpc_port)
-            tcp_ports_events.port_allowed(sec_node, snode_lvs_port)
+            sec1 = sec_nodes[0] if sec_nodes else None
+            failover_node = sec1 if i >= 1 and sec1 and sec1.get_id() not in disconnected_peers else None
+            try:
+                sec_role = "tertiary" if i >= 1 else "secondary"
+                if not sec_node.connect_to_hublvol(snode, failover_node=failover_node, role=sec_role):
+                    logger.error("connect_to_hublvol failed for %s", sec_node.get_id())
+            except Exception as e:
+                logger.error("Error establishing hublvol: %s", e)
 
     # Phase transition: post_unblock — delayed sync deletes and registrations can now proceed
     _set_restart_phase(snode, lvs_name, StorageNode.RESTART_PHASE_POST_UNBLOCK, db_controller)

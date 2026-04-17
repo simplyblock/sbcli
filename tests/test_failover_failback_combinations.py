@@ -504,14 +504,15 @@ class TestRecreateLvstoreFTT2(unittest.TestCase):
         result = recreate_lvstore(snode)
         self.assertTrue(result)
 
-        # Both secondaries should have port blocked and allowed
+        # Per design: only the current leader port should be blocked and allowed,
+        # not all secondaries.
         all_fw_calls = []
         for fw in fw_instances:
             all_fw_calls.extend(fw.firewall_set_port.call_args_list)
         block_calls = [c for c in all_fw_calls if c[0][2] == "block"]
         allow_calls = [c for c in all_fw_calls if c[0][2] == "allow"]
-        self.assertEqual(len(block_calls), 2, "Block on both secondaries")
-        self.assertEqual(len(allow_calls), 2, "Allow on both secondaries")
+        self.assertEqual(len(block_calls), 1, "Block on current leader only")
+        self.assertEqual(len(allow_calls), 1, "Allow on current leader only")
 
     @patch("simplyblock_core.storage_node_ops._check_peer_disconnected", side_effect=lambda peer, **kw: peer.status in ["offline"])
     @patch("simplyblock_core.storage_node_ops._set_restart_phase")
@@ -576,11 +577,11 @@ class TestRecreateLvstoreOnSecPrimaryOnline(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.RPCClient")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
-    def test_primary_online_port_blocked_sleep_force_nonleader_inflight(
+    def test_primary_online_port_blocked_drain_io_no_leadership_drop(
             self, mock_db_cls, mock_create_bdev,
             mock_rpc_cls, mock_fw_cls, mock_tasks, mock_tcp_events, mock_storage_events, _mock_disc, _mock_phase, _mock_handle):
-        """When primary is online, recreate_lvstore_on_non_leader must: block port, sleep 0.5s,
-        set_leader(False), force_to_non_leader, check_inflight_io, then allow port."""
+        """When primary is online, recreate_lvstore_on_non_leader must: block port,
+        drain inflight IO, examine, then allow port. Leadership must NOT be dropped."""
         nodes = _build_ftt2_nodes()
         # node-2 is the secondary being rebuilt; node-1 is its primary (online)
         secondary = nodes["node-2"]
@@ -602,23 +603,24 @@ class TestRecreateLvstoreOnSecPrimaryOnline(unittest.TestCase):
         result = recreate_lvstore_on_non_leader(secondary, leader_node=primary, primary_node=primary)
         self.assertTrue(result)
 
-        # Port should be blocked and then allowed on primary
+        # Port should be blocked and then allowed on leader only
         all_fw_calls = []
         for fw in fw_instances:
             all_fw_calls.extend(fw.firewall_set_port.call_args_list)
         block_calls = [c for c in all_fw_calls if c[0][2] == "block"]
         allow_calls = [c for c in all_fw_calls if c[0][2] == "allow"]
-        self.assertGreaterEqual(len(block_calls), 1, "Port should be blocked on primary")
-        self.assertGreaterEqual(len(allow_calls), 1, "Port should be allowed on primary")
+        self.assertGreaterEqual(len(block_calls), 1, "Port should be blocked on leader")
+        self.assertGreaterEqual(len(allow_calls), 1, "Port should be allowed on leader")
 
-        # Leadership must be dropped on primary
-        rpc.bdev_lvol_set_leader.assert_any_call(
-            primary.lvstore, leader=False, bs_nonleadership=True)
+        # Per design: non-leader restart must NOT drop leadership
+        leader_set_leader_calls = [
+            c for c in rpc.bdev_lvol_set_leader.call_args_list
+            if c[0][0] == primary.lvstore and c[1].get("leader") is False
+        ]
+        self.assertEqual(len(leader_set_leader_calls), 0,
+                         "Non-leader restart must not drop leadership on current leader")
 
-        # force_to_non_leader must be called with primary's jm_vuid
-        rpc.bdev_distrib_force_to_non_leader.assert_any_call(primary.jm_vuid)
-
-        # Inflight IO check must be called
+        # Inflight IO check must be called (drain only)
         rpc.bdev_distrib_check_inflight_io.assert_any_call(primary.jm_vuid)
 
 
@@ -680,14 +682,16 @@ class TestRecreateLvstoreOnSecPrimaryOffline(unittest.TestCase):
         self.assertGreaterEqual(len(allow_calls), 1,
                                 "Port should be allowed on second secondary after examine")
 
-        # Leadership must be dropped on second secondary
-        rpc.bdev_lvol_set_leader.assert_any_call(
-            nodes["node-1"].lvstore, leader=False, bs_nonleadership=True)
+        # Per design: non-leader restart must NOT drop leadership on the current leader.
+        # It only blocks the port, drains inflight IO, examines, then unblocks.
+        leader_set_leader_calls = [
+            c for c in rpc.bdev_lvol_set_leader.call_args_list
+            if c[0][0] == nodes["node-1"].lvstore and c[1].get("leader") is False
+        ]
+        self.assertEqual(len(leader_set_leader_calls), 0,
+                         "Non-leader restart must not drop leadership on current leader")
 
-        # force_to_non_leader on second secondary with primary's jm_vuid
-        rpc.bdev_distrib_force_to_non_leader.assert_any_call(nodes["node-1"].jm_vuid)
-
-        # Inflight IO check on second secondary
+        # Inflight IO check on leader (drain only, no demotion)
         rpc.bdev_distrib_check_inflight_io.assert_any_call(nodes["node-1"].jm_vuid)
 
     @patch("simplyblock_core.storage_node_ops._check_peer_disconnected", side_effect=lambda peer, **kw: peer.status in ["offline"])
@@ -806,14 +810,13 @@ class TestRecreateLvstoreOnSecPrimaryOffline(unittest.TestCase):
         result = recreate_lvstore_on_non_leader(secondary, leader_node=leader, primary_node=primary)
         self.assertTrue(result)
 
-        # Sibling secondary (node-2) gets port blocked + restarting node's own port block
+        # Per design: only leader port should be blocked, not restarting node's own port
         all_fw_calls = []
         for fw in fw_instances:
             all_fw_calls.extend(fw.firewall_set_port.call_args_list)
         block_calls = [c for c in all_fw_calls if c[0][2] == "block"]
-        # 2 block calls: restarting node's own port + leader port
-        self.assertEqual(len(block_calls), 2,
-                         "Restarting node + leader should both get port blocked")
+        self.assertEqual(len(block_calls), 1,
+                         "Only leader should get port blocked")
 
 
 class TestRecreateLvstoreOnSecANAFailback(unittest.TestCase):
