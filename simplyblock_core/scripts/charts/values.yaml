@@ -1,5 +1,5 @@
 observability:
-  enabled: true
+  enabled: false
   secret: "sWbpOgba1bKnCfcPkVQi"
   deletionInterval: "3d"
   level: "DEBUG"
@@ -265,46 +265,3 @@ ingress:
             topologyKey: "kubernetes.io/hostname"
     nodeSelector: {}
 
-
-simplyblock:
-  cluster:
-    clusterName: simplyblock-cluster
-    mgmtIfname: eth0
-    fabric: tcp
-    isSingleNode: false
-    enableNodeAffinity: false
-    strictNodeAntiAffinity: false
-    warningThreshold:
-      capacity: 80
-      provisionedCapacity: 80
-    criticalThreshold:
-      capacity: 90
-      provisionedCapacity: 90
-
-  pool:
-    name: simplyblock-pool
-    capacityLimit: 100Gi
-
-  lvol:
-    name: simplyblock-lvol
-    
-  storageNodes:
-    name: simplyblock-node
-    clusterImage: simplyblock/simplyblock:main-snapshot-replication
-    mgmtIfname: eth0
-    maxLogicalVolumeCount: 10
-    maxSize: 0
-    partitions: 0
-    corePercentage: 65
-    spdkDebug: false
-    spdkImage:
-    coreIsolation: false
-    skipKubeletConfiguration: false
-    enableCpuTopology: false
-    workerNodes:
-
-  devices:
-    name: simplyblock-devices
-
-  tasks:
-    name: simplyblock-task
