@@ -754,6 +754,29 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
                                     m["clones"].discard(cn)
                         continue  # retry snapshot delete
 
+                # Check the backend for clones that the local registry doesn't know about
+                # (e.g. orphaned clones from failed bdev retries).
+                try:
+                    backend_clones = self.sbcli_utils.get_clones_of_snapshot(snap_id)
+                except Exception as api_err:
+                    self.logger.warning(f"[delete_snapshot] Failed to query backend clones for {snap_name}: {api_err}")
+                    backend_clones = []
+
+                if backend_clones:
+                    self.logger.warning(
+                        f"[delete_snapshot] {snap_name} still has {len(backend_clones)} backend clone(s) "
+                        f"not in local registry: {backend_clones} — deleting and retrying"
+                    )
+                    for clone_info in backend_clones:
+                        try:
+                            self.sbcli_utils.delete_lvol(
+                                lvol_name=clone_info["lvol_name"], skip_error=True)
+                        except Exception as del_err:
+                            self.logger.warning(
+                                f"[delete_snapshot] Failed to delete backend clone "
+                                f"{clone_info['id']}: {del_err}")
+                    continue  # retry snapshot delete
+
                 if attempt < RETRY_MAX - 1:
                     self.logger.warning(f"[retry] delete_snapshot attempt {attempt + 1}/{RETRY_MAX} failed: {e}; retrying in {RETRY_INTERVAL}s")
                     sleep_n_sec(RETRY_INTERVAL)

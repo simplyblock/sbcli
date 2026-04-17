@@ -1,6 +1,7 @@
 # coding=utf-8
 import time
-from typing import List
+from datetime import datetime, timedelta, timezone
+from typing import List, Optional
 from uuid import uuid4
 
 from simplyblock_core import utils
@@ -533,6 +534,13 @@ class StorageNode(BaseNodeObject):
                 logger.info(f"remove lvol_del_sync_lock from node: {self.get_id()}")
         time.sleep(0.250)
         return True
+
+    def uptime(self) -> Optional[timedelta]:
+        return (
+            datetime.now(timezone.utc) - datetime.fromisoformat(self.online_since)
+            if self.online_since and self.status == StorageNode.STATUS_ONLINE
+            else None
+        )
 
 
 class NodeLVolDelLock(BaseModel):

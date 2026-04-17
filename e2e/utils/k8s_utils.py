@@ -526,31 +526,52 @@ class K8sUtils:
                              fabric: str = "tcp"):
         """Create a simplyblock CSI StorageClass."""
         yaml_content = (
+            f"allowVolumeExpansion: true\n"
             f"apiVersion: storage.k8s.io/v1\n"
             f"kind: StorageClass\n"
             f"metadata:\n"
             f"  name: {name}\n"
-            f"provisioner: csi.simplyblock.io\n"
             f"parameters:\n"
-            f"  csi.storage.k8s.io/fstype: {fs_type}\n"
-            f"  pool_name: {pool_name}\n"
-            f"  cluster_id: {cluster_id}\n"
+            f"  cluster_id: \"{cluster_id}\"\n"
             f"  compression: \"{str(compression)}\"\n"
-            f"  encryption: \"{str(encryption)}\"\n"
-            f"  fabric: \"{fabric}\"\n"
-            f"  max_namespace_per_subsys: \"1\"\n"
+            f"  csi.storage.k8s.io/fstype: {fs_type}\n"
             f"  distr_ndcs: \"{ndcs}\"\n"
             f"  distr_npcs: \"{npcs}\"\n"
+            f"  encryption: \"{str(encryption)}\"\n"
+            f"  fabric: {fabric}\n"
             f"  lvol_priority_class: \"0\"\n"
-            f"reclaimPolicy: Retain\n"
+            f"  max_namespace_per_subsys: \"1\"\n"
+            f"  pool_name: {pool_name}\n"
+            f"  qos_r_mbytes: \"0\"\n"
+            f"  qos_rw_iops: \"0\"\n"
+            f"  qos_rw_mbytes: \"0\"\n"
+            f"  qos_w_mbytes: \"0\"\n"
+            f"  replicate: \"False\"\n"
+            f"  tune2fs_reserved_blocks: \"0\"\n"
+            f"provisioner: csi.simplyblock.io\n"
+            f"reclaimPolicy: Delete\n"
             f"volumeBindingMode: Immediate\n"
-            f"allowVolumeExpansion: true\n"
         )
+        # StorageClass parameters and volumeBindingMode are immutable —
+        # delete first to allow recreation with different parameters.
+        self.logger.info(f"[K8sUtils] Deleting existing StorageClass '{name}' (if any)")
+        self._exec_kubectl(f"kubectl delete storageclass {name} --ignore-not-found")
         self.logger.info(f"[K8sUtils] Creating StorageClass '{name}'")
         self.apply_yaml_cluster_scoped(yaml_content)
 
     def create_volume_snapshot_class(self, name: str = "simplyblock-csi-snapshotclass"):
-        """Create a VolumeSnapshotClass for the simplyblock CSI driver."""
+        """Create a VolumeSnapshotClass for the simplyblock CSI driver.
+
+        If the class already exists (e.g. created by Helm), it is left as-is.
+        """
+        out, _ = self._exec_kubectl(
+            f"kubectl get volumesnapshotclass {name} --no-headers 2>/dev/null || true",
+            supress_logs=True,
+        )
+        if out.strip():
+            self.logger.info(f"[K8sUtils] VolumeSnapshotClass '{name}' already exists, skipping creation")
+            return
+
         yaml_content = (
             f"apiVersion: snapshot.storage.k8s.io/v1\n"
             f"kind: VolumeSnapshotClass\n"
