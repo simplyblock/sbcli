@@ -407,14 +407,17 @@ class StorageNode(BaseNodeObject):
                     tr_type = "TCP"
                 else:
                     continue
-                ret = attach_rpc.bdev_nvme_attach_controller(
-                    primary_node.hublvol.bdev_name, primary_node.hublvol.nqn,
-                    iface.ip4_address, primary_node.hublvol.nvmf_port,
-                    tr_type, multipath=use_multipath)
-                if ret:
-                    primary_attached = True
-                else:
-                    logger.warning(f'Failed to connect to hublvol on {iface.ip4_address}')
+                try:
+                    ret = attach_rpc.bdev_nvme_attach_controller(
+                        primary_node.hublvol.bdev_name, primary_node.hublvol.nqn,
+                        iface.ip4_address, primary_node.hublvol.nvmf_port,
+                        tr_type, multipath=use_multipath)
+                    if ret:
+                        primary_attached = True
+                    else:
+                        logger.warning(f'Failed to connect to hublvol on {iface.ip4_address}')
+                except Exception as e:
+                    logger.warning(f'Failed to connect to hublvol on {iface.ip4_address}: {e}')
 
             if not primary_attached:
                 logger.error(
@@ -435,12 +438,15 @@ class StorageNode(BaseNodeObject):
                         tr_type = "TCP"
                     else:
                         continue
-                    ret = attach_rpc.bdev_nvme_attach_controller(
-                        primary_node.hublvol.bdev_name, primary_node.hublvol.nqn,
-                        iface.ip4_address, primary_node.hublvol.nvmf_port,
-                        tr_type, multipath="multipath")
-                    if not ret:
-                        logger.warning(f'Failed to connect failover hublvol path on {iface.ip4_address}')
+                    try:
+                        ret = attach_rpc.bdev_nvme_attach_controller(
+                            primary_node.hublvol.bdev_name, primary_node.hublvol.nqn,
+                            iface.ip4_address, primary_node.hublvol.nvmf_port,
+                            tr_type, multipath="multipath")
+                        if not ret:
+                            logger.warning(f'Failed to connect failover hublvol path on {iface.ip4_address}')
+                    except Exception as e:
+                        logger.warning(f'Failed to connect failover hublvol path on {iface.ip4_address}: {e}')
 
         if not rpc_client.bdev_lvol_set_lvs_opts(
                 primary_node.lvstore,
