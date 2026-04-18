@@ -4408,10 +4408,6 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
     # Set restart phase: blocked — sync deletes and registrations must be delayed until post_unblock
     _set_restart_phase(snode, primary_node.lvstore, StorageNode.RESTART_PHASE_BLOCKED, db_controller)
 
-    # --- Quorum check: determine which LVS peers are reachable ---
-    lvs_peer_ids = [sid for sid in [primary_node.secondary_node_id, primary_node.tertiary_node_id] if sid]
-    leader_has_quorum = not _check_peer_disconnected(leader_node, lvs_peer_ids=lvs_peer_ids)
-
     # Resolve the secondary node for tertiary→secondary hublvol fallback
     secondary_node = None
     if primary_node.secondary_node_id and primary_node.secondary_node_id != snode.get_id():
@@ -4439,6 +4435,13 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
                 logger.error("Failed to unblock leader port during abort: %s", ue)
         _set_restart_phase(snode, primary_node.lvstore, "", db_controller)
         raise Exception(f"Abort non-leader restart: {reason}")
+
+    # Quorum check on the current leader ONLY. Use a peer list that excludes the
+    # restarting node (snode) — snode's JM is expected to be disconnected on peers
+    # during restart, so including it would cause false negatives.
+    lvs_peer_ids_excl_snode = [sid for sid in [primary_node.secondary_node_id, primary_node.tertiary_node_id]
+                               if sid and sid != snode.get_id()]
+    leader_has_quorum = not _check_peer_disconnected(leader_node, lvs_peer_ids=lvs_peer_ids_excl_snode)
 
     if not activation_mode and leader_has_quorum:
         ### 3- block leader port ONLY (no siblings)
@@ -4477,10 +4480,8 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
             _abort_and_unblock(f"Failed inflight IO check on leader {leader_node.get_id()}: {e}")
 
     elif not activation_mode and not leader_has_quorum:
-        # Leader has no quorum — skip port block entirely, force journal sync
         logger.info("Leader %s has no quorum for %s, skipping port block",
                     leader_node.get_id(), primary_node.lvstore)
-        snode_rpc_client.jc_explicit_synchronization(primary_node.jm_vuid)
 
     ### 4- examine
     ret = snode_rpc_client.bdev_examine(primary_node.raid)
@@ -4509,7 +4510,7 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
                 # Tertiary: connect to leader's hublvol with secondary as failover.
                 # If leader is unreachable, fall back to connecting to secondary's hublvol.
                 failover_node = secondary_node if (secondary_node and
-                    not _check_peer_disconnected(secondary_node, lvs_peer_ids=lvs_peer_ids)) else None
+                    not _check_peer_disconnected(secondary_node, lvs_peer_ids=lvs_peer_ids_excl_snode)) else None
                 connected = snode.connect_to_hublvol(leader_node, failover_node=failover_node, role=sec_role)
                 if not connected and secondary_node and secondary_node.hublvol:
                     # Leader unreachable — connect to secondary's hublvol as primary path
@@ -4548,7 +4549,7 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
             tert_id = primary_node.tertiary_node_id
             if tert_id != snode.get_id() and tert_id != leader_node.get_id():
                 tert_node = db_controller.get_storage_node_by_id(tert_id)
-                if tert_node and not _check_peer_disconnected(tert_node, lvs_peer_ids=lvs_peer_ids):
+                if tert_node and not _check_peer_disconnected(tert_node, lvs_peer_ids=lvs_peer_ids_excl_snode):
                     try:
                         tert_rpc = tert_node.rpc_client()
                         for iface in snode.data_nics:
@@ -4700,8 +4701,11 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
 
     # Gather peer nodes for this LVS, EXCLUDING snode itself
     sec_nodes = []
-    lvs_peer_ids = [sid for sid in [lvs_node.secondary_node_id, lvs_node.tertiary_node_id] if sid]
-    for sec_id in lvs_peer_ids:
+    lvs_all_peer_ids = [sid for sid in [lvs_node.secondary_node_id, lvs_node.tertiary_node_id] if sid]
+    # Peer list for quorum checks: exclude snode (restarting node) since its JM
+    # is expected to be disconnected on peers during restart.
+    lvs_peer_ids = [sid for sid in lvs_all_peer_ids if sid != snode.get_id()]
+    for sec_id in lvs_all_peer_ids:
         if sec_id != snode.get_id():
             sec = db_controller.get_storage_node_by_id(sec_id)
             if sec:
@@ -4839,23 +4843,6 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
         raise Exception(f"Abort restart: {reason}")
 
     if not activation_mode:
-        # Quorum check: verify the current leader is reachable before any port block.
-        # If no quorum, skip ALL leader operations: port block, leadership drop,
-        # IO drain, hublvol create/connect on that node.
-        if current_leader and _check_peer_disconnected(current_leader, lvs_peer_ids=lvs_peer_ids):
-            logger.info("Leader %s has no quorum for %s, skipping all leader operations",
-                        current_leader.get_id(), lvs_name)
-            disconnected_peers.add(current_leader.get_id())
-            current_leader = None
-
-        # Also quorum-check each sec_node; mark disconnected ones to skip hublvol connect later
-        for sec_node in sec_nodes:
-            if sec_node.get_id() not in disconnected_peers:
-                if _check_peer_disconnected(sec_node, lvs_peer_ids=lvs_peer_ids):
-                    logger.info("Peer %s has no quorum for %s, skipping",
-                                sec_node.get_id(), lvs_name)
-                    disconnected_peers.add(sec_node.get_id())
-
         # Wait for replication to finish on the current leader only
         if current_leader and current_leader.get_id() not in disconnected_peers:
             try:
