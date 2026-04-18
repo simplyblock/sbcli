@@ -910,6 +910,54 @@ class SoakRunner:
             except Exception:
                 pass
 
+    # --- Multipath NIC chaos ---
+
+    def _is_multipath(self):
+        return bool(self.metadata.get("multipath"))
+
+    def _get_data_nics(self):
+        """Return the list of data NIC names (e.g. ['eth1', 'eth2'])."""
+        return self.metadata.get("data_nics", [])
+
+    def _get_all_node_ips(self):
+        """Return list of (uuid, private_ip) for all storage nodes."""
+        result = []
+        for sn in self.metadata.get("storage_nodes", []):
+            ip = sn.get("private_ip")
+            # Find uuid from topology
+            uuid = None
+            for tn in (self.metadata.get("topology") or {}).get("nodes", []):
+                if tn.get("management_ip") == ip:
+                    uuid = tn.get("uuid")
+                    break
+            if ip:
+                result.append((uuid, ip))
+        return result
+
+    def _disable_nic_on_all_nodes(self, nic_name):
+        """Bring down a data NIC on all storage nodes."""
+        self.logger.log(f"Multipath NIC chaos: disabling {nic_name} on all nodes")
+        for uuid, ip in self._get_all_node_ips():
+            try:
+                host = self._node_host(uuid) if uuid else RemoteHost(
+                    ip, self.user, self.key_path, self.logger, f"sn[{ip}]")
+                host.run(f"sudo ip link set {nic_name} down", timeout=10, check=False,
+                         label=f"disable {nic_name} on {ip}")
+            except Exception as e:
+                self.logger.log(f"WARNING: failed to disable {nic_name} on {ip}: {e}")
+
+    def _enable_nic_on_all_nodes(self, nic_name):
+        """Bring up a data NIC on all storage nodes."""
+        self.logger.log(f"Multipath NIC chaos: re-enabling {nic_name} on all nodes")
+        for uuid, ip in self._get_all_node_ips():
+            try:
+                host = self._node_host(uuid) if uuid else RemoteHost(
+                    ip, self.user, self.key_path, self.logger, f"sn[{ip}]")
+                host.run(f"sudo ip link set {nic_name} up", timeout=10, check=False,
+                         label=f"enable {nic_name} on {ip}")
+            except Exception as e:
+                self.logger.log(f"WARNING: failed to enable {nic_name} on {ip}: {e}")
+
     def _apply_outage(self, node_id, method):
         self.logger.log(f"Applying outage '{method}' on {node_id}")
         if method == "graceful":
@@ -1008,11 +1056,26 @@ class SoakRunner:
                 method1, method2 = random.sample(self.methods, 2)
             else:
                 method1 = method2 = self.methods[0]
+            # Multipath NIC chaos: randomly disable one data NIC on all nodes
+            disabled_nic = None
+            if self._is_multipath():
+                data_nics = self._get_data_nics()
+                if len(data_nics) >= 2:
+                    disabled_nic = random.choice(data_nics)
+                    self._disable_nic_on_all_nodes(disabled_nic)
+
             self.logger.log(
                 f"Starting outage iteration {iteration}: "
                 f"{node1}={method1}, {node2}={method2}"
+                + (f" (NIC {disabled_nic} down)" if disabled_nic else "")
             )
-            done = self.run_outage_pair(node1, node2, method1, method2)
+            try:
+                done = self.run_outage_pair(node1, node2, method1, method2)
+            finally:
+                # Re-enable the NIC after recovery, regardless of success/failure
+                if disabled_nic:
+                    self._enable_nic_on_all_nodes(disabled_nic)
+
             if done:
                 self.logger.log(f"Test completed successfully after {iteration} outage iterations")
                 return
