@@ -4511,16 +4511,19 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
                 # If leader is unreachable, fall back to connecting to secondary's hublvol.
                 failover_node = secondary_node if (secondary_node and
                     not _check_peer_disconnected(secondary_node, lvs_peer_ids=lvs_peer_ids_excl_snode)) else None
-                connected = snode.connect_to_hublvol(leader_node, failover_node=failover_node, role=sec_role)
+                connected = snode.connect_to_hublvol(leader_node, failover_node=failover_node,
+                                                    role=sec_role, timeout=0.5)
                 if not connected and secondary_node and secondary_node.hublvol:
                     # Leader unreachable — connect to secondary's hublvol as primary path
                     logger.info("Leader %s unreachable, connecting tertiary %s to secondary %s hublvol for %s",
                                 leader_node.get_id(), snode.get_id(),
                                 secondary_node.get_id(), primary_node.lvstore)
-                    snode.connect_to_hublvol(secondary_node, failover_node=None, role=sec_role)
+                    snode.connect_to_hublvol(secondary_node, failover_node=None,
+                                            role=sec_role, timeout=0.5)
             else:
                 # Secondary: connect to leader (primary) hublvol
-                snode.connect_to_hublvol(leader_node, failover_node=None, role=sec_role)
+                snode.connect_to_hublvol(leader_node, failover_node=None,
+                                        role=sec_role, timeout=0.5)
         except Exception as e:
             logger.error("Error connecting to hublvol: %s", e)
 

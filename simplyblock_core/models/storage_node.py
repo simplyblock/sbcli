@@ -348,7 +348,7 @@ class StorageNode(BaseNodeObject):
                 logger.error("Error establishing hublvol: %s", e.message)
                 return False
 
-    def connect_to_hublvol(self, primary_node, failover_node=None, role="secondary"):
+    def connect_to_hublvol(self, primary_node, failover_node=None, role="secondary", timeout=None):
         """Connect to a primary node's hublvol, optionally with multipath failover.
 
         If failover_node is provided (typically sec_1), sets up NVMe ANA
@@ -364,6 +364,11 @@ class StorageNode(BaseNodeObject):
         tolerated as long as at least one primary path is present after the
         attach loop. Callers in the restart flow rely on this boolean to
         decide whether to unblock the secondary port.
+
+        Args:
+            timeout: if set, override the RPC timeout for attach_controller
+                calls. Used during port-blocked windows to avoid long waits
+                on unreachable NICs.
         """
         logger.info(f'Connecting node {self.get_id()} to hublvol on {primary_node.get_id()}'
                      + (f' with failover to {failover_node.get_id()}' if failover_node else ''))
@@ -372,6 +377,12 @@ class StorageNode(BaseNodeObject):
             raise ValueError(f"HubLVol of primary node {primary_node.get_id()} is not present")
 
         rpc_client = self.rpc_client()
+        if timeout is not None:
+            attach_rpc = RPCClient(self.mgmt_ip, self.rpc_port,
+                                   self.rpc_username, self.rpc_password,
+                                   timeout=timeout, retry=0)
+        else:
+            attach_rpc = rpc_client
 
         remote_bdev = f"{primary_node.hublvol.bdev_name}n1"
 
@@ -396,7 +407,7 @@ class StorageNode(BaseNodeObject):
                     tr_type = "TCP"
                 else:
                     continue
-                ret = rpc_client.bdev_nvme_attach_controller(
+                ret = attach_rpc.bdev_nvme_attach_controller(
                     primary_node.hublvol.bdev_name, primary_node.hublvol.nqn,
                     iface.ip4_address, primary_node.hublvol.nvmf_port,
                     tr_type, multipath=use_multipath)
@@ -424,7 +435,7 @@ class StorageNode(BaseNodeObject):
                         tr_type = "TCP"
                     else:
                         continue
-                    ret = rpc_client.bdev_nvme_attach_controller(
+                    ret = attach_rpc.bdev_nvme_attach_controller(
                         primary_node.hublvol.bdev_name, primary_node.hublvol.nqn,
                         iface.ip4_address, primary_node.hublvol.nvmf_port,
                         tr_type, multipath="multipath")
