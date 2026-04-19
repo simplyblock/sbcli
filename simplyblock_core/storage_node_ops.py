@@ -226,7 +226,7 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names:
             if not bdev_name and ret and isinstance(ret, list):
                 bdev_name = ret[0]
 
-            if device.nvmf_multipath:
+            if device.nvmf_multipath and bdev_name:
                 rpc_client.bdev_nvme_set_multipath_policy(bdev_name, "active_active")
 
         if not bdev_name:
