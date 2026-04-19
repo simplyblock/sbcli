@@ -220,17 +220,20 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names:
                 raise RuntimeError(msg)
 
         for ip in device.nvmf_ip.split(","):
-            ret = rpc_client.bdev_nvme_attach_controller(
-                name, device.nvmf_nqn, ip, device.nvmf_port, tr_type,
-                multipath=device.nvmf_multipath)
-            if not bdev_name and ret and isinstance(ret, list):
-                bdev_name = ret[0]
+            try:
+                ret = rpc_client.bdev_nvme_attach_controller(
+                    name, device.nvmf_nqn, ip, device.nvmf_port, tr_type,
+                    multipath=device.nvmf_multipath)
+                if not bdev_name and ret and isinstance(ret, list):
+                    bdev_name = ret[0]
+            except Exception as e:
+                logger.warning(f"Failed to attach controller {name} via {ip}: {e}")
 
             if device.nvmf_multipath and bdev_name:
                 rpc_client.bdev_nvme_set_multipath_policy(bdev_name, "active_active")
 
         if not bdev_name:
-            msg = "Bdev name not returned from controller attach"
+            msg = f"Bdev name not returned from controller attach for {name}"
             logger.error(msg)
             raise RuntimeError(msg)
         bdev_found = False
@@ -4993,27 +4996,11 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
                     logger.error("Error creating hublvol: %s", e.message)
                     _abort_restart_and_unblock(f"recreate_hublvol raised: {e.message}")
 
-        ### 8b- unblock leader port immediately after hublvol success
-        if leader_port_blocked and current_leader:
-            try:
-                port_type = "tcp"
-                if current_leader.active_rdma:
-                    port_type = "udp"
-                fw_api = FirewallClient(current_leader, timeout=5, retry=2)
-                fw_api.firewall_set_port(snode_lvs_port, port_type, "allow", current_leader.rpc_port)
-                tcp_ports_events.port_allowed(current_leader, snode_lvs_port)
-            except Exception as e:
-                logger.error("Failed to unblock leader port for %s: %s", lvs_name, e)
-            leader_port_blocked = False
-
-    ### 9- add lvols to subsystems
-    executor = ThreadPoolExecutor(max_workers=50)
-    for lvol in lvol_list:
-        executor.submit(add_lvol_thread, lvol, snode, lvol_ana_state)
-    executor.shutdown(wait=True)
-
-    if not activation_mode:
-        # Connect peers to hublvol
+        ### 8b- connect peers to hublvol WITHIN port-blocked window
+        # The old leader must be set to secondary role (via set_lvs_opts + connect_hublvol)
+        # BEFORE we unblock its port.  Otherwise new IO can arrive and trigger
+        # spdk_lvs_trigger_leadership_switch, re-promoting the old leader and
+        # causing a writer conflict.
         cluster = db_controller.get_cluster_by_id(snode.cluster_id)
         sec1 = sec_nodes[0] if sec_nodes else None
         if sec1 and sec1.get_id() not in disconnected_peers:
@@ -5031,10 +5018,30 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
             failover_node = sec1 if i >= 1 and sec1 and sec1.get_id() not in disconnected_peers else None
             try:
                 sec_role = "tertiary" if i >= 1 else "secondary"
-                if not sec_node.connect_to_hublvol(snode, failover_node=failover_node, role=sec_role):
+                if not sec_node.connect_to_hublvol(snode, failover_node=failover_node, role=sec_role,
+                                                   timeout=0.5):
                     logger.error("connect_to_hublvol failed for %s", sec_node.get_id())
             except Exception as e:
                 logger.error("Error establishing hublvol: %s", e)
+
+        ### 8c- unblock leader port AFTER peers connected to hublvol
+        if leader_port_blocked and current_leader:
+            try:
+                port_type = "tcp"
+                if current_leader.active_rdma:
+                    port_type = "udp"
+                fw_api = FirewallClient(current_leader, timeout=5, retry=2)
+                fw_api.firewall_set_port(snode_lvs_port, port_type, "allow", current_leader.rpc_port)
+                tcp_ports_events.port_allowed(current_leader, snode_lvs_port)
+            except Exception as e:
+                logger.error("Failed to unblock leader port for %s: %s", lvs_name, e)
+            leader_port_blocked = False
+
+    ### 9- add lvols to subsystems
+    executor = ThreadPoolExecutor(max_workers=50)
+    for lvol in lvol_list:
+        executor.submit(add_lvol_thread, lvol, snode, lvol_ana_state)
+    executor.shutdown(wait=True)
 
     # Phase transition: post_unblock — delayed sync deletes and registrations can now proceed
     _set_restart_phase(snode, lvs_name, StorageNode.RESTART_PHASE_POST_UNBLOCK, db_controller)
