@@ -128,7 +128,7 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--format-4k', help='Force format nvme devices with 4K.', dest='format_4k', action='store_true')
         if self.developer_mode:
             argument = subcommand.add_argument('--jm-percent', help='Number in percent to use for JM from each device. Default: `3`.', type=int, default=3, dest='jm_percent')
-        argument = subcommand.add_argument('--data-nics', help='The storage network interface names. Currently, one interface is supported.', type=str, dest='data_nics', nargs='+')
+        argument = subcommand.add_argument('--data-nics', help='Storage network interface names. Pass one or more space-separated names; multiple NICs enable multipath.', type=str, dest='data_nics', nargs='+')
         if self.developer_mode:
             argument = subcommand.add_argument('--size-of-device', help='The size of device per storage node.', type=str, dest='partition_size')
         if self.developer_mode:

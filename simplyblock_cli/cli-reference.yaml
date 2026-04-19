@@ -191,9 +191,9 @@ commands:
             default: 3
             private: true
           - name: "--data-nics"
-            help: "The storage network interface names. Currently, one interface is supported."
+            help: "Storage network interface names. Pass one or more space-separated names; multiple NICs enable multipath."
             description: >
-              Storage network interface names, e.g. eth0,eth1
+              Storage network interface names, space-separated, e.g. `eth0 eth1`
             dest: data_nics
             type: str
             nargs: "+"
