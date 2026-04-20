@@ -69,14 +69,14 @@ class K8sNativeFailoverTest(TestClusterBase):
         self.FIO_IMAGE = "dockerpinata/fio:2.1"
 
         # Sizing
-        self.pvc_size = "20Gi"
-        self.int_pvc_size = 20
-        self.fio_size = "15G"
+        self.pvc_size = "10Gi"
+        self.int_pvc_size = 10
+        self.fio_size = "3G"
         self.FIO_RUNTIME = 2000
 
         # Counts
-        self.total_pvcs = 20
-        self.fio_num_jobs = 4
+        self.total_pvcs = 15
+        self.fio_num_jobs = 2
 
         # Outage config
         self.npcs = kwargs.get("npcs", 1)

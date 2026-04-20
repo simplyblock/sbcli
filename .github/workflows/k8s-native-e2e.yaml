@@ -341,7 +341,7 @@ jobs:
             clusterImage: "${SB_REPO}:${SB_TAG}"
             mgmtIfname: ${MGMT_IFC}
             maxLogicalVolumeCount: 10
-            partitions: 1
+            partitions: 0
             corePercentage: 65
             coreIsolation: false
             journalManager:
