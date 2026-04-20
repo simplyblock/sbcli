@@ -22,8 +22,16 @@ except ImportError:
 UUID_RE = re.compile(r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}")
 
 
-OUTAGE_METHODS = ("graceful", "forced", "container_kill", "host_reboot")
-AUTO_RECOVER_METHODS = ("container_kill", "host_reboot")
+OUTAGE_METHODS = (
+    "graceful", "forced", "container_kill", "host_reboot",
+    "network_outage_20", "network_outage_50",
+)
+# Methods that leave the node in a state where it recovers on its own
+# (no sbctl restart required from the soak driver).
+AUTO_RECOVER_METHODS = (
+    "container_kill", "host_reboot",
+    "network_outage_20", "network_outage_50",
+)
 
 
 def parse_args():
@@ -73,6 +81,23 @@ def parse_args():
             f"Choices: {','.join(OUTAGE_METHODS)}. "
             "Each iteration picks 2 distinct methods at random."
         ),
+    )
+    parser.add_argument(
+        "--nic-chaos-min",
+        type=int,
+        default=30,
+        help="Minimum seconds to hold a data NIC down between iterations (multipath only).",
+    )
+    parser.add_argument(
+        "--nic-chaos-max",
+        type=int,
+        default=120,
+        help="Maximum seconds to hold a data NIC down between iterations (multipath only).",
+    )
+    parser.add_argument(
+        "--no-nic-chaos",
+        action="store_true",
+        help="Disable inter-iteration NIC chaos even on multipath clusters.",
     )
     parser.add_argument(
         "--auto-recover-wait",
@@ -958,6 +983,58 @@ class SoakRunner:
             except Exception as e:
                 self.logger.log(f"WARNING: failed to enable {nic_name} on {ip}: {e}")
 
+    def _ensure_all_data_nics_up(self):
+        if not self._is_multipath():
+            return
+        for nic in self._get_data_nics():
+            self._enable_nic_on_all_nodes(nic)
+
+    def _inter_iteration_nic_chaos(self):
+        if self.args.no_nic_chaos or not self._is_multipath():
+            return
+        data_nics = self._get_data_nics()
+        if len(data_nics) < 2:
+            return
+        lo = max(0, self.args.nic_chaos_min)
+        hi = max(lo, self.args.nic_chaos_max)
+        duration = random.randint(lo, hi) if hi > lo else lo
+        nic = random.choice(data_nics)
+        self.logger.log(
+            f"Inter-iteration NIC chaos: dropping {nic} on all nodes for {duration}s"
+        )
+        try:
+            self._disable_nic_on_all_nodes(nic)
+            time.sleep(duration)
+        finally:
+            self._enable_nic_on_all_nodes(nic)
+        self.wait_for_cluster_stable()
+
+    def _network_outage(self, node_id, duration):
+        """Take all data NICs down on one storage node for *duration* seconds,
+        then bring them back up. Simulates a transient network partition of
+        a single node. Node is expected to auto-recover once the NICs return
+        — no sbctl restart is issued."""
+        host = self._node_host(node_id)
+        nics = self._get_data_nics() or ["eth1"]
+        self.logger.log(
+            f"network_outage on {node_id}: dropping {nics} for {duration}s"
+        )
+        for nic in nics:
+            try:
+                host.run(f"sudo ip link set {nic} down", timeout=10, check=False,
+                         label=f"netout down {nic} on {node_id}")
+            except Exception as e:
+                self.logger.log(f"WARNING: failed to down {nic} on {node_id}: {e}")
+        try:
+            time.sleep(duration)
+        finally:
+            for nic in nics:
+                try:
+                    host.run(f"sudo ip link set {nic} up", timeout=10, check=False,
+                             label=f"netout up {nic} on {node_id}")
+                except Exception as e:
+                    self.logger.log(f"WARNING: failed to up {nic} on {node_id}: {e}")
+
     def _apply_outage(self, node_id, method):
         self.logger.log(f"Applying outage '{method}' on {node_id}")
         if method == "graceful":
@@ -968,6 +1045,12 @@ class SoakRunner:
             self._container_kill(node_id)
         elif method == "host_reboot":
             self._host_reboot(node_id)
+        elif method.startswith("network_outage_"):
+            try:
+                duration = int(method.rsplit("_", 1)[-1])
+            except ValueError:
+                raise TestRunError(f"Unknown outage method: {method}")
+            self._network_outage(node_id, duration)
         else:
             raise TestRunError(f"Unknown outage method: {method}")
 
@@ -1050,35 +1133,27 @@ class SoakRunner:
                     "Cluster not healthy before starting outage iteration: "
                     + ", ".join(f"{node['uuid']}:{node['status']}" for node in current_nodes)
                 )
+            # Safety: all data NICs must be up during an outage iteration.
+            # NIC chaos runs only in the quiet window between iterations below.
+            self._ensure_all_data_nics_up()
             node1, node2 = random.sample(current_uuids, 2)
             # Pick 2 distinct outage methods (or fall back to same if only 1 enabled)
             if len(self.methods) >= 2:
                 method1, method2 = random.sample(self.methods, 2)
             else:
                 method1 = method2 = self.methods[0]
-            # Multipath NIC chaos: randomly disable one data NIC on all nodes
-            disabled_nic = None
-            if self._is_multipath():
-                data_nics = self._get_data_nics()
-                if len(data_nics) >= 2:
-                    disabled_nic = random.choice(data_nics)
-                    self._disable_nic_on_all_nodes(disabled_nic)
 
             self.logger.log(
                 f"Starting outage iteration {iteration}: "
                 f"{node1}={method1}, {node2}={method2}"
-                + (f" (NIC {disabled_nic} down)" if disabled_nic else "")
             )
-            try:
-                done = self.run_outage_pair(node1, node2, method1, method2)
-            finally:
-                # Re-enable the NIC after recovery, regardless of success/failure
-                if disabled_nic:
-                    self._enable_nic_on_all_nodes(disabled_nic)
+            done = self.run_outage_pair(node1, node2, method1, method2)
 
             if done:
                 self.logger.log(f"Test completed successfully after {iteration} outage iterations")
                 return
+
+            self._inter_iteration_nic_chaos()
 
 
 def main():

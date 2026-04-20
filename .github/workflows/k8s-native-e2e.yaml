@@ -291,6 +291,8 @@ jobs:
           MGMT_IFC="${{ github.event.inputs.mgmt_ifc || 'ens18' }}"
           SB_REPO="${{ github.event.inputs.simplyblock_repository || 'public.ecr.aws/simply-block/simplyblock' }}"
           SB_TAG="${{ github.event.inputs.simplyblock_image }}"
+          SPDK_IMAGE="${{ github.event.inputs.spdk_image }}"
+          DATA_NICS="${{ github.event.inputs.data_nics || 'ens16' }}"
 
           # Build workerNodes YAML list from comma-separated input
           WORKER_YAML=""
@@ -339,9 +341,12 @@ jobs:
           spec:
             clusterName: simplyblock-cluster
             clusterImage: "${SB_REPO}:${SB_TAG}"
+            spdkImage: "${SPDK_IMAGE}"
             mgmtIfname: ${MGMT_IFC}
+            dataIfname:
+              - ${DATA_NICS}
             maxLogicalVolumeCount: 10
-            partitions: 1
+            partitions: 0
             corePercentage: 65
             coreIsolation: false
             journalManager:

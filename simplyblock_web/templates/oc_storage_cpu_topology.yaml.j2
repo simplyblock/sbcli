@@ -34,43 +34,31 @@ spec:
             - |
               set -e
               MARKER="/var/simplyblock/.cpu_topology_applied"
-
-              # Generic resource names — shared across all storage nodes.
-              # Only the MCP nodeSelector hostname is unique per node.
-              MCP_NAME="simplyblock-storage-mcp"
-              MC_NAME="simplyblock-storage-mc"
-              KC_NAME="simplyblock-storage-kubelet"
-              KC_LABEL="simplyblock-storage-cpumanager"
-              HOSTNAME="{{ HOSTNAME }}"
-
-              if [[ -f "$MARKER" ]]; then
-                  echo "[INFO] Node already configured. Releasing MCP nodeSelector."
-                  if kubectl get machineconfigpool "$MCP_NAME" > /dev/null 2>&1; then
-                    CUR=$(kubectl get machineconfigpool "$MCP_NAME" \
-                      -o jsonpath='{.spec.nodeSelector.matchLabels.kubernetes\.io/hostname}')
-                    if [[ "$CUR" != "" ]]; then
-                      echo "[INFO] Clearing MCP $MCP_NAME hostname (was $CUR)"
-                      kubectl patch machineconfigpool "$MCP_NAME" --type=merge -p \
-                        '{"spec":{"nodeSelector":{"matchLabels":{"kubernetes.io/hostname":""}}}}'
-                    fi
-                  fi
+              if [ -f "$MARKER" ]; then
+                  echo "[INFO] Node already configured. Skipping."
                   exit 0
               fi
-              
+
+              # Resource names — one MCP/MC/KC shared across all storage nodes in the cluster.
+              # The MCP nodeSelector grows as new nodes are added (In operator).
+              MCP_NAME="storage-{{ CLUSTER_ID }}"
+              MC_NAME="storage-mc-{{ CLUSTER_ID }}"
+              KC_NAME="storage-kubelet-{{ CLUSTER_ID }}"
+              KC_LABEL="storage-cpumanager-{{ CLUSTER_ID }}"
+              HOSTNAME="{{ HOSTNAME }}"
+
               # ---- MachineConfigPool ----------------------------------------
-              # If MCP already exists, patch only the nodeSelector hostname.
-              # If it does not exist, create it.
               if kubectl get machineconfigpool "$MCP_NAME" > /dev/null 2>&1; then
-                echo "[INFO] MCP $MCP_NAME already exists — patching nodeSelector to $HOSTNAME"
-                kubectl patch machineconfigpool "$MCP_NAME" --type=merge -p "{
-                  \"spec\": {
-                    \"nodeSelector\": {
-                      \"matchLabels\": {
-                        \"kubernetes.io/hostname\": \"$HOSTNAME\"
-                      }
-                    }
-                  }
-                }"
+                echo "[INFO] MCP $MCP_NAME already exists — appending $HOSTNAME to nodeSelector"
+                EXISTING=$(kubectl get machineconfigpool "$MCP_NAME" \
+                  -o jsonpath='{.spec.nodeSelector.matchExpressions[?(@.key=="kubernetes.io/hostname")].values}')
+                if echo "$EXISTING" | grep -q "$HOSTNAME"; then
+                  echo "[INFO] $HOSTNAME already in MCP nodeSelector, skipping patch"
+                else
+                  kubectl patch machineconfigpool "$MCP_NAME" --type=json \
+                    -p "[{\"op\": \"add\", \"path\": \"/spec/nodeSelector/matchExpressions/0/values/-\", \"value\": \"$HOSTNAME\"}]"
+                  echo "[INFO] Added $HOSTNAME to MCP $MCP_NAME"
+                fi
               else
                 echo "[INFO] Creating MCP $MCP_NAME for $HOSTNAME"
                 cat <<MCPEOF | kubectl apply -f -
@@ -87,16 +75,19 @@ spec:
                       operator: In
                       values:
                         - worker
-                        - simplyblock-storage
+                        - $MCP_NAME
                 nodeSelector:
-                  matchLabels:
-                    kubernetes.io/hostname: $HOSTNAME
+                  matchExpressions:
+                    - key: kubernetes.io/hostname
+                      operator: In
+                      values:
+                        - $HOSTNAME
                 maxUnavailable: 1
               MCPEOF
               fi
 
               # ---- MachineConfig --------------------------------------------
-              # Shared across all nodes — only created once, never patched.
+              # Role matches MCP name so MCO-generated KubeletConfig MC is also picked up.
               if kubectl get machineconfig "$MC_NAME" > /dev/null 2>&1; then
                 echo "[INFO] MC $MC_NAME already exists — skipping"
               else
@@ -107,7 +98,7 @@ spec:
               metadata:
                 name: $MC_NAME
                 labels:
-                  machineconfiguration.openshift.io/role: simplyblock-storage
+                  machineconfiguration.openshift.io/role: $MCP_NAME
               spec:
                 config:
                   ignition:
@@ -116,7 +107,6 @@ spec:
               fi
 
               # ---- KubeletConfig --------------------------------------------
-              # Shared across all nodes — only created once, never patched.
               if kubectl get kubeletconfig "$KC_NAME" > /dev/null 2>&1; then
                 echo "[INFO] KubeletConfig $KC_NAME already exists — skipping"
               else
@@ -141,6 +131,5 @@ spec:
               echo "[INFO] Marking node as configured."
               touch "$MARKER"
 
-              echo "[INFO] Node is updating the kubeletconfig"
+              echo "[INFO] Node is updating the kubeletconfig, waiting for reboot..."
               sleep 900
-              
