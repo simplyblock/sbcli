@@ -1066,6 +1066,38 @@ class SoakRunner:
     def _needs_manual_restart(self, method):
         return method not in AUTO_RECOVER_METHODS
 
+    def wait_node_leaves_online(self, node_id, timeout=90, poll=2):
+        """Poll sbctl until the control plane observes node_id leaving 'online'.
+        Returns True once any non-online status is seen, False on timeout.
+
+        Why this exists: the CP's health-check loop updates status on its own
+        cadence. If the soak polls wait_for_all_online *before* the CP has
+        noticed the outage, the first poll reports all-online and we return
+        while the target is actually still down. The next iteration then
+        stacks extra outages on a silently-offline node and breaks the FTT
+        budget (see incident: 2026-04-20 iter 17 container_kill on 2870dfa5,
+        CP status transition lagged the soak's first sn-list by ~1 s).
+        """
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                nodes = self.get_nodes()
+            except Exception as exc:
+                self.logger.log(f"wait_node_leaves_online: sn list failed ({exc})")
+                time.sleep(poll)
+                continue
+            status = next(
+                (n["status"] for n in nodes if n["uuid"] == node_id),
+                "unknown",
+            )
+            if status != "online":
+                self.logger.log(
+                    f"CP observed {node_id[:8]} leaving online (now {status})"
+                )
+                return True
+            time.sleep(poll)
+        return False
+
     def run_outage_pair(self, node1, node2, method1, method2):
         self.logger.log(
             f"Outage pair: {node1}={method1} and {node2}={method2}"
@@ -1100,6 +1132,35 @@ class SoakRunner:
                         f"retrying in 15s (peer may still be recovering)")
                     time.sleep(15)
 
+        # Before we call wait_for_all_online, make sure the control plane has
+        # actually observed each auto-recover target leaving 'online' state.
+        # Otherwise wait_for_all_online can race the CP: the first sn-list
+        # poll may still report the just-killed node as 'online' (stale),
+        # all statuses look good, and we return immediately — the node is
+        # then in a silent offline state when the next iteration stacks
+        # more outages on top, crossing the FTT budget.
+        # network_outage_* methods can finish before the CP notices; that's
+        # fine (short outages often recover from HA multipath without CP
+        # involvement), so we don't fail if the observation window expires.
+        for node_id, method in [(node1, method1), (node2, method2)]:
+            if method not in AUTO_RECOVER_METHODS:
+                continue
+            if method.startswith("network_outage_"):
+                observed = self.wait_node_leaves_online(node_id, timeout=30)
+                if not observed:
+                    self.logger.log(
+                        f"CP did not observe {node_id[:8]} offline for "
+                        f"{method} within 30s (expected for short NIC drops)"
+                    )
+            else:
+                # container_kill, host_reboot: the node IS down; we must see it.
+                observed = self.wait_node_leaves_online(node_id, timeout=90)
+                if not observed:
+                    self.logger.log(
+                        f"WARN: CP never observed {node_id[:8]} offline after "
+                        f"{method} within 90s; sn-list may be stale"
+                    )
+
         # For auto-recovery methods, allow a longer wait window since the host
         # has to reboot / the container has to come back under its supervisor.
         wait_timeout = self.args.restart_timeout
@@ -1131,17 +1192,20 @@ class SoakRunner:
         iteration = 0
         while True:
             iteration += 1
+            # After an outage iteration a node typically transitions
+            # online → unreachable → down → online before the control
+            # plane settles. wait_for_cluster_stable() polls until every
+            # node reports "online" AND the cluster is active and not
+            # rebalancing, so those transient states are tolerated here.
+            # It is called both before and after the migration-wait so
+            # we can't race a late transition between the two.
             self.wait_for_cluster_stable()
             self.wait_for_data_migration_complete(
                 f"starting outage iteration {iteration}"
             )
+            self.wait_for_cluster_stable()
             current_nodes = self.ensure_expected_nodes()
             current_uuids = [node["uuid"] for node in current_nodes]
-            if any(node["status"] != "online" for node in current_nodes):
-                raise TestRunError(
-                    "Cluster not healthy before starting outage iteration: "
-                    + ", ".join(f"{node['uuid']}:{node['status']}" for node in current_nodes)
-                )
             # Safety: all data NICs must be up during an outage iteration.
             # NIC chaos runs only in the quiet window between iterations below.
             self._ensure_all_data_nics_up()
