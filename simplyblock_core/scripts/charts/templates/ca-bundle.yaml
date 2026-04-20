@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: simplyblock-ca
+  {{- if .Values.tls.serviceCA.enabled }}
+  annotations:
+    service.beta.openshift.io/inject-cabundle: "true"
+  {{- end }}
+data: {}

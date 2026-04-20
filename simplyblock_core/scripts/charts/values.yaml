@@ -308,3 +308,7 @@ simplyblock:
 
   tasks:
     name: simplyblock-task
+
+tls:
+  serviceCA:
+    enabled: false
