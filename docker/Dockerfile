@@ -5,8 +5,8 @@ WORKDIR /app
 
 COPY requirements.txt .
 
-RUN pip3 install -r requirements.txt
+RUN sudo pip3 install -r requirements.txt
 
 COPY . /app
 
-RUN python3 setup.py install
+RUN sudo python3 setup.py install
