@@ -202,10 +202,12 @@ jobs:
               fi
             done
           done
-          # Specifically clean numa-resource-plugin SA in kube-system
+          # Specifically clean numa-resource-plugin resources in kube-system
+          kubectl -n kube-system delete ds simplyblock-numa-resource-plugin --ignore-not-found 2>/dev/null || true
           kubectl -n kube-system delete sa simplyblock-numa-resource-plugin --ignore-not-found 2>/dev/null || true
-          kubectl -n kube-system delete clusterrole simplyblock-numa-resource-plugin --ignore-not-found 2>/dev/null || true
-          kubectl -n kube-system delete clusterrolebinding simplyblock-numa-resource-plugin --ignore-not-found 2>/dev/null || true
+          kubectl -n kube-system delete cm simplyblock-numa-resource-plugin-config --ignore-not-found 2>/dev/null || true
+          kubectl delete clusterrole simplyblock-numa-resource-plugin --ignore-not-found 2>/dev/null || true
+          kubectl delete clusterrolebinding simplyblock-numa-resource-plugin --ignore-not-found 2>/dev/null || true
 
           echo "=== Phase 5: Verify nothing remains ==="
           echo "Namespaced resources:"
@@ -335,17 +337,17 @@ jobs:
             mgmtIfname: ${MGMT_IFC}
             fabricType: tcp
             isSingleNode: false
-            enableNodeAffinity: false
+            enableNodeAffinity: true
             strictNodeAntiAffinity: false
             stripe:
               dataChunks: ${NDCS}
               parityChunks: ${NPCS}
             warningThreshold:
-              capacity: 80
-              provisionedCapacity: 80
+              capacity: 95
+              provisionedCapacity: 97
             criticalThreshold:
-              capacity: 90
-              provisionedCapacity: 90
+              capacity: 96
+              provisionedCapacity: 98
           ---
           apiVersion: storage.simplyblock.io/v1alpha1
           kind: Pool
@@ -368,14 +370,14 @@ jobs:
             mgmtIfname: ${MGMT_IFC}
             dataIfname:
               - ${DATA_NICS}
-            maxLogicalVolumeCount: 10
+            maxLogicalVolumeCount: 30
             partitions: 0
             corePercentage: 65
             coreIsolation: false
             journalManager:
               count: 3
               percentPerDevice: 3
-            skipKubeletConfiguration: false
+            skipKubeletConfiguration: true
             enableCpuTopology: true
             openShiftCluster: false
             ubuntuHost: false
