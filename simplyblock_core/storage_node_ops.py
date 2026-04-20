@@ -7,7 +7,7 @@ import socket
 
 import psutil
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, List
+from typing import Any, List, Optional
 
 import threading
 
@@ -151,11 +151,17 @@ def trigger_ana_failback_for_node(restarting_node):
                 logger.error("ANA failback for primary %s failed: %s", node_id, e)
 
 
-def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names: List[str], reattach: bool):
+def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names: List[str], reattach: bool,
+                   attach_timeout: Optional[int] = None):
     """Connect snode to device
 
     This only performs the actual operation between both involved SPDK instances,
     no book-keeping is done here.
+
+    If ``attach_timeout`` is provided, the ``bdev_nvme_attach_controller`` RPC
+    uses that timeout (seconds) with no retries. Callers on the restart-rebuild
+    path pass a short timeout so a single unreachable peer cannot block the
+    entire rebuild on the default 180 s RPC timeout.
 
     More sensibly this would be a member function of either StorageNode or NVMeDevice.
     """
@@ -167,6 +173,13 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names:
             return bdev
 
     rpc_client = node.rpc_client()
+    if attach_timeout is not None:
+        attach_rpc_client = RPCClient(
+            node.mgmt_ip, node.rpc_port,
+            node.rpc_username, node.rpc_password,
+            timeout=attach_timeout, retry=0)
+    else:
+        attach_rpc_client = rpc_client
     # check connection status
     if device.is_connection_in_progress_to_node(node.get_id()):
         logger.warning("This device is being connected to from other node, sleep for 5 seconds")
@@ -221,7 +234,7 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names:
 
         for ip in device.nvmf_ip.split(","):
             try:
-                ret = rpc_client.bdev_nvme_attach_controller(
+                ret = attach_rpc_client.bdev_nvme_attach_controller(
                     name, device.nvmf_nqn, ip, device.nvmf_port, tr_type,
                     multipath=device.nvmf_multipath)
                 if not bdev_name and ret and isinstance(ret, list):
@@ -1088,6 +1101,41 @@ def sync_remote_devices_from_spdk(this_node: StorageNode, node_bdev_names=None):
     return changed
 
 
+def _peer_reachable_via_jm_quorum(target_node_id, this_node, peer_probe_timeout=2):
+    """Check whether ``target_node`` is reachable on the data plane by asking
+    other online peers about their JM quorum state.
+
+    Each peer's ``jc_get_jm_status(jm_vuid)`` returns a dict that includes
+    ``remote_jm_<peer>n1: bool``. If any online peer (other than this_node and
+    target) reports the target's remote_jm as True, the target is reachable
+    from at least one vantage point and we attempt the attach. If we can probe
+    one or more peers and none of them report the target reachable, treat it
+    as data-plane unreachable and skip the attach. If we can't probe any
+    peer, default to True (don't block on missing information).
+    """
+    db_controller = DBController()
+    remote_key = f"remote_jm_{target_node_id}n1"
+    probed = False
+    for peer in db_controller.get_storage_nodes_by_cluster_id(this_node.cluster_id):
+        if peer.get_id() in (target_node_id, this_node.get_id()):
+            continue
+        if peer.status != StorageNode.STATUS_ONLINE:
+            continue
+        if not peer.jm_vuid:
+            continue
+        try:
+            ret = peer.rpc_client(timeout=peer_probe_timeout, retry=0).jc_get_jm_status(peer.jm_vuid)
+        except Exception as e:
+            logger.debug("JM-quorum probe on %s failed: %s", peer.get_id(), e)
+            continue
+        if not isinstance(ret, dict):
+            continue
+        probed = True
+        if ret.get(remote_key) is True:
+            return True
+    return not probed
+
+
 def _connect_to_remote_jm_devs(this_node, jm_ids=None):
     db_controller = DBController()
 
@@ -1153,6 +1201,13 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=None):
             logger.warning(f"Skipping device:{org_dev.get_id()} with status: {org_dev.status}")
             continue
 
+        if org_dev_node is not None and not _peer_reachable_via_jm_quorum(
+                org_dev_node.get_id(), this_node):
+            logger.warning(
+                "Skipping remote JM %s: peer %s unreachable via JM quorum",
+                org_dev.jm_bdev, org_dev_node.get_id())
+            continue
+
         remote_device = RemoteJMDevice()
         remote_device.uuid = org_dev.uuid
         remote_device.alceml_name = org_dev.alceml_name
@@ -1166,6 +1221,7 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=None):
             remote_device.remote_bdev = connect_device(
                 f"remote_{org_dev.jm_bdev}", org_dev, this_node,
                 bdev_names=node_bdev_names, reattach=True,
+                attach_timeout=1,
             )
         except RuntimeError:
             logger.error(f'Failed to connect to {org_dev.get_id()}')
