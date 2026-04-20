@@ -30,12 +30,10 @@ def range_type(min, max):
     return f
 
 
-def list_type():
-    def f(arg):
-        if arg is None:
-            return None
+def list_type(separator: str = ','):
+    def f(arg) -> list[str]:
+        return arg.split(separator)
 
-        return [str(x) for x in arg.split(',')]
     return f
 
 
