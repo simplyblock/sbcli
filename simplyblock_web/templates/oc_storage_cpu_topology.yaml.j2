@@ -35,7 +35,17 @@ spec:
               set -e
               MARKER="/var/simplyblock/.cpu_topology_applied"
               if [ -f "$MARKER" ]; then
-                  echo "[INFO] Node already configured. Skipping."
+                  echo "[INFO] Node already configured. Waiting for NUMA to be fully ready..."
+                  while true; do
+                    NUMA_ALLOC=$(kubectl get node "{{ HOSTNAME }}" \
+                      -o jsonpath='{.status.allocatable.numa-align/numa-{{ NSOCKET }}}' 2>/dev/null || true)
+                    if [ "$NUMA_ALLOC" = "100" ]; then
+                      echo "[INFO] numa-align/numa-{{ NSOCKET }} is fully available (100)"
+                      break
+                    fi
+                    echo "[INFO] numa-align/numa-{{ NSOCKET }} not ready yet (got: '$NUMA_ALLOC'), retrying in 5s..."
+                    sleep 5
+                  done
                   exit 0
               fi
 
