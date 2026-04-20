@@ -296,10 +296,22 @@ def check_node(snode):
 def loop_for_node(snode):
     while True:
         try:
+            # Refresh so we see status transitions since the last iteration
+            # — the adaptive interval below keys off node.status.
+            snode = db.get_storage_node_by_id(snode.get_id())
             check_node(snode)
+        except KeyError:
+            # Node was deleted from the DB; nothing to poll.
+            return
         except Exception as e:
             logger.error(e)
-        time.sleep(constants.HEALTH_CHECK_INTERVAL_SEC)
+        # Poll faster when the node isn't ONLINE so the state machine sees
+        # the recovery transition as soon as it happens (recovery is time-
+        # critical; healthy-node polling stays at the normal 30 s cadence).
+        if snode.status == StorageNode.STATUS_ONLINE:
+            time.sleep(constants.HEALTH_CHECK_INTERVAL_SEC)
+        else:
+            time.sleep(constants.HEALTH_CHECK_FAST_INTERVAL_SEC)
 
 
 logger.info("Starting health check service")

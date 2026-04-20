@@ -70,6 +70,10 @@ weights = {
 
 
 HEALTH_CHECK_INTERVAL_SEC = 30
+# Faster cadence used by the per-node health-check loop when a node is NOT
+# STATUS_ONLINE.  Accelerates observation of recovery transitions without
+# adding polling cost to healthy nodes.
+HEALTH_CHECK_FAST_INTERVAL_SEC = 5
 
 GRAYLOG_CHECK_INTERVAL_SEC = 60
 
@@ -77,6 +81,14 @@ FDB_CHECK_INTERVAL_SEC = 60
 
 TASK_EXEC_INTERVAL_SEC = 10
 TASK_EXEC_RETRY_COUNT = 8
+# Shorter interval + lower ceiling for node/device restart tasks.  Restart
+# tasks are time-critical (cluster is degraded until the node is back) and
+# each retry does useful work (ping + api check + kill + restart), so we
+# don't want an exponential 10→20→40→80 backoff to dominate the recovery
+# window.  See incident 2026-04-20: 83 s end-to-end recovery, ~60 s of which
+# was TASK_EXEC_INTERVAL doubling between redundant retries.
+RESTART_TASK_EXEC_INTERVAL_SEC = 3
+RESTART_TASK_EXEC_INTERVAL_MAX_SEC = 15
 
 SIMPLY_BLOCK_SPDK_CORE_IMAGE = "simplyblock/spdk-core:v24.05-tag-latest"
 SIMPLY_BLOCK_DOCKER_IMAGE = get_config_var(
