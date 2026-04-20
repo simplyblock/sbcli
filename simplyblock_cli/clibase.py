@@ -30,6 +30,15 @@ def range_type(min, max):
     return f
 
 
+def list_type():
+    def f(arg):
+        if arg is None:
+            return None
+
+        return [str(x) for x in arg.split(',')]
+    return f
+
+
 def size_type(min=None, max=None):
     def f(arg):
         size = utils.parse_size(arg)
