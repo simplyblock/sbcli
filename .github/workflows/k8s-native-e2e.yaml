@@ -250,6 +250,8 @@ jobs:
           helm upgrade --install spdk-csi ./ \
             --namespace simplyblock \
             --create-namespace \
+            --debug \
+            --timeout 10m \
             --set controlplane.enabled=true \
             --set operator.enabled=true \
             --set controlplane.csiHostpathDriver.enabled=true \
