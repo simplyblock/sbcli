@@ -544,8 +544,9 @@ class CLIWrapperBase:
         npcs = args.npcs
 
         allowed_hosts = None
-        if args.allowed_hosts:
-            with open(args.allowed_hosts, 'r') as f:
+        allowed_hosts_arg = getattr(args, 'allowed_hosts', None)
+        if allowed_hosts_arg:
+            with open(allowed_hosts_arg, 'r') as f:
                 allowed_hosts = _json.load(f)
             if not isinstance(allowed_hosts, list):
                 print("Error: --allowed-hosts JSON must be a list of host NQN strings")
@@ -571,33 +572,6 @@ class CLIWrapperBase:
             return results
         else:
             return error
-
-    def volume__add_host(self, sub_command, args):
-        import json as _json
-        result, error = lvol_controller.add_host_to_lvol(args.volume_id, args.host_nqn)
-        if error:
-            print(f"Error: {error}")
-            return False
-        print(_json.dumps(result, indent=2))
-        return True
-
-    def volume__remove_host(self, sub_command, args):
-        result, error = lvol_controller.remove_host_from_lvol(args.volume_id, args.host_nqn)
-        if not result:
-            print(f"Error: {error}")
-            return False
-        if error:
-            print(error)
-        return True
-
-    def volume__get_secret(self, sub_command, args):
-        import json as _json
-        result, error = lvol_controller.get_host_secret(args.volume_id, args.host_nqn)
-        if error:
-            print(f"Error: {error}")
-            return False
-        print(_json.dumps(result, indent=2))
-        return True
 
     def volume__qos_set(self, sub_command, args):
         return lvol_controller.set_lvol(
@@ -738,11 +712,6 @@ class CLIWrapperBase:
         return mgmt_ops.remove_mgmt_node(args.node_id)
 
     def storage_pool__add(self, sub_command, args):
-        import json as _json
-        sec_options = None
-        if args.sec_options:
-            with open(args.sec_options, 'r') as f:
-                sec_options = _json.load(f)
         return pool_controller.add_pool(
             args.name,
             args.pool_max,
@@ -753,7 +722,7 @@ class CLIWrapperBase:
             args.max_w_mbytes,
             args.cluster_id,
             args.qos_host,
-            sec_options=sec_options,
+            dhchap=args.dhchap,
         )
 
     def storage_pool__set(self, sub_command, args):
@@ -790,6 +759,20 @@ class CLIWrapperBase:
 
     def storage_pool__get_io_stats(self, sub_command, args):
         return pool_controller.get_io_stats(args.pool_id, args.history, args.records)
+
+    def storage_pool__add_host(self, sub_command, args):
+        ok, err = pool_controller.add_host_to_pool(args.pool_id, args.host_nqn)
+        if not ok:
+            print(f"Error: {err}")
+            return False
+        return True
+
+    def storage_pool__remove_host(self, sub_command, args):
+        ok, err = pool_controller.remove_host_from_pool(args.pool_id, args.host_nqn)
+        if not ok:
+            print(f"Error: {err}")
+            return False
+        return True
 
     def snapshot__add(self, sub_command, args):
         backup = getattr(args, 'backup', False)
@@ -1002,7 +985,7 @@ class CLIWrapperBase:
         is_single_node = args.is_single_node
         client_data_nic = args.client_data_nic
 
-        max_fault_tolerance = args.max_fault_tolerance
+        max_fault_tolerance = min(distr_npcs, 2) if distr_npcs >= 1 else 1
 
         backup_config = None
         if args.use_backup:
@@ -1053,17 +1036,7 @@ class CLIWrapperBase:
         fabric = args.fabric
         client_data_nic = args.client_data_nic
 
-        nvmeof_tls_config = None
-        if args.host_sec:
-            with open(args.host_sec, 'r') as f:
-                nvmeof_tls_config = _json.load(f)
-            from simplyblock_core.utils import validate_tls_config
-            ok, err = validate_tls_config(nvmeof_tls_config)
-            if not ok:
-                print(f"Error: {err}")
-                return False
-
-        max_fault_tolerance = args.max_fault_tolerance
+        max_fault_tolerance = min(distr_npcs, 2) if distr_npcs >= 1 else 1
 
         backup_config = None
         if args.use_backup:
@@ -1077,7 +1050,7 @@ class CLIWrapperBase:
             distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, mode, enable_node_affinity,
             qpair_count, client_qpair_count, max_queue_size, inflight_io_threshold, disable_monitoring,
             strict_node_anti_affinity, name, tls_secret, ingress_host_source, dns_name, fabric, is_single_node, client_data_nic,
-            nvmeof_tls_config=nvmeof_tls_config, max_fault_tolerance=max_fault_tolerance,
+            max_fault_tolerance=max_fault_tolerance,
             backup_config=backup_config,
             nvmf_base_port=args.nvmf_base_port, rpc_base_port=args.rpc_base_port, snode_api_port=args.snode_api_port)
 

@@ -27,11 +27,6 @@ on:
         required: true
         default: "192.168.10.211"
 
-      SBCLI_CMD:
-        description: "sbcli command name"
-        required: true
-        default: "sbctl"
-
       SBCLI_BRANCH:
         description: "sbcli repo branch to clone for tests"
         required: true
@@ -105,7 +100,7 @@ jobs:
       BASTION_IP: ${{ inputs.BASTION_IP }}
       BASTION_SERVER: ${{ inputs.BASTION_IP }}
       MNODES: ${{ inputs.MNODES }}
-      SBCLI_CMD: ${{ inputs.SBCLI_CMD }}
+      SBCLI_CMD: "sbctl"
       SBCLI_BRANCH: ${{ inputs.SBCLI_BRANCH }}
 
       # SSH/client env

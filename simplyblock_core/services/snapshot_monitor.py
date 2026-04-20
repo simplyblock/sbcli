@@ -29,10 +29,10 @@ def process_snap_delete_finish(snap, leader_node):
     # check leadership
     snode = db.get_storage_node_by_id(snap.lvol.node_id)
     sec_nodes = []
-    for sec_id in [snode.secondary_node_id, snode.secondary_node_id_2]:
-        if sec_id:
+    for peer_id in [snode.secondary_node_id, snode.tertiary_node_id]:
+        if peer_id:
             try:
-                sec_nodes.append(db.get_storage_node_by_id(sec_id))
+                sec_nodes.append(db.get_storage_node_by_id(peer_id))
             except KeyError:
                 pass
     leader_node = None
@@ -75,8 +75,8 @@ def process_snap_delete_finish(snap, leader_node):
     secondary_ids = []
     if snode.secondary_node_id:
         secondary_ids.append(snode.secondary_node_id)
-    if snode.secondary_node_id_2:
-        secondary_ids.append(snode.secondary_node_id_2)
+    if snode.tertiary_node_id:
+        secondary_ids.append(snode.tertiary_node_id)
     # If the host node itself is not the leader, it's also a non-leader
     if snode.get_id() != leader_node.get_id():
         non_leaders.append(db.get_storage_node_by_id(snode.get_id()))
@@ -266,11 +266,11 @@ while True:
                         if "aliases" in bdev and bdev["aliases"]:
                             node_bdev_names.extend(bdev['aliases'])
 
-            for sec_id in [snode.secondary_node_id, snode.secondary_node_id_2]:
-                if not sec_id:
+            for peer_id in [snode.secondary_node_id, snode.tertiary_node_id]:
+                if not peer_id:
                     continue
                 try:
-                    sec_node = db.get_storage_node_by_id(sec_id)
+                    sec_node = db.get_storage_node_by_id(peer_id)
                 except KeyError:
                     continue
                 if sec_node and sec_node.status in [

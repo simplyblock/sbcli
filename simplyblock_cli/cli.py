@@ -116,6 +116,7 @@ class CLIWrapper(CLIWrapperBase):
     def init_storage_node__clean_devices(self, subparser):
         subcommand = self.add_sub_command(subparser, 'clean-devices', 'Clean devices stored in /etc/simplyblock/sn_config_file (local run)')
         argument = subcommand.add_argument('--config-path', help='The config path to read stored nvme devices from. Default: `/etc/simplyblock/sn_config_file`.', type=str, default='/etc/simplyblock/sn_config_file', dest='config_path', required=False)
+        argument = subcommand.add_argument('--format-4k', help='Force format nvme devices with 4K.', dest='format_4k', action='store_true')
 
     def init_storage_node__add_node(self, subparser):
         subcommand = self.add_sub_command(subparser, 'add-node', 'Adds a storage node by its IP address.')
@@ -142,7 +143,7 @@ class CLIWrapper(CLIWrapperBase):
             argument = subcommand.add_argument('--enable-test-device', help='Enable creation of test device.', dest='enable_test_device', action='store_true')
         if self.developer_mode:
             argument = subcommand.add_argument('--disable-ha-jm', help='Disable HA JM for distrib creation. Default: `true`.', dest='enable_ha_jm', action='store_false')
-        argument = subcommand.add_argument('--ha-jm-count', help='The HA JM count. Default: `3`.', type=int, default=3, dest='ha_jm_count')
+        argument = subcommand.add_argument('--ha-jm-count', help='HA JM count. Defaults to 4 for FT=2 clusters, otherwise 3.', type=int, dest='ha_jm_count')
         argument = subcommand.add_argument('--namespace', help='The Kubernetes namespace to deploy on.', type=str, dest='namespace')
         if self.developer_mode:
             argument = subcommand.add_argument('--id-device-by-nqn', help='Use the device NQN instead of the serial number for identification. Default: `false`.', dest='id_device_by_nqn', action='store_true')
@@ -422,8 +423,6 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--qpair-count', help='The NVMe/TCP transport qpair count per logical volume. Default: `32`.', type=range_type(0, 128), default=32, dest='qpair_count')
         argument = subcommand.add_argument('--client-qpair-count', help='The default NVMe/TCP transport qpair count per logical volume for client. Default: `3`.', type=range_type(0, 128), default=3, dest='client_qpair_count')
         argument = subcommand.add_argument('--client-data-nic', help='Network interface name from client to use for logical volume connection.', type=str, dest='client_data_nic')
-        argument = subcommand.add_argument('--host-sec', help='Path to JSON file with NVMe-oF host security config (bdev_nvme_set_options params including dhchap_digests and dhchap_dhgroups).', type=str, dest='host_sec')
-        argument = subcommand.add_argument('--max-fault-tolerance', help='Maximum number of node failures tolerated (1=single secondary, 2=dual secondary). Default: `1`.', type=int, default=1, dest='max_fault_tolerance', choices=[1,2,])
         argument = subcommand.add_argument('--use-backup', help='The path to JSON file with S3/MinIO backup configuration.', type=str, dest='use_backup')
         argument = subcommand.add_argument('--nvmf-base-port', help='Base port for all NVMe-oF listeners (lvol, hublvol, device). Default: `4420`.', type=int, default=4420, dest='nvmf_base_port')
         argument = subcommand.add_argument('--rpc-base-port', help='The base port for SPDK JSON-RPC. Default: `8080`.', type=int, default=8080, dest='rpc_base_port')
@@ -456,7 +455,6 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--strict-node-anti-affinity', help='Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node. This requires a minimum of _data-chunks-in-stripe + parity-chunks-in-stripe + 1_ nodes in the cluster."', dest='strict_node_anti_affinity', action='store_true')
         argument = subcommand.add_argument('--name', '-n', help='Assigns a name to the newly created cluster.', type=str, dest='name')
         argument = subcommand.add_argument('--client-data-nic', help='Network interface name from client to use for logical volume connection.', type=str, dest='client_data_nic')
-        argument = subcommand.add_argument('--max-fault-tolerance', help='Maximum number of node failures tolerated (1=single secondary, 2=dual secondary). Default: `1`.', type=int, default=1, dest='max_fault_tolerance', choices=[1,2,])
         argument = subcommand.add_argument('--use-backup', help='The path to JSON file with S3/MinIO backup configuration.', type=str, dest='use_backup')
         argument = subcommand.add_argument('--nvmf-base-port', help='Base port for all NVMe-oF listeners (lvol, hublvol, device). Default: `4420`.', type=int, default=4420, dest='nvmf_base_port')
         argument = subcommand.add_argument('--rpc-base-port', help='The base port for SPDK JSON-RPC. Default: `8080`.', type=int, default=8080, dest='rpc_base_port')
@@ -584,9 +582,6 @@ class CLIWrapper(CLIWrapperBase):
     def init_volume(self):
         subparser = self.add_command('volume', 'Logical Volume Commands', aliases=['lvol',])
         self.init_volume__add(subparser)
-        self.init_volume__add_host(subparser)
-        self.init_volume__remove_host(subparser)
-        self.init_volume__get_secret(subparser)
         self.init_volume__qos_set(subparser)
         self.init_volume__list(subparser)
         if self.developer_mode:
@@ -646,22 +641,6 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--data-chunks-per-stripe', help='The erasure coding schema parameter k (distributed raid). Default: `0`.', type=int, default=0, dest='ndcs')
         argument = subcommand.add_argument('--parity-chunks-per-stripe', help='The erasure coding schema parameter n (distributed raid). Default: `0`.', type=int, default=0, dest='npcs')
         argument = subcommand.add_argument('--replicate', help='Replicate LVol snapshot', dest='replicate', action='store_true')
-        argument = subcommand.add_argument('--allowed-hosts', help='Path to JSON file with host NQNs allowed to access this volume\'s subsystem.', type=str, dest='allowed_hosts')
-
-    def init_volume__add_host(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'add-host', 'Add an allowed host NQN to a volume\'s subsystem.')
-        subcommand.add_argument('volume_id', help='The logical volume id.', type=str)
-        subcommand.add_argument('host_nqn', help='The host NQN to allow access.', type=str)
-
-    def init_volume__remove_host(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'remove-host', 'Remove an allowed host NQN from a volume\'s subsystem.')
-        subcommand.add_argument('volume_id', help='The logical volume id.', type=str)
-        subcommand.add_argument('host_nqn', help='The host NQN to remove.', type=str)
-
-    def init_volume__get_secret(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'get-secret', 'Get security credentials for a host on a volume.')
-        subcommand.add_argument('volume_id', help='The logical volume id.', type=str)
-        subcommand.add_argument('host_nqn', help='The host NQN to get credentials for.', type=str)
 
     def init_volume__qos_set(self, subparser):
         subcommand = self.add_sub_command(subparser, 'qos-set', 'Changes QoS settings for an active logical volume.')
@@ -824,6 +803,8 @@ class CLIWrapper(CLIWrapperBase):
         self.init_storage_pool__disable(subparser)
         self.init_storage_pool__get_capacity(subparser)
         self.init_storage_pool__get_io_stats(subparser)
+        self.init_storage_pool__add_host(subparser)
+        self.init_storage_pool__remove_host(subparser)
 
 
     def init_storage_pool__add(self, subparser):
@@ -837,7 +818,7 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--max-r-mbytes', help='Maximum Read Megabytes Per Second.', type=int, dest='max_r_mbytes')
         argument = subcommand.add_argument('--max-w-mbytes', help='Maximum Write Megabytes Per Second.', type=int, dest='max_w_mbytes')
         argument = subcommand.add_argument('--qos-host', help='The node id for QoS pool.', type=str, dest='qos_host', required=False)
-        argument = subcommand.add_argument('--sec-options', help='Path to JSON file with security options: dhchap_key, dhchap_ctrlr_key, psk (keys are auto-generated). Applied to all volumes in the pool.', type=str, dest='sec_options')
+        argument = subcommand.add_argument('--dhchap', help='Enable DH-HMAC-CHAP authentication for all volumes in the pool.', default=False, dest='dhchap', action='store_true')
 
     def init_storage_pool__set(self, subparser):
         subcommand = self.add_sub_command(subparser, 'set', 'Sets a storage pool\'s attributes.')
@@ -880,6 +861,16 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('pool_id', help='The storage pool id.', type=str)
         argument = subcommand.add_argument('--history', help='(XXdYYh), list history records (one for every 15 minutes) for XX days and YY hours (up to 10 days in total).', type=str, dest='history')
         argument = subcommand.add_argument('--records', help='The number of records. Default: `20`.', type=int, default=20, dest='records')
+
+    def init_storage_pool__add_host(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'add-host', 'Add an allowed host NQN to a storage pool.')
+        subcommand.add_argument('pool_id', help='The storage pool id.', type=str)
+        subcommand.add_argument('host_nqn', help='The host NQN to allow access.', type=str)
+
+    def init_storage_pool__remove_host(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'remove-host', 'Remove an allowed host NQN from a storage pool.')
+        subcommand.add_argument('pool_id', help='The storage pool id.', type=str)
+        subcommand.add_argument('host_nqn', help='The host NQN to remove.', type=str)
 
 
     def init_snapshot(self):
@@ -1307,12 +1298,6 @@ class CLIWrapper(CLIWrapperBase):
                         args.distr_vuid = None
                         args.uid = None
                     ret = self.volume__add(sub_command, args)
-                elif sub_command in ['add-host']:
-                    ret = self.volume__add_host(sub_command, args)
-                elif sub_command in ['remove-host']:
-                    ret = self.volume__remove_host(sub_command, args)
-                elif sub_command in ['get-secret']:
-                    ret = self.volume__get_secret(sub_command, args)
                 elif sub_command in ['qos-set']:
                     ret = self.volume__qos_set(sub_command, args)
                 elif sub_command in ['list']:
@@ -1415,6 +1400,10 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.storage_pool__get_capacity(sub_command, args)
                 elif sub_command in ['get-io-stats']:
                     ret = self.storage_pool__get_io_stats(sub_command, args)
+                elif sub_command in ['add-host']:
+                    ret = self.storage_pool__add_host(sub_command, args)
+                elif sub_command in ['remove-host']:
+                    ret = self.storage_pool__remove_host(sub_command, args)
                 else:
                     self.parser.print_help()
 

@@ -1,5 +1,5 @@
 name: Bootstrap Cluster + Stress Run Until Failure
-run-name: "Stress Bootstrap | ${{ inputs.SBCLI_BRANCH }} | ${{ inputs.MNODES }}"
+run-name: "Stress Bootstrap | ${{ inputs.SBCLI_BRANCH }} | ${{ inputs.MNODES }} | ${{ inputs.TEST_CLASS }} | NDCS:${{ inputs.BOOTSTRAP_DATA_CHUNKS }} NPCS:${{ inputs.BOOTSTRAP_PARITY_CHUNKS }}"
 
 on:
   workflow_dispatch:
@@ -31,10 +31,6 @@ on:
         required: true
         default: "http://192.168.10.211/grafana"
 
-      SBCLI_CMD:
-        description: "sbcli command name"
-        required: true
-        default: "sbctl"
       SBCLI_BRANCH:
         description: "sbcli repo branch to clone for tests"
         required: true
@@ -133,20 +129,13 @@ on:
       # Security inputs
       # =========================
       CLUSTER_SECURITY:
-        description: |
-          Cluster setup mode.
-          'host-sec'        — writes dhchap JSON and passes --host-sec to cluster create.
-          'backup'          — writes s3-backup.json and passes --use-backup to cluster create.
-          'host-sec+backup' — applies both.
-          Required for security stress tests (RandomSecurityFailoverTest, RandomAllSecurityFailoverTest, etc.)
+        description: "Cluster setup mode. 'backup' writes s3-backup.json and passes --use-backup to cluster create."
         required: false
         type: choice
         default: "none"
         options:
           - none
-          - host-sec
           - backup
-          - host-sec+backup
 
 concurrency:
   group: simplyblock-lab-stress-${{ inputs.MNODES }}
@@ -170,7 +159,7 @@ jobs:
       EXTRA_CLUSTER_ARGS: ${{ inputs.EXTRA_CLUSTER_ARGS || '' }}
       EXTRA_SN_ARGS: ${{ inputs.EXTRA_SN_ARGS || '' }}
       GRAFANA_ENDPOINT: ${{ inputs.GRAFANA_ENDPOINT }}
-      SBCLI_CMD: ${{ inputs.SBCLI_CMD }}
+      SBCLI_CMD: 'sbctl'
       SBCLI_BRANCH: ${{ inputs.SBCLI_BRANCH }}
 
       # SSH/client env
@@ -534,18 +523,19 @@ jobs:
             exit 0
           fi
           mgmt_ip="$(echo "${MNODES}" | awk '{print $1}')"
-          if [[ "${CLUSTER_SECURITY}" == "host-sec" || "${CLUSTER_SECURITY}" == "host-sec+backup" ]]; then
-            echo "Writing /root/host-sec.json to ${mgmt_ip}..."
-            HOST_SEC_JSON='{"dhchap_digests":["sha256","sha384"],"dhchap_dhgroups":["ffdhe2048","ffdhe3072","ffdhe4096","ffdhe6144","ffdhe8192"]}'
-            sshpass -p "${SSH_PASSWORD}" ssh \
-              -o StrictHostKeyChecking=no \
-              -o UserKnownHostsFile=/dev/null \
-              "${SSH_USER}@${mgmt_ip}" \
-              "echo '${HOST_SEC_JSON}' > /root/host-sec.json && echo 'Written:' && cat /root/host-sec.json"
-            echo "EXTRA_CLUSTER_ARGS=${EXTRA_CLUSTER_ARGS} --host-sec /root/host-sec.json" >> "$GITHUB_ENV"
-            echo "Appended --host-sec /root/host-sec.json to EXTRA_CLUSTER_ARGS"
-          fi
-          if [[ "${CLUSTER_SECURITY}" == "backup" || "${CLUSTER_SECURITY}" == "host-sec+backup" ]]; then
+          # --- host-sec block commented out (kept for reference) ---
+          # if [[ "${CLUSTER_SECURITY}" == "host-sec" || "${CLUSTER_SECURITY}" == "host-sec+backup" ]]; then
+          #   echo "Writing /root/host-sec.json to ${mgmt_ip}..."
+          #   HOST_SEC_JSON='{"dhchap_digests":["sha256","sha384"],"dhchap_dhgroups":["ffdhe2048","ffdhe3072","ffdhe4096","ffdhe6144","ffdhe8192"]}'
+          #   sshpass -p "${SSH_PASSWORD}" ssh \
+          #     -o StrictHostKeyChecking=no \
+          #     -o UserKnownHostsFile=/dev/null \
+          #     "${SSH_USER}@${mgmt_ip}" \
+          #     "echo '${HOST_SEC_JSON}' > /root/host-sec.json && echo 'Written:' && cat /root/host-sec.json"
+          #   echo "EXTRA_CLUSTER_ARGS=${EXTRA_CLUSTER_ARGS} --host-sec /root/host-sec.json" >> "$GITHUB_ENV"
+          #   echo "Appended --host-sec /root/host-sec.json to EXTRA_CLUSTER_ARGS"
+          # fi
+          if [[ "${CLUSTER_SECURITY}" == "backup" ]]; then
             echo "Writing /root/s3-backup.json to ${mgmt_ip}..."
             S3_BACKUP_JSON='{"access_key_id":"minioadmin","secret_access_key":"minioadmin","local_endpoint":"http://192.168.10.164:9000","snapshot_backups":true,"with_compression":false,"secondary_target":0,"local_testing":true}'
             sshpass -p "${SSH_PASSWORD}" ssh \

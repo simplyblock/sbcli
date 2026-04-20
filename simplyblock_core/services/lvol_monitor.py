@@ -209,8 +209,8 @@ def check_node(snode):
     sec_ids_for_check = []
     if snode.secondary_node_id:
         sec_ids_for_check.append(snode.secondary_node_id)
-    if snode.secondary_node_id_2:
-        sec_ids_for_check.append(snode.secondary_node_id_2)
+    if snode.tertiary_node_id:
+        sec_ids_for_check.append(snode.tertiary_node_id)
     first_sec_node = None
     for sec_id in sec_ids_for_check:
         sec_node = db.get_storage_node_by_id(sec_id)

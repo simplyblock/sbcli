@@ -24,7 +24,7 @@ def list(cluster: Cluster, storage_node: StorageNode) -> List[DeviceDTO]:
         ret = db.get_device_stats(device, 1)
         if ret:
             stat_obj = ret[0]
-        data.append(DeviceDTO.from_model(device, stat_obj))
+        data.append(DeviceDTO.from_model(device, storage_node.get_id(), stat_obj))
     return data
 
 instance_api = APIRouter(prefix='/{device_id}')
@@ -46,7 +46,7 @@ def get(cluster: Cluster, storage_node: StorageNode, device: Device) -> DeviceDT
     ret = db.get_device_stats(device, 1)
     if ret:
         stat_obj = ret[0]
-    return DeviceDTO.from_model(device, stat_obj)
+    return DeviceDTO.from_model(device, storage_node.get_id(), stat_obj)
 
 
 @instance_api.post('/remove', name='clusters:storage_nodes:devices:remove', status_code=204, responses={204: {"content": None}})

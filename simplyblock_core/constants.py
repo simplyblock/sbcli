@@ -91,7 +91,7 @@ GELF_PORT = 12202
 
 MIN_HUGE_PAGE_MEMORY_FOR_LVOL = 209715200
 MIN_SYS_MEMORY_FOR_LVOL = 524288000
-EXTRA_SMALL_POOL_COUNT = 4096
+EXTRA_SMALL_POOL_COUNT = 30000
 EXTRA_LARGE_POOL_COUNT = 10240
 EXTRA_HUGE_PAGE_MEMORY = 3221225472
 EXTRA_SYS_MEMORY = 0.10
@@ -140,6 +140,11 @@ NVMF_MAX_SUBSYSTEMS=50000
 KATO=10000
 ACK_TO=11
 BDEV_RETRY=0
+# Used when the storage node has >1 data NIC (NVMe multipath active). Per the
+# SPDK NVMe multipath docs, bdev_retry_count must be non-zero so aborted IOs
+# from a failed path are retried on the alternate path instead of returning
+# as errors to the caller.
+BDEV_RETRY_MULTIPATH=3
 TRANSPORT_RETRY=3
 CTRL_LOSS_TO=1
 FAST_FAIL_TO=0
@@ -241,6 +246,10 @@ LVOL_MIG_MAX_INTERMEDIATE_SNAPS = 3  # max recursive "shrink" snapshot rounds
 # NVMe-oF TLS / DH-HMAC-CHAP security
 VALID_DHCHAP_DIGESTS = ["sha256", "sha384", "sha512"]
 VALID_DHCHAP_DHGROUPS = ["null", "ffdhe2048", "ffdhe3072", "ffdhe4096", "ffdhe6144", "ffdhe8192"]
+
+# Fixed pool-level DHCHAP settings: all main digests and weakest DH group only
+DHCHAP_DIGESTS = ["sha256", "sha384", "sha512"]
+DHCHAP_DHGROUP = "ffdhe2048"
 
 # Default port ranges (configurable per-cluster via Cluster model fields)
 NVMF_BASE_PORT = 4420         # Base port for ALL NVMe-oF listeners (lvol, hublvol, device)

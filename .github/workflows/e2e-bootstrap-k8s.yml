@@ -27,11 +27,6 @@ on:
         required: false
         default: ""
 
-      SBCLI_CMD:
-        description: "sbcli command name (inside admin pod)"
-        required: true
-        default: "sbctl"
-
       SBCLI_BRANCH:
         description: "sbcli repo branch for test code"
         required: true
@@ -140,7 +135,7 @@ jobs:
       BASTION_IP:          ${{ inputs.K3S_MNODES }}
       K8S_NAMESPACE:       ${{ inputs.K8S_NAMESPACE || 'simplyblock' }}
       GRAFANA_ENDPOINT:    ${{ inputs.GRAFANA_ENDPOINT || '' }}
-      SBCLI_CMD:           ${{ inputs.SBCLI_CMD }}
+      SBCLI_CMD:           "sbctl"
       SBCLI_BRANCH:        ${{ inputs.SBCLI_BRANCH }}
       K8S_CHARTS_BRANCH:   ${{ inputs.K8S_CHARTS_BRANCH || 'main-sfam-2359' }}
       BOOTSTRAP_DATA_NIC:  ${{ inputs.BOOTSTRAP_DATA_NIC }}

@@ -232,6 +232,7 @@ class TestStressLvolCloneClusterFioRun(TestLvolHACluster):
             fio_thread.start()
             self.fio_threads.append(fio_thread)
             self.logger.info(f"Created snapshot {snapshot_name} and clone {clone_name}.")
+        self._log_block_sizes("after_resize")
 
     def resize_lvol_clone(self):
         lvols = random.sample(list(self.lvol_mount_details.keys()), 2)

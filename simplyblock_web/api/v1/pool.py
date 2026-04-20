@@ -80,12 +80,12 @@ def add_pool():
     max_r_mbytes_per_sec = utils.get_int_value_or_default(pool_data, "max_r_mbytes", 0)
     max_w_mbytes_per_sec = utils.get_int_value_or_default(pool_data, "max_w_mbytes", 0)
 
-    sec_options = pool_data.get('sec_options')
+    dhchap = bool(pool_data.get('dhchap', False))
 
     ret = pool_controller.add_pool(
         name, pool_max_size, lvol_max_size, max_rw_iops, max_rw_mbytes,
         max_r_mbytes_per_sec, max_w_mbytes_per_sec, cluster_id,
-        sec_options=sec_options)
+        dhchap=dhchap)
 
     return utils.get_response(ret)
 
@@ -194,6 +194,30 @@ def pool_iostats(uuid, history):
     }
     return utils.get_response(ret)
 
+
+
+@bp.route('/pool/<string:pool_id>/host', methods=['POST'])
+def add_host_to_pool(pool_id):
+    data = request.get_json() or {}
+    host_nqn = data.get('host_nqn')
+    if not host_nqn:
+        return utils.get_response_error("missing required param: host_nqn", 400)
+    ok, err = pool_controller.add_host_to_pool(pool_id, host_nqn)
+    if not ok:
+        return utils.get_response_error(err, 400)
+    return utils.get_response("Done")
+
+
+@bp.route('/pool/<string:pool_id>/host', methods=['DELETE'])
+def remove_host_from_pool(pool_id):
+    data = request.get_json() or {}
+    host_nqn = data.get('host_nqn')
+    if not host_nqn:
+        return utils.get_response_error("missing required param: host_nqn", 400)
+    ok, err = pool_controller.remove_host_from_pool(pool_id, host_nqn)
+    if not ok:
+        return utils.get_response_error(err, 400)
+    return utils.get_response("Done")
 
 
 @bp.route('/pool/iostats-all-lvols/<string:pool_uuid>', methods=['GET'])

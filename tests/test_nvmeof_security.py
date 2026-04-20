@@ -25,6 +25,8 @@ from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.utils import (
+
+
     generate_psk_key,
     generate_dhchap_key,
     validate_tls_config,
@@ -314,12 +316,23 @@ class TestRpcClientSignatures(unittest.TestCase):
         from simplyblock_core.rpc_client import RPCClient
         self.assertTrue(hasattr(RPCClient, "subsystem_remove_host"))
 
-    def test_bdev_nvme_set_options_dhchap_params(self):
+    def test_bdev_nvme_set_options_no_dhchap_params(self):
+        """DHCHAP moved to nvmf_set_config – bdev_nvme_set_options must not accept them."""
         import inspect
         from simplyblock_core.rpc_client import RPCClient
         sig = inspect.signature(RPCClient.bdev_nvme_set_options)
+        self.assertNotIn("dhchap_digests", sig.parameters)
+        self.assertNotIn("dhchap_dhgroups", sig.parameters)
+
+    def test_nvmf_set_config_dhchap_params(self):
+        """nvmf_set_config must accept dhchap_digests and dhchap_dhgroups."""
+        import inspect
+        from simplyblock_core.rpc_client import RPCClient
+        sig = inspect.signature(RPCClient.nvmf_set_config)
         self.assertIn("dhchap_digests", sig.parameters)
         self.assertIn("dhchap_dhgroups", sig.parameters)
+        self.assertIsNone(sig.parameters["dhchap_digests"].default)
+        self.assertIsNone(sig.parameters["dhchap_dhgroups"].default)
 
 
 # ---------------------------------------------------------------------------
@@ -533,9 +546,12 @@ class TestAddHostToLvol(unittest.TestCase):
         node2.cluster_id = cl.uuid
         lvol = _lvol(nodes=["node-1", "node-2"])
 
+        pool = _pool()  # dhchap=False – use legacy path
+
         mock_db = MagicMock()
         mock_db.get_lvol_by_id.return_value = lvol
         mock_db.get_cluster_by_id.return_value = cl
+        mock_db.get_pool_by_id.return_value = pool
         mock_db.kv_store = MagicMock()
 
         def get_node(nid):
@@ -694,6 +710,7 @@ class TestConnectLvolTls(unittest.TestCase):
 class TestBdevNvmeSetOptionsParams(unittest.TestCase):
 
     def test_no_dhchap_params_not_in_request(self):
+        """bdev_nvme_set_options must never send dhchap params (moved to nvmf_set_config)."""
         from simplyblock_core.rpc_client import RPCClient
         client = RPCClient.__new__(RPCClient)
         client._request = MagicMock(return_value=True)
@@ -703,18 +720,45 @@ class TestBdevNvmeSetOptionsParams(unittest.TestCase):
         self.assertNotIn("dhchap_digests", params)
         self.assertNotIn("dhchap_dhgroups", params)
 
-    def test_dhchap_params_passed_through(self):
+
+class TestNvmfSetConfigDhchapParams(unittest.TestCase):
+
+    def _client(self):
         from simplyblock_core.rpc_client import RPCClient
-        client = RPCClient.__new__(RPCClient)
-        client._request = MagicMock(return_value=True)
-        client.bdev_nvme_set_options(
-            dhchap_digests=["sha384", "sha512"],
-            dhchap_dhgroups=["ffdhe6144"],
-        )
-        call_args = client._request.call_args[0]
-        params = call_args[1]
-        self.assertEqual(params["dhchap_digests"], ["sha384", "sha512"])
-        self.assertEqual(params["dhchap_dhgroups"], ["ffdhe6144"])
+        c = RPCClient.__new__(RPCClient)
+        c._request = MagicMock(return_value=True)
+        return c
+
+    def test_without_dhchap_only_pollers_mask_sent(self):
+        client = self._client()
+        client.nvmf_set_config("0x1")
+        params = client._request.call_args[0][1]
+        self.assertEqual(params["poll_groups_mask"], "0x1")
+        self.assertNotIn("dhchap_digests", params)
+        self.assertNotIn("dhchap_dhgroups", params)
+
+    def test_with_dhchap_digests_and_dhgroups(self):
+        client = self._client()
+        client.nvmf_set_config("0x3",
+                               dhchap_digests=["sha256", "sha384", "sha512"],
+                               dhchap_dhgroups=["ffdhe2048"])
+        params = client._request.call_args[0][1]
+        self.assertEqual(params["poll_groups_mask"], "0x3")
+        self.assertEqual(params["dhchap_digests"], ["sha256", "sha384", "sha512"])
+        self.assertEqual(params["dhchap_dhgroups"], ["ffdhe2048"])
+
+    def test_fixed_constants_are_sent(self):
+        """The fixed DHCHAP_DIGESTS and DHCHAP_DHGROUP constants must match expectations."""
+        from simplyblock_core import constants
+        client = self._client()
+        client.nvmf_set_config("0x1",
+                               dhchap_digests=constants.DHCHAP_DIGESTS,
+                               dhchap_dhgroups=[constants.DHCHAP_DHGROUP])
+        params = client._request.call_args[0][1]
+        self.assertIn("sha256", params["dhchap_digests"])
+        self.assertIn("sha384", params["dhchap_digests"])
+        self.assertIn("sha512", params["dhchap_digests"])
+        self.assertEqual(params["dhchap_dhgroups"], ["ffdhe2048"])
 
 
 # ---------------------------------------------------------------------------
@@ -883,8 +927,11 @@ class TestReapplyAllowedHosts(unittest.TestCase):
             dhchap_group="ffdhe2048",
         )
 
+    @patch("simplyblock_core.storage_node_ops._check_peer_disconnected", return_value=False)
+    @patch("simplyblock_core.storage_node_ops._set_restart_phase")
+    @patch("simplyblock_core.storage_node_ops._handle_rpc_failure_on_peer", return_value="skip")
     @patch("simplyblock_core.storage_node_ops.DBController")
-    def test_reapply_hosts_without_keys(self, MockDB):
+    def test_reapply_hosts_without_keys(self, MockDB, _mock_disc, _mock_phase, _mock_handle):
         """Hosts without security keys get added with just the NQN."""
         MockDB.return_value = self._mock_db()
         mock_rpc = MagicMock()
@@ -898,9 +945,12 @@ class TestReapplyAllowedHosts(unittest.TestCase):
         mock_rpc.subsystem_add_host.assert_called_once_with(
             lvol.nqn, "nqn:plain-host")
 
+    @patch("simplyblock_core.storage_node_ops._check_peer_disconnected", return_value=False)
+    @patch("simplyblock_core.storage_node_ops._set_restart_phase")
+    @patch("simplyblock_core.storage_node_ops._handle_rpc_failure_on_peer", return_value="skip")
     @patch("simplyblock_core.storage_node_ops.DBController")
     @patch("simplyblock_core.controllers.lvol_controller._register_dhchap_keys_on_node")
-    def test_reapply_multiple_hosts(self, mock_register, MockDB):
+    def test_reapply_multiple_hosts(self, mock_register, MockDB, _mock_disc, _mock_phase, _mock_handle):
         """All hosts are re-registered, not just the first one."""
         MockDB.return_value = self._mock_db()
         mock_register.return_value = {"dhchap_key": "kn"}
@@ -919,9 +969,12 @@ class TestReapplyAllowedHosts(unittest.TestCase):
         self.assertEqual(mock_rpc.subsystem_add_host.call_count, 3)
         self.assertEqual(mock_register.call_count, 2)  # h1 and h3 have keys
 
+    @patch("simplyblock_core.storage_node_ops._check_peer_disconnected", return_value=False)
+    @patch("simplyblock_core.storage_node_ops._set_restart_phase")
+    @patch("simplyblock_core.storage_node_ops._handle_rpc_failure_on_peer", return_value="skip")
     @patch("simplyblock_core.storage_node_ops.DBController")
     @patch("simplyblock_core.controllers.lvol_controller._register_dhchap_keys_on_node")
-    def test_reapply_with_psk(self, mock_register, MockDB):
+    def test_reapply_with_psk(self, mock_register, MockDB, _mock_disc, _mock_phase, _mock_handle):
         """PSK-only host entry gets keyring registration."""
         MockDB.return_value = self._mock_db()
         mock_register.return_value = {"psk": "psk_key_name"}
@@ -949,6 +1002,9 @@ class TestReapplyAllowedHosts(unittest.TestCase):
 class TestRecreateSubsystemSecurity(unittest.TestCase):
     """Verify that recreate_lvstore* passes allow_any_host and re-applies hosts."""
 
+    @patch("simplyblock_core.storage_node_ops._check_peer_disconnected", return_value=False)
+    @patch("simplyblock_core.storage_node_ops._set_restart_phase")
+    @patch("simplyblock_core.storage_node_ops._handle_rpc_failure_on_peer", return_value="skip")
     @patch("simplyblock_core.storage_node_ops._reapply_allowed_hosts")
     @patch("simplyblock_core.storage_node_ops.add_lvol_thread")
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
@@ -957,10 +1013,10 @@ class TestRecreateSubsystemSecurity(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.tasks_controller")
     @patch("simplyblock_core.storage_node_ops.RPCClient")
     @patch("simplyblock_core.storage_node_ops.DBController")
-    def test_recreate_lvstore_on_sec_passes_allow_any_false(
+    def test_recreate_lvstore_on_non_leader_passes_allow_any_false(
             self, MockDB, MockRPC, mock_tasks, mock_bdev_stack,
-            MockFW, mock_tcp_events, mock_add_thread, mock_reapply):
-        """recreate_lvstore_on_sec sets allow_any_host=False for lvols with allowed_hosts."""
+            MockFW, mock_tcp_events, mock_add_thread, mock_reapply, _mock_disc, _mock_phase, _mock_handle):
+        """recreate_lvstore_on_non_leader sets allow_any_host=False for lvols with allowed_hosts."""
         dhchap_host = {"nqn": "nqn:secured", "dhchap_key": "DHHC-1:01:x:"}
 
         sec_node = _node("sec-1")
@@ -972,7 +1028,7 @@ class TestRecreateSubsystemSecurity(unittest.TestCase):
         primary_node.lvstore_status = "ready"
         primary_node.lvstore_stack = []
         primary_node.secondary_node_id = sec_node.uuid
-        primary_node.secondary_node_id_2 = ""
+        primary_node.tertiary_node_id = ""
         primary_node.active_rdma = False
         primary_node.jm_vuid = "jm1"
         primary_node.raid = "raid0"
@@ -1011,7 +1067,7 @@ class TestRecreateSubsystemSecurity(unittest.TestCase):
                     mock_fw_inst = MagicMock()
                     MockFW.return_value = mock_fw_inst
 
-                    snode_ops.recreate_lvstore_on_sec(sec_node)
+                    snode_ops.recreate_lvstore_on_non_leader(sec_node, leader_node=primary_node, primary_node=primary_node)
 
         # Verify subsystem_create calls
         create_calls = mock_rpc_inst.subsystem_create.call_args_list
@@ -1037,6 +1093,7 @@ class TestRecreateSubsystemSecurity(unittest.TestCase):
         cl = _cluster(tls=True, tls_config={"params": {"dhchap_dhgroups": ["ffdhe2048"]}})
         mock_db = MagicMock()
         mock_db.get_cluster_by_id.return_value = cl
+        mock_db.get_pool_by_id.side_effect = KeyError("no pool")  # non-DHCHAP path
         MockDBCtrl.return_value = mock_db
 
         dhchap_host = {"nqn": "nqn:host", "dhchap_key": "DHHC-1:01:k:"}

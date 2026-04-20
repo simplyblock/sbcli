@@ -449,7 +449,6 @@ def main():
         " --enable-node-affinity"
         " --data-chunks-per-stripe 1"
         " --parity-chunks-per-stripe 1"
-        " --max-fault-tolerance 1"
     ], check=True)
     print("Phase 2a: DONE — cluster created.")
 

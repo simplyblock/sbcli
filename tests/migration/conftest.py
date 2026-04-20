@@ -14,6 +14,7 @@ started; the test process only imports the task runner directly.
 import os
 import time
 import logging
+import unittest.mock
 import uuid as _uuid_mod
 import pytest
 
@@ -49,7 +50,7 @@ def ensure_cluster():
     from simplyblock_core.models.cluster import Cluster
 
     db = DBController()
-    if db.kv_store is None:
+    if db.kv_store is None or isinstance(db.kv_store, unittest.mock.MagicMock):
         pytest.skip("FoundationDB is not available – skipping migration e2e tests")
 
     existing = db.get_clusters()

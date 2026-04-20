@@ -216,8 +216,12 @@ class K8sUtils:
 
             dump_file = None
             for line in combined.splitlines():
-                if "LVS dump file will be here" in line and ":" in line:
-                    dump_file = line.split(":", 1)[1].strip()
+                if "LVS dump file will be here" in line:
+                    # Line format: "...: INFO: LVS dump file will be here: /etc/simplyblock/..."
+                    # Split on the marker text to reliably extract the path
+                    parts = line.split("LVS dump file will be here:", 1)
+                    if len(parts) == 2:
+                        dump_file = parts[1].strip()
                     break
 
             if not dump_file:
@@ -229,12 +233,19 @@ class K8sUtils:
             pod_name = self.get_spdk_pod_name(storage_node_ip)
             dest_dir = os.path.join(logs_path, pod_name, "lvstore_dumps")
             os.makedirs(dest_dir, exist_ok=True)
-            dest_path = os.path.join(dest_dir, os.path.basename(dump_file))
+            safe_name = os.path.basename(dump_file).replace(":", "_")
+            dest_path = os.path.join(dest_dir, safe_name)
 
+            # kubectl cp misinterprets colons in filenames as pod:path
+            # separators, so copy to a colon-free temp path first.
+            kexec = f"kubectl exec -n {self.namespace} {pod_name} -c spdk-container --"
+            tmp_path = f"/tmp/{safe_name}"
+            self._exec_kubectl(f"{kexec} cp {dump_file} {tmp_path}")
             self._exec_kubectl(
-                f"kubectl cp -n {self.namespace} {pod_name}:{dump_file} "
+                f"kubectl cp -n {self.namespace} {pod_name}:{tmp_path} "
                 f"-c spdk-container {dest_path}"
             )
+            self._exec_kubectl(f"{kexec} rm -f {tmp_path}", supress_logs=True)
             self.logger.info(f"[dump_lvstore_k8s] {dump_file} → {dest_path}")
         except Exception as e:
             self.logger.warning(f"[dump_lvstore_k8s] FAILED node={storage_node_id}: {e}")
@@ -245,8 +256,8 @@ class K8sUtils:
         K8s equivalent of ssh_utils.fetch_distrib_logs:
           1. Find spdk.sock inside spdk-container.
           2. Get bdevs via RPC, collect distrib_* names.
-          3. For each distrib: run distr_debug_placement_map_dump RPC.
-          4. kubectl cp any new files from /tmp inside container → logs_path/<pod_name>/distrib_logs/.
+          3. For each distrib: create JSON config and run rpc_sock.py (same as SSH path).
+          4. kubectl cp result files from /tmp inside container → logs_path/<pod_name>/distrib_logs/.
         Returns True (non-fatal failures are logged and skipped).
         """
         try:
@@ -255,10 +266,10 @@ class K8sUtils:
             dest_dir = os.path.join(logs_path, pod_name, "distrib_logs")
             os.makedirs(dest_dir, exist_ok=True)
 
-            rpc_base = (
-                f"kubectl exec {pod_name} -c spdk-container -n {self.namespace} -- "
-                f"python spdk/scripts/rpc.py -s {sock}"
+            kexec = (
+                f"kubectl exec {pod_name} -c spdk-container -n {self.namespace} --"
             )
+            rpc_base = f"{kexec} python spdk/scripts/rpc.py -s {sock}"
 
             # 1. Get bdevs
             bdev_out, _ = self._exec_kubectl(f"{rpc_base} bdev_get_bdevs", supress_logs=True)
@@ -279,20 +290,50 @@ class K8sUtils:
 
             self.logger.info(f"[fetch_distrib_logs_k8s] distribs={distribs} pod={pod_name}")
 
-            # 2. Dump each distrib and kubectl cp result
+            # 2. Dump each distrib using rpc_sock.py (matches SSH approach)
             for distrib in distribs:
                 try:
-                    dump_out, _ = self._exec_kubectl(
-                        f"{rpc_base} distr_debug_placement_map_dump "
-                        f"--name {shlex.quote(distrib)}",
+                    # Create JSON config inside the container
+                    json_cfg = (
+                        '{"subsystems":[{"subsystem":"distr","config":'
+                        '[{"method":"distr_debug_placement_map_dump",'
+                        f'"params":{{"name":"{distrib}"}}'
+                        '}]}]}'
+                    )
+                    stack_file = f"/tmp/stack_{distrib}.json"
+                    rpc_log = f"/tmp/rpc_{distrib}.log"
+
+                    # Write JSON config, run rpc_sock.py, capture output
+                    self._exec_kubectl(
+                        f"{kexec} bash -c "
+                        + shlex.quote(
+                            f"echo '{json_cfg}' > {stack_file} && "
+                            f"python scripts/rpc_sock.py {stack_file} {sock} "
+                            f"> {rpc_log} 2>&1 || true"
+                        ),
                         supress_logs=True,
                     )
-                    self.logger.info(f"[fetch_distrib_logs_k8s] {distrib}: {dump_out.strip()}")
+
+                    # Read the RPC log to see what happened
+                    log_out, _ = self._exec_kubectl(
+                        f"{kexec} bash -c 'cat {rpc_log} 2>/dev/null || true'",
+                        supress_logs=True,
+                    )
+                    self.logger.info(
+                        f"[fetch_distrib_logs_k8s] {distrib} rpc_log: {log_out.strip()[:500]}"
+                    )
+
+                    # Copy the RPC log file out
+                    rpc_log_dest = os.path.join(dest_dir, f"rpc_{distrib}.log")
+                    self._exec_kubectl(
+                        f"kubectl cp -n {self.namespace} {pod_name}:{rpc_log} "
+                        f"-c spdk-container {rpc_log_dest}"
+                    )
 
                     # Collect any /tmp files matching this distrib name
                     ls_out, _ = self._exec_kubectl(
-                        f"kubectl exec {pod_name} -c spdk-container -n {self.namespace} -- "
-                        f"bash -c 'ls /tmp/ 2>/dev/null | grep -F {shlex.quote(distrib)} || true'",
+                        f"{kexec} bash -c "
+                        + shlex.quote(f"ls /tmp/ 2>/dev/null | grep -F '{distrib}' || true"),
                         supress_logs=True,
                     )
                     for fname in ls_out.splitlines():
@@ -305,6 +346,13 @@ class K8sUtils:
                             f"-c spdk-container {dest}"
                         )
                         self.logger.info(f"[fetch_distrib_logs_k8s] copied /tmp/{fname} → {dest}")
+
+                    # Cleanup temp files in container
+                    self._exec_kubectl(
+                        f"{kexec} bash -c "
+                        + shlex.quote(f"rm -f {stack_file} {rpc_log} || true"),
+                        supress_logs=True,
+                    )
                 except Exception as e:
                     self.logger.warning(f"[fetch_distrib_logs_k8s] distrib={distrib} error: {e}")
 
@@ -435,6 +483,407 @@ class K8sUtils:
             f"[K8sUtils] Pod with prefix {pod_name_prefix!r} not Running within {timeout}s"
         )
 
+    # ── Generic YAML apply / delete ─────────────────────────────────────────
+
+    def apply_yaml(self, yaml_content: str, namespace: str = None):
+        """Apply a YAML manifest via ``kubectl apply -f -``."""
+        ns = namespace or self.namespace
+        escaped = yaml_content.replace("'", "'\\''")
+        return self._exec_kubectl(f"echo '{escaped}' | kubectl apply -n {ns} -f -")
+
+    def apply_yaml_cluster_scoped(self, yaml_content: str):
+        """Apply a cluster-scoped YAML manifest (no namespace flag)."""
+        escaped = yaml_content.replace("'", "'\\''")
+        return self._exec_kubectl(f"echo '{escaped}' | kubectl apply -f -")
+
+    def delete_resource(self, kind: str, name: str, namespace: str = None):
+        """Delete a K8s resource by kind and name."""
+        ns = namespace or self.namespace
+        return self._exec_kubectl(
+            f"kubectl delete {kind} {name} -n {ns} --ignore-not-found --wait=false"
+        )
+
+    def get_resource_json(self, kind: str, name: str, namespace: str = None) -> dict:
+        """Get a K8s resource as parsed JSON.  Returns ``{}`` if not found."""
+        ns = namespace or self.namespace
+        out, err = self._exec_kubectl(
+            f"kubectl get {kind} {name} -n {ns} -o json 2>/dev/null || true",
+            supress_logs=True,
+        )
+        text = out.strip()
+        if not text or "NotFound" in (err or ""):
+            return {}
+        try:
+            return json.loads(text)
+        except Exception:
+            return {}
+
+    # ── StorageClass & VolumeSnapshotClass (cluster-scoped) ──────────────────
+
+    def create_storage_class(self, name: str, cluster_id: str, pool_name: str,
+                             ndcs: int = 1, npcs: int = 1, fs_type: str = "ext4",
+                             compression: bool = False, encryption: bool = False,
+                             fabric: str = "tcp"):
+        """Create a simplyblock CSI StorageClass."""
+        yaml_content = (
+            f"allowVolumeExpansion: true\n"
+            f"apiVersion: storage.k8s.io/v1\n"
+            f"kind: StorageClass\n"
+            f"metadata:\n"
+            f"  name: {name}\n"
+            f"parameters:\n"
+            f"  cluster_id: \"{cluster_id}\"\n"
+            f"  compression: \"{str(compression)}\"\n"
+            f"  csi.storage.k8s.io/fstype: {fs_type}\n"
+            f"  distr_ndcs: \"{ndcs}\"\n"
+            f"  distr_npcs: \"{npcs}\"\n"
+            f"  encryption: \"{str(encryption)}\"\n"
+            f"  fabric: {fabric}\n"
+            f"  lvol_priority_class: \"0\"\n"
+            f"  max_namespace_per_subsys: \"1\"\n"
+            f"  pool_name: {pool_name}\n"
+            f"  qos_r_mbytes: \"0\"\n"
+            f"  qos_rw_iops: \"0\"\n"
+            f"  qos_rw_mbytes: \"0\"\n"
+            f"  qos_w_mbytes: \"0\"\n"
+            f"  replicate: \"False\"\n"
+            f"  tune2fs_reserved_blocks: \"0\"\n"
+            f"provisioner: csi.simplyblock.io\n"
+            f"reclaimPolicy: Delete\n"
+            f"volumeBindingMode: Immediate\n"
+        )
+        # StorageClass parameters and volumeBindingMode are immutable —
+        # delete first to allow recreation with different parameters.
+        self.logger.info(f"[K8sUtils] Deleting existing StorageClass '{name}' (if any)")
+        self._exec_kubectl(f"kubectl delete storageclass {name} --ignore-not-found")
+        self.logger.info(f"[K8sUtils] Creating StorageClass '{name}'")
+        self.apply_yaml_cluster_scoped(yaml_content)
+
+    def create_volume_snapshot_class(self, name: str = "simplyblock-csi-snapshotclass"):
+        """Create a VolumeSnapshotClass for the simplyblock CSI driver.
+
+        If the class already exists (e.g. created by Helm), it is left as-is.
+        """
+        out, _ = self._exec_kubectl(
+            f"kubectl get volumesnapshotclass {name} --no-headers 2>/dev/null || true",
+            supress_logs=True,
+        )
+        if out.strip():
+            self.logger.info(f"[K8sUtils] VolumeSnapshotClass '{name}' already exists, skipping creation")
+            return
+
+        yaml_content = (
+            f"apiVersion: snapshot.storage.k8s.io/v1\n"
+            f"kind: VolumeSnapshotClass\n"
+            f"metadata:\n"
+            f"  name: {name}\n"
+            f"driver: csi.simplyblock.io\n"
+            f"deletionPolicy: Delete\n"
+        )
+        self.logger.info(f"[K8sUtils] Creating VolumeSnapshotClass '{name}'")
+        self.apply_yaml_cluster_scoped(yaml_content)
+
+    def delete_storage_class(self, name: str):
+        """Delete a StorageClass (cluster-scoped)."""
+        self._exec_kubectl(f"kubectl delete storageclass {name} --ignore-not-found")
+
+    def delete_volume_snapshot_class(self, name: str):
+        """Delete a VolumeSnapshotClass (cluster-scoped)."""
+        self._exec_kubectl(
+            f"kubectl delete volumesnapshotclass {name} --ignore-not-found"
+        )
+
+    # ── PVC operations ───────────────────────────────────────────────────────
+
+    def create_pvc(self, name: str, size: str, storage_class: str,
+                   namespace: str = None):
+        """Create a PersistentVolumeClaim (provisions an lvol via CSI)."""
+        ns = namespace or self.namespace
+        yaml_content = (
+            f"apiVersion: v1\n"
+            f"kind: PersistentVolumeClaim\n"
+            f"metadata:\n"
+            f"  name: {name}\n"
+            f"  namespace: {ns}\n"
+            f"spec:\n"
+            f"  accessModes:\n"
+            f"  - ReadWriteOnce\n"
+            f"  resources:\n"
+            f"    requests:\n"
+            f"      storage: {size}\n"
+            f"  storageClassName: {storage_class}\n"
+        )
+        self.logger.info(f"[K8sUtils] Creating PVC '{name}' size={size}")
+        self.apply_yaml(yaml_content, namespace=ns)
+
+    def create_clone_pvc(self, name: str, size: str, storage_class: str,
+                         snapshot_name: str, namespace: str = None):
+        """Create a PVC restored from a VolumeSnapshot (clone)."""
+        ns = namespace or self.namespace
+        yaml_content = (
+            f"apiVersion: v1\n"
+            f"kind: PersistentVolumeClaim\n"
+            f"metadata:\n"
+            f"  name: {name}\n"
+            f"  namespace: {ns}\n"
+            f"spec:\n"
+            f"  storageClassName: {storage_class}\n"
+            f"  dataSource:\n"
+            f"    name: {snapshot_name}\n"
+            f"    kind: VolumeSnapshot\n"
+            f"    apiGroup: snapshot.storage.k8s.io\n"
+            f"  accessModes:\n"
+            f"  - ReadWriteOnce\n"
+            f"  resources:\n"
+            f"    requests:\n"
+            f"      storage: {size}\n"
+        )
+        self.logger.info(
+            f"[K8sUtils] Creating clone PVC '{name}' from snapshot '{snapshot_name}'"
+        )
+        self.apply_yaml(yaml_content, namespace=ns)
+
+    def resize_pvc(self, name: str, new_size: str, namespace: str = None):
+        """Patch a PVC to request a larger size."""
+        ns = namespace or self.namespace
+        patch = f'{{"spec":{{"resources":{{"requests":{{"storage":"{new_size}"}}}}}}}}'
+        self.logger.info(f"[K8sUtils] Resizing PVC '{name}' to {new_size}")
+        self._exec_kubectl(
+            f"kubectl patch pvc {name} -n {ns} -p '{patch}' --type merge"
+        )
+
+    def wait_pvc_bound(self, name: str, timeout: int = 300,
+                       namespace: str = None) -> bool:
+        """Poll until PVC phase is ``Bound``.  Returns True on success."""
+        ns = namespace or self.namespace
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            out, _ = self._exec_kubectl(
+                f"kubectl get pvc {name} -n {ns} -o jsonpath='{{.status.phase}}' 2>/dev/null || true",
+                supress_logs=True,
+            )
+            if out.strip() == "Bound":
+                self.logger.info(f"[K8sUtils] PVC '{name}' is Bound")
+                return True
+            self.logger.info(f"[K8sUtils] Waiting for PVC '{name}' to bind (current: {out.strip()!r})…")
+            time.sleep(5)
+        raise TimeoutError(f"[K8sUtils] PVC '{name}' not Bound within {timeout}s")
+
+    def delete_pvc(self, name: str, namespace: str = None):
+        """Delete a PVC."""
+        ns = namespace or self.namespace
+        self.logger.info(f"[K8sUtils] Deleting PVC '{name}'")
+        self.delete_resource("pvc", name, namespace=ns)
+
+    def get_pvc_status(self, name: str, namespace: str = None) -> dict:
+        """Return ``{phase, capacity}`` for a PVC."""
+        ns = namespace or self.namespace
+        out, _ = self._exec_kubectl(
+            f"kubectl get pvc {name} -n {ns} -o jsonpath="
+            f"'{{.status.phase}} {{.status.capacity.storage}}' 2>/dev/null || true",
+            supress_logs=True,
+        )
+        parts = out.strip().split()
+        return {
+            "phase": parts[0] if parts else "",
+            "capacity": parts[1] if len(parts) > 1 else "",
+        }
+
+    # ── VolumeSnapshot operations ────────────────────────────────────────────
+
+    def create_volume_snapshot(self, name: str, pvc_name: str,
+                               snapshot_class: str = "simplyblock-csi-snapshotclass",
+                               namespace: str = None):
+        """Create a VolumeSnapshot from a PVC."""
+        ns = namespace or self.namespace
+        yaml_content = (
+            f"apiVersion: snapshot.storage.k8s.io/v1\n"
+            f"kind: VolumeSnapshot\n"
+            f"metadata:\n"
+            f"  name: {name}\n"
+            f"  namespace: {ns}\n"
+            f"spec:\n"
+            f"  volumeSnapshotClassName: {snapshot_class}\n"
+            f"  source:\n"
+            f"    persistentVolumeClaimName: {pvc_name}\n"
+        )
+        self.logger.info(
+            f"[K8sUtils] Creating VolumeSnapshot '{name}' from PVC '{pvc_name}'"
+        )
+        self.apply_yaml(yaml_content, namespace=ns)
+
+    def wait_volume_snapshot_ready(self, name: str, timeout: int = 300,
+                                    namespace: str = None) -> bool:
+        """Poll until VolumeSnapshot ``readyToUse`` is true."""
+        ns = namespace or self.namespace
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            out, _ = self._exec_kubectl(
+                f"kubectl get volumesnapshot {name} -n {ns} "
+                f"-o jsonpath='{{.status.readyToUse}}' 2>/dev/null || true",
+                supress_logs=True,
+            )
+            if out.strip() == "true":
+                self.logger.info(f"[K8sUtils] VolumeSnapshot '{name}' is ready")
+                return True
+            self.logger.info(
+                f"[K8sUtils] Waiting for VolumeSnapshot '{name}' readyToUse "
+                f"(current: {out.strip()!r})…"
+            )
+            time.sleep(5)
+        raise TimeoutError(
+            f"[K8sUtils] VolumeSnapshot '{name}' not ready within {timeout}s"
+        )
+
+    def delete_volume_snapshot(self, name: str, namespace: str = None):
+        """Delete a VolumeSnapshot."""
+        ns = namespace or self.namespace
+        self.logger.info(f"[K8sUtils] Deleting VolumeSnapshot '{name}'")
+        self.delete_resource("volumesnapshot", name, namespace=ns)
+
+    # ── FIO Job operations ───────────────────────────────────────────────────
+
+    def create_fio_job(self, job_name: str, pvc_name: str, configmap_name: str,
+                       fio_config: str, namespace: str = None,
+                       image: str = "dockerpinata/fio:2.1"):
+        """Create a ConfigMap with FIO config and a Job that runs FIO against a PVC."""
+        ns = namespace or self.namespace
+        # Indent fio_config for YAML embedding (each line indented by 8 spaces)
+        indented_cfg = "\n".join(
+            f"      {line}" for line in fio_config.strip().splitlines()
+        )
+        yaml_content = (
+            f"apiVersion: v1\n"
+            f"kind: ConfigMap\n"
+            f"metadata:\n"
+            f"  name: {configmap_name}\n"
+            f"  namespace: {ns}\n"
+            f"data:\n"
+            f"  fio.cfg: |\n"
+            f"{indented_cfg}\n"
+            f"---\n"
+            f"apiVersion: batch/v1\n"
+            f"kind: Job\n"
+            f"metadata:\n"
+            f"  name: {job_name}\n"
+            f"  namespace: {ns}\n"
+            f"spec:\n"
+            f"  backoffLimit: 4\n"
+            f"  template:\n"
+            f"    spec:\n"
+            f"      containers:\n"
+            f"      - name: fio-benchmark\n"
+            f"        image: {image}\n"
+            f"        imagePullPolicy: Always\n"
+            f"        command: [\"fio\", \"--eta=always\", \"--status-interval=5\", \"/fio/fio.cfg\"]\n"
+            f"        volumeMounts:\n"
+            f"        - mountPath: /spdkvol\n"
+            f"          name: benchmark-volume\n"
+            f"        - mountPath: /fio\n"
+            f"          name: fio-config\n"
+            f"      volumes:\n"
+            f"      - name: benchmark-volume\n"
+            f"        persistentVolumeClaim:\n"
+            f"          claimName: {pvc_name}\n"
+            f"      - name: fio-config\n"
+            f"        configMap:\n"
+            f"          name: {configmap_name}\n"
+            f"      restartPolicy: Never\n"
+        )
+        self.logger.info(
+            f"[K8sUtils] Creating FIO Job '{job_name}' on PVC '{pvc_name}'"
+        )
+        self.apply_yaml(yaml_content, namespace=ns)
+
+    def wait_job_complete(self, job_name: str, timeout: int = 600,
+                          namespace: str = None) -> str:
+        """Wait for a Job to reach Complete or Failed.
+
+        Returns ``'succeeded'``, ``'failed'``, or ``'timeout'``.
+        """
+        ns = namespace or self.namespace
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            out, _ = self._exec_kubectl(
+                f"kubectl get job {job_name} -n {ns} "
+                f"-o jsonpath='{{.status.succeeded}} {{.status.failed}}' "
+                f"2>/dev/null || true",
+                supress_logs=True,
+            )
+            parts = out.strip().split()
+            succeeded = parts[0] if parts else ""
+            failed = parts[1] if len(parts) > 1 else ""
+            if succeeded and int(succeeded) >= 1:
+                self.logger.info(f"[K8sUtils] Job '{job_name}' succeeded")
+                return "succeeded"
+            if failed and int(failed) >= 1:
+                self.logger.warning(f"[K8sUtils] Job '{job_name}' failed")
+                return "failed"
+            time.sleep(10)
+        self.logger.warning(f"[K8sUtils] Job '{job_name}' timed out after {timeout}s")
+        return "timeout"
+
+    def get_job_pod_name(self, job_name: str, namespace: str = None) -> str:
+        """Get the pod name created by a Job."""
+        ns = namespace or self.namespace
+        out, _ = self._exec_kubectl(
+            f"kubectl get pods -n {ns} --selector=job-name={job_name} "
+            f"--no-headers -o custom-columns=:metadata.name | head -1",
+            supress_logs=True,
+        )
+        return out.strip()
+
+    def get_pod_logs(self, pod_name: str, namespace: str = None,
+                     tail: int = 200) -> str:
+        """Get pod logs (last *tail* lines)."""
+        ns = namespace or self.namespace
+        out, _ = self._exec_kubectl(
+            f"kubectl logs {pod_name} -n {ns} --tail={tail} 2>/dev/null || true",
+            supress_logs=True,
+        )
+        return out
+
+    def delete_job(self, job_name: str, namespace: str = None):
+        """Delete a Job (cascading to its pods)."""
+        ns = namespace or self.namespace
+        self.logger.info(f"[K8sUtils] Deleting Job '{job_name}'")
+        self._exec_kubectl(
+            f"kubectl delete job {job_name} -n {ns} "
+            f"--ignore-not-found --cascade=foreground"
+        )
+
+    def delete_configmap(self, name: str, namespace: str = None):
+        """Delete a ConfigMap."""
+        ns = namespace or self.namespace
+        self.delete_resource("configmap", name, namespace=ns)
+
+    def validate_fio_job(self, job_name: str, namespace: str = None) -> bool:
+        """Check Job succeeded and pod logs have no FIO error keywords.
+
+        Returns True if valid.  Raises RuntimeError on failure.
+        """
+        ns = namespace or self.namespace
+        status = self.wait_job_complete(job_name, namespace=ns)
+        if status != "succeeded":
+            raise RuntimeError(
+                f"FIO Job '{job_name}' did not succeed (status={status})"
+            )
+        pod_name = self.get_job_pod_name(job_name, namespace=ns)
+        if not pod_name:
+            self.logger.warning(
+                f"[K8sUtils] Could not find pod for Job '{job_name}'; skipping log check"
+            )
+            return True
+        logs = self.get_pod_logs(pod_name, namespace=ns, tail=500)
+        fail_words = ["error", "fail", "interrupt", "terminate"]
+        logs_lower = logs.lower()
+        for word in fail_words:
+            if word in logs_lower:
+                raise RuntimeError(
+                    f"FIO Job '{job_name}' pod logs contain '{word}'"
+                )
+        return True
+
 
 # ── K8s-native sbcli_utils replacement ──────────────────────────────────────
 
@@ -541,27 +990,40 @@ class K8sSbcliUtils:
         self.k8s.exec_sbcli(cmd)
 
     def delete_lvol(self, lvol_name, max_attempt=120, skip_error=False):
-        """Delete lvol by name, waiting until it disappears."""
+        """Delete lvol by name, retrying the delete command periodically
+        if the lvol returns to online state (mirrors sbcli_utils behaviour)."""
         lvol_id = self.get_lvol_id(lvol_name=lvol_name)
         if not lvol_id:
             if skip_error:
                 self.logger.info(f"Lvol {lvol_name} not found. Continuing without delete.")
-                return
+                return True
             raise Exception(f"No such Lvol {lvol_name} found!!")
 
         self.k8s.exec_sbcli(f"{self.sbcli_cmd} -d lvol delete {lvol_id}")
 
         attempt = 0
         while attempt < max_attempt:
-            if lvol_name not in self.list_lvols():
+            lvols = self.list_lvols()
+            if lvol_name not in lvols:
                 self.logger.info(f"Lvol {lvol_name} deleted successfully!!")
-                return
+                return True
+            # Every 12 attempts, check status and retry delete if lvol is
+            # back to online (e.g. delete failed during outage).
+            if attempt > 0 and attempt % 12 == 0:
+                try:
+                    details = self.get_lvol_details(lvol_id=lvol_id)
+                    cur_state = details[0]["status"] if details else "unknown"
+                except Exception:
+                    cur_state = "unknown"
+                if cur_state == "online":
+                    self.logger.info(f"Lvol {lvol_name} in online state. Retrying delete!")
+                    self.k8s.exec_sbcli(f"{self.sbcli_cmd} -d lvol delete {lvol_id}")
             attempt += 1
             self.logger.info(f"Lvol {lvol_name} deletion in progress... ({attempt})")
             sleep_n_sec(5)
 
         if skip_error:
-            return
+            return False
         raise Exception(f"Lvol {lvol_name} is not getting deleted!!")
 
     def delete_all_lvols(self):
@@ -734,6 +1196,22 @@ class K8sSbcliUtils:
             sleep_n_sec(5)
         self.logger.warning("[pool] Pool not confirmed after kubectl apply")
         return pool_name
+
+    def add_host_to_pool(self, pool_id, host_nqn):
+        """Run ``pool add-host <pool_id> <nqn>`` via kubectl exec.
+
+        Registers a client NQN at pool level so it can connect to any
+        DHCHAP-enabled volume in the pool.
+        """
+        out = self._run(f"{self.sbcli_cmd} pool add-host {pool_id} {host_nqn}")
+        self.logger.info(f"[add_host_to_pool] pool={pool_id} nqn={host_nqn}: {out}")
+        return out
+
+    def remove_host_from_pool(self, pool_id, host_nqn):
+        """Run ``pool remove-host <pool_id> <nqn>`` via kubectl exec."""
+        out = self._run(f"{self.sbcli_cmd} pool remove-host {pool_id} {host_nqn}")
+        self.logger.info(f"[remove_host_from_pool] pool={pool_id} nqn={host_nqn}: {out}")
+        return out
 
     def delete_storage_pool(self, pool_name):
         self.logger.info(f"[pool] K8s mode: skipping delete of pool '{pool_name}'")
@@ -951,19 +1429,34 @@ class K8sSbcliUtils:
                 self.logger.info(f"Snapshot not found (skip_error=True). snap_name={snap_name}")
                 return
             raise Exception(f"Snapshot not found. snap_name={snap_name}")
+
         self.k8s.exec_sbcli(f"{self.sbcli_cmd} -d snapshot delete {snap_id}")
-        # Wait for it to disappear from the list
+
         resolve_name = snap_name or next(
             (k for k, v in self.list_snapshots().items() if v == snap_id), None
         )
-        if resolve_name:
-            try:
-                self.wait_for_snapshot(resolve_name, present=False, timeout=60)
-            except TimeoutError as e:
-                if skip_error:
-                    self.logger.warning(str(e))
-                else:
-                    raise
+        # Wait for it to disappear, retrying the delete command periodically
+        attempt = 0
+        while attempt < max_attempt:
+            cur = self.list_snapshots()
+            gone = True
+            if resolve_name and resolve_name in cur:
+                gone = False
+            elif not resolve_name and snap_id in cur.values():
+                gone = False
+            if gone:
+                self.logger.info(f"Snapshot {snap_name or snap_id} deleted successfully!")
+                return
+            if attempt > 0 and attempt % 12 == 0:
+                self.logger.info(f"Snapshot {snap_name or snap_id} still present. Retrying delete!")
+                self.k8s.exec_sbcli(f"{self.sbcli_cmd} -d snapshot delete {snap_id}")
+            attempt += 1
+            sleep_n_sec(5)
+
+        if skip_error:
+            self.logger.warning(f"Snapshot {snap_name or snap_id} not deleted after {max_attempt} attempts")
+            return
+        raise Exception(f"Snapshot did not get deleted in time. snap_name={snap_name}, snap_id={snap_id}")
 
     def delete_all_snapshots(self):
         for snap_name in list(self.list_snapshots().keys()):

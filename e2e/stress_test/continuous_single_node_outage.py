@@ -282,6 +282,7 @@ class RandomMultiClientSingleNodeTest(TestLvolHACluster):
                     self.logger.warning(issue)
             else:
                 self.logger.info(f"No NVMe issues found on {node}")
+        self._log_block_sizes("post_recovery")
 
     def create_snapshots_and_clones(self):
         """Create snapshots and clones."""
@@ -430,6 +431,7 @@ class RandomMultiClientSingleNodeTest(TestLvolHACluster):
             if self.clone_mount_details[clone_name]["ID"]:
                 self.sbcli_utils.resize_lvol(lvol_id=self.clone_mount_details[clone_name]["ID"],
                                              new_size=f"{self.int_lvol_size}G")
+        self._log_block_sizes("after_resize")
 
     def delete_random_lvols(self, count):
         """Delete random lvols."""

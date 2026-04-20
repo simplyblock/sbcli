@@ -142,6 +142,11 @@ commands:
             required: false
             type: str
             default: "/etc/simplyblock/sn_config_file"
+          - name: "--format-4k"
+            help: "Force format nvme devices with 4K."
+            dest: format_4k
+            type: bool
+            action: store_true
 
       - name: add-node
         help: "Adds a storage node by its IP address."
@@ -233,10 +238,9 @@ commands:
             action: store_false
             private: true
           - name: "--ha-jm-count"
-            help: "The HA JM count. Default: `3`."
+            help: "HA JM count. Defaults to 4 for FT=2 clusters, otherwise 3."
             dest: ha_jm_count
             type: int
-            default: 3
           - name: "--namespace"
             help: "The Kubernetes namespace to deploy on."
             dest: namespace
@@ -1007,18 +1011,6 @@ commands:
               Network interface name from client to use for logical volume connection.
             dest: client_data_nic
             type: str
-          - name: "--host-sec"
-            help: "Path to JSON file with NVMe-oF host security config (bdev_nvme_set_options params including dhchap_digests and dhchap_dhgroups)."
-            dest: host_sec
-            type: str
-          - name: "--max-fault-tolerance"
-            help: "Maximum number of node failures tolerated (1=single secondary, 2=dual secondary). Default: `1`."
-            dest: max_fault_tolerance
-            type: int
-            default: 1
-            choices:
-              - 1
-              - 2
           - name: "--use-backup"
             help: "The path to JSON file with S3/MinIO backup configuration."
             dest: use_backup
@@ -1170,14 +1162,6 @@ commands:
               Network interface name from client to use for logical volume connection.
             dest: client_data_nic
             type: str
-          - name: "--max-fault-tolerance"
-            help: "Maximum number of node failures tolerated (1=single secondary, 2=dual secondary). Default: `1`."
-            dest: max_fault_tolerance
-            type: int
-            default: 1
-            choices:
-              - 1
-              - 2
           - name: "--use-backup"
             help: "The path to JSON file with S3/MinIO backup configuration."
             dest: use_backup
@@ -1637,43 +1621,6 @@ commands:
             dest: replicate
             type: bool
             action: store_true
-          - name: "--allowed-hosts"
-            help: "Path to JSON file with host NQNs allowed to access this volume's subsystem."
-            dest: allowed_hosts
-            type: str
-      - name: add-host
-        help: "Add an allowed host NQN to a volume's subsystem."
-        arguments:
-          - name: "volume_id"
-            help: "The logical volume id."
-            dest: volume_id
-            type: str
-          - name: "host_nqn"
-            help: "The host NQN to allow access."
-            dest: host_nqn
-            type: str
-      - name: remove-host
-        help: "Remove an allowed host NQN from a volume's subsystem."
-        arguments:
-          - name: "volume_id"
-            help: "The logical volume id."
-            dest: volume_id
-            type: str
-          - name: "host_nqn"
-            help: "The host NQN to remove."
-            dest: host_nqn
-            type: str
-      - name: get-secret
-        help: "Get security credentials for a host on a volume."
-        arguments:
-          - name: "volume_id"
-            help: "The logical volume id."
-            dest: volume_id
-            type: str
-          - name: "host_nqn"
-            help: "The host NQN to get credentials for."
-            dest: host_nqn
-            type: str
       - name: qos-set
         help: "Changes QoS settings for an active logical volume."
         arguments:
@@ -2085,10 +2032,12 @@ commands:
             dest: qos_host
             type: str
             required: false
-          - name: "--sec-options"
-            help: "Path to JSON file with security options: dhchap_key, dhchap_ctrlr_key, psk (keys are auto-generated). Applied to all volumes in the pool."
-            dest: sec_options
-            type: str
+          - name: "--dhchap"
+            help: "Enable DH-HMAC-CHAP authentication for all volumes in the pool."
+            dest: dhchap
+            type: bool
+            default: false
+            action: store_true
       - name: set
         help: "Sets a storage pool's attributes."
         arguments:
@@ -2189,6 +2138,28 @@ commands:
             dest: records
             type: int
             default: 20
+      - name: add-host
+        help: "Add an allowed host NQN to a storage pool."
+        arguments:
+          - name: "pool_id"
+            help: "The storage pool id."
+            dest: pool_id
+            type: str
+          - name: "host_nqn"
+            help: "The host NQN to allow access."
+            dest: host_nqn
+            type: str
+      - name: remove-host
+        help: "Remove an allowed host NQN from a storage pool."
+        arguments:
+          - name: "pool_id"
+            help: "The storage pool id."
+            dest: pool_id
+            type: str
+          - name: "host_nqn"
+            help: "The host NQN to remove."
+            dest: host_nqn
+            type: str
   - name: "snapshot"
     help: "Snapshot Commands"
     weight: 600

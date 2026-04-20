@@ -3338,18 +3338,63 @@ echo "$WORKDIR_HOST/{os.path.basename(remote_tar)}"
 
         print(f"\n All logs and /etc/simplyblock configs copied to: {logs_path}\n")
 
+    # ── COMMENTED OUT: old add_storage_pool with --sec-options JSON file ────
+    # def add_storage_pool(self, node, pool_name, cluster_id,
+    #                      max_rw_iops=0, max_rw_mbytes=0, max_r_mbytes=0, max_w_mbytes=0,
+    #                      sec_options=None):
+    #     """Adds a new storage pool using sbcli-dev CLI command (skips zero-value params).
+    #
+    #     sec_options: dict e.g. {"dhchap_key": True, "dhchap_ctrlr_key": True}.
+    #                  Written to a temp file and passed via --sec-options.
+    #                  Security is applied to all volumes created in this pool.
+    #     """
+    #     cmd_parts = [f"{self.base_cmd} -d pool add"]
+    #
+    #     # Append only non-zero QoS parameters
+    #     if max_rw_iops:
+    #         cmd_parts.append(f"--max-rw-iops {max_rw_iops}")
+    #     if max_rw_mbytes:
+    #         cmd_parts.append(f"--max-rw-mbytes {max_rw_mbytes}")
+    #     if max_r_mbytes:
+    #         cmd_parts.append(f"--max-r-mbytes {max_r_mbytes}")
+    #     if max_w_mbytes:
+    #         cmd_parts.append(f"--max-w-mbytes {max_w_mbytes}")
+    #
+    #     tmp_files = []
+    #     if sec_options is not None:
+    #         import random as _random
+    #         import string as _string
+    #         suffix = ''.join(_random.choices(_string.ascii_uppercase + _string.digits, k=6))
+    #         p = f"/tmp/sec_pool_{suffix}.json"
+    #         self.write_json_file(node, p, sec_options)
+    #         self.exec_command(node, f"chmod 600 {p}", supress_logs=True)
+    #         cmd_parts.append(f"--sec-options {p}")
+    #         tmp_files.append(p)
+    #
+    #     # Append required positional arguments
+    #     cmd_parts.extend([pool_name, cluster_id])
+    #
+    #     # Join all parts into a single command
+    #     cmd = " ".join(cmd_parts)
+    #
+    #     output, error = self.exec_command(node=node, command=cmd)
+    #
+    #     for f in tmp_files:
+    #         self.exec_command(node, f"rm -f {f}", supress_logs=True)
+    #
+    #     return output, error
+
     def add_storage_pool(self, node, pool_name, cluster_id,
                          max_rw_iops=0, max_rw_mbytes=0, max_r_mbytes=0, max_w_mbytes=0,
-                         sec_options=None):
-        """Adds a new storage pool using sbcli-dev CLI command (skips zero-value params).
+                         dhchap=False, sec_options=None):
+        """Adds a new storage pool using sbcli-dev CLI command.
 
-        sec_options: dict e.g. {"dhchap_key": True, "dhchap_ctrlr_key": True}.
-                     Written to a temp file and passed via --sec-options.
-                     Security is applied to all volumes created in this pool.
+        dhchap: bool — if True, passes ``--dhchap`` flag to enable bidirectional
+                DH-HMAC-CHAP authentication for all volumes in this pool.
+        sec_options: DEPRECATED — kept for backward compat, ignored if dhchap is set.
         """
         cmd_parts = [f"{self.base_cmd} -d pool add"]
 
-        # Append only non-zero QoS parameters
         if max_rw_iops:
             cmd_parts.append(f"--max-rw-iops {max_rw_iops}")
         if max_rw_mbytes:
@@ -3359,28 +3404,13 @@ echo "$WORKDIR_HOST/{os.path.basename(remote_tar)}"
         if max_w_mbytes:
             cmd_parts.append(f"--max-w-mbytes {max_w_mbytes}")
 
-        tmp_files = []
-        if sec_options is not None:
-            import random as _random
-            import string as _string
-            suffix = ''.join(_random.choices(_string.ascii_uppercase + _string.digits, k=6))
-            p = f"/tmp/sec_pool_{suffix}.json"
-            self.write_json_file(node, p, sec_options)
-            self.exec_command(node, f"chmod 600 {p}", supress_logs=True)
-            cmd_parts.append(f"--sec-options {p}")
-            tmp_files.append(p)
+        if dhchap:
+            cmd_parts.append("--dhchap")
 
-        # Append required positional arguments
         cmd_parts.extend([pool_name, cluster_id])
-
-        # Join all parts into a single command
         cmd = " ".join(cmd_parts)
 
         output, error = self.exec_command(node=node, command=cmd)
-
-        for f in tmp_files:
-            self.exec_command(node, f"rm -f {f}", supress_logs=True)
-
         return output, error
     
     def list_nvme_ns_devices(self, node, ctrl_dev: str) -> list[str]:
@@ -3446,21 +3476,74 @@ echo "$WORKDIR_HOST/{os.path.basename(remote_tar)}"
             f"[get_lvol_connect_str_with_host_nqn] connect_lines repr: {connect_lines!r}")
         return connect_lines, err
 
+    # ── COMMENTED OUT: old create_sec_lvol with --allowed-hosts JSON file ──
+    # def create_sec_lvol(self, node, lvol_name, size, pool,
+    #                     allowed_hosts=None,
+    #                     encrypt=False, key1=None, key2=None,
+    #                     distr_ndcs=0, distr_npcs=0, fabric="tcp"):
+    #     """
+    #     Create an lvol with optional security parameters via CLI.
+    #
+    #     Security (DHCHAP) is configured at pool level via ``pool add --sec-options``.
+    #     This method only handles volume-level options: ``--allowed-hosts``,
+    #     encryption, fabric, and distribution parameters.
+    #
+    #     allowed_hosts: list of NQN strings
+    #     distr_ndcs   : number of data chunks per stripe (0 = cluster default)
+    #     distr_npcs   : number of parity chunks per stripe (0 = cluster default)
+    #     fabric       : "tcp" or "rdma"
+    #     Returns (stdout, stderr).
+    #     """
+    #     cmd = f"{self.base_cmd} -d volume add {lvol_name} {size} {pool}"
+    #     if encrypt and key1 and key2:
+    #         cmd += f" --encrypt --crypto-key1 {key1} --crypto-key2 {key2}"
+    #     if fabric and fabric != "tcp":
+    #         cmd += f" --fabric {fabric}"
+    #     if distr_ndcs and distr_npcs:
+    #         cmd += f" --data-chunks-per-stripe {distr_ndcs} --parity-chunks-per-stripe {distr_npcs}"
+    #
+    #     self.logger.info(f"[create_sec_lvol] allowed_hosts={allowed_hosts!r} "
+    #                      f"encrypt={encrypt} fabric={fabric} ndcs={distr_ndcs} npcs={distr_npcs}")
+    #
+    #     tmp_files = []
+    #     if allowed_hosts is not None:
+    #         p = f"/tmp/hosts_{lvol_name}.json"
+    #         self.logger.info(f"[create_sec_lvol] Writing allowed_hosts to {p} on {node}: {allowed_hosts}")
+    #         self.write_json_file(node, p, allowed_hosts)
+    #         self.exec_command(node, f"chmod 600 {p}", supress_logs=False)
+    #         out_cat, _ = self.exec_command(node, f"cat {p}", supress_logs=False)
+    #         self.logger.info(f"[create_sec_lvol] allowed_hosts file contents: {out_cat!r}")
+    #         cmd += f" --allowed-hosts {p}"
+    #         tmp_files.append(p)
+    #
+    #     self.logger.info(f"[create_sec_lvol] FULL COMMAND: {cmd}")
+    #     out, err = self.exec_command(node, cmd)
+    #     self.logger.info(f"[create_sec_lvol] {lvol_name}: out={out!r}, err={err!r}")
+    #
+    #     # Log lvol details post-creation to verify security was applied
+    #     lvol_id_line = [ln.strip() for ln in out.splitlines() if ln.strip()]
+    #     if lvol_id_line:
+    #         # try to show the volume details for debug
+    #         possible_id = lvol_id_line[-1]
+    #         get_out, get_err = self.exec_command(node, f"{self.base_cmd} volume get {possible_id}", supress_logs=False)
+    #         self.logger.info(f"[create_sec_lvol] volume get {possible_id}: out={get_out!r}, err={get_err!r}")
+    #
+    #     for f in tmp_files:
+    #         self.exec_command(node, f"rm -f {f}", supress_logs=True)
+    #     return out, err
+
     def create_sec_lvol(self, node, lvol_name, size, pool,
-                        allowed_hosts=None,
                         encrypt=False, key1=None, key2=None,
-                        distr_ndcs=0, distr_npcs=0, fabric="tcp"):
+                        distr_ndcs=0, distr_npcs=0, fabric="tcp",
+                        allowed_hosts=None, sec_options=None):
         """
-        Create an lvol with optional security parameters via CLI.
+        Create an lvol via CLI.
 
-        Security (DHCHAP) is configured at pool level via ``pool add --sec-options``.
-        This method only handles volume-level options: ``--allowed-hosts``,
-        encryption, fabric, and distribution parameters.
+        DHCHAP authentication is now configured at pool level (``pool add --dhchap``).
+        Host management is pool-level (``pool add-host / remove-host``).
+        This method only handles: encryption, fabric, distribution parameters.
 
-        allowed_hosts: list of NQN strings
-        distr_ndcs   : number of data chunks per stripe (0 = cluster default)
-        distr_npcs   : number of parity chunks per stripe (0 = cluster default)
-        fabric       : "tcp" or "rdma"
+        allowed_hosts / sec_options: DEPRECATED — kept for backward compat signature, ignored.
         Returns (stdout, stderr).
         """
         cmd = f"{self.base_cmd} -d volume add {lvol_name} {size} {pool}"
@@ -3471,56 +3554,86 @@ echo "$WORKDIR_HOST/{os.path.basename(remote_tar)}"
         if distr_ndcs and distr_npcs:
             cmd += f" --data-chunks-per-stripe {distr_ndcs} --parity-chunks-per-stripe {distr_npcs}"
 
-        self.logger.info(f"[create_sec_lvol] allowed_hosts={allowed_hosts!r} "
-                         f"encrypt={encrypt} fabric={fabric} ndcs={distr_ndcs} npcs={distr_npcs}")
-
-        tmp_files = []
-        if allowed_hosts is not None:
-            p = f"/tmp/hosts_{lvol_name}.json"
-            self.logger.info(f"[create_sec_lvol] Writing allowed_hosts to {p} on {node}: {allowed_hosts}")
-            self.write_json_file(node, p, allowed_hosts)
-            self.exec_command(node, f"chmod 600 {p}", supress_logs=False)
-            out_cat, _ = self.exec_command(node, f"cat {p}", supress_logs=False)
-            self.logger.info(f"[create_sec_lvol] allowed_hosts file contents: {out_cat!r}")
-            cmd += f" --allowed-hosts {p}"
-            tmp_files.append(p)
-
+        self.logger.info(f"[create_sec_lvol] encrypt={encrypt} fabric={fabric} "
+                         f"ndcs={distr_ndcs} npcs={distr_npcs}")
         self.logger.info(f"[create_sec_lvol] FULL COMMAND: {cmd}")
         out, err = self.exec_command(node, cmd)
         self.logger.info(f"[create_sec_lvol] {lvol_name}: out={out!r}, err={err!r}")
 
-        # Log lvol details post-creation to verify security was applied
         lvol_id_line = [ln.strip() for ln in out.splitlines() if ln.strip()]
         if lvol_id_line:
-            # try to show the volume details for debug
             possible_id = lvol_id_line[-1]
-            get_out, get_err = self.exec_command(node, f"{self.base_cmd} volume get {possible_id}", supress_logs=False)
-            self.logger.info(f"[create_sec_lvol] volume get {possible_id}: out={get_out!r}, err={get_err!r}")
+            get_out, get_err = self.exec_command(
+                node, f"{self.base_cmd} volume get {possible_id}", supress_logs=False)
+            self.logger.info(
+                f"[create_sec_lvol] volume get {possible_id}: out={get_out!r}, err={get_err!r}")
 
-        for f in tmp_files:
-            self.exec_command(node, f"rm -f {f}", supress_logs=True)
+        return out, err
+
+    # ── COMMENTED OUT: old volume-level host management ────────────────────
+    # def add_host_to_lvol(self, node, lvol_id, host_nqn):
+    #     """
+    #     Run ``volume add-host <id> <nqn>``.
+    #
+    #     Security credentials (DHCHAP) are inherited from the pool's --sec-options
+    #     configuration and are no longer specified per-host at add time.
+    #     Returns (stdout, stderr).
+    #     """
+    #     cmd = f"{self.base_cmd} volume add-host {lvol_id} {host_nqn}"
+    #     out, err = self.exec_command(node, cmd)
+    #     self.logger.info(
+    #         f"[add_host_to_lvol] {lvol_id} {host_nqn}: out={out!r}, err={err!r}")
+    #     return out, err
+    #
+    # def remove_host_from_lvol(self, node, lvol_id, host_nqn):
+    #     """Run ``volume remove-host <id> <nqn>`` and return (stdout, stderr)."""
+    #     cmd = f"{self.base_cmd} volume remove-host {lvol_id} {host_nqn}"
+    #     out, err = self.exec_command(node, cmd)
+    #     self.logger.info(
+    #         f"[remove_host_from_lvol] {lvol_id} {host_nqn}: out={out!r}, err={err!r}")
+    #     return out, err
+
+    def add_host_to_pool(self, node, pool_id, host_nqn):
+        """Run ``pool add-host <pool_id> <nqn>`` and return (stdout, stderr).
+
+        Registers a client NQN at pool level so it can connect to any
+        DHCHAP-enabled volume in the pool.
+        """
+        cmd = f"{self.base_cmd} pool add-host {pool_id} {host_nqn}"
+        out, err = self.exec_command(node, cmd)
+        self.logger.info(
+            f"[add_host_to_pool] pool={pool_id} nqn={host_nqn}: out={out!r}, err={err!r}")
+        return out, err
+
+    def remove_host_from_pool(self, node, pool_id, host_nqn):
+        """Run ``pool remove-host <pool_id> <nqn>`` and return (stdout, stderr)."""
+        cmd = f"{self.base_cmd} pool remove-host {pool_id} {host_nqn}"
+        out, err = self.exec_command(node, cmd)
+        self.logger.info(
+            f"[remove_host_from_pool] pool={pool_id} nqn={host_nqn}: out={out!r}, err={err!r}")
         return out, err
 
     def add_host_to_lvol(self, node, lvol_id, host_nqn):
-        """
-        Run ``volume add-host <id> <nqn>``.
-
-        Security credentials (DHCHAP) are inherited from the pool's --sec-options
-        configuration and are no longer specified per-host at add time.
+        """DEPRECATED: volume-level host management replaced by pool-level.
+        Kept for backward compat — calls pool add-host would be needed instead.
         Returns (stdout, stderr).
         """
+        self.logger.warning(
+            f"[add_host_to_lvol] DEPRECATED — use add_host_to_pool instead. "
+            f"lvol_id={lvol_id} nqn={host_nqn}")
         cmd = f"{self.base_cmd} volume add-host {lvol_id} {host_nqn}"
         out, err = self.exec_command(node, cmd)
-        self.logger.info(
-            f"[add_host_to_lvol] {lvol_id} {host_nqn}: out={out!r}, err={err!r}")
         return out, err
 
     def remove_host_from_lvol(self, node, lvol_id, host_nqn):
-        """Run ``volume remove-host <id> <nqn>`` and return (stdout, stderr)."""
+        """DEPRECATED: volume-level host management replaced by pool-level.
+        Returns (stdout, stderr).
+        """
+        self.logger.warning(
+            f"[remove_host_from_lvol] DEPRECATED — use remove_host_from_pool instead. "
+            f"lvol_id={lvol_id} nqn={host_nqn}")
         cmd = f"{self.base_cmd} volume remove-host {lvol_id} {host_nqn}"
         out, err = self.exec_command(node, cmd)
-        self.logger.info(
-            f"[remove_host_from_lvol] {lvol_id} {host_nqn}: out={out!r}, err={err!r}")
         return out, err
 
     def get_lvol_host_secret(self, node, lvol_id, host_nqn):

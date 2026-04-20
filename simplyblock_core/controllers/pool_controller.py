@@ -24,7 +24,7 @@ def _generate_string(length):
 
 
 def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, cluster_id,
-                 cr_name=None, cr_namespace=None, cr_plural=None, qos_host=None, sec_options=None):
+                 cr_name=None, cr_namespace=None, cr_plural=None, qos_host=None, sec_options=None, dhchap=False):
     db_controller = DBController()
     if not name:
         logger.error("Pool name is empty!")
@@ -96,11 +96,65 @@ def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes,
             return False
         pool.sec_options = sec_options
 
+    pool.dhchap = bool(dhchap)
+    if pool.dhchap:
+        pool.dhchap_key = utils.generate_dhchap_key(length=36)
+        pool.dhchap_ctrlr_key = utils.generate_dhchap_key(length=36)
+
     pool.status = "active"
     pool.write_to_db(db_controller.kv_store)
     pool_events.pool_add(pool)
     logger.info("Done")
     return pool.get_id()
+
+
+def add_host_to_pool(pool_id, host_nqn):
+    """Add a host NQN to the pool's allowed_hosts list.
+
+    Only valid for DHCHAP-enabled pools. Does not affect currently connected volumes.
+    Returns (True, None) on success or (False, error_message) on failure.
+    """
+    db_controller = DBController()
+    try:
+        pool = db_controller.get_pool_by_id(pool_id)
+    except KeyError:
+        return False, f"Pool not found: {pool_id}"
+
+    if not pool.dhchap:
+        return False, "Pool does not have DHCHAP enabled"
+
+    if host_nqn in pool.allowed_hosts:
+        return False, f"Host {host_nqn} is already in the pool's allowed list"
+
+    pool.allowed_hosts = list(pool.allowed_hosts) + [host_nqn]
+    pool.write_to_db(db_controller.kv_store)
+    logger.info(f"Added host {host_nqn} to pool {pool_id}")
+    return True, None
+
+
+def remove_host_from_pool(pool_id, host_nqn):
+    """Remove a host NQN from the pool's allowed_hosts list.
+
+    Does not affect currently connected volumes.
+    Returns (True, None) on success or (False, error_message) on failure.
+    """
+    db_controller = DBController()
+    try:
+        pool = db_controller.get_pool_by_id(pool_id)
+    except KeyError:
+        return False, f"Pool not found: {pool_id}"
+
+    if not pool.dhchap:
+        return False, "Pool does not have DHCHAP enabled"
+
+    if host_nqn not in pool.allowed_hosts:
+        return False, f"Host {host_nqn} is not in the pool's allowed list"
+
+    pool.allowed_hosts = [h for h in pool.allowed_hosts if h != host_nqn]
+    pool.write_to_db(db_controller.kv_store)
+    logger.info(f"Removed host {host_nqn} from pool {pool_id}")
+    return True, None
+
 
 def _generate_numeric_id(pool_list: list[Pool]):
     if (pool_list is None) or (len(pool_list) == 0):
@@ -290,15 +344,19 @@ def list_pools(is_json, cluster_id=None):
     db_controller = DBController()
     pools = db_controller.get_pools(cluster_id)
     data = []
+    all_lvols = db_controller.get_lvols() or []
     for pool in pools:
-        lvs = db_controller.get_lvols_by_pool_id(pool.get_id()) or []
+        lvols_count = 0
+        for lvol in all_lvols:
+            if lvol.pool_uuid == pool.get_id():
+                lvols_count += 1
         data.append({
             "UUID": pool.get_id(),
             "Name": pool.pool_name,
             "Capacity": utils.humanbytes(get_pool_total_capacity(pool.get_id())),
             "Max size": utils.humanbytes(pool.pool_max_size),
             "LVol Max Size": utils.humanbytes(pool.lvol_max_size),
-            "LVols": f"{len(lvs)}",
+            "LVols": f"{lvols_count}",
             "QOS": f"{pool.has_qos()}",
             "QOS Host": f"{pool.qos_host}",
             "Security": ", ".join(sorted(pool.sec_options.keys())) if pool.sec_options else "none",

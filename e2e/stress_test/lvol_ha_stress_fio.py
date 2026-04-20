@@ -1,4 +1,5 @@
 import random
+import re
 import threading
 from utils.common_utils import sleep_n_sec
 from e2e_tests.data_migration.data_migration_ha_fio import FioWorkloadTest
@@ -220,6 +221,38 @@ class TestLvolHACluster(FioWorkloadTest):
             final_checksums = self.ssh_obj.generate_checksums(node=self.node, files=final_files)
             
             assert final_checksums == lvol["MD5"], f"Checksum validation for {lvol['Name']} is not successful. Intial: {lvol['MD5']}, Final: {final_checksums}"
+
+
+    def _log_block_sizes(self, label: str = "") -> None:
+        """Log sysfs block sizes for every connected lvol/clone."""
+        tag = f"[block_size{' ' + label if label else ''}]"
+        all_details = dict(self.lvol_mount_details)
+        all_details.update(getattr(self, 'clone_mount_details', {}))
+        for lvol_name, details in all_details.items():
+            device = details.get("Device")
+            client = details.get("Client") or (
+                self.fio_node[0] if isinstance(
+                    getattr(self, 'fio_node', None), list)
+                else getattr(self, 'fio_node', None)
+            )
+            if not device or not client:
+                continue
+            dev_name = device.split("/")[-1]
+            m = re.match(r'nvme(\d+)n(\d+)', dev_name)
+            if not m:
+                continue
+            sub, ns = m.group(1), m.group(2)
+            self.logger.info(
+                f"{tag} {lvol_name} ({device}) "
+                f"— /sys/block/nvme{sub}c*n{ns}/size"
+            )
+            self.ssh_obj.exec_command(
+                node=client,
+                command=(
+                    f"for d in /sys/block/nvme{sub}c*n{ns}; do "
+                    f'echo "$d: $(cat $d/size 2>/dev/null)"; done'
+                ),
+            )
 
 
 class TestLvolHAClusterGracefulShutdown(TestLvolHACluster):

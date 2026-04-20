@@ -26,18 +26,62 @@ from simplyblock_core.snode_client import SNodeClient
 logger = lg.getLogger()
 
 
-def _get_dhchap_group(cluster):
+def _get_dhchap_group(cluster, pool=None):
     """Return the DH group to set on the target subsystem for DH-HMAC-CHAP.
 
-    Uses the first group from cluster.tls_config.dhchap_dhgroups if configured,
+    For pool-level DHCHAP the fixed DHCHAP_DHGROUP constant is used.
+    Falls back to cluster.tls_config for legacy cluster-level config,
     otherwise returns 'null' (HMAC-CHAP only, no DH key exchange).
     """
+    if pool and getattr(pool, 'dhchap', False):
+        return constants.DHCHAP_DHGROUP
     if cluster and cluster.tls and cluster.tls_config:
         params = cluster.tls_config.get("params", cluster.tls_config)
         groups = params.get("dhchap_dhgroups") or []
         if groups:
             return groups[0]
     return "null"
+
+
+def _register_pool_dhchap_keys_on_node(pool, snode, rpc_client):
+    """Write pool-level DHCHAP key files to a storage node and register in SPDK keyring.
+
+    All LVols in a DHCHAP pool share one key pair stored on the pool.
+    Key names are pool-scoped so a single registration serves all LVols.
+
+    Returns a dict with 'dhchap_key' and 'dhchap_ctrlr_key' keyring names,
+    or an empty dict on failure.
+    """
+    snode_api = SNodeClient(snode.api_endpoint)
+    safe_pool = pool.get_id().replace("-", "_")
+    key_names = {}
+
+    for key_type, key_value in (
+        ("dhchap_key", pool.dhchap_key),
+        ("dhchap_ctrlr_key", pool.dhchap_ctrlr_key),
+    ):
+        if not key_value:
+            continue
+        key_name = f"pool_{safe_pool}_{key_type}"
+        result, error = snode_api.write_key_file(key_name, key_value)
+        if error:
+            logger.error("Failed to write pool key %s on node %s: %s",
+                         key_name, snode.get_id(), error)
+            continue
+        key_path = result
+        ret, err = rpc_client._request2("keyring_file_add_key",
+                                        {"name": key_name, "path": key_path})
+        if not ret and err:
+            if err.get("code") == -17:
+                logger.info("Pool key %s already in SPDK keyring on node %s, reusing",
+                            key_name, snode.get_id())
+            else:
+                logger.error("Failed to register pool key %s in SPDK keyring on node %s: %s",
+                             key_name, snode.get_id(), err.get("message", err))
+                continue
+        key_names[key_type] = key_name
+
+    return key_names
 
 
 def _register_dhchap_keys_on_node(snode, host_nqn, host_entry, rpc_client):
@@ -204,8 +248,7 @@ def _get_next_3_nodes(cluster_id, lvol_size=0):
             if subsys_count >= node.max_lvol:
                 continue
             if node.lvol_sync_del():
-                logger.warning(f"LVol sync delete task found on node: {node.get_id()}, skipping")
-                continue
+                logger.info(f"LVol sync delete task found on node: {node.get_id()}, proceeding anyway")
             online_nodes.append(node)
             node_st = {
                 "lvol": subsys_count+1
@@ -323,8 +366,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
             else:
                 return False, f"Can not find storage node: {host_id_or_name}"
         if host_node.lvol_sync_del():
-            logger.error(f"LVol sync deletion found on node: {host_node.get_id()}")
-            return False, f"LVol sync deletion found on node: {host_node.get_id()}"
+            logger.info(f"LVol sync delete task on node: {host_node.get_id()}, proceeding anyway")
 
     if namespace:
         try:
@@ -428,6 +470,11 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
 
     if host_node and host_node.status != StorageNode.STATUS_ONLINE:
         mgs = f"Storage node is not online. ID: {host_node.get_id()} status: {host_node.status}"
+        logger.error(mgs)
+        return False, mgs
+
+    if host_node and host_node.lvstore_status == "in_creation":
+        mgs = f"Storage node LVStore is being recreated (restart in progress). ID: {host_node.get_id()}"
         logger.error(mgs)
         return False, mgs
 
@@ -589,12 +636,16 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
         lvol.crypto_key2 = crypto_key2
 
     # Process allowed hosts (for host restriction and/or DH-HMAC-CHAP authentication)
-    # Security options are inherited from the pool
-    if allowed_hosts and not namespace:
-        host_entries = _build_host_entries(allowed_hosts, pool.sec_options or None)
-        if isinstance(host_entries, tuple):
-            return host_entries  # (False, error_message)
-        lvol.allowed_hosts = host_entries
+    if not namespace:
+        if pool.dhchap:
+            # Pool-level DHCHAP: inherit allowed hosts from pool (no per-host key generation)
+            lvol.allowed_hosts = [{"nqn": h} for h in pool.allowed_hosts]
+        elif allowed_hosts:
+            # Legacy per-lvol host restriction with pool.sec_options key generation
+            host_entries = _build_host_entries(allowed_hosts, pool.sec_options or None)
+            if isinstance(host_entries, tuple):
+                return host_entries  # (False, error_message)
+            lvol.allowed_hosts = host_entries
 
     lvol.write_to_db(db_controller.kv_store)
 
@@ -615,92 +666,96 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
             return False, msg
 
     if ha_type == "ha":
-        # Build nodes list with all secondaries
+        from simplyblock_core.storage_node_ops import (
+            find_leader_with_failover, check_non_leader_for_operation,
+            queue_for_restart_drain, execute_on_leader_with_failover,
+        )
+
+        # Build nodes list
         secondary_ids = [host_node.secondary_node_id]
-        if host_node.secondary_node_id_2:
-            secondary_ids.append(host_node.secondary_node_id_2)
+        if host_node.tertiary_node_id:
+            secondary_ids.append(host_node.tertiary_node_id)
         lvol.nodes = [host_node.get_id()] + secondary_ids
 
-        primary_node = None
-        secondary_nodes = []
-        sec_node = db_controller.get_storage_node_by_id(host_node.secondary_node_id)
-        if host_node.status == StorageNode.STATUS_ONLINE:
-
-            if is_node_leader(host_node, lvol.lvs_name):
-                primary_node = host_node
-                if sec_node.status == StorageNode.STATUS_DOWN:
-                    msg = "Secondary node is in down status, can not create lvol"
-                    logger.error(msg)
-                    lvol.remove(db_controller.kv_store)
-                    return False, msg
-                elif sec_node.status == StorageNode.STATUS_ONLINE:
-                    secondary_nodes.append(sec_node)
-
-            elif sec_node.status == StorageNode.STATUS_ONLINE:
-                if is_node_leader(sec_node, lvol.lvs_name):
-                    primary_node = sec_node
-                    secondary_nodes.append(host_node)
-                else:
-                    # both nodes are non leaders and online, set primary as leader
-                    primary_node = host_node
-                    secondary_nodes.append(sec_node)
-
-            else:
-                # sec node is not online, set primary as leader
-                primary_node = host_node
-
-        elif sec_node.status == StorageNode.STATUS_ONLINE:
-            # primary is not online but secondary is, create on secondary and set leader if needed,
-            primary_node = sec_node
-
-        else:
-            # Primary and first secondary are both offline.
-            # Check if second secondary (FTT=2) is online.
-            for extra_sec_id in secondary_ids[1:]:
-                try:
-                    extra_sec = db_controller.get_storage_node_by_id(extra_sec_id)
-                    if extra_sec.status == StorageNode.STATUS_ONLINE:
-                        primary_node = extra_sec
-                        break
-                except KeyError:
-                    pass
-            if not primary_node:
-                msg = "Host nodes are not online"
-                logger.error(msg)
-                lvol.remove(db_controller.kv_store)
-                return False, msg
-
-        # Add additional secondaries (secondary_node_id_2, etc.) if online
-        for extra_sec_id in secondary_ids[1:]:
+        all_nodes = [host_node]
+        for sid in secondary_ids:
             try:
-                extra_sec = db_controller.get_storage_node_by_id(extra_sec_id)
-                if extra_sec.status == StorageNode.STATUS_ONLINE and extra_sec.get_id() != (primary_node.get_id() if primary_node else None):
-                    secondary_nodes.append(extra_sec)
+                all_nodes.append(db_controller.get_storage_node_by_id(sid))
             except KeyError:
                 pass
 
-        if primary_node:
-            lvol_bdev, error = add_lvol_on_node(lvol, primary_node)
-            if error:
-                logger.error(error)
+        # Step 1: Pre-check all non-leaders BEFORE executing on leader
+        primary_node, non_leaders = find_leader_with_failover(all_nodes, lvol.lvs_name)
+        if primary_node is None:
+            msg = "No leader available for lvol create"
+            logger.error(msg)
+            lvol.remove(db_controller.kv_store)
+            return False, msg
+
+        secondary_nodes = []
+        for nl in non_leaders:
+            action = check_non_leader_for_operation(
+                nl.get_id(), lvol.lvs_name, operation_type="create",
+                leader_op_completed=False, all_nodes=all_nodes)
+            if action == "reject":
+                msg = f"Cannot create lvol: non-leader {nl.get_id()[:8]} unreachable but fabric healthy"
+                logger.error(msg)
                 lvol.remove(db_controller.kv_store)
-                return False, error
+                return False, msg
+            elif action == "proceed":
+                secondary_nodes.append(nl)
+            elif action == "queue":
+                queue_for_restart_drain(
+                    nl.get_id(), lvol.lvs_name,
+                    lambda c=nl, idx=len(secondary_nodes): add_lvol_on_node(
+                        lvol, c, is_primary=False, secondary_index=idx),
+                    f"register create lvol {lvol.uuid} on {nl.get_id()[:8]}")
+            # "skip" — disconnected or pre_block, skip
 
-            lvol.lvol_uuid = lvol_bdev['uuid']
-            lvol.blobid = lvol_bdev['driver_specific']['lvol']['blobid']
+        # Step 2: Execute on leader (with failover on failure)
+        def _create_on_leader(leader):
+            lvol_bdev, error = add_lvol_on_node(lvol, leader)
+            if error:
+                raise RuntimeError(error)
+            return lvol_bdev
 
+        success, actual_leader, result = execute_on_leader_with_failover(
+            all_nodes, lvol.lvs_name, _create_on_leader)
+        if not success:
+            logger.error(f"Failed to create lvol on leader: {result}")
+            lvol.remove(db_controller.kv_store)
+            return False, str(result)
+
+        lvol_bdev = result
+        lvol.lvol_uuid = lvol_bdev['uuid']
+        lvol.blobid = lvol_bdev['driver_specific']['lvol']['blobid']
+
+        # Step 3: Execute registration on non-leaders that passed pre-check
         for sec_idx, sec in enumerate(secondary_nodes):
-            sec = db_controller.get_storage_node_by_id(sec.get_id())
-            if sec.status == StorageNode.STATUS_ONLINE:
+            action = check_non_leader_for_operation(
+                sec.get_id(), lvol.lvs_name, operation_type="create",
+                leader_op_completed=True, all_nodes=all_nodes)
+            if action == "proceed":
                 lvol_bdev, error = add_lvol_on_node(lvol, sec, is_primary=False, secondary_index=sec_idx)
                 if error:
                     logger.error(error)
-                    # remove lvol from primary
-                    ret = delete_lvol_from_node(lvol.get_id(), primary_node.get_id())
+                    ret = delete_lvol_from_node(lvol.get_id(), actual_leader.get_id())
                     if not ret:
                         logger.error("")
                     lvol.remove(db_controller.kv_store)
                     return False, error
+            elif action == "kill_and_wait":
+                logger.warning("Non-leader %s needs kill+restart for lvol create", sec.get_id()[:8])
+                queue_for_restart_drain(
+                    sec.get_id(), lvol.lvs_name,
+                    lambda c=sec, si=sec_idx: add_lvol_on_node(lvol, c, is_primary=False, secondary_index=si),
+                    f"register create lvol {lvol.uuid} on {sec.get_id()[:8]} (after kill)")
+            elif action == "queue":
+                queue_for_restart_drain(
+                    sec.get_id(), lvol.lvs_name,
+                    lambda c=sec, si=sec_idx: add_lvol_on_node(lvol, c, is_primary=False, secondary_index=si),
+                    f"register create lvol {lvol.uuid} on {sec.get_id()[:8]}")
+            # "skip", "reject" at this stage → already handled or skip
 
     lvol.pool_uuid = pool.get_id()
     lvol.pool_name = pool.pool_name
@@ -793,21 +848,38 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
         if lvol.allowed_hosts:
             db_ctrl = DBController()
             cluster = db_ctrl.get_cluster_by_id(snode.cluster_id)
-            dhchap_group = _get_dhchap_group(cluster)
+            pool = None
+            if lvol.pool_uuid:
+                try:
+                    pool = db_ctrl.get_pool_by_id(lvol.pool_uuid)
+                except KeyError:
+                    pass
+            dhchap_group = _get_dhchap_group(cluster, pool)
+            pool_key_names = {}
+            if pool and pool.dhchap:
+                pool_key_names = _register_pool_dhchap_keys_on_node(pool, snode, rpc_client)
             for host_entry in lvol.allowed_hosts:
                 logger.info("adding allowed host %s to subsystem %s", host_entry["nqn"], lvol.nqn)
-                has_keys = any(host_entry.get(k) for k in ("dhchap_key", "dhchap_ctrlr_key", "psk"))
-                if has_keys:
-                    key_names = _register_dhchap_keys_on_node(snode, host_entry["nqn"], host_entry, rpc_client)
+                if pool and pool.dhchap:
                     rpc_client.subsystem_add_host(
                         lvol.nqn, host_entry["nqn"],
-                        psk=key_names.get("psk"),
-                        dhchap_key=key_names.get("dhchap_key"),
-                        dhchap_ctrlr_key=key_names.get("dhchap_ctrlr_key"),
+                        dhchap_key=pool_key_names.get("dhchap_key"),
+                        dhchap_ctrlr_key=pool_key_names.get("dhchap_ctrlr_key"),
                         dhchap_group=dhchap_group,
                     )
                 else:
-                    rpc_client.subsystem_add_host(lvol.nqn, host_entry["nqn"])
+                    has_keys = any(host_entry.get(k) for k in ("dhchap_key", "dhchap_ctrlr_key", "psk"))
+                    if has_keys:
+                        key_names = _register_dhchap_keys_on_node(snode, host_entry["nqn"], host_entry, rpc_client)
+                        rpc_client.subsystem_add_host(
+                            lvol.nqn, host_entry["nqn"],
+                            psk=key_names.get("psk"),
+                            dhchap_key=key_names.get("dhchap_key"),
+                            dhchap_ctrlr_key=key_names.get("dhchap_ctrlr_key"),
+                            dhchap_group=dhchap_group,
+                        )
+                    else:
+                        rpc_client.subsystem_add_host(lvol.nqn, host_entry["nqn"])
 
         if is_primary or lvol.node_id == snode.get_id():
             ana_state = "optimized"
@@ -887,21 +959,38 @@ def recreate_lvol_on_node(lvol, snode, ha_inode_self=0, ana_state=None):
     if lvol.allowed_hosts:
         db_ctrl = DBController()
         cluster = db_ctrl.get_cluster_by_id(snode.cluster_id)
-        dhchap_group = _get_dhchap_group(cluster)
+        pool = None
+        if lvol.pool_uuid:
+            try:
+                pool = db_ctrl.get_pool_by_id(lvol.pool_uuid)
+            except KeyError:
+                pass
+        dhchap_group = _get_dhchap_group(cluster, pool)
+        pool_key_names = {}
+        if pool and pool.dhchap:
+            pool_key_names = _register_pool_dhchap_keys_on_node(pool, snode, rpc_client)
         for host_entry in lvol.allowed_hosts:
             logger.info("adding allowed host %s to subsystem %s", host_entry["nqn"], lvol.nqn)
-            has_keys = any(host_entry.get(k) for k in ("dhchap_key", "dhchap_ctrlr_key", "psk"))
-            if has_keys:
-                key_names = _register_dhchap_keys_on_node(snode, host_entry["nqn"], host_entry, rpc_client)
+            if pool and pool.dhchap:
                 rpc_client.subsystem_add_host(
                     lvol.nqn, host_entry["nqn"],
-                    psk=key_names.get("psk"),
-                    dhchap_key=key_names.get("dhchap_key"),
-                    dhchap_ctrlr_key=key_names.get("dhchap_ctrlr_key"),
+                    dhchap_key=pool_key_names.get("dhchap_key"),
+                    dhchap_ctrlr_key=pool_key_names.get("dhchap_ctrlr_key"),
                     dhchap_group=dhchap_group,
                 )
             else:
-                rpc_client.subsystem_add_host(lvol.nqn, host_entry["nqn"])
+                has_keys = any(host_entry.get(k) for k in ("dhchap_key", "dhchap_ctrlr_key", "psk"))
+                if has_keys:
+                    key_names = _register_dhchap_keys_on_node(snode, host_entry["nqn"], host_entry, rpc_client)
+                    rpc_client.subsystem_add_host(
+                        lvol.nqn, host_entry["nqn"],
+                        psk=key_names.get("psk"),
+                        dhchap_key=key_names.get("dhchap_key"),
+                        dhchap_ctrlr_key=key_names.get("dhchap_ctrlr_key"),
+                        dhchap_group=dhchap_group,
+                    )
+                else:
+                    rpc_client.subsystem_add_host(lvol.nqn, host_entry["nqn"])
 
     # if namespace_found is False:
     logger.info("Add BDev to subsystem")
@@ -988,13 +1077,36 @@ def _remove_bdev_stack(bdev_stack, rpc_client, del_async=False):
     return True
 
 
-def delete_lvol_from_node(lvol_id, node_id, clear_data=True, del_async=False):
+def delete_lvol_from_node(lvol_id, node_id, clear_data=True, del_async=False, force=False):
     db_controller = DBController()
     try:
         lvol = db_controller.get_lvol_by_id(lvol_id)
         snode = db_controller.get_storage_node_by_id(node_id)
     except KeyError:
         return True
+
+    # Per design: gate sync deletes on non-leader nodes.
+    from simplyblock_core.storage_node_ops import check_non_leader_for_operation, queue_for_restart_drain
+    if not force:
+        action = check_non_leader_for_operation(node_id, lvol.lvs_name, operation_type="delete")
+        if action == "skip":
+            logger.info(f"Skipping sync delete of {lvol_id} on {node_id[:8]}: node disconnected")
+            lvol.deletion_status = node_id
+            lvol.write_to_db(db_controller.kv_store)
+            return True
+        elif action == "queue":
+            queue_for_restart_drain(
+                node_id, lvol.lvs_name,
+                lambda: delete_lvol_from_node(lvol_id, node_id, clear_data, del_async),
+                f"sync delete lvol {lvol_id}")
+            return True
+        elif action == "retry":
+            queue_for_restart_drain(
+                node_id, lvol.lvs_name,
+                lambda: delete_lvol_from_node(lvol_id, node_id, clear_data, del_async),
+                f"retry sync delete lvol {lvol_id}")
+            return True
+    # action == "proceed" — execute now
 
     logger.info(f"Deleting LVol:{lvol.get_id()} from node:{snode.get_id()}")
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=5, retry=2)
@@ -1036,6 +1148,15 @@ def delete_lvol(id_or_name, force_delete=False):
     except KeyError as e:
         logger.error(e)
         return False
+
+    # Block during restart Phase 5
+    try:
+        snode = db_controller.get_storage_node_by_id(lvol.node_id)
+        if snode.lvstore_status == "in_creation" and not force_delete:
+            logger.error(f"Cannot delete lvol {lvol.uuid}: node LVStore restart in progress")
+            return False
+    except KeyError:
+        pass
 
     from simplyblock_core.controllers import migration_controller
     active_mig = migration_controller.get_active_migration_for_lvol(lvol.uuid)
@@ -1088,109 +1209,71 @@ def delete_lvol(id_or_name, force_delete=False):
         return False
 
     if lvol.ha_type == 'single':
-        if snode.status  != StorageNode.STATUS_ONLINE:
-            logger.error(f"Node status is not online, node: {snode.get_id()}, status: {snode.status}")
+        ret = delete_lvol_from_node(lvol.get_id(), lvol.node_id, force=force_delete)
+        if not ret:
             if not force_delete:
                 return False
 
-        ret = delete_lvol_from_node(lvol.get_id(), lvol.node_id)
-        if not ret:
-            return False
-
-
     elif lvol.ha_type == "ha":
+        from simplyblock_core.storage_node_ops import (
+            check_non_leader_for_operation,
+            queue_for_restart_drain, execute_on_leader_with_failover,
+        )
 
         host_node = db_controller.get_storage_node_by_id(snode.get_id())
-
-        # Gather all secondary nodes from lvol.nodes[1:]
         all_sec_nodes = []
         for sec_id in lvol.nodes[1:]:
             try:
                 all_sec_nodes.append(db_controller.get_storage_node_by_id(sec_id))
             except KeyError:
                 pass
+        all_nodes = [host_node] + all_sec_nodes
 
-        primary_node = None
-        secondary_nodes = []
+        # Step 1: Execute async delete on leader (with failover)
+        def _delete_on_leader(leader):
+            ret = delete_lvol_from_node(lvol.get_id(), leader.get_id(), force=force_delete)
+            return ret if ret else None
 
-        # Find at least one online secondary to verify status
-        first_sec = all_sec_nodes[0] if all_sec_nodes else None
-        if host_node.status == StorageNode.STATUS_ONLINE:
+        success, actual_leader, result = execute_on_leader_with_failover(
+            all_nodes, lvol.lvs_name, _delete_on_leader)
+        if not success:
+            logger.error(f"Failed to delete lvol from leader: {result}")
+            if not force_delete:
+                return False
 
-            if is_node_leader(host_node, lvol.lvs_name):
-                primary_node = host_node
-                if first_sec and first_sec.status == StorageNode.STATUS_DOWN:
-                    msg = "Secondary node is in down status, can not delete lvol"
-                    logger.error(msg)
-                    return False, msg
-                for sn in all_sec_nodes:
-                    if sn.status == StorageNode.STATUS_ONLINE:
-                        secondary_nodes.append(sn)
-
-            elif first_sec and first_sec.status == StorageNode.STATUS_ONLINE:
-                if is_node_leader(first_sec, lvol.lvs_name):
-                    primary_node = first_sec
-                    if host_node.status == StorageNode.STATUS_ONLINE:
-                        secondary_nodes.append(host_node)
-                    for sn in all_sec_nodes[1:]:
-                        if sn.status == StorageNode.STATUS_ONLINE:
-                            secondary_nodes.append(sn)
-                else:
-                    primary_node = host_node
-                    for sn in all_sec_nodes:
-                        if sn.status == StorageNode.STATUS_ONLINE:
-                            secondary_nodes.append(sn)
-
-            else:
-                primary_node = host_node
-
-        elif first_sec and first_sec.status == StorageNode.STATUS_ONLINE:
-            primary_node = first_sec
-            # Add remaining online secondaries (second_sec etc.) for cleanup
-            for sn in all_sec_nodes[1:]:
-                if sn.status == StorageNode.STATUS_ONLINE:
-                    secondary_nodes.append(sn)
-
-        else:
-            # Primary and first secondary are both offline.
-            # Check if any other secondary (e.g. second_sec in FTT=2) is online.
-            for sn in all_sec_nodes[1:]:
-                if sn.status == StorageNode.STATUS_ONLINE:
-                    primary_node = sn
-                    # Add remaining online secondaries for cleanup
-                    for other_sn in all_sec_nodes:
-                        if other_sn.get_id() != sn.get_id() and other_sn.status == StorageNode.STATUS_ONLINE:
-                            secondary_nodes.append(other_sn)
-                    break
-            if not primary_node:
-                msg = "Host nodes are not online"
-                logger.error(msg)
-                return False, msg
-
-        # 1- delete subsystem from all secondaries
-        for sec in secondary_nodes:
-            sec = db_controller.get_storage_node_by_id(sec.get_id())
-            if sec.status == StorageNode.STATUS_ONLINE:
-                secondary_rpc_client = sec.rpc_client()
-                subsystem = secondary_rpc_client.subsystem_list(lvol.nqn)
-                if subsystem:
-                    if len(subsystem[0]["namespaces"]) > 1:
-                        logger.info("Removing namespace")
-                        ret = secondary_rpc_client.nvmf_subsystem_remove_ns(lvol.nqn, lvol.ns_id)
-                    else:
-                        logger.info(f"Deleting subsystem for lvol:{lvol.get_id()} from node:{sec.get_id()}")
-                        ret = secondary_rpc_client.subsystem_delete(lvol.nqn)
-                    if not ret:
-                        logger.warning(f"Failed to delete subsystem from node: {sec.get_id()}")
-
-        # 2- delete subsystem and lvol bdev from primary
-        if primary_node:
-
-            ret = delete_lvol_from_node(lvol.get_id(), primary_node.get_id())
-            if not ret:
-                logger.error(f"Failed to delete lvol from node: {primary_node.get_id()}")
-                if not force_delete:
-                    return False
+        # Step 2: Sync delete on non-leaders (leader op already completed)
+        non_leaders = [n for n in all_nodes if actual_leader and n.get_id() != actual_leader.get_id()]
+        for nl in non_leaders:
+            action = check_non_leader_for_operation(
+                nl.get_id(), lvol.lvs_name, operation_type="delete",
+                leader_op_completed=True, all_nodes=all_nodes)
+            if action == "skip":
+                continue
+            elif action in ("queue", "kill_and_wait"):
+                queue_for_restart_drain(
+                    nl.get_id(), lvol.lvs_name,
+                    lambda c=nl: delete_lvol_from_node(lvol.get_id(), c.get_id()),
+                    f"sync delete lvol {lvol.get_id()} on {nl.get_id()[:8]}")
+            elif action == "proceed":
+                try:
+                    sec_rpc = nl.rpc_client()
+                    subsystem = sec_rpc.subsystem_list(lvol.nqn)
+                    if subsystem:
+                        if len(subsystem[0]["namespaces"]) > 1:
+                            sec_rpc.nvmf_subsystem_remove_ns(lvol.nqn, lvol.ns_id)
+                        else:
+                            sec_rpc.subsystem_delete(lvol.nqn)
+                except Exception as e:
+                    logger.warning(f"Failed sync delete on {nl.get_id()}: {e}")
+                    # Post-leader-op: check if we should kill or queue
+                    post_action = check_non_leader_for_operation(
+                        nl.get_id(), lvol.lvs_name, operation_type="delete",
+                        leader_op_completed=True, all_nodes=all_nodes)
+                    if post_action in ("queue", "kill_and_wait"):
+                        queue_for_restart_drain(
+                            nl.get_id(), lvol.lvs_name,
+                            lambda c=nl: delete_lvol_from_node(lvol.get_id(), c.get_id()),
+                            f"retry sync delete lvol {lvol.get_id()} on {nl.get_id()[:8]}")
 
     lvol = db_controller.get_lvol_by_id(lvol.get_id())
     # set status
@@ -1334,8 +1417,8 @@ def set_lvol(uuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, name=
     secondary_ids = []
     if snode.secondary_node_id:
         secondary_ids.append(snode.secondary_node_id)
-    if snode.secondary_node_id_2:
-        secondary_ids.append(snode.secondary_node_id_2)
+    if snode.tertiary_node_id:
+        secondary_ids.append(snode.tertiary_node_id)
     for sec_id in secondary_ids:
         sec_node = db_controller.get_storage_node_by_id(sec_id)
         if sec_node and sec_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
@@ -1669,6 +1752,16 @@ def resize_lvol(id, new_size):
         logger.error(e)
         return False, str(e)
 
+    # Block during restart Phase 5
+    try:
+        snode = db_controller.get_storage_node_by_id(lvol.node_id)
+        if snode.lvstore_status == "in_creation":
+            msg = f"Cannot resize lvol {lvol.uuid}: node LVStore restart in progress"
+            logger.error(msg)
+            return False, msg
+    except KeyError:
+        pass
+
     from simplyblock_core.controllers import migration_controller
     active_mig = migration_controller.get_active_migration_for_lvol(lvol.uuid)
     if active_mig:
@@ -1711,8 +1804,7 @@ def resize_lvol(id, new_size):
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
 
     if snode.lvol_sync_del():
-        logger.error(f"LVol sync deletion found on node: {snode.get_id()}")
-        return False, f"LVol sync deletion found on node: {snode.get_id()}"
+        logger.info(f"LVol sync delete task on node: {snode.get_id()}, proceeding with resize")
 
     logger.info(f"Resizing LVol: {lvol.get_id()}")
     logger.info(f"Current size: {utils.humanbytes(lvol.size)}, new size: {utils.humanbytes(new_size)}")
@@ -1743,64 +1835,45 @@ def resize_lvol(id, new_size):
             except KeyError:
                 pass
 
-        first_sec = all_sec_nodes[0] if all_sec_nodes else None
-        if host_node.status == StorageNode.STATUS_ONLINE:
+        from simplyblock_core.storage_node_ops import check_non_leader_for_operation, queue_for_restart_drain
 
-            if is_node_leader(host_node, lvol.lvs_name):
-                primary_node = host_node
-                if first_sec and first_sec.status == StorageNode.STATUS_DOWN:
-                    msg = "Secondary node is in down status, can not resize lvol"
-                    logger.error(msg)
-                    return False, msg
-                for sn in all_sec_nodes:
-                    if sn.status == StorageNode.STATUS_ONLINE:
-                        secondary_nodes.append(sn)
-
-            elif first_sec and first_sec.status == StorageNode.STATUS_ONLINE:
-                if is_node_leader(first_sec, lvol.lvs_name):
-                    primary_node = first_sec
-                    if host_node.status == StorageNode.STATUS_ONLINE:
-                        secondary_nodes.append(host_node)
-                    for sn in all_sec_nodes[1:]:
-                        if sn.status == StorageNode.STATUS_ONLINE:
-                            secondary_nodes.append(sn)
-                else:
-                    primary_node = host_node
-                    for sn in all_sec_nodes:
-                        if sn.status == StorageNode.STATUS_ONLINE:
-                            secondary_nodes.append(sn)
-
-            else:
-                primary_node = host_node
-
-        elif first_sec and first_sec.status == StorageNode.STATUS_ONLINE:
-            primary_node = first_sec
-            for sn in all_sec_nodes[1:]:
-                if sn.status == StorageNode.STATUS_ONLINE:
-                    secondary_nodes.append(sn)
-
-        else:
-            # Primary and first secondary are both offline.
-            # Check if any other secondary (e.g. second_sec in FTT=2) is online.
-            for sn in all_sec_nodes[1:]:
-                if sn.status == StorageNode.STATUS_ONLINE:
-                    primary_node = sn
-                    for other_sn in all_sec_nodes:
-                        if other_sn.get_id() != sn.get_id() and other_sn.status == StorageNode.STATUS_ONLINE:
-                            secondary_nodes.append(other_sn)
+        # Detect current leader via RPC (no status checks)
+        all_nodes = [host_node] + all_sec_nodes
+        for candidate in all_nodes:
+            try:
+                if is_node_leader(candidate, lvol.lvs_name):
+                    primary_node = candidate
                     break
-            if not primary_node:
-                msg = "Host nodes are not online"
+            except Exception:
+                continue
+        if not primary_node:
+            primary_node = host_node
+
+        # Check non-leader nodes (no status checks)
+        for candidate in all_nodes:
+            if candidate.get_id() == primary_node.get_id():
+                continue
+            action = check_non_leader_for_operation(
+                candidate.get_id(), lvol.lvs_name, operation_type="create")
+            if action == "reject":
+                msg = f"Cannot resize: non-leader {candidate.get_id()[:8]} unreachable but fabric healthy"
                 logger.error(msg)
                 return False, msg
-
+            elif action == "proceed":
+                secondary_nodes.append(candidate)
+            elif action == "queue":
+                queue_for_restart_drain(
+                    candidate.get_id(), lvol.lvs_name,
+                    lambda c=candidate: RPCClient(c.mgmt_ip, c.rpc_port, c.rpc_username,
+                                                  c.rpc_password).bdev_lvol_resize(
+                            f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib),
+                        f"resize lvol {lvol.uuid} on {candidate.get_id()[:8]}")
+            # "skip" — disconnected or pre_block, skip
 
         if primary_node:
             logger.info(f"Resizing LVol: {lvol.get_id()} on node: {primary_node.get_id()}")
-
-            rpc_client = RPCClient(primary_node.mgmt_ip, primary_node.rpc_port, primary_node.rpc_username,
-                                       primary_node.rpc_password)
-
+            rpc_client = RPCClient(primary_node.mgmt_ip, primary_node.rpc_port,
+                                   primary_node.rpc_username, primary_node.rpc_password)
             ret = rpc_client.bdev_lvol_resize(f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib)
             if not ret:
                 msg = f"Error resizing lvol on node: {primary_node.get_id()}"
@@ -1809,17 +1882,13 @@ def resize_lvol(id, new_size):
 
         for sec in secondary_nodes:
             logger.info(f"Resizing LVol: {lvol.get_id()} on node: {sec.get_id()}")
-            sec = db_controller.get_storage_node_by_id(sec.get_id())
-            if sec.status == StorageNode.STATUS_ONLINE:
-
-                sec_rpc_client = RPCClient(sec.mgmt_ip, sec.rpc_port, sec.rpc_username,
-                                           sec.rpc_password)
-
-                ret = sec_rpc_client.bdev_lvol_resize(f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib)
-                if not ret:
-                    msg = f"Error resizing lvol on node: {sec.get_id()}"
-                    logger.error(msg)
-                    return False, msg
+            sec_rpc_client = RPCClient(sec.mgmt_ip, sec.rpc_port, sec.rpc_username,
+                                       sec.rpc_password)
+            ret = sec_rpc_client.bdev_lvol_resize(f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib)
+            if not ret:
+                msg = f"Error resizing lvol on node: {sec.get_id()}"
+                logger.error(msg)
+                return False, msg
 
     lvol = db_controller.get_lvol_by_id(id)
     lvol.size = new_size
@@ -2707,8 +2776,10 @@ def _build_host_entries(allowed_hosts, sec_options=None):
 def add_host_to_lvol(lvol_id, host_nqn):
     """Add an allowed host to a volume's subsystem.
 
-    Security options are inherited from the volume's pool.
-    Returns a dict with the host NQN and any auto-generated keys, or (False, error).
+    For DHCHAP pools the pool's shared key pair is used automatically.
+    For non-DHCHAP pools, security options are inherited from pool.sec_options.
+    Returns a dict with the host NQN (and any per-host keys for non-DHCHAP pools),
+    or (False, error_message) on failure.
     """
     db_controller = DBController()
     try:
@@ -2722,53 +2793,71 @@ def add_host_to_lvol(lvol_id, host_nqn):
         if h["nqn"] == host_nqn:
             return False, f"Host {host_nqn} is already allowed"
 
-    # Get sec_options from the pool
-    sec_options = None
+    # Resolve pool
+    pool = None
     if lvol.pool_uuid:
         try:
             pool = db_controller.get_pool_by_id(lvol.pool_uuid)
-            sec_options = pool.sec_options or None
         except KeyError:
             pass
 
     entry = {"nqn": host_nqn}
-    if sec_options:
-        ok, err = utils.validate_sec_options(sec_options)
-        if not ok:
-            return False, err
-        if "dhchap_key" in sec_options:
-            entry["dhchap_key"] = utils.generate_dhchap_key()
-        if "dhchap_ctrlr_key" in sec_options:
-            entry["dhchap_ctrlr_key"] = utils.generate_dhchap_key()
-        if "psk" in sec_options:
-            entry["psk"] = utils.generate_psk_key()
 
-    # Apply to all nodes where the subsystem exists
-    has_keys = any(entry.get(k) for k in ("dhchap_key", "dhchap_ctrlr_key", "psk"))
-    # Resolve DH group from cluster config (LVol has no cluster_id, get from first node)
-    dhchap_group = "null"
-    if has_keys and lvol.nodes:
-        first_node = db_controller.get_storage_node_by_id(lvol.nodes[0])
-        cluster = db_controller.get_cluster_by_id(first_node.cluster_id)
-        dhchap_group = _get_dhchap_group(cluster)
-    for node_id in lvol.nodes:
-        snode = db_controller.get_storage_node_by_id(node_id)
-        if snode.status != StorageNode.STATUS_ONLINE:
-            continue
-        rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
-        if has_keys:
-            key_names = _register_dhchap_keys_on_node(snode, host_nqn, entry, rpc_client)
+    if pool and pool.dhchap:
+        # Pool-level DHCHAP: use pool's shared key pair, no per-host key generation
+        dhchap_group = constants.DHCHAP_DHGROUP
+        for node_id in lvol.nodes:
+            snode = db_controller.get_storage_node_by_id(node_id)
+            if snode.status != StorageNode.STATUS_ONLINE:
+                continue
+            rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+            pool_key_names = _register_pool_dhchap_keys_on_node(pool, snode, rpc_client)
             ret = rpc_client.subsystem_add_host(
                 lvol.nqn, host_nqn,
-                psk=key_names.get("psk"),
-                dhchap_key=key_names.get("dhchap_key"),
-                dhchap_ctrlr_key=key_names.get("dhchap_ctrlr_key"),
+                dhchap_key=pool_key_names.get("dhchap_key"),
+                dhchap_ctrlr_key=pool_key_names.get("dhchap_ctrlr_key"),
                 dhchap_group=dhchap_group,
             )
-        else:
-            ret = rpc_client.subsystem_add_host(lvol.nqn, host_nqn)
-        if not ret:
-            return False, f"Failed to add host {host_nqn} on node {node_id}"
+            if not ret:
+                return False, f"Failed to add host {host_nqn} on node {node_id}"
+    else:
+        # Legacy per-host key generation from pool.sec_options
+        sec_options = pool.sec_options if pool else None
+        if sec_options:
+            ok, err = utils.validate_sec_options(sec_options)
+            if not ok:
+                return False, err
+            if "dhchap_key" in sec_options:
+                entry["dhchap_key"] = utils.generate_dhchap_key()
+            if "dhchap_ctrlr_key" in sec_options:
+                entry["dhchap_ctrlr_key"] = utils.generate_dhchap_key()
+            if "psk" in sec_options:
+                entry["psk"] = utils.generate_psk_key()
+
+        has_keys = any(entry.get(k) for k in ("dhchap_key", "dhchap_ctrlr_key", "psk"))
+        dhchap_group = "null"
+        if has_keys and lvol.nodes:
+            first_node = db_controller.get_storage_node_by_id(lvol.nodes[0])
+            cluster = db_controller.get_cluster_by_id(first_node.cluster_id)
+            dhchap_group = _get_dhchap_group(cluster)
+        for node_id in lvol.nodes:
+            snode = db_controller.get_storage_node_by_id(node_id)
+            if snode.status != StorageNode.STATUS_ONLINE:
+                continue
+            rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+            if has_keys:
+                key_names = _register_dhchap_keys_on_node(snode, host_nqn, entry, rpc_client)
+                ret = rpc_client.subsystem_add_host(
+                    lvol.nqn, host_nqn,
+                    psk=key_names.get("psk"),
+                    dhchap_key=key_names.get("dhchap_key"),
+                    dhchap_ctrlr_key=key_names.get("dhchap_ctrlr_key"),
+                    dhchap_group=dhchap_group,
+                )
+            else:
+                ret = rpc_client.subsystem_add_host(lvol.nqn, host_nqn)
+            if not ret:
+                return False, f"Failed to add host {host_nqn} on node {node_id}"
 
     lvol.allowed_hosts.append(entry)
     lvol.write_to_db(db_controller.kv_store)

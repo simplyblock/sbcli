@@ -7,7 +7,7 @@ Covers:
   - rpc_client.bdev_lvol_set_lvs_opts accepts a role string
   - connect_to_hublvol passes the role through to the RPC call
   - recreate_lvstore sets primary role on primary, secondary/tertiary on secs
-  - recreate_lvstore_on_sec sets the correct role based on is_second_sec
+  - recreate_lvstore_on_non_leader sets the correct role based on is_tertiary
   - health_controller auto-fix passes correct role based on is_sec2
   - create_lvstore sets correct roles for primary and both secondaries
 """
@@ -19,6 +19,8 @@ from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.hublvol import HubLVol
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -43,10 +45,10 @@ def _cluster(cluster_id="cluster-1", ha_type="ha", max_fault_tolerance=2):
 
 
 def _node(uuid, status=StorageNode.STATUS_ONLINE, cluster_id="cluster-1",
-          lvstore="", secondary_node_id="", secondary_node_id_2="",
+          lvstore="", secondary_node_id="", tertiary_node_id="",
           mgmt_ip="", rpc_port=8080, lvol_subsys_port=9090,
           lvstore_ports=None, active_tcp=True, active_rdma=False,
-          lvstore_stack_secondary_1="", lvstore_stack_secondary_2="",
+          lvstore_stack_secondary="", lvstore_stack_tertiary="",
           jm_vuid=100, lvstore_status="ready"):
     n = StorageNode()
     n.uuid = uuid
@@ -55,7 +57,7 @@ def _node(uuid, status=StorageNode.STATUS_ONLINE, cluster_id="cluster-1",
     n.hostname = f"host-{uuid[:8]}"
     n.lvstore = lvstore
     n.secondary_node_id = secondary_node_id
-    n.secondary_node_id_2 = secondary_node_id_2
+    n.tertiary_node_id = tertiary_node_id
     n.mgmt_ip = mgmt_ip or f"10.0.0.{hash(uuid) % 254 + 1}"
     n.rpc_port = rpc_port
     n.rpc_username = "user"
@@ -64,8 +66,8 @@ def _node(uuid, status=StorageNode.STATUS_ONLINE, cluster_id="cluster-1",
     n.lvstore_ports = dict(lvstore_ports) if lvstore_ports else {}
     n.active_tcp = active_tcp
     n.active_rdma = active_rdma
-    n.lvstore_stack_secondary_1 = lvstore_stack_secondary_1
-    n.lvstore_stack_secondary_2 = lvstore_stack_secondary_2
+    n.lvstore_stack_secondary = lvstore_stack_secondary
+    n.lvstore_stack_tertiary = lvstore_stack_tertiary
     n.jm_vuid = jm_vuid
     n.lvstore_status = lvstore_status
     n.enable_ha_jm = False
@@ -183,7 +185,7 @@ class TestConnectToHublvolRole(unittest.TestCase):
 
     def _make_secondary(self):
         return _node("sec-1", lvstore="LVS_200", mgmt_ip="10.0.0.2",
-                      lvstore_stack_secondary_1="cluster-1/primary-1")
+                      lvstore_stack_secondary="cluster-1/primary-1")
 
     def test_secondary_role_default(self):
         primary = self._make_primary()
@@ -246,7 +248,7 @@ class TestRecreateLvstoreRoles(unittest.TestCase):
         nodes["node-1"] = _node(
             "node-1", lvstore="LVS_100",
             secondary_node_id="cluster-1/node-2",
-            secondary_node_id_2="cluster-1/node-3",
+            tertiary_node_id="cluster-1/node-3",
             lvstore_ports={"LVS_100": {"lvol_subsys_port": 4420, "hublvol_port": 4421}},
             mgmt_ip="10.0.0.1")
         nodes["node-2"] = _node(
@@ -259,7 +261,10 @@ class TestRecreateLvstoreRoles(unittest.TestCase):
             mgmt_ip="10.0.0.3")
         return nodes
 
-    @patch("simplyblock_core.storage_node_ops.recreate_lvstore_on_sec")
+    @patch("simplyblock_core.storage_node_ops._check_peer_disconnected", return_value=False)
+    @patch("simplyblock_core.storage_node_ops._set_restart_phase")
+    @patch("simplyblock_core.storage_node_ops._handle_rpc_failure_on_peer", return_value="skip")
+    @patch("simplyblock_core.storage_node_ops.recreate_lvstore_on_non_leader")
     @patch("simplyblock_core.storage_node_ops.health_controller")
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
     @patch("simplyblock_core.storage_node_ops.storage_events")
@@ -271,7 +276,7 @@ class TestRecreateLvstoreRoles(unittest.TestCase):
     def test_primary_gets_primary_role(
             self, mock_db_cls, mock_create_bdev, mock_connect_jm,
             mock_rpc_cls, mock_fw_cls, mock_storage_events, mock_tcp_events,
-            mock_health, mock_recreate_on_sec):
+            mock_health, mock_recreate_on_non_leader, _mock_disc, _mock_phase, _mock_handle):
         from simplyblock_core.storage_node_ops import recreate_lvstore
 
         nodes = self._build_cluster()
@@ -308,7 +313,7 @@ class TestRecreateLvstoreRoles(unittest.TestCase):
             n.create_secondary_hublvol = MagicMock()
             n.write_to_db = MagicMock()
 
-        mock_recreate_on_sec.return_value = True
+        mock_recreate_on_non_leader.return_value = True
         mock_health.check_bdev.return_value = True
 
         snode = nodes["node-1"]
@@ -323,7 +328,10 @@ class TestRecreateLvstoreRoles(unittest.TestCase):
             role="primary"
         )
 
-    @patch("simplyblock_core.storage_node_ops.recreate_lvstore_on_sec")
+    @patch("simplyblock_core.storage_node_ops._check_peer_disconnected", return_value=False)
+    @patch("simplyblock_core.storage_node_ops._set_restart_phase")
+    @patch("simplyblock_core.storage_node_ops._handle_rpc_failure_on_peer", return_value="skip")
+    @patch("simplyblock_core.storage_node_ops.recreate_lvstore_on_non_leader")
     @patch("simplyblock_core.storage_node_ops.health_controller")
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
     @patch("simplyblock_core.storage_node_ops.storage_events")
@@ -335,7 +343,7 @@ class TestRecreateLvstoreRoles(unittest.TestCase):
     def test_sec1_secondary_sec2_tertiary(
             self, mock_db_cls, mock_create_bdev, mock_connect_jm,
             mock_rpc_cls, mock_fw_cls, mock_storage_events, mock_tcp_events,
-            mock_health, mock_recreate_on_sec):
+            mock_health, mock_recreate_on_non_leader, _mock_disc, _mock_phase, _mock_handle):
         """sec1 gets role='secondary', sec2 gets role='tertiary'."""
         from simplyblock_core.storage_node_ops import recreate_lvstore
 
@@ -373,7 +381,7 @@ class TestRecreateLvstoreRoles(unittest.TestCase):
             n.create_secondary_hublvol = MagicMock()
             n.write_to_db = MagicMock()
 
-        mock_recreate_on_sec.return_value = True
+        mock_recreate_on_non_leader.return_value = True
         mock_health.check_bdev.return_value = True
 
         snode = nodes["node-1"]
@@ -386,7 +394,10 @@ class TestRecreateLvstoreRoles(unittest.TestCase):
         nodes["node-3"].connect_to_hublvol.assert_called_once_with(
             snode, failover_node=nodes["node-2"], role="tertiary")
 
-    @patch("simplyblock_core.storage_node_ops.recreate_lvstore_on_sec")
+    @patch("simplyblock_core.storage_node_ops._check_peer_disconnected", return_value=False)
+    @patch("simplyblock_core.storage_node_ops._set_restart_phase")
+    @patch("simplyblock_core.storage_node_ops._handle_rpc_failure_on_peer", return_value="skip")
+    @patch("simplyblock_core.storage_node_ops.recreate_lvstore_on_non_leader")
     @patch("simplyblock_core.storage_node_ops.health_controller")
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
     @patch("simplyblock_core.storage_node_ops.storage_events")
@@ -398,13 +409,13 @@ class TestRecreateLvstoreRoles(unittest.TestCase):
     def test_single_secondary_gets_secondary_role(
             self, mock_db_cls, mock_create_bdev, mock_connect_jm,
             mock_rpc_cls, mock_fw_cls, mock_storage_events, mock_tcp_events,
-            mock_health, mock_recreate_on_sec):
+            mock_health, mock_recreate_on_non_leader, _mock_disc, _mock_phase, _mock_handle):
         """With only one secondary (FTT=1), it should get role='secondary'."""
         from simplyblock_core.storage_node_ops import recreate_lvstore
 
         nodes = self._build_cluster()
-        # Remove secondary_node_id_2
-        nodes["node-1"].secondary_node_id_2 = ""
+        # Remove tertiary_node_id
+        nodes["node-1"].tertiary_node_id = ""
         db = mock_db_cls.return_value
 
         def get_node(nid):
@@ -438,7 +449,7 @@ class TestRecreateLvstoreRoles(unittest.TestCase):
             n.create_secondary_hublvol = MagicMock()
             n.write_to_db = MagicMock()
 
-        mock_recreate_on_sec.return_value = True
+        mock_recreate_on_non_leader.return_value = True
         mock_health.check_bdev.return_value = True
 
         snode = nodes["node-1"]
@@ -452,32 +463,35 @@ class TestRecreateLvstoreRoles(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 4. recreate_lvstore_on_sec: role based on is_second_sec
+# 4. recreate_lvstore_on_non_leader: role based on is_tertiary
 # ---------------------------------------------------------------------------
 
 class TestRecreateLvstoreOnSecRoles(unittest.TestCase):
-    """recreate_lvstore_on_sec must pass the correct role depending on
+    """recreate_lvstore_on_non_leader must pass the correct role depending on
     whether the secondary is sec_1 or sec_2 for the primary."""
 
     def _build_nodes(self):
         primary = _node(
             "primary-1", lvstore="LVS_100",
             secondary_node_id="sec-1",
-            secondary_node_id_2="sec-2",
+            tertiary_node_id="sec-2",
             lvstore_ports={"LVS_100": {"lvol_subsys_port": 4420, "hublvol_port": 4421}},
             mgmt_ip="10.0.0.1")
         sec1 = _node(
             "sec-1", lvstore="LVS_200",
-            lvstore_stack_secondary_1="primary-1",
+            lvstore_stack_secondary="primary-1",
             lvstore_ports={"LVS_100": {"lvol_subsys_port": 4420, "hublvol_port": 4421}},
             mgmt_ip="10.0.0.2")
         sec2 = _node(
             "sec-2", lvstore="LVS_300",
-            lvstore_stack_secondary_2="primary-1",
+            lvstore_stack_tertiary="primary-1",
             lvstore_ports={"LVS_100": {"lvol_subsys_port": 4420, "hublvol_port": 4421}},
             mgmt_ip="10.0.0.3")
         return {"primary-1": primary, "sec-1": sec1, "sec-2": sec2}
 
+    @patch("simplyblock_core.storage_node_ops._check_peer_disconnected", return_value=False)
+    @patch("simplyblock_core.storage_node_ops._set_restart_phase")
+    @patch("simplyblock_core.storage_node_ops._handle_rpc_failure_on_peer", return_value="skip")
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
     @patch("simplyblock_core.storage_node_ops.FirewallClient")
     @patch("simplyblock_core.storage_node_ops.RPCClient")
@@ -486,8 +500,8 @@ class TestRecreateLvstoreOnSecRoles(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.DBController")
     def test_first_secondary_gets_secondary_role(
             self, mock_db_cls, mock_create_bdev, mock_connect_jm,
-            mock_rpc_cls, mock_fw_cls, mock_tcp_events):
-        from simplyblock_core.storage_node_ops import recreate_lvstore_on_sec
+            mock_rpc_cls, mock_fw_cls, mock_tcp_events, _mock_disc, _mock_phase, _mock_handle):
+        from simplyblock_core.storage_node_ops import recreate_lvstore_on_non_leader
 
         nodes = self._build_nodes()
         db = mock_db_cls.return_value
@@ -515,6 +529,7 @@ class TestRecreateLvstoreOnSecRoles(unittest.TestCase):
         mock_fw_cls.return_value = MagicMock()
 
         sec1 = nodes["sec-1"]
+        primary = nodes["primary-1"]
         for n in nodes.values():
             n.rpc_client = MagicMock(return_value=rpc)
             n.connect_to_hublvol = MagicMock()
@@ -522,13 +537,16 @@ class TestRecreateLvstoreOnSecRoles(unittest.TestCase):
             n.write_to_db = MagicMock()
             n.wait_for_jm_rep_tasks_to_finish = MagicMock(return_value=True)
 
-        recreate_lvstore_on_sec(sec1)
+        recreate_lvstore_on_non_leader(sec1, leader_node=primary, primary_node=primary)
 
-        # sec-1 is lvstore_stack_secondary_1 → role="secondary"
+        # sec-1 is lvstore_stack_secondary → role="secondary"
         sec1.connect_to_hublvol.assert_called_once()
         call_kwargs = sec1.connect_to_hublvol.call_args
         self.assertEqual(call_kwargs[1].get("role"), "secondary")
 
+    @patch("simplyblock_core.storage_node_ops._check_peer_disconnected", return_value=False)
+    @patch("simplyblock_core.storage_node_ops._set_restart_phase")
+    @patch("simplyblock_core.storage_node_ops._handle_rpc_failure_on_peer", return_value="skip")
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
     @patch("simplyblock_core.storage_node_ops.FirewallClient")
     @patch("simplyblock_core.storage_node_ops.RPCClient")
@@ -537,8 +555,8 @@ class TestRecreateLvstoreOnSecRoles(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.DBController")
     def test_second_secondary_gets_tertiary_role(
             self, mock_db_cls, mock_create_bdev, mock_connect_jm,
-            mock_rpc_cls, mock_fw_cls, mock_tcp_events):
-        from simplyblock_core.storage_node_ops import recreate_lvstore_on_sec
+            mock_rpc_cls, mock_fw_cls, mock_tcp_events, _mock_disc, _mock_phase, _mock_handle):
+        from simplyblock_core.storage_node_ops import recreate_lvstore_on_non_leader
 
         nodes = self._build_nodes()
         db = mock_db_cls.return_value
@@ -566,6 +584,7 @@ class TestRecreateLvstoreOnSecRoles(unittest.TestCase):
         mock_fw_cls.return_value = MagicMock()
 
         sec2 = nodes["sec-2"]
+        primary = nodes["primary-1"]
         for n in nodes.values():
             n.rpc_client = MagicMock(return_value=rpc)
             n.connect_to_hublvol = MagicMock()
@@ -573,9 +592,9 @@ class TestRecreateLvstoreOnSecRoles(unittest.TestCase):
             n.write_to_db = MagicMock()
             n.wait_for_jm_rep_tasks_to_finish = MagicMock(return_value=True)
 
-        recreate_lvstore_on_sec(sec2)
+        recreate_lvstore_on_non_leader(sec2, leader_node=primary, primary_node=primary)
 
-        # sec-2 is lvstore_stack_secondary_2 → role="tertiary"
+        # sec-2 is lvstore_stack_tertiary → role="tertiary"
         sec2.connect_to_hublvol.assert_called_once()
         call_kwargs = sec2.connect_to_hublvol.call_args
         self.assertEqual(call_kwargs[1].get("role"), "tertiary")
@@ -592,17 +611,17 @@ class TestSetNodeOnlineRoles(unittest.TestCase):
     def test_secondary_ids_role_mapping(self):
         """Verify that the role mapping logic in set_node_status correctly
         assigns 'secondary' to secondary_node_id and 'tertiary' to
-        secondary_node_id_2."""
+        tertiary_node_id."""
         # This tests the pattern used in set_node_status:
         #   for sec_id, sec_role in [(snode.secondary_node_id, "secondary"),
-        #                            (snode.secondary_node_id_2, "tertiary")]:
+        #                            (snode.tertiary_node_id, "tertiary")]:
         primary = _node(
             "node-1", lvstore="LVS_100",
             secondary_node_id="cluster-1/node-2",
-            secondary_node_id_2="cluster-1/node-3")
+            tertiary_node_id="cluster-1/node-3")
 
         role_map = [(primary.secondary_node_id, "secondary"),
-                    (primary.secondary_node_id_2, "tertiary")]
+                    (primary.tertiary_node_id, "tertiary")]
 
         self.assertEqual(role_map[0], ("cluster-1/node-2", "secondary"))
         self.assertEqual(role_map[1], ("cluster-1/node-3", "tertiary"))
@@ -612,10 +631,10 @@ class TestSetNodeOnlineRoles(unittest.TestCase):
         primary = _node(
             "node-1", lvstore="LVS_100",
             secondary_node_id="cluster-1/node-2",
-            secondary_node_id_2="")
+            tertiary_node_id="")
 
         role_map = [(primary.secondary_node_id, "secondary"),
-                    (primary.secondary_node_id_2, "tertiary")]
+                    (primary.tertiary_node_id, "tertiary")]
 
         active = [(sid, role) for sid, role in role_map if sid]
         self.assertEqual(len(active), 1)

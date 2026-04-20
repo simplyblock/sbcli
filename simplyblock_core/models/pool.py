@@ -36,6 +36,10 @@ class Pool(BaseModel):
     lvols_cr_namespace: str = ""
     lvols_cr_plural: str = ""
     sec_options: dict = {}
+    dhchap: bool = False
+    dhchap_key: str = ""
+    dhchap_ctrlr_key: str = ""
+    allowed_hosts: List[str] = []
 
 
     def has_qos(self):
