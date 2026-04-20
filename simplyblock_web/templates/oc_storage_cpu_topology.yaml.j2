@@ -36,17 +36,20 @@ spec:
               MARKER="/var/simplyblock/.cpu_topology_applied"
               if [ -f "$MARKER" ]; then
                   echo "[INFO] Node already configured. Waiting for NUMA to be fully ready..."
-                  while true; do
+                  RETRIES=0
+                  while [ $RETRIES -lt 12 ]; do
                     NUMA_ALLOC=$(kubectl get node "{{ HOSTNAME }}" \
                       -o jsonpath='{.status.allocatable.numa-align/numa-{{ NSOCKET }}}' 2>/dev/null || true)
                     if [ "$NUMA_ALLOC" = "100" ]; then
                       echo "[INFO] numa-align/numa-{{ NSOCKET }} is fully available (100)"
-                      break
+                      exit 0
                     fi
-                    echo "[INFO] numa-align/numa-{{ NSOCKET }} not ready yet (got: '$NUMA_ALLOC'), retrying in 5s..."
+                    RETRIES=$((RETRIES + 1))
+                    echo "[INFO] numa-align/numa-{{ NSOCKET }} not ready yet (got: '$NUMA_ALLOC'), retry $RETRIES/12 in 5s..."
                     sleep 5
                   done
-                  exit 0
+                  echo "[ERROR] numa-align/numa-{{ NSOCKET }} did not reach 100 after 12 retries (60s)"
+                  exit 1
               fi
 
               # Resource names — one MCP/MC/KC shared across all storage nodes in the cluster.
