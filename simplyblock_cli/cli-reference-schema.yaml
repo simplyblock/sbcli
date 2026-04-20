@@ -318,5 +318,5 @@ properties:
                           x-intellij-html-description: The version of the parameter which deprecates the replacement.
                         migration:
                           type: string
-                          description: The migration function which migrates the old value to the new value..
+                          description: The migration function which migrates the old value to the new value.
                           x-intellij-html-description: The migration function which migrates the old value to the new value.
