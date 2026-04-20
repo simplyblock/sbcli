@@ -1089,7 +1089,7 @@ class CLIWrapperBase:
         if partitions < 0 or partitions > 1:
             self.parser.error("partitions must be either 0 or 1")
         else:
-            if not hasattr(args, 'enable_journal_device') or args.enable_journal_device is None:
+            if getattr(args, 'enable_journal_device', None) is not True:
                 args.enable_journal_device = args.partitions == 0
-                del args.partitions
+            del args.partitions
         return args
