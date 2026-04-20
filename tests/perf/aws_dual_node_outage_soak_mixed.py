@@ -83,16 +83,10 @@ def parse_args():
         ),
     )
     parser.add_argument(
-        "--nic-chaos-min",
+        "--nic-chaos-duration",
         type=int,
-        default=30,
-        help="Minimum seconds to hold a data NIC down between iterations (multipath only).",
-    )
-    parser.add_argument(
-        "--nic-chaos-max",
-        type=int,
-        default=120,
-        help="Maximum seconds to hold a data NIC down between iterations (multipath only).",
+        default=20,
+        help="Seconds to hold a data NIC down between iterations (multipath only).",
     )
     parser.add_argument(
         "--no-nic-chaos",
@@ -362,6 +356,23 @@ class SoakRunner:
         self.created_volume_ids = []
         # Mixed-outage state
         self.methods = list(args.methods)
+        # On multipath clusters, network-layer coverage is provided by the
+        # inter-iteration single-NIC chaos. Dropping all data NICs on a node
+        # (network_outage_*) is a simple-cluster-only scenario.
+        if self._is_multipath():
+            filtered = [m for m in self.methods if not m.startswith("network_outage_")]
+            dropped = [m for m in self.methods if m not in filtered]
+            if dropped:
+                self.logger.log(
+                    f"multipath cluster detected: excluding {dropped} from outage methods"
+                )
+            if not filtered:
+                raise TestRunError(
+                    "No outage methods remain after excluding network_outage_* "
+                    "on multipath cluster; pass --methods with at least one "
+                    "non-network_outage method"
+                )
+            self.methods = filtered
         self.node_hosts = {}  # uuid -> RemoteHost (private_ip of storage node)
         self.node_ip_map = self._build_node_ip_map()
 
@@ -995,9 +1006,7 @@ class SoakRunner:
         data_nics = self._get_data_nics()
         if len(data_nics) < 2:
             return
-        lo = max(0, self.args.nic_chaos_min)
-        hi = max(lo, self.args.nic_chaos_max)
-        duration = random.randint(lo, hi) if hi > lo else lo
+        duration = max(0, self.args.nic_chaos_duration)
         nic = random.choice(data_nics)
         self.logger.log(
             f"Inter-iteration NIC chaos: dropping {nic} on all nodes for {duration}s"
