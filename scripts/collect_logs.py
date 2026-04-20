@@ -153,6 +153,67 @@ def sbctl_raw(*args):
 
 
 # ---------------------------------------------------------------------------
+# SSH + per-host helpers (for --include-node-docker-logs, --include-client-dmesg)
+# ---------------------------------------------------------------------------
+
+
+def ssh_exec(host: str, user: str, key: str, command: str, timeout: int = 120) -> tuple[int, str, str]:
+    """Run *command* on *host* via ssh. Returns (rc, stdout, stderr)."""
+    argv = [
+        "ssh",
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "BatchMode=yes",
+        "-o", "ConnectTimeout=15",
+        "-o", "ServerAliveInterval=15",
+        "-o", "ServerAliveCountMax=3",
+        "-i", key,
+        f"{user}@{host}",
+        f"bash -lc {json.dumps(command)}",
+    ]
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        return 124, exc.stdout or "", exc.stderr or "timeout"
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+def docker_logs_for_window(host: str, user: str, key: str, container: str,
+                           from_iso: str, to_iso: str, out_path: Path) -> int:
+    """Capture `docker logs <container>` for the given UTC window. Returns line count."""
+    # --since/--until accept RFC3339. Graylog ISOs already look like
+    # 2024-01-15T10:00:00.000Z which docker accepts.
+    cmd = (
+        f"sudo docker logs --timestamps "
+        f"--since {from_iso} --until {to_iso} {container} 2>&1 || true"
+    )
+    rc, out, err = ssh_exec(host, user, key, cmd, timeout=300)
+    out_path.write_text(out, encoding="utf-8", errors="replace")
+    # rc is best-effort; docker may return non-zero if the container died but
+    # still dumped logs. We keep whatever it produced.
+    return out.count("\n")
+
+
+def files_overlapping_window(directory: Path, patterns: tuple,
+                             from_dt: datetime, to_dt: datetime, slack_s: int = 7200) -> list[Path]:
+    """Return files in *directory* matching *patterns* whose mtime falls inside
+    [from_dt - slack, to_dt + slack].  A generous slack catches the run that
+    started before the window and is still being appended to after it."""
+    if not directory.is_dir():
+        return []
+    window_start = from_dt.timestamp() - slack_s
+    window_end = to_dt.timestamp() + slack_s
+    matched: list[Path] = []
+    for pattern in patterns:
+        for p in directory.glob(pattern):
+            if not p.is_file():
+                continue
+            mtime = p.stat().st_mtime
+            if window_start <= mtime <= window_end:
+                matched.append(p)
+    return sorted(set(matched))
+
+
+# ---------------------------------------------------------------------------
 # Log-line formatter
 # ---------------------------------------------------------------------------
 
@@ -700,9 +761,87 @@ def main():
             "to understand the actual data layout.  Implies --use-opensearch."
         ),
     )
+    parser.add_argument(
+        "--include-node-docker-logs",
+        action="store_true",
+        help=(
+            "SSH to each storage node and capture `docker logs SNodeAPI` for "
+            "the requested time window (supplements the Graylog-based "
+            "collection with raw container output)."
+        ),
+    )
+    parser.add_argument(
+        "--node-ssh-user",
+        default="ec2-user",
+        help="SSH user for storage-node docker-logs collection (default ec2-user).",
+    )
+    parser.add_argument(
+        "--node-ssh-key",
+        metavar="PATH",
+        help="SSH private key for storage-node docker-logs collection.",
+    )
+    parser.add_argument(
+        "--include-soak-logs",
+        action="store_true",
+        help=(
+            "Include soak test stdout/log files (*.log, *.out) whose mtime "
+            "overlaps the requested window, from --soak-logs-dir."
+        ),
+    )
+    parser.add_argument(
+        "--soak-logs-dir",
+        metavar="DIR",
+        default=str(Path.home() / "perf"),
+        help="Directory to scan for soak *.log/*.out files (default: ~/perf).",
+    )
+    parser.add_argument(
+        "--include-client-dmesg",
+        action="store_true",
+        help=(
+            "SSH to each client and collect dmesg + a persistent dmesg log "
+            "(/var/log/sb-dmesg.log if present) + journalctl -k for the "
+            "window.  NOTE: full coverage requires the soak script to run "
+            "`nohup sudo dmesg -Tw >> /var/log/sb-dmesg.log &` at start so "
+            "the kernel ring buffer doesn't rotate the incident out."
+        ),
+    )
+    parser.add_argument(
+        "--metadata",
+        metavar="PATH",
+        help=(
+            "Cluster metadata JSON (e.g. cluster_metadata_base.json) used to "
+            "auto-fill client IPs and the SSH key path for client/node "
+            "collections."
+        ),
+    )
+    parser.add_argument(
+        "--client-ssh-user",
+        default="ec2-user",
+        help="SSH user for client dmesg collection (default ec2-user).",
+    )
+    parser.add_argument(
+        "--client-ssh-key",
+        metavar="PATH",
+        help="SSH private key for client dmesg collection.",
+    )
     args = parser.parse_args()
     if args.diagnose:
         args.use_opensearch = True
+
+    # ── 0. Metadata auto-fill ───────────────────────────────────────────────
+    metadata_clients: list[dict] = []
+    if args.metadata:
+        with open(args.metadata, "r", encoding="utf-8") as fh:
+            md = json.load(fh)
+        metadata_clients = md.get("clients") or []
+        if not args.node_ssh_key:
+            args.node_ssh_key = md.get("key_path") or None
+        if not args.client_ssh_key:
+            args.client_ssh_key = md.get("key_path") or None
+        if md.get("user") and args.client_ssh_user == "ec2-user":
+            args.client_ssh_user = md["user"]
+        if md.get("user") and args.node_ssh_user == "ec2-user":
+            args.node_ssh_user = md["user"]
 
     # ── 1. Parse time range ──────────────────────────────────────────────────
 
@@ -908,6 +1047,91 @@ def main():
                     **fetch_kw,
                 )
                 print(f"    {cname:<42} {n:>8,} lines")
+
+        # ── 8b. SNodeAPI per-node docker logs (optional, via SSH) ────────────
+        if args.include_node_docker_logs:
+            print("\n[6b] Collecting SNodeAPI docker logs per storage node (ssh) …")
+            if not args.node_ssh_key:
+                print("  SKIP: --node-ssh-key not set (and no key_path in --metadata).")
+            else:
+                for node in sn_list:
+                    hostname = node.get("Hostname", "unknown")
+                    node_ip = node.get("Management IP", "")
+                    if not node_ip:
+                        print(f"  SKIP {hostname}: no Management IP")
+                        continue
+                    node_label = f"{hostname}_{node_ip}".strip("_") if node_ip else hostname
+                    node_dir = sn_root / node_label
+                    node_dir.mkdir(exist_ok=True)
+                    out_f = node_dir / "SNodeAPI_docker.log"
+                    print(f"  ssh {args.node_ssh_user}@{node_ip}: docker logs SNodeAPI --since {from_iso} --until {to_iso}")
+                    try:
+                        n = docker_logs_for_window(
+                            node_ip, args.node_ssh_user, args.node_ssh_key,
+                            "SNodeAPI", from_iso, to_iso, out_f,
+                        )
+                        print(f"    {'SNodeAPI (docker)':<42} {n:>8,} lines -> {out_f.name}")
+                    except Exception as exc:
+                        print(f"    WARN: {exc}", file=sys.stderr)
+
+        # ── 8c. Client dmesg (optional, via SSH) ─────────────────────────────
+        if args.include_client_dmesg:
+            print("\n[6c] Collecting client dmesg / journalctl -k …")
+            if not args.client_ssh_key:
+                print("  SKIP: --client-ssh-key not set (and no key_path in --metadata).")
+            elif not metadata_clients:
+                print("  SKIP: no clients in --metadata JSON.")
+            else:
+                client_dir = log_root / "clients"
+                client_dir.mkdir(exist_ok=True)
+                for c in metadata_clients:
+                    host = c.get("public_ip") or c.get("private_ip")
+                    if not host:
+                        print(f"  SKIP client without IP: {c}")
+                        continue
+                    per = client_dir / host.replace(".", "_")
+                    per.mkdir(exist_ok=True)
+                    # 1. Persistent dmesg log written by the soak script (if any)
+                    rc, out, _ = ssh_exec(
+                        host, args.client_ssh_user, args.client_ssh_key,
+                        "sudo cat /var/log/sb-dmesg.log 2>/dev/null || true",
+                        timeout=180,
+                    )
+                    (per / "sb-dmesg.log").write_text(out, encoding="utf-8", errors="replace")
+                    if not out:
+                        print(f"  {host}: /var/log/sb-dmesg.log missing or empty "
+                              f"(soak script must run `nohup sudo dmesg -Tw >> /var/log/sb-dmesg.log &` at start)")
+                    # 2. Current kernel ring buffer snapshot (may have rotated)
+                    _, out, _ = ssh_exec(
+                        host, args.client_ssh_user, args.client_ssh_key,
+                        "sudo dmesg -T 2>&1 || true",
+                    )
+                    (per / "dmesg_current.log").write_text(out, encoding="utf-8", errors="replace")
+                    # 3. journalctl -k for the window (often has longer retention)
+                    cmd = (
+                        f"sudo journalctl -k --no-pager --since {json.dumps(from_iso)} "
+                        f"--until {json.dumps(to_iso)} 2>&1 || true"
+                    )
+                    _, out, _ = ssh_exec(host, args.client_ssh_user, args.client_ssh_key, cmd, timeout=180)
+                    (per / "journalctl_k.log").write_text(out, encoding="utf-8", errors="replace")
+                    print(f"  {host}: sb-dmesg / dmesg_current / journalctl_k saved under clients/{per.name}/")
+
+        # ── 8d. Soak test stdout/log files (optional, local copy) ────────────
+        if args.include_soak_logs:
+            print(f"\n[6d] Collecting soak *.log/*.out from {args.soak_logs_dir} …")
+            soak_src = Path(args.soak_logs_dir).expanduser()
+            matched = files_overlapping_window(
+                soak_src, ("*.log", "*.out"), start_dt, end_dt,
+            )
+            if not matched:
+                print("  (no files overlap the time window)")
+            else:
+                soak_dst = log_root / "soak_scripts"
+                soak_dst.mkdir(exist_ok=True)
+                import shutil as _sh
+                for p in matched:
+                    _sh.copy2(p, soak_dst / p.name)
+                    print(f"  copied {p.name} ({p.stat().st_size} bytes)")
 
         # ── 9. sbctl cluster / node snapshots ────────────────────────────────
 
