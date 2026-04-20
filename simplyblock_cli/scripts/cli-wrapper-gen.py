@@ -152,6 +152,8 @@ def validate_deprecated_parameters(items):
                 if not found:
                     raise ValueError(f"replaced-by parameter '{replaced_by}' not found in parameters")
 
+            item.pop("default", None)
+
 
 base_path = sys.argv[1]
 with open("%s/cli-reference.yaml" % base_path) as stream:
