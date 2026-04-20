@@ -186,6 +186,27 @@ jobs:
           kubectl delete clusterrole simplyblock-storage-node-role --ignore-not-found 2>/dev/null || true
           kubectl delete clusterrolebinding simplyblock-storage-node-binding --ignore-not-found 2>/dev/null || true
 
+          echo "=== Phase 4b: Cleanup leftover secrets, SAs, and kube-system resources ==="
+          kubectl -n $NAMESPACE delete secret simplyblock-csi-secret-v2 --ignore-not-found 2>/dev/null || true
+          kubectl -n $NAMESPACE delete sa simplyblock-storage-node-sa --ignore-not-found 2>/dev/null || true
+
+          # Clean up kube-system resources from previous helm installs
+          for RES in sa clusterrole clusterrolebinding; do
+            for NAME in $(kubectl get $RES -A --no-headers 2>/dev/null | grep -i simplyblock | awk '{print $1 ":" $2}' 2>/dev/null); do
+              NS=$(echo "$NAME" | cut -d: -f1)
+              RNAME=$(echo "$NAME" | cut -d: -f2)
+              if [ "$RES" = "sa" ]; then
+                kubectl -n "$NS" delete sa "$RNAME" --ignore-not-found 2>/dev/null || true
+              else
+                kubectl delete "$RES" "$RNAME" --ignore-not-found 2>/dev/null || true
+              fi
+            done
+          done
+          # Specifically clean numa-resource-plugin SA in kube-system
+          kubectl -n kube-system delete sa simplyblock-numa-resource-plugin --ignore-not-found 2>/dev/null || true
+          kubectl -n kube-system delete clusterrole simplyblock-numa-resource-plugin --ignore-not-found 2>/dev/null || true
+          kubectl -n kube-system delete clusterrolebinding simplyblock-numa-resource-plugin --ignore-not-found 2>/dev/null || true
+
           echo "=== Phase 5: Verify nothing remains ==="
           echo "Namespaced resources:"
           kubectl -n $NAMESPACE get all 2>/dev/null || echo "No resources found"
