@@ -4853,6 +4853,28 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
         storage_events.snode_restart_failed(snode)
         snode_api = SNodeClient(snode.api_endpoint, timeout=5, retry=5)
         snode_api.spdk_process_kill(snode.rpc_port, snode.cluster_id)
+        # spdk_process_kill returns as soon as the HTTP request is
+        # queued — SPDK may keep serving IO for a short while after.
+        # Block here until SPDK is actually gone so the subsequent
+        # peer-port unblock in _abort_restart_and_unblock cannot race
+        # client IO back into the secondary while a still-alive primary
+        # on snode tries to serve as leader (→ writer conflict).
+        # We hold the peer port blocks during this wait; cap it at 5 s
+        # so a stuck kill does not leave peers permanently blocked.
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            try:
+                up = snode_api.spdk_process_is_up(snode.rpc_port, snode.cluster_id)
+            except Exception:
+                up = False
+            if not up:
+                break
+            time.sleep(0.25)
+        else:
+            logger.warning(
+                "SPDK on %s still up 5s after kill signal; proceeding with unblock anyway",
+                snode.get_id(),
+            )
         set_node_status(snode.get_id(), StorageNode.STATUS_OFFLINE)
 
     def _abort_restart_and_unblock(reason):
