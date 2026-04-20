@@ -65,6 +65,27 @@ def _ensure_spdk_killed(node):
             f"assuming SPDK is not serving"
         )
         return True
+
+    # Short-circuit when the SPDK container is already gone (common after a
+    # `docker kill spdk_*`: by the time this task body runs, SNodeAPI reports
+    # the container in `exited` state).  Skipping the kill RPC avoids a ~30 s
+    # retry-then-timeout cycle on an already-dead container.
+    try:
+        client = SNodeClient(node.api_endpoint, timeout=5, retry=2)
+        is_up, _ = client.spdk_process_is_up(node.rpc_port, node.cluster_id)
+        if not is_up:
+            logger.info(
+                f"SPDK on {node.get_id()} already not running; skipping kill"
+            )
+            return True
+    except Exception as exc:
+        # If the probe itself fails, fall through and try the kill — it's
+        # the conservative path (better to over-kill than leave SPDK serving).
+        logger.warning(
+            f"spdk_process_is_up probe failed on {node.get_id()}: {exc}; "
+            f"proceeding with kill"
+        )
+
     try:
         logger.info(f"Killing SPDK on node {node.get_id()} (rpc_port={node.rpc_port})")
         SNodeClient(node.api_endpoint, timeout=10, retry=5).spdk_process_kill(
@@ -340,8 +361,11 @@ while True:
         for cl in clusters:
             tasks = db.get_job_tasks(cl.get_id(), reverse=False)
             for task in tasks:
-                delay_seconds = constants.TASK_EXEC_INTERVAL_SEC
                 if task.function_name in [JobSchedule.FN_DEV_RESTART, JobSchedule.FN_NODE_RESTART]:
+                    # Restart tasks start at a short cadence and cap the
+                    # exponential backoff at RESTART_TASK_EXEC_INTERVAL_MAX_SEC
+                    # so recovery time is bounded even after several retries.
+                    delay_seconds = constants.RESTART_TASK_EXEC_INTERVAL_SEC
                     while task.status != JobSchedule.STATUS_DONE:
                         # get new task object because it could be changed from cancel task
                         task = db.get_task_by_id(task.uuid)
@@ -350,7 +374,10 @@ while True:
                             if task.status == JobSchedule.STATUS_DONE:
                                 break
                         else:
-                            delay_seconds *= 2
+                            delay_seconds = min(
+                                delay_seconds * 2,
+                                constants.RESTART_TASK_EXEC_INTERVAL_MAX_SEC,
+                            )
                         time.sleep(delay_seconds)
 
     time.sleep(constants.TASK_EXEC_INTERVAL_SEC)
