@@ -1082,9 +1082,14 @@ class CLIWrapperBase:
         return (cluster.get_id() for cluster in db.get_storage_nodes() if cluster.get_id().startswith(prefix))
 
     def migrate_journal_partition(self, args):
-        if args.partitions < 0 or args.partitions > 1:
+        partitions = getattr(args, 'partitions', None)
+        if partitions is None:
+            return args
+
+        if partitions < 0 or partitions > 1:
             self.parser.error("partitions must be either 0 or 1")
         else:
-            args.enable_journal_device = True
-            del args.partitions
+            if not hasattr(args, 'enable_journal_device') or args.enable_journal_device is None:
+                args.enable_journal_device = args.partitions == 0
+                del args.partitions
         return args

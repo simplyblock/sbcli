@@ -1085,7 +1085,7 @@ class CLIWrapper(CLIWrapperBase):
                         args.id_device_by_nqn = False
                         args.max_snap = 5000
                         args.spdk_proxy_image = None
-                    if getattr(args, 'partitions', None) is not None:
+                    if hasattr(args, 'partitions') and getattr(args, 'partitions', None) is not None:
                         args = self.migrate_journal_partition(args)
                     ret = self.storage_node__add_node(sub_command, args)
                 elif sub_command in ['delete']:
