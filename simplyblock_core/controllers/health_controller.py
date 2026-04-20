@@ -328,20 +328,11 @@ def _check_sec_node_hublvol(node: StorageNode, node_bdev=None, node_lvols_nqns=N
                 try:
                     sec1 = db_controller.get_storage_node_by_id(primary_node.secondary_node_id)
                     if sec1.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
-                        for iface in sec1.data_nics:
-                            if sec1.active_rdma and iface.trtype == "RDMA":
-                                tr_type = "RDMA"
-                            elif not sec1.active_rdma and sec1.active_tcp and iface.trtype == "TCP":
-                                tr_type = "TCP"
-                            else:
-                                continue
-                            r = rpc_client.bdev_nvme_attach_controller(
-                                primary_node.hublvol.bdev_name, primary_node.hublvol.nqn,
-                                iface.ip4_address, primary_node.hublvol.nvmf_port,
-                                tr_type, multipath="multipath")
-                            if not r:
-                                logger.warning("Failed to add secondary hublvol path via %s", iface.ip4_address)
-                        logger.info("Added missing secondary hublvol path on tertiary %s", node.get_id())
+                        if node.add_hublvol_failover_path(primary_node, sec1):
+                            logger.info("Added missing secondary hublvol path on tertiary %s", node.get_id())
+                        else:
+                            logger.warning("Failed to add missing secondary hublvol path on tertiary %s",
+                                           node.get_id())
                 except Exception as e:
                     logger.error("Error adding secondary hublvol path: %s", e)
 

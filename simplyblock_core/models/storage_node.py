@@ -387,12 +387,18 @@ class StorageNode(BaseNodeObject):
         remote_bdev = f"{primary_node.hublvol.bdev_name}n1"
 
         if not rpc_client.get_bdevs(remote_bdev):
-            # Per design: multipathing is defined by the number of data NICs.
-            # Enable multipath when there are multiple data NICs or a failover node.
+            # Multipathing is defined by the number of data NICs OR by role.
+            # A tertiary's hublvol controller must be attached in multipath mode
+            # regardless of current peer reachability, because the design expects
+            # it to hold both primary and secondary (failover) paths over its
+            # lifetime. SPDK does not allow widening a non-multipath controller
+            # to multipath after attach (bdev_nvme.c:5849 returns -EINVAL), so
+            # if we defer multipath until the failover peer is online we can
+            # end up permanently stuck in single-path mode.
             multiple_nics = len([n for n in primary_node.data_nics
                                  if (primary_node.active_rdma and n.trtype == "RDMA")
                                  or (primary_node.active_tcp and n.trtype == "TCP")]) > 1
-            use_multipath = "multipath" if (failover_node or multiple_nics) else False
+            use_multipath = "multipath" if (role == "tertiary" or failover_node or multiple_nics) else False
 
             # Attach primary path(s) — one per data NIC. Track whether at
             # least one primary attach succeeded: without that, the remote
@@ -464,6 +470,80 @@ class StorageNode(BaseNodeObject):
             return False
 
         return True
+
+    def add_hublvol_failover_path(self, primary_node, failover_node):
+        """Add failover_node's data-NIC paths to this node's existing hublvol
+        controller for primary_node's LVStore, self-healing non-multipath
+        controllers.
+
+        SPDK (bdev_nvme.c:5849) rejects adding a multipath path to a controller
+        attached with multipath='disable'/'failover'. That situation occurs when
+        the initial tertiary attach ran while the failover peer was unreachable
+        (single-NIC cluster + offline peer → use_multipath=False). When the
+        fast-path attach fails we detach the whole controller and re-attach all
+        expected paths (primary_node + failover_node) in multipath mode.
+
+        Returns True if at least one path to failover_node ends up attached,
+        with the primary path(s) still present (or re-attached).
+        """
+        controller_name = primary_node.hublvol.bdev_name
+        nqn = primary_node.hublvol.nqn
+        port = primary_node.hublvol.nvmf_port
+        rpc = self.rpc_client()
+
+        def _tr_type_for(peer, iface):
+            if peer.active_rdma and iface.trtype == "RDMA":
+                return "RDMA"
+            if not peer.active_rdma and peer.active_tcp and iface.trtype == "TCP":
+                return "TCP"
+            return None
+
+        def _attach_peer_paths(peer):
+            attached = False
+            for iface in peer.data_nics:
+                tr_type = _tr_type_for(peer, iface)
+                if tr_type is None:
+                    continue
+                try:
+                    if rpc.bdev_nvme_attach_controller(
+                            controller_name, nqn, iface.ip4_address, port,
+                            tr_type, multipath="multipath"):
+                        attached = True
+                    else:
+                        logger.warning(
+                            "Failed to attach hublvol path %s (peer %s) to %s",
+                            iface.ip4_address, peer.get_id(), controller_name)
+                except Exception as e:
+                    logger.warning(
+                        "Failed to attach hublvol path %s (peer %s) to %s: %s",
+                        iface.ip4_address, peer.get_id(), controller_name, e)
+            return attached
+
+        if _attach_peer_paths(failover_node):
+            return True
+
+        logger.warning(
+            "Fast-path failover attach to %s failed on %s; detaching and "
+            "rebuilding in multipath mode (existing controller may be in "
+            "non-multipath mode)",
+            controller_name, self.get_id())
+        try:
+            rpc.bdev_nvme_detach_controller(controller_name)
+        except Exception as e:
+            # Detach may fail if the controller doesn't exist yet; re-attach
+            # below will reveal the real state via its own error handling.
+            logger.warning(
+                "Detach of %s on %s before multipath repair did not succeed: %s",
+                controller_name, self.get_id(), e)
+
+        primary_ok = _attach_peer_paths(primary_node)
+        failover_ok = _attach_peer_paths(failover_node)
+        if not primary_ok:
+            logger.error(
+                "Multipath repair of %s on %s lost primary path — no paths "
+                "to %s were re-attached",
+                controller_name, self.get_id(), primary_node.get_id())
+        return failover_ok and primary_ok
 
     def create_alceml(self, name, nvme_bdev, uuid, **kwargs):
         logger.info(f"Adding {name}")
