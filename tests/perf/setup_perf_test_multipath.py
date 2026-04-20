@@ -394,7 +394,7 @@ def main():
 
     # ── Phase 1: Launch instances ────────────────────────────────────────
     print("\n--- Phase 1: Launch instances ---")
-    mgmt_instances = launch_instances(1, MGMT_TYPE, num_nics=1, tag_name="SB-Mgmt-MP")
+    mgmt_instances = launch_instances(1, MGMT_TYPE, num_nics=1, tag_name="SB-Mgmt-MP", root_gb=80)
     sn_instances   = launch_instances(SN_COUNT, SN_TYPE, num_nics=3, tag_name="SB-SN-MP")
     client_instances = launch_instances(CLIENT_COUNT, CLIENT_TYPE, num_nics=3, tag_name="SB-Client-MP")
 

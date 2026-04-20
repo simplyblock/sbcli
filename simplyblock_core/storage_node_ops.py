@@ -4824,7 +4824,30 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
     # Phase transition: blocked — sync deletes and registrations must be delayed
     _set_restart_phase(snode, lvs_name, StorageNode.RESTART_PHASE_BLOCKED, db_controller)
 
-    leader_port_blocked = False
+    # Peers whose LVS port is currently blocked. Client IO to any peer on
+    # snode_lvs_port is rejected until that peer is removed from the list.
+    # Every blocked peer MUST be unblocked — either per-peer after its
+    # connect_to_hublvol succeeds, or en bloc on abort.
+    blocked_peers = []
+
+    def _unblock_peer_port(peer):
+        """Remove the firewall block for snode_lvs_port on peer and drop
+        the peer from blocked_peers. Safe to call if peer is not currently
+        blocked (no-op). Tolerates RPC failure — logs and continues so
+        other peers can still be unblocked."""
+        try:
+            _pt = "udp" if peer.active_rdma else "tcp"
+            _fw = FirewallClient(peer, timeout=5, retry=2)
+            _fw.firewall_set_port(snode_lvs_port, _pt, "allow", peer.rpc_port)
+            tcp_ports_events.port_allowed(peer, snode_lvs_port)
+        except Exception as ue:
+            logger.error("Failed to unblock port %s on %s: %s",
+                         snode_lvs_port, peer.get_id(), ue)
+        finally:
+            try:
+                blocked_peers.remove(peer)
+            except ValueError:
+                pass
 
     def _kill_app():
         storage_events.snode_restart_failed(snode)
@@ -4833,19 +4856,12 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
         set_node_status(snode.get_id(), StorageNode.STATUS_OFFLINE)
 
     def _abort_restart_and_unblock(reason):
-        """Abort: kill SPDK, set offline, unblock leader port, raise."""
+        """Abort: kill SPDK, set offline, unblock every blocked peer, raise."""
         logger.error("Aborting recreate_lvstore on %s for %s: %s",
                      snode.get_id(), lvs_name, reason)
         _kill_app()
-        if leader_port_blocked and current_leader:
-            try:
-                _fw = FirewallClient(current_leader, timeout=5, retry=2)
-                _pt = "udp" if current_leader.active_rdma else "tcp"
-                _fw.firewall_set_port(snode_lvs_port, _pt, "allow", current_leader.rpc_port)
-                tcp_ports_events.port_allowed(current_leader, snode_lvs_port)
-            except Exception as ue:
-                logger.error("Failed to unblock leader port %s on %s during abort: %s",
-                             snode_lvs_port, current_leader.get_id(), ue)
+        for peer in list(blocked_peers):
+            _unblock_peer_port(peer)
         raise Exception(f"Abort restart: {reason}")
 
     if not activation_mode:
@@ -4864,7 +4880,12 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
                 disconnected_peers.add(current_leader.get_id())
                 current_leader = None
 
-        ### 3- block leader port ONLY (no siblings/non-leaders)
+        ### 3- block LVS port on every connected peer (leader + non-leaders).
+        # Without blocking the tertiary, client IO can leak to it during the
+        # leader flap: tertiary's LVOL listener stays open and serves writes
+        # whose hublvol redirect target is mid-transition, producing
+        # writer_conflict events on the journal. Each peer stays blocked
+        # until its connect_to_hublvol succeeds in ### 8b.
         if current_leader and current_leader.get_id() not in disconnected_peers:
             try:
                 current_leader.lvstore_status = "in_creation"
@@ -4877,13 +4898,36 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
                 fw_api = FirewallClient(current_leader, timeout=5, retry=2)
                 fw_api.firewall_set_port(snode_lvs_port, port_type, "block", current_leader.rpc_port)
                 tcp_ports_events.port_deny(current_leader, snode_lvs_port)
-                leader_port_blocked = True
+                blocked_peers.append(current_leader)
             except Exception:
                 rpc_result = _handle_rpc_failure_on_peer(snode, current_leader, lvs_jm_vuid, lvs_name=lvs_name)
                 if rpc_result == "abort":
                     raise Exception(f"Abort restart: leader {current_leader.get_id()} fabric-connected but mgmt unresponsive")
                 disconnected_peers.add(current_leader.get_id())
                 current_leader = None
+
+        # Also block non-leader peers (tertiary). The leader's demote+drain
+        # below is leader-specific; non-leaders just need the port shut so
+        # IO can't leak to them during the flap.
+        for sec_node in sec_nodes:
+            if sec_node is current_leader:
+                continue
+            if sec_node.get_id() in disconnected_peers:
+                continue
+            if sec_node in blocked_peers:
+                continue
+            try:
+                port_type = "udp" if sec_node.active_rdma else "tcp"
+                fw_api = FirewallClient(sec_node, timeout=5, retry=2)
+                fw_api.firewall_set_port(snode_lvs_port, port_type, "block", sec_node.rpc_port)
+                tcp_ports_events.port_deny(sec_node, snode_lvs_port)
+                blocked_peers.append(sec_node)
+            except Exception:
+                rpc_result = _handle_rpc_failure_on_peer(snode, sec_node, lvs_jm_vuid, lvs_name=lvs_name)
+                if rpc_result == "abort":
+                    _abort_restart_and_unblock(
+                        f"peer {sec_node.get_id()} fabric-connected but mgmt unresponsive during port block")
+                disconnected_peers.add(sec_node.get_id())
 
         if leader_port_blocked and current_leader:
             # --- Inside port-blocked window: timeout=0.2s, retry=0, abort on failure ---
@@ -5016,26 +5060,21 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
                 continue
             sec1 = sec_nodes[0] if sec_nodes else None
             failover_node = sec1 if i >= 1 and sec1 and sec1.get_id() not in disconnected_peers else None
+            sec_role = "tertiary" if i >= 1 else "secondary"
             try:
-                sec_role = "tertiary" if i >= 1 else "secondary"
-                if not sec_node.connect_to_hublvol(snode, failover_node=failover_node, role=sec_role,
-                                                   timeout=0.5):
-                    logger.error("connect_to_hublvol failed for %s", sec_node.get_id())
+                ok = sec_node.connect_to_hublvol(snode, failover_node=failover_node, role=sec_role,
+                                                 timeout=0.5)
             except Exception as e:
-                logger.error("Error establishing hublvol: %s", e)
+                logger.error("Error establishing hublvol on %s: %s", sec_node.get_id(), e)
+                _abort_restart_and_unblock(
+                    f"connect_to_hublvol on {sec_node.get_id()} raised: {e}")
+            if not ok:
+                _abort_restart_and_unblock(
+                    f"connect_to_hublvol returned False on {sec_node.get_id()} ({sec_role})")
 
-        ### 8c- unblock leader port AFTER peers connected to hublvol
-        if leader_port_blocked and current_leader:
-            try:
-                port_type = "tcp"
-                if current_leader.active_rdma:
-                    port_type = "udp"
-                fw_api = FirewallClient(current_leader, timeout=5, retry=2)
-                fw_api.firewall_set_port(snode_lvs_port, port_type, "allow", current_leader.rpc_port)
-                tcp_ports_events.port_allowed(current_leader, snode_lvs_port)
-            except Exception as e:
-                logger.error("Failed to unblock leader port for %s: %s", lvs_name, e)
-            leader_port_blocked = False
+            ### 8c- unblock this peer's port only after its hublvol is connected
+            if sec_node in blocked_peers:
+                _unblock_peer_port(sec_node)
 
     ### 9- add lvols to subsystems
     executor = ThreadPoolExecutor(max_workers=50)
