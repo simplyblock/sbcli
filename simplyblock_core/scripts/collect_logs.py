@@ -943,8 +943,12 @@ def main():
         mgmt_ip = cp_nodes[0]["IP"]
         print(f"    Management IP : {mgmt_ip}  ({len(cp_nodes)} node(s) total)")
 
-    graylog_base = f"http://{mgmt_ip}/graylog/api"
-    opensearch_base = f"http://{mgmt_ip}/opensearch"
+    if args.mode == "kubernetes":
+        graylog_base = f"http://{mgmt_ip}:9000/api"
+        opensearch_base = f"http://{mgmt_ip}:9200"
+    else:
+        graylog_base = f"http://{mgmt_ip}/graylog/api"
+        opensearch_base = f"http://{mgmt_ip}/opensearch"
 
     # ── 4. Storage nodes ─────────────────────────────────────────────────────
 
