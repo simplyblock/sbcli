@@ -195,8 +195,7 @@ commands:
             description: >
               Storage network interface names, e.g. eth0,eth1
             dest: data_nics
-            type: str
-            nargs: "+"
+            type: list
           - name: "--size-of-device"
             help: "The size of device per storage node."
             dest: partition_size
