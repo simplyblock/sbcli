@@ -139,7 +139,8 @@ class CLIWrapper(CLIWrapperBase):
 {%- endfor -%}
 {%- for parameter in subcommand.parameters -%}
 {%- if parameter.deprecated is defined and parameter.deprecated.migration is defined %}
-                    args = self.{{ parameter.deprecated.migration }}(args)
+                    if hasattr(args, '{{ parameter.dest if parameter.dest is defined else parameter.name }}') and getattr(args, '{{ parameter.dest if parameter.dest is defined else parameter.name }}', None) is not None:
+                        args = self.{{ parameter.deprecated.migration }}(args)
 {%- endif %}
 {%- endfor -%}
 {%- if subcommand.private %}
