@@ -1,66 +1,99 @@
 {
+    "provider": "aws",
+    "multipath": true,
+    "data_nics": [
+        "eth1",
+        "eth2"
+    ],
     "mgmt": {
-        "instance_id": "i-00b4631e78118a705",
-        "public_ip": "100.30.192.143",
-        "private_ip": "172.31.36.74",
+        "instance_id": "i-0d3a18ea3570dee6a",
+        "public_ip": "52.45.23.98",
+        "private_ip": "172.31.34.134",
         "subnet_id": "subnet-0593459d6b931ee4c",
         "security_group_id": "sg-02e89a1372e9f39e9"
     },
     "storage_nodes": [
         {
-            "instance_id": "i-045e3c9eab5384455",
-            "private_ip": "172.31.45.161",
-            "public_ip": "54.196.37.84",
+            "instance_id": "i-0c111901688dea9db",
+            "private_ip": "172.31.43.72",
+            "public_ip": "34.192.87.77",
             "subnet_id": "subnet-0593459d6b931ee4c",
-            "security_group_id": "sg-02e89a1372e9f39e9"
+            "security_group_id": "sg-02e89a1372e9f39e9",
+            "data_nics": {
+                "eth1": "172.31.37.57",
+                "eth2": "172.31.43.139"
+            }
         },
         {
-            "instance_id": "i-089bd28a4ef5d4dac",
-            "private_ip": "172.31.38.76",
-            "public_ip": "18.207.163.137",
+            "instance_id": "i-07f31c6b985a5e74c",
+            "private_ip": "172.31.34.118",
+            "public_ip": "44.196.14.170",
             "subnet_id": "subnet-0593459d6b931ee4c",
-            "security_group_id": "sg-02e89a1372e9f39e9"
+            "security_group_id": "sg-02e89a1372e9f39e9",
+            "data_nics": {
+                "eth1": "172.31.36.36",
+                "eth2": "172.31.36.75"
+            }
         },
         {
-            "instance_id": "i-08f040918c5f97cac",
-            "private_ip": "172.31.46.132",
-            "public_ip": "3.89.136.108",
+            "instance_id": "i-04807b297c1546726",
+            "private_ip": "172.31.47.229",
+            "public_ip": "54.83.13.23",
             "subnet_id": "subnet-0593459d6b931ee4c",
-            "security_group_id": "sg-02e89a1372e9f39e9"
+            "security_group_id": "sg-02e89a1372e9f39e9",
+            "data_nics": {
+                "eth1": "172.31.35.194",
+                "eth2": "172.31.35.85"
+            }
         },
         {
-            "instance_id": "i-06b8da64cafb2caa4",
-            "private_ip": "172.31.37.231",
-            "public_ip": "54.172.152.204",
+            "instance_id": "i-01c84b966bc6b5e33",
+            "private_ip": "172.31.35.242",
+            "public_ip": "98.88.212.135",
             "subnet_id": "subnet-0593459d6b931ee4c",
-            "security_group_id": "sg-02e89a1372e9f39e9"
+            "security_group_id": "sg-02e89a1372e9f39e9",
+            "data_nics": {
+                "eth1": "172.31.43.209",
+                "eth2": "172.31.45.178"
+            }
         },
         {
-            "instance_id": "i-0a37ef4cd682defbd",
-            "private_ip": "172.31.37.66",
-            "public_ip": "52.55.128.39",
+            "instance_id": "i-0db3226776b9f4cca",
+            "private_ip": "172.31.32.123",
+            "public_ip": "54.235.164.207",
             "subnet_id": "subnet-0593459d6b931ee4c",
-            "security_group_id": "sg-02e89a1372e9f39e9"
+            "security_group_id": "sg-02e89a1372e9f39e9",
+            "data_nics": {
+                "eth1": "172.31.45.125",
+                "eth2": "172.31.37.238"
+            }
         },
         {
-            "instance_id": "i-0de85e9f649374111",
-            "private_ip": "172.31.39.146",
-            "public_ip": "54.166.233.103",
+            "instance_id": "i-06b4e7f06252fb6a6",
+            "private_ip": "172.31.36.217",
+            "public_ip": "35.173.10.107",
             "subnet_id": "subnet-0593459d6b931ee4c",
-            "security_group_id": "sg-02e89a1372e9f39e9"
+            "security_group_id": "sg-02e89a1372e9f39e9",
+            "data_nics": {
+                "eth1": "172.31.41.251",
+                "eth2": "172.31.45.124"
+            }
         }
     ],
     "clients": [
         {
-            "instance_id": "i-0dca4221412ee2296",
-            "public_ip": "98.86.223.87",
-            "private_ip": "172.31.40.97",
-            "security_group_id": "sg-02e89a1372e9f39e9"
+            "instance_id": "i-039d51e90411a98af",
+            "public_ip": "44.212.119.188",
+            "private_ip": "172.31.41.52",
+            "security_group_id": "sg-02e89a1372e9f39e9",
+            "data_nics": {
+                "eth1": "172.31.35.93",
+                "eth2": "172.31.32.104"
+            }
         }
     ],
     "subnet_id": "subnet-0593459d6b931ee4c",
-    "target_group": "sg-02e89a1372e9f39e9",
-    "cluster_uuid": "6da24efb-eaa2-491a-ba03-2a248423f8b5",
+    "cluster_uuid": "cd03b42d-a34f-4a70-a1b0-2263661b843d",
     "user": "ec2-user",
-    "key_path": "/home/michael/.ssh/mtes01.pem"
+    "key_path": "C:\\ssh\\mtes01.pem"
 }
