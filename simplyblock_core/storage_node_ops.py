@@ -4828,7 +4828,7 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
     # snode_lvs_port is rejected until that peer is removed from the list.
     # Every blocked peer MUST be unblocked — either per-peer after its
     # connect_to_hublvol succeeds, or en bloc on abort.
-    blocked_peers = []
+    blocked_peers: list = []
 
     def _unblock_peer_port(peer):
         """Remove the firewall block for snode_lvs_port on peer and drop
@@ -4929,7 +4929,7 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
                         f"peer {sec_node.get_id()} fabric-connected but mgmt unresponsive during port block")
                 disconnected_peers.add(sec_node.get_id())
 
-        if leader_port_blocked and current_leader:
+        if current_leader and current_leader in blocked_peers:
             # --- Inside port-blocked window: timeout=0.2s, retry=0, abort on failure ---
             leader_rpc = RPCClient(
                 current_leader.mgmt_ip, current_leader.rpc_port,

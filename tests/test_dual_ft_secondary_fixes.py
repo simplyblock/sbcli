@@ -372,9 +372,9 @@ class TestRecreateLvstoreDualSecondary(unittest.TestCase):
         # Both sec1 (node-2) and sec2 (node-3) should have connect_to_hublvol called
         # sec1 gets role="secondary", sec2 gets role="tertiary" with failover to sec1
         nodes["node-2"].connect_to_hublvol.assert_called_once_with(
-            snode, failover_node=None, role="secondary")
+            snode, failover_node=None, role="secondary", timeout=0.5)
         nodes["node-3"].connect_to_hublvol.assert_called_once_with(
-            snode, failover_node=nodes["node-2"], role="tertiary")
+            snode, failover_node=nodes["node-2"], role="tertiary", timeout=0.5)
 
     @patch("simplyblock_core.storage_node_ops._check_peer_disconnected", return_value=False)
     @patch("simplyblock_core.storage_node_ops._set_restart_phase")

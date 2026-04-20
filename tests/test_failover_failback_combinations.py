@@ -504,15 +504,18 @@ class TestRecreateLvstoreFTT2(unittest.TestCase):
         result = recreate_lvstore(snode)
         self.assertTrue(result)
 
-        # Per design: only the current leader port should be blocked and allowed,
-        # not all secondaries.
+        # Per design: every online peer (current leader + non-leader peers)
+        # must have its LVS port blocked during the primary restart, and
+        # each peer's port is unblocked only after its connect_to_hublvol
+        # succeeds. With FTT=2 and both secondaries online, that's 2 blocks
+        # and 2 matching allows.
         all_fw_calls = []
         for fw in fw_instances:
             all_fw_calls.extend(fw.firewall_set_port.call_args_list)
         block_calls = [c for c in all_fw_calls if c[0][2] == "block"]
         allow_calls = [c for c in all_fw_calls if c[0][2] == "allow"]
-        self.assertEqual(len(block_calls), 1, "Block on current leader only")
-        self.assertEqual(len(allow_calls), 1, "Allow on current leader only")
+        self.assertEqual(len(block_calls), 2, "Block on both secondaries")
+        self.assertEqual(len(allow_calls), 2, "Allow on both secondaries")
 
     @patch("simplyblock_core.storage_node_ops._check_peer_disconnected", side_effect=lambda peer, **kw: peer.status in ["offline"])
     @patch("simplyblock_core.storage_node_ops._set_restart_phase")

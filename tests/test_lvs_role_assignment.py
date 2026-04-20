@@ -390,9 +390,9 @@ class TestRecreateLvstoreRoles(unittest.TestCase):
 
         # sec1 (node-2) → secondary, sec2 (node-3) → tertiary
         nodes["node-2"].connect_to_hublvol.assert_called_once_with(
-            snode, failover_node=None, role="secondary")
+            snode, failover_node=None, role="secondary", timeout=0.5)
         nodes["node-3"].connect_to_hublvol.assert_called_once_with(
-            snode, failover_node=nodes["node-2"], role="tertiary")
+            snode, failover_node=nodes["node-2"], role="tertiary", timeout=0.5)
 
     @patch("simplyblock_core.storage_node_ops._check_peer_disconnected", return_value=False)
     @patch("simplyblock_core.storage_node_ops._set_restart_phase")
@@ -458,7 +458,7 @@ class TestRecreateLvstoreRoles(unittest.TestCase):
 
         # Only sec1 should be called, with role="secondary"
         nodes["node-2"].connect_to_hublvol.assert_called_once_with(
-            snode, failover_node=None, role="secondary")
+            snode, failover_node=None, role="secondary", timeout=0.5)
         nodes["node-3"].connect_to_hublvol.assert_not_called()
 
 
