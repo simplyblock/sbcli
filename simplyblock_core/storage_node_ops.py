@@ -4557,23 +4557,13 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
                 tert_node = db_controller.get_storage_node_by_id(tert_id)
                 if tert_node and not _check_peer_disconnected(tert_node, lvs_peer_ids=lvs_peer_ids_excl_snode):
                     try:
-                        tert_rpc = tert_node.rpc_client()
-                        for iface in snode.data_nics:
-                            if snode.active_rdma and iface.trtype == "RDMA":
-                                tr_type = "RDMA"
-                            elif not snode.active_rdma and snode.active_tcp and iface.trtype == "TCP":
-                                tr_type = "TCP"
-                            else:
-                                continue
-                            ret = tert_rpc.bdev_nvme_attach_controller(
-                                leader_node.hublvol.bdev_name, leader_node.hublvol.nqn,
-                                iface.ip4_address, leader_node.hublvol.nvmf_port,
-                                tr_type, multipath="multipath")
-                            if not ret:
-                                logger.warning("Failed to add secondary hublvol path on tertiary %s via %s",
-                                               tert_node.get_id(), iface.ip4_address)
-                        logger.info("Added secondary %s hublvol path on tertiary %s for %s",
-                                    snode.get_id(), tert_node.get_id(), primary_node.lvstore)
+                        if tert_node.add_hublvol_failover_path(leader_node, snode):
+                            logger.info("Added secondary %s hublvol path on tertiary %s for %s",
+                                        snode.get_id(), tert_node.get_id(), primary_node.lvstore)
+                        else:
+                            logger.warning(
+                                "Failed to add secondary %s hublvol path on tertiary %s for %s",
+                                snode.get_id(), tert_node.get_id(), primary_node.lvstore)
                     except Exception as e:
                         logger.error("Error adding secondary hublvol path on tertiary: %s", e)
 
