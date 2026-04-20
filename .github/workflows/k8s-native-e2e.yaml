@@ -326,6 +326,68 @@ jobs:
             WORKER_YAML="${WORKER_YAML}    - ${NODE}"$'\n'
           done
 
+          echo "=== Custom resource YAML to apply ==="
+          cat <<EOF
+          apiVersion: storage.simplyblock.io/v1alpha1
+          kind: StorageCluster
+          metadata:
+            name: simplyblock-cluster
+            namespace: ${NAMESPACE}
+          spec:
+            clusterName: simplyblock-cluster
+            mgmtIfname: ${MGMT_IFC}
+            fabricType: tcp
+            isSingleNode: false
+            enableNodeAffinity: true
+            strictNodeAntiAffinity: false
+            stripe:
+              dataChunks: ${NDCS}
+              parityChunks: ${NPCS}
+            warningThreshold:
+              capacity: 95
+              provisionedCapacity: 97
+            criticalThreshold:
+              capacity: 96
+              provisionedCapacity: 98
+          ---
+          apiVersion: storage.simplyblock.io/v1alpha1
+          kind: Pool
+          metadata:
+            name: simplyblock-pool
+            namespace: ${NAMESPACE}
+          spec:
+            name: simplyblock-pool
+            clusterName: simplyblock-cluster
+          ---
+          apiVersion: storage.simplyblock.io/v1alpha1
+          kind: StorageNode
+          metadata:
+            name: simplyblock-node
+            namespace: ${NAMESPACE}
+          spec:
+            clusterName: simplyblock-cluster
+            clusterImage: "${SB_REPO}:${SB_TAG}"
+            spdkImage: "${SPDK_IMAGE}"
+            mgmtIfname: ${MGMT_IFC}
+            dataIfname:
+              - ${DATA_NICS}
+            maxLogicalVolumeCount: 30
+            partitions: 0
+            corePercentage: 65
+            coreIsolation: false
+            journalManager:
+              count: 3
+              percentPerDevice: 3
+            skipKubeletConfiguration: true
+            enableCpuTopology: true
+            openShiftCluster: false
+            ubuntuHost: false
+            forceFormat4K: false
+            workerNodes:
+          ${WORKER_YAML}
+          EOF
+
+          echo "=== Applying custom resources ==="
           cat <<EOF | kubectl apply -f -
           apiVersion: storage.simplyblock.io/v1alpha1
           kind: StorageCluster
