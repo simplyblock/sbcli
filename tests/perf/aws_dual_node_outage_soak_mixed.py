@@ -353,6 +353,9 @@ class SoakRunner:
         self.client = RemoteHost(metadata["clients"][0]["public_ip"], self.user, self.key_path, logger, "client")
         self.cluster_id = metadata.get("cluster_uuid") or ""
         self.fio_jobs = []
+        # Stored so stop_fio/start_fio can be called between outage iterations
+        # without re-querying / re-mounting.
+        self.volumes = []
         self.created_volume_ids = []
         # Mixed-outage state
         self.methods = list(args.methods)
@@ -878,6 +881,39 @@ class SoakRunner:
         if finished_cleanly:
             raise TestRunError("fio completed before outage loop started")
 
+    def stop_fio(self):
+        """Stop every fio process launched by this soak on the client host.
+
+        Called between outage iterations so that the subsequent rebalancing
+        runs unloaded. We match by fio --name=aws_dual_soak_* rather than
+        tracked PIDs because fio can spawn worker processes whose parent
+        (the nohup bash) may already have exited, leaving tracked PIDs
+        stale. A short graceful window is followed by SIGKILL so a stuck
+        fio cannot hold up the next iteration.
+        """
+        if not self.fio_jobs:
+            return
+        self.logger.log("Stopping fio on all volumes")
+        kill_script = (
+            "set +e\n"
+            "sudo pkill -TERM -f 'fio --name=aws_dual_soak_' 2>/dev/null || true\n"
+            "for i in $(seq 1 15); do\n"
+            "  if ! pgrep -f 'fio --name=aws_dual_soak_' >/dev/null; then\n"
+            "    exit 0\n"
+            "  fi\n"
+            "  sleep 2\n"
+            "done\n"
+            "sudo pkill -KILL -f 'fio --name=aws_dual_soak_' 2>/dev/null || true\n"
+        )
+        self.client.run(
+            f"bash -lc {shlex.quote(kill_script)}",
+            timeout=90,
+            check=False,
+            label="stop fio",
+        )
+        # Drop the job list; start_fio will rebuild it from self.volumes.
+        self.fio_jobs = []
+
     # ----- outage methods ---------------------------------------------------
 
     def _forced_shutdown(self, node_id):
@@ -1122,7 +1158,21 @@ class SoakRunner:
             deadline = time.time() + self.args.restart_timeout
             while True:
                 try:
-                    self.sbctl(f"sn restart {node_id}", timeout=300)
+                    # Emit a RESTART header with the wall-clock timestamp,
+                    # then dump the raw sbctl -d restart stdout below it
+                    # (without per-line timestamp prefix) so the CP trace
+                    # produced by -d lines up with a single moment in time.
+                    self.logger.log(
+                        f"RESTART: {time.strftime('%Y-%m-%d %H:%M:%S')} {node_id}"
+                    )
+                    stdout_text = self.sbctl(f"sn restart {node_id}", timeout=300)
+                    with self.logger.lock:
+                        print(stdout_text, flush=True, end=""
+                              if stdout_text.endswith("\n") else "\n")
+                        with open(self.logger.path, "a", encoding="utf-8") as handle:
+                            handle.write(stdout_text)
+                            if not stdout_text.endswith("\n"):
+                                handle.write("\n")
                     break
                 except Exception as e:
                     if time.time() >= deadline:
@@ -1172,12 +1222,13 @@ class SoakRunner:
         self.wait_for_all_online(
             target_nodes={node1, node2}, timeout=wait_timeout
         )
-        finished = self.check_fio()
-        if finished:
-            self.logger.log("fio workload completed successfully after outage cycle")
-            return True
+        # Intentionally no check_fio here: fio is stopped immediately after
+        # the outage pair by the outer loop so that the subsequent
+        # rebalancing/migration runs without IO load. The outer loop then
+        # restarts fio for the next iteration. Any natural fio completion
+        # (e.g. runtime expired) will surface when stop_fio's pkill becomes
+        # a no-op and the next start_fio picks the run up cleanly.
         self.wait_for_cluster_stable()
-        return False
 
     def run(self):
         self.ensure_prerequisites()
@@ -1186,8 +1237,13 @@ class SoakRunner:
         self.wait_for_cluster_stable()
         mount_root = self.prepare_client()
         volumes = self.create_volumes(nodes)
+        # Stored so stop_fio/start_fio can be driven per-iteration without
+        # re-creating / re-mounting the underlying volumes.
+        self.volumes = volumes
         self.connect_and_mount_volumes(volumes, mount_root)
-        self.start_fio(volumes)
+        # fio is (re)started at the top of every iteration below, once the
+        # cluster is verified stable and the previous iteration's rebalancing
+        # has completed. No initial start_fio here.
 
         iteration = 0
         while True:
@@ -1204,6 +1260,12 @@ class SoakRunner:
                 f"starting outage iteration {iteration}"
             )
             self.wait_for_cluster_stable()
+
+            # Cluster is now fully healthy with no in-flight rebalancing.
+            # Start a fresh fio run so the upcoming outage is applied under
+            # live IO load, matching the original soak semantics.
+            self.start_fio(self.volumes)
+
             current_nodes = self.ensure_expected_nodes()
             current_uuids = [node["uuid"] for node in current_nodes]
             # Safety: all data NICs must be up during an outage iteration.
@@ -1220,11 +1282,12 @@ class SoakRunner:
                 f"Starting outage iteration {iteration}: "
                 f"{node1}={method1}, {node2}={method2}"
             )
-            done = self.run_outage_pair(node1, node2, method1, method2)
+            self.run_outage_pair(node1, node2, method1, method2)
 
-            if done:
-                self.logger.log(f"Test completed successfully after {iteration} outage iterations")
-                return
+            # Stop fio immediately so the ensuing migration/rebalance runs
+            # unloaded. The next iteration will wait for the migration to
+            # complete and then restart fio from scratch on all volumes.
+            self.stop_fio()
 
             self._inter_iteration_nic_chaos()
 
