@@ -687,6 +687,7 @@ jobs:
           NPCS: ${{ env.NPCS }}
           BS: ${{ env.BS }}
           CHUNK_BS: ${{ env.CHUNK_BS }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
 
       # ── Post-test: timing, logs, notifications ──────────────────────────────
 
