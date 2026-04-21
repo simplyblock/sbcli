@@ -1201,12 +1201,12 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=None):
             logger.warning(f"Skipping device:{org_dev.get_id()} with status: {org_dev.status}")
             continue
 
-        if org_dev_node is not None and not _peer_reachable_via_jm_quorum(
-                org_dev_node.get_id(), this_node):
-            logger.warning(
-                "Skipping remote JM %s: peer %s unreachable via JM quorum",
-                org_dev.jm_bdev, org_dev_node.get_id())
-            continue
+        # Quorum reachability check intentionally not gated here:
+        # during cluster_activate the peers' JC quorums are still being
+        # bootstrapped, so _peer_reachable_via_jm_quorum cannot answer
+        # correctly for a not-yet-built group and would skip every intended
+        # member of the new jm_vuid. Runtime re-attach paths (rejoin,
+        # restart-task) carry their own reachability gating.
 
         remote_device = RemoteJMDevice()
         remote_device.uuid = org_dev.uuid
@@ -5333,13 +5333,23 @@ def get_secondary_nodes(current_node, exclude_ids=None):
     return nodes
 
 
-def get_secondary_nodes_2(current_node, exclude_ids=None):
+def get_secondary_nodes_2(current_node, exclude_ids=None, exclude_mgmt_ips=None):
     """Get candidate nodes for second secondary assignment (dual fault tolerance).
     Unlike get_secondary_nodes, this checks lvstore_stack_tertiary instead of
     lvstore_stack_secondary, since nodes that already serve as first secondary
-    for another primary are still eligible as second secondary."""
+    for another primary are still eligible as second secondary.
+
+    The tertiary must be host-disjoint from both the primary (current_node) and
+    the already-picked first secondary, otherwise a single host outage would
+    take out two of the four HA journal members and violate the cluster's
+    fault-tolerance guarantee. Caller passes the secondary's mgmt_ip via
+    exclude_mgmt_ips to enforce this.
+    """
     if exclude_ids is None:
         exclude_ids = []
+    forbidden_ips = {current_node.mgmt_ip}
+    if exclude_mgmt_ips:
+        forbidden_ips.update(exclude_mgmt_ips)
     db_controller = DBController()
     nodes = []
     nod_found = False
@@ -5354,7 +5364,7 @@ def get_secondary_nodes_2(current_node, exclude_ids=None):
             if node.get_id() == current_node.get_id():
                 nod_found = True
             continue
-        elif node.status == StorageNode.STATUS_ONLINE and node.mgmt_ip != current_node.mgmt_ip:
+        elif node.status == StorageNode.STATUS_ONLINE and node.mgmt_ip not in forbidden_ips:
             if node.is_secondary_node:
                 nodes.append(node.get_id())
 

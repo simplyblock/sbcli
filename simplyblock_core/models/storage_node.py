@@ -454,6 +454,20 @@ class StorageNode(BaseNodeObject):
                     except Exception as e:
                         logger.warning(f'Failed to connect failover hublvol path on {iface.ip4_address}: {e}')
 
+        # Register the lvstore locally via the remote hublvol BEFORE setting
+        # opts. set_lvs_opts requires the lvstore to exist in SPDK's local
+        # registry; it gets there either via bdev_examine auto-registering
+        # from the raid0 superblock (works only when the local raid0 has a
+        # valid superblock, i.e. Pass-1 distribs were healthy), or via
+        # bdev_lvol_connect_hublvol. The second path is robust regardless of
+        # local raid0 state, so do it first. This fixes the tertiary
+        # activation where empty distribs make the examine-path unusable
+        # and set_lvs_opts then returns -19 "No such device".
+        if not rpc_client.bdev_lvol_connect_hublvol(primary_node.lvstore, remote_bdev):
+            logger.error("bdev_lvol_connect_hublvol failed for %s on %s",
+                         primary_node.lvstore, self.get_id())
+            return False
+
         if not rpc_client.bdev_lvol_set_lvs_opts(
                 primary_node.lvstore,
                 groupid=primary_node.jm_vuid,
@@ -461,11 +475,6 @@ class StorageNode(BaseNodeObject):
                 role=role,
         ):
             logger.error("bdev_lvol_set_lvs_opts failed for %s on %s",
-                         primary_node.lvstore, self.get_id())
-            return False
-
-        if not rpc_client.bdev_lvol_connect_hublvol(primary_node.lvstore, remote_bdev):
-            logger.error("bdev_lvol_connect_hublvol failed for %s on %s",
                          primary_node.lvstore, self.get_id())
             return False
 
