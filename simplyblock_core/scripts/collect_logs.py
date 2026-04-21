@@ -203,6 +203,14 @@ def _fmt(msg: dict) -> str:
 # Graylog REST API helpers
 # ---------------------------------------------------------------------------
 
+def _gl_escape(value: str) -> str:
+    """
+    Escape Lucene special characters in a Graylog field query term.
+    Hyphens are NOT escaped — they are only special in range expressions
+    and cause HTTP 400 when escaped in the Graylog REST API.
+    """
+    return value.replace(".", "\\.")
+
 
 def _gl_search_page(session, search_url, query, from_iso, to_iso, limit, offset):
     """
@@ -1145,8 +1153,8 @@ def main():
                 for cname, fname in spdk_containers:
                     out_f = node_dir / fname
                     gl_q = (
-                        f'kubernetes_pod_name:"{pod_name}" '
-                        f'AND kubernetes_container_name:"{cname}"'
+                        f'kubernetes_pod_name:{_gl_escape(pod_name)} '
+                        f'AND kubernetes_container_name:"{_gl_escape(cname)}"'
                     )
                     n = fetch(
                         gl_query=gl_q,
