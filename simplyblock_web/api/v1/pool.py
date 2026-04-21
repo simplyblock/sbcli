@@ -2,6 +2,7 @@
 # encoding: utf-8
 
 import logging
+import time
 
 from flask import Blueprint, request
 
@@ -20,6 +21,8 @@ db = db_controller.DBController()
 @bp.route('/pool', defaults={'uuid': None}, methods=['GET'])
 @bp.route('/pool/<string:uuid>', methods=['GET'])
 def list_pools(uuid):
+    start_time = time.time()
+    logger.info("Listing pools: start")
     cluster_id = utils.get_cluster_id(request)
     if uuid:
         try:
@@ -38,6 +41,9 @@ def list_pools(uuid):
         lvs = db.get_lvols_by_pool_id(pool.get_id()) or []
         d['lvols'] = len(lvs)
         data.append(d)
+    end_time = time.time()
+    duration = int(end_time - start_time)
+    logger.info(f"Listing pools: end, duration: {duration}s")
     return utils.get_response(data)
 
 

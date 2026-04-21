@@ -3,6 +3,7 @@
 # encoding: utf-8
 
 import logging
+import time
 
 from flask import Blueprint
 from flask import request
@@ -22,6 +23,8 @@ db = db_controller.DBController()
 @bp.route('/lvol', defaults={'uuid': None}, methods=['GET'])
 @bp.route('/lvol/<string:uuid>', methods=['GET'])
 def list_lvols(uuid):
+    start_time = time.time()
+    logger.info(f"Listing lvols: start")
     cluster_id = utils.get_cluster_id(request)
     lvols = []
     if uuid:
@@ -41,6 +44,9 @@ def list_lvols(uuid):
     for lvol in lvols:
         tmp = lvol.get_clean_dict()
         data.append(tmp)
+    end_time = time.time()
+    duration = int(end_time - start_time)
+    logger.info(f"Listing lvols: end, duration: {duration}s")
     return utils.get_response(data)
 
 
@@ -108,7 +114,8 @@ def add_lvol():
         | pvc_name        | set PVC name for this LVol
         | fabric          | Lvol fabric
     """""
-
+    start_time = time.time()
+    logger.info(f"adding lvol: start")
     cl_data = request.get_json()
     logger.debug(cl_data)
     if 'size' not in cl_data:
@@ -188,7 +195,9 @@ def add_lvol():
         npcs=npcs,
         fabric=fabric
     )
-
+    end_time = time.time()
+    duration = int(end_time - start_time)
+    logger.info(f"Adding lvol: end, duration: {duration}s")
     return utils.get_response(ret, error, http_code=400)
 
 
