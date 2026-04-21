@@ -406,16 +406,50 @@ class TestConnectToHublvolUnit(unittest.TestCase):
         assert max(attach_positions) < min(connect_positions), \
             "All attach_controller calls must precede connect_hublvol on tertiary"
 
-    def test_set_opts_before_connect_hublvol(self):
-        """SPDK constraint: set_lvs_opts (sets node_role) must precede connect_hublvol."""
+    def test_connect_hublvol_before_set_opts_on_secondary(self):
+        """connect_hublvol must run BEFORE set_lvs_opts.
+
+        set_lvs_opts needs the lvstore to be registered in SPDK. The lvstore
+        gets registered either via bdev_examine of the raid0 superblock (only
+        works when Pass-1 distribs are healthy) or via
+        bdev_lvol_connect_hublvol (robust). Doing connect_hublvol first makes
+        the ordering work for tertiary too, where empty distribs make the
+        examine-path unusable and set_lvs_opts would return -19 "No such
+        device" if called first.
+        """
         self.secondary.connect_to_hublvol(self.primary, failover_node=None, role="secondary")
         set_positions = self._call_order('bdev_lvol_set_lvs_opts')
         connect_positions = self._call_order('bdev_lvol_connect_hublvol')
         assert set_positions, "bdev_lvol_set_lvs_opts not called"
         assert connect_positions, "bdev_lvol_connect_hublvol not called"
-        assert max(set_positions) < min(connect_positions), \
-            ("SPDK requires node_role to be set (via set_lvs_opts) "
-             "before connect_hublvol is called")
+        assert max(connect_positions) < min(set_positions), \
+            ("connect_hublvol must register the lvstore before set_lvs_opts "
+             "applies options, so set_lvs_opts can find the lvstore without "
+             "relying on bdev_examine of the raid0 superblock")
+
+    def test_connect_hublvol_before_set_opts_on_tertiary(self):
+        """Same ordering requirement on tertiary, where it actually matters.
+
+        On tertiary the raid0 superblock is empty (distribs have never seen
+        IO), so bdev_examine cannot auto-register the lvstore. If set_lvs_opts
+        ran first it would fail -19. connect_hublvol must run first.
+        """
+        self.tertiary.connect_to_hublvol(self.primary, failover_node=self.sec1, role="tertiary")
+        set_positions = self._call_order('bdev_lvol_set_lvs_opts')
+        connect_positions = self._call_order('bdev_lvol_connect_hublvol')
+        assert set_positions, "bdev_lvol_set_lvs_opts not called"
+        assert connect_positions, "bdev_lvol_connect_hublvol not called"
+        assert max(connect_positions) < min(set_positions), \
+            "connect_hublvol must precede set_lvs_opts on tertiary"
+
+    def test_set_opts_not_called_if_connect_hublvol_fails(self):
+        """If connect_hublvol fails, set_lvs_opts must not be called — the
+        fix is pointless if set_lvs_opts can still fire after a failed connect.
+        """
+        self.rpc.bdev_lvol_connect_hublvol.return_value = False
+        result = self.secondary.connect_to_hublvol(self.primary, failover_node=None, role="secondary")
+        assert result is False, "connect_to_hublvol must return False on connect_hublvol failure"
+        self.rpc.bdev_lvol_set_lvs_opts.assert_not_called()
 
     # --- error handling ---
 
