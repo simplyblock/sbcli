@@ -219,13 +219,21 @@ def _gl_search_page(session, search_url, query, from_iso, to_iso, limit, offset)
         "fields": "timestamp,source,container_name,level,message",
     }
     try:
-        resp = session.get(search_url, params=params, timeout=90)
+        resp = session.get(search_url, params=params, timeout=90,
+                           headers={"Accept": "application/json"})
         resp.raise_for_status()
     except requests.RequestException as exc:
         print(f"    WARN: Graylog page request failed (offset={offset}): {exc}", file=sys.stderr)
         return None, 0
 
-    data = resp.json()
+    if not resp.text.strip():
+        print(f"    WARN: Graylog returned empty response (offset={offset}, status={resp.status_code})", file=sys.stderr)
+        return None, 0
+    try:
+        data = resp.json()
+    except requests.exceptions.JSONDecodeError as exc:
+        print(f"    WARN: Graylog response is not valid JSON (offset={offset}): {exc}", file=sys.stderr)
+        return None, 0
     return data.get("messages", []), data.get("total_results", 0)
 
 
