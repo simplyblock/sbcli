@@ -64,7 +64,9 @@ class RandomMultiClientMultiFailoverAllNodesTest(RandomMultiClientMultiFailoverT
         self.logger.info(f"Selected outage nodes (all-nodes mode): {outage_nodes}")
 
         # Collect diagnostics for ALL nodes before any outage is triggered
-        self.collect_outage_diagnostics(f"pre_outage_nodes_{'_'.join(outage_nodes[:3])}")
+        # Skip if multipath NIC is already down — API calls would be very slow
+        if not use_multipath_outage:
+            self.collect_outage_diagnostics(f"pre_outage_nodes_{'_'.join(outage_nodes[:3])}")
 
         # Choose outage type pools based on multipath state
         if use_multipath_outage:
