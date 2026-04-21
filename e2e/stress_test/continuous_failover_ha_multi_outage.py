@@ -71,6 +71,9 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
         self.spdk_mem_thread = None
         self.blocked_ports = None
         self.dump_validation_errors = []
+        self.multipath_outage_types = ["container_stop", "graceful_shutdown"]
+        self.multipath_nic_disabled = False
+        self.multipath_disconnected_nics = []  # [(mgmt_ip, iface, nic_ip), ...]
         self.outage_log_file = os.path.join("logs", f"outage_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
         self._initialize_outage_log()
 
@@ -139,11 +142,137 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
             )
         return chosen
 
+    def _is_multipath_enabled(self):
+        """Return True if ALL storage nodes have 2+ data NICs (multipath capable)."""
+        for node in self.sn_nodes_with_sec:
+            details = self.sbcli_utils.get_storage_node_details(node)
+            data_nics = details[0].get("data_nics", [])
+            if len(data_nics) < 2:
+                return False
+        return True
+
+    def _disconnect_single_data_nic_all_nodes(self):
+        """
+        Disable one data NIC on ALL storage nodes in parallel (no auto-restore).
+
+        Uses data_nics[0]["ip4_address"] from the API (reliable), then resolves
+        the actual Linux interface name via SSH (ip -o addr show) because the
+        API's if_name field may not match the real interface name.
+
+        The NICs stay down until _reconnect_multipath_nics() is called
+        (after node outage recovery).
+
+        Returns list of (mgmt_ip, resolved_iface, data_nic_ip) for logging.
+        """
+        node_plans = []
+        for node in self.sn_nodes_with_sec:
+            details = self.sbcli_utils.get_storage_node_details(node)
+            mgmt_ip = details[0]["mgmt_ip"]
+            data_nics = details[0].get("data_nics", [])
+            if not data_nics:
+                self.logger.warning(f"Node {node} has no data_nics, skipping multipath NIC disable")
+                continue
+            nic_ip = data_nics[0]["ip4_address"]
+            iface = self.ssh_obj.get_interface_by_ip(mgmt_ip, nic_ip)
+            if not iface:
+                self.logger.error(
+                    f"Cannot resolve interface for {nic_ip} on {mgmt_ip}, skipping this node"
+                )
+                continue
+            node_plans.append((mgmt_ip, iface, nic_ip))
+
+        if not node_plans:
+            self.logger.error("No nodes could resolve data NIC interface; aborting multipath outage")
+            return []
+
+        self.logger.info(
+            f"Multipath NIC outage: disabling one data NIC on {len(node_plans)} nodes (until recovery)"
+        )
+
+        def _bring_down(mgmt_ip, iface):
+            cmd = f"nmcli connection down {iface}"
+            try:
+                self.ssh_obj.exec_command(node=mgmt_ip, command=cmd, max_retries=1, timeout=20)
+            except Exception as e:
+                self.logger.warning(f"NIC down command on {mgmt_ip} ({iface}): {e}")
+
+        threads = []
+        for mgmt_ip, iface, _ in node_plans:
+            t = threading.Thread(target=_bring_down, args=(mgmt_ip, iface))
+            threads.append(t)
+
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.multipath_disconnected_nics = node_plans
+        for mgmt_ip, iface, nic_ip in node_plans:
+            self.logger.info(f"  Disabled {iface} (IP={nic_ip}) on {mgmt_ip}")
+            self.log_outage_event(mgmt_ip, "multipath_single_nic_down", f"Disabled {iface} (IP={nic_ip})")
+
+        return node_plans
+
+    def _reconnect_multipath_nics(self):
+        """Bring back up all data NICs that were disabled by _disconnect_single_data_nic_all_nodes."""
+        if not self.multipath_disconnected_nics:
+            return
+
+        self.logger.info(
+            f"Reconnecting multipath NICs on {len(self.multipath_disconnected_nics)} nodes"
+        )
+
+        def _bring_up(mgmt_ip, iface):
+            cmd = f"nmcli connection up {iface}"
+            try:
+                self.ssh_obj.exec_command(node=mgmt_ip, command=cmd, max_retries=3, timeout=20)
+                self.logger.info(f"  Reconnected {iface} on {mgmt_ip}")
+            except Exception as e:
+                self.logger.error(f"Failed to reconnect {iface} on {mgmt_ip}: {e}")
+
+        threads = []
+        for mgmt_ip, iface, nic_ip in self.multipath_disconnected_nics:
+            t = threading.Thread(target=_bring_up, args=(mgmt_ip, iface))
+            threads.append(t)
+
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        for mgmt_ip, iface, nic_ip in self.multipath_disconnected_nics:
+            self.log_outage_event(mgmt_ip, "multipath_single_nic_up", f"Reconnected {iface} (IP={nic_ip})")
+
+        self.multipath_disconnected_nics = []
+        self.multipath_nic_disabled = False
+
     def perform_n_plus_k_outages(self):
         """
         Select K outage nodes such that no two are in a primary/secondary
         relationship (in either direction). Candidates = keys of the map.
+
+        When multipath is enabled (all nodes have 2+ data NICs), there is a 50%
+        chance that one data NIC will be disabled cluster-wide before per-node
+        outages are triggered. In that case only container_stop and
+        graceful_shutdown are used (no additional network outages).
         """
+        # ── Multipath: optionally disable one data NIC on ALL nodes ──────
+        use_multipath_outage = False
+        if self._is_multipath_enabled() and random.random() < 0.5:
+            self.logger.info("Multipath detected and selected — disabling one data NIC on all nodes")
+            self.multipath_nic_disabled = True
+            nic_plans = self._disconnect_single_data_nic_all_nodes()
+            self.log_outage_event(
+                "ALL_NODES", "multipath_single_nic_down",
+                f"Disabled 1 data NIC on {len(nic_plans)} nodes (until recovery)"
+            )
+            self.logger.info("Waiting 30s for multipath failover to settle...")
+            time.sleep(30)
+            use_multipath_outage = True
+        else:
+            self.multipath_nic_disabled = False
+            self.log_outage_event("ALL_NODES", "multipath_nic_outage", "SKIPPED (not enabled or not selected)")
+
         # Candidates are nodes that are primary *for someone* (map keys)
         primary_candidates = list(self.sn_primary_secondary_map.keys())
         self.current_outage_nodes = []
@@ -159,19 +288,22 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
         # Collect diagnostics for ALL nodes before any outage is triggered
         self.collect_outage_diagnostics(f"pre_outage_nodes_{'_'.join(outage_nodes[:3])}")
 
+        # Choose outage type pools based on multipath state
+        if use_multipath_outage:
+            types_first = self.multipath_outage_types
+            types_rest = self.multipath_outage_types
+        else:
+            types_first = self.outage_types2 if self.npcs == 1 else self.outage_types
+            types_rest = self.outage_types2
+
         outage_combinations = []
         outage_num = 0
         for node in outage_nodes:
             if outage_num == 0:
-                # When only 1 outage per cycle, use outage_types2 so that
-                # container_stop is also eligible (no second-node timing risk).
-                if self.npcs == 1:
-                    outage_type = random.choice(self.outage_types2)
-                else:
-                    outage_type = random.choice(self.outage_types)
+                outage_type = random.choice(types_first)
                 outage_num = 1
             else:
-                outage_type = random.choice(self.outage_types2)
+                outage_type = random.choice(types_rest)
             node_details = self.sbcli_utils.get_storage_node_details(node)
             node_ip = node_details[0]["mgmt_ip"]
             node_rpc_port = node_details[0]["rpc_port"]
@@ -226,8 +358,18 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
             self.logger.info(f"Node {node} not yet offline; retrying shutdown...")
 
     def _disconnect_partial_interface(self, node, node_ip):
-        active_interfaces = [nic["if_name"] for nic in self.sbcli_utils.get_storage_node_details(node)[0]["data_nics"]]
-        active_interfaces = ['eth1']
+        data_nics = self.sbcli_utils.get_storage_node_details(node)[0]["data_nics"]
+        nic_ip = data_nics[0]["ip4_address"]
+        iface = self.ssh_obj.get_interface_by_ip(node_ip, nic_ip)
+        if not iface:
+            self.logger.error(
+                f"Cannot resolve interface for {nic_ip} on {node_ip}, "
+                f"falling back to get_active_interfaces"
+            )
+            active_interfaces = self.ssh_obj.get_active_interfaces(node_ip)[:1]
+        else:
+            active_interfaces = [iface]
+        self.logger.info(f"Partial NIC disconnect on {node_ip}: {active_interfaces}")
         self.disconnect_thread = threading.Thread(
             target=self.ssh_obj.disconnect_all_active_interfaces,
             args=(node_ip, active_interfaces, 300)
@@ -792,6 +934,9 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
 
                 self.logger.info("Waiting for fallback recovery.")
                 sleep_n_sec(100)
+
+            # Reconnect multipath NICs after all node outages are recovered
+            self._reconnect_multipath_nics()
 
             self.collect_outage_diagnostics("post_recovery")
 

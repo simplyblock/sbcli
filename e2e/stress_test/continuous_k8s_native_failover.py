@@ -109,6 +109,7 @@ class K8sNativeFailoverTest(TestClusterBase):
             "logs", f"outage_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
         )
 
+
     # ── Setup / Teardown ─────────────────────────────────────────────────────
 
     def setup(self):
@@ -820,21 +821,37 @@ class K8sNativeFailoverTest(TestClusterBase):
 
     # ── FIO Validation ───────────────────────────────────────────────────────
 
+    def _save_fio_pod_logs(self, job_name: str, resource_name: str):
+        """Save FIO pod logs to local log directory for debugging."""
+        try:
+            pod_name = self.k8s_utils.get_job_pod_name(job_name)
+            if not pod_name:
+                return
+            logs = self.k8s_utils.get_pod_logs(pod_name, tail=2000)
+            if logs:
+                log_file = os.path.join(self.log_path, f"{resource_name}_fio.log")
+                with open(log_file, "w") as f:
+                    f.write(logs)
+                self.logger.info(f"Saved FIO logs for {resource_name} to {log_file}")
+        except Exception as exc:
+            self.logger.warning(f"Could not save FIO logs for {resource_name}: {exc}")
+
     def validate_fio_jobs(self):
-        """Validate all active FIO Jobs (status + pod logs)."""
+        """Validate all active FIO Jobs (status + pod logs).
+
+        Saves FIO pod logs to self.log_path for debugging, then raises
+        RuntimeError on any single FIO job failure — matches the behavior
+        of the SSH-based stress tests (validate_fio_test).
+        """
         self._ensure_k8s_utils()
 
         for pvc_name, pvc_info in self.pvc_details.items():
-            try:
-                self.k8s_utils.validate_fio_job(pvc_info["job_name"])
-            except Exception as exc:
-                self.logger.warning(f"[validate_fio] PVC {pvc_name} FIO validation: {exc}")
+            self._save_fio_pod_logs(pvc_info["job_name"], pvc_name)
+            self.k8s_utils.validate_fio_job(pvc_info["job_name"])
 
         for clone_name, clone_info in self.clone_details.items():
-            try:
-                self.k8s_utils.validate_fio_job(clone_info["job_name"])
-            except Exception as exc:
-                self.logger.warning(f"[validate_fio] Clone {clone_name} FIO validation: {exc}")
+            self._save_fio_pod_logs(clone_info["job_name"], clone_name)
+            self.k8s_utils.validate_fio_job(clone_info["job_name"])
 
     # ── Cleanup ──────────────────────────────────────────────────────────────
 
