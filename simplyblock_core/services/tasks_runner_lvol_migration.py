@@ -260,15 +260,15 @@ def _register_snap_on_secondary(tgt_rpc, tgt_node, tgt_sec, sec_rpc, snap, migra
     tgt_snap_uuid = bdev_info[0]['uuid']
 
     # The parent name for bdev_lvol_snapshot_register is the predecessor snapshot
-    # on the secondary's lvstore (or the snapshot itself if there is no predecessor).
+    # on the secondary's lvstore, or the lvstore itself for the first snapshot.
     if migration.snaps_migrated:
         try:
             pred_snap = db.get_snapshot_by_id(migration.snaps_migrated[-1])
             parent_name = f"{tgt_sec.lvstore}/{_snap_short_name(pred_snap)}"
         except KeyError:
-            parent_name = f"{tgt_sec.lvstore}/{snap_short}"
+            parent_name = tgt_sec.lvstore
     else:
-        parent_name = f"{tgt_sec.lvstore}/{snap_short}"
+        parent_name = tgt_sec.lvstore
 
     ret = sec_rpc.bdev_lvol_snapshot_register(
         parent_name, snap_short, tgt_snap_uuid, tgt_blobid)
@@ -968,7 +968,7 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
     # Step 1: create writable target lvol (size in MiB)
     # Note: SPDK's bdev_lvol_create 'uuid' param is for the lvol *store*, not
     # the new lvol.  Do not pass the lvol UUID here.
-    ret = tgt_rpc.create_lvol(lvol.lvol_bdev, lvol.size, tgt_node.lvstore)
+    ret = tgt_rpc.create_lvol(lvol.lvol_bdev, _bytes_to_mib(lvol.size), tgt_node.lvstore)
     if not ret:
         return False, True, f"Failed to create target lvol {tgt_lvol_composite}"
 
