@@ -36,9 +36,11 @@ RUN pip3 install --upgrade pip setuptools
 RUN yum remove python-urllib3 -y
 RUN pip3 install -r requirements.txt
 
+RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.13 20
+
 RUN dnf clean all
+
+RUN yum update -y
 
 RUN useradd -ms /bin/bash simplyblock
 RUN echo "simplyblock  ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
-USER simplyblock
-
