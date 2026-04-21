@@ -787,11 +787,16 @@ class RPCClient:
         # https://spdk.io/doc/nvme_multipath.html
         # Otherwise aborted IOs (e.g. from a NIC going down) are returned as
         # errors to the caller instead of being retried on the alternate path.
+        # In multipath mode transport_retry_count is tightened too: the
+        # alternate path already provides redundancy, so failing fast onto
+        # the other path beats burning the per-path retry budget first.
         bdev_retry = constants.BDEV_RETRY_MULTIPATH if multipath else constants.BDEV_RETRY
+        transport_retry = (
+            constants.TRANSPORT_RETRY_MULTIPATH if multipath else constants.TRANSPORT_RETRY)
         params = {
             # "action_on_timeout": "abort",
             "bdev_retry_count": bdev_retry,
-            "transport_retry_count": constants.TRANSPORT_RETRY,
+            "transport_retry_count": transport_retry,
             "ctrlr_loss_timeout_sec": constants.CTRL_LOSS_TO,
             "fast_io_fail_timeout_sec" : constants.FAST_FAIL_TO,
             "reconnect_delay_sec": constants.RECONNECT_DELAY_CLUSTER,

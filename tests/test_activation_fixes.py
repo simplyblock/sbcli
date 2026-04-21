@@ -359,5 +359,186 @@ class TestTertiaryHostDisjointness(unittest.TestCase):
         self.assertNotIn("off", candidates)
 
 
+# ===========================================================================
+# 3. NVMe attach-controller timeout caps
+# ===========================================================================
+
+class TestAttachControllerTimeoutCap(unittest.TestCase):
+    """Task 12: bdev_nvme_attach_controller must always be called through an
+    RPC client with timeout <= 1s and retry=0. A reachable SPDK peer replies
+    in microseconds; a longer wait is an unreachable path we want to fail
+    fast on so per-peer iteration stays bounded.
+    """
+
+    @patch("simplyblock_core.storage_node_ops.time.sleep", return_value=None)
+    @patch("simplyblock_core.storage_node_ops.RPCClient")
+    @patch("simplyblock_core.storage_node_ops.DBController")
+    def test_connect_device_caps_attach_timeout_at_1s(
+            self, MockDBCtrl, MockRPC, _sleep):
+        """connect_device must build its attach RPC client with timeout<=1."""
+        import simplyblock_core.storage_node_ops as ops
+
+        node = _node("n", mgmt_ip="10.0.0.1")
+        device = NVMeDevice()
+        device.uuid = "dev-1"
+        device.alceml_name = "alceml-1"
+        device.nvmf_ip = "10.0.0.2"
+        device.nvmf_port = 4420
+        device.nvmf_nqn = "nqn.test"
+        device.node_id = "other-node"
+        device.nvmf_multipath = False
+
+        # node.rpc_client() returns a mock; bdev_nvme_controller_list -> None
+        # to force the attach path.
+        node_rpc = MagicMock()
+        node_rpc.bdev_nvme_controller_list.return_value = None
+        node_rpc.get_bdevs.return_value = [{"name": "remote-fake-n1"}]
+        node.rpc_client = MagicMock(return_value=node_rpc)
+
+        attach_rpc = MagicMock()
+        attach_rpc.bdev_nvme_attach_controller.return_value = ["remote-fake-n1"]
+        MockRPC.return_value = attach_rpc
+
+        mock_db = MagicMock()
+        mock_db.get_storage_node_by_id.return_value = node
+        MockDBCtrl.return_value = mock_db
+
+        # No caller-specified timeout: should default-cap at 1.
+        ops.connect_device("remote-fake", device, node,
+                           bdev_names=[], reattach=False)
+        timeouts_used = [c.kwargs.get("timeout") for c in MockRPC.call_args_list]
+        self.assertTrue(timeouts_used,
+                        "a short-timeout attach RPC client must be built")
+        self.assertLessEqual(max(timeouts_used), 1,
+            f"attach RPC timeout must be <= 1s; got {timeouts_used!r}")
+
+        # Caller passes 5 — must be clamped to 1.
+        MockRPC.reset_mock()
+        ops.connect_device("remote-fake", device, node,
+                           bdev_names=[], reattach=False, attach_timeout=5)
+        timeouts_used = [c.kwargs.get("timeout") for c in MockRPC.call_args_list]
+        self.assertLessEqual(max(timeouts_used), 1,
+            "excessive attach_timeout must be clamped to 1s")
+
+        # Caller passes 0.3 — must be kept (lower than cap).
+        MockRPC.reset_mock()
+        ops.connect_device("remote-fake", device, node,
+                           bdev_names=[], reattach=False, attach_timeout=0.3)
+        timeouts_used = [c.kwargs.get("timeout") for c in MockRPC.call_args_list]
+        self.assertIn(0.3, timeouts_used,
+            f"caller-supplied sub-cap timeout must be preserved; got {timeouts_used!r}")
+
+    @patch("simplyblock_core.models.storage_node.RPCClient")
+    def test_connect_to_hublvol_caps_attach_timeout_at_1s(self, MockRPC):
+        """connect_to_hublvol must build its attach_rpc with timeout<=1."""
+        from simplyblock_core.models.hublvol import HubLVol
+        from simplyblock_core.models.iface import IFace
+
+        def _make_node(uuid_, ip):
+            n = StorageNode()
+            n.uuid = uuid_
+            n.cluster_id = "c"
+            n.status = StorageNode.STATUS_ONLINE
+            n.hostname = f"h-{uuid_}"
+            n.mgmt_ip = ip
+            n.rpc_port = 8080
+            n.rpc_username = "u"
+            n.rpc_password = "p"
+            n.active_tcp = True
+            n.active_rdma = False
+            n.lvstore = "LVS_1"
+            n.jm_vuid = 1
+            n.lvstore_ports = {"LVS_1": {"lvol_subsys_port": 4420, "hublvol_port": 4425}}
+            nic = IFace()
+            nic.ip4_address = ip
+            nic.trtype = "TCP"
+            n.data_nics = [nic]
+            return n
+
+        primary = _make_node("p", "10.0.0.1")
+        primary.hublvol = HubLVol({
+            "uuid": "hub", "nqn": "nqn.hub", "bdev_name": "LVS_1/hublvol",
+            "model_number": "m", "nguid": "0" * 32, "nvmf_port": 4425,
+        })
+        secondary = _make_node("s", "10.0.0.2")
+
+        all_rpcs = []
+
+        def _rpc_factory(*args, **kwargs):
+            m = MagicMock()
+            m.timeout = kwargs.get("timeout")
+            m.bdev_nvme_attach_controller.return_value = ["LVS_1/hublvoln1"]
+            m.bdev_lvol_set_lvs_opts.return_value = True
+            m.bdev_lvol_connect_hublvol.return_value = True
+            m.get_bdevs.return_value = []
+            all_rpcs.append((args, kwargs, m))
+            return m
+
+        MockRPC.side_effect = _rpc_factory
+
+        # No timeout passed: must cap at 1.
+        secondary.connect_to_hublvol(primary, failover_node=None, role="secondary")
+        attach_timeouts = [kw.get("timeout")
+                           for _, kw, _ in all_rpcs if "timeout" in kw]
+        self.assertTrue(attach_timeouts, "no short-timeout attach client built")
+        self.assertLessEqual(max(attach_timeouts), 1,
+            f"hublvol attach RPC timeout must be <= 1s; got {attach_timeouts!r}")
+
+        # Caller passes 0.5 — must be kept.
+        all_rpcs.clear()
+        secondary.connect_to_hublvol(primary, failover_node=None,
+                                     role="secondary", timeout=0.5)
+        attach_timeouts = [kw.get("timeout")
+                           for _, kw, _ in all_rpcs if "timeout" in kw]
+        self.assertIn(0.5, attach_timeouts,
+            f"sub-cap caller timeout must be preserved; got {attach_timeouts!r}")
+
+        # Caller passes 10 — must clamp to 1.
+        all_rpcs.clear()
+        secondary.connect_to_hublvol(primary, failover_node=None,
+                                     role="secondary", timeout=10)
+        attach_timeouts = [kw.get("timeout")
+                           for _, kw, _ in all_rpcs if "timeout" in kw]
+        self.assertLessEqual(max(attach_timeouts), 1,
+            f"excessive caller timeout must be clamped; got {attach_timeouts!r}")
+
+
+# ===========================================================================
+# 4. bdev_nvme_set_options transport_retry in multipath mode
+# ===========================================================================
+
+class TestBdevNvmeSetOptionsRetries(unittest.TestCase):
+    """Task 12: in multipath mode, transport_retry_count must be
+    TRANSPORT_RETRY_MULTIPATH (1) so IOs fail over to the alternate path
+    quickly. Non-multipath keeps TRANSPORT_RETRY (3).
+    """
+
+    def test_transport_retry_tightened_when_multipath(self):
+        from simplyblock_core.rpc_client import RPCClient
+        from simplyblock_core import constants
+
+        self.assertEqual(constants.BDEV_RETRY_MULTIPATH, 2)
+        self.assertEqual(constants.TRANSPORT_RETRY_MULTIPATH, 1)
+        self.assertEqual(constants.TRANSPORT_RETRY, 3)
+
+        client = RPCClient.__new__(RPCClient)
+        captured = {}
+
+        def _fake_request(method, params=None):
+            captured[method] = params
+            return True
+
+        client._request = _fake_request
+
+        client.bdev_nvme_set_options(multipath=True)
+        self.assertEqual(captured["bdev_nvme_set_options"]["transport_retry_count"], 1)
+        self.assertEqual(captured["bdev_nvme_set_options"]["bdev_retry_count"], 2)
+
+        captured.clear()
+        client.bdev_nvme_set_options(multipath=False)
+        self.assertEqual(captured["bdev_nvme_set_options"]["transport_retry_count"], 3)
+        self.assertEqual(captured["bdev_nvme_set_options"]["bdev_retry_count"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

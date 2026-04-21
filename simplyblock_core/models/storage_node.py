@@ -377,12 +377,14 @@ class StorageNode(BaseNodeObject):
             raise ValueError(f"HubLVol of primary node {primary_node.get_id()} is not present")
 
         rpc_client = self.rpc_client()
-        if timeout is not None:
-            attach_rpc = RPCClient(self.mgmt_ip, self.rpc_port,
-                                   self.rpc_username, self.rpc_password,
-                                   timeout=timeout, retry=0)
-        else:
-            attach_rpc = rpc_client
+        # bdev_nvme_attach_controller is hard-capped at 1s with no retries.
+        # Callers may pass a lower `timeout` (e.g. 0.5s on restart); values
+        # above the cap are clamped. See _ATTACH_CONTROLLER_MAX_TIMEOUT_SEC
+        # in storage_node_ops.py for the rationale.
+        attach_timeout = 1 if timeout is None else min(timeout, 1)
+        attach_rpc = RPCClient(self.mgmt_ip, self.rpc_port,
+                               self.rpc_username, self.rpc_password,
+                               timeout=attach_timeout, retry=0)
 
         remote_bdev = f"{primary_node.hublvol.bdev_name}n1"
 
