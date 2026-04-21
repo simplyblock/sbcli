@@ -151,17 +151,25 @@ def trigger_ana_failback_for_node(restarting_node):
                 logger.error("ANA failback for primary %s failed: %s", node_id, e)
 
 
+#: Hard cap on the bdev_nvme_attach_controller RPC timeout (seconds).
+#: A reachable peer replies in microseconds; anything longer is an unreachable
+#: path and we prefer a fast failure so per-peer iteration stays bounded and
+#: the overall connect_device budget stays ~2s across two data NICs.
+_ATTACH_CONTROLLER_MAX_TIMEOUT_SEC = 1
+
+
 def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names: List[str], reattach: bool,
-                   attach_timeout: Optional[int] = None):
+                   attach_timeout: Optional[float] = None):
     """Connect snode to device
 
     This only performs the actual operation between both involved SPDK instances,
     no book-keeping is done here.
 
-    If ``attach_timeout`` is provided, the ``bdev_nvme_attach_controller`` RPC
-    uses that timeout (seconds) with no retries. Callers on the restart-rebuild
-    path pass a short timeout so a single unreachable peer cannot block the
-    entire rebuild on the default 180 s RPC timeout.
+    The bdev_nvme_attach_controller RPC is always bounded by
+    ``_ATTACH_CONTROLLER_MAX_TIMEOUT_SEC`` (1 s) with no retries. Callers may
+    pass ``attach_timeout`` to shorten further (kept as-is if lower); values
+    above the cap are clamped, since a reachable SPDK peer answers in µs and
+    anything longer is an unreachable path we want to fail fast on.
 
     More sensibly this would be a member function of either StorageNode or NVMeDevice.
     """
@@ -173,13 +181,12 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names:
             return bdev
 
     rpc_client = node.rpc_client()
-    if attach_timeout is not None:
-        attach_rpc_client = RPCClient(
-            node.mgmt_ip, node.rpc_port,
-            node.rpc_username, node.rpc_password,
-            timeout=attach_timeout, retry=0)
-    else:
-        attach_rpc_client = rpc_client
+    if attach_timeout is None or attach_timeout > _ATTACH_CONTROLLER_MAX_TIMEOUT_SEC:
+        attach_timeout = _ATTACH_CONTROLLER_MAX_TIMEOUT_SEC
+    attach_rpc_client = RPCClient(
+        node.mgmt_ip, node.rpc_port,
+        node.rpc_username, node.rpc_password,
+        timeout=attach_timeout, retry=0)
     # check connection status
     if device.is_connection_in_progress_to_node(node.get_id()):
         logger.warning("This device is being connected to from other node, sleep for 5 seconds")
@@ -1101,7 +1108,7 @@ def sync_remote_devices_from_spdk(this_node: StorageNode, node_bdev_names=None):
     return changed
 
 
-def _peer_reachable_via_jm_quorum(target_node_id, this_node, peer_probe_timeout=2):
+def _peer_reachable_via_jm_quorum(target_node_id, this_node, peer_probe_timeout=1):
     """Check whether ``target_node`` is reachable on the data plane by asking
     other online peers about their JM quorum state.
 
@@ -1736,8 +1743,13 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 return False
 
         # 6- set nvme bdev options
+        # bdev_nvme_set_options is a pure local SPDK config call; bound it at
+        # 5 s so a stuck proxy can't consume the 3 min startup RPC budget.
         mp = bool(snode.data_nics and len(snode.data_nics) > 1)
-        ret = rpc_client.bdev_nvme_set_options(multipath=mp)
+        set_opts_rpc = RPCClient(
+            snode.mgmt_ip, snode.rpc_port,
+            snode.rpc_username, snode.rpc_password, timeout=5, retry=0)
+        ret = set_opts_rpc.bdev_nvme_set_options(multipath=mp)
         if not ret:
             logger.error("Failed to set nvme options")
             return False
@@ -2388,8 +2400,13 @@ def _restart_storage_node_impl(
             return False
 
     # 6- set nvme bdev options
+    # bdev_nvme_set_options is a pure local SPDK config call; bound it at
+    # 5 s so a stuck proxy can't consume the 10 min restart RPC budget.
     mp = bool(snode.data_nics and len(snode.data_nics) > 1)
-    ret = rpc_client.bdev_nvme_set_options(multipath=mp)
+    set_opts_rpc = RPCClient(
+        snode.mgmt_ip, snode.rpc_port,
+        snode.rpc_username, snode.rpc_password, timeout=5, retry=0)
+    ret = set_opts_rpc.bdev_nvme_set_options(multipath=mp)
     if not ret:
         logger.error("Failed to set nvme options")
         return False
