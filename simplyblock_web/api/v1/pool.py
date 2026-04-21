@@ -38,8 +38,6 @@ def list_pools(uuid):
     data = []
     for pool in pools:
         d = pool.get_clean_dict()
-        lvs = db.get_lvols_by_pool_id(pool.get_id()) or []
-        d['lvols'] = len(lvs)
         data.append(d)
     end_time = time.time()
     duration = int(end_time - start_time)
