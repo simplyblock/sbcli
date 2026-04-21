@@ -1,4 +1,4 @@
-name: K8s Native Stress Tests
+name: Stress Tests
 
 on:
   workflow_dispatch:
@@ -65,11 +65,13 @@ on:
         default: 4096
 
 jobs:
-  k8s-native-e2e:
+  stress-test:
     runs-on: self-hosted
     concurrency:
       group: ${{ github.workflow }}
       cancel-in-progress: false
+    env:
+      TESTNAME: ${{ github.event.inputs.testname || 'K8sNativeFailoverTest' }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -664,6 +666,7 @@ jobs:
 
       - name: Setup and Run Tests
         run: |
+          set -o pipefail
           cd $GITHUB_WORKSPACE/e2e
           python3 -m venv myenv
           source myenv/bin/activate
@@ -769,6 +772,43 @@ jobs:
           echo "${FAILED_CASES_BULLETS}" >> $GITHUB_ENV
           echo "EOF" >> $GITHUB_ENV
 
+      - name: Write Job Summary
+        if: always()
+        run: |
+          echo "## Stress Test: ${{ env.TESTNAME }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Setting | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|---------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Branch** | ${{ github.ref_name }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **CSI Branch** | ${{ github.event.inputs.simplyblock_csi_branch }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **SPDK Image** | ${{ github.event.inputs.spdk_image }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **NDCS** | ${{ env.NDCS }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **NPCS** | ${{ env.NPCS }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **BS** | ${{ env.BS }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Chunk BS** | ${{ env.CHUNK_BS }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Runtime** | ${{ env.TEST_TIME_HOURS }}h ${{ env.TEST_TIME_MINS }}m ${{ env.TEST_TIME_SECS }}s |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Results" >> $GITHUB_STEP_SUMMARY
+          echo "- **Total**: ${{ env.TOTAL_TESTS }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Passed**: ${{ env.PASSED_TESTS }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Failed**: ${{ env.FAILED_TESTS }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ -n "${{ env.PASSED_CASES }}" ]; then
+            echo "#### Passed" >> $GITHUB_STEP_SUMMARY
+            echo "${{ env.PASSED_CASES }}" | while IFS= read -r line; do
+              [ -n "$line" ] && echo "- $line" >> $GITHUB_STEP_SUMMARY
+            done
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
+          if [ -n "${{ env.FAILED_CASES }}" ]; then
+            echo "#### Failed" >> $GITHUB_STEP_SUMMARY
+            echo "${{ env.FAILED_CASES }}" | while IFS= read -r line; do
+              [ -n "$line" ] && echo "- $line" >> $GITHUB_STEP_SUMMARY
+            done
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "[AWS Logs](https://s3.console.aws.amazon.com/s3/buckets/simplyblock-e2e-test-logs?prefix=${{ github.run_id }}/&region=us-east-2)" >> $GITHUB_STEP_SUMMARY
+
       - name: Set slack notification flag
         if: always()
         run: |
@@ -787,6 +827,7 @@ jobs:
           TOTAL_TESTS: ${{ env.TOTAL_TESTS }}
           PASSED_CASES_BULLETS: ${{ env.PASSED_CASES_BULLETS }}
           FAILED_CASES_BULLETS: ${{ env.FAILED_CASES_BULLETS }}
+          TESTNAME: ${{ env.TESTNAME }}
           BRANCH_NAME: ${{ github.ref_name }}
           TEST_TIME_HOURS: ${{ env.TEST_TIME_HOURS }}
           TEST_TIME_MINS: ${{ env.TEST_TIME_MINS }}
@@ -806,7 +847,7 @@ jobs:
 
           TIME_TAKEN="${TEST_TIME_HOURS}h ${TEST_TIME_MINS}m ${TEST_TIME_SECS}s"
 
-          MESSAGE="K8s Native E2E tests run triggered on branch *${BRANCH_NAME}*. \nCSI branch: *${{ github.event.inputs.simplyblock_csi_branch }}*\nTotal Time: ${TIME_TAKEN}\n\n${OVERALL_STATUS}\nGitHub Run: ${GITHUB_RUN_URL}\nAWS Logs: ${AWS_LOGS_URL}\n\n*Config*: NDCS: ${NDCS}, NPCS: ${NPCS}, BS: ${BS}, Chunk BS: ${CHUNK_BS}\n\nTotal Tests: *${TOTAL_TESTS}*, Passed: *${PASSED_TESTS}*, Failed: *${FAILED_TESTS}*\n\n-- Passed :white_check_mark:\n${PASSED_CASES_BULLETS}\n\n-- Failed :x:\n${FAILED_CASES_BULLETS}"
+          MESSAGE="Stress test *${TESTNAME}* on branch *${BRANCH_NAME}*\nCSI branch: *${{ github.event.inputs.simplyblock_csi_branch }}*\nTotal Time: ${TIME_TAKEN}\n\n${OVERALL_STATUS}\nGitHub Run: ${GITHUB_RUN_URL}\nAWS Logs: ${AWS_LOGS_URL}\n\n*Config*: NDCS: ${NDCS}, NPCS: ${NPCS}, BS: ${BS}, Chunk BS: ${CHUNK_BS}\n\nTotal Tests: *${TOTAL_TESTS}*, Passed: *${PASSED_TESTS}*, Failed: *${FAILED_TESTS}*\n\n-- Passed :white_check_mark:\n${PASSED_CASES_BULLETS}\n\n-- Failed :x:\n${FAILED_CASES_BULLETS}"
 
           curl -X POST -H 'Content-type: application/json' \
             --data "{\"text\":\"${MESSAGE}\"}" "$SLACK_WEBHOOK_URL"
