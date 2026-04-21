@@ -177,12 +177,68 @@ jobs:
           }
           patch_and_delete_crs
 
-          echo "=== Phase 3: Force delete all namespaced resources ==="
-          for RTYPE in pod pvc pv jobs service ds statefulset deployment replicaset secret sa configmap; do
+          echo "=== Phase 3a: Delete VolumeSnapshots & VolumeSnapshotContents ==="
+          # Delete snapshots first (they block PVC deletion)
+          for VS in $(kubectl get volumesnapshot -n $NAMESPACE --no-headers -o custom-columns=:metadata.name 2>/dev/null); do
+            kubectl -n $NAMESPACE patch volumesnapshot "$VS" \
+              --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
+            kubectl -n $NAMESPACE delete volumesnapshot "$VS" --wait=false 2>/dev/null || true
+          done
+
+          # Delete VolumeSnapshotContents (cluster-scoped, may block snapshot deletion)
+          for VSC in $(kubectl get volumesnapshotcontent --no-headers -o custom-columns=:metadata.name 2>/dev/null); do
+            kubectl patch volumesnapshotcontent "$VSC" \
+              --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
+            kubectl delete volumesnapshotcontent "$VSC" --wait=false 2>/dev/null || true
+          done
+
+          # Delete VolumeSnapshotClasses
+          for VSCLASS in $(kubectl get volumesnapshotclass --no-headers -o custom-columns=:metadata.name 2>/dev/null); do
+            kubectl delete volumesnapshotclass "$VSCLASS" --ignore-not-found 2>/dev/null || true
+          done
+
+          echo "=== Phase 3b: Delete PVCs (with timeout + retry) ==="
+          # First attempt: normal delete
+          kubectl -n $NAMESPACE delete pvc --all --wait=false 2>/dev/null || true
+
+          # Wait up to 60s for PVCs to go away
+          PVC_TIMEOUT=60
+          while [ $PVC_TIMEOUT -gt 0 ]; do
+            REMAINING=$(kubectl -n $NAMESPACE get pvc --no-headers 2>/dev/null | wc -l)
+            if [ "$REMAINING" -eq 0 ]; then
+              echo "All PVCs deleted"
+              break
+            fi
+            echo "Waiting for $REMAINING PVCs to delete ($PVC_TIMEOUT s remaining)..."
+            sleep 5
+            PVC_TIMEOUT=$((PVC_TIMEOUT - 5))
+          done
+
+          # If PVCs are still stuck, patch finalizers and force delete
+          for PVC in $(kubectl -n $NAMESPACE get pvc --no-headers -o custom-columns=:metadata.name 2>/dev/null); do
+            echo "Force-deleting stuck PVC: $PVC"
+            kubectl -n $NAMESPACE patch pvc "$PVC" \
+              --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
+            kubectl -n $NAMESPACE delete pvc "$PVC" --force --grace-period=0 2>/dev/null || true
+          done
+
+          echo "=== Phase 3c: Delete PVs ==="
+          for PV in $(kubectl get pv --no-headers -o custom-columns=:metadata.name 2>/dev/null | grep -i simplyblock 2>/dev/null); do
+            kubectl patch pv "$PV" \
+              --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
+            kubectl delete pv "$PV" --force --grace-period=0 2>/dev/null || true
+          done
+
+          echo "=== Phase 3d: Force delete remaining namespaced resources ==="
+          for RTYPE in pod jobs service ds statefulset deployment replicaset secret sa configmap; do
             kubectl -n $NAMESPACE delete $RTYPE --all --force --grace-period=0 2>/dev/null || true
           done
 
           echo "=== Phase 4: Cleanup cluster-scoped resources ==="
+          # Delete StorageClasses
+          for SC in $(kubectl get sc --no-headers -o custom-columns=:metadata.name 2>/dev/null | grep -i simplyblock 2>/dev/null); do
+            kubectl delete sc "$SC" --ignore-not-found 2>/dev/null || true
+          done
           kubectl delete clusterrole simplyblock-storage-node-role --ignore-not-found 2>/dev/null || true
           kubectl delete clusterrolebinding simplyblock-storage-node-binding --ignore-not-found 2>/dev/null || true
 

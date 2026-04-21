@@ -155,14 +155,13 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
         """
         Disable one data NIC on ALL storage nodes in parallel (no auto-restore).
 
-        Uses data_nics[0]["ip4_address"] from the API (reliable), then resolves
-        the actual Linux interface name via SSH (ip -o addr show) because the
-        API's if_name field may not match the real interface name.
+        Uses data_nics[0]["if_name"] directly from the API for multipath setups
+        where the interface name is correct.
 
         The NICs stay down until _reconnect_multipath_nics() is called
         (after node outage recovery).
 
-        Returns list of (mgmt_ip, resolved_iface, data_nic_ip) for logging.
+        Returns list of (mgmt_ip, if_name, data_nic_ip) for logging.
         """
         node_plans = []
         for node in self.sn_nodes_with_sec:
@@ -172,13 +171,8 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
             if not data_nics:
                 self.logger.warning(f"Node {node} has no data_nics, skipping multipath NIC disable")
                 continue
+            iface = data_nics[0]["if_name"]
             nic_ip = data_nics[0]["ip4_address"]
-            iface = self.ssh_obj.get_interface_by_ip(mgmt_ip, nic_ip)
-            if not iface:
-                self.logger.error(
-                    f"Cannot resolve interface for {nic_ip} on {mgmt_ip}, skipping this node"
-                )
-                continue
             node_plans.append((mgmt_ip, iface, nic_ip))
 
         if not node_plans:
@@ -359,16 +353,7 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
 
     def _disconnect_partial_interface(self, node, node_ip):
         data_nics = self.sbcli_utils.get_storage_node_details(node)[0]["data_nics"]
-        nic_ip = data_nics[0]["ip4_address"]
-        iface = self.ssh_obj.get_interface_by_ip(node_ip, nic_ip)
-        if not iface:
-            self.logger.error(
-                f"Cannot resolve interface for {nic_ip} on {node_ip}, "
-                f"falling back to get_active_interfaces"
-            )
-            active_interfaces = self.ssh_obj.get_active_interfaces(node_ip)[:1]
-        else:
-            active_interfaces = [iface]
+        active_interfaces = [data_nics[0]["if_name"]]
         self.logger.info(f"Partial NIC disconnect on {node_ip}: {active_interfaces}")
         self.disconnect_thread = threading.Thread(
             target=self.ssh_obj.disconnect_all_active_interfaces,
