@@ -1,5 +1,3 @@
-
----
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -82,6 +80,15 @@ spec:
         - name: fdb-cluster-file
           mountPath: /etc/foundationdb/fdb.cluster
           subPath: fdb.cluster
+        {{- if .Values.tls.serviceCA.enabled }}
+        - name: tls
+          mountPath: /etc/simplyblock/tls
+          readOnly: true
+        - name: service-ca
+          mountPath: /etc/ssl/certs/service-ca.crt
+          subPath: service-ca.crt
+          readOnly: true
+        {{- end }}
         resources:
           requests:
             cpu: "200m"
@@ -96,6 +103,14 @@ spec:
           items:
             - key: cluster-file
               path: fdb.cluster
+      {{- if .Values.tls.serviceCA.enabled }}
+      - name: tls
+        secret:
+         secretName: simplyblock-webappapi-tls
+      - name: ca
+        configMap:
+          name: simplyblock-ca
+      {{- end }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -153,6 +168,15 @@ spec:
 {{ toYaml .env | nindent 12 }}
           volumeMounts:
 {{ toYaml .volumeMounts | nindent 12 }}
+            {{- if .Values.tls.serviceCA.enabled }}
+            - name: tls
+              mountPath: /etc/simplyblock/tls
+              readOnly: true
+            - name: service-ca
+              mountPath: /etc/ssl/certs/service-ca.crt
+              subPath: service-ca.crt
+              readOnly: true
+            {{- end }}
           resources:
 {{ toYaml .resources | nindent 12 }}
 {{- end }}
@@ -172,6 +196,15 @@ spec:
 {{ toYaml .env | nindent 12 }}
           volumeMounts:
 {{ toYaml .volumeMounts | nindent 12 }}
+            {{- if .Values.tls.serviceCA.enabled }}
+            - name: tls
+              mountPath: /etc/simplyblock/tls
+              readOnly: true
+            - name: service-ca
+              mountPath: /etc/ssl/certs/service-ca.crt
+              subPath: service-ca.crt
+              readOnly: true
+            {{- end }}
           resources:
 {{ toYaml .resources | nindent 12 }}
 {{- end }}
@@ -189,6 +222,15 @@ spec:
 {{ toYaml .env | nindent 12 }}
           volumeMounts:
 {{ toYaml .volumeMounts | nindent 12 }}
+            {{- if .Values.tls.serviceCA.enabled }}
+            - name: tls
+              mountPath: /etc/simplyblock/tls
+              readOnly: true
+            - name: service-ca
+              mountPath: /etc/ssl/certs/service-ca.crt
+              subPath: service-ca.crt
+              readOnly: true
+            {{- end }}
           resources:
 {{ toYaml .resources | nindent 12 }}
 {{- end }}
@@ -206,6 +248,15 @@ spec:
 {{ toYaml .env | nindent 12 }}
           volumeMounts:
 {{ toYaml .volumeMounts | nindent 12 }}
+            {{- if .Values.tls.serviceCA.enabled }}
+            - name: tls
+              mountPath: /etc/simplyblock/tls
+              readOnly: true
+            - name: service-ca
+              mountPath: /etc/ssl/certs/service-ca.crt
+              subPath: service-ca.crt
+              readOnly: true
+            {{- end }}
           resources:
 {{ toYaml .resources | nindent 12 }}
 {{- end }}
@@ -223,6 +274,15 @@ spec:
 {{ toYaml .env | nindent 12 }}
           volumeMounts:
 {{ toYaml .volumeMounts | nindent 12 }}
+            {{- if .Values.tls.serviceCA.enabled }}
+            - name: tls
+              mountPath: /etc/simplyblock/tls
+              readOnly: true
+            - name: service-ca
+              mountPath: /etc/ssl/certs/service-ca.crt
+              subPath: service-ca.crt
+              readOnly: true
+            {{- end }}
           resources:
 {{ toYaml .resources | nindent 12 }}
 {{- end }}
@@ -240,6 +300,15 @@ spec:
 {{ toYaml .env | nindent 12 }}
           volumeMounts:
 {{ toYaml .volumeMounts | nindent 12 }}
+            {{- if .Values.tls.serviceCA.enabled }}
+            - name: tls
+              mountPath: /etc/simplyblock/tls
+              readOnly: true
+            - name: service-ca
+              mountPath: /etc/ssl/certs/service-ca.crt
+              subPath: service-ca.crt
+              readOnly: true
+            {{- end }}
           resources:
 {{ toYaml .resources | nindent 12 }}
 {{- end }}
@@ -257,6 +326,15 @@ spec:
 {{ toYaml .env | nindent 12 }}
           volumeMounts:
 {{ toYaml .volumeMounts | nindent 12 }}
+            {{- if .Values.tls.serviceCA.enabled }}
+            - name: tls
+              mountPath: /etc/simplyblock/tls
+              readOnly: true
+            - name: service-ca
+              mountPath: /etc/ssl/certs/service-ca.crt
+              subPath: service-ca.crt
+              readOnly: true
+            {{- end }}
           resources:
 {{ toYaml .resources | nindent 12 }}
 {{- end }}
@@ -274,6 +352,15 @@ spec:
 {{ toYaml .env | nindent 12 }}
           volumeMounts:
 {{ toYaml .volumeMounts | nindent 12 }}
+            {{- if .Values.tls.serviceCA.enabled }}
+            - name: tls
+              mountPath: /etc/simplyblock/tls
+              readOnly: true
+            - name: service-ca
+              mountPath: /etc/ssl/certs/service-ca.crt
+              subPath: service-ca.crt
+              readOnly: true
+            {{- end }}
           resources:
 {{ toYaml .resources | nindent 12 }}
 {{- end }}
@@ -291,6 +378,15 @@ spec:
 {{ toYaml .env | nindent 12 }}
           volumeMounts:
 {{ toYaml .volumeMounts | nindent 12 }}
+            {{- if .Values.tls.serviceCA.enabled }}
+            - name: tls
+              mountPath: /etc/simplyblock/tls
+              readOnly: true
+            - name: service-ca
+              mountPath: /etc/ssl/certs/service-ca.crt
+              subPath: service-ca.crt
+              readOnly: true
+            {{- end }}
           resources:
 {{ toYaml .resources | nindent 12 }}
 {{- end }}
@@ -308,6 +404,15 @@ spec:
 {{ toYaml .env | nindent 12 }}
           volumeMounts:
 {{ toYaml .volumeMounts | nindent 12 }}
+            {{- if .Values.tls.serviceCA.enabled }}
+            - name: tls
+              mountPath: /etc/simplyblock/tls
+              readOnly: true
+            - name: service-ca
+              mountPath: /etc/ssl/certs/service-ca.crt
+              subPath: service-ca.crt
+              readOnly: true
+            {{- end }}
           resources:
 {{ toYaml .resources | nindent 12 }}
 {{- end }}
@@ -339,6 +444,14 @@ spec:
         - name: config
           configMap:
             name: simplyblock-fluent-bit-config
+      {{- if .Values.tls.serviceCA.enabled }}
+      - name: tls
+        secret:
+         secretName: simplyblock-webappapi-tls
+      - name: ca
+        configMap:
+          name: simplyblock-ca
+      {{- end }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -399,6 +512,15 @@ spec:
 {{ toYaml .env | nindent 12 }}
           volumeMounts:
 {{ toYaml .volumeMounts | nindent 12 }}
+            {{- if .Values.tls.serviceCA.enabled }}
+            - name: tls
+              mountPath: /etc/simplyblock/tls
+              readOnly: true
+            - name: service-ca
+              mountPath: /etc/ssl/certs/service-ca.crt
+              subPath: service-ca.crt
+              readOnly: true
+            {{- end }}
           resources:
 {{ toYaml .resources | nindent 12 }}
 {{- end }}
@@ -416,6 +538,15 @@ spec:
 {{ toYaml .env | nindent 12 }}
           volumeMounts:
 {{ toYaml .volumeMounts | nindent 12 }}
+            {{- if .Values.tls.serviceCA.enabled }}
+            - name: tls
+              mountPath: /etc/simplyblock/tls
+              readOnly: true
+            - name: service-ca
+              mountPath: /etc/ssl/certs/service-ca.crt
+              subPath: service-ca.crt
+              readOnly: true
+            {{- end }}
           resources:
 {{ toYaml .resources | nindent 12 }}
 {{- end }}
@@ -433,6 +564,15 @@ spec:
 {{ toYaml .env | nindent 12 }}
           volumeMounts:
 {{ toYaml .volumeMounts | nindent 12 }}
+            {{- if .Values.tls.serviceCA.enabled }}
+            - name: tls
+              mountPath: /etc/simplyblock/tls
+              readOnly: true
+            - name: service-ca
+              mountPath: /etc/ssl/certs/service-ca.crt
+              subPath: service-ca.crt
+              readOnly: true
+            {{- end }}
           resources:
 {{ toYaml .resources | nindent 12 }}
 {{- end }}
@@ -450,6 +590,15 @@ spec:
 {{ toYaml .env | nindent 12 }}
           volumeMounts:
 {{ toYaml .volumeMounts | nindent 12 }}
+            {{- if .Values.tls.serviceCA.enabled }}
+            - name: tls
+              mountPath: /etc/simplyblock/tls
+              readOnly: true
+            - name: service-ca
+              mountPath: /etc/ssl/certs/service-ca.crt
+              subPath: service-ca.crt
+              readOnly: true
+            {{- end }}
           resources:
 {{ toYaml .resources | nindent 12 }}
 {{- end }}
@@ -467,6 +616,15 @@ spec:
 {{ toYaml .env | nindent 12 }}
           volumeMounts:
 {{ toYaml .volumeMounts | nindent 12 }}
+            {{- if .Values.tls.serviceCA.enabled }}
+            - name: tls
+              mountPath: /etc/simplyblock/tls
+              readOnly: true
+            - name: service-ca
+              mountPath: /etc/ssl/certs/service-ca.crt
+              subPath: service-ca.crt
+              readOnly: true
+            {{- end }}
           resources:
 {{ toYaml .resources | nindent 12 }}
 {{- end }}
@@ -484,6 +642,15 @@ spec:
 {{ toYaml .env | nindent 12 }}
           volumeMounts:
 {{ toYaml .volumeMounts | nindent 12 }}
+            {{- if .Values.tls.serviceCA.enabled }}
+            - name: tls
+              mountPath: /etc/simplyblock/tls
+              readOnly: true
+            - name: service-ca
+              mountPath: /etc/ssl/certs/service-ca.crt
+              subPath: service-ca.crt
+              readOnly: true
+            {{- end }}
           resources:
 {{ toYaml .resources | nindent 12 }}
 {{- end }}
@@ -501,6 +668,15 @@ spec:
 {{ toYaml .env | nindent 12 }}
           volumeMounts:
 {{ toYaml .volumeMounts | nindent 12 }}
+            {{- if .Values.tls.serviceCA.enabled }}
+            - name: tls
+              mountPath: /etc/simplyblock/tls
+              readOnly: true
+            - name: service-ca
+              mountPath: /etc/ssl/certs/service-ca.crt
+              subPath: service-ca.crt
+              readOnly: true
+            {{- end }}
           resources:
 {{ toYaml .resources | nindent 12 }}
 {{- end }}
@@ -518,6 +694,15 @@ spec:
 {{ toYaml .env | nindent 12 }}
           volumeMounts:
 {{ toYaml .volumeMounts | nindent 12 }}
+            {{- if .Values.tls.serviceCA.enabled }}
+            - name: tls
+              mountPath: /etc/simplyblock/tls
+              readOnly: true
+            - name: service-ca
+              mountPath: /etc/ssl/certs/service-ca.crt
+              subPath: service-ca.crt
+              readOnly: true
+            {{- end }}
           resources:
 {{ toYaml .resources | nindent 12 }}
 {{- end }}
@@ -535,6 +720,15 @@ spec:
 {{ toYaml .env | nindent 12 }}
           volumeMounts:
 {{ toYaml .volumeMounts | nindent 12 }}
+            {{- if .Values.tls.serviceCA.enabled }}
+            - name: tls
+              mountPath: /etc/simplyblock/tls
+              readOnly: true
+            - name: service-ca
+              mountPath: /etc/ssl/certs/service-ca.crt
+              subPath: service-ca.crt
+              readOnly: true
+            {{- end }}
           resources:
 {{ toYaml .resources | nindent 12 }}
 {{- end }}
@@ -552,6 +746,15 @@ spec:
 {{ toYaml .env | nindent 12 }}
           volumeMounts:
 {{ toYaml .volumeMounts | nindent 12 }}
+            {{- if .Values.tls.serviceCA.enabled }}
+            - name: tls
+              mountPath: /etc/simplyblock/tls
+              readOnly: true
+            - name: service-ca
+              mountPath: /etc/ssl/certs/service-ca.crt
+              subPath: service-ca.crt
+              readOnly: true
+            {{- end }}
           resources:
 {{ toYaml .resources | nindent 12 }}
 {{- end }}
@@ -569,6 +772,15 @@ spec:
 {{ toYaml .env | nindent 12 }}
           volumeMounts:
 {{ toYaml .volumeMounts | nindent 12 }}
+            {{- if .Values.tls.serviceCA.enabled }}
+            - name: tls
+              mountPath: /etc/simplyblock/tls
+              readOnly: true
+            - name: service-ca
+              mountPath: /etc/ssl/certs/service-ca.crt
+              subPath: service-ca.crt
+              readOnly: true
+            {{- end }}
           resources:
 {{ toYaml .resources | nindent 12 }}
 {{- end }}
@@ -586,6 +798,15 @@ spec:
 {{ toYaml .env | nindent 12 }}
           volumeMounts:
 {{ toYaml .volumeMounts | nindent 12 }}
+            {{- if .Values.tls.serviceCA.enabled }}
+            - name: tls
+              mountPath: /etc/simplyblock/tls
+              readOnly: true
+            - name: service-ca
+              mountPath: /etc/ssl/certs/service-ca.crt
+              subPath: service-ca.crt
+              readOnly: true
+            {{- end }}
           resources:
 {{ toYaml .resources | nindent 12 }}
 {{- end }}
@@ -605,15 +826,23 @@ spec:
               memory: "400Mi"
 
       volumes:
-        - name: fdb-cluster-file
-          configMap:
-            name: simplyblock-fdb-cluster-config
-            items:
-              - key: cluster-file
-                path: fdb.cluster
-        - name: varlog
-          hostPath:
-            path: /var/log
-        - name: config
-          configMap:
-            name: simplyblock-fluent-bit-config
+      - name: fdb-cluster-file
+        configMap:
+          name: simplyblock-fdb-cluster-config
+          items:
+            - key: cluster-file
+              path: fdb.cluster
+      - name: varlog
+        hostPath:
+          path: /var/log
+      - name: config
+        configMap:
+          name: simplyblock-fluent-bit-config
+      {{- if .Values.tls.serviceCA.enabled }}
+      - name: tls
+        secret:
+         secretName: simplyblock-webappapi-tls
+      - name: ca
+        configMap:
+          name: simplyblock-ca
+      {{- end }}
