@@ -1154,7 +1154,7 @@ def main():
                     out_f = node_dir / fname
                     gl_q = (
                         f'kubernetes_pod_name:{_gl_escape(pod_name)} '
-                        f'AND kubernetes_container_name:"{_gl_escape(cname)}"'
+                        f'AND kubernetes_container_name:{_gl_escape(cname)}'
                     )
                     n = fetch(
                         gl_query=gl_q,
