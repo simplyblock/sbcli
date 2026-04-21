@@ -1,0 +1,12 @@
+{{- if .Values.tls.serviceCA.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: simplyblock-snodeapi
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    service.beta.openshift.io/serving-cert-secret-name: simplyblock-snodeapi-tls
+spec:
+  clusterIP: None
+  ports: []
+{{- end }}
