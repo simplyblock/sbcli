@@ -8,7 +8,7 @@ Tests cover:
   - Unified NVMe-oF port pool (_get_all_nvmf_ports, get_next_nvmf_port)
   - Legacy wrappers: get_next_port, get_next_dev_port, next_free_hublvol_port
   - RPC port allocation with cluster config
-  - Firewall/SNodeAPI port: per-host-IP sharing
+  - Firewall/SNodeAPI port: per-storage-node allocation (unique per SPDK)
   - Port config propagation through cluster_ops (create_cluster, add_cluster)
   - CLI argument parsing for port params
   - Port uniqueness across port types in the unified pool
@@ -354,7 +354,7 @@ class TestGetNextRpcPort(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Test get_next_fw_port (SNodeAPI per-host-IP)
+# Test get_next_fw_port (SNodeAPI — per-storage-node, unique per SPDK)
 # ---------------------------------------------------------------------------
 
 class TestGetNextFwPort(unittest.TestCase):
@@ -369,14 +369,19 @@ class TestGetNextFwPort(unittest.TestCase):
 
     @patch("simplyblock_core.utils._get_cluster_port_config")
     @patch("simplyblock_core.db_controller.DBController")
-    def test_reuses_port_for_same_host_ip(self, mock_db_cls, mock_config):
-        """Two nodes on the same mgmt_ip should share the same firewall port."""
+    def test_co_located_nodes_get_distinct_ports(self, mock_db_cls, mock_config):
+        """Two SPDK nodes on the same mgmt_ip must get DIFFERENT firewall ports.
+
+        In K8s hyper-converged layouts, each SPDK pod runs its own SnodeAPI
+        sidecar; sharing a port would cause bind conflicts and ECONNREFUSED
+        on firewall checks.
+        """
         from simplyblock_core.utils import get_next_fw_port
         mock_config.return_value = (4420, 8080, 50001)
         nodes = [_node("n1", mgmt_ip="10.0.0.1", firewall_port=50001)]
         mock_db_cls.return_value.get_storage_nodes_by_cluster_id.return_value = nodes
         result = get_next_fw_port("c1", mgmt_ip="10.0.0.1")
-        self.assertEqual(result, 50001)
+        self.assertEqual(result, 50002)
 
     @patch("simplyblock_core.utils._get_cluster_port_config")
     @patch("simplyblock_core.db_controller.DBController")
@@ -422,17 +427,17 @@ class TestGetNextFwPort(unittest.TestCase):
 
     @patch("simplyblock_core.utils._get_cluster_port_config")
     @patch("simplyblock_core.db_controller.DBController")
-    def test_reuses_existing_for_third_node_same_ip(self, mock_db_cls, mock_config):
-        """Three nodes on same IP: all share same firewall port."""
+    def test_third_node_same_ip_gets_fresh_port(self, mock_db_cls, mock_config):
+        """Three SPDK nodes on the same IP: each gets its own port."""
         from simplyblock_core.utils import get_next_fw_port
         mock_config.return_value = (4420, 8080, 50001)
         nodes = [
             _node("n1", mgmt_ip="10.0.0.1", firewall_port=50001),
-            _node("n2", mgmt_ip="10.0.0.1", firewall_port=50001),
+            _node("n2", mgmt_ip="10.0.0.1", firewall_port=50002),
         ]
         mock_db_cls.return_value.get_storage_nodes_by_cluster_id.return_value = nodes
         result = get_next_fw_port("c1", mgmt_ip="10.0.0.1")
-        self.assertEqual(result, 50001)
+        self.assertEqual(result, 50003)
 
     @patch("simplyblock_core.utils._get_cluster_port_config")
     @patch("simplyblock_core.db_controller.DBController")
@@ -441,7 +446,7 @@ class TestGetNextFwPort(unittest.TestCase):
         mock_config.return_value = (4420, 8080, 50001)
         nodes = [_node("n1", mgmt_ip="10.0.0.1", firewall_port=0)]
         mock_db_cls.return_value.get_storage_nodes_by_cluster_id.return_value = nodes
-        # Should not reuse the 0 port even though mgmt_ip matches
+        # firewall_port=0 is unallocated; should not be treated as reserved
         result = get_next_fw_port("c1", mgmt_ip="10.0.0.1")
         self.assertEqual(result, 50001)
 
@@ -537,20 +542,20 @@ class TestPortGapsAndReuse(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestMultiNodeSameHost(unittest.TestCase):
-    """Test that multiple nodes on the same host IP get distinct NVMe-oF ports
-    but share the same SNodeAPI/firewall port."""
+    """Test that multiple nodes on the same host IP get distinct ports across
+    all port types, including SNodeAPI/firewall (one sidecar per SPDK pod)."""
 
     @patch("simplyblock_core.utils._get_cluster_port_config", return_value=(4420, 8080, 50001))
     @patch("simplyblock_core.db_controller.DBController")
-    def test_two_nodes_same_ip_share_fw_port(self, mock_db_cls, mock_config):
+    def test_two_nodes_same_ip_get_distinct_fw_ports(self, mock_db_cls, mock_config):
         from simplyblock_core.utils import get_next_fw_port
         nodes = [
             _node("n1", mgmt_ip="10.0.0.1", firewall_port=50001,
                   lvol_subsys_port=4420, nvmf_port=4421, hublvol_port=4422),
         ]
         mock_db_cls.return_value.get_storage_nodes_by_cluster_id.return_value = nodes
-        # Second node on same IP gets same FW port
-        self.assertEqual(get_next_fw_port("c1", mgmt_ip="10.0.0.1"), 50001)
+        # Second SPDK pod on same host gets its own FW port
+        self.assertEqual(get_next_fw_port("c1", mgmt_ip="10.0.0.1"), 50002)
 
     @patch("simplyblock_core.utils._get_cluster_port_config", return_value=(4420, 8080, 50001))
     @patch("simplyblock_core.utils._get_all_nvmf_ports")
@@ -729,7 +734,7 @@ class TestEndToEndAllocationScenario(unittest.TestCase):
         rpc2 = get_next_rpc_port("c1")
         fw2 = get_next_fw_port("c1", mgmt_ip="10.0.0.1")
         self.assertEqual(rpc2, 8081)
-        self.assertEqual(fw2, 50001)  # reused
+        self.assertEqual(fw2, 50002)  # second SPDK on host gets its own port
 
         n2 = _node("n2", mgmt_ip="10.0.0.1", rpc_port=rpc2, firewall_port=fw2,
                     lvol_subsys_port=4423, nvmf_port=4424, hublvol_port=4425)
@@ -740,7 +745,7 @@ class TestEndToEndAllocationScenario(unittest.TestCase):
         rpc3 = get_next_rpc_port("c1")
         fw3 = get_next_fw_port("c1", mgmt_ip="10.0.0.2")
         self.assertEqual(rpc3, 8082)
-        self.assertEqual(fw3, 50002)  # new host, new port
+        self.assertEqual(fw3, 50003)  # next unused port in pool
 
         n3 = _node("n3", mgmt_ip="10.0.0.2", rpc_port=rpc3, firewall_port=fw3,
                     lvol_subsys_port=4426, nvmf_port=4427, hublvol_port=4428)
@@ -751,7 +756,7 @@ class TestEndToEndAllocationScenario(unittest.TestCase):
         rpc4 = get_next_rpc_port("c1")
         fw4 = get_next_fw_port("c1", mgmt_ip="10.0.0.2")
         self.assertEqual(rpc4, 8083)
-        self.assertEqual(fw4, 50002)  # reused for same host
+        self.assertEqual(fw4, 50004)  # each SPDK gets its own port
 
         # Verify all NVMe-oF ports are unique
         all_nvmf = set()
@@ -766,9 +771,9 @@ class TestEndToEndAllocationScenario(unittest.TestCase):
         all_rpc = {rpc1, rpc2, rpc3, rpc4}
         self.assertEqual(len(all_rpc), 4)
 
-        # Verify FW ports: 2 unique (one per host)
+        # Verify FW ports: one per SPDK, all distinct
         all_fw = {fw1, fw2, fw3, fw4}
-        self.assertEqual(all_fw, {50001, 50002})
+        self.assertEqual(all_fw, {50001, 50002, 50003, 50004})
 
 
 # ---------------------------------------------------------------------------

@@ -159,10 +159,6 @@ def _start_snode_api():
     proc = subprocess.Popen(
         [sys.executable, "-c",
          f"""
-import os
-os.environ['WITHOUT_CLOUD_INFO'] = 'True'
-os.environ['SIMPLYBLOCK_LOG_LEVEL'] = 'ERROR'
-os.environ['DHCHAP_KEY_DIR'] = '{_dhchap_tmpdir}'
 from flask_openapi3 import OpenAPI
 from simplyblock_web.api.internal.storage_node.docker import api
 app = OpenAPI(__name__)

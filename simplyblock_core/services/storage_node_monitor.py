@@ -418,8 +418,8 @@ def node_port_check_fun(snode):
                 ret = health_controller.check_port_on_node(snode, port)
                 logger.info(f"Check: node port {snode.mgmt_ip}, {port} ... {ret}")
                 node_port_check &= ret
-            except Exception:
-                logger.error("Check node port failed, connection error")
+            except Exception as e:
+                health_controller._log_port_check_failure(db, snode, port, e)
 
         node_data_nic_ping_check = False
         for data_nic in snode.data_nics:
