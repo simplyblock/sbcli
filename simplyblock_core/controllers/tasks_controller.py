@@ -151,7 +151,7 @@ def add_device_to_auto_restart(device):
 def add_node_to_auto_restart(node):
     cluster = db.get_cluster_by_id(node.cluster_id)
     if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED,
-                              Cluster.STATUS_READONLY, Cluster.STATUS_UNREADY]:
+                              Cluster.STATUS_READONLY, Cluster.STATUS_UNREADY, Cluster.STATUS_SUSPENDED]:
         logger.warning(f"Cluster is not active, skip node auto restart, status: {cluster.status}")
         return False
     offline_nodes = 0
