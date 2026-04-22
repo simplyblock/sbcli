@@ -368,10 +368,8 @@ class CLIWrapper(CLIWrapperBase):
         self.init_cluster__update_fabric(subparser)
         self.init_cluster__check(subparser)
         self.init_cluster__update(subparser)
-        if self.developer_mode:
-            self.init_cluster__graceful_shutdown(subparser)
-        if self.developer_mode:
-            self.init_cluster__graceful_startup(subparser)
+        self.init_cluster__graceful_shutdown(subparser)
+        self.init_cluster__graceful_startup(subparser)
         self.init_cluster__list_tasks(subparser)
         self.init_cluster__cancel_task(subparser)
         self.init_cluster__get_subtasks(subparser)
@@ -1259,17 +1257,9 @@ class CLIWrapper(CLIWrapperBase):
                 elif sub_command in ['update']:
                     ret = self.cluster__update(sub_command, args)
                 elif sub_command in ['graceful-shutdown']:
-                    if not self.developer_mode:
-                        print("This command is private.")
-                        ret = False
-                    else:
-                        ret = self.cluster__graceful_shutdown(sub_command, args)
+                    ret = self.cluster__graceful_shutdown(sub_command, args)
                 elif sub_command in ['graceful-startup']:
-                    if not self.developer_mode:
-                        print("This command is private.")
-                        ret = False
-                    else:
-                        ret = self.cluster__graceful_startup(sub_command, args)
+                    ret = self.cluster__graceful_startup(sub_command, args)
                 elif sub_command in ['list-tasks']:
                     ret = self.cluster__list_tasks(sub_command, args)
                 elif sub_command in ['cancel-task']:
