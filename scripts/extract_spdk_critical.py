@@ -26,13 +26,12 @@ timestamp seen above them.
 from __future__ import annotations
 
 import argparse
-import os
 import re
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Iterable
 
 TS_RE = re.compile(r"\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+)\]")
 TS_FMT = "%Y-%m-%d %H:%M:%S.%f"

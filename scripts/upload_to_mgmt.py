@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import shlex
 import shutil
 import subprocess
@@ -105,7 +104,8 @@ def main() -> int:
     global VERBOSE
     VERBOSE = args.verbose
 
-    need("ssh"); need("scp")
+    need("ssh")
+    need("scp")
 
     meta: dict = {}
     if args.metadata:
