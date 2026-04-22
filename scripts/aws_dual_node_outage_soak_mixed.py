@@ -528,9 +528,28 @@ class SoakRunner:
         return status
 
     def wait_for_all_online(self, target_nodes=None, timeout=None):
+        """Wait until every SN reports online.
+
+        Two callers with different semantics:
+          * Initial bring-up (target_nodes=None): tolerate any transient
+            state (in_restart, in_shutdown, offline) and just keep polling
+            until timeout — CP may be in the middle of an auto-recovery
+            when the soak was launched, and forcing a hard error there
+            just makes the operator wait-and-retry manually. The
+            TRANSITIONAL_STATES set below is what we accept.
+          * Post-outage (target_nodes={n1, n2}): any node outside the
+            target set going non-online is a real cascade signal — we
+            keep failing loudly so the soak flags the regression.
+        """
         timeout = timeout or self.args.restart_timeout
         expected = self.args.expected_node_count
         target_nodes = set(target_nodes or [])
+        initial_wait = not target_nodes
+        # Statuses that are considered a legitimate in-flight transition
+        # rather than a cascade. Any other non-online status (e.g.
+        # unreachable/removed) still raises even during initial wait.
+        TRANSITIONAL_STATES = {"in_restart", "in_shutdown", "in_creation",
+                                "offline", "suspended", "restarting"}
         started = time.time()
         while time.time() - started < timeout:
             self.assert_cluster_not_suspended()
@@ -541,11 +560,23 @@ class SoakRunner:
                 uuid for uuid, status in statuses.items()
                 if uuid not in target_nodes and status != "online"
             ]
-            if unaffected_bad:
+            if unaffected_bad and not initial_wait:
                 raise TestRunError(
                     "Unaffected nodes are not online: "
                     + ", ".join(f"{uuid}:{statuses[uuid]}" for uuid in unaffected_bad)
                 )
+            if initial_wait and unaffected_bad:
+                # Only raise here if a node is in a status we do NOT consider
+                # a legitimate in-flight transition.
+                stuck_bad = [
+                    uuid for uuid in unaffected_bad
+                    if statuses[uuid] not in TRANSITIONAL_STATES
+                ]
+                if stuck_bad:
+                    raise TestRunError(
+                        "Unaffected nodes are not online: "
+                        + ", ".join(f"{uuid}:{statuses[uuid]}" for uuid in stuck_bad)
+                    )
             if not offline and len(statuses) == expected:
                 return nodes
             self.logger.log(
