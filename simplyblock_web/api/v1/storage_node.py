@@ -182,7 +182,7 @@ def storage_node_restart():
         target=storage_node_ops.restart_storage_node,
         kwargs={
             "node_id": uuid,
-            "node_ip": node_ip,
+            "node_address": node_ip,
             "force": force,
             "reattach_volume": reattach_volume,
         }

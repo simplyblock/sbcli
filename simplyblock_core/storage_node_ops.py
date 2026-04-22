@@ -2037,7 +2037,7 @@ def restart_storage_node(
         node_id, max_lvol=0, max_snap=0, max_prov=0,
         spdk_image=None, set_spdk_debug=None,
         small_bufsize=0, large_bufsize=0,
-        force=False, node_ip=None, reattach_volume=False, clear_data=False, new_ssd_pcie=[],
+        force=False, node_address=None, reattach_volume=False, clear_data=False, new_ssd_pcie=[],
         force_lvol_recreate=False, spdk_proxy_image=None):
     """Wrapper that guarantees the node is reset to OFFLINE if the restart
     fails after the RESTARTING status has been set.  Without this, any
@@ -2049,7 +2049,7 @@ def restart_storage_node(
             node_id, max_lvol=max_lvol, max_snap=max_snap, max_prov=max_prov,
             spdk_image=spdk_image, set_spdk_debug=set_spdk_debug,
             small_bufsize=small_bufsize, large_bufsize=large_bufsize,
-            force=force, node_ip=node_ip, reattach_volume=reattach_volume,
+            force=force, node_address=node_address, reattach_volume=reattach_volume,
             clear_data=clear_data, new_ssd_pcie=new_ssd_pcie,
             force_lvol_recreate=force_lvol_recreate, spdk_proxy_image=spdk_proxy_image)
     except Exception:
@@ -2074,7 +2074,7 @@ def _restart_storage_node_impl(
         node_id, max_lvol=0, max_snap=0, max_prov=0,
         spdk_image=None, set_spdk_debug=None,
         small_bufsize=0, large_bufsize=0,
-        force=False, node_ip=None, reattach_volume=False, clear_data=False, new_ssd_pcie=[],
+        force=False, node_address=None, reattach_volume=False, clear_data=False, new_ssd_pcie=[],
         force_lvol_recreate=False, spdk_proxy_image=None):
     db_controller = DBController()
     logger.info("Restarting storage node")
@@ -2116,16 +2116,16 @@ def _restart_storage_node_impl(
         return False
     snode = db_controller.get_storage_node_by_id(node_id)
 
-    if node_ip:
-        if node_ip != snode.api_endpoint:
-            logger.info(f"Restarting on new node with ip: {node_ip}")
-            snode_api = SNodeClient(node_ip, timeout=5 * 60, retry=3)
+    if node_address:
+        if node_address != snode.api_endpoint:
+            logger.info(f"Restarting on new node with ip: {node_address}")
+            snode_api = SNodeClient(node_address, timeout=5 * 60, retry=3)
             node_info, _ = snode_api.info()
             if not node_info:
                 logger.error("Failed to get node info!")
                 return False
-            snode.api_endpoint = node_ip
-            snode.mgmt_ip = node_ip.split(":")[0]
+            snode.api_endpoint = node_address
+            snode.mgmt_ip = node_address.split(":")[0]
             data_nics = []
             for nic in snode.data_nics:
                 if_name = nic["if_name"]
@@ -2162,7 +2162,7 @@ def _restart_storage_node_impl(
                     if dev['serial_number'] in known_sn:
                         snode_api.bind_device_to_spdk(dev['address'])
         else:
-            node_ip = None
+            node_address = None
     active_tcp = False
     active_rdma = False
     fabric_tcp = cluster.fabric_tcp
@@ -2498,7 +2498,7 @@ def _restart_storage_node_impl(
             snode.nvme_devices.append(dev)
 
     snode.write_to_db(db_controller.kv_store)
-    if node_ip and len(new_devices) > 0:
+    if node_address and len(new_devices) > 0:
         # prepare devices on new node
         if snode.num_partitions_per_dev == 0 or snode.jm_percent == 0:
 

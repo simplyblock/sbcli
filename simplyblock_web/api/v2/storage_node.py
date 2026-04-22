@@ -244,7 +244,7 @@ def restart(cluster: Cluster, storage_node: StorageNode, parameters: _RestartPar
         kwargs={
             "node_id": storage_node.get_id(),
             "force": parameters.force,
-            "node_ip": parameters.node_address,
+            "node_address": parameters.node_address,
             "reattach_volume": parameters.reattach_volume,
         }
     ).start()
