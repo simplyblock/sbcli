@@ -9,12 +9,10 @@ LABEL summary="Simplyblock controlplane plane component"
 LABEL description="Simplyblock controlplane plane container"
 LABEL maintainer="developers@simplyblock.io"
 
-
-RUN dnf config-manager addrepo --add-repo https://download.docker.com/linux/rhel/docker-ce.repo
 RUN dnf install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-10.noarch.rpm
 
 RUN dnf install -y wget dmidecode pciutils sudo nano gdisk openssh-clients util-linux pkg-config hostname\
-    ca-certificates curl kmod docker-ce-cli python3.13 python3-pip iputils iproute iscsi-initiator-utils
+    ca-certificates curl kmod python3.13 python3-pip iputils iproute iscsi-initiator-utils
 #Error: Unable to find a match: nvme-cli  parted
 
 ARG TARGETPLATFORM
