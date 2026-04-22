@@ -2,6 +2,7 @@
 # encoding: utf-8
 
 import logging
+import ssl
 import sys
 import time
 
@@ -95,6 +96,8 @@ def main() -> None:
         forwarded_allow_ips='192.168.1.0/24',
         ssl_certfile=settings.tls_certificate if settings.tls_enabled else None,
         ssl_keyfile=settings.tls_key if settings.tls_enabled else None,
+        ssl_ca_certs=settings.certificate_authority if settings.tls_enabled else None,
+        ssl_cert_reqs=ssl.CERT_REQUIRED if settings.tls_enabled else None,
     )
     server: uvicorn.Server = uvicorn.Server(config)
     server.run()

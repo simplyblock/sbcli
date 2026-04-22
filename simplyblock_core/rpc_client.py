@@ -112,6 +112,8 @@ class RPCClient:
                         allowed_methods=self.DEFAULT_ALLOWED_METHODS)
         self.session.mount("http://", HTTPAdapter(max_retries=retries))
         self.session.mount("https://", HTTPAdapter(max_retries=retries))
+        if settings.tls_enabled:
+            self.session.cert = (str(settings.tls_certificate), str(settings.tls_key))
 
     def _request_cached(self, method, params=None, cache_ttl=RPC_CACHE_TTL_SEC):
         """Like _request but returns a cached result if one exists within cache_ttl seconds."""

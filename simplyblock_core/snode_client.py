@@ -30,6 +30,8 @@ class SNodeClient:
         retries = Retry(total=retry, backoff_factor=1, connect=retry, read=retry)
         self.session.mount("http://", HTTPAdapter(max_retries=retries))
         self.session.mount("https://", HTTPAdapter(max_retries=retries))
+        if settings.tls_enabled:
+            self.session.cert = (str(settings.tls_certificate), str(settings.tls_key))
 
     def _request(self, method, path, payload=None):
         try:

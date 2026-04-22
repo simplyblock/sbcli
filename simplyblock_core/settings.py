@@ -1,3 +1,4 @@
+import ssl
 from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -17,3 +18,13 @@ class Settings(BaseSettings):
             self.tls_key.is_file(),
             self.certificate_authority.is_file(),
         ])
+
+    def make_server_ssl_context(self):
+        """Return an SSLContext requiring client certificates, or None if TLS is not configured."""
+        if not self.tls_enabled:
+            return None
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(self.tls_certificate, self.tls_key)
+        ctx.verify_mode = ssl.CERT_REQUIRED
+        ctx.load_verify_locations(self.certificate_authority)
+        return ctx
