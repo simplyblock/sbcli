@@ -416,6 +416,21 @@ class SbcliUtils:
         self.logger.debug(f"LVOL List: {lvol_data}")
         return lvol_data
 
+    def get_clones_of_snapshot(self, snap_id):
+        """Return list of clone lvols for a given snapshot ID.
+        Queries GET /lvol and filters by cloned_from_snap.
+        Returns list of {"lvol_name": ..., "id": ...} dicts.
+        """
+        data = self.get_request(api_url="/lvol")
+        clones = []
+        for lvol_info in data.get("results", []):
+            if lvol_info.get("cloned_from_snap") == snap_id:
+                clones.append({
+                    "lvol_name": lvol_info.get("lvol_name"),
+                    "id": lvol_info.get("id"),
+                })
+        return clones
+
     def get_lvol_by_id(self, lvol_id):
         """Return all lvol with given id
         """
@@ -482,8 +497,10 @@ class SbcliUtils:
             raise Exception(f"No such Lvol {lvol_name} found!!")
 
         if not lvol_id:
-            self.logger.info("Lvol does not exist. Exiting!!")
-            return True
+            if skip_error:
+                self.logger.info(f"Lvol {lvol_name} does not exist. Exiting!!")
+                return True
+            raise Exception(f"Lvol {lvol_name} does not exist")
         self.logger.info(f"ledoo {lvol_name}, {lvol_id}")
 
         data = self.delete_request(api_url=f"/lvol/{lvol_id}")

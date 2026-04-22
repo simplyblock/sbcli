@@ -16,7 +16,8 @@ All sbcli CLI wrappers live in ssh_utils.SshUtils:
   ssh_obj.get_client_host_nqn(node)
 """
 
-# import threading
+import threading
+import time
 import random
 import string
 from pathlib import Path
@@ -66,6 +67,15 @@ class SecurityTestBase(TestClusterBase):
         self.lvol_mount_details = {}
         self.pool_name = "sec_test_pool"
         self._client_host_nqn = None
+        self.fio_threads = []
+
+    # ── filesystem helper ────────────────────────────────────────────────────
+
+    def _pick_fs_type(self):
+        """Randomly choose ext4 or xfs so both filesystems get coverage."""
+        fs = random.choice(["ext4", "xfs"])
+        self.logger.info(f"[_pick_fs_type] Selected filesystem: {fs}")
+        return fs
 
     # ── debug helpers ─────────────────────────────────────────────────────────
 
@@ -418,7 +428,7 @@ class SecurityTestBase(TestClusterBase):
 #         self.logger.info(f"DHCHAP key present in connect string: {has_dhchap}")
 #
 #         mount_point = f"{self.mount_path}/{lvol_name}"
-#         self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type="ext4")
+#         self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type=self._pick_fs_type())
 #         self.ssh_obj.mount_path(node=self.fio_node, device=lvol_device,
 #                                 mount_path=mount_point)
 #         log_file = f"{self.log_path}/{lvol_name}.log"
@@ -588,7 +598,7 @@ class SecurityTestBase(TestClusterBase):
 #         self.logger.info(f"Connected via added host NQN → {lvol_device}")
 #
 #         mount_point = f"{self.mount_path}/{lvol_name}"
-#         self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type="ext4")
+#         self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type=self._pick_fs_type())
 #         self.ssh_obj.mount_path(node=self.fio_node, device=lvol_device,
 #                                 mount_path=mount_point)
 #         self.lvol_mount_details[lvol_name]["Mount"] = mount_point
@@ -689,7 +699,7 @@ class SecurityTestBase(TestClusterBase):
 #
 #         mount_point = f"{self.mount_path}/{lvol_name}"
 #         log_file = f"{self.log_path}/{lvol_name}.log"
-#         self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type="ext4")
+#         self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type=self._pick_fs_type())
 #         self.ssh_obj.mount_path(node=self.fio_node, device=lvol_device,
 #                                 mount_path=mount_point)
 #         self.lvol_mount_details[lvol_name] = {
@@ -768,7 +778,7 @@ class SecurityTestBase(TestClusterBase):
 #
 #             mount_point = f"{self.mount_path}/{lvol_name}"
 #             log_file = f"{self.log_path}/{lvol_name}.log"
-#             self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type="ext4")
+#             self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type=self._pick_fs_type())
 #             self.ssh_obj.mount_path(node=self.fio_node, device=lvol_device,
 #                                     mount_path=mount_point)
 #             self.lvol_mount_details[lvol_name] = {
@@ -847,7 +857,7 @@ class SecurityTestBase(TestClusterBase):
 #
 #         mount_point = f"{self.mount_path}/{lvol_name}"
 #         log_file = f"{self.log_path}/{lvol_name}.log"
-#         self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type="ext4")
+#         self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type=self._pick_fs_type())
 #         self.ssh_obj.mount_path(node=self.fio_node, device=lvol_device,
 #                                 mount_path=mount_point)
 #         self.lvol_mount_details[lvol_name]["Mount"] = mount_point
@@ -1539,7 +1549,7 @@ class SecurityTestBase(TestClusterBase):
 #
 #         lvol_device, _ = self._connect_and_get_device(lvol_name, lvol_id, host_nqn=host_nqn)
 #         mount_point = f"{self.mount_path}/{lvol_name}"
-#         self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type="ext4")
+#         self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type=self._pick_fs_type())
 #         self.ssh_obj.mount_path(node=self.fio_node, device=lvol_device, mount_path=mount_point)
 #         self.lvol_mount_details[lvol_name]["Mount"] = mount_point
 #         self.logger.info("TC-SEC-070: Initial connect + format PASSED")
@@ -1630,7 +1640,7 @@ class SecurityTestBase(TestClusterBase):
 #
 #         lvol_device, _ = self._connect_and_get_device(lvol_name, lvol_id, host_nqn=host_nqn)
 #         mount_point = f"{self.mount_path}/{lvol_name}"
-#         self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type="ext4")
+#         self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type=self._pick_fs_type())
 #         self.ssh_obj.mount_path(node=self.fio_node, device=lvol_device, mount_path=mount_point)
 #         self.lvol_mount_details[lvol_name]["Mount"] = mount_point
 #         self.logger.info("TC-SEC-075: PASSED")
@@ -1725,7 +1735,7 @@ class SecurityTestBase(TestClusterBase):
 #         self.logger.info("TC-SEC-081: Connecting HA lvol and running FIO …")
 #         lvol_device, _ = self._connect_and_get_device(lvol_name, lvol_id, host_nqn=host_nqn)
 #         mount_point = f"{self.mount_path}/{lvol_name}"
-#         self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type="ext4")
+#         self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type=self._pick_fs_type())
 #         self.ssh_obj.mount_path(node=self.fio_node, device=lvol_device, mount_path=mount_point)
 #         self.lvol_mount_details[lvol_name]["Mount"] = mount_point
 #         log_file = f"{self.log_path}/{lvol_name}_pre.log"
@@ -1961,7 +1971,7 @@ class SecurityTestBase(TestClusterBase):
 #         sleep_n_sec(3)
 #         lvol_device, _ = self._connect_and_get_device(lvol_name, lvol_id, host_nqn=host_nqn)
 #         mount_point = f"{self.mount_path}/{lvol_name}"
-#         self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type="ext4")
+#         self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type=self._pick_fs_type())
 #         self.ssh_obj.mount_path(node=self.fio_node, device=lvol_device, mount_path=mount_point)
 #         self.lvol_mount_details[lvol_name]["Mount"] = mount_point
 #         log_file = f"{self.log_path}/{lvol_name}_out.log"
@@ -2050,7 +2060,7 @@ class SecurityTestBase(TestClusterBase):
 #         self.logger.info("TC-SEC-100: Connecting and running FIO with correct NQN …")
 #         lvol_device, _ = self._connect_and_get_device(lvol_name, lvol_id, host_nqn=host_nqn)
 #         mount_point = f"{self.mount_path}/{lvol_name}"
-#         self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type="ext4")
+#         self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type=self._pick_fs_type())
 #         self.ssh_obj.mount_path(node=self.fio_node, device=lvol_device, mount_path=mount_point)
 #         self.lvol_mount_details[lvol_name]["Mount"] = mount_point
 #         log_file = f"{self.log_path}/{lvol_name}_out.log"
@@ -2303,7 +2313,7 @@ class SecurityTestBase(TestClusterBase):
 #         # Connect, write data, disconnect
 #         lvol_device, _ = self._connect_and_get_device(parent_name, parent_id, host_nqn=nqn_a)
 #         mount_point = f"{self.mount_path}/{parent_name}"
-#         self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type="ext4")
+#         self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type=self._pick_fs_type())
 #         self.ssh_obj.mount_path(node=self.fio_node, device=lvol_device, mount_path=mount_point)
 #         self.lvol_mount_details[parent_name]["Mount"] = mount_point
 #         log_file = f"{self.log_path}/{parent_name}_w.log"
@@ -2419,7 +2429,7 @@ class SecurityTestBase(TestClusterBase):
 #
 #         lvol_device, _ = self._connect_and_get_device(lvol_name, lvol_id, host_nqn=host_nqn)
 #         mount_point = f"{self.mount_path}/{lvol_name}"
-#         self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type="ext4")
+#         self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type=self._pick_fs_type())
 #         self.ssh_obj.mount_path(node=self.fio_node, device=lvol_device, mount_path=mount_point)
 #         self.lvol_mount_details[lvol_name]["Mount"] = mount_point
 #         log_file = f"{self.log_path}/{lvol_name}_w.log"
@@ -2579,7 +2589,7 @@ class SecurityTestBase(TestClusterBase):
 #
 #         lvol_device, _ = self._connect_and_get_device(lvol_name, lvol_id, host_nqn=host_nqn)
 #         mount_point = f"{self.mount_path}/{lvol_name}"
-#         self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type="ext4")
+#         self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type=self._pick_fs_type())
 #         self.ssh_obj.mount_path(node=self.fio_node, device=lvol_device, mount_path=mount_point)
 #         self.lvol_mount_details[lvol_name]["Mount"] = mount_point
 #         log_file = f"{self.log_path}/{lvol_name}_pre.log"
@@ -2755,7 +2765,7 @@ class SecurityTestBase(TestClusterBase):
 #         self.logger.info("TC-SEC-127: Connecting RDMA lvol and running FIO …")
 #         lvol_device, _ = self._connect_and_get_device(lvol_name, lvol_id, host_nqn=host_nqn)
 #         mount_point = f"{self.mount_path}/{lvol_name}"
-#         self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type="ext4")
+#         self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type=self._pick_fs_type())
 #         self.ssh_obj.mount_path(node=self.fio_node, device=lvol_device, mount_path=mount_point)
 #         self.lvol_mount_details[lvol_name]["Mount"] = mount_point
 #         log_file = f"{self.log_path}/{lvol_name}_out.log"
@@ -2832,7 +2842,7 @@ class TestLvolSecurityCombinations(SecurityTestBase):
 
             lvol_device, _ = self._connect_and_get_device(lvol_name, lvol_id, host_nqn=host_nqn)
             mount_point = f"{self.mount_path}/{lvol_name}"
-            self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type="ext4")
+            self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type=self._pick_fs_type())
             self.ssh_obj.mount_path(node=self.fio_node, device=lvol_device, mount_path=mount_point)
             self.lvol_mount_details[lvol_name]["Mount"] = mount_point
             log_file = f"{self.log_path}/{lvol_name}_out.log"
@@ -2878,7 +2888,7 @@ class TestLvolDynamicHostManagement(SecurityTestBase):
         self.logger.info("TC-NEW-010: Connecting and running FIO …")
         lvol_device, _ = self._connect_and_get_device(lvol_name, lvol_id, host_nqn=host_nqn)
         mount_point = f"{self.mount_path}/{lvol_name}"
-        self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type="ext4")
+        self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type=self._pick_fs_type())
         self.ssh_obj.mount_path(node=self.fio_node, device=lvol_device, mount_path=mount_point)
         self.lvol_mount_details[lvol_name]["Mount"] = mount_point
         log_file = f"{self.log_path}/{lvol_name}_pre.log"
@@ -2893,13 +2903,18 @@ class TestLvolDynamicHostManagement(SecurityTestBase):
         self.lvol_mount_details[lvol_name]["Mount"] = None
 
         # TC-NEW-011: remove host from pool
+        # Known behaviour: when pool has NO allowed hosts we still get a
+        # connect string but WITHOUT dhchap keys (issue #3).
         self.logger.info("TC-NEW-011: Removing host from pool …")
         self.ssh_obj.remove_host_from_pool(self.mgmt_nodes[0], pool_id, host_nqn)
         sleep_n_sec(3)
         connect_ls, err = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
-        assert not connect_ls or err, \
-            "Expected no connect string after removing host from pool"
-        self.logger.info("TC-NEW-011: Host removed – connect rejected PASSED")
+        assert connect_ls and not err, \
+            f"Expected connect string (without dhchap) after removing only host; err={err}"
+        connect_str = " ".join(connect_ls) if isinstance(connect_ls, list) else str(connect_ls)
+        assert "dhchap" not in connect_str.lower(), \
+            f"Expected no DHCHAP keys when pool has no allowed hosts; got: {connect_str}"
+        self.logger.info("TC-NEW-011: Host removed – connect string without DHCHAP PASSED")
 
         # TC-NEW-012: re-add host
         self.logger.info("TC-NEW-012: Re-adding host to pool …")
@@ -2955,7 +2970,7 @@ class TestLvolCryptoWithDhchap(SecurityTestBase):
         # TC-NEW-022
         lvol_device, _ = self._connect_and_get_device(lvol_name, lvol_id, host_nqn=host_nqn)
         mount_point = f"{self.mount_path}/{lvol_name}"
-        self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type="ext4")
+        self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type=self._pick_fs_type())
         self.ssh_obj.mount_path(node=self.fio_node, device=lvol_device, mount_path=mount_point)
         self.lvol_mount_details[lvol_name]["Mount"] = mount_point
         log_file = f"{self.log_path}/{lvol_name}_out.log"
@@ -3004,7 +3019,7 @@ class TestLvolDhchapBidirectional(SecurityTestBase):
 
         # TC-NEW-033: FIO
         mount_point = f"{self.mount_path}/{lvol_name}"
-        self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type="ext4")
+        self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type=self._pick_fs_type())
         self.ssh_obj.mount_path(node=self.fio_node, device=lvol_device, mount_path=mount_point)
         self.lvol_mount_details[lvol_name]["Mount"] = mount_point
         log_file = f"{self.log_path}/{lvol_name}_out.log"
@@ -3018,9 +3033,9 @@ class TestLvolSecurityNegativeHostOps(SecurityTestBase):
     """
     Negative tests for pool-level host operations.
 
-    TC-NEW-040  Connect without registered host → rejected
+    TC-NEW-040  Connect without registered host → connect string returned but without DHCHAP keys
     TC-NEW-041  Remove non-registered NQN from pool → expect error or no-op
-    TC-NEW-042  Add host, connect succeeds; remove host, connect fails
+    TC-NEW-042  Add host, connect succeeds with DHCHAP keys; remove host, connect string without DHCHAP keys
     """
 
     def __init__(self, **kwargs):
@@ -3045,12 +3060,15 @@ class TestLvolSecurityNegativeHostOps(SecurityTestBase):
         assert lvol_id
         self.lvol_mount_details[lvol_name] = {"ID": lvol_id, "Mount": None}
 
-        # TC-NEW-040: connect without registering host → must fail
+        # TC-NEW-040: connect without registering host → connect string returned but without DHCHAP keys
         self.logger.info("TC-NEW-040: Connecting without registered host …")
         connect_ls, err = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
-        assert not connect_ls or err, \
-            "Expected rejection when host is not registered at pool level"
-        self.logger.info("TC-NEW-040: Unregistered host rejected PASSED")
+        assert connect_ls and not err, \
+            f"Expected connect string even without registered host; err={err}"
+        connect_str = " ".join(connect_ls) if isinstance(connect_ls, list) else str(connect_ls)
+        assert "dhchap" not in connect_str.lower(), \
+            f"Expected no DHCHAP keys when host is not registered; got: {connect_str}"
+        self.logger.info("TC-NEW-040: Connect without DHCHAP keys PASSED")
 
         # TC-NEW-041: remove non-registered NQN → should not crash
         self.logger.info("TC-NEW-041: Removing non-registered NQN …")
@@ -3060,19 +3078,26 @@ class TestLvolSecurityNegativeHostOps(SecurityTestBase):
         self.logger.info(f"TC-NEW-041: remove non-registered NQN result: out={out!r} err={err!r}")
         self.logger.info("TC-NEW-041: PASSED (no crash)")
 
-        # TC-NEW-042: add host → connect succeeds; remove → connect fails
-        self.logger.info("TC-NEW-042: Add host, verify connect, remove, verify reject …")
+        # TC-NEW-042: add host → connect with DHCHAP keys; remove → connect without DHCHAP keys
+        self.logger.info("TC-NEW-042: Add host, verify connect with DHCHAP, remove, verify no DHCHAP …")
         self.ssh_obj.add_host_to_pool(self.mgmt_nodes[0], pool_id, host_nqn)
         sleep_n_sec(3)
         connect_ls2, err2 = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
         assert connect_ls2 and not err2, \
             f"Connect should succeed after adding host; err={err2}"
+        connect_str2 = " ".join(connect_ls2) if isinstance(connect_ls2, list) else str(connect_ls2)
+        assert "dhchap" in connect_str2.lower(), \
+            f"Expected DHCHAP keys after registering host; got: {connect_str2}"
+        self.logger.info("TC-NEW-042: Connect with DHCHAP keys PASSED")
 
         self.ssh_obj.remove_host_from_pool(self.mgmt_nodes[0], pool_id, host_nqn)
         sleep_n_sec(3)
         connect_ls3, err3 = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
-        assert not connect_ls3 or err3, \
-            "Connect should fail after removing host from pool"
+        assert connect_ls3 and not err3, \
+            f"Connect string should still be returned after removing host; err={err3}"
+        connect_str3 = " ".join(connect_ls3) if isinstance(connect_ls3, list) else str(connect_ls3)
+        assert "dhchap" not in connect_str3.lower(), \
+            f"Expected no DHCHAP keys after removing host; got: {connect_str3}"
         self.logger.info("TC-NEW-042: Add/remove lifecycle PASSED")
 
         self.logger.info("=== TestLvolSecurityNegativeHostOps PASSED ===")
@@ -3113,6 +3138,8 @@ class TestLvolSecuritySnapshotClone(SecurityTestBase):
 
         lvol_device, _ = self._connect_and_get_device(lvol_name, lvol_id, host_nqn=host_nqn)
         mount_point = f"{self.mount_path}/{lvol_name}"
+        # Use ext4 explicitly: xfs clones share the source UUID and cannot be
+        # connected on the same client as the source (known issue #2).
         self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type="ext4")
         self.ssh_obj.mount_path(node=self.fio_node, device=lvol_device, mount_path=mount_point)
         self.lvol_mount_details[lvol_name]["Mount"] = mount_point
@@ -3208,7 +3235,7 @@ class TestLvolSecurityRDMAv2(SecurityTestBase):
         # TC-NEW-062: connect, FIO
         lvol_device, _ = self._connect_and_get_device(lvol_name, lvol_id, host_nqn=host_nqn)
         mount_point = f"{self.mount_path}/{lvol_name}"
-        self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type="ext4")
+        self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type=self._pick_fs_type())
         self.ssh_obj.mount_path(node=self.fio_node, device=lvol_device, mount_path=mount_point)
         self.lvol_mount_details[lvol_name]["Mount"] = mount_point
         log_file = f"{self.log_path}/{lvol_name}_out.log"
@@ -3216,3 +3243,1206 @@ class TestLvolSecurityRDMAv2(SecurityTestBase):
         self.logger.info("TC-NEW-062: RDMA FIO PASSED")
 
         self.logger.info("=== TestLvolSecurityRDMAv2 PASSED ===")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Outage Test 1 – Storage node outage with FIO running (DHCHAP HA lvol)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestLvolSecurityStorageNodeOutage(SecurityTestBase):
+    """
+    Verifies that DHCHAP credentials and I/O survive a storage node
+    outage/restart on an HA lvol.  FIO runs *during* the outage and
+    must complete without interruption.
+
+    TC-SEC-070  Create DHCHAP pool + host, create HA lvol (ndcs=1, npcs=1)
+    TC-SEC-071  Connect, format, mount, start long-running FIO in thread
+    TC-SEC-072  Shutdown a primary storage node; validate node offline,
+                lvols remain online, FIO still running
+    TC-SEC-073  Restart node; wait for online + HA settle
+    TC-SEC-074  Wait for FIO to finish; validate FIO log (no interruption)
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.test_name = "lvol_security_storage_node_outage"
+        self.fio_runtime = 300
+
+    def run(self):
+        self.logger.info("=== TestLvolSecurityStorageNodeOutage START ===")
+        self.fio_node = self.fio_node[0]
+
+        # TC-SEC-070: DHCHAP pool + host + HA lvol
+        self.logger.info("TC-SEC-070: Creating DHCHAP pool + HA lvol …")
+        self.ssh_obj.add_storage_pool(
+            self.mgmt_nodes[0], self.pool_name, self.cluster_id, dhchap=True)
+        host_nqn = self._get_client_host_nqn()
+        pool_id = self.sbcli_utils.get_storage_pool_id(self.pool_name)
+        assert pool_id, f"Pool {self.pool_name} not found"
+        self.ssh_obj.add_host_to_pool(self.mgmt_nodes[0], pool_id, host_nqn)
+
+        lvol_name = f"secout{_rand_suffix()}"
+        out, err = self.ssh_obj.create_sec_lvol(
+            self.mgmt_nodes[0], lvol_name, self.lvol_size, self.pool_name,
+            distr_ndcs=1, distr_npcs=1,
+        )
+        assert not err or "error" not in err.lower(), f"lvol creation failed: {err}"
+        sleep_n_sec(5)
+        lvol_id = self.sbcli_utils.get_lvol_id(lvol_name)
+        assert lvol_id, f"Could not find ID for {lvol_name}"
+        self.lvol_mount_details[lvol_name] = {"ID": lvol_id, "Mount": None}
+        self.logger.info("TC-SEC-070: DHCHAP pool + HA lvol PASSED")
+
+        # TC-SEC-071: connect, format, mount, start FIO in thread
+        self.logger.info("TC-SEC-071: Connecting and starting long-running FIO …")
+        lvol_device, _ = self._connect_and_get_device(lvol_name, lvol_id, host_nqn=host_nqn)
+        mount_point = f"{self.mount_path}/{lvol_name}"
+        self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type=self._pick_fs_type())
+        self.ssh_obj.mount_path(node=self.fio_node, device=lvol_device, mount_path=mount_point)
+        self.lvol_mount_details[lvol_name]["Mount"] = mount_point
+
+        log_file = f"{self.log_path}/{lvol_name}_out.log"
+        fio_thread = threading.Thread(
+            target=self.ssh_obj.run_fio_test,
+            args=(self.fio_node, None, mount_point, log_file),
+            kwargs={
+                "name": f"fio_run_{lvol_name}",
+                "runtime": self.fio_runtime,
+                "rw": "randrw",
+                "bs": "4K",
+                "size": self.fio_size,
+                "nrfiles": 4,
+                "iodepth": 1,
+                "numjobs": 2,
+                "time_based": True,
+            },
+        )
+        fio_thread.start()
+        self.fio_threads.append(fio_thread)
+        sleep_n_sec(15)  # let FIO settle
+        self.logger.info("TC-SEC-071: FIO thread started PASSED")
+
+        # TC-SEC-072: shutdown a primary storage node
+        self.logger.info("TC-SEC-072: Shutting down a primary storage node …")
+        nodes = self.sbcli_utils.get_storage_nodes()
+        primary_nodes = [n for n in nodes["results"]
+                         if not n.get("is_secondary_node") and n.get("lvols", 0) > 0]
+        assert primary_nodes, "No primary storage nodes with lvols found"
+        target_node = primary_nodes[0]["uuid"]
+
+        deadline = time.time() + 300
+        self.sbcli_utils.shutdown_node(node_uuid=target_node, force=False)
+        while True:
+            sleep_n_sec(20)
+            node_detail = self.sbcli_utils.get_storage_node_details(target_node)
+            if node_detail[0]["status"] == "offline":
+                break
+            if time.time() >= deadline:
+                raise RuntimeError(
+                    f"Node {target_node} did not go offline within 5 minutes")
+            self.logger.info(f"Node {target_node} not yet offline; retrying …")
+            try:
+                self.sbcli_utils.shutdown_node(node_uuid=target_node, force=False)
+            except Exception as e:
+                self.logger.warning(f"shutdown retry raised: {e}")
+
+        self.logger.info("TC-SEC-072: Node offline — verifying FIO still running …")
+        procs = self.ssh_obj.find_process_name(self.fio_node, f"fio.*fio_run_{lvol_name}")
+        running = [p for p in procs if p.strip() and "grep" not in p and "fio --name" in p]
+        assert running, "FIO should still be running during outage"
+        self.logger.info("TC-SEC-072: Node offline + FIO alive PASSED")
+
+        # TC-SEC-073: restart node
+        self.logger.info("TC-SEC-073: Restarting storage node …")
+        sleep_n_sec(30)
+        self.sbcli_utils.restart_node(node_uuid=target_node)
+        self.sbcli_utils.wait_for_storage_node_status(target_node, "online", timeout=300)
+        self.logger.info("TC-SEC-073: Node online — waiting for HA to settle …")
+        sleep_n_sec(120)
+        self.logger.info("TC-SEC-073: Node restart PASSED")
+
+        # TC-SEC-074: wait for FIO and validate
+        self.logger.info("TC-SEC-074: Waiting for FIO to complete …")
+        self.common_utils.manage_fio_threads(
+            self.fio_node, self.fio_threads, timeout=self.fio_runtime + 120)
+        self.common_utils.validate_fio_test(self.fio_node, log_file=log_file)
+        self.logger.info("TC-SEC-074: FIO completed without interruption PASSED")
+
+        self.logger.info("=== TestLvolSecurityStorageNodeOutage PASSED ===")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Outage Test 2 – Management node reboot (DHCHAP config survives)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestLvolSecurityMgmtNodeReboot(SecurityTestBase):
+    """
+    Reboots the management node and verifies that pool-level DHCHAP
+    configuration is preserved — connect strings still contain DHCHAP
+    keys and volumes remain accessible.
+
+    TC-SEC-080  Create DHCHAP pool + host, create lvol, verify DHCHAP keys in connect string
+    TC-SEC-081  Reboot management node; wait for services to recover
+    TC-SEC-082  Verify connect string still has DHCHAP keys post-reboot
+    TC-SEC-083  Connect lvol, mount, FIO — data plane intact after mgmt reboot
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.test_name = "lvol_security_mgmt_node_reboot"
+
+    def run(self):
+        self.logger.info("=== TestLvolSecurityMgmtNodeReboot START ===")
+        self.fio_node = self.fio_node[0]
+
+        # TC-SEC-080: DHCHAP pool + host + lvol + baseline check
+        self.logger.info("TC-SEC-080: Creating DHCHAP pool + lvol …")
+        self.ssh_obj.add_storage_pool(
+            self.mgmt_nodes[0], self.pool_name, self.cluster_id, dhchap=True)
+        host_nqn = self._get_client_host_nqn()
+        pool_id = self.sbcli_utils.get_storage_pool_id(self.pool_name)
+        assert pool_id, f"Pool {self.pool_name} not found"
+        self.ssh_obj.add_host_to_pool(self.mgmt_nodes[0], pool_id, host_nqn)
+
+        lvol_name = f"secmgmt{_rand_suffix()}"
+        out, err = self.ssh_obj.create_sec_lvol(
+            self.mgmt_nodes[0], lvol_name, self.lvol_size, self.pool_name)
+        assert not err or "error" not in err.lower(), f"lvol creation failed: {err}"
+        sleep_n_sec(3)
+        lvol_id = self.sbcli_utils.get_lvol_id(lvol_name)
+        assert lvol_id
+        self.lvol_mount_details[lvol_name] = {"ID": lvol_id, "Mount": None}
+
+        # Verify DHCHAP keys in connect string before reboot
+        pre_connect, pre_err = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
+        assert pre_connect and not pre_err, f"Pre-reboot connect failed: {pre_err}"
+        pre_str = " ".join(pre_connect) if isinstance(pre_connect, list) else str(pre_connect)
+        assert "dhchap" in pre_str.lower(), \
+            f"Expected DHCHAP keys in pre-reboot connect string; got: {pre_str}"
+        self.logger.info("TC-SEC-080: Pre-reboot DHCHAP keys present PASSED")
+
+        # TC-SEC-081: reboot management node
+        self.logger.info("TC-SEC-081: Rebooting management node …")
+        self.ssh_obj.reboot_node(self.mgmt_nodes[0], wait_time=300)
+        sleep_n_sec(100)  # wait for all services to fully start
+        self.logger.info("TC-SEC-081: Management node back online PASSED")
+
+        # TC-SEC-082: verify DHCHAP keys post-reboot
+        self.logger.info("TC-SEC-082: Verifying DHCHAP keys post-reboot …")
+        post_connect, post_err = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
+        assert post_connect and not post_err, \
+            f"Post-reboot connect string failed: {post_err}"
+        post_str = " ".join(post_connect) if isinstance(post_connect, list) else str(post_connect)
+        assert "dhchap" in post_str.lower(), \
+            f"Expected DHCHAP keys in post-reboot connect string; got: {post_str}"
+        self.logger.info("TC-SEC-082: Post-reboot DHCHAP keys preserved PASSED")
+
+        # TC-SEC-083: connect, mount, FIO
+        self.logger.info("TC-SEC-083: Connecting and running FIO after mgmt reboot …")
+        lvol_device, _ = self._connect_and_get_device(lvol_name, lvol_id, host_nqn=host_nqn)
+        mount_point = f"{self.mount_path}/{lvol_name}"
+        self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type=self._pick_fs_type())
+        self.ssh_obj.mount_path(node=self.fio_node, device=lvol_device, mount_path=mount_point)
+        self.lvol_mount_details[lvol_name]["Mount"] = mount_point
+        log_file = f"{self.log_path}/{lvol_name}_out.log"
+        self._run_fio_and_validate(lvol_name, mount_point, log_file, rw="randrw", runtime=30)
+        self.logger.info("TC-SEC-083: FIO after mgmt reboot PASSED")
+
+        self.logger.info("=== TestLvolSecurityMgmtNodeReboot PASSED ===")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Outage Test 3 – HA failover with DHCHAP + encryption (FIO during outage)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestLvolSecurityHAFailover(SecurityTestBase):
+    """
+    Creates an HA lvol (ndcs=1, npcs=1) with encryption + DHCHAP,
+    runs FIO *during* a primary node shutdown, and verifies that
+    security config survives the failover.
+
+    TC-SEC-085  Create DHCHAP pool + host, create encrypted HA lvol
+    TC-SEC-086  Connect, format, mount, start long-running FIO in thread
+    TC-SEC-087  Shutdown the primary storage node; validate FIO alive
+    TC-SEC-088  Restart node; wait for HA settle
+    TC-SEC-089  Wait for FIO to finish; validate no interruption;
+                verify DHCHAP keys still present in connect string
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.test_name = "lvol_security_ha_failover"
+        self.fio_runtime = 300
+
+    def run(self):
+        self.logger.info("=== TestLvolSecurityHAFailover START ===")
+        self.fio_node = self.fio_node[0]
+
+        # TC-SEC-085: DHCHAP pool + host + encrypted HA lvol
+        self.logger.info("TC-SEC-085: Creating DHCHAP pool + encrypted HA lvol …")
+        self.ssh_obj.add_storage_pool(
+            self.mgmt_nodes[0], self.pool_name, self.cluster_id, dhchap=True)
+        host_nqn = self._get_client_host_nqn()
+        pool_id = self.sbcli_utils.get_storage_pool_id(self.pool_name)
+        assert pool_id, f"Pool {self.pool_name} not found"
+        self.ssh_obj.add_host_to_pool(self.mgmt_nodes[0], pool_id, host_nqn)
+
+        lvol_name = f"secha{_rand_suffix()}"
+        out, err = self.ssh_obj.create_sec_lvol(
+            self.mgmt_nodes[0], lvol_name, self.lvol_size, self.pool_name,
+            encrypt=True, key1=self.lvol_crypt_keys[0], key2=self.lvol_crypt_keys[1],
+            distr_ndcs=1, distr_npcs=1,
+        )
+        assert not err or "error" not in err.lower(), f"lvol creation failed: {err}"
+        sleep_n_sec(5)
+        lvol_id = self.sbcli_utils.get_lvol_id(lvol_name)
+        assert lvol_id
+        self.lvol_mount_details[lvol_name] = {"ID": lvol_id, "Mount": None}
+        self.logger.info("TC-SEC-085: Encrypted HA lvol PASSED")
+
+        # TC-SEC-086: connect, format, mount, start FIO thread
+        self.logger.info("TC-SEC-086: Connecting and starting FIO …")
+        lvol_device, _ = self._connect_and_get_device(lvol_name, lvol_id, host_nqn=host_nqn)
+        mount_point = f"{self.mount_path}/{lvol_name}"
+        self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type=self._pick_fs_type())
+        self.ssh_obj.mount_path(node=self.fio_node, device=lvol_device, mount_path=mount_point)
+        self.lvol_mount_details[lvol_name]["Mount"] = mount_point
+
+        log_file = f"{self.log_path}/{lvol_name}_out.log"
+        fio_thread = threading.Thread(
+            target=self.ssh_obj.run_fio_test,
+            args=(self.fio_node, None, mount_point, log_file),
+            kwargs={
+                "name": f"fio_run_{lvol_name}",
+                "runtime": self.fio_runtime,
+                "rw": "randrw",
+                "bs": "4K",
+                "size": self.fio_size,
+                "nrfiles": 4,
+                "iodepth": 1,
+                "numjobs": 2,
+                "time_based": True,
+            },
+        )
+        fio_thread.start()
+        self.fio_threads.append(fio_thread)
+        sleep_n_sec(15)
+        self.logger.info("TC-SEC-086: FIO thread started PASSED")
+
+        # TC-SEC-087: shutdown a primary storage node
+        self.logger.info("TC-SEC-087: Shutting down primary storage node …")
+        nodes = self.sbcli_utils.get_storage_nodes()
+        primary_nodes = [n for n in nodes["results"]
+                         if not n.get("is_secondary_node") and n.get("lvols", 0) > 0]
+        assert primary_nodes, "No primary storage nodes with lvols found"
+        target_node = primary_nodes[0]["uuid"]
+
+        deadline = time.time() + 300
+        self.sbcli_utils.shutdown_node(node_uuid=target_node, force=False)
+        while True:
+            sleep_n_sec(20)
+            node_detail = self.sbcli_utils.get_storage_node_details(target_node)
+            if node_detail[0]["status"] == "offline":
+                break
+            if time.time() >= deadline:
+                raise RuntimeError(
+                    f"Node {target_node} did not go offline within 5 minutes")
+            self.logger.info(f"Node {target_node} not yet offline; retrying …")
+            try:
+                self.sbcli_utils.shutdown_node(node_uuid=target_node, force=False)
+            except Exception as e:
+                self.logger.warning(f"shutdown retry raised: {e}")
+
+        self.logger.info("TC-SEC-087: Node offline — verifying FIO alive …")
+        procs = self.ssh_obj.find_process_name(self.fio_node, f"fio.*fio_run_{lvol_name}")
+        running = [p for p in procs if p.strip() and "grep" not in p and "fio --name" in p]
+        assert running, "FIO should still be running during HA failover"
+        self.logger.info("TC-SEC-087: Node offline + FIO alive PASSED")
+
+        # TC-SEC-088: restart node, settle
+        self.logger.info("TC-SEC-088: Restarting node …")
+        sleep_n_sec(30)
+        self.sbcli_utils.restart_node(node_uuid=target_node)
+        self.sbcli_utils.wait_for_storage_node_status(target_node, "online", timeout=300)
+        self.logger.info("TC-SEC-088: Node online — waiting for HA to settle …")
+        sleep_n_sec(120)
+        self.logger.info("TC-SEC-088: Node restart PASSED")
+
+        # TC-SEC-089: wait for FIO, validate, check DHCHAP keys
+        self.logger.info("TC-SEC-089: Waiting for FIO to complete …")
+        self.common_utils.manage_fio_threads(
+            self.fio_node, self.fio_threads, timeout=self.fio_runtime + 120)
+        self.common_utils.validate_fio_test(self.fio_node, log_file=log_file)
+        self.logger.info("TC-SEC-089: FIO completed without interruption")
+
+        # Verify DHCHAP keys still in connect string post-failover
+        post_connect, post_err = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
+        assert post_connect and not post_err, \
+            f"Post-failover connect string failed: {post_err}"
+        post_str = " ".join(post_connect) if isinstance(post_connect, list) else str(post_connect)
+        assert "dhchap" in post_str.lower(), \
+            f"Expected DHCHAP keys post-failover; got: {post_str}"
+        self.logger.info("TC-SEC-089: DHCHAP keys preserved post-failover PASSED")
+
+        self.logger.info("=== TestLvolSecurityHAFailover PASSED ===")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Outage Test 4 – 30-second network interrupt with FIO running
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestLvolSecurityNetworkInterrupt(SecurityTestBase):
+    """
+    30-second NIC-level network interrupt on a storage node while FIO
+    is running on an HA DHCHAP lvol.  FIO must survive the interrupt
+    and DHCHAP auth must still work after reconnect.
+
+    TC-SEC-090  Create DHCHAP pool + host, create HA lvol, connect, format, mount
+    TC-SEC-091  Start long-running FIO in thread
+    TC-SEC-092  Trigger 30s network interrupt on a storage node
+    TC-SEC-093  Wait for interrupt to end; verify FIO completed without errors
+    TC-SEC-094  Disconnect + reconnect with DHCHAP creds; verify auth still works
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.test_name = "lvol_security_network_interrupt"
+        self.fio_runtime = 120
+
+    def run(self):
+        self.logger.info("=== TestLvolSecurityNetworkInterrupt START ===")
+        self.fio_node = self.fio_node[0]
+
+        # TC-SEC-090: DHCHAP pool + host + HA lvol
+        self.logger.info("TC-SEC-090: Creating DHCHAP pool + HA lvol …")
+        self.ssh_obj.add_storage_pool(
+            self.mgmt_nodes[0], self.pool_name, self.cluster_id, dhchap=True)
+        host_nqn = self._get_client_host_nqn()
+        pool_id = self.sbcli_utils.get_storage_pool_id(self.pool_name)
+        assert pool_id, f"Pool {self.pool_name} not found"
+        self.ssh_obj.add_host_to_pool(self.mgmt_nodes[0], pool_id, host_nqn)
+
+        lvol_name = f"secnwi{_rand_suffix()}"
+        out, err = self.ssh_obj.create_sec_lvol(
+            self.mgmt_nodes[0], lvol_name, self.lvol_size, self.pool_name,
+            distr_ndcs=1, distr_npcs=1,
+        )
+        assert not err or "error" not in err.lower(), f"lvol creation failed: {err}"
+        sleep_n_sec(5)
+        lvol_id = self.sbcli_utils.get_lvol_id(lvol_name)
+        assert lvol_id
+        self.lvol_mount_details[lvol_name] = {"ID": lvol_id, "Mount": None}
+
+        lvol_device, _ = self._connect_and_get_device(lvol_name, lvol_id, host_nqn=host_nqn)
+        mount_point = f"{self.mount_path}/{lvol_name}"
+        self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type=self._pick_fs_type())
+        self.ssh_obj.mount_path(node=self.fio_node, device=lvol_device, mount_path=mount_point)
+        self.lvol_mount_details[lvol_name]["Mount"] = mount_point
+        self.logger.info("TC-SEC-090: HA lvol connected + mounted PASSED")
+
+        # TC-SEC-091: start FIO in thread
+        self.logger.info("TC-SEC-091: Starting FIO thread …")
+        log_file = f"{self.log_path}/{lvol_name}_out.log"
+        fio_thread = threading.Thread(
+            target=self.ssh_obj.run_fio_test,
+            args=(self.fio_node, None, mount_point, log_file),
+            kwargs={
+                "name": f"fio_run_{lvol_name}",
+                "runtime": self.fio_runtime,
+                "rw": "randrw",
+                "bs": "4K",
+                "size": self.fio_size,
+                "nrfiles": 4,
+                "iodepth": 1,
+                "numjobs": 2,
+                "time_based": True,
+            },
+        )
+        fio_thread.start()
+        self.fio_threads.append(fio_thread)
+        sleep_n_sec(15)
+        self.logger.info("TC-SEC-091: FIO running PASSED")
+
+        # TC-SEC-092: trigger 30s network interrupt on a storage node
+        self.logger.info("TC-SEC-092: Triggering 30s network interrupt …")
+        nodes = self.sbcli_utils.get_storage_nodes()
+        primary_nodes = [n for n in nodes["results"]
+                         if not n.get("is_secondary_node")]
+        assert primary_nodes, "No primary storage nodes found"
+        target_node_ip = primary_nodes[0]["mgmt_ip"]
+        active_ifaces = self.ssh_obj.get_active_interfaces(target_node_ip)
+        assert active_ifaces, f"No active interfaces found on {target_node_ip}"
+        self.ssh_obj.disconnect_all_active_interfaces(
+            target_node_ip, active_ifaces, duration_secs=30)
+        self.logger.info("TC-SEC-092: Network interrupt triggered PASSED")
+
+        # TC-SEC-093: wait for interrupt to end, then wait for FIO
+        self.logger.info("TC-SEC-093: Waiting 45s for network recovery …")
+        sleep_n_sec(45)
+        self.logger.info("TC-SEC-093: Waiting for FIO to complete …")
+        self.common_utils.manage_fio_threads(
+            self.fio_node, self.fio_threads, timeout=self.fio_runtime + 120)
+        self.common_utils.validate_fio_test(self.fio_node, log_file=log_file)
+        self.logger.info("TC-SEC-093: FIO completed without interruption PASSED")
+
+        # TC-SEC-094: disconnect + reconnect to verify DHCHAP still works
+        self.logger.info("TC-SEC-094: Reconnecting with DHCHAP after interrupt …")
+        self.ssh_obj.unmount_path(self.fio_node, mount_point)
+        sleep_n_sec(2)
+        self._disconnect_lvol(lvol_id)
+        sleep_n_sec(2)
+        self.lvol_mount_details[lvol_name]["Mount"] = None
+
+        lvol_device2, _ = self._connect_and_get_device(lvol_name, lvol_id, host_nqn=host_nqn)
+        assert lvol_device2, "Reconnect after network interrupt failed"
+        mount_point2 = f"{self.mount_path}/{lvol_name}_post"
+        self.ssh_obj.mount_path(node=self.fio_node, device=lvol_device2, mount_path=mount_point2)
+        self.lvol_mount_details[lvol_name]["Mount"] = mount_point2
+        log_file2 = f"{self.log_path}/{lvol_name}_post.log"
+        self._run_fio_and_validate(lvol_name, mount_point2, log_file2, rw="randrw", runtime=30)
+        self.logger.info("TC-SEC-094: Post-interrupt reconnect + FIO PASSED")
+
+        self.logger.info("=== TestLvolSecurityNetworkInterrupt PASSED ===")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Negative Test 1 – Invalid pool-level host operations at creation time
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestLvolSecurityNegativeCreation(SecurityTestBase):
+    """
+    Covers invalid input scenarios for pool-level host management:
+
+    TC-SEC-100  add-host to pool with syntactically invalid NQN → error
+    TC-SEC-101  add-host to pool with empty NQN string → error
+    TC-SEC-102  remove-host with non-existent NQN → error or no-op (no crash)
+    TC-SEC-103  Create lvol in non-DHCHAP pool → connect string has no DHCHAP keys
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.test_name = "lvol_security_negative_creation_v2"
+
+    def _assert_cli_error(self, out, err, label):
+        """Assert that at least one of out/err signals a failure."""
+        failure_signals = ("error", "invalid", "failed", "no such", "not found",
+                           "cannot", "unable")
+        combined = (out or "").lower() + (err or "").lower()
+        has_signal = any(s in combined for s in failure_signals)
+        self.logger.info(
+            f"[{label}] out={out!r}, err={err!r}, has_error_signal={has_signal}")
+        assert has_signal or not (out or "").strip(), \
+            f"[{label}] Expected error signal but got: out={out!r} err={err!r}"
+
+    def run(self):
+        self.logger.info("=== TestLvolSecurityNegativeCreation START ===")
+        self.fio_node = self.fio_node[0]
+
+        # Create DHCHAP pool
+        self.ssh_obj.add_storage_pool(
+            self.mgmt_nodes[0], self.pool_name, self.cluster_id, dhchap=True)
+        pool_id = self.sbcli_utils.get_storage_pool_id(self.pool_name)
+        assert pool_id, f"Pool {self.pool_name} not found"
+
+        # TC-SEC-100: add-host with invalid NQN
+        self.logger.info("TC-SEC-100: add-host with invalid NQN …")
+        invalid_nqn = "not-a-valid-nqn-format-!@#$%"
+        out, err = self.ssh_obj.add_host_to_pool(
+            self.mgmt_nodes[0], pool_id, invalid_nqn)
+        self._assert_cli_error(out, err, "TC-SEC-100")
+        self.logger.info("TC-SEC-100: Invalid NQN rejected PASSED")
+
+        # TC-SEC-101: add-host with empty NQN
+        self.logger.info("TC-SEC-101: add-host with empty NQN …")
+        out, err = self.ssh_obj.add_host_to_pool(
+            self.mgmt_nodes[0], pool_id, "")
+        self._assert_cli_error(out, err, "TC-SEC-101")
+        self.logger.info("TC-SEC-101: Empty NQN rejected PASSED")
+
+        # TC-SEC-102: remove-host with non-existent NQN
+        self.logger.info("TC-SEC-102: remove-host with non-existent NQN …")
+        fake_nqn = f"nqn.2024-01.io.simplyblock:test:fake-{_rand_suffix()}"
+        out, err = self.ssh_obj.remove_host_from_pool(
+            self.mgmt_nodes[0], pool_id, fake_nqn)
+        # Should return error or be a no-op – must not crash
+        self.logger.info(
+            f"TC-SEC-102: remove non-existent NQN result: out={out!r} err={err!r}")
+        self.logger.info("TC-SEC-102: PASSED (no crash)")
+
+        # TC-SEC-103: lvol in non-DHCHAP pool → no DHCHAP keys
+        self.logger.info("TC-SEC-103: Creating lvol in non-DHCHAP pool …")
+        plain_pool = f"{self.pool_name}_nodhchap"
+        self.ssh_obj.add_storage_pool(
+            self.mgmt_nodes[0], plain_pool, self.cluster_id, dhchap=False)
+        lvol_name = f"secneg{_rand_suffix()}"
+        out, err = self.ssh_obj.create_sec_lvol(
+            self.mgmt_nodes[0], lvol_name, self.lvol_size, plain_pool)
+        assert not err or "error" not in err.lower(), f"lvol creation failed: {err}"
+        sleep_n_sec(3)
+        lvol_id = self.sbcli_utils.get_lvol_id(lvol_name)
+        assert lvol_id
+        self.lvol_mount_details[lvol_name] = {"ID": lvol_id, "Mount": None}
+
+        host_nqn = self._get_client_host_nqn()
+        connect_ls, cerr = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
+        if connect_ls:
+            connect_str = " ".join(connect_ls) if isinstance(connect_ls, list) else str(connect_ls)
+            assert "dhchap" not in connect_str.lower(), \
+                f"Non-DHCHAP pool should not produce DHCHAP keys; got: {connect_str}"
+        self.logger.info("TC-SEC-103: Non-DHCHAP pool has no keys PASSED")
+
+        self.logger.info("=== TestLvolSecurityNegativeCreation PASSED ===")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Negative Test 2 – Connect rejection scenarios (pool-level)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestLvolSecurityNegativeConnect(SecurityTestBase):
+    """
+    Tests connect behaviour for unregistered/wrong host NQNs:
+
+    TC-SEC-110  Unregistered NQN → connect rejected (pool has allowed hosts)
+    TC-SEC-111  Tampered DHCHAP secret → nvme connect fails (no new device)
+    TC-SEC-112  Connect without host-nqn → no DHCHAP keys
+    TC-SEC-113  Delete lvol in DHCHAP pool → cleanup succeeds
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.test_name = "lvol_security_negative_connect_v2"
+
+    def run(self):
+        self.logger.info("=== TestLvolSecurityNegativeConnect START ===")
+        self.fio_node = self.fio_node[0]
+
+        self.ssh_obj.add_storage_pool(
+            self.mgmt_nodes[0], self.pool_name, self.cluster_id, dhchap=True)
+        host_nqn = self._get_client_host_nqn()
+        pool_id = self.sbcli_utils.get_storage_pool_id(self.pool_name)
+        self.ssh_obj.add_host_to_pool(self.mgmt_nodes[0], pool_id, host_nqn)
+
+        lvol_name = f"secnc{_rand_suffix()}"
+        out, err = self.ssh_obj.create_sec_lvol(
+            self.mgmt_nodes[0], lvol_name, self.lvol_size, self.pool_name)
+        assert not err or "error" not in err.lower(), f"lvol creation failed: {err}"
+        sleep_n_sec(3)
+        lvol_id = self.sbcli_utils.get_lvol_id(lvol_name)
+        assert lvol_id
+        self.lvol_mount_details[lvol_name] = {"ID": lvol_id, "Mount": None}
+
+        # TC-SEC-110: unregistered NQN → connect must FAIL
+        # Known behaviour: when pool HAS allowed hosts and a wrong/unregistered
+        # NQN is passed with --host-nqn, the connect command fails (issue #4).
+        self.logger.info("TC-SEC-110: Connect with unregistered NQN …")
+        wrong_nqn = f"nqn.2024-01.io.simplyblock:test:wrong-{_rand_suffix()}"
+        connect_ls, cerr = self._get_connect_str_cli(lvol_id, host_nqn=wrong_nqn)
+        rejected = bool(cerr) or not connect_ls
+        assert rejected, (
+            f"Expected rejection for wrong NQN {wrong_nqn!r} when pool has "
+            f"allowed hosts, but got connect strings: {connect_ls}")
+        self.logger.info("TC-SEC-110: Wrong NQN rejected PASSED")
+
+        # TC-SEC-111: tampered DHCHAP secret → no new device
+        self.logger.info("TC-SEC-111: Tampered DHCHAP secret …")
+        import re
+        connect_auth, _ = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
+        if connect_auth:
+            tampered = connect_auth[0]
+            if "dhchap-secret" in tampered:
+                tampered = re.sub(
+                    r'(--dhchap-secret\s+)\S+',
+                    r'\1DHHC-1:00:DEADBEEFDEADBEEFDEADBEEFDEADBEEF',
+                    tampered)
+                initial_devices = self.ssh_obj.get_devices(node=self.fio_node)
+                self.ssh_obj.exec_command(node=self.fio_node, command=tampered)
+                sleep_n_sec(3)
+                final_devices = self.ssh_obj.get_devices(node=self.fio_node)
+                new_devices = [d for d in final_devices if d not in initial_devices]
+                assert not new_devices, \
+                    f"Tampered key should not produce a new device; got: {new_devices}"
+                self.logger.info("TC-SEC-111: Tampered key rejected PASSED")
+            else:
+                self.logger.info("TC-SEC-111: No dhchap-secret in string; skipped")
+        else:
+            self.logger.info("TC-SEC-111: No connect string; skipped")
+
+        # TC-SEC-112: connect without host-nqn → no DHCHAP keys
+        self.logger.info("TC-SEC-112: Connect without host-nqn …")
+        connect_no_nqn, _ = self._get_connect_str_cli(lvol_id, host_nqn=None)
+        if connect_no_nqn:
+            has_dhchap = any("dhchap" in c.lower() for c in connect_no_nqn)
+            assert not has_dhchap, \
+                "Connect without host-nqn must not contain DHCHAP keys"
+        self.logger.info("TC-SEC-112: No keys without host-nqn PASSED")
+
+        # TC-SEC-113: delete lvol in DHCHAP pool
+        self.logger.info("TC-SEC-113: Deleting lvol in DHCHAP pool …")
+        self.sbcli_utils.delete_lvol(lvol_name=lvol_name, skip_error=False)
+        sleep_n_sec(3)
+        gone_id = self.sbcli_utils.get_lvol_id(lvol_name)
+        assert not gone_id, f"lvol {lvol_name} should be deleted"
+        del self.lvol_mount_details[lvol_name]
+        self.logger.info("TC-SEC-113: DHCHAP lvol deleted cleanly PASSED")
+
+        self.logger.info("=== TestLvolSecurityNegativeConnect PASSED ===")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Test – Dynamic modification of pool hosts with multi-NQN lifecycle
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestLvolSecurityDynamicModification(SecurityTestBase):
+    """
+    Tests live add/remove of host NQNs at pool level and multi-NQN scenarios.
+
+    TC-SEC-120  Create DHCHAP pool + NQN_A, create lvol, connect + FIO
+    TC-SEC-121  Remove NQN_A from pool → connect string has no DHCHAP keys
+    TC-SEC-122  Re-add NQN_A → connect string has DHCHAP keys, FIO works
+    TC-SEC-123  Add NQN_B to pool → both NQNs get DHCHAP connect strings
+    TC-SEC-124  Remove NQN_A → NQN_B still gets DHCHAP; NQN_A does not
+    TC-SEC-125  Remove NQN_B → neither NQN gets DHCHAP keys
+    TC-SEC-126  Re-add NQN_A → reconnect + FIO
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.test_name = "lvol_security_dynamic_modification_v2"
+
+    def run(self):
+        self.logger.info("=== TestLvolSecurityDynamicModification START ===")
+        self.fio_node = self.fio_node[0]
+
+        self.ssh_obj.add_storage_pool(
+            self.mgmt_nodes[0], self.pool_name, self.cluster_id, dhchap=True)
+        host_nqn = self._get_client_host_nqn()
+        pool_id = self.sbcli_utils.get_storage_pool_id(self.pool_name)
+        self.ssh_obj.add_host_to_pool(self.mgmt_nodes[0], pool_id, host_nqn)
+
+        second_nqn = f"nqn.2024-01.io.simplyblock:test:second-{_rand_suffix()}"
+        lvol_name = f"secdmod{_rand_suffix()}"
+
+        out, err = self.ssh_obj.create_sec_lvol(
+            self.mgmt_nodes[0], lvol_name, self.lvol_size, self.pool_name)
+        assert not err or "error" not in err.lower(), f"lvol creation failed: {err}"
+        sleep_n_sec(3)
+        lvol_id = self.sbcli_utils.get_lvol_id(lvol_name)
+        assert lvol_id
+        self.lvol_mount_details[lvol_name] = {"ID": lvol_id, "Mount": None}
+
+        # TC-SEC-120: connect + FIO
+        self.logger.info("TC-SEC-120: Initial connect + FIO …")
+        lvol_device, _ = self._connect_and_get_device(lvol_name, lvol_id, host_nqn=host_nqn)
+        mount_point = f"{self.mount_path}/{lvol_name}"
+        self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type=self._pick_fs_type())
+        self.ssh_obj.mount_path(node=self.fio_node, device=lvol_device, mount_path=mount_point)
+        self.lvol_mount_details[lvol_name]["Mount"] = mount_point
+        log_file = f"{self.log_path}/{lvol_name}_pre.log"
+        self._run_fio_and_validate(lvol_name, mount_point, log_file, rw="write", runtime=20)
+        self.logger.info("TC-SEC-120: Initial FIO PASSED")
+
+        # Disconnect
+        self.ssh_obj.unmount_path(self.fio_node, mount_point)
+        sleep_n_sec(2)
+        self._disconnect_lvol(lvol_id)
+        sleep_n_sec(2)
+        self.lvol_mount_details[lvol_name]["Mount"] = None
+
+        # TC-SEC-121: remove NQN_A → no DHCHAP keys
+        self.logger.info("TC-SEC-121: Removing NQN_A from pool …")
+        self.ssh_obj.remove_host_from_pool(self.mgmt_nodes[0], pool_id, host_nqn)
+        sleep_n_sec(3)
+        connect_ls, err = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
+        if connect_ls:
+            cs = " ".join(connect_ls) if isinstance(connect_ls, list) else str(connect_ls)
+            assert "dhchap" not in cs.lower(), \
+                f"Expected no DHCHAP keys after removing host; got: {cs}"
+        self.logger.info("TC-SEC-121: No DHCHAP keys after removal PASSED")
+
+        # TC-SEC-122: re-add NQN_A → DHCHAP keys present, FIO works
+        self.logger.info("TC-SEC-122: Re-adding NQN_A …")
+        self.ssh_obj.add_host_to_pool(self.mgmt_nodes[0], pool_id, host_nqn)
+        sleep_n_sec(3)
+        connect_ls2, err2 = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
+        assert connect_ls2 and not err2, f"Re-add should restore connect; err={err2}"
+        cs2 = " ".join(connect_ls2) if isinstance(connect_ls2, list) else str(connect_ls2)
+        assert "dhchap" in cs2.lower(), f"Expected DHCHAP keys after re-add; got: {cs2}"
+        lvol_device2, _ = self._connect_and_get_device(lvol_name, lvol_id, host_nqn=host_nqn)
+        self.ssh_obj.mount_path(node=self.fio_node, device=lvol_device2, mount_path=mount_point)
+        self.lvol_mount_details[lvol_name]["Mount"] = mount_point
+        log_file2 = f"{self.log_path}/{lvol_name}_readd.log"
+        self._run_fio_and_validate(lvol_name, mount_point, log_file2, rw="randrw", runtime=20)
+        self.logger.info("TC-SEC-122: Re-add FIO PASSED")
+
+        self.ssh_obj.unmount_path(self.fio_node, mount_point)
+        sleep_n_sec(2)
+        self._disconnect_lvol(lvol_id)
+        sleep_n_sec(2)
+        self.lvol_mount_details[lvol_name]["Mount"] = None
+
+        # TC-SEC-123: add NQN_B → both get DHCHAP
+        self.logger.info("TC-SEC-123: Adding NQN_B …")
+        self.ssh_obj.add_host_to_pool(self.mgmt_nodes[0], pool_id, second_nqn)
+        sleep_n_sec(3)
+        cs_a, _ = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
+        cs_b, _ = self._get_connect_str_cli(lvol_id, host_nqn=second_nqn)
+        assert cs_a, "NQN_A should get connect string"
+        assert cs_b, "NQN_B should get connect string"
+        str_a = " ".join(cs_a) if isinstance(cs_a, list) else str(cs_a)
+        str_b = " ".join(cs_b) if isinstance(cs_b, list) else str(cs_b)
+        assert "dhchap" in str_a.lower(), f"NQN_A should have DHCHAP; got: {str_a}"
+        assert "dhchap" in str_b.lower(), f"NQN_B should have DHCHAP; got: {str_b}"
+        self.logger.info("TC-SEC-123: Both NQNs have DHCHAP PASSED")
+
+        # TC-SEC-124: remove NQN_A → NQN_B still has DHCHAP; NQN_A is rejected
+        # Known behaviour: pool still HAS allowed hosts (NQN_B), so connecting
+        # with removed NQN_A must FAIL (issue #4).
+        self.logger.info("TC-SEC-124: Removing NQN_A …")
+        self.ssh_obj.remove_host_from_pool(self.mgmt_nodes[0], pool_id, host_nqn)
+        sleep_n_sec(3)
+        cs_a2, err_a2 = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
+        rejected_a = bool(err_a2) or not cs_a2
+        assert rejected_a, (
+            f"NQN_A should be rejected when pool still has allowed hosts "
+            f"(NQN_B); got: cs={cs_a2}")
+        cs_b2, _ = self._get_connect_str_cli(lvol_id, host_nqn=second_nqn)
+        assert cs_b2, "NQN_B should still get connect string"
+        str_b2 = " ".join(cs_b2) if isinstance(cs_b2, list) else str(cs_b2)
+        assert "dhchap" in str_b2.lower(), f"NQN_B should still have DHCHAP; got: {str_b2}"
+        self.logger.info("TC-SEC-124: PASSED")
+
+        # TC-SEC-125: remove NQN_B → pool has NO allowed hosts
+        # Known behaviour: connect string IS returned but without dhchap
+        # keys when pool has no allowed hosts (issue #3).
+        self.logger.info("TC-SEC-125: Removing NQN_B …")
+        self.ssh_obj.remove_host_from_pool(self.mgmt_nodes[0], pool_id, second_nqn)
+        sleep_n_sec(3)
+        cs_a3, err_a3 = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
+        cs_b3, err_b3 = self._get_connect_str_cli(lvol_id, host_nqn=second_nqn)
+        for label, cs, cerr in [("NQN_A", cs_a3, err_a3), ("NQN_B", cs_b3, err_b3)]:
+            assert cs and not cerr, \
+                f"{label} should still get connect string when pool has no allowed hosts; err={cerr}"
+            s = " ".join(cs) if isinstance(cs, list) else str(cs)
+            assert "dhchap" not in s.lower(), \
+                f"{label} should not have DHCHAP after all hosts removed; got: {s}"
+        self.logger.info("TC-SEC-125: Neither NQN has DHCHAP PASSED")
+
+        # TC-SEC-126: re-add NQN_A → reconnect + FIO
+        self.logger.info("TC-SEC-126: Re-adding NQN_A and running FIO …")
+        self.ssh_obj.add_host_to_pool(self.mgmt_nodes[0], pool_id, host_nqn)
+        sleep_n_sec(3)
+        lvol_device3, _ = self._connect_and_get_device(lvol_name, lvol_id, host_nqn=host_nqn)
+        self.ssh_obj.mount_path(node=self.fio_node, device=lvol_device3, mount_path=mount_point)
+        self.lvol_mount_details[lvol_name]["Mount"] = mount_point
+        log_file3 = f"{self.log_path}/{lvol_name}_final.log"
+        self._run_fio_and_validate(lvol_name, mount_point, log_file3, rw="randrw", runtime=20)
+        self.logger.info("TC-SEC-126: Final FIO PASSED")
+
+        self.logger.info("=== TestLvolSecurityDynamicModification PASSED ===")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Test – Scale: 10 DHCHAP volumes with rapid pool-level host add/remove
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestLvolSecurityScaleAndRapidOps(SecurityTestBase):
+    """
+    Creates 10 DHCHAP volumes in the same pool, rapidly removes and re-adds
+    the host, then verifies all volumes still have DHCHAP connect strings.
+
+    TC-SEC-130  Create 10 lvols in DHCHAP pool (no key collisions)
+    TC-SEC-131  Remove host from pool → no lvol has DHCHAP connect string
+    TC-SEC-132  Re-add host → all 10 lvols have DHCHAP connect strings
+    TC-SEC-133  Connect one lvol and run FIO to confirm
+    """
+
+    VOLUME_COUNT = 10
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.test_name = "lvol_security_scale_rapid_ops_v2"
+
+    def run(self):
+        self.logger.info("=== TestLvolSecurityScaleAndRapidOps START ===")
+        self.fio_node = self.fio_node[0]
+
+        self.ssh_obj.add_storage_pool(
+            self.mgmt_nodes[0], self.pool_name, self.cluster_id, dhchap=True)
+        host_nqn = self._get_client_host_nqn()
+        pool_id = self.sbcli_utils.get_storage_pool_id(self.pool_name)
+        self.ssh_obj.add_host_to_pool(self.mgmt_nodes[0], pool_id, host_nqn)
+
+        # TC-SEC-130: create 10 lvols
+        self.logger.info(f"TC-SEC-130: Creating {self.VOLUME_COUNT} lvols …")
+        volumes = []
+        for i in range(self.VOLUME_COUNT):
+            lvol_name = f"secsc{i}{_rand_suffix()}"
+            out, err = self.ssh_obj.create_sec_lvol(
+                self.mgmt_nodes[0], lvol_name, "1G", self.pool_name)
+            assert not err or "error" not in err.lower(), \
+                f"lvol {lvol_name} creation failed: {err}"
+            sleep_n_sec(1)
+            lvol_id = self.sbcli_utils.get_lvol_id(lvol_name)
+            assert lvol_id, f"Could not find ID for {lvol_name}"
+            volumes.append((lvol_name, lvol_id))
+            self.lvol_mount_details[lvol_name] = {"ID": lvol_id, "Mount": None}
+        self.logger.info(f"TC-SEC-130: {self.VOLUME_COUNT} volumes created PASSED")
+
+        # TC-SEC-131: remove host → connect string returned without DHCHAP
+        # Known behaviour: pool has NO allowed hosts after removal, so connect
+        # string IS returned but without dhchap keys (issue #3).
+        self.logger.info("TC-SEC-131: Removing host from pool …")
+        self.ssh_obj.remove_host_from_pool(self.mgmt_nodes[0], pool_id, host_nqn)
+        sleep_n_sec(3)
+        for lvol_name, lvol_id in volumes:
+            cs, cerr = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
+            assert cs and not cerr, \
+                f"{lvol_name}: should get connect string when pool has no allowed hosts; err={cerr}"
+            s = " ".join(cs) if isinstance(cs, list) else str(cs)
+            assert "dhchap" not in s.lower(), \
+                f"{lvol_name}: should not have DHCHAP after host removal; got: {s}"
+        self.logger.info("TC-SEC-131: All volumes have no DHCHAP PASSED")
+
+        # TC-SEC-132: re-add host → all have DHCHAP
+        self.logger.info("TC-SEC-132: Re-adding host to pool …")
+        self.ssh_obj.add_host_to_pool(self.mgmt_nodes[0], pool_id, host_nqn)
+        sleep_n_sec(3)
+        for lvol_name, lvol_id in volumes:
+            cs, err = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
+            assert cs and not err, \
+                f"{lvol_name}: should have connect string after re-add; err={err}"
+            s = " ".join(cs) if isinstance(cs, list) else str(cs)
+            assert "dhchap" in s.lower(), \
+                f"{lvol_name}: should have DHCHAP after re-add; got: {s}"
+        self.logger.info("TC-SEC-132: All volumes have DHCHAP PASSED")
+
+        # TC-SEC-133: connect one lvol + FIO
+        self.logger.info("TC-SEC-133: Connecting first lvol and running FIO …")
+        first_name, first_id = volumes[0]
+        lvol_device, _ = self._connect_and_get_device(first_name, first_id, host_nqn=host_nqn)
+        mount_point = f"{self.mount_path}/{first_name}"
+        self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type=self._pick_fs_type())
+        self.ssh_obj.mount_path(node=self.fio_node, device=lvol_device, mount_path=mount_point)
+        self.lvol_mount_details[first_name]["Mount"] = mount_point
+        log_file = f"{self.log_path}/{first_name}_out.log"
+        self._run_fio_and_validate(first_name, mount_point, log_file, rw="randrw", runtime=30)
+        self.logger.info("TC-SEC-133: Scale FIO PASSED")
+
+        self.logger.info("=== TestLvolSecurityScaleAndRapidOps PASSED ===")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Test – Resize DHCHAP+crypto lvol: security config preserved
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestLvolSecurityResize(SecurityTestBase):
+    """
+    Creates a DHCHAP+crypto lvol, resizes it, and verifies that DHCHAP
+    configuration is unchanged after the resize operation.
+
+    TC-SEC-140  Create DHCHAP+crypto lvol (5G), connect, FIO
+    TC-SEC-141  Disconnect, resize to 10G
+    TC-SEC-142  Verify DHCHAP keys in connect string post-resize; reconnect, FIO
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.test_name = "lvol_security_resize_v2"
+
+    def run(self):
+        self.logger.info("=== TestLvolSecurityResize START ===")
+        self.fio_node = self.fio_node[0]
+
+        self.ssh_obj.add_storage_pool(
+            self.mgmt_nodes[0], self.pool_name, self.cluster_id, dhchap=True)
+        host_nqn = self._get_client_host_nqn()
+        pool_id = self.sbcli_utils.get_storage_pool_id(self.pool_name)
+        self.ssh_obj.add_host_to_pool(self.mgmt_nodes[0], pool_id, host_nqn)
+
+        lvol_name = f"secrsz{_rand_suffix()}"
+
+        # TC-SEC-140: create DHCHAP+crypto 5G lvol, connect, FIO
+        self.logger.info("TC-SEC-140: Creating DHCHAP+crypto 5G lvol …")
+        out, err = self.ssh_obj.create_sec_lvol(
+            self.mgmt_nodes[0], lvol_name, "5G", self.pool_name,
+            encrypt=True, key1=self.lvol_crypt_keys[0], key2=self.lvol_crypt_keys[1])
+        assert not err or "error" not in err.lower(), f"lvol creation failed: {err}"
+        sleep_n_sec(3)
+        lvol_id = self.sbcli_utils.get_lvol_id(lvol_name)
+        assert lvol_id
+        self.lvol_mount_details[lvol_name] = {"ID": lvol_id, "Mount": None}
+
+        lvol_device, _ = self._connect_and_get_device(lvol_name, lvol_id, host_nqn=host_nqn)
+        mount_point = f"{self.mount_path}/{lvol_name}"
+        self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type=self._pick_fs_type())
+        self.ssh_obj.mount_path(node=self.fio_node, device=lvol_device, mount_path=mount_point)
+        self.lvol_mount_details[lvol_name]["Mount"] = mount_point
+        log_file = f"{self.log_path}/{lvol_name}_pre.log"
+        self._run_fio_and_validate(lvol_name, mount_point, log_file, rw="write", runtime=20)
+        self.logger.info("TC-SEC-140: Pre-resize FIO PASSED")
+
+        # TC-SEC-141: disconnect, resize to 10G
+        self.ssh_obj.unmount_path(self.fio_node, mount_point)
+        sleep_n_sec(2)
+        self._disconnect_lvol(lvol_id)
+        sleep_n_sec(2)
+        self.lvol_mount_details[lvol_name]["Mount"] = None
+
+        self.logger.info("TC-SEC-141: Resizing to 10G …")
+        self.sbcli_utils.resize_lvol(lvol_id, "10G")
+        sleep_n_sec(5)
+        self.logger.info("TC-SEC-141: Resize PASSED")
+
+        # TC-SEC-142: verify DHCHAP keys, reconnect, FIO
+        self.logger.info("TC-SEC-142: Verifying DHCHAP after resize …")
+        post_cs, post_err = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
+        assert post_cs and not post_err, f"Post-resize connect failed: {post_err}"
+        post_str = " ".join(post_cs) if isinstance(post_cs, list) else str(post_cs)
+        assert "dhchap" in post_str.lower(), \
+            f"Expected DHCHAP keys post-resize; got: {post_str}"
+
+        lvol_device2, _ = self._connect_and_get_device(lvol_name, lvol_id, host_nqn=host_nqn)
+        self.ssh_obj.mount_path(node=self.fio_node, device=lvol_device2, mount_path=mount_point)
+        self.lvol_mount_details[lvol_name]["Mount"] = mount_point
+        log_file2 = f"{self.log_path}/{lvol_name}_post.log"
+        self._run_fio_and_validate(lvol_name, mount_point, log_file2, rw="randrw", runtime=20)
+        self.logger.info("TC-SEC-142: Post-resize FIO PASSED")
+
+        self.logger.info("=== TestLvolSecurityResize PASSED ===")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Test – Backup/restore preserves DHCHAP credentials
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestLvolSecurityWithBackup(SecurityTestBase):
+    """
+    Backs up a DHCHAP+crypto lvol and verifies the restored lvol
+    is accessible with pool-level DHCHAP credentials.
+
+    TC-SEC-150  Create DHCHAP+crypto lvol, write data, snapshot + backup
+    TC-SEC-151  Wait for backup completion
+    TC-SEC-152  Restore backup to new lvol name
+    TC-SEC-153  Verify restored lvol has DHCHAP connect string; connect + FIO
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.test_name = "lvol_security_with_backup_v2"
+
+    def run(self):
+        self.logger.info("=== TestLvolSecurityWithBackup START ===")
+        # Check backup feature availability
+        out, err = self.ssh_obj.exec_command(
+            self.mgmt_nodes[0], f"{self.base_cmd} backup list 2>&1 | head -5")
+        if "command not found" in (out or "").lower() or "error" in (err or "").lower():
+            self.logger.info("Backup feature not available – SKIPPED")
+            return
+
+        self.fio_node = self.fio_node[0]
+
+        self.ssh_obj.add_storage_pool(
+            self.mgmt_nodes[0], self.pool_name, self.cluster_id, dhchap=True)
+        host_nqn = self._get_client_host_nqn()
+        pool_id = self.sbcli_utils.get_storage_pool_id(self.pool_name)
+        self.ssh_obj.add_host_to_pool(self.mgmt_nodes[0], pool_id, host_nqn)
+
+        lvol_name = f"secbck{_rand_suffix()}"
+
+        # TC-SEC-150: create lvol, write data, snapshot + backup
+        self.logger.info("TC-SEC-150: Creating DHCHAP+crypto lvol …")
+        out, err = self.ssh_obj.create_sec_lvol(
+            self.mgmt_nodes[0], lvol_name, self.lvol_size, self.pool_name,
+            encrypt=True, key1=self.lvol_crypt_keys[0], key2=self.lvol_crypt_keys[1])
+        assert not err or "error" not in err.lower(), f"lvol creation failed: {err}"
+        sleep_n_sec(3)
+        lvol_id = self.sbcli_utils.get_lvol_id(lvol_name)
+        assert lvol_id
+        self.lvol_mount_details[lvol_name] = {"ID": lvol_id, "Mount": None}
+
+        lvol_device, _ = self._connect_and_get_device(lvol_name, lvol_id, host_nqn=host_nqn)
+        mount_point = f"{self.mount_path}/{lvol_name}"
+        # Use ext4 explicitly: xfs restored volumes share the source UUID
+        # and cannot be connected on the same client as the source (known issue #2).
+        self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type="ext4")
+        self.ssh_obj.mount_path(node=self.fio_node, device=lvol_device, mount_path=mount_point)
+        self.lvol_mount_details[lvol_name]["Mount"] = mount_point
+        log_file = f"{self.log_path}/{lvol_name}_w.log"
+        self._run_fio_and_validate(lvol_name, mount_point, log_file, rw="write", runtime=20)
+
+        self.ssh_obj.unmount_path(self.fio_node, mount_point)
+        sleep_n_sec(2)
+        self._disconnect_lvol(lvol_id)
+        self.lvol_mount_details[lvol_name]["Mount"] = None
+
+        snap_name = f"snap{lvol_name[-6:]}"
+        out, err = self.ssh_obj.exec_command(
+            self.mgmt_nodes[0],
+            f"{self.base_cmd} -d snapshot add {lvol_id} {snap_name} --backup")
+        assert not err or "error" not in err.lower(), f"snapshot+backup failed: {err}"
+        sleep_n_sec(5)
+        self.logger.info("TC-SEC-150: Snapshot + backup triggered PASSED")
+
+        # TC-SEC-151: wait for backup
+        self.logger.info("TC-SEC-151: Waiting for backup completion …")
+        deadline = time.time() + 300
+        backup_id = None
+        while time.time() < deadline:
+            list_out, _ = self.ssh_obj.exec_command(
+                self.mgmt_nodes[0], f"{self.base_cmd} -d backup list")
+            for line in (list_out or "").splitlines():
+                if snap_name in line:
+                    parts = [p.strip() for p in line.split("|") if p.strip()]
+                    for p in parts:
+                        if len(p) == 36 and "-" in p:
+                            backup_id = p
+                    if "done" in line.lower() or "complete" in line.lower():
+                        break
+            if backup_id:
+                break
+            sleep_n_sec(10)
+        assert backup_id, "Could not find backup ID"
+        self.logger.info(f"TC-SEC-151: Backup {backup_id} complete PASSED")
+
+        # TC-SEC-152: restore
+        self.logger.info("TC-SEC-152: Restoring backup …")
+        restored_name = f"secrst{_rand_suffix()}"
+        out, err = self.ssh_obj.exec_command(
+            self.mgmt_nodes[0],
+            f"{self.base_cmd} -d backup restore {backup_id} --lvol {restored_name} --pool {self.pool_name}")
+        assert not err or "error" not in err.lower(), f"restore failed: {err}"
+
+        deadline2 = time.time() + 300
+        while time.time() < deadline2:
+            list_out, _ = self.ssh_obj.exec_command(
+                self.mgmt_nodes[0], f"{self.base_cmd} lvol list")
+            if restored_name in (list_out or ""):
+                break
+            sleep_n_sec(10)
+        else:
+            raise TimeoutError(f"Restored lvol {restored_name} did not appear within 300s")
+
+        restored_id = self.sbcli_utils.get_lvol_id(restored_name)
+        assert restored_id
+        self.lvol_mount_details[restored_name] = {"ID": restored_id, "Mount": None}
+        self.logger.info("TC-SEC-152: Restore PASSED")
+
+        # TC-SEC-153: verify DHCHAP + connect + FIO
+        self.logger.info("TC-SEC-153: Verifying restored lvol DHCHAP …")
+        rest_cs, rest_err = self._get_connect_str_cli(restored_id, host_nqn=host_nqn)
+        assert rest_cs and not rest_err, f"Restored connect failed: {rest_err}"
+        rest_str = " ".join(rest_cs) if isinstance(rest_cs, list) else str(rest_cs)
+        assert "dhchap" in rest_str.lower(), \
+            f"Expected DHCHAP keys for restored lvol; got: {rest_str}"
+
+        rest_device, _ = self._connect_and_get_device(restored_name, restored_id, host_nqn=host_nqn)
+        rest_mount = f"{self.mount_path}/{restored_name}"
+        self.ssh_obj.mount_path(node=self.fio_node, device=rest_device, mount_path=rest_mount)
+        self.lvol_mount_details[restored_name]["Mount"] = rest_mount
+        log_file2 = f"{self.log_path}/{restored_name}_out.log"
+        self._run_fio_and_validate(restored_name, rest_mount, log_file2, rw="randrw", runtime=20)
+        self.logger.info("TC-SEC-153: Restored lvol FIO PASSED")
+
+        self.logger.info("=== TestLvolSecurityWithBackup PASSED ===")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Test – Concurrent multi-client connect with DHCHAP
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestLvolSecurityMultiClientConcurrent(SecurityTestBase):
+    """
+    Tests concurrent connect string requests: registered NQN vs unregistered.
+
+    TC-SEC-160  Create DHCHAP pool, register NQN_A only, create lvol
+    TC-SEC-161  Concurrently request connect strings for NQN_A and NQN_B
+    TC-SEC-162  NQN_A gets DHCHAP keys; NQN_B is rejected (pool has allowed hosts)
+    TC-SEC-163  Connect with NQN_A and run FIO
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.test_name = "lvol_security_multi_client_concurrent_v2"
+
+    def run(self):
+        self.logger.info("=== TestLvolSecurityMultiClientConcurrent START ===")
+        self.fio_node = self.fio_node[0]
+
+        self.ssh_obj.add_storage_pool(
+            self.mgmt_nodes[0], self.pool_name, self.cluster_id, dhchap=True)
+        host_nqn = self._get_client_host_nqn()
+        pool_id = self.sbcli_utils.get_storage_pool_id(self.pool_name)
+        self.ssh_obj.add_host_to_pool(self.mgmt_nodes[0], pool_id, host_nqn)
+
+        wrong_nqn = f"nqn.2024-01.io.simplyblock:test:wrong-{_rand_suffix()}"
+        lvol_name = f"secmc{_rand_suffix()}"
+
+        # TC-SEC-160: create lvol
+        self.logger.info("TC-SEC-160: Creating DHCHAP lvol …")
+        out, err = self.ssh_obj.create_sec_lvol(
+            self.mgmt_nodes[0], lvol_name, self.lvol_size, self.pool_name)
+        assert not err or "error" not in err.lower(), f"lvol creation failed: {err}"
+        sleep_n_sec(3)
+        lvol_id = self.sbcli_utils.get_lvol_id(lvol_name)
+        assert lvol_id
+        self.lvol_mount_details[lvol_name] = {"ID": lvol_id, "Mount": None}
+
+        # TC-SEC-161: concurrent requests
+        self.logger.info("TC-SEC-161: Concurrent connect-string requests …")
+        results = {}
+
+        def _req(nqn, key):
+            try:
+                cs, cerr = self._get_connect_str_cli(lvol_id, host_nqn=nqn)
+                results[key] = (cs, cerr)
+            except Exception as e:
+                results[key] = (None, str(e))
+
+        t_good = threading.Thread(target=_req, args=(host_nqn, "good"))
+        t_bad = threading.Thread(target=_req, args=(wrong_nqn, "bad"))
+        t_good.start()
+        t_bad.start()
+        t_good.join()
+        t_bad.join()
+
+        good_cs, good_err = results.get("good", (None, "no result"))
+        bad_cs, bad_err = results.get("bad", (None, "no result"))
+
+        # TC-SEC-162: registered NQN gets DHCHAP; unregistered does not
+        assert good_cs, f"Registered NQN should get connect string; err={good_err}"
+        good_str = " ".join(good_cs) if isinstance(good_cs, list) else str(good_cs)
+        assert "dhchap" in good_str.lower(), \
+            f"Registered NQN should have DHCHAP keys; got: {good_str}"
+        self.logger.info("TC-SEC-162: Registered NQN has DHCHAP PASSED")
+
+        # Known behaviour: when pool HAS allowed hosts, a wrong/unregistered
+        # NQN is rejected entirely (issue #4).
+        bad_rejected = bool(bad_err) or not bad_cs
+        assert bad_rejected, (
+            f"Unregistered NQN should be rejected when pool has allowed hosts; "
+            f"got: cs={bad_cs}")
+        self.logger.info("TC-SEC-162: Unregistered NQN rejected PASSED")
+
+        # TC-SEC-163: connect + FIO
+        self.logger.info("TC-SEC-163: Connecting and running FIO …")
+        lvol_device, _ = self._connect_and_get_device(lvol_name, lvol_id, host_nqn=host_nqn)
+        mount_point = f"{self.mount_path}/{lvol_name}"
+        self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type=self._pick_fs_type())
+        self.ssh_obj.mount_path(node=self.fio_node, device=lvol_device, mount_path=mount_point)
+        self.lvol_mount_details[lvol_name]["Mount"] = mount_point
+        log_file = f"{self.log_path}/{lvol_name}_out.log"
+        self._run_fio_and_validate(lvol_name, mount_point, log_file, rw="randrw", runtime=30)
+        self.logger.info("TC-SEC-163: FIO PASSED")
+
+        self.logger.info("=== TestLvolSecurityMultiClientConcurrent PASSED ===")

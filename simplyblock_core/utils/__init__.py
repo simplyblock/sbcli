@@ -823,14 +823,19 @@ def _get_cluster_port_config(cluster_id):
 
 
 def get_next_fw_port(cluster_id, mgmt_ip=None):
-    """Get the SNodeAPI/firewall port. One per host IP."""
+    """Get the SNodeAPI/firewall port. One per SPDK storage node.
+
+    In Kubernetes hyper-converged layouts, multiple SPDK pods can land on the
+    same worker host (one per NUMA socket). Each pod runs its own SnodeAPI
+    sidecar, which binds `FW_PORT` in its pod network namespace, so two co-
+    located pods must get DIFFERENT ports or only one sidecar wins the bind
+    and firewall RPCs for the others fail with ECONNREFUSED.
+
+    `mgmt_ip` is kept for signature compatibility but is no longer used for
+    port sharing — allocation is strictly per-node.
+    """
     from simplyblock_core.db_controller import DBController
     db_controller = DBController()
-
-    if mgmt_ip:
-        for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
-            if node.mgmt_ip == mgmt_ip and node.firewall_port > 0:
-                return node.firewall_port
 
     _, _, snode_api_port = _get_cluster_port_config(cluster_id)
     used_ports = set()

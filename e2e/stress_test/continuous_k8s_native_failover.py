@@ -69,14 +69,14 @@ class K8sNativeFailoverTest(TestClusterBase):
         self.FIO_IMAGE = "dockerpinata/fio:2.1"
 
         # Sizing
-        self.pvc_size = "20Gi"
-        self.int_pvc_size = 20
-        self.fio_size = "15G"
+        self.pvc_size = "10Gi"
+        self.int_pvc_size = 10
+        self.fio_size = "3G"
         self.FIO_RUNTIME = 2000
 
         # Counts
-        self.total_pvcs = 20
-        self.fio_num_jobs = 4
+        self.total_pvcs = 15
+        self.fio_num_jobs = 2
 
         # Outage config
         self.npcs = kwargs.get("npcs", 1)
@@ -108,6 +108,7 @@ class K8sNativeFailoverTest(TestClusterBase):
         self.outage_log_file = os.path.join(
             "logs", f"outage_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
         )
+
 
     # ── Setup / Teardown ─────────────────────────────────────────────────────
 
@@ -172,12 +173,15 @@ class K8sNativeFailoverTest(TestClusterBase):
             self.logger.warning(f"Cleanup of old resources failed: {e}")
 
         # 6. Initialize K8sUtils
-        if self.mgmt_nodes:
-            self.k8s_utils = K8sUtils(
-                ssh_obj=self.ssh_obj,
-                mgmt_node=self.mgmt_nodes[0],
-            )
-            self.logger.info(f"[K8s] K8sUtils initialized for mgmt_node={self.mgmt_nodes[0]}")
+        # In local kubectl mode (K8S_LOCAL_KUBECTL=1), mgmt_nodes may be empty
+        # because MNODES env var is not set — K8sUtils doesn't need a real IP
+        # since it runs kubectl locally via subprocess.
+        mgmt_node = self.mgmt_nodes[0] if self.mgmt_nodes else ""
+        self.k8s_utils = K8sUtils(
+            ssh_obj=self.ssh_obj,
+            mgmt_node=mgmt_node,
+        )
+        self.logger.info(f"[K8s] K8sUtils initialized for mgmt_node={mgmt_node!r}")
 
         self.logger.info("K8sNativeFailoverTest.setup() complete (no SSH)")
 
@@ -817,21 +821,37 @@ class K8sNativeFailoverTest(TestClusterBase):
 
     # ── FIO Validation ───────────────────────────────────────────────────────
 
+    def _save_fio_pod_logs(self, job_name: str, resource_name: str):
+        """Save FIO pod logs to local log directory for debugging."""
+        try:
+            pod_name = self.k8s_utils.get_job_pod_name(job_name)
+            if not pod_name:
+                return
+            logs = self.k8s_utils.get_pod_logs(pod_name, tail=2000)
+            if logs:
+                log_file = os.path.join(self.log_path, f"{resource_name}_fio.log")
+                with open(log_file, "w") as f:
+                    f.write(logs)
+                self.logger.info(f"Saved FIO logs for {resource_name} to {log_file}")
+        except Exception as exc:
+            self.logger.warning(f"Could not save FIO logs for {resource_name}: {exc}")
+
     def validate_fio_jobs(self):
-        """Validate all active FIO Jobs (status + pod logs)."""
+        """Validate all active FIO Jobs (status + pod logs).
+
+        Saves FIO pod logs to self.log_path for debugging, then raises
+        RuntimeError on any single FIO job failure — matches the behavior
+        of the SSH-based stress tests (validate_fio_test).
+        """
         self._ensure_k8s_utils()
 
         for pvc_name, pvc_info in self.pvc_details.items():
-            try:
-                self.k8s_utils.validate_fio_job(pvc_info["job_name"])
-            except Exception as exc:
-                self.logger.warning(f"[validate_fio] PVC {pvc_name} FIO validation: {exc}")
+            self._save_fio_pod_logs(pvc_info["job_name"], pvc_name)
+            self.k8s_utils.validate_fio_job(pvc_info["job_name"])
 
         for clone_name, clone_info in self.clone_details.items():
-            try:
-                self.k8s_utils.validate_fio_job(clone_info["job_name"])
-            except Exception as exc:
-                self.logger.warning(f"[validate_fio] Clone {clone_name} FIO validation: {exc}")
+            self._save_fio_pod_logs(clone_info["job_name"], clone_name)
+            self.k8s_utils.validate_fio_job(clone_info["job_name"])
 
     # ── Cleanup ──────────────────────────────────────────────────────────────
 

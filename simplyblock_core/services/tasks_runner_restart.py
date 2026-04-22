@@ -6,6 +6,7 @@ from simplyblock_core.controllers import device_controller, health_controller, t
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.snode_client import SNodeClient, SNodeClientException
 
 
 logger = utils.get_logger(__name__)
@@ -40,6 +41,103 @@ def _validate_no_task_node_restart(cluster_id, node_id):
                 logger.info(f"Task found, skip adding new task: {task.get_id()}")
                 return False
     return True
+
+
+def _ensure_spdk_killed(node):
+    """Best-effort kill of the SPDK process on the node before we mark it
+    OFFLINE. Without this, flipping the status to OFFLINE while SPDK is still
+    running produces a DB-vs-data-plane split: the DB says the node is not
+    serving, but SPDK is actually still serving IO — and a subsequent
+    restart_storage_node would spin up a second SPDK on top.
+
+    Returns True if we are confident the data plane is not serving (SPDK
+    killed successfully, or the node API is unreachable which implies the
+    process is also unreachable). Returns False only when the node API is
+    reachable but spdk_process_kill raised — in that narrow case we don't
+    know for sure whether SPDK is gone, so the caller should leave the DB
+    state as-is and let a later attempt retry.
+    """
+    if not health_controller._check_node_api(node.mgmt_ip):
+        # Node API is down; the SPDK process on the same host is not reachable
+        # to serve IO either. Safe to proceed.
+        logger.info(
+            f"Node {node.get_id()} API unreachable at {node.mgmt_ip}:5000; "
+            f"assuming SPDK is not serving"
+        )
+        return True
+
+    # Short-circuit when the SPDK container is already gone (common after a
+    # `docker kill spdk_*`: by the time this task body runs, SNodeAPI reports
+    # the container in `exited` state).  Skipping the kill RPC avoids a ~30 s
+    # retry-then-timeout cycle on an already-dead container.
+    try:
+        client = SNodeClient(node.api_endpoint, timeout=5, retry=2)
+        is_up, _ = client.spdk_process_is_up(node.rpc_port, node.cluster_id)
+        if not is_up:
+            logger.info(
+                f"SPDK on {node.get_id()} already not running; skipping kill"
+            )
+            return True
+    except Exception as exc:
+        # If the probe itself fails, fall through and try the kill — it's
+        # the conservative path (better to over-kill than leave SPDK serving).
+        logger.warning(
+            f"spdk_process_is_up probe failed on {node.get_id()}: {exc}; "
+            f"proceeding with kill"
+        )
+
+    try:
+        logger.info(f"Killing SPDK on node {node.get_id()} (rpc_port={node.rpc_port})")
+        SNodeClient(node.api_endpoint, timeout=10, retry=5).spdk_process_kill(
+            node.rpc_port, node.cluster_id)
+        return True
+    except SNodeClientException as exc:
+        logger.error(
+            f"Failed to kill SPDK on {node.get_id()}: {exc}; "
+            f"leaving DB state unchanged to avoid split-brain"
+        )
+        return False
+    except Exception as exc:
+        # Other transport errors — treat as unreachable (process also unreachable).
+        logger.warning(
+            f"spdk_process_kill transport error on {node.get_id()}: {exc}; "
+            f"assuming SPDK is not serving"
+        )
+        return True
+
+
+def _reset_if_transient(node_id):
+    """Roll the node back to STATUS_OFFLINE if a partial shutdown/restart
+    left it stuck in an intermediate CP state. Without this, a failed
+    attempt leaves the node pinned in STATUS_IN_SHUTDOWN or STATUS_RESTARTING,
+    which (a) blocks future restart attempts via the mutual-exclusion guard,
+    and (b) causes peers' cluster_map health checks to fail cluster-wide.
+
+    Before flipping to OFFLINE we confirm the SPDK process is not running
+    on the node's host — otherwise we'd risk a split-brain where the DB
+    says OFFLINE but SPDK is still serving IO.
+    """
+    try:
+        node = db.get_storage_node_by_id(node_id)
+    except KeyError:
+        return
+    if node.status not in (StorageNode.STATUS_IN_SHUTDOWN, StorageNode.STATUS_RESTARTING):
+        return
+    logger.warning(
+        f"Node {node_id} left in {node.status} after failed restart attempt; "
+        f"verifying SPDK is not serving before resetting to OFFLINE"
+    )
+    if not _ensure_spdk_killed(node):
+        logger.error(
+            f"Could not confirm SPDK is down on {node_id}; refusing to flip to "
+            f"OFFLINE to avoid split-brain. Next retry will attempt again."
+        )
+        return
+    try:
+        storage_node_ops.set_node_status(node_id, StorageNode.STATUS_OFFLINE)
+        logger.info(f"Node {node_id} reset to OFFLINE (SPDK confirmed down)")
+    except Exception as exc:
+        logger.error(f"Failed to reset node {node_id} to OFFLINE: {exc}")
 
 
 def task_runner(task):
@@ -193,39 +291,65 @@ def task_runner_node(task):
         return False
 
 
+    shutdown_succeeded = False
     try:
-        # shutting down node
-        logger.info(f"Shutdown node {node.get_id()}")
-        ret = storage_node_ops.shutdown_storage_node(node.get_id(), force=True)
-        if ret:
-            logger.info("Node shutdown succeeded")
+        try:
+            # shutting down node
+            logger.info(f"Shutdown node {node.get_id()}")
+            ret = storage_node_ops.shutdown_storage_node(node.get_id(), force=True)
+            if ret:
+                logger.info("Node shutdown succeeded")
+                shutdown_succeeded = True
+            else:
+                logger.error("Node shutdown returned False; will retry after reset")
+            time.sleep(3)
+        except Exception as e:
+            logger.error(e)
+            return False
+
+        # Skip the restart step if shutdown did not succeed — restarting on top
+        # of a half-shutdown node produced the in_restart hang we're guarding
+        # against. Let the outer retry reattempt the whole cycle.
+        if not shutdown_succeeded:
+            task.retry += 1
+            task.write_to_db(db.kv_store)
+            return False
+
+        try:
+            # resetting node
+            logger.info(f"Restart node {node.get_id()}")
+            ret = storage_node_ops.restart_storage_node(node.get_id(), force=True)
+            if ret:
+                logger.info("Node restart succeeded")
+        except Exception as e:
+            logger.error(e)
+            return False
+
         time.sleep(3)
-    except Exception as e:
-        logger.error(e)
-        return False
+        node = db.get_storage_node_by_id(task.node_id)
+        if _get_node_unavailable_devices_count(node.get_id()) == 0 and node.status == StorageNode.STATUS_ONLINE:
+            logger.info(f"Node is online: {node.get_id()}")
+            task.function_result = "done"
+            task.status = JobSchedule.STATUS_DONE
+            task.write_to_db(db.kv_store)
+            return True
 
-    try:
-        # resetting node
-        logger.info(f"Restart node {node.get_id()}")
-        ret = storage_node_ops.restart_storage_node(node.get_id(), force=True)
-        if ret:
-            logger.info("Node restart succeeded")
-    except Exception as e:
-        logger.error(e)
-        return False
-
-    time.sleep(3)
-    node = db.get_storage_node_by_id(task.node_id)
-    if _get_node_unavailable_devices_count(node.get_id()) == 0 and node.status == StorageNode.STATUS_ONLINE:
-        logger.info(f"Node is online: {node.get_id()}")
-        task.function_result = "done"
-        task.status = JobSchedule.STATUS_DONE
+        task.retry += 1
         task.write_to_db(db.kv_store)
-        return True
-
-    task.retry += 1
-    task.write_to_db(db.kv_store)
-    return False
+        return False
+    finally:
+        # On any non-success exit from the shutdown/restart sequence, make sure
+        # we don't leave the node pinned in STATUS_IN_SHUTDOWN or
+        # STATUS_RESTARTING — both are terminal traps if the task doesn't
+        # reach STATUS_ONLINE.
+        try:
+            post_node = db.get_storage_node_by_id(task.node_id)
+            if post_node.status != StorageNode.STATUS_ONLINE:
+                _reset_if_transient(task.node_id)
+        except KeyError:
+            pass
+        except Exception as exc:
+            logger.error(f"Post-task status reset check failed: {exc}")
 
 
 logger.info("Starting Tasks runner...")
@@ -237,8 +361,11 @@ while True:
         for cl in clusters:
             tasks = db.get_job_tasks(cl.get_id(), reverse=False)
             for task in tasks:
-                delay_seconds = constants.TASK_EXEC_INTERVAL_SEC
                 if task.function_name in [JobSchedule.FN_DEV_RESTART, JobSchedule.FN_NODE_RESTART]:
+                    # Restart tasks start at a short cadence and cap the
+                    # exponential backoff at RESTART_TASK_EXEC_INTERVAL_MAX_SEC
+                    # so recovery time is bounded even after several retries.
+                    delay_seconds = constants.RESTART_TASK_EXEC_INTERVAL_SEC
                     while task.status != JobSchedule.STATUS_DONE:
                         # get new task object because it could be changed from cancel task
                         task = db.get_task_by_id(task.uuid)
@@ -247,7 +374,10 @@ while True:
                             if task.status == JobSchedule.STATUS_DONE:
                                 break
                         else:
-                            delay_seconds *= 2
+                            delay_seconds = min(
+                                delay_seconds * 2,
+                                constants.RESTART_TASK_EXEC_INTERVAL_MAX_SEC,
+                            )
                         time.sleep(delay_seconds)
 
     time.sleep(constants.TASK_EXEC_INTERVAL_SEC)

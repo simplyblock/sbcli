@@ -32,6 +32,8 @@ from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.stats import ClusterStatObject
 
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -800,7 +802,7 @@ def _mock_get_secondary_nodes(current_node, exclude_ids=None):
         if node.get_id() == current_node.get_id() or node.get_id() in exclude_ids:
             continue
         if node.status == StorageNode.STATUS_ONLINE and node.is_secondary_node:
-            if not node.lvstore_stack_secondary_1 or node.lvstore_stack_secondary_1 == current_node.get_id():
+            if not node.lvstore_stack_secondary or node.lvstore_stack_secondary == current_node.get_id():
                 nodes.append(node.get_id())
     return nodes
 
@@ -826,8 +828,8 @@ class TestClusterActivation:
         """
         Activate a cluster with max_fault_tolerance=2.
         Verify:
-          - Each primary gets secondary_node_id AND secondary_node_id_2 assigned
-          - Secondary nodes get lvstore_stack_secondary_1 / _2 back-references
+          - Each primary gets secondary_node_id AND tertiary_node_id assigned
+          - Secondary nodes get lvstore_stack_secondary / _2 back-references
           - Cluster status becomes ACTIVE
           - lvstore_status is "ready" on all nodes
         """
@@ -859,9 +861,9 @@ class TestClusterActivation:
             for primary in primaries:
                 assert primary.secondary_node_id, \
                     f"Primary {primary.uuid} missing secondary_node_id"
-                assert primary.secondary_node_id_2, \
-                    f"Primary {primary.uuid} missing secondary_node_id_2"
-                assert primary.secondary_node_id != primary.secondary_node_id_2, \
+                assert primary.tertiary_node_id, \
+                    f"Primary {primary.uuid} missing tertiary_node_id"
+                assert primary.secondary_node_id != primary.tertiary_node_id, \
                     f"Primary {primary.uuid} has same node for both secondaries"
 
                 # Verify lvstore was created
@@ -874,15 +876,15 @@ class TestClusterActivation:
             sec_1_refs = set()
             sec_2_refs = set()
             for sec in secondaries:
-                if sec.lvstore_stack_secondary_1:
+                if sec.lvstore_stack_secondary:
                     sec_1_refs.add(sec.uuid)
-                if sec.lvstore_stack_secondary_2:
+                if sec.lvstore_stack_tertiary:
                     sec_2_refs.add(sec.uuid)
 
             # Every primary assigned a secondary_node_id, so at least some
-            # secondaries must have lvstore_stack_secondary_1 set
-            assert len(sec_1_refs) > 0, "No secondaries have lvstore_stack_secondary_1"
-            assert len(sec_2_refs) > 0, "No secondaries have lvstore_stack_secondary_2"
+            # secondaries must have lvstore_stack_secondary set
+            assert len(sec_1_refs) > 0, "No secondaries have lvstore_stack_secondary"
+            assert len(sec_2_refs) > 0, "No secondaries have lvstore_stack_tertiary"
 
             # Verify the mock RPC servers received the expected calls
             for i in range(_NUM_PRIMARIES):
@@ -930,9 +932,9 @@ class TestClusterActivation:
 
 class TestNodeRestart:
 
-    def test_recreate_lvstore_on_sec_both_secondaries(self, cluster_env):
+    def test_recreate_lvstore_on_non_leader_both_secondaries(self, cluster_env):
         """
-        After activation, call recreate_lvstore_on_sec for each secondary.
+        After activation, call recreate_lvstore_on_non_leader for each secondary.
         Verify that each secondary gets its bdev stack recreated and connects
         to the correct primary's hublvol with the correct min_cntlid.
         """
@@ -961,24 +963,30 @@ class TestNodeRestart:
 
             # Track which subsystem_create calls happen (for min_cntlid verification)
 
-            # Pick a secondary that has lvstore_stack_secondary_1 set
+            # Pick a secondary that has lvstore_stack_secondary set
             target_sec = None
             for sec in secondaries:
-                if sec.lvstore_stack_secondary_1:
+                if sec.lvstore_stack_secondary:
                     target_sec = sec
                     break
 
             if target_sec is None:
-                pytest.skip("No secondary with lvstore_stack_secondary_1")
+                pytest.skip("No secondary with lvstore_stack_secondary")
+
+            # Resolve the primary node for this secondary
+            primary_id = target_sec.lvstore_stack_secondary
+            primary_node = db.get_storage_node_by_id(primary_id)
+            assert primary_node is not None, f"Primary node {primary_id} not found"
 
             # Reset the secondary's mock server to simulate restart
             srv_idx = _find_server_for_node(env, target_sec)
             assert srv_idx is not None
             env['servers'][srv_idx].reset_state()
 
-            # Call recreate_lvstore_on_sec
-            ret = storage_node_ops.recreate_lvstore_on_sec(target_sec)
-            assert ret, "recreate_lvstore_on_sec should return True"
+            # Call recreate_lvstore_on_non_leader (primary is online, so leader=primary)
+            ret = storage_node_ops.recreate_lvstore_on_non_leader(
+                target_sec, leader_node=primary_node, primary_node=primary_node)
+            assert ret, "recreate_lvstore_on_non_leader should return True"
 
             # Verify the secondary's mock server now has bdevs (from _create_bdev_stack)
             srv = env['servers'][srv_idx]
@@ -995,7 +1003,7 @@ class TestNodeRestart:
 
     def test_recreate_lvstore_secondary_2_min_cntlid(self, cluster_env):
         """
-        Verify that recreate_lvstore_on_sec uses min_cntlid=2000 for secondary_2
+        Verify that recreate_lvstore_on_non_leader uses min_cntlid=2000 for secondary_2
         and min_cntlid=1000 for secondary_1.
         """
         from simplyblock_core import cluster_ops
@@ -1016,29 +1024,29 @@ class TestNodeRestart:
             all_nodes = db.get_storage_nodes_by_cluster_id(cl.uuid)
             primaries = [n for n in all_nodes if not n.is_secondary_node]
 
-            # Find a primary with secondary_node_id_2 set
+            # Find a primary with tertiary_node_id set
             target_primary = None
             for p_node in primaries:
-                if p_node.secondary_node_id_2:
+                if p_node.tertiary_node_id:
                     target_primary = p_node
                     break
 
             if target_primary is None:
-                pytest.skip("No primary with secondary_node_id_2")
+                pytest.skip("No primary with tertiary_node_id")
 
             # Verify min_cntlid logic
             sec_1 = db.get_storage_node_by_id(target_primary.secondary_node_id)
-            sec_2 = db.get_storage_node_by_id(target_primary.secondary_node_id_2)
+            sec_2 = db.get_storage_node_by_id(target_primary.tertiary_node_id)
 
             # For secondary_1
-            if target_primary.secondary_node_id_2 == sec_1.get_id():
+            if target_primary.tertiary_node_id == sec_1.get_id():
                 cntlid_1 = 2000
             else:
                 cntlid_1 = 1000
             assert cntlid_1 == 1000, "Secondary 1 should get min_cntlid=1000"
 
             # For secondary_2
-            if target_primary.secondary_node_id_2 == sec_2.get_id():
+            if target_primary.tertiary_node_id == sec_2.get_id():
                 cntlid_2 = 2000
             else:
                 cntlid_2 = 1000
@@ -1091,7 +1099,7 @@ class TestHealthCheck:
 
         target_primary = None
         for p in primaries:
-            if p.secondary_node_id and p.secondary_node_id_2:
+            if p.secondary_node_id and p.tertiary_node_id:
                 target_primary = p
                 break
 
@@ -1101,7 +1109,7 @@ class TestHealthCheck:
         # Seed the mock RPC servers with the bdevs/subsystems that health check expects
         _seed_primary_for_health_check(env, target_primary, db)
         _seed_secondary_for_health_check(env, target_primary, target_primary.secondary_node_id, db)
-        _seed_secondary_for_health_check(env, target_primary, target_primary.secondary_node_id_2, db)
+        _seed_secondary_for_health_check(env, target_primary, target_primary.tertiary_node_id, db)
 
         # Replicate the secondary-checking logic from check_node (lines 213-241)
         # This is the core logic we want to verify works for dual fault tolerance
@@ -1110,8 +1118,8 @@ class TestHealthCheck:
         sec_ids_to_check = []
         if snode.secondary_node_id:
             sec_ids_to_check.append(snode.secondary_node_id)
-        if snode.secondary_node_id_2:
-            sec_ids_to_check.append(snode.secondary_node_id_2)
+        if snode.tertiary_node_id:
+            sec_ids_to_check.append(snode.tertiary_node_id)
 
         assert len(sec_ids_to_check) == 2, \
             f"Expected 2 secondaries to check, got {len(sec_ids_to_check)}"
@@ -1145,8 +1153,8 @@ class TestHealthCheck:
             checked_node_ids = [c['node_id'] for c in sec_hublvol_calls]
             assert target_primary.secondary_node_id in checked_node_ids, \
                 f"Secondary 1 ({target_primary.secondary_node_id}) not checked"
-            assert target_primary.secondary_node_id_2 in checked_node_ids, \
-                f"Secondary 2 ({target_primary.secondary_node_id_2}) not checked"
+            assert target_primary.tertiary_node_id in checked_node_ids, \
+                f"Secondary 2 ({target_primary.tertiary_node_id}) not checked"
 
             # Verify primary_node_id was passed correctly
             for call in sec_hublvol_calls:
@@ -1160,7 +1168,7 @@ class TestHealthCheck:
     def test_health_check_port_checks_both_secondaries(self, cluster_env):
         """
         Verify health check port-checking logic covers both secondary
-        back-references (lvstore_stack_secondary_1 and _2).
+        back-references (lvstore_stack_secondary and _2).
         """
         from simplyblock_core import cluster_ops
         from simplyblock_core.db_controller import DBController
@@ -1184,7 +1192,7 @@ class TestHealthCheck:
 
         # Replicate the port-checking logic from check_node (lines 247-264)
         # Find a secondary node that acts as secondary for TWO primaries
-        # (has both lvstore_stack_secondary_1 and _2 set), or verify
+        # (has both lvstore_stack_secondary and _2 set), or verify
         # that secondaries with back-references get port-checked.
         all_nodes = db.get_storage_nodes_by_cluster_id(cl.uuid)
 
@@ -1196,7 +1204,7 @@ class TestHealthCheck:
 
             # Replicate the port collection logic from check_node
             ports = [primary.lvol_subsys_port]
-            for sec_stack_ref in [primary.lvstore_stack_secondary_1, primary.lvstore_stack_secondary_2]:
+            for sec_stack_ref in [primary.lvstore_stack_secondary, primary.lvstore_stack_tertiary]:
                 if sec_stack_ref:
                     try:
                         sec_ref_node = db.get_storage_node_by_id(sec_stack_ref)
@@ -1210,7 +1218,7 @@ class TestHealthCheck:
 
         # Also verify secondary nodes have back-references populated
         sec_with_refs = [n for n in all_nodes
-                         if n.lvstore_stack_secondary_1 or n.lvstore_stack_secondary_2]
+                         if n.lvstore_stack_secondary or n.lvstore_stack_tertiary]
         assert len(sec_with_refs) > 0, "No secondaries have back-references"
 
 

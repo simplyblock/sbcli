@@ -1,5 +1,6 @@
 # coding=utf-8
 import json
+import logging
 import os.path
 
 import fdb
@@ -21,6 +22,8 @@ from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.stats import DeviceStatObject, NodeStatObject, ClusterStatObject, LVolStatObject, \
     PoolStatObject, CachedLVolStatObject
 from simplyblock_core.models.storage_node import StorageNode, NodeLVolDelLock
+
+logger = logging.getLogger(__name__)
 
 
 class Singleton(type):
@@ -314,7 +317,7 @@ class DBController(metaclass=Singleton):
         ret = StorageNode().read_from_db(self.kv_store)
         nodes = []
         for node in ret:
-            if (node.secondary_node_id == node_id or node.secondary_node_id_2 == node_id) and node.lvstore:
+            if (node.secondary_node_id == node_id or node.tertiary_node_id == node_id) and node.lvstore:
                 nodes.append(node)
         return sorted(nodes, key=lambda x: x.create_dt)
 
@@ -408,6 +411,98 @@ class DBController(metaclass=Singleton):
         ordered_snapshot_ids = sorted(set(snapshot_ids))
         transactional = fdb.transactional(DBController._release_backup_chain_locks_tx)
         transactional(self, self.kv_store, ordered_snapshot_ids)
+
+    # ---- Pre-Restart Guard (Single FDB Transaction) ----
+
+    def _try_set_node_restarting_tx(self, tr, cluster_id, node_id):
+        """Pre-restart check as a single FDB transaction.
+
+        Opens transaction, queries status of all nodes in the cluster.
+        If any node is in restart or shutdown, returns False.
+        Otherwise sets this node to in_restart and commits.
+
+        Returns (True, None) on success, or (False, reason) if blocked.
+        """
+        all_nodes = StorageNode().read_from_db(tr)
+        for n in all_nodes:
+            if n.cluster_id != cluster_id:
+                continue
+            if n.get_id() == node_id:
+                continue
+            if n.status in [StorageNode.STATUS_RESTARTING, StorageNode.STATUS_IN_SHUTDOWN]:
+                return False, f"Node {n.get_id()} is {n.status}"
+
+        # Set this node to in_restart atomically within the same transaction
+        target = None
+        for n in all_nodes:
+            if n.get_id() == node_id:
+                target = n
+                break
+        if target:
+            target.status = StorageNode.STATUS_RESTARTING
+            prefix = target.get_db_id()
+            data = json.dumps(target.get_clean_dict())
+            tr[prefix.encode()] = data.encode()
+
+        return True, None
+
+    def try_set_node_restarting(self, cluster_id, node_id):
+        """Pre-restart check: single FDB transaction.
+
+        Opens FDB transaction, queries status of all nodes.
+        If any node is in restart or shutdown, returns False.
+        Sets node to in_restart and commits transaction.
+
+        On successful acquisition the status-change event and peer
+        notification are emitted AFTER the commit. The FDB tx itself
+        writes directly via ``tr[...] = ...`` and so bypasses
+        ``set_node_status``; without this post-commit emission every
+        offline→in_restart transition via the guard would be invisible
+        in the cluster event log and to peers, leaving DeviceMonitor
+        and HealthCheck to observe the new state with no event trail.
+
+        Returns (True, None) on success, or (False, reason) if blocked.
+        """
+        if not self.kv_store:
+            return False, "No DB connection"
+
+        # Snapshot old status before the tx so we can emit an accurate
+        # change event after it commits. Best-effort: if the read fails,
+        # we still emit with ``old_status="unknown"`` rather than skip
+        # the event.
+        old_status = None
+        try:
+            pre = self.get_storage_node_by_id(node_id)
+            if pre is not None:
+                old_status = pre.status
+        except Exception:
+            pass
+
+        transactional = fdb.transactional(DBController._try_set_node_restarting_tx)
+        acquired, reason = transactional(self, self.kv_store, cluster_id, node_id)
+
+        if acquired:
+            # Emit the status-change event and peer notification AFTER commit.
+            # These side-effects must live outside the FDB transaction because
+            # they don't compose with FDB retry semantics (a retried tx would
+            # re-emit). Delayed imports avoid any dependency cycle between
+            # db_controller and the controllers package.
+            try:
+                from simplyblock_core.controllers import storage_events
+                from simplyblock_core import distr_controller
+                snode = self.get_storage_node_by_id(node_id)
+                if snode is not None and old_status != snode.status:
+                    storage_events.snode_status_change(
+                        snode, snode.status, old_status or "unknown",
+                        caused_by="restart_guard",
+                    )
+                    distr_controller.send_node_status_event(snode, snode.status)
+            except Exception as e:
+                logger.warning(
+                    "try_set_node_restarting committed but event emission "
+                    "failed for %s: %s", node_id, e,
+                )
+        return acquired, reason
 
     # ---- S3 Backup ----
 

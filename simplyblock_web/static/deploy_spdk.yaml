@@ -13,6 +13,7 @@ spec:
         app: spdk-app
     spec:
       hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
       volumes:
         - name: socket-dir
           emptyDir:

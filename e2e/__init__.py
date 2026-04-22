@@ -65,6 +65,7 @@ from stress_test.continuous_failover_ha_multi_client_quick_outage import (
     RandomRapidFailoverNoGapV2NoMigration,
 )
 from stress_test.continuous_parallel_lvol_snapshot_clone import TestParallelLvolSnapshotCloneAPI
+from stress_test.continuous_lvol_dirfill_stress import TestLvolDirFillStress
 from stress_test.continuous_failover_ha_namespace import RandomMultiClientFailoverNamespaceTest
 from stress_test.continuous_single_node_outage import RandomMultiClientSingleNodeTest
 from stress_test.continuous_failover_ha_security import (
@@ -80,6 +81,17 @@ from e2e_tests.security.test_lvol_security import (
     TestLvolSecurityNegativeHostOps,
     TestLvolSecuritySnapshotClone,
     TestLvolSecurityRDMAv2,
+    TestLvolSecurityStorageNodeOutage,
+    TestLvolSecurityMgmtNodeReboot,
+    TestLvolSecurityHAFailover,
+    TestLvolSecurityNetworkInterrupt,
+    TestLvolSecurityNegativeCreation,
+    TestLvolSecurityNegativeConnect,
+    TestLvolSecurityDynamicModification,
+    TestLvolSecurityScaleAndRapidOps,
+    TestLvolSecurityResize,
+    TestLvolSecurityWithBackup,
+    TestLvolSecurityMultiClientConcurrent,
 )
 
 from e2e_tests.upgrade_tests.major_upgrade import TestMajorUpgrade, TestMajorUpgradeSingleNode
@@ -167,6 +179,19 @@ ALL_TESTS = [
     TestLvolSecurityNegativeHostOps,
     TestLvolSecuritySnapshotClone,
     TestLvolSecurityRDMAv2,
+    # Security outage tests
+    TestLvolSecurityStorageNodeOutage,
+    TestLvolSecurityMgmtNodeReboot,
+    TestLvolSecurityHAFailover,
+    TestLvolSecurityNetworkInterrupt,
+    # Security negative / advanced E2E tests
+    TestLvolSecurityNegativeCreation,
+    TestLvolSecurityNegativeConnect,
+    TestLvolSecurityDynamicModification,
+    TestLvolSecurityScaleAndRapidOps,
+    TestLvolSecurityResize,
+    TestLvolSecurityWithBackup,
+    TestLvolSecurityMultiClientConcurrent,
     # Security stress tests
     RandomSecurityFailoverTest,
     RandomAllSecurityFailoverTest,
@@ -281,6 +306,19 @@ def get_security_tests():
         TestLvolSecurityNegativeHostOps,
         TestLvolSecuritySnapshotClone,
         TestLvolSecurityRDMAv2,
+        # Security negative / advanced E2E tests
+        TestLvolSecurityNegativeCreation,
+        TestLvolSecurityNegativeConnect,
+        TestLvolSecurityDynamicModification,
+        TestLvolSecurityScaleAndRapidOps,
+        TestLvolSecurityResize,
+        TestLvolSecurityWithBackup,
+        TestLvolSecurityMultiClientConcurrent,
+        # Security outage tests — run last (involves node shutdown/restart)
+        TestLvolSecurityStorageNodeOutage,
+        TestLvolSecurityMgmtNodeReboot,
+        TestLvolSecurityHAFailover,
+        TestLvolSecurityNetworkInterrupt,
     ]
 
 
@@ -306,6 +344,7 @@ def get_stress_tests():
         RandomRapidFailoverNoGapV2WithMigration,
         RandomRapidFailoverNoGapV2NoMigration,
         TestParallelLvolSnapshotCloneAPI,
+        TestLvolDirFillStress,
         RandomMultiClientFailoverNamespaceTest,
         RandomMultiClientSingleNodeTest,
         K8sNativeFailoverTest,

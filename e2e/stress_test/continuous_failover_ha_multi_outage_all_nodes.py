@@ -1,5 +1,6 @@
 import random
 import threading
+import time
 from datetime import datetime
 
 from stress_test.continuous_failover_ha_multi_outage import RandomMultiClientMultiFailoverTest
@@ -24,10 +25,32 @@ class RandomMultiClientMultiFailoverAllNodesTest(RandomMultiClientMultiFailoverT
         secondary).  No primary/secondary exclusion constraint is applied
         because max_fault_tolerance > 1 guarantees the cluster can survive it.
 
+        When multipath is enabled (all nodes have 2+ data NICs), there is a 50%
+        chance that one data NIC will be disabled cluster-wide before per-node
+        outages are triggered. In that case only container_stop and
+        graceful_shutdown are used (no additional network outages).
+
         Two-phase approach:
           Phase 1: collect node info + pre-dump all nodes (sequential)
           Phase 2: trigger all outages simultaneously (parallel threads)
         """
+        # ── Multipath: optionally disable one data NIC on ALL nodes ──────
+        use_multipath_outage = False
+        if self._is_multipath_enabled() and random.random() < 0.5:
+            self.logger.info("Multipath detected and selected — disabling one data NIC on all nodes")
+            self.multipath_nic_disabled = True
+            nic_plans = self._disconnect_single_data_nic_all_nodes()
+            self.log_outage_event(
+                "ALL_NODES", "multipath_single_nic_down",
+                f"Disabled 1 data NIC on {len(nic_plans)} nodes (until recovery)"
+            )
+            self.logger.info("Waiting 30s for multipath failover to settle...")
+            time.sleep(30)
+            use_multipath_outage = True
+        else:
+            self.multipath_nic_disabled = False
+            self.log_outage_event("ALL_NODES", "multipath_nic_outage", "SKIPPED (not enabled or not selected)")
+
         all_nodes = list(self.sn_nodes_with_sec)
         self.current_outage_nodes = []
 
@@ -41,20 +64,27 @@ class RandomMultiClientMultiFailoverAllNodesTest(RandomMultiClientMultiFailoverT
         self.logger.info(f"Selected outage nodes (all-nodes mode): {outage_nodes}")
 
         # Collect diagnostics for ALL nodes before any outage is triggered
-        self.collect_outage_diagnostics(f"pre_outage_nodes_{'_'.join(outage_nodes[:3])}")
+        # Skip if multipath NIC is already down — API calls would be very slow
+        if not use_multipath_outage:
+            self.collect_outage_diagnostics(f"pre_outage_nodes_{'_'.join(outage_nodes[:3])}")
+
+        # Choose outage type pools based on multipath state
+        if use_multipath_outage:
+            types_first = self.multipath_outage_types
+            types_rest = self.multipath_outage_types
+        else:
+            types_first = self.outage_types2 if self.npcs == 1 else self.outage_types
+            types_rest = self.outage_types2
 
         # ── Phase 1: pick types + collect node details for ALL nodes ─────────
         node_plans = []  # (node, outage_type, node_ip, node_rpc_port)
         outage_num = 0
         for node in outage_nodes:
             if outage_num == 0:
-                if self.npcs == 1:
-                    outage_type = random.choice(self.outage_types2)
-                else:
-                    outage_type = random.choice(self.outage_types)
+                outage_type = random.choice(types_first)
                 outage_num = 1
             else:
-                outage_type = random.choice(self.outage_types2)
+                outage_type = random.choice(types_rest)
 
             node_details = self.sbcli_utils.get_storage_node_details(node)
             node_ip = node_details[0]["mgmt_ip"]

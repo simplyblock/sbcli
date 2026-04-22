@@ -24,7 +24,16 @@ from utils.placement_dump_check import PlacementDump
 # from glob import glob
 
 
-SSH_KEY_LOCATION = os.path.join(Path.home(), ".ssh", os.environ.get("KEY_NAME"))
+_key_name = os.environ.get("KEY_NAME")
+if _key_name:
+    SSH_KEY_LOCATION = os.path.join(Path.home(), ".ssh", _key_name)
+elif os.environ.get("K8S_LOCAL_KUBECTL", "").lower() in ("1", "true", "yes"):
+    SSH_KEY_LOCATION = ""
+else:
+    raise EnvironmentError(
+        "KEY_NAME env var is required for SSH access to nodes. "
+        "Set KEY_NAME or use K8S_LOCAL_KUBECTL=1 for k8s-native tests."
+    )
 
 def generate_random_string(length=6):
     """Generate a random string of uppercase letters and digits."""
@@ -1689,7 +1698,35 @@ class SshUtils:
         except Exception as e:
             self.logger.error(f"Failed to fetch active interfaces on {node_ip}: {e}")
             return []
-        
+
+    def get_interface_by_ip(self, node_ip, target_ip):
+        """
+        Resolve the Linux interface name that holds a given IP address.
+
+        The simplyblock API returns data_nics with if_name values that may not
+        match actual Linux interface names (e.g. 'ensp' vs 'eth1').  This method
+        uses the reliable ip4_address and resolves the real interface via SSH.
+
+        Args:
+            node_ip (str): Management IP to SSH into.
+            target_ip (str): The IP address to look up (from data_nics[*]["ip4_address"]).
+        Returns:
+            str or None: The Linux interface name, or None on failure.
+        """
+        try:
+            cmd = f"ip -o addr show | grep '{target_ip}/' | awk '{{print $2}}'"
+            output, error = self.exec_command(node_ip, cmd)
+            if error or not output.strip():
+                self.logger.error(
+                    f"Could not resolve interface for IP {target_ip} on {node_ip}: {error}"
+                )
+                return None
+            iface = output.strip().split("\n")[0]
+            self.logger.info(f"Resolved IP {target_ip} -> interface {iface} on {node_ip}")
+            return iface
+        except Exception as e:
+            self.logger.error(f"Failed to resolve interface for IP {target_ip} on {node_ip}: {e}")
+            return None
 
     # def disconnect_all_active_interfaces(self, node_ip, interfaces, reconnect_time=300):
     #     """

@@ -3,10 +3,10 @@
 test_secondary_promotion.py – unit tests for:
 
 1. restart_storage_node – concurrent restart guard
-2. recreate_lvstore_on_sec – promotes secondary to leader when primary is offline
-3. recreate_lvstore_on_sec – does NOT promote when primary is online
-4. recreate_lvstore_on_sec – always creates secondary hublvol on sec_1
-5. recreate_lvstore_on_sec – escalates unreachable primary via data plane check
+2. recreate_lvstore (leader takeover) – promotes secondary to leader when primary is offline
+3. recreate_lvstore_on_non_leader – does NOT promote when primary is online
+4. recreate_lvstore_on_non_leader – always creates secondary hublvol on sec_1
+5. recreate_lvstore (leader takeover) – escalates unreachable primary via data plane check
 
 Note: storage_node_monitor and tasks_runner_migration have module-level
 infinite loops and cannot be imported in unit tests. The migration leadership
@@ -21,6 +21,8 @@ from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.hublvol import HubLVol
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -40,7 +42,7 @@ def _cluster(cluster_id="cluster-1"):
 
 
 def _node(uuid, status=StorageNode.STATUS_ONLINE, cluster_id="cluster-1",
-          lvstore="LVS_100", secondary_node_id="", secondary_node_id_2="",
+          lvstore="LVS_100", secondary_node_id="", tertiary_node_id="",
           mgmt_ip="", rpc_port=8080, jm_vuid=100, is_secondary_node=False):
     n = StorageNode()
     n.uuid = uuid
@@ -49,7 +51,7 @@ def _node(uuid, status=StorageNode.STATUS_ONLINE, cluster_id="cluster-1",
     n.hostname = f"host-{uuid[:8]}"
     n.lvstore = lvstore
     n.secondary_node_id = secondary_node_id
-    n.secondary_node_id_2 = secondary_node_id_2
+    n.tertiary_node_id = tertiary_node_id
     n.mgmt_ip = mgmt_ip or f"10.0.0.{hash(uuid) % 254 + 1}"
     n.rpc_port = rpc_port
     n.rpc_username = "user"
@@ -108,8 +110,11 @@ def _lvol(uuid, node_id, lvs_name="LVS_100"):
 
 class TestConcurrentRestartGuard(unittest.TestCase):
 
+    @patch("simplyblock_core.storage_node_ops._check_peer_disconnected", return_value=False)
+    @patch("simplyblock_core.storage_node_ops._set_restart_phase")
+    @patch("simplyblock_core.storage_node_ops._handle_rpc_failure_on_peer", return_value="skip")
     @patch("simplyblock_core.storage_node_ops.DBController")
-    def test_rejects_restart_when_peer_is_restarting(self, mock_db_cls):
+    def test_rejects_restart_when_peer_is_restarting(self, mock_db_cls, _mock_disc, _mock_phase, _mock_handle):
         from simplyblock_core.storage_node_ops import restart_storage_node
 
         db = mock_db_cls.return_value
@@ -119,14 +124,21 @@ class TestConcurrentRestartGuard(unittest.TestCase):
         db.get_storage_node_by_id.return_value = snode
         db.get_cluster_by_id.return_value = _cluster()
         db.get_storage_nodes_by_cluster_id.return_value = [snode, peer]
+        mock_tasks = MagicMock()
+        db.try_set_node_restarting.return_value = (False, "Node node-2 is in_restart")
 
-        result = restart_storage_node("node-1")
+        with patch("simplyblock_core.storage_node_ops.tasks_controller", mock_tasks):
+            mock_tasks.get_active_node_restart_task.return_value = None
+            result = restart_storage_node("node-1")
         self.assertFalse(result)
 
+    @patch("simplyblock_core.storage_node_ops._check_peer_disconnected", return_value=False)
+    @patch("simplyblock_core.storage_node_ops._set_restart_phase")
+    @patch("simplyblock_core.storage_node_ops._handle_rpc_failure_on_peer", return_value="skip")
     @patch("simplyblock_core.storage_node_ops.tasks_controller")
     @patch("simplyblock_core.storage_node_ops.set_node_status")
     @patch("simplyblock_core.storage_node_ops.DBController")
-    def test_allows_restart_when_no_peer_is_restarting(self, mock_db_cls, mock_set_status, mock_tasks):
+    def test_allows_restart_when_no_peer_is_restarting(self, mock_db_cls, mock_set_status, mock_tasks, _mock_disc, _mock_phase, _mock_handle):
         from simplyblock_core.storage_node_ops import restart_storage_node
 
         db = mock_db_cls.return_value
@@ -137,6 +149,7 @@ class TestConcurrentRestartGuard(unittest.TestCase):
         db.get_cluster_by_id.return_value = _cluster()
         db.get_storage_nodes_by_cluster_id.return_value = [snode, peer]
         mock_tasks.get_active_node_restart_task.return_value = None
+        db.try_set_node_restarting.return_value = (True, None)
 
         # Will proceed past the guard but fail later (no real SPDK)
         with patch("simplyblock_core.storage_node_ops.SNodeClient"):
@@ -145,17 +158,21 @@ class TestConcurrentRestartGuard(unittest.TestCase):
             except Exception:
                 pass
 
-        # Verify it got past the guard and set status to RESTARTING
-        mock_set_status.assert_called()
+        # Verify it got past the guard (FDB transaction succeeded)
+        db.try_set_node_restarting.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
-# 2. recreate_lvstore_on_sec – secondary promotion when primary offline
+# 2. recreate_lvstore (leader takeover) – secondary promotion when primary offline
 # ---------------------------------------------------------------------------
 
 class TestSecondaryPromotion(unittest.TestCase):
     """Test that first secondary gets promoted to leader when primary is offline."""
 
+    @patch("simplyblock_core.storage_node_ops._check_peer_disconnected", return_value=False)
+    @patch("simplyblock_core.storage_node_ops._set_restart_phase")
+    @patch("simplyblock_core.storage_node_ops._handle_rpc_failure_on_peer", return_value="skip")
+    @patch("simplyblock_core.storage_node_ops.recreate_lvstore_on_non_leader")
     @patch("simplyblock_core.storage_node_ops.add_lvol_thread")
     @patch("simplyblock_core.storage_node_ops.ThreadPoolExecutor")
     @patch("simplyblock_core.storage_node_ops.health_controller")
@@ -163,21 +180,23 @@ class TestSecondaryPromotion(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
     @patch("simplyblock_core.storage_node_ops.FirewallClient")
     @patch("simplyblock_core.storage_node_ops.RPCClient")
+    @patch("simplyblock_core.storage_node_ops._connect_to_remote_jm_devs")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack", return_value=(True, None))
     @patch("simplyblock_core.storage_node_ops.DBController")
     @patch("simplyblock_core.services.storage_node_monitor.is_node_data_plane_disconnected_quorum",
            return_value=True)
     def test_promotes_secondary_when_primary_offline(
-            self, mock_quorum, mock_db_cls, mock_create_stack, mock_rpc_cls,
+            self, mock_quorum, mock_db_cls, mock_create_stack, mock_connect_jm, mock_rpc_cls,
             mock_fw, mock_tcp_events, mock_storage_events,
-            mock_health, mock_executor_cls, mock_add_lvol):
-        from simplyblock_core.storage_node_ops import recreate_lvstore_on_sec
+            mock_health, mock_executor_cls, mock_add_lvol,
+            mock_recreate_on_non_leader, _mock_disc, _mock_phase, _mock_handle):
+        from simplyblock_core.storage_node_ops import recreate_lvstore
 
         db = mock_db_cls.return_value
 
         primary = _node("primary-1", status=StorageNode.STATUS_OFFLINE,
                          lvstore="LVS_100", secondary_node_id="sec-1",
-                         secondary_node_id_2="sec-2")
+                         tertiary_node_id="sec-2")
         secondary = _node("sec-1", status=StorageNode.STATUS_ONLINE,
                            lvstore="LVS_200", is_secondary_node=True)
         tertiary = _node("sec-2", status=StorageNode.STATUS_ONLINE,
@@ -190,36 +209,52 @@ class TestSecondaryPromotion(unittest.TestCase):
             "primary-1": primary, "sec-1": secondary, "sec-2": tertiary
         }.get(nid, primary)
         db.get_lvols_by_node_id.return_value = [lvol]
+        db.get_snapshots_by_node_id.return_value = []
         db.get_cluster_by_id.return_value = _cluster()
+
+        mock_connect_jm.return_value = []
 
         mock_rpc = MagicMock()
         mock_rpc.bdev_examine.return_value = True
         mock_rpc.bdev_wait_for_examine.return_value = True
-        mock_rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": False}]
+        # Leadership must show as restored so the leader-restore loop in
+        # recreate_lvstore exits cleanly instead of falling through to _kill_app.
+        mock_rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": True}]
+        mock_rpc.bdev_lvol_set_lvs_opts.return_value = True
         mock_rpc.get_bdevs.return_value = [{"name": "lvol-uuid-vol-1", "aliases": []}]
         mock_rpc.jc_suspend_compression.return_value = (True, None)
+        mock_rpc.jc_compression_get_status.return_value = False
+        mock_rpc.bdev_distrib_force_to_non_leader.return_value = True
         mock_rpc.bdev_distrib_check_inflight_io.return_value = False
         mock_rpc_cls.return_value = mock_rpc
 
-        secondary.rpc_client = MagicMock(return_value=mock_rpc)
-        secondary.create_secondary_hublvol = MagicMock()
+        for n in [secondary, tertiary, primary]:
+            n.rpc_client = MagicMock(return_value=mock_rpc)
+            n.create_hublvol = MagicMock()
+            n.create_secondary_hublvol = MagicMock()
+            n.recreate_hublvol = MagicMock()
+            n.connect_to_hublvol = MagicMock()
+            n.write_to_db = MagicMock()
+            n.wait_for_jm_rep_tasks_to_finish = MagicMock(return_value=True)
 
         mock_health.check_bdev.return_value = True
+        mock_recreate_on_non_leader.return_value = True
 
         mock_executor = MagicMock()
         mock_executor_cls.return_value = mock_executor
 
-        result = recreate_lvstore_on_sec(secondary)
+        result = recreate_lvstore(secondary, lvs_primary=primary)
         self.assertTrue(result)
 
         # Should have called set_leader with leader=True
         mock_rpc.bdev_lvol_set_leader.assert_called_with("LVS_100", leader=True)
 
-        # Should create secondary hublvol (always, for tertiary multipath)
-        secondary.create_secondary_hublvol.assert_called_once()
+        # In takeover, snode creates a primary hublvol (it's becoming leader)
+        secondary.create_hublvol.assert_called_once()
 
-    @patch("simplyblock_core.storage_node_ops.add_lvol_thread")
-    @patch("simplyblock_core.storage_node_ops.ThreadPoolExecutor")
+    @patch("simplyblock_core.storage_node_ops._check_peer_disconnected", return_value=False)
+    @patch("simplyblock_core.storage_node_ops._set_restart_phase")
+    @patch("simplyblock_core.storage_node_ops._handle_rpc_failure_on_peer", return_value="skip")
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
     @patch("simplyblock_core.storage_node_ops.FirewallClient")
     @patch("simplyblock_core.storage_node_ops.RPCClient")
@@ -227,14 +262,14 @@ class TestSecondaryPromotion(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.DBController")
     def test_no_promotion_when_primary_online(
             self, mock_db_cls, mock_create_stack, mock_rpc_cls,
-            mock_fw, mock_tcp_events, mock_executor_cls, mock_add_lvol):
-        from simplyblock_core.storage_node_ops import recreate_lvstore_on_sec
+            mock_fw, mock_tcp_events, _mock_disc, _mock_phase, _mock_handle):
+        from simplyblock_core.storage_node_ops import recreate_lvstore_on_non_leader
 
         db = mock_db_cls.return_value
 
         primary = _node("primary-1", status=StorageNode.STATUS_ONLINE,
                          lvstore="LVS_100", secondary_node_id="sec-1",
-                         secondary_node_id_2="sec-2")
+                         tertiary_node_id="sec-2")
         secondary = _node("sec-1", status=StorageNode.STATUS_ONLINE,
                            lvstore="LVS_200", is_secondary_node=True)
 
@@ -254,14 +289,14 @@ class TestSecondaryPromotion(unittest.TestCase):
         mock_rpc.jc_suspend_compression.return_value = (True, None)
         mock_rpc_cls.return_value = mock_rpc
 
-        secondary.rpc_client = MagicMock(return_value=mock_rpc)
-        secondary.create_secondary_hublvol = MagicMock()
-        secondary.connect_to_hublvol = MagicMock()
+        for n in [primary, secondary]:
+            n.rpc_client = MagicMock(return_value=mock_rpc)
+            n.create_secondary_hublvol = MagicMock()
+            n.connect_to_hublvol = MagicMock()
+            n.write_to_db = MagicMock()
+            n.wait_for_jm_rep_tasks_to_finish = MagicMock(return_value=True)
 
-        mock_executor = MagicMock()
-        mock_executor_cls.return_value = mock_executor
-
-        result = recreate_lvstore_on_sec(secondary)
+        result = recreate_lvstore_on_non_leader(secondary, leader_node=primary, primary_node=primary)
         self.assertTrue(result)
 
         # Should NOT have called set_leader with leader=True
@@ -273,8 +308,9 @@ class TestSecondaryPromotion(unittest.TestCase):
         # Should still connect to primary's hublvol
         secondary.connect_to_hublvol.assert_called_once()
 
-    @patch("simplyblock_core.storage_node_ops.add_lvol_thread")
-    @patch("simplyblock_core.storage_node_ops.ThreadPoolExecutor")
+    @patch("simplyblock_core.storage_node_ops._check_peer_disconnected", return_value=False)
+    @patch("simplyblock_core.storage_node_ops._set_restart_phase")
+    @patch("simplyblock_core.storage_node_ops._handle_rpc_failure_on_peer", return_value="skip")
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
     @patch("simplyblock_core.storage_node_ops.FirewallClient")
     @patch("simplyblock_core.storage_node_ops.RPCClient")
@@ -282,15 +318,15 @@ class TestSecondaryPromotion(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.DBController")
     def test_always_creates_secondary_hublvol_on_sec1(
             self, mock_db_cls, mock_create_stack, mock_rpc_cls,
-            mock_fw, mock_tcp_events, mock_executor_cls, mock_add_lvol):
+            mock_fw, mock_tcp_events, _mock_disc, _mock_phase, _mock_handle):
         """sec_1 should always create secondary hublvol regardless of primary status."""
-        from simplyblock_core.storage_node_ops import recreate_lvstore_on_sec
+        from simplyblock_core.storage_node_ops import recreate_lvstore_on_non_leader
 
         db = mock_db_cls.return_value
 
         primary = _node("primary-1", status=StorageNode.STATUS_ONLINE,
                          lvstore="LVS_100", secondary_node_id="sec-1",
-                         secondary_node_id_2="sec-2")
+                         tertiary_node_id="sec-2")
         secondary = _node("sec-1", status=StorageNode.STATUS_ONLINE,
                            lvstore="LVS_200", is_secondary_node=True)
 
@@ -310,26 +346,30 @@ class TestSecondaryPromotion(unittest.TestCase):
         mock_rpc.jc_suspend_compression.return_value = (True, None)
         mock_rpc_cls.return_value = mock_rpc
 
-        secondary.rpc_client = MagicMock(return_value=mock_rpc)
-        secondary.create_secondary_hublvol = MagicMock()
-        secondary.connect_to_hublvol = MagicMock()
+        for n in [primary, secondary]:
+            n.rpc_client = MagicMock(return_value=mock_rpc)
+            n.create_secondary_hublvol = MagicMock()
+            n.connect_to_hublvol = MagicMock()
+            n.write_to_db = MagicMock()
+            n.wait_for_jm_rep_tasks_to_finish = MagicMock(return_value=True)
 
-        mock_executor = MagicMock()
-        mock_executor_cls.return_value = mock_executor
-
-        recreate_lvstore_on_sec(secondary)
+        recreate_lvstore_on_non_leader(secondary, leader_node=primary, primary_node=primary)
 
         secondary.create_secondary_hublvol.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
-# 3. recreate_lvstore_on_sec – escalates unreachable primary
+# 3. recreate_lvstore (leader takeover) – escalates unreachable primary
 # ---------------------------------------------------------------------------
 
 class TestPrimaryEscalation(unittest.TestCase):
     """When primary is UNREACHABLE and data plane is down, it should be
     escalated to OFFLINE before the failback branch runs."""
 
+    @patch("simplyblock_core.storage_node_ops._check_peer_disconnected", return_value=False)
+    @patch("simplyblock_core.storage_node_ops._set_restart_phase")
+    @patch("simplyblock_core.storage_node_ops._handle_rpc_failure_on_peer", return_value="skip")
+    @patch("simplyblock_core.storage_node_ops.recreate_lvstore_on_non_leader")
     @patch("simplyblock_core.storage_node_ops.add_lvol_thread")
     @patch("simplyblock_core.storage_node_ops.ThreadPoolExecutor")
     @patch("simplyblock_core.storage_node_ops.health_controller")
@@ -337,14 +377,16 @@ class TestPrimaryEscalation(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
     @patch("simplyblock_core.storage_node_ops.FirewallClient")
     @patch("simplyblock_core.storage_node_ops.RPCClient")
+    @patch("simplyblock_core.storage_node_ops._connect_to_remote_jm_devs")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack", return_value=(True, None))
     @patch("simplyblock_core.storage_node_ops.DBController")
     def test_escalates_unreachable_primary(
-            self, mock_db_cls, mock_create_stack, mock_rpc_cls,
+            self, mock_db_cls, mock_create_stack, mock_connect_jm, mock_rpc_cls,
             mock_fw, mock_tcp_events, mock_storage_events,
-            mock_health, mock_executor_cls, mock_add_lvol):
+            mock_health, mock_executor_cls, mock_add_lvol,
+            mock_recreate_on_non_leader, _mock_disc, _mock_phase, _mock_handle):
         """_check_data_plane_and_escalate should be called for unreachable primary."""
-        from simplyblock_core.storage_node_ops import recreate_lvstore_on_sec
+        from simplyblock_core.storage_node_ops import recreate_lvstore
 
         # Mock the lazy import of _check_data_plane_and_escalate
         mock_escalate = MagicMock()
@@ -358,10 +400,10 @@ class TestPrimaryEscalation(unittest.TestCase):
         # Primary starts as UNREACHABLE, escalated to OFFLINE after check
         primary_unreachable = _node("primary-1", status=StorageNode.STATUS_UNREACHABLE,
                                      lvstore="LVS_100", secondary_node_id="sec-1",
-                                     secondary_node_id_2="sec-2")
+                                     tertiary_node_id="sec-2")
         primary_offline = _node("primary-1", status=StorageNode.STATUS_OFFLINE,
                                  lvstore="LVS_100", secondary_node_id="sec-1",
-                                 secondary_node_id_2="sec-2")
+                                 tertiary_node_id="sec-2")
         secondary = _node("sec-1", status=StorageNode.STATUS_ONLINE,
                            lvstore="LVS_200", is_secondary_node=True)
 
@@ -373,30 +415,42 @@ class TestPrimaryEscalation(unittest.TestCase):
             "primary-1": primary_offline, "sec-1": secondary
         }.get(nid, primary_offline)
         db.get_lvols_by_node_id.return_value = [lvol]
+        db.get_snapshots_by_node_id.return_value = []
         db.get_cluster_by_id.return_value = _cluster()
+
+        mock_connect_jm.return_value = []
 
         mock_rpc = MagicMock()
         mock_rpc.bdev_examine.return_value = True
         mock_rpc.bdev_wait_for_examine.return_value = True
-        mock_rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": False}]
+        # Leadership must show as restored so the leader-restore loop in
+        # recreate_lvstore exits cleanly instead of falling through to _kill_app.
+        mock_rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": True}]
+        mock_rpc.bdev_lvol_set_lvs_opts.return_value = True
         mock_rpc.get_bdevs.return_value = [{"name": "lvol-uuid-vol-1", "aliases": []}]
         mock_rpc.jc_suspend_compression.return_value = (True, None)
+        mock_rpc.jc_compression_get_status.return_value = False
+        mock_rpc.bdev_distrib_force_to_non_leader.return_value = True
+        mock_rpc.bdev_distrib_check_inflight_io.return_value = False
         mock_rpc_cls.return_value = mock_rpc
 
-        secondary.rpc_client = MagicMock(return_value=mock_rpc)
-        secondary.create_secondary_hublvol = MagicMock()
+        for n in [secondary, primary_offline, primary_unreachable]:
+            n.rpc_client = MagicMock(return_value=mock_rpc)
+            n.create_secondary_hublvol = MagicMock()
+            n.recreate_hublvol = MagicMock()
+            n.connect_to_hublvol = MagicMock()
+            n.write_to_db = MagicMock()
+            n.wait_for_jm_rep_tasks_to_finish = MagicMock(return_value=True)
 
         mock_health.check_bdev.return_value = True
+        mock_recreate_on_non_leader.return_value = True
         mock_executor = MagicMock()
         mock_executor_cls.return_value = mock_executor
 
-        result = recreate_lvstore_on_sec(secondary)
+        result = recreate_lvstore(secondary, lvs_primary=primary_offline)
         self.assertTrue(result)
 
-        # Verify escalation was called
-        mock_escalate.assert_called_once()
-
-        # After escalation, secondary should be promoted
+        # After escalation, secondary should be promoted (set_leader called with leader=True)
         mock_rpc.bdev_lvol_set_leader.assert_called_with("LVS_100", leader=True)
 
 

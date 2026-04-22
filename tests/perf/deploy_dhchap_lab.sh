@@ -121,7 +121,7 @@ cat > /tmp/dhchap.json << 'EOFJ'
 {\"dhchap_digests\": [\"sha256\", \"sha384\", \"sha512\"], \"dhchap_dhgroups\": [\"ffdhe2048\", \"ffdhe3072\", \"ffdhe4096\", \"ffdhe6144\", \"ffdhe8192\"]}
 EOFJ
 "
-CLUSTER_ID=$(run_mgmt "sbctl cluster create --ha-type ha --max-fault-tolerance 2 --parity-chunks-per-stripe 2 --host-sec /tmp/dhchap.json 2>&1 | tail -1")
+CLUSTER_ID=$(run_mgmt "sbctl cluster create --ha-type ha --parity-chunks-per-stripe 2 --host-sec /tmp/dhchap.json 2>&1 | tail -1")
 if [ -z "$CLUSTER_ID" ] || [[ "$CLUSTER_ID" == *"error"* ]] || [[ "$CLUSTER_ID" == *"failed"* ]]; then
     log "ERROR: Cluster create failed: $CLUSTER_ID"
     exit 1

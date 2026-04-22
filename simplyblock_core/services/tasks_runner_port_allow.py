@@ -3,17 +3,30 @@ import time
 
 
 from simplyblock_core import db_controller, utils, storage_node_ops, distr_controller
-from simplyblock_core.controllers import tcp_ports_events, health_controller, tasks_controller
+from simplyblock_core.controllers import tcp_ports_events, health_controller, tasks_controller, lvol_controller
 from simplyblock_core.fw_api_client import FirewallClient
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.cluster import Cluster
-from simplyblock_core.models.nvme_device import NVMeDevice, RemoteDevice
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.rpc_client import RPCClient
 
 logger = utils.get_logger(__name__)
 
 # get DB controller
 db = db_controller.DBController()
+
+
+def _get_lvs_leader(lvs_name, candidates):
+    for candidate in candidates:
+        if not candidate or candidate.status != StorageNode.STATUS_ONLINE:
+            continue
+        try:
+            if lvol_controller.is_node_leader(candidate, lvs_name):
+                return candidate
+        except Exception as e:
+            logger.warning("Failed to query leadership for %s on %s: %s",
+                           lvs_name, candidate.get_id(), e)
+    return None
 
 
 def exec_port_allow_task(task):
@@ -60,7 +73,6 @@ def exec_port_allow_task(task):
 
     # check node ping
     logger.info("connect to remote devices")
-    nodes = db.get_storage_nodes_by_cluster_id(node.cluster_id)
     # connect to remote devs
     try:
         node_bdevs = node.rpc_client().get_bdevs()
@@ -73,33 +85,7 @@ def exec_port_allow_task(task):
                     node_bdev_names[al] = b
         else:
             node_bdev_names = {}
-        remote_devices = []
-        for nd in nodes:
-            if nd.get_id() == node.get_id() or nd.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
-                continue
-            logger.info(f"Connecting to node {nd.get_id()}")
-            for index, dev in enumerate(nd.nvme_devices):
-
-                if dev.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY,
-                                      NVMeDevice.STATUS_CANNOT_ALLOCATE]:
-                    logger.debug(f"Device is not online: {dev.get_id()}, status: {dev.status}")
-                    continue
-
-                if not dev.alceml_bdev:
-                    raise ValueError(f"device alceml bdev not found!, {dev.get_id()}")
-
-                remote_device = RemoteDevice()
-                remote_device.uuid = dev.uuid
-                remote_device.alceml_name = dev.alceml_name
-                remote_device.node_id = dev.node_id
-                remote_device.size = dev.size
-                remote_device.nvmf_multipath = dev.nvmf_multipath
-                remote_device.status = NVMeDevice.STATUS_ONLINE
-                remote_device.remote_bdev = storage_node_ops.connect_device(
-                    f"remote_{dev.alceml_bdev}", dev, node,
-                    bdev_names=list(node_bdev_names), reattach=False)
-
-                remote_devices.append(remote_device)
+        remote_devices = storage_node_ops._connect_to_remote_devs(node, reattach=False)
         if not remote_devices:
             msg = "Node unable to connect to remote devs, retry task"
             logger.info(msg)
@@ -138,19 +124,30 @@ def exec_port_allow_task(task):
         task.write_to_db(db.kv_store)
         return
 
-    logger.info("Sending device status event")
-    for db_dev in node.nvme_devices:
-        distr_controller.send_dev_status_event(db_dev, db_dev.status, node)
+    # After a network outage, every distrib on the recovering node has a
+    # stale view of remote devices (status_device=48 / is_device_available_read=0),
+    # which causes DISTRIBD "Unable to read stripe" errors as soon as the
+    # port is unblocked. Push the full cluster map now (covers all nodes'
+    # devices, including our own) so the distribs have up-to-date status
+    # before any IO is allowed through.
+    logger.info("Sending full cluster map to recovering node")
+    if not distr_controller.send_cluster_map_to_node(node):
+        msg = "Failed to send cluster map to recovering node, retry task"
+        logger.warning(msg)
+        task.function_result = msg
+        task.status = JobSchedule.STATUS_SUSPENDED
+        task.write_to_db(db.kv_store)
+        return
 
-    logger.info("Finished sending device status and now waiting 5s for JMs to connect")
+    logger.info("Cluster map sent; waiting 5s for JMs to connect")
     time.sleep(5)
 
     snode = db.get_storage_node_by_id(node.get_id())
     sec_ids = []
     if node.secondary_node_id:
         sec_ids.append(node.secondary_node_id)
-    if node.secondary_node_id_2:
-        sec_ids.append(node.secondary_node_id_2)
+    if node.tertiary_node_id:
+        sec_ids.append(node.tertiary_node_id)
     for sec_id in sec_ids:
         sec_node = db.get_storage_node_by_id(sec_id)
         if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
@@ -188,8 +185,8 @@ def exec_port_allow_task(task):
         sec_ids = []
         if node.secondary_node_id:
             sec_ids.append(node.secondary_node_id)
-        if node.secondary_node_id_2:
-            sec_ids.append(node.secondary_node_id_2)
+        if node.tertiary_node_id:
+            sec_ids.append(node.tertiary_node_id)
         if sec_ids:
             primary_hublvol_check = health_controller._check_node_hublvol(node)
             if not primary_hublvol_check:
@@ -224,51 +221,126 @@ def exec_port_allow_task(task):
             time.sleep(3)
             lvol_sync_del_found = tasks_controller.get_lvol_sync_del_task(task.cluster_id, task.node_id)
 
-        # Drop leadership and drain inflight IO on ALL online secondaries before
-        # allowing the port.  Without this, the primary's JC reconnects to remote
-        # JMs that still hold stale write locks, triggering writer conflicts that
-        # cascade into block_port / IO errors on the secondary.
         port_number = task.function_params["port_number"]
         secs_to_unblock = []
-        for sid in sec_ids:
-            sn = db.get_storage_node_by_id(sid)
-            if not sn or sn.status != StorageNode.STATUS_ONLINE:
-                continue
+        primary_lvs_port = node.get_lvol_subsys_port(node.lvstore)
+        if port_number == primary_lvs_port:
+            candidates = [node] + [db.get_storage_node_by_id(sid) for sid in sec_ids]
+            current_leader = _get_lvs_leader(node.lvstore, candidates)
 
-            sn_rpc = sn.rpc_client()
-            ret = sn.wait_for_jm_rep_tasks_to_finish(node.jm_vuid)
-            if not ret:
-                msg = f"JM replication task found on secondary {sn.get_id()}"
-                logger.warning(msg)
-                task.function_result = msg
-                task.status = JobSchedule.STATUS_SUSPENDED
-                task.write_to_db(db.kv_store)
-                return
+            # On network-outage recovery of `node`, the current leader is
+            # typically a peer (the secondary/tertiary that took over while
+            # `node` was unreachable). The previous behaviour — skipping
+            # demotion when the leader is a peer — left the peer leading
+            # while this node's port got unblocked, allowing dual-leader IO
+            # and writer conflicts. Instead: block the peer leader's port,
+            # demote it and drain inflight IO, then take leadership locally
+            # and proceed to demote any remaining secondaries.
+            if current_leader and current_leader.get_id() != node.get_id():
+                peer = current_leader
+                logger.info("Current leader for %s is peer %s; demoting before port_allow on %s",
+                            node.lvstore, peer.get_id(), node.get_id())
+                peer_fw = FirewallClient(peer, timeout=5, retry=2)
+                peer_port_type = "udp" if peer.active_rdma else "tcp"
+                peer_fw.firewall_set_port(port_number, peer_port_type, "block", peer.rpc_port)
+                tcp_ports_events.port_deny(peer, port_number)
+                time.sleep(0.5)
 
-            # Block → sleep → drop leadership → force non-leader → check inflight
-            sn_fw = FirewallClient(sn, timeout=5, retry=2)
-            sn_port_type = "udp" if sn.active_rdma else "tcp"
-            sn_fw.firewall_set_port(port_number, sn_port_type, "block", sn.rpc_port)
-            tcp_ports_events.port_deny(sn, port_number)
+                peer_rpc = RPCClient(
+                    peer.mgmt_ip, peer.rpc_port,
+                    peer.rpc_username, peer.rpc_password,
+                    timeout=0.2, retry=0,
+                )
+                try:
+                    peer_rpc.bdev_lvol_set_leader(node.lvstore, leader=False, bs_nonleadership=True)
+                    peer_rpc.bdev_distrib_force_to_non_leader(node.jm_vuid)
+                except Exception as e:
+                    logger.error("Failed to demote peer leader %s for %s: %s",
+                                 peer.get_id(), node.lvstore, e)
+                    try:
+                        peer_fw.firewall_set_port(port_number, peer_port_type, "allow", peer.rpc_port)
+                        tcp_ports_events.port_allowed(peer, port_number)
+                    except Exception:
+                        pass
+                    msg = "Failed to demote peer leader, retry task"
+                    task.function_result = msg
+                    task.status = JobSchedule.STATUS_SUSPENDED
+                    task.write_to_db(db.kv_store)
+                    return
 
-            time.sleep(0.5)
-
-            sn_rpc.bdev_lvol_set_leader(node.lvstore, leader=False, bs_nonleadership=True)
-            sn_rpc.bdev_distrib_force_to_non_leader(node.jm_vuid)
-            logger.info(f"Checking for inflight IO from node: {sn.get_id()}")
-            for i in range(100):
-                is_inflight = sn_rpc.bdev_distrib_check_inflight_io(node.jm_vuid)
-                if is_inflight:
-                    logger.info("Inflight IO found, retry in 100ms")
+                logger.info("Draining inflight IO on peer leader %s for %s",
+                            peer.get_id(), node.lvstore)
+                for _ in range(100):
+                    try:
+                        if not peer_rpc.bdev_distrib_check_inflight_io(node.jm_vuid):
+                            break
+                    except Exception:
+                        break
                     time.sleep(0.1)
-                else:
-                    logger.info("Inflight IO NOT found, continuing")
-                    break
-            else:
-                logger.error(
-                    f"Timeout while checking for inflight IO after 10 seconds on node {sn.get_id()}")
+                secs_to_unblock.append(peer)
+                # Fall through to the local take-leadership path below.
+                current_leader = None
 
-            secs_to_unblock.append(sn)
+            if current_leader is None:
+                logger.warning("No leader found for %s during port_allow on %s; attempting local restore",
+                               node.lvstore, node.get_id())
+                node.rpc_client().bdev_lvol_set_lvs_opts(
+                    node.lvstore,
+                    groupid=node.jm_vuid,
+                    subsystem_port=primary_lvs_port,
+                    role="primary"
+                )
+                node.rpc_client().bdev_lvol_set_leader(node.lvstore, leader=True)
+                current_leader = _get_lvs_leader(node.lvstore, [node])
+                if not current_leader:
+                    msg = f"No leader available for {node.lvstore}, retry task"
+                    logger.warning(msg)
+                    task.function_result = msg
+                    task.status = JobSchedule.STATUS_SUSPENDED
+                    task.write_to_db(db.kv_store)
+                    return
+
+            for sid in sec_ids:
+                sn = db.get_storage_node_by_id(sid)
+                if not sn or sn.status != StorageNode.STATUS_ONLINE:
+                    continue
+                # Skip the peer we already demoted + blocked above.
+                if any(s.get_id() == sn.get_id() for s in secs_to_unblock):
+                    continue
+
+                sn_rpc = sn.rpc_client()
+                ret = sn.wait_for_jm_rep_tasks_to_finish(node.jm_vuid)
+                if not ret:
+                    msg = f"JM replication task found on secondary {sn.get_id()}"
+                    logger.warning(msg)
+                    task.function_result = msg
+                    task.status = JobSchedule.STATUS_SUSPENDED
+                    task.write_to_db(db.kv_store)
+                    return
+
+                sn_fw = FirewallClient(sn, timeout=5, retry=2)
+                sn_port_type = "udp" if sn.active_rdma else "tcp"
+                sn_fw.firewall_set_port(port_number, sn_port_type, "block", sn.rpc_port)
+                tcp_ports_events.port_deny(sn, port_number)
+
+                time.sleep(0.5)
+
+                sn_rpc.bdev_lvol_set_leader(node.lvstore, leader=False, bs_nonleadership=True)
+                sn_rpc.bdev_distrib_force_to_non_leader(node.jm_vuid)
+                logger.info(f"Checking for inflight IO from node: {sn.get_id()}")
+                for i in range(100):
+                    is_inflight = sn_rpc.bdev_distrib_check_inflight_io(node.jm_vuid)
+                    if is_inflight:
+                        logger.info("Inflight IO found, retry in 100ms")
+                        time.sleep(0.1)
+                    else:
+                        logger.info("Inflight IO NOT found, continuing")
+                        break
+                else:
+                    logger.error(
+                        f"Timeout while checking for inflight IO after 10 seconds on node {sn.get_id()}")
+
+                secs_to_unblock.append(sn)
 
     except Exception as e:
         logger.error(e)
@@ -294,19 +366,24 @@ def exec_port_allow_task(task):
     task.write_to_db(db.kv_store)
 
 
-logger.info("Starting Tasks runner...")
-while True:
-    clusters = db.get_clusters()
-    if not clusters:
-        logger.error("No clusters found!")
-    else:
-        for cl in clusters:
-            if cl.status == Cluster.STATUS_IN_ACTIVATION:
-                continue
-            tasks = db.get_job_tasks(cl.get_id(), reverse=False)
-            for task in tasks:
-                if task.function_name == JobSchedule.FN_PORT_ALLOW:
-                    if task.status != JobSchedule.STATUS_DONE:
-                        exec_port_allow_task(task)
+def _main():
+    logger.info("Starting Tasks runner...")
+    while True:
+        clusters = db.get_clusters()
+        if not clusters:
+            logger.error("No clusters found!")
+        else:
+            for cl in clusters:
+                if cl.status == Cluster.STATUS_IN_ACTIVATION:
+                    continue
+                tasks = db.get_job_tasks(cl.get_id(), reverse=False)
+                for task in tasks:
+                    if task.function_name == JobSchedule.FN_PORT_ALLOW:
+                        if task.status != JobSchedule.STATUS_DONE:
+                            exec_port_allow_task(task)
 
-    time.sleep(5)
+        time.sleep(5)
+
+
+if __name__ == "__main__":
+    _main()

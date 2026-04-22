@@ -133,15 +133,26 @@ def update_cluster_status(cluster_id):
     next_current_status = get_next_cluster_status(cluster_id)
     logger.info("cluster_new_status: %s", next_current_status)
 
-    first_iter_task_pending = 0
+    rebalancing_task_names = {
+        JobSchedule.FN_DEV_MIG,
+        JobSchedule.FN_NEW_DEV_MIG,
+        JobSchedule.FN_FAILED_DEV_MIG,
+        JobSchedule.FN_BALANCING_AFTER_NODE_RESTART,
+        JobSchedule.FN_BALANCING_AFTER_DEV_REMOVE,
+        JobSchedule.FN_BALANCING_AFTER_DEV_EXPANSION,
+        JobSchedule.FN_LVOL_MIG,
+    }
+    active_rebalancing_tasks = 0
     for task in db.get_job_tasks(cluster_id):
-        if task.status != JobSchedule.STATUS_DONE and task.function_name in [
-            JobSchedule.FN_DEV_MIG, JobSchedule.FN_NEW_DEV_MIG, JobSchedule.FN_FAILED_DEV_MIG]:
-            if "migration" not in task.function_params:
-                first_iter_task_pending += 1
+        if task.canceled:
+            continue
+        if task.status == JobSchedule.STATUS_DONE:
+            continue
+        if task.function_name in rebalancing_task_names:
+            active_rebalancing_tasks += 1
 
     cluster = db.get_cluster_by_id(cluster_id)
-    cluster.is_re_balancing = first_iter_task_pending > 0
+    cluster.is_re_balancing = active_rebalancing_tasks > 0
     cluster.write_to_db()
 
     current_cluster_status = cluster.status
@@ -266,7 +277,7 @@ def set_node_unreachable(node):
 
 
 def is_node_data_plane_disconnected(node):
-    """Return True if all online primary peers report *node*'s remote JM as disconnected.
+    """Return True if all other online nodes report *node*'s remote JM as disconnected.
 
     Returns False if no peers are available to check (conservative).
     """
@@ -274,8 +285,8 @@ def is_node_data_plane_disconnected(node):
     return total > 0 and disconnected == total
 
 
-def is_node_data_plane_disconnected_quorum(node):
-    """Return True if a majority of online primary peers report *node*'s remote JM as disconnected.
+def is_node_data_plane_disconnected_quorum(node, lvs_peer_ids=None):
+    """Return True if a majority of online nodes report *node*'s remote JM as disconnected.
 
     Returns False if no peers are available to check (conservative).
     """
@@ -284,34 +295,38 @@ def is_node_data_plane_disconnected_quorum(node):
 
 
 def _count_data_plane_votes(node):
-    """Query online primary peers for *node*'s JM connectivity.
+    """Query all other online storage nodes for *node*'s JM connectivity.
 
     Returns (disconnected_count, total_peers_checked).
     """
     node_id = node.get_id()
     cluster_nodes = db.get_storage_nodes_by_cluster_id(node.cluster_id)
 
-    online_primaries = [
+    online_peers = [
         n for n in cluster_nodes
         if n.get_id() != node_id
         and n.status == StorageNode.STATUS_ONLINE
-        and not n.is_secondary_node
         and n.jm_vuid
     ]
 
-    if not online_primaries:
-        logger.debug("No online primary peers to verify data plane for %s", node_id)
+    if not online_peers:
+        logger.debug("No online peers to verify data plane for %s", node_id)
         return 0, 0
 
     remote_jm_key = f"remote_jm_{node_id}n1"
     disconnected = 0
     total = 0
 
-    for peer in online_primaries:
+    for peer in online_peers:
         try:
             ret = peer.rpc_client(timeout=5, retry=1).jc_get_jm_status(peer.jm_vuid)
+            if not ret or remote_jm_key not in ret:
+                logger.debug("Data-plane check: peer %s has no status for %s JM; ignoring vote",
+                             peer.get_id(), node_id)
+                continue
+
             total += 1
-            if ret and ret.get(remote_jm_key) is True:
+            if ret[remote_jm_key] is True:
                 logger.info("Data-plane check: peer %s still sees %s JM as connected",
                             peer.get_id(), node_id)
             else:
@@ -379,7 +394,7 @@ def node_port_check_fun(snode):
     node_port_check = True
     if snode.lvstore_status == "ready":
         ports = [snode.nvmf_port]
-        if snode.lvstore_stack_secondary_1 or snode.lvstore_stack_secondary_2:
+        if snode.lvstore_stack_secondary or snode.lvstore_stack_tertiary:
             for n in db.get_primary_storage_nodes_by_secondary_node_id(snode.get_id()):
                 if n.lvstore_status != "ready":
                     continue
@@ -403,8 +418,8 @@ def node_port_check_fun(snode):
                 ret = health_controller.check_port_on_node(snode, port)
                 logger.info(f"Check: node port {snode.mgmt_ip}, {port} ... {ret}")
                 node_port_check &= ret
-            except Exception:
-                logger.error("Check node port failed, connection error")
+            except Exception as e:
+                health_controller._log_port_check_failure(db, snode, port, e)
 
         node_data_nic_ping_check = False
         for data_nic in snode.data_nics:
@@ -537,7 +552,7 @@ def loop_for_node(snode):
         time.sleep(constants.NODE_MONITOR_INTERVAL_SEC)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     logger.info("Starting node monitor")
     threads_maps: dict[str, threading.Thread] = {}
 

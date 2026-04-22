@@ -9,7 +9,7 @@ from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
-from simplyblock_core import constants, db_controller, distr_controller, storage_node_ops
+from simplyblock_core import constants, db_controller, storage_node_ops
 
 
 utils.init_sentry_sdk()
@@ -55,6 +55,11 @@ def check_node(snode):
         snode = db.get_storage_node_by_id(snode.get_id())
     except KeyError:
         return
+
+    try:
+        cluster = db.get_cluster_by_id(snode.cluster_id)
+    except KeyError:
+        cluster = None
 
     logger.info("Node: %s, status %s", snode.get_id(), snode.status)
 
@@ -149,6 +154,9 @@ def check_node(snode):
             if device.status == NVMeDevice.STATUS_ONLINE:
                 node_devices_check &= passed
 
+        if storage_node_ops.sync_remote_devices_from_spdk(snode, node_bdev_names=node_bdev_names):
+            snode = db.get_storage_node_by_id(snode.get_id())
+
         logger.info(f"Node remote device: {len(snode.remote_devices)}")
 
         for remote_device in snode.remote_devices:
@@ -156,6 +164,14 @@ def check_node(snode):
             org_node = db.get_storage_node_by_id(remote_device.node_id)
             if org_dev.status == NVMeDevice.STATUS_ONLINE and org_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
                 if health_controller.check_bdev(remote_device.remote_bdev, bdev_names=node_bdev_names):
+                    # Bdev exists but multipath may be degraded — repair missing paths
+                    if org_dev.nvmf_multipath:
+                        ctrl_name = f"remote_{org_dev.alceml_bdev}" if org_dev.alceml_bdev else None
+                        if ctrl_name:
+                            try:
+                                storage_node_ops.repair_multipath_controller(ctrl_name, org_dev, snode)
+                            except Exception as e:
+                                logger.warning("Multipath repair failed for %s: %s", ctrl_name, e)
                     connected_devices.append(remote_device.get_id())
                     continue
 
@@ -169,14 +185,6 @@ def check_node(snode):
                         bdev_names=list(node_bdev_names), reattach=False,
                     )
                     connected_devices.append(org_dev.get_id())
-                    # Re-read right before write to avoid overwriting concurrent changes
-                    sn = db.get_storage_node_by_id(snode.get_id())
-                    for d in sn.remote_devices:
-                        if d.get_id() == remote_device.get_id():
-                            d.status = NVMeDevice.STATUS_ONLINE
-                            break
-                    sn.write_to_db()
-                    distr_controller.send_dev_status_event(org_dev, NVMeDevice.STATUS_ONLINE, snode)
                 except RuntimeError:
                     logger.error(f"Failed to connect to device: {org_dev.get_id()}")
                     node_remote_devices_check = False
@@ -197,6 +205,13 @@ def check_node(snode):
                 if remote_device.remote_bdev:
                     check = health_controller.check_bdev(remote_device.remote_bdev, bdev_names=node_bdev_names)
                     if check:
+                        # JM bdev exists but multipath may be degraded — repair missing paths
+                        if remote_device.nvmf_multipath:
+                            ctrl_name = remote_device.remote_bdev.replace("n1", "")
+                            try:
+                                storage_node_ops.repair_multipath_controller(ctrl_name, remote_device, snode)
+                            except Exception as e:
+                                logger.warning("Multipath repair failed for JM %s: %s", ctrl_name, e)
                         connected_jms.append(remote_device.get_id())
                     else:
                         node_remote_devices_check = False
@@ -209,7 +224,7 @@ def check_node(snode):
                                 node_remote_devices_check = False
                             break
 
-            if not node_remote_devices_check and cluster.status in [
+            if not node_remote_devices_check and cluster is not None and cluster.status in [
                 Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
                 remote_jm_devices = storage_node_ops._connect_to_remote_jm_devs(snode)
                 snode = db.get_storage_node_by_id(snode.get_id())
@@ -228,8 +243,8 @@ def check_node(snode):
             sec_ids_to_check = []
             if snode.secondary_node_id:
                 sec_ids_to_check.append(snode.secondary_node_id)
-            if snode.secondary_node_id_2:
-                sec_ids_to_check.append(snode.secondary_node_id_2)
+            if snode.tertiary_node_id:
+                sec_ids_to_check.append(snode.tertiary_node_id)
 
             if sec_ids_to_check:
 
@@ -259,7 +274,7 @@ def check_node(snode):
             # if node_api_check:
             ports = [snode.get_lvol_subsys_port(snode.lvstore)]
 
-            for sec_stack_ref in [snode.lvstore_stack_secondary_1, snode.lvstore_stack_secondary_2]:
+            for sec_stack_ref in [snode.lvstore_stack_secondary, snode.lvstore_stack_tertiary]:
                 if sec_stack_ref:
                     try:
                         sec_ref_node = db.get_storage_node_by_id(sec_stack_ref)
@@ -275,8 +290,8 @@ def check_node(snode):
                         f"Check: node {snode.mgmt_ip}, port: {port} ... {lvol_port_check}")
                     if not lvol_port_check and snode.status != StorageNode.STATUS_SUSPENDED:
                         tasks_controller.add_port_allow_task(snode.cluster_id, snode.get_id(), port)
-                except Exception:
-                    logger.error("Check node port failed, connection error")
+                except Exception as e:
+                    health_controller._log_port_check_failure(db, snode, port, e)
 
         health_check_status = is_node_online and node_devices_check and node_remote_devices_check and lvstore_check
     set_node_health_check(snode, bool(health_check_status))
@@ -286,24 +301,43 @@ def check_node(snode):
 def loop_for_node(snode):
     while True:
         try:
+            # Refresh so we see status transitions since the last iteration
+            # — the adaptive interval below keys off node.status.
+            snode = db.get_storage_node_by_id(snode.get_id())
             check_node(snode)
+        except KeyError:
+            # Node was deleted from the DB; nothing to poll.
+            return
         except Exception as e:
             logger.error(e)
+        # Poll faster when the node isn't ONLINE so the state machine sees
+        # the recovery transition as soon as it happens (recovery is time-
+        # critical; healthy-node polling stays at the normal 30 s cadence).
+        if snode.status == StorageNode.STATUS_ONLINE:
+            time.sleep(constants.HEALTH_CHECK_INTERVAL_SEC)
+        else:
+            time.sleep(constants.HEALTH_CHECK_FAST_INTERVAL_SEC)
+
+
+db = db_controller.DBController()
+threads_maps: dict[str, threading.Thread] = {}
+
+
+def _main():
+    logger.info("Starting health check service")
+    while True:
+        clusters = db.get_clusters()
+        for cluster in clusters:
+            for node in db.get_storage_nodes_by_cluster_id(cluster.get_id()):
+                node_id = node.get_id()
+                if node_id not in threads_maps or threads_maps[node_id].is_alive() is False:
+                    t = threading.Thread(target=loop_for_node, args=(node,))
+                    t.start()
+                    threads_maps[node_id] = t
+
         time.sleep(constants.HEALTH_CHECK_INTERVAL_SEC)
 
 
-logger.info("Starting health check service")
-db = db_controller.DBController()
-threads_maps: dict[str, threading.Thread] = {}
-while True:
-    clusters = db.get_clusters()
-    for cluster in clusters:
-        for node in  db.get_storage_nodes_by_cluster_id(cluster.get_id()):
-            node_id = node.get_id()
-            if node_id not in threads_maps or threads_maps[node_id].is_alive() is False:
-                t = threading.Thread(target=loop_for_node, args=(node,))
-                t.start()
-                threads_maps[node_id] = t
-
-    time.sleep(constants.HEALTH_CHECK_INTERVAL_SEC)
+if __name__ == "__main__":
+    _main()
 

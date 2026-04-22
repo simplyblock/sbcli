@@ -30,6 +30,13 @@ def range_type(min, max):
     return f
 
 
+def list_type(separator: str = ','):
+    def f(arg) -> list[str]:
+        return arg.split(separator)
+
+    return f
+
+
 def size_type(min=None, max=None):
     def f(arg):
         size = utils.parse_size(arg)
@@ -985,7 +992,7 @@ class CLIWrapperBase:
         is_single_node = args.is_single_node
         client_data_nic = args.client_data_nic
 
-        max_fault_tolerance = args.max_fault_tolerance
+        max_fault_tolerance = min(distr_npcs, 2) if distr_npcs >= 1 else 1
 
         backup_config = None
         if args.use_backup:
@@ -1036,7 +1043,7 @@ class CLIWrapperBase:
         fabric = args.fabric
         client_data_nic = args.client_data_nic
 
-        max_fault_tolerance = args.max_fault_tolerance
+        max_fault_tolerance = min(distr_npcs, 2) if distr_npcs >= 1 else 1
 
         backup_config = None
         if args.use_backup:

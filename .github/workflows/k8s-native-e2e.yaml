@@ -1,4 +1,4 @@
-name: K8s Native Stress Tests
+name: Stress Tests
 
 on:
   workflow_dispatch:
@@ -10,6 +10,18 @@ on:
       simplyblock_image:
         description: 'Simplyblock image tag'
         required: true
+        default: 'main'
+      simplyblock_repository:
+        description: 'Simplyblock image repository'
+        required: false
+        default: 'public.ecr.aws/simply-block/simplyblock'
+      operator_repository:
+        description: 'Operator image repository'
+        required: false
+        default: 'simplyblock/simplyblock-manager'
+      operator_tag:
+        description: 'Operator image tag'
+        required: false
         default: 'main'
       spdk_image:
         description: 'SPDK container image'
@@ -38,7 +50,7 @@ on:
       ndcs:
         description: 'Number of data chunks'
         required: false
-        default: 2
+        default: 1
       npcs:
         description: 'Number of parity chunks'
         required: false
@@ -53,11 +65,13 @@ on:
         default: 4096
 
 jobs:
-  k8s-native-e2e:
+  stress-test:
     runs-on: self-hosted
     concurrency:
       group: ${{ github.workflow }}
       cancel-in-progress: false
+    env:
+      TESTNAME: ${{ github.event.inputs.testname || 'K8sNativeFailoverTest' }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -165,14 +179,93 @@ jobs:
           }
           patch_and_delete_crs
 
-          echo "=== Phase 3: Force delete all namespaced resources ==="
-          for RTYPE in pod pvc pv jobs service ds statefulset deployment replicaset secret sa configmap; do
+          echo "=== Phase 3a: Delete VolumeSnapshots & VolumeSnapshotContents ==="
+          # Delete snapshots first (they block PVC deletion)
+          for VS in $(kubectl get volumesnapshot -n $NAMESPACE --no-headers -o custom-columns=:metadata.name 2>/dev/null); do
+            kubectl -n $NAMESPACE patch volumesnapshot "$VS" \
+              --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
+            kubectl -n $NAMESPACE delete volumesnapshot "$VS" --wait=false 2>/dev/null || true
+          done
+
+          # Delete VolumeSnapshotContents (cluster-scoped, may block snapshot deletion)
+          for VSC in $(kubectl get volumesnapshotcontent --no-headers -o custom-columns=:metadata.name 2>/dev/null); do
+            kubectl patch volumesnapshotcontent "$VSC" \
+              --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
+            kubectl delete volumesnapshotcontent "$VSC" --wait=false 2>/dev/null || true
+          done
+
+          # Delete VolumeSnapshotClasses
+          for VSCLASS in $(kubectl get volumesnapshotclass --no-headers -o custom-columns=:metadata.name 2>/dev/null); do
+            kubectl delete volumesnapshotclass "$VSCLASS" --ignore-not-found 2>/dev/null || true
+          done
+
+          echo "=== Phase 3b: Delete PVCs (with timeout + retry) ==="
+          # First attempt: normal delete
+          kubectl -n $NAMESPACE delete pvc --all --wait=false 2>/dev/null || true
+
+          # Wait up to 60s for PVCs to go away
+          PVC_TIMEOUT=60
+          while [ $PVC_TIMEOUT -gt 0 ]; do
+            REMAINING=$(kubectl -n $NAMESPACE get pvc --no-headers 2>/dev/null | wc -l)
+            if [ "$REMAINING" -eq 0 ]; then
+              echo "All PVCs deleted"
+              break
+            fi
+            echo "Waiting for $REMAINING PVCs to delete ($PVC_TIMEOUT s remaining)..."
+            sleep 5
+            PVC_TIMEOUT=$((PVC_TIMEOUT - 5))
+          done
+
+          # If PVCs are still stuck, patch finalizers and force delete
+          for PVC in $(kubectl -n $NAMESPACE get pvc --no-headers -o custom-columns=:metadata.name 2>/dev/null); do
+            echo "Force-deleting stuck PVC: $PVC"
+            kubectl -n $NAMESPACE patch pvc "$PVC" \
+              --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
+            kubectl -n $NAMESPACE delete pvc "$PVC" --force --grace-period=0 2>/dev/null || true
+          done
+
+          echo "=== Phase 3c: Delete PVs ==="
+          for PV in $(kubectl get pv --no-headers -o custom-columns=:metadata.name 2>/dev/null | grep -i simplyblock 2>/dev/null); do
+            kubectl patch pv "$PV" \
+              --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
+            kubectl delete pv "$PV" --force --grace-period=0 2>/dev/null || true
+          done
+
+          echo "=== Phase 3d: Force delete remaining namespaced resources ==="
+          for RTYPE in pod jobs service ds statefulset deployment replicaset secret sa configmap; do
             kubectl -n $NAMESPACE delete $RTYPE --all --force --grace-period=0 2>/dev/null || true
           done
 
           echo "=== Phase 4: Cleanup cluster-scoped resources ==="
+          # Delete StorageClasses
+          for SC in $(kubectl get sc --no-headers -o custom-columns=:metadata.name 2>/dev/null | grep -i simplyblock 2>/dev/null); do
+            kubectl delete sc "$SC" --ignore-not-found 2>/dev/null || true
+          done
           kubectl delete clusterrole simplyblock-storage-node-role --ignore-not-found 2>/dev/null || true
           kubectl delete clusterrolebinding simplyblock-storage-node-binding --ignore-not-found 2>/dev/null || true
+
+          echo "=== Phase 4b: Cleanup leftover secrets, SAs, and kube-system resources ==="
+          kubectl -n $NAMESPACE delete secret simplyblock-csi-secret-v2 --ignore-not-found 2>/dev/null || true
+          kubectl -n $NAMESPACE delete sa simplyblock-storage-node-sa --ignore-not-found 2>/dev/null || true
+
+          # Clean up kube-system resources from previous helm installs
+          for RES in sa clusterrole clusterrolebinding; do
+            for NAME in $(kubectl get $RES -A --no-headers 2>/dev/null | grep -i simplyblock | awk '{print $1 ":" $2}' 2>/dev/null); do
+              NS=$(echo "$NAME" | cut -d: -f1)
+              RNAME=$(echo "$NAME" | cut -d: -f2)
+              if [ "$RES" = "sa" ]; then
+                kubectl -n "$NS" delete sa "$RNAME" --ignore-not-found 2>/dev/null || true
+              else
+                kubectl delete "$RES" "$RNAME" --ignore-not-found 2>/dev/null || true
+              fi
+            done
+          done
+          # Specifically clean numa-resource-plugin resources in kube-system
+          kubectl -n kube-system delete ds simplyblock-numa-resource-plugin --ignore-not-found 2>/dev/null || true
+          kubectl -n kube-system delete sa simplyblock-numa-resource-plugin --ignore-not-found 2>/dev/null || true
+          kubectl -n kube-system delete cm simplyblock-numa-resource-plugin-config --ignore-not-found 2>/dev/null || true
+          kubectl delete clusterrole simplyblock-numa-resource-plugin --ignore-not-found 2>/dev/null || true
+          kubectl delete clusterrolebinding simplyblock-numa-resource-plugin --ignore-not-found 2>/dev/null || true
 
           echo "=== Phase 5: Verify nothing remains ==="
           echo "Namespaced resources:"
@@ -215,16 +308,6 @@ jobs:
 
           echo "=== Cleanup complete ==="
 
-      # # ── Label nodes ─────────────────────────────────────────────────────────
-
-      # - name: Label worker nodes
-      #   run: |
-      #     IFS=',' read -ra NODES <<< "${{ github.event.inputs.worker_nodes }}"
-      #     for NODE in "${NODES[@]}"; do
-      #       echo "Labeling node $NODE with simplyblock.io/role=mgmt-plane"
-      #       kubectl label node "$NODE" simplyblock.io/role=mgmt-plane --overwrite
-      #     done
-
       # ── Prepare namespace ─────────────────────────────────────────────────
 
       - name: Create namespace and set pod-security labels
@@ -245,45 +328,186 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/simplyblock-csi/charts/spdk-csi/latest/spdk-csi/
 
-          # Build worker nodes JSON array for --set-json
-          IFS=',' read -ra NODES <<< "${{ github.event.inputs.worker_nodes }}"
-          WORKER_JSON=$(printf '%s\n' "${NODES[@]}" | jq -R . | jq -s .)
-          echo "Worker nodes JSON: $WORKER_JSON"
-
-          # Build data nics JSON array
-          DATA_NICS_JSON='["${{ github.event.inputs.data_nics }}"]'
-
           helm upgrade --install spdk-csi ./ \
             --namespace simplyblock \
             --create-namespace \
+            --debug \
+            --timeout 10m \
             --set controlplane.enabled=true \
             --set operator.enabled=true \
             --set controlplane.csiHostpathDriver.enabled=true \
             --set controlplane.storageclass.name=local-hostpath \
-            --set operator.cluster.mgmtIfname="${{ github.event.inputs.mgmt_ifc }}" \
-            --set operator.cluster.enableNodeAffinity=true \
-            --set operator.cluster.fabricType=tcp \
-            --set operator.cluster.isSingleNode=false \
-            --set operator.cluster.strictNodeAntiAffinity=false \
-            --set operator.cluster.warningThreshold.capacity=95 \
-            --set operator.cluster.criticalThreshold.capacity=97 \
-            --set operator.storageNodes.mgmtIfname="${{ github.event.inputs.mgmt_ifc }}" \
-            --set operator.storageNodes.skipKubeletConfiguration=true \
-            --set operator.storageNodes.enableCpuTopology=true \
-            --set operator.storageNodes.maxLogicalVolumeCount=30 \
-            --set operator.storageNodes.spdkImage="${{ github.event.inputs.spdk_image }}" \
-            --set operator.storageNodes.spdkDebug=false \
-            --set operator.storageNodes.coreIsolation=false \
-            --set operator.storageNodes.numPartitions=0 \
+            --set image.simplyblock.repository="${{ github.event.inputs.simplyblock_repository || 'public.ecr.aws/simply-block/simplyblock' }}" \
             --set image.simplyblock.tag="${{ github.event.inputs.simplyblock_image }}" \
-            --set-json "operator.storageNodes.workerNodes=${WORKER_JSON}" \
-            --set-json "operator.storageNodes.dataIfname=${DATA_NICS_JSON}" \
-            --set operator.stripe.dataChunks="${NDCS}" \
-            --set operator.stripe.parityChunks="${NPCS}" \
+            --set image.operator.repository="${{ github.event.inputs.operator_repository || 'simplyblock/simplyblock-manager' }}" \
+            --set image.operator.tag="${{ github.event.inputs.operator_tag || 'main' }}" \
             --set csiConfig.simplybk.ip="http://simplyblock-webappapi.simplyblock:5000" \
             --set prometheus.server.persistentVolume.storageClass=local-hostpath \
             --set controlplane.observability.enabled=true \
             --set opensearch.persistence.storageClass=local-hostpath
+
+      # ── Apply custom resources ────────────────────────────────────────────
+
+      - name: Wait for operator pod to be ready
+        run: |
+          NAMESPACE=simplyblock
+          echo "=== Waiting for operator pod ==="
+          for i in $(seq 1 60); do
+            POD=$(kubectl -n $NAMESPACE get pods \
+              -l app=simplyblock-admin-control \
+              -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) || true
+            if [ -n "$POD" ]; then
+              PHASE=$(kubectl -n $NAMESPACE get pod "$POD" \
+                -o jsonpath='{.status.phase}' 2>/dev/null) || true
+              if [ "$PHASE" = "Running" ]; then
+                echo "Operator pod $POD is Running"
+                break
+              fi
+            fi
+            echo "Waiting for operator pod ($i/60)..."
+            sleep 10
+          done
+
+      - name: Apply operator custom resources
+        run: |
+          NAMESPACE=simplyblock
+          MGMT_IFC="${{ github.event.inputs.mgmt_ifc || 'ens18' }}"
+          SB_REPO="${{ github.event.inputs.simplyblock_repository || 'public.ecr.aws/simply-block/simplyblock' }}"
+          SB_TAG="${{ github.event.inputs.simplyblock_image }}"
+          SPDK_IMAGE="${{ github.event.inputs.spdk_image }}"
+          DATA_NICS="${{ github.event.inputs.data_nics || 'ens16' }}"
+
+          # Build workerNodes YAML list from comma-separated input
+          WORKER_YAML=""
+          IFS=',' read -ra NODES <<< "${{ github.event.inputs.worker_nodes }}"
+          for NODE in "${NODES[@]}"; do
+            WORKER_YAML="${WORKER_YAML}    - ${NODE}"$'\n'
+          done
+
+          echo "=== Custom resource YAML to apply ==="
+          cat <<EOF
+          apiVersion: storage.simplyblock.io/v1alpha1
+          kind: StorageCluster
+          metadata:
+            name: simplyblock-cluster
+            namespace: ${NAMESPACE}
+          spec:
+            clusterName: simplyblock-cluster
+            mgmtIfname: ${MGMT_IFC}
+            fabricType: tcp
+            isSingleNode: false
+            enableNodeAffinity: true
+            strictNodeAntiAffinity: false
+            stripe:
+              dataChunks: ${NDCS}
+              parityChunks: ${NPCS}
+            warningThreshold:
+              capacity: 95
+              provisionedCapacity: 97
+            criticalThreshold:
+              capacity: 96
+              provisionedCapacity: 98
+          ---
+          apiVersion: storage.simplyblock.io/v1alpha1
+          kind: Pool
+          metadata:
+            name: simplyblock-pool
+            namespace: ${NAMESPACE}
+          spec:
+            name: simplyblock-pool
+            clusterName: simplyblock-cluster
+          ---
+          apiVersion: storage.simplyblock.io/v1alpha1
+          kind: StorageNode
+          metadata:
+            name: simplyblock-node
+            namespace: ${NAMESPACE}
+          spec:
+            clusterName: simplyblock-cluster
+            clusterImage: "${SB_REPO}:${SB_TAG}"
+            spdkImage: "${SPDK_IMAGE}"
+            mgmtIfname: ${MGMT_IFC}
+            dataIfname:
+              - ${DATA_NICS}
+            maxLogicalVolumeCount: 30
+            partitions: 0
+            corePercentage: 65
+            coreIsolation: false
+            journalManager:
+              count: 3
+              percentPerDevice: 3
+            skipKubeletConfiguration: true
+            enableCpuTopology: true
+            openShiftCluster: false
+            ubuntuHost: false
+            forceFormat4K: false
+            workerNodes:
+          ${WORKER_YAML}
+          EOF
+
+          echo "=== Applying custom resources ==="
+          cat <<EOF | kubectl apply -f -
+          apiVersion: storage.simplyblock.io/v1alpha1
+          kind: StorageCluster
+          metadata:
+            name: simplyblock-cluster
+            namespace: ${NAMESPACE}
+          spec:
+            clusterName: simplyblock-cluster
+            mgmtIfname: ${MGMT_IFC}
+            fabricType: tcp
+            isSingleNode: false
+            enableNodeAffinity: true
+            strictNodeAntiAffinity: false
+            stripe:
+              dataChunks: ${NDCS}
+              parityChunks: ${NPCS}
+            warningThreshold:
+              capacity: 95
+              provisionedCapacity: 97
+            criticalThreshold:
+              capacity: 96
+              provisionedCapacity: 98
+          ---
+          apiVersion: storage.simplyblock.io/v1alpha1
+          kind: Pool
+          metadata:
+            name: simplyblock-pool
+            namespace: ${NAMESPACE}
+          spec:
+            name: simplyblock-pool
+            clusterName: simplyblock-cluster
+          ---
+          apiVersion: storage.simplyblock.io/v1alpha1
+          kind: StorageNode
+          metadata:
+            name: simplyblock-node
+            namespace: ${NAMESPACE}
+          spec:
+            clusterName: simplyblock-cluster
+            clusterImage: "${SB_REPO}:${SB_TAG}"
+            spdkImage: "${SPDK_IMAGE}"
+            mgmtIfname: ${MGMT_IFC}
+            dataIfname:
+              - ${DATA_NICS}
+            maxLogicalVolumeCount: 30
+            partitions: 0
+            corePercentage: 65
+            coreIsolation: false
+            journalManager:
+              count: 3
+              percentPerDevice: 3
+            skipKubeletConfiguration: true
+            enableCpuTopology: true
+            openShiftCluster: false
+            ubuntuHost: false
+            forceFormat4K: false
+            workerNodes:
+          ${WORKER_YAML}
+          EOF
+
+          echo "Custom resources applied"
+          sleep 10
         env:
           NDCS: ${{ env.NDCS }}
           NPCS: ${{ env.NPCS }}
@@ -346,14 +570,53 @@ jobs:
             sleep 10
           done
 
+          echo "=== Re-resolving admin pod before cluster status polling ==="
+          ADMIN_POD=""
+          for i in $(seq 1 30); do
+            ADMIN_POD=$(kubectl -n $NAMESPACE get pods \
+              -l app=simplyblock-admin-control \
+              -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) || true
+            if [ -n "$ADMIN_POD" ]; then
+              PHASE=$(kubectl -n $NAMESPACE get pod "$ADMIN_POD" \
+                -o jsonpath='{.status.phase}' 2>/dev/null) || true
+              if [ "$PHASE" = "Running" ]; then
+                echo "Admin pod resolved: $ADMIN_POD (Running)"
+                break
+              fi
+              echo "Admin pod $ADMIN_POD phase=$PHASE, retrying ($i/30)..."
+              ADMIN_POD=""
+            else
+              echo "Admin pod not found, retrying ($i/30)..."
+            fi
+            sleep 10
+          done
+          if [ -z "$ADMIN_POD" ]; then
+            echo "ERROR: Could not find running admin pod before polling"
+            kubectl -n $NAMESPACE get pods
+            exit 1
+          fi
+
           echo "=== Polling cluster status ==="
           for i in $(seq 1 90); do
+            # Re-resolve admin pod each iteration in case it gets recreated
+            NEW_POD=$(kubectl -n $NAMESPACE get pods \
+              -l app=simplyblock-admin-control \
+              -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) || true
+            NEW_PHASE=$(kubectl -n $NAMESPACE get pod "$NEW_POD" \
+              -o jsonpath='{.status.phase}' 2>/dev/null) || true
+            if [ -n "$NEW_POD" ] && [ "$NEW_PHASE" = "Running" ] && [ "$NEW_POD" != "$ADMIN_POD" ]; then
+              echo "Admin pod changed: $ADMIN_POD -> $NEW_POD"
+              ADMIN_POD="$NEW_POD"
+            fi
+
+            echo "[poll $i/90] Using admin pod: $ADMIN_POD"
             OUTPUT=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
-              sbctl cluster list 2>/dev/null) || true
+              sbctl cluster list 2>&1) || true
+            echo "[poll $i/90] sbctl cluster list output:"
+            echo "$OUTPUT"
 
             if echo "$OUTPUT" | grep -qi "active"; then
               echo "Cluster is active!"
-              echo "$OUTPUT"
 
               # Extract cluster ID and secret
               # sbctl cluster list outputs a table; parse the data row
@@ -362,12 +625,15 @@ jobs:
 
               # Fallback: try JSON format if table parsing fails
               if [ -z "$CLUSTER_ID" ] || [ "$CLUSTER_ID" = "+" ]; then
+                echo "Table parsing failed (CLUSTER_ID=$CLUSTER_ID), trying JSON..."
                 JSON_OUT=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
-                  sbctl cluster list --json 2>/dev/null) || true
+                  sbctl cluster list --json 2>&1) || true
+                echo "JSON output: $JSON_OUT"
                 CLUSTER_ID=$(echo "$JSON_OUT" | jq -r '.[0].id // .[0].uuid // empty')
                 CLUSTER_SECRET=$(echo "$JSON_OUT" | jq -r '.[0].secret // empty')
               fi
 
+              echo "Parsed CLUSTER_ID=${CLUSTER_ID}"
               echo "CLUSTER_ID=${CLUSTER_ID}" >> $GITHUB_ENV
               echo "CLUSTER_SECRET=${CLUSTER_SECRET}" >> $GITHUB_ENV
               exit 0
@@ -379,8 +645,19 @@ jobs:
 
           echo "ERROR: Cluster did not become active within timeout"
           kubectl -n $NAMESPACE get pods
-          kubectl -n $NAMESPACE exec "$ADMIN_POD" -- sbctl cluster list 2>/dev/null || true
+          kubectl -n $NAMESPACE exec "$ADMIN_POD" -- sbctl cluster list 2>&1 || true
           exit 1
+
+      # ── Label nodes (after cluster is active) ───────────────────────────────
+
+      - name: Label worker nodes
+        run: |
+          IFS=',' read -ra NODES <<< "${{ github.event.inputs.worker_nodes }}"
+          for NODE in "${NODES[@]}"; do
+            echo "Labeling node $NODE"
+            kubectl label node "$NODE" topology.kubernetes.io/zone=default --overwrite
+            kubectl label node "$NODE" simplyblock.io/role=mgmt-plane --overwrite
+          done
 
       # ── Run tests ───────────────────────────────────────────────────────────
 
@@ -389,6 +666,7 @@ jobs:
 
       - name: Setup and Run Tests
         run: |
+          set -o pipefail
           cd $GITHUB_WORKSPACE/e2e
           python3 -m venv myenv
           source myenv/bin/activate
@@ -412,6 +690,7 @@ jobs:
           NPCS: ${{ env.NPCS }}
           BS: ${{ env.BS }}
           CHUNK_BS: ${{ env.CHUNK_BS }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
 
       # ── Post-test: timing, logs, notifications ──────────────────────────────
 
@@ -493,6 +772,43 @@ jobs:
           echo "${FAILED_CASES_BULLETS}" >> $GITHUB_ENV
           echo "EOF" >> $GITHUB_ENV
 
+      - name: Write Job Summary
+        if: always()
+        run: |
+          echo "## Stress Test: ${{ env.TESTNAME }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Setting | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|---------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Branch** | ${{ github.ref_name }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **CSI Branch** | ${{ github.event.inputs.simplyblock_csi_branch }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **SPDK Image** | ${{ github.event.inputs.spdk_image }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **NDCS** | ${{ env.NDCS }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **NPCS** | ${{ env.NPCS }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **BS** | ${{ env.BS }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Chunk BS** | ${{ env.CHUNK_BS }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Runtime** | ${{ env.TEST_TIME_HOURS }}h ${{ env.TEST_TIME_MINS }}m ${{ env.TEST_TIME_SECS }}s |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Results" >> $GITHUB_STEP_SUMMARY
+          echo "- **Total**: ${{ env.TOTAL_TESTS }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Passed**: ${{ env.PASSED_TESTS }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Failed**: ${{ env.FAILED_TESTS }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ -n "${{ env.PASSED_CASES }}" ]; then
+            echo "#### Passed" >> $GITHUB_STEP_SUMMARY
+            echo "${{ env.PASSED_CASES }}" | while IFS= read -r line; do
+              [ -n "$line" ] && echo "- $line" >> $GITHUB_STEP_SUMMARY
+            done
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
+          if [ -n "${{ env.FAILED_CASES }}" ]; then
+            echo "#### Failed" >> $GITHUB_STEP_SUMMARY
+            echo "${{ env.FAILED_CASES }}" | while IFS= read -r line; do
+              [ -n "$line" ] && echo "- $line" >> $GITHUB_STEP_SUMMARY
+            done
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "[AWS Logs](https://s3.console.aws.amazon.com/s3/buckets/simplyblock-e2e-test-logs?prefix=${{ github.run_id }}/&region=us-east-2)" >> $GITHUB_STEP_SUMMARY
+
       - name: Set slack notification flag
         if: always()
         run: |
@@ -511,6 +827,7 @@ jobs:
           TOTAL_TESTS: ${{ env.TOTAL_TESTS }}
           PASSED_CASES_BULLETS: ${{ env.PASSED_CASES_BULLETS }}
           FAILED_CASES_BULLETS: ${{ env.FAILED_CASES_BULLETS }}
+          TESTNAME: ${{ env.TESTNAME }}
           BRANCH_NAME: ${{ github.ref_name }}
           TEST_TIME_HOURS: ${{ env.TEST_TIME_HOURS }}
           TEST_TIME_MINS: ${{ env.TEST_TIME_MINS }}
@@ -530,7 +847,7 @@ jobs:
 
           TIME_TAKEN="${TEST_TIME_HOURS}h ${TEST_TIME_MINS}m ${TEST_TIME_SECS}s"
 
-          MESSAGE="K8s Native E2E tests run triggered on branch *${BRANCH_NAME}*. \nCSI branch: *${{ github.event.inputs.simplyblock_csi_branch }}*\nTotal Time: ${TIME_TAKEN}\n\n${OVERALL_STATUS}\nGitHub Run: ${GITHUB_RUN_URL}\nAWS Logs: ${AWS_LOGS_URL}\n\n*Config*: NDCS: ${NDCS}, NPCS: ${NPCS}, BS: ${BS}, Chunk BS: ${CHUNK_BS}\n\nTotal Tests: *${TOTAL_TESTS}*, Passed: *${PASSED_TESTS}*, Failed: *${FAILED_TESTS}*\n\n-- Passed :white_check_mark:\n${PASSED_CASES_BULLETS}\n\n-- Failed :x:\n${FAILED_CASES_BULLETS}"
+          MESSAGE="Stress test *${TESTNAME}* on branch *${BRANCH_NAME}*\nCSI branch: *${{ github.event.inputs.simplyblock_csi_branch }}*\nTotal Time: ${TIME_TAKEN}\n\n${OVERALL_STATUS}\nGitHub Run: ${GITHUB_RUN_URL}\nAWS Logs: ${AWS_LOGS_URL}\n\n*Config*: NDCS: ${NDCS}, NPCS: ${NPCS}, BS: ${BS}, Chunk BS: ${CHUNK_BS}\n\nTotal Tests: *${TOTAL_TESTS}*, Passed: *${PASSED_TESTS}*, Failed: *${FAILED_TESTS}*\n\n-- Passed :white_check_mark:\n${PASSED_CASES_BULLETS}\n\n-- Failed :x:\n${FAILED_CASES_BULLETS}"
 
           curl -X POST -H 'Content-type: application/json' \
             --data "{\"text\":\"${MESSAGE}\"}" "$SLACK_WEBHOOK_URL"

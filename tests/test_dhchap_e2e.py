@@ -159,10 +159,6 @@ def _start_snode_api():
     proc = subprocess.Popen(
         [sys.executable, "-c",
          f"""
-import os
-os.environ['WITHOUT_CLOUD_INFO'] = 'True'
-os.environ['SIMPLYBLOCK_LOG_LEVEL'] = 'ERROR'
-os.environ['DHCHAP_KEY_DIR'] = '{_dhchap_tmpdir}'
 from flask_openapi3 import OpenAPI
 from simplyblock_web.api.internal.storage_node.docker import api
 app = OpenAPI(__name__)
@@ -254,9 +250,11 @@ class TestDHCHAPE2E(unittest.TestCase):
         self.assertTrue(os.path.isfile(result))
         with open(result) as f:
             self.assertEqual(f.read(), "DHHC-1:01:dGVzdA==:")
-        # Verify permissions are 0600
-        mode = os.stat(result).st_mode & 0o777
-        self.assertEqual(mode, 0o600)
+        # Verify permissions are 0600 (POSIX only — Windows uses ACLs and
+        # cannot represent 0o600 via the POSIX mode bits returned by stat).
+        if sys.platform != "win32":
+            mode = os.stat(result).st_mode & 0o777
+            self.assertEqual(mode, 0o600)
 
     def test_write_key_file_invalid_name_rejected(self):
         from simplyblock_core.snode_client import SNodeClient

@@ -23,6 +23,9 @@ Usage
 Options
 -------
   --output-dir DIR    Write the tarball here (default: current directory).
+  --mode MODE         Deployment mode: "docker" (default) or "kubernetes".
+                      Selects the set of control-plane service names and
+                      adjusts which log sources are queried.
   --use-opensearch    Query OpenSearch scroll API directly instead of the
                       Graylog search REST API.  Useful when Graylog is
                       unavailable or when the result set is very large.
@@ -34,6 +37,7 @@ Examples
   collect_logs.py "2024-01-15T10:00:00" 60
   collect_logs.py "2024-01-15 10:00:00" 30 --output-dir /tmp/logs
   collect_logs.py "2024-01-15T10:00:00" 120 --use-opensearch
+  collect_logs.py "2024-01-15T10:00:00" 60 --mode kubernetes
 """
 
 import argparse
@@ -69,7 +73,7 @@ PAGE_SIZE = 1000
 MAX_RESULT_WINDOW = 100_000
 
 # Docker Swarm service names that run on the management / control-plane node.
-CONTROL_PLANE_SERVICES = [
+CONTROL_PLANE_SERVICES_DOCKER = [
     "WebAppAPI",
     "fdb-server",
     "fdb-backup-agent",
@@ -96,6 +100,33 @@ CONTROL_PLANE_SERVICES = [
     "TasksRunnerBackup",
     "TasksRunnerBackupMerge",
     "HAProxy",
+]
+
+CONTROL_PLANE_SERVICES_KUBERNETES = [
+    "simplyblock-control",
+    "webappapi",
+    "storage-node-monitor",
+    "mgmt-node-monitor",
+    "lvol-stats-collector",
+    "main-distr-event-collector",
+    "capacity-and-stats-collector",
+    "capacity-monitor",
+    "health-check",
+    "device-monitor",
+    "lvol-monitor",
+    "snapshot-monitor",
+    "tasks-node-add-runner",
+    "tasks-runner-restart",
+    "tasks-runner-migration",
+    "tasks-runner-failed-migration",
+    "tasks-runner-cluster-status",
+    "tasks-runner-new-device-migration",
+    "tasks-runner-port-allow",
+    "tasks-runner-jc-comp-resume",
+    "tasks-runner-sync-lvol-del",
+    "tasks-runner-backup",
+    "tasks-runner-backup-merge",
+    "tasks-runner-snapshot-replication",
 ]
 
 # ---------------------------------------------------------------------------
@@ -172,6 +203,14 @@ def _fmt(msg: dict) -> str:
 # Graylog REST API helpers
 # ---------------------------------------------------------------------------
 
+def _gl_escape(value: str) -> str:
+    """
+    Escape Lucene special characters in a Graylog field query term.
+    Hyphens are NOT escaped — they are only special in range expressions
+    and cause HTTP 400 when escaped in the Graylog REST API.
+    """
+    return value.replace(".", "\\.")
+
 
 def _gl_search_page(session, search_url, query, from_iso, to_iso, limit, offset):
     """
@@ -188,13 +227,21 @@ def _gl_search_page(session, search_url, query, from_iso, to_iso, limit, offset)
         "fields": "timestamp,source,container_name,level,message",
     }
     try:
-        resp = session.get(search_url, params=params, timeout=90)
+        resp = session.get(search_url, params=params, timeout=90,
+                           headers={"Accept": "application/json"})
         resp.raise_for_status()
     except requests.RequestException as exc:
         print(f"    WARN: Graylog page request failed (offset={offset}): {exc}", file=sys.stderr)
         return None, 0
 
-    data = resp.json()
+    if not resp.text.strip():
+        print(f"    WARN: Graylog returned empty response (offset={offset}, status={resp.status_code})", file=sys.stderr)
+        return None, 0
+    try:
+        data = resp.json()
+    except requests.exceptions.JSONDecodeError as exc:
+        print(f"    WARN: Graylog response is not valid JSON (offset={offset}): {exc}", file=sys.stderr)
+        return None, 0
     return data.get("messages", []), data.get("total_results", 0)
 
 
@@ -329,7 +376,8 @@ def _os_probe(session, os_url, index, from_ms, to_ms):
                 if "@timestamp" in src:
                     result["ts_field"] = "@timestamp"
                 # Detect container-name field (various naming conventions)
-                for candidate in ("container_name", "container_id", "containerName",
+                for candidate in ("kubernetes_container_name", "container_name",
+                                  "container_id", "containerName",
                                   "_container_name", "docker_container_name"):
                     if candidate in src:
                         result["cname_field"] = candidate
@@ -453,7 +501,7 @@ def opensearch_diagnose(session, os_url, from_iso, to_iso):
 
 
 def opensearch_fetch_all(session, os_url, container_name, source, from_iso, to_iso, out_path,
-                         probe_cache=None):
+                         probe_cache=None, pod_name=None):
     """
     Fetch logs directly from OpenSearch using the scroll API.
 
@@ -503,6 +551,15 @@ def opensearch_fetch_all(session, os_url, container_name, source, from_iso, to_i
             "query_string": {
                 "default_field": cname_f,
                 "query": f"*{esc}*",
+                "analyze_wildcard": True,
+            }
+        })
+    if pod_name:
+        esc_pod = pod_name.replace("/", "\\/").replace(":", "\\:")
+        must_clauses.append({
+            "query_string": {
+                "default_field": "kubernetes_pod_name",
+                "query": f"*{esc_pod}*",
                 "analyze_wildcard": True,
             }
         })
@@ -622,6 +679,7 @@ def fetch(
     to_iso,
     out_path,
     probe_cache,
+    os_pod_name=None,
 ):
     """Route to Graylog or OpenSearch depending on *use_opensearch*."""
     if use_opensearch:
@@ -630,6 +688,7 @@ def fetch(
             os_container, os_source,
             from_iso, to_iso, str(out_path),
             probe_cache=probe_cache,
+            pod_name=os_pod_name,
         )
     return graylog_fetch_all(
         gl_session, graylog_base,
@@ -764,6 +823,7 @@ def main():
             '  collect_logs.py "2024-01-15T10:00:00" 60\n'
             '  collect_logs.py "2024-01-15 10:00:00" 30 --output-dir /tmp/logs\n'
             '  collect_logs.py "2024-01-15T10:00:00" 120 --use-opensearch\n'
+            '  collect_logs.py "2024-01-15T10:00:00" 60 --mode kubernetes\n'
         ),
     )
     parser.add_argument(
@@ -783,6 +843,16 @@ def main():
         default=".",
         metavar="DIR",
         help="Directory to write the output tarball (default: current directory).",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["docker", "kubernetes"],
+        default="docker",
+        help=(
+            "Deployment mode: 'docker' (default) uses Docker Swarm service names "
+            "for control-plane log collection; 'kubernetes' uses Kubernetes container "
+            "names and skips Graylog-based SPDK log collection (kubectl is used instead)."
+        ),
     )
     parser.add_argument(
         "--use-opensearch",
@@ -853,6 +923,7 @@ def main():
     print("  Simplyblock Log Collector")
     print("=" * 64)
     print(f"  Window : {from_iso}  →  {to_iso}  ({args.duration_minutes} min)")
+    print(f"  Deploy : {args.mode}")
     print(f"  Mode   : {'OpenSearch (direct)' if args.use_opensearch else 'Graylog REST API'}")
 
     # ── 2. Cluster UUID + secret ─────────────────────────────────────────────
@@ -888,8 +959,12 @@ def main():
         mgmt_ip = cp_nodes[0]["IP"]
         print(f"    Management IP : {mgmt_ip}  ({len(cp_nodes)} node(s) total)")
 
-    graylog_base = f"http://{mgmt_ip}/graylog/api"
-    opensearch_base = f"http://{mgmt_ip}/opensearch"
+    if args.mode == "kubernetes":
+        graylog_base = f"http://{mgmt_ip}:9000/api"
+        opensearch_base = f"http://{mgmt_ip}:9200"
+    else:
+        graylog_base = f"http://{mgmt_ip}/graylog/api"
+        opensearch_base = f"http://{mgmt_ip}/opensearch"
 
     # ── 4. Storage nodes ─────────────────────────────────────────────────────
 
@@ -968,15 +1043,21 @@ def main():
 
         # ── 7. Control-plane logs ────────────────────────────────────────────
 
-        print(f"\n[5] Collecting control-plane logs ({len(CONTROL_PLANE_SERVICES)} services) …")
+        cp_services = (
+            CONTROL_PLANE_SERVICES_KUBERNETES
+            if args.mode == "kubernetes"
+            else CONTROL_PLANE_SERVICES_DOCKER
+        )
+        print(f"\n[5] Collecting control-plane logs ({len(cp_services)} services, mode={args.mode}) …")
         cp_dir = log_root / "control_plane"
         cp_dir.mkdir()
 
+        gl_cname_field = "kubernetes_container_name" if args.mode == "kubernetes" else "container_name"
+
         total_cp_lines = 0
-        for svc in CONTROL_PLANE_SERVICES:
+        for svc in cp_services:
             out_f = cp_dir / f"{svc}.log"
-            # Graylog Lucene query – no source filter (services are globally unique)
-            gl_q = f'container_name:"{svc}"'
+            gl_q = f'{gl_cname_field}:"{svc}"'
             n = fetch(
                 gl_query=gl_q,
                 os_container=svc,
@@ -991,57 +1072,99 @@ def main():
         print(f"  {'Control-plane total':<42} {total_cp_lines:>8,} lines")
 
         # ── 8. Storage-node logs ─────────────────────────────────────────────
+        # Docker mode: collect SPDK/SNodeAPI logs from Graylog/OpenSearch.
+        # Kubernetes mode: SPDK logs are captured via kubectl in step 9.
 
-        print("\n[6] Collecting storage-node logs …")
-        sn_root = log_root / "storage_nodes"
-        sn_root.mkdir()
+        if args.mode == "docker":
+            print("\n[6] Collecting storage-node logs (docker) …")
+            sn_root = log_root / "storage_nodes"
+            sn_root.mkdir()
 
-        # SNodeAPI runs on every storage node under the same container name.
-        # Its GELF 'source' field is the Docker host hostname whose exact
-        # format varies by deployment and cannot be reliably derived from
-        # the management IP alone.  Collect ALL SNodeAPI logs once (no
-        # source filter) into a shared file; each line contains src=<host>
-        # so per-node filtering can be done with grep afterwards.
-        print("\n  SNodeAPI (all nodes combined) …")
-        snode_api_log = sn_root / "SNodeAPI_all_nodes.log"
-        snode_api_count = fetch(
-            gl_query='container_name:"SNodeAPI"',
-            os_container="SNodeAPI",
-            os_source=None,
-            out_path=snode_api_log,
-            **fetch_kw,
-        )
-        print(f"  {'SNodeAPI (all nodes)':<42} {snode_api_count:>8,} lines")
-        print("  (filter by src=<ip> to isolate per-node logs)")
+            # SNodeAPI runs on every storage node under the same container name.
+            # Its GELF 'source' field is the Docker host hostname whose exact
+            # format varies by deployment and cannot be reliably derived from
+            # the management IP alone.  Collect ALL SNodeAPI logs once (no
+            # source filter) into a shared file; each line contains src=<host>
+            # so per-node filtering can be done with grep afterwards.
+            print("\n  SNodeAPI (all nodes combined) …")
+            snode_api_log = sn_root / "SNodeAPI_all_nodes.log"
+            snode_api_count = fetch(
+                gl_query='container_name:"SNodeAPI"',
+                os_container="SNodeAPI",
+                os_source=None,
+                out_path=snode_api_log,
+                **fetch_kw,
+            )
+            print(f"  {'SNodeAPI (all nodes)':<42} {snode_api_count:>8,} lines")
+            print("  (filter by src=<ip> to isolate per-node logs)")
 
-        for node in sn_list:
-            hostname = node.get("Hostname", "unknown")
-            node_ip = node.get("Management IP", "")
-            rpc_port = node.get("SPDK P", 8080)
+            for node in sn_list:
+                hostname = node.get("Hostname", "unknown")
+                node_ip = node.get("Management IP", "")
+                rpc_port = node.get("SPDK P", 8080)
 
-            node_label = f"{hostname}_{node_ip}".strip("_") if node_ip else hostname
-            node_dir = sn_root / node_label
-            node_dir.mkdir()
+                node_label = f"{hostname}_{node_ip}".strip("_") if node_ip else hostname
+                node_dir = sn_root / node_label
+                node_dir.mkdir()
 
-            print(f"\n  Node: {hostname}  ip={node_ip}  rpc_port={rpc_port}")
+                print(f"\n  Node: {hostname}  ip={node_ip}  rpc_port={rpc_port}")
 
-            # spdk_N and spdk_proxy_N are globally unique by RPC port number;
-            # no source filter needed.
-            spdk_containers = [
-                (f"spdk_{rpc_port}",       f"spdk_{rpc_port}.log"),
-                (f"spdk_proxy_{rpc_port}", f"spdk_proxy_{rpc_port}.log"),
-            ]
+                # spdk_N and spdk_proxy_N are globally unique by RPC port number;
+                # no source filter needed.
+                spdk_containers = [
+                    (f"spdk_{rpc_port}",       f"spdk_{rpc_port}.log"),
+                    (f"spdk_proxy_{rpc_port}", f"spdk_proxy_{rpc_port}.log"),
+                ]
 
-            for cname, fname in spdk_containers:
-                out_f = node_dir / fname
-                n = fetch(
-                    gl_query=f'container_name:"{cname}"',
-                    os_container=cname,
-                    os_source=None,
-                    out_path=out_f,
-                    **fetch_kw,
-                )
-                print(f"    {cname:<42} {n:>8,} lines")
+                for cname, fname in spdk_containers:
+                    out_f = node_dir / fname
+                    n = fetch(
+                        gl_query=f'container_name:"{cname}"',
+                        os_container=cname,
+                        os_source=None,
+                        out_path=out_f,
+                        **fetch_kw,
+                    )
+                    print(f"    {cname:<42} {n:>8,} lines")
+        else:
+            print("\n[6] Collecting storage-node logs (kubernetes) …")
+            sn_root = log_root / "storage_nodes"
+            sn_root.mkdir()
+
+            for node in sn_list:
+                hostname = node.get("Hostname", "unknown")
+                node_ip = node.get("Management IP", "")
+                rpc_port = node.get("SPDK P", 8080)
+
+                node_label = f"{hostname}_{node_ip}".strip("_") if node_ip else hostname
+                node_dir = sn_root / node_label
+                node_dir.mkdir()
+
+                print(f"\n  Node: {hostname}  ip={node_ip}  rpc_port={rpc_port}")
+
+                # Pod name pattern: snode-spdk-pod-<rpc_port>-<cluster_uuid>
+                # Container names inside that pod: spdk-container, spdk-proxy-container
+                pod_name = f"snode-spdk-pod-{rpc_port}-*"
+                spdk_containers = [
+                    ("spdk-container",       f"spdk-container_{rpc_port}.log"),
+                    ("spdk-proxy-container", f"spdk-proxy-container_{rpc_port}.log"),
+                ]
+
+                for cname, fname in spdk_containers:
+                    out_f = node_dir / fname
+                    gl_q = (
+                        f'kubernetes_pod_name:{_gl_escape(pod_name)} '
+                        f'AND kubernetes_container_name:{_gl_escape(cname)}'
+                    )
+                    n = fetch(
+                        gl_query=gl_q,
+                        os_container=cname,
+                        os_source=None,
+                        os_pod_name=pod_name,
+                        out_path=out_f,
+                        **fetch_kw,
+                    )
+                    print(f"    {cname:<42} {n:>8,} lines")
 
         # ── 9. Kubernetes pod logs (CSI node + storage-node DS) ──────────────
 
@@ -1179,7 +1302,8 @@ def main():
             "duration_minutes": args.duration_minutes,
             "cluster_uuid": cluster_uuid,
             "mgmt_ip": mgmt_ip,
-            "mode": "opensearch-direct" if args.use_opensearch else "graylog-api",
+            "deploy_mode": args.mode,
+            "log_source": "opensearch-direct" if args.use_opensearch else "graylog-api",
             "storage_nodes": [
                 {
                     "hostname": n.get("Hostname"),

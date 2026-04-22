@@ -208,6 +208,7 @@ properties:
                             - str
                             - bool
                             - size
+                            - list
                         - type: object
                           description: |
                             Valid arguments are integers within a specific range. Minimum is inclusive and maximum is exclusive.
