@@ -199,7 +199,7 @@ def spdk_process_start(body: SPDKParams):
     )
     node_docker.containers.run(
         body.spdk_proxy_image,
-        "python simplyblock_core/services/spdk_http_proxy_server.py ",
+        "python3 simplyblock_core/services/spdk_http_proxy_server.py ",
         name=f"spdk_proxy_{body.rpc_port}",
         detach=True,
         network_mode="host",
