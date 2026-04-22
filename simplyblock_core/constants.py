@@ -271,7 +271,7 @@ DHCHAP_DHGROUP = "ffdhe2048"
 # Default port ranges (configurable per-cluster via Cluster model fields)
 NVMF_BASE_PORT = 4420         # Base port for ALL NVMe-oF listeners (lvol, hublvol, device)
 RPC_BASE_PORT = 8080          # Base port for SPDK JSON-RPC
-SNODE_API_PORT = 50001        # SNodeAPI/firewall port (one per host IP)
+SNODE_API_PORT = 50001        # SNodeAPI/firewall port base — allocated per SPDK node, not per host
 
 # Legacy constants kept for backward compatibility with env override
 LVOL_NVMF_PORT_ENV = os.getenv("LVOL_NVMF_PORT_START", "")

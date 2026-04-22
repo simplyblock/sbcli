@@ -138,8 +138,23 @@ def _check_spdk_process_up(ip, rpc_port, cluster_id):
     return is_up
 
 
+def _log_port_check_failure(db_controller, snode, port, exc):
+    # ECONNREFUSED from the node-agent's /firewall endpoint is routine during
+    # activation and restart windows. Downgrade to WARNING so a transient miss
+    # doesn't look like a real outage in logs.
+    try:
+        cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+        cluster_status = cluster.status if cluster else None
+    except Exception:
+        cluster_status = None
+    unstable = (cluster_status in (Cluster.STATUS_IN_ACTIVATION, Cluster.STATUS_SUSPENDED)
+                or snode.status in (StorageNode.STATUS_RESTARTING, StorageNode.STATUS_IN_SHUTDOWN))
+    log_fn = logger.warning if unstable else logger.error
+    log_fn("Check node port failed for %s port %s: %s", snode.get_id(), port, exc)
+
+
 def check_port_on_node(snode, port_id):
-    fw_api = FirewallClient(snode, timeout=5, retry=2)
+    fw_api = FirewallClient(snode, timeout=5, retry=5)
     iptables_command_output, _ = fw_api.get_firewall(snode.rpc_port)
     if type(iptables_command_output) is str:
         iptables_command_output = [iptables_command_output]
@@ -634,16 +649,16 @@ def check_node(node_id, with_devices=True):
                 logger.info(f"Check: node {snode.mgmt_ip}, port: {sec_lvs_port} ... {lvol_port_check}")
             except KeyError:
                 logger.error("node not found")
-            except Exception:
-                logger.error("Check node port failed, connection error")
+            except Exception as e:
+                _log_port_check_failure(db_controller, snode, sec_lvs_port, e)
 
     if not snode.is_secondary_node:
         try:
             own_lvs_port = snode.get_lvol_subsys_port(snode.lvstore)
             lvol_port_check = check_port_on_node(snode, own_lvs_port)
             logger.info(f"Check: node {snode.mgmt_ip}, port: {own_lvs_port} ... {lvol_port_check}")
-        except Exception:
-            logger.error("Check node port failed, connection error")
+        except Exception as e:
+            _log_port_check_failure(db_controller, snode, own_lvs_port, e)
 
     is_node_online = ping_check and node_api_check and node_rpc_check
 
