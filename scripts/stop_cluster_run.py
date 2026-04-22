@@ -32,10 +32,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import shlex
+import shutil as _shutil
 import subprocess
-import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -345,8 +344,6 @@ def reboot_client(host: str, user: str, key: str) -> None:
 # AWS EC2 helpers (CLI subprocess)
 # --------------------------------------------------------------------------- #
 
-import shutil as _shutil
-
 
 def _require_aws_cli() -> None:
     if _shutil.which("aws") is None:
@@ -540,7 +537,7 @@ def replace_client(client_meta: dict, metadata: dict, metadata_path: Path,
 
     log(f"terminating old client {old_id}")
     aws_ec2(["terminate-instances", "--instance-ids", old_id], region)
-    log(f"old client termination initiated")
+    log("old client termination initiated")
     return client_meta
 
 
