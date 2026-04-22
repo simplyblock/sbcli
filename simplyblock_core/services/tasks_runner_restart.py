@@ -6,7 +6,7 @@ from simplyblock_core.controllers import device_controller, health_controller, t
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.snode_client import SNodeClient, SNodeClientException
+from simplyblock_core.snode_client import SNodeClientException
 
 
 logger = utils.get_logger(__name__)
@@ -71,7 +71,7 @@ def _ensure_spdk_killed(node):
     # the container in `exited` state).  Skipping the kill RPC avoids a ~30 s
     # retry-then-timeout cycle on an already-dead container.
     try:
-        client = SNodeClient(node.api_endpoint, timeout=5, retry=2)
+        client = node.client(timeout=5, retry=2)
         is_up, _ = client.spdk_process_is_up(node.rpc_port, node.cluster_id)
         if not is_up:
             logger.info(
@@ -88,8 +88,7 @@ def _ensure_spdk_killed(node):
 
     try:
         logger.info(f"Killing SPDK on node {node.get_id()} (rpc_port={node.rpc_port})")
-        SNodeClient(node.api_endpoint, timeout=10, retry=5).spdk_process_kill(
-            node.rpc_port, node.cluster_id)
+        node.client(timeout=10, retry=5).spdk_process_kill(node.rpc_port, node.cluster_id)
         return True
     except SNodeClientException as exc:
         logger.error(
