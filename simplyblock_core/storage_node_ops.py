@@ -4475,7 +4475,7 @@ def _handle_rpc_failure_on_peer(snode, peer_node, lvs_jm_vuid, lvs_name=None):
         return "abort"
 
 
-def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_mode=False):
+def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_mode=False, force=False):
     """Recreate a non-leader LVS on snode.
 
     Per design: runs for secondary when primary is online, or for tertiary always.
@@ -4693,6 +4693,61 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
                 detail=f"raid={primary_node.raid} present but lvstore did not recover"
                 if raid_already else "examine did not produce lvstore")
 
+    # Verify that examine actually rediscovered the lvstore and every lvol
+    # the FDB expects to be present on this node. Mirrors the check in
+    # recreate_lvstore() for the primary path. If an lvol blob did not
+    # become durable on this peer's shard of raid0 before it was torn down
+    # (e.g. the blob was committed on the primary/tertiary quorum but this
+    # node missed the write window due to a simultaneous force-shutdown),
+    # the examine won't surface it. Continuing would leave the lvol
+    # subsystem bound without a namespace on this node — present on
+    # primary/tertiary, missing here — and the divergence would never be
+    # reconciled because there is no FDB↔SPDK lvol-set reconcile loop.
+    if not activation_mode:
+        if not snode_rpc_client.bdev_lvol_get_lvstores(primary_node.lvstore):
+            logger.error(
+                "Failed to recover lvstore %s on %s after examine",
+                primary_node.lvstore, snode.get_id())
+            if not force:
+                _abort_and_unblock(
+                    f"lvstore {primary_node.lvstore} did not recover after examine "
+                    f"on non-leader {snode.get_id()}")
+
+        registered_bdevs = snode_rpc_client.get_bdevs() or []
+        bdev_names: set = set()
+        for b in registered_bdevs:
+            name = b.get('name')
+            if name:
+                bdev_names.add(name)
+            for alias in (b.get('aliases') or []):
+                bdev_names.add(alias)
+
+        missing_lvols = []
+        for lv in lvol_list:
+            base_bdev_name = f"{lv.lvs_name}/{lv.lvol_bdev}"
+            if lv.lvol_uuid in bdev_names or base_bdev_name in bdev_names:
+                continue
+            missing_lvols.append(lv)
+
+        if missing_lvols:
+            missing_repr = ", ".join(
+                f"{lv.lvs_name}/{lv.lvol_bdev}(uuid={lv.lvol_uuid[:8]})"
+                for lv in missing_lvols)
+            logger.error(
+                "Expected lvol bdevs missing on %s for %s after examine: %s",
+                snode.get_id(), primary_node.lvstore, missing_repr)
+            if not force:
+                _abort_and_unblock(
+                    f"Expected lvols not registered on {snode.get_id()} after "
+                    f"examine of {primary_node.raid}: {missing_repr}. "
+                    f"Re-run restart with force=True to proceed anyway "
+                    f"(this peer will not serve these lvols).")
+            else:
+                logger.warning(
+                    "force=True: proceeding with %d missing lvol(s) on %s for %s; "
+                    "these lvols will not be served by this peer",
+                    len(missing_lvols), snode.get_id(), primary_node.lvstore)
+
     # bdev_examine brings the LVS back with its metadata-persisted role
     # (primary). Leaving it as primary makes SPDK reject a later
     # bdev_lvol_connect_hublvol with "-22 nonsecondary node".
@@ -4824,7 +4879,7 @@ def recreate_all_lvstores(snode, force=False):
                 leader_node = secondary_primary_node
                 logger.info("Non-leader for %s on %s (leader=%s)",
                             secondary_primary_node.lvstore, snode.get_id(), leader_node.get_id())
-                ret = recreate_lvstore_on_non_leader(snode, leader_node, secondary_primary_node)
+                ret = recreate_lvstore_on_non_leader(snode, leader_node, secondary_primary_node, force=force)
             if not ret:
                 logger.error(f"Failed to recreate secondary LVS {secondary_primary_node.lvstore}")
         except Exception as e:
@@ -4854,7 +4909,7 @@ def recreate_all_lvstores(snode, force=False):
                     logger.info("Primary disconnected, secondary %s is leader for %s, "
                                 "tertiary %s connects as non-leader",
                                 leader_node.get_id(), tertiary_primary_node.lvstore, snode.get_id())
-                    ret = recreate_lvstore_on_non_leader(snode, leader_node, tertiary_primary_node)
+                    ret = recreate_lvstore_on_non_leader(snode, leader_node, tertiary_primary_node, force=force)
                 else:
                     logger.warning("Both primary and secondary disconnected for tertiary LVS %s, skipping",
                                    tertiary_primary_node.lvstore)
@@ -4863,7 +4918,7 @@ def recreate_all_lvstores(snode, force=False):
                 leader_node = tertiary_primary_node
                 logger.info("Non-leader (tertiary) for %s on %s (leader=%s)",
                             tertiary_primary_node.lvstore, snode.get_id(), leader_node.get_id())
-                ret = recreate_lvstore_on_non_leader(snode, leader_node, tertiary_primary_node)
+                ret = recreate_lvstore_on_non_leader(snode, leader_node, tertiary_primary_node, force=force)
             if not ret:
                 logger.error(f"Failed to recreate tertiary LVS {tertiary_primary_node.lvstore}")
         except Exception as e:
