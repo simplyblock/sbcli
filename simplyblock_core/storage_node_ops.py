@@ -4550,6 +4550,19 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
     if not ret:
         logger.warning("Failed to examine bdevs on non-leader node")
 
+    # bdev_examine brings the LVS back with its metadata-persisted role
+    # (primary). Leaving it as primary makes SPDK reject a later
+    # bdev_lvol_connect_hublvol with "-22 nonsecondary node".
+    sec_role = "tertiary" if is_tertiary else "secondary"
+    if not snode_rpc_client.bdev_lvol_set_lvs_opts(
+            primary_node.lvstore,
+            groupid=primary_node.jm_vuid,
+            subsystem_port=primary_node.get_lvol_subsys_port(primary_node.lvstore),
+            role=sec_role,
+    ):
+        logger.error("bdev_lvol_set_lvs_opts(%s) failed for %s on %s",
+                     sec_role, primary_node.lvstore, snode.get_id())
+
     if not activation_mode:
         ### 6- create hublvol on secondary (non-leader) for multipath failover
         # Secondary creates its own hublvol so the tertiary can use it as a failover path.
@@ -4564,7 +4577,6 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
 
         ### 7- connect to leader's hublvol (with fallback to secondary for tertiary)
         try:
-            sec_role = "tertiary" if is_tertiary else "secondary"
             if is_tertiary:
                 # Tertiary: connect to leader's hublvol with secondary as failover.
                 # If leader is unreachable, fall back to connecting to secondary's hublvol.

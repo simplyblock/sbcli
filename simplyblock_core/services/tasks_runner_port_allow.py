@@ -302,19 +302,24 @@ def exec_port_allow_task(task):
     task.write_to_db(db.kv_store)
 
 
-logger.info("Starting Tasks runner...")
-while True:
-    clusters = db.get_clusters()
-    if not clusters:
-        logger.error("No clusters found!")
-    else:
-        for cl in clusters:
-            if cl.status == Cluster.STATUS_IN_ACTIVATION:
-                continue
-            tasks = db.get_job_tasks(cl.get_id(), reverse=False)
-            for task in tasks:
-                if task.function_name == JobSchedule.FN_PORT_ALLOW:
-                    if task.status != JobSchedule.STATUS_DONE:
-                        exec_port_allow_task(task)
+def _main():
+    logger.info("Starting Tasks runner...")
+    while True:
+        clusters = db.get_clusters()
+        if not clusters:
+            logger.error("No clusters found!")
+        else:
+            for cl in clusters:
+                if cl.status == Cluster.STATUS_IN_ACTIVATION:
+                    continue
+                tasks = db.get_job_tasks(cl.get_id(), reverse=False)
+                for task in tasks:
+                    if task.function_name == JobSchedule.FN_PORT_ALLOW:
+                        if task.status != JobSchedule.STATUS_DONE:
+                            exec_port_allow_task(task)
 
-    time.sleep(5)
+        time.sleep(5)
+
+
+if __name__ == "__main__":
+    _main()

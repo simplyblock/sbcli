@@ -285,8 +285,8 @@ def check_node(snode):
                         f"Check: node {snode.mgmt_ip}, port: {port} ... {lvol_port_check}")
                     if not lvol_port_check and snode.status != StorageNode.STATUS_SUSPENDED:
                         tasks_controller.add_port_allow_task(snode.cluster_id, snode.get_id(), port)
-                except Exception:
-                    logger.error("Check node port failed, connection error")
+                except Exception as e:
+                    health_controller._log_port_check_failure(db, snode, port, e)
 
         health_check_status = is_node_online and node_devices_check and node_remote_devices_check and lvstore_check
     set_node_health_check(snode, bool(health_check_status))
@@ -314,18 +314,25 @@ def loop_for_node(snode):
             time.sleep(constants.HEALTH_CHECK_FAST_INTERVAL_SEC)
 
 
-logger.info("Starting health check service")
 db = db_controller.DBController()
 threads_maps: dict[str, threading.Thread] = {}
-while True:
-    clusters = db.get_clusters()
-    for cluster in clusters:
-        for node in  db.get_storage_nodes_by_cluster_id(cluster.get_id()):
-            node_id = node.get_id()
-            if node_id not in threads_maps or threads_maps[node_id].is_alive() is False:
-                t = threading.Thread(target=loop_for_node, args=(node,))
-                t.start()
-                threads_maps[node_id] = t
 
-    time.sleep(constants.HEALTH_CHECK_INTERVAL_SEC)
+
+def _main():
+    logger.info("Starting health check service")
+    while True:
+        clusters = db.get_clusters()
+        for cluster in clusters:
+            for node in db.get_storage_nodes_by_cluster_id(cluster.get_id()):
+                node_id = node.get_id()
+                if node_id not in threads_maps or threads_maps[node_id].is_alive() is False:
+                    t = threading.Thread(target=loop_for_node, args=(node,))
+                    t.start()
+                    threads_maps[node_id] = t
+
+        time.sleep(constants.HEALTH_CHECK_INTERVAL_SEC)
+
+
+if __name__ == "__main__":
+    _main()
 
