@@ -642,7 +642,7 @@ def _create_device_partitions(rpc_client, nvme, snode, num_partitions_per_dev, j
     if not nbd_device:
         logger.error("Failed to start nbd dev")
         return False
-    snode_api = SNodeClient(snode.api_endpoint)
+    snode_api = snode.client()
     partition_percent = 0
     if partition_size:
         partition_percent = int(partition_size * 100 / nvme.size)
@@ -2011,7 +2011,7 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
     try:
         if health_controller._check_node_api(snode.mgmt_ip):
             logger.info("Stopping SPDK container")
-            snode_api = SNodeClient(snode.api_endpoint, timeout=20)
+            snode_api = snode.client(timeout=20)
             snode_api.spdk_process_kill(snode.rpc_port, snode.cluster_id)
             snode_api.leave_swarm()
             pci_address = []
@@ -2167,7 +2167,7 @@ def _restart_storage_node_impl(
     active_rdma = False
     fabric_tcp = cluster.fabric_tcp
     fabric_rdma = cluster.fabric_rdma
-    snode_api = SNodeClient(snode.api_endpoint, timeout=5 * 60, retry=3)
+    snode_api = snode.client(timeout=5 * 60, retry=3)
     for nic in snode.data_nics:
         if fabric_rdma and snode_api.ifc_is_roce(nic["if_name"]):
             nic.trtype = "RDMA"
@@ -2636,7 +2636,7 @@ def _restart_storage_node_impl(
             """Kill SPDK and set offline on fatal error."""
             logger.error(f"Restart abort: {reason}")
             storage_events.snode_restart_failed(snode)
-            snode_api_inner = SNodeClient(snode.api_endpoint, timeout=5, retry=5)
+            snode_api_inner = snode.client(timeout=5, retry=5)
             snode_api_inner.spdk_process_kill(snode.rpc_port, snode.cluster_id)
             set_node_status(snode.get_id(), StorageNode.STATUS_OFFLINE)
 
@@ -3140,7 +3140,7 @@ def shutdown_storage_node(node_id, force=False):
     time.sleep(1)
     logger.info("Stopping SPDK")
     try:
-        SNodeClient(snode.api_endpoint, timeout=10, retry=10).spdk_process_kill(snode.rpc_port, snode.cluster_id)
+        snode.client(timeout=10, retry=10).spdk_process_kill(snode.rpc_port, snode.cluster_id)
     except SNodeClientException:
         logger.error('Failed to kill SPDK')
         return False
@@ -3148,7 +3148,7 @@ def shutdown_storage_node(node_id, force=False):
     for dev in snode.nvme_devices:
         if dev.pcie_address not in pci_address:
             try:
-                ret = SNodeClient(snode.api_endpoint, timeout=30, retry=1).bind_device_to_nvme(dev.pcie_address)
+                ret = snode.client(timeout=30, retry=1).bind_device_to_nvme(dev.pcie_address)
                 logger.debug(ret)
                 pci_address.append(dev.pcie_address)
             except Exception as e:
@@ -3790,8 +3790,7 @@ def health_check(node_id):
 
     try:
         logger.info("Connecting to node's API")
-        snode_api = SNodeClient(f"{snode.mgmt_ip}:5000")
-        node_info, _ = snode_api.info()
+        node_info, _ = snode.client().info()
         logger.info(f"Node info: {node_info['hostname']}")
 
     except Exception as e:
@@ -3807,8 +3806,7 @@ def get_info(node_id):
         logger.exception("Can not find storage node")
         return False
 
-    snode_api = SNodeClient(f"{snode.mgmt_ip}:5000")
-    node_info, _ = snode_api.info()
+    node_info, _ = snode.client().info()
     return json.dumps(node_info, indent=2)
 
 
@@ -4497,7 +4495,7 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
                      snode.get_id(), primary_node.lvstore, reason)
         try:
             storage_events.snode_restart_failed(snode)
-            snode_api = SNodeClient(snode.api_endpoint, timeout=5, retry=5)
+            snode_api = snode.client(timeout=5, retry=5)
             snode_api.spdk_process_kill(snode.rpc_port, snode.cluster_id)
         except Exception as ke:
             logger.error("Failed to kill SPDK during abort: %s", ke)
@@ -4926,7 +4924,7 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
 
     def _kill_app():
         storage_events.snode_restart_failed(snode)
-        snode_api = SNodeClient(snode.api_endpoint, timeout=5, retry=5)
+        snode_api = snode.client(timeout=5, retry=5)
         snode_api.spdk_process_kill(snode.rpc_port, snode.cluster_id)
         # spdk_process_kill returns as soon as the HTTP request is
         # queued — SPDK may keep serving IO for a short while after.
