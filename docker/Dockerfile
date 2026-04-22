@@ -3,6 +3,8 @@ FROM simplyblock/simplyblock:base_image_ubi10
 
 USER root
 
+RUN dnf install -y iproute
+
 WORKDIR /app
 
 COPY requirements.txt .
