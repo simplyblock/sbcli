@@ -3,7 +3,7 @@
 
 Uploads:
   * scripts/stop_cluster_run.py, scripts/extract_spdk_critical.py  -> <dest>/scripts/
-  * tests/perf/*soak*.py                                           -> <dest>/perf/
+  * scripts/*soak*.py                                              -> <dest>/perf/
   * tests/perf/cluster_metadata*.json                              -> <dest>/perf/
   * The SSH key                                                    -> ~/.ssh/<basename>  (chmod 600)
 
@@ -31,7 +31,7 @@ from pathlib import Path
 REPO_ROOT  = Path(__file__).resolve().parent.parent
 LOCAL_OPS  = [REPO_ROOT / "scripts" / "stop_cluster_run.py",
               REPO_ROOT / "scripts" / "extract_spdk_critical.py"]
-SOAK_GLOB  = "tests/perf/*soak*.py"
+SOAK_GLOB  = "scripts/*soak*.py"
 META_GLOB  = "tests/perf/cluster_metadata*.json"
 
 
