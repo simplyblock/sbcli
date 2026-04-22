@@ -14,6 +14,7 @@ from uvicorn.config import Config
 
 from simplyblock_web.api import public, v1
 from simplyblock_core import constants, utils as core_utils
+from simplyblock_core.settings import Settings
 
 logger = core_utils.get_logger(__name__)
 logger.setLevel(constants.LOG_WEB_LEVEL)
@@ -83,6 +84,7 @@ def main() -> None:
     """
     Main entry point for running the FastAPI application.
     """
+    settings = Settings()
     config: Config = uvicorn.Config(
         app=app,
         host='0.0.0.0',
@@ -90,7 +92,9 @@ def main() -> None:
         log_level='debug',
         access_log=False,
         proxy_headers=True,
-        forwarded_allow_ips='192.168.1.0/24'
+        forwarded_allow_ips='192.168.1.0/24',
+        ssl_certfile=settings.tls_certificate if settings.tls_enabled else None,
+        ssl_keyfile=settings.tls_key if settings.tls_enabled else None,
     )
     server: uvicorn.Server = uvicorn.Server(config)
     server.run()

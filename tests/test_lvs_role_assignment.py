@@ -187,10 +187,18 @@ class TestConnectToHublvolRole(unittest.TestCase):
         return _node("sec-1", lvstore="LVS_200", mgmt_ip="10.0.0.2",
                       lvstore_stack_secondary="cluster-1/primary-1")
 
-    def test_secondary_role_default(self):
-        primary = self._make_primary()
-        sec = self._make_secondary()
+    def _install_rpc_mocks(self, sec):
+        """Install mocks so connect_to_hublvol completes all three steps.
 
+        connect_to_hublvol uses TWO RPC clients:
+          - sec.rpc_client() for get_bdevs / set_lvs_opts / connect_hublvol
+          - an attach-only RPCClient constructed inline for
+            bdev_nvme_attach_controller (hard-capped 1s timeout, no retries)
+
+        Both must be mocked, otherwise the attach falls through to a real
+        TCP connect and returns False, short-circuiting before set_lvs_opts
+        is ever reached.
+        """
         rpc = MagicMock()
         rpc.get_bdevs.return_value = []  # trigger attach
         rpc.bdev_nvme_attach_controller.return_value = True
@@ -198,7 +206,19 @@ class TestConnectToHublvolRole(unittest.TestCase):
         rpc.bdev_lvol_connect_hublvol.return_value = True
         sec.rpc_client = MagicMock(return_value=rpc)
 
-        sec.connect_to_hublvol(primary)
+        attach_rpc = MagicMock()
+        attach_rpc.bdev_nvme_attach_controller.return_value = True
+        return rpc, patch(
+            "simplyblock_core.models.storage_node.RPCClient",
+            return_value=attach_rpc,
+        )
+
+    def test_secondary_role_default(self):
+        primary = self._make_primary()
+        sec = self._make_secondary()
+        rpc, rpcclient_patch = self._install_rpc_mocks(sec)
+        with rpcclient_patch:
+            sec.connect_to_hublvol(primary)
         rpc.bdev_lvol_set_lvs_opts.assert_called_once()
         call_kwargs = rpc.bdev_lvol_set_lvs_opts.call_args
         self.assertEqual(call_kwargs[1]["role"], "secondary")
@@ -206,15 +226,9 @@ class TestConnectToHublvolRole(unittest.TestCase):
     def test_tertiary_role_explicit(self):
         primary = self._make_primary()
         sec = self._make_secondary()
-
-        rpc = MagicMock()
-        rpc.get_bdevs.return_value = []
-        rpc.bdev_nvme_attach_controller.return_value = True
-        rpc.bdev_lvol_set_lvs_opts.return_value = True
-        rpc.bdev_lvol_connect_hublvol.return_value = True
-        sec.rpc_client = MagicMock(return_value=rpc)
-
-        sec.connect_to_hublvol(primary, role="tertiary")
+        rpc, rpcclient_patch = self._install_rpc_mocks(sec)
+        with rpcclient_patch:
+            sec.connect_to_hublvol(primary, role="tertiary")
         rpc.bdev_lvol_set_lvs_opts.assert_called_once()
         call_kwargs = rpc.bdev_lvol_set_lvs_opts.call_args
         self.assertEqual(call_kwargs[1]["role"], "tertiary")
@@ -222,15 +236,9 @@ class TestConnectToHublvolRole(unittest.TestCase):
     def test_secondary_role_explicit(self):
         primary = self._make_primary()
         sec = self._make_secondary()
-
-        rpc = MagicMock()
-        rpc.get_bdevs.return_value = []
-        rpc.bdev_nvme_attach_controller.return_value = True
-        rpc.bdev_lvol_set_lvs_opts.return_value = True
-        rpc.bdev_lvol_connect_hublvol.return_value = True
-        sec.rpc_client = MagicMock(return_value=rpc)
-
-        sec.connect_to_hublvol(primary, role="secondary")
+        rpc, rpcclient_patch = self._install_rpc_mocks(sec)
+        with rpcclient_patch:
+            sec.connect_to_hublvol(primary, role="secondary")
         call_kwargs = rpc.bdev_lvol_set_lvs_opts.call_args
         self.assertEqual(call_kwargs[1]["role"], "secondary")
 

@@ -12,7 +12,6 @@ from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice, RemoteDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
-from simplyblock_core.snode_client import SNodeClient
 from simplyblock_core.controllers import device_controller
 
 logger = utils.get_logger(__name__)
@@ -117,10 +116,10 @@ def _check_node_rpc(rpc_ip, rpc_port, rpc_username, rpc_password, timeout=5, ret
     return False, False
 
 
-def _check_node_api(ip):
+def _check_node_api(node):
     try:
-        snode_api = SNodeClient(f"{ip}:5000", timeout=90, retry=2)
-        logger.debug(f"Node API={ip}:5000")
+        snode_api = node.client(timeout=90, retry=2)
+        logger.debug(f"Node API={node.api_endpoint}")
         ret, _ = snode_api.is_live()
         logger.debug(f"snode is alive: {ret}")
         if ret:
@@ -128,14 +127,6 @@ def _check_node_api(ip):
     except Exception as e:
         logger.debug(e)
     return False
-
-
-def _check_spdk_process_up(ip, rpc_port, cluster_id):
-    snode_api = SNodeClient(f"{ip}:5000", timeout=90, retry=2)
-    logger.debug(f"Node API={ip}:5000")
-    is_up, _ = snode_api.spdk_process_is_up(rpc_port, cluster_id)
-    logger.debug(f"SPDK is {is_up}")
-    return is_up
 
 
 def _log_port_check_failure(db_controller, snode, port, exc):
@@ -186,7 +177,7 @@ def _check_node_ping(ip):
 
 
 def _check_ping_from_node(ip, ifname, node):
-    snodeapi = SNodeClient(node.api_endpoint, timeout=3, retry=3)
+    snodeapi = node.client(timeout=3, retry=3)
     try:
         ret, _ = snodeapi.ping_ip(ip, ifname)
         return bool(ret)
@@ -624,7 +615,7 @@ def check_node(node_id, with_devices=True):
     logger.info(f"Check: ping mgmt ip {snode.mgmt_ip} ... {ping_check}")
 
     # 2- check node API
-    node_api_check = _check_node_api(snode.mgmt_ip)
+    node_api_check = _check_node_api(snode)
     logger.info(f"Check: node API {snode.mgmt_ip}:5000 ... {node_api_check}")
 
     # 3- check node RPC

@@ -1055,6 +1055,9 @@ class TestRecreateSubsystemSecurity(unittest.TestCase):
         mock_rpc_inst.subsystem_create.return_value = True
         mock_rpc_inst.bdev_examine.return_value = True
         mock_rpc_inst.bdev_wait_for_examine.return_value = True
+        # recreate_lvstore_on_non_leader now probes subsystem existence
+        # before creating. Return empty so the create path is exercised.
+        mock_rpc_inst.subsystem_list.return_value = []
         MockRPC.return_value = mock_rpc_inst
 
         # Mock secondary_node.rpc_client() for jc_suspend_compression

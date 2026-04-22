@@ -11,6 +11,7 @@ from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice, RemoteDevice, RemoteJMDevice
 from simplyblock_core.rpc_client import RPCClient, RPCException
+from simplyblock_core.snode_client import SNodeClient
 
 logger = utils.get_logger(__name__)
 
@@ -143,6 +144,11 @@ class StorageNode(BaseNodeObject):
         if self.hublvol:
             return self.hublvol.nvmf_port
         return 0
+
+    def client(self, **kwargs):
+        """Return API client to this node
+        """
+        return SNodeClient(self.api_endpoint, **kwargs)
 
     def rpc_client(self, **kwargs):
         """Return rpc client to this node

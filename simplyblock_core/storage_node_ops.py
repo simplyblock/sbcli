@@ -43,6 +43,85 @@ import os
 logger = utils.get_logger(__name__)
 
 
+class LVSRestartRequiredError(Exception):
+    """Raised when an LVS fails to recover via ``bdev_examine`` during
+    activation-mode recreate. The node's SPDK holds partial state that
+    the activation path cannot safely reconcile: the caller should
+    reject the (re)activation and tell the operator to restart that
+    specific node before trying again.
+    """
+
+    def __init__(self, node_id, lvs_name, detail=""):
+        self.node_id = node_id
+        self.lvs_name = lvs_name
+        self.detail = detail
+        msg = (f"LVS {lvs_name} did not recover on examine on node "
+               f"{node_id}")
+        if detail:
+            msg += f": {detail}"
+        msg += ". Restart this node before continuing."
+        super().__init__(msg)
+
+
+def _rpc_subsystem_exists(rpc_client, nqn):
+    """True iff a subsystem with the given NQN exists in SPDK."""
+    try:
+        return bool(rpc_client.subsystem_list(nqn_name=nqn))
+    except Exception:
+        return False
+
+
+def _rpc_subsystem_has_ns(rpc_client, nqn, nsid=None, bdev_name=None):
+    """True iff the subsystem has a namespace matching nsid and/or bdev_name."""
+    try:
+        subs = rpc_client.subsystem_list(nqn_name=nqn)
+        if not subs:
+            return False
+        for ns in subs[0].get('namespaces', []) or []:
+            if nsid is not None and ns.get('nsid') != nsid:
+                continue
+            if bdev_name is not None and ns.get('bdev_name') != bdev_name:
+                continue
+            return True
+        return False
+    except Exception:
+        return False
+
+
+def _rpc_subsystem_has_listener(rpc_client, nqn, trtype, traddr, trsvcid):
+    """True iff the subsystem already has a matching listener."""
+    try:
+        subs = rpc_client.subsystem_list(nqn_name=nqn)
+        if not subs:
+            return False
+        for la in subs[0].get('listen_addresses', []) or []:
+            if (la.get('trtype', '').upper() == trtype.upper()
+                    and la.get('traddr') == traddr
+                    and str(la.get('trsvcid')) == str(trsvcid)):
+                return True
+        return False
+    except Exception:
+        return False
+
+
+def _rpc_bdev_exists(rpc_client, name):
+    """True iff a bdev with the given name is visible to SPDK."""
+    try:
+        ret = rpc_client.get_bdevs(name)
+        return bool(ret)
+    except Exception:
+        return False
+
+
+def _rpc_lvstore_exists(rpc_client, lvs_name):
+    """True iff bdev_lvol_get_lvstores(lvs_name) returns a live lvstore."""
+    try:
+        ret = rpc_client.bdev_lvol_get_lvstores(lvs_name)
+        return bool(ret)
+    except Exception:
+        return False
+
+
 def _reapply_allowed_hosts(lvol, snode, rpc_client):
     """Re-register allowed hosts (with DHCHAP keys) on a subsystem after recreation."""
     from simplyblock_core.controllers.lvol_controller import _register_dhchap_keys_on_node, _get_dhchap_group
@@ -642,7 +721,7 @@ def _create_device_partitions(rpc_client, nvme, snode, num_partitions_per_dev, j
     if not nbd_device:
         logger.error("Failed to start nbd dev")
         return False
-    snode_api = SNodeClient(snode.api_endpoint)
+    snode_api = snode.client()
     partition_percent = 0
     if partition_size:
         partition_percent = int(partition_size * 100 / nvme.size)
@@ -2011,7 +2090,7 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
     try:
         if health_controller._check_node_api(snode.mgmt_ip):
             logger.info("Stopping SPDK container")
-            snode_api = SNodeClient(snode.api_endpoint, timeout=20)
+            snode_api = snode.client(timeout=20)
             snode_api.spdk_process_kill(snode.rpc_port, snode.cluster_id)
             snode_api.leave_swarm()
             pci_address = []
@@ -2037,7 +2116,7 @@ def restart_storage_node(
         node_id, max_lvol=0, max_snap=0, max_prov=0,
         spdk_image=None, set_spdk_debug=None,
         small_bufsize=0, large_bufsize=0,
-        force=False, node_ip=None, reattach_volume=False, clear_data=False, new_ssd_pcie=[],
+        force=False, node_address=None, reattach_volume=False, clear_data=False, new_ssd_pcie=[],
         force_lvol_recreate=False, spdk_proxy_image=None):
     """Wrapper that guarantees the node is reset to OFFLINE if the restart
     fails after the RESTARTING status has been set.  Without this, any
@@ -2049,7 +2128,7 @@ def restart_storage_node(
             node_id, max_lvol=max_lvol, max_snap=max_snap, max_prov=max_prov,
             spdk_image=spdk_image, set_spdk_debug=set_spdk_debug,
             small_bufsize=small_bufsize, large_bufsize=large_bufsize,
-            force=force, node_ip=node_ip, reattach_volume=reattach_volume,
+            force=force, node_address=node_address, reattach_volume=reattach_volume,
             clear_data=clear_data, new_ssd_pcie=new_ssd_pcie,
             force_lvol_recreate=force_lvol_recreate, spdk_proxy_image=spdk_proxy_image)
     except Exception:
@@ -2074,7 +2153,7 @@ def _restart_storage_node_impl(
         node_id, max_lvol=0, max_snap=0, max_prov=0,
         spdk_image=None, set_spdk_debug=None,
         small_bufsize=0, large_bufsize=0,
-        force=False, node_ip=None, reattach_volume=False, clear_data=False, new_ssd_pcie=[],
+        force=False, node_address=None, reattach_volume=False, clear_data=False, new_ssd_pcie=[],
         force_lvol_recreate=False, spdk_proxy_image=None):
     db_controller = DBController()
     logger.info("Restarting storage node")
@@ -2116,16 +2195,16 @@ def _restart_storage_node_impl(
         return False
     snode = db_controller.get_storage_node_by_id(node_id)
 
-    if node_ip:
-        if node_ip != snode.api_endpoint:
-            logger.info(f"Restarting on new node with ip: {node_ip}")
-            snode_api = SNodeClient(node_ip, timeout=5 * 60, retry=3)
+    if node_address:
+        if node_address != snode.api_endpoint:
+            logger.info(f"Restarting on new node with ip: {node_address}")
+            snode_api = SNodeClient(node_address, timeout=5 * 60, retry=3)
             node_info, _ = snode_api.info()
             if not node_info:
                 logger.error("Failed to get node info!")
                 return False
-            snode.api_endpoint = node_ip
-            snode.mgmt_ip = node_ip.split(":")[0]
+            snode.api_endpoint = node_address
+            snode.mgmt_ip = node_address.split(":")[0]
             data_nics = []
             for nic in snode.data_nics:
                 if_name = nic["if_name"]
@@ -2162,12 +2241,12 @@ def _restart_storage_node_impl(
                     if dev['serial_number'] in known_sn:
                         snode_api.bind_device_to_spdk(dev['address'])
         else:
-            node_ip = None
+            node_address = None
     active_tcp = False
     active_rdma = False
     fabric_tcp = cluster.fabric_tcp
     fabric_rdma = cluster.fabric_rdma
-    snode_api = SNodeClient(snode.api_endpoint, timeout=5 * 60, retry=3)
+    snode_api = snode.client(timeout=5 * 60, retry=3)
     for nic in snode.data_nics:
         if fabric_rdma and snode_api.ifc_is_roce(nic["if_name"]):
             nic.trtype = "RDMA"
@@ -2498,7 +2577,7 @@ def _restart_storage_node_impl(
             snode.nvme_devices.append(dev)
 
     snode.write_to_db(db_controller.kv_store)
-    if node_ip and len(new_devices) > 0:
+    if node_address and len(new_devices) > 0:
         # prepare devices on new node
         if snode.num_partitions_per_dev == 0 or snode.jm_percent == 0:
 
@@ -2636,7 +2715,7 @@ def _restart_storage_node_impl(
             """Kill SPDK and set offline on fatal error."""
             logger.error(f"Restart abort: {reason}")
             storage_events.snode_restart_failed(snode)
-            snode_api_inner = SNodeClient(snode.api_endpoint, timeout=5, retry=5)
+            snode_api_inner = snode.client(timeout=5, retry=5)
             snode_api_inner.spdk_process_kill(snode.rpc_port, snode.cluster_id)
             set_node_status(snode.get_id(), StorageNode.STATUS_OFFLINE)
 
@@ -3140,7 +3219,7 @@ def shutdown_storage_node(node_id, force=False):
     time.sleep(1)
     logger.info("Stopping SPDK")
     try:
-        SNodeClient(snode.api_endpoint, timeout=10, retry=10).spdk_process_kill(snode.rpc_port, snode.cluster_id)
+        snode.client(timeout=10, retry=10).spdk_process_kill(snode.rpc_port, snode.cluster_id)
     except SNodeClientException:
         logger.error('Failed to kill SPDK')
         return False
@@ -3148,7 +3227,7 @@ def shutdown_storage_node(node_id, force=False):
     for dev in snode.nvme_devices:
         if dev.pcie_address not in pci_address:
             try:
-                ret = SNodeClient(snode.api_endpoint, timeout=30, retry=1).bind_device_to_nvme(dev.pcie_address)
+                ret = snode.client(timeout=30, retry=1).bind_device_to_nvme(dev.pcie_address)
                 logger.debug(ret)
                 pci_address.append(dev.pcie_address)
             except Exception as e:
@@ -3790,8 +3869,7 @@ def health_check(node_id):
 
     try:
         logger.info("Connecting to node's API")
-        snode_api = SNodeClient(f"{snode.mgmt_ip}:5000")
-        node_info, _ = snode_api.info()
+        node_info, _ = snode.client().info()
         logger.info(f"Node info: {node_info['hostname']}")
 
     except Exception as e:
@@ -3807,8 +3885,7 @@ def get_info(node_id):
         logger.exception("Can not find storage node")
         return False
 
-    snode_api = SNodeClient(f"{snode.mgmt_ip}:5000")
-    node_info, _ = snode_api.info()
+    node_info, _ = snode.client().info()
     return json.dumps(node_info, indent=2)
 
 
@@ -4398,7 +4475,7 @@ def _handle_rpc_failure_on_peer(snode, peer_node, lvs_jm_vuid, lvs_name=None):
         return "abort"
 
 
-def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_mode=False):
+def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_mode=False, force=False):
     """Recreate a non-leader LVS on snode.
 
     Per design: runs for secondary when primary is online, or for tertiary always.
@@ -4422,6 +4499,27 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
     snode_rpc_client = RPCClient(
         snode.mgmt_ip, snode.rpc_port,
         snode.rpc_username, snode.rpc_password)
+
+    if activation_mode:
+        # Soft prelude: reconnect any missing remote devices + remote JMs
+        # before touching the LVS stack. Both helpers iterate existing bdevs
+        # internally and no-op on controllers that are already attached.
+        try:
+            fresh_remote_devs = _connect_to_remote_devs(snode, reattach=False)
+            snode = db_controller.get_storage_node_by_id(snode.get_id())
+            snode.remote_devices = fresh_remote_devs or snode.remote_devices
+            snode.write_to_db()
+        except Exception as e:
+            logger.warning("Soft reconnect of remote devices failed on %s: %s",
+                           snode.get_id(), e)
+        try:
+            fresh_remote_jms = _connect_to_remote_jm_devs(snode)
+            snode = db_controller.get_storage_node_by_id(snode.get_id())
+            snode.remote_jm_devices = fresh_remote_jms or snode.remote_jm_devices
+            snode.write_to_db()
+        except Exception as e:
+            logger.warning("Soft reconnect of remote JMs failed on %s: %s",
+                           snode.get_id(), e)
 
     # Ensure snode has per-lvstore ports from primary
     if primary_node.lvstore_ports and primary_node.lvstore in primary_node.lvstore_ports:
@@ -4461,15 +4559,19 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
         tasks_controller.add_jc_comp_resume_task(
             snode.cluster_id, snode.get_id(), jm_vuid=primary_node.jm_vuid)
 
-    ### 2- create lvols nvmf subsystems
+    ### 2- create lvols nvmf subsystems (idempotent: skip existing)
     is_tertiary = (primary_node.tertiary_node_id == snode.get_id())
     min_cntlid = 2000 if is_tertiary else 1000
     for lvol in lvol_list:
         allow_any = not bool(lvol.allowed_hosts)
-        logger.info("creating subsystem %s (allow_any_host=%s)", lvol.nqn, allow_any)
-        snode_rpc_client.subsystem_create(lvol.nqn, lvol.ha_type, lvol.uuid, min_cntlid,
-                                          max_namespaces=constants.LVO_MAX_NAMESPACES_PER_SUBSYS,
-                                          allow_any_host=allow_any)
+        if _rpc_subsystem_exists(snode_rpc_client, lvol.nqn):
+            logger.info("subsystem %s already exists on %s, skipping create",
+                        lvol.nqn, snode.get_id())
+        else:
+            logger.info("creating subsystem %s (allow_any_host=%s)", lvol.nqn, allow_any)
+            snode_rpc_client.subsystem_create(lvol.nqn, lvol.ha_type, lvol.uuid, min_cntlid,
+                                              max_namespaces=constants.LVO_MAX_NAMESPACES_PER_SUBSYS,
+                                              allow_any_host=allow_any)
         if lvol.allowed_hosts:
             _reapply_allowed_hosts(lvol, snode, snode_rpc_client)
 
@@ -4497,7 +4599,7 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
                      snode.get_id(), primary_node.lvstore, reason)
         try:
             storage_events.snode_restart_failed(snode)
-            snode_api = SNodeClient(snode.api_endpoint, timeout=5, retry=5)
+            snode_api = snode.client(timeout=5, retry=5)
             snode_api.spdk_process_kill(snode.rpc_port, snode.cluster_id)
         except Exception as ke:
             logger.error("Failed to kill SPDK during abort: %s", ke)
@@ -4559,13 +4661,92 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
         logger.info("Leader %s has no quorum for %s, skipping port block",
                     leader_node.get_id(), primary_node.lvstore)
 
-    ### 4- examine
-    ret = snode_rpc_client.bdev_examine(primary_node.raid)
+    ### 4- examine (idempotent: skip when raid + lvstore already present)
+    raid_already = _rpc_bdev_exists(snode_rpc_client, primary_node.raid)
+    lvstore_already = _rpc_lvstore_exists(snode_rpc_client, primary_node.lvstore)
+    if activation_mode and raid_already and lvstore_already:
+        logger.info(
+            "Raid %s and lvstore %s already present on %s; skipping examine",
+            primary_node.raid, primary_node.lvstore, snode.get_id())
+    else:
+        if raid_already:
+            logger.info(
+                "Raid %s already exists on %s but lvstore %s is missing; "
+                "skipping manual examine and relying on existing state",
+                primary_node.raid, snode.get_id(), primary_node.lvstore)
+        else:
+            snode_rpc_client.bdev_examine(primary_node.raid)
 
-    ### 5- wait for examine
-    ret = snode_rpc_client.bdev_wait_for_examine()
-    if not ret:
-        logger.warning("Failed to examine bdevs on non-leader node")
+        ### 5- wait for examine
+        ret = snode_rpc_client.bdev_wait_for_examine()
+        if not ret:
+            logger.warning("Failed to examine bdevs on non-leader node")
+
+        # After examine, the lvstore MUST be present. If it isn't, SPDK
+        # failed to rediscover the lvstore from its persisted metadata
+        # (e.g. partial stack components left over, corrupt on-disk state).
+        # During activation we can't safely recover — signal the caller
+        # to reject the activation and ask for a restart of this node.
+        if activation_mode and not _rpc_lvstore_exists(snode_rpc_client, primary_node.lvstore):
+            raise LVSRestartRequiredError(
+                snode.get_id(), primary_node.lvstore,
+                detail=f"raid={primary_node.raid} present but lvstore did not recover"
+                if raid_already else "examine did not produce lvstore")
+
+    # Verify that examine actually rediscovered the lvstore and every lvol
+    # the FDB expects to be present on this node. Mirrors the check in
+    # recreate_lvstore() for the primary path. If an lvol blob did not
+    # become durable on this peer's shard of raid0 before it was torn down
+    # (e.g. the blob was committed on the primary/tertiary quorum but this
+    # node missed the write window due to a simultaneous force-shutdown),
+    # the examine won't surface it. Continuing would leave the lvol
+    # subsystem bound without a namespace on this node — present on
+    # primary/tertiary, missing here — and the divergence would never be
+    # reconciled because there is no FDB↔SPDK lvol-set reconcile loop.
+    if not activation_mode:
+        if not snode_rpc_client.bdev_lvol_get_lvstores(primary_node.lvstore):
+            logger.error(
+                "Failed to recover lvstore %s on %s after examine",
+                primary_node.lvstore, snode.get_id())
+            if not force:
+                _abort_and_unblock(
+                    f"lvstore {primary_node.lvstore} did not recover after examine "
+                    f"on non-leader {snode.get_id()}")
+
+        registered_bdevs = snode_rpc_client.get_bdevs() or []
+        bdev_names: set = set()
+        for b in registered_bdevs:
+            name = b.get('name')
+            if name:
+                bdev_names.add(name)
+            for alias in (b.get('aliases') or []):
+                bdev_names.add(alias)
+
+        missing_lvols = []
+        for lv in lvol_list:
+            base_bdev_name = f"{lv.lvs_name}/{lv.lvol_bdev}"
+            if lv.lvol_uuid in bdev_names or base_bdev_name in bdev_names:
+                continue
+            missing_lvols.append(lv)
+
+        if missing_lvols:
+            missing_repr = ", ".join(
+                f"{lv.lvs_name}/{lv.lvol_bdev}(uuid={lv.lvol_uuid[:8]})"
+                for lv in missing_lvols)
+            logger.error(
+                "Expected lvol bdevs missing on %s for %s after examine: %s",
+                snode.get_id(), primary_node.lvstore, missing_repr)
+            if not force:
+                _abort_and_unblock(
+                    f"Expected lvols not registered on {snode.get_id()} after "
+                    f"examine of {primary_node.raid}: {missing_repr}. "
+                    f"Re-run restart with force=True to proceed anyway "
+                    f"(this peer will not serve these lvols).")
+            else:
+                logger.warning(
+                    "force=True: proceeding with %d missing lvol(s) on %s for %s; "
+                    "these lvols will not be served by this peer",
+                    len(missing_lvols), snode.get_id(), primary_node.lvstore)
 
     # bdev_examine brings the LVS back with its metadata-persisted role
     # (primary). Leaving it as primary makes SPDK reject a later
@@ -4698,7 +4879,7 @@ def recreate_all_lvstores(snode, force=False):
                 leader_node = secondary_primary_node
                 logger.info("Non-leader for %s on %s (leader=%s)",
                             secondary_primary_node.lvstore, snode.get_id(), leader_node.get_id())
-                ret = recreate_lvstore_on_non_leader(snode, leader_node, secondary_primary_node)
+                ret = recreate_lvstore_on_non_leader(snode, leader_node, secondary_primary_node, force=force)
             if not ret:
                 logger.error(f"Failed to recreate secondary LVS {secondary_primary_node.lvstore}")
         except Exception as e:
@@ -4728,7 +4909,7 @@ def recreate_all_lvstores(snode, force=False):
                     logger.info("Primary disconnected, secondary %s is leader for %s, "
                                 "tertiary %s connects as non-leader",
                                 leader_node.get_id(), tertiary_primary_node.lvstore, snode.get_id())
-                    ret = recreate_lvstore_on_non_leader(snode, leader_node, tertiary_primary_node)
+                    ret = recreate_lvstore_on_non_leader(snode, leader_node, tertiary_primary_node, force=force)
                 else:
                     logger.warning("Both primary and secondary disconnected for tertiary LVS %s, skipping",
                                    tertiary_primary_node.lvstore)
@@ -4737,7 +4918,7 @@ def recreate_all_lvstores(snode, force=False):
                 leader_node = tertiary_primary_node
                 logger.info("Non-leader (tertiary) for %s on %s (leader=%s)",
                             tertiary_primary_node.lvstore, snode.get_id(), leader_node.get_id())
-                ret = recreate_lvstore_on_non_leader(snode, leader_node, tertiary_primary_node)
+                ret = recreate_lvstore_on_non_leader(snode, leader_node, tertiary_primary_node, force=force)
             if not ret:
                 logger.error(f"Failed to recreate tertiary LVS {tertiary_primary_node.lvstore}")
         except Exception as e:
@@ -4774,6 +4955,21 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
 
     lvs_node.lvstore_status = "in_creation"
     lvs_node.write_to_db()
+
+    if activation_mode:
+        # Soft prelude: reconnect any missing remote devices + remote JMs
+        # so the recreate path doesn't stumble on stale/absent controllers.
+        # Both helpers iterate existing bdevs internally and no-op on
+        # controllers that are already attached, so this is safe to call
+        # every activation pass.
+        try:
+            fresh_remote_devs = _connect_to_remote_devs(snode, reattach=False)
+            snode = db_controller.get_storage_node_by_id(snode.get_id())
+            snode.remote_devices = fresh_remote_devs or snode.remote_devices
+            snode.write_to_db()
+        except Exception as e:
+            logger.warning("Soft reconnect of remote devices failed on %s: %s",
+                           snode.get_id(), e)
 
     if not is_takeover:
         snode = db_controller.get_storage_node_by_id(snode.get_id())
@@ -4926,7 +5122,7 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
 
     def _kill_app():
         storage_events.snode_restart_failed(snode)
-        snode_api = SNodeClient(snode.api_endpoint, timeout=5, retry=5)
+        snode_api = snode.client(timeout=5, retry=5)
         snode_api.spdk_process_kill(snode.rpc_port, snode.cluster_id)
         # spdk_process_kill returns as soon as the HTTP request is
         # queued — SPDK may keep serving IO for a short while after.
@@ -5063,17 +5259,37 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
             logger.info(f"Peers disconnected {disconnected_peers}, forcing journal replication on node: {snode.get_id()}")
             rpc_client.jc_explicit_synchronization(lvs_jm_vuid)
 
-    ### 5- examine
+    ### 5- examine (idempotent: skip when raid + lvstore already present)
     rpc_client.bdev_distrib_force_to_non_leader(lvs_jm_vuid)
-    ret = rpc_client.bdev_examine(lvs_raid)
+    raid_already = _rpc_bdev_exists(rpc_client, lvs_raid)
+    lvstore_already = _rpc_lvstore_exists(rpc_client, lvs_name)
+    if activation_mode and raid_already and lvstore_already:
+        logger.info(
+            "Raid %s and lvstore %s already present on %s; skipping examine",
+            lvs_raid, lvs_name, snode.get_id())
+    else:
+        if raid_already:
+            logger.info(
+                "Raid %s already exists on %s but lvstore %s is missing; "
+                "skipping manual examine and relying on existing state",
+                lvs_raid, snode.get_id(), lvs_name)
+        else:
+            rpc_client.bdev_examine(lvs_raid)
 
-    ### 6- wait for examine
-    ret = rpc_client.bdev_wait_for_examine()
+        ### 6- wait for examine
+        rpc_client.bdev_wait_for_examine()
 
     # Validate lvstore recovery
     ret = rpc_client.bdev_lvol_get_lvstores(lvs_name)
     if not ret:
         logger.error(f"Failed to recover lvstore: {lvs_name} on node: {snode.get_id()}")
+        if activation_mode:
+            # In activation we can't safely patch partial on-disk state.
+            # Tell the caller to restart this node before continuing.
+            raise LVSRestartRequiredError(
+                snode.get_id(), lvs_name,
+                detail=f"raid={lvs_raid} present but lvstore did not recover"
+                if raid_already else "examine did not produce lvstore")
         if not force:
             _abort_restart_and_unblock("Failed to recover lvstore")
 
@@ -5244,19 +5460,30 @@ def add_lvol_thread(lvol, snode, lvol_ana_state="optimized"):
             logger.error(msg)
             return False, msg
 
-    logger.info("Add BDev to subsystem "+f"{lvol.vuid:016X}")
-    ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid, nsid=lvol.ns_id)
+    # Add NS to subsystem (idempotent: skip if already bound with matching NSID).
+    if _rpc_subsystem_has_ns(rpc_client, lvol.nqn, nsid=lvol.ns_id, bdev_name=lvol.top_bdev):
+        logger.info("Namespace nsid=%s already on subsystem %s, skipping add_ns",
+                    lvol.ns_id, lvol.nqn)
+    else:
+        logger.info("Add BDev to subsystem " + f"{lvol.vuid:016X}")
+        rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid, nsid=lvol.ns_id)
+
     # Use per-lvstore port for this lvol's lvstore
     listener_port = snode.get_lvol_subsys_port(lvol.lvs_name)
     for iface in snode.data_nics:
         if iface.ip4_address and lvol.fabric == iface.trtype.lower():
-            logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
-            ret = rpc_client.listeners_create(
-                lvol.nqn, iface.trtype, iface.ip4_address, listener_port, ana_state=lvol_ana_state)
+            tr = iface.trtype
         elif iface.ip4_address and lvol.fabric == "tcp" and snode.active_tcp:
-            logger.info("adding listener for %s on IP %s, fabric TCP" % (lvol.nqn, iface.ip4_address))
-            ret = rpc_client.listeners_create(
-                lvol.nqn, "TCP", iface.ip4_address, listener_port, ana_state=lvol_ana_state)
+            tr = "TCP"
+        else:
+            continue
+        if _rpc_subsystem_has_listener(rpc_client, lvol.nqn, tr, iface.ip4_address, listener_port):
+            logger.info("Listener %s %s:%s already on %s, skipping",
+                        tr, iface.ip4_address, listener_port, lvol.nqn)
+            continue
+        logger.info("adding listener for %s on IP %s (%s)", lvol.nqn, iface.ip4_address, tr)
+        rpc_client.listeners_create(
+            lvol.nqn, tr, iface.ip4_address, listener_port, ana_state=lvol_ana_state)
 
     lvol_obj = db_controller.get_lvol_by_id(lvol.get_id())
     lvol_obj.status = LVol.STATUS_ONLINE

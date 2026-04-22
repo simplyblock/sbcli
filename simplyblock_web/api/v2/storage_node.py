@@ -33,7 +33,7 @@ def list(cluster: Cluster) -> List[StorageNodeDTO]:
 
 
 class StorageNodeParams(BaseModel):
-    node_address: Annotated[str, Field(web_utils.IP_PATTERN)]
+    node_address: Annotated[str, Field(pattern=web_utils.IP_PATTERN)]
     interface_name: str
     max_snapshots: Optional[int] = Field(500)
     ha_jm: Optional[bool] = Field(True)
@@ -232,7 +232,7 @@ def shutdown(cluster: Cluster, storage_node: StorageNode, force: bool = False) -
 class _RestartParams(BaseModel):
     force: bool = False
     reattach_volume: bool = False
-    node_address: Optional[Annotated[str, Field(web_utils.IP_PATTERN)]] = None
+    node_address: Optional[Annotated[str, Field(pattern=web_utils.IP_PATTERN)]] = None
 
 
 @instance_api.post('/start', name='clusters:storage-nodes:start', status_code=202, responses={202: {"content": None}})  # Same as restart for now
@@ -244,7 +244,7 @@ def restart(cluster: Cluster, storage_node: StorageNode, parameters: _RestartPar
         kwargs={
             "node_id": storage_node.get_id(),
             "force": parameters.force,
-            "node_ip": parameters.node_address,
+            "node_address": parameters.node_address,
             "reattach_volume": parameters.reattach_volume,
         }
     ).start()

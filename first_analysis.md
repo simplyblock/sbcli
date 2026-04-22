@@ -52,7 +52,6 @@ In general all of this errors will lead to failed IO on lvstore-level and a down
 To identify the reason, we need to extract critical data from spdk logs and correlate it with the timing of events in the cluster logs and the incident itself. First extract (filter) logs by using
 sbcli\scripts\extract_spdk_critical.py
 
-
 1. identify potential writer conflicts and problems with hublvol connectivity
 
 if there is an unexpected node in down state (node not affected by expected network outage test), probability of writer conflict is very high. in the extracted log for writer conflicts of the respective node (spdk_80xx, where xx identifies the respective node), you should find a writer conflict shortly (not more than 1 minute) before the time the down state was seen in the cluster log.
@@ -61,6 +60,10 @@ a. on which lvs did the conflict happen (example: jm_vuid= 8371)? based on this 
 b. now its necessary to find the correlating event (writer conflict) on the counterparty nodes and to correlate with any restart activity on that nodes. was there a recent restart on any of the two or three (in case there is a tertiary) nodes? if there was a restart, the restart log (in case of auto-restart: from restart task runner; in case of restart by test script: test script log output). The restart should show port blocks on counterparty nodes during recreate_lvstore(...) on restarted nodes. It should also show the connection of hublvols and any errors that may have occurred during hublvol connection (separate extracted critical log for hublvol errors).
 If there was no restart, it is necessary to check why the hublvol connection was not working, look for hublvol errors and when/why they have happened. hublvols have to be connected in the following manner:
 from secondary to primary. from tertiary to both primary (ana: optimized) and secondary (ana: non-optimized). Also, in case of multipathing there are two connections (one per path) per hublvol. The most common reason for a writer conflict is a not properly connected hublvol btw. secondary and primary or tertiary and primary or tertiary and secondary (in this case, only if the primary is not online).
+
+inconsistencies in the lvol bdevs between primary, secondary and tertiary LVS (all most contain exactly the same lvol bdevs per LVS) will 
+also lead to a failed hublvol redirect EVEN IF THE CONNECTION ITSELF IS ESTABLISHED. Look for the following error prints in spdk logs:
+vbdev_hublvol_submit_request: FAILED
 
 Sometimes a writer conflict can lead to subsequent issues in the cluster: if the fault tolerance limit is already reached before the writer conflict, an additional down state can lead to io interrupt. an abort of the node following the down state can lead to subsequent cluster suspension, because too many nodes are not online. 
 
@@ -82,7 +85,6 @@ IO redirect CNT — redirect counters per role
 IO hublvol CNT — Hub Lvol I/O Counters (Primary Role Only)
   lvol.c:3536:spdk_lvs_IO_hublvol: *NOTICE*: IO hublvol CNT: t[61] c[0] tc[16]
   Fires every ~1s. t[Total redirected I/O received] c[Current redirected I/O received] tc[Total currently received I/O from NVMf]
-
 
 2. unrecoverable io errors 
 
