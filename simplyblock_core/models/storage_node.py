@@ -152,58 +152,82 @@ class StorageNode(BaseNodeObject):
             self.rpc_username, self.rpc_password, **kwargs)
 
     def expose_bdev(self, nqn, bdev_name, model_number, uuid, nguid, port, ana_state=None):
+        """Expose `bdev_name` via NVMe-oF on `nqn` at `port`, one listener per data NIC.
+
+        Idempotent: if the subsystem, a matching listener, or the namespace (by uuid)
+        already exists, the corresponding RPC is skipped. This matters during
+        activation/restart where the same subsystem can be re-examined by multiple
+        paths (secondary hublvol shares the primary's NQN; multi-NIC nodes loop per
+        NIC), and unconditional create_listener / add_ns would return -32602
+        "Listener already exists" / "Invalid parameters" for state that is correct.
+        """
         rpc_client = self.rpc_client()
 
         try:
-            subsys =  rpc_client.subsystem_list(nqn)
-            if not subsys:
+            subsys_list = rpc_client.subsystem_list(nqn)
+            subsys = subsys_list[0] if subsys_list else None
+            if subsys is None:
                 if not rpc_client.subsystem_create(
                         nqn=nqn,
                         serial_number='sbcli-cn',
                         model_number=model_number,
                 ):
-                    logger.error("fFailed to create subsystem for {nqn}")
+                    logger.error(f"Failed to create subsystem for {nqn}")
                     raise RPCException(f'Failed to create subsystem for {nqn}')
+                existing_listeners: set = set()
+                existing_ns_uuids: set = set()
+            else:
+                existing_listeners = {
+                    (la.get("trtype", "").upper(),
+                     la.get("traddr"),
+                     str(la.get("trsvcid")))
+                    for la in (subsys.get("listen_addresses") or [])
+                }
+                existing_ns_uuids = {
+                    ns.get("uuid")
+                    for ns in (subsys.get("namespaces") or [])
+                    if ns.get("uuid")
+                }
 
             for iface in self.data_nics:
                 ip = iface.ip4_address
                 if self.active_rdma:
                     if iface.trtype != "RDMA":
-                        logger.info("Skipping as the RDMA is enabled")
+                        logger.debug("Skipping non-RDMA iface %s (active_rdma=True)", ip)
                         continue
-                    rpc_client.listeners_create(
-                        nqn=nqn,
-                        trtype="RDMA",
-                        traddr=ip,
-                        trsvcid=port,
-                        ana_state=ana_state,
-                    )
+                    trtype = "RDMA"
                 else:
                     if iface.trtype != "TCP":
-                        logger.info("Skipping as the TCP is only enabled")
+                        logger.debug("Skipping non-TCP iface %s (active_tcp=True)", ip)
                         continue
-                    rpc_client.listeners_create(
-                        nqn=nqn,
-                        trtype="TCP",
-                        traddr=ip,
-                        trsvcid=port,
-                        ana_state=ana_state,
-                    )
+                    trtype = "TCP"
 
-            rpc_client.nvmf_subsystem_add_ns(
+                if (trtype, ip, str(port)) in existing_listeners:
+                    logger.info(
+                        f"Listener on {nqn} at {trtype}/{ip}:{port} already present, skipping"
+                    )
+                    continue
+                rpc_client.listeners_create(
+                    nqn=nqn,
+                    trtype=trtype,
+                    traddr=ip,
+                    trsvcid=port,
+                    ana_state=ana_state,
+                )
+
+            if uuid in existing_ns_uuids:
+                logger.info(
+                    f"Namespace {uuid} already present on {nqn}, skipping add_ns"
+                )
+            else:
+                rpc_client.nvmf_subsystem_add_ns(
                     nqn=nqn,
                     dev_name=bdev_name,
                     uuid=uuid,
                     nguid=nguid,
-            )
-                # logger.error(f'Failed to add namespace to subsytem {nqn}')
-                # raise RPCException(f'Failed to add namespace to subsytem {nqn}')
+                )
         except RPCException as e:
             logger.exception(e)
-            # if self.hublvol and rpc_client.subsystem_list(self.hublvol.nqn):
-            #     rpc_client.subsystem_delete(self.hublvol.nqn)
-            #
-            # raise
 
     @staticmethod
     def hublvol_nqn_for_lvstore(cluster_nqn, lvstore_name):
