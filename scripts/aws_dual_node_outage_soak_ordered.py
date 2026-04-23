@@ -333,7 +333,12 @@ class SoakRunner:
             self.mgmt = LocalHost(logger, "mgmt")
         else:
             self.mgmt = RemoteHost(metadata["mgmt"]["public_ip"], self.user, self.key_path, logger, "mgmt")
-        self.client = RemoteHost(metadata["clients"][0]["public_ip"], self.user, self.key_path, logger, "client")
+        client_entry = metadata["clients"][0]
+        if args.run_on_mgmt:
+            client_addr = client_entry.get("private_ip") or client_entry["public_ip"]
+        else:
+            client_addr = client_entry["public_ip"]
+        self.client = RemoteHost(client_addr, self.user, self.key_path, logger, "client")
         self.cluster_id = metadata.get("cluster_uuid") or ""
         self.fio_jobs = []
         self.created_volume_ids = []

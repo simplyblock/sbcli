@@ -1,21 +1,25 @@
 #!/usr/bin/env python3
 """Copy operator scripts, SSH key and soak scripts to a simplyblock mgmt node.
 
+All source files are read from the directory containing this script (i.e.
+sbcli/scripts/), so `setup_perf_test*.py` output lands here and gets picked up
+on the next upload without needing to be copied anywhere else first.
+
 Uploads:
-  * scripts/stop_cluster_run.py, scripts/extract_spdk_critical.py  -> <dest>/scripts/
-  * scripts/*soak*.py                                              -> <dest>/perf/
-  * tests/perf/cluster_metadata*.json                              -> <dest>/perf/
-  * The SSH key                                                    -> ~/.ssh/<basename>  (chmod 600)
+  * <this_dir>/stop_cluster_run.py, <this_dir>/extract_spdk_critical.py -> <dest>/scripts/
+  * <this_dir>/*soak*.py                                                -> <dest>/perf/
+  * <this_dir>/cluster_metadata*.json                                   -> <dest>/perf/
+  * The SSH key                                                         -> ~/.ssh/<basename> (chmod 600)
 
 The mgmt IP is the required positional argument. Key path and SSH user default
-to the values in a metadata JSON (e.g. tests/perf/cluster_metadata_base.json)
+to the values in a metadata JSON (e.g. scripts/cluster_metadata_base.json)
 when one is passed with --metadata, otherwise use --key / --user.
 
 Usage:
   python upload_to_mgmt.py 50.17.149.3 \
       --key C:\\ssh\\mtes01.pem \
       --user ec2-user \
-      --metadata tests\\perf\\cluster_metadata_base.json
+      --metadata scripts\\cluster_metadata_base.json
 """
 from __future__ import annotations
 
@@ -28,11 +32,11 @@ import sys
 import time
 from pathlib import Path
 
-REPO_ROOT  = Path(__file__).resolve().parent.parent
-LOCAL_OPS  = [REPO_ROOT / "scripts" / "stop_cluster_run.py",
-              REPO_ROOT / "scripts" / "extract_spdk_critical.py"]
-SOAK_GLOB  = "scripts/*soak*.py"
-META_GLOB  = "tests/perf/cluster_metadata*.json"
+SCRIPT_DIR = Path(__file__).resolve().parent
+LOCAL_OPS  = [SCRIPT_DIR / "stop_cluster_run.py",
+              SCRIPT_DIR / "extract_spdk_critical.py"]
+SOAK_GLOB  = "*soak*.py"
+META_GLOB  = "cluster_metadata*.json"
 
 
 def log(msg: str) -> None:
@@ -140,16 +144,16 @@ def main() -> int:
         scp_upload(p, user, host, str(key_path), f"{dest}/scripts/")
 
     # 3) upload soak scripts
-    soaks = sorted(REPO_ROOT.glob(SOAK_GLOB))
+    soaks = sorted(SCRIPT_DIR.glob(SOAK_GLOB))
     if not soaks:
-        log(f"WARNING: no files matched {SOAK_GLOB}")
+        log(f"WARNING: no files matched {SOAK_GLOB} in {SCRIPT_DIR}")
     for p in soaks:
         scp_upload(p, user, host, str(key_path), f"{dest}/perf/")
 
     # 3b) upload cluster metadata JSONs (used as stop_cluster_run.py input)
-    metas = sorted(REPO_ROOT.glob(META_GLOB))
+    metas = sorted(SCRIPT_DIR.glob(META_GLOB))
     if not metas:
-        log(f"WARNING: no files matched {META_GLOB}")
+        log(f"WARNING: no files matched {META_GLOB} in {SCRIPT_DIR}")
     for p in metas:
         scp_upload(p, user, host, str(key_path), f"{dest}/perf/")
 
