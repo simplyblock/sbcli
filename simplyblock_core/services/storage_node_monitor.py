@@ -233,7 +233,22 @@ def set_node_online(node):
 
 def set_node_offline(node):
     node = db.get_storage_node_by_id(node.get_id())
-    if node.status not in [StorageNode.STATUS_OFFLINE, StorageNode.STATUS_IN_SHUTDOWN]:
+    # Do not flip to OFFLINE while the node is mid-restart / mid-shutdown:
+    # the runner owns the status transitions during those phases, and an
+    # external flip here would race with it. Observed failure mode:
+    # HealthCheck/monitor's spdk_process_is_up probe catches the runner's
+    # shutdown→restart window and returns False, so set_node_offline fires
+    # with status==IN_RESTART and clobbers the runner's progress — also
+    # marking devices unavailable, which then fails the runner's
+    # post-restart check and forces a full retry loop.
+    #
+    # UNREACHABLE is intentionally NOT in this skip list: the legitimate
+    # escalation path UNREACHABLE → OFFLINE runs through here (via
+    # _check_data_plane_and_escalate). Skipping it leaves the node stuck
+    # in UNREACHABLE and auto-restart never gets queued.
+    if node.status not in [StorageNode.STATUS_OFFLINE,
+                           StorageNode.STATUS_IN_SHUTDOWN,
+                           StorageNode.STATUS_RESTARTING]:
         try:
             storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_OFFLINE)
             for dev in node.nvme_devices:
@@ -258,7 +273,12 @@ def set_node_offline(node):
 
 
 def set_node_unreachable(node):
-    if node.status != StorageNode.STATUS_UNREACHABLE:
+    # Same rationale as set_node_offline: when the runner owns the node's
+    # status transitions (IN_SHUTDOWN → OFFLINE → IN_RESTART → ONLINE), the
+    # monitor must not race those writes with its own UNREACHABLE flip.
+    if node.status not in [StorageNode.STATUS_UNREACHABLE,
+                           StorageNode.STATUS_IN_SHUTDOWN,
+                           StorageNode.STATUS_RESTARTING]:
         try:
             storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_UNREACHABLE)
             update_cluster_status(cluster_id)
