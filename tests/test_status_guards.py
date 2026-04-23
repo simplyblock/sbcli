@@ -86,10 +86,22 @@ class TestSetNodeOfflineGuard(unittest.TestCase):
         mod.set_node_offline(mod.db.get_storage_node_by_id.return_value)
         self._assert_no_writes()
 
-    def test_skips_when_node_unreachable(self):
-        mod = self._patch(_node(status=StorageNode.STATUS_UNREACHABLE))
-        mod.set_node_offline(mod.db.get_storage_node_by_id.return_value)
-        self._assert_no_writes()
+    def test_fires_when_node_unreachable(self):
+        # UNREACHABLE → OFFLINE is the legitimate escalation path from
+        # _check_data_plane_and_escalate: when peers confirm the data plane
+        # is down, the node should be promoted to OFFLINE so auto-restart
+        # gets queued. Previously (briefly) UNREACHABLE was skipped here,
+        # which left nodes wedged in UNREACHABLE with no auto-restart.
+        node = _node(status=StorageNode.STATUS_UNREACHABLE)
+        dev = MagicMock()
+        dev.status = NVMeDevice.STATUS_ONLINE
+        dev.get_id.return_value = "dev-1"
+        node.nvme_devices = [dev]
+        mod = self._patch(node)
+        mod.set_node_offline(node)
+        self.mock_ops.set_node_status.assert_called_once_with(
+            node.get_id(), StorageNode.STATUS_OFFLINE)
+        self.mock_tasks.add_node_to_auto_restart.assert_called_once_with(node)
 
     def test_fires_when_node_online(self):
         node = _node(status=StorageNode.STATUS_ONLINE)

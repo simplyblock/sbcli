@@ -233,18 +233,22 @@ def set_node_online(node):
 
 def set_node_offline(node):
     node = db.get_storage_node_by_id(node.get_id())
-    # Do not flip to OFFLINE while the node is mid-restart / mid-shutdown or
-    # already-known-unreachable: the runner owns the status transitions during
-    # those phases, and an external flip here would race with it. Observed
-    # failure mode: HealthCheck/monitor's spdk_process_is_up probe catches the
-    # runner's shutdown→restart window and returns False, so set_node_offline
-    # fires with status==IN_RESTART and clobbers the runner's progress —
-    # also marking devices unavailable, which then fails the runner's
+    # Do not flip to OFFLINE while the node is mid-restart / mid-shutdown:
+    # the runner owns the status transitions during those phases, and an
+    # external flip here would race with it. Observed failure mode:
+    # HealthCheck/monitor's spdk_process_is_up probe catches the runner's
+    # shutdown→restart window and returns False, so set_node_offline fires
+    # with status==IN_RESTART and clobbers the runner's progress — also
+    # marking devices unavailable, which then fails the runner's
     # post-restart check and forces a full retry loop.
+    #
+    # UNREACHABLE is intentionally NOT in this skip list: the legitimate
+    # escalation path UNREACHABLE → OFFLINE runs through here (via
+    # _check_data_plane_and_escalate). Skipping it leaves the node stuck
+    # in UNREACHABLE and auto-restart never gets queued.
     if node.status not in [StorageNode.STATUS_OFFLINE,
                            StorageNode.STATUS_IN_SHUTDOWN,
-                           StorageNode.STATUS_RESTARTING,
-                           StorageNode.STATUS_UNREACHABLE]:
+                           StorageNode.STATUS_RESTARTING]:
         try:
             storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_OFFLINE)
             for dev in node.nvme_devices:
