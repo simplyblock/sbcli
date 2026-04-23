@@ -399,6 +399,17 @@ def spdk_process_start(body: SPDKParams):
         job_template = env.get_template('storage_init_job.yaml.j2')
         job_yaml = yaml.safe_load(job_template.render(values))
         batch_v1 = core_utils.get_k8s_batch_client()
+        existing_job_name = job_yaml['metadata']['name']
+        try:
+            batch_v1.delete_namespaced_job(
+                name=existing_job_name,
+                namespace=namespace,
+                body=V1DeleteOptions(propagation_policy='Foreground', grace_period_seconds=0)
+            )
+            logger.info(f"Deleted stale job '{existing_job_name}' left from a previous attempt")
+        except ApiException as e:
+            if e.status != 404:
+                raise
         job_resp = batch_v1.create_namespaced_job(namespace=namespace, body=job_yaml)
         msg = f"Job created: '{job_resp.metadata.name}' in namespace '{namespace}"
         logger.info(msg)

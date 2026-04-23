@@ -4623,14 +4623,42 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
 
     if not activation_mode and leader_has_quorum:
         ### 3- block leader port ONLY (no siblings)
-        try:
-            fw_api = FirewallClient(leader_node, timeout=5, retry=2)
-            fw_api.firewall_set_port(leader_lvs_port, port_type, "block", leader_node.rpc_port)
-            tcp_ports_events.port_deny(leader_node, leader_lvs_port)
-            leader_port_blocked = True
-        except Exception as e:
-            logger.warning("Skipping port block for leader %s on %s: %s",
-                           leader_node.get_id(), primary_node.lvstore, e)
+        # Blocking the leader's LVS port is what quiesces its IO so this
+        # restarting node can safely examine its raid0 without a write
+        # racing into a half-reconstructed lvstore. Silently skipping the
+        # block (as we used to do on ConnectionRefused) lets the leader
+        # keep serving reads/writes while we examine — which has produced
+        # CRC mismatches and lvol drops on the restarting peer. So retry
+        # aggressively and, if it still can't land, abort the restart
+        # unless force=True.
+        last_err = None
+        attempts = 5
+        for attempt in range(1, attempts + 1):
+            try:
+                fw_api = FirewallClient(leader_node, timeout=5, retry=5)
+                fw_api.firewall_set_port(leader_lvs_port, port_type, "block", leader_node.rpc_port)
+                tcp_ports_events.port_deny(leader_node, leader_lvs_port)
+                leader_port_blocked = True
+                last_err = None
+                break
+            except Exception as e:
+                last_err = e
+                logger.warning(
+                    "Port-block attempt %d/%d failed for leader %s on %s: %s",
+                    attempt, attempts, leader_node.get_id(), primary_node.lvstore, e)
+                if attempt < attempts:
+                    time.sleep(2)
+        if not leader_port_blocked:
+            msg = (f"Failed to block leader {leader_node.get_id()} port "
+                   f"{leader_lvs_port} after {attempts} attempts for "
+                   f"{primary_node.lvstore}: {last_err}")
+            if force:
+                logger.warning(
+                    "%s — force=True: proceeding without leader port block; "
+                    "this allows leader-vs-restarter writes to race during "
+                    "examine and can corrupt the rebuilt lvstore", msg)
+            else:
+                _abort_and_unblock(msg)
 
     if not activation_mode and leader_port_blocked:
         # --- Inside port-blocked window: timeout=0.2s, retry=0, abort on failure ---
@@ -4661,21 +4689,18 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
         logger.info("Leader %s has no quorum for %s, skipping port block",
                     leader_node.get_id(), primary_node.lvstore)
 
-    ### 4- examine (idempotent: skip when raid + lvstore already present)
+    ### 4- examine (idempotent: skip only when raid AND lvstore already surfaced)
     raid_already = _rpc_bdev_exists(snode_rpc_client, primary_node.raid)
     lvstore_already = _rpc_lvstore_exists(snode_rpc_client, primary_node.lvstore)
-    if activation_mode and raid_already and lvstore_already:
+    if raid_already and lvstore_already:
         logger.info(
             "Raid %s and lvstore %s already present on %s; skipping examine",
             primary_node.raid, primary_node.lvstore, snode.get_id())
     else:
-        if raid_already:
-            logger.info(
-                "Raid %s already exists on %s but lvstore %s is missing; "
-                "skipping manual examine and relying on existing state",
-                primary_node.raid, snode.get_id(), primary_node.lvstore)
-        else:
-            snode_rpc_client.bdev_examine(primary_node.raid)
+        # Examine is required whenever the lvstore isn't surfaced — whether
+        # the raid was freshly created by _create_bdev_stack (normal restart
+        # path) or pre-existing with stale state (activation retry).
+        snode_rpc_client.bdev_examine(primary_node.raid)
 
         ### 5- wait for examine
         ret = snode_rpc_client.bdev_wait_for_examine()
@@ -4797,13 +4822,36 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
             logger.error("Error connecting to hublvol: %s", e)
 
         ### 8- unblock leader port
+        # If we blocked it, we MUST unblock — a stuck-blocked leader can't
+        # serve client IO on that LVS. Retry until it lands; schedule a
+        # port_allow task as a fallback if we still can't reach the leader
+        # after our attempts so another retry loop keeps trying.
         if leader_port_blocked:
-            try:
-                fw_api = FirewallClient(leader_node, timeout=5, retry=2)
-                fw_api.firewall_set_port(leader_lvs_port, port_type, "allow", leader_node.rpc_port)
-                tcp_ports_events.port_allowed(leader_node, leader_lvs_port)
-            except Exception as e:
-                logger.error("Failed to unblock leader port for %s: %s", primary_node.lvstore, e)
+            unblocked = False
+            attempts = 5
+            for attempt in range(1, attempts + 1):
+                try:
+                    fw_api = FirewallClient(leader_node, timeout=5, retry=5)
+                    fw_api.firewall_set_port(leader_lvs_port, port_type, "allow", leader_node.rpc_port)
+                    tcp_ports_events.port_allowed(leader_node, leader_lvs_port)
+                    unblocked = True
+                    break
+                except Exception as e:
+                    logger.warning(
+                        "Port-unblock attempt %d/%d failed for leader %s on %s: %s",
+                        attempt, attempts, leader_node.get_id(), primary_node.lvstore, e)
+                    if attempt < attempts:
+                        time.sleep(2)
+            if not unblocked:
+                logger.error(
+                    "Failed to unblock leader %s port %s for %s after %d attempts; "
+                    "scheduling port_allow task",
+                    leader_node.get_id(), leader_lvs_port, primary_node.lvstore, attempts)
+                try:
+                    tasks_controller.add_port_allow_task(
+                        leader_node.cluster_id, leader_node.get_id(), leader_lvs_port)
+                except Exception as sched_exc:
+                    logger.error("Failed to schedule port_allow fallback: %s", sched_exc)
             leader_port_blocked = False
 
     # Set restart phase: post_unblock — delayed sync deletes and registrations can now proceed
@@ -5259,22 +5307,23 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
             logger.info(f"Peers disconnected {disconnected_peers}, forcing journal replication on node: {snode.get_id()}")
             rpc_client.jc_explicit_synchronization(lvs_jm_vuid)
 
-    ### 5- examine (idempotent: skip when raid + lvstore already present)
+    ### 5- examine (idempotent: skip only when raid AND lvstore already surfaced)
     rpc_client.bdev_distrib_force_to_non_leader(lvs_jm_vuid)
     raid_already = _rpc_bdev_exists(rpc_client, lvs_raid)
     lvstore_already = _rpc_lvstore_exists(rpc_client, lvs_name)
-    if activation_mode and raid_already and lvstore_already:
+    if raid_already and lvstore_already:
         logger.info(
             "Raid %s and lvstore %s already present on %s; skipping examine",
             lvs_raid, lvs_name, snode.get_id())
     else:
-        if raid_already:
-            logger.info(
-                "Raid %s already exists on %s but lvstore %s is missing; "
-                "skipping manual examine and relying on existing state",
-                lvs_raid, snode.get_id(), lvs_name)
-        else:
-            rpc_client.bdev_examine(lvs_raid)
+        # Examine is required whenever the lvstore isn't surfaced — whether
+        # the raid was freshly created by _create_bdev_stack (normal restart
+        # path) or pre-existing with stale state (activation retry). The
+        # previous "raid_already → skip examine" shortcut broke the normal
+        # restart path: _create_bdev_stack leaves the raid in place but does
+        # not examine it, so the lvstore never surfaces and the subsequent
+        # bdev_lvol_get_lvstores validation fails every time.
+        rpc_client.bdev_examine(lvs_raid)
 
         ### 6- wait for examine
         rpc_client.bdev_wait_for_examine()
