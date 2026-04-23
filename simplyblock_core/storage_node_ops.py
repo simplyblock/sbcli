@@ -4689,21 +4689,18 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
         logger.info("Leader %s has no quorum for %s, skipping port block",
                     leader_node.get_id(), primary_node.lvstore)
 
-    ### 4- examine (idempotent: skip when raid + lvstore already present)
+    ### 4- examine (idempotent: skip only when raid AND lvstore already surfaced)
     raid_already = _rpc_bdev_exists(snode_rpc_client, primary_node.raid)
     lvstore_already = _rpc_lvstore_exists(snode_rpc_client, primary_node.lvstore)
-    if activation_mode and raid_already and lvstore_already:
+    if raid_already and lvstore_already:
         logger.info(
             "Raid %s and lvstore %s already present on %s; skipping examine",
             primary_node.raid, primary_node.lvstore, snode.get_id())
     else:
-        if raid_already:
-            logger.info(
-                "Raid %s already exists on %s but lvstore %s is missing; "
-                "skipping manual examine and relying on existing state",
-                primary_node.raid, snode.get_id(), primary_node.lvstore)
-        else:
-            snode_rpc_client.bdev_examine(primary_node.raid)
+        # Examine is required whenever the lvstore isn't surfaced — whether
+        # the raid was freshly created by _create_bdev_stack (normal restart
+        # path) or pre-existing with stale state (activation retry).
+        snode_rpc_client.bdev_examine(primary_node.raid)
 
         ### 5- wait for examine
         ret = snode_rpc_client.bdev_wait_for_examine()
@@ -4720,61 +4717,6 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
                 snode.get_id(), primary_node.lvstore,
                 detail=f"raid={primary_node.raid} present but lvstore did not recover"
                 if raid_already else "examine did not produce lvstore")
-
-    # Verify that examine actually rediscovered the lvstore and every lvol
-    # the FDB expects to be present on this node. Mirrors the check in
-    # recreate_lvstore() for the primary path. If an lvol blob did not
-    # become durable on this peer's shard of raid0 before it was torn down
-    # (e.g. the blob was committed on the primary/tertiary quorum but this
-    # node missed the write window due to a simultaneous force-shutdown),
-    # the examine won't surface it. Continuing would leave the lvol
-    # subsystem bound without a namespace on this node — present on
-    # primary/tertiary, missing here — and the divergence would never be
-    # reconciled because there is no FDB↔SPDK lvol-set reconcile loop.
-    if not activation_mode:
-        if not snode_rpc_client.bdev_lvol_get_lvstores(primary_node.lvstore):
-            logger.error(
-                "Failed to recover lvstore %s on %s after examine",
-                primary_node.lvstore, snode.get_id())
-            if not force:
-                _abort_and_unblock(
-                    f"lvstore {primary_node.lvstore} did not recover after examine "
-                    f"on non-leader {snode.get_id()}")
-
-        registered_bdevs = snode_rpc_client.get_bdevs() or []
-        bdev_names: set = set()
-        for b in registered_bdevs:
-            name = b.get('name')
-            if name:
-                bdev_names.add(name)
-            for alias in (b.get('aliases') or []):
-                bdev_names.add(alias)
-
-        missing_lvols = []
-        for lv in lvol_list:
-            base_bdev_name = f"{lv.lvs_name}/{lv.lvol_bdev}"
-            if lv.lvol_uuid in bdev_names or base_bdev_name in bdev_names:
-                continue
-            missing_lvols.append(lv)
-
-        if missing_lvols:
-            missing_repr = ", ".join(
-                f"{lv.lvs_name}/{lv.lvol_bdev}(uuid={lv.lvol_uuid[:8]})"
-                for lv in missing_lvols)
-            logger.error(
-                "Expected lvol bdevs missing on %s for %s after examine: %s",
-                snode.get_id(), primary_node.lvstore, missing_repr)
-            if not force:
-                _abort_and_unblock(
-                    f"Expected lvols not registered on {snode.get_id()} after "
-                    f"examine of {primary_node.raid}: {missing_repr}. "
-                    f"Re-run restart with force=True to proceed anyway "
-                    f"(this peer will not serve these lvols).")
-            else:
-                logger.warning(
-                    "force=True: proceeding with %d missing lvol(s) on %s for %s; "
-                    "these lvols will not be served by this peer",
-                    len(missing_lvols), snode.get_id(), primary_node.lvstore)
 
     # Verify that examine actually rediscovered the lvstore and every lvol
     # the FDB expects to be present on this node. Mirrors the check in
@@ -5365,22 +5307,23 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
             logger.info(f"Peers disconnected {disconnected_peers}, forcing journal replication on node: {snode.get_id()}")
             rpc_client.jc_explicit_synchronization(lvs_jm_vuid)
 
-    ### 5- examine (idempotent: skip when raid + lvstore already present)
+    ### 5- examine (idempotent: skip only when raid AND lvstore already surfaced)
     rpc_client.bdev_distrib_force_to_non_leader(lvs_jm_vuid)
     raid_already = _rpc_bdev_exists(rpc_client, lvs_raid)
     lvstore_already = _rpc_lvstore_exists(rpc_client, lvs_name)
-    if activation_mode and raid_already and lvstore_already:
+    if raid_already and lvstore_already:
         logger.info(
             "Raid %s and lvstore %s already present on %s; skipping examine",
             lvs_raid, lvs_name, snode.get_id())
     else:
-        if raid_already:
-            logger.info(
-                "Raid %s already exists on %s but lvstore %s is missing; "
-                "skipping manual examine and relying on existing state",
-                lvs_raid, snode.get_id(), lvs_name)
-        else:
-            rpc_client.bdev_examine(lvs_raid)
+        # Examine is required whenever the lvstore isn't surfaced — whether
+        # the raid was freshly created by _create_bdev_stack (normal restart
+        # path) or pre-existing with stale state (activation retry). The
+        # previous "raid_already → skip examine" shortcut broke the normal
+        # restart path: _create_bdev_stack leaves the raid in place but does
+        # not examine it, so the lvstore never surfaces and the subsequent
+        # bdev_lvol_get_lvstores validation fails every time.
+        rpc_client.bdev_examine(lvs_raid)
 
         ### 6- wait for examine
         rpc_client.bdev_wait_for_examine()

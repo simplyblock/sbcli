@@ -1058,6 +1058,16 @@ class TestRecreateSubsystemSecurity(unittest.TestCase):
         # recreate_lvstore_on_non_leader now probes subsystem existence
         # before creating. Return empty so the create path is exercised.
         mock_rpc_inst.subsystem_list.return_value = []
+        # The inflight-IO drain check on the leader must not time out.
+        mock_rpc_inst.bdev_distrib_check_inflight_io.return_value = False
+        # Post-examine verification scans get_bdevs() for each expected lvol
+        # (by uuid or lvs/bdev alias); without this the check aborts.
+        mock_rpc_inst.get_bdevs.return_value = [
+            {"name": lvol_secured.uuid,
+             "aliases": [f"{lvol_secured.lvs_name}/{lvol_secured.lvol_bdev}"]},
+            {"name": lvol_open.uuid,
+             "aliases": [f"{lvol_open.lvs_name}/{lvol_open.lvol_bdev}"]},
+        ]
         MockRPC.return_value = mock_rpc_inst
 
         # Mock secondary_node.rpc_client() for jc_suspend_compression

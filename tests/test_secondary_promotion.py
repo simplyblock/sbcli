@@ -287,6 +287,13 @@ class TestSecondaryPromotion(unittest.TestCase):
         mock_rpc.bdev_wait_for_examine.return_value = True
         mock_rpc.bdev_distrib_check_inflight_io.return_value = False
         mock_rpc.jc_suspend_compression.return_value = (True, None)
+        # Post-examine lvol-bdev verification scans get_bdevs() for each
+        # expected lvol (by uuid or lvs/bdev alias); default MagicMock isn't
+        # iterable as a bdev list, so supply the expected entry here.
+        mock_rpc.get_bdevs.return_value = [
+            {"name": lvol.lvol_uuid,
+             "aliases": [f"{lvol.lvs_name}/{lvol.lvol_bdev}"]},
+        ]
         mock_rpc_cls.return_value = mock_rpc
 
         for n in [primary, secondary]:
@@ -344,6 +351,14 @@ class TestSecondaryPromotion(unittest.TestCase):
         mock_rpc.bdev_wait_for_examine.return_value = True
         mock_rpc.bdev_distrib_check_inflight_io.return_value = False
         mock_rpc.jc_suspend_compression.return_value = (True, None)
+        # Post-examine verification in recreate_lvstore_on_non_leader scans
+        # get_bdevs() for each expected lvol (by uuid or lvs/bdev alias). The
+        # default MagicMock isn't iterable as a bdev list, so the check fails
+        # before the hublvol assertion. Return the expected lvol bdev here.
+        mock_rpc.get_bdevs.return_value = [
+            {"name": lvol.lvol_uuid,
+             "aliases": [f"{lvol.lvs_name}/{lvol.lvol_bdev}"]},
+        ]
         mock_rpc_cls.return_value = mock_rpc
 
         for n in [primary, secondary]:
