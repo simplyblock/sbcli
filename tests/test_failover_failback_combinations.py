@@ -1266,8 +1266,17 @@ class TestRecreateLvstoreNonLeaderPortBlockFailure(unittest.TestCase):
             self, mock_db_cls, mock_create_bdev, mock_rpc_cls, mock_fw_cls,
             mock_snode_client, mock_set_status, mock_tasks, mock_tcp_events,
             mock_storage_events, _mock_disc, _mock_phase, _mock_handle, _mock_sleep):
-        """All 5 port-block attempts fail → restart aborts, leader kept
-        untouched, node goes offline. No continuing with an unblocked leader."""
+        """All port-block attempts fail → restart aborts, leader kept
+        untouched, node goes offline. No continuing with an unblocked leader.
+
+        The attempt budget was tightened from 5 to 3 (PR #996) — an aborted
+        iteration now costs ~15 s instead of ~140 s, giving the outer retry
+        loop more chances to re-evaluate _check_peer_disconnected after
+        NVMe-TCP keep-alive propagates. The FDB-status short-circuit in
+        _check_peer_disconnected should route dead-mgmt peers to takeover
+        before we ever reach this code; the reduced budget protects the
+        remaining fabric-partition-while-mgmt-reachable case.
+        """
         secondary, primary, _rpc, fw = self._setup(
             mock_rpc_cls, mock_db_cls, mock_create_bdev, mock_fw_cls,
             fw_set_port_side_effect=ConnectionRefusedError("Connection refused"),
@@ -1277,8 +1286,8 @@ class TestRecreateLvstoreNonLeaderPortBlockFailure(unittest.TestCase):
             recreate_lvstore_on_non_leader(
                 secondary, leader_node=primary, primary_node=primary, force=False)
         self.assertIn("Failed to block leader", str(cm.exception))
-        # All 5 attempts must have been tried
-        self.assertEqual(fw.firewall_set_port.call_count, 5)
+        # All 3 attempts must have been tried
+        self.assertEqual(fw.firewall_set_port.call_count, 3)
         # Abort path sets the restarting node offline
         mock_set_status.assert_any_call(secondary.get_id(), StorageNode.STATUS_OFFLINE)
 
@@ -1300,8 +1309,9 @@ class TestRecreateLvstoreNonLeaderPortBlockFailure(unittest.TestCase):
             self, mock_db_cls, mock_create_bdev, mock_rpc_cls, mock_fw_cls,
             mock_snode_client, mock_set_status, mock_tasks, mock_tcp_events,
             mock_storage_events, _mock_disc, _mock_phase, _mock_handle, _mock_sleep):
-        """With force=True, 5 failed block attempts don't abort — restart
-        proceeds despite the race risk (operator explicit choice)."""
+        """With force=True, all failed block attempts don't abort — restart
+        proceeds despite the race risk (operator explicit choice). Attempt
+        count was tightened from 5 to 3 (PR #996)."""
         secondary, primary, _rpc, fw = self._setup(
             mock_rpc_cls, mock_db_cls, mock_create_bdev, mock_fw_cls,
             fw_set_port_side_effect=ConnectionRefusedError("Connection refused"),
@@ -1313,7 +1323,7 @@ class TestRecreateLvstoreNonLeaderPortBlockFailure(unittest.TestCase):
         result = recreate_lvstore_on_non_leader(
             secondary, leader_node=primary, primary_node=primary, force=True)
         self.assertTrue(result)
-        self.assertEqual(fw.firewall_set_port.call_count, 5)
+        self.assertEqual(fw.firewall_set_port.call_count, 3)
 
     @patch("simplyblock_core.storage_node_ops.time.sleep", return_value=None)
     @patch("simplyblock_core.storage_node_ops._check_peer_disconnected",

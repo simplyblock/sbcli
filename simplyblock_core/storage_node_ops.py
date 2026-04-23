@@ -4376,24 +4376,44 @@ def execute_on_leader_with_failover(all_nodes, lvs_name, operation_fn):
 
 
 def _check_peer_disconnected(peer_node, lvs_peer_ids=None):
-    """Method 1: Check if a peer node is data-plane disconnected via JM quorum.
+    """Check if a peer node should be treated as disconnected for the purpose
+    of routing (takeover vs. non-leader path) and peer-port-block decisions.
 
-    Per design: we do NOT rely on node statuses anywhere in restart,
-    but solely on disconnect state and RPC behaviour.
+    Returns True if peer is disconnected (should be skipped), False otherwise.
 
-    Uses is_node_data_plane_disconnected_quorum — checks if the majority of
-    still-online nodes cannot reach the JM of peer_node.
+    Two signals, first match wins:
 
-    Returns True if peer is disconnected (should be skipped), False if connected.
+      1. Mgmt ground truth (FDB status). If FDB already says the peer is
+         OFFLINE / REMOVED / UNREACHABLE, trust it immediately — mgmt has
+         observed the peer leaving the cluster. Attempting to port-block
+         such a peer's mgmt API will only hit ECONNREFUSED and, after 5×
+         retries, abort the entire restart with a misleading "LVStore
+         recovery failed" event. IN_SHUTDOWN / RESTARTING are deliberately
+         NOT in this list — those are transient states the runner owns;
+         preempting another node's leadership during its own restart
+         would be incorrect.
+
+      2. Data-plane JM quorum (legacy path). Only reached if mgmt says
+         the peer is in an "alive" state. Useful to detect fabric
+         partitions where mgmt is still reachable but the data plane
+         isn't — the quorum reads NVMe controller state on surviving
+         peers (see storage_node_monitor::_count_data_plane_votes).
     """
     from simplyblock_core.services.storage_node_monitor import is_node_data_plane_disconnected_quorum
 
+    if peer_node.status in (StorageNode.STATUS_OFFLINE,
+                            StorageNode.STATUS_REMOVED,
+                            StorageNode.STATUS_UNREACHABLE):
+        logger.info("Peer %s mgmt status is %s — treating as disconnected",
+                    peer_node.get_id(), peer_node.status)
+        return True
+
     if is_node_data_plane_disconnected_quorum(peer_node, lvs_peer_ids=lvs_peer_ids):
-        logger.info("Peer %s is data-plane disconnected (JM quorum confirmed), will skip",
+        logger.info("Peer %s is data-plane disconnected (NVMe-ctrlr quorum confirmed), will skip",
                      peer_node.get_id())
         return True
 
-    logger.info("Peer %s is data-plane connected (JM quorum check)", peer_node.get_id())
+    logger.info("Peer %s is data-plane connected (NVMe-ctrlr quorum check)", peer_node.get_id())
     return False
 
 
@@ -4628,14 +4648,21 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
         # racing into a half-reconstructed lvstore. Silently skipping the
         # block (as we used to do on ConnectionRefused) lets the leader
         # keep serving reads/writes while we examine — which has produced
-        # CRC mismatches and lvol drops on the restarting peer. So retry
-        # aggressively and, if it still can't land, abort the restart
-        # unless force=True.
+        # CRC mismatches and lvol drops on the restarting peer. So retry,
+        # and if it still can't land, abort the restart unless force=True.
+        #
+        # Budget: 3 attempts × FirewallClient(timeout=3, retry=1) × 1s sleep
+        # between attempts → worst-case ~15s abort. Previously 5× ×
+        # (timeout=5, retry=5) × 2s = ~140s, which made every iteration
+        # against a dead-mgmt leader stall the restart task for minutes.
+        # The FDB-status short-circuit in _check_peer_disconnected should
+        # already route such peers to the takeover path before we reach
+        # here; keeping a short local budget protects against stragglers.
         last_err = None
-        attempts = 5
+        attempts = 3
         for attempt in range(1, attempts + 1):
             try:
-                fw_api = FirewallClient(leader_node, timeout=5, retry=5)
+                fw_api = FirewallClient(leader_node, timeout=3, retry=1)
                 fw_api.firewall_set_port(leader_lvs_port, port_type, "block", leader_node.rpc_port)
                 tcp_ports_events.port_deny(leader_node, leader_lvs_port)
                 leader_port_blocked = True
@@ -4647,7 +4674,7 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
                     "Port-block attempt %d/%d failed for leader %s on %s: %s",
                     attempt, attempts, leader_node.get_id(), primary_node.lvstore, e)
                 if attempt < attempts:
-                    time.sleep(2)
+                    time.sleep(1)
         if not leader_port_blocked:
             msg = (f"Failed to block leader {leader_node.get_id()} port "
                    f"{leader_lvs_port} after {attempts} attempts for "
@@ -4828,10 +4855,10 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
         # after our attempts so another retry loop keeps trying.
         if leader_port_blocked:
             unblocked = False
-            attempts = 5
+            attempts = 3
             for attempt in range(1, attempts + 1):
                 try:
-                    fw_api = FirewallClient(leader_node, timeout=5, retry=5)
+                    fw_api = FirewallClient(leader_node, timeout=3, retry=1)
                     fw_api.firewall_set_port(leader_lvs_port, port_type, "allow", leader_node.rpc_port)
                     tcp_ports_events.port_allowed(leader_node, leader_lvs_port)
                     unblocked = True
@@ -4841,7 +4868,7 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
                         "Port-unblock attempt %d/%d failed for leader %s on %s: %s",
                         attempt, attempts, leader_node.get_id(), primary_node.lvstore, e)
                     if attempt < attempts:
-                        time.sleep(2)
+                        time.sleep(1)
             if not unblocked:
                 logger.error(
                     "Failed to unblock leader %s port %s for %s after %d attempts; "
@@ -5388,11 +5415,11 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
             if is_takeover:
                 try:
                     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
-                    snode.create_hublvol(cluster_nqn=cluster.nqn)
-                    logger.info("Created and exposed hublvol on new leader %s for %s", snode.get_id(), lvs_name)
+                    snode.adopt_hublvol(lvs_node, cluster.nqn)
+                    logger.info("Adopted hublvol on new leader %s for %s", snode.get_id(), lvs_name)
                 except Exception as e:
-                    logger.error("Error creating hublvol on new leader: %s", e)
-                    _abort_restart_and_unblock(f"create_hublvol on new leader failed: {e}")
+                    logger.error("Error adopting hublvol on new leader: %s", e)
+                    _abort_restart_and_unblock(f"adopt_hublvol on new leader failed: {e}")
             else:
                 try:
                     if not snode.recreate_hublvol():
