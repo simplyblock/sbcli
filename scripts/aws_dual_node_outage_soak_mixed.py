@@ -1328,20 +1328,20 @@ class SoakRunner:
         so the outage semantics (what the pair represents) remain stable
         across retries even if the control plane has re-promoted since.
         """
+        # Flattened to a single `python3 -c` line: a multi-line for-loop can't
+        # be expressed with semicolons, so this is a dict-comprehension.
         script = (
             "import json; "
             "from simplyblock_core import db_controller; "
             "db = db_controller.DBController(); "
             "nodes = db.get_storage_nodes(); "
-            "out = {}; "
-            "for n in nodes: "
-            "    if not getattr(n, 'lvstore', '') or getattr(n, 'is_secondary_node', False): "
-            "        continue; "
-            "    out[n.lvstore] = {"
-            "        'primary': n.get_id(), "
-            "        'secondary': getattr(n, 'secondary_node_id', '') or '', "
-            "        'tertiary': getattr(n, 'tertiary_node_id', '') or '', "
-            "    }; "
+            "out = {n.lvstore: {"
+            "'primary': n.get_id(), "
+            "'secondary': getattr(n, 'secondary_node_id', '') or '', "
+            "'tertiary': getattr(n, 'tertiary_node_id', '') or ''"
+            "} for n in nodes "
+            "if getattr(n, 'lvstore', '') "
+            "and not getattr(n, 'is_secondary_node', False)}; "
             "print(json.dumps(out))"
         )
         _, stdout_text, _ = self.mgmt.run(
