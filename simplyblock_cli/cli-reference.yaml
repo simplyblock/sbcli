@@ -164,8 +164,11 @@ commands:
             dest: ifname
             type: str
           - name: "--journal-partition"
-            help: >-
-              **Deprecated:** use `--enable-journal-device` instead.<br><br>
+            deprecated:
+              since: "26.1"
+              replaced-by: "--enable-journal-device"
+              migration: "migrate_journal_partition"
+            help: |
               1: Auto-create small partitions for journal on nvme devices. 0: use a separate (the smallest) nvme device of the node for journal. The journal needs a maximum of 3 percent of total available raw disk space. Default: `1`.
             dest: partitions
             type: int
