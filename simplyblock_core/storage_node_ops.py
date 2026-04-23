@@ -2208,53 +2208,54 @@ def _restart_storage_node_impl(
         return False
     snode = db_controller.get_storage_node_by_id(node_id)
 
+    if  node_address == snode.api_endpoint:
+        node_address = None
+
     if node_address:
-        if node_address != snode.api_endpoint:
-            logger.info(f"Restarting on new node with ip: {node_address}")
-            snode_api = SNodeClient(node_address, timeout=5 * 60, retry=3)
-            node_info, _ = snode_api.info()
-            if not node_info:
-                logger.error("Failed to get node info!")
+        logger.info(f"Restarting on new node with ip: {node_address}")
+        snode_api = SNodeClient(node_address, timeout=5 * 60, retry=3)
+        node_info, _ = snode_api.info()
+        if not node_info:
+            logger.error("Failed to get node info!")
+            return False
+        snode.api_endpoint = node_address
+        snode.mgmt_ip = utils.resolve_address(node_address)
+        data_nics = []
+        for nic in snode.data_nics:
+            if_name = nic["if_name"]
+            device = node_info['network_interface'][if_name]
+            data_nics.append(
+                IFace({
+                    'uuid': str(uuid.uuid4()),
+                    'if_name': if_name,
+                    'ip4_address': device['ip'],
+                    'status': device['status'],
+                    'net_type': device['net_type']}))
+        snode.data_nics = data_nics
+        snode.hostname = node_info['hostname']
+
+        if snode.num_partitions_per_dev == 0 and reattach_volume:
+            new_cloud_instance_id = node_info['cloud_instance']['id']
+            detached_volumes = node_utils.detach_ebs_volumes(snode.cloud_instance_id)
+            if not detached_volumes:
+                logger.error("No volumes with matching tags were detached.")
                 return False
-            snode.api_endpoint = node_address
-            snode.mgmt_ip = node_address.split(":")[0]
-            data_nics = []
-            for nic in snode.data_nics:
-                if_name = nic["if_name"]
-                device = node_info['network_interface'][if_name]
-                data_nics.append(
-                    IFace({
-                        'uuid': str(uuid.uuid4()),
-                        'if_name': if_name,
-                        'ip4_address': device['ip'],
-                        'status': device['status'],
-                        'net_type': device['net_type']}))
-            snode.data_nics = data_nics
-            snode.hostname = node_info['hostname']
 
-            if snode.num_partitions_per_dev == 0 and reattach_volume:
-                new_cloud_instance_id = node_info['cloud_instance']['id']
-                detached_volumes = node_utils.detach_ebs_volumes(snode.cloud_instance_id)
-                if not detached_volumes:
-                    logger.error("No volumes with matching tags were detached.")
-                    return False
+            attached_volumes = node_utils.attach_ebs_volumes(new_cloud_instance_id, detached_volumes)
+            if not attached_volumes:
+                logger.error("Failed to attach volumes.")
+                return False
 
-                attached_volumes = node_utils.attach_ebs_volumes(new_cloud_instance_id, detached_volumes)
-                if not attached_volumes:
-                    logger.error("Failed to attach volumes.")
-                    return False
+            snode.cloud_instance_id = new_cloud_instance_id
+            known_sn = [dev.serial_number for dev in snode.nvme_devices]
+            if snode.jm_device and 'serial_number' in snode.jm_device.device_data_dict:
+                known_sn.append(snode.jm_device.device_data_dict['serial_number'])
 
-                snode.cloud_instance_id = new_cloud_instance_id
-                known_sn = [dev.serial_number for dev in snode.nvme_devices]
-                if snode.jm_device and 'serial_number' in snode.jm_device.device_data_dict:
-                    known_sn.append(snode.jm_device.device_data_dict['serial_number'])
+            node_info, _ = snode_api.info()
+            for dev in node_info['nvme_devices']:
+                if dev['serial_number'] in known_sn:
+                    snode_api.bind_device_to_spdk(dev['address'])
 
-                node_info, _ = snode_api.info()
-                for dev in node_info['nvme_devices']:
-                    if dev['serial_number'] in known_sn:
-                        snode_api.bind_device_to_spdk(dev['address'])
-        else:
-            node_address = None
     active_tcp = False
     active_rdma = False
     fabric_tcp = cluster.fabric_tcp

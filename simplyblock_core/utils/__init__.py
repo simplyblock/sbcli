@@ -6,6 +6,7 @@ import math
 import os
 import random
 import re
+import socket
 import string
 import subprocess
 import sys
@@ -3123,3 +3124,31 @@ def recalculate_cores_distribution(cores, number_of_alcemls):
         "distrib_cpu_cores": get_core_indexes(core_to_index, distribution[5]),
         "jc_singleton_core": get_core_indexes(core_to_index, distribution[6]),
         "lvol_poller_core": get_core_indexes(core_to_index, distribution[7])}
+
+
+def resolve_address(host_port: str) -> str:
+    """Resolves an host:port string to its IP address
+
+    Resilient to IPv4, IPv6, hostnames, and an optional port suffix.
+    """
+
+    default_port = 1234
+    # Check for bracketed IPv6: [::1] or [::1]:8080
+    if host_port.startswith("["):
+        bracket_end = host_port.index("]")
+        host = host_port[1:bracket_end]
+        rest = host_port[bracket_end + 1:]
+        port = int(rest[1:]) if rest.startswith(":") else default_port
+    # Plain IPv4 or hostname: 1.2.3.4, 1.2.3.4:8080, example.com, example.com:8080
+    elif ":" in host_port:
+        host, port_str = host_port.rsplit(":", 1)
+        port = int(port_str)
+    else:
+        host = host_port
+        port = default_port
+
+    results = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    ip = results[0][4][0]
+    if not isinstance(ip, str):
+        raise ValueError(f"Invalid return value {ip}")
+    return ip
