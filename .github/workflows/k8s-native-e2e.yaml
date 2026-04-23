@@ -361,28 +361,28 @@ jobs:
           kubectl delete clusterrole simplyblock-storage-node-role --ignore-not-found 2>/dev/null || true
           kubectl delete clusterrolebinding simplyblock-storage-node-binding --ignore-not-found 2>/dev/null || true
 
-          echo "=== Phase 4b: Cleanup leftover secrets, SAs, and kube-system resources ==="
-          kubectl -n $NAMESPACE delete secret simplyblock-csi-secret-v2 --ignore-not-found 2>/dev/null || true
-          kubectl -n $NAMESPACE delete sa simplyblock-storage-node-sa --ignore-not-found 2>/dev/null || true
+          # echo "=== Phase 4b: Cleanup leftover secrets, SAs, and kube-system resources ==="
+          # kubectl -n $NAMESPACE delete secret simplyblock-csi-secret-v2 --ignore-not-found 2>/dev/null || true
+          # kubectl -n $NAMESPACE delete sa simplyblock-storage-node-sa --ignore-not-found 2>/dev/null || true
 
-          # Clean up kube-system resources from previous helm installs
-          for RES in sa clusterrole clusterrolebinding; do
-            for NAME in $(kubectl get $RES -A --no-headers 2>/dev/null | grep -i simplyblock | awk '{print $1 ":" $2}' 2>/dev/null); do
-              NS=$(echo "$NAME" | cut -d: -f1)
-              RNAME=$(echo "$NAME" | cut -d: -f2)
-              if [ "$RES" = "sa" ]; then
-                kubectl -n "$NS" delete sa "$RNAME" --ignore-not-found 2>/dev/null || true
-              else
-                kubectl delete "$RES" "$RNAME" --ignore-not-found 2>/dev/null || true
-              fi
-            done
-          done
-          # Specifically clean numa-resource-plugin resources in kube-system
-          kubectl -n kube-system delete ds simplyblock-numa-resource-plugin --ignore-not-found 2>/dev/null || true
-          kubectl -n kube-system delete sa simplyblock-numa-resource-plugin --ignore-not-found 2>/dev/null || true
-          kubectl -n kube-system delete cm simplyblock-numa-resource-plugin-config --ignore-not-found 2>/dev/null || true
-          kubectl delete clusterrole simplyblock-numa-resource-plugin --ignore-not-found 2>/dev/null || true
-          kubectl delete clusterrolebinding simplyblock-numa-resource-plugin --ignore-not-found 2>/dev/null || true
+          # # Clean up kube-system resources from previous helm installs
+          # for RES in sa clusterrole clusterrolebinding; do
+          #   for NAME in $(kubectl get $RES -A --no-headers 2>/dev/null | grep -i simplyblock | awk '{print $1 ":" $2}' 2>/dev/null); do
+          #     NS=$(echo "$NAME" | cut -d: -f1)
+          #     RNAME=$(echo "$NAME" | cut -d: -f2)
+          #     if [ "$RES" = "sa" ]; then
+          #       kubectl -n "$NS" delete sa "$RNAME" --ignore-not-found 2>/dev/null || true
+          #     else
+          #       kubectl delete "$RES" "$RNAME" --ignore-not-found 2>/dev/null || true
+          #     fi
+          #   done
+          # done
+          # # Specifically clean numa-resource-plugin resources in kube-system
+          # kubectl -n kube-system delete ds simplyblock-numa-resource-plugin --ignore-not-found 2>/dev/null || true
+          # kubectl -n kube-system delete sa simplyblock-numa-resource-plugin --ignore-not-found 2>/dev/null || true
+          # kubectl -n kube-system delete cm simplyblock-numa-resource-plugin-config --ignore-not-found 2>/dev/null || true
+          # kubectl delete clusterrole simplyblock-numa-resource-plugin --ignore-not-found 2>/dev/null || true
+          # kubectl delete clusterrolebinding simplyblock-numa-resource-plugin --ignore-not-found 2>/dev/null || true
 
           echo "=== Phase 5: Verify nothing remains ==="
           echo "Namespaced resources:"
@@ -424,6 +424,18 @@ jobs:
           done
 
           echo "=== Cleanup complete ==="
+      
+      
+      # ── Label nodes (after cluster is active) ───────────────────────────────
+
+      - name: Label worker nodes
+        run: |
+          IFS=',' read -ra NODES <<< "${{ github.event.inputs.worker_nodes }}"
+          for NODE in "${NODES[@]}"; do
+            echo "Labeling node $NODE"
+            kubectl label node "$NODE" topology.kubernetes.io/zone=default --overwrite
+            kubectl label node "$NODE" simplyblock.io/role=mgmt-plane --overwrite
+          done
 
       # ── Prepare namespace ─────────────────────────────────────────────────
 
@@ -764,17 +776,6 @@ jobs:
           kubectl -n $NAMESPACE get pods
           kubectl -n $NAMESPACE exec "$ADMIN_POD" -- sbctl cluster list 2>&1 || true
           exit 1
-
-      # ── Label nodes (after cluster is active) ───────────────────────────────
-
-      - name: Label worker nodes
-        run: |
-          IFS=',' read -ra NODES <<< "${{ github.event.inputs.worker_nodes }}"
-          for NODE in "${NODES[@]}"; do
-            echo "Labeling node $NODE"
-            kubectl label node "$NODE" topology.kubernetes.io/zone=default --overwrite
-            kubectl label node "$NODE" simplyblock.io/role=mgmt-plane --overwrite
-          done
 
       # ── Run tests ───────────────────────────────────────────────────────────
 
