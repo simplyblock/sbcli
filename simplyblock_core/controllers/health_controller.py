@@ -12,7 +12,6 @@ from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice, RemoteDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCClient
-from simplyblock_core.snode_client import SNodeClient
 from simplyblock_core.controllers import device_controller
 
 logger = utils.get_logger(__name__)
@@ -117,10 +116,10 @@ def _check_node_rpc(rpc_ip, rpc_port, rpc_username, rpc_password, timeout=5, ret
     return False, False
 
 
-def _check_node_api(ip):
+def _check_node_api(node):
     try:
-        snode_api = SNodeClient(f"{ip}:5000", timeout=90, retry=2)
-        logger.debug(f"Node API={ip}:5000")
+        snode_api = node.client(timeout=90, retry=2)
+        logger.debug(f"Node API={node.api_endpoint}")
         ret, _ = snode_api.is_live()
         logger.debug(f"snode is alive: {ret}")
         if ret:
@@ -130,16 +129,23 @@ def _check_node_api(ip):
     return False
 
 
-def _check_spdk_process_up(ip, rpc_port, cluster_id):
-    snode_api = SNodeClient(f"{ip}:5000", timeout=90, retry=2)
-    logger.debug(f"Node API={ip}:5000")
-    is_up, _ = snode_api.spdk_process_is_up(rpc_port, cluster_id)
-    logger.debug(f"SPDK is {is_up}")
-    return is_up
+def _log_port_check_failure(db_controller, snode, port, exc):
+    # ECONNREFUSED from the node-agent's /firewall endpoint is routine during
+    # activation and restart windows. Downgrade to WARNING so a transient miss
+    # doesn't look like a real outage in logs.
+    try:
+        cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+        cluster_status = cluster.status if cluster else None
+    except Exception:
+        cluster_status = None
+    unstable = (cluster_status in (Cluster.STATUS_IN_ACTIVATION, Cluster.STATUS_SUSPENDED)
+                or snode.status in (StorageNode.STATUS_RESTARTING, StorageNode.STATUS_IN_SHUTDOWN))
+    log_fn = logger.warning if unstable else logger.error
+    log_fn("Check node port failed for %s port %s: %s", snode.get_id(), port, exc)
 
 
 def check_port_on_node(snode, port_id):
-    fw_api = FirewallClient(snode, timeout=5, retry=2)
+    fw_api = FirewallClient(snode, timeout=5, retry=5)
     iptables_command_output, _ = fw_api.get_firewall(snode.rpc_port)
     if type(iptables_command_output) is str:
         iptables_command_output = [iptables_command_output]
@@ -171,7 +177,7 @@ def _check_node_ping(ip):
 
 
 def _check_ping_from_node(ip, ifname, node):
-    snodeapi = SNodeClient(node.api_endpoint, timeout=3, retry=3)
+    snodeapi = node.client(timeout=3, retry=3)
     try:
         ret, _ = snodeapi.ping_ip(ip, ifname)
         return bool(ret)
@@ -609,7 +615,7 @@ def check_node(node_id, with_devices=True):
     logger.info(f"Check: ping mgmt ip {snode.mgmt_ip} ... {ping_check}")
 
     # 2- check node API
-    node_api_check = _check_node_api(snode.mgmt_ip)
+    node_api_check = _check_node_api(snode)
     logger.info(f"Check: node API {snode.mgmt_ip}:5000 ... {node_api_check}")
 
     # 3- check node RPC
@@ -634,16 +640,16 @@ def check_node(node_id, with_devices=True):
                 logger.info(f"Check: node {snode.mgmt_ip}, port: {sec_lvs_port} ... {lvol_port_check}")
             except KeyError:
                 logger.error("node not found")
-            except Exception:
-                logger.error("Check node port failed, connection error")
+            except Exception as e:
+                _log_port_check_failure(db_controller, snode, sec_lvs_port, e)
 
     if not snode.is_secondary_node:
         try:
             own_lvs_port = snode.get_lvol_subsys_port(snode.lvstore)
             lvol_port_check = check_port_on_node(snode, own_lvs_port)
             logger.info(f"Check: node {snode.mgmt_ip}, port: {own_lvs_port} ... {lvol_port_check}")
-        except Exception:
-            logger.error("Check node port failed, connection error")
+        except Exception as e:
+            _log_port_check_failure(db_controller, snode, own_lvs_port, e)
 
     is_node_online = ping_check and node_api_check and node_rpc_check
 

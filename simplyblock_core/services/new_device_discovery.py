@@ -5,8 +5,6 @@ from simplyblock_core import constants, db_controller, storage_node_ops, utils
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 
-from simplyblock_core.snode_client import SNodeClient
-
 logger = utils.get_logger(__name__)
 
 # get DB controller
@@ -29,7 +27,7 @@ while True:
         if node.jm_device and 'serial_number' in node.jm_device.device_data_dict:
             known_sn.append(node.jm_device.device_data_dict['serial_number'])
 
-        snode_api = SNodeClient(node.api_endpoint)
+        snode_api = node.client()
         node_info, _ = snode_api.info()
 
 

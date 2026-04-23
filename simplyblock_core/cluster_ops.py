@@ -694,6 +694,13 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
             logger.warning(f"Node {snode.get_id()} already has lvstore {snode.lvstore}")
             try:
                 ret = storage_node_ops.recreate_lvstore(snode, activation_mode=True)
+            except storage_node_ops.LVSRestartRequiredError as e:
+                logger.error(e)
+                set_cluster_status(cl_id, ols_status)
+                raise ValueError(
+                    f"Failed to activate cluster: node {e.node_id} holds "
+                    f"partial state for LVS {e.lvs_name} that examine could "
+                    f"not recover. Restart node {e.node_id} before activating.")
             except Exception as e:
                 logger.error(e)
                 set_cluster_status(cl_id, ols_status)
@@ -737,7 +744,16 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
         for primary_node in primary_nodes:
             primary_node.lvstore_status = "in_creation"
             primary_node.write_to_db()
-            r = storage_node_ops.recreate_lvstore_on_non_leader(snode, primary_node, primary_node, activation_mode=True)
+            try:
+                r = storage_node_ops.recreate_lvstore_on_non_leader(
+                    snode, primary_node, primary_node, activation_mode=True)
+            except storage_node_ops.LVSRestartRequiredError as e:
+                logger.error(e)
+                set_cluster_status(cl_id, ols_status)
+                raise ValueError(
+                    f"Failed to activate cluster: node {e.node_id} holds "
+                    f"partial state for LVS {e.lvs_name} (non-leader). "
+                    f"Restart node {e.node_id} before activating.")
             if not r:
                 ret = False
 

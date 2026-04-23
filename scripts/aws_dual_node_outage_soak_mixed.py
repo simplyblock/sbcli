@@ -885,15 +885,57 @@ class SoakRunner:
         """Stop every fio process launched by this soak on the client host.
 
         Called between outage iterations so that the subsequent rebalancing
-        runs unloaded. We match by fio --name=aws_dual_soak_* rather than
+        runs unloaded. First verifies every tracked fio is still running;
+        a premature exit (clean or failed) during the outage iteration
+        indicates a real fault that must surface rather than be masked by
+        the kill. Only after the check do we SIGTERM (short grace window)
+        then SIGKILL. We match by fio --name=aws_dual_soak_* rather than
         tracked PIDs because fio can spawn worker processes whose parent
         (the nohup bash) may already have exited, leaving tracked PIDs
-        stale. A short graceful window is followed by SIGKILL so a stuck
-        fio cannot hold up the next iteration.
+        stale.
         """
         if not self.fio_jobs:
             return
-        self.logger.log("Stopping fio on all volumes")
+
+        # Pre-kill verification: every tracked fio must still be running.
+        dead = []
+        for job in self.fio_jobs:
+            check_script = (
+                "set -euo pipefail\n"
+                f"if kill -0 {job.pid} 2>/dev/null; then\n"
+                "  echo RUNNING\n"
+                f"elif [ -f {shlex.quote(job.rc_file)} ]; then\n"
+                f"  echo EXITED:$(cat {shlex.quote(job.rc_file)})\n"
+                "else\n"
+                "  echo MISSING\n"
+                "fi\n"
+            )
+            _, stdout_text, _ = self.client.run(
+                f"bash -lc {shlex.quote(check_script)}",
+                timeout=30,
+                label=f"pre-stop check fio pid {job.pid}",
+            )
+            status = stdout_text.strip().splitlines()[-1]
+            if status != "RUNNING":
+                dead.append((job, status))
+        if dead:
+            for job, status in dead:
+                tail = self.client.run(
+                    f"bash -lc {shlex.quote(f'tail -50 {shlex.quote(job.fio_log)}')}",
+                    timeout=30,
+                    check=False,
+                    label=f"tail fio log {job.volume_name}",
+                )[1]
+                self.logger.log(
+                    f"fio for {job.volume_name} not running (status={status}). "
+                    f"Last log lines:\n{tail}"
+                )
+            details = ", ".join(f"{j.volume_name}={s}" for j, s in dead)
+            raise TestRunError(
+                f"fio exited prematurely during outage iteration: {details}"
+            )
+
+        self.logger.log("All fio still running; stopping them between iterations")
         kill_script = (
             "set +e\n"
             "sudo pkill -TERM -f 'fio --name=aws_dual_soak_' 2>/dev/null || true\n"
@@ -1222,13 +1264,10 @@ class SoakRunner:
         self.wait_for_all_online(
             target_nodes={node1, node2}, timeout=wait_timeout
         )
-        # Intentionally no check_fio here: fio is stopped immediately after
-        # the outage pair by the outer loop so that the subsequent
-        # rebalancing/migration runs without IO load. The outer loop then
-        # restarts fio for the next iteration. Any natural fio completion
-        # (e.g. runtime expired) will surface when stop_fio's pkill becomes
-        # a no-op and the next start_fio picks the run up cleanly.
-        self.wait_for_cluster_stable()
+        # Intentionally no check_fio / wait_for_cluster_stable here: the outer
+        # loop calls stop_fio first (so rebalancing runs without IO load) and
+        # then waits for cluster stability. Any natural fio completion
+        # (e.g. runtime expired) will surface via stop_fio's pre-kill check.
 
     def run(self):
         self.ensure_prerequisites()
@@ -1284,10 +1323,12 @@ class SoakRunner:
             )
             self.run_outage_pair(node1, node2, method1, method2)
 
-            # Stop fio immediately so the ensuing migration/rebalance runs
-            # unloaded. The next iteration will wait for the migration to
-            # complete and then restart fio from scratch on all volumes.
+            # Nodes are back online but rebalancing may still be in flight.
+            # Stop fio FIRST (after verifying all jobs are still running) so
+            # the rebalance/migration proceeds without IO load, then wait for
+            # the cluster to settle before the next iteration restarts fio.
             self.stop_fio()
+            self.wait_for_cluster_stable()
 
             self._inter_iteration_nic_chaos()
 

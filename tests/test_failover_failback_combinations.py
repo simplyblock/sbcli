@@ -120,7 +120,9 @@ def _mock_rpc():
     """Create a standard mock RPC client with all expected methods."""
     rpc = MagicMock()
     rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": True}]
-    rpc.get_bdevs.return_value = []
+    # Include the standard _lvol()'s base bdev so the post-examine
+    # lvol-presence check in recreate_lvstore_on_non_leader passes.
+    rpc.get_bdevs.return_value = [{"name": "LVS_100/bdev_test", "aliases": []}]
     rpc.bdev_lvol_set_lvs_opts.return_value = True
     rpc.bdev_lvol_set_leader.return_value = True
     rpc.bdev_lvol_get_leader.return_value = True
@@ -1084,6 +1086,272 @@ class TestLvolSecondSecondaryFallback(unittest.TestCase):
         src = self._get_function_source(self._read_lvol_controller_source(), "delete_lvol")
         self.assertIn("for nl in non_leaders", src,
                        "delete_lvol must iterate all non-leaders")
+
+
+# ===========================================================================
+# Non-leader restart must fail-loudly on lvol mismatch unless force=True
+# ===========================================================================
+
+class TestRecreateLvstoreNonLeaderLvolMismatch(unittest.TestCase):
+    """After bdev_examine on a non-leader, the set of lvol bdevs in SPDK must
+    match the set of lvols FDB says belong to this LVS. If a blob wasn't
+    durable on this peer's raid0 shard before a force-shutdown (see
+    2026-04-20 dual-outage race), the examine silently skips it and the
+    subsystem ends up bound without a namespace. Without this check the
+    restart returned success while leaving the lvol unserved on this peer.
+    """
+
+    def _setup(self, mock_rpc_cls, mock_db_cls, mock_create_bdev, mock_fw_cls,
+                present_bdevs=None):
+        nodes = _build_ftt2_nodes()
+        secondary = nodes["node-2"]
+        primary = nodes["node-1"]
+        lvols = [_lvol("lv1", "node-1")]
+
+        db = _make_db_mock(nodes, lvols)
+        mock_db_cls.return_value = db
+
+        rpc = _mock_rpc()
+        if present_bdevs is not None:
+            rpc.get_bdevs.return_value = [
+                {"name": n, "aliases": []} for n in present_bdevs
+            ]
+        mock_rpc_cls.return_value = rpc
+        mock_create_bdev.return_value = (True, None)
+
+        make_fw, _ = _mock_fw_factory()
+        mock_fw_cls.side_effect = make_fw
+        _setup_node_methods(nodes, rpc)
+        return secondary, primary, rpc
+
+    @patch("simplyblock_core.storage_node_ops._check_peer_disconnected",
+           side_effect=lambda peer, **kw: peer.status in ["offline"])
+    @patch("simplyblock_core.storage_node_ops._set_restart_phase")
+    @patch("simplyblock_core.storage_node_ops._handle_rpc_failure_on_peer", return_value="skip")
+    @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
+    @patch("simplyblock_core.storage_node_ops.storage_events")
+    @patch("simplyblock_core.storage_node_ops.tasks_controller")
+    @patch("simplyblock_core.storage_node_ops.set_node_status")
+    @patch("simplyblock_core.storage_node_ops.SNodeClient")
+    @patch("simplyblock_core.storage_node_ops.FirewallClient")
+    @patch("simplyblock_core.storage_node_ops.RPCClient")
+    @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
+    @patch("simplyblock_core.storage_node_ops.DBController")
+    def test_missing_lvol_bdev_aborts_when_not_force(
+            self, mock_db_cls, mock_create_bdev, mock_rpc_cls, mock_fw_cls,
+            mock_snode_client, mock_set_status, mock_tasks, mock_tcp_events,
+            mock_storage_events, _mock_disc, _mock_phase, _mock_handle):
+        """Without force=True, restart must abort when an expected lvol bdev
+        isn't in the SPDK bdev registry after examine."""
+        # Empty bdev registry — the expected LVS_100/bdev_test isn't there
+        secondary, primary, _rpc = self._setup(
+            mock_rpc_cls, mock_db_cls, mock_create_bdev, mock_fw_cls,
+            present_bdevs=[],
+        )
+        from simplyblock_core.storage_node_ops import recreate_lvstore_on_non_leader
+        with self.assertRaises(Exception) as cm:
+            recreate_lvstore_on_non_leader(
+                secondary, leader_node=primary, primary_node=primary, force=False)
+        self.assertIn("Expected lvols not registered", str(cm.exception))
+        # Node must be marked offline by the abort path
+        mock_set_status.assert_any_call(secondary.get_id(), StorageNode.STATUS_OFFLINE)
+
+    @patch("simplyblock_core.storage_node_ops._check_peer_disconnected",
+           side_effect=lambda peer, **kw: peer.status in ["offline"])
+    @patch("simplyblock_core.storage_node_ops._set_restart_phase")
+    @patch("simplyblock_core.storage_node_ops._handle_rpc_failure_on_peer", return_value="skip")
+    @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
+    @patch("simplyblock_core.storage_node_ops.storage_events")
+    @patch("simplyblock_core.storage_node_ops.tasks_controller")
+    @patch("simplyblock_core.storage_node_ops.set_node_status")
+    @patch("simplyblock_core.storage_node_ops.SNodeClient")
+    @patch("simplyblock_core.storage_node_ops.FirewallClient")
+    @patch("simplyblock_core.storage_node_ops.RPCClient")
+    @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
+    @patch("simplyblock_core.storage_node_ops.DBController")
+    def test_missing_lvol_bdev_succeeds_with_force(
+            self, mock_db_cls, mock_create_bdev, mock_rpc_cls, mock_fw_cls,
+            mock_snode_client, mock_set_status, mock_tasks, mock_tcp_events,
+            mock_storage_events, _mock_disc, _mock_phase, _mock_handle):
+        """With force=True, restart proceeds even when lvol bdev is missing
+        (operator explicitly accepts that the peer won't serve it)."""
+        secondary, primary, _rpc = self._setup(
+            mock_rpc_cls, mock_db_cls, mock_create_bdev, mock_fw_cls,
+            present_bdevs=[],
+        )
+        from simplyblock_core.storage_node_ops import recreate_lvstore_on_non_leader
+        result = recreate_lvstore_on_non_leader(
+            secondary, leader_node=primary, primary_node=primary, force=True)
+        self.assertTrue(result)
+
+    @patch("simplyblock_core.storage_node_ops._check_peer_disconnected",
+           side_effect=lambda peer, **kw: peer.status in ["offline"])
+    @patch("simplyblock_core.storage_node_ops._set_restart_phase")
+    @patch("simplyblock_core.storage_node_ops._handle_rpc_failure_on_peer", return_value="skip")
+    @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
+    @patch("simplyblock_core.storage_node_ops.storage_events")
+    @patch("simplyblock_core.storage_node_ops.tasks_controller")
+    @patch("simplyblock_core.storage_node_ops.set_node_status")
+    @patch("simplyblock_core.storage_node_ops.SNodeClient")
+    @patch("simplyblock_core.storage_node_ops.FirewallClient")
+    @patch("simplyblock_core.storage_node_ops.RPCClient")
+    @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
+    @patch("simplyblock_core.storage_node_ops.DBController")
+    def test_lvol_present_passes(
+            self, mock_db_cls, mock_create_bdev, mock_rpc_cls, mock_fw_cls,
+            mock_snode_client, mock_set_status, mock_tasks, mock_tcp_events,
+            mock_storage_events, _mock_disc, _mock_phase, _mock_handle):
+        """Happy path: expected lvol bdev is in the registry, restart succeeds
+        without force."""
+        secondary, primary, _rpc = self._setup(
+            mock_rpc_cls, mock_db_cls, mock_create_bdev, mock_fw_cls,
+            present_bdevs=["LVS_100/bdev_test"],
+        )
+        from simplyblock_core.storage_node_ops import recreate_lvstore_on_non_leader
+        result = recreate_lvstore_on_non_leader(
+            secondary, leader_node=primary, primary_node=primary, force=False)
+        self.assertTrue(result)
+
+
+# ===========================================================================
+# Port-block failure during restart must retry then abort (unless force=True)
+# ===========================================================================
+
+class TestRecreateLvstoreNonLeaderPortBlockFailure(unittest.TestCase):
+    """The leader-port-block step used to swallow FirewallClient exceptions
+    and continue the restart, allowing the leader to keep serving writes
+    while the restarting node examined raid0 — races that observably led
+    to CRC mismatches and lvols dropped during examine. Restart must now
+    retry the block and, if it still can't land, abort (unless force=True).
+    """
+
+    def _setup(self, mock_rpc_cls, mock_db_cls, mock_create_bdev, mock_fw_cls,
+                fw_set_port_side_effect=None):
+        nodes = _build_ftt2_nodes()
+        secondary = nodes["node-2"]
+        primary = nodes["node-1"]
+        lvols = [_lvol("lv1", "node-1")]
+
+        db = _make_db_mock(nodes, lvols)
+        mock_db_cls.return_value = db
+
+        rpc = _mock_rpc()
+        mock_rpc_cls.return_value = rpc
+        mock_create_bdev.return_value = (True, None)
+
+        # Single FirewallClient mock whose firewall_set_port raises as directed
+        fw = MagicMock()
+        if fw_set_port_side_effect is not None:
+            fw.firewall_set_port.side_effect = fw_set_port_side_effect
+        mock_fw_cls.return_value = fw
+
+        _setup_node_methods(nodes, rpc)
+        return secondary, primary, rpc, fw
+
+    @patch("simplyblock_core.storage_node_ops.time.sleep", return_value=None)
+    @patch("simplyblock_core.storage_node_ops._check_peer_disconnected",
+           side_effect=lambda peer, **kw: peer.status in ["offline"])
+    @patch("simplyblock_core.storage_node_ops._set_restart_phase")
+    @patch("simplyblock_core.storage_node_ops._handle_rpc_failure_on_peer", return_value="skip")
+    @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
+    @patch("simplyblock_core.storage_node_ops.storage_events")
+    @patch("simplyblock_core.storage_node_ops.tasks_controller")
+    @patch("simplyblock_core.storage_node_ops.set_node_status")
+    @patch("simplyblock_core.storage_node_ops.SNodeClient")
+    @patch("simplyblock_core.storage_node_ops.FirewallClient")
+    @patch("simplyblock_core.storage_node_ops.RPCClient")
+    @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
+    @patch("simplyblock_core.storage_node_ops.DBController")
+    def test_block_fails_all_attempts_aborts_without_force(
+            self, mock_db_cls, mock_create_bdev, mock_rpc_cls, mock_fw_cls,
+            mock_snode_client, mock_set_status, mock_tasks, mock_tcp_events,
+            mock_storage_events, _mock_disc, _mock_phase, _mock_handle, _mock_sleep):
+        """All 5 port-block attempts fail → restart aborts, leader kept
+        untouched, node goes offline. No continuing with an unblocked leader."""
+        secondary, primary, _rpc, fw = self._setup(
+            mock_rpc_cls, mock_db_cls, mock_create_bdev, mock_fw_cls,
+            fw_set_port_side_effect=ConnectionRefusedError("Connection refused"),
+        )
+        from simplyblock_core.storage_node_ops import recreate_lvstore_on_non_leader
+        with self.assertRaises(Exception) as cm:
+            recreate_lvstore_on_non_leader(
+                secondary, leader_node=primary, primary_node=primary, force=False)
+        self.assertIn("Failed to block leader", str(cm.exception))
+        # All 5 attempts must have been tried
+        self.assertEqual(fw.firewall_set_port.call_count, 5)
+        # Abort path sets the restarting node offline
+        mock_set_status.assert_any_call(secondary.get_id(), StorageNode.STATUS_OFFLINE)
+
+    @patch("simplyblock_core.storage_node_ops.time.sleep", return_value=None)
+    @patch("simplyblock_core.storage_node_ops._check_peer_disconnected",
+           side_effect=lambda peer, **kw: peer.status in ["offline"])
+    @patch("simplyblock_core.storage_node_ops._set_restart_phase")
+    @patch("simplyblock_core.storage_node_ops._handle_rpc_failure_on_peer", return_value="skip")
+    @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
+    @patch("simplyblock_core.storage_node_ops.storage_events")
+    @patch("simplyblock_core.storage_node_ops.tasks_controller")
+    @patch("simplyblock_core.storage_node_ops.set_node_status")
+    @patch("simplyblock_core.storage_node_ops.SNodeClient")
+    @patch("simplyblock_core.storage_node_ops.FirewallClient")
+    @patch("simplyblock_core.storage_node_ops.RPCClient")
+    @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
+    @patch("simplyblock_core.storage_node_ops.DBController")
+    def test_block_fails_all_attempts_proceeds_with_force(
+            self, mock_db_cls, mock_create_bdev, mock_rpc_cls, mock_fw_cls,
+            mock_snode_client, mock_set_status, mock_tasks, mock_tcp_events,
+            mock_storage_events, _mock_disc, _mock_phase, _mock_handle, _mock_sleep):
+        """With force=True, 5 failed block attempts don't abort — restart
+        proceeds despite the race risk (operator explicit choice)."""
+        secondary, primary, _rpc, fw = self._setup(
+            mock_rpc_cls, mock_db_cls, mock_create_bdev, mock_fw_cls,
+            fw_set_port_side_effect=ConnectionRefusedError("Connection refused"),
+        )
+        # Include expected lvol so the later lvol-registration check passes
+        _rpc.get_bdevs.return_value = [{"name": "LVS_100/bdev_test", "aliases": []}]
+
+        from simplyblock_core.storage_node_ops import recreate_lvstore_on_non_leader
+        result = recreate_lvstore_on_non_leader(
+            secondary, leader_node=primary, primary_node=primary, force=True)
+        self.assertTrue(result)
+        self.assertEqual(fw.firewall_set_port.call_count, 5)
+
+    @patch("simplyblock_core.storage_node_ops.time.sleep", return_value=None)
+    @patch("simplyblock_core.storage_node_ops._check_peer_disconnected",
+           side_effect=lambda peer, **kw: peer.status in ["offline"])
+    @patch("simplyblock_core.storage_node_ops._set_restart_phase")
+    @patch("simplyblock_core.storage_node_ops._handle_rpc_failure_on_peer", return_value="skip")
+    @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
+    @patch("simplyblock_core.storage_node_ops.storage_events")
+    @patch("simplyblock_core.storage_node_ops.tasks_controller")
+    @patch("simplyblock_core.storage_node_ops.set_node_status")
+    @patch("simplyblock_core.storage_node_ops.SNodeClient")
+    @patch("simplyblock_core.storage_node_ops.FirewallClient")
+    @patch("simplyblock_core.storage_node_ops.RPCClient")
+    @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
+    @patch("simplyblock_core.storage_node_ops.DBController")
+    def test_block_succeeds_on_retry(
+            self, mock_db_cls, mock_create_bdev, mock_rpc_cls, mock_fw_cls,
+            mock_snode_client, mock_set_status, mock_tasks, mock_tcp_events,
+            mock_storage_events, _mock_disc, _mock_phase, _mock_handle, _mock_sleep):
+        """Transient ConnectionRefused — first 2 attempts fail, 3rd succeeds.
+        Restart must keep going (no abort, no force needed)."""
+        # side_effect: raise twice, then succeed (return None = call succeeds)
+        secondary, primary, _rpc, fw = self._setup(
+            mock_rpc_cls, mock_db_cls, mock_create_bdev, mock_fw_cls,
+            fw_set_port_side_effect=[
+                ConnectionRefusedError("x"),
+                ConnectionRefusedError("x"),
+                None, None, None,  # 3rd = block-ok; 4th = unblock-ok; extra for safety
+            ],
+        )
+        _rpc.get_bdevs.return_value = [{"name": "LVS_100/bdev_test", "aliases": []}]
+
+        from simplyblock_core.storage_node_ops import recreate_lvstore_on_non_leader
+        result = recreate_lvstore_on_non_leader(
+            secondary, leader_node=primary, primary_node=primary, force=False)
+        self.assertTrue(result)
+        # Block succeeded on the 3rd attempt; then unblock ran too (1 more call)
+        self.assertGreaterEqual(fw.firewall_set_port.call_count, 3)
 
 
 if __name__ == '__main__':

@@ -286,6 +286,7 @@ class SnapshotDTO(BaseModel):
 class StorageNodeDTO(BaseModel):
     id: UUID
     cluster_id: UUID
+    secondary_node_id: Optional[UUID]
     status: StorageNodeStatus
     uptime: Optional[timedelta]
     hostname: str
@@ -314,6 +315,7 @@ class StorageNodeDTO(BaseModel):
         return StorageNodeDTO(
             id=UUID(model.get_id()),
             cluster_id=UUID(model.cluster_id),
+            secondary_node_id=UUID(model.secondary_node_id) if model.secondary_node_id else None,
             status=cast(StorageNodeStatus, model.status),
             uptime=model.uptime(),
             hostname=model.hostname,

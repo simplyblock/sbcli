@@ -49,12 +49,16 @@ _IMPORT_TARGETS = [
 
 @pytest.mark.parametrize("module_path", _IMPORT_TARGETS)
 def test_module_imports_cleanly(module_path):
-    """Each critical module must import without errors (no circular imports)."""
-    # Remove from cache to force a fresh import
-    to_remove = [k for k in sys.modules if k.startswith(module_path)]
-    for k in to_remove:
-        del sys.modules[k]
+    """Each critical module must import without errors (no circular imports).
 
+    We intentionally do NOT del from sys.modules to force a fresh import:
+    doing so breaks subsequent tests that already hold references to classes
+    from the old module object (their methods close over the old module's
+    globals, so mock.patch on the reimported module becomes a no-op for
+    those callers). True "fresh import" semantics are covered by
+    ``test_no_circular_import_in_subprocess`` below, which runs in its own
+    process with a clean sys.modules.
+    """
     mod = importlib.import_module(module_path)
     assert mod is not None
 
