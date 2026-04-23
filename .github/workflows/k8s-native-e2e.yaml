@@ -111,6 +111,7 @@ jobs:
           NFS_MOUNTPOINT: ${{ github.event.inputs.nfs_mountpoint || '/mnt/nfs_share/' }}
           SSH_USER: ${{ github.event.inputs.ssh_user || 'root' }}
           KEY_PATH: ${{ github.event.inputs.key_path || '/home/ec2-user/.ssh/simplyblock-us-east-2.pem' }}
+          SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
         run: |
           set -euxo pipefail
 
