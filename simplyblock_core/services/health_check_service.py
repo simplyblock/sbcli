@@ -80,7 +80,7 @@ def check_node(snode):
     logger.info(f"Check: ping mgmt ip {snode.mgmt_ip} ... {ping_check}")
 
     # 2- check node API
-    node_api_check = health_controller._check_node_api(snode.mgmt_ip)
+    node_api_check = health_controller._check_node_api(snode)
     logger.info(f"Check: node API {snode.mgmt_ip}:5000 ... {node_api_check}")
 
     # 3- check node RPC
