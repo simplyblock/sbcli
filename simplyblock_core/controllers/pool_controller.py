@@ -129,6 +129,9 @@ def add_host_to_pool(pool_id, host_nqn):
     pool.allowed_hosts = list(pool.allowed_hosts) + [host_nqn]
     pool.write_to_db(db_controller.kv_store)
     logger.info(f"Added host {host_nqn} to pool {pool_id}")
+    for lvol in db_controller.get_lvols_by_pool_id(pool_id):
+        logger.info(f"Adding host {host_nqn} to lvol {lvol.get_id()}")
+        lvol_controller.add_host_to_lvol(lvol.get_id(), host_nqn)
     return True, None
 
 
@@ -153,6 +156,9 @@ def remove_host_from_pool(pool_id, host_nqn):
     pool.allowed_hosts = [h for h in pool.allowed_hosts if h != host_nqn]
     pool.write_to_db(db_controller.kv_store)
     logger.info(f"Removed host {host_nqn} from pool {pool_id}")
+    for lvol in db_controller.get_lvols_by_pool_id(pool_id):
+        logger.info(f"Removing host {host_nqn} from lvol {lvol.get_id()}")
+        lvol_controller.remove_host_from_lvol(lvol.get_id(), host_nqn)
     return True, None
 
 
