@@ -80,6 +80,14 @@ on:
         description: 'Chunk block size'
         required: false
         default: 4096
+      partitions:
+        description: 'Number of partitions per storage node'
+        required: false
+        default: 0
+      journal_manager_count:
+        description: 'Number of journal managers per device'
+        required: false
+        default: 3
 
 jobs:
   stress-test:
@@ -505,6 +513,8 @@ jobs:
           SB_TAG="${{ github.event.inputs.simplyblock_image }}"
           SPDK_IMAGE="${{ github.event.inputs.spdk_image }}"
           DATA_NICS="${{ github.event.inputs.data_nics || 'ens16' }}"
+          PARTITIONS="${{ github.event.inputs.partitions || '0' }}"
+          JM_COUNT="${{ github.event.inputs.journal_manager_count || '3' }}"
 
           # Build workerNodes YAML list from comma-separated input
           WORKER_YAML=""
@@ -559,11 +569,11 @@ jobs:
             dataIfname:
               - ${DATA_NICS}
             maxLogicalVolumeCount: 30
-            partitions: 0
+            partitions: ${PARTITIONS}
             corePercentage: 65
             coreIsolation: false
             journalManager:
-              count: 3
+              count: ${JM_COUNT}
               percentPerDevice: 3
             skipKubeletConfiguration: true
             enableCpuTopology: true
@@ -620,11 +630,11 @@ jobs:
             dataIfname:
               - ${DATA_NICS}
             maxLogicalVolumeCount: 30
-            partitions: 0
+            partitions: ${PARTITIONS}
             corePercentage: 65
             coreIsolation: false
             journalManager:
-              count: 3
+              count: ${JM_COUNT}
               percentPerDevice: 3
             skipKubeletConfiguration: true
             enableCpuTopology: true
