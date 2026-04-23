@@ -39,10 +39,22 @@ on:
         description: 'Data network interface'
         required: false
         default: 'ens16'
+      ssh_user:
+        description: 'SSH user for client nodes'
+        required: false
+        default: 'root'
+      key_path:
+        description: "SSH private key path on runner (default: /home/ec2-user/.ssh/simplyblock-us-east-2.pem)"
+        required: true
+        default: "/home/ec2-user/.ssh/simplyblock-us-east-2.pem"
       client_ips:
         description: 'Space-separated client IPs for external FIO (empty = FIO runs as K8s Jobs)'
         required: false
         default: ''
+      nfs_mountpoint:
+        description: 'NFS mountpoint on client nodes'
+        required: false
+        default: '/mnt/nfs_share/'
       testname:
         description: 'Test to run'
         required: false
@@ -96,6 +108,9 @@ jobs:
         shell: bash
         env:
           CLIENT_IPS: ${{ github.event.inputs.client_ips || '' }}
+          NFS_MOUNTPOINT: ${{ github.event.inputs.nfs_mountpoint || '/mnt/nfs_share/' }}
+          SSH_USER: ${{ github.event.inputs.ssh_user || 'root' }}
+          KEY_PATH: ${{ github.event.inputs.key_path || '/home/ec2-user/.ssh/simplyblock-us-east-2.pem' }}
         run: |
           set -euxo pipefail
 
