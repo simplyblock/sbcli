@@ -239,41 +239,52 @@ def _get_target_secondary_nodes(tgt_node):
     return sec_nodes, None
 
 
-def _register_snap_on_secondary(tgt_rpc, tgt_node, tgt_sec, sec_rpc, snap, migration):
+def _register_snaps_on_secondary(migration, lvol, tgt_node, tgt_sec, tgt_rpc, sec_rpc):
     """
-    Register a newly converted snapshot on the target's secondary node.
+    Register all snapshots from PHASE_SNAP_COPY on the target secondary, now
+    that the lvol itself has been registered there via _expose_lvol_on_secondary.
 
-    Steps:
-    1. Query target primary for the snapshot's current blobid/uuid.
-    2. Call bdev_lvol_snapshot_register on the secondary.
+    The lvol bdev on the secondary serves as the parent for the first snapshot.
+    Each subsequent snapshot's parent is the previous one — preserving the same
+    ancestry chain that exists on the target primary.
 
-    Returns (success: bool, error: str|None).
+    Must be called after _expose_lvol_on_secondary succeeds.
+    Returns (ok: bool, error: str|None).
     """
-    snap_short = _snap_short_name(snap)
-    tgt_composite = f"{tgt_node.lvstore}/{snap_short}"
+    lvol_bdev_on_sec = f"{tgt_sec.lvstore}/{lvol.lvol_bdev}"
 
-    bdev_info = tgt_rpc.get_bdevs(tgt_composite)
-    if not bdev_info:
-        return False, f"Cannot get bdev info for {tgt_composite} after convert"
-
-    tgt_blobid = bdev_info[0]['driver_specific']['lvol']['blobid']
-    tgt_snap_uuid = bdev_info[0]['uuid']
-
-    # The parent name for bdev_lvol_snapshot_register is the predecessor snapshot
-    # on the secondary's lvstore, or the lvstore itself for the first snapshot.
-    if migration.snaps_migrated:
+    for i, snap_uuid in enumerate(migration.snaps_migrated):
         try:
-            pred_snap = db.get_snapshot_by_id(migration.snaps_migrated[-1])
-            parent_name = f"{tgt_sec.lvstore}/{_snap_short_name(pred_snap)}"
+            snap = db.get_snapshot_by_id(snap_uuid)
         except KeyError:
-            parent_name = tgt_sec.lvstore
-    else:
-        parent_name = tgt_sec.lvstore
+            logger.warning(f"Snapshot {snap_uuid} not found in DB; skipping secondary registration")
+            continue
 
-    ret = sec_rpc.bdev_lvol_snapshot_register(
-        parent_name, snap_short, tgt_snap_uuid, tgt_blobid)
-    if not ret:
-        return False, f"bdev_lvol_snapshot_register failed for snap {snap.uuid} on secondary"
+        snap_short = _snap_short_name(snap)
+        tgt_composite = f"{tgt_node.lvstore}/{snap_short}"
+
+        bdev_info = tgt_rpc.get_bdevs(tgt_composite)
+        if not bdev_info:
+            return False, f"Cannot get bdev info for {tgt_composite} on target primary"
+
+        tgt_blobid = bdev_info[0]['driver_specific']['lvol']['blobid']
+        tgt_snap_uuid = bdev_info[0]['uuid']
+
+        if i == 0:
+            parent_name = lvol_bdev_on_sec
+        else:
+            try:
+                pred_snap = db.get_snapshot_by_id(migration.snaps_migrated[i - 1])
+                parent_name = f"{tgt_sec.lvstore}/{_snap_short_name(pred_snap)}"
+            except KeyError:
+                parent_name = lvol_bdev_on_sec
+
+        ret = sec_rpc.bdev_lvol_snapshot_register(
+            parent_name, snap_short, tgt_snap_uuid, tgt_blobid)
+        if not ret:
+            return False, f"bdev_lvol_snapshot_register failed for snap {snap_uuid} on secondary"
+
+        logger.info(f"Registered snap {snap_uuid} on secondary {tgt_sec.get_id()}")
 
     return True, None
 
@@ -510,17 +521,10 @@ def _post_process_snap(snap, tgt_node, tgt_rpc, src_rpc, migration, t):
     if not ret:
         return False, f"bdev_lvol_convert failed for {snap_uuid}"
 
-    # Register on target secondary (HA volumes only)
-    if snap.lvol.ha_type == "ha":
-        tgt_sec, sec_err = _get_target_secondary_node(tgt_node)
-        if sec_err:
-            return False, _WAIT  # type: ignore[return-value]
-        if tgt_sec is not None:
-            sec_rpc = _make_rpc(tgt_sec)
-            ok, err = _register_snap_on_secondary(
-                tgt_rpc, tgt_node, tgt_sec, sec_rpc, snap, migration)
-            if not ok:
-                return False, err
+    # Secondary registration is deferred to PHASE_LVOL_MIGRATE: the lvol must
+    # exist on the secondary before snapshots can be registered against it as
+    # children. _expose_lvol_on_secondary (Phase 2) registers the lvol first,
+    # then _register_snaps_on_secondary registers all migrated snapshots in order.
 
     # Cleanup temp NVMe-oF plumbing for this snapshot
     _cleanup_snap_transfer(src_rpc, tgt_rpc, t)
@@ -947,6 +951,14 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                     return False, True, err
                 logger.info(
                     f"Lvol {lvol.uuid} registered and exposed on secondary {tgt_sec.get_id()}")
+
+                if migration.snaps_migrated:
+                    ok, err = _register_snaps_on_secondary(
+                        migration, lvol, tgt_node, tgt_sec, tgt_rpc, sec_rpc)
+                    if not ok:
+                        migration.transfer_context = {}
+                        migration.write_to_db(db.kv_store)
+                        return False, True, err
 
         migration.transfer_context = {}
 
