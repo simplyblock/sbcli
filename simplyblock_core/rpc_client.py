@@ -98,13 +98,15 @@ class RPCClient:
     def __init__(self, host, port, username, password, timeout=180, retry=3):
         self.host = host
         self.port = port
-        tls_enabled = Settings().tls_enabled
-        scheme = "https" if tls_enabled else "http"
+        settings = Settings()
+        scheme = "https" if settings.tls_enabled else "http"
         self.url = '%s://%s:%s/' % (scheme, self.host, self.port)
         self.username = username
         self.password = password
         self.timeout = timeout
         self.session = requests.session()
+        if settings.tls_enabled:
+            self.session.verify = str(settings.certificate_authority)
         self.session.auth = (self.username, self.password)
         retries = Retry(total=retry, backoff_factor=1, connect=retry, read=retry,
                         allowed_methods=self.DEFAULT_ALLOWED_METHODS)
