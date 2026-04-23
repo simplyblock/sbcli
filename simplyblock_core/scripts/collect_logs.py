@@ -904,10 +904,20 @@ def main():
     if args.diagnose:
         args.use_opensearch = True
 
+    collect_logs(args.start_time, args.duration_minutes, args.output_dir, args.use_opensearch, args.cluster_id,
+                 args.mgmt_ip, args.monitoring_secret, args.namespace, args.diagnose, args.mode)
+
+def collect_logs(start_time, duration_minutes, output_dir, use_opensearch, cluster_id, mgmt_ip, monitoring_secret,
+                 namespace, diagnose, mode):
     # ── 1. Parse time range ──────────────────────────────────────────────────
+    if not start_time:
+        start_time = str(datetime.now())
+
+    if not duration_minutes:
+        duration_minutes = 60
 
     try:
-        start_dt = datetime.fromisoformat(args.start_time.replace(" ", "T"))
+        start_dt = datetime.fromisoformat(str(datetime.now()).replace(" ", "T"))
     except ValueError as exc:
         print(f"ERROR: invalid start_time – {exc}", file=sys.stderr)
         sys.exit(1)
@@ -915,21 +925,21 @@ def main():
     if start_dt.tzinfo is None:
         start_dt = start_dt.replace(tzinfo=timezone.utc)
 
-    end_dt = start_dt + timedelta(minutes=args.duration_minutes)
+    end_dt = start_dt + timedelta(minutes=duration_minutes)
     from_iso = start_dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
     to_iso = end_dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
     print("=" * 64)
     print("  Simplyblock Log Collector")
     print("=" * 64)
-    print(f"  Window : {from_iso}  →  {to_iso}  ({args.duration_minutes} min)")
-    print(f"  Deploy : {args.mode}")
-    print(f"  Mode   : {'OpenSearch (direct)' if args.use_opensearch else 'Graylog REST API'}")
+    print(f"  Window : {from_iso}  →  {to_iso}  ({duration_minutes} min)")
+    print(f"  Deploy : {mode}")
+    print(f"  Mode   : {'OpenSearch (direct)' if use_opensearch else 'Graylog REST API'}")
 
     # ── 2. Cluster UUID + secret ─────────────────────────────────────────────
 
     print("\n[1] Retrieving cluster info …")
-    cluster_uuid = args.cluster_id
+    cluster_uuid = cluster_id
     if not cluster_uuid:
         clusters = sbctl_json("cluster", "list")
         if not clusters:
@@ -948,8 +958,7 @@ def main():
     # ── 3. Management-node IP ────────────────────────────────────────────────
 
     print("\n[2] Resolving management node …")
-    if args.mgmt_ip:
-        mgmt_ip = args.mgmt_ip
+    if mgmt_ip:
         print(f"    Using provided IP : {mgmt_ip}")
     else:
         cp_nodes = sbctl_json("control-plane", "list")
@@ -959,7 +968,7 @@ def main():
         mgmt_ip = cp_nodes[0]["IP"]
         print(f"    Management IP : {mgmt_ip}  ({len(cp_nodes)} node(s) total)")
 
-    if args.mode == "kubernetes":
+    if mode == "kubernetes":
         graylog_base = f"http://{mgmt_ip}:9000/api"
         opensearch_base = f"http://{mgmt_ip}:9200"
     else:
@@ -977,8 +986,8 @@ def main():
 
     # ── 5. HTTP sessions ─────────────────────────────────────────────────────
 
-    graylog_password = args.monitoring_secret if args.monitoring_secret else cluster_secret
-    if args.monitoring_secret:
+    graylog_password = monitoring_secret if monitoring_secret else cluster_secret
+    if monitoring_secret:
         print("    Using provided --monitoring-secret for Graylog auth.")
 
     gl_session = requests.Session()
@@ -988,7 +997,7 @@ def main():
     os_session = requests.Session()
 
     # Verify Graylog reachability (informational only)
-    if not args.use_opensearch:
+    if not use_opensearch:
         print(f"\n[4] Checking Graylog at {graylog_base} …")
         try:
             r = gl_session.get(f"{graylog_base}/system", timeout=10)
@@ -1012,15 +1021,15 @@ def main():
             print(f"    WARN: {exc}.")
 
         # --diagnose: print full report and exit
-        if args.diagnose:
+        if diagnose:
             opensearch_diagnose(os_session, opensearch_base, from_iso, to_iso)
             sys.exit(0)
 
     # ── 6. Prepare temp workspace ────────────────────────────────────────────
 
     ts_str = start_dt.strftime("%Y%m%d_%H%M%S")
-    bundle_name = f"sb_logs_{ts_str}_{args.duration_minutes}m"
-    output_dir = Path(args.output_dir).resolve()
+    bundle_name = f"sb_logs_{ts_str}_{duration_minutes}m"
+    output_dir = Path(output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     tarball_path = output_dir / f"{bundle_name}.tar.gz"
 
@@ -1031,7 +1040,7 @@ def main():
         os_session=os_session,
         graylog_base=graylog_base,
         opensearch_base=opensearch_base,
-        use_opensearch=args.use_opensearch,
+        use_opensearch=use_opensearch,
         from_iso=from_iso,
         to_iso=to_iso,
         probe_cache=probe_cache,
@@ -1045,14 +1054,14 @@ def main():
 
         cp_services = (
             CONTROL_PLANE_SERVICES_KUBERNETES
-            if args.mode == "kubernetes"
+            if mode == "kubernetes"
             else CONTROL_PLANE_SERVICES_DOCKER
         )
-        print(f"\n[5] Collecting control-plane logs ({len(cp_services)} services, mode={args.mode}) …")
+        print(f"\n[5] Collecting control-plane logs ({len(cp_services)} services, mode={mode}) …")
         cp_dir = log_root / "control_plane"
         cp_dir.mkdir()
 
-        gl_cname_field = "kubernetes_container_name" if args.mode == "kubernetes" else "container_name"
+        gl_cname_field = "kubernetes_container_name" if mode == "kubernetes" else "container_name"
 
         total_cp_lines = 0
         for svc in cp_services:
@@ -1075,7 +1084,7 @@ def main():
         # Docker mode: collect SPDK/SNodeAPI logs from Graylog/OpenSearch.
         # Kubernetes mode: SPDK logs are captured via kubectl in step 9.
 
-        if args.mode == "docker":
+        if mode == "docker":
             print("\n[6] Collecting storage-node logs (docker) …")
             sn_root = log_root / "storage_nodes"
             sn_root.mkdir()
@@ -1168,7 +1177,7 @@ def main():
 
         # ── 9. Kubernetes pod logs (CSI node + storage-node DS) ──────────────
 
-        k8s_ns = args.namespace
+        k8s_ns = namespace
         if k8s_ns:
             print(f"\n[7] Collecting Kubernetes pod logs (namespace: {k8s_ns}) …")
             k8s_dir = log_root / "k8s_pods"
@@ -1299,11 +1308,11 @@ def main():
             "collected_at": datetime.now(timezone.utc).isoformat(),
             "window_from": from_iso,
             "window_to": to_iso,
-            "duration_minutes": args.duration_minutes,
+            "duration_minutes": duration_minutes,
             "cluster_uuid": cluster_uuid,
             "mgmt_ip": mgmt_ip,
-            "deploy_mode": args.mode,
-            "log_source": "opensearch-direct" if args.use_opensearch else "graylog-api",
+            "deploy_mode": mode,
+            "log_source": "opensearch-direct" if use_opensearch else "graylog-api",
             "storage_nodes": [
                 {
                     "hostname": n.get("Hostname"),

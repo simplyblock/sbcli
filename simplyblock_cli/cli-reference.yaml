@@ -1486,6 +1486,66 @@ commands:
             help: "Target cluster pool ID or name"
             dest: target_pool
             type: str
+      - name: collect-logs
+        help: Collect simplyblock container logs for a given time window.
+        arguments:
+          - name: "--start-time"
+            help: "Start of the collection window (UTC assumed if no timezone given). Formats: \"2024-01-15T10:00:00\"  or  \"2024-01-15 10:00:00\""
+            dest: start_time
+            type: str
+          - name: "--duration-minutes"
+            help: "Duration in minutes."
+            dest: duration_minutes
+            type: int
+            default: 60
+          - name: "--output-dir"
+            help: "Directory to write the output tarball (default: current directory)."
+            dest: output_dir
+            type: str
+            default: "."
+          - name: "--use-opensearch"
+            help: "Query OpenSearch directly via scroll API instead of the Graylog REST API. 
+            Useful for very large result sets or when Graylog is unreachable."
+            dest: use_opensearch
+            type: bool
+            default: false
+            action: store_true
+          - name: "--cluster-id"
+            help: "Target a specific cluster UUID (default: first cluster returned by sbctl)."
+            dest: cluster_id
+            type: str
+          - name: "--mgmt-ip"
+            help: "Override the management-node IP used to reach Graylog / OpenSearch."
+            dest: mgmt_ip
+            type: str
+          - name: "--monitoring-secret"
+            help: "Graylog / OpenSearch password to use instead of the cluster secret. 
+            When provided this takes precedence over the cluster secret."
+            dest: monitoring_secret
+            type: str
+          - name: "--namespace"
+            help: "Kubernetes namespace to collect CSI / storage-node DS pod logs from (default: simplyblock). 
+            Pass an empty string to skip kubectl collection."
+            dest: namespace
+            type: str
+            default: "simplyblock"
+          - name: "--diagnose"
+            help: "Print a diagnostic report from OpenSearch (indices, field names, 
+            sample documents, container names present in the time window) and exit without collecting logs. 
+            Use this when collections return 0 to understand the actual data layout.  Implies --use-opensearch."
+            dest: diagnose
+            type: bool
+            action: store_true
+          - name: "--mode"
+            help: "Deployment mode: 'docker' (default) uses Docker Swarm service names 
+            for control-plane log collection; 'kubernetes' uses Kubernetes container 
+            names and skips Graylog-based SPDK log collection (kubectl is used instead)."
+            dest: mode
+            type: str
+            choices:
+              - docker
+              - kubernetes
+            default: docker
   - name: "volume"
     help: "Logical Volume Commands"
     aliases:
