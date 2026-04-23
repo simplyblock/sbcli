@@ -1,4 +1,5 @@
-name: Stress Tests
+name: K8s Native Stress Tests
+run-name: "K8s Native Stress Tests | ${{ inputs.testname || 'K8sNativeFailoverTest' }} | NDCS:${{ inputs.ndcs || '1' }} NPCS:${{ inputs.npcs || '1' }}"
 
 on:
   workflow_dispatch:
@@ -38,6 +39,10 @@ on:
         description: 'Data network interface'
         required: false
         default: 'ens16'
+      client_ips:
+        description: 'Space-separated client IPs for external FIO (empty = FIO runs as K8s Jobs)'
+        required: false
+        default: ''
       testname:
         description: 'Test to run'
         required: false
@@ -691,6 +696,7 @@ jobs:
           BS: ${{ env.BS }}
           CHUNK_BS: ${{ env.CHUNK_BS }}
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          CLIENT_IP: ${{ github.event.inputs.client_ips }}
 
       # ── Post-test: timing, logs, notifications ──────────────────────────────
 
@@ -847,7 +853,7 @@ jobs:
 
           TIME_TAKEN="${TEST_TIME_HOURS}h ${TEST_TIME_MINS}m ${TEST_TIME_SECS}s"
 
-          MESSAGE="Stress test *${TESTNAME}* on branch *${BRANCH_NAME}*\nCSI branch: *${{ github.event.inputs.simplyblock_csi_branch }}*\nTotal Time: ${TIME_TAKEN}\n\n${OVERALL_STATUS}\nGitHub Run: ${GITHUB_RUN_URL}\nAWS Logs: ${AWS_LOGS_URL}\n\n*Config*: NDCS: ${NDCS}, NPCS: ${NPCS}, BS: ${BS}, Chunk BS: ${CHUNK_BS}\n\nTotal Tests: *${TOTAL_TESTS}*, Passed: *${PASSED_TESTS}*, Failed: *${FAILED_TESTS}*\n\n-- Passed :white_check_mark:\n${PASSED_CASES_BULLETS}\n\n-- Failed :x:\n${FAILED_CASES_BULLETS}"
+          MESSAGE="K8s Native Stress | *${TESTNAME}* | NDCS:${NDCS} NPCS:${NPCS}\nBranch: *${BRANCH_NAME}* | CSI: *${{ github.event.inputs.simplyblock_csi_branch }}*\nTotal Time: ${TIME_TAKEN}\n\n${OVERALL_STATUS}\nGitHub Run: ${GITHUB_RUN_URL}\nAWS Logs: ${AWS_LOGS_URL}\n\n*Config*: NDCS: ${NDCS}, NPCS: ${NPCS}, BS: ${BS}, Chunk BS: ${CHUNK_BS}\n\nTotal Tests: *${TOTAL_TESTS}*, Passed: *${PASSED_TESTS}*, Failed: *${FAILED_TESTS}*\n\n-- Passed :white_check_mark:\n${PASSED_CASES_BULLETS}\n\n-- Failed :x:\n${FAILED_CASES_BULLETS}"
 
           curl -X POST -H 'Content-type: application/json' \
             --data "{\"text\":\"${MESSAGE}\"}" "$SLACK_WEBHOOK_URL"
