@@ -34,17 +34,18 @@ AUTO_RECOVER_METHODS = (
     "network_outage_20", "network_outage_50",
 )
 
-# Role-pair categories for deterministic scenario enumeration. Each (ordered
-# outage pair × unordered role set) is one scenario; "unrelated" means the
-# pair shares no LVS in any role. For N nodes the total is
-#   P(N, 2) × 4 = N·(N-1)·4
-# which is 80 for N=5.
-ROLE_CATEGORIES = (
-    ("primary", "tertiary"),
-    ("primary", "secondary"),
-    ("secondary", "tertiary"),
-    ("unrelated",),
-)
+# Scenario enumeration: every unordered node pair × every ordered method
+# pair (with repeats / same-method pairs included). For N nodes and M
+# enabled methods the total per cycle is
+#   C(N, 2) × M² = N·(N-1)/2 × M²
+# Examples:
+#   N=5, M=5 → 10 × 25 =  250
+#   N=6, M=5 → 15 × 25 =  375
+#   N=6, M=6 → 15 × 36 =  540
+# Node order within the pair is fixed at the alphabetical first — the
+# method-pair enumeration (m_A, m_B) vs (m_B, m_A) already covers the
+# "which method hits first" swap, so a separate node-ordering axis would
+# double-count.
 
 
 def parse_args():
@@ -121,24 +122,18 @@ def parse_args():
         default=1,
         help=(
             "Number of passes through the full deterministic scenario list. "
-            "Each pass covers P(N,2)*4 scenarios (80 for a 5-node cluster). "
-            "0 means loop forever."
+            "Each pass covers C(N,2)*M² scenarios (250 for 5 nodes × 5 methods; "
+            "540 for 6 × 6). 0 means loop forever."
         ),
     )
     parser.add_argument(
-        "--skip-unreachable-scenarios",
+        "--shuffle-scenarios",
         action="store_true",
-        default=True,
         help=(
-            "Skip scenarios whose (pair, role-category) has no matching LVS in "
-            "the pinned startup topology. Enabled by default — set --no-skip-"
-            "unreachable-scenarios to hard-fail instead."
+            "Shuffle scenario order per cycle (seeded deterministically off "
+            "the cycle index). Useful when a full cycle is too long to finish "
+            "and you want even coverage across early/mid/late pairs."
         ),
-    )
-    parser.add_argument(
-        "--no-skip-unreachable-scenarios",
-        dest="skip_unreachable_scenarios",
-        action="store_false",
     )
     args = parser.parse_args()
     methods = [m.strip() for m in args.methods.split(",") if m.strip()]
@@ -1312,128 +1307,33 @@ class SoakRunner:
         # then waits for cluster stability. Any natural fio completion
         # (e.g. runtime expired) will surface via stop_fio's pre-kill check.
 
-    # ----- topology & scenario enumeration ---------------------------------
-
-    def discover_topology(self):
-        """Return {lvs_name: {'primary': uuid, 'secondary': uuid, 'tertiary': uuid}}.
-
-        Queries the mgmt-node DB directly — ``sbctl sn list`` exposes the
-        secondary_node_id but not the tertiary_node_id, and a pinned
-        authoritative snapshot at soak startup is what the 80-scenario
-        enumeration is anchored to.
-
-        Pinned: built once in ``run()`` before the outage loop. Role shifts
-        caused by leader takeover during the soak are deliberately ignored
-        — each scenario is still applied to the same original node IDs,
-        so the outage semantics (what the pair represents) remain stable
-        across retries even if the control plane has re-promoted since.
-        """
-        # Flattened to a single `python3 -c` line: a multi-line for-loop can't
-        # be expressed with semicolons, so this is a dict-comprehension.
-        script = (
-            "import json; "
-            "from simplyblock_core import db_controller; "
-            "db = db_controller.DBController(); "
-            "nodes = db.get_storage_nodes(); "
-            "out = {n.lvstore: {"
-            "'primary': n.get_id(), "
-            "'secondary': getattr(n, 'secondary_node_id', '') or '', "
-            "'tertiary': getattr(n, 'tertiary_node_id', '') or ''"
-            "} for n in nodes "
-            "if getattr(n, 'lvstore', '') "
-            "and not getattr(n, 'is_secondary_node', False)}; "
-            "print(json.dumps(out))"
-        )
-        _, stdout_text, _ = self.mgmt.run(
-            f"sudo python3 -c {shlex.quote(script)}",
-            timeout=60,
-            label="discover topology",
-        )
-        raw = (stdout_text or "").strip().splitlines()
-        for line in reversed(raw):
-            line = line.strip()
-            if line.startswith("{"):
-                try:
-                    return json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-        raise TestRunError(
-            f"Failed to parse topology JSON from mgmt; stdout was:\n{stdout_text}"
-        )
-
-    @staticmethod
-    def _role_of(uuid, lvs_roles):
-        """Return 'primary' | 'secondary' | 'tertiary' | None."""
-        for role, uid in lvs_roles.items():
-            if uid == uuid:
-                return role
-        return None
-
-    def _find_matching_lvs(self, a, b, category_roles):
-        """Return the name of an LVS where ``{role(a), role(b)} == category_roles``,
-        else None. ``category_roles`` is a frozenset of role strings.
-        """
-        for lvs_name, lvs_roles in self.topology.items():
-            ra = self._role_of(a, lvs_roles)
-            rb = self._role_of(b, lvs_roles)
-            if ra is None or rb is None:
-                continue
-            if frozenset((ra, rb)) == category_roles:
-                return lvs_name
-        return None
-
-    def _is_unrelated(self, a, b):
-        """True iff a and b share no LVS in any role — pair is outside any
-        single LVS's replication ring."""
-        for lvs_roles in self.topology.values():
-            members = set(lvs_roles.values())
-            if a in members and b in members:
-                return False
-        return True
+    # ----- scenario enumeration --------------------------------------------
 
     def build_scenarios(self, nodes):
-        """Enumerate deterministic outage scenarios.
+        """Enumerate every unordered node pair × every ordered method pair.
 
-        Returns a list of dicts with keys: a, b, category, target_lvs.
-        One entry per ordered pair × role category; total P(N,2)*4.
-        Pairs whose (category) has no matching LVS are either skipped
-        (``--skip-unreachable-scenarios``, default) or raise TestRunError.
+        Returns a list of dicts with keys: a, b, method_a, method_b.
+        Total = C(N, 2) × M² where M = len(self.methods). Same-method pairs
+        (graceful+graceful, forced+forced, ...) are included intentionally
+        — they exercise the "simultaneous identical outage" case which has
+        different failover semantics from a mixed pair.
+
+        Node order inside the pair is fixed (sorted by UUID) so the log /
+        cycle index is reproducible. The method-pair axis already covers
+        the (m_A, m_B) / (m_B, m_A) swap.
         """
-        node_ids = [n["uuid"] for n in nodes]
-        scenarios = []
-        skipped = 0
-        for a, b in itertools.permutations(node_ids, 2):
-            for category in ROLE_CATEGORIES:
-                if category == ("unrelated",):
-                    if self._is_unrelated(a, b):
-                        target_lvs = None
-                        match = True
-                    else:
-                        match = False
-                        target_lvs = None
-                else:
-                    target_lvs = self._find_matching_lvs(a, b, frozenset(category))
-                    match = target_lvs is not None
-                if not match:
-                    skipped += 1
-                    label = "/".join(category)
-                    msg = (
-                        f"No LVS found where {a[:8]}+{b[:8]} hold roles {label}; "
-                        f"scenario unreachable in current topology"
-                    )
-                    if not self.args.skip_unreachable_scenarios:
-                        raise TestRunError(msg)
-                    self.logger.log(f"SKIP: {msg}")
-                    continue
-                scenarios.append({
-                    "a": a,
-                    "b": b,
-                    "category": "/".join(category),
-                    "target_lvs": target_lvs,
-                })
+        node_ids = sorted(n["uuid"] for n in nodes)
+        scenarios = [
+            {"a": a, "b": b, "method_a": m_a, "method_b": m_b}
+            for a, b in itertools.combinations(node_ids, 2)
+            for m_a, m_b in itertools.product(self.methods, repeat=2)
+        ]
+        pair_count = len(node_ids) * (len(node_ids) - 1) // 2
         self.logger.log(
-            f"Built {len(scenarios)} outage scenarios from {len(node_ids)} nodes "
-            f"× 4 role categories ({skipped} unreachable combos skipped)"
+            f"Built {len(scenarios)} scenarios: "
+            f"C({len(node_ids)},2)={pair_count} pairs × "
+            f"{len(self.methods)**2} method combos "
+            f"({len(self.methods)} methods enabled)"
         )
         return scenarios
 
@@ -1452,14 +1352,9 @@ class SoakRunner:
         # cluster is verified stable and the previous iteration's rebalancing
         # has completed. No initial start_fio here.
 
-        # Pin the topology once, before any outages. Leader takeover during
-        # the soak can permanently shift role assignments, but the scenario
-        # list is fixed at startup so coverage stays deterministic.
-        self.topology = self.discover_topology()
-        self.logger.log(f"Pinned topology: {json.dumps(self.topology, sort_keys=True)}")
         self.scenarios = self.build_scenarios(nodes)
         if not self.scenarios:
-            raise TestRunError("No outage scenarios built; topology unusable")
+            raise TestRunError("No outage scenarios built; method/node list empty")
 
         iteration = 0
         cycle = 0
@@ -1471,11 +1366,20 @@ class SoakRunner:
                     f"scenarios; exiting"
                 )
                 return
+
+            cycle_scenarios = list(self.scenarios)
+            if self.args.shuffle_scenarios:
+                # Seed off cycle number so two soaks with the same --cycles
+                # walk identical sequences, but successive cycles rotate
+                # through different orderings.
+                random.Random(cycle).shuffle(cycle_scenarios)
+
             self.logger.log(
-                f"Starting cycle {cycle} ({len(self.scenarios)} scenarios)"
+                f"Starting cycle {cycle} ({len(cycle_scenarios)} scenarios"
+                f"{', shuffled' if self.args.shuffle_scenarios else ''})"
             )
 
-            for scenario_idx, scenario in enumerate(self.scenarios, 1):
+            for scenario_idx, scenario in enumerate(cycle_scenarios, 1):
                 iteration += 1
                 # After an outage iteration a node typically transitions
                 # online → unreachable → down → online before the control
@@ -1501,23 +1405,14 @@ class SoakRunner:
 
                 node1 = scenario["a"]
                 node2 = scenario["b"]
-                category = scenario["category"]
-                target_lvs = scenario["target_lvs"]
-
-                # Outage method pair: keep random selection per scenario so
-                # method coverage accumulates across scenarios without blowing
-                # up scenario count. Deterministic method rotation would
-                # multiply 80 → 80 × 15 (C(6,2)) which is not what was asked.
-                if len(self.methods) >= 2:
-                    method1, method2 = random.sample(self.methods, 2)
-                else:
-                    method1 = method2 = self.methods[0]
+                method1 = scenario["method_a"]
+                method2 = scenario["method_b"]
 
                 self.logger.log(
                     f"Starting outage iteration {iteration} "
-                    f"(cycle {cycle} scenario {scenario_idx}/{len(self.scenarios)}): "
-                    f"pair=({node1[:8]},{node2[:8]}) category={category} "
-                    f"target_lvs={target_lvs or '-'} methods=({method1},{method2})"
+                    f"(cycle {cycle} scenario {scenario_idx}/{len(cycle_scenarios)}): "
+                    f"pair=({node1[:8]},{node2[:8]}) "
+                    f"methods=({method1},{method2})"
                 )
 
                 # Skip scenarios whose nodes are not currently in the
