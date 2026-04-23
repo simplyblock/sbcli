@@ -5415,11 +5415,11 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
             if is_takeover:
                 try:
                     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
-                    snode.create_hublvol(cluster_nqn=cluster.nqn)
-                    logger.info("Created and exposed hublvol on new leader %s for %s", snode.get_id(), lvs_name)
+                    snode.adopt_hublvol(lvs_node, cluster.nqn)
+                    logger.info("Adopted hublvol on new leader %s for %s", snode.get_id(), lvs_name)
                 except Exception as e:
-                    logger.error("Error creating hublvol on new leader: %s", e)
-                    _abort_restart_and_unblock(f"create_hublvol on new leader failed: {e}")
+                    logger.error("Error adopting hublvol on new leader: %s", e)
+                    _abort_restart_and_unblock(f"adopt_hublvol on new leader failed: {e}")
             else:
                 try:
                     if not snode.recreate_hublvol():

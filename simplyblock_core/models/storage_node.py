@@ -334,6 +334,49 @@ class StorageNode(BaseNodeObject):
         logger.info(f'Secondary hublvol exposed: {nqn} on port {hublvol_port}')
         return nqn
 
+    def adopt_hublvol(self, lvs_node, cluster_nqn):
+        """Adopt a peer's hublvol during LVS takeover.
+
+        ``self`` is the new leader (the restarting node); ``lvs_node`` is the
+        offline peer whose LVS is being taken over. The hublvol bdev must be
+        created for the TAKEN-OVER lvstore (``lvs_node.lvstore``) — not
+        ``self.lvstore``, which is self's own primary — and exposed via the
+        same NQN/port/UUID as the original so existing client paths keep
+        working after failover.
+
+        Idempotent: safe to call across restart retries. Both the create and
+        the subsystem expose layer are probe-guarded (expose_bdev filters
+        out existing listeners/namespaces, and create_hublvol returns
+        EEXIST on an already-existing bdev).
+        """
+        lvstore_name = lvs_node.lvstore
+        if not lvs_node.hublvol or not lvs_node.hublvol.uuid:
+            raise RPCException(
+                f"lvs_node {lvs_node.get_id()} has no hublvol metadata for {lvstore_name}"
+            )
+
+        bdev_name = f'{lvstore_name}/hublvol'
+        logger.info('Adopting hublvol %s on %s', bdev_name, self.get_id())
+        rpc_client = self.rpc_client()
+
+        if not rpc_client.get_bdevs(bdev_name):
+            if not rpc_client.bdev_lvol_create_hublvol(lvstore_name):
+                raise RPCException(f'Failed to create adopted hublvol for {lvstore_name}')
+        else:
+            logger.info('Adopted hublvol already exists: %s', bdev_name)
+
+        nqn = self.hublvol_nqn_for_lvstore(cluster_nqn, lvstore_name)
+        self.expose_bdev(
+            nqn=nqn,
+            bdev_name=bdev_name,
+            model_number=lvs_node.hublvol.model_number,
+            uuid=lvs_node.hublvol.uuid,
+            nguid=lvs_node.hublvol.nguid,
+            port=lvs_node.hublvol.nvmf_port,
+            ana_state="optimized",
+        )
+        return nqn
+
     def recreate_hublvol(self):
         """reCreate a hublvol for this node's lvstore.
 
