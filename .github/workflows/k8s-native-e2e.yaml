@@ -88,6 +88,62 @@ jobs:
           ref: refs/heads/${{ github.event.inputs.simplyblock_csi_branch || 'add_sbcli_operator_helm' }}
           path: 'simplyblock-csi'
 
+      # ============================================================
+      # PRE-BOOTSTRAP CLEANUP (remote ops only)
+      # Targets = CLIENTNODES
+      # ============================================================
+      - name: Pre-clean kill fio/tmux and unmount NFS on clients
+        shell: bash
+        env:
+          CLIENT_IPS: ${{ github.event.inputs.client_ips || '' }}
+        run: |
+          set -euxo pipefail
+
+          run_remote() {
+            local ip="$1"
+            local script="$2"
+            sshpass -p "${SSH_PASSWORD}" ssh \
+              -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              "${SSH_USER}@${ip}" "bash -s" <<< "$script"
+          }
+
+          run_remote_with_retry() {
+            local ip="$1"
+            local script="$2"
+            local max=5
+            for attempt in $(seq 1 $max); do
+              run_remote "$ip" "$script" && return 0
+              echo "Attempt $attempt/$max failed for $ip, retrying in 5s..."
+              sleep 5
+            done
+            echo "All $max attempts failed for $ip, continuing..."
+            return 0
+          }
+
+          # Support comma-separated and/or space-separated input
+          normalized_targets="$(echo "${CLIENT_IPS}" | tr ',' ' ' | xargs -n1 | sort -u | xargs || true)"
+
+          if [ -z "${normalized_targets}" ]; then
+            echo "No client IPs provided, skipping client cleanup."
+            exit 0
+          fi
+
+          for ip in ${normalized_targets}; do
+            echo "---- ${ip}: kill fio/tmux + umount ${NFS_MOUNTPOINT} ----"
+            run_remote_with_retry "${ip}" "set -euxo pipefail;
+              pkill -9 fio || true;
+              pkill -9 tmux || true;
+              mp='${NFS_MOUNTPOINT}';
+              if mountpoint -q \"\$mp\"; then
+                umount -f \"\$mp\" || umount \"\$mp\" || true;
+              else
+                if mount | grep -q \" \$mp \"; then
+                  umount -f \"\$mp\" || umount \"\$mp\" || true;
+                fi
+              fi"
+          done
+
       - name: Setup kubeconfig
         run: |
           mkdir -p $HOME/.kube
