@@ -16,9 +16,8 @@ class SNodeClientException(Exception):
 
 class SNodeClient:
 
-    def __init__(self, ip_address, timeout=300, retry=5):
-        self.ip_address = ip_address
-        self.url = 'http://%s/snode/' % self.ip_address
+    def __init__(self, address, timeout=300, retry=5):
+        self.url = 'http://%s/snode/' % address
         self.timeout = timeout
         self.session = requests.session()
         self.session.verify = False
