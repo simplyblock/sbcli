@@ -296,6 +296,21 @@ def is_node_data_plane_disconnected_quorum(node, lvs_peer_ids=None):
 def _count_data_plane_votes(node):
     """Query all other online storage nodes for *node*'s JM connectivity.
 
+    For each online peer, check the state of its NVMe controller that points
+    at *node*'s JM subsystem (controller name = ``remote_jm_{node_id}``).
+    A peer reports "connected" only if the controller exists AND is in the
+    ``enabled`` SPDK state (``deleting``/``failed``/``resetting``/
+    ``reconnect_is_delayed``/``disabled`` all count as disconnected).
+
+    Peers that never attached a controller for *node* (no topology link)
+    are ignored — they don't have a meaningful vote.
+
+    Why not ``jc_get_jm_status``: that RPC reads ``mjm_stat``, a sync-health
+    map updated only by the JC's replication/leveling state machine. It is
+    never flipped to ``false`` when the underlying NVMe controller is lost
+    (bdev-remove / keep-alive timeout / peer death), so a quietly-dead peer
+    perpetually votes "connected" and the quorum gets stuck.
+
     Returns (disconnected_count, total_peers_checked).
     """
     node_id = node.get_id()
@@ -312,27 +327,62 @@ def _count_data_plane_votes(node):
         logger.debug("No online peers to verify data plane for %s", node_id)
         return 0, 0
 
-    remote_jm_key = f"remote_jm_{node_id}n1"
+    ctrl_name = f"remote_jm_{node_id}"
+    bdev_name = f"{ctrl_name}n1"
     disconnected = 0
     total = 0
 
     for peer in online_peers:
-        try:
-            ret = peer.rpc_client(timeout=5, retry=1).jc_get_jm_status(peer.jm_vuid)
-            if not ret or remote_jm_key not in ret:
-                logger.debug("Data-plane check: peer %s has no status for %s JM; ignoring vote",
-                             peer.get_id(), node_id)
-                continue
+        peer_rpc = peer.rpc_client(timeout=5, retry=1)
 
-            total += 1
-            if ret[remote_jm_key] is True:
-                logger.info("Data-plane check: peer %s still sees %s JM as connected",
-                            peer.get_id(), node_id)
-            else:
-                disconnected += 1
+        # Fast path: does the namespace bdev still exist on the peer?
+        # A missing bdev means the controller has been torn down / is being
+        # torn down, which is unambiguously "disconnected". We check this
+        # first because bdev_get_bdevs is a pure registry lookup and can't
+        # block on a degraded controller's internal state, whereas
+        # bdev_nvme_get_controllers on a `resetting` / `reconnect_is_delayed`
+        # ctrlr can sit on locks during reset.
+        try:
+            bdevs = peer_rpc.get_bdevs(bdev_name)
         except Exception as e:
-            logger.debug("jc_get_jm_status on peer %s failed: %s", peer.get_id(), e)
+            logger.debug("get_bdevs(%s) on peer %s failed: %s", bdev_name, peer.get_id(), e)
             continue
+
+        if not bdevs:
+            # If the peer never had a topology link to this node, it never
+            # created this bdev either. We can't distinguish "never had it"
+            # from "had it and it's gone" just from a missing bdev, so abstain
+            # -- callers that know the topology (lvs_peer_ids) are the right
+            # place to assert "this peer SHOULD have seen it".
+            logger.debug("Data-plane check: peer %s has no %s bdev; abstaining",
+                         peer.get_id(), bdev_name)
+            continue
+
+        # Bdev exists -> controller must exist too. Now check its state.
+        try:
+            ret = peer_rpc.bdev_nvme_controller_list(ctrl_name)
+        except Exception as e:
+            logger.debug("bdev_nvme_controller_list(%s) on peer %s failed: %s",
+                         ctrl_name, peer.get_id(), e)
+            continue
+
+        total += 1
+        if not ret:
+            logger.info("Data-plane check: peer %s has %s bdev but no controller -> disconnected",
+                        peer.get_id(), bdev_name)
+            disconnected += 1
+            continue
+
+        paths = ret[0].get("ctrlrs") or []
+        enabled = any((p.get("state") == "enabled") for p in paths)
+        if enabled:
+            logger.info("Data-plane check: peer %s sees %s controller enabled",
+                        peer.get_id(), node_id)
+        else:
+            states = [p.get("state") for p in paths] or ["no-paths"]
+            logger.info("Data-plane check: peer %s reports %s controller state=%s -> disconnected",
+                        peer.get_id(), node_id, states)
+            disconnected += 1
 
     logger.info("Data-plane check for %s: %d/%d peers report disconnected", node_id, disconnected, total)
     return disconnected, total
