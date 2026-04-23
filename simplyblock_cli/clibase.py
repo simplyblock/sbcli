@@ -537,7 +537,7 @@ class CLIWrapperBase:
 
     def cluster__collect_logs(self, sub_command, args):
         return collect_logs(args.start_time, args.duration_minutes, args.output_dir, args.use_opensearch,
-                                        args.cluster_id, args.mgmt_ip, args.monitoring_secret, args.namespace, args.diagnose)
+                            args.cluster_id, args.mgmt_ip, args.monitoring_secret, args.namespace, args.diagnose, args.mode)
 
     def volume__add(self, sub_command, args):
         import json as _json

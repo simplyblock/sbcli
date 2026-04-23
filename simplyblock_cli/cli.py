@@ -581,8 +581,8 @@ class CLIWrapper(CLIWrapperBase):
 
     def init_cluster__collect_logs(self, subparser):
         subcommand = self.add_sub_command(subparser, 'collect-logs', 'Collect simplyblock container logs for a given time window.')
-        subcommand.add_argument('start_time', help='Start of the collection window (UTC assumed if no timezone given). Formats: "2024-01-15T10:00:00"  or  "2024-01-15 10:00:00"', type=str)
-        subcommand.add_argument('duration_minutes', help='Duration in minutes.', type=int)
+        argument = subcommand.add_argument('--start-time', help='Start of the collection window (UTC assumed if no timezone given). Formats: "2024-01-15T10:00:00"  or  "2024-01-15 10:00:00"', type=str, dest='start_time')
+        argument = subcommand.add_argument('--duration-minutes', help='Duration in minutes.', type=int, default=60, dest='duration_minutes')
         argument = subcommand.add_argument('--output-dir', help='Directory to write the output tarball (default: current directory).', type=str, default='.', dest='output_dir')
         argument = subcommand.add_argument('--use-opensearch', help='Query OpenSearch directly via scroll API instead of the Graylog REST API. Useful for very large result sets or when Graylog is unreachable.', default=False, dest='use_opensearch', action='store_true')
         argument = subcommand.add_argument('--cluster-id', help='Target a specific cluster UUID (default: first cluster returned by sbctl).', type=str, dest='cluster_id')
@@ -590,6 +590,7 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--monitoring-secret', help='Graylog / OpenSearch password to use instead of the cluster secret. When provided this takes precedence over the cluster secret.', type=str, dest='monitoring_secret')
         argument = subcommand.add_argument('--namespace', help='Kubernetes namespace to collect CSI / storage-node DS pod logs from (default: simplyblock). Pass an empty string to skip kubectl collection.', type=str, default='simplyblock', dest='namespace')
         argument = subcommand.add_argument('--diagnose', help='Print a diagnostic report from OpenSearch (indices, field names, sample documents, container names present in the time window) and exit without collecting logs. Use this when collections return 0 to understand the actual data layout.  Implies --use-opensearch.', dest='diagnose', action='store_true')
+        argument = subcommand.add_argument('--mode', help='Deployment mode: \'docker\' (default) uses Docker Swarm service names for control-plane log collection; \'kubernetes\' uses Kubernetes container names and skips Graylog-based SPDK log collection (kubectl is used instead).', type=str, default='docker', dest='mode', choices=['docker','kubernetes',])
 
 
     def init_volume(self):

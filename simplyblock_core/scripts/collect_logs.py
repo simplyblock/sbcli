@@ -910,9 +910,14 @@ def main():
 def collect_logs(start_time, duration_minutes, output_dir, use_opensearch, cluster_id, mgmt_ip, monitoring_secret,
                  namespace, diagnose, mode):
     # ── 1. Parse time range ──────────────────────────────────────────────────
+    if not start_time:
+        start_time = str(datetime.now())
+
+    if not duration_minutes:
+        duration_minutes = 60
 
     try:
-        start_dt = datetime.fromisoformat(start_time.replace(" ", "T"))
+        start_dt = datetime.fromisoformat(str(datetime.now()).replace(" ", "T"))
     except ValueError as exc:
         print(f"ERROR: invalid start_time – {exc}", file=sys.stderr)
         sys.exit(1)

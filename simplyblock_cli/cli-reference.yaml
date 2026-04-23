@@ -1489,14 +1489,15 @@ commands:
       - name: collect-logs
         help: Collect simplyblock container logs for a given time window.
         arguments:
-          - name: "start_time"
+          - name: "--start-time"
             help: "Start of the collection window (UTC assumed if no timezone given). Formats: \"2024-01-15T10:00:00\"  or  \"2024-01-15 10:00:00\""
             dest: start_time
             type: str
-          - name: "duration_minutes"
+          - name: "--duration-minutes"
             help: "Duration in minutes."
             dest: duration_minutes
             type: int
+            default: 60
           - name: "--output-dir"
             help: "Directory to write the output tarball (default: current directory)."
             dest: output_dir
@@ -1535,6 +1536,16 @@ commands:
             dest: diagnose
             type: bool
             action: store_true
+          - name: "--mode"
+            help: "Deployment mode: 'docker' (default) uses Docker Swarm service names 
+            for control-plane log collection; 'kubernetes' uses Kubernetes container 
+            names and skips Graylog-based SPDK log collection (kubectl is used instead)."
+            dest: mode
+            type: str
+            choices:
+              - docker
+              - kubernetes
+            default: docker
   - name: "volume"
     help: "Logical Volume Commands"
     aliases:
