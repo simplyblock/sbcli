@@ -9,7 +9,6 @@ from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.controllers import health_controller, lvol_events, tasks_controller, lvol_controller
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.rpc_client import RPCClient
 
 logger = utils.get_logger(__name__)
 
@@ -58,8 +57,7 @@ def resume_comp(lvol):
         if n.status != StorageNode.STATUS_ONLINE:
             logger.warning("Not all nodes are online, can not resume JC compression")
             return
-    rpc_client = RPCClient(
-        node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=5, retry=2)
+    rpc_client = node.rpc_client(timeout=5, retry=2)
     ret, err = rpc_client.jc_suspend_compression(jm_vuid=node.jm_vuid, suspend=False)
     if err:
         logger.info("Failed to resume JC compression adding task...")
@@ -217,9 +215,7 @@ def check_node(snode):
         if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
             if first_sec_node is None:
                 first_sec_node = sec_node
-            sec_rpc_client = RPCClient(
-                sec_node.mgmt_ip, sec_node.rpc_port,
-                sec_node.rpc_username, sec_node.rpc_password, timeout=3, retry=2)
+            sec_rpc_client = sec_node.rpc_client(timeout=3, retry=2)
             ret = sec_rpc_client.get_bdevs()
             if ret:
                 for bdev in ret:

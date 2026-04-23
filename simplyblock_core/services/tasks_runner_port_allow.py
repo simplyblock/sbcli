@@ -8,7 +8,6 @@ from simplyblock_core.fw_api_client import FirewallClient
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.rpc_client import RPCClient
 
 logger = utils.get_logger(__name__)
 
@@ -256,11 +255,7 @@ def exec_port_allow_task(task):
                 tcp_ports_events.port_deny(peer, port_number)
                 time.sleep(0.5)
 
-                peer_rpc = RPCClient(
-                    peer.mgmt_ip, peer.rpc_port,
-                    peer.rpc_username, peer.rpc_password,
-                    timeout=0.2, retry=0,
-                )
+                peer_rpc = peer.rpc_client(timeout=0.2, retry=0)
                 try:
                     peer_rpc.bdev_lvol_set_leader(node.lvstore, leader=False, bs_nonleadership=True)
                     peer_rpc.bdev_distrib_force_to_non_leader(node.jm_vuid)

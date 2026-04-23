@@ -15,7 +15,7 @@ from simplyblock_core.models.backup import Backup
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.rpc_client import RPCClient, RPCException
+from simplyblock_core.rpc_client import RPCException
 
 logger = utils.get_logger(__name__)
 
@@ -66,9 +66,7 @@ def _run_backup(task):
         task.write_to_db(db.kv_store)
         return
 
-    rpc_client = RPCClient(
-        snode.mgmt_ip, snode.rpc_port,
-        snode.rpc_username, snode.rpc_password, timeout=30)
+    rpc_client = snode.rpc_client(timeout=30)
 
     # Resolve snapshot bdev name (needed for both kick-off and polling)
     try:
@@ -175,9 +173,7 @@ def _run_restore(task):
         task.write_to_db(db.kv_store)
         return
 
-    rpc_client = RPCClient(
-        snode.mgmt_ip, snode.rpc_port,
-        snode.rpc_username, snode.rpc_password, timeout=30)
+    rpc_client = snode.rpc_client(timeout=30)
 
     # Check that the target lvol still exists in DB before doing any RPC work
     lvol_id = task.function_params.get("lvol_id")
@@ -296,9 +292,7 @@ def _run_merge(task):
         task.write_to_db(db.kv_store)
         return
 
-    rpc_client = RPCClient(
-        snode.mgmt_ip, snode.rpc_port,
-        snode.rpc_username, snode.rpc_password, timeout=30)
+    rpc_client = snode.rpc_client(timeout=30)
 
     if not merge_started:
         try:

@@ -8,7 +8,6 @@ from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.prom_client import PromClient
-from simplyblock_core.rpc_client import RPCClient
 
 logger = logging.getLogger()
 
@@ -127,10 +126,7 @@ def get_alceml_name(alceml_id):
 def _def_create_device_stack(device_obj, snode, force=False, clear_data=False):
     db_controller = DBController()
 
-    rpc_client = RPCClient(
-        snode.mgmt_ip, snode.rpc_port,
-        snode.rpc_username, snode.rpc_password,
-        timeout=600)
+    rpc_client = snode.rpc_client(timeout=600)
 
     bdev_names = []
     for dev in rpc_client.get_bdevs():
@@ -287,7 +283,7 @@ def restart_device(device_id, force=False):
                 set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
         else:
             # looking for jm partition
-            rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+            rpc_client = snode.rpc_client()
             jm_dev_part = f"{dev.nvme_bdev[:-1]}1"
             ret = rpc_client.get_bdevs(jm_dev_part)
             if ret:
@@ -326,10 +322,7 @@ def set_device_testing_mode(device_id, mode):
         return False
 
     logger.info(f"Set device:{device_id} Test mode:{mode}")
-    # creating RPCClient instance
-    rpc_client = RPCClient(
-        snode.mgmt_ip, snode.rpc_port,
-        snode.rpc_username, snode.rpc_password)
+    rpc_client = snode.rpc_client()
 
     ret = rpc_client.bdev_passtest_mode(device.testing_bdev, mode)
     return ret
@@ -477,7 +470,7 @@ def remove_from_jm_device(device_id, jm_bdev):
         return False
 
     if snode.status == StorageNode.STATUS_ONLINE:
-        rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+        rpc_client = snode.rpc_client()
 
         if snode.jm_device.raid_bdev:
             logger.info("device part of raid1: only remove from raid")
@@ -628,9 +621,7 @@ def reset_storage_device(dev_id):
     #         device_set_unavailable(dev.get_id())
 
     logger.info("Resetting device")
-    rpc_client = RPCClient(
-        snode.mgmt_ip, snode.rpc_port,
-        snode.rpc_username, snode.rpc_password)
+    rpc_client = snode.rpc_client()
 
     controller_name = device.nvme_controller
     response = rpc_client.reset_device(controller_name)
@@ -688,7 +679,7 @@ def device_set_failed(device_id):
         logger.warning("Failed to set device state to failed")
     for node in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
         if node.status == StorageNode.STATUS_ONLINE:
-            rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password)
+            rpc_client = node.rpc_client()
             rpc_client.distr_replace_id_in_map_prob(dev.cluster_device_order, -1)
 
     tasks_controller.add_device_failed_mig_task(device_id)
@@ -753,7 +744,7 @@ def device_set_failed_and_migrated(device_id):
     dev = db_controller.get_storage_device_by_id(device_id)
     for node in db_controller.get_storage_nodes_by_cluster_id(dev.cluster_id):
         if node.status == StorageNode.STATUS_ONLINE:
-            rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password)
+            rpc_client = node.rpc_client()
             rpc_client.distr_replace_id_in_map_prob(dev.cluster_device_order, -1)
     return True
 
@@ -809,7 +800,7 @@ def remove_jm_device(device_id, force=False):
     set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
 
     if snode.status == StorageNode.STATUS_ONLINE:
-        rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+        rpc_client = snode.rpc_client()
         # delete jm stack
         if snode.enable_ha_jm:
             ret = rpc_client.subsystem_delete(snode.jm_device.nvmf_nqn)
@@ -854,7 +845,7 @@ def restart_jm_device(device_id, force=False, format_alceml=False):
 
     # add to jm raid
     if snode.jm_device:
-        rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+        rpc_client = snode.rpc_client()
         if snode.jm_device.raid_bdev:
             bdevs_names = [d['name'] for d in rpc_client.get_bdevs()]
             jm_nvme_bdevs = []

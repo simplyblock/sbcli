@@ -11,7 +11,6 @@ from simplyblock_core.controllers import backup_events, tasks_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.backup import Backup, BackupPolicy, BackupPolicyAttachment
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.rpc_client import RPCClient
 
 logger = logging.getLogger()
 
@@ -135,9 +134,7 @@ def create_s3_bdev(node, backup_config):
     """
     if not node.lvstore:
         return False
-    rpc_client = RPCClient(
-        node.mgmt_ip, node.rpc_port,
-        node.rpc_username, node.rpc_password)
+    rpc_client = node.rpc_client()
     s3_bdev_name = f"s3_{node.lvstore}"
 
     bdb_lcpu_mask, s3_lcpu_mask = _compute_s3_cpu_masks(node)
@@ -539,9 +536,7 @@ def delete_backups(lvol_id):
 
     # Call S3 delete RPC (dummy for now)
     if snode.status == StorageNode.STATUS_ONLINE:
-        rpc_client = RPCClient(
-            snode.mgmt_ip, snode.rpc_port,
-            snode.rpc_username, snode.rpc_password)
+        rpc_client = snode.rpc_client()
         s3_ids = [b.s3_id for b in completed]
         try:
             rpc_client.bdev_lvol_s3_delete(s3_ids)
@@ -747,9 +742,7 @@ def switch_backup_source(cluster_id, source_cluster_id):
         if node.status != StorageNode.STATUS_ONLINE or not node.lvstore:
             continue
         try:
-            rpc_client = RPCClient(
-                node.mgmt_ip, node.rpc_port,
-                node.rpc_username, node.rpc_password)
+            rpc_client = node.rpc_client()
             s3_bdev_name = f"s3_{node.lvstore}"
             ret = rpc_client.bdev_s3_add_bucket_name(s3_bdev_name, bucket_name)
             if not ret:

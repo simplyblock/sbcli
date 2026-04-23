@@ -14,7 +14,6 @@ from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.rpc_client import RPCClient
 
 
 logger = lg.getLogger()
@@ -132,7 +131,7 @@ def add(lvol_id, snapshot_name, backup=False, lock=True):
 
     if lvol.ha_type == "single":
         if snode.status == StorageNode.STATUS_ONLINE:
-            rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+            rpc_client = snode.rpc_client()
             logger.info("Creating Snapshot bdev")
             ret = rpc_client.lvol_create_snapshot(f"{lvol.lvs_name}/{lvol.lvol_bdev}", snap_bdev_name)
             if not ret:
@@ -201,8 +200,7 @@ def add(lvol_id, snapshot_name, backup=False, lock=True):
 
         try:
             if primary_node:
-                rpc_client = RPCClient(
-                    primary_node.mgmt_ip, primary_node.rpc_port, primary_node.rpc_username, primary_node.rpc_password)
+                rpc_client = primary_node.rpc_client()
 
                 logger.info("Creating Snapshot bdev")
                 ret = rpc_client.lvol_create_snapshot(f"{lvol.lvs_name}/{lvol.lvol_bdev}", snap_bdev_name)
@@ -226,14 +224,12 @@ def add(lvol_id, snapshot_name, backup=False, lock=True):
                 if gate == "delay":
                     queue_for_restart_drain(
                         sec.get_id(), lvol.lvs_name,
-                        lambda s=sec: RPCClient(s.mgmt_ip, s.rpc_port, s.rpc_username,
-                                                s.rpc_password).bdev_lvol_snapshot_register(
+                        lambda s=sec: s.rpc_client().bdev_lvol_snapshot_register(
                             f"{lvol.lvs_name}/{lvol.lvol_bdev}", snap_bdev_name, snap_uuid, blobid),
                         f"register snapshot {snap_bdev_name} on {sec.get_id()[:8]}")
                     continue
 
-                sec_rpc_client = RPCClient(
-                    sec.mgmt_ip, sec.rpc_port, sec.rpc_username, sec.rpc_password)
+                sec_rpc_client = sec.rpc_client()
 
                 ret = sec_rpc_client.bdev_lvol_snapshot_register(
                     f"{lvol.lvs_name}/{lvol.lvol_bdev}", snap_bdev_name, snap_uuid, blobid)
@@ -241,8 +237,7 @@ def add(lvol_id, snapshot_name, backup=False, lock=True):
                     msg = f"Failed to register snapshot on node: {sec.get_id()}"
                     logger.error(msg)
                     logger.info(f"Removing snapshot from {primary_node.get_id()}")
-                    rpc_client = RPCClient(
-                        primary_node.mgmt_ip, primary_node.rpc_port, primary_node.rpc_username, primary_node.rpc_password)
+                    rpc_client = primary_node.rpc_client()
                     ret, _ = rpc_client.delete_lvol(f"{lvol.lvs_name}/{snap_bdev_name}")
                     if not ret:
                         logger.error(f"Failed to delete snap from node: {snode.get_id()}")
@@ -430,11 +425,7 @@ def delete(snapshot_uuid, force_delete=False):
 
     if snap.lvol.ha_type == "single":
         if snode.status == StorageNode.STATUS_ONLINE:
-            rpc_client = RPCClient(
-                snode.mgmt_ip,
-                snode.rpc_port,
-                snode.rpc_username,
-                snode.rpc_password)
+            rpc_client = snode.rpc_client()
 
             ret, _ = rpc_client.delete_lvol(snap.snap_bdev)
             if not ret:
@@ -477,8 +468,7 @@ def delete(snapshot_uuid, force_delete=False):
         if not primary_node:
             primary_node = host_node
 
-        rpc_client = RPCClient(primary_node.mgmt_ip, primary_node.rpc_port, primary_node.rpc_username,
-                                   primary_node.rpc_password)
+        rpc_client = primary_node.rpc_client()
 
         ret, _ = rpc_client.delete_lvol(snap.snap_bdev)
         if not ret:
