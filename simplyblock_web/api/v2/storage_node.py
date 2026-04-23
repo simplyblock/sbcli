@@ -9,7 +9,6 @@ from simplyblock_core.db_controller import DBController
 from simplyblock_core.controllers import tasks_controller
 from simplyblock_core import storage_node_ops
 from simplyblock_core.models.storage_node import StorageNode as StorageNodeModel
-from simplyblock_web import utils as web_utils
 
 from . import util as util
 from .cluster import Cluster
@@ -33,7 +32,7 @@ def list(cluster: Cluster) -> List[StorageNodeDTO]:
 
 
 class StorageNodeParams(BaseModel):
-    node_address: Annotated[str, Field(pattern=web_utils.IP_PATTERN)]
+    node_address: str
     interface_name: str
     max_snapshots: Optional[int] = Field(500)
     ha_jm: Optional[bool] = Field(True)
@@ -232,7 +231,7 @@ def shutdown(cluster: Cluster, storage_node: StorageNode, force: bool = False) -
 class _RestartParams(BaseModel):
     force: bool = False
     reattach_volume: bool = False
-    node_address: Optional[Annotated[str, Field(pattern=web_utils.IP_PATTERN)]] = None
+    node_address: Optional[str] = None
 
 
 @instance_api.post('/start', name='clusters:storage-nodes:start', status_code=202, responses={202: {"content": None}})  # Same as restart for now
