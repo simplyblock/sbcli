@@ -2088,7 +2088,7 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
             pass
 
     try:
-        if health_controller._check_node_api(snode.mgmt_ip):
+        if health_controller._check_node_api(snode):
             logger.info("Stopping SPDK container")
             snode_api = snode.client(timeout=20)
             snode_api.spdk_process_kill(snode.rpc_port, snode.cluster_id)
