@@ -2169,6 +2169,7 @@ def render_and_deploy_alerting_configs(contact_point, grafana_endpoint, cluster_
         ALERT_TYPE = "email"
     else:
         ALERT_TYPE = "slack"
+        contact_point = 'https://hooks.slack.com/services/'
 
     values = {
         'CONTACT_POINT': contact_point,
