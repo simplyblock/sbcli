@@ -99,6 +99,49 @@ jobs:
           repository: simplyblock-io/simplyblock-csi
           ref: refs/heads/${{ github.event.inputs.simplyblock_csi_branch || 'add_sbcli_operator_helm' }}
           path: 'simplyblock-csi'
+      
+      - name: Resolve KEY_PATH (handles .ssh/, ~/.ssh/, quoted ~) and validate key exists
+        shell: bash
+        env:
+          KEY_PATH: ${{ github.event.inputs.key_path || '/home/ec2-user/.ssh/simplyblock-us-east-2.pem' }}
+        run: |
+          set -euxo pipefail
+
+          kp="${KEY_PATH}"
+
+          # Strip wrapping quotes if user typed "~/.ssh/..." with quotes
+          kp="${kp%\"}"; kp="${kp#\"}"
+          kp="${kp%\'}"; kp="${kp#\'}"
+
+          # Normalize ".ssh/..." -> "$HOME/.ssh/..."
+          if [[ "$kp" == .ssh/* ]]; then
+            kp="${HOME}/${kp}"
+          fi
+
+          # Normalize "~/" -> "$HOME/"
+          if [[ "$kp" == ~/* ]]; then
+            kp="${HOME}/${kp#~/}"
+          fi
+
+          # Also handle "~.ssh/.." (unlikely, but safe)
+          if [[ "$kp" == "~.ssh/"* ]]; then
+            kp="${HOME}/.${kp#~.}"
+          fi
+
+          echo "Resolved KEY_PATH=$kp"
+          echo "KEY_PATH=$kp" >> "$GITHUB_ENV"
+
+          test -f "$kp" || (echo "ERROR: SSH key not found at $kp" && exit 1)
+          chmod 600 "$kp" || true
+
+      - name: Export KEY_NAME from KEY_PATH
+        shell: bash
+        run: |
+          set -euxo pipefail
+          # KEY_PATH is already resolved and exported to $GITHUB_ENV in previous step
+          key_name="$(basename "${KEY_PATH}")"
+          echo "KEY_NAME=${key_name}" >> "$GITHUB_ENV"
+          echo "Exported KEY_NAME=${key_name}"
 
       # ============================================================
       # PRE-BOOTSTRAP CLEANUP (remote ops only)
