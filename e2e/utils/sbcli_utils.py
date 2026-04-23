@@ -416,6 +416,21 @@ class SbcliUtils:
         self.logger.debug(f"LVOL List: {lvol_data}")
         return lvol_data
 
+    def get_clones_of_snapshot(self, snap_id):
+        """Return list of clone lvols for a given snapshot ID.
+        Queries GET /lvol and filters by cloned_from_snap.
+        Returns list of {"lvol_name": ..., "id": ...} dicts.
+        """
+        data = self.get_request(api_url="/lvol")
+        clones = []
+        for lvol_info in data.get("results", []):
+            if lvol_info.get("cloned_from_snap") == snap_id:
+                clones.append({
+                    "lvol_name": lvol_info.get("lvol_name"),
+                    "id": lvol_info.get("id"),
+                })
+        return clones
+
     def get_lvol_by_id(self, lvol_id):
         """Return all lvol with given id
         """
@@ -478,12 +493,14 @@ class SbcliUtils:
         except:
             if skip_error:
                 self.logger.info(f"Lvol {lvol_name} not not found!! Continuing without Delete!!")
-                return
+                return True
             raise Exception(f"No such Lvol {lvol_name} found!!")
 
         if not lvol_id:
-            self.logger.info("Lvol does not exist. Exiting!!")
-            return
+            if skip_error:
+                self.logger.info(f"Lvol {lvol_name} does not exist. Exiting!!")
+                return True
+            raise Exception(f"Lvol {lvol_name} does not exist")
         self.logger.info(f"ledoo {lvol_name}, {lvol_id}")
 
         data = self.delete_request(api_url=f"/lvol/{lvol_id}")
@@ -494,7 +511,7 @@ class SbcliUtils:
         while True:
             if lvol_name not in list(lvols.keys()):
                 self.logger.info(f"Lvol {lvol_name} deleted successfully!!")
-                break
+                return True
             if attempt % 12 == 0:
                 try:
                     cur_state = self.get_lvol_details(lvol_id=lvol_id)[0]["status"]
@@ -508,7 +525,7 @@ class SbcliUtils:
                     self.logger.info(f"Delete lvol resp: {data}")
             if attempt > max_attempt:
                 if skip_error:
-                    return
+                    return False
                 raise Exception(f"Lvol {lvol_name} is not getting deleted!!")
             
             attempt += 1
@@ -948,4 +965,23 @@ class SbcliUtils:
                 self.delete_snapshot(snap_name=snap_name, skip_error=True)
             except Exception as e:
                 self.logger.info(f"Snapshot delete failed (continuing): {snap_name}, err={e}")
+
+    # ── Pool-level host management (DHCHAP) ─────────────────────────────────
+
+    def add_host_to_pool(self, pool_id, host_nqn):
+        """Register a client NQN at pool level.
+
+        POST /pool/<pool_id>/host  body: {"host_nqn": "<nqn>"}
+        """
+        body = {"host_nqn": host_nqn}
+        self.logger.info(f"[add_host_to_pool] pool={pool_id} nqn={host_nqn}")
+        return self.post_request(api_url=f"/pool/{pool_id}/host", body=body)
+
+    def remove_host_from_pool(self, pool_id, host_nqn):
+        """Remove a client NQN from pool-level host list.
+
+        DELETE /pool/<pool_id>/host  body: {"host_nqn": "<nqn>"}
+        """
+        self.logger.info(f"[remove_host_from_pool] pool={pool_id} nqn={host_nqn}")
+        return self.delete_request(api_url=f"/pool/{pool_id}/host/{host_nqn}")
 

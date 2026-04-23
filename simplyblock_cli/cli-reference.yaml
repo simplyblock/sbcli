@@ -2,7 +2,7 @@
 # yaml-language-server: $schema=./cli-reference-schema.yaml
 commands:
   - name: "storage-node"
-    help: "Storage node commands."
+    help: "Storage Node Commands"
     aliases:
       - sn
     weight: 100
@@ -132,7 +132,7 @@ commands:
           scratch-deployment of cluster software.
 
       - name: clean-devices
-        help: "Clean devices stored in /etc/simplyblock/sn_config_file (local run)."
+        help: "Clean devices stored in /etc/simplyblock/sn_config_file (local run)"
         description: >
           Run locally on storage nodes to clean nvme devices and free them.
         arguments:
@@ -142,6 +142,11 @@ commands:
             required: false
             type: str
             default: "/etc/simplyblock/sn_config_file"
+          - name: "--format-4k"
+            help: "Force format nvme devices with 4K."
+            dest: format_4k
+            type: bool
+            action: store_true
 
       - name: add-node
         help: "Adds a storage node by its IP address."
@@ -159,9 +164,8 @@ commands:
             dest: ifname
             type: str
           - name: "--journal-partition"
-            help: |
-              **Deprecated:** use `--enable-journal-device` instead.
-              
+            help: >-
+              **Deprecated:** use `--enable-journal-device` instead.<br><br>
               1: Auto-create small partitions for journal on nvme devices. 0: use a separate (the smallest) nvme device of the node for journal. The journal needs a maximum of 3 percent of total available raw disk space. Default: `1`.
             dest: partitions
             type: int
@@ -190,8 +194,7 @@ commands:
             description: >
               Storage network interface names, e.g. eth0,eth1
             dest: data_nics
-            type: str
-            nargs: "+"
+            type: list
           - name: "--size-of-device"
             help: "The size of device per storage node."
             dest: partition_size
@@ -234,10 +237,9 @@ commands:
             action: store_false
             private: true
           - name: "--ha-jm-count"
-            help: "The HA JM count. Default: `3`."
+            help: "HA JM count. Defaults to 4 for FT=2 clusters, otherwise 3."
             dest: ha_jm_count
             type: int
-            default: 3
           - name: "--namespace"
             help: "The Kubernetes namespace to deploy on."
             dest: namespace
@@ -272,7 +274,7 @@ commands:
             completer: _completer_get_sn_list
             type: str
           - name: "--force"
-            help: "Force delete storage node from DB...Hopefully you know what you do."
+            help: "Force delete storage node from DB. Ensure you know what you're doing."
             dest: force_remove
             type: bool
             action: store_true
@@ -805,7 +807,7 @@ commands:
             dest: node_id
             type: str
   - name: "cluster"
-    help: "Cluster commands."
+    help: "Cluster Commands"
     weight: 200
     subcommands:
       - name: create
@@ -1008,14 +1010,6 @@ commands:
               Network interface name from client to use for logical volume connection.
             dest: client_data_nic
             type: str
-          - name: "--max-fault-tolerance"
-            help: "Maximum number of node failures tolerated (1=single secondary, 2=dual secondary). Default: `1`."
-            dest: max_fault_tolerance
-            type: int
-            default: 1
-            choices:
-              - 1
-              - 2
           - name: "--use-backup"
             help: "The path to JSON file with S3/MinIO backup configuration."
             dest: use_backup
@@ -1167,14 +1161,6 @@ commands:
               Network interface name from client to use for logical volume connection.
             dest: client_data_nic
             type: str
-          - name: "--max-fault-tolerance"
-            help: "Maximum number of node failures tolerated (1=single secondary, 2=dual secondary). Default: `1`."
-            dest: max_fault_tolerance
-            type: int
-            default: 1
-            choices:
-              - 1
-              - 2
           - name: "--use-backup"
             help: "The path to JSON file with S3/MinIO backup configuration."
             dest: use_backup
@@ -1550,7 +1536,7 @@ commands:
             type: bool
             action: store_true
   - name: "volume"
-    help: "Logical volume commands."
+    help: "Logical Volume Commands"
     aliases:
       - lvol
     weight: 300
@@ -1661,12 +1647,11 @@ commands:
           - name: "--pvc-name"
             aliases:
               - "--pvc_name"
-            help: "Set logical volume PVC name for k8s clients."
-            description: |
+            help: "Set logical volume PVC name for k8s clients"
+            description: >-
               Set the logical volume persistent volume claim name for Kubernetes clients.<br><br>
-              !!! warning
-                  The old parameter name `--pvc_name` is deprecated and shouldn't be used anymore. It will eventually be
-                  removed. Please exchange the use of `--pvc_name` with `--pvc-name`.
+              The old parameter name `--pvc_name` is deprecated and shouldn't be used anymore. It will eventually be
+              removed. Please exchange the use of `--pvc_name` with `--pvc-name`.
             dest: pvc_name
             type: str
           - name: "--data-chunks-per-stripe"
@@ -1995,7 +1980,7 @@ commands:
             dest: migration_id
             type: str
   - name: "control-plane"
-    help: "Control plane commands."
+    help: "Control Plane Commands"
     aliases:
       - cp
       - mgmt
@@ -2048,7 +2033,7 @@ commands:
             dest: node_id
             type: str
   - name: "storage-pool"
-    help: "Storage pool commands."
+    help: "Storage Pool Commands"
     aliases:
       - pool
     weight: 500
@@ -2224,7 +2209,7 @@ commands:
             dest: host_nqn
             type: str
   - name: "snapshot"
-    help: "Snapshot commands."
+    help: "Snapshot Commands"
     weight: 600
     subcommands:
       - name: add
@@ -2341,7 +2326,7 @@ commands:
             dest: snapshot_id
             type: str
   - name: "backup"
-    help: "Backup commands."
+    help: "Backup Commands"
     weight: 650
     subcommands:
       - name: list
@@ -2503,18 +2488,18 @@ commands:
             dest: cluster_id
             type: str
   - name: "qos"
-    help: "Qos commands."
+    help: "QoS Commands"
     weight: 700
     subcommands:
       - name: add
-        help: "Creates a new QOS class."
+        help: "Creates a new QoS class"
         arguments:
           - name: "name"
-            help: "The QOS class name."
+            help: "QoS class name"
             dest: name
             type: str
           - name: "weight"
-            help: "The QOS class weight."
+            help: "QoS class weight"
             dest: weight
             type: int
           - name: "cluster_id"
@@ -2541,7 +2526,7 @@ commands:
         help: "Delete a class."
         arguments:
           - name: "name"
-            help: "The QOS class name."
+            help: "QoS class name"
             dest: name
             type: str
           - name: "cluster_id"

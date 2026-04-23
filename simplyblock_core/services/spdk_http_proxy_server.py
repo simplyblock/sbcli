@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import socket
+import ssl
 import sys
 import threading
 import time
@@ -12,6 +13,8 @@ import time
 from http.server import HTTPServer
 from http.server import ThreadingHTTPServer
 from http.server import BaseHTTPRequestHandler
+
+from simplyblock_core.settings import Settings
 
 
 logger_handler = logging.StreamHandler(stream=sys.stdout)
@@ -254,6 +257,11 @@ def run_server(host, port, user, password, is_threading_enabled=False):
     try:
         ServerHandler.key = key
         httpd = (ThreadingHTTPServer if is_threading_enabled else HTTPServer)((host, port), ServerHandler)
+        settings = Settings()
+        if settings.tls_enabled:
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.load_cert_chain(settings.tls_certificate, settings.tls_key)
+            httpd.socket = context.wrap_socket(httpd.socket, server_side=True)
         httpd.timeout = TIMEOUT
         logger.info('Started RPC http proxy server')
         httpd.serve_forever()

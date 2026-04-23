@@ -46,6 +46,9 @@ def argument_type(spec):
     if isinstance(spec, dict) and ((range := spec.get('range')) is not None):
         return f"range_type({range['min']}, {range['max']})"
 
+    if spec == 'list':
+        return "list_type()"
+
     return spec
 
 

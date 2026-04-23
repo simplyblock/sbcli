@@ -2725,8 +2725,8 @@ paths:
                           num_md_pages_per_cluster_ratio: 1
                         status: created
                         type: bdev_lvstore
-                    lvstore_stack_secondary_1: []
-                    lvstore_stack_secondary_2: []
+                    lvstore_stack_secondary: []
+                    lvstore_stack_tertiary: []
                     max_lvol: 10
                     max_prov: 1000000000000
                     max_snap: 500
@@ -3503,8 +3503,8 @@ paths:
                           num_md_pages_per_cluster_ratio: 1
                         status: created
                         type: bdev_lvstore
-                    lvstore_stack_secondary_1: []
-                    lvstore_stack_secondary_2: []
+                    lvstore_stack_secondary: []
+                    lvstore_stack_tertiary: []
                     max_lvol: 10
                     max_prov: 1000000000000
                     max_snap: 500
@@ -4281,8 +4281,8 @@ paths:
                           num_md_pages_per_cluster_ratio: 1
                         status: created
                         type: bdev_lvstore
-                    lvstore_stack_secondary_1: []
-                    lvstore_stack_secondary_2: []
+                    lvstore_stack_secondary: []
+                    lvstore_stack_tertiary: []
                     max_lvol: 10
                     max_prov: 1000000000000
                     max_snap: 500
@@ -5059,8 +5059,8 @@ paths:
                           num_md_pages_per_cluster_ratio: 1
                         status: created
                         type: bdev_lvstore
-                    lvstore_stack_secondary_1: []
-                    lvstore_stack_secondary_2: []
+                    lvstore_stack_secondary: []
+                    lvstore_stack_tertiary: []
                     max_lvol: 10
                     max_prov: 1000000000000
                     max_snap: 500
@@ -5733,8 +5733,8 @@ paths:
                     lvols: 0
                     lvstore: ''
                     lvstore_stack: []
-                    lvstore_stack_secondary_1: []
-                    lvstore_stack_secondary_2: []
+                    lvstore_stack_secondary: []
+                    lvstore_stack_tertiary: []
                     max_lvol: 10
                     max_prov: 10000000000000
                     max_snap: 500
@@ -6729,8 +6729,8 @@ paths:
                           num_md_pages_per_cluster_ratio: 1
                         status: created
                         type: bdev_lvstore
-                    lvstore_stack_secondary_1: []
-                    lvstore_stack_secondary_2: []
+                    lvstore_stack_secondary: []
+                    lvstore_stack_tertiary: []
                     max_lvol: 10
                     max_prov: 1000000000000
                     max_snap: 500
@@ -8827,8 +8827,8 @@ paths:
                           num_md_pages_per_cluster_ratio: 1
                         status: created
                         type: bdev_lvstore
-                    lvstore_stack_secondary_1: []
-                    lvstore_stack_secondary_2: []
+                    lvstore_stack_secondary: []
+                    lvstore_stack_tertiary: []
                     max_lvol: 10
                     max_prov: 1000000000000
                     max_snap: 500
@@ -10250,8 +10250,8 @@ paths:
                           num_md_pages_per_cluster_ratio: 1
                         status: created
                         type: bdev_lvstore
-                    lvstore_stack_secondary_1: []
-                    lvstore_stack_secondary_2: []
+                    lvstore_stack_secondary: []
+                    lvstore_stack_tertiary: []
                     max_lvol: 10
                     max_prov: 1000000000000
                     max_snap: 500

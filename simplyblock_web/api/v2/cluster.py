@@ -88,7 +88,10 @@ def list() -> List[ClusterDTO]:
 @api.post('/', name='clusters:create', status_code=201, responses={201: {"content": None}})
 def add(parameters: ClusterParams):
     try:
-        cluster_id_or_false = cluster_ops.add_cluster(**parameters.model_dump(exclude_none=True))
+        params = parameters.model_dump(exclude_none=True)
+        npcs = params.get('distr_npcs', 1)
+        params['max_fault_tolerance'] = min(npcs, 2) if npcs >= 1 else 1
+        cluster_id_or_false = cluster_ops.add_cluster(**params)
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
     if not cluster_id_or_false:

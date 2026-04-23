@@ -1,7 +1,7 @@
 # coding=utf-8
 """
 test_dual_ft_secondary_fixes.py – unit tests for the three bugs fixed in
-the dual fault-tolerance (secondary_node_id_2) support:
+the dual fault-tolerance (tertiary_node_id) support:
 
 1. recreate_lvstore now handles BOTH secondaries (not just secondary_node_id)
 2. Remote-devices loops re-read nodes from DB before writing (race condition)
@@ -18,6 +18,8 @@ from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.hublvol import HubLVol
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -39,10 +41,10 @@ def _cluster(cluster_id="cluster-1", ha_type="ha", max_fault_tolerance=2,
 
 
 def _node(uuid, status=StorageNode.STATUS_ONLINE, cluster_id="cluster-1",
-          lvstore="", secondary_node_id="", secondary_node_id_2="",
+          lvstore="", secondary_node_id="", tertiary_node_id="",
           mgmt_ip="", rpc_port=8080, lvol_subsys_port=9090,
           lvstore_ports=None, data_nics=None, active_tcp=True, active_rdma=False,
-          lvstore_stack_secondary_1="", lvstore_stack_secondary_2="",
+          lvstore_stack_secondary="", lvstore_stack_tertiary="",
           jm_vuid=100, lvstore_status="ready"):
     n = StorageNode()
     n.uuid = uuid
@@ -51,7 +53,7 @@ def _node(uuid, status=StorageNode.STATUS_ONLINE, cluster_id="cluster-1",
     n.hostname = f"host-{uuid[:8]}"
     n.lvstore = lvstore
     n.secondary_node_id = secondary_node_id
-    n.secondary_node_id_2 = secondary_node_id_2
+    n.tertiary_node_id = tertiary_node_id
     n.mgmt_ip = mgmt_ip or f"10.0.0.{hash(uuid) % 254 + 1}"
     n.rpc_port = rpc_port
     n.rpc_username = "user"
@@ -60,8 +62,8 @@ def _node(uuid, status=StorageNode.STATUS_ONLINE, cluster_id="cluster-1",
     n.lvstore_ports = dict(lvstore_ports) if lvstore_ports else {}
     n.active_tcp = active_tcp
     n.active_rdma = active_rdma
-    n.lvstore_stack_secondary_1 = lvstore_stack_secondary_1
-    n.lvstore_stack_secondary_2 = lvstore_stack_secondary_2
+    n.lvstore_stack_secondary = lvstore_stack_secondary
+    n.lvstore_stack_tertiary = lvstore_stack_tertiary
     n.jm_vuid = jm_vuid
     n.lvstore_status = lvstore_status
     n.enable_ha_jm = False
@@ -191,33 +193,36 @@ class TestRecreateLvstoreDualSecondary(unittest.TestCase):
         nodes["node-1"] = _node(
             "node-1", lvstore="LVS_100",
             secondary_node_id="cluster-1/node-2",
-            secondary_node_id_2="cluster-1/node-3",
+            tertiary_node_id="cluster-1/node-3",
             lvstore_ports={"LVS_100": {"lvol_subsys_port": 4420, "hublvol_port": 4425}},
-            lvstore_stack_secondary_1="", lvstore_stack_secondary_2="",
+            lvstore_stack_secondary="", lvstore_stack_tertiary="",
             mgmt_ip="10.0.0.1")
         nodes["node-2"] = _node(
             "node-2", lvstore="LVS_200",
             secondary_node_id="cluster-1/node-3",
-            secondary_node_id_2="cluster-1/node-4",
+            tertiary_node_id="cluster-1/node-4",
             lvstore_ports={"LVS_200": {"lvol_subsys_port": 4426, "hublvol_port": 4427},
                            "LVS_100": {"lvol_subsys_port": 4420, "hublvol_port": 4425}},
             mgmt_ip="10.0.0.2")
         nodes["node-3"] = _node(
             "node-3", lvstore="LVS_300",
             secondary_node_id="cluster-1/node-4",
-            secondary_node_id_2="cluster-1/node-1",
+            tertiary_node_id="cluster-1/node-1",
             lvstore_ports={"LVS_300": {"lvol_subsys_port": 4428, "hublvol_port": 4429},
                            "LVS_100": {"lvol_subsys_port": 4420, "hublvol_port": 4425}},
             mgmt_ip="10.0.0.3")
         nodes["node-4"] = _node(
             "node-4", lvstore="LVS_400",
             secondary_node_id="cluster-1/node-1",
-            secondary_node_id_2="cluster-1/node-2",
+            tertiary_node_id="cluster-1/node-2",
             status=StorageNode.STATUS_OFFLINE,
             mgmt_ip="10.0.0.4")
         return nodes
 
-    @patch("simplyblock_core.storage_node_ops.recreate_lvstore_on_sec")
+    @patch("simplyblock_core.storage_node_ops._check_peer_disconnected", return_value=False)
+    @patch("simplyblock_core.storage_node_ops._set_restart_phase")
+    @patch("simplyblock_core.storage_node_ops._handle_rpc_failure_on_peer", return_value="skip")
+    @patch("simplyblock_core.storage_node_ops.recreate_lvstore_on_non_leader")
     @patch("simplyblock_core.storage_node_ops.health_controller")
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
     @patch("simplyblock_core.storage_node_ops.storage_events")
@@ -229,7 +234,7 @@ class TestRecreateLvstoreDualSecondary(unittest.TestCase):
     def test_both_secondaries_get_firewall_blocked(
             self, mock_db_cls, mock_create_bdev, mock_connect_jm,
             mock_rpc_cls, mock_fw_cls, mock_storage_events, mock_tcp_events,
-            mock_health, mock_recreate_on_sec):
+            mock_health, mock_recreate_on_non_leader, _mock_disc, _mock_phase, _mock_handle):
         """Both sec1 and sec2 should have their ports blocked during primary restart."""
         from simplyblock_core.storage_node_ops import recreate_lvstore
 
@@ -278,7 +283,7 @@ class TestRecreateLvstoreDualSecondary(unittest.TestCase):
             n.connect_to_hublvol = MagicMock()
             n.write_to_db = MagicMock()
 
-        mock_recreate_on_sec.return_value = True
+        mock_recreate_on_non_leader.return_value = True
         mock_health.check_bdev.return_value = True
 
         # Primary node-1 restarts
@@ -303,7 +308,10 @@ class TestRecreateLvstoreDualSecondary(unittest.TestCase):
         self.assertEqual(len(block_calls), 2, "Expected 2 block calls (one per secondary)")
         self.assertEqual(len(allow_calls), 2, "Expected 2 allow calls (one per secondary)")
 
-    @patch("simplyblock_core.storage_node_ops.recreate_lvstore_on_sec")
+    @patch("simplyblock_core.storage_node_ops._check_peer_disconnected", return_value=False)
+    @patch("simplyblock_core.storage_node_ops._set_restart_phase")
+    @patch("simplyblock_core.storage_node_ops._handle_rpc_failure_on_peer", return_value="skip")
+    @patch("simplyblock_core.storage_node_ops.recreate_lvstore_on_non_leader")
     @patch("simplyblock_core.storage_node_ops.health_controller")
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
     @patch("simplyblock_core.storage_node_ops.storage_events")
@@ -315,7 +323,7 @@ class TestRecreateLvstoreDualSecondary(unittest.TestCase):
     def test_both_secondaries_get_hublvol_connection(
             self, mock_db_cls, mock_create_bdev, mock_connect_jm,
             mock_rpc_cls, mock_fw_cls, mock_storage_events, mock_tcp_events,
-            mock_health, mock_recreate_on_sec):
+            mock_health, mock_recreate_on_non_leader, _mock_disc, _mock_phase, _mock_handle):
         """Both secondaries should connect to hublvol after primary restart."""
         from simplyblock_core.storage_node_ops import recreate_lvstore
 
@@ -354,7 +362,7 @@ class TestRecreateLvstoreDualSecondary(unittest.TestCase):
             n.connect_to_hublvol = MagicMock()
             n.write_to_db = MagicMock()
 
-        mock_recreate_on_sec.return_value = True
+        mock_recreate_on_non_leader.return_value = True
         mock_health.check_bdev.return_value = True
 
         snode = nodes["node-1"]
@@ -364,11 +372,14 @@ class TestRecreateLvstoreDualSecondary(unittest.TestCase):
         # Both sec1 (node-2) and sec2 (node-3) should have connect_to_hublvol called
         # sec1 gets role="secondary", sec2 gets role="tertiary" with failover to sec1
         nodes["node-2"].connect_to_hublvol.assert_called_once_with(
-            snode, failover_node=None, role="secondary")
+            snode, failover_node=None, role="secondary", timeout=0.5)
         nodes["node-3"].connect_to_hublvol.assert_called_once_with(
-            snode, failover_node=nodes["node-2"], role="tertiary")
+            snode, failover_node=nodes["node-2"], role="tertiary", timeout=0.5)
 
-    @patch("simplyblock_core.storage_node_ops.recreate_lvstore_on_sec")
+    @patch("simplyblock_core.storage_node_ops._check_peer_disconnected", return_value=False)
+    @patch("simplyblock_core.storage_node_ops._set_restart_phase")
+    @patch("simplyblock_core.storage_node_ops._handle_rpc_failure_on_peer", return_value="skip")
+    @patch("simplyblock_core.storage_node_ops.recreate_lvstore_on_non_leader")
     @patch("simplyblock_core.storage_node_ops.health_controller")
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
     @patch("simplyblock_core.storage_node_ops.storage_events")
@@ -380,7 +391,7 @@ class TestRecreateLvstoreDualSecondary(unittest.TestCase):
     def test_both_secondaries_get_lvstore_status_ready(
             self, mock_db_cls, mock_create_bdev, mock_connect_jm,
             mock_rpc_cls, mock_fw_cls, mock_storage_events, mock_tcp_events,
-            mock_health, mock_recreate_on_sec):
+            mock_health, mock_recreate_on_non_leader, _mock_disc, _mock_phase, _mock_handle):
         """Both online secondaries should get lvstore_status='ready' at the end."""
         from simplyblock_core.storage_node_ops import recreate_lvstore
 
@@ -430,7 +441,7 @@ class TestRecreateLvstoreDualSecondary(unittest.TestCase):
             n.recreate_hublvol = MagicMock()
             n.connect_to_hublvol = MagicMock()
 
-        mock_recreate_on_sec.return_value = True
+        mock_recreate_on_non_leader.return_value = True
         mock_health.check_bdev.return_value = True
 
         snode = nodes["node-1"]
@@ -441,7 +452,9 @@ class TestRecreateLvstoreDualSecondary(unittest.TestCase):
         self.assertEqual(nodes["node-2"].lvstore_status, "ready")
         self.assertEqual(nodes["node-3"].lvstore_status, "ready")
 
-    @patch("simplyblock_core.storage_node_ops.recreate_lvstore_on_sec")
+    @patch("simplyblock_core.storage_node_ops._set_restart_phase")
+    @patch("simplyblock_core.storage_node_ops._handle_rpc_failure_on_peer", return_value="skip")
+    @patch("simplyblock_core.storage_node_ops.recreate_lvstore_on_non_leader")
     @patch("simplyblock_core.storage_node_ops.health_controller")
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
     @patch("simplyblock_core.storage_node_ops.storage_events")
@@ -453,13 +466,13 @@ class TestRecreateLvstoreDualSecondary(unittest.TestCase):
     def test_offline_secondary2_skipped_gracefully(
             self, mock_db_cls, mock_create_bdev, mock_connect_jm,
             mock_rpc_cls, mock_fw_cls, mock_storage_events, mock_tcp_events,
-            mock_health, mock_recreate_on_sec):
-        """If secondary_node_id_2 is offline, it should be skipped for
+            mock_health, mock_recreate_on_non_leader, _mock_phase, _mock_handle):
+        """If tertiary_node_id is offline, it should be skipped for
         firewall/hublvol but not crash."""
         from simplyblock_core.storage_node_ops import recreate_lvstore
 
         nodes = self._build_4node_cluster()
-        # Make secondary_node_id_2 (node-3) offline
+        # Make tertiary_node_id (node-3) offline
         nodes["node-3"].status = StorageNode.STATUS_OFFLINE
 
         db = mock_db_cls.return_value
@@ -480,6 +493,7 @@ class TestRecreateLvstoreDualSecondary(unittest.TestCase):
         rpc.get_bdevs.return_value = []
         rpc.bdev_lvol_set_lvs_opts.return_value = True
         rpc.bdev_lvol_set_leader.return_value = True
+        rpc.bdev_lvol_get_leader.return_value = True
         rpc.bdev_wait_for_examine.return_value = True
         rpc.bdev_examine.return_value = True
         rpc.bdev_distrib_force_to_non_leader.return_value = True
@@ -495,13 +509,19 @@ class TestRecreateLvstoreDualSecondary(unittest.TestCase):
             n.wait_for_jm_rep_tasks_to_finish = MagicMock(return_value=True)
             n.recreate_hublvol = MagicMock()
             n.connect_to_hublvol = MagicMock()
+            n.create_secondary_hublvol = MagicMock()
             n.write_to_db = MagicMock()
 
-        mock_recreate_on_sec.return_value = True
+        mock_recreate_on_non_leader.return_value = True
         mock_health.check_bdev.return_value = True
 
-        snode = nodes["node-1"]
-        result = recreate_lvstore(snode)
+        # Mock _check_peer_disconnected: node-3 (offline) is disconnected, others connected
+        def _disc_side_effect(peer, **kwargs):
+            return peer.uuid == "node-3" or peer.status == StorageNode.STATUS_OFFLINE
+        with patch("simplyblock_core.storage_node_ops._check_peer_disconnected",
+                   side_effect=_disc_side_effect):
+            snode = nodes["node-1"]
+            result = recreate_lvstore(snode)
         self.assertTrue(result)
 
         # Online sec1 should have connect_to_hublvol called
@@ -509,7 +529,10 @@ class TestRecreateLvstoreDualSecondary(unittest.TestCase):
         # Offline sec2 should NOT have connect_to_hublvol called
         nodes["node-3"].connect_to_hublvol.assert_not_called()
 
-    @patch("simplyblock_core.storage_node_ops.recreate_lvstore_on_sec")
+    @patch("simplyblock_core.storage_node_ops._check_peer_disconnected", return_value=False)
+    @patch("simplyblock_core.storage_node_ops._set_restart_phase")
+    @patch("simplyblock_core.storage_node_ops._handle_rpc_failure_on_peer", return_value="skip")
+    @patch("simplyblock_core.storage_node_ops.recreate_lvstore_on_non_leader")
     @patch("simplyblock_core.storage_node_ops.health_controller")
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
     @patch("simplyblock_core.storage_node_ops.storage_events")
@@ -521,7 +544,7 @@ class TestRecreateLvstoreDualSecondary(unittest.TestCase):
     def test_suspend_when_any_secondary_unreachable(
             self, mock_db_cls, mock_create_bdev, mock_connect_jm,
             mock_rpc_cls, mock_fw_cls, mock_storage_events, mock_tcp_events,
-            mock_health, mock_recreate_on_sec):
+            mock_health, mock_recreate_on_non_leader, _mock_disc, _mock_phase, _mock_handle):
         """If any secondary is UNREACHABLE, primary should be suspended."""
         from simplyblock_core.storage_node_ops import recreate_lvstore
 
@@ -566,17 +589,21 @@ class TestRecreateLvstoreDualSecondary(unittest.TestCase):
             n.connect_to_hublvol = MagicMock()
             n.write_to_db = MagicMock()
 
-        mock_recreate_on_sec.return_value = True
+        mock_recreate_on_non_leader.return_value = True
         mock_health.check_bdev.return_value = True
 
+        # Mock disconnect: node-3 (unreachable) is disconnected
+        def _disc_side_effect(peer, **kwargs):
+            return peer.uuid == "node-3" or peer.status == StorageNode.STATUS_UNREACHABLE
         snode = nodes["node-1"]
-        with patch("simplyblock_core.storage_node_ops.set_node_status"):
+        with patch("simplyblock_core.storage_node_ops._check_peer_disconnected",
+                   side_effect=_disc_side_effect):
             result = recreate_lvstore(snode)
 
-        # Should return False because secondary is unreachable (suspend)
-        self.assertFalse(result)
+        # Per design: unreachable secondary is skipped, restart succeeds
+        self.assertTrue(result)
 
-        # jc_explicit_synchronization should be called for unreachable secondary
+        # jc_explicit_synchronization should be called for disconnected peer
         rpc.jc_explicit_synchronization.assert_called_once_with(snode.jm_vuid)
 
 

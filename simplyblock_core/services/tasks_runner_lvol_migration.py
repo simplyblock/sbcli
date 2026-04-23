@@ -216,14 +216,14 @@ def _get_target_secondary_node(tgt_node):
 def _get_target_secondary_nodes(tgt_node):
     """
     Return ``(sec_nodes_list, error_string)`` for all secondaries on the target.
-    Checks both secondary_node_id and secondary_node_id_2.
+    Checks both secondary_node_id and tertiary_node_id.
     """
     sec_nodes = []
-    for sec_id in [tgt_node.secondary_node_id, tgt_node.secondary_node_id_2]:
-        if not sec_id:
+    for peer_id in [tgt_node.secondary_node_id, tgt_node.tertiary_node_id]:
+        if not peer_id:
             continue
         try:
-            sec = db.get_storage_node_by_id(sec_id)
+            sec = db.get_storage_node_by_id(peer_id)
         except KeyError:
             continue
 
@@ -233,7 +233,7 @@ def _get_target_secondary_nodes(tgt_node):
             continue
         else:
             return [], (
-                f"Target secondary node {sec_id} is in state "
+                f"Target secondary node {peer_id} is in state "
                 f"'{sec.status}'; cannot create on target primary"
             )
     return sec_nodes, None
@@ -1148,11 +1148,11 @@ def _get_secondary_rpc(node):
 def _get_all_secondary_rpcs(node):
     """Return list of RPC clients for all online secondaries of node."""
     rpcs = []
-    for sec_id in [node.secondary_node_id, node.secondary_node_id_2]:
-        if not sec_id:
+    for peer_id in [node.secondary_node_id, node.tertiary_node_id]:
+        if not peer_id:
             continue
         try:
-            sec = db.get_storage_node_by_id(sec_id)
+            sec = db.get_storage_node_by_id(peer_id)
             if sec.status == StorageNode.STATUS_ONLINE:
                 rpcs.append(_make_rpc(sec))
         except KeyError:

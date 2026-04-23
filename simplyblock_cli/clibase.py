@@ -31,6 +31,13 @@ def range_type(min, max):
     return f
 
 
+def list_type(separator: str = ','):
+    def f(arg) -> list[str]:
+        return arg.split(separator)
+
+    return f
+
+
 def size_type(min=None, max=None):
     def f(arg):
         size = utils.parse_size(arg)
@@ -234,7 +241,7 @@ class CLIWrapperBase:
             return storage_ops.restart_storage_node(
                 node_id, max_lvol, max_snap, max_prov,
                 spdk_image, spdk_debug,
-                small_bufsize, large_bufsize, node_ip=args.node_ip, reattach_volume=reattach_volume, force=args.force,
+                small_bufsize, large_bufsize, node_address=args.node_ip, reattach_volume=reattach_volume, force=args.force,
                 new_ssd_pcie=ssd_pcie, force_lvol_recreate=args.force_lvol_recreate, spdk_proxy_image=getattr(args, 'spdk_proxy_image', None))
         except Exception as e:
             print(e)
@@ -549,8 +556,9 @@ class CLIWrapperBase:
         npcs = args.npcs
 
         allowed_hosts = None
-        if args.allowed_hosts:
-            with open(args.allowed_hosts, 'r') as f:
+        allowed_hosts_arg = getattr(args, 'allowed_hosts', None)
+        if allowed_hosts_arg:
+            with open(allowed_hosts_arg, 'r') as f:
                 allowed_hosts = _json.load(f)
             if not isinstance(allowed_hosts, list):
                 print("Error: --allowed-hosts JSON must be a list of host NQN strings")
@@ -989,7 +997,7 @@ class CLIWrapperBase:
         is_single_node = args.is_single_node
         client_data_nic = args.client_data_nic
 
-        max_fault_tolerance = args.max_fault_tolerance
+        max_fault_tolerance = min(distr_npcs, 2) if distr_npcs >= 1 else 1
 
         backup_config = None
         if args.use_backup:
@@ -1040,7 +1048,7 @@ class CLIWrapperBase:
         fabric = args.fabric
         client_data_nic = args.client_data_nic
 
-        max_fault_tolerance = args.max_fault_tolerance
+        max_fault_tolerance = min(distr_npcs, 2) if distr_npcs >= 1 else 1
 
         backup_config = None
         if args.use_backup:

@@ -19,6 +19,45 @@ EVENTS_LIST = ['SPDK_BDEV_EVENT_REMOVE', "error_open", 'error_read', "error_writ
                "error_write_cannot_allocate"]
 
 
+def _get_target_remote_device(node_obj, device_id):
+    fresh = db.get_storage_node_by_id(node_obj.get_id())
+    for rem_dev in fresh.remote_devices:
+        if rem_dev.get_id() == device_id:
+            return rem_dev
+    return None
+
+
+def _is_target_remote_controller_healthy(device_obj, event_node_obj):
+    remote_dev = _get_target_remote_device(event_node_obj, device_obj.get_id())
+    remote_bdev = None
+    if remote_dev and remote_dev.remote_bdev:
+        remote_bdev = remote_dev.remote_bdev
+    else:
+        remote_bdev = f"remote_{device_obj.alceml_bdev}n1"
+
+    ctrl_name = remote_bdev[:-2] if remote_bdev.endswith("n1") else remote_bdev
+    ret, err = event_node_obj.rpc_client().bdev_nvme_controller_list_2(ctrl_name)
+    if not ret:
+        return False
+
+    ctrlrs = ret[0].get("ctrlrs", []) if ret else []
+    if not ctrlrs:
+        return False
+
+    bad_states = {"failed", "deleting", "resetting", "reconnect_is_delayed"}
+    healthy = False
+    for controller in ctrlrs:
+        controller_state = controller.get("state", "")
+        if controller_state not in bad_states:
+            healthy = True
+            break
+
+    if not healthy:
+        return False
+
+    return bool(event_node_obj.rpc_client().get_bdevs(remote_bdev))
+
+
 def remove_remote_device_from_node(node_id, device_id):
     # Re-read node immediately before write to avoid overwriting concurrent changes
     # (e.g. lvstore_ports set during cluster activation)
@@ -54,11 +93,11 @@ def process_device_event(event, logger):
             ev_time = event.object_dict['timestamp']
             time_delta = datetime.now() - datetime.strptime(ev_time, '%Y-%m-%dT%H:%M:%S.%fZ')
             if time_delta.total_seconds() > 8:
-                ret, err = event_node_obj.rpc_client().bdev_nvme_controller_list_2(device_obj.nvme_controller)
-                if ret:
-                    logger.info(f"event was fired {time_delta.total_seconds()} seconds ago, controller ok, skipping")
+                if _is_target_remote_controller_healthy(device_obj, event_node_obj):
+                    logger.info(f"event was fired {time_delta.total_seconds()} seconds ago, target remote controller ok, skipping")
                     event.status = f'skipping_late_by_{int(time_delta.total_seconds())}s_but_controller_ok'
                     return
+                ret, err = event_node_obj.rpc_client().bdev_nvme_controller_list_2(device_obj.nvme_controller)
                 if err and err['code'] == 22:
                     logger.info(f"event was fired {time_delta.total_seconds()} seconds ago, checking controller filed")
                     event.status = f'late_by_{int(time_delta.total_seconds())}s'
@@ -72,6 +111,11 @@ def process_device_event(event, logger):
             time.sleep(5)
 
         device_obj.lock_device_connection(event_node_obj.get_id())
+        if device_node_obj.get_id() != event_node_obj.get_id() and _is_target_remote_controller_healthy(device_obj, event_node_obj):
+            logger.info("Remote controller is still healthy on target node, skipping unavailable event")
+            event.status = 'skipped:remote_controller_healthy'
+            device_obj.release_device_connection()
+            return
 
         if device_obj.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY,
                                      NVMeDevice.STATUS_CANNOT_ALLOCATE]:

@@ -182,7 +182,7 @@ def storage_node_restart():
         target=storage_node_ops.restart_storage_node,
         kwargs={
             "node_id": uuid,
-            "node_ip": node_ip,
+            "node_address": node_ip,
             "force": force,
             "reattach_volume": reattach_volume,
         }
@@ -255,7 +255,7 @@ def storage_node_add():
     if 'iobuf_large_pool_count' in req_data:
         iobuf_large_pool_count = int(req_data['iobuf_large_pool_count'])
 
-    ha_jm_count = 3
+    ha_jm_count = None
     if 'ha_jm_count' in req_data:
         ha_jm_count = int(req_data['ha_jm_count'])
 

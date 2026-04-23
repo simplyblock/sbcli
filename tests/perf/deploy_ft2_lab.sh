@@ -62,7 +62,7 @@ done
 
 # Step 5: Cluster create (parallel with step 4)
 log "Step 5: Cluster create (ha, FT=2, npcs=2)"
-CLUSTER_ID=$(sbctl cluster create --ha-type ha --max-fault-tolerance 2 --parity-chunks-per-stripe 2 2>&1 | tail -1)
+CLUSTER_ID=$(sbctl cluster create --ha-type ha --parity-chunks-per-stripe 2 2>&1 | tail -1)
 if [ -z "$CLUSTER_ID" ] || [[ "$CLUSTER_ID" == *"error"* ]]; then
     log "ERROR: Cluster create failed: $CLUSTER_ID"
     exit 1

@@ -34,20 +34,53 @@ spec:
             - |
               set -e
               MARKER="/var/simplyblock/.cpu_topology_applied"
-              if [[ -f "$MARKER" ]]; then
-                  echo "[INFO] Node already configured. Skipping sleep and exiting..."
-                  exit 0
+              if [ -f "$MARKER" ]; then
+                  echo "[INFO] Node already configured. Waiting for NUMA to be fully ready..."
+                  RETRIES=0
+                  while [ $RETRIES -lt 12 ]; do
+                    NUMA_ALLOC=$(kubectl get node "{{ HOSTNAME }}" \
+                      -o jsonpath='{.status.allocatable.numa-align/numa-{{ NSOCKET }}}' 2>/dev/null || true)
+                    if [ "$NUMA_ALLOC" = "100" ]; then
+                      echo "[INFO] numa-align/numa-{{ NSOCKET }} is fully available (100)"
+                      exit 0
+                    fi
+                    RETRIES=$((RETRIES + 1))
+                    echo "[INFO] numa-align/numa-{{ NSOCKET }} not ready yet (got: '$NUMA_ALLOC'), retry $RETRIES/12 in 5s..."
+                    sleep 5
+                  done
+                  echo "[ERROR] numa-align/numa-{{ NSOCKET }} did not reach 100 after 12 retries (60s)"
+                  exit 1
               fi
 
-              SHORT_ID=$(echo "{{ HOSTNAME }}" | rev | cut -d'-' -f1 | rev)
-              # Create the Machine config pool
-              cat <<EOF | kubectl apply -f -
+              # Resource names — one MCP/MC/KC shared across all storage nodes in the cluster.
+              # The MCP nodeSelector grows as new nodes are added (In operator).
+              MCP_NAME="storage-{{ CLUSTER_ID }}"
+              MC_NAME="storage-mc-{{ CLUSTER_ID }}"
+              KC_NAME="storage-kubelet-{{ CLUSTER_ID }}"
+              KC_LABEL="storage-cpumanager-{{ CLUSTER_ID }}"
+              HOSTNAME="{{ HOSTNAME }}"
+
+              # ---- MachineConfigPool ----------------------------------------
+              if kubectl get machineconfigpool "$MCP_NAME" > /dev/null 2>&1; then
+                echo "[INFO] MCP $MCP_NAME already exists — appending $HOSTNAME to nodeSelector"
+                EXISTING=$(kubectl get machineconfigpool "$MCP_NAME" \
+                  -o jsonpath='{.spec.nodeSelector.matchExpressions[?(@.key=="kubernetes.io/hostname")].values}')
+                if echo "$EXISTING" | grep -q "$HOSTNAME"; then
+                  echo "[INFO] $HOSTNAME already in MCP nodeSelector, skipping patch"
+                else
+                  kubectl patch machineconfigpool "$MCP_NAME" --type=json \
+                    -p "[{\"op\": \"add\", \"path\": \"/spec/nodeSelector/matchExpressions/0/values/-\", \"value\": \"$HOSTNAME\"}]"
+                  echo "[INFO] Added $HOSTNAME to MCP $MCP_NAME"
+                fi
+              else
+                echo "[INFO] Creating MCP $MCP_NAME for $HOSTNAME"
+                cat <<MCPEOF | kubectl apply -f -
               apiVersion: machineconfiguration.openshift.io/v1
               kind: MachineConfigPool
               metadata:
-                name: storage-$SHORT_ID
+                name: $MCP_NAME
                 labels:
-                  custom-kubelet: cpumanager-enabled-$SHORT_ID
+                  custom-kubelet: $KC_LABEL
               spec:
                 machineConfigSelector:
                   matchExpressions:
@@ -55,45 +88,61 @@ spec:
                       operator: In
                       values:
                         - worker
-                        - storage-$SHORT_ID
+                        - $MCP_NAME
                 nodeSelector:
-                  matchLabels:
-                    kubernetes.io/hostname: {{ HOSTNAME }}
-              EOF
+                  matchExpressions:
+                    - key: kubernetes.io/hostname
+                      operator: In
+                      values:
+                        - $HOSTNAME
+                maxUnavailable: 1
+              MCPEOF
+              fi
 
-              # Create the Machine config
-              cat <<EOF | kubectl apply -f -
+              # ---- MachineConfig --------------------------------------------
+              # Role matches MCP name so MCO-generated KubeletConfig MC is also picked up.
+              if kubectl get machineconfig "$MC_NAME" > /dev/null 2>&1; then
+                echo "[INFO] MC $MC_NAME already exists — skipping"
+              else
+                echo "[INFO] Creating MC $MC_NAME"
+                cat <<MCEOF | kubectl apply -f -
               apiVersion: machineconfiguration.openshift.io/v1
               kind: MachineConfig
               metadata:
-                name: 00-storage-$SHORT_ID
+                name: $MC_NAME
                 labels:
-                  machineconfiguration.openshift.io/role: storage-$SHORT_ID
+                  machineconfiguration.openshift.io/role: $MCP_NAME
               spec:
                 config:
                   ignition:
                     version: 3.2.0
-              EOF
+              MCEOF
+              fi
 
-              # Create the KubeletConfig to enable static CPU manager
-              cat <<EOF | kubectl apply -f -
+              # ---- KubeletConfig --------------------------------------------
+              if kubectl get kubeletconfig "$KC_NAME" > /dev/null 2>&1; then
+                echo "[INFO] KubeletConfig $KC_NAME already exists — skipping"
+              else
+                echo "[INFO] Creating KubeletConfig $KC_NAME"
+                cat <<KCEOF | kubectl apply -f -
               apiVersion: machineconfiguration.openshift.io/v1
               kind: KubeletConfig
               metadata:
-                name: kubelet-storage-$SHORT_ID
+                name: $KC_NAME
               spec:
                 machineConfigPoolSelector:
                   matchLabels:
-                    custom-kubelet: cpumanager-enabled-$SHORT_ID
+                    custom-kubelet: $KC_LABEL
                 kubeletConfig:
                   cpuManagerPolicy: static
                   cpuManagerReconcilePeriod: 5s
                   topologyManagerPolicy: single-numa-node
                   reservedSystemCPUs: {{ RESERVED_SYSTEM_CPUS }}
-              EOF
+              KCEOF
+              fi
 
               echo "[INFO] Marking node as configured."
               touch "$MARKER"
 
-              echo "[INFO] Node is updating the kubeletconfig"
-              sleep 300
+              echo "[INFO] Node is updating the kubeletconfig, waiting for reboot..."
+              sleep 900

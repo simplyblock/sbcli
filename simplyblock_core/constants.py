@@ -70,6 +70,10 @@ weights = {
 
 
 HEALTH_CHECK_INTERVAL_SEC = 30
+# Faster cadence used by the per-node health-check loop when a node is NOT
+# STATUS_ONLINE.  Accelerates observation of recovery transitions without
+# adding polling cost to healthy nodes.
+HEALTH_CHECK_FAST_INTERVAL_SEC = 5
 
 GRAYLOG_CHECK_INTERVAL_SEC = 60
 
@@ -77,6 +81,14 @@ FDB_CHECK_INTERVAL_SEC = 60
 
 TASK_EXEC_INTERVAL_SEC = 10
 TASK_EXEC_RETRY_COUNT = 8
+# Shorter interval + lower ceiling for node/device restart tasks.  Restart
+# tasks are time-critical (cluster is degraded until the node is back) and
+# each retry does useful work (ping + api check + kill + restart), so we
+# don't want an exponential 10→20→40→80 backoff to dominate the recovery
+# window.  See incident 2026-04-20: 83 s end-to-end recovery, ~60 s of which
+# was TASK_EXEC_INTERVAL doubling between redundant retries.
+RESTART_TASK_EXEC_INTERVAL_SEC = 3
+RESTART_TASK_EXEC_INTERVAL_MAX_SEC = 15
 
 SIMPLY_BLOCK_SPDK_CORE_IMAGE = "simplyblock/spdk-core:v24.05-tag-latest"
 SIMPLY_BLOCK_DOCKER_IMAGE = get_config_var(
@@ -91,7 +103,7 @@ GELF_PORT = 12202
 
 MIN_HUGE_PAGE_MEMORY_FOR_LVOL = 209715200
 MIN_SYS_MEMORY_FOR_LVOL = 524288000
-EXTRA_SMALL_POOL_COUNT = 4096
+EXTRA_SMALL_POOL_COUNT = 30000
 EXTRA_LARGE_POOL_COUNT = 10240
 EXTRA_HUGE_PAGE_MEMORY = 3221225472
 EXTRA_SYS_MEMORY = 0.10
@@ -140,7 +152,17 @@ NVMF_MAX_SUBSYSTEMS=50000
 KATO=10000
 ACK_TO=11
 BDEV_RETRY=0
+# Used when the storage node has >1 data NIC (NVMe multipath active). Per the
+# SPDK NVMe multipath docs, bdev_retry_count must be non-zero so aborted IOs
+# from a failed path are retried on the alternate path instead of returning
+# as errors to the caller. Kept minimal: one fast retry is enough to cover
+# a brief path-switch window without compounding latency on genuine outages.
+BDEV_RETRY_MULTIPATH=2
 TRANSPORT_RETRY=3
+# With NVMe multipath active the alternate path already provides redundancy,
+# so transport_retry_count can be tightened from 3 to 1 to fail an IO faster
+# onto the other path instead of burning the per-path retry budget first.
+TRANSPORT_RETRY_MULTIPATH=1
 CTRL_LOSS_TO=1
 FAST_FAIL_TO=0
 RECONNECT_DELAY_CLUSTER=1
@@ -249,7 +271,7 @@ DHCHAP_DHGROUP = "ffdhe2048"
 # Default port ranges (configurable per-cluster via Cluster model fields)
 NVMF_BASE_PORT = 4420         # Base port for ALL NVMe-oF listeners (lvol, hublvol, device)
 RPC_BASE_PORT = 8080          # Base port for SPDK JSON-RPC
-SNODE_API_PORT = 50001        # SNodeAPI/firewall port (one per host IP)
+SNODE_API_PORT = 50001        # SNodeAPI/firewall port base — allocated per SPDK node, not per host
 
 # Legacy constants kept for backward compatibility with env override
 LVOL_NVMF_PORT_ENV = os.getenv("LVOL_NVMF_PORT_START", "")

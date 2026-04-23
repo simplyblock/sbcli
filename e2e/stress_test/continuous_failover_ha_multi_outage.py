@@ -52,6 +52,7 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
         self.outage_start_time = None
         self.outage_end_time = None
         self.node_vs_lvol = {}
+        self.persistent_lvols: set[str] = set()
         self.outage_dur = 0
         self.sn_nodes_with_sec = []
         self.lvol_node = ""
@@ -70,6 +71,9 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
         self.spdk_mem_thread = None
         self.blocked_ports = None
         self.dump_validation_errors = []
+        self.multipath_outage_types = ["container_stop", "graceful_shutdown"]
+        self.multipath_nic_disabled = False
+        self.multipath_disconnected_nics = []  # [(mgmt_ip, iface, nic_ip), ...]
         self.outage_log_file = os.path.join("logs", f"outage_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
         self._initialize_outage_log()
 
@@ -138,11 +142,131 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
             )
         return chosen
 
+    def _is_multipath_enabled(self):
+        """Return True if ALL storage nodes have 2+ data NICs (multipath capable)."""
+        for node in self.sn_nodes_with_sec:
+            details = self.sbcli_utils.get_storage_node_details(node)
+            data_nics = details[0].get("data_nics", [])
+            if len(data_nics) < 2:
+                return False
+        return True
+
+    def _disconnect_single_data_nic_all_nodes(self):
+        """
+        Disable one data NIC on ALL storage nodes in parallel (no auto-restore).
+
+        Uses data_nics[0]["if_name"] directly from the API for multipath setups
+        where the interface name is correct.
+
+        The NICs stay down until _reconnect_multipath_nics() is called
+        (after node outage recovery).
+
+        Returns list of (mgmt_ip, if_name, data_nic_ip) for logging.
+        """
+        node_plans = []
+        for node in self.sn_nodes_with_sec:
+            details = self.sbcli_utils.get_storage_node_details(node)
+            mgmt_ip = details[0]["mgmt_ip"]
+            data_nics = details[0].get("data_nics", [])
+            if not data_nics:
+                self.logger.warning(f"Node {node} has no data_nics, skipping multipath NIC disable")
+                continue
+            iface = data_nics[0]["if_name"]
+            nic_ip = data_nics[0]["ip4_address"]
+            node_plans.append((mgmt_ip, iface, nic_ip))
+
+        if not node_plans:
+            self.logger.error("No nodes could resolve data NIC interface; aborting multipath outage")
+            return []
+
+        self.logger.info(
+            f"Multipath NIC outage: disabling one data NIC on {len(node_plans)} nodes (until recovery)"
+        )
+
+        def _bring_down(mgmt_ip, iface):
+            cmd = f"nmcli connection down {iface}"
+            try:
+                self.ssh_obj.exec_command(node=mgmt_ip, command=cmd, max_retries=1, timeout=20)
+            except Exception as e:
+                self.logger.warning(f"NIC down command on {mgmt_ip} ({iface}): {e}")
+
+        threads = []
+        for mgmt_ip, iface, _ in node_plans:
+            t = threading.Thread(target=_bring_down, args=(mgmt_ip, iface))
+            threads.append(t)
+
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.multipath_disconnected_nics = node_plans
+        for mgmt_ip, iface, nic_ip in node_plans:
+            self.logger.info(f"  Disabled {iface} (IP={nic_ip}) on {mgmt_ip}")
+            self.log_outage_event(mgmt_ip, "multipath_single_nic_down", f"Disabled {iface} (IP={nic_ip})")
+
+        return node_plans
+
+    def _reconnect_multipath_nics(self):
+        """Bring back up all data NICs that were disabled by _disconnect_single_data_nic_all_nodes."""
+        if not self.multipath_disconnected_nics:
+            return
+
+        self.logger.info(
+            f"Reconnecting multipath NICs on {len(self.multipath_disconnected_nics)} nodes"
+        )
+
+        def _bring_up(mgmt_ip, iface):
+            cmd = f"nmcli connection up {iface}"
+            try:
+                self.ssh_obj.exec_command(node=mgmt_ip, command=cmd, max_retries=3, timeout=20)
+                self.logger.info(f"  Reconnected {iface} on {mgmt_ip}")
+            except Exception as e:
+                self.logger.error(f"Failed to reconnect {iface} on {mgmt_ip}: {e}")
+
+        threads = []
+        for mgmt_ip, iface, nic_ip in self.multipath_disconnected_nics:
+            t = threading.Thread(target=_bring_up, args=(mgmt_ip, iface))
+            threads.append(t)
+
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        for mgmt_ip, iface, nic_ip in self.multipath_disconnected_nics:
+            self.log_outage_event(mgmt_ip, "multipath_single_nic_up", f"Reconnected {iface} (IP={nic_ip})")
+
+        self.multipath_disconnected_nics = []
+        self.multipath_nic_disabled = False
+
     def perform_n_plus_k_outages(self):
         """
         Select K outage nodes such that no two are in a primary/secondary
         relationship (in either direction). Candidates = keys of the map.
+
+        When multipath is enabled (all nodes have 2+ data NICs), there is a 50%
+        chance that one data NIC will be disabled cluster-wide before per-node
+        outages are triggered. In that case only container_stop and
+        graceful_shutdown are used (no additional network outages).
         """
+        # ── Multipath: optionally disable one data NIC on ALL nodes ──────
+        use_multipath_outage = False
+        if self._is_multipath_enabled() and random.random() < 0.5:
+            self.logger.info("Multipath detected and selected — disabling one data NIC on all nodes")
+            self.multipath_nic_disabled = True
+            nic_plans = self._disconnect_single_data_nic_all_nodes()
+            self.log_outage_event(
+                "ALL_NODES", "multipath_single_nic_down",
+                f"Disabled 1 data NIC on {len(nic_plans)} nodes (until recovery)"
+            )
+            self.logger.info("Waiting 30s for multipath failover to settle...")
+            time.sleep(30)
+            use_multipath_outage = True
+        else:
+            self.multipath_nic_disabled = False
+            self.log_outage_event("ALL_NODES", "multipath_nic_outage", "SKIPPED (not enabled or not selected)")
+
         # Candidates are nodes that are primary *for someone* (map keys)
         primary_candidates = list(self.sn_primary_secondary_map.keys())
         self.current_outage_nodes = []
@@ -154,33 +278,31 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
 
         outage_nodes = self._pick_outage_nodes(primary_candidates, self.npcs)
         self.logger.info(f"Selected outage nodes: {outage_nodes}")
+
+        # Collect diagnostics for ALL nodes before any outage is triggered
+        # Skip if multipath NIC is already down — API calls would be very slow
+        if not use_multipath_outage:
+            self.collect_outage_diagnostics(f"pre_outage_nodes_{'_'.join(outage_nodes[:3])}")
+
+        # Choose outage type pools based on multipath state
+        if use_multipath_outage:
+            types_first = self.multipath_outage_types
+            types_rest = self.multipath_outage_types
+        else:
+            types_first = self.outage_types2 if self.npcs == 1 else self.outage_types
+            types_rest = self.outage_types2
+
         outage_combinations = []
         outage_num = 0
         for node in outage_nodes:
             if outage_num == 0:
-                # When only 1 outage per cycle, use outage_types2 so that
-                # container_stop is also eligible (no second-node timing risk).
-                if self.npcs == 1:
-                    outage_type = random.choice(self.outage_types2)
-                else:
-                    outage_type = random.choice(self.outage_types)
+                outage_type = random.choice(types_first)
                 outage_num = 1
             else:
-                outage_type = random.choice(self.outage_types2)
+                outage_type = random.choice(types_rest)
             node_details = self.sbcli_utils.get_storage_node_details(node)
             node_ip = node_details[0]["mgmt_ip"]
             node_rpc_port = node_details[0]["rpc_port"]
-
-            self.ssh_obj.dump_lvstore(node_ip=self.mgmt_nodes[0],
-                                      storage_node_id=node)
-
-            status = self.ssh_obj.fetch_distrib_logs(
-                storage_node_ip=node_ip,
-                storage_node_id=node,
-                logs_path=self.docker_logs_path
-            )
-            if not status:
-                raise RuntimeError("Placement Dump Status incorrect!!!")
 
             self.logger.info(f"Performing {outage_type} on primary node {node}.")
 
@@ -203,75 +325,6 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
 
         self.outage_start_time = int(datetime.now().timestamp())
         return outage_combinations
-
-    # [COMMENTED OUT — kept for future use]
-    # Two-phase parallel outage approach: pre-dump all nodes first, then trigger
-    # all outages simultaneously. Re-enable if sequential timing gap is a problem.
-    # def perform_n_plus_k_outages(self):
-    #     """Two-phase: Phase 1 pre-dumps all nodes, Phase 2 triggers outages in parallel."""
-    #     primary_candidates = list(self.sn_primary_secondary_map.keys())
-    #     self.current_outage_nodes = []
-    #     if len(primary_candidates) < self.npcs:
-    #         raise Exception(
-    #             f"Need {self.npcs} outage nodes, but only {len(primary_candidates)} primary-role nodes exist."
-    #         )
-    #     outage_nodes = self._pick_outage_nodes(primary_candidates, self.npcs)
-    #     self.logger.info(f"Selected outage nodes: {outage_nodes}")
-    #     node_plans = []  # (node, outage_type, node_ip, node_rpc_port, position)
-    #     outage_num = 0
-    #     for i, node in enumerate(outage_nodes):
-    #         if outage_num == 0:
-    #             if self.npcs == 1:
-    #                 outage_type = random.choice(self.outage_types2)
-    #             else:
-    #                 outage_type = random.choice(self.outage_types)
-    #             outage_num = 1
-    #         else:
-    #             outage_type = random.choice(self.outage_types2)
-    #         node_details = self.sbcli_utils.get_storage_node_details(node)
-    #         node_ip = node_details[0]["mgmt_ip"]
-    #         node_rpc_port = node_details[0]["rpc_port"]
-    #         if self.k8s_test:
-    #             k8s_obj = getattr(self.sbcli_utils, 'k8s', None)
-    #             if k8s_obj:
-    #                 k8s_obj.dump_lvstore_k8s(storage_node_id=node, storage_node_ip=node_ip, logs_path=self.docker_logs_path)
-    #                 k8s_obj.fetch_distrib_logs_k8s(storage_node_ip=node_ip, storage_node_id=node, logs_path=self.docker_logs_path)
-    #         else:
-    #             self.ssh_obj.dump_lvstore(node_ip=self.mgmt_nodes[0], storage_node_id=node)
-    #             self.ssh_obj.fetch_distrib_logs(
-    #                 storage_node_ip=node_ip, storage_node_id=node,
-    #                 logs_path=self.docker_logs_path,
-    #                 validate_async=True, error_sink=self.dump_validation_errors
-    #             )
-    #         node_plans.append((node, outage_type, node_ip, node_rpc_port, i))
-    #     outage_results = {}
-    #     def _trigger(node, outage_type, node_ip, node_rpc_port, position):
-    #         node_outage_dur = 0
-    #         effective_type = outage_type
-    #         if outage_type == "container_stop":
-    #             self.ssh_obj.stop_spdk_process(node_ip, node_rpc_port, self.cluster_id)
-    #         elif outage_type == "graceful_shutdown":
-    #             self._graceful_shutdown_node(node)
-    #         elif outage_type == "interface_partial_network_interrupt":
-    #             self._disconnect_partial_interface(node, node_ip)
-    #             node_outage_dur = 300
-    #         elif outage_type == "interface_full_network_interrupt":
-    #             node_outage_dur, effective_type = self._disconnect_full_interface(node, node_ip, position)
-    #         self.log_outage_event(node, effective_type, "Outage started")
-    #         outage_results[node] = (effective_type, node_outage_dur)
-    #     threads = [
-    #         threading.Thread(target=_trigger, args=(node, otype, nip, nrpc, pos))
-    #         for node, otype, nip, nrpc, pos in node_plans
-    #     ]
-    #     for t in threads: t.start()
-    #     for t in threads: t.join()
-    #     outage_combinations = []
-    #     for node, _, _, _, _ in node_plans:
-    #         effective_type, node_outage_dur = outage_results[node]
-    #         outage_combinations.append((node, effective_type, node_outage_dur))
-    #         self.current_outage_nodes.append(node)
-    #     self.outage_start_time = int(datetime.now().timestamp())
-    #     return outage_combinations
 
     def _graceful_shutdown_node(self, node):
         """Shutdown node without --force; retry every 20 s for up to 5 minutes.
@@ -301,8 +354,9 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
             self.logger.info(f"Node {node} not yet offline; retrying shutdown...")
 
     def _disconnect_partial_interface(self, node, node_ip):
-        active_interfaces = [nic["if_name"] for nic in self.sbcli_utils.get_storage_node_details(node)[0]["data_nics"]]
-        active_interfaces = ['eth1']
+        data_nics = self.sbcli_utils.get_storage_node_details(node)[0]["data_nics"]
+        active_interfaces = [data_nics[0]["if_name"]]
+        self.logger.info(f"Partial NIC disconnect on {node_ip}: {active_interfaces}")
         self.disconnect_thread = threading.Thread(
             target=self.ssh_obj.disconnect_all_active_interfaces,
             args=(node_ip, active_interfaces, 300)
@@ -348,6 +402,7 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
         available_lvols = [
             lvol for node, lvols in self.node_vs_lvol.items()
             for lvol in lvols
+            if lvol not in self.persistent_lvols
         ]
 
         self.logger.info(f"Available Lvols: {available_lvols}")
@@ -364,8 +419,9 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                     if self.k8s_test and clone_details.get("pending_connect"):
                         # Clone was never connected/mounted — skip FIO/unmount/disconnect
                         self.logger.info(f"[pending_connect] Deleting deferred clone '{clone_name}' (no FIO/mount to clean up).")
-                        self.sbcli_utils.delete_lvol(clone_name, max_attempt=20, skip_error=True)
-                        self.record_pending_lvol_delete(clone_name, clone_details['ID'])
+                        deleted = self.sbcli_utils.delete_lvol(clone_name, max_attempt=20, skip_error=True)
+                        if not deleted:
+                            self.record_pending_lvol_delete(clone_name, clone_details['ID'])
                         if clone_name in self.lvols_without_sec_connect:
                             self.lvols_without_sec_connect.remove(clone_name)
                         to_delete.append(clone_name)
@@ -397,10 +453,12 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                             sleep_n_sec(10)
 
                         sleep_n_sec(10)
+                        self.disconnect_lvol(clone_details['ID'])
                         self.ssh_obj.unmount_path(clone_details["Client"], f"/mnt/{clone_name}")
                         self.ssh_obj.remove_dir(clone_details["Client"], dir_path=f"/mnt/{clone_name}")
-                        self.sbcli_utils.delete_lvol(clone_name, max_attempt=20, skip_error=True)
-                        self.record_pending_lvol_delete(clone_name, clone_details['ID'])
+                        deleted = self.sbcli_utils.delete_lvol(clone_name, max_attempt=20, skip_error=True)
+                        if not deleted:
+                            self.record_pending_lvol_delete(clone_name, clone_details['ID'])
                         sleep_n_sec(30)
                         if clone_name in self.lvols_without_sec_connect:
                             self.lvols_without_sec_connect.remove(clone_name)
@@ -448,10 +506,12 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                 sleep_n_sec(10)
 
             sleep_n_sec(10)
+            self.disconnect_lvol(self.lvol_mount_details[lvol]['ID'])
             self.ssh_obj.unmount_path(self.lvol_mount_details[lvol]["Client"], f"/mnt/{lvol}")
             self.ssh_obj.remove_dir(self.lvol_mount_details[lvol]["Client"], dir_path=f"/mnt/{lvol}")
-            self.sbcli_utils.delete_lvol(lvol, max_attempt=20, skip_error=True)
-            self.record_pending_lvol_delete(lvol, self.lvol_mount_details[lvol]['ID'])
+            deleted = self.sbcli_utils.delete_lvol(lvol, max_attempt=20, skip_error=True)
+            if not deleted:
+                self.record_pending_lvol_delete(lvol, self.lvol_mount_details[lvol]['ID'])
             self.ssh_obj.delete_files(self.lvol_mount_details[lvol]["Client"], [f"{self.log_path}/local-{lvol}_fio*"])
             self.ssh_obj.delete_files(self.lvol_mount_details[lvol]["Client"], [f"{self.log_path}/{lvol}_fio_iolog*"])
             self.ssh_obj.delete_files(self.lvol_mount_details[lvol]["Client"], [f"/mnt/{lvol}/*"])
@@ -467,7 +527,6 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
 
     def create_snapshots_and_clones(self):
         """Create snapshots and clones during an outage, avoiding lvols on outage nodes."""
-        self.int_lvol_size += 1
         skip_nodes = [node for node in self.sn_primary_secondary_map if self.sn_primary_secondary_map[node] in self.current_outage_nodes]
         self.logger.info(f"Skip Nodes: {skip_nodes}")
         for node in self.current_outage_nodes:
@@ -483,6 +542,7 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
             return
         self.logger.info(f"Available lvols: {available_lvols}")
         for _ in range(3):
+            self.int_lvol_size += 1
             random.shuffle(available_lvols)
             lvol = available_lvols[0]
             snapshot_name = f"snap_{generate_random_sequence(15)}"
@@ -729,7 +789,7 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
             if self.clone_mount_details[clone_name]["ID"]:
                 self.sbcli_utils.resize_lvol(lvol_id=self.clone_mount_details[clone_name]["ID"],
                                              new_size=f"{self.int_lvol_size}G")
-
+        self._log_block_sizes("after_resize")
 
     # [COMMENTED OUT — kept for future use]
     # K8s temp method: connect/mount/FIO for clones deferred during outage.
@@ -862,24 +922,10 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                 self.logger.info("Waiting for fallback recovery.")
                 sleep_n_sec(100)
 
-            for node in self.sn_nodes_with_sec:
-                cur_node_details = self.sbcli_utils.get_storage_node_details(node)
-                cur_node_ip = cur_node_details[0]["mgmt_ip"]
-                if self.k8s_test:
-                    k8s_obj = getattr(self.sbcli_utils, 'k8s', None)
-                    if k8s_obj:
-                        k8s_obj.dump_lvstore_k8s(storage_node_id=node, storage_node_ip=cur_node_ip, logs_path=self.docker_logs_path)
-                        k8s_obj.fetch_distrib_logs_k8s(storage_node_ip=cur_node_ip, storage_node_id=node, logs_path=self.docker_logs_path)
-                else:
-                    self.ssh_obj.dump_lvstore(node_ip=self.mgmt_nodes[0],
-                                              storage_node_id=node)
-                    self.ssh_obj.fetch_distrib_logs(
-                        storage_node_ip=cur_node_ip,
-                        storage_node_id=node,
-                        logs_path=self.docker_logs_path,
-                        validate_async=True,
-                        error_sink=self.dump_validation_errors
-                    )
+            # Reconnect multipath NICs after all node outages are recovered
+            self._reconnect_multipath_nics()
+
+            self.collect_outage_diagnostics("post_recovery")
 
             time_duration = self.common_utils.calculate_time_duration(
                 start_timestamp=self.outage_start_time,
@@ -925,23 +971,6 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
 
             self.logger.info(f"N+K failover iteration {iteration} complete.")
 
-            for node in self.sn_nodes_with_sec:
-                cur_node_details = self.sbcli_utils.get_storage_node_details(node)
-                cur_node_ip = cur_node_details[0]["mgmt_ip"]
-                if self.k8s_test:
-                    k8s_obj = getattr(self.sbcli_utils, 'k8s', None)
-                    if k8s_obj:
-                        k8s_obj.dump_lvstore_k8s(storage_node_id=node, storage_node_ip=cur_node_ip, logs_path=self.docker_logs_path)
-                        k8s_obj.fetch_distrib_logs_k8s(storage_node_ip=cur_node_ip, storage_node_id=node, logs_path=self.docker_logs_path)
-                else:
-                    self.ssh_obj.dump_lvstore(node_ip=self.mgmt_nodes[0],
-                                              storage_node_id=node)
-                    self.ssh_obj.fetch_distrib_logs(
-                        storage_node_ip=cur_node_ip,
-                        storage_node_id=node,
-                        logs_path=self.docker_logs_path,
-                        validate_async=True,
-                        error_sink=self.dump_validation_errors
-                    )
+            self.collect_outage_diagnostics(f"end_iteration_{iteration}")
             iteration += 1
 

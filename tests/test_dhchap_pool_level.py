@@ -13,6 +13,7 @@ Covers:
   - LVol creation inherits pool.allowed_hosts when pool.dhchap=True
   - add_host_to_lvol uses pool keys for DHCHAP pools
   - bdev_nvme_set_options no longer accepts/sends dhchap params
+  - connect_lvol builds nvme connect strings with/without DHCHAP secrets and TLS
 """
 
 import inspect
@@ -630,6 +631,175 @@ class TestAddHostToLvolDhchapPool(unittest.TestCase):
         with patch.object(utils, "generate_dhchap_key") as mock_gen:
             add_host_to_lvol("lvol-1", "nqn:new-host")
             mock_gen.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# connect_lvol: DHCHAP secret & TLS flag handling in the nvme connect string
+# ---------------------------------------------------------------------------
+
+def _make_connect_ctx(lvol_allowed_hosts):
+    """Build the mocked DBController context used by every connect_lvol test.
+
+    Returns (patchers, lvol) — patchers must be started/stopped by the test.
+    """
+    from simplyblock_core.models.cluster import Cluster
+    from simplyblock_core.models.iface import IFace
+    from simplyblock_core.models.lvol_model import LVol
+    from simplyblock_core.models.storage_node import StorageNode
+
+    lvol = MagicMock(spec=LVol)
+    lvol.get_id.return_value = "lvol-1"
+    lvol.nqn = "nqn:test:lvol-1"
+    lvol.ha_type = "single"
+    lvol.node_id = "node-1"
+    lvol.nodes = ["node-1"]
+    lvol.lvs_name = "lvs1"
+    lvol.ns_id = 1
+    lvol.fabric = "tcp"
+    lvol.allowed_hosts = lvol_allowed_hosts
+
+    nic = IFace()
+    nic.ip4_address = "10.0.0.1"
+    nic.trtype = "TCP"
+
+    node = MagicMock(spec=StorageNode)
+    node.get_id.return_value = "node-1"
+    node.cluster_id = "cluster-1"
+    node.data_nics = [nic]
+    node.get_lvol_subsys_port.return_value = 4420
+
+    cluster = MagicMock(spec=Cluster)
+    cluster.status = Cluster.STATUS_ACTIVE
+    cluster.snapshot_replication_target_cluster = None
+    cluster.client_qpair_count = 3
+    cluster.client_data_nic = ""
+
+    db_patch = patch(
+        "simplyblock_core.controllers.lvol_controller.DBController")
+    MockDB = db_patch.start()
+    mock_db = MockDB.return_value
+    mock_db.get_lvol_by_id.return_value = lvol
+    mock_db.get_storage_node_by_id.return_value = node
+    mock_db.get_cluster_by_id.return_value = cluster
+
+    return db_patch, lvol
+
+
+class TestConnectLvolDhchap(unittest.TestCase):
+
+    def test_host_with_dhchap_keys_injected_into_connect_cmd(self):
+        """connect_lvol must add --dhchap-secret and --dhchap-ctrl-secret when
+        the matched host_entry has those fields."""
+        from simplyblock_core.controllers.lvol_controller import connect_lvol
+
+        host_entry = {
+            "nqn": "nqn:host-a",
+            "dhchap_key": "DHHC-1:01:aGVsbG8=:",
+            "dhchap_ctrlr_key": "DHHC-1:01:d29ybGQ=:",
+        }
+        patcher, _ = _make_connect_ctx([host_entry])
+        try:
+            result = connect_lvol("lvol-1", host_nqn="nqn:host-a")
+        finally:
+            patcher.stop()
+
+        self.assertIsInstance(result, list)
+        self.assertEqual(len(result), 1)
+        cmd = result[0]["connect"]
+        self.assertIn("--hostnqn=nqn:host-a", cmd)
+        self.assertIn(f"--dhchap-secret={host_entry['dhchap_key']}", cmd)
+        self.assertIn(
+            f"--dhchap-ctrl-secret={host_entry['dhchap_ctrlr_key']}", cmd)
+        # No PSK/TLS was configured
+        self.assertNotIn(" --tls", cmd)
+        self.assertNotIn("tls", result[0])
+
+    def test_host_with_psk_sets_tls_flag(self):
+        """A host_entry with a psk must add --tls to the connect command and
+        mark tls=True on the returned entry."""
+        from simplyblock_core.controllers.lvol_controller import connect_lvol
+
+        host_entry = {
+            "nqn": "nqn:host-a",
+            "psk": "NVMeTLSkey-1:01:aGVsbG8=:",
+        }
+        patcher, _ = _make_connect_ctx([host_entry])
+        try:
+            result = connect_lvol("lvol-1", host_nqn="nqn:host-a")
+        finally:
+            patcher.stop()
+
+        self.assertIsInstance(result, list)
+        cmd = result[0]["connect"]
+        self.assertIn(" --tls", cmd)
+        self.assertIn("--hostnqn=nqn:host-a", cmd)
+        self.assertTrue(result[0].get("tls"))
+        # No DHCHAP keys on the entry
+        self.assertNotIn("--dhchap-secret", cmd)
+        self.assertNotIn("--dhchap-ctrl-secret", cmd)
+
+    def test_missing_host_nqn_when_allowed_hosts_present_returns_false(self):
+        """If allowed_hosts is populated, host_nqn is mandatory."""
+        from simplyblock_core.controllers.lvol_controller import connect_lvol
+
+        patcher, _ = _make_connect_ctx([{"nqn": "nqn:host-a"}])
+        try:
+            result = connect_lvol("lvol-1", host_nqn=None)
+        finally:
+            patcher.stop()
+        self.assertFalse(result)
+
+    def test_unknown_host_nqn_returns_false(self):
+        """host_nqn that is not in the allowed_hosts list is rejected."""
+        from simplyblock_core.controllers.lvol_controller import connect_lvol
+
+        patcher, _ = _make_connect_ctx([{"nqn": "nqn:host-a"}])
+        try:
+            result = connect_lvol("lvol-1", host_nqn="nqn:intruder")
+        finally:
+            patcher.stop()
+        self.assertFalse(result)
+
+    def test_no_allowed_hosts_pass_through_with_host_nqn(self):
+        """When lvol.allowed_hosts is empty, host_nqn is passed through
+        without any DHCHAP/TLS material and the volume accepts any host."""
+        from simplyblock_core.controllers.lvol_controller import connect_lvol
+
+        patcher, _ = _make_connect_ctx([])
+        try:
+            result = connect_lvol("lvol-1", host_nqn="nqn:whoever")
+        finally:
+            patcher.stop()
+
+        self.assertIsInstance(result, list)
+        cmd = result[0]["connect"]
+        self.assertIn("--hostnqn=nqn:whoever", cmd)
+        self.assertNotIn("--dhchap-secret", cmd)
+        self.assertNotIn("--dhchap-ctrl-secret", cmd)
+        self.assertNotIn(" --tls", cmd)
+        # No allowed_hosts → no allowed_hosts key in returned entry
+        self.assertNotIn("allowed_hosts", result[0])
+
+    def test_pool_level_dhchap_lvol_has_no_secret_in_connect_cmd(self):
+        """Lvols inheriting from a pool-level DHCHAP pool have nqn-only entries
+        in allowed_hosts (no key material stored on the lvol). connect_lvol
+        therefore emits --hostnqn but no --dhchap-secret — documents current
+        behavior (clients retrieve pool keys via a separate path)."""
+        from simplyblock_core.controllers.lvol_controller import connect_lvol
+
+        # Pool-level DHCHAP: lvol.allowed_hosts contains only nqn, no keys.
+        patcher, _ = _make_connect_ctx([{"nqn": "nqn:host-a"}])
+        try:
+            result = connect_lvol("lvol-1", host_nqn="nqn:host-a")
+        finally:
+            patcher.stop()
+
+        self.assertIsInstance(result, list)
+        cmd = result[0]["connect"]
+        self.assertIn("--hostnqn=nqn:host-a", cmd)
+        self.assertNotIn("--dhchap-secret", cmd)
+        self.assertNotIn("--dhchap-ctrl-secret", cmd)
+        self.assertEqual(result[0]["allowed_hosts"], ["nqn:host-a"])
 
 
 if __name__ == "__main__":

@@ -68,10 +68,11 @@ class RandomK8sMultiOutageFailoverTest(RandomMultiClientMultiFailoverTest):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.logger = setup_logger(__name__)
-        self.total_lvols = 15
+        self.total_lvols = 20
         self.test_name = "n_plus_k_k8s_failover_ha"
         self.k8s_utils: K8sUtils | None = None
         self.fio_num_jobs = 2
+        self.persistent_lvols: set[str] = set()
         # Network outage not supported in K8s (no direct SSH to storage nodes).
         self.outage_types = ["graceful_shutdown"]
         self.outage_types2 = ["container_stop", "graceful_shutdown"]
@@ -95,6 +96,166 @@ class RandomK8sMultiOutageFailoverTest(RandomMultiClientMultiFailoverTest):
             self.logger.info(
                 f"[K8s] K8sUtils initialized for mgmt_node={self.mgmt_nodes[0]}"
             )
+
+    # ── persistent lvol creation ────────────────────────────────────────────
+
+    def create_persistent_lvols(self) -> None:
+        """Create 2 persistent lvols per storage node (never deleted)."""
+        for node_id in self.sn_nodes:
+            for i in range(2):
+                fs_type = random.choice(["ext4", "xfs"])
+                ndcs, npcs = random.choice(_NDCS_NPCS_CHOICES)
+                lvol_name = f"persist_{generate_random_sequence(10)}_{i}"
+                while lvol_name in self.lvol_mount_details:
+                    lvol_name = f"persist_{generate_random_sequence(10)}_{i}"
+
+                self.logger.info(
+                    f"[persistent] Creating lvol {lvol_name!r} on node "
+                    f"{node_id}, fs={fs_type}, ndcs={ndcs}, npcs={npcs}")
+
+                created = False
+                for attempt in range(5):
+                    if attempt > 0:
+                        lvol_name = f"persist_{generate_random_sequence(10)}_{i}"
+                        self.logger.info(
+                            f"[persistent] Retry {attempt}/4: "
+                            f"new name={lvol_name!r}")
+                    try:
+                        self.sbcli_utils.add_lvol(
+                            lvol_name=lvol_name,
+                            pool_name=self.pool_name,
+                            size=self.lvol_size,
+                            host_id=node_id,
+                            distr_ndcs=ndcs, distr_npcs=npcs,
+                        )
+                    except Exception as exc:
+                        self.logger.warning(
+                            f"[persistent] add_lvol raised for "
+                            f"{lvol_name!r} (attempt {attempt + 1}/5):"
+                            f" {exc}. Waiting 10s.")
+                        sleep_n_sec(10)
+                        continue
+
+                    found = False
+                    for check in range(10):
+                        lvols_now = self.sbcli_utils.list_lvols()
+                        if lvol_name in lvols_now:
+                            found = True
+                            break
+                        self.logger.info(
+                            f"[persistent] Waiting for {lvol_name!r}"
+                            f" (check {check + 1}/10)…")
+                        sleep_n_sec(3)
+
+                    if found:
+                        created = True
+                        break
+                    sleep_n_sec(10)
+
+                if not created:
+                    raise RuntimeError(
+                        f"[persistent] Failed to create {lvol_name!r}"
+                        f" on node {node_id} after 5 attempts.")
+
+                self.lvol_mount_details[lvol_name] = {
+                    "ID":              self.sbcli_utils.get_lvol_id(lvol_name),
+                    "Command":         None,
+                    "Mount":           None,
+                    "Device":          None,
+                    "MD5":             None,
+                    "FS":              fs_type,
+                    "Log":             f"{self.log_path}/{lvol_name}.log",
+                    "snapshots":       [],
+                    "iolog_base_path": f"{self.log_path}/{lvol_name}_fio_iolog",
+                }
+                self.node_vs_lvol.setdefault(node_id, []).append(lvol_name)
+                self.persistent_lvols.add(lvol_name)
+
+                connect_ls = self.sbcli_utils.get_lvol_connect_str(
+                    lvol_name=lvol_name)
+                self.lvol_mount_details[lvol_name]["Command"] = connect_ls
+
+                client_node = random.choice(self.fio_node)
+                self.lvol_mount_details[lvol_name]["Client"] = client_node
+
+                lvol_nqn = None
+                for _cs in connect_ls:
+                    if '--nqn=' in _cs:
+                        lvol_nqn = _cs.split('--nqn=')[1].split()[0]
+                        break
+
+                initial_devices = self.ssh_obj.get_devices(node=client_node)
+                already_connected = False
+                for connect_str in connect_ls:
+                    _, error = self.ssh_obj.exec_command(
+                        node=client_node, command=connect_str)
+                    if error:
+                        if "already connected" in error.lower():
+                            already_connected = True
+                        else:
+                            self.record_failed_nvme_connect(
+                                lvol_name, connect_str,
+                                client=client_node)
+
+                sleep_n_sec(3)
+                final_devices = self.ssh_obj.get_devices(node=client_node)
+                lvol_device = None
+                for device in final_devices:
+                    if device not in initial_devices:
+                        lvol_device = f"/dev/{device.strip()}"
+                        break
+
+                if not lvol_device and already_connected and lvol_nqn:
+                    lvol_device = self.ssh_obj.get_nvme_device_for_nqn(
+                        client_node, lvol_nqn)
+
+                if not lvol_device:
+                    raise LvolNotConnectException(
+                        f"[persistent] {lvol_name!r} did not connect")
+
+                self.lvol_mount_details[lvol_name]["Device"] = lvol_device
+                self.ssh_obj.format_disk(
+                    node=client_node, device=lvol_device,
+                    fs_type=fs_type)
+                mount_point = f"{self.mount_path}/{lvol_name}"
+                self.ssh_obj.mount_path(
+                    node=client_node, device=lvol_device,
+                    mount_path=mount_point)
+                self.lvol_mount_details[lvol_name]["Mount"] = mount_point
+
+                sleep_n_sec(10)
+                self.ssh_obj.delete_files(
+                    client_node, [f"{mount_point}/*fio*"])
+                sleep_n_sec(5)
+
+                fio_thread = threading.Thread(
+                    target=self.ssh_obj.run_fio_test,
+                    args=(client_node, None, mount_point,
+                          self.lvol_mount_details[lvol_name]["Log"]),
+                    kwargs={
+                        "size":         self.fio_size,
+                        "name":         f"{lvol_name}_fio",
+                        "rw":           "randrw",
+                        "bs":           f"{2 ** random.randint(2, 7)}K",
+                        "nrfiles":      16,
+                        "iodepth":      1,
+                        "numjobs":      self.fio_num_jobs,
+                        "time_based":   True,
+                        "runtime":      2000,
+                        "log_avg_msec": 1000,
+                        "iolog_file":   self.lvol_mount_details[lvol_name]["iolog_base_path"],
+                    },
+                )
+                fio_thread.start()
+                self.fio_threads.append(fio_thread)
+                self.logger.info(
+                    f"[persistent] {lvol_name} created on node "
+                    f"{node_id}, device={lvol_device}")
+                sleep_n_sec(10)
+
+        self.logger.info(
+            f"[persistent] Created {len(self.persistent_lvols)} "
+            f"persistent lvols: {self.persistent_lvols}")
 
     # ── lvol creation ────────────────────────────────────────────────────────
 
@@ -343,45 +504,6 @@ class RandomK8sMultiOutageFailoverTest(RandomMultiClientMultiFailoverTest):
             f"[K8s] container_stop: deleted SPDK pod {pod_name!r} for node {node_ip}"
         )
 
-    # ── Block-size logging ───────────────────────────────────────────────────
-
-    def _log_block_sizes(self, label: str = "") -> None:
-        """
-        For every connected lvol/clone, print the size of each per-controller
-        sysfs path (nvme<S>c<C>n<N>/size).
-
-        The device stored is the multipath namespace, e.g. /dev/nvme0n1.
-        From that we derive the subsystem (0) and namespace (1) numbers and
-        glob /sys/block/nvme0c*n1 to reach the individual controller entries —
-        the same paths the user reads with ``cat /sys/block/nvme0c0n1/size``.
-        """
-        tag = f"[block_size{' ' + label if label else ''}]"
-        all_details = {
-            **self.lvol_mount_details,
-            **self.clone_mount_details,
-        }
-        for lvol_name, details in all_details.items():
-            device = details.get("Device")
-            client = details.get("Client")
-            if not device or not client:
-                continue
-            dev_name = device.split("/")[-1]   # e.g. nvme0n1
-            m = re.match(r'nvme(\d+)n(\d+)', dev_name)
-            if not m:
-                continue
-            sub, ns = m.group(1), m.group(2)   # "0", "1"
-            self.logger.info(
-                f"{tag} {lvol_name} ({device}) — /sys/block/nvme{sub}c*n{ns}/size"
-            )
-            # List all per-controller paths for this subsystem+namespace
-            self.ssh_obj.exec_command(
-                node=client,
-                command=(
-                    f"for d in /sys/block/nvme{sub}c*n{ns}; do "
-                    f"echo \"$d: $(cat $d/size 2>/dev/null)\"; done"
-                ),
-            )
-
     def perform_n_plus_k_outages(self):
         """
         Two-phase K8s override of perform_n_plus_k_outages.
@@ -405,7 +527,10 @@ class RandomK8sMultiOutageFailoverTest(RandomMultiClientMultiFailoverTest):
         outage_nodes = self._pick_outage_nodes(primary_candidates, self.npcs)
         self.logger.info(f"Selected outage nodes: {outage_nodes}")
 
-        # Phase 1: pick types + pre-dump for ALL nodes (before any outage)
+        # Phase 1: pick types + pre-dump ALL nodes (before any outage)
+        # Collect diagnostics for ALL nodes in parallel (covers outage + secondary + all others)
+        self.collect_outage_diagnostics(f"pre_outage_nodes_{'_'.join(outage_nodes[:3])}")
+
         node_plans = []  # (node, outage_type, node_ip, node_rpc_port)
         outage_num = 0
 
@@ -422,30 +547,6 @@ class RandomK8sMultiOutageFailoverTest(RandomMultiClientMultiFailoverTest):
             node_details = self.sbcli_utils.get_storage_node_details(node)
             node_ip = node_details[0]["mgmt_ip"]
             node_rpc_port = node_details[0]["rpc_port"]
-
-            if self.k8s_test:
-                self.k8s_utils.dump_lvstore_k8s(
-                    sbcli_cmd=self.sbcli_utils.sbcli_cmd,
-                    storage_node_id=node,
-                    storage_node_ip=node_ip,
-                    logs_path=self.docker_logs_path,
-                )
-                self.k8s_utils.fetch_distrib_logs_k8s(
-                    storage_node_id=node,
-                    storage_node_ip=node_ip,
-                    logs_path=self.docker_logs_path,
-                )
-            else:
-                self.ssh_obj.dump_lvstore(
-                    node_ip=self.mgmt_nodes[0], storage_node_id=node
-                )
-                self.ssh_obj.fetch_distrib_logs(
-                    storage_node_ip=node_ip,
-                    storage_node_id=node,
-                    logs_path=self.docker_logs_path,
-                    validate_async=True,
-                    error_sink=self.dump_validation_errors
-                )
 
             node_plans.append((node, outage_type, node_ip, node_rpc_port))
 
@@ -493,59 +594,6 @@ class RandomK8sMultiOutageFailoverTest(RandomMultiClientMultiFailoverTest):
         self.outage_start_time = int(datetime.now().timestamp())
         return outage_combinations
 
-    # ── Sequential single-loop version (commented out — kept for reference) ───
-    # def perform_n_plus_k_outages(self):
-    #     """Sequential K8s override — dump + trigger per node, one at a time.
-    #     NOTE: uses ssh_obj.dump_lvstore which requires SSH to mgmt nodes.
-    #     Not suitable for k8s environments. Use the two-phase version above.
-    #     """
-    #     from datetime import datetime
-    #     primary_candidates = list(self.sn_primary_secondary_map.keys())
-    #     self.current_outage_nodes = []
-    #     outage_nodes = self._pick_outage_nodes(primary_candidates, self.npcs)
-    #     outage_combinations = []
-    #     outage_num = 0
-    #     for node in outage_nodes:
-    #         if outage_num == 0:
-    #             outage_type = random.choice(self.outage_types2 if self.npcs == 1 else self.outage_types)
-    #             outage_num = 1
-    #         else:
-    #             outage_type = random.choice(self.outage_types2)
-    #         node_details = self.sbcli_utils.get_storage_node_details(node)
-    #         node_ip = node_details[0]["mgmt_ip"]
-    #         node_rpc_port = node_details[0]["rpc_port"]
-    #         self.ssh_obj.dump_lvstore(node_ip=self.mgmt_nodes[0], storage_node_id=node)
-    #         status = self.ssh_obj.fetch_distrib_logs(
-    #             storage_node_ip=node_ip, storage_node_id=node, logs_path=self.docker_logs_path)
-    #         if not status:
-    #             raise RuntimeError("Placement Dump Status incorrect!!!")
-    #         self.log_outage_event(node, outage_type, "Outage started")
-    #         node_outage_dur = 0
-    #         if outage_type == "container_stop":
-    #             self._k8s_stop_spdk_pod(node_ip, node) if (self.k8s_test and self.k8s_utils) else self.ssh_obj.stop_spdk_process(node_ip, node_rpc_port, self.cluster_id)
-    #         elif outage_type == "graceful_shutdown":
-    #             self._graceful_shutdown_node(node)
-    #         elif outage_type == "interface_partial_network_interrupt":
-    #             self._disconnect_partial_interface(node, node_ip); node_outage_dur = 300
-    #         elif outage_type == "interface_full_network_interrupt":
-    #             node_outage_dur = self._disconnect_full_interface(node, node_ip)
-    #         outage_combinations.append((node, outage_type, node_outage_dur))
-    #         self.current_outage_nodes.append(node)
-    #     self.outage_start_time = int(datetime.now().timestamp())
-    #     return outage_combinations
-
-    # ── Resize + recovery hooks ───────────────────────────────────────────────
-
-    def create_snapshots_and_clones(self):
-        """Delegate to parent then log block sizes for all lvols after resize."""
-        super().create_snapshots_and_clones()
-        self._log_block_sizes("after_resize")
-
-    def restart_nodes_after_failover(self, outage_type, restart=False):
-        """Delegate to parent then log block sizes for all lvols after recovery."""
-        super().restart_nodes_after_failover(outage_type, restart)
-        self._log_block_sizes("post_recovery")
-
     # ── run ──────────────────────────────────────────────────────────────────
 
     def run(self) -> None:
@@ -588,6 +636,19 @@ class RandomK8sMultiOutageFailoverTest(RandomMultiClientMultiFailoverTest):
             self.pool_name = actual_pool
         self.logger.info(f"Pool '{self.pool_name}' ready.")
 
-        # Skip parent run() and call grandparent directly since we override
-        # perform_n_plus_k_outages; the rest of the loop is inherited.
+        # Populate sn_nodes early so we can create persistent lvols
+        # before the parent run() loop starts. Parent run() will
+        # re-populate (harmless, same data).
+        storage_nodes = self.sbcli_utils.get_storage_nodes()
+        for result in storage_nodes['results']:
+            if result["uuid"] not in self.sn_nodes:
+                self.sn_nodes.append(result["uuid"])
+                self.sn_nodes_with_sec.append(result["uuid"])
+                self.sn_primary_secondary_map[result["uuid"]] = (
+                    result["secondary_node_id"])
+        self.logger.info(
+            f"[persistent] {len(self.sn_nodes)} storage nodes found,"
+            f" creating 2 persistent lvols per node.")
+        self.create_persistent_lvols()
+
         super().run()

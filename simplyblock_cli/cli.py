@@ -5,7 +5,7 @@ import logging
 import sys
 import traceback
 
-from simplyblock_cli.clibase import CLIWrapperBase, range_type, size_type
+from simplyblock_cli.clibase import CLIWrapperBase, range_type, size_type, list_type
 from simplyblock_core import utils, constants
 
 class CLIWrapper(CLIWrapperBase):
@@ -32,7 +32,7 @@ class CLIWrapper(CLIWrapperBase):
         super().__init__()
 
     def init_storage_node(self):
-        subparser = self.add_command('storage-node', 'Storage node commands.', aliases=['sn',])
+        subparser = self.add_command('storage-node', 'Storage Node Commands', aliases=['sn',])
         self.init_storage_node__deploy(subparser)
         self.init_storage_node__configure(subparser)
         self.init_storage_node__configure_upgrade(subparser)
@@ -114,20 +114,21 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'deploy-cleaner', 'Cleans a previous simplyblock deploy (local run).')
 
     def init_storage_node__clean_devices(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'clean-devices', 'Clean devices stored in /etc/simplyblock/sn_config_file (local run).')
+        subcommand = self.add_sub_command(subparser, 'clean-devices', 'Clean devices stored in /etc/simplyblock/sn_config_file (local run)')
         argument = subcommand.add_argument('--config-path', help='The config path to read stored nvme devices from. Default: `/etc/simplyblock/sn_config_file`.', type=str, default='/etc/simplyblock/sn_config_file', dest='config_path', required=False)
+        argument = subcommand.add_argument('--format-4k', help='Force format nvme devices with 4K.', dest='format_4k', action='store_true')
 
     def init_storage_node__add_node(self, subparser):
         subcommand = self.add_sub_command(subparser, 'add-node', 'Adds a storage node by its IP address.')
         subcommand.add_argument('cluster_id', help='The cluster id.', type=str)
         subcommand.add_argument('node_addr', help='Address of storage node api to add, like <node-ip>:5000.', type=str)
         subcommand.add_argument('ifname', help='The management interface name.', type=str)
-        argument = subcommand.add_argument('--journal-partition', help='**Deprecated:** use `--enable-journal-device` instead.1: Auto-create small partitions for journal on nvme devices. 0: use a separate (the smallest) nvme device of the node for journal. The journal needs a maximum of 3 percent of total available raw disk space. Default: `1`.', type=int, dest='partitions', choices=[0,1,])
+        argument = subcommand.add_argument('--journal-partition', help='**Deprecated:** use `--enable-journal-device` instead.<br><br> 1: Auto-create small partitions for journal on nvme devices. 0: use a separate (the smallest) nvme device of the node for journal. The journal needs a maximum of 3 percent of total available raw disk space. Default: `1`.', type=int, dest='partitions', choices=[0,1,])
         argument = subcommand.add_argument('--enable-journal-device', help='Enables the use of a separate (the smallest) NVMe device of the node for the journal. Otherwise, the journal uses a maximum of 3%% of total available raw disk space across all NVMe devices.', default=False, dest='enable_journal_device', action='store_true')
         argument = subcommand.add_argument('--format-4k', help='Force format nvme devices with 4K.', dest='format_4k', action='store_true')
         if self.developer_mode:
             argument = subcommand.add_argument('--jm-percent', help='Number in percent to use for JM from each device. Default: `3`.', type=int, default=3, dest='jm_percent')
-        argument = subcommand.add_argument('--data-nics', help='The storage network interface names. Currently, one interface is supported.', type=str, dest='data_nics', nargs='+')
+        argument = subcommand.add_argument('--data-nics', help='The storage network interface names. Currently, one interface is supported.', type=list_type(), dest='data_nics')
         if self.developer_mode:
             argument = subcommand.add_argument('--size-of-device', help='The size of device per storage node.', type=str, dest='partition_size')
         if self.developer_mode:
@@ -142,7 +143,7 @@ class CLIWrapper(CLIWrapperBase):
             argument = subcommand.add_argument('--enable-test-device', help='Enable creation of test device.', dest='enable_test_device', action='store_true')
         if self.developer_mode:
             argument = subcommand.add_argument('--disable-ha-jm', help='Disable HA JM for distrib creation. Default: `true`.', dest='enable_ha_jm', action='store_false')
-        argument = subcommand.add_argument('--ha-jm-count', help='The HA JM count. Default: `3`.', type=int, default=3, dest='ha_jm_count')
+        argument = subcommand.add_argument('--ha-jm-count', help='HA JM count. Defaults to 4 for FT=2 clusters, otherwise 3.', type=int, dest='ha_jm_count')
         argument = subcommand.add_argument('--namespace', help='The Kubernetes namespace to deploy on.', type=str, dest='namespace')
         if self.developer_mode:
             argument = subcommand.add_argument('--id-device-by-nqn', help='Use the device NQN instead of the serial number for identification. Default: `false`.', dest='id_device_by_nqn', action='store_true')
@@ -154,7 +155,7 @@ class CLIWrapper(CLIWrapperBase):
     def init_storage_node__delete(self, subparser):
         subcommand = self.add_sub_command(subparser, 'delete', 'Deletes a storage node object from the state database.')
         subcommand.add_argument('node_id', help='Storage node id', type=str).completer = self._completer_get_sn_list
-        argument = subcommand.add_argument('--force', help='Force delete storage node from DB...Hopefully you know what you do.', dest='force_remove', action='store_true')
+        argument = subcommand.add_argument('--force', help='Force delete storage node from DB. Ensure you know what you\'re doing.', dest='force_remove', action='store_true')
 
     def init_storage_node__remove(self, subparser):
         subcommand = self.add_sub_command(subparser, 'remove', 'Removes a storage node from the cluster.')
@@ -348,7 +349,7 @@ class CLIWrapper(CLIWrapperBase):
 
 
     def init_cluster(self):
-        subparser = self.add_command('cluster', 'Cluster commands.')
+        subparser = self.add_command('cluster', 'Cluster Commands')
         self.init_cluster__create(subparser)
         self.init_cluster__add(subparser)
         self.init_cluster__activate(subparser)
@@ -423,7 +424,6 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--qpair-count', help='The NVMe/TCP transport qpair count per logical volume. Default: `32`.', type=range_type(0, 128), default=32, dest='qpair_count')
         argument = subcommand.add_argument('--client-qpair-count', help='The default NVMe/TCP transport qpair count per logical volume for client. Default: `3`.', type=range_type(0, 128), default=3, dest='client_qpair_count')
         argument = subcommand.add_argument('--client-data-nic', help='Network interface name from client to use for logical volume connection.', type=str, dest='client_data_nic')
-        argument = subcommand.add_argument('--max-fault-tolerance', help='Maximum number of node failures tolerated (1=single secondary, 2=dual secondary). Default: `1`.', type=int, default=1, dest='max_fault_tolerance', choices=[1,2,])
         argument = subcommand.add_argument('--use-backup', help='The path to JSON file with S3/MinIO backup configuration.', type=str, dest='use_backup')
         argument = subcommand.add_argument('--nvmf-base-port', help='Base port for all NVMe-oF listeners (lvol, hublvol, device). Default: `4420`.', type=int, default=4420, dest='nvmf_base_port')
         argument = subcommand.add_argument('--rpc-base-port', help='The base port for SPDK JSON-RPC. Default: `8080`.', type=int, default=8080, dest='rpc_base_port')
@@ -456,7 +456,6 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--strict-node-anti-affinity', help='Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node. This requires a minimum of _data-chunks-in-stripe + parity-chunks-in-stripe + 1_ nodes in the cluster."', dest='strict_node_anti_affinity', action='store_true')
         argument = subcommand.add_argument('--name', '-n', help='Assigns a name to the newly created cluster.', type=str, dest='name')
         argument = subcommand.add_argument('--client-data-nic', help='Network interface name from client to use for logical volume connection.', type=str, dest='client_data_nic')
-        argument = subcommand.add_argument('--max-fault-tolerance', help='Maximum number of node failures tolerated (1=single secondary, 2=dual secondary). Default: `1`.', type=int, default=1, dest='max_fault_tolerance', choices=[1,2,])
         argument = subcommand.add_argument('--use-backup', help='The path to JSON file with S3/MinIO backup configuration.', type=str, dest='use_backup')
         argument = subcommand.add_argument('--nvmf-base-port', help='Base port for all NVMe-oF listeners (lvol, hublvol, device). Default: `4420`.', type=int, default=4420, dest='nvmf_base_port')
         argument = subcommand.add_argument('--rpc-base-port', help='The base port for SPDK JSON-RPC. Default: `8080`.', type=int, default=8080, dest='rpc_base_port')
@@ -594,7 +593,7 @@ class CLIWrapper(CLIWrapperBase):
 
 
     def init_volume(self):
-        subparser = self.add_command('volume', 'Logical volume commands.', aliases=['lvol',])
+        subparser = self.add_command('volume', 'Logical Volume Commands', aliases=['lvol',])
         self.init_volume__add(subparser)
         self.init_volume__qos_set(subparser)
         self.init_volume__list(subparser)
@@ -651,7 +650,7 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--namespace', help='Sets the NVMe namespace for the logical volume (namespace must already exist).', type=str, dest='namespace')
         if self.developer_mode:
             argument = subcommand.add_argument('--uid', help='Set logical volume id.', type=str, dest='uid')
-        argument = subcommand.add_argument('--pvc-name', '--pvc_name', help='Set logical volume PVC name for k8s clients.', type=str, dest='pvc_name')
+        argument = subcommand.add_argument('--pvc-name', '--pvc_name', help='Set logical volume PVC name for k8s clients', type=str, dest='pvc_name')
         argument = subcommand.add_argument('--data-chunks-per-stripe', help='The erasure coding schema parameter k (distributed raid). Default: `0`.', type=int, default=0, dest='ndcs')
         argument = subcommand.add_argument('--parity-chunks-per-stripe', help='The erasure coding schema parameter n (distributed raid). Default: `0`.', type=int, default=0, dest='npcs')
         argument = subcommand.add_argument('--replicate', help='Replicate LVol snapshot', dest='replicate', action='store_true')
@@ -782,7 +781,7 @@ class CLIWrapper(CLIWrapperBase):
 
 
     def init_control_plane(self):
-        subparser = self.add_command('control-plane', 'Control plane commands.', aliases=['cp','mgmt',])
+        subparser = self.add_command('control-plane', 'Control Plane Commands', aliases=['cp','mgmt',])
         self.init_control_plane__add(subparser)
         self.init_control_plane__list(subparser)
         self.init_control_plane__remove(subparser)
@@ -807,7 +806,7 @@ class CLIWrapper(CLIWrapperBase):
 
 
     def init_storage_pool(self):
-        subparser = self.add_command('storage-pool', 'Storage pool commands.', aliases=['pool',])
+        subparser = self.add_command('storage-pool', 'Storage Pool Commands', aliases=['pool',])
         self.init_storage_pool__add(subparser)
         self.init_storage_pool__set(subparser)
         self.init_storage_pool__list(subparser)
@@ -888,7 +887,7 @@ class CLIWrapper(CLIWrapperBase):
 
 
     def init_snapshot(self):
-        subparser = self.add_command('snapshot', 'Snapshot commands.')
+        subparser = self.add_command('snapshot', 'Snapshot Commands')
         self.init_snapshot__add(subparser)
         self.init_snapshot__list(subparser)
         self.init_snapshot__delete(subparser)
@@ -953,7 +952,7 @@ class CLIWrapper(CLIWrapperBase):
 
 
     def init_backup(self):
-        subparser = self.add_command('backup', 'Backup commands.')
+        subparser = self.add_command('backup', 'Backup Commands')
         self.init_backup__list(subparser)
         self.init_backup__delete(subparser)
         self.init_backup__restore(subparser)
@@ -1034,16 +1033,16 @@ class CLIWrapper(CLIWrapperBase):
 
 
     def init_qos(self):
-        subparser = self.add_command('qos', 'Qos commands.')
+        subparser = self.add_command('qos', 'QoS Commands')
         self.init_qos__add(subparser)
         self.init_qos__list(subparser)
         self.init_qos__delete(subparser)
 
 
     def init_qos__add(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'add', 'Creates a new QOS class.')
-        subcommand.add_argument('name', help='The QOS class name.', type=str)
-        subcommand.add_argument('weight', help='The QOS class weight.', type=int)
+        subcommand = self.add_sub_command(subparser, 'add', 'Creates a new QoS class')
+        subcommand.add_argument('name', help='QoS class name', type=str)
+        subcommand.add_argument('weight', help='QoS class weight', type=int)
         subcommand.add_argument('cluster_id', help='The cluster id.', type=str, default='')
 
     def init_qos__list(self, subparser):
@@ -1053,7 +1052,7 @@ class CLIWrapper(CLIWrapperBase):
 
     def init_qos__delete(self, subparser):
         subcommand = self.add_sub_command(subparser, 'delete', 'Delete a class.')
-        subcommand.add_argument('name', help='The QOS class name.', type=str)
+        subcommand.add_argument('name', help='QoS class name', type=str)
         subcommand.add_argument('cluster_id', help='The cluster id.', type=str, default='')
 
 

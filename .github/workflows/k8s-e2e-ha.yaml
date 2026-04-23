@@ -12,10 +12,6 @@ on:
         description: 'Branch for simplyblock-csi'
         required: true
         default: 'master'
-      sbcli_cmd:
-        description: 'Command for sbcli execution'
-        required: true
-        default: 'sbcli-main'
       testname:
         description: 'Name of test to run. Empty to run all'
         required: false
@@ -134,16 +130,7 @@ jobs:
       
       - name: Set parameters based on branch and input
         run: |
-          if [[ "${GITHUB_REF##*/}" == *"pre-release"* ]]; then
-            echo "Branch is pre-release. Setting SBCLI_CMD to sbcli-pre."
-            echo "SBCLI_CMD=sbcli-pre" >> $GITHUB_ENV
-          elif [[ "${GITHUB_REF##*/}" == "sbcli" ]]; then
-            echo "Branch is sbcli. Setting SBCLI_CMD to sbcli."
-            echo "SBCLI_CMD=sbcli" >> $GITHUB_ENV
-          else
-            echo "Setting SBCLI_CMD to input or default to sbcli-dev."
-            echo "SBCLI_CMD=${{ github.event.inputs.sbcli_cmd || 'sbcli-dev' }}" >> $GITHUB_ENV
-          fi
+          echo "SBCLI_CMD=sbctl" >> $GITHUB_ENV
           echo "NDCS=${{ github.event.inputs.ndcs || 2 }}" >> $GITHUB_ENV
           echo "NPCS=${{ github.event.inputs.npcs || 1 }}" >> $GITHUB_ENV
           echo "BS=${{ github.event.inputs.bs || 4096 }}" >> $GITHUB_ENV
@@ -162,7 +149,7 @@ jobs:
             -var "extra_nodes_arch=arm64" -var "sec_storage_nodes=1" -var "sec_storage_nodes_instance_type=m6g.4xlarge" \
             -var "sbcli_cmd=$SBCLI_CMD" -out=tfplan
         env:
-          SBCLI_CMD: ${{ env.SBCLI_CMD }}
+          SBCLI_CMD: sbctl
 
       - name: Apply Terraform Changes
         run: |
@@ -194,7 +181,7 @@ jobs:
             --k8s-snode --partitions 0 --ha-type ha
         id: bootstrap_cluster
         env:
-          SBCLI_CMD: ${{ env.SBCLI_CMD }}
+          SBCLI_CMD: sbctl
           NDCS: ${{ env.NDCS }}
           NPCS: ${{ env.NPCS }}
           BS: ${{ env.BS }}
@@ -332,7 +319,7 @@ jobs:
                   --ndcs $NDCS --npcs $NPCS --bs $BS --chunk_bs $CHUNK_BS \
                   --run_k8s True --run_ha True
         env:
-          SBCLI_CMD: ${{ env.SBCLI_CMD }}
+          SBCLI_CMD: sbctl
           NDCS: ${{ env.NDCS }}
           NPCS: ${{ env.NPCS }}
           BS: ${{ env.BS }}

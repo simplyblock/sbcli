@@ -1,0 +1,10 @@
+{
+  "data1_subnet": "subnet-0bc107204ccb6c2df",
+  "data1_sg": "sg-007ad0bd943abbefd",
+  "data1_rt": "rtb-093008e12c134a05b",
+  "data1_cidr": "172.31.96.0/24",
+  "data2_subnet": "subnet-09dabfde67a5ae7a0",
+  "data2_sg": "sg-069a5f96309b8dbdd",
+  "data2_rt": "rtb-09fba0c0e1ad7b785",
+  "data2_cidr": "172.31.97.0/24"
+}

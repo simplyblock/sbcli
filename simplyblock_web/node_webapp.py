@@ -6,6 +6,7 @@ import argparse
 from flask_openapi3 import OpenAPI
 
 from simplyblock_core import constants
+from simplyblock_core.settings import Settings
 from simplyblock_web import utils
 from simplyblock_web.api import internal as internal_api
 
@@ -42,4 +43,6 @@ if __name__ == '__main__':
     if mode == "storage_node_k8s":
         app.register_api(internal_api.storage_node.kubernetes.api)
 
-    app.run(host='0.0.0.0', debug=constants.LOG_WEB_DEBUG)
+    settings = Settings()
+    ssl_ctx = (settings.tls_certificate, settings.tls_key) if settings.tls_enabled else None
+    app.run(host='0.0.0.0', debug=constants.LOG_WEB_DEBUG, ssl_context=ssl_ctx)

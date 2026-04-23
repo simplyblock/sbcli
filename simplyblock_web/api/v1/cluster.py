@@ -56,7 +56,7 @@ def add_cluster():
     strict_node_anti_affinity = cl_data.get('strict_node_anti_affinity', False)
     is_single_node = cl_data.get('is_single_node', False)
     client_data_nic = cl_data.get('client_data_nic', "")
-    max_fault_tolerance = cl_data.get('max_fault_tolerance', 1)
+    max_fault_tolerance = min(distr_npcs, 2) if distr_npcs >= 1 else 1
     nvmf_base_port = cl_data.get('nvmf_base_port', 4420)
     rpc_base_port = cl_data.get('rpc_base_port', 8080)
     snode_api_port = cl_data.get('snode_api_port', 50001)
@@ -109,7 +109,7 @@ def create_first_cluster():
     cluster_ip = cl_data.get('cluster_ip', None)
     grafana_secret = cl_data.get('grafana_secret', None)
     client_data_nic = cl_data.get('client_data_nic', "")
-    max_fault_tolerance = cl_data.get('max_fault_tolerance', 1)
+    max_fault_tolerance = min(distr_npcs, 2) if distr_npcs >= 1 else 1
     nvmf_base_port = cl_data.get('nvmf_base_port', 4420)
     rpc_base_port = cl_data.get('rpc_base_port', 8080)
     snode_api_port = cl_data.get('snode_api_port', 50001)

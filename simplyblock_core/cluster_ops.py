@@ -636,7 +636,7 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     max_size = records[0]['size_total']
 
     used_nodes_as_sec: t.List[str] = []
-    used_nodes_as_sec_2: t.List[str] = []
+    used_nodes_as_tertiary: t.List[str] = []
     snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     if cluster.ha_type == "ha":
         for snode in snodes:
@@ -644,7 +644,7 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                 continue
             if snode.secondary_node_id:
                 sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-                sec_node.lvstore_stack_secondary_1 = snode.get_id()
+                sec_node.lvstore_stack_secondary = snode.get_id()
                 sec_node.write_to_db()
                 used_nodes_as_sec.append(snode.secondary_node_id)
             else:
@@ -657,25 +657,29 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                 snode.secondary_node_id = secondary_nodes[0]
                 snode.write_to_db()
                 sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-                sec_node.lvstore_stack_secondary_1 = snode.get_id()
+                sec_node.lvstore_stack_secondary = snode.get_id()
                 sec_node.write_to_db()
                 used_nodes_as_sec.append(snode.secondary_node_id)
 
             # Assign second secondary when max_fault_tolerance >= 2
-            if cluster.max_fault_tolerance >= 2 and not snode.secondary_node_id_2:
+            if cluster.max_fault_tolerance >= 2 and not snode.tertiary_node_id:
                 snode = db_controller.get_storage_node_by_id(snode.get_id())
+                sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
                 secondary_nodes_2 = storage_node_ops.get_secondary_nodes_2(
-                    snode, exclude_ids=[snode.secondary_node_id] + used_nodes_as_sec_2)
+                    snode,
+                    exclude_ids=[snode.secondary_node_id] + used_nodes_as_tertiary,
+                    exclude_mgmt_ips=[sec_node.mgmt_ip],
+                )
                 if not secondary_nodes_2:
                     set_cluster_status(cl_id, ols_status)
                     raise ValueError("Failed to activate cluster, not enough nodes for dual fault tolerance")
 
-                snode.secondary_node_id_2 = secondary_nodes_2[0]
+                snode.tertiary_node_id = secondary_nodes_2[0]
                 snode.write_to_db()
-                sec_node_2 = db_controller.get_storage_node_by_id(snode.secondary_node_id_2)
-                sec_node_2.lvstore_stack_secondary_2 = snode.get_id()
+                sec_node_2 = db_controller.get_storage_node_by_id(snode.tertiary_node_id)
+                sec_node_2.lvstore_stack_tertiary = snode.get_id()
                 sec_node_2.write_to_db()
-                used_nodes_as_sec_2.append(snode.secondary_node_id_2)
+                used_nodes_as_tertiary.append(snode.tertiary_node_id)
 
     snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     for snode in snodes:
@@ -689,7 +693,14 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
         if snode.lvstore and force_lvstore_create is False:
             logger.warning(f"Node {snode.get_id()} already has lvstore {snode.lvstore}")
             try:
-                ret = storage_node_ops.recreate_lvstore(snode)
+                ret = storage_node_ops.recreate_lvstore(snode, activation_mode=True)
+            except storage_node_ops.LVSRestartRequiredError as e:
+                logger.error(e)
+                set_cluster_status(cl_id, ols_status)
+                raise ValueError(
+                    f"Failed to activate cluster: node {e.node_id} holds "
+                    f"partial state for LVS {e.lvs_name} that examine could "
+                    f"not recover. Restart node {e.node_id} before activating.")
             except Exception as e:
                 logger.error(e)
                 set_cluster_status(cl_id, ols_status)
@@ -713,28 +724,99 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
             set_cluster_status(cl_id, ols_status)
             raise ValueError("Failed to activate cluster")
 
+    # Pass 2: Recreate secondary/tertiary LVS on every node that participates
+    # as a non-leader for another node's LVS. In a ring topology (FTT=2 with
+    # 6 nodes) every node is both a primary AND a secondary/tertiary — the old
+    # is_secondary_node filter only matched dedicated secondary-only nodes,
+    # skipping the ring participants entirely.
     snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     for snode in snodes:
         if snode.status != StorageNode.STATUS_ONLINE:
             continue
 
-        if not snode.is_secondary_node:
+        primary_nodes = db_controller.get_primary_storage_nodes_by_secondary_node_id(snode.get_id())
+        if not primary_nodes:
             continue
 
-        logger.info(f"recreating secondary node {snode.get_id()}")
-        ret = storage_node_ops.recreate_lvstore_on_sec(snode)
+        snode = db_controller.get_storage_node_by_id(snode.get_id())
+        logger.info(f"recreating secondary/tertiary LVS on node {snode.get_id()}")
+        ret = True
+        for primary_node in primary_nodes:
+            primary_node.lvstore_status = "in_creation"
+            primary_node.write_to_db()
+            try:
+                r = storage_node_ops.recreate_lvstore_on_non_leader(
+                    snode, primary_node, primary_node, activation_mode=True)
+            except storage_node_ops.LVSRestartRequiredError as e:
+                logger.error(e)
+                set_cluster_status(cl_id, ols_status)
+                raise ValueError(
+                    f"Failed to activate cluster: node {e.node_id} holds "
+                    f"partial state for LVS {e.lvs_name} (non-leader). "
+                    f"Restart node {e.node_id} before activating.")
+            if not r:
+                ret = False
 
         snode = db_controller.get_storage_node_by_id(snode.get_id())
         if ret:
             snode.lvstore_status = "ready"
             snode.write_to_db()
-
         else:
             snode.lvstore_status = "failed"
             snode.write_to_db()
             logger.error(f"Failed to restore lvstore on node {snode.get_id()}")
             set_cluster_status(cl_id, ols_status)
             raise ValueError("Failed to activate cluster")
+
+    # --- Pass 3: Create hublvols and cross-connections ---
+    # All lvstores (primary + secondary/tertiary) are now up. Safe to create
+    # hublvols and connect peers. This mirrors the logic in create_lvstore()
+    # lines 5350-5379 and must tolerate offline nodes (FTT=1 or FTT=2).
+    snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
+    for snode in snodes:
+        if snode.is_secondary_node:
+            continue
+        if snode.status != StorageNode.STATUS_ONLINE:
+            continue
+        snode = db_controller.get_storage_node_by_id(snode.get_id())
+
+        secondary_ids = []
+        if snode.secondary_node_id:
+            secondary_ids.append(snode.secondary_node_id)
+        if snode.tertiary_node_id:
+            secondary_ids.append(snode.tertiary_node_id)
+
+        if not secondary_ids:
+            continue
+
+        # Create hublvol on primary
+        try:
+            if not snode.recreate_hublvol():
+                logger.error("Failed to recreate hublvol on %s", snode.get_id())
+        except Exception as e:
+            logger.error("Error creating hublvol on %s: %s", snode.get_id(), e)
+
+        # Create secondary hublvol on sec_1 (for tertiary multipath failover)
+        sec1 = db_controller.get_storage_node_by_id(secondary_ids[0])
+        if sec1 and sec1.status == StorageNode.STATUS_ONLINE:
+            try:
+                snode = db_controller.get_storage_node_by_id(snode.get_id())
+                sec1.create_secondary_hublvol(snode, cluster.nqn)
+            except Exception as e:
+                logger.error("Error creating secondary hublvol on sec_1 %s: %s", sec1.get_id(), e)
+
+        # Connect each secondary/tertiary to primary's hublvol
+        for i, sec_node_id in enumerate(secondary_ids):
+            sec_node = db_controller.get_storage_node_by_id(sec_node_id)
+            if sec_node.status != StorageNode.STATUS_ONLINE:
+                continue
+            try:
+                time.sleep(1)
+                failover_node = sec1 if i >= 1 and sec1 and sec1.status == StorageNode.STATUS_ONLINE else None
+                sec_role = "tertiary" if i >= 1 else "secondary"
+                sec_node.connect_to_hublvol(snode, failover_node=failover_node, role=sec_role)
+            except Exception as e:
+                logger.error("Error connecting %s to hublvol on %s: %s", sec_node.get_id(), snode.get_id(), e)
 
     # reorder qos classes ids
     qos_classes = db_controller.get_qos(cl_id)
@@ -804,10 +886,10 @@ def cluster_expand(cl_id) -> None:
             snode.write_to_db()
 
             sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-            sec_node.lvstore_stack_secondary_1 = snode.get_id()
+            sec_node.lvstore_stack_secondary = snode.get_id()
             sec_node.write_to_db()
 
-        if cluster.ha_type == "ha" and cluster.max_fault_tolerance >= 2 and not snode.secondary_node_id_2:
+        if cluster.ha_type == "ha" and cluster.max_fault_tolerance >= 2 and not snode.tertiary_node_id:
             snode = db_controller.get_storage_node_by_id(snode.get_id())
             secondary_nodes_2 = storage_node_ops.get_secondary_nodes(
                 snode, exclude_ids=[snode.secondary_node_id])
@@ -815,11 +897,11 @@ def cluster_expand(cl_id) -> None:
                 set_cluster_status(cl_id, ols_status)
                 raise ValueError("A minimum of 3 new nodes are required to expand cluster with dual fault tolerance")
 
-            snode.secondary_node_id_2 = secondary_nodes_2[0]
+            snode.tertiary_node_id = secondary_nodes_2[0]
             snode.write_to_db()
 
-            sec_node_2 = db_controller.get_storage_node_by_id(snode.secondary_node_id_2)
-            sec_node_2.lvstore_stack_secondary_2 = snode.get_id()
+            sec_node_2 = db_controller.get_storage_node_by_id(snode.tertiary_node_id)
+            sec_node_2.lvstore_stack_tertiary = snode.get_id()
             sec_node_2.write_to_db()
 
         ret = storage_node_ops.create_lvstore(snode, cluster.distr_ndcs, cluster.distr_npcs, cluster.distr_bs,
