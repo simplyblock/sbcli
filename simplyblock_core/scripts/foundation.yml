@@ -2,7 +2,7 @@
 services:
 
   fdb-server:
-    image: foundationdb/foundationdb:7.3.63
+    image: quay.io/simplyblock-io/foundationdb:7.3.63
     environment:
       FDB_NETWORKING_MODE: 'container'
       FDB_CLUSTER_FILE: '/etc/foundationdb/fdb.cluster'
@@ -25,7 +25,7 @@ services:
       - cli
 
   cli:
-    image: "simplyblock/simplyblock:main"
+    image: "quay.io/simplyblock-io/simplyblock:main"
     command: "sleep 9999"
 
     deploy:
