@@ -19,7 +19,7 @@ on:
       operator_repository:
         description: 'Operator image repository'
         required: false
-        default: 'simplyblock/simplyblock-manager'
+        default: 'simplyblock/simplyblock-operator'
       operator_tag:
         description: 'Operator image tag'
         required: false
@@ -468,7 +468,7 @@ jobs:
             --set controlplane.storageclass.name=local-hostpath \
             --set image.simplyblock.repository="${{ github.event.inputs.simplyblock_repository || 'public.ecr.aws/simply-block/simplyblock' }}" \
             --set image.simplyblock.tag="${{ github.event.inputs.simplyblock_image }}" \
-            --set image.operator.repository="${{ github.event.inputs.operator_repository || 'simplyblock/simplyblock-manager' }}" \
+            --set image.operator.repository="${{ github.event.inputs.operator_repository || 'simplyblock/simplyblock-operator' }}" \
             --set image.operator.tag="${{ github.event.inputs.operator_tag || 'main' }}" \
             --set csiConfig.simplybk.ip="http://simplyblock-webappapi.simplyblock:5000" \
             --set prometheus.server.persistentVolume.storageClass=local-hostpath \
@@ -843,6 +843,11 @@ jobs:
           S3_BUCKET_NAME: "simplyblock-e2e-test-logs"
           RUN_ID: ${{ github.run_id }}
 
+      - name: Set slack notification flag
+        if: always()
+        run: |
+          echo "send_slack_notification=${{ github.event.inputs.send_slack_notification || 'true' }}" >> $GITHUB_ENV
+
       - name: Parse test results
         if: always() && env.send_slack_notification == 'true'
         id: parse_results
@@ -927,11 +932,6 @@ jobs:
             echo "" >> $GITHUB_STEP_SUMMARY
           fi
           echo "[AWS Logs](https://s3.console.aws.amazon.com/s3/buckets/simplyblock-e2e-test-logs?prefix=${{ github.run_id }}/&region=us-east-2)" >> $GITHUB_STEP_SUMMARY
-
-      - name: Set slack notification flag
-        if: always()
-        run: |
-          echo "send_slack_notification=${{ github.event.inputs.send_slack_notification || 'true' }}" >> $GITHUB_ENV
 
       - name: Send Slack Notification
         if: always() && env.send_slack_notification == 'true'
