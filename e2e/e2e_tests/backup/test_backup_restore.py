@@ -68,7 +68,6 @@ Test class map
       python e2e.py --testname TestBackupCrossClusterRestore
 """
 
-import json
 import os
 import re
 import random
