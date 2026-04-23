@@ -7,7 +7,6 @@ import threading
 from simplyblock_core import utils
 from simplyblock_core.models.nvme_device import NVMeDevice, RemoteDevice
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core.db_controller import DBController
 
 logger = logging.getLogger()
@@ -175,7 +174,7 @@ def disconnect_device(device):
         if node.status != node.STATUS_ONLINE:
             continue
         new_remote_devices = []
-        rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=5, retry=2)
+        rpc_client = node.rpc_client(timeout=5, retry=2)
         for rem_dev in node.remote_devices:
             if rem_dev.get_id() == device.get_id():
                 ctrl_name = rem_dev.remote_bdev[:-2]
@@ -410,8 +409,7 @@ def send_cluster_map_add_device(device: NVMeDevice, target_node: StorageNode):
         return False
     dev_w_gib = utils.convert_size(device.size, 'GiB') or 1
     if target_node.status == StorageNode.STATUS_ONLINE:
-        rpc_client = RPCClient(
-            target_node.mgmt_ip, target_node.rpc_port, target_node.rpc_username, target_node.rpc_password, timeout=3)
+        rpc_client = target_node.rpc_client(timeout=3)
 
         if target_node.get_id() == dnode.get_id():
             name = device.alceml_bdev

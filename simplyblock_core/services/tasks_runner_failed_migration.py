@@ -10,7 +10,6 @@ from simplyblock_core.models.job_schedule import JobSchedule
 
 
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.rpc_client import RPCClient
 
 
 def task_runner(task):
@@ -71,8 +70,7 @@ def task_runner(task):
         task.write_to_db(db.kv_store)
         return False
 
-    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password,
-                           timeout=5, retry=2)
+    rpc_client = snode.rpc_client(timeout=5, retry=2)
     if "migration" not in task.function_params:
         try:
             device = db.get_storage_device_by_id(task.device_id)

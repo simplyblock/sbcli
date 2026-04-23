@@ -11,7 +11,6 @@ from simplyblock_core.models.job_schedule import JobSchedule
 
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.rpc_client import RPCClient
 
 
 def task_runner(task):
@@ -67,7 +66,7 @@ def task_runner(task):
 
 
 
-    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=5, retry=2)
+    rpc_client = snode.rpc_client(timeout=5, retry=2)
     all_devs_online_or_failed = True
     for node in db.get_storage_nodes_by_cluster_id(task.cluster_id):
         for dev in node.nvme_devices:

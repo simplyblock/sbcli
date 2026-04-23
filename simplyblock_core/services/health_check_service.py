@@ -8,7 +8,6 @@ from simplyblock_core.controllers import health_controller, storage_events, devi
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core import constants, db_controller, storage_node_ops
 
 
@@ -84,8 +83,7 @@ def check_node(snode):
     logger.info(f"Check: node API {snode.mgmt_ip}:5000 ... {node_api_check}")
 
     # 3- check node RPC
-    node_rpc_check = health_controller._check_node_rpc(
-        snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+    node_rpc_check = health_controller.check_node_rpc(snode)
     logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}")
 
     is_node_online = ping_check and node_api_check and node_rpc_check
@@ -96,10 +94,7 @@ def check_node(snode):
         node_devices_check = True
         node_remote_devices_check = True
 
-        rpc_client = RPCClient(
-            snode.mgmt_ip, snode.rpc_port,
-            snode.rpc_username, snode.rpc_password,
-            timeout=3, retry=2)
+        rpc_client = snode.rpc_client(timeout=3, retry=2)
         connected_devices = []
 
         node_bdevs = rpc_client.get_bdevs()

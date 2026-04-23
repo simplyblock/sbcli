@@ -32,7 +32,7 @@ from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.prom_client import PromClient
-from simplyblock_core.rpc_client import RPCClient, RPCException
+from simplyblock_core.rpc_client import RPCException
 from simplyblock_core.snode_client import SNodeClient, SNodeClientException
 from simplyblock_web import node_utils
 from simplyblock_core.utils import addNvmeDevices
@@ -146,7 +146,7 @@ def _reapply_allowed_hosts(lvol, snode, rpc_client):
 
 def _set_lvol_ana_on_node(lvol, node, ana_state):
     """Set ANA state for a single lvol's listeners on a given node."""
-    rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=10, retry=2)
+    rpc_client = node.rpc_client(timeout=10, retry=2)
     listener_port = node.get_lvol_subsys_port(lvol.lvs_name)
     for iface in node.data_nics:
         if iface.ip4_address and (lvol.fabric == iface.trtype.lower() or (lvol.fabric == "tcp" and node.active_tcp)):
@@ -262,10 +262,7 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names:
     rpc_client = node.rpc_client()
     if attach_timeout is None or attach_timeout > _ATTACH_CONTROLLER_MAX_TIMEOUT_SEC:
         attach_timeout = _ATTACH_CONTROLLER_MAX_TIMEOUT_SEC
-    attach_rpc_client = RPCClient(
-        node.mgmt_ip, node.rpc_port,
-        node.rpc_username, node.rpc_password,
-        timeout=attach_timeout, retry=0)
+    attach_rpc_client = node.rpc_client(timeout=attach_timeout, retry=0)
     # check connection status
     if device.is_connection_in_progress_to_node(node.get_id()):
         logger.warning("This device is being connected to from other node, sleep for 5 seconds")
@@ -843,7 +840,7 @@ def _prepare_cluster_devices_jm_on_dev(snode, devices):
 
     # Set device cluster order
     dev_order = get_next_cluster_device_order(db_controller, snode.cluster_id)
-    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+    rpc_client = snode.rpc_client()
     new_devices = []
     for index, nvme in enumerate(devices):
         if nvme.status == "not_found":
@@ -880,9 +877,7 @@ def _prepare_cluster_devices_on_restart(snode, clear_data=False):
 
     new_devices = []
 
-    rpc_client = RPCClient(
-        snode.mgmt_ip, snode.rpc_port,
-        snode.rpc_username, snode.rpc_password, timeout=5 * 60)
+    rpc_client = snode.rpc_client(timeout=5 * 60)
 
     thread_list = []
     for index, nvme in enumerate(snode.nvme_devices):
@@ -1018,9 +1013,7 @@ def _connect_to_remote_devs(
 ):
     db_controller = DBController()
 
-    rpc_client = RPCClient(
-        this_node.mgmt_ip, this_node.rpc_port,
-        this_node.rpc_username, this_node.rpc_password, timeout=5, retry=1)
+    rpc_client = this_node.rpc_client(timeout=5, retry=1)
 
     node_bdevs = rpc_client.get_bdevs()
     if node_bdevs:
@@ -1135,9 +1128,7 @@ def sync_remote_devices_from_spdk(this_node: StorageNode, node_bdev_names=None):
     """Persist remote data bdevs that already exist in SPDK for this node."""
     db_controller = DBController()
     if node_bdev_names is None:
-        rpc_client = RPCClient(
-            this_node.mgmt_ip, this_node.rpc_port,
-            this_node.rpc_username, this_node.rpc_password, timeout=5, retry=1)
+        rpc_client = this_node.rpc_client(timeout=5, retry=1)
         node_bdevs = rpc_client.get_bdevs()
         node_bdev_names = [b["name"] for b in node_bdevs] if node_bdevs else []
     elif isinstance(node_bdev_names, dict):
@@ -1225,9 +1216,7 @@ def _peer_reachable_via_jm_quorum(target_node_id, this_node, peer_probe_timeout=
 def _connect_to_remote_jm_devs(this_node, jm_ids=None):
     db_controller = DBController()
 
-    rpc_client = RPCClient(
-        this_node.mgmt_ip, this_node.rpc_port,
-        this_node.rpc_username, this_node.rpc_password, timeout=5, retry=2)
+    rpc_client = this_node.rpc_client(timeout=5, retry=2)
 
     node_bdevs = rpc_client.get_bdevs()
     if node_bdevs:
@@ -1749,10 +1738,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         if partition_size:
             snode.partition_size = utils.parse_size(partition_size)
 
-        # creating RPCClient instance
-        rpc_client = RPCClient(
-            snode.mgmt_ip, snode.rpc_port,
-            snode.rpc_username, snode.rpc_password, timeout=3 * 60, retry=10)
+        rpc_client = snode.rpc_client(timeout=3 * 60, retry=10)
 
         # 1- set iobuf options
         if (snode.iobuf_small_pool_count or snode.iobuf_large_pool_count or
@@ -1825,9 +1811,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         # bdev_nvme_set_options is a pure local SPDK config call; bound it at
         # 5 s so a stuck proxy can't consume the 3 min startup RPC budget.
         mp = bool(snode.data_nics and len(snode.data_nics) > 1)
-        set_opts_rpc = RPCClient(
-            snode.mgmt_ip, snode.rpc_port,
-            snode.rpc_username, snode.rpc_password, timeout=5, retry=0)
+        set_opts_rpc = snode.rpc_client(timeout=5, retry=0)
         ret = set_opts_rpc.bdev_nvme_set_options(multipath=mp)
         if not ret:
             logger.error("Failed to set nvme options")
@@ -2436,11 +2420,7 @@ def _restart_storage_node_impl(
 
     snode.write_to_db(db_controller.kv_store)
 
-    # creating RPCClient instance
-    rpc_client = RPCClient(
-        snode.mgmt_ip, snode.rpc_port,
-        snode.rpc_username, snode.rpc_password,
-        timeout=10 * 60, retry=10)
+    rpc_client = snode.rpc_client(timeout=10 * 60, retry=10)
 
     # 1- set iobuf options
     if (snode.iobuf_small_pool_count or snode.iobuf_large_pool_count or
@@ -2511,9 +2491,7 @@ def _restart_storage_node_impl(
     # bdev_nvme_set_options is a pure local SPDK config call; bound it at
     # 5 s so a stuck proxy can't consume the 10 min restart RPC budget.
     mp = bool(snode.data_nics and len(snode.data_nics) > 1)
-    set_opts_rpc = RPCClient(
-        snode.mgmt_ip, snode.rpc_port,
-        snode.rpc_username, snode.rpc_password, timeout=5, retry=0)
+    set_opts_rpc = snode.rpc_client(timeout=5, retry=0)
     ret = set_opts_rpc.bdev_nvme_set_options(multipath=mp)
     if not ret:
         logger.error("Failed to set nvme options")
@@ -3863,10 +3841,7 @@ def health_check(node_id):
 
     try:
         logger.info("Connecting to node's SPDK")
-        rpc_client = RPCClient(
-            snode.mgmt_ip, snode.rpc_port,
-            snode.rpc_username, snode.rpc_password,
-            timeout=3, retry=1)
+        rpc_client = snode.rpc_client(timeout=3, retry=1)
 
         ret = rpc_client.get_version()
         logger.info(f"SPDK version: {ret['version']}")
@@ -3933,7 +3908,7 @@ def get_spdk_info(node_id):
         logger.exception("Can not find storage node")
         return False
 
-    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+    rpc_client = snode.rpc_client()
     ret = rpc_client.ultra21_util_get_malloc_stats()
     if not ret:
         logger.error(f"Failed to get SPDK info for node {node_id}")
@@ -4211,9 +4186,7 @@ def _is_node_rpc_responsive(node, lvs_name, timeout=5, retry=2):
     beyond the defined retries.
     """
     try:
-        rpc = RPCClient(node.mgmt_ip, node.rpc_port,
-                        node.rpc_username, node.rpc_password,
-                        timeout=timeout, retry=retry)
+        rpc = node.rpc_client(timeout=timeout, retry=retry)
         ret = rpc.bdev_lvol_get_lvstores(lvs_name)
         return ret is not None
     except Exception:
@@ -4306,9 +4279,7 @@ def find_leader_with_failover(all_nodes, lvs_name):
     # but data plane is healthy). The signal tells the leader's SPDK to drop
     # leadership for this LVS.
     try:
-        rpc = RPCClient(failover_target.mgmt_ip, failover_target.rpc_port,
-                        failover_target.rpc_username, failover_target.rpc_password,
-                        timeout=5, retry=2)
+        rpc = failover_target.rpc_client(timeout=5, retry=2)
         rpc.bdev_lvol_set_lvs_signal(lvs_name)
         time.sleep(2)
         logger.info("Sent bdev_lvol_set_lvs_signal(%s) from %s to leader %s via fabric",
@@ -4508,8 +4479,7 @@ def _check_hublvol_connected(snode, peer_node):
     Returns True if hublvol is connected, False if disconnected.
     """
     try:
-        rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port,
-                               snode.rpc_username, snode.rpc_password, timeout=5, retry=1)
+        rpc_client = snode.rpc_client(timeout=5, retry=1)
         if peer_node.hublvol and peer_node.hublvol.bdev_name:
             remote_bdev = f"{peer_node.hublvol.bdev_name}n1"
             bdevs = rpc_client.get_bdevs(remote_bdev)
@@ -4557,8 +4527,7 @@ def _handle_rpc_failure_on_peer(snode, peer_node, lvs_jm_vuid, lvs_name=None):
         logger.error("_handle_rpc_failure_on_peer: lvs_name required for fabric signal")
         return "abort"
     try:
-        rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port,
-                               snode.rpc_username, snode.rpc_password, timeout=5, retry=1)
+        rpc_client = snode.rpc_client(timeout=5, retry=1)
         ret = rpc_client.bdev_lvol_set_lvs_signal(lvs_name)
         if ret:
             logger.info("Sent bdev_lvol_set_lvs_signal(%s) from %s to peer %s via fabric, waiting 2s",
@@ -4596,9 +4565,7 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
             cluster_activate() where not all LVS are ready yet.
     """
     db_controller = DBController()
-    snode_rpc_client = RPCClient(
-        snode.mgmt_ip, snode.rpc_port,
-        snode.rpc_username, snode.rpc_password)
+    snode_rpc_client = snode.rpc_client()
 
     if activation_mode:
         # Soft prelude: reconnect any missing remote devices + remote JMs
@@ -5202,8 +5169,7 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
             if sec_node.get_id() in disconnected_peers:
                 continue
             try:
-                sec_rpc = RPCClient(sec_node.mgmt_ip, sec_node.rpc_port,
-                                    sec_node.rpc_username, sec_node.rpc_password, timeout=5, retry=2)
+                sec_rpc = sec_node.rpc_client(timeout=5, retry=2)
                 ret = sec_rpc.bdev_lvol_get_lvstores(lvs_name)
                 if ret and len(ret) > 0 and ret[0].get("lvs leadership"):
                     current_leader = sec_node
@@ -5252,9 +5218,7 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
         _set_restart_phase(snode, lvs_name, "", db_controller)
         return False
 
-    rpc_client = RPCClient(
-        snode.mgmt_ip, snode.rpc_port,
-        snode.rpc_username, snode.rpc_password)
+    rpc_client = snode.rpc_client()
 
     lvol_list = []
     for lv in db_controller.get_lvols_by_node_id(lvs_node.get_id()):
@@ -5425,10 +5389,7 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
 
         if current_leader and current_leader in blocked_peers:
             # --- Inside port-blocked window: timeout=0.2s, retry=0, abort on failure ---
-            leader_rpc = RPCClient(
-                current_leader.mgmt_ip, current_leader.rpc_port,
-                current_leader.rpc_username, current_leader.rpc_password,
-                timeout=0.2, retry=0)
+            leader_rpc = current_leader.rpc_client(timeout=0.2, retry=0)
 
             time.sleep(0.5)
 
@@ -5679,8 +5640,7 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
             if sec_node.get_id() in disconnected_peers:
                 continue
             try:
-                sec_rpc = RPCClient(sec_node.mgmt_ip, sec_node.rpc_port,
-                                    sec_node.rpc_username, sec_node.rpc_password, timeout=10, retry=2)
+                sec_rpc = sec_node.rpc_client(timeout=10, retry=2)
                 for lvol in lvol_list:
                     listener_port = sec_node.get_lvol_subsys_port(lvol.lvs_name)
                     for iface in sec_node.data_nics:
@@ -5720,9 +5680,7 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
 def add_lvol_thread(lvol, snode, lvol_ana_state="optimized"):
     db_controller = DBController()
 
-    rpc_client = RPCClient(
-        snode.mgmt_ip, snode.rpc_port,
-        snode.rpc_username, snode.rpc_password, timeout=10, retry=2)
+    rpc_client = snode.rpc_client(timeout=10, retry=2)
 
     if "crypto" in lvol.lvol_type:
         base = f"{lvol.lvs_name}/{lvol.lvol_bdev}"
@@ -6017,7 +5975,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
         logger.error(err)
         return False
 
-    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+    rpc_client = snode.rpc_client()
     ret = rpc_client.bdev_lvol_set_lvs_opts(
         snode.lvstore,
         groupid=snode.jm_vuid,
@@ -6107,7 +6065,7 @@ def _create_bdev_stack(snode, lvstore_stack=None, primary_node=None):
         if not ret:
             logger.error("Failed to send cluster map")
 
-    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+    rpc_client = snode.rpc_client()
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     created_bdevs: list = []
@@ -6241,7 +6199,7 @@ def get_cluster_map(node_id):
 
     for node in nodes:
         logger.info(f"getting cluster map from node: {node.get_id()}")
-        rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password)
+        rpc_client = node.rpc_client()
         for distr in distribs_list:
             ret = rpc_client.distr_get_cluster_map(distr)
             if not ret:
@@ -6296,7 +6254,7 @@ def dump_lvstore(node_id):
         logger.error("Storage node does not have lvstore")
         return False
 
-    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=120)
+    rpc_client = snode.rpc_client(timeout=120)
     logger.info(f"Dumping lvstore data on node: {snode.get_id()}")
     file_name = f"LVS_dump_{snode.hostname}_{snode.lvstore}_{str(datetime.datetime.now().isoformat())}.txt"
     file_path = f"/etc/simplyblock/{file_name}"

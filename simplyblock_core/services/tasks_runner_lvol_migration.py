@@ -95,7 +95,7 @@ from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_migration import LVolMigration
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.rpc_client import RPCClient, RPCException
+from simplyblock_core.rpc_client import RPCException
 
 logger = utils.get_logger(__name__)
 db = db_mod.DBController()
@@ -1567,9 +1567,7 @@ def task_runner(task):
 # ---------------------------------------------------------------------------
 
 def _make_rpc(node):
-    return RPCClient(
-        node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password,
-        timeout=5, retry=2)
+    return node.rpc_client(timeout=5, retry=2)
 
 
 def _suspend_task(task, migration, reason):

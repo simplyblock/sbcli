@@ -574,8 +574,7 @@ def check_node(snode):
         return False
 
     # 4- check node rpc interface
-    node_rpc_check, node_rpc_check_1 = health_controller._check_node_rpc(
-        snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=20, retry=1)
+    node_rpc_check, node_rpc_check_1 = health_controller.check_node_rpc(snode, timeout=20, retry=1)
     logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}")
 
     #if RPC times out, we dont know if its due to node becoming unavailable or spdk hanging

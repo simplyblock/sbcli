@@ -3,7 +3,7 @@ import threading
 import time
 from datetime import datetime
 
-from simplyblock_core import constants, db_controller, utils, rpc_client, distr_controller
+from simplyblock_core import constants, db_controller, utils, distr_controller
 from simplyblock_core.controllers import events_controller, device_controller
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
@@ -194,12 +194,7 @@ def start_event_collector_on_node(node_id):
 
     logger.info(f"Starting Distr event collector on node: {node_id}")
 
-    client = rpc_client.RPCClient(
-        snode.mgmt_ip,
-        snode.rpc_port,
-        snode.rpc_username,
-        snode.rpc_password,
-        timeout=2, retry=2)
+    client = snode.rpc_client(timeout=2, retry=2)
 
     try:
         while True:
