@@ -34,18 +34,21 @@ AUTO_RECOVER_METHODS = (
     "network_outage_20", "network_outage_50",
 )
 
-# Scenario enumeration: every unordered node pair × every ordered method
-# pair (with repeats / same-method pairs included). For N nodes and M
-# enabled methods the total per cycle is
-#   C(N, 2) × M² = N·(N-1)/2 × M²
+# Scenario enumeration:
+#   4 representative node pairs (one per role category) × P(M,2) ordered
+#   distinct-method pairs = 4 × M·(M-1) scenarios per cycle.
 # Examples:
-#   N=5, M=5 → 10 × 25 =  250
-#   N=6, M=5 → 15 × 25 =  375
-#   N=6, M=6 → 15 × 36 =  540
-# Node order within the pair is fixed at the alphabetical first — the
-# method-pair enumeration (m_A, m_B) vs (m_B, m_A) already covers the
-# "which method hits first" swap, so a separate node-ordering axis would
-# double-count.
+#   M=5 → 4 × 20 =  80
+#   M=6 → 4 × 30 = 120
+# Role categories (one pair each, picked from the pinned topology):
+#   - primary_secondary : primary + secondary of same LVS
+#   - primary_tertiary  : primary + tertiary  of same LVS
+#   - secondary_tertiary: secondary + tertiary of same LVS
+#   - unrelated         : pair sharing no LVS in any role
+# Same-method pairs (graceful,graceful etc.) are not enumerated — the
+# user-agreed count 30 for 6 methods equals 6·5, not 6².
+ROLE_CATEGORIES = ("primary_secondary", "primary_tertiary",
+                   "secondary_tertiary", "unrelated")
 
 
 def parse_args():
@@ -1307,34 +1310,129 @@ class SoakRunner:
         # then waits for cluster stability. Any natural fio completion
         # (e.g. runtime expired) will surface via stop_fio's pre-kill check.
 
-    # ----- scenario enumeration --------------------------------------------
+    # ----- topology & scenario enumeration ---------------------------------
+
+    def discover_topology(self):
+        """Return {lvs_name: {'primary': uuid, 'secondary': uuid, 'tertiary': uuid}}.
+
+        Queried once at soak startup to identify the 4 role-representative
+        node pairs. Leader takeover mid-soak may shift role assignments;
+        the scenario list is pinned at startup so the 4 chosen pairs stay
+        fixed across retries even if the CP has re-promoted since.
+        """
+        script = (
+            "import json; "
+            "from simplyblock_core import db_controller; "
+            "db = db_controller.DBController(); "
+            "nodes = db.get_storage_nodes(); "
+            "out = {n.lvstore: {"
+            "'primary': n.get_id(), "
+            "'secondary': getattr(n, 'secondary_node_id', '') or '', "
+            "'tertiary': getattr(n, 'tertiary_node_id', '') or ''"
+            "} for n in nodes "
+            "if getattr(n, 'lvstore', '') "
+            "and not getattr(n, 'is_secondary_node', False)}; "
+            "print(json.dumps(out))"
+        )
+        _, stdout_text, _ = self.mgmt.run(
+            f"sudo python3 -c {shlex.quote(script)}",
+            timeout=60,
+            label="discover topology",
+        )
+        for line in reversed((stdout_text or "").strip().splitlines()):
+            line = line.strip()
+            if line.startswith("{"):
+                try:
+                    return json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+        raise TestRunError(
+            f"Failed to parse topology JSON from mgmt; stdout was:\n{stdout_text}"
+        )
+
+    def pick_representative_pairs(self):
+        """Pick one node pair per role category.
+
+        Returns dict: {category: (node_a, node_b)}.
+
+        primary_secondary / primary_tertiary / secondary_tertiary all come
+        from the same LVS (alphabetical-first for reproducibility). unrelated
+        comes from any node pair that shares no LVS in any role.
+
+        Raises TestRunError if:
+          * the pinned topology has no LVS (empty cluster)
+          * no unrelated pair exists — in a dense FT=2 ring with N ≤ 4 this
+            is possible; raise so coverage gap is explicit.
+        """
+        if not self.topology:
+            raise TestRunError("Empty topology; cannot pick representative pairs")
+
+        lvs_name = sorted(self.topology.keys())[0]
+        roles = self.topology[lvs_name]
+        p = roles.get("primary")
+        s = roles.get("secondary")
+        t = roles.get("tertiary")
+        if not (p and s and t):
+            raise TestRunError(
+                f"LVS {lvs_name} is missing role(s): {roles}; cannot pick "
+                f"primary/secondary/tertiary representative pairs"
+            )
+
+        # Collect all known node UUIDs + per-LVS membership for unrelated
+        # search.
+        all_nodes = set()
+        lvs_members = []
+        for r in self.topology.values():
+            members = {v for v in r.values() if v}
+            lvs_members.append(members)
+            all_nodes.update(members)
+
+        unrelated = None
+        for a, b in itertools.combinations(sorted(all_nodes), 2):
+            if not any(a in m and b in m for m in lvs_members):
+                unrelated = (a, b)
+                break
+        if unrelated is None:
+            raise TestRunError(
+                "No unrelated node pair found in topology "
+                f"({len(all_nodes)} nodes across {len(lvs_members)} LVSs)"
+            )
+
+        return {
+            "primary_secondary":  (p, s),
+            "primary_tertiary":   (p, t),
+            "secondary_tertiary": (s, t),
+            "unrelated":          unrelated,
+        }
 
     def build_scenarios(self, nodes):
-        """Enumerate every unordered node pair × every ordered method pair.
+        """Enumerate 4 representative pairs × P(M,2) ordered method pairs.
 
-        Returns a list of dicts with keys: a, b, method_a, method_b.
-        Total = C(N, 2) × M² where M = len(self.methods). Same-method pairs
-        (graceful+graceful, forced+forced, ...) are included intentionally
-        — they exercise the "simultaneous identical outage" case which has
-        different failover semantics from a mixed pair.
-
-        Node order inside the pair is fixed (sorted by UUID) so the log /
-        cycle index is reproducible. The method-pair axis already covers
-        the (m_A, m_B) / (m_B, m_A) swap.
+        Returns a list of dicts with keys: a, b, method_a, method_b, category.
+        Same-method method pairs are NOT included — ordered distinct pairs
+        only, per itertools.permutations(methods, 2).
         """
-        node_ids = sorted(n["uuid"] for n in nodes)
-        scenarios = [
-            {"a": a, "b": b, "method_a": m_a, "method_b": m_b}
-            for a, b in itertools.combinations(node_ids, 2)
-            for m_a, m_b in itertools.product(self.methods, repeat=2)
-        ]
-        pair_count = len(node_ids) * (len(node_ids) - 1) // 2
+        _ = nodes  # unused: representatives come from self.topology
+        reps = self.pick_representative_pairs()
+        scenarios = []
+        for category in ROLE_CATEGORIES:
+            a, b = reps[category]
+            for m_a, m_b in itertools.permutations(self.methods, 2):
+                scenarios.append({
+                    "a": a,
+                    "b": b,
+                    "method_a": m_a,
+                    "method_b": m_b,
+                    "category": category,
+                })
+        method_pair_count = len(self.methods) * (len(self.methods) - 1)
         self.logger.log(
             f"Built {len(scenarios)} scenarios: "
-            f"C({len(node_ids)},2)={pair_count} pairs × "
-            f"{len(self.methods)**2} method combos "
-            f"({len(self.methods)} methods enabled)"
+            f"{len(ROLE_CATEGORIES)} role-representative pairs × "
+            f"P({len(self.methods)},2)={method_pair_count} ordered method pairs"
         )
+        for cat, (a, b) in reps.items():
+            self.logger.log(f"  {cat:20s}: ({a[:8]}, {b[:8]})")
         return scenarios
 
     def run(self):
@@ -1352,6 +1450,12 @@ class SoakRunner:
         # cluster is verified stable and the previous iteration's rebalancing
         # has completed. No initial start_fio here.
 
+        # Pin the topology once, before any outages. Leader takeover during
+        # the soak can permanently shift role assignments, but the 4
+        # representative pairs are fixed at startup so each cycle targets
+        # the same pairs for the same role categories.
+        self.topology = self.discover_topology()
+        self.logger.log(f"Pinned topology: {json.dumps(self.topology, sort_keys=True)}")
         self.scenarios = self.build_scenarios(nodes)
         if not self.scenarios:
             raise TestRunError("No outage scenarios built; method/node list empty")
@@ -1411,6 +1515,7 @@ class SoakRunner:
                 self.logger.log(
                     f"Starting outage iteration {iteration} "
                     f"(cycle {cycle} scenario {scenario_idx}/{len(cycle_scenarios)}): "
+                    f"category={scenario['category']} "
                     f"pair=({node1[:8]},{node2[:8]}) "
                     f"methods=({method1},{method2})"
                 )
