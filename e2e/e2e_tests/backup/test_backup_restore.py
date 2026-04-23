@@ -1762,31 +1762,15 @@ class TestBackupCrossClusterRestore(BackupTestBase):
 
     def _export_backup_metadata(self, backup_id: str) -> str:
         """
-        Fetch backup list from Cluster-1 and write a JSON metadata file
-        containing the entry matching *backup_id* to self._meta_file.
+        Export backup metadata from Cluster-1 using the CLI backup export
+        command, writing a JSON file to self._meta_file.
 
-        Returns the local path of the metadata file.
+        Returns the path of the metadata file on the mgmt node.
         """
-        backups = self._list_backups()
-        matching = []
-        for b in backups:
-            bid = b.get("id") or b.get("ID") or b.get("uuid") or ""
-            if backup_id in bid or bid in backup_id:
-                matching.append(b)
-
-        if not matching:
-            # Fall back to all entries — let import decide
-            matching = backups
-
-        meta_json = json.dumps(matching, indent=2)
-        self.logger.info(
-            f"TC-BCK-072: writing {len(matching)} backup entries to {self._meta_file}")
-
-        # Write to the mgmt node (import command reads from that node's filesystem)
-        escaped = meta_json.replace("'", "'\\''")
-        self.ssh_obj.exec_command(
-            self.mgmt_nodes[0],
-            f"echo '{escaped}' > {self._meta_file}")
+        out, err = self._sbcli(f"backup export -o {self._meta_file}")
+        assert not (err and "error" in err.lower()), \
+            f"TC-BCK-072: backup export failed: {err}"
+        self.logger.info(f"TC-BCK-072: backup export result: {(out or '').strip()}")
         return self._meta_file
 
     # ── main run ──────────────────────────────────────────────────────────────

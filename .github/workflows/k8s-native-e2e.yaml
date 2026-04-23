@@ -353,13 +353,13 @@ jobs:
             kubectl -n $NAMESPACE delete $RTYPE --all --force --grace-period=0 2>/dev/null || true
           done
 
-          echo "=== Phase 4: Cleanup cluster-scoped resources ==="
+          # echo "=== Phase 4: Cleanup cluster-scoped resources ==="
           # Delete StorageClasses
-          for SC in $(kubectl get sc --no-headers -o custom-columns=:metadata.name 2>/dev/null | grep -i simplyblock 2>/dev/null); do
-            kubectl delete sc "$SC" --ignore-not-found 2>/dev/null || true
-          done
-          kubectl delete clusterrole simplyblock-storage-node-role --ignore-not-found 2>/dev/null || true
-          kubectl delete clusterrolebinding simplyblock-storage-node-binding --ignore-not-found 2>/dev/null || true
+          # for SC in $(kubectl get sc --no-headers -o custom-columns=:metadata.name 2>/dev/null | grep -i simplyblock 2>/dev/null); do
+          #   kubectl delete sc "$SC" --ignore-not-found 2>/dev/null || true
+          # done
+          # kubectl delete clusterrole simplyblock-storage-node-role --ignore-not-found 2>/dev/null || true
+          # kubectl delete clusterrolebinding simplyblock-storage-node-binding --ignore-not-found 2>/dev/null || true
 
           # echo "=== Phase 4b: Cleanup leftover secrets, SAs, and kube-system resources ==="
           # kubectl -n $NAMESPACE delete secret simplyblock-csi-secret-v2 --ignore-not-found 2>/dev/null || true
