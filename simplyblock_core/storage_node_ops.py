@@ -4504,14 +4504,42 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
 
     if not activation_mode and leader_has_quorum:
         ### 3- block leader port ONLY (no siblings)
-        try:
-            fw_api = FirewallClient(leader_node, timeout=5, retry=2)
-            fw_api.firewall_set_port(leader_lvs_port, port_type, "block", leader_node.rpc_port)
-            tcp_ports_events.port_deny(leader_node, leader_lvs_port)
-            leader_port_blocked = True
-        except Exception as e:
-            logger.warning("Skipping port block for leader %s on %s: %s",
-                           leader_node.get_id(), primary_node.lvstore, e)
+        # Blocking the leader's LVS port is what quiesces its IO so this
+        # restarting node can safely examine its raid0 without a write
+        # racing into a half-reconstructed lvstore. Silently skipping the
+        # block (as we used to do on ConnectionRefused) lets the leader
+        # keep serving reads/writes while we examine — which has produced
+        # CRC mismatches and lvol drops on the restarting peer. So retry
+        # aggressively and, if it still can't land, abort the restart
+        # unless force=True.
+        last_err = None
+        attempts = 5
+        for attempt in range(1, attempts + 1):
+            try:
+                fw_api = FirewallClient(leader_node, timeout=5, retry=5)
+                fw_api.firewall_set_port(leader_lvs_port, port_type, "block", leader_node.rpc_port)
+                tcp_ports_events.port_deny(leader_node, leader_lvs_port)
+                leader_port_blocked = True
+                last_err = None
+                break
+            except Exception as e:
+                last_err = e
+                logger.warning(
+                    "Port-block attempt %d/%d failed for leader %s on %s: %s",
+                    attempt, attempts, leader_node.get_id(), primary_node.lvstore, e)
+                if attempt < attempts:
+                    time.sleep(2)
+        if not leader_port_blocked:
+            msg = (f"Failed to block leader {leader_node.get_id()} port "
+                   f"{leader_lvs_port} after {attempts} attempts for "
+                   f"{primary_node.lvstore}: {last_err}")
+            if force:
+                logger.warning(
+                    "%s — force=True: proceeding without leader port block; "
+                    "this allows leader-vs-restarter writes to race during "
+                    "examine and can corrupt the rebuilt lvstore", msg)
+            else:
+                _abort_and_unblock(msg)
 
     if not activation_mode and leader_port_blocked:
         # --- Inside port-blocked window: timeout=0.2s, retry=0, abort on failure ---
@@ -4654,13 +4682,36 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
             logger.error("Error connecting to hublvol: %s", e)
 
         ### 8- unblock leader port
+        # If we blocked it, we MUST unblock — a stuck-blocked leader can't
+        # serve client IO on that LVS. Retry until it lands; schedule a
+        # port_allow task as a fallback if we still can't reach the leader
+        # after our attempts so another retry loop keeps trying.
         if leader_port_blocked:
-            try:
-                fw_api = FirewallClient(leader_node, timeout=5, retry=2)
-                fw_api.firewall_set_port(leader_lvs_port, port_type, "allow", leader_node.rpc_port)
-                tcp_ports_events.port_allowed(leader_node, leader_lvs_port)
-            except Exception as e:
-                logger.error("Failed to unblock leader port for %s: %s", primary_node.lvstore, e)
+            unblocked = False
+            attempts = 5
+            for attempt in range(1, attempts + 1):
+                try:
+                    fw_api = FirewallClient(leader_node, timeout=5, retry=5)
+                    fw_api.firewall_set_port(leader_lvs_port, port_type, "allow", leader_node.rpc_port)
+                    tcp_ports_events.port_allowed(leader_node, leader_lvs_port)
+                    unblocked = True
+                    break
+                except Exception as e:
+                    logger.warning(
+                        "Port-unblock attempt %d/%d failed for leader %s on %s: %s",
+                        attempt, attempts, leader_node.get_id(), primary_node.lvstore, e)
+                    if attempt < attempts:
+                        time.sleep(2)
+            if not unblocked:
+                logger.error(
+                    "Failed to unblock leader %s port %s for %s after %d attempts; "
+                    "scheduling port_allow task",
+                    leader_node.get_id(), leader_lvs_port, primary_node.lvstore, attempts)
+                try:
+                    tasks_controller.add_port_allow_task(
+                        leader_node.cluster_id, leader_node.get_id(), leader_lvs_port)
+                except Exception as sched_exc:
+                    logger.error("Failed to schedule port_allow fallback: %s", sched_exc)
             leader_port_blocked = False
 
     # Set restart phase: post_unblock — delayed sync deletes and registrations can now proceed

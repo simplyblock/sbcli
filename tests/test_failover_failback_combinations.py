@@ -1213,5 +1213,146 @@ class TestRecreateLvstoreNonLeaderLvolMismatch(unittest.TestCase):
         self.assertTrue(result)
 
 
+# ===========================================================================
+# Port-block failure during restart must retry then abort (unless force=True)
+# ===========================================================================
+
+class TestRecreateLvstoreNonLeaderPortBlockFailure(unittest.TestCase):
+    """The leader-port-block step used to swallow FirewallClient exceptions
+    and continue the restart, allowing the leader to keep serving writes
+    while the restarting node examined raid0 — races that observably led
+    to CRC mismatches and lvols dropped during examine. Restart must now
+    retry the block and, if it still can't land, abort (unless force=True).
+    """
+
+    def _setup(self, mock_rpc_cls, mock_db_cls, mock_create_bdev, mock_fw_cls,
+                fw_set_port_side_effect=None):
+        nodes = _build_ftt2_nodes()
+        secondary = nodes["node-2"]
+        primary = nodes["node-1"]
+        lvols = [_lvol("lv1", "node-1")]
+
+        db = _make_db_mock(nodes, lvols)
+        mock_db_cls.return_value = db
+
+        rpc = _mock_rpc()
+        mock_rpc_cls.return_value = rpc
+        mock_create_bdev.return_value = (True, None)
+
+        # Single FirewallClient mock whose firewall_set_port raises as directed
+        fw = MagicMock()
+        if fw_set_port_side_effect is not None:
+            fw.firewall_set_port.side_effect = fw_set_port_side_effect
+        mock_fw_cls.return_value = fw
+
+        _setup_node_methods(nodes, rpc)
+        return secondary, primary, rpc, fw
+
+    @patch("simplyblock_core.storage_node_ops.time.sleep", return_value=None)
+    @patch("simplyblock_core.storage_node_ops._check_peer_disconnected",
+           side_effect=lambda peer, **kw: peer.status in ["offline"])
+    @patch("simplyblock_core.storage_node_ops._set_restart_phase")
+    @patch("simplyblock_core.storage_node_ops._handle_rpc_failure_on_peer", return_value="skip")
+    @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
+    @patch("simplyblock_core.storage_node_ops.storage_events")
+    @patch("simplyblock_core.storage_node_ops.tasks_controller")
+    @patch("simplyblock_core.storage_node_ops.set_node_status")
+    @patch("simplyblock_core.storage_node_ops.SNodeClient")
+    @patch("simplyblock_core.storage_node_ops.FirewallClient")
+    @patch("simplyblock_core.storage_node_ops.RPCClient")
+    @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
+    @patch("simplyblock_core.storage_node_ops.DBController")
+    def test_block_fails_all_attempts_aborts_without_force(
+            self, mock_db_cls, mock_create_bdev, mock_rpc_cls, mock_fw_cls,
+            mock_snode_client, mock_set_status, mock_tasks, mock_tcp_events,
+            mock_storage_events, _mock_disc, _mock_phase, _mock_handle, _mock_sleep):
+        """All 5 port-block attempts fail → restart aborts, leader kept
+        untouched, node goes offline. No continuing with an unblocked leader."""
+        secondary, primary, _rpc, fw = self._setup(
+            mock_rpc_cls, mock_db_cls, mock_create_bdev, mock_fw_cls,
+            fw_set_port_side_effect=ConnectionRefusedError("Connection refused"),
+        )
+        from simplyblock_core.storage_node_ops import recreate_lvstore_on_non_leader
+        with self.assertRaises(Exception) as cm:
+            recreate_lvstore_on_non_leader(
+                secondary, leader_node=primary, primary_node=primary, force=False)
+        self.assertIn("Failed to block leader", str(cm.exception))
+        # All 5 attempts must have been tried
+        self.assertEqual(fw.firewall_set_port.call_count, 5)
+        # Abort path sets the restarting node offline
+        mock_set_status.assert_any_call(secondary.get_id(), StorageNode.STATUS_OFFLINE)
+
+    @patch("simplyblock_core.storage_node_ops.time.sleep", return_value=None)
+    @patch("simplyblock_core.storage_node_ops._check_peer_disconnected",
+           side_effect=lambda peer, **kw: peer.status in ["offline"])
+    @patch("simplyblock_core.storage_node_ops._set_restart_phase")
+    @patch("simplyblock_core.storage_node_ops._handle_rpc_failure_on_peer", return_value="skip")
+    @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
+    @patch("simplyblock_core.storage_node_ops.storage_events")
+    @patch("simplyblock_core.storage_node_ops.tasks_controller")
+    @patch("simplyblock_core.storage_node_ops.set_node_status")
+    @patch("simplyblock_core.storage_node_ops.SNodeClient")
+    @patch("simplyblock_core.storage_node_ops.FirewallClient")
+    @patch("simplyblock_core.storage_node_ops.RPCClient")
+    @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
+    @patch("simplyblock_core.storage_node_ops.DBController")
+    def test_block_fails_all_attempts_proceeds_with_force(
+            self, mock_db_cls, mock_create_bdev, mock_rpc_cls, mock_fw_cls,
+            mock_snode_client, mock_set_status, mock_tasks, mock_tcp_events,
+            mock_storage_events, _mock_disc, _mock_phase, _mock_handle, _mock_sleep):
+        """With force=True, 5 failed block attempts don't abort — restart
+        proceeds despite the race risk (operator explicit choice)."""
+        secondary, primary, _rpc, fw = self._setup(
+            mock_rpc_cls, mock_db_cls, mock_create_bdev, mock_fw_cls,
+            fw_set_port_side_effect=ConnectionRefusedError("Connection refused"),
+        )
+        # Include expected lvol so the later lvol-registration check passes
+        _rpc.get_bdevs.return_value = [{"name": "LVS_100/bdev_test", "aliases": []}]
+
+        from simplyblock_core.storage_node_ops import recreate_lvstore_on_non_leader
+        result = recreate_lvstore_on_non_leader(
+            secondary, leader_node=primary, primary_node=primary, force=True)
+        self.assertTrue(result)
+        self.assertEqual(fw.firewall_set_port.call_count, 5)
+
+    @patch("simplyblock_core.storage_node_ops.time.sleep", return_value=None)
+    @patch("simplyblock_core.storage_node_ops._check_peer_disconnected",
+           side_effect=lambda peer, **kw: peer.status in ["offline"])
+    @patch("simplyblock_core.storage_node_ops._set_restart_phase")
+    @patch("simplyblock_core.storage_node_ops._handle_rpc_failure_on_peer", return_value="skip")
+    @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
+    @patch("simplyblock_core.storage_node_ops.storage_events")
+    @patch("simplyblock_core.storage_node_ops.tasks_controller")
+    @patch("simplyblock_core.storage_node_ops.set_node_status")
+    @patch("simplyblock_core.storage_node_ops.SNodeClient")
+    @patch("simplyblock_core.storage_node_ops.FirewallClient")
+    @patch("simplyblock_core.storage_node_ops.RPCClient")
+    @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
+    @patch("simplyblock_core.storage_node_ops.DBController")
+    def test_block_succeeds_on_retry(
+            self, mock_db_cls, mock_create_bdev, mock_rpc_cls, mock_fw_cls,
+            mock_snode_client, mock_set_status, mock_tasks, mock_tcp_events,
+            mock_storage_events, _mock_disc, _mock_phase, _mock_handle, _mock_sleep):
+        """Transient ConnectionRefused — first 2 attempts fail, 3rd succeeds.
+        Restart must keep going (no abort, no force needed)."""
+        # side_effect: raise twice, then succeed (return None = call succeeds)
+        secondary, primary, _rpc, fw = self._setup(
+            mock_rpc_cls, mock_db_cls, mock_create_bdev, mock_fw_cls,
+            fw_set_port_side_effect=[
+                ConnectionRefusedError("x"),
+                ConnectionRefusedError("x"),
+                None, None, None,  # 3rd = block-ok; 4th = unblock-ok; extra for safety
+            ],
+        )
+        _rpc.get_bdevs.return_value = [{"name": "LVS_100/bdev_test", "aliases": []}]
+
+        from simplyblock_core.storage_node_ops import recreate_lvstore_on_non_leader
+        result = recreate_lvstore_on_non_leader(
+            secondary, leader_node=primary, primary_node=primary, force=False)
+        self.assertTrue(result)
+        # Block succeeded on the 3rd attempt; then unblock ran too (1 more call)
+        self.assertGreaterEqual(fw.firewall_set_port.call_count, 3)
+
+
 if __name__ == '__main__':
     unittest.main()
