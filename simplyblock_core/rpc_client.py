@@ -10,13 +10,14 @@ import jsonschema
 from jsonschema.exceptions import ValidationError
 
 from simplyblock_core import utils, constants
+from simplyblock_core.settings import Settings
 from requests.adapters import HTTPAdapter
 from urllib3 import Retry
 
 logger = utils.get_logger()
 
 # Shared per-node cache for expensive read-only RPCs (e.g. bdev_get_bdevs, nvmf_get_subsystems).
-# Key: (ip_address, port, method_name), Value: (timestamp, result)
+# Key: (host, port, method_name), Value: (timestamp, result)
 _rpc_cache: dict[tuple, tuple[float, Any]] = {}
 _rpc_cache_lock = threading.Lock()
 RPC_CACHE_TTL_SEC = 15  # cached results are valid for this many seconds
@@ -94,29 +95,31 @@ class RPCClient:
     # ref: https://spdk.io/doc/jsonrpc.html
     DEFAULT_ALLOWED_METHODS = ["HEAD", "GET", "PUT", "DELETE", "OPTIONS", "TRACE", "POST"]
 
-    def __init__(self, ip_address, port, username, password, timeout=180, retry=3):
-        self.ip_address = ip_address
+    def __init__(self, host, port, username, password, timeout=180, retry=3):
+        self.host = host
         self.port = port
-        self.url = 'http://%s:%s/' % (self.ip_address, self.port)
+        tls_enabled = Settings().tls_enabled
+        scheme = "https" if tls_enabled else "http"
+        self.url = '%s://%s:%s/' % (scheme, self.host, self.port)
         self.username = username
         self.password = password
         self.timeout = timeout
         self.session = requests.session()
         self.session.auth = (self.username, self.password)
-        self.session.verify = False
         retries = Retry(total=retry, backoff_factor=1, connect=retry, read=retry,
                         allowed_methods=self.DEFAULT_ALLOWED_METHODS)
         self.session.mount("http://", HTTPAdapter(max_retries=retries))
+        self.session.mount("https://", HTTPAdapter(max_retries=retries))
 
     def _request_cached(self, method, params=None, cache_ttl=RPC_CACHE_TTL_SEC):
         """Like _request but returns a cached result if one exists within cache_ttl seconds."""
-        cache_key = (self.ip_address, self.port, method, json.dumps(params, sort_keys=True) if params else None)
+        cache_key = (self.host, self.port, method, json.dumps(params, sort_keys=True) if params else None)
         now = time.monotonic()
         with _rpc_cache_lock:
             if cache_key in _rpc_cache:
                 ts, cached_result = _rpc_cache[cache_key]
                 if now - ts < cache_ttl:
-                    logger.debug("Cache hit for %s on %s:%s", method, self.ip_address, self.port)
+                    logger.debug("Cache hit for %s on %s:%s", method, self.host, self.port)
                     return cached_result
         result = self._request(method, params)
         if result is not None:
@@ -138,7 +141,7 @@ class RPCClient:
         # window, where a single attach has to land within hundreds of ms).
         effective_timeout = request_timeout if request_timeout is not None else self.timeout
         try:
-            logger.debug("From: %s, Requesting method: %s, params: %s", self.ip_address, method, params)
+            logger.debug("From: %s, Requesting method: %s, params: %s", self.host, method, params)
             response = self.session.post(self.url, data=json.dumps(payload), timeout=effective_timeout)
         except Exception:
             raise RPCException("connection error")
