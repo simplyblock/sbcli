@@ -19,10 +19,13 @@ class SNodeClientException(Exception):
 class SNodeClient:
 
     def __init__(self, host, timeout=300, retry=5):
-        scheme = "https" if Settings().tls_enabled else "http"
+        settings = Settings()
+        scheme = "https" if settings.tls_enabled else "http"
         self.url = f'{scheme}://{host}/snode/'
         self.timeout = timeout
         self.session = requests.session()
+        if settings.tls_enabled:
+            self.session.verify = str(settings.certificate_authority)
         self.session.headers['Content-Type'] = "application/json"
         retries = Retry(total=retry, backoff_factor=1, connect=retry, read=retry)
         self.session.mount("http://", HTTPAdapter(max_retries=retries))
