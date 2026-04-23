@@ -11,7 +11,7 @@ services:
 
   fdb-server:
     <<: *service-base
-    image: foundationdb/foundationdb:7.3.63
+    image: quay.io/simplyblock-io/foundationdb:7.3.63
     networks:
       - hostnet
     environment:
@@ -34,7 +34,7 @@ services:
 
   fdb-backup-agent:
     <<: *service-base
-    image: foundationdb/foundationdb:7.3.63
+    image: quay.io/simplyblock-io/foundationdb:7.3.63
     entrypoint: "/usr/bin/backup_agent -C  /etc/foundationdb/fdb.cluster"
     networks:
       - hostnet
@@ -121,7 +121,7 @@ services:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
 
   HAProxy:
-    image: haproxytech/haproxy-debian:latest
+    image: quay.io/simplyblock-io/haproxy-debian:latest
     deploy:
       mode: global
       placement:

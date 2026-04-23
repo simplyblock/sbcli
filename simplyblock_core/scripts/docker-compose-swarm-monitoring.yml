@@ -3,7 +3,7 @@ version: '3.8'
 services:
   ### monitoring ###
   mongodb:
-    image: "mongo:5.0"
+    image: "quay.io/simplyblock-io/mongo:5.0"
     volumes:
       - "mongodb_data:/data/db"
     deploy:
@@ -15,7 +15,7 @@ services:
       - monitoring-net
 
   opensearch:
-    image: "opensearchproject/opensearch:2.4.0"
+    image: "quay.io/simplyblock-io/opensearch:2.4.0"
     environment:
       - "OPENSEARCH_JAVA_OPTS=-Xms1g -Xmx1g"
       - "bootstrap.memory_lock=true"
@@ -35,7 +35,7 @@ services:
 
   graylog:
     hostname: "server"
-    image: "graylog/graylog:5.0"
+    image: "quay.io/simplyblock-io/graylog:5.0"
     entrypoint: "/usr/bin/tini -- wait-for-it opensearch:9200 --  /docker-entrypoint.sh"
     environment:
       GRAYLOG_NODE_ID_FILE: "/usr/share/graylog/data/config/node-id"
@@ -75,7 +75,7 @@ services:
       - monitoring-net
 
   prometheus:
-    image: prom/prometheus:v2.44.0
+    image: quay.io/simplyblock-io/prometheus:v2.44.0
     user: root
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml
@@ -96,7 +96,7 @@ services:
       - monitoring-net
 
   thanos-sidecar:
-    image: thanosio/thanos:v0.31.0
+    image: quay.io/simplyblock-io/thanos:v0.31.0
     user: root
     command:
       - sidecar
@@ -114,7 +114,7 @@ services:
       - monitoring-net
 
   thanos-store:
-    image: thanosio/thanos:v0.31.0
+    image: quay.io/simplyblock-io/thanos:v0.31.0
     command:
       - store
       - --objstore.config-file=/etc/thanos/objstore.yml
@@ -130,7 +130,7 @@ services:
       - monitoring-net
 
   thanos-query:
-    image: thanosio/thanos:v0.31.0
+    image: quay.io/simplyblock-io/thanos:v0.31.0
     command:
       - query
       - --http-address=0.0.0.0:9091
@@ -144,7 +144,7 @@ services:
       - monitoring-net
 
   thanos-compactor:
-    image: thanosio/thanos:v0.31.0
+    image: quay.io/simplyblock-io/thanos:v0.31.0
     command:
       - compact
       - --data-dir=/data
@@ -165,7 +165,7 @@ services:
       - monitoring-net
 
   node-exporter:
-    image: prom/node-exporter:v1.7.0
+    image: quay.io/simplyblock-io/node-exporter:v1.7.0
     user: root
     volumes:
       - /proc:/host/proc:ro
@@ -185,7 +185,7 @@ services:
       - monitoring-net
 
   grafana:
-    image: grafana/grafana:10.0.12
+    image: quay.io/simplyblock-io/grafana:10.0.12
     environment:
       GF_SECURITY_ADMIN_USER: "admin"
       GF_SECURITY_ADMIN_PASSWORD: "${CLUSTER_SECRET}"
