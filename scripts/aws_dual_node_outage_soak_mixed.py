@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import itertools
 import json
 import os
 import posixpath
@@ -31,6 +32,18 @@ OUTAGE_METHODS = (
 AUTO_RECOVER_METHODS = (
     "container_kill", "host_reboot",
     "network_outage_20", "network_outage_50",
+)
+
+# Role-pair categories for deterministic scenario enumeration. Each (ordered
+# outage pair × unordered role set) is one scenario; "unrelated" means the
+# pair shares no LVS in any role. For N nodes the total is
+#   P(N, 2) × 4 = N·(N-1)·4
+# which is 80 for N=5.
+ROLE_CATEGORIES = (
+    ("primary", "tertiary"),
+    ("primary", "secondary"),
+    ("secondary", "tertiary"),
+    ("unrelated",),
 )
 
 
@@ -101,6 +114,31 @@ def parse_args():
             "Seconds to wait for a node to return online after a container_kill "
             "or host_reboot outage (no sbctl restart is issued)."
         ),
+    )
+    parser.add_argument(
+        "--cycles",
+        type=int,
+        default=1,
+        help=(
+            "Number of passes through the full deterministic scenario list. "
+            "Each pass covers P(N,2)*4 scenarios (80 for a 5-node cluster). "
+            "0 means loop forever."
+        ),
+    )
+    parser.add_argument(
+        "--skip-unreachable-scenarios",
+        action="store_true",
+        default=True,
+        help=(
+            "Skip scenarios whose (pair, role-category) has no matching LVS in "
+            "the pinned startup topology. Enabled by default — set --no-skip-"
+            "unreachable-scenarios to hard-fail instead."
+        ),
+    )
+    parser.add_argument(
+        "--no-skip-unreachable-scenarios",
+        dest="skip_unreachable_scenarios",
+        action="store_false",
     )
     args = parser.parse_args()
     methods = [m.strip() for m in args.methods.split(",") if m.strip()]
@@ -1274,6 +1312,131 @@ class SoakRunner:
         # then waits for cluster stability. Any natural fio completion
         # (e.g. runtime expired) will surface via stop_fio's pre-kill check.
 
+    # ----- topology & scenario enumeration ---------------------------------
+
+    def discover_topology(self):
+        """Return {lvs_name: {'primary': uuid, 'secondary': uuid, 'tertiary': uuid}}.
+
+        Queries the mgmt-node DB directly — ``sbctl sn list`` exposes the
+        secondary_node_id but not the tertiary_node_id, and a pinned
+        authoritative snapshot at soak startup is what the 80-scenario
+        enumeration is anchored to.
+
+        Pinned: built once in ``run()`` before the outage loop. Role shifts
+        caused by leader takeover during the soak are deliberately ignored
+        — each scenario is still applied to the same original node IDs,
+        so the outage semantics (what the pair represents) remain stable
+        across retries even if the control plane has re-promoted since.
+        """
+        script = (
+            "import json; "
+            "from simplyblock_core import db_controller; "
+            "db = db_controller.DBController(); "
+            "nodes = db.get_storage_nodes(); "
+            "out = {}; "
+            "for n in nodes: "
+            "    if not getattr(n, 'lvstore', '') or getattr(n, 'is_secondary_node', False): "
+            "        continue; "
+            "    out[n.lvstore] = {"
+            "        'primary': n.get_id(), "
+            "        'secondary': getattr(n, 'secondary_node_id', '') or '', "
+            "        'tertiary': getattr(n, 'tertiary_node_id', '') or '', "
+            "    }; "
+            "print(json.dumps(out))"
+        )
+        _, stdout_text, _ = self.mgmt.run(
+            f"sudo python3 -c {shlex.quote(script)}",
+            timeout=60,
+            label="discover topology",
+        )
+        raw = (stdout_text or "").strip().splitlines()
+        for line in reversed(raw):
+            line = line.strip()
+            if line.startswith("{"):
+                try:
+                    return json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+        raise TestRunError(
+            f"Failed to parse topology JSON from mgmt; stdout was:\n{stdout_text}"
+        )
+
+    @staticmethod
+    def _role_of(uuid, lvs_roles):
+        """Return 'primary' | 'secondary' | 'tertiary' | None."""
+        for role, uid in lvs_roles.items():
+            if uid == uuid:
+                return role
+        return None
+
+    def _find_matching_lvs(self, a, b, category_roles):
+        """Return the name of an LVS where ``{role(a), role(b)} == category_roles``,
+        else None. ``category_roles`` is a frozenset of role strings.
+        """
+        for lvs_name, lvs_roles in self.topology.items():
+            ra = self._role_of(a, lvs_roles)
+            rb = self._role_of(b, lvs_roles)
+            if ra is None or rb is None:
+                continue
+            if frozenset((ra, rb)) == category_roles:
+                return lvs_name
+        return None
+
+    def _is_unrelated(self, a, b):
+        """True iff a and b share no LVS in any role — pair is outside any
+        single LVS's replication ring."""
+        for lvs_roles in self.topology.values():
+            members = set(lvs_roles.values())
+            if a in members and b in members:
+                return False
+        return True
+
+    def build_scenarios(self, nodes):
+        """Enumerate deterministic outage scenarios.
+
+        Returns a list of dicts with keys: a, b, category, target_lvs.
+        One entry per ordered pair × role category; total P(N,2)*4.
+        Pairs whose (category) has no matching LVS are either skipped
+        (``--skip-unreachable-scenarios``, default) or raise TestRunError.
+        """
+        node_ids = [n["uuid"] for n in nodes]
+        scenarios = []
+        skipped = 0
+        for a, b in itertools.permutations(node_ids, 2):
+            for category in ROLE_CATEGORIES:
+                if category == ("unrelated",):
+                    if self._is_unrelated(a, b):
+                        target_lvs = None
+                        match = True
+                    else:
+                        match = False
+                        target_lvs = None
+                else:
+                    target_lvs = self._find_matching_lvs(a, b, frozenset(category))
+                    match = target_lvs is not None
+                if not match:
+                    skipped += 1
+                    label = "/".join(category)
+                    msg = (
+                        f"No LVS found where {a[:8]}+{b[:8]} hold roles {label}; "
+                        f"scenario unreachable in current topology"
+                    )
+                    if not self.args.skip_unreachable_scenarios:
+                        raise TestRunError(msg)
+                    self.logger.log(f"SKIP: {msg}")
+                    continue
+                scenarios.append({
+                    "a": a,
+                    "b": b,
+                    "category": "/".join(category),
+                    "target_lvs": target_lvs,
+                })
+        self.logger.log(
+            f"Built {len(scenarios)} outage scenarios from {len(node_ids)} nodes "
+            f"× 4 role categories ({skipped} unreachable combos skipped)"
+        )
+        return scenarios
+
     def run(self):
         self.ensure_prerequisites()
         nodes = self.ensure_expected_nodes()
@@ -1289,53 +1452,99 @@ class SoakRunner:
         # cluster is verified stable and the previous iteration's rebalancing
         # has completed. No initial start_fio here.
 
+        # Pin the topology once, before any outages. Leader takeover during
+        # the soak can permanently shift role assignments, but the scenario
+        # list is fixed at startup so coverage stays deterministic.
+        self.topology = self.discover_topology()
+        self.logger.log(f"Pinned topology: {json.dumps(self.topology, sort_keys=True)}")
+        self.scenarios = self.build_scenarios(nodes)
+        if not self.scenarios:
+            raise TestRunError("No outage scenarios built; topology unusable")
+
         iteration = 0
+        cycle = 0
         while True:
-            iteration += 1
-            # After an outage iteration a node typically transitions
-            # online → unreachable → down → online before the control
-            # plane settles. wait_for_cluster_stable() polls until every
-            # node reports "online" AND the cluster is active and not
-            # rebalancing, so those transient states are tolerated here.
-            # It is called both before and after the migration-wait so
-            # we can't race a late transition between the two.
-            self.wait_for_cluster_stable()
-            self.wait_for_data_migration_complete(
-                f"starting outage iteration {iteration}"
-            )
-            self.wait_for_cluster_stable()
-
-            # Cluster is now fully healthy with no in-flight rebalancing.
-            # Start a fresh fio run so the upcoming outage is applied under
-            # live IO load, matching the original soak semantics.
-            self.start_fio(self.volumes)
-
-            current_nodes = self.ensure_expected_nodes()
-            current_uuids = [node["uuid"] for node in current_nodes]
-            # Safety: all data NICs must be up during an outage iteration.
-            # NIC chaos runs only in the quiet window between iterations below.
-            self._ensure_all_data_nics_up()
-            node1, node2 = random.sample(current_uuids, 2)
-            # Pick 2 distinct outage methods (or fall back to same if only 1 enabled)
-            if len(self.methods) >= 2:
-                method1, method2 = random.sample(self.methods, 2)
-            else:
-                method1 = method2 = self.methods[0]
-
+            cycle += 1
+            if self.args.cycles and cycle > self.args.cycles:
+                self.logger.log(
+                    f"Completed {cycle - 1} full cycle(s) of {len(self.scenarios)} "
+                    f"scenarios; exiting"
+                )
+                return
             self.logger.log(
-                f"Starting outage iteration {iteration}: "
-                f"{node1}={method1}, {node2}={method2}"
+                f"Starting cycle {cycle} ({len(self.scenarios)} scenarios)"
             )
-            self.run_outage_pair(node1, node2, method1, method2)
 
-            # Nodes are back online but rebalancing may still be in flight.
-            # Stop fio FIRST (after verifying all jobs are still running) so
-            # the rebalance/migration proceeds without IO load, then wait for
-            # the cluster to settle before the next iteration restarts fio.
-            self.stop_fio()
-            self.wait_for_cluster_stable()
+            for scenario_idx, scenario in enumerate(self.scenarios, 1):
+                iteration += 1
+                # After an outage iteration a node typically transitions
+                # online → unreachable → down → online before the control
+                # plane settles. wait_for_cluster_stable() polls until every
+                # node reports "online" AND the cluster is active and not
+                # rebalancing, so those transient states are tolerated here.
+                # It is called both before and after the migration-wait so
+                # we can't race a late transition between the two.
+                self.wait_for_cluster_stable()
+                self.wait_for_data_migration_complete(
+                    f"starting outage iteration {iteration}"
+                )
+                self.wait_for_cluster_stable()
 
-            self._inter_iteration_nic_chaos()
+                # Cluster is now fully healthy with no in-flight rebalancing.
+                # Start a fresh fio run so the upcoming outage is applied under
+                # live IO load, matching the original soak semantics.
+                self.start_fio(self.volumes)
+
+                # Safety: all data NICs must be up during an outage iteration.
+                # NIC chaos runs only in the quiet window between iterations.
+                self._ensure_all_data_nics_up()
+
+                node1 = scenario["a"]
+                node2 = scenario["b"]
+                category = scenario["category"]
+                target_lvs = scenario["target_lvs"]
+
+                # Outage method pair: keep random selection per scenario so
+                # method coverage accumulates across scenarios without blowing
+                # up scenario count. Deterministic method rotation would
+                # multiply 80 → 80 × 15 (C(6,2)) which is not what was asked.
+                if len(self.methods) >= 2:
+                    method1, method2 = random.sample(self.methods, 2)
+                else:
+                    method1 = method2 = self.methods[0]
+
+                self.logger.log(
+                    f"Starting outage iteration {iteration} "
+                    f"(cycle {cycle} scenario {scenario_idx}/{len(self.scenarios)}): "
+                    f"pair=({node1[:8]},{node2[:8]}) category={category} "
+                    f"target_lvs={target_lvs or '-'} methods=({method1},{method2})"
+                )
+
+                # Skip scenarios whose nodes are not currently in the
+                # expected-node set (e.g. one has been removed from the
+                # cluster mid-soak). Better to log-and-skip than to try to
+                # restart a ghost.
+                current_uuids = {n["uuid"] for n in self.ensure_expected_nodes()}
+                missing = [uid for uid in (node1, node2) if uid not in current_uuids]
+                if missing:
+                    self.logger.log(
+                        f"Scenario {iteration} skipped: nodes {missing} not in "
+                        f"current cluster set {sorted(current_uuids)}"
+                    )
+                    self.stop_fio()
+                    continue
+
+                self.run_outage_pair(node1, node2, method1, method2)
+
+                # Nodes are back online but rebalancing may still be in flight.
+                # Stop fio FIRST (after verifying all jobs are still running) so
+                # the rebalance/migration proceeds without IO load, then wait
+                # for the cluster to settle before the next iteration restarts
+                # fio.
+                self.stop_fio()
+                self.wait_for_cluster_stable()
+
+                self._inter_iteration_nic_chaos()
 
 
 def main():
