@@ -46,16 +46,16 @@ AUTO_RECOVER_METHODS = (
 # the widest blast-radius coverage (two nodes from different LVS rings)
 # exercises the cluster before the within-ring categories.
 #   - unrelated         : pair sharing no LVS in any role
+#   - primary_tertiary  : primary + tertiary of same LVS — distinct
+#                         because no replication edge connects them
+#                         (jumps over the secondary).
 #   - primary_secondary : primary + secondary of same LVS  ← represents
 #                         both (P,S) and (S,T): two adjacent replicas of
 #                         the same LVS going down is structurally
 #                         symmetric regardless of which end.
-#   - primary_tertiary  : primary + tertiary of same LVS — distinct
-#                         because no replication edge connects them
-#                         (jumps over the secondary).
 # Same-method pairs (graceful,graceful etc.) are not enumerated — the
 # user-agreed count 30 for 6 methods equals 6·5, not 6².
-ROLE_CATEGORIES = ("unrelated", "primary_secondary", "primary_tertiary")
+ROLE_CATEGORIES = ("unrelated", "primary_tertiary", "primary_secondary")
 
 
 def parse_args():
