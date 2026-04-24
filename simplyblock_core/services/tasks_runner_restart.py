@@ -247,8 +247,21 @@ def task_runner_node(task):
         task.write_to_db(db.kv_store)
         return True
 
-    if _get_node_unavailable_devices_count(node.get_id()) == 0 and node.status == StorageNode.STATUS_ONLINE:
-        logger.info(f"Node is online: {node.get_id()}")
+    # The node-restart task is meant to fix the NODE, not individual devices.
+    # Previously this short-circuit also required `unavailable_devices_count
+    # == 0`, which meant a node that was ONLINE but still had any residual
+    # UNAVAILABLE device (a routine transient right after an outage — peer
+    # nodes call device_set_unavailable on the target's remote-device records
+    # and clearing those is decoupled from the target node's own restart
+    # completion) would be treated as "still broken", and the runner would
+    # slam through another shutdown + restart cycle even though the node was
+    # serving IO just fine. That produced visible online → in_shutdown →
+    # offline → in_restart cycles.
+    #
+    # Device-level recovery has its own task type (add_device_to_auto_restart
+    # / FN_DEV_RESTART); this one only needs the NODE to be healthy.
+    if node.status == StorageNode.STATUS_ONLINE and getattr(node, "health_check", True):
+        logger.info(f"Node is online and healthy: {node.get_id()}")
         task.function_result = "Node is online"
         task.status = JobSchedule.STATUS_DONE
         task.write_to_db(db.kv_store)
@@ -326,8 +339,14 @@ def task_runner_node(task):
 
         time.sleep(3)
         node = db.get_storage_node_by_id(task.node_id)
-        if _get_node_unavailable_devices_count(node.get_id()) == 0 and node.status == StorageNode.STATUS_ONLINE:
-            logger.info(f"Node is online: {node.get_id()}")
+        # Same relaxation as the task-entry short-circuit above: success of
+        # THIS task is "node is online and healthy". Residual per-device
+        # UNAVAILABLE flags are the responsibility of FN_DEV_RESTART, not
+        # this runner — accepting them here prevents an endless shutdown/
+        # restart cycle when a device stays UNAVAILABLE for reasons outside
+        # this node's control (peer-side records, timing, etc.).
+        if node.status == StorageNode.STATUS_ONLINE and getattr(node, "health_check", True):
+            logger.info(f"Node is online and healthy: {node.get_id()}")
             task.function_result = "done"
             task.status = JobSchedule.STATUS_DONE
             task.write_to_db(db.kv_store)
