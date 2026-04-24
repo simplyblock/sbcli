@@ -379,10 +379,9 @@ class LocalHost:
 
 
 # Number of fio worker processes per --name. Must match --numjobs in
-# start_fio(). Used by the pre-stop health probe to detect worker crashes.
-# fio in fork mode spawns numjobs workers + 1 master per --name, but older
-# fio versions count the master as worker 0 (so actual count == numjobs).
-# The probe uses ">= FIO_NUMJOBS" so either version is accepted.
+# start_fio(). --group_reporting aggregates all workers into one report,
+# so a single fio summary + per-run stderr stream is sufficient to
+# diagnose any fio fault.
 FIO_NUMJOBS = 4
 
 
@@ -391,14 +390,13 @@ class FioJob:
     volume_id: str
     volume_name: str
     mount_point: str
-    fio_log: str
+    fio_log: str       # fio's --output summary file (written on exit)
+    fio_stderr: str    # captured stdout+stderr during the run (progress,
+                       # errors, "max_latency exceeded" messages). This is
+                       # the primary source of ground truth for fio faults.
     rc_file: str
     pid: int
-    fio_name: str  # matches --name=<fio_name> in the fio command line
-    expected_workers: int = 0  # actual post-fork fio process count; filled
-                               # after start so we can detect even single
-                               # worker deaths (version-agnostic over
-                               # master-as-worker-0 vs master-separate)
+    fio_name: str      # matches --name=<fio_name> in the fio command line
 
 
 class TestRunError(RuntimeError):
@@ -839,6 +837,7 @@ class SoakRunner:
                 )
             volume["mount_point"] = posixpath.join(mount_root, f"vol{volume['index']}")
             volume["fio_log"] = posixpath.join(mount_root, f"fio_vol{volume['index']}.log")
+            volume["fio_stderr"] = posixpath.join(mount_root, f"fio_vol{volume['index']}.stderr")
             volume["rc_file"] = posixpath.join(mount_root, f"fio_vol{volume['index']}.rc")
             find_and_mount = (
                 "set -euo pipefail\n"
@@ -863,9 +862,14 @@ class SoakRunner:
         fio_jobs = []
         for volume in volumes:
             fio_name = f"aws_dual_soak_{volume['index']}"
+            # Capture fio's stdout+stderr to a dedicated file. --output only
+            # writes the aggregate summary on exit; progress lines and error
+            # messages ("fio: max_latency exceeded", IO error details, etc.)
+            # go to stderr during the run. That stream is the authoritative
+            # source for "what went wrong" — surface it on every fault.
             start_script = (
                 "set -euo pipefail\n"
-                f"rm -f {shlex.quote(volume['rc_file'])}\n"
+                f"rm -f {shlex.quote(volume['rc_file'])} {shlex.quote(volume['fio_stderr'])}\n"
                 "nohup bash -lc "
                 + shlex.quote(
                     f"cd {shlex.quote(volume['mount_point'])} && "
@@ -877,7 +881,7 @@ class SoakRunner:
                     "rc=$?; "
                     f"echo $rc > {shlex.quote(volume['rc_file'])}"
                 )
-                + " >/dev/null 2>&1 & echo $!"
+                + f" > {shlex.quote(volume['fio_stderr'])} 2>&1 & echo $!"
             )
             _, stdout_text, _ = self.client.run(
                 f"bash -lc {shlex.quote(start_script)}",
@@ -892,6 +896,7 @@ class SoakRunner:
                     volume_name=volume["volume_name"],
                     mount_point=volume["mount_point"],
                     fio_log=volume["fio_log"],
+                    fio_stderr=volume["fio_stderr"],
                     rc_file=volume["rc_file"],
                     pid=pid,
                     fio_name=fio_name,
@@ -899,51 +904,11 @@ class SoakRunner:
             )
             self.logger.log(f"Started fio for {volume['volume_name']} with pid {pid}")
         self.fio_jobs = fio_jobs
-        # Wait for fio to finish forking all its workers, then snapshot the
-        # actual process count per fio_name. The health probe compares
-        # against this baseline, so a later single-worker crash (count drops
-        # by 1) is caught regardless of whether this fio build treats the
-        # master as a separate process or worker-0.
-        #
-        # We poll rather than fixed-sleep because initial file layout on a
-        # fresh xfs volume over NVMe-oF can take 5–30 s on the first write
-        # pass. Until layout completes, fio master is up but workers have
-        # not been forked — pgrep sees only bash + master.
-        FIO_BASELINE_TIMEOUT = 120
-        FIO_BASELINE_POLL = 3
-        for job in self.fio_jobs:
-            pattern = shlex.quote(f"fio --name={job.fio_name}")
-            deadline = time.time() + FIO_BASELINE_TIMEOUT
-            count = 0
-            while time.time() < deadline:
-                _, stdout_text, _ = self.client.run(
-                    f"bash -lc {shlex.quote(f'pgrep -cf {pattern}')}",
-                    timeout=15,
-                    check=False,
-                    label=f"baseline worker count {job.fio_name}",
-                )
-                try:
-                    count = int((stdout_text or "0").strip().splitlines()[-1])
-                except (ValueError, IndexError):
-                    count = 0
-                if count >= FIO_NUMJOBS:
-                    break
-                self.logger.log(
-                    f"fio {job.fio_name}: {count} processes visible, "
-                    f"waiting for workers to fork (need ≥{FIO_NUMJOBS})"
-                )
-                time.sleep(FIO_BASELINE_POLL)
-            if count < FIO_NUMJOBS:
-                raise TestRunError(
-                    f"fio {job.fio_name} only spawned {count} processes "
-                    f"after {FIO_BASELINE_TIMEOUT}s (expected at least "
-                    f"{FIO_NUMJOBS}); startup failed"
-                )
-            job.expected_workers = count
-            self.logger.log(
-                f"Baseline worker count for {job.fio_name}: {count}"
-            )
-        self.ensure_fio_running()
+        # Give fio a few seconds to begin; don't block on worker fork — the
+        # authoritative "fio is in trouble" signal is rc_file / stderr, not
+        # process counts. If fio never issues IO the pre-stop check and
+        # outage cluster-health checks will surface that.
+        time.sleep(5)
 
     def read_remote_file(self, path):
         rc, stdout_text, _ = self.client.run(
@@ -956,109 +921,76 @@ class SoakRunner:
             return ""
         return stdout_text
 
-    # ----- fio health probe ------------------------------------------------
+    # ----- fio fault detection --------------------------------------------
 
-    _FIO_HEALTH_OK = "RUNNING"
+    def _check_fio_exited(self, job):
+        """Return the rc string if fio has written its rc_file, else None.
 
-    def _fio_health_probe(self, job):
-        """Check every known failure mode of one fio job.
-
-        Returns one of:
-          RUNNING                 — all invariants hold
-          EXITED:<rc>             — rc_file exists (fio master exited,
-                                     any rc including 0 is a fault
-                                     mid-iteration)
-          BASH_DEAD               — tracked bash wrapper not alive and
-                                     no rc_file (crash before write)
-          BASH_ZOMBIE             — bash pid is a Z-state zombie
-                                     (kill -0 would lie about liveness)
-          LOW_WORKERS:<a>/<e>     — fewer fio processes than expected
-                                     (a<e); catches worker crash/stall
-                                     even when master is alive
-          NO_MOUNT                — fio's mount point disappeared
-                                     (xfs panic / kernel unmount)
-          RO_MOUNT                — mount remounted read-only
-                                     (xfs saw IO errors and protected
-                                     itself)
-          ERR_RCFILE:<e>          — the status probe itself failed
-                                     (e.g. ssh hiccup); caller should
-                                     retry or treat as fault depending
-                                     on context
-
-        Checks are ordered so rc_file wins over "bash alive" — during the
-        microsecond race between fio exit and bash exit, rc_file existing
-        is authoritative: fio IS gone.
+        ``rc_file`` is the single source of truth: bash writes it only
+        after ``fio`` returns. Any content — including ``0`` — mid-soak
+        is a fault because fio's --runtime is far longer than an outage
+        iteration.
         """
-        # Ordering matters — rc_file is the authoritative "fio exited"
-        # signal, so it's checked before the bash-alive probe that could
-        # race and report RUNNING on an already-dead fio.
         probe = (
-            "set +e\n"
-            f"rc_file={shlex.quote(job.rc_file)}\n"
-            f"pid={job.pid}\n"
-            f"fio_name={shlex.quote(job.fio_name)}\n"
-            f"mount_point={shlex.quote(job.mount_point)}\n"
-            f"expected={job.expected_workers or FIO_NUMJOBS}\n"
-            'if [ -f "$rc_file" ]; then echo "EXITED:$(cat "$rc_file")"; exit 0; fi\n'
-            'if ! kill -0 "$pid" 2>/dev/null; then echo BASH_DEAD; exit 0; fi\n'
-            'state=$(awk "/^State:/ {print \\$2; exit}" /proc/$pid/status 2>/dev/null)\n'
-            'if [ "$state" = "Z" ]; then echo BASH_ZOMBIE; exit 0; fi\n'
-            # Worker count: pgrep -c matches fio master + workers sharing --name.
-            'actual=$(pgrep -cf "fio --name=$fio_name")\n'
-            'if [ "$actual" -lt "$expected" ]; then echo "LOW_WORKERS:$actual/$expected"; exit 0; fi\n'
-            # Mount present: /proc/self/mountinfo field 5 is mount point,
-            # field 6 is mount options (comma-separated; ro/rw is one of them).
-            'mount_opts=$(awk -v m="$mount_point" \'$5==m {print $6; exit}\' /proc/self/mountinfo)\n'
-            'if [ -z "$mount_opts" ]; then echo NO_MOUNT; exit 0; fi\n'
-            'case ",$mount_opts," in *,ro,*) echo RO_MOUNT; exit 0;; esac\n'
-            "echo RUNNING\n"
+            f"if [ -f {shlex.quote(job.rc_file)} ]; then "
+            f"cat {shlex.quote(job.rc_file)}; fi"
         )
-        try:
-            _, stdout_text, _ = self.client.run(
-                f"bash -lc {shlex.quote(probe)}",
-                timeout=30,
-                label=f"fio health {job.volume_name}",
-            )
-        except RemoteCommandError as exc:
-            return f"PROBE_FAILED:{exc}"
-        return (stdout_text or "").strip().splitlines()[-1] if stdout_text.strip() else "EMPTY"
+        _, stdout_text, _ = self.client.run(
+            f"bash -lc {shlex.quote(probe)}",
+            timeout=15,
+            check=False,
+            label=f"check rc_file {job.volume_name}",
+        )
+        rc = (stdout_text or "").strip()
+        return rc or None
 
-    def _raise_fio_fault(self, faults, context):
-        """Log full fio-log tails and raise a structured TestRunError for
-        one or more failing jobs. ``faults`` is a list of (job, status)."""
-        for job, status in faults:
-            tail = self.client.run(
-                f"bash -lc {shlex.quote(f'tail -50 {shlex.quote(job.fio_log)}')}",
+    def _dump_fio_streams(self, job, context):
+        """Write fio's captured stderr and --output summary into the soak
+        log so the actual fio error text (max_latency violations, IO
+        errors, "fio: pid=…, err=…, func=…" lines) is visible next to
+        the outage scenario that triggered it."""
+        for label, path, lines in [
+            ("fio stderr",  job.fio_stderr, 200),
+            ("fio summary", job.fio_log,     60),
+        ]:
+            _, body, _ = self.client.run(
+                f"bash -lc {shlex.quote(f'tail -{lines} {shlex.quote(path)} 2>/dev/null || true')}",
                 timeout=30,
                 check=False,
-                label=f"tail fio log {job.volume_name}",
-            )[1]
-            self.logger.log(
-                f"fio fault [{context}] {job.volume_name} status={status}. "
-                f"Last log lines:\n{tail}"
+                label=f"dump {label} {job.volume_name}",
             )
-        details = ", ".join(f"{j.volume_name}={s}" for j, s in faults)
-        raise TestRunError(
-            f"fio fault during {context}: {details}"
-        )
+            if body.strip():
+                self.logger.block(
+                    f"[{context}] {job.volume_name} {label} ({path}):",
+                    body,
+                )
+            else:
+                self.logger.log(
+                    f"[{context}] {job.volume_name} {label} ({path}): (empty)"
+                )
 
     def check_fio(self):
-        """Health-probe every tracked fio.
+        """Raise if any tracked fio has exited (rc_file written).
 
-        Used by ``ensure_fio_running`` right after start. Any status other
-        than RUNNING is a fault — we don't accept EXITED:0 here either,
-        because a clean completion right after start means the runtime
-        settings are wrong or the volume is unusable. Unlike the old
-        implementation this no longer returns a bool — it either returns
-        silently or raises.
+        Called by ``ensure_fio_running`` right after start and by
+        ``stop_fio`` before the between-iterations kill. Any rc — clean
+        or not — is a fault mid-run: fio's ``--runtime`` is orders of
+        magnitude longer than a single outage iteration.
+
+        On fault, dumps each faulting job's captured stderr and summary
+        into the soak log so the exact fio error lines are visible.
         """
-        faults = []
+        faulted = []
         for job in self.fio_jobs:
-            status = self._fio_health_probe(job)
-            if status != self._FIO_HEALTH_OK:
-                faults.append((job, status))
-        if faults:
-            self._raise_fio_fault(faults, context="post-start fio check")
+            rc = self._check_fio_exited(job)
+            if rc is not None:
+                faulted.append((job, rc))
+        if not faulted:
+            return
+        for job, rc in faulted:
+            self._dump_fio_streams(job, context=f"fio exited rc={rc}")
+        details = ", ".join(f"{j.volume_name}=rc:{rc}" for j, rc in faulted)
+        raise TestRunError(f"fio exited prematurely: {details}")
 
     def ensure_fio_running(self):
         self.check_fio()
@@ -1067,25 +999,19 @@ class SoakRunner:
         """Stop every fio process launched by this soak on the client host.
 
         Called between outage iterations so rebalancing runs unloaded.
-        Verifies every tracked fio passes the full health probe — any
-        anomaly is a fault that must surface, not be hidden by the kill.
-        Only after a clean probe do we SIGTERM (short grace window) then
-        SIGKILL. We match by ``fio --name=aws_dual_soak_*`` rather than
-        by tracked PIDs because fio workers outlive the nohup bash that
-        spawned them.
+        Before killing, calls ``check_fio`` — any fio that wrote its
+        rc_file is a mid-run exit, which is a fault. Dumps the captured
+        fio stderr/summary into the soak log so the actual fio error
+        text is side-by-side with the outage scenario that triggered it.
+        After the check passes we SIGTERM (short grace window) then
+        SIGKILL; matching by ``fio --name=aws_dual_soak_*`` catches both
+        the bash wrapper and any fio workers.
         """
         if not self.fio_jobs:
             return
 
-        # Pre-kill verification: ALL potential fio fault modes must be
-        # clear (see _fio_health_probe for the full list).
-        faults = []
-        for job in self.fio_jobs:
-            status = self._fio_health_probe(job)
-            if status != self._FIO_HEALTH_OK:
-                faults.append((job, status))
-        if faults:
-            self._raise_fio_fault(faults, context="pre-stop fio check")
+        # Pre-kill verification: any fio having exited is a fault.
+        self.check_fio()
 
         self.logger.log("All fio still running; stopping them between iterations")
         kill_script = (
