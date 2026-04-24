@@ -768,6 +768,12 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     # set QOS
     if max_rw_iops >= 0 or max_rw_mbytes >= 0 or max_r_mbytes >= 0 or max_w_mbytes >= 0:
         set_lvol(lvol.uuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes)
+
+    if pool.allowed_hosts:
+        for host_nqn in pool.allowed_hosts:
+            logger.info(f"Adding host {host_nqn} to lvol {lvol.get_id()}")
+            add_host_to_lvol(lvol.get_id(), host_nqn)
+
     return lvol.uuid, None
 
 

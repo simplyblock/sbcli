@@ -600,7 +600,22 @@ def check_node(node_id, with_devices=True):
         logger.exception("node not found")
         return False
 
-    if snode.status in [StorageNode.STATUS_OFFLINE, StorageNode.STATUS_REMOVED]:
+    # Skip HealthCheck entirely while the node is in a transient state.
+    # During IN_SHUTDOWN / RESTARTING / UNREACHABLE / SUSPENDED / IN_CREATION
+    # the upper stack is being torn down or rebuilt by the runner (or the
+    # operator) and the data-plane state read back here — distrib cluster_map
+    # on peers, lvstore_stack comparisons, remote device reachability — is
+    # momentarily inconsistent with FDB. Acting on that mismatch (e.g.
+    # device_set_unavailable, recreate secondary hublvol) clobbers the
+    # in-progress restart. Lower-stack self-heal during a restart is the
+    # runner's job.
+    if snode.status in [StorageNode.STATUS_OFFLINE,
+                        StorageNode.STATUS_REMOVED,
+                        StorageNode.STATUS_IN_SHUTDOWN,
+                        StorageNode.STATUS_RESTARTING,
+                        StorageNode.STATUS_UNREACHABLE,
+                        StorageNode.STATUS_SUSPENDED,
+                        StorageNode.STATUS_IN_CREATION]:
         logger.info(f"Skipping ,node status is {snode.status}")
         return True
 

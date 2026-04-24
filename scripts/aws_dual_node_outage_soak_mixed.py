@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import itertools
 import json
 import os
 import posixpath
@@ -32,6 +33,29 @@ AUTO_RECOVER_METHODS = (
     "container_kill", "host_reboot",
     "network_outage_20", "network_outage_50",
 )
+
+# Scenario enumeration:
+#   3 representative node pairs (one per role category) × P(M,2) ordered
+#   distinct-method pairs = 3 × M·(M-1) scenarios per cycle.
+# Examples:
+#   M=5 → 3 × 20 = 60
+#   M=6 → 3 × 30 = 90
+# Role categories (one pair each, picked from the pinned topology).
+# Order matters: the soak walks the full method permutation for one
+# category before moving on. "unrelated" runs first so the outage with
+# the widest blast-radius coverage (two nodes from different LVS rings)
+# exercises the cluster before the within-ring categories.
+#   - unrelated         : pair sharing no LVS in any role
+#   - primary_tertiary  : primary + tertiary of same LVS — distinct
+#                         because no replication edge connects them
+#                         (jumps over the secondary).
+#   - primary_secondary : primary + secondary of same LVS  ← represents
+#                         both (P,S) and (S,T): two adjacent replicas of
+#                         the same LVS going down is structurally
+#                         symmetric regardless of which end.
+# Same-method pairs (graceful,graceful etc.) are not enumerated — the
+# user-agreed count 30 for 6 methods equals 6·5, not 6².
+ROLE_CATEGORIES = ("unrelated", "primary_tertiary", "primary_secondary")
 
 
 def parse_args():
@@ -100,6 +124,36 @@ def parse_args():
         help=(
             "Seconds to wait for a node to return online after a container_kill "
             "or host_reboot outage (no sbctl restart is issued)."
+        ),
+    )
+    parser.add_argument(
+        "--cycles",
+        type=int,
+        default=1,
+        help=(
+            "Number of passes through the full deterministic scenario list. "
+            "Each pass covers C(N,2)*M² scenarios (250 for 5 nodes × 5 methods; "
+            "540 for 6 × 6). 0 means loop forever."
+        ),
+    )
+    parser.add_argument(
+        "--shuffle-scenarios",
+        action="store_true",
+        help=(
+            "Shuffle scenario order per cycle (seeded deterministically off "
+            "the cycle index). Useful when a full cycle is too long to finish "
+            "and you want even coverage across early/mid/late pairs."
+        ),
+    )
+    parser.add_argument(
+        "--start-at",
+        type=int,
+        default=1,
+        help=(
+            "Start the first cycle at scenario N (1-indexed). Scenarios "
+            "1..N-1 are skipped in the first cycle only; subsequent cycles "
+            "run from scenario 1 as normal. Use to resume after a failure — "
+            "e.g. --start-at 60 if scenario 60 is the one that failed."
         ),
     )
     args = parser.parse_args()
@@ -324,14 +378,25 @@ class LocalHost:
         return
 
 
+# Number of fio worker processes per --name. Must match --numjobs in
+# start_fio(). --group_reporting aggregates all workers into one report,
+# so a single fio summary + per-run stderr stream is sufficient to
+# diagnose any fio fault.
+FIO_NUMJOBS = 4
+
+
 @dataclass
 class FioJob:
     volume_id: str
     volume_name: str
     mount_point: str
-    fio_log: str
+    fio_log: str       # fio's --output summary file (written on exit)
+    fio_stderr: str    # captured stdout+stderr during the run (progress,
+                       # errors, "max_latency exceeded" messages). This is
+                       # the primary source of ground truth for fio faults.
     rc_file: str
     pid: int
+    fio_name: str      # matches --name=<fio_name> in the fio command line
 
 
 class TestRunError(RuntimeError):
@@ -772,6 +837,7 @@ class SoakRunner:
                 )
             volume["mount_point"] = posixpath.join(mount_root, f"vol{volume['index']}")
             volume["fio_log"] = posixpath.join(mount_root, f"fio_vol{volume['index']}.log")
+            volume["fio_stderr"] = posixpath.join(mount_root, f"fio_vol{volume['index']}.stderr")
             volume["rc_file"] = posixpath.join(mount_root, f"fio_vol{volume['index']}.rc")
             find_and_mount = (
                 "set -euo pipefail\n"
@@ -796,21 +862,26 @@ class SoakRunner:
         fio_jobs = []
         for volume in volumes:
             fio_name = f"aws_dual_soak_{volume['index']}"
+            # Capture fio's stdout+stderr to a dedicated file. --output only
+            # writes the aggregate summary on exit; progress lines and error
+            # messages ("fio: max_latency exceeded", IO error details, etc.)
+            # go to stderr during the run. That stream is the authoritative
+            # source for "what went wrong" — surface it on every fault.
             start_script = (
                 "set -euo pipefail\n"
-                f"rm -f {shlex.quote(volume['rc_file'])}\n"
+                f"rm -f {shlex.quote(volume['rc_file'])} {shlex.quote(volume['fio_stderr'])}\n"
                 "nohup bash -lc "
                 + shlex.quote(
                     f"cd {shlex.quote(volume['mount_point'])} && "
                     f"fio --name={fio_name} --directory={shlex.quote(volume['mount_point'])} "
                     "--direct=1 --rw=randrw --bs=4K --group_reporting --time_based "
-                    f"--numjobs=4 --iodepth=4 --size=4G --runtime={self.args.runtime} "
+                    f"--numjobs={FIO_NUMJOBS} --iodepth=4 --size=4G --runtime={self.args.runtime} "
                     "--ioengine=aiolib --max_latency=5s "
                     f"--output={shlex.quote(volume['fio_log'])}; "
                     "rc=$?; "
                     f"echo $rc > {shlex.quote(volume['rc_file'])}"
                 )
-                + " >/dev/null 2>&1 & echo $!"
+                + f" > {shlex.quote(volume['fio_stderr'])} 2>&1 & echo $!"
             )
             _, stdout_text, _ = self.client.run(
                 f"bash -lc {shlex.quote(start_script)}",
@@ -825,14 +896,19 @@ class SoakRunner:
                     volume_name=volume["volume_name"],
                     mount_point=volume["mount_point"],
                     fio_log=volume["fio_log"],
+                    fio_stderr=volume["fio_stderr"],
                     rc_file=volume["rc_file"],
                     pid=pid,
+                    fio_name=fio_name,
                 )
             )
             self.logger.log(f"Started fio for {volume['volume_name']} with pid {pid}")
         self.fio_jobs = fio_jobs
+        # Give fio a few seconds to begin; don't block on worker fork — the
+        # authoritative "fio is in trouble" signal is rc_file / stderr, not
+        # process counts. If fio never issues IO the pre-stop check and
+        # outage cluster-health checks will surface that.
         time.sleep(5)
-        self.ensure_fio_running()
 
     def read_remote_file(self, path):
         rc, stdout_text, _ = self.client.run(
@@ -845,100 +921,97 @@ class SoakRunner:
             return ""
         return stdout_text
 
-    def check_fio(self):
-        completed = 0
-        for job in self.fio_jobs:
-            check_script = (
-                "set -euo pipefail\n"
-                f"if kill -0 {job.pid} 2>/dev/null; then\n"
-                "  echo RUNNING\n"
-                f"elif [ -f {shlex.quote(job.rc_file)} ]; then\n"
-                f"  echo EXITED:$(cat {shlex.quote(job.rc_file)})\n"
-                "else\n"
-                "  echo MISSING\n"
-                "fi\n"
-            )
-            _, stdout_text, _ = self.client.run(
-                f"bash -lc {shlex.quote(check_script)}",
-                timeout=30,
-                label=f"check fio pid {job.pid}",
-            )
-            status = stdout_text.strip().splitlines()[-1]
-            if status == "RUNNING":
-                continue
-            if status == "EXITED:0":
-                completed += 1
-                continue
-            tail = self.client.run(
-                f"bash -lc {shlex.quote(f'tail -50 {shlex.quote(job.fio_log)}')}",
+    # ----- fio fault detection --------------------------------------------
+
+    def _check_fio_exited(self, job):
+        """Return the rc string if fio has written its rc_file, else None.
+
+        ``rc_file`` is the single source of truth: bash writes it only
+        after ``fio`` returns. Any content — including ``0`` — mid-soak
+        is a fault because fio's --runtime is far longer than an outage
+        iteration.
+        """
+        probe = (
+            f"if [ -f {shlex.quote(job.rc_file)} ]; then "
+            f"cat {shlex.quote(job.rc_file)}; fi"
+        )
+        _, stdout_text, _ = self.client.run(
+            f"bash -lc {shlex.quote(probe)}",
+            timeout=15,
+            check=False,
+            label=f"check rc_file {job.volume_name}",
+        )
+        rc = (stdout_text or "").strip()
+        return rc or None
+
+    def _dump_fio_streams(self, job, context):
+        """Write fio's captured stderr and --output summary into the soak
+        log so the actual fio error text (max_latency violations, IO
+        errors, "fio: pid=…, err=…, func=…" lines) is visible next to
+        the outage scenario that triggered it."""
+        for label, path, lines in [
+            ("fio stderr",  job.fio_stderr, 200),
+            ("fio summary", job.fio_log,     60),
+        ]:
+            _, body, _ = self.client.run(
+                f"bash -lc {shlex.quote(f'tail -{lines} {shlex.quote(path)} 2>/dev/null || true')}",
                 timeout=30,
                 check=False,
-                label=f"tail fio log {job.volume_name}",
-            )[1]
-            raise TestRunError(
-                f"fio job for {job.volume_name} stopped unexpectedly with status {status}. "
-                f"Last log lines:\n{tail}"
+                label=f"dump {label} {job.volume_name}",
             )
-        return completed == len(self.fio_jobs)
+            if body.strip():
+                self.logger.block(
+                    f"[{context}] {job.volume_name} {label} ({path}):",
+                    body,
+                )
+            else:
+                self.logger.log(
+                    f"[{context}] {job.volume_name} {label} ({path}): (empty)"
+                )
+
+    def check_fio(self):
+        """Raise if any tracked fio has exited (rc_file written).
+
+        Called by ``ensure_fio_running`` right after start and by
+        ``stop_fio`` before the between-iterations kill. Any rc — clean
+        or not — is a fault mid-run: fio's ``--runtime`` is orders of
+        magnitude longer than a single outage iteration.
+
+        On fault, dumps each faulting job's captured stderr and summary
+        into the soak log so the exact fio error lines are visible.
+        """
+        faulted = []
+        for job in self.fio_jobs:
+            rc = self._check_fio_exited(job)
+            if rc is not None:
+                faulted.append((job, rc))
+        if not faulted:
+            return
+        for job, rc in faulted:
+            self._dump_fio_streams(job, context=f"fio exited rc={rc}")
+        details = ", ".join(f"{j.volume_name}=rc:{rc}" for j, rc in faulted)
+        raise TestRunError(f"fio exited prematurely: {details}")
 
     def ensure_fio_running(self):
-        finished_cleanly = self.check_fio()
-        if finished_cleanly:
-            raise TestRunError("fio completed before outage loop started")
+        self.check_fio()
 
     def stop_fio(self):
         """Stop every fio process launched by this soak on the client host.
 
-        Called between outage iterations so that the subsequent rebalancing
-        runs unloaded. First verifies every tracked fio is still running;
-        a premature exit (clean or failed) during the outage iteration
-        indicates a real fault that must surface rather than be masked by
-        the kill. Only after the check do we SIGTERM (short grace window)
-        then SIGKILL. We match by fio --name=aws_dual_soak_* rather than
-        tracked PIDs because fio can spawn worker processes whose parent
-        (the nohup bash) may already have exited, leaving tracked PIDs
-        stale.
+        Called between outage iterations so rebalancing runs unloaded.
+        Before killing, calls ``check_fio`` — any fio that wrote its
+        rc_file is a mid-run exit, which is a fault. Dumps the captured
+        fio stderr/summary into the soak log so the actual fio error
+        text is side-by-side with the outage scenario that triggered it.
+        After the check passes we SIGTERM (short grace window) then
+        SIGKILL; matching by ``fio --name=aws_dual_soak_*`` catches both
+        the bash wrapper and any fio workers.
         """
         if not self.fio_jobs:
             return
 
-        # Pre-kill verification: every tracked fio must still be running.
-        dead = []
-        for job in self.fio_jobs:
-            check_script = (
-                "set -euo pipefail\n"
-                f"if kill -0 {job.pid} 2>/dev/null; then\n"
-                "  echo RUNNING\n"
-                f"elif [ -f {shlex.quote(job.rc_file)} ]; then\n"
-                f"  echo EXITED:$(cat {shlex.quote(job.rc_file)})\n"
-                "else\n"
-                "  echo MISSING\n"
-                "fi\n"
-            )
-            _, stdout_text, _ = self.client.run(
-                f"bash -lc {shlex.quote(check_script)}",
-                timeout=30,
-                label=f"pre-stop check fio pid {job.pid}",
-            )
-            status = stdout_text.strip().splitlines()[-1]
-            if status != "RUNNING":
-                dead.append((job, status))
-        if dead:
-            for job, status in dead:
-                tail = self.client.run(
-                    f"bash -lc {shlex.quote(f'tail -50 {shlex.quote(job.fio_log)}')}",
-                    timeout=30,
-                    check=False,
-                    label=f"tail fio log {job.volume_name}",
-                )[1]
-                self.logger.log(
-                    f"fio for {job.volume_name} not running (status={status}). "
-                    f"Last log lines:\n{tail}"
-                )
-            details = ", ".join(f"{j.volume_name}={s}" for j, s in dead)
-            raise TestRunError(
-                f"fio exited prematurely during outage iteration: {details}"
-            )
+        # Pre-kill verification: any fio having exited is a fault.
+        self.check_fio()
 
         self.logger.log("All fio still running; stopping them between iterations")
         kill_script = (
@@ -1274,6 +1347,132 @@ class SoakRunner:
         # then waits for cluster stability. Any natural fio completion
         # (e.g. runtime expired) will surface via stop_fio's pre-kill check.
 
+    # ----- topology & scenario enumeration ---------------------------------
+
+    def discover_topology(self):
+        """Return {lvs_name: {'primary': uuid, 'secondary': uuid, 'tertiary': uuid}}.
+
+        Queried once at soak startup to identify the 4 role-representative
+        node pairs. Leader takeover mid-soak may shift role assignments;
+        the scenario list is pinned at startup so the 4 chosen pairs stay
+        fixed across retries even if the CP has re-promoted since.
+        """
+        script = (
+            "import json; "
+            "from simplyblock_core import db_controller; "
+            "db = db_controller.DBController(); "
+            "nodes = db.get_storage_nodes(); "
+            "out = {n.lvstore: {"
+            "'primary': n.get_id(), "
+            "'secondary': getattr(n, 'secondary_node_id', '') or '', "
+            "'tertiary': getattr(n, 'tertiary_node_id', '') or ''"
+            "} for n in nodes "
+            "if getattr(n, 'lvstore', '') "
+            "and not getattr(n, 'is_secondary_node', False)}; "
+            "print(json.dumps(out))"
+        )
+        _, stdout_text, _ = self.mgmt.run(
+            f"sudo python3 -c {shlex.quote(script)}",
+            timeout=60,
+            label="discover topology",
+        )
+        for line in reversed((stdout_text or "").strip().splitlines()):
+            line = line.strip()
+            if line.startswith("{"):
+                try:
+                    return json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+        raise TestRunError(
+            f"Failed to parse topology JSON from mgmt; stdout was:\n{stdout_text}"
+        )
+
+    def pick_representative_pairs(self):
+        """Pick one node pair per role category.
+
+        Returns dict: {category: (node_a, node_b)}.
+
+        primary_secondary / primary_tertiary / secondary_tertiary all come
+        from the same LVS (alphabetical-first for reproducibility). unrelated
+        comes from any node pair that shares no LVS in any role.
+
+        Raises TestRunError if:
+          * the pinned topology has no LVS (empty cluster)
+          * no unrelated pair exists — in a dense FT=2 ring with N ≤ 4 this
+            is possible; raise so coverage gap is explicit.
+        """
+        if not self.topology:
+            raise TestRunError("Empty topology; cannot pick representative pairs")
+
+        lvs_name = sorted(self.topology.keys())[0]
+        roles = self.topology[lvs_name]
+        p = roles.get("primary")
+        s = roles.get("secondary")
+        t = roles.get("tertiary")
+        if not (p and s and t):
+            raise TestRunError(
+                f"LVS {lvs_name} is missing role(s): {roles}; cannot pick "
+                f"primary/secondary/tertiary representative pairs"
+            )
+
+        # Collect all known node UUIDs + per-LVS membership for unrelated
+        # search.
+        all_nodes = set()
+        lvs_members = []
+        for r in self.topology.values():
+            members = {v for v in r.values() if v}
+            lvs_members.append(members)
+            all_nodes.update(members)
+
+        unrelated = None
+        for a, b in itertools.combinations(sorted(all_nodes), 2):
+            if not any(a in m and b in m for m in lvs_members):
+                unrelated = (a, b)
+                break
+        if unrelated is None:
+            raise TestRunError(
+                "No unrelated node pair found in topology "
+                f"({len(all_nodes)} nodes across {len(lvs_members)} LVSs)"
+            )
+
+        return {
+            "primary_secondary":  (p, s),
+            "primary_tertiary":   (p, t),
+            "secondary_tertiary": (s, t),
+            "unrelated":          unrelated,
+        }
+
+    def build_scenarios(self, nodes):
+        """Enumerate 4 representative pairs × P(M,2) ordered method pairs.
+
+        Returns a list of dicts with keys: a, b, method_a, method_b, category.
+        Same-method method pairs are NOT included — ordered distinct pairs
+        only, per itertools.permutations(methods, 2).
+        """
+        _ = nodes  # unused: representatives come from self.topology
+        reps = self.pick_representative_pairs()
+        scenarios = []
+        for category in ROLE_CATEGORIES:
+            a, b = reps[category]
+            for m_a, m_b in itertools.permutations(self.methods, 2):
+                scenarios.append({
+                    "a": a,
+                    "b": b,
+                    "method_a": m_a,
+                    "method_b": m_b,
+                    "category": category,
+                })
+        method_pair_count = len(self.methods) * (len(self.methods) - 1)
+        self.logger.log(
+            f"Built {len(scenarios)} scenarios: "
+            f"{len(ROLE_CATEGORIES)} role-representative pairs × "
+            f"P({len(self.methods)},2)={method_pair_count} ordered method pairs"
+        )
+        for cat in ROLE_CATEGORIES:
+            a, b = reps[cat]
+            self.logger.log(f"  {cat:20s}: ({a[:8]}, {b[:8]})")
+        return scenarios
+
     def run(self):
         self.ensure_prerequisites()
         nodes = self.ensure_expected_nodes()
@@ -1289,53 +1488,115 @@ class SoakRunner:
         # cluster is verified stable and the previous iteration's rebalancing
         # has completed. No initial start_fio here.
 
-        iteration = 0
+        # Pin the topology once, before any outages. Leader takeover during
+        # the soak can permanently shift role assignments, but the 4
+        # representative pairs are fixed at startup so each cycle targets
+        # the same pairs for the same role categories.
+        self.topology = self.discover_topology()
+        self.logger.log(f"Pinned topology: {json.dumps(self.topology, sort_keys=True)}")
+        self.scenarios = self.build_scenarios(nodes)
+        if not self.scenarios:
+            raise TestRunError("No outage scenarios built; method/node list empty")
+
+        start_at = max(1, self.args.start_at)
+        if start_at > len(self.scenarios):
+            raise TestRunError(
+                f"--start-at {start_at} exceeds scenario count "
+                f"{len(self.scenarios)}; nothing to run"
+            )
+        # iteration counter is aligned to scenario_idx: when --start-at N is
+        # used, the first executed scenario logs as iteration=N so post-hoc
+        # grep for "iteration 60" finds the resumed scenario and its prior
+        # failure side by side.
+        iteration = start_at - 1
+        cycle = 0
         while True:
-            iteration += 1
-            # After an outage iteration a node typically transitions
-            # online → unreachable → down → online before the control
-            # plane settles. wait_for_cluster_stable() polls until every
-            # node reports "online" AND the cluster is active and not
-            # rebalancing, so those transient states are tolerated here.
-            # It is called both before and after the migration-wait so
-            # we can't race a late transition between the two.
-            self.wait_for_cluster_stable()
-            self.wait_for_data_migration_complete(
-                f"starting outage iteration {iteration}"
-            )
-            self.wait_for_cluster_stable()
+            cycle += 1
+            if self.args.cycles and cycle > self.args.cycles:
+                self.logger.log(
+                    f"Completed {cycle - 1} full cycle(s) of {len(self.scenarios)} "
+                    f"scenarios; exiting"
+                )
+                return
 
-            # Cluster is now fully healthy with no in-flight rebalancing.
-            # Start a fresh fio run so the upcoming outage is applied under
-            # live IO load, matching the original soak semantics.
-            self.start_fio(self.volumes)
+            cycle_scenarios = list(self.scenarios)
+            if self.args.shuffle_scenarios:
+                # Seed off cycle number so two soaks with the same --cycles
+                # walk identical sequences, but successive cycles rotate
+                # through different orderings.
+                random.Random(cycle).shuffle(cycle_scenarios)
 
-            current_nodes = self.ensure_expected_nodes()
-            current_uuids = [node["uuid"] for node in current_nodes]
-            # Safety: all data NICs must be up during an outage iteration.
-            # NIC chaos runs only in the quiet window between iterations below.
-            self._ensure_all_data_nics_up()
-            node1, node2 = random.sample(current_uuids, 2)
-            # Pick 2 distinct outage methods (or fall back to same if only 1 enabled)
-            if len(self.methods) >= 2:
-                method1, method2 = random.sample(self.methods, 2)
-            else:
-                method1 = method2 = self.methods[0]
-
+            cycle_start_at = start_at if cycle == 1 else 1
             self.logger.log(
-                f"Starting outage iteration {iteration}: "
-                f"{node1}={method1}, {node2}={method2}"
+                f"Starting cycle {cycle} ({len(cycle_scenarios)} scenarios"
+                f"{', shuffled' if self.args.shuffle_scenarios else ''}"
+                f"{f', starting at scenario {cycle_start_at}' if cycle_start_at > 1 else ''})"
             )
-            self.run_outage_pair(node1, node2, method1, method2)
 
-            # Nodes are back online but rebalancing may still be in flight.
-            # Stop fio FIRST (after verifying all jobs are still running) so
-            # the rebalance/migration proceeds without IO load, then wait for
-            # the cluster to settle before the next iteration restarts fio.
-            self.stop_fio()
-            self.wait_for_cluster_stable()
+            for scenario_idx, scenario in enumerate(cycle_scenarios, 1):
+                if scenario_idx < cycle_start_at:
+                    continue
+                iteration += 1
+                # After an outage iteration a node typically transitions
+                # online → unreachable → down → online before the control
+                # plane settles. wait_for_cluster_stable() polls until every
+                # node reports "online" AND the cluster is active and not
+                # rebalancing, so those transient states are tolerated here.
+                # It is called both before and after the migration-wait so
+                # we can't race a late transition between the two.
+                self.wait_for_cluster_stable()
+                self.wait_for_data_migration_complete(
+                    f"starting outage iteration {iteration}"
+                )
+                self.wait_for_cluster_stable()
 
-            self._inter_iteration_nic_chaos()
+                # Cluster is now fully healthy with no in-flight rebalancing.
+                # Start a fresh fio run so the upcoming outage is applied under
+                # live IO load, matching the original soak semantics.
+                self.start_fio(self.volumes)
+
+                # Safety: all data NICs must be up during an outage iteration.
+                # NIC chaos runs only in the quiet window between iterations.
+                self._ensure_all_data_nics_up()
+
+                node1 = scenario["a"]
+                node2 = scenario["b"]
+                method1 = scenario["method_a"]
+                method2 = scenario["method_b"]
+
+                self.logger.log(
+                    f"Starting outage iteration {iteration} "
+                    f"(cycle {cycle} scenario {scenario_idx}/{len(cycle_scenarios)}): "
+                    f"category={scenario['category']} "
+                    f"pair=({node1[:8]},{node2[:8]}) "
+                    f"methods=({method1},{method2})"
+                )
+
+                # Skip scenarios whose nodes are not currently in the
+                # expected-node set (e.g. one has been removed from the
+                # cluster mid-soak). Better to log-and-skip than to try to
+                # restart a ghost.
+                current_uuids = {n["uuid"] for n in self.ensure_expected_nodes()}
+                missing = [uid for uid in (node1, node2) if uid not in current_uuids]
+                if missing:
+                    self.logger.log(
+                        f"Scenario {iteration} skipped: nodes {missing} not in "
+                        f"current cluster set {sorted(current_uuids)}"
+                    )
+                    self.stop_fio()
+                    continue
+
+                self.run_outage_pair(node1, node2, method1, method2)
+
+                # Nodes are back online but rebalancing may still be in flight.
+                # Stop fio FIRST (after verifying all jobs are still running) so
+                # the rebalance/migration proceeds without IO load, then wait
+                # for the cluster to settle before the next iteration restarts
+                # fio.
+                self.stop_fio()
+                self.wait_for_cluster_stable()
+
+                self._inter_iteration_nic_chaos()
 
 
 def main():

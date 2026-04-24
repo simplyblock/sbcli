@@ -19,7 +19,7 @@ on:
       operator_repository:
         description: 'Operator image repository'
         required: false
-        default: 'simplyblock/simplyblock-manager'
+        default: 'simplyblock/simplyblock-operator'
       operator_tag:
         description: 'Operator image tag'
         required: false
@@ -80,6 +80,14 @@ on:
         description: 'Chunk block size'
         required: false
         default: 4096
+      partitions:
+        description: 'Number of partitions per storage node'
+        required: false
+        default: 0
+      journal_manager_count:
+        description: 'Number of journal managers per device'
+        required: false
+        default: 3
 
 jobs:
   stress-test:
@@ -468,7 +476,7 @@ jobs:
             --set controlplane.storageclass.name=local-hostpath \
             --set image.simplyblock.repository="${{ github.event.inputs.simplyblock_repository || 'public.ecr.aws/simply-block/simplyblock' }}" \
             --set image.simplyblock.tag="${{ github.event.inputs.simplyblock_image }}" \
-            --set image.operator.repository="${{ github.event.inputs.operator_repository || 'simplyblock/simplyblock-manager' }}" \
+            --set image.operator.repository="${{ github.event.inputs.operator_repository || 'simplyblock/simplyblock-operator' }}" \
             --set image.operator.tag="${{ github.event.inputs.operator_tag || 'main' }}" \
             --set csiConfig.simplybk.ip="http://simplyblock-webappapi.simplyblock:5000" \
             --set prometheus.server.persistentVolume.storageClass=local-hostpath \
@@ -505,6 +513,8 @@ jobs:
           SB_TAG="${{ github.event.inputs.simplyblock_image }}"
           SPDK_IMAGE="${{ github.event.inputs.spdk_image }}"
           DATA_NICS="${{ github.event.inputs.data_nics || 'ens16' }}"
+          PARTITIONS="${{ github.event.inputs.partitions || '0' }}"
+          JM_COUNT="${{ github.event.inputs.journal_manager_count || '3' }}"
 
           # Build workerNodes YAML list from comma-separated input
           WORKER_YAML=""
@@ -559,11 +569,11 @@ jobs:
             dataIfname:
               - ${DATA_NICS}
             maxLogicalVolumeCount: 30
-            partitions: 0
+            partitions: ${PARTITIONS}
             corePercentage: 65
             coreIsolation: false
             journalManager:
-              count: 3
+              count: ${JM_COUNT}
               percentPerDevice: 3
             skipKubeletConfiguration: true
             enableCpuTopology: true
@@ -620,11 +630,11 @@ jobs:
             dataIfname:
               - ${DATA_NICS}
             maxLogicalVolumeCount: 30
-            partitions: 0
+            partitions: ${PARTITIONS}
             corePercentage: 65
             coreIsolation: false
             journalManager:
-              count: 3
+              count: ${JM_COUNT}
               percentPerDevice: 3
             skipKubeletConfiguration: true
             enableCpuTopology: true
@@ -843,6 +853,11 @@ jobs:
           S3_BUCKET_NAME: "simplyblock-e2e-test-logs"
           RUN_ID: ${{ github.run_id }}
 
+      - name: Set slack notification flag
+        if: always()
+        run: |
+          echo "send_slack_notification=${{ github.event.inputs.send_slack_notification || 'true' }}" >> $GITHUB_ENV
+
       - name: Parse test results
         if: always() && env.send_slack_notification == 'true'
         id: parse_results
@@ -927,11 +942,6 @@ jobs:
             echo "" >> $GITHUB_STEP_SUMMARY
           fi
           echo "[AWS Logs](https://s3.console.aws.amazon.com/s3/buckets/simplyblock-e2e-test-logs?prefix=${{ github.run_id }}/&region=us-east-2)" >> $GITHUB_STEP_SUMMARY
-
-      - name: Set slack notification flag
-        if: always()
-        run: |
-          echo "send_slack_notification=${{ github.event.inputs.send_slack_notification || 'true' }}" >> $GITHUB_ENV
 
       - name: Send Slack Notification
         if: always() && env.send_slack_notification == 'true'

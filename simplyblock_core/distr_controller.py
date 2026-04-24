@@ -443,8 +443,11 @@ def _send_event_to_node(node, events, result=None):
             result["sent"] = True
         return True
     except Exception as e:
-        logger.warning("Failed to send event update")
-        logger.error(e)
+        # Best-effort broadcast. Peer may be restarting / port-blocked /
+        # momentarily unreachable; periodic device-status resync will
+        # converge it. Demoted to debug so the restart log isn't noisy
+        # with non-fatal delivery misses.
+        logger.debug("Failed to send event update to %s: %s", node.get_id(), e)
         if result is not None:
             result["sent"] = False
         return False

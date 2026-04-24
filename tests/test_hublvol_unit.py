@@ -268,6 +268,125 @@ class TestRecreateHublvolUnit(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# TestAdoptHublvolUnit
+# ---------------------------------------------------------------------------
+
+class TestAdoptHublvolUnit(unittest.TestCase):
+    """adopt_hublvol — takeover leader creates hub bdev for the taken-over LVS
+    and re-exposes it under the same NQN/port/UUID as the original primary.
+
+    The bug this pins:
+      - ``create_hublvol`` on the takeover node used ``self.lvstore`` (self's
+        OWN primary), not the taken-over lvstore → EEXIST against self's
+        already-present primary hublvol bdev, and wrong bdev name if it had
+        not been there.
+      - No probe-before-create, so the second restart retry was guaranteed to
+        hit EEXIST on the adopted bdev.
+
+    adopt_hublvol must (a) target ``lvs_node.lvstore``, (b) reuse
+    ``lvs_node.hublvol`` metadata so clients see the same NQN/port/UUID,
+    (c) probe before creating, (d) be safely re-entrant across retries.
+    """
+
+    _TAKEOVER_LVS = "LVS_remote"
+
+    def setUp(self):
+        # Takeover node has its own primary lvstore (LVS_self) and a
+        # separate adopted lvstore (LVS_remote).
+        self.takeover_node = _make_node(_PRIMARY_IP, "LVS_self", jm_vuid=100)
+        self.takeover_node.hublvol = _make_hublvol("LVS_self", _PRIMARY_PORT)
+
+        # The offline peer whose LVS is being taken over.
+        self.offline_peer = _make_node(_SECONDARY_IP, self._TAKEOVER_LVS, jm_vuid=200)
+        self.offline_peer.hublvol = _make_hublvol(self._TAKEOVER_LVS, 4431)
+
+        self.rpc = _mock_rpc()
+        patcher = patch(
+            'simplyblock_core.models.storage_node.RPCClient',
+            return_value=self.rpc,
+        )
+        self.addCleanup(patcher.stop)
+        patcher.start()
+
+    def test_creates_bdev_for_taken_over_lvstore_not_self(self):
+        """bdev_lvol_create_hublvol must target the peer's lvstore, not self's."""
+        self.rpc.get_bdevs.return_value = []  # bdev absent
+        self.takeover_node.adopt_hublvol(self.offline_peer, _CLUSTER_NQN)
+        self.rpc.bdev_lvol_create_hublvol.assert_called_once_with(self._TAKEOVER_LVS)
+
+    def test_skips_create_when_bdev_already_exists(self):
+        """Idempotent: probe succeeds → no create call, no EEXIST."""
+        self.rpc.get_bdevs.return_value = [
+            {'name': f'{self._TAKEOVER_LVS}/hublvol'}
+        ]
+        self.takeover_node.adopt_hublvol(self.offline_peer, _CLUSTER_NQN)
+        self.rpc.bdev_lvol_create_hublvol.assert_not_called()
+
+    def test_exposes_with_peer_hublvol_metadata(self):
+        """Subsystem must be exposed with the peer's existing UUID/port so
+        that surviving clients don't see a new NQN and keep their paths."""
+        self.rpc.get_bdevs.return_value = [{}]
+        self.takeover_node.adopt_hublvol(self.offline_peer, _CLUSTER_NQN)
+        listener_calls = self.rpc.listeners_create.call_args_list
+        assert listener_calls, "listeners_create must be called"
+        for c in listener_calls:
+            kwargs = c.kwargs
+            args = c.args
+            trsvcid = kwargs.get('trsvcid', args[3] if len(args) > 3 else None)
+            assert trsvcid == self.offline_peer.hublvol.nvmf_port, (
+                f"Adopted hublvol must use peer port "
+                f"{self.offline_peer.hublvol.nvmf_port}; got {trsvcid}"
+            )
+        add_ns_call = self.rpc.nvmf_subsystem_add_ns.call_args
+        assert add_ns_call is not None
+        called_uuid = add_ns_call.kwargs.get('uuid')
+        assert called_uuid == self.offline_peer.hublvol.uuid, (
+            "Adopted namespace must reuse peer hublvol UUID for client continuity"
+        )
+
+    def test_exposes_under_shared_nqn_for_lvs(self):
+        """NQN must be the deterministic shared hublvol NQN for the taken-over
+        lvstore — not self's primary NQN."""
+        self.rpc.get_bdevs.return_value = [{}]
+        self.takeover_node.adopt_hublvol(self.offline_peer, _CLUSTER_NQN)
+        expected = f"{_CLUSTER_NQN}:hublvol:{self._TAKEOVER_LVS}"
+        create_call = self.rpc.subsystem_create.call_args
+        called_nqn = create_call.kwargs.get('nqn') or create_call.args[0]
+        assert called_nqn == expected, f"NQN must be {expected}; got {called_nqn}"
+
+    def test_exposes_with_optimized_ana(self):
+        """Takeover leader is the NEW primary for the adopted LVS → ANA optimized."""
+        self.rpc.get_bdevs.return_value = [{}]
+        self.takeover_node.adopt_hublvol(self.offline_peer, _CLUSTER_NQN)
+        listener_calls = self.rpc.listeners_create.call_args_list
+        assert listener_calls
+        for c in listener_calls:
+            kwargs = c.kwargs
+            args = c.args
+            ana_state = kwargs.get('ana_state', args[4] if len(args) > 4 else None)
+            assert ana_state == 'optimized', (
+                f"Adopted hublvol must have ana_state=optimized; got {ana_state}"
+            )
+
+    def test_does_not_mutate_self_hublvol(self):
+        """Takeover runs in addition to self's own primary — self.hublvol
+        (self's own lvstore's hub) must not be overwritten by adoption."""
+        self.rpc.get_bdevs.return_value = []
+        original_self_hublvol = self.takeover_node.hublvol
+        self.takeover_node.adopt_hublvol(self.offline_peer, _CLUSTER_NQN)
+        assert self.takeover_node.hublvol is original_self_hublvol
+
+    def test_raises_when_peer_has_no_hublvol_metadata(self):
+        """If the offline peer has no hublvol metadata in FDB, adopt must
+        fail loudly — silent no-op would leave IO unreachable."""
+        from simplyblock_core.rpc_client import RPCException
+        self.offline_peer.hublvol = None
+        with self.assertRaises(RPCException):
+            self.takeover_node.adopt_hublvol(self.offline_peer, _CLUSTER_NQN)
+        self.rpc.bdev_lvol_create_hublvol.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # TestConnectToHublvolUnit
 # ---------------------------------------------------------------------------
 
