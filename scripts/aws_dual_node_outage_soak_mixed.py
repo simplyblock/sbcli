@@ -142,6 +142,17 @@ def parse_args():
             "and you want even coverage across early/mid/late pairs."
         ),
     )
+    parser.add_argument(
+        "--start-at",
+        type=int,
+        default=1,
+        help=(
+            "Start the first cycle at scenario N (1-indexed). Scenarios "
+            "1..N-1 are skipped in the first cycle only; subsequent cycles "
+            "run from scenario 1 as normal. Use to resume after a failure — "
+            "e.g. --start-at 60 if scenario 60 is the one that failed."
+        ),
+    )
     args = parser.parse_args()
     methods = [m.strip() for m in args.methods.split(",") if m.strip()]
     bad = [m for m in methods if m not in OUTAGE_METHODS]
@@ -1464,7 +1475,17 @@ class SoakRunner:
         if not self.scenarios:
             raise TestRunError("No outage scenarios built; method/node list empty")
 
-        iteration = 0
+        start_at = max(1, self.args.start_at)
+        if start_at > len(self.scenarios):
+            raise TestRunError(
+                f"--start-at {start_at} exceeds scenario count "
+                f"{len(self.scenarios)}; nothing to run"
+            )
+        # iteration counter is aligned to scenario_idx: when --start-at N is
+        # used, the first executed scenario logs as iteration=N so post-hoc
+        # grep for "iteration 60" finds the resumed scenario and its prior
+        # failure side by side.
+        iteration = start_at - 1
         cycle = 0
         while True:
             cycle += 1
@@ -1482,12 +1503,16 @@ class SoakRunner:
                 # through different orderings.
                 random.Random(cycle).shuffle(cycle_scenarios)
 
+            cycle_start_at = start_at if cycle == 1 else 1
             self.logger.log(
                 f"Starting cycle {cycle} ({len(cycle_scenarios)} scenarios"
-                f"{', shuffled' if self.args.shuffle_scenarios else ''})"
+                f"{', shuffled' if self.args.shuffle_scenarios else ''}"
+                f"{f', starting at scenario {cycle_start_at}' if cycle_start_at > 1 else ''})"
             )
 
             for scenario_idx, scenario in enumerate(cycle_scenarios, 1):
+                if scenario_idx < cycle_start_at:
+                    continue
                 iteration += 1
                 # After an outage iteration a node typically transitions
                 # online → unreachable → down → online before the control
