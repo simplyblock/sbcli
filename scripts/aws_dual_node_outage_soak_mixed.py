@@ -40,15 +40,19 @@ AUTO_RECOVER_METHODS = (
 # Examples:
 #   M=5 → 4 × 20 =  80
 #   M=6 → 4 × 30 = 120
-# Role categories (one pair each, picked from the pinned topology):
+# Role categories (one pair each, picked from the pinned topology).
+# Order matters: the soak walks the full method permutation for one
+# category before moving on. "unrelated" runs first so the outage with
+# the widest blast-radius coverage (two nodes from different LVS rings)
+# exercises the cluster before the within-ring categories.
+#   - unrelated         : pair sharing no LVS in any role
 #   - primary_secondary : primary + secondary of same LVS
 #   - primary_tertiary  : primary + tertiary  of same LVS
 #   - secondary_tertiary: secondary + tertiary of same LVS
-#   - unrelated         : pair sharing no LVS in any role
 # Same-method pairs (graceful,graceful etc.) are not enumerated — the
 # user-agreed count 30 for 6 methods equals 6·5, not 6².
-ROLE_CATEGORIES = ("primary_secondary", "primary_tertiary",
-                   "secondary_tertiary", "unrelated")
+ROLE_CATEGORIES = ("unrelated", "primary_secondary",
+                   "primary_tertiary", "secondary_tertiary")
 
 
 def parse_args():
