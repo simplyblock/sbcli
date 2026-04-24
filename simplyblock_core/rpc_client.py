@@ -1466,7 +1466,7 @@ class RPCClient:
         """
         return self._request("bdev_lvol_final_migration", {
             "lvol_name": lvol_name,
-            "blobid": lvol_id,
+            "map_id": lvol_id,
             "snapshot_name": snapshot_name,
             "cluster_batch": batch_size,
             "gateway": bdev_name,
