@@ -268,15 +268,14 @@ def exec_port_allow_task(task):
                     task.write_to_db(db.kv_store)
                     return
 
-                logger.info("Draining inflight IO on peer leader %s for %s",
-                            peer.get_id(), node.lvstore)
-                for _ in range(100):
-                    try:
-                        if not peer_rpc.bdev_distrib_check_inflight_io(node.jm_vuid):
-                            break
-                    except Exception:
-                        break
-                    time.sleep(0.1)
+                # Fixed 0.5s quiesce window instead of polling
+                # bdev_distrib_check_inflight_io. Distrib-inflight includes
+                # data-migration IO that the port block does not pause, so
+                # the poll can hold clients blocked beyond their latency
+                # budget. Migration IO does not touch lvstore metadata, so
+                # a short fixed wait is sufficient for the examine to see
+                # a consistent superblock.
+                time.sleep(0.5)
                 secs_to_unblock.append(peer)
                 # Fall through to the local take-leadership path below.
                 current_leader = None
@@ -327,18 +326,9 @@ def exec_port_allow_task(task):
 
                 sn_rpc.bdev_lvol_set_leader(node.lvstore, leader=False, bs_nonleadership=True)
                 sn_rpc.bdev_distrib_force_to_non_leader(node.jm_vuid)
-                logger.info(f"Checking for inflight IO from node: {sn.get_id()}")
-                for i in range(100):
-                    is_inflight = sn_rpc.bdev_distrib_check_inflight_io(node.jm_vuid)
-                    if is_inflight:
-                        logger.info("Inflight IO found, retry in 100ms")
-                        time.sleep(0.1)
-                    else:
-                        logger.info("Inflight IO NOT found, continuing")
-                        break
-                else:
-                    logger.error(
-                        f"Timeout while checking for inflight IO after 10 seconds on node {sn.get_id()}")
+                # Fixed 0.5s quiesce (see above): draining distrib-inflight
+                # would wait out migration IO and breach client latency.
+                time.sleep(0.5)
 
                 secs_to_unblock.append(sn)
 

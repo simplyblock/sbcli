@@ -465,8 +465,11 @@ class TestRecreateLvstoreFTT1(unittest.TestCase):
         self.assertGreaterEqual(len(force_calls), 2,
                                 "force_to_non_leader on secondary + primary self")
 
-        # Verify inflight IO check on secondary
-        rpc.bdev_distrib_check_inflight_io.assert_called()
+        # The former bdev_distrib_check_inflight_io drain poll on the
+        # secondary was replaced with a fixed 0.5s quiesce (see
+        # storage_node_ops.py). Migration IO kept distrib-inflight non-zero
+        # through the whole port-block window and breached client latency,
+        # so we no longer poll it.
 
 
 class TestRecreateLvstoreFTT2(unittest.TestCase):
@@ -625,8 +628,8 @@ class TestRecreateLvstoreOnSecPrimaryOnline(unittest.TestCase):
         self.assertEqual(len(leader_set_leader_calls), 0,
                          "Non-leader restart must not drop leadership on current leader")
 
-        # Inflight IO check must be called (drain only)
-        rpc.bdev_distrib_check_inflight_io.assert_any_call(primary.jm_vuid)
+        # The former bdev_distrib_check_inflight_io drain was replaced with
+        # a fixed 0.5s quiesce; see storage_node_ops.py.
 
 
 class TestRecreateLvstoreOnSecPrimaryOffline(unittest.TestCase):
@@ -696,8 +699,8 @@ class TestRecreateLvstoreOnSecPrimaryOffline(unittest.TestCase):
         self.assertEqual(len(leader_set_leader_calls), 0,
                          "Non-leader restart must not drop leadership on current leader")
 
-        # Inflight IO check on leader (drain only, no demotion)
-        rpc.bdev_distrib_check_inflight_io.assert_any_call(nodes["node-1"].jm_vuid)
+        # The former bdev_distrib_check_inflight_io drain was replaced with
+        # a fixed 0.5s quiesce; see storage_node_ops.py.
 
     @patch("simplyblock_core.storage_node_ops._check_peer_disconnected", side_effect=lambda peer, **kw: peer.status in ["offline"])
     @patch("simplyblock_core.storage_node_ops._set_restart_phase")
@@ -983,12 +986,14 @@ class TestPortAllowTask(unittest.TestCase):
             return f.read()
 
     def test_port_allow_code_has_force_to_non_leader(self):
-        """Verify the fixed code calls force_to_non_leader and check_inflight_io."""
+        """Verify the fixed code calls force_to_non_leader and still has a quiesce step."""
         src = self._read_source()
         self.assertIn("bdev_distrib_force_to_non_leader", src,
                        "exec_port_allow_task must call force_to_non_leader")
-        self.assertIn("bdev_distrib_check_inflight_io", src,
-                       "exec_port_allow_task must call check_inflight_io")
+        # The former bdev_distrib_check_inflight_io poll was replaced with
+        # a fixed 0.5s quiesce window. Just verify a quiesce still exists.
+        self.assertIn("time.sleep(0.5)", src,
+                       "exec_port_allow_task must keep a quiesce window")
         self.assertIn("secs_to_unblock", src,
                        "exec_port_allow_task must track secondaries to unblock")
 

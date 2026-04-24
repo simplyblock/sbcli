@@ -302,16 +302,15 @@ class TestPeerLeaderDemoted(_BasePortAllowTest):
         self.assertLess(peer_block_idx, sec_demote_idx,
                         "peer port must be blocked before demote RPC is issued")
 
-        # B) demote + inflight drain happened on the peer
+        # B) demote happened on the peer. The previous code also drained via
+        # bdev_distrib_check_inflight_io here; that loop was removed because
+        # distrib-inflight includes migration IO that the port block does not
+        # pause, so the drain could hold clients blocked beyond fio max_latency.
+        # A fixed 0.5s quiesce in storage_node_ops now stands in for the drain.
         self.assertTrue(
             any(c[0] == "bdev_distrib_force_to_non_leader" and c[1] == "sec"
                 for c in self.calls),
             "expected bdev_distrib_force_to_non_leader on the peer leader",
-        )
-        self.assertTrue(
-            any(c[0] == "bdev_distrib_check_inflight_io" and c[1] == "sec"
-                for c in self.calls),
-            "expected inflight IO drain on the peer leader",
         )
 
         # C) leadership taken locally AFTER the peer was demoted
