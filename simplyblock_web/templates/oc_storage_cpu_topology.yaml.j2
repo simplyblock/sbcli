@@ -35,20 +35,24 @@ spec:
               set -e
               MARKER="/var/simplyblock/.cpu_topology_applied"
               if [ -f "$MARKER" ]; then
-                  echo "[INFO] Node already configured. Waiting for NUMA to be fully ready..."
+                  echo "[INFO] Node already configured. Waiting for NUMA plugin pod to be ready..."
                   RETRIES=0
-                  while [ $RETRIES -lt 12 ]; do
+                  while [ $RETRIES -lt 36 ]; do
+                    PLUGIN_READY=$(kubectl get pod -n kube-system \
+                      --field-selector spec.nodeName={{ HOSTNAME }} \
+                      -l app=simplyblock-numa-resource-plugin \
+                      -o jsonpath='{.items[0].status.containerStatuses[0].ready}' 2>/dev/null || true)
                     NUMA_ALLOC=$(kubectl get node "{{ HOSTNAME }}" \
                       -o jsonpath='{.status.allocatable.numa-align/numa-{{ NSOCKET }}}' 2>/dev/null || true)
-                    if [ "$NUMA_ALLOC" = "100" ]; then
-                      echo "[INFO] numa-align/numa-{{ NSOCKET }} is fully available (100)"
+                    if [ "$PLUGIN_READY" = "true" ] && [ "$NUMA_ALLOC" = "100" ]; then
+                      echo "[INFO] NUMA plugin is ready and numa-align/numa-{{ NSOCKET }} is available (100)"
                       exit 0
                     fi
                     RETRIES=$((RETRIES + 1))
-                    echo "[INFO] numa-align/numa-{{ NSOCKET }} not ready yet (got: '$NUMA_ALLOC'), retry $RETRIES/12 in 5s..."
-                    sleep 5
+                    echo "[INFO] Waiting for NUMA readiness (plugin=$PLUGIN_READY, allocatable=$NUMA_ALLOC), retry $RETRIES/36 in 10s..."
+                    sleep 10
                   done
-                  echo "[ERROR] numa-align/numa-{{ NSOCKET }} did not reach 100 after 12 retries (60s)"
+                  echo "[ERROR] NUMA plugin did not become ready after 6 minutes"
                   exit 1
               fi
 
