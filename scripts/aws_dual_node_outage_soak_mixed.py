@@ -35,24 +35,27 @@ AUTO_RECOVER_METHODS = (
 )
 
 # Scenario enumeration:
-#   4 representative node pairs (one per role category) × P(M,2) ordered
-#   distinct-method pairs = 4 × M·(M-1) scenarios per cycle.
+#   3 representative node pairs (one per role category) × P(M,2) ordered
+#   distinct-method pairs = 3 × M·(M-1) scenarios per cycle.
 # Examples:
-#   M=5 → 4 × 20 =  80
-#   M=6 → 4 × 30 = 120
+#   M=5 → 3 × 20 = 60
+#   M=6 → 3 × 30 = 90
 # Role categories (one pair each, picked from the pinned topology).
 # Order matters: the soak walks the full method permutation for one
 # category before moving on. "unrelated" runs first so the outage with
 # the widest blast-radius coverage (two nodes from different LVS rings)
 # exercises the cluster before the within-ring categories.
 #   - unrelated         : pair sharing no LVS in any role
-#   - primary_secondary : primary + secondary of same LVS
-#   - primary_tertiary  : primary + tertiary  of same LVS
-#   - secondary_tertiary: secondary + tertiary of same LVS
+#   - primary_secondary : primary + secondary of same LVS  ← represents
+#                         both (P,S) and (S,T): two adjacent replicas of
+#                         the same LVS going down is structurally
+#                         symmetric regardless of which end.
+#   - primary_tertiary  : primary + tertiary of same LVS — distinct
+#                         because no replication edge connects them
+#                         (jumps over the secondary).
 # Same-method pairs (graceful,graceful etc.) are not enumerated — the
 # user-agreed count 30 for 6 methods equals 6·5, not 6².
-ROLE_CATEGORIES = ("unrelated", "primary_secondary",
-                   "primary_tertiary", "secondary_tertiary")
+ROLE_CATEGORIES = ("unrelated", "primary_secondary", "primary_tertiary")
 
 
 def parse_args():
@@ -1446,7 +1449,8 @@ class SoakRunner:
             f"{len(ROLE_CATEGORIES)} role-representative pairs × "
             f"P({len(self.methods)},2)={method_pair_count} ordered method pairs"
         )
-        for cat, (a, b) in reps.items():
+        for cat in ROLE_CATEGORIES:
+            a, b = reps[cat]
             self.logger.log(f"  {cat:20s}: ({a[:8]}, {b[:8]})")
         return scenarios
 
