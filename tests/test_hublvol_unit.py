@@ -87,10 +87,37 @@ def _mock_rpc(return_bdev_create=str(uuid.uuid4()),
     rpc.listeners_create.return_value = True
     rpc.nvmf_subsystem_add_ns.return_value = True
     rpc.bdev_nvme_attach_controller.side_effect = (
-        lambda name, nqn, ip, port, trtype, multipath=None: [f"{name}n1"]
+        lambda name, nqn, ip, port, trtype, multipath=None, **_kw: [f"{name}n1"]
     )
     rpc.bdev_lvol_set_lvs_opts.return_value = True
     rpc.bdev_lvol_connect_hublvol.return_value = True
+    rpc.bdev_nvme_detach_controller.return_value = True
+
+    # Make bdev_nvme_controller_list reflect attach history so the
+    # HublvolReconnectCoordinator (which connect_to_hublvol routes
+    # through) sees "no controller" on its initial observe and
+    # "enabled, with the attached paths" on its post-attach verify.
+    # Without this the coordinator's final _wait_for_settled check
+    # sees no ctrlr and fails the reconcile, which would skip the
+    # downstream bdev_lvol_set_lvs_opts / bdev_lvol_connect_hublvol
+    # calls that this test file pins.
+    def _ctrlr_list(*_a, **_kw):
+        attaches = rpc.bdev_nvme_attach_controller.call_args_list
+        ips = []
+        for c in attaches:
+            ip = c.args[2] if len(c.args) > 2 else c.kwargs.get("traddr")
+            if ip:
+                ips.append(ip)
+        if not ips:
+            return None
+        return [{
+            "ctrlrs": [{
+                "state": "enabled",
+                "trid": {"traddr": ips[0]},
+                "alternate_trids": [{"traddr": ip} for ip in ips[1:]],
+            }],
+        }]
+    rpc.bdev_nvme_controller_list.side_effect = _ctrlr_list
     return rpc
 
 
@@ -415,6 +442,13 @@ class TestConnectToHublvolUnit(unittest.TestCase):
         self.addCleanup(patcher.stop)
         patcher.start()
 
+        # Clear the coordinator's module-level in-process lock + cooldown
+        # state between tests. Without this, the cooldown persists across
+        # tests and the second reconcile sleeps out a ~5s window.
+        from simplyblock_core.utils import hublvol_reconnect
+        hublvol_reconnect._process_local_locks.clear()
+        hublvol_reconnect._process_local_state.clear()
+
     # --- secondary (no failover) ---
 
     def test_secondary_attaches_one_path(self):
@@ -433,12 +467,21 @@ class TestConnectToHublvolUnit(unittest.TestCase):
             f"Secondary must attach to primary IP {_PRIMARY_IP}; got {called_ip}"
 
     def test_secondary_no_multipath_mode(self):
-        """Secondary (no failover, single NIC) must NOT use multipath mode."""
+        """All hublvol attaches now use multipath='multipath' unconditionally.
+
+        Rationale (updated contract): SPDK cannot widen a non-multipath
+        controller to multipath after attach (bdev_nvme.c:5849 returns
+        -EINVAL), so even a secondary with a single NIC and no current
+        failover peer must start in multipath mode — otherwise adding the
+        failover peer later would need a detach+reattach (which is
+        exactly the hublvol race we closed). The
+        HublvolReconnectCoordinator enforces this unconditionally.
+        """
         self.secondary.connect_to_hublvol(self.primary, failover_node=None, role="secondary")
         attach_call = self.rpc.bdev_nvme_attach_controller.call_args
         multipath = attach_call.kwargs.get('multipath')
-        assert multipath != 'multipath', \
-            f"Secondary with no failover must not use multipath='multipath'; got {multipath!r}"
+        assert multipath == 'multipath', \
+            f"hublvol attaches must use multipath='multipath'; got {multipath!r}"
 
     def test_secondary_set_lvs_opts_role(self):
         """bdev_lvol_set_lvs_opts must be called with role='secondary' on secondary node."""
