@@ -899,27 +899,45 @@ class SoakRunner:
             )
             self.logger.log(f"Started fio for {volume['volume_name']} with pid {pid}")
         self.fio_jobs = fio_jobs
-        # Give fio a moment to fork its workers, then snapshot the actual
-        # process count per fio_name. The health probe compares against
-        # this baseline, so even a single-worker crash (count drops by 1)
-        # is caught regardless of whether this fio build treats the master
-        # as a separate process or worker-0.
-        time.sleep(5)
+        # Wait for fio to finish forking all its workers, then snapshot the
+        # actual process count per fio_name. The health probe compares
+        # against this baseline, so a later single-worker crash (count drops
+        # by 1) is caught regardless of whether this fio build treats the
+        # master as a separate process or worker-0.
+        #
+        # We poll rather than fixed-sleep because initial file layout on a
+        # fresh xfs volume over NVMe-oF can take 5–30 s on the first write
+        # pass. Until layout completes, fio master is up but workers have
+        # not been forked — pgrep sees only bash + master.
+        FIO_BASELINE_TIMEOUT = 120
+        FIO_BASELINE_POLL = 3
         for job in self.fio_jobs:
             pattern = shlex.quote(f"fio --name={job.fio_name}")
-            _, stdout_text, _ = self.client.run(
-                f"bash -lc {shlex.quote(f'pgrep -cf {pattern}')}",
-                timeout=15,
-                label=f"baseline worker count {job.fio_name}",
-            )
-            try:
-                count = int((stdout_text or "0").strip().splitlines()[-1])
-            except (ValueError, IndexError):
-                count = 0
+            deadline = time.time() + FIO_BASELINE_TIMEOUT
+            count = 0
+            while time.time() < deadline:
+                _, stdout_text, _ = self.client.run(
+                    f"bash -lc {shlex.quote(f'pgrep -cf {pattern}')}",
+                    timeout=15,
+                    check=False,
+                    label=f"baseline worker count {job.fio_name}",
+                )
+                try:
+                    count = int((stdout_text or "0").strip().splitlines()[-1])
+                except (ValueError, IndexError):
+                    count = 0
+                if count >= FIO_NUMJOBS:
+                    break
+                self.logger.log(
+                    f"fio {job.fio_name}: {count} processes visible, "
+                    f"waiting for workers to fork (need ≥{FIO_NUMJOBS})"
+                )
+                time.sleep(FIO_BASELINE_POLL)
             if count < FIO_NUMJOBS:
                 raise TestRunError(
                     f"fio {job.fio_name} only spawned {count} processes "
-                    f"(expected at least {FIO_NUMJOBS}); startup failed"
+                    f"after {FIO_BASELINE_TIMEOUT}s (expected at least "
+                    f"{FIO_NUMJOBS}); startup failed"
                 )
             job.expected_workers = count
             self.logger.log(
