@@ -70,7 +70,7 @@ class RandomRapidFailoverNoGap(TestLvolHACluster):
         self.outage_types = [
             "graceful_shutdown",
             "container_stop",
-            # "interface_full_network_interrupt",
+            "interface_full_network_interrupt",
         ]
         self.available_fabrics = ["tcp"]   # overwritten in run() via fabric detection
         self.k8s_utils = None              # initialised in run() when k8s_test=True
@@ -825,7 +825,8 @@ class RandomRapidFailoverNoGapV2WithMigration(RandomRapidFailoverNoGap):
             # 30 s  → network blip; SPDK stays running, tests reconnect path
             # 300 s → triggers SPDK abort, tests full restart/recovery
             # 600 s → same as 300 s but longer outage window
-            outage_dur = random.choice([30, 300, 600])
+            # outage_dur = random.choice([30, 300, 600])
+            outage_dur = random.choice([300, 600])
             outage_type = f"interface_full_network_interrupt_{outage_dur}sec"
             self.logger.info(f"[V2] Network outage duration: {outage_dur}s")
 
