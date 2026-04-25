@@ -27,7 +27,8 @@ def _get_lvs_leader(lvs_name, candidates, local_node_id=None):
     for candidate in candidates:
         if not candidate:
             continue
-        if candidate.get_id() != local_node_id and candidate.status != StorageNode.STATUS_ONLINE:
+        if candidate.get_id() != local_node_id and candidate.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
+            logger.info(f"Skipping candidate {candidate.get_id()} because status is {candidate.status}",)
             continue
         try:
             if lvol_controller.is_node_leader(candidate, lvs_name):
