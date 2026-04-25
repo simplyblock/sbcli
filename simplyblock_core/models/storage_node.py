@@ -334,6 +334,49 @@ class StorageNode(BaseNodeObject):
         logger.info(f'Secondary hublvol exposed: {nqn} on port {hublvol_port}')
         return nqn
 
+    def adopt_hublvol(self, lvs_node, cluster_nqn):
+        """Adopt a peer's hublvol during LVS takeover.
+
+        ``self`` is the new leader (the restarting node); ``lvs_node`` is the
+        offline peer whose LVS is being taken over. The hublvol bdev must be
+        created for the TAKEN-OVER lvstore (``lvs_node.lvstore``) — not
+        ``self.lvstore``, which is self's own primary — and exposed via the
+        same NQN/port/UUID as the original so existing client paths keep
+        working after failover.
+
+        Idempotent: safe to call across restart retries. Both the create and
+        the subsystem expose layer are probe-guarded (expose_bdev filters
+        out existing listeners/namespaces, and create_hublvol returns
+        EEXIST on an already-existing bdev).
+        """
+        lvstore_name = lvs_node.lvstore
+        if not lvs_node.hublvol or not lvs_node.hublvol.uuid:
+            raise RPCException(
+                f"lvs_node {lvs_node.get_id()} has no hublvol metadata for {lvstore_name}"
+            )
+
+        bdev_name = f'{lvstore_name}/hublvol'
+        logger.info('Adopting hublvol %s on %s', bdev_name, self.get_id())
+        rpc_client = self.rpc_client()
+
+        if not rpc_client.get_bdevs(bdev_name):
+            if not rpc_client.bdev_lvol_create_hublvol(lvstore_name):
+                raise RPCException(f'Failed to create adopted hublvol for {lvstore_name}')
+        else:
+            logger.info('Adopted hublvol already exists: %s', bdev_name)
+
+        nqn = self.hublvol_nqn_for_lvstore(cluster_nqn, lvstore_name)
+        self.expose_bdev(
+            nqn=nqn,
+            bdev_name=bdev_name,
+            model_number=lvs_node.hublvol.model_number,
+            uuid=lvs_node.hublvol.uuid,
+            nguid=lvs_node.hublvol.nguid,
+            port=lvs_node.hublvol.nvmf_port,
+            ana_state="optimized",
+        )
+        return nqn
+
     def recreate_hublvol(self):
         """reCreate a hublvol for this node's lvstore.
 
@@ -390,16 +433,19 @@ class StorageNode(BaseNodeObject):
           1. at least one NVMe controller attach established the remote bdev
           2. bdev_lvol_set_lvs_opts committed
           3. bdev_lvol_connect_hublvol committed
-        Returns False otherwise. Individual per-NIC attach failures are
-        tolerated as long as at least one primary path is present after the
-        attach loop. Callers in the restart flow rely on this boolean to
-        decide whether to unblock the secondary port.
+        Returns False otherwise.
 
-        Args:
-            timeout: if set, override the RPC timeout for attach_controller
-                calls. Used during port-blocked windows to avoid long waits
-                on unreachable NICs.
+        The NVMe-oF attach itself is delegated to
+        :class:`HublvolReconnectCoordinator`, which serializes across
+        control-plane services on an FDB advisory lock keyed on
+        ``(self.id, primary.lvstore)`` and enforces a cooldown between
+        attempts. The ``timeout`` kwarg is accepted for back-compat but
+        is no longer wired through — the coordinator uses SPDK reset
+        tuning (ctrlr_loss_timeout_sec, reconnect_delay_sec,
+        fast_io_fail_timeout_sec) that makes per-call RPC timeouts
+        redundant.
         """
+        del timeout  # kept in the signature for back-compat; see docstring
         logger.info(f'Connecting node {self.get_id()} to hublvol on {primary_node.get_id()}'
                      + (f' with failover to {failover_node.get_id()}' if failover_node else ''))
 
@@ -407,84 +453,31 @@ class StorageNode(BaseNodeObject):
             raise ValueError(f"HubLVol of primary node {primary_node.get_id()} is not present")
 
         rpc_client = self.rpc_client()
-        # bdev_nvme_attach_controller is hard-capped at 1s with no retries.
-        # Callers may pass a lower `timeout` (e.g. 0.5s on restart); values
-        # above the cap are clamped. See _ATTACH_CONTROLLER_MAX_TIMEOUT_SEC
-        # in storage_node_ops.py for the rationale.
-        attach_timeout = 1 if timeout is None else min(timeout, 1)
-        attach_rpc = RPCClient(self.mgmt_ip, self.rpc_port,
-                               self.rpc_username, self.rpc_password,
-                               timeout=attach_timeout, retry=0)
-
         remote_bdev = f"{primary_node.hublvol.bdev_name}n1"
 
         if not rpc_client.get_bdevs(remote_bdev):
-            # Multipathing is defined by the number of data NICs OR by role.
-            # A tertiary's hublvol controller must be attached in multipath mode
-            # regardless of current peer reachability, because the design expects
-            # it to hold both primary and secondary (failover) paths over its
-            # lifetime. SPDK does not allow widening a non-multipath controller
-            # to multipath after attach (bdev_nvme.c:5849 returns -EINVAL), so
-            # if we defer multipath until the failover peer is online we can
-            # end up permanently stuck in single-path mode.
-            multiple_nics = len([n for n in primary_node.data_nics
-                                 if (primary_node.active_rdma and n.trtype == "RDMA")
-                                 or (primary_node.active_tcp and n.trtype == "TCP")]) > 1
-            use_multipath = "multipath" if (role == "tertiary" or failover_node or multiple_nics) else False
-
-            # Attach primary path(s) — one per data NIC. Track whether at
-            # least one primary attach succeeded: without that, the remote
-            # bdev won't exist and the subsequent lvs_opts/connect_hublvol
-            # would fail anyway. Multipath tolerates per-NIC failures; a
-            # single working path is enough.
-            primary_attached = False
-            for iface in primary_node.data_nics:
-                if primary_node.active_rdma and iface.trtype == "RDMA":
-                    tr_type = "RDMA"
-                elif not primary_node.active_rdma and primary_node.active_tcp and iface.trtype == "TCP":
-                    tr_type = "TCP"
-                else:
-                    continue
-                try:
-                    ret = attach_rpc.bdev_nvme_attach_controller(
-                        primary_node.hublvol.bdev_name, primary_node.hublvol.nqn,
-                        iface.ip4_address, primary_node.hublvol.nvmf_port,
-                        tr_type, multipath=use_multipath)
-                    if ret:
-                        primary_attached = True
-                    else:
-                        logger.warning(f'Failed to connect to hublvol on {iface.ip4_address}')
-                except Exception as e:
-                    logger.warning(f'Failed to connect to hublvol on {iface.ip4_address}: {e}')
-
-            if not primary_attached:
+            # All hublvol NVMe-oF attach/detach now flows through a single
+            # cross-process coordinator (FDB-locked, cooldown-gated,
+            # detach-and-wait-gone). Previously two services could fire
+            # bdev_nvme_attach_controller on the same subnqn within a few
+            # ms and race SPDK's async destroy, producing
+            # "bdev_nvme_check_multipath: cntlid N are duplicated" and
+            # leaving the hublvol torn down — after which the tertiary's
+            # failover poller could claim leadership and cause a writer
+            # conflict. The coordinator is the one place that issues the
+            # attach.
+            from simplyblock_core.db_controller import DBController
+            from simplyblock_core.utils.hublvol_reconnect import (
+                HublvolReconnectCoordinator,
+            )
+            peers = [primary_node] + ([failover_node] if failover_node else [])
+            coordinator = HublvolReconnectCoordinator(DBController())
+            if not coordinator.reconcile(self, primary_node, peers, role=role):
                 logger.error(
-                    "No primary-path NVMe attach succeeded for hublvol of %s; "
-                    "remote bdev %s will not be present",
-                    primary_node.get_id(), remote_bdev,
+                    "Hublvol reconcile failed for %s on %s (role=%s)",
+                    primary_node.hublvol.bdev_name, self.get_id(), role,
                 )
                 return False
-
-            # Attach failover path(s) — same controller name, same NQN, different IP.
-            # Failover-path failures are best-effort; the overall connect still
-            # succeeds as long as the primary path is present.
-            if failover_node:
-                for iface in failover_node.data_nics:
-                    if failover_node.active_rdma and iface.trtype == "RDMA":
-                        tr_type = "RDMA"
-                    elif not failover_node.active_rdma and failover_node.active_tcp and iface.trtype == "TCP":
-                        tr_type = "TCP"
-                    else:
-                        continue
-                    try:
-                        ret = attach_rpc.bdev_nvme_attach_controller(
-                            primary_node.hublvol.bdev_name, primary_node.hublvol.nqn,
-                            iface.ip4_address, primary_node.hublvol.nvmf_port,
-                            tr_type, multipath="multipath")
-                        if not ret:
-                            logger.warning(f'Failed to connect failover hublvol path on {iface.ip4_address}')
-                    except Exception as e:
-                        logger.warning(f'Failed to connect failover hublvol path on {iface.ip4_address}: {e}')
 
         if not rpc_client.bdev_lvol_set_lvs_opts(
                 primary_node.lvstore,
@@ -504,78 +497,33 @@ class StorageNode(BaseNodeObject):
         return True
 
     def add_hublvol_failover_path(self, primary_node, failover_node):
-        """Add failover_node's data-NIC paths to this node's existing hublvol
-        controller for primary_node's LVStore, self-healing non-multipath
-        controllers.
+        """Ensure this node's hublvol controller for primary_node's LVStore
+        has both ``primary_node`` and ``failover_node`` paths attached.
 
-        SPDK (bdev_nvme.c:5849) rejects adding a multipath path to a controller
-        attached with multipath='disable'/'failover'. That situation occurs when
-        the initial tertiary attach ran while the failover peer was unreachable
-        (single-NIC cluster + offline peer → use_multipath=False). When the
-        fast-path attach fails we detach the whole controller and re-attach all
-        expected paths (primary_node + failover_node) in multipath mode.
+        Delegated to :class:`HublvolReconnectCoordinator` so attach / detach
+        is serialized (FDB lock) and cooldown-gated across all callers. The
+        coordinator handles the non-multipath → multipath rebuild on its
+        own: if the currently-attached controller is in anything other than
+        ``enabled``, or is missing paths that can't be added to it (e.g. a
+        non-multipath ctrlr rejecting a multipath extension), it detaches,
+        waits for SPDK's async destroy to finish, and reattaches all
+        expected peer paths. That is the safe version of the detach+retry
+        idiom this method used to implement inline — the inline version
+        could race SPDK's destroy and fail with
+        ``bdev_nvme_check_multipath: cntlid N are duplicated``.
 
-        Returns True if at least one path to failover_node ends up attached,
-        with the primary path(s) still present (or re-attached).
+        Returns True if the resulting controller is enabled with at least
+        one path to ``failover_node``.
         """
-        controller_name = primary_node.hublvol.bdev_name
-        nqn = primary_node.hublvol.nqn
-        port = primary_node.hublvol.nvmf_port
-        rpc = self.rpc_client()
-
-        def _tr_type_for(peer, iface):
-            if peer.active_rdma and iface.trtype == "RDMA":
-                return "RDMA"
-            if not peer.active_rdma and peer.active_tcp and iface.trtype == "TCP":
-                return "TCP"
-            return None
-
-        def _attach_peer_paths(peer):
-            attached = False
-            for iface in peer.data_nics:
-                tr_type = _tr_type_for(peer, iface)
-                if tr_type is None:
-                    continue
-                try:
-                    if rpc.bdev_nvme_attach_controller(
-                            controller_name, nqn, iface.ip4_address, port,
-                            tr_type, multipath="multipath"):
-                        attached = True
-                    else:
-                        logger.warning(
-                            "Failed to attach hublvol path %s (peer %s) to %s",
-                            iface.ip4_address, peer.get_id(), controller_name)
-                except Exception as e:
-                    logger.warning(
-                        "Failed to attach hublvol path %s (peer %s) to %s: %s",
-                        iface.ip4_address, peer.get_id(), controller_name, e)
-            return attached
-
-        if _attach_peer_paths(failover_node):
-            return True
-
-        logger.warning(
-            "Fast-path failover attach to %s failed on %s; detaching and "
-            "rebuilding in multipath mode (existing controller may be in "
-            "non-multipath mode)",
-            controller_name, self.get_id())
-        try:
-            rpc.bdev_nvme_detach_controller(controller_name)
-        except Exception as e:
-            # Detach may fail if the controller doesn't exist yet; re-attach
-            # below will reveal the real state via its own error handling.
-            logger.warning(
-                "Detach of %s on %s before multipath repair did not succeed: %s",
-                controller_name, self.get_id(), e)
-
-        primary_ok = _attach_peer_paths(primary_node)
-        failover_ok = _attach_peer_paths(failover_node)
-        if not primary_ok:
-            logger.error(
-                "Multipath repair of %s on %s lost primary path — no paths "
-                "to %s were re-attached",
-                controller_name, self.get_id(), primary_node.get_id())
-        return failover_ok and primary_ok
+        from simplyblock_core.db_controller import DBController
+        from simplyblock_core.utils.hublvol_reconnect import (
+            HublvolReconnectCoordinator,
+        )
+        coordinator = HublvolReconnectCoordinator(DBController())
+        return coordinator.reconcile(
+            self, primary_node, [primary_node, failover_node],
+            role="failover_repair",
+        )
 
     def create_alceml(self, name, nvme_bdev, uuid, **kwargs):
         logger.info(f"Adding {name}")

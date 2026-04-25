@@ -17,6 +17,21 @@ from simplyblock_core.controllers import device_controller
 logger = utils.get_logger(__name__)
 
 
+def _restart_owns_lvs(primary_node) -> bool:
+    """True if the restart task currently owns ``primary_node.lvstore``.
+
+    While ``primary_node.restart_phases[lvs]`` is set (pre_block / blocked /
+    post_unblock), the restart runner is the exclusive author of hublvol
+    attach/detach on that LVS. The periodic health repair must stand aside
+    so it doesn't issue a parallel bdev_nvme_attach_controller on the same
+    subnqn — that was the class of race that produced
+    "bdev_nvme_check_multipath: cntlid N are duplicated" and left the
+    tertiary without a hublvol to primary.
+    """
+    phases = getattr(primary_node, "restart_phases", None) or {}
+    return bool(phases.get(primary_node.lvstore))
+
+
 def check_bdev(name, *, rpc_client=None, bdev_names=None) -> bool:
     present = (
             ((bdev_names is not None) and (name in bdev_names)) or
@@ -330,7 +345,7 @@ def _check_sec_node_hublvol(node: StorageNode, node_bdev=None, node_lvols_nqns=N
             # Controller exists but may only have the optimized path; ensure secondary path is present
             # ret is [{..., "ctrlrs": [path1, path2, ...]}, ...] — paths are inside ctrlrs
             ctrlrs = ret[0].get("ctrlrs", []) if ret else []
-            if len(ctrlrs) < 2:
+            if len(ctrlrs) < 2 and not _restart_owns_lvs(primary_node):
                 try:
                     sec1 = db_controller.get_storage_node_by_id(primary_node.secondary_node_id)
                     if sec1.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
@@ -353,9 +368,12 @@ def _check_sec_node_hublvol(node: StorageNode, node_bdev=None, node_lvols_nqns=N
                 node_bdev = []
 
         # Repair degraded multipath on hublvol controller: each NIC should
-        # contribute one path.  If a NIC went down and came back, the path may
-        # not have been re-established.
-        if passed and auto_fix and ret:
+        # contribute one path. If a NIC went down and came back, the path may
+        # not have been re-established. Skip entirely while the restart task
+        # owns this LVS — the restart flow is the exclusive author of hublvol
+        # (re)attaches during its phases, and running a concurrent repair
+        # here is what created the attach-during-destroy race in the past.
+        if passed and auto_fix and ret and not _restart_owns_lvs(primary_node):
             ctrlrs = ret[0].get("ctrlrs", [])
             for ct in ctrlrs:
                 if ct.get("state") != "enabled":
@@ -371,18 +389,37 @@ def _check_sec_node_hublvol(node: StorageNode, node_bdev=None, node_lvols_nqns=N
                         expected_ips.add(iface.ip4_address)
                 missing_ips = expected_ips - attached_ips
                 if missing_ips:
-                    logger.info("Hublvol %s on %s missing paths: %s, re-attaching",
+                    logger.info("Hublvol %s on %s missing paths: %s, reconciling via coordinator",
                                 primary_node.hublvol.bdev_name, node.get_id(), missing_ips)
-                    tr_type = "RDMA" if primary_node.active_rdma else "TCP"
-                    for ip in missing_ips:
-                        try:
-                            rpc_client.bdev_nvme_attach_controller(
-                                primary_node.hublvol.bdev_name, primary_node.hublvol.nqn,
-                                ip, primary_node.hublvol.nvmf_port,
-                                tr_type, multipath="multipath")
-                            logger.info("Re-attached hublvol path %s on %s", ip, node.get_id())
-                        except Exception as e:
-                            logger.error("Failed to re-attach hublvol path %s: %s", ip, e)
+                    try:
+                        # All hublvol (re)attach goes through the single
+                        # cross-process coordinator. Even though we just
+                        # guarded on _restart_owns_lvs above, the coordinator
+                        # still serializes against any other non-restart
+                        # caller and enforces the attach cooldown, which
+                        # removes the "cntlid N are duplicated" race window.
+                        from simplyblock_core.utils.hublvol_reconnect import (
+                            HublvolReconnectCoordinator,
+                        )
+                        coordinator = HublvolReconnectCoordinator(db_controller)
+                        peers = [primary_node]
+                        if is_sec2 and primary_node.secondary_node_id:
+                            try:
+                                sec1 = db_controller.get_storage_node_by_id(
+                                    primary_node.secondary_node_id)
+                                if sec1.status in (
+                                        StorageNode.STATUS_ONLINE,
+                                        StorageNode.STATUS_DOWN):
+                                    peers.append(sec1)
+                            except Exception:
+                                pass
+                        coordinator.reconcile(
+                            node, primary_node, peers,
+                            role="tertiary" if is_sec2 else "secondary")
+                    except Exception as e:
+                        logger.error(
+                            "Failed to reconcile hublvol on %s: %s",
+                            node.get_id(), e)
 
         passed &= check_bdev(primary_node.hublvol.get_remote_bdev_name(), bdev_names=node_bdev)
         if not passed:

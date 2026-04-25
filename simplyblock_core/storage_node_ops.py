@@ -4017,15 +4017,30 @@ def set_node_status(node_id, status, reconnect_on_online=True):
 def _set_restart_phase(snode, lvs_name, phase, db_controller):
     """Persist the restart phase for a given LVS to FDB.
 
-    Other services check this to gate sync deletes and create/clone/resize
-    registrations:
-    - pre_block: operations can still complete; port block waits for them
-    - blocked: operations must be delayed until post_unblock
-    - post_unblock: delayed operations can now proceed
-    - "" (empty): not in restart
+    Other services check this to gate sync deletes and create/clone/
+    resize/snapshot registrations. All non-empty phases are treated as
+    "restart in progress" — operations during any of them are queued and
+    applied after the phase is cleared:
 
-    When transitioning away from "blocked", notifies all threads waiting
-    on the gate condition so they wake in FIFO order and proceed.
+    - pre_block     : restart task has claimed the LVS but hasn't blocked
+                      the client port yet. The primary-side operation can
+                      still run; however the restarting peer's SPDK state
+                      is about to be torn down and rebuilt, so fanning
+                      the operation out to it now would be lost. Queue it.
+    - blocked       : client port blocked, examine + hublvol wiring in
+                      flight. Queue.
+    - post_unblock  : port unblocked, but the subsystem re-registration
+                      loop is still running on the restarting node — an
+                      nvmf_subsystem_add_ns for a concurrently-created
+                      lvol would race a subsystem_create in the restart
+                      flow. Queue until the phase is cleared.
+    - ""            : not in restart.
+
+    When transitioning out of any non-empty phase to a phase that implies
+    "the restart task is done with the queue", the queue is drained: from
+    BLOCKED → POST_UNBLOCK (once the rebuild owns the node) and from
+    POST_UNBLOCK → "" (once the per-lvol subsystem re-registration has
+    finished). Operations are applied in FIFO order.
     """
     node_id = snode.get_id()
     snode = db_controller.get_storage_node_by_id(node_id)
@@ -4039,8 +4054,20 @@ def _set_restart_phase(snode, lvs_name, phase, db_controller):
     snode.write_to_db()
     logger.info("Restart phase for %s on %s: %s", lvs_name, node_id[:8], phase or "cleared")
 
-    # Drain queued operations when transitioning from "blocked" to "post_unblock"
+    # Drain queued operations whenever the phase advances past a queue-gating
+    # state. Two drain points, both drain the same FIFO queue:
+    #   1. BLOCKED → POST_UNBLOCK: rebuild is done enough that RPCs won't
+    #      race the examine. Drain so ops queued during pre_block+blocked
+    #      can execute before clients resume.
+    #   2. POST_UNBLOCK → "": subsystem re-registration has also finished.
+    #      Drain any ops that arrived between the previous drain and now
+    #      (e.g. a create submitted during post_unblock) so they don't
+    #      hit a partially-initialized node.
+    # The queue is popped on drain so a second drain on an empty queue is
+    # a no-op.
     if old_phase == StorageNode.RESTART_PHASE_BLOCKED and phase == StorageNode.RESTART_PHASE_POST_UNBLOCK:
+        drain_restart_queue(node_id, lvs_name)
+    elif old_phase == StorageNode.RESTART_PHASE_POST_UNBLOCK and phase == "":
         drain_restart_queue(node_id, lvs_name)
 
 
@@ -4060,21 +4087,33 @@ def get_restart_phase(node_id, lvs_name):
 def wait_or_delay_for_restart_gate(node_id, lvs_name, timeout=30):
     """Gate for sync deletes and create/clone/resize registrations.
 
-    Normal (healthy) case: phase is not "blocked" → returns "proceed"
-    immediately. No queue, no delay. Operations execute in ms.
+    Any non-empty restart phase (pre_block / blocked / post_unblock)
+    returns ``"delay"`` — the caller must queue the op via
+    :func:`queue_for_restart_drain`. The queue drains automatically on
+    the ``BLOCKED → POST_UNBLOCK`` and ``POST_UNBLOCK → ""`` transitions
+    in :func:`_set_restart_phase`, so the op lands on the rebuilt node in
+    FIFO order after per-lvol subsystem re-registration has completed.
 
-    Blocked case: phase is "blocked" → returns "delay". Caller must
-    queue the operation via queue_for_restart_drain() and return.
-    The queued operation will execute after port unblock when
-    drain_restart_queue() is called by the restart code.
+    Why all three non-empty phases delay:
 
-    All operations on a node execute in strict order because:
-    - In healthy case: single-threaded caller executes immediately
-    - In blocked case: operations are queued in FIFO order and
-      drained sequentially after unblock
+    - ``pre_block``: restart task has claimed the LVS. The node's SPDK
+      state is about to be torn down / rebuilt; applying a metadata op
+      now would be lost by the rebuild.
+    - ``blocked``: client port blocked, examine in flight. Applying a
+      create/delete now can race examine's read of the primary's
+      blobstore.
+    - ``post_unblock``: client port unblocked but the per-lvol subsystem
+      re-registration loop on the restarting node is still running.
+      ``nvmf_subsystem_add_ns`` from a mgmt-side create would race the
+      restart's own ``subsystem_create``.
+
+    Normal (healthy) case: phase is empty → returns ``"proceed"``
+    immediately. Operations execute in ms.
     """
     phase = get_restart_phase(node_id, lvs_name)
-    if phase == StorageNode.RESTART_PHASE_BLOCKED:
+    if phase in (StorageNode.RESTART_PHASE_PRE_BLOCK,
+                 StorageNode.RESTART_PHASE_BLOCKED,
+                 StorageNode.RESTART_PHASE_POST_UNBLOCK):
         return "delay"
     return "proceed"
 
@@ -4276,12 +4315,18 @@ def check_non_leader_for_operation(node_id, lvs_name, operation_type="create",
     if _check_peer_disconnected(node, lvs_peer_ids=lvs_peer_ids):
         return "skip"
 
-    # 2. Check restart phase
+    # 2. Check restart phase — any non-empty phase means the restart task
+    # owns the node's LVS state and the operation must be queued for the
+    # post-rebuild drain. "skip" (the old pre_block behaviour) is incorrect
+    # because the primary-side op runs unaffected by the LVS port block
+    # (its mgmt RPC goes to port 8085, not 4436), so a pre_block skip can
+    # lose a create/delete on the restarting node. See
+    # _set_restart_phase for the drain timing.
     phase = get_restart_phase(node_id, lvs_name)
-    if phase == StorageNode.RESTART_PHASE_PRE_BLOCK:
-        return "skip"  # Restart hasn't reached port block
-    if phase == StorageNode.RESTART_PHASE_BLOCKED:
-        return "queue"  # Port blocked, queue for post-unblock
+    if phase in (StorageNode.RESTART_PHASE_PRE_BLOCK,
+                 StorageNode.RESTART_PHASE_BLOCKED,
+                 StorageNode.RESTART_PHASE_POST_UNBLOCK):
+        return "queue"
 
     # 3. Fabric is connected — check RPC responsiveness
     if _is_node_rpc_responsive(node, lvs_name):
@@ -4376,24 +4421,44 @@ def execute_on_leader_with_failover(all_nodes, lvs_name, operation_fn):
 
 
 def _check_peer_disconnected(peer_node, lvs_peer_ids=None):
-    """Method 1: Check if a peer node is data-plane disconnected via JM quorum.
+    """Check if a peer node should be treated as disconnected for the purpose
+    of routing (takeover vs. non-leader path) and peer-port-block decisions.
 
-    Per design: we do NOT rely on node statuses anywhere in restart,
-    but solely on disconnect state and RPC behaviour.
+    Returns True if peer is disconnected (should be skipped), False otherwise.
 
-    Uses is_node_data_plane_disconnected_quorum — checks if the majority of
-    still-online nodes cannot reach the JM of peer_node.
+    Two signals, first match wins:
 
-    Returns True if peer is disconnected (should be skipped), False if connected.
+      1. Mgmt ground truth (FDB status). If FDB already says the peer is
+         OFFLINE / REMOVED / UNREACHABLE, trust it immediately — mgmt has
+         observed the peer leaving the cluster. Attempting to port-block
+         such a peer's mgmt API will only hit ECONNREFUSED and, after 5×
+         retries, abort the entire restart with a misleading "LVStore
+         recovery failed" event. IN_SHUTDOWN / RESTARTING are deliberately
+         NOT in this list — those are transient states the runner owns;
+         preempting another node's leadership during its own restart
+         would be incorrect.
+
+      2. Data-plane JM quorum (legacy path). Only reached if mgmt says
+         the peer is in an "alive" state. Useful to detect fabric
+         partitions where mgmt is still reachable but the data plane
+         isn't — the quorum reads NVMe controller state on surviving
+         peers (see storage_node_monitor::_count_data_plane_votes).
     """
     from simplyblock_core.services.storage_node_monitor import is_node_data_plane_disconnected_quorum
 
+    if peer_node.status in (StorageNode.STATUS_OFFLINE,
+                            StorageNode.STATUS_REMOVED,
+                            StorageNode.STATUS_UNREACHABLE):
+        logger.info("Peer %s mgmt status is %s — treating as disconnected",
+                    peer_node.get_id(), peer_node.status)
+        return True
+
     if is_node_data_plane_disconnected_quorum(peer_node, lvs_peer_ids=lvs_peer_ids):
-        logger.info("Peer %s is data-plane disconnected (JM quorum confirmed), will skip",
+        logger.info("Peer %s is data-plane disconnected (NVMe-ctrlr quorum confirmed), will skip",
                      peer_node.get_id())
         return True
 
-    logger.info("Peer %s is data-plane connected (JM quorum check)", peer_node.get_id())
+    logger.info("Peer %s is data-plane connected (NVMe-ctrlr quorum check)", peer_node.get_id())
     return False
 
 
@@ -4628,14 +4693,21 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
         # racing into a half-reconstructed lvstore. Silently skipping the
         # block (as we used to do on ConnectionRefused) lets the leader
         # keep serving reads/writes while we examine — which has produced
-        # CRC mismatches and lvol drops on the restarting peer. So retry
-        # aggressively and, if it still can't land, abort the restart
-        # unless force=True.
+        # CRC mismatches and lvol drops on the restarting peer. So retry,
+        # and if it still can't land, abort the restart unless force=True.
+        #
+        # Budget: 3 attempts × FirewallClient(timeout=3, retry=1) × 1s sleep
+        # between attempts → worst-case ~15s abort. Previously 5× ×
+        # (timeout=5, retry=5) × 2s = ~140s, which made every iteration
+        # against a dead-mgmt leader stall the restart task for minutes.
+        # The FDB-status short-circuit in _check_peer_disconnected should
+        # already route such peers to the takeover path before we reach
+        # here; keeping a short local budget protects against stragglers.
         last_err = None
-        attempts = 5
+        attempts = 3
         for attempt in range(1, attempts + 1):
             try:
-                fw_api = FirewallClient(leader_node, timeout=5, retry=5)
+                fw_api = FirewallClient(leader_node, timeout=3, retry=1)
                 fw_api.firewall_set_port(leader_lvs_port, port_type, "block", leader_node.rpc_port)
                 tcp_ports_events.port_deny(leader_node, leader_lvs_port)
                 leader_port_blocked = True
@@ -4647,7 +4719,7 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
                     "Port-block attempt %d/%d failed for leader %s on %s: %s",
                     attempt, attempts, leader_node.get_id(), primary_node.lvstore, e)
                 if attempt < attempts:
-                    time.sleep(2)
+                    time.sleep(1)
         if not leader_port_blocked:
             msg = (f"Failed to block leader {leader_node.get_id()} port "
                    f"{leader_lvs_port} after {attempts} attempts for "
@@ -4661,29 +4733,14 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
                 _abort_and_unblock(msg)
 
     if not activation_mode and leader_port_blocked:
-        # --- Inside port-blocked window: timeout=0.2s, retry=0, abort on failure ---
-        leader_rpc = RPCClient(
-            leader_node.mgmt_ip, leader_node.rpc_port,
-            leader_node.rpc_username, leader_node.rpc_password,
-            timeout=0.2, retry=0)
-
-        ### 3a- drain inflight IO
-        try:
-            logger.info("Checking for inflight IO on leader %s for %s",
-                        leader_node.get_id(), primary_node.lvstore)
-            for _ in range(100):
-                is_inflight = leader_rpc.bdev_distrib_check_inflight_io(primary_node.jm_vuid)
-                if is_inflight:
-                    time.sleep(0.1)
-                else:
-                    logger.info("Inflight IO drained on leader %s", leader_node.get_id())
-                    break
-            else:
-                logger.error(
-                    "Timeout waiting for inflight IO to drain on leader %s (%s)",
-                    leader_node.get_id(), primary_node.lvstore)
-        except Exception as e:
-            _abort_and_unblock(f"Failed inflight IO check on leader {leader_node.get_id()}: {e}")
+        # Fixed 0.5s quiesce window instead of draining distrib-inflight.
+        # bdev_distrib_check_inflight_io counts internal distrib IO (including
+        # data-migration moves) which the port block does not pause, so polling
+        # for it to hit zero can hold the leader's lvol port blocked long
+        # enough to breach client fio max_latency. Migration IO does not touch
+        # lvstore metadata, so a brief fixed wait is sufficient for the
+        # secondary's examine to see a consistent superblock.
+        time.sleep(0.5)
 
     elif not activation_mode and not leader_has_quorum:
         logger.info("Leader %s has no quorum for %s, skipping port block",
@@ -4828,10 +4885,10 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
         # after our attempts so another retry loop keeps trying.
         if leader_port_blocked:
             unblocked = False
-            attempts = 5
+            attempts = 3
             for attempt in range(1, attempts + 1):
                 try:
-                    fw_api = FirewallClient(leader_node, timeout=5, retry=5)
+                    fw_api = FirewallClient(leader_node, timeout=3, retry=1)
                     fw_api.firewall_set_port(leader_lvs_port, port_type, "allow", leader_node.rpc_port)
                     tcp_ports_events.port_allowed(leader_node, leader_lvs_port)
                     unblocked = True
@@ -4841,7 +4898,7 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
                         "Port-unblock attempt %d/%d failed for leader %s on %s: %s",
                         attempt, attempts, leader_node.get_id(), primary_node.lvstore, e)
                     if attempt < attempts:
-                        time.sleep(2)
+                        time.sleep(1)
             if not unblocked:
                 logger.error(
                     "Failed to unblock leader %s port %s for %s after %d attempts; "
@@ -5286,22 +5343,8 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
             except Exception as e:
                 _abort_restart_and_unblock(f"Failed to demote leader {current_leader.get_id()}: {e}")
 
-            ### 4-1 drain inflight IO
-            try:
-                logger.info(f"Checking for inflight IO from leader node: {current_leader.get_id()}")
-                for i in range(100):
-                    is_inflight = leader_rpc.bdev_distrib_check_inflight_io(lvs_jm_vuid)
-                    if is_inflight:
-                        logger.info("Inflight IO found, retry in 100ms")
-                        time.sleep(0.1)
-                    else:
-                        logger.info("Inflight IO NOT found, continuing")
-                        break
-                else:
-                    logger.error(
-                        f"Timeout while checking for inflight IO after 10 seconds on node {current_leader.get_id()}")
-            except Exception as e:
-                _abort_restart_and_unblock(f"Failed inflight IO check on leader {current_leader.get_id()}: {e}")
+            ### 4-1 fixed 0.5s quiesce window (see secondary/tertiary path above)
+            time.sleep(0.5)
 
         if disconnected_peers:
             logger.info(f"Peers disconnected {disconnected_peers}, forcing journal replication on node: {snode.get_id()}")
@@ -5388,11 +5431,11 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
             if is_takeover:
                 try:
                     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
-                    snode.create_hublvol(cluster_nqn=cluster.nqn)
-                    logger.info("Created and exposed hublvol on new leader %s for %s", snode.get_id(), lvs_name)
+                    snode.adopt_hublvol(lvs_node, cluster.nqn)
+                    logger.info("Adopted hublvol on new leader %s for %s", snode.get_id(), lvs_name)
                 except Exception as e:
-                    logger.error("Error creating hublvol on new leader: %s", e)
-                    _abort_restart_and_unblock(f"create_hublvol on new leader failed: {e}")
+                    logger.error("Error adopting hublvol on new leader: %s", e)
+                    _abort_restart_and_unblock(f"adopt_hublvol on new leader failed: {e}")
             else:
                 try:
                     if not snode.recreate_hublvol():

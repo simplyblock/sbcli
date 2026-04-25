@@ -721,10 +721,19 @@ class RPCClient:
         # ultra/DISTR_v2/src_code_app_spdk/specs/message_format_rpcs__distrib__v5.txt#L396C1-L396C27
         return self._request("distr_status_events_update", params)
 
-    def bdev_nvme_attach_controller(self, name, nqn, traddr, trsvcid, trtype, multipath=False):
+    def bdev_nvme_attach_controller(self, name, nqn, traddr, trsvcid, trtype, multipath=False,
+                                    ctrlr_loss_timeout_sec=None,
+                                    reconnect_delay_sec=None,
+                                    fast_io_fail_timeout_sec=None):
         """Attach an NVMe-oF controller.
 
         multipath: False/"disable", True/"failover", or "multipath" (ANA-based).
+
+        ctrlr_loss_timeout_sec / reconnect_delay_sec / fast_io_fail_timeout_sec
+        tune SPDK's controller reset window. Defaults (None) leave SPDK's
+        own defaults untouched. For hublvol controllers the coordinator
+        passes higher values so a short peer blip becomes a successful
+        reset instead of a destroy→reattach cycle.
         """
         params = {
             "name": name,
@@ -740,6 +749,12 @@ class RPCClient:
             params["multipath"] = "failover"
         else:
             params["multipath"] = "disable"
+        if ctrlr_loss_timeout_sec is not None:
+            params["ctrlr_loss_timeout_sec"] = int(ctrlr_loss_timeout_sec)
+        if reconnect_delay_sec is not None:
+            params["reconnect_delay_sec"] = int(reconnect_delay_sec)
+        if fast_io_fail_timeout_sec is not None:
+            params["fast_io_fail_timeout_sec"] = int(fast_io_fail_timeout_sec)
         return self._request("bdev_nvme_attach_controller", params)
 
     def bdev_split(self, base_bdev, split_count):
