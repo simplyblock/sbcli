@@ -33,6 +33,8 @@ from e2e_tests.add_node_fio_run import (
     TestAddNodesDuringFioRun,
     TestAddK8sNodesDuringFioRun
 )
+from e2e_tests.k8s_native_add_node import K8sNativeAddNodeTest
+from e2e_tests.k8s_native_node_migration import K8sNativeNodeMigrationTest
 from e2e_tests.reboot_on_another_node_fio_run import TestRestartNodeOnAnotherHost
 from e2e_tests.mgmt_restart_fio_run import TestMgmtNodeReboot
 from e2e_tests.single_node_vm_reboot import TestRebootNodeHost
@@ -171,6 +173,8 @@ ALL_TESTS = [
     TestHASingleNodeOutage,
     TestSingleNodeResizeLvolCone,
     TestAddK8sNodesDuringFioRun,
+    K8sNativeAddNodeTest,
+    K8sNativeNodeMigrationTest,
     # Security E2E tests
     TestLvolSecurityCombinations,
     TestLvolDynamicHostManagement,

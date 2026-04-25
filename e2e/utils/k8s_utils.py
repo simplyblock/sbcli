@@ -857,6 +857,152 @@ class K8sUtils:
         ns = namespace or self.namespace
         self.delete_resource("configmap", name, namespace=ns)
 
+    # ── CRD patch operations (StorageNode / StorageCluster) ────────────────
+
+    def patch_storage_node_add_workers(self, new_workers: list,
+                                        name: str = "simplyblock-node",
+                                        namespace: str = None):
+        """Patch StorageNode CRD to add new worker nodes.
+
+        Uses JSON Patch (RFC 6902) to append each worker name to
+        ``spec.workerNodes``.  Workers must be added in counts of at
+        least 2.
+
+        Parameters
+        ----------
+        new_workers : list[str]
+            Kubernetes node names to add (e.g. ``["worker-4", "worker-5"]``).
+        name : str
+            StorageNode CR name (default ``simplyblock-node``).
+        namespace : str | None
+            Override namespace (default ``self.namespace``).
+        """
+        ns = namespace or self.namespace
+        patch_ops = ",".join(
+            f'{{"op":"add","path":"/spec/workerNodes/-","value":"{w}"}}'
+            for w in new_workers
+        )
+        cmd = (
+            f"kubectl patch storagenodes.storage.simplyblock.io {name} "
+            f"-n {ns} --type=json -p '[{patch_ops}]'"
+        )
+        self.logger.info(
+            f"[K8sUtils] Patching StorageNode '{name}' to add workers: {new_workers}"
+        )
+        out, err = self._exec_kubectl(cmd)
+        return out, err
+
+    def patch_storage_cluster_expand(self, name: str = "simplyblock-cluster",
+                                      namespace: str = None):
+        """Patch StorageCluster CRD to trigger cluster expansion.
+
+        Sets ``spec.action`` to ``expand`` which the operator watches
+        and acts upon.
+
+        Parameters
+        ----------
+        name : str
+            StorageCluster CR name (default ``simplyblock-cluster``).
+        namespace : str | None
+            Override namespace (default ``self.namespace``).
+        """
+        ns = namespace or self.namespace
+        cmd = (
+            f"kubectl patch storageclusters.storage.simplyblock.io {name} "
+            f"-n {ns} --type=merge "
+            f"-p '{{\"spec\":{{\"action\":\"expand\"}}}}'"
+        )
+        self.logger.info(
+            f"[K8sUtils] Patching StorageCluster '{name}' to trigger expansion"
+        )
+        out, err = self._exec_kubectl(cmd)
+        return out, err
+
+    def wait_spdk_pods_ready(self, expected_count: int, timeout: int = 600,
+                              namespace: str = None) -> int:
+        """Wait until at least *expected_count* snode-spdk pods are Running.
+
+        Parameters
+        ----------
+        expected_count : int
+            Minimum number of Running snode-spdk pods to wait for.
+        timeout : int
+            Maximum seconds to wait (default 600).
+        namespace : str | None
+            Override namespace (default ``self.namespace``).
+
+        Returns
+        -------
+        int
+            Number of Running pods once threshold is met.
+
+        Raises
+        ------
+        TimeoutError
+            If threshold is not met within *timeout* seconds.
+        """
+        ns = namespace or self.namespace
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            out, _ = self._exec_kubectl(
+                f"kubectl get pods -n {ns} -l role=simplyblock-storage-node "
+                f"--no-headers 2>/dev/null || true",
+                supress_logs=True,
+            )
+            running = 0
+            for line in out.strip().splitlines():
+                if "Running" in line:
+                    running += 1
+            if running >= expected_count:
+                self.logger.info(
+                    f"[K8sUtils] {running}/{expected_count} snode-spdk pods Running"
+                )
+                return running
+            self.logger.info(
+                f"[K8sUtils] Waiting for snode-spdk pods: "
+                f"{running}/{expected_count} Running…"
+            )
+            time.sleep(10)
+        raise TimeoutError(
+            f"[K8sUtils] Only {running}/{expected_count} snode-spdk pods "
+            f"Running after {timeout}s"
+        )
+
+    def patch_storage_node_migrate(self, node_uuid: str, target_worker: str,
+                                     name: str = "simplyblock-node",
+                                     namespace: str = None):
+        """Patch StorageNode CRD to migrate a storage node to a different worker.
+
+        Triggers a node restart/migration by setting ``spec.action`` to
+        ``restart`` along with the target ``nodeUUID`` and ``workerNode``.
+
+        Parameters
+        ----------
+        node_uuid : str
+            UUID of the storage node to migrate.
+        target_worker : str
+            Kubernetes node name to migrate the storage node onto.
+        name : str
+            StorageNode CR name (default ``simplyblock-node``).
+        namespace : str | None
+            Override namespace (default ``self.namespace``).
+        """
+        ns = namespace or self.namespace
+        patch = (
+            f'{{"spec":{{"action":"restart",'
+            f'"nodeUUID":"{node_uuid}",'
+            f'"workerNode":"{target_worker}"}}}}'
+        )
+        cmd = (
+            f"kubectl patch storagenodes.storage.simplyblock.io {name} "
+            f"-n {ns} --type=merge -p '{patch}'"
+        )
+        self.logger.info(
+            f"[K8sUtils] Migrating storage node {node_uuid} to worker '{target_worker}'"
+        )
+        out, err = self._exec_kubectl(cmd)
+        return out, err
+
     def validate_fio_job(self, job_name: str, namespace: str = None) -> bool:
         """Check Job succeeded and pod logs have no FIO error keywords.
 

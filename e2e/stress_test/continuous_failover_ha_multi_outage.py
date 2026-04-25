@@ -366,7 +366,7 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
     def _disconnect_full_interface(self, node, node_ip):
         self.logger.info("Handling full interface based network interruption...")
         active_interfaces = self.ssh_obj.get_active_interfaces(node_ip)
-        outage_dur = random.choice([300, 30])
+        outage_dur = random.choice([300, 600])  # 5 or 10 minutes
         self.logger.info(f"Selected Outage seconds for n/w outage: {outage_dur}")
         self.disconnect_thread = threading.Thread(
             target=self.ssh_obj.disconnect_all_active_interfaces,

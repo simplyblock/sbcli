@@ -42,6 +42,8 @@ def main():
     parser.add_argument('--new_nodes', type=str, help="New nodes to add (space-separated)", default="")
     parser.add_argument('--k3s_mnode', type=str, help="K8s master node", default="")
     parser.add_argument('--namespace', type=str, help="Kubernetes namespace", default="")
+    parser.add_argument('--new_worker_nodes', type=str, help="New K8s worker node names to add (comma-separated)", default="")
+    parser.add_argument('--migrate_to_worker', type=str, help="K8s worker node name to migrate a storage node onto", default="")
     
 
     args = parser.parse_args()
@@ -53,6 +55,7 @@ def main():
 
     test_class_run = []
     new_nodes = args.new_nodes.strip().split() if args.new_nodes else []
+    new_worker_nodes = [n.strip() for n in args.new_worker_nodes.split(",") if n.strip()] if args.new_worker_nodes else []
     skipped_cases = 0
 
     # group keywords — run a named category of tests
@@ -81,6 +84,20 @@ def main():
                     logger.warning("Skipping TestAddK8sNodesDuringFioRun: requires --new-nodes with IPs in multiples of 2.")
                     skipped_cases += 1
                     continue
+            if cls.__name__ == "K8sNativeAddNodeTest":
+                if not args.run_k8s:
+                    continue
+                if len(new_worker_nodes) == 0 or len(new_worker_nodes) % 2 != 0:
+                    logger.warning("Skipping K8sNativeAddNodeTest: requires --new_worker_nodes with node names in multiples of 2.")
+                    skipped_cases += 1
+                    continue
+            if cls.__name__ == "K8sNativeNodeMigrationTest":
+                if not args.run_k8s:
+                    continue
+                if not args.migrate_to_worker.strip():
+                    logger.warning("Skipping K8sNativeNodeMigrationTest: requires --migrate_to_worker with a K8s worker node name.")
+                    skipped_cases += 1
+                    continue
 
             test_class_run.append(cls)
     else:
@@ -95,6 +112,16 @@ def main():
                     if not args.run_k8s:
                         continue
                     raise ValueError("TestAddK8sNodesDuringFioRun requires --new-nodes with IPs in multiples of 2.")
+                if cls.__name__ == "K8sNativeAddNodeTest":
+                    if not args.run_k8s:
+                        continue
+                    if len(new_worker_nodes) == 0 or len(new_worker_nodes) % 2 != 0:
+                        raise ValueError("K8sNativeAddNodeTest requires --new_worker_nodes with node names in multiples of 2.")
+                if cls.__name__ == "K8sNativeNodeMigrationTest":
+                    if not args.run_k8s:
+                        continue
+                    if not args.migrate_to_worker.strip():
+                        raise ValueError("K8sNativeNodeMigrationTest requires --migrate_to_worker with a K8s worker node name.")
                 test_class_run.append(cls)
 
     if not test_class_run:
@@ -153,7 +180,9 @@ def main():
                         k8s_run=args.run_k8s,
                         new_nodes=new_nodes,
                         k3s_mnode=args.k3s_mnode,
-                        namespace=args.namespace
+                        namespace=args.namespace,
+                        new_worker_nodes=new_worker_nodes,
+                        migrate_to_worker=args.migrate_to_worker,
                         )
         try:
             test_obj.setup()
