@@ -1679,6 +1679,8 @@ class SshUtils:
         """
         Get the list of active physical network interfaces on the node.
 
+        Uses 'ip link show' (kernel-level) instead of nmcli for reliability.
+
         Args:
             node_ip (str): IP of the target node.
         Returns:
@@ -1686,13 +1688,13 @@ class SshUtils:
         """
         try:
             cmd = (
-                "sudo nmcli device status | grep 'connected' | awk '{print $1}' | grep -Ev '^(docker|lo)'"
+                "ip -o link show up | awk -F': ' '{print $2}' | grep -Ev '^(docker|lo|veth|br-)'"
             )
             output, error = self.exec_command(node_ip, cmd)
             if error:
                 self.logger.error(f"Error fetching active interfaces on {node_ip}: {error}")
                 return []
-            interfaces = output.strip().split("\n")
+            interfaces = [iface.strip() for iface in output.strip().split("\n") if iface.strip()]
             self.logger.info(f"Filtered active interfaces on {node_ip}: {interfaces}")
             return interfaces
         except Exception as e:
@@ -1770,40 +1772,44 @@ class SshUtils:
         max_tries: int = 3,
     ):
         """
-        Bring all given interfaces DOWN, verify outage by ping, keep for duration, then bring them UP.
-        Fire-and-forget style; robust against brief SSH flaps.
+        Bring all given interfaces DOWN via ‘ip link set’, verify outage by ping,
+        keep for duration, then bring them UP.
+
+        Uses kernel-level ‘ip link set’ instead of nmcli for deterministic
+        behavior — no NetworkManager state machine, no D-Bus timeouts, and
+        ‘ip link set up’ always restores the link without re-negotiation.
         """
         if not interfaces:
             self.logger.info(f"No active interfaces provided for {node_ip}; skipping NIC down.")
             return
 
-        down_cmd = " && ".join([f"nmcli connection down {i}" for i in interfaces])
-        up_cmd   = " && ".join([f"nmcli connection up {i}" for i in interfaces])
+        down_cmd = " && ".join([f"ip link set {i} down" for i in interfaces])
+        up_cmd   = " && ".join([f"ip link set {i} up" for i in interfaces])
         cmd = f'nohup sh -c "{down_cmd} && sleep {duration_secs} && {up_cmd}" &'
 
         try:
-            self.logger.info(f"Executing combined disconnect command on node {node_ip}: {cmd}")
+            self.logger.info(f"Executing ip link disconnect on node {node_ip}: {cmd}")
             out, err = self.exec_command(node=node_ip, command=cmd, max_retries=1, timeout=20)
             if err:
                 raise Exception(err)
         except Exception as e:
             self.logger.info(f"Command: {cmd}, error: {e}! Checking pings!!")
 
-        # Verify outage begins (best-effort). If ping still works, attempt to issue 'down' again.
+        # Verify outage begins (best-effort). If ping still works, attempt to issue ‘down’ again.
         time.sleep(5)
         tries = 0
         if duration_secs < 100:
             attempts = 2
         else:
             attempts = 5
+        down_only_cmd = f'nohup sh -c "{down_cmd}" &'
         while self._ping_once(node_ip) and attempts > 0:
             tries += 1
             if tries >= max_tries:
                 self.logger.warning(f"Ping to {node_ip} still responding after NIC down attempts; continuing anyway.")
                 break
             self.logger.info(f"Ping to {node_ip} still alive; retrying NIC down...")
-            # re-run only the DOWN part (don’t append sleep again to avoid stacking)
-            self.exec_command(node=node_ip, command=cmd, max_retries=2)
+            self.exec_command(node=node_ip, command=down_only_cmd, max_retries=2)
             time.sleep(3)
             attempts -= 1
 

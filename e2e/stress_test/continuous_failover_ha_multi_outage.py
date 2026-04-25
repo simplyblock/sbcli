@@ -184,7 +184,7 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
         )
 
         def _bring_down(mgmt_ip, iface):
-            cmd = f"nmcli connection down {iface}"
+            cmd = f"ip link set {iface} down"
             try:
                 self.ssh_obj.exec_command(node=mgmt_ip, command=cmd, max_retries=1, timeout=20)
             except Exception as e:
@@ -217,7 +217,7 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
         )
 
         def _bring_up(mgmt_ip, iface):
-            cmd = f"nmcli connection up {iface}"
+            cmd = f"ip link set {iface} up"
             try:
                 self.ssh_obj.exec_command(node=mgmt_ip, command=cmd, max_retries=3, timeout=20)
                 self.logger.info(f"  Reconnected {iface} on {mgmt_ip}")
