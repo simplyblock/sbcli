@@ -16,9 +16,18 @@ logger = utils.get_logger(__name__)
 db = db_controller.DBController()
 
 
-def _get_lvs_leader(lvs_name, candidates):
+def _get_lvs_leader(lvs_name, candidates, local_node_id=None):
+    # The recovering node is DB-marked DOWN while its own port_allow task
+    # runs, so the STATUS_ONLINE filter would skip it on the post-takeover
+    # verify and falsely report "no leader" even after SPDK accepted
+    # bdev_lvol_set_leader(True). When local_node_id is supplied, exempt
+    # that node from the filter and trust the SPDK query (is_node_leader)
+    # for it. Peers are still filtered to avoid RPC to nodes the controller
+    # already knows are unreachable.
     for candidate in candidates:
-        if not candidate or candidate.status != StorageNode.STATUS_ONLINE:
+        if not candidate:
+            continue
+        if candidate.get_id() != local_node_id and candidate.status != StorageNode.STATUS_ONLINE:
             continue
         try:
             if lvol_controller.is_node_leader(candidate, lvs_name):
@@ -290,7 +299,7 @@ def exec_port_allow_task(task):
                     role="primary"
                 )
                 node.rpc_client().bdev_lvol_set_leader(node.lvstore, leader=True)
-                current_leader = _get_lvs_leader(node.lvstore, [node])
+                current_leader = _get_lvs_leader(node.lvstore, [node], local_node_id=node.get_id())
                 if not current_leader:
                     msg = f"No leader available for {node.lvstore}, retry task"
                     logger.warning(msg)
