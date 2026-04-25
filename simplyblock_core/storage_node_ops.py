@@ -2119,9 +2119,34 @@ def restart_storage_node(
         force=False, node_address=None, reattach_volume=False, clear_data=False, new_ssd_pcie=[],
         force_lvol_recreate=False, spdk_proxy_image=None):
     """Wrapper that guarantees the node is reset to OFFLINE if the restart
-    fails after the RESTARTING status has been set.  Without this, any
+    fails after THIS call set the RESTARTING status. Without this, any
     ``return False`` inside the inner logic leaves the node pinned in
-    STATUS_RESTARTING, which blocks all future restart attempts."""
+    STATUS_RESTARTING, which blocks all future restart attempts.
+
+    The cleanup is gated on pre-call status. The earlier version of this
+    wrapper unconditionally wrote OFFLINE whenever the post-call status was
+    RESTARTING, which corrupted concurrent in-flight restarts: a CLI retry
+    bails fast in `_restart_storage_node_impl` (status != OFFLINE → return
+    False) without acquiring the lock, but the wrapper would still see
+    RESTARTING (held by the auto-restart task) and clobber it with OFFLINE.
+    Peers then saw the node as OFFLINE while the running restart was still
+    progressing, and `health_controller` flipped that node's local devices
+    to UNAVAILABLE — leaving them stuck once the restart completed because
+    the device-online block in the impl had already executed earlier.
+
+    Pre-status of RESTARTING or IN_SHUTDOWN means another caller owns the
+    transition; we must not clean up after them. Any other pre-status means
+    the only way post-call status can be RESTARTING is that THIS call's
+    `try_set_node_restarting` acquired the lock and a subsequent step
+    failed — that's the case the cleanup is for."""
+    db_ctrl = DBController()
+    pre_status = None
+    try:
+        pre_status = db_ctrl.get_storage_node_by_id(node_id).status
+    except Exception:
+        logger.warning(f"Could not read pre-call status for {node_id}; "
+                       f"skipping orphan-RESTARTING cleanup as a precaution")
+
     result = False
     try:
         result = _restart_storage_node_impl(
@@ -2134,9 +2159,13 @@ def restart_storage_node(
     except Exception:
         logger.exception("restart_storage_node raised unexpectedly")
     finally:
-        if not result:
+        skip_cleanup_pre = (
+            StorageNode.STATUS_RESTARTING,
+            StorageNode.STATUS_IN_SHUTDOWN,
+            None,
+        )
+        if not result and pre_status not in skip_cleanup_pre:
             try:
-                db_ctrl = DBController()
                 post_node = db_ctrl.get_storage_node_by_id(node_id)
                 if post_node.status == StorageNode.STATUS_RESTARTING:
                     logger.warning(

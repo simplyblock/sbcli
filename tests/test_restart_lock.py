@@ -284,5 +284,143 @@ class TestRestartStorageNodePreCheck(unittest.TestCase):
         self.assertFalse(result)
 
 
+# ---------------------------------------------------------------------------
+# 3. Wrapper cleanup safety: never clobber a concurrent caller's RESTARTING
+# ---------------------------------------------------------------------------
+
+class TestRestartWrapperCleanupSafety(unittest.TestCase):
+    """The wrapper's RESTARTING→OFFLINE cleanup must not fire when another
+    caller owns the lock. Regression test for the soak-test stall on
+    2026-04-25, where a parallel CLI retry bailed fast in the impl
+    (status != OFFLINE) but the wrapper still wrote OFFLINE on top of the
+    auto-restart task's RESTARTING state. That clobber caused
+    health_controller on peers to flip the node's local devices to
+    UNAVAILABLE, and they stayed stuck after the restart completed."""
+
+    def _node(self, status, uuid="node-1", cluster_id="c1"):
+        n = StorageNode()
+        n.uuid = uuid
+        n.status = status
+        n.cluster_id = cluster_id
+        n.mgmt_ip = "10.0.0.1"
+        n.rpc_port = 8080
+        return n
+
+    @patch("simplyblock_core.storage_node_ops.set_node_status")
+    @patch("simplyblock_core.storage_node_ops._restart_storage_node_impl")
+    @patch("simplyblock_core.storage_node_ops.DBController")
+    def test_no_cleanup_when_pre_status_already_restarting(
+            self, mock_db_cls, mock_impl, mock_set_status):
+        """Concurrent caller owns RESTARTING; impl bails fast; wrapper
+        must NOT write OFFLINE. This is the exact bug from the soak run."""
+        from simplyblock_core.storage_node_ops import restart_storage_node
+
+        # Pre-call: node is already RESTARTING (auto-restart task in flight).
+        # Impl returns False fast (status != OFFLINE). Post-call: still RESTARTING.
+        node = self._node(StorageNode.STATUS_RESTARTING)
+        mock_db_cls.return_value.get_storage_node_by_id.return_value = node
+        mock_impl.return_value = False
+
+        result = restart_storage_node("node-1")
+        self.assertFalse(result)
+        mock_set_status.assert_not_called()
+
+    @patch("simplyblock_core.storage_node_ops.set_node_status")
+    @patch("simplyblock_core.storage_node_ops._restart_storage_node_impl")
+    @patch("simplyblock_core.storage_node_ops.DBController")
+    def test_no_cleanup_when_pre_status_in_shutdown(
+            self, mock_db_cls, mock_impl, mock_set_status):
+        """Peer is shutting down; we must not clobber that transition."""
+        from simplyblock_core.storage_node_ops import restart_storage_node
+
+        node = self._node(StorageNode.STATUS_IN_SHUTDOWN)
+        mock_db_cls.return_value.get_storage_node_by_id.return_value = node
+        mock_impl.return_value = False
+
+        result = restart_storage_node("node-1")
+        self.assertFalse(result)
+        mock_set_status.assert_not_called()
+
+    @patch("simplyblock_core.storage_node_ops.set_node_status")
+    @patch("simplyblock_core.storage_node_ops._restart_storage_node_impl")
+    @patch("simplyblock_core.storage_node_ops.DBController")
+    def test_cleanup_runs_when_pre_offline_and_post_restarting(
+            self, mock_db_cls, mock_impl, mock_set_status):
+        """Original positive case: WE acquired RESTARTING (pre=OFFLINE) and
+        a later step failed (impl returned False). Cleanup must reset to
+        OFFLINE so future attempts can proceed."""
+        from simplyblock_core.storage_node_ops import restart_storage_node
+
+        pre_node = self._node(StorageNode.STATUS_OFFLINE)
+        post_node = self._node(StorageNode.STATUS_RESTARTING)
+        # First read = pre-call; second read = post-call (in the finally).
+        mock_db_cls.return_value.get_storage_node_by_id.side_effect = [
+            pre_node, post_node,
+        ]
+        mock_impl.return_value = False
+
+        result = restart_storage_node("node-1")
+        self.assertFalse(result)
+        mock_set_status.assert_called_once_with(
+            "node-1", StorageNode.STATUS_OFFLINE)
+
+    @patch("simplyblock_core.storage_node_ops.set_node_status")
+    @patch("simplyblock_core.storage_node_ops._restart_storage_node_impl")
+    @patch("simplyblock_core.storage_node_ops.DBController")
+    def test_no_cleanup_when_impl_succeeded(
+            self, mock_db_cls, mock_impl, mock_set_status):
+        """Successful restart leaves the node ONLINE — wrapper must not
+        touch status."""
+        from simplyblock_core.storage_node_ops import restart_storage_node
+
+        node = self._node(StorageNode.STATUS_OFFLINE)
+        mock_db_cls.return_value.get_storage_node_by_id.return_value = node
+        mock_impl.return_value = True
+
+        result = restart_storage_node("node-1")
+        self.assertTrue(result)
+        mock_set_status.assert_not_called()
+
+    @patch("simplyblock_core.storage_node_ops.set_node_status")
+    @patch("simplyblock_core.storage_node_ops._restart_storage_node_impl")
+    @patch("simplyblock_core.storage_node_ops.DBController")
+    def test_no_cleanup_when_pre_status_unreadable(
+            self, mock_db_cls, mock_impl, mock_set_status):
+        """If we can't read pre-status (DB error, deleted node), be
+        conservative and skip cleanup rather than risk a clobber."""
+        from simplyblock_core.storage_node_ops import restart_storage_node
+
+        # Pre-read fails; post-read (in finally) would see RESTARTING.
+        post_node = self._node(StorageNode.STATUS_RESTARTING)
+        mock_db_cls.return_value.get_storage_node_by_id.side_effect = [
+            KeyError("node not found"),
+            post_node,
+        ]
+        mock_impl.return_value = False
+
+        result = restart_storage_node("node-1")
+        self.assertFalse(result)
+        mock_set_status.assert_not_called()
+
+    @patch("simplyblock_core.storage_node_ops.set_node_status")
+    @patch("simplyblock_core.storage_node_ops._restart_storage_node_impl")
+    @patch("simplyblock_core.storage_node_ops.DBController")
+    def test_no_cleanup_when_post_status_not_restarting(
+            self, mock_db_cls, mock_impl, mock_set_status):
+        """Pre=OFFLINE, post=OFFLINE (impl bailed before acquisition).
+        Nothing to clean up."""
+        from simplyblock_core.storage_node_ops import restart_storage_node
+
+        offline_node = self._node(StorageNode.STATUS_OFFLINE)
+        mock_db_cls.return_value.get_storage_node_by_id.side_effect = [
+            offline_node, offline_node,
+        ]
+        mock_impl.return_value = False
+
+        result = restart_storage_node("node-1")
+        self.assertFalse(result)
+        mock_set_status.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
