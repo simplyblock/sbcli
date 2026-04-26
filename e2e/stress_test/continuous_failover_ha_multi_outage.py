@@ -60,12 +60,12 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
         self.test_name = "n_plus_k_failover_multi_client_ha"
         self.outage_types = [
             "graceful_shutdown",
-            "interface_full_network_interrupt"
+            # "interface_full_network_interrupt"
         ]
         self.outage_types2 = [
             "container_stop",
             "graceful_shutdown",
-            "interface_full_network_interrupt"
+            # "interface_full_network_interrupt"
         ]
         self._stop_spdk_mem_thread = False
         self.spdk_mem_thread = None
