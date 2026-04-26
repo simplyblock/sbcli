@@ -11,6 +11,7 @@ from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice, RemoteDevice, RemoteJMDevice
 from simplyblock_core.rpc_client import RPCClient, RPCException
+from simplyblock_core.settings import Settings
 from simplyblock_core.snode_client import SNodeClient
 
 logger = utils.get_logger(__name__)
@@ -148,14 +149,24 @@ class StorageNode(BaseNodeObject):
     def client(self, **kwargs):
         """Return API client to this node
         """
-        return SNodeClient(self.api_endpoint, **kwargs)
+        host = self.api_endpoint
+        if Settings().tls_enabled:
+            port = self.api_endpoint.rsplit(":", 1)[1]
+            host = f"{self._k8s_node_label()}.simplyblock-storage-node-api.{self.cr_namespace}.svc.cluster.local:{port}"
+        return SNodeClient(host, **kwargs)
 
     def rpc_client(self, **kwargs):
         """Return rpc client to this node
         """
+        host = self.mgmt_ip
+        if Settings().tls_enabled:
+            host = f"{self._k8s_node_label()}.simplyblock-spdk-proxy.{self.cr_namespace}.svc.cluster.local"
         return RPCClient(
-            self.mgmt_ip, self.rpc_port,
+            host, self.rpc_port,
             self.rpc_username, self.rpc_password, **kwargs)
+
+    def _k8s_node_label(self) -> str:
+        return self.hostname.removesuffix(f"_{self.rpc_port}")
 
     def expose_bdev(self, nqn, bdev_name, model_number, uuid, nguid, port,
                     ana_state=None, min_cntlid=1):
