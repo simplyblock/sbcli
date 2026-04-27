@@ -346,6 +346,12 @@ jobs:
             sleep 5
           done
 
+          echo "=== Phase 7: Delete Released PVs from simplyblock ==="
+          for pv in $(kubectl get pv --no-headers 2>/dev/null | grep 'simplyblock/' | awk '{print $1}'); do
+            echo "Deleting PV $pv"
+            kubectl delete pv "$pv" --ignore-not-found 2>/dev/null || true
+          done
+
           echo "=== Cleanup complete ==="
 
       # ── Label nodes ─────────────────────────────────────────────────────────
