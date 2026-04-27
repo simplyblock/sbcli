@@ -61,7 +61,7 @@ class K8sNativeNodeMigrationTest(TestClusterBase):
 
         # Sizing
         self.pvc_size = "10Gi"
-        self.fio_size = "3G"
+        self.fio_size = "1G"
         self.FIO_RUNTIME = 2000
 
         # Counts
@@ -148,7 +148,7 @@ class K8sNativeNodeMigrationTest(TestClusterBase):
         return (
             f"[global]\n"
             f"name={name}-fio\n"
-            f"filename=/spdkvol/fio-testfile\n"
+            f"filename_format=/spdkvol/fio-testfile.$jobnum\n"
             f"rw=randrw\n"
             f"rwmixread=50\n"
             f"bs={bs}\n"

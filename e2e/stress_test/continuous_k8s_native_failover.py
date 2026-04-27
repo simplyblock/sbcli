@@ -72,7 +72,7 @@ class K8sNativeFailoverTest(TestClusterBase):
         # Sizing
         self.pvc_size = "10Gi"
         self.int_pvc_size = 10
-        self.fio_size = "3G"
+        self.fio_size = "1G"
         self.FIO_RUNTIME = 2000
 
         # Counts
@@ -416,7 +416,7 @@ class K8sNativeFailoverTest(TestClusterBase):
         return (
             f"[global]\n"
             f"name={name}-fio\n"
-            f"filename=/spdkvol/fio-testfile\n"
+            f"filename_format=/spdkvol/fio-testfile.$jobnum\n"
             f"rw=randrw\n"
             f"rwmixread=50\n"
             f"bs={bs}\n"
