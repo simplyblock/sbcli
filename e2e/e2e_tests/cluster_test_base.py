@@ -81,6 +81,7 @@ class TestClusterBase:
         self.container_nodes = {}
         self.docker_logs_path = ""
         self.runner_k8s_log = ""
+        self.test_start_time_utc = None
 
     def setup(self):
         """Contains setup required to run the test case
@@ -142,6 +143,9 @@ class TestClusterBase:
         self.ssh_obj.ensure_nfs_mounted("localhost", nfs_server, nfs_path, nfs_mount_point, is_local=True)
 
         self.fio_node = self.client_machines if self.client_machines else [self.mgmt_nodes[0]]
+
+        # Record UTC start time for Graylog log export at teardown
+        self.test_start_time_utc = datetime.now(timezone.utc)
 
         # Construct the logs path with test name and timestamp
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -1047,6 +1051,342 @@ class TestClusterBase:
         """Print logs path on nfs
         """
         self.logger.info(f"Logs Path: {self.docker_logs_path}")
+
+    # ------------------------------------------------------------------
+    # Graylog log export helpers
+    # ------------------------------------------------------------------
+
+    def _build_graylog_session(self):
+        """Create a requests.Session pre-configured for Graylog API auth."""
+        import requests
+        session = requests.Session()
+        session.auth = ("admin", self.cluster_secret)
+        session.headers.update({
+            "X-Requested-By": "sb-log-collector",
+            "Accept": "application/json",
+        })
+        return session
+
+    def _graylog_base_url(self):
+        """Return the Graylog API base URL for the first management node."""
+        mgmt_ip = self.mgmt_nodes[0]
+        if self.k8s_test:
+            return f"http://{mgmt_ip}:9000/api"
+        return f"http://{mgmt_ip}/graylog/api"
+
+    def _graylog_discover_containers(self, session, base_url, from_iso, to_iso):
+        """Discover all unique container names in the time window via Graylog.
+
+        Tries the ``/terms`` stats endpoint first; falls back to extracting
+        names from a sample search page when that endpoint is unavailable.
+
+        Returns:
+            list[str]: container names, or empty list on failure.
+        """
+        cname_field = (
+            "kubernetes_container_name" if self.k8s_test else "container_name"
+        )
+
+        # Primary: /terms endpoint
+        terms_url = f"{base_url}/search/universal/absolute/terms"
+        params = {
+            "field": cname_field,
+            "query": "*",
+            "from": from_iso,
+            "to": to_iso,
+            "size": 200,
+        }
+        try:
+            resp = session.get(terms_url, params=params, timeout=30)
+            if resp.ok:
+                terms = resp.json().get("terms", {})
+                if terms:
+                    self.logger.info(
+                        f"[graylog-export] Discovered {len(terms)} containers "
+                        f"via terms endpoint"
+                    )
+                    return list(terms.keys())
+        except Exception as exc:
+            self.logger.warning(
+                f"[graylog-export] Terms endpoint failed: {exc}"
+            )
+
+        # Fallback: sample a search page
+        self.logger.info(
+            "[graylog-export] Falling back to search-based container discovery"
+        )
+        search_url = f"{base_url}/search/universal/absolute"
+        params = {
+            "query": "*",
+            "from": from_iso,
+            "to": to_iso,
+            "limit": 1000,
+            "offset": 0,
+            "sort": "timestamp:asc",
+            "fields": f"timestamp,{cname_field}",
+        }
+        try:
+            resp = session.get(search_url, params=params, timeout=60)
+            if resp.ok:
+                messages = resp.json().get("messages", [])
+                names = {
+                    m.get("message", {}).get(cname_field, "")
+                    for m in messages
+                }
+                names.discard("")
+                self.logger.info(
+                    f"[graylog-export] Discovered {len(names)} containers "
+                    f"via search fallback"
+                )
+                return list(names)
+        except Exception as exc:
+            self.logger.warning(
+                f"[graylog-export] Search fallback also failed: {exc}"
+            )
+
+        return []
+
+    @staticmethod
+    def _gl_escape(value):
+        """Escape Lucene special characters (dots) in Graylog field queries."""
+        return value.replace(".", "\\.")
+
+    def _graylog_fetch_container_logs(
+        self, session, base_url, container_name, from_iso, to_iso, out_path
+    ):
+        """Fetch all log lines for *container_name* and write them to *out_path*.
+
+        Uses paginated Graylog search (page size 1000).  If the total exceeds
+        100 000, the window is split into 10-minute sub-windows — the same
+        strategy used by ``simplyblock_core/scripts/collect_logs.py``.
+
+        Returns:
+            int: number of lines written.
+        """
+        import requests as _requests
+
+        PAGE_SIZE = 1000
+        MAX_RESULT_WINDOW = 100_000
+
+        # The query uses the mode-specific field name, but the fields list
+        # and formatter always use "container_name" — matching collect_logs.py.
+        cname_query_field = (
+            "kubernetes_container_name" if self.k8s_test else "container_name"
+        )
+        search_url = f"{base_url}/search/universal/absolute"
+        query = f'{cname_query_field}:"{self._gl_escape(container_name)}"'
+
+        def _fetch_page(q, f_iso, t_iso, limit, offset):
+            params = {
+                "query": q, "from": f_iso, "to": t_iso,
+                "limit": limit, "offset": offset,
+                "sort": "timestamp:asc",
+                "fields": "timestamp,source,container_name,level,message",
+            }
+            try:
+                resp = session.get(
+                    search_url, params=params, timeout=90,
+                    headers={"Accept": "application/json"},
+                )
+                resp.raise_for_status()
+            except _requests.RequestException as exc:
+                self.logger.warning(
+                    f"[graylog-export] page request failed "
+                    f"(offset={offset}): {exc}"
+                )
+                return None, 0
+
+            if not resp.text.strip():
+                self.logger.warning(
+                    f"[graylog-export] empty response "
+                    f"(offset={offset}, status={resp.status_code})"
+                )
+                return None, 0
+            try:
+                data = resp.json()
+            except ValueError as exc:
+                self.logger.warning(
+                    f"[graylog-export] invalid JSON "
+                    f"(offset={offset}): {exc}"
+                )
+                return None, 0
+            return data.get("messages", []), data.get("total_results", 0)
+
+        def _fmt(msg):
+            ts = msg.get("timestamp", "")
+            src = msg.get("source", "")
+            cname = msg.get("container_name", "")
+            lvl = msg.get("level", "")
+            text = str(msg.get("message", "")).replace("\n", "\\n")
+            return f"{ts}  src={src}  ctr={cname}  lvl={lvl}  {text}"
+
+        def _write_window(fh, q, f_iso, t_iso):
+            written = 0
+            offset = 0
+            msgs, total = _fetch_page(q, f_iso, t_iso, 1, 0)
+            if msgs is None:
+                return 0
+            while offset < total:
+                msgs, _ = _fetch_page(q, f_iso, t_iso, PAGE_SIZE, offset)
+                if not msgs:
+                    break
+                for m in msgs:
+                    fh.write(_fmt(m.get("message", {})) + "\n")
+                    written += 1
+                offset += len(msgs)
+                if len(msgs) < PAGE_SIZE:
+                    break
+            return written
+
+        # Probe total result count
+        msgs, total = _fetch_page(query, from_iso, to_iso, 1, 0)
+        if msgs is None:
+            Path(out_path).touch()
+            return 0
+
+        written = 0
+        with open(out_path, "w") as fh:
+            if total <= MAX_RESULT_WINDOW:
+                written = _write_window(fh, query, from_iso, to_iso)
+            else:
+                # Split into 10-minute sub-windows
+                self.logger.info(
+                    f"[graylog-export] {container_name}: >100k entries, "
+                    f"using 10-min sub-windows"
+                )
+                t = datetime.fromisoformat(from_iso.replace("Z", "+00:00"))
+                t_end = datetime.fromisoformat(to_iso.replace("Z", "+00:00"))
+                chunk = timedelta(minutes=10)
+                while t < t_end:
+                    chunk_end = min(t + chunk, t_end)
+                    c_from = t.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+                    c_to = chunk_end.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+                    written += _write_window(fh, query, c_from, c_to)
+                    t = chunk_end
+
+        return written
+
+    def export_graylog_logs(self):
+        """Export all container logs from Graylog for the test time window.
+
+        Each container's logs are saved to a separate file under
+        ``<docker_logs_path>/graylog_logs/<container>.log``.
+
+        This method is fully resilient — all exceptions are caught and logged
+        so that it never disrupts the teardown sequence.
+        """
+        try:
+            import requests  # noqa: F811
+        except ImportError:
+            self.logger.warning(
+                "[graylog-export] 'requests' library not available, skipping"
+            )
+            return
+
+        if not getattr(self, "mgmt_nodes", None):
+            self.logger.warning(
+                "[graylog-export] No management nodes available, skipping"
+            )
+            return
+        if not self.cluster_secret:
+            self.logger.warning(
+                "[graylog-export] No cluster secret available, skipping"
+            )
+            return
+        if not self.test_start_time_utc:
+            self.logger.warning(
+                "[graylog-export] test_start_time_utc not set, skipping"
+            )
+            return
+        if not self.docker_logs_path:
+            self.logger.warning(
+                "[graylog-export] docker_logs_path not set, skipping"
+            )
+            return
+
+        try:
+            from_iso = self.test_start_time_utc.strftime(
+                "%Y-%m-%dT%H:%M:%S.000Z"
+            )
+            to_iso = datetime.now(timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%S.000Z"
+            )
+
+            self.logger.info(
+                f"[graylog-export] Exporting logs: {from_iso} -> {to_iso}"
+            )
+
+            base_url = self._graylog_base_url()
+            session = self._build_graylog_session()
+
+            # Verify Graylog is reachable
+            try:
+                r = session.get(f"{base_url}/system", timeout=10)
+                if r.status_code != 200:
+                    self.logger.warning(
+                        f"[graylog-export] Graylog returned HTTP "
+                        f"{r.status_code}, attempting anyway"
+                    )
+            except Exception as exc:
+                self.logger.warning(
+                    f"[graylog-export] Graylog unreachable ({exc}), "
+                    f"skipping export"
+                )
+                return
+
+            # Discover containers
+            containers = self._graylog_discover_containers(
+                session, base_url, from_iso, to_iso
+            )
+            if not containers:
+                self.logger.warning(
+                    "[graylog-export] No containers discovered, "
+                    "skipping export"
+                )
+                return
+
+            # Create output directory
+            graylog_dir = os.path.join(self.docker_logs_path, "graylog_logs")
+            os.makedirs(graylog_dir, exist_ok=True)
+
+            self.logger.info(
+                f"[graylog-export] Fetching logs for {len(containers)} "
+                f"containers -> {graylog_dir}"
+            )
+
+            total_lines = 0
+            for container in sorted(containers):
+                safe_name = (
+                    container.replace("/", "_")
+                    .replace("\\", "_")
+                    .replace(":", "_")
+                    .strip("_")
+                ) or "unnamed"
+                out_path = os.path.join(graylog_dir, f"{safe_name}.log")
+
+                try:
+                    n = self._graylog_fetch_container_logs(
+                        session, base_url, container,
+                        from_iso, to_iso, out_path,
+                    )
+                    total_lines += n
+                    self.logger.info(
+                        f"[graylog-export]   {container}: {n} lines"
+                    )
+                except Exception as exc:
+                    self.logger.warning(
+                        f"[graylog-export] Failed to fetch {container}: {exc}"
+                    )
+
+            self.logger.info(
+                f"[graylog-export] Complete: {total_lines} total lines "
+                f"from {len(containers)} containers"
+            )
+
+        except Exception as exc:
+            self.logger.warning(
+                f"[graylog-export] Unexpected error, skipping: {exc}"
+            )
 
     def _get_all_nodes(self):
         """Return ordered, de-duplicated list of mgmt + storage nodes."""

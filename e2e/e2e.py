@@ -207,6 +207,7 @@ def main():
             test_obj.teardown(delete_lvols=True, close_ssh=False)
             all_nodes = test_obj._get_all_nodes()
             test_obj.ssh_obj.collect_final_docker_logs_simple(all_nodes, test_obj.docker_logs_path)
+            test_obj.export_graylog_logs()
             test_obj.teardown(delete_lvols=False, close_ssh=True)
             # pass
         except Exception as _:
