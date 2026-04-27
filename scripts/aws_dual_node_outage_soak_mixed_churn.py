@@ -21,7 +21,10 @@ except ImportError:
 
 
 UUID_RE = re.compile(r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}")
-NQN_RE = re.compile(r"-n\s+(\S+)")
+# `sbctl lvol connect` emits `sudo nvme connect ... --nqn=<NQN> ...`
+# (long form with `=`, see lvol_controller.py:1737). Tolerate the legacy
+# short form `-n <NQN>` as well so older sbctl deployments still parse.
+NQN_RE = re.compile(r"(?:--nqn[=\s]+|-n\s+)(\S+)")
 
 
 OUTAGE_METHODS = (
