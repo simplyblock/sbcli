@@ -157,6 +157,13 @@ class DBController(metaclass=Singleton):
                 lvols.append(lvol)
         return sorted(lvols, key=lambda x: x.create_dt)
 
+    def get_lvols_by_namespace(self, namespace) -> List[LVol]:
+        lvols = []
+        for lvol in self.get_lvols():
+            if lvol.namespace and lvol.namespace == namespace:
+                lvols.append(lvol)
+        return sorted(lvols, key=lambda x: x.create_dt)
+
     def get_hostnames_by_pool_id(self, pool_id) -> List[str]:
         lvols = self.get_lvols_by_pool_id(pool_id)
         hostnames = []

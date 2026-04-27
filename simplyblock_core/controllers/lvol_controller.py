@@ -2953,3 +2953,32 @@ def remove_host_from_lvol(lvol_id, host_nqn):
     if errors:
         return True, f"Warning: SPDK remove_host failed on nodes: {', '.join(errors)}"
     return True, None
+
+
+def get_master_lvols_by_pool_uuid(pool_id, is_json):
+    db_controller = DBController()
+    lvols = db_controller.get_lvols_by_pool_id(pool_id)
+
+    data = []
+
+    for lvol in lvols:
+        if lvol.deleted is True and all is False:
+            continue
+        if lvol.namespace:
+            continue
+
+        lvol_data = {
+            "Id": lvol.uuid,
+            "Name": lvol.lvol_name,
+            "Size": utils.humanbytes(lvol.size),
+            "Hostname": lvol.hostname,
+            "Status": lvol.status,
+            "Namespaces": len(db_controller.get_lvols_by_namespace(lvol.uuid)),
+            "MaxNamespaces": lvol.max_namespace_per_subsys,
+        }
+        data.append(lvol_data)
+
+    if is_json:
+        return json.dumps(data, indent=2)
+    else:
+        return utils.print_table(data)

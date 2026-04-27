@@ -781,6 +781,9 @@ class CLIWrapperBase:
             return False
         return True
 
+    def storage_pool__get_master_lvols(self, sub_command, args):
+        return lvol_controller.get_master_lvols_by_pool_uuid(args.pool_id)
+
     def snapshot__add(self, sub_command, args):
         backup = getattr(args, 'backup', False)
         snapshot_id, error = snapshot_controller.add(args.volume_id, args.name, backup=backup)
