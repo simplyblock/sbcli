@@ -1808,10 +1808,39 @@ class TestClusterBase:
                     .replace(":", "_").strip("_")
                 ) or "unnamed"
 
+            # Pre-populate the probe cache before parallel fetch
+            os_probe_cache = {}
+            if use_opensearch:
+                try:
+                    from_ms = int(
+                        datetime.fromisoformat(
+                            from_iso.replace("Z", "+00:00")
+                        ).timestamp() * 1000
+                    )
+                    to_ms = int(
+                        datetime.fromisoformat(
+                            to_iso.replace("Z", "+00:00")
+                        ).timestamp() * 1000
+                    )
+                    os_probe_cache["index"] = self._os_get_index(os_session, os_url)
+                    os_probe_cache["probe"] = self._os_probe(
+                        os_session, os_url, os_probe_cache["index"], from_ms, to_ms
+                    )
+                except Exception as exc:
+                    self.logger.warning(
+                        f"[graylog-export] Failed to pre-populate probe cache: {exc}"
+                    )
+
+            # Fetch logs in parallel -- each container in its own thread
+            # so one slow/failing container does not block others.
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+
+            max_workers = min(8, len(pairs))
             total_lines = 0
-            os_probe_cache = {}  # shared across OpenSearch calls
-            for container_name, source in sorted(pairs):
-                # Build filename: container__source.log
+            lock = threading.Lock()
+
+            def _fetch_one(container_name, source):
+                """Fetch a single container's logs. Returns (label, line_count)."""
                 safe_cname = _safe(container_name)
                 if source:
                     safe_source = _safe(source)
@@ -1819,30 +1848,46 @@ class TestClusterBase:
                 else:
                     fname = f"{safe_cname}.log"
                 out_path = os.path.join(graylog_dir, fname)
-
                 label = f"{container_name}@{source}" if source else container_name
-                try:
-                    if use_opensearch:
-                        n = self._os_fetch_container_logs(
-                            os_session, os_url,
-                            container_name, source,
-                            from_iso, to_iso, out_path,
-                            probe_cache=os_probe_cache,
-                        )
-                    else:
-                        n = self._graylog_fetch_container_logs(
-                            session, base_url,
-                            container_name, source,
-                            from_iso, to_iso, out_path,
-                        )
-                    total_lines += n
-                    self.logger.info(
-                        f"[graylog-export]   {label}: {n} lines"
+
+                # Each thread gets its own session to avoid thread-safety issues
+                thread_os_session = self._build_opensearch_session()
+                thread_gl_session = self._build_graylog_session()
+
+                if use_opensearch:
+                    n = self._os_fetch_container_logs(
+                        thread_os_session, os_url,
+                        container_name, source,
+                        from_iso, to_iso, out_path,
+                        probe_cache=os_probe_cache,
                     )
-                except Exception as exc:
-                    self.logger.warning(
-                        f"[graylog-export] Failed to fetch {label}: {exc}"
+                else:
+                    n = self._graylog_fetch_container_logs(
+                        thread_gl_session, base_url,
+                        container_name, source,
+                        from_iso, to_iso, out_path,
                     )
+                return label, n
+
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {
+                    executor.submit(_fetch_one, cname, src): (cname, src)
+                    for cname, src in sorted(pairs)
+                }
+                for future in as_completed(futures):
+                    cname, src = futures[future]
+                    label = f"{cname}@{src}" if src else cname
+                    try:
+                        label, n = future.result()
+                        with lock:
+                            total_lines += n
+                        self.logger.info(
+                            f"[graylog-export]   {label}: {n} lines"
+                        )
+                    except Exception as exc:
+                        self.logger.warning(
+                            f"[graylog-export] Failed to fetch {label}: {exc}"
+                        )
 
             self.logger.info(
                 f"[graylog-export] Complete: {total_lines} total lines "

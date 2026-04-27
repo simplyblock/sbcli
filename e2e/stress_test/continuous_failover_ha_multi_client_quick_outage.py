@@ -233,7 +233,7 @@ class RandomRapidFailoverNoGap(TestLvolHACluster):
                     nqn = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)[0]["nqn"]
                     self.ssh_obj.disconnect_nvme(node=client_node, nqn_grep=nqn)
                     self.logger.info(f"[LFNG] connect error → clean lvol {lvol_name}")
-                    self.sbcli_utils.delete_lvol(lvol_name=lvol_name, max_attempt=20, skip_error=True)
+                    self.sbcli_utils.delete_lvol(lvol_name=lvol_name, max_attempt=120, skip_error=True)
                     sleep_n_sec(3)
                     del self.lvol_mount_details[lvol_name]
                     self.node_vs_lvol[lvol_node_id].remove(lvol_name)
@@ -314,7 +314,7 @@ class RandomRapidFailoverNoGap(TestLvolHACluster):
                     nqn = self.sbcli_utils.get_lvol_details(lvol_id=self.clone_mount_details[clone_name]["ID"])[0]["nqn"]
                     self.ssh_obj.disconnect_nvme(node=client, nqn_grep=nqn)
                     self.logger.info("[LFNG] connect clone error → cleanup")
-                    self.sbcli_utils.delete_lvol(lvol_name=clone_name, max_attempt=20, skip_error=True)
+                    self.sbcli_utils.delete_lvol(lvol_name=clone_name, max_attempt=120, skip_error=True)
                     sleep_n_sec(3)
                     del self.clone_mount_details[clone_name]
                     continue
@@ -721,7 +721,7 @@ class RandomRapidFailoverNoGapV2WithMigration(RandomRapidFailoverNoGap):
                     nqn = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)[0]["nqn"]
                     self.ssh_obj.disconnect_nvme(node=client_node, nqn_grep=nqn)
                     self.logger.info(f"[V2] connect error → cleaning lvol {lvol_name}")
-                    self.sbcli_utils.delete_lvol(lvol_name=lvol_name, max_attempt=20, skip_error=True)
+                    self.sbcli_utils.delete_lvol(lvol_name=lvol_name, max_attempt=120, skip_error=True)
                     sleep_n_sec(3)
                     del self.lvol_mount_details[lvol_name]
                     self.node_vs_lvol[lvol_node_id].remove(lvol_name)

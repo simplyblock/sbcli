@@ -419,7 +419,7 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                     if self.k8s_test and clone_details.get("pending_connect"):
                         # Clone was never connected/mounted — skip FIO/unmount/disconnect
                         self.logger.info(f"[pending_connect] Deleting deferred clone '{clone_name}' (no FIO/mount to clean up).")
-                        deleted = self.sbcli_utils.delete_lvol(clone_name, max_attempt=20, skip_error=True)
+                        deleted = self.sbcli_utils.delete_lvol(clone_name, max_attempt=120, skip_error=True)
                         if not deleted:
                             self.record_pending_lvol_delete(clone_name, clone_details['ID'])
                         if clone_name in self.lvols_without_sec_connect:
@@ -456,7 +456,7 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                         self.disconnect_lvol(clone_details['ID'])
                         self.ssh_obj.unmount_path(clone_details["Client"], f"/mnt/{clone_name}")
                         self.ssh_obj.remove_dir(clone_details["Client"], dir_path=f"/mnt/{clone_name}")
-                        deleted = self.sbcli_utils.delete_lvol(clone_name, max_attempt=20, skip_error=True)
+                        deleted = self.sbcli_utils.delete_lvol(clone_name, max_attempt=120, skip_error=True)
                         if not deleted:
                             self.record_pending_lvol_delete(clone_name, clone_details['ID'])
                         sleep_n_sec(30)
@@ -509,7 +509,7 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
             self.disconnect_lvol(self.lvol_mount_details[lvol]['ID'])
             self.ssh_obj.unmount_path(self.lvol_mount_details[lvol]["Client"], f"/mnt/{lvol}")
             self.ssh_obj.remove_dir(self.lvol_mount_details[lvol]["Client"], dir_path=f"/mnt/{lvol}")
-            deleted = self.sbcli_utils.delete_lvol(lvol, max_attempt=20, skip_error=True)
+            deleted = self.sbcli_utils.delete_lvol(lvol, max_attempt=120, skip_error=True)
             if not deleted:
                 self.record_pending_lvol_delete(lvol, self.lvol_mount_details[lvol]['ID'])
             self.ssh_obj.delete_files(self.lvol_mount_details[lvol]["Client"], [f"{self.log_path}/local-{lvol}_fio*"])

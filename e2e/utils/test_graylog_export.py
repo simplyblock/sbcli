@@ -646,9 +646,24 @@ def main():
             .replace(":", "_").strip("_")
         ) or "unnamed"
 
-    total_lines = 0
+    # Pre-populate probe cache before parallel fetch
     os_probe_cache = {}
-    for container_name, source in sorted(pairs):
+    if os_ok:
+        try:
+            os_probe_cache["index"] = os_get_index()
+            os_probe_cache["probe"] = os_probe(os_probe_cache["index"])
+        except Exception as exc:
+            print(f"  WARN: Failed to pre-populate probe cache: {exc}")
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import threading
+
+    max_workers = min(8, len(pairs))
+    total_lines = 0
+    lock = threading.Lock()
+
+    def _fetch_one(container_name, source):
+        """Fetch a single container's logs. Returns (label, line_count)."""
         safe_cname = _safe(container_name)
         if source:
             safe_source = _safe(source)
@@ -656,20 +671,32 @@ def main():
         else:
             fname = f"{safe_cname}.log"
         out_path = os.path.join(OUTPUT_DIR, fname)
-
         label = f"{container_name}@{source}" if source else container_name
-        try:
-            if os_ok:
-                n = os_fetch_container_logs(
-                    container_name, source, out_path,
-                    probe_cache=os_probe_cache,
-                )
-            else:
-                n = gl_fetch_container_logs(container_name, source, out_path)
-            total_lines += n
-            print(f"  {label:<60} {n:>8,} lines")
-        except Exception as exc:
-            print(f"  {label:<60} FAILED: {exc}")
+
+        if os_ok:
+            n = os_fetch_container_logs(
+                container_name, source, out_path,
+                probe_cache=os_probe_cache,
+            )
+        else:
+            n = gl_fetch_container_logs(container_name, source, out_path)
+        return label, n
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(_fetch_one, cname, src): (cname, src)
+            for cname, src in sorted(pairs)
+        }
+        for future in as_completed(futures):
+            cname, src = futures[future]
+            label = f"{cname}@{src}" if src else cname
+            try:
+                label, n = future.result()
+                with lock:
+                    total_lines += n
+                print(f"  {label:<60} {n:>8,} lines")
+            except Exception as exc:
+                print(f"  {label:<60} FAILED: {exc}")
 
     print("-" * 64)
     print(f"  TOTAL: {total_lines:,} lines from {len(pairs)} (container, source) pairs")
