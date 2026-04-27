@@ -69,7 +69,9 @@ class TestClusterBase:
         self.pool_name = "test_pool"
         self.lvol_name = f"test_lvl_{generate_random_sequence(4)}"
         self.mount_path = "/mnt/test_location"
-        self.nfs_log_base = os.environ.get("NFS_LOG_BASE", "/mnt/nfs_share")
+        _skip_nfs = os.environ.get("SKIP_NFS", "").strip() in ("1", "true")
+        _default_log_base = os.path.join(os.path.expanduser("~"), "e2e-logs") if _skip_nfs else "/mnt/nfs_share"
+        self.nfs_log_base = os.environ.get("NFS_LOG_BASE", _default_log_base)
         self.log_path = f"{os.path.dirname(self.mount_path)}/log_file.log"
         self.base_cmd = os.environ.get("SBCLI_CMD", "sbcli-dev")
         self.fio_debug = kwargs.get("fio_debug", False)
@@ -131,16 +133,20 @@ class TestClusterBase:
             )
             sleep_n_sec(2)
 
-        nfs_server = "10.10.10.140"
-        nfs_path = "/srv/nfs_share"
-        nfs_mount_point = "/mnt/nfs_share"
+        # Mount NFS for shared log access (skip for cloud clusters)
+        if os.environ.get("SKIP_NFS", "").strip() not in ("1", "true"):
+            nfs_server = "10.10.10.140"
+            nfs_path = "/srv/nfs_share"
+            nfs_mount_point = "/mnt/nfs_share"
 
-        if not self.k8s_test:
-            for node in self.storage_nodes + self.mgmt_nodes:
+            if not self.k8s_test:
+                for node in self.storage_nodes + self.mgmt_nodes:
+                    self.ssh_obj.ensure_nfs_mounted(node, nfs_server, nfs_path, nfs_mount_point)
+            for node in self.client_machines:
                 self.ssh_obj.ensure_nfs_mounted(node, nfs_server, nfs_path, nfs_mount_point)
-        for node in self.client_machines:
-            self.ssh_obj.ensure_nfs_mounted(node, nfs_server, nfs_path, nfs_mount_point)
-        self.ssh_obj.ensure_nfs_mounted("localhost", nfs_server, nfs_path, nfs_mount_point, is_local=True)
+            self.ssh_obj.ensure_nfs_mounted("localhost", nfs_server, nfs_path, nfs_mount_point, is_local=True)
+        else:
+            self.logger.info("SKIP_NFS set — skipping NFS mount (cloud cluster or no NFS available)")
 
         self.fio_node = self.client_machines if self.client_machines else [self.mgmt_nodes[0]]
 

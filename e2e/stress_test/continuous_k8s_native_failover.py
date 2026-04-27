@@ -212,17 +212,20 @@ class K8sNativeFailoverTest(TestClusterBase):
                 sleep_n_sec(2)
                 self.ssh_obj.set_aio_max_nr(client)
 
-            # Mount NFS on clients for shared log access
-            nfs_server = "10.10.10.140"
-            nfs_path = "/srv/nfs_share"
-            nfs_mount_point = "/mnt/nfs_share"
-            for client in self.client_machines:
+            # Mount NFS on clients for shared log access (skip for cloud clusters)
+            if os.environ.get("SKIP_NFS", "").strip() not in ("1", "true"):
+                nfs_server = "10.10.10.140"
+                nfs_path = "/srv/nfs_share"
+                nfs_mount_point = "/mnt/nfs_share"
+                for client in self.client_machines:
+                    self.ssh_obj.ensure_nfs_mounted(
+                        client, nfs_server, nfs_path, nfs_mount_point
+                    )
                 self.ssh_obj.ensure_nfs_mounted(
-                    client, nfs_server, nfs_path, nfs_mount_point
+                    "localhost", nfs_server, nfs_path, nfs_mount_point, is_local=True
                 )
-            self.ssh_obj.ensure_nfs_mounted(
-                "localhost", nfs_server, nfs_path, nfs_mount_point, is_local=True
-            )
+            else:
+                self.logger.info("[K8s] SKIP_NFS set — skipping NFS mount on clients")
 
             # Create log directories on clients
             for client in self.fio_node:
