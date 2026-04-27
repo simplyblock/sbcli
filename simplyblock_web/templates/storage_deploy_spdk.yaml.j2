@@ -56,6 +56,18 @@ spec:
     - name: dockercontainerlogdirectory
       hostPath:
         path: /var/log/pods
+    {% if TLS_ENABLED %}
+    - name: tls
+      projected:
+        sources:
+          - secret:
+              name: simplyblock-spdk-proxy-tls
+          - configMap:
+              name: simplyblock-certificate-authority
+              items:
+                - key: service-ca.crt
+                  path: ca.crt
+    {% endif %}
 
   containers:
     - name: spdk-container
@@ -123,6 +135,11 @@ spec:
       volumeMounts:
         - name: socket-dir
           mountPath: /mnt/ramdisk
+        {% if TLS_ENABLED %}
+        - name: tls
+          mountPath: /etc/simplyblock/tls
+          readOnly: true
+        {% endif %}
       env:
         - name: SERVER_IP
           value: "{{ SERVER_IP }}"
