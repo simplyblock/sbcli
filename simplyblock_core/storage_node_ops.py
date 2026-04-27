@@ -3776,7 +3776,13 @@ def start_storage_node_api_container(node_ip, cluster_ip=None):
             '/var/run:/var/run',
             '/dev:/dev',
             '/lib/modules/:/lib/modules/',
-            '/sys:/sys'],
+            '/sys:/sys',
+            # Bind-mount the SPDK ramdisk so the spdk_process_is_up endpoint
+            # can probe SPDK's JSON-RPC Unix socket directly at
+            # /mnt/ramdisk/spdk_<port>/spdk.sock. Without this, the endpoint
+            # has to fall through to dockerd, which can stall for 60-80s
+            # during post-outage Swarm reconciliation (incident 2026-04-24).
+            '/mnt/ramdisk:/mnt/ramdisk'],
         restart_policy={"Name": "always"},
         environment=[
             f"DOCKER_IP={node_ip}",
