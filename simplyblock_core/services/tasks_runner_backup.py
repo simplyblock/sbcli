@@ -152,6 +152,22 @@ def _set_lvol_online(task):
         logger.warning(f"Restored lvol {lvol_id} not found in DB")
 
 
+def _set_lvol_restore_failed(task, reason):
+    """Mark restored lvol as restore_failed after exhausting all retries."""
+    lvol_id = task.function_params.get("lvol_id")
+    if not lvol_id:
+        return
+    try:
+        from simplyblock_core.models.lvol_model import LVol
+        lvol = db.get_lvol_by_id(lvol_id)
+        if lvol.status == LVol.STATUS_RESTORING:
+            lvol.status = LVol.STATUS_RESTORE_FAILED
+            lvol.write_to_db()
+            logger.error(f"Restore of lvol {lvol_id} failed: {reason}")
+    except KeyError:
+        logger.warning(f"Restored lvol {lvol_id} not found in DB")
+
+
 def _run_restore(task):
     backup_id = task.function_params.get("backup_id")
     lvol_name = task.function_params.get("lvol_name")
@@ -240,8 +256,18 @@ def _run_restore(task):
         elif state == "Failed":
             fail_count = task.function_params.get("fail_count", 0) + 1
             task.function_params["fail_count"] = fail_count
-            task.function_result = f"Restore failed on data plane (attempt {fail_count})"
+            reason = f"S3 transfer failed on data plane (attempt {fail_count})"
+            task.function_result = reason
             if fail_count >= 3:
+                _set_lvol_restore_failed(task, reason)
+                try:
+                    backup = db.get_backup_by_id(backup_id)
+                    backup_events.backup_restore_failed(
+                        task.cluster_id, node_id, backup, lvol_name, reason)
+                except KeyError:
+                    logger.warning(
+                        "Backup %s not found in DB; restore-failed event skipped for lvol %s",
+                        backup_id, lvol_name)
                 task.status = JobSchedule.STATUS_DONE
             else:
                 task.retry += 1

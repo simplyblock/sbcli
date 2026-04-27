@@ -37,6 +37,11 @@ def backup_restore_completed(cluster_id, node_id, backup, lvol_name, caused_by=e
                   f"Backup restored: {backup.uuid} -> {lvol_name}", caused_by, ec.EVENT_STATUS_CHANGE)
 
 
+def backup_restore_failed(cluster_id, node_id, backup, lvol_name, reason, caused_by=ec.CAUSED_BY_CLI):
+    _backup_event(cluster_id, node_id, backup,
+                  f"Backup restore failed: {backup.uuid} -> {lvol_name}: {reason}", caused_by, ec.EVENT_STATUS_CHANGE)
+
+
 def backup_merge_completed(cluster_id, node_id, backup, old_backup_id, caused_by=ec.CAUSED_BY_CLI):
     _backup_event(cluster_id, node_id, backup,
                   f"Backup merged: {old_backup_id} into {backup.uuid}", caused_by, ec.EVENT_STATUS_CHANGE)
