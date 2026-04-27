@@ -387,6 +387,17 @@ jobs:
             pod-security.kubernetes.io/audit=privileged \
             --overwrite
 
+      - name: Configure OpenShift SCC policies
+        if: ${{ github.event.inputs.cluster_environment == 'aws-openshift' }}
+        run: |
+          oc adm policy add-scc-to-user privileged -z default -n simplyblock
+          oc adm policy add-scc-to-user anyuid -z default -n simplyblock
+          oc label namespace simplyblock \
+            pod-security.kubernetes.io/enforce=privileged \
+            pod-security.kubernetes.io/audit=privileged \
+            pod-security.kubernetes.io/warn=privileged \
+            --overwrite
+
       - name: Wait before helm install
         run: sleep 30
 
@@ -413,6 +424,15 @@ jobs:
             --set prometheus.server.persistentVolume.storageClass=local-hostpath \
             --set controlplane.observability.enabled=true \
             --set opensearch.persistence.storageClass=local-hostpath
+
+      - name: Grant OpenShift SCC to all service accounts (post-helm)
+        if: ${{ github.event.inputs.cluster_environment == 'aws-openshift' }}
+        run: |
+          for sa in $(oc get sa -n simplyblock -o name | cut -d/ -f2); do
+            oc adm policy add-scc-to-user privileged -z $sa -n simplyblock
+            echo "Granted privileged SCC to $sa"
+          done
+          kubectl rollout restart daemonset simplyblock-storage-node-ds-simplyblock-cluster -n simplyblock || true
 
       # ── Apply custom resources ─────────────────────────────────────────────
 
@@ -524,6 +544,15 @@ jobs:
         env:
           NDCS: ${{ env.NDCS }}
           NPCS: ${{ env.NPCS }}
+
+      - name: Grant OpenShift SCC to all service accounts (post-CR)
+        if: ${{ github.event.inputs.cluster_environment == 'aws-openshift' }}
+        run: |
+          for sa in $(oc get sa -n simplyblock -o name | cut -d/ -f2); do
+            oc adm policy add-scc-to-user privileged -z $sa -n simplyblock
+            echo "Granted privileged SCC to $sa"
+          done
+          kubectl rollout restart daemonset simplyblock-storage-node-ds-simplyblock-cluster -n simplyblock || true
 
       # ── Wait for cluster readiness ──────────────────────────────────────────
 
