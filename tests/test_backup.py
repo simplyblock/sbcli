@@ -281,7 +281,7 @@ class TestCreateS3Bdev(unittest.TestCase):
     def test_success(self, MockRPC, mock_boto3_client):
         mock_rpc = MockRPC.return_value
         mock_rpc.bdev_s3_create.return_value = True
-        mock_rpc.bdev_s3_add_bucket_name.return_value = True
+        mock_rpc.bdev_s3_add_bucket_name.return_value = (True, None)
         mock_rpc.bdev_lvol_s3_bdev.return_value = True
         mock_s3 = mock_boto3_client.return_value
         mock_s3.head_bucket.return_value = {}
@@ -328,7 +328,7 @@ class TestCreateS3Bdev(unittest.TestCase):
     def test_bucket_name_fails(self, MockRPC, mock_boto3_client):
         mock_rpc = MockRPC.return_value
         mock_rpc.bdev_s3_create.return_value = True
-        mock_rpc.bdev_s3_add_bucket_name.return_value = None
+        mock_rpc.bdev_s3_add_bucket_name.return_value = (None, {"code": -1, "message": "error"})
         mock_s3 = mock_boto3_client.return_value
         mock_s3.head_bucket.return_value = {}
 
@@ -343,7 +343,7 @@ class TestCreateS3Bdev(unittest.TestCase):
     def test_attach_fails(self, MockRPC, mock_boto3_client):
         mock_rpc = MockRPC.return_value
         mock_rpc.bdev_s3_create.return_value = True
-        mock_rpc.bdev_s3_add_bucket_name.return_value = True
+        mock_rpc.bdev_s3_add_bucket_name.return_value = (True, None)
         mock_rpc.bdev_lvol_s3_bdev.return_value = None
         mock_s3 = mock_boto3_client.return_value
         mock_s3.head_bucket.return_value = {}
@@ -358,7 +358,7 @@ class TestCreateS3Bdev(unittest.TestCase):
     def test_local_testing_params(self, MockRPC, mock_boto3_client):
         mock_rpc = MockRPC.return_value
         mock_rpc.bdev_s3_create.return_value = True
-        mock_rpc.bdev_s3_add_bucket_name.return_value = True
+        mock_rpc.bdev_s3_add_bucket_name.return_value = (True, None)
         mock_rpc.bdev_lvol_s3_bdev.return_value = True
         mock_s3 = mock_boto3_client.return_value
         mock_s3.head_bucket.return_value = {}
@@ -1001,8 +1001,8 @@ class TestImportBackups(unittest.TestCase):
 
         from simplyblock_core.controllers.backup_controller import import_backups
         count = import_backups([
-            {"backup_id": "b-1", "lvol_id": "l-1"},
-            {"backup_id": "b-2", "lvol_id": "l-1"},
+            {"backup_id": "b-1", "lvol_id": "l-1", "cluster_id": "cluster-1"},
+            {"backup_id": "b-2", "lvol_id": "l-1", "cluster_id": "cluster-1"},
         ])
 
         self.assertEqual(count, 1)
