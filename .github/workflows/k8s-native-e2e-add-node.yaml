@@ -1,5 +1,5 @@
 name: K8s Native E2E - Add Node
-run-name: "K8s Native E2E - Add Node | NDCS:${{ inputs.ndcs || '1' }} NPCS:${{ inputs.npcs || '1' }}"
+run-name: "K8s Native E2E - Add Node | ${{ inputs.cluster_environment || 'local' }} | NDCS:${{ inputs.ndcs || '1' }} NPCS:${{ inputs.npcs || '1' }}"
 
 on:
   workflow_dispatch:
@@ -79,6 +79,15 @@ on:
         description: 'Number of journal managers per device'
         required: false
         default: 3
+      cluster_environment:
+        description: 'Target cluster environment'
+        required: true
+        default: 'local'
+        type: choice
+        options:
+          - local
+          - aws-openshift
+          - gcp
 jobs:
   e2e-add-node:
     runs-on: self-hosted
@@ -139,8 +148,14 @@ jobs:
       - name: Setup kubeconfig
         run: |
           mkdir -p $HOME/.kube
-          echo "${{ secrets.KUBECONFIG_CONTENT }}" > $HOME/.kube/config
+          echo "${KUBECONFIG_DATA}" > $HOME/.kube/config
           chmod 600 $HOME/.kube/config
+        env:
+          KUBECONFIG_DATA: ${{
+            github.event.inputs.cluster_environment == 'aws-openshift' && secrets.KUBECONFIG_AWS_OPENSHIFT ||
+            github.event.inputs.cluster_environment == 'gcp' && secrets.KUBECONFIG_GCP ||
+            secrets.KUBECONFIG_LOCAL || secrets.KUBECONFIG_CONTENT
+            }}
 
       - name: Install Helm v3.15.4
         run: |
@@ -328,19 +343,29 @@ jobs:
 
       - name: Label initial worker nodes
         run: |
+          CLUSTER_ENV="${{ github.event.inputs.cluster_environment || 'local' }}"
           IFS=',' read -ra NODES <<< "${{ github.event.inputs.worker_nodes }}"
           for NODE in "${NODES[@]}"; do
-            echo "Labeling node $NODE"
-            kubectl label node "$NODE" topology.kubernetes.io/zone=default --overwrite
+            if [ "$CLUSTER_ENV" = "local" ]; then
+              echo "Labeling node $NODE with zone=default (local cluster)"
+              kubectl label node "$NODE" topology.kubernetes.io/zone=default --overwrite
+            else
+              echo "Skipping zone label for $NODE (cloud cluster: $CLUSTER_ENV)"
+            fi
             kubectl label node "$NODE" simplyblock.io/role=mgmt-plane --overwrite
           done
 
       - name: Label new worker nodes
         run: |
+          CLUSTER_ENV="${{ github.event.inputs.cluster_environment || 'local' }}"
           IFS=',' read -ra NODES <<< "${{ github.event.inputs.new_worker_nodes }}"
           for NODE in "${NODES[@]}"; do
-            echo "Labeling new node $NODE"
-            kubectl label node "$NODE" topology.kubernetes.io/zone=default --overwrite
+            if [ "$CLUSTER_ENV" = "local" ]; then
+              echo "Labeling new node $NODE with zone=default (local cluster)"
+              kubectl label node "$NODE" topology.kubernetes.io/zone=default --overwrite
+            else
+              echo "Skipping zone label for new node $NODE (cloud cluster: $CLUSTER_ENV)"
+            fi
             kubectl label node "$NODE" simplyblock.io/role=mgmt-plane --overwrite
           done
 
@@ -414,6 +439,7 @@ jobs:
           DATA_NICS="${{ github.event.inputs.data_nics || 'ens16' }}"
           PARTITIONS="${{ github.event.inputs.partitions || '0' }}"
           JM_COUNT="${{ github.event.inputs.journal_manager_count || '3' }}"
+          OPENSHIFT_CLUSTER="${{ github.event.inputs.cluster_environment == 'aws-openshift' && 'true' || 'false' }}"
 
           # Build workerNodes YAML list from initial worker nodes only
           WORKER_YAML=""
@@ -476,7 +502,7 @@ jobs:
               percentPerDevice: 3
             skipKubeletConfiguration: true
             enableCpuTopology: true
-            openShiftCluster: false
+            openShiftCluster: ${OPENSHIFT_CLUSTER}
             ubuntuHost: false
             forceFormat4K: false
             workerNodes:
@@ -800,6 +826,7 @@ jobs:
           NPCS: ${{ env.NPCS }}
           CHUNK_BS: ${{ env.CHUNK_BS }}
           BS: ${{ env.BS }}
+          CLUSTER_ENV: ${{ github.event.inputs.cluster_environment || 'local' }}
         run: |
           GITHUB_RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}"
           AWS_LOGS_URL="https://s3.console.aws.amazon.com/s3/buckets/${S3_BUCKET_NAME}?prefix=${RUN_ID}/&region=us-east-2"
@@ -811,7 +838,7 @@ jobs:
 
           TIME_TAKEN="${TEST_TIME_HOURS}h ${TEST_TIME_MINS}m ${TEST_TIME_SECS}s"
 
-          MESSAGE="K8s Native E2E Add Node | *${TESTNAME}* | NDCS:${NDCS} NPCS:${NPCS}\nBranch: *${BRANCH_NAME}* | CSI: *${{ github.event.inputs.simplyblock_csi_branch }}*\nWorkers: ${{ github.event.inputs.worker_nodes }} + ${{ github.event.inputs.new_worker_nodes }}\nTotal Time: ${TIME_TAKEN}\n\n${OVERALL_STATUS}\nGitHub Run: ${GITHUB_RUN_URL}\nAWS Logs: ${AWS_LOGS_URL}\n\n*Config*: NDCS: ${NDCS}, NPCS: ${NPCS}, BS: ${BS}, Chunk BS: ${CHUNK_BS}\n\nTotal Tests: *${TOTAL_TESTS}*, Passed: *${PASSED_TESTS}*, Failed: *${FAILED_TESTS}*\n\n-- Passed :white_check_mark:\n${PASSED_CASES_BULLETS}\n\n-- Failed :x:\n${FAILED_CASES_BULLETS}"
+          MESSAGE="K8s Native E2E Add Node | *${TESTNAME}* | ${CLUSTER_ENV} | NDCS:${NDCS} NPCS:${NPCS}\nBranch: *${BRANCH_NAME}* | CSI: *${{ github.event.inputs.simplyblock_csi_branch }}*\nCluster: *${CLUSTER_ENV}*\nWorkers: ${{ github.event.inputs.worker_nodes }} + ${{ github.event.inputs.new_worker_nodes }}\nTotal Time: ${TIME_TAKEN}\n\n${OVERALL_STATUS}\nGitHub Run: ${GITHUB_RUN_URL}\nAWS Logs: ${AWS_LOGS_URL}\n\n*Config*: NDCS: ${NDCS}, NPCS: ${NPCS}, BS: ${BS}, Chunk BS: ${CHUNK_BS}\n\nTotal Tests: *${TOTAL_TESTS}*, Passed: *${PASSED_TESTS}*, Failed: *${FAILED_TESTS}*\n\n-- Passed :white_check_mark:\n${PASSED_CASES_BULLETS}\n\n-- Failed :x:\n${FAILED_CASES_BULLETS}"
 
           curl -X POST -H 'Content-type: application/json' \
             --data "{\"text\":\"${MESSAGE}\"}" "$SLACK_WEBHOOK_URL"
