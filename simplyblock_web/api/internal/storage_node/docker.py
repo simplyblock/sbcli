@@ -250,23 +250,46 @@ def spdk_process_kill(query: utils.RPCPortParams):
 # Tight client timeout for the dockerd fall-through in spdk_process_is_up.
 # The docker-py default is 60s, which under post-outage Swarm reconciliation
 # (incident 2026-04-24, vm205) caused this endpoint to take 76-80s. The
-# fast path now answers most calls without consulting dockerd at all; this
-# bound only applies when the TCP probe fails and we genuinely need to
-# distinguish "container exited" from "proxy port closed".
+# fast path now answers most calls from SPDK's own Unix socket; this bound
+# only applies when /mnt/ramdisk is not visible to the SnodeAPI container
+# (old deployments without the ramdisk mount).
 _SPDK_IS_UP_DOCKERD_TIMEOUT = 5
 
+_SPDK_RAMDISK_ROOT = "/mnt/ramdisk"
 
-def _spdk_proxy_tcp_open(rpc_port, host="127.0.0.1", timeout=1.0):
-    """True if something is accepting TCP on host:rpc_port.
 
-    The SPDK proxy container binds to that port and is started/stopped
-    together with the SPDK container, so an open socket is a sufficient
-    "is SPDK process up" signal for the auto-restart pre-checks. Sub-
-    millisecond in the happy case and never touches the docker socket,
-    so it can't get queued behind a dockerd swarm-reconciliation backlog.
+def _spdk_unix_socket_alive(rpc_port, timeout=1.0):
+    """Three-state probe of SPDK's JSON-RPC Unix socket.
+
+    SPDK binds its RPC socket at ``/mnt/ramdisk/spdk_<port>/spdk.sock``
+    (see ``simplyblock_core/services/spdk_http_proxy_server.py``). A
+    successful ``connect()`` proves the SPDK process is alive AND
+    polling its socket — exactly what the auto-restart pre-checks
+    actually want to know.
+
+    Why not the proxy port: the spdk_proxy_<port> container binds the
+    TCP port and stays up serving HTTP errors even when its connection
+    to SPDK's Unix socket is broken. Probing the proxy can return a
+    false positive (proxy alive, SPDK dead).
+
+    Returns:
+      True  — connect() succeeded; SPDK is responsive.
+      False — socket file exists but connect() failed (SPDK crashed
+              and left a stale socket, or the process is wedged hard
+              enough not to accept).
+      None  — ``/mnt/ramdisk`` is not visible from this container
+              (older SnodeAPI deployments lacked the bind-mount). The
+              caller must fall through to dockerd to get an answer.
     """
+    if not os.path.isdir(_SPDK_RAMDISK_ROOT):
+        return None
+    sock_path = os.path.join(_SPDK_RAMDISK_ROOT, f"spdk_{rpc_port}", "spdk.sock")
+    if not os.path.exists(sock_path):
+        return False
     try:
-        with socket.create_connection((host, rpc_port), timeout=timeout):
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(timeout)
+            s.connect(sock_path)
             return True
     except OSError:
         return False
@@ -281,17 +304,25 @@ def spdk_process_is_up(query: utils.RPCPortParams):
     req_unique_id = time.time_ns()
     logger.debug(f"function:spdk_process_is_up start f{req_unique_id}")
 
-    # Fast path: TCP-probe the SPDK proxy. Bypasses dockerd entirely; a
-    # wedged docker daemon can't stall this endpoint anymore.
-    if _spdk_proxy_tcp_open(query.rpc_port):
+    # Fast path: probe SPDK's Unix domain socket directly. Sub-millisecond
+    # in the common case and bypasses dockerd entirely — a wedged docker
+    # daemon (incident 2026-04-24, vm205) can no longer stall this
+    # endpoint when the SnodeAPI container has /mnt/ramdisk mounted.
+    sock_state = _spdk_unix_socket_alive(query.rpc_port)
+    if sock_state is True:
         total_time = int((time.time_ns() - req_unique_id) / (1000 * 1000 * 1000))
-        logger.debug(f"function:spdk_process_is_up tcp-fast-path total time {total_time}")
+        logger.debug(f"function:spdk_process_is_up unix-socket-alive total time {total_time}")
         return utils.get_response(True)
+    if sock_state is False:
+        total_time = int((time.time_ns() - req_unique_id) / (1000 * 1000 * 1000))
+        logger.debug(f"function:spdk_process_is_up unix-socket-down total time {total_time}")
+        return utils.get_response(False,
+            f"SPDK Unix socket for spdk_{query.rpc_port} not accepting connections")
 
-    # Slow path: TCP probe failed — fall through to dockerd to distinguish
-    # "container exited" from "container running but proxy port closed".
-    # Bounded client timeout so dockerd cannot hang the caller for a
-    # minute when its API queue is backlogged after a peer outage.
+    # sock_state is None: /mnt/ramdisk is not mounted in this SnodeAPI
+    # container (legacy deployment). Fall through to dockerd. Bounded
+    # client timeout so dockerd cannot hang the caller for the docker-py
+    # default 60s when its API queue is backlogged after a peer outage.
     try:
         node_docker = get_docker_client(timeout=_SPDK_IS_UP_DOCKERD_TIMEOUT)
         try:
