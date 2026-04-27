@@ -105,6 +105,14 @@ on:
         options:
           - 'false'
           - 'true'
+      use_existing_cluster:
+        description: 'Skip cluster cleanup and setup, reuse existing cluster'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
 
 jobs:
   stress-test:
@@ -269,6 +277,7 @@ jobs:
       # ── Cleanup old deployment ──────────────────────────────────────────────
 
       - name: Cleanup old CSI deployment
+        if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
         run: |
           set +e
           NAMESPACE=simplyblock
@@ -466,6 +475,7 @@ jobs:
       # ── Label nodes (after cluster is active) ───────────────────────────────
 
       - name: Label worker nodes
+        if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
         run: |
           CLUSTER_ENV="${{ github.event.inputs.cluster_environment || 'local' }}"
           IFS=',' read -ra NODES <<< "${{ github.event.inputs.worker_nodes }}"
@@ -482,6 +492,7 @@ jobs:
       # ── Prepare namespace ─────────────────────────────────────────────────
 
       - name: Create namespace and set pod-security labels
+        if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
         run: |
           kubectl create namespace simplyblock --dry-run=client -o yaml | kubectl apply -f -
           kubectl label namespace simplyblock \
@@ -491,7 +502,7 @@ jobs:
             --overwrite
 
       - name: Configure OpenShift SCC policies
-        if: ${{ github.event.inputs.cluster_environment == 'aws-openshift' }}
+        if: ${{ github.event.inputs.use_existing_cluster != 'true' && github.event.inputs.cluster_environment == 'aws-openshift' }}
         run: |
           oc adm policy add-scc-to-user privileged -z default -n simplyblock
           oc adm policy add-scc-to-user anyuid -z default -n simplyblock
@@ -502,11 +513,13 @@ jobs:
             --overwrite
 
       - name: Wait before helm install
+        if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
         run: sleep 30
 
       # ── Deploy CSI stack ────────────────────────────────────────────────────
 
       - name: Install Helm Chart for simplyblock-csi
+        if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
         run: |
           cd $GITHUB_WORKSPACE/simplyblock-csi/charts/spdk-csi/latest/spdk-csi/
 
@@ -529,7 +542,7 @@ jobs:
             --set opensearch.persistence.storageClass=local-hostpath
 
       - name: Grant OpenShift SCC to all service accounts (post-helm)
-        if: ${{ github.event.inputs.cluster_environment == 'aws-openshift' }}
+        if: ${{ github.event.inputs.use_existing_cluster != 'true' && github.event.inputs.cluster_environment == 'aws-openshift' }}
         run: |
           for sa in $(oc get sa -n simplyblock -o name | cut -d/ -f2); do
             oc adm policy add-scc-to-user privileged -z $sa -n simplyblock
@@ -539,6 +552,7 @@ jobs:
       # ── Apply custom resources ────────────────────────────────────────────
 
       - name: Wait for operator pod to be ready
+        if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
         run: |
           NAMESPACE=simplyblock
           echo "=== Waiting for operator pod ==="
@@ -559,6 +573,7 @@ jobs:
           done
 
       - name: Apply operator custom resources
+        if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
         run: |
           NAMESPACE=simplyblock
           MGMT_IFC="${{ github.event.inputs.mgmt_ifc || 'ens18' }}"
@@ -709,7 +724,7 @@ jobs:
           NPCS: ${{ env.NPCS }}
 
       - name: Grant OpenShift SCC and restart storage daemonset (post-CR)
-        if: ${{ github.event.inputs.cluster_environment == 'aws-openshift' }}
+        if: ${{ github.event.inputs.use_existing_cluster != 'true' && github.event.inputs.cluster_environment == 'aws-openshift' }}
         run: |
           echo "Waiting for simplyblock-storage-node-sa service account..."
           for i in $(seq 1 60); do
@@ -743,7 +758,7 @@ jobs:
       # ── Wait for cluster readiness ──────────────────────────────────────────
 
       - name: Wait for cluster to become active
-        timeout-minutes: 25
+        timeout-minutes: 80
         id: cluster_status
         run: |
           NAMESPACE=simplyblock
@@ -780,7 +795,7 @@ jobs:
           EXPECTED_SNODES=${#NODES[@]}
           echo "=== Waiting for $EXPECTED_SNODES snode-spdk pods to be ready (max 30 min) ==="
 
-          for i in $(seq 1 180); do
+          for i in $(seq 1 720); do
             TOTAL=$(kubectl -n $NAMESPACE get pods -l role=simplyblock-storage-node --no-headers 2>/dev/null | wc -l)
             READY=$(kubectl -n $NAMESPACE get pods -l role=simplyblock-storage-node --no-headers 2>/dev/null | grep -c "Running" || true)
 
@@ -1058,7 +1073,6 @@ jobs:
           CLUSTER_ENV: ${{ github.event.inputs.cluster_environment || 'local' }}
         run: |
           GITHUB_RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}"
-          AWS_LOGS_URL="https://s3.console.aws.amazon.com/s3/buckets/${S3_BUCKET_NAME}?prefix=${RUN_ID}/&region=us-east-2"
           if [[ ${{ job.status }} == 'success' ]]; then
             OVERALL_STATUS=":white_check_mark: Overall Status: SUCCESS"
           else
