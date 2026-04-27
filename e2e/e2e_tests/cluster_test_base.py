@@ -1075,56 +1075,21 @@ class TestClusterBase:
         return f"http://{mgmt_ip}/graylog/api"
 
     def _graylog_discover_containers(self, session, base_url, from_iso, to_iso):
-        """Discover all unique container names in the time window.
+        """Discover all unique (container_name, source) pairs in the time window.
 
         Strategy (in order):
-          1. Graylog ``/terms`` stats endpoint (fast, but may not exist)
-          2. OpenSearch terms aggregation (reliable, finds ALL containers)
-          3. Graylog search sampling (last resort)
+          1. OpenSearch nested terms aggregation (reliable, finds ALL pairs)
+          2. Graylog time-slice sampling (last resort)
 
         Returns:
-            list[str]: container names, or empty list on failure.
+            list[tuple[str, str]]: (container_name, source) pairs,
+            or empty list on failure.
         """
         cname_field = (
             "kubernetes_container_name" if self.k8s_test else "container_name"
         )
 
-        # ------ 1. Graylog /terms endpoint ------
-        terms_url = f"{base_url}/search/universal/absolute/terms"
-        params = {
-            "field": cname_field,
-            "query": "*",
-            "from": from_iso,
-            "to": to_iso,
-            "size": 200,
-        }
-        try:
-            resp = session.get(terms_url, params=params, timeout=30)
-            if resp.ok:
-                data = resp.json()
-                terms = data.get("terms", {})
-                if terms:
-                    self.logger.info(
-                        f"[graylog-export] Discovered {len(terms)} containers "
-                        f"via Graylog /terms endpoint"
-                    )
-                    return list(terms.keys())
-                else:
-                    self.logger.warning(
-                        f"[graylog-export] /terms returned OK but no 'terms' key. "
-                        f"Keys: {list(data.keys())}"
-                    )
-            else:
-                self.logger.warning(
-                    f"[graylog-export] /terms returned HTTP {resp.status_code}: "
-                    f"{resp.text[:300]}"
-                )
-        except Exception as exc:
-            self.logger.warning(
-                f"[graylog-export] Graylog /terms endpoint failed: {exc}"
-            )
-
-        # ------ 2. OpenSearch terms aggregation ------
+        # ------ 1. OpenSearch nested terms aggregation ------
         self.logger.info(
             "[graylog-export] Trying OpenSearch terms aggregation for discovery"
         )
@@ -1141,102 +1106,84 @@ class TestClusterBase:
                     to_iso.replace("Z", "+00:00")
                 ).timestamp() * 1000
             )
-            os_names = self._os_discover_containers(
+            os_pairs = self._os_discover_containers(
                 os_session, os_url, from_ms, to_ms
             )
-            if os_names:
-                return os_names
+            if os_pairs:
+                return os_pairs
         except Exception as exc:
             self.logger.warning(
                 f"[graylog-export] OpenSearch discovery failed: {exc}"
             )
 
-        # ------ 3. Graylog search sampling (last resort) ------
+        # ------ 2. Graylog search — time-slice sampling (last resort) ------
+        # Large offsets cause Graylog 500 errors, so we slice the time
+        # window into chunks and sample the first page of each chunk.
         self.logger.info(
-            "[graylog-export] Falling back to Graylog search-based discovery"
+            "[graylog-export] Falling back to Graylog time-slice discovery"
         )
         search_url = f"{base_url}/search/universal/absolute"
-        names = set()
+        pairs = set()
 
-        # Get total count
-        params = {
-            "query": "*",
-            "from": from_iso,
-            "to": to_iso,
-            "limit": 1,
-            "offset": 0,
-            "sort": "timestamp:asc",
-            "fields": f"timestamp,{cname_field}",
-        }
-        total = 0
-        try:
-            resp = session.get(search_url, params=params, timeout=60)
-            if resp.ok:
-                total = resp.json().get("total_results", 0)
-                self.logger.info(
-                    f"[graylog-export] Total messages in window: {total}"
-                )
-            else:
-                self.logger.warning(
-                    f"[graylog-export] Search returned HTTP {resp.status_code}: "
-                    f"{resp.text[:300]}"
-                )
-                return []
-        except Exception as exc:
-            self.logger.warning(
-                f"[graylog-export] Search probe failed: {exc}"
-            )
-            return []
+        t_start = datetime.fromisoformat(from_iso.replace("Z", "+00:00"))
+        t_end = datetime.fromisoformat(to_iso.replace("Z", "+00:00"))
+        total_minutes = (t_end - t_start).total_seconds() / 60
 
-        if total == 0:
-            self.logger.info("[graylog-export] No messages found in time window")
-            return []
+        # Use ~10 slices, minimum 1 minute each
+        num_slices = max(1, min(20, int(total_minutes / 5)))
+        slice_delta = (t_end - t_start) / num_slices
 
-        # Sample at start, middle, and end of the result set
-        offsets = [0]
-        if total > 1000:
-            offsets.append(total // 2)
-        if total > 2000:
-            offsets.append(max(0, total - 1000))
+        self.logger.info(
+            f"[graylog-export] Sampling {num_slices} time slices "
+            f"across {total_minutes:.0f} minutes"
+        )
 
-        for off in offsets:
+        for i in range(num_slices):
+            s_from = t_start + slice_delta * i
+            s_to = t_start + slice_delta * (i + 1)
+            s_from_iso = s_from.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+            s_to_iso = s_to.strftime("%Y-%m-%dT%H:%M:%S.000Z")
             params = {
                 "query": "*",
-                "from": from_iso,
-                "to": to_iso,
-                "limit": 1000,
-                "offset": off,
+                "from": s_from_iso,
+                "to": s_to_iso,
+                "limit": 500,
+                "offset": 0,
                 "sort": "timestamp:asc",
-                "fields": f"timestamp,{cname_field}",
+                "fields": f"timestamp,source,{cname_field}",
             }
             try:
                 resp = session.get(search_url, params=params, timeout=60)
                 if resp.ok:
                     messages = resp.json().get("messages", [])
                     for m in messages:
-                        name = m.get("message", {}).get(cname_field, "")
+                        msg = m.get("message", {})
+                        name = msg.get(cname_field, "")
+                        source = msg.get("source", "")
                         if name:
-                            names.add(name)
+                            pairs.add((name, source))
                     self.logger.info(
-                        f"[graylog-export] Sampled offset={off}: "
-                        f"{len(messages)} msgs, {len(names)} unique containers so far"
+                        f"[graylog-export] Slice {i+1}/{num_slices}: "
+                        f"{len(messages)} msgs, "
+                        f"{len(pairs)} unique (container, source) pairs so far"
                     )
                 else:
                     self.logger.warning(
-                        f"[graylog-export] Search at offset={off} returned HTTP "
-                        f"{resp.status_code}: {resp.text[:200]}"
+                        f"[graylog-export] Slice {i+1}/{num_slices} "
+                        f"returned HTTP {resp.status_code}"
                     )
             except Exception as exc:
                 self.logger.warning(
-                    f"[graylog-export] Search at offset={off} failed: {exc}"
+                    f"[graylog-export] Slice {i+1}/{num_slices} "
+                    f"failed: {exc}"
                 )
 
-        if names:
+        if pairs:
             self.logger.info(
-                f"[graylog-export] Discovered {len(names)} containers "
-                f"via search fallback"
+                f"[graylog-export] Discovered {len(pairs)} "
+                f"(container, source) pairs via time-slice sampling"
             )
-            return list(names)
+            return list(pairs)
 
         self.logger.warning(
             "[graylog-export] No container names found via any method"
@@ -1351,13 +1298,14 @@ class TestClusterBase:
         return result
 
     def _os_discover_containers(self, session, os_url, from_ms, to_ms):
-        """Discover container names via OpenSearch terms aggregation.
+        """Discover (container_name, source) pairs via OpenSearch aggregation.
 
-        This is the most reliable method -- it finds ALL unique container
-        names in the time window using an aggregation query.
+        Uses a nested terms aggregation: container_name -> source.
+        Tries ``field.keyword`` first, then the raw field name.
 
         Returns:
-            list[str]: container names, or empty list on failure.
+            list[tuple[str, str]]: (container_name, source) pairs,
+            or empty list on failure.
         """
         index = self._os_get_index(session, os_url)
         probe = self._os_probe(session, os_url, index, from_ms, to_ms)
@@ -1375,63 +1323,93 @@ class TestClusterBase:
             )
             return []
 
-        body = {
-            "size": 0,
-            "query": {
-                "range": {
-                    probe["ts_field"]: {
-                        "gte": from_ms, "lte": to_ms,
-                        "format": "epoch_millis",
+        cname_f = probe["cname_field"]
+        # Try .keyword first, then raw field name
+        for suffix in [".keyword", ""]:
+            agg_cname = f"{cname_f}{suffix}"
+            agg_source = f"source{suffix}"
+            body = {
+                "size": 0,
+                "query": {
+                    "range": {
+                        probe["ts_field"]: {
+                            "gte": from_ms, "lte": to_ms,
+                            "format": "epoch_millis",
+                        }
                     }
-                }
-            },
-            "aggs": {
-                "names": {
-                    "terms": {
-                        "field": f"{probe['cname_field']}.keyword",
-                        "size": 500,
+                },
+                "aggs": {
+                    "containers": {
+                        "terms": {
+                            "field": agg_cname,
+                            "size": 500,
+                        },
+                        "aggs": {
+                            "sources": {
+                                "terms": {
+                                    "field": agg_source,
+                                    "size": 100,
+                                }
+                            }
+                        },
                     }
-                }
-            },
-        }
-        try:
-            r = session.post(
-                f"{os_url}/{index}/_search", json=body, timeout=30
-            )
-            if r.ok:
-                buckets = (
-                    r.json()
-                    .get("aggregations", {})
-                    .get("names", {})
-                    .get("buckets", [])
+                },
+            }
+            try:
+                r = session.post(
+                    f"{os_url}/{index}/_search", json=body, timeout=30
                 )
-                names = [b["key"] for b in buckets if b["key"]]
-                if names:
-                    self.logger.info(
-                        f"[graylog-export] OpenSearch discovered "
-                        f"{len(names)} containers via terms aggregation"
+                if r.ok:
+                    ctr_buckets = (
+                        r.json()
+                        .get("aggregations", {})
+                        .get("containers", {})
+                        .get("buckets", [])
                     )
-                    return names
+                    if ctr_buckets:
+                        pairs = []
+                        for cb in ctr_buckets:
+                            cname = cb["key"]
+                            src_buckets = (
+                                cb.get("sources", {}).get("buckets", [])
+                            )
+                            if src_buckets:
+                                for sb in src_buckets:
+                                    pairs.append((cname, sb["key"]))
+                            else:
+                                pairs.append((cname, ""))
+                        self.logger.info(
+                            f"[graylog-export] OpenSearch discovered "
+                            f"{len(ctr_buckets)} containers, "
+                            f"{len(pairs)} (container, source) pairs "
+                            f"(field={agg_cname})"
+                        )
+                        return pairs
+                    else:
+                        self.logger.info(
+                            f"[graylog-export] OpenSearch terms agg on "
+                            f"'{agg_cname}' returned no buckets, trying next"
+                        )
                 else:
-                    self.logger.warning(
-                        "[graylog-export] OpenSearch terms aggregation "
-                        "returned no buckets"
+                    self.logger.info(
+                        f"[graylog-export] OpenSearch terms agg on "
+                        f"'{agg_cname}' returned HTTP {r.status_code}, "
+                        f"trying next"
                     )
-            else:
-                self.logger.warning(
-                    f"[graylog-export] OpenSearch terms agg returned HTTP "
-                    f"{r.status_code}: {r.text[:300]}"
+            except Exception as exc:
+                self.logger.info(
+                    f"[graylog-export] OpenSearch terms agg on "
+                    f"'{agg_cname}' failed: {exc}, trying next"
                 )
-        except Exception as exc:
-            self.logger.warning(
-                f"[graylog-export] OpenSearch terms aggregation failed: {exc}"
-            )
 
+        self.logger.warning(
+            "[graylog-export] OpenSearch terms aggregation found no containers"
+        )
         return []
 
     def _os_fetch_container_logs(
-        self, session, os_url, container_name, from_iso, to_iso, out_path,
-        probe_cache=None,
+        self, session, os_url, container_name, source,
+        from_iso, to_iso, out_path, probe_cache=None,
     ):
         """Fetch logs from OpenSearch using the scroll API.
 
@@ -1469,28 +1447,32 @@ class TestClusterBase:
 
         # Build query
         esc = container_name.replace("/", "\\/").replace(":", "\\:")
-        body = {
-            "query": {
-                "bool": {
-                    "must": [
-                        {
-                            "range": {
-                                ts_f: {
-                                    "gte": from_ms, "lte": to_ms,
-                                    "format": "epoch_millis",
-                                }
-                            }
-                        },
-                        {
-                            "query_string": {
-                                "default_field": cname_f,
-                                "query": f"*{esc}*",
-                                "analyze_wildcard": True,
-                            }
-                        },
-                    ]
+        must_clauses = [
+            {
+                "range": {
+                    ts_f: {
+                        "gte": from_ms, "lte": to_ms,
+                        "format": "epoch_millis",
+                    }
                 }
             },
+            {
+                "query_string": {
+                    "default_field": cname_f,
+                    "query": f"*{esc}*",
+                    "analyze_wildcard": True,
+                }
+            },
+        ]
+        if source:
+            must_clauses.append({
+                "query_string": {
+                    "default_field": "source",
+                    "query": f'"{source}"',
+                }
+            })
+        body = {
+            "query": {"bool": {"must": must_clauses}},
             "sort": [{ts_f: {"order": "asc"}}],
             "size": PAGE_SIZE,
             "_source": [ts_f, "source", cname_f, "level", "message"],
@@ -1576,9 +1558,10 @@ class TestClusterBase:
         return written
 
     def _graylog_fetch_container_logs(
-        self, session, base_url, container_name, from_iso, to_iso, out_path
+        self, session, base_url, container_name, source,
+        from_iso, to_iso, out_path,
     ):
-        """Fetch all log lines for *container_name* and write them to *out_path*.
+        """Fetch all log lines for *container_name* on *source* and write to *out_path*.
 
         Uses paginated Graylog search (page size 1000).  If the total exceeds
         100 000, the window is split into 10-minute sub-windows — the same
@@ -1598,7 +1581,12 @@ class TestClusterBase:
             "kubernetes_container_name" if self.k8s_test else "container_name"
         )
         search_url = f"{base_url}/search/universal/absolute"
-        query = f'{cname_query_field}:"{self._gl_escape(container_name)}"'
+        # Use wildcard so partial names work (e.g. "spdk_8080" matches
+        # "/spdk_8080", "SNodeAPI" matches "simplyblock_SNodeAPI.1.xyz")
+        esc_name = self._gl_escape(container_name)
+        query = f'{cname_query_field}:*{esc_name}*'
+        if source:
+            query += f' AND source:"{source}"'
 
         def _fetch_page(q, f_iso, t_iso, limit, offset):
             params = {
@@ -1693,13 +1681,14 @@ class TestClusterBase:
     def export_graylog_logs(self):
         """Export all container logs from Graylog / OpenSearch for the test window.
 
-        Each container's logs are saved to a separate file under
-        ``<docker_logs_path>/graylog_logs/<container>.log``.
+        Each (container, source) pair gets its own file under
+        ``<docker_logs_path>/graylog_logs/<container>__<source>.log``.
+        This ensures containers like SNodeAPI that run on every node get
+        separate log files per node.
 
         Strategy:
-          - Try Graylog first (discovery + fetch).
-          - If Graylog is unreachable, fall back to OpenSearch entirely.
-          - Discovery itself tries Graylog /terms -> OpenSearch agg -> Graylog search.
+          - Discovery returns (container_name, source) pairs.
+          - Fetch via Graylog when reachable, otherwise OpenSearch scroll API.
 
         This method is fully resilient -- all exceptions are caught and logged
         so that it never disrupts the teardown sequence.
@@ -1750,7 +1739,7 @@ class TestClusterBase:
             os_url = self._opensearch_base_url()
             os_session = self._build_opensearch_session()
 
-            # Check if Graylog is reachable — determines fetch strategy
+            # Check if Graylog is reachable -- determines fetch strategy
             graylog_ok = False
             try:
                 r = session.get(f"{base_url}/system", timeout=10)
@@ -1768,15 +1757,14 @@ class TestClusterBase:
                     f"will use OpenSearch for fetching"
                 )
 
-            # Discover containers
-            # _graylog_discover_containers already tries:
-            #   1) Graylog /terms  2) OpenSearch agg  3) Graylog search sampling
+            # Discover (container_name, source) pairs
+            # _graylog_discover_containers tries:
+            #   1) OpenSearch nested agg  2) Graylog time-slice sampling
             if graylog_ok:
-                containers = self._graylog_discover_containers(
+                pairs = self._graylog_discover_containers(
                     session, base_url, from_iso, to_iso
                 )
             else:
-                # Graylog unreachable — go straight to OpenSearch
                 self.logger.info(
                     "[graylog-export] Using OpenSearch for container discovery"
                 )
@@ -1790,11 +1778,11 @@ class TestClusterBase:
                         to_iso.replace("Z", "+00:00")
                     ).timestamp() * 1000
                 )
-                containers = self._os_discover_containers(
+                pairs = self._os_discover_containers(
                     os_session, os_url, from_ms, to_ms
                 )
 
-            if not containers:
+            if not pairs:
                 self.logger.warning(
                     "[graylog-export] No containers discovered, "
                     "skipping export"
@@ -1807,46 +1795,56 @@ class TestClusterBase:
 
             use_opensearch = not graylog_ok
             self.logger.info(
-                f"[graylog-export] Fetching logs for {len(containers)} "
-                f"containers -> {graylog_dir}  "
+                f"[graylog-export] Fetching logs for {len(pairs)} "
+                f"(container, source) pairs -> {graylog_dir}  "
                 f"(via {'OpenSearch' if use_opensearch else 'Graylog'})"
             )
 
+            def _safe(s):
+                return (
+                    s.replace("/", "_").replace("\\", "_")
+                    .replace(":", "_").strip("_")
+                ) or "unnamed"
+
             total_lines = 0
             os_probe_cache = {}  # shared across OpenSearch calls
-            for container in sorted(containers):
-                safe_name = (
-                    container.replace("/", "_")
-                    .replace("\\", "_")
-                    .replace(":", "_")
-                    .strip("_")
-                ) or "unnamed"
-                out_path = os.path.join(graylog_dir, f"{safe_name}.log")
+            for container_name, source in sorted(pairs):
+                # Build filename: container__source.log
+                safe_cname = _safe(container_name)
+                if source:
+                    safe_source = _safe(source)
+                    fname = f"{safe_cname}__{safe_source}.log"
+                else:
+                    fname = f"{safe_cname}.log"
+                out_path = os.path.join(graylog_dir, fname)
 
+                label = f"{container_name}@{source}" if source else container_name
                 try:
                     if use_opensearch:
                         n = self._os_fetch_container_logs(
-                            os_session, os_url, container,
+                            os_session, os_url,
+                            container_name, source,
                             from_iso, to_iso, out_path,
                             probe_cache=os_probe_cache,
                         )
                     else:
                         n = self._graylog_fetch_container_logs(
-                            session, base_url, container,
+                            session, base_url,
+                            container_name, source,
                             from_iso, to_iso, out_path,
                         )
                     total_lines += n
                     self.logger.info(
-                        f"[graylog-export]   {container}: {n} lines"
+                        f"[graylog-export]   {label}: {n} lines"
                     )
                 except Exception as exc:
                     self.logger.warning(
-                        f"[graylog-export] Failed to fetch {container}: {exc}"
+                        f"[graylog-export] Failed to fetch {label}: {exc}"
                     )
 
             self.logger.info(
                 f"[graylog-export] Complete: {total_lines} total lines "
-                f"from {len(containers)} containers"
+                f"from {len(pairs)} (container, source) pairs"
             )
 
         except Exception as exc:

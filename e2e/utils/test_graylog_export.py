@@ -183,7 +183,13 @@ def os_probe(index):
 
 
 def os_discover_containers():
-    """Discover container names via OpenSearch terms aggregation."""
+    """Discover (container_name, source) pairs via OpenSearch aggregation.
+
+    Uses a nested terms aggregation: container_name -> source.
+    Tries field.keyword first, then raw field name.
+
+    Returns list of (container_name, source) tuples.
+    """
     print("    Trying OpenSearch terms aggregation ...")
     index = os_get_index()
     probe = os_probe(index)
@@ -195,53 +201,80 @@ def os_discover_containers():
         print("    OpenSearch: no documents in time window")
         return []
 
-    body = {
-        "size": 0,
-        "query": {
-            "range": {
-                probe["ts_field"]: {
-                    "gte": FROM_MS, "lte": TO_MS, "format": "epoch_millis",
+    cname_f = probe["cname_field"]
+    for suffix in [".keyword", ""]:
+        agg_cname = f"{cname_f}{suffix}"
+        agg_source = f"source{suffix}"
+        body = {
+            "size": 0,
+            "query": {
+                "range": {
+                    probe["ts_field"]: {
+                        "gte": FROM_MS, "lte": TO_MS, "format": "epoch_millis",
+                    }
                 }
-            }
-        },
-        "aggs": {
-            "names": {
-                "terms": {
-                    "field": f"{probe['cname_field']}.keyword",
-                    "size": 500,
+            },
+            "aggs": {
+                "containers": {
+                    "terms": {
+                        "field": agg_cname,
+                        "size": 500,
+                    },
+                    "aggs": {
+                        "sources": {
+                            "terms": {
+                                "field": agg_source,
+                                "size": 100,
+                            }
+                        }
+                    },
                 }
-            }
-        },
-    }
-    try:
-        r = os_session.post(
-            f"{OPENSEARCH_BASE}/{index}/_search", json=body, timeout=30
-        )
-        if r.ok:
-            buckets = (
-                r.json()
-                .get("aggregations", {})
-                .get("names", {})
-                .get("buckets", [])
+            },
+        }
+        try:
+            r = os_session.post(
+                f"{OPENSEARCH_BASE}/{index}/_search", json=body, timeout=30
             )
-            names = [b["key"] for b in buckets if b["key"]]
-            if names:
-                print(f"    OpenSearch discovered {len(names)} containers via terms aggregation:")
-                for b in sorted(buckets, key=lambda x: -x["doc_count"]):
-                    print(f"      {b['key']:<50} {b['doc_count']:>10} docs")
-                return names
+            if r.ok:
+                ctr_buckets = (
+                    r.json()
+                    .get("aggregations", {})
+                    .get("containers", {})
+                    .get("buckets", [])
+                )
+                if ctr_buckets:
+                    pairs = []
+                    for cb in ctr_buckets:
+                        cname = cb["key"]
+                        src_buckets = cb.get("sources", {}).get("buckets", [])
+                        if src_buckets:
+                            for sb in src_buckets:
+                                pairs.append((cname, sb["key"]))
+                        else:
+                            pairs.append((cname, ""))
+                    print(f"    OpenSearch discovered {len(ctr_buckets)} containers, "
+                          f"{len(pairs)} (container, source) pairs "
+                          f"(field={agg_cname}):")
+                    for cb in sorted(ctr_buckets, key=lambda x: -x["doc_count"]):
+                        src_buckets = cb.get("sources", {}).get("buckets", [])
+                        for sb in sorted(src_buckets, key=lambda x: -x["doc_count"]):
+                            print(f"      {cb['key']:<35} @ {sb['key']:<25} {sb['doc_count']:>10} docs")
+                    return pairs
+                else:
+                    print(f"    OpenSearch terms agg on '{agg_cname}' "
+                          f"returned no buckets, trying next")
             else:
-                print("    OpenSearch terms aggregation returned no buckets")
-        else:
-            print(f"    OpenSearch terms agg returned HTTP {r.status_code}: "
-                  f"{r.text[:300]}")
-    except Exception as exc:
-        print(f"    OpenSearch terms aggregation failed: {exc}")
+                print(f"    OpenSearch terms agg on '{agg_cname}' returned "
+                      f"HTTP {r.status_code}, trying next")
+        except Exception as exc:
+            print(f"    OpenSearch terms agg on '{agg_cname}' failed: {exc}, "
+                  f"trying next")
 
+    print("    OpenSearch terms aggregation found no containers")
     return []
 
 
-def os_fetch_container_logs(container_name, out_path, probe_cache=None):
+def os_fetch_container_logs(container_name, source, out_path, probe_cache=None):
     """Fetch logs from OpenSearch using the scroll API. Returns line count."""
     from_ms = FROM_MS
     to_ms = TO_MS
@@ -258,18 +291,22 @@ def os_fetch_container_logs(container_name, out_path, probe_cache=None):
     cname_f = probe["cname_field"]
 
     esc = container_name.replace("/", "\\/").replace(":", "\\:")
-    body = {
-        "query": {
-            "bool": {
-                "must": [
-                    {"range": {ts_f: {"gte": from_ms, "lte": to_ms,
-                                       "format": "epoch_millis"}}},
-                    {"query_string": {"default_field": cname_f,
-                                       "query": f"*{esc}*",
-                                       "analyze_wildcard": True}},
-                ]
+    must_clauses = [
+        {"range": {ts_f: {"gte": from_ms, "lte": to_ms,
+                           "format": "epoch_millis"}}},
+        {"query_string": {"default_field": cname_f,
+                           "query": f"*{esc}*",
+                           "analyze_wildcard": True}},
+    ]
+    if source:
+        must_clauses.append({
+            "query_string": {
+                "default_field": "source",
+                "query": f'"{source}"',
             }
-        },
+        })
+    body = {
+        "query": {"bool": {"must": must_clauses}},
         "sort": [{ts_f: {"order": "asc"}}],
         "size": PAGE_SIZE,
         "_source": [ts_f, "source", cname_f, "level", "message"],
@@ -357,56 +394,40 @@ def _gl_escape(value):
 
 
 def gl_discover_containers():
-    """Discover containers via Graylog search sampling (last resort)."""
-    print("    Falling back to Graylog search-based discovery ...")
+    """Discover (container, source) pairs via Graylog time-slice sampling.
+
+    Large offsets cause Graylog 500 errors, so we slice the time window
+    into chunks and sample the first page of each chunk.
+
+    Returns list of (container_name, source) tuples.
+    """
+    print("    Falling back to Graylog time-slice discovery ...")
     search_url = f"{GRAYLOG_BASE}/search/universal/absolute"
-    names = set()
+    pairs = set()
 
-    # Get total count
-    params = {
-        "query": "*",
-        "from": FROM_ISO,
-        "to": TO_ISO,
-        "limit": 1,
-        "offset": 0,
-        "sort": "timestamp:asc",
-        "fields": f"timestamp,{CNAME_FIELD}",
-    }
-    total = 0
-    try:
-        resp = gl_session.get(search_url, params=params, timeout=60,
-                              headers={"Accept": "application/json"})
-        if resp.ok:
-            total = resp.json().get("total_results", 0)
-            print(f"    Total messages in window: {total}")
-        else:
-            print(f"    Search returned HTTP {resp.status_code}: "
-                  f"{resp.text[:300]}")
-            return []
-    except Exception as exc:
-        print(f"    Search probe failed: {exc}")
-        return []
+    t_start = datetime.fromisoformat(FROM_ISO.replace("Z", "+00:00"))
+    t_end = datetime.fromisoformat(TO_ISO.replace("Z", "+00:00"))
+    total_minutes = (t_end - t_start).total_seconds() / 60
 
-    if total == 0:
-        print("    No messages found in time window")
-        return []
+    # Use ~10-20 slices, minimum 1 minute each
+    num_slices = max(1, min(20, int(total_minutes / 5)))
+    slice_delta = (t_end - t_start) / num_slices
 
-    # Sample at start, middle, and end
-    offsets = [0]
-    if total > 1000:
-        offsets.append(total // 2)
-    if total > 2000:
-        offsets.append(max(0, total - 1000))
+    print(f"    Sampling {num_slices} time slices across {total_minutes:.0f} minutes")
 
-    for off in offsets:
+    for i in range(num_slices):
+        s_from = t_start + slice_delta * i
+        s_to = t_start + slice_delta * (i + 1)
+        s_from_iso = s_from.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        s_to_iso = s_to.strftime("%Y-%m-%dT%H:%M:%S.000Z")
         params = {
             "query": "*",
-            "from": FROM_ISO,
-            "to": TO_ISO,
-            "limit": 1000,
-            "offset": off,
+            "from": s_from_iso,
+            "to": s_to_iso,
+            "limit": 500,
+            "offset": 0,
             "sort": "timestamp:asc",
-            "fields": f"timestamp,{CNAME_FIELD}",
+            "fields": f"timestamp,source,{CNAME_FIELD}",
         }
         try:
             resp = gl_session.get(search_url, params=params, timeout=60,
@@ -414,31 +435,39 @@ def gl_discover_containers():
             if resp.ok:
                 messages = resp.json().get("messages", [])
                 for m in messages:
-                    name = m.get("message", {}).get(CNAME_FIELD, "")
+                    msg = m.get("message", {})
+                    name = msg.get(CNAME_FIELD, "")
+                    source = msg.get("source", "")
                     if name:
-                        names.add(name)
-                print(f"    Sampled offset={off}: "
-                      f"{len(messages)} msgs, {len(names)} unique containers so far")
+                        pairs.add((name, source))
+                print(f"    Slice {i+1}/{num_slices}: "
+                      f"{len(messages)} msgs, {len(pairs)} unique pairs so far")
             else:
-                print(f"    Search at offset={off} returned HTTP "
-                      f"{resp.status_code}: {resp.text[:200]}")
+                print(f"    Slice {i+1}/{num_slices} returned HTTP "
+                      f"{resp.status_code}")
         except Exception as exc:
-            print(f"    Search at offset={off} failed: {exc}")
+            print(f"    Slice {i+1}/{num_slices} failed: {exc}")
 
-    if names:
-        print(f"    Discovered {len(names)} containers via search fallback:")
-        for name in sorted(names):
-            print(f"      {name}")
-        return list(names)
+    if pairs:
+        print(f"    Discovered {len(pairs)} (container, source) pairs "
+              f"via time-slice sampling:")
+        for cname, src in sorted(pairs):
+            print(f"      {cname:<35} @ {src}")
+        return list(pairs)
 
-    print("    No container names found in sampled messages")
+    print("    No container names found via any method")
     return []
 
 
-def gl_fetch_container_logs(container_name, out_path):
-    """Fetch all logs for a container via Graylog. Returns line count."""
+def gl_fetch_container_logs(container_name, source, out_path):
+    """Fetch all logs for a container+source via Graylog. Returns line count."""
     search_url = f"{GRAYLOG_BASE}/search/universal/absolute"
-    query = f'{CNAME_FIELD}:"{_gl_escape(container_name)}"'
+    # Use wildcard so partial names work (e.g. "spdk_8080" matches
+    # "/spdk_8080", "SNodeAPI" matches "simplyblock_SNodeAPI.1.xyz")
+    esc_name = _gl_escape(container_name)
+    query = f'{CNAME_FIELD}:*{esc_name}*'
+    if source:
+        query += f' AND source:"{source}"'
 
     def _fetch_page(q, f_iso, t_iso, limit, offset):
         params = {
@@ -527,48 +556,22 @@ def gl_fetch_container_logs(container_name, out_path):
 
 
 def discover_containers(graylog_ok):
-    """Try all discovery methods in order."""
+    """Try all discovery methods in order.
+
+    Returns list of (container_name, source) tuples.
+    """
     print(f"\n[2] Discovering containers ({FROM_ISO} -> {TO_ISO}) ...")
 
-    # 1. Graylog /terms endpoint
-    if graylog_ok:
-        terms_url = f"{GRAYLOG_BASE}/search/universal/absolute/terms"
-        params = {
-            "field": CNAME_FIELD,
-            "query": "*",
-            "from": FROM_ISO,
-            "to": TO_ISO,
-            "size": 200,
-        }
-        try:
-            resp = gl_session.get(terms_url, params=params, timeout=30)
-            if resp.ok:
-                data = resp.json()
-                terms = data.get("terms", {})
-                if terms:
-                    print(f"    Found {len(terms)} containers via Graylog /terms endpoint:")
-                    for name, count in sorted(terms.items(), key=lambda x: -x[1]):
-                        print(f"      {name:<50} {count:>10} messages")
-                    return list(terms.keys())
-                else:
-                    print(f"    /terms returned OK but no 'terms' key. "
-                          f"Keys: {list(data.keys())}")
-            else:
-                print(f"    /terms returned HTTP {resp.status_code}: "
-                      f"{resp.text[:300]}")
-        except Exception as exc:
-            print(f"    Graylog /terms endpoint error: {exc}")
+    # 1. OpenSearch nested terms aggregation (most reliable)
+    pairs = os_discover_containers()
+    if pairs:
+        return pairs
 
-    # 2. OpenSearch terms aggregation
-    names = os_discover_containers()
-    if names:
-        return names
-
-    # 3. Graylog search sampling (last resort)
+    # 2. Graylog time-slice sampling (last resort)
     if graylog_ok:
-        names = gl_discover_containers()
-        if names:
-            return names
+        pairs = gl_discover_containers()
+        if pairs:
+            return pairs
 
     return []
 
@@ -621,9 +624,9 @@ def main():
         print("\nNeither Graylog nor OpenSearch is reachable. Exiting.")
         sys.exit(1)
 
-    # Discover containers
-    containers = discover_containers(graylog_ok)
-    if not containers:
+    # Discover (container, source) pairs
+    pairs = discover_containers(graylog_ok)
+    if not pairs:
         print("\nNo containers found. Check your time window and log setup.")
         sys.exit(1)
 
@@ -633,32 +636,43 @@ def main():
     # Decide fetch strategy
     use_opensearch = not graylog_ok
     fetch_via = "OpenSearch" if use_opensearch else "Graylog"
-    print(f"\n[3] Fetching logs for {len(containers)} containers via {fetch_via} -> {OUTPUT_DIR}")
+    print(f"\n[3] Fetching logs for {len(pairs)} (container, source) pairs "
+          f"via {fetch_via} -> {OUTPUT_DIR}")
     print("-" * 64)
+
+    def _safe(s):
+        return (
+            s.replace("/", "_").replace("\\", "_")
+            .replace(":", "_").strip("_")
+        ) or "unnamed"
 
     total_lines = 0
     os_probe_cache = {}
-    for container in sorted(containers):
-        safe_name = (
-            container.replace("/", "_")
-            .replace("\\", "_")
-            .replace(":", "_")
-            .strip("_")
-        ) or "unnamed"
-        out_path = os.path.join(OUTPUT_DIR, f"{safe_name}.log")
+    for container_name, source in sorted(pairs):
+        safe_cname = _safe(container_name)
+        if source:
+            safe_source = _safe(source)
+            fname = f"{safe_cname}__{safe_source}.log"
+        else:
+            fname = f"{safe_cname}.log"
+        out_path = os.path.join(OUTPUT_DIR, fname)
 
+        label = f"{container_name}@{source}" if source else container_name
         try:
             if use_opensearch:
-                n = os_fetch_container_logs(container, out_path, probe_cache=os_probe_cache)
+                n = os_fetch_container_logs(
+                    container_name, source, out_path,
+                    probe_cache=os_probe_cache,
+                )
             else:
-                n = gl_fetch_container_logs(container, out_path)
+                n = gl_fetch_container_logs(container_name, source, out_path)
             total_lines += n
-            print(f"  {container:<50} {n:>8,} lines")
+            print(f"  {label:<60} {n:>8,} lines")
         except Exception as exc:
-            print(f"  {container:<50} FAILED: {exc}")
+            print(f"  {label:<60} FAILED: {exc}")
 
     print("-" * 64)
-    print(f"  TOTAL: {total_lines:,} lines from {len(containers)} containers")
+    print(f"  TOTAL: {total_lines:,} lines from {len(pairs)} (container, source) pairs")
     print(f"  Output: {os.path.abspath(OUTPUT_DIR)}")
     print()
 
