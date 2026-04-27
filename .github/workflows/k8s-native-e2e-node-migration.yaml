@@ -432,7 +432,6 @@ jobs:
             oc adm policy add-scc-to-user privileged -z $sa -n simplyblock
             echo "Granted privileged SCC to $sa"
           done
-          kubectl rollout restart daemonset simplyblock-storage-node-ds-simplyblock-cluster -n simplyblock || true
 
       # ── Apply custom resources ─────────────────────────────────────────────
 
@@ -545,14 +544,26 @@ jobs:
           NDCS: ${{ env.NDCS }}
           NPCS: ${{ env.NPCS }}
 
-      - name: Grant OpenShift SCC to all service accounts (post-CR)
+      - name: Grant OpenShift SCC and restart storage daemonset (post-CR)
         if: ${{ github.event.inputs.cluster_environment == 'aws-openshift' }}
         run: |
           for sa in $(oc get sa -n simplyblock -o name | cut -d/ -f2); do
             oc adm policy add-scc-to-user privileged -z $sa -n simplyblock
             echo "Granted privileged SCC to $sa"
           done
-          kubectl rollout restart daemonset simplyblock-storage-node-ds-simplyblock-cluster -n simplyblock || true
+
+          echo "Waiting for storage node daemonset to be created..."
+          for i in $(seq 1 60); do
+            if kubectl get daemonset simplyblock-storage-node-ds-simplyblock-cluster -n simplyblock &>/dev/null; then
+              echo "Daemonset found, waiting for rollout to complete..."
+              kubectl rollout status daemonset simplyblock-storage-node-ds-simplyblock-cluster -n simplyblock --timeout=300s
+              echo "Restarting daemonset..."
+              kubectl rollout restart daemonset simplyblock-storage-node-ds-simplyblock-cluster -n simplyblock
+              break
+            fi
+            echo "Attempt $i/60: daemonset not found yet, waiting 10s..."
+            sleep 10
+          done
 
       # ── Wait for cluster readiness ──────────────────────────────────────────
 
