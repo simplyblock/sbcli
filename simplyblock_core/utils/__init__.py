@@ -1222,6 +1222,27 @@ def addNvmeDevices(rpc_client, snode, devs):
             model_number = nvme_driver_data['ctrlr_data']['model_number']
             total_size = nvme_dict['block_size'] * nvme_dict['num_blocks']
 
+            # Skip zero-size NVMe namespaces. On AWS i3en the underlying
+            # physical SSD is reused across tenants; AWS scrubs the data
+            # but does NOT reset NVMe namespace structure. Drives drawn
+            # from the pool can therefore arrive with leftover empty
+            # namespaces from a previous tenant who used `nvme create-ns`.
+            # Treating those as devices fans the per-device init loop out
+            # to dozens of phantom slots, exhausts /dev/nbd<N>
+            # (default nbds_max=16) in `_create_device_partitions`, and
+            # fails add-node with -ENOENT on nbd_start_disk for
+            # bdevs that genuinely exist on SPDK but have no usable LBA
+            # range. Observed 2026-04-27 on a node where AWS handed us
+            # a drive with 83 namespaces (1 real, 82 zero-size).
+            if total_size == 0:
+                logger.info(
+                    "Skipping zero-size NVMe namespace %s (PCI %s, NSID %s)",
+                    nvme_bdev,
+                    nvme_driver_data.get('pci_address'),
+                    nvme_driver_data.get('ns_data', {}).get('id'),
+                )
+                continue
+
             serial_number = nvme_driver_data['ctrlr_data']['serial_number']
             if snode.id_device_by_nqn:
                 if "ns_data" in nvme_driver_data:
