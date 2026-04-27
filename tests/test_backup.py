@@ -277,7 +277,7 @@ class TestComputeS3CpuMasks(unittest.TestCase):
 class TestCreateS3Bdev(unittest.TestCase):
 
     @patch("simplyblock_core.controllers.backup_controller.boto3.client")
-    @patch("simplyblock_core.controllers.backup_controller.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     def test_success(self, MockRPC, mock_boto3_client):
         mock_rpc = MockRPC.return_value
         mock_rpc.bdev_s3_create.return_value = True
@@ -303,7 +303,7 @@ class TestCreateS3Bdev(unittest.TestCase):
         mock_rpc.bdev_lvol_s3_bdev.assert_called_once_with("lvs_test", "s3_lvs_test")
 
     @patch("simplyblock_core.controllers.backup_controller.boto3.client")
-    @patch("simplyblock_core.controllers.backup_controller.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     def test_no_lvstore(self, MockRPC, _mock_boto3_client):
         from simplyblock_core.controllers.backup_controller import create_s3_bdev
         node = _node(lvstore="")
@@ -311,7 +311,7 @@ class TestCreateS3Bdev(unittest.TestCase):
         self.assertFalse(result)
         MockRPC.assert_not_called()
 
-    @patch("simplyblock_core.controllers.backup_controller.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     def test_bdev_s3_create_fails(self, MockRPC):
         mock_rpc = MockRPC.return_value
         mock_rpc.bdev_s3_create.return_value = None
@@ -324,7 +324,7 @@ class TestCreateS3Bdev(unittest.TestCase):
         mock_rpc.bdev_lvol_s3_bdev.assert_not_called()
 
     @patch("simplyblock_core.controllers.backup_controller.boto3.client")
-    @patch("simplyblock_core.controllers.backup_controller.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     def test_bucket_name_fails(self, MockRPC, mock_boto3_client):
         mock_rpc = MockRPC.return_value
         mock_rpc.bdev_s3_create.return_value = True
@@ -339,7 +339,7 @@ class TestCreateS3Bdev(unittest.TestCase):
         mock_rpc.bdev_lvol_s3_bdev.assert_not_called()
 
     @patch("simplyblock_core.controllers.backup_controller.boto3.client")
-    @patch("simplyblock_core.controllers.backup_controller.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     def test_attach_fails(self, MockRPC, mock_boto3_client):
         mock_rpc = MockRPC.return_value
         mock_rpc.bdev_s3_create.return_value = True
@@ -354,7 +354,7 @@ class TestCreateS3Bdev(unittest.TestCase):
         self.assertFalse(result)
 
     @patch("simplyblock_core.controllers.backup_controller.boto3.client")
-    @patch("simplyblock_core.controllers.backup_controller.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     def test_local_testing_params(self, MockRPC, mock_boto3_client):
         mock_rpc = MockRPC.return_value
         mock_rpc.bdev_s3_create.return_value = True
@@ -386,7 +386,7 @@ class TestCreateS3Bdev(unittest.TestCase):
             endpoint_url="http://minio:9000",
         )
 
-    @patch("simplyblock_core.controllers.backup_controller.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     def test_exception_handled(self, MockRPC):
         mock_rpc = MockRPC.return_value
         mock_rpc.bdev_s3_create.side_effect = Exception("connection refused")
@@ -643,7 +643,7 @@ class TestRestoreBackup(unittest.TestCase):
 class TestDeleteBackups(unittest.TestCase):
 
     @patch("simplyblock_core.controllers.backup_controller.backup_events")
-    @patch("simplyblock_core.controllers.backup_controller.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.controllers.backup_controller.db_controller")
     def test_success(self, mock_db, MockRPC, mock_events):
         b1 = _backup(uuid="b-1")

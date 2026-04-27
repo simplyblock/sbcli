@@ -111,7 +111,7 @@ class TestConnectToRemoteJmDevs(unittest.TestCase):
 
     @patch("simplyblock_core.storage_node_ops.time.sleep", return_value=None)
     @patch("simplyblock_core.storage_node_ops.connect_device")
-    @patch("simplyblock_core.storage_node_ops.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops.DBController")
     def test_attaches_proceed_when_quorum_probe_would_fail(
             self, MockDBCtrl, MockRPC, mock_connect_device, _mock_sleep):
@@ -152,7 +152,7 @@ class TestConnectToRemoteJmDevs(unittest.TestCase):
 
     @patch("simplyblock_core.storage_node_ops.time.sleep", return_value=None)
     @patch("simplyblock_core.storage_node_ops.connect_device")
-    @patch("simplyblock_core.storage_node_ops.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops.DBController")
     def test_local_jm_device_is_not_reattached(
             self, MockDBCtrl, MockRPC, mock_connect_device, _mock_sleep):
@@ -179,7 +179,7 @@ class TestConnectToRemoteJmDevs(unittest.TestCase):
 
     @patch("simplyblock_core.storage_node_ops.time.sleep", return_value=None)
     @patch("simplyblock_core.storage_node_ops.connect_device")
-    @patch("simplyblock_core.storage_node_ops.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops.DBController")
     def test_offline_peer_jm_is_skipped(
             self, MockDBCtrl, MockRPC, mock_connect_device, _mock_sleep):
@@ -371,7 +371,7 @@ class TestAttachControllerTimeoutCap(unittest.TestCase):
     """
 
     @patch("simplyblock_core.storage_node_ops.time.sleep", return_value=None)
-    @patch("simplyblock_core.storage_node_ops.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops.DBController")
     def test_connect_device_caps_attach_timeout_at_1s(
             self, MockDBCtrl, MockRPC, _sleep):
@@ -393,11 +393,15 @@ class TestAttachControllerTimeoutCap(unittest.TestCase):
         node_rpc = MagicMock()
         node_rpc.bdev_nvme_controller_list.return_value = None
         node_rpc.get_bdevs.return_value = [{"name": "remote-fake-n1"}]
-        node.rpc_client = MagicMock(return_value=node_rpc)
+        def _rpc_client(*_args, **kwargs):
+            if "timeout" in kwargs:
+                return attach_rpc
+            return node_rpc
+
+        node.rpc_client = MagicMock(side_effect=_rpc_client)
 
         attach_rpc = MagicMock()
         attach_rpc.bdev_nvme_attach_controller.return_value = ["remote-fake-n1"]
-        MockRPC.return_value = attach_rpc
 
         mock_db = MagicMock()
         mock_db.get_storage_node_by_id.return_value = node
@@ -406,25 +410,28 @@ class TestAttachControllerTimeoutCap(unittest.TestCase):
         # No caller-specified timeout: should default-cap at 1.
         ops.connect_device("remote-fake", device, node,
                            bdev_names=[], reattach=False)
-        timeouts_used = [c.kwargs.get("timeout") for c in MockRPC.call_args_list]
+        timeouts_used = [c.kwargs.get("timeout") for c in node.rpc_client.call_args_list
+                         if "timeout" in c.kwargs]
         self.assertTrue(timeouts_used,
                         "a short-timeout attach RPC client must be built")
         self.assertLessEqual(max(timeouts_used), 1,
             f"attach RPC timeout must be <= 1s; got {timeouts_used!r}")
 
         # Caller passes 5 — must be clamped to 1.
-        MockRPC.reset_mock()
+        node.rpc_client.reset_mock()
         ops.connect_device("remote-fake", device, node,
                            bdev_names=[], reattach=False, attach_timeout=5)
-        timeouts_used = [c.kwargs.get("timeout") for c in MockRPC.call_args_list]
+        timeouts_used = [c.kwargs.get("timeout") for c in node.rpc_client.call_args_list
+                         if "timeout" in c.kwargs]
         self.assertLessEqual(max(timeouts_used), 1,
             "excessive attach_timeout must be clamped to 1s")
 
         # Caller passes 0.3 — must be kept (lower than cap).
-        MockRPC.reset_mock()
+        node.rpc_client.reset_mock()
         ops.connect_device("remote-fake", device, node,
                            bdev_names=[], reattach=False, attach_timeout=0.3)
-        timeouts_used = [c.kwargs.get("timeout") for c in MockRPC.call_args_list]
+        timeouts_used = [c.kwargs.get("timeout") for c in node.rpc_client.call_args_list
+                         if "timeout" in c.kwargs]
         self.assertIn(0.3, timeouts_used,
             f"caller-supplied sub-cap timeout must be preserved; got {timeouts_used!r}")
 
