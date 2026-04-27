@@ -1213,6 +1213,23 @@ def delete_lvol(id_or_name, force_delete=False):
         logger.error("Pool is disabled")
         return False
 
+    # Persist deletion intent BEFORE any data-plane RPC. If the leader-side
+    # delete then times out or errors (for example: SPDK back-pressure on
+    # the leader while a peer is being container-killed in an outage soak),
+    # the lvol stays in_deletion and lvol_monitor's STATUS_IN_DELETION
+    # reconcile path drives it to completion. Previously the status was set
+    # only after a successful leader op, so a transient leader RPC failure
+    # left the lvol in 'online' state with no record of the deletion intent
+    # — the API returned results=False and no background process retried.
+    if lvol.status != LVol.STATUS_IN_DELETION:
+        old_status = lvol.status
+        lvol.status = LVol.STATUS_IN_DELETION
+        lvol.write_to_db(db_controller.kv_store)
+        try:
+            lvol_events.lvol_status_change(lvol, lvol.status, old_status)
+        except KeyError:
+            pass
+
     if lvol.ha_type == 'single':
         ret = delete_lvol_from_node(lvol.get_id(), lvol.node_id, force=force_delete)
         if not ret:
@@ -1280,15 +1297,10 @@ def delete_lvol(id_or_name, force_delete=False):
                             lambda c=nl: delete_lvol_from_node(lvol.get_id(), c.get_id()),
                             f"retry sync delete lvol {lvol.get_id()} on {nl.get_id()[:8]}")
 
+    # Status was already set to STATUS_IN_DELETION above, before the
+    # data-plane RPC, so we just refresh the in-memory copy in case
+    # delete_lvol_from_node updated other fields (e.g. deletion_status).
     lvol = db_controller.get_lvol_by_id(lvol.get_id())
-    # set status
-    old_status = lvol.status
-    lvol.status = LVol.STATUS_IN_DELETION
-    lvol.write_to_db()
-    try:
-        lvol_events.lvol_status_change(lvol, lvol.status, old_status)
-    except KeyError:
-        pass
 
     if lvol.cloned_from_snap and lvol.delete_snap_on_lvol_delete:
         logger.info(f"Deleting snap: {lvol.cloned_from_snap}")
