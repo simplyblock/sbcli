@@ -421,5 +421,265 @@ class TestRecreateLvstoreRoleDerivation(unittest.TestCase):
                          f"{leadership_call.kwargs['role']}")
 
 
+# --------------------------------------------------------------------------
+# Step 8b — sec_1 hublvol creation + per-peer role assignment
+# --------------------------------------------------------------------------
+
+class TestRecreateLvstoreStep8bHublvolWiring(unittest.TestCase):
+    """Step 8b on takeover must:
+
+    1. Pass lvs_node (the original primary owner) to
+       create_secondary_hublvol — NOT snode (the new leader). Reading
+       the lvstore name off snode.lvstore is wrong: snode.lvstore is
+       snode's OWN primary, which leaks across takeovers (LVS_9060
+       takeover, 2026-04-25 11:28:50 run, routed sec_1 work to
+       LVS_9380 because LVS_9380's takeover ran just before and
+       mutated snode's local state).
+
+    2. Choose sec_1 by topology (lvs_node.secondary_node_id), not by
+       sec_nodes index. When the original primary is in
+       disconnected_peers, sec_nodes[0] becomes whichever peer
+       happened to come next, and the index-based 'secondary' /
+       'tertiary' assignment no longer matches topology.
+    """
+
+    def _build_topology(self, snode_role):
+        """Build snode + lvs_owner + remaining peers for a takeover where
+        snode plays ``snode_role`` (secondary or tertiary) of lvs_owner.
+
+        snode_role='tertiary' is the LVS_9060 case: lvs_owner.primary is
+        offline, the topological secondary (sec) is online and was the
+        prior acting leader, and snode (the topological tertiary) is
+        restarting and taking leadership.
+
+        snode_role='secondary' is the LVS_9380 case: snode is the
+        topological secondary taking leadership, and the topological
+        tertiary (tert) is the only remaining peer.
+        """
+        if snode_role == "tertiary":
+            snode = _node("snode", lvstore="LVS_OWN_OF_SNODE",
+                           jm_vuid=100,
+                           lvstore_ports={"LVS_TAKEOVER": {
+                               "lvol_subsys_port": 4432,
+                               "hublvol_port": 4433}})
+            lvs_owner = _node("lvs_owner", lvstore="LVS_TAKEOVER",
+                               secondary_node_id="sec",
+                               tertiary_node_id="snode",
+                               status=StorageNode.STATUS_OFFLINE,
+                               jm_vuid=9060)
+            sec = _node("sec", lvstore="LVS_OWN_OF_SEC", jm_vuid=200)
+            return {"snode": snode, "lvs_owner": lvs_owner, "sec": sec}
+        elif snode_role == "secondary":
+            snode = _node("snode", lvstore="LVS_OWN_OF_SNODE",
+                           jm_vuid=100,
+                           lvstore_ports={"LVS_TAKEOVER": {
+                               "lvol_subsys_port": 4432,
+                               "hublvol_port": 4433}})
+            lvs_owner = _node("lvs_owner", lvstore="LVS_TAKEOVER",
+                               secondary_node_id="snode",
+                               tertiary_node_id="tert",
+                               status=StorageNode.STATUS_OFFLINE,
+                               jm_vuid=9060)
+            tert = _node("tert", lvstore="LVS_OWN_OF_TERT", jm_vuid=300)
+            return {"snode": snode, "lvs_owner": lvs_owner, "tert": tert}
+        else:
+            raise ValueError(snode_role)
+
+    def _run_step8b(self, snode_role,
+                    primary_in_disconnected=True,
+                    secondary_in_disconnected=False,
+                    tertiary_in_disconnected=False):
+        """Drive recreate_lvstore in takeover mode and capture what
+        Step 8b did. Returns a dict with the captured calls.
+
+        Most peer-side RPCs/events are mocked away (we only care about
+        which peer's create_secondary_hublvol/connect_to_hublvol got
+        called with what arguments)."""
+        from simplyblock_core import storage_node_ops
+
+        nodes = self._build_topology(snode_role)
+        snode = nodes["snode"]
+        lvs_owner = nodes["lvs_owner"]
+
+        disconnected_peers = set()
+        if primary_in_disconnected:
+            disconnected_peers.add(lvs_owner.get_id())
+        if snode_role == "tertiary":
+            sec = nodes["sec"]
+            if secondary_in_disconnected:
+                disconnected_peers.add(sec.get_id())
+        if snode_role == "secondary":
+            tert = nodes["tert"]
+            if tertiary_in_disconnected:
+                disconnected_peers.add(tert.get_id())
+
+        def disc_side(node, lvs_peer_ids=None):
+            return node.get_id() in disconnected_peers
+
+        captured = {
+            "create_sec_hublvol_calls": [],
+            "connect_calls": [],
+        }
+
+        def fake_create_sec(self_node, primary_node, cluster_nqn):
+            captured["create_sec_hublvol_calls"].append({
+                "self_id": self_node.get_id(),
+                "primary_node_id": primary_node.get_id(),
+                "primary_node_lvstore": primary_node.lvstore,
+            })
+            return f"nqn-{primary_node.lvstore}"
+
+        def fake_connect(self_node, primary_node, failover_node=None,
+                         role=None, timeout=None):
+            captured["connect_calls"].append({
+                "self_id": self_node.get_id(),
+                "primary_node_id": primary_node.get_id(),
+                "failover_id": failover_node.get_id() if failover_node else None,
+                "role": role,
+            })
+            return True
+
+        for n in nodes.values():
+            n.write_to_db = MagicMock()
+            n.rpc_client = MagicMock(return_value=MagicMock(
+                bdev_lvol_get_lvstores=MagicMock(return_value=[
+                    {"lvs leadership": True, "uuid": "u",
+                     "lvs_primary": False}]),
+                get_bdevs=MagicMock(return_value=[]),
+                bdev_lvol_set_lvs_opts=MagicMock(return_value=True),
+                bdev_lvol_set_leader=MagicMock(return_value=True),
+                bdev_wait_for_examine=MagicMock(return_value=True),
+                bdev_examine=MagicMock(return_value=True),
+                bdev_distrib_force_to_non_leader=MagicMock(return_value=True),
+                jc_compression_get_status=MagicMock(return_value=False),
+                jc_explicit_synchronization=MagicMock(return_value=True),
+                bdev_distrib_check_inflight_io=MagicMock(return_value=False),
+            ))
+            n.wait_for_jm_rep_tasks_to_finish = MagicMock(return_value=True)
+            n.recreate_hublvol = MagicMock()
+            n.adopt_hublvol = MagicMock()
+            # Bind the captured-call helpers as bound methods so call sites
+            # see the standard self-first signature.
+            n.create_secondary_hublvol = lambda primary_node, cluster_nqn, _self=n: \
+                fake_create_sec(_self, primary_node, cluster_nqn)
+            n.connect_to_hublvol = lambda primary_node, failover_node=None, role=None, \
+                                          timeout=None, _self=n: \
+                fake_connect(_self, primary_node, failover_node=failover_node,
+                             role=role, timeout=timeout)
+            n.client = MagicMock(return_value=MagicMock())
+
+        with patch("simplyblock_core.storage_node_ops._check_peer_disconnected",
+                   side_effect=disc_side), \
+             patch("simplyblock_core.storage_node_ops._set_restart_phase"), \
+             patch("simplyblock_core.storage_node_ops._failback_primary_ana"), \
+             patch("simplyblock_core.storage_node_ops.health_controller") as mh, \
+             patch("simplyblock_core.storage_node_ops.tcp_ports_events"), \
+             patch("simplyblock_core.storage_node_ops.storage_events"), \
+             patch("simplyblock_core.storage_node_ops.FirewallClient",
+                   return_value=MagicMock()), \
+             patch("simplyblock_core.storage_node_ops.RPCClient",
+                   return_value=MagicMock(
+                       bdev_lvol_get_lvstores=MagicMock(return_value=[
+                           {"lvs leadership": True}]))), \
+             patch("simplyblock_core.storage_node_ops._connect_to_remote_jm_devs",
+                   return_value=[]), \
+             patch("simplyblock_core.storage_node_ops._connect_to_remote_devs",
+                   return_value=[]), \
+             patch("simplyblock_core.storage_node_ops._create_bdev_stack",
+                   return_value=(True, None)), \
+             patch("simplyblock_core.storage_node_ops.DBController") as mdb:
+
+            mh.check_bdev.return_value = True
+
+            db = mdb.return_value
+            db.get_storage_node_by_id.side_effect = \
+                lambda nid: nodes.get(nid.split("/")[-1] if "/" in nid else nid, snode)
+            db.get_lvols_by_node_id.return_value = []
+            db.get_snapshots_by_node_id.return_value = []
+            db.get_cluster_by_id.return_value = _cluster()
+
+            storage_node_ops.recreate_lvstore(snode, lvs_primary=lvs_owner)
+
+        return captured
+
+    def test_create_secondary_hublvol_called_with_lvs_node_in_takeover(self):
+        """LVS_9060 case: snode is the topological tertiary, takes
+        leadership, and sec_1 is the topological secondary peer.
+
+        create_secondary_hublvol must be invoked with lvs_owner (which
+        carries lvstore=LVS_TAKEOVER), NOT with snode (whose lvstore is
+        snode's OWN primary). The whole point of this fix is that
+        sec_1 ends up exposing a hublvol bdev for THE LVS BEING TAKEN
+        OVER, not for an unrelated LVS that snode happens to own."""
+        captured = self._run_step8b("tertiary")
+
+        sec_calls = captured["create_sec_hublvol_calls"]
+        self.assertEqual(len(sec_calls), 1,
+                         f"Expected exactly one create_secondary_hublvol "
+                         f"call on sec_1, got {sec_calls}")
+        c = sec_calls[0]
+        self.assertEqual(c["self_id"], "sec",
+                         "create_secondary_hublvol must run on the "
+                         "topological secondary owner ('sec'), not some "
+                         "other peer")
+        self.assertEqual(c["primary_node_id"], "lvs_owner",
+                         "create_secondary_hublvol must be called with "
+                         "lvs_owner (the LVS being taken over), not snode")
+        self.assertEqual(c["primary_node_lvstore"], "LVS_TAKEOVER",
+                         "primary_node.lvstore must resolve to the LVS "
+                         "being taken over (LVS_TAKEOVER), not snode's "
+                         "own primary lvstore")
+
+    def test_connect_role_assignment_uses_topology_tertiary_takeover(self):
+        """LVS_9060 case: in the post-takeover ring, sec_1 is the
+        topological secondary owner and gets role='secondary'. There
+        are no other peers in this scenario, so no 'tertiary' role
+        connect happens."""
+        captured = self._run_step8b("tertiary")
+
+        connects = captured["connect_calls"]
+        # There is one peer (sec) — only one connect_to_hublvol expected.
+        self.assertEqual(len(connects), 1,
+                         f"Expected one connect_to_hublvol call (to sec_1), "
+                         f"got {connects}")
+        c = connects[0]
+        self.assertEqual(c["self_id"], "sec")
+        self.assertEqual(c["primary_node_id"], "snode")
+        self.assertEqual(c["role"], "secondary",
+                         "The topological secondary owner must get "
+                         "role='secondary' regardless of its index in "
+                         "sec_nodes")
+        self.assertIsNone(c["failover_id"],
+                          "The secondary peer connects only to the new "
+                          "leader; no failover path applies")
+
+    def test_connect_role_assignment_uses_topology_secondary_takeover(self):
+        """LVS_9380 case: snode is the topological secondary taking
+        leadership; the only remaining peer is the topological
+        tertiary. With topology-based role assignment, the tertiary
+        peer gets role='tertiary' (NOT 'secondary' as the old
+        index-based code would assign). Since snode IS the topological
+        secondary, no separate sec_1 hublvol is created."""
+        captured = self._run_step8b("secondary")
+
+        # No create_secondary_hublvol call — snode IS sec_1 topologically,
+        # so there is no separate node to expose the secondary hublvol on.
+        self.assertEqual(captured["create_sec_hublvol_calls"], [],
+                         "create_secondary_hublvol must NOT be called when "
+                         "snode itself is the topological secondary owner")
+
+        connects = captured["connect_calls"]
+        self.assertEqual(len(connects), 1,
+                         f"Expected one connect_to_hublvol call (to tert), "
+                         f"got {connects}")
+        c = connects[0]
+        self.assertEqual(c["self_id"], "tert")
+        self.assertEqual(c["role"], "tertiary",
+                         "The topological tertiary must get role='tertiary' "
+                         "even though the index-based logic would assign "
+                         "'secondary' (since the offline primary was "
+                         "filtered out)")
+
+
 if __name__ == "__main__":
     unittest.main()
