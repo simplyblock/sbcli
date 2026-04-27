@@ -88,6 +88,15 @@ on:
           - local
           - aws-openshift
           - gcp
+      skip_nfs:
+        description: 'Skip NFS mounting (use local logs directory instead)'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+
 jobs:
   e2e-add-node:
     runs-on: self-hosted
@@ -679,6 +688,7 @@ jobs:
           BS: ${{ env.BS }}
           CHUNK_BS: ${{ env.CHUNK_BS }}
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          SKIP_NFS: ${{ github.event.inputs.skip_nfs || 'false' }}
 
       # ── Post-test: timing, logs, notifications ──────────────────────────────
 

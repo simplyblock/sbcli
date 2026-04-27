@@ -97,6 +97,14 @@ on:
           - local
           - aws-openshift
           - gcp
+      skip_nfs:
+        description: 'Skip NFS mounting (use local logs directory instead)'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
 
 jobs:
   stress-test:
@@ -841,6 +849,7 @@ jobs:
           CHUNK_BS: ${{ env.CHUNK_BS }}
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
           CLIENT_IP: ${{ github.event.inputs.client_ips }}
+          SKIP_NFS: ${{ github.event.inputs.skip_nfs || 'false' }}
 
       # ── Post-test: timing, logs, notifications ──────────────────────────────
 
