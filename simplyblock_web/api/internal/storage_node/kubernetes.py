@@ -16,6 +16,7 @@ import yaml
 from pydantic import BaseModel, Field
 
 from simplyblock_core import constants, shell_utils, utils as core_utils
+from simplyblock_core.settings import Settings
 from simplyblock_web import utils, node_utils, node_utils_k8s
 from simplyblock_web.node_utils_k8s import namespace_id_file
 
@@ -371,7 +372,8 @@ def spdk_process_start(body: SPDKParams):
             'NSOCKET': body.socket,
             'FW_PORT': body.firewall_port,
             'CPU_TOPOLOGY_ENABLED': cpu_topology_enabled,
-            'RESERVED_SYSTEM_CPUS': reserved_system_cpus
+            'RESERVED_SYSTEM_CPUS': reserved_system_cpus,
+            'TLS_ENABLED': Settings().tls_enabled,
         }
 
         if ubuntu_host:
