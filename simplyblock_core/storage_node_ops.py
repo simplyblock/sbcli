@@ -5148,11 +5148,15 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
                     current_leader = sec_node
                     logger.info("Current leader for %s is %s", lvs_name, sec_node.get_id())
                     break
-            except Exception:
-                rpc_result = _handle_rpc_failure_on_peer(snode, sec_node, lvs_jm_vuid, lvs_name=lvs_name)
-                if rpc_result == "abort":
-                    raise Exception(f"Abort restart: peer {sec_node.get_id()} fabric-connected but mgmt unresponsive")
-                disconnected_peers.add(sec_node.get_id())
+            except Exception as e:
+                # Cannot tell "peer down" from "peer mgmt slow" at this stage:
+                # snode has no peer-hublvol controller bdevs yet, so any
+                # hublvol-presence check from snode would always say
+                # "disconnected" and silently drop the leader. Abort and let
+                # the next restart attempt re-evaluate peer state via the
+                # data-plane check earlier in this function.
+                raise Exception(
+                    f"Abort restart: leader detection RPC to peer {sec_node.get_id()} failed: {e}")
 
         # Check compression and replication only on the current leader
         if current_leader:
@@ -5169,12 +5173,9 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
                     time.sleep(60)
                     jc_compression_is_active = current_leader.rpc_client().jc_compression_get_status(
                         current_leader.jm_vuid)
-            except Exception:
-                rpc_result = _handle_rpc_failure_on_peer(snode, current_leader, lvs_jm_vuid, lvs_name=lvs_name)
-                if rpc_result == "abort":
-                    raise Exception(f"Abort restart: leader {current_leader.get_id()} fabric-connected but mgmt unresponsive")
-                disconnected_peers.add(current_leader.get_id())
-                current_leader = None
+            except Exception as e:
+                raise Exception(
+                    f"Abort restart: jc_compression check on leader {current_leader.get_id()} failed: {e}")
 
     ### 1- create distribs and raid
     _set_restart_phase(snode, lvs_name, StorageNode.RESTART_PHASE_PRE_BLOCK, db_controller)
@@ -5300,12 +5301,9 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
                     msg = f"JM replication task found on leader {current_leader.get_id()} for jm {lvs_jm_vuid}"
                     logger.error(msg)
                     storage_events.jm_repl_tasks_found(current_leader, lvs_jm_vuid)
-            except Exception:
-                rpc_result = _handle_rpc_failure_on_peer(snode, current_leader, lvs_jm_vuid, lvs_name=lvs_name)
-                if rpc_result == "abort":
-                    raise Exception(f"Abort restart: leader {current_leader.get_id()} fabric-connected but mgmt unresponsive")
-                disconnected_peers.add(current_leader.get_id())
-                current_leader = None
+            except Exception as e:
+                raise Exception(
+                    f"Abort restart: replication-wait on leader {current_leader.get_id()} failed: {e}")
 
         ### 3- block LVS port on every connected peer (leader + non-leaders).
         # Without blocking the tertiary, client IO can leak to it during the
@@ -5326,12 +5324,17 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
                 fw_api.firewall_set_port(snode_lvs_port, port_type, "block", current_leader.rpc_port)
                 tcp_ports_events.port_deny(current_leader, snode_lvs_port)
                 blocked_peers.append(current_leader)
-            except Exception:
-                rpc_result = _handle_rpc_failure_on_peer(snode, current_leader, lvs_jm_vuid, lvs_name=lvs_name)
-                if rpc_result == "abort":
-                    raise Exception(f"Abort restart: leader {current_leader.get_id()} fabric-connected but mgmt unresponsive")
-                disconnected_peers.add(current_leader.get_id())
-                current_leader = None
+            except Exception as e:
+                # Failing to port-block the current leader means we cannot
+                # safely promote snode: the old leader may still be serving
+                # IO, and a parallel leader on snode would produce a writer
+                # conflict (observed 2026-04-25, LVS_6609 incident).
+                # _check_hublvol_connected from snode is meaningless here —
+                # snode hasn't reconnected to peer hublvols yet — so we
+                # cannot use it to discriminate "peer gone" from "peer slow".
+                # Abort the attempt; the task runner will retry.
+                _abort_restart_and_unblock(
+                    f"Failed to port-block leader {current_leader.get_id()}: {e}")
 
         # Also block non-leader peers (tertiary). The leader's demote+drain
         # below is leader-specific; non-leaders just need the port shut so
@@ -5349,12 +5352,15 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
                 fw_api.firewall_set_port(snode_lvs_port, port_type, "block", sec_node.rpc_port)
                 tcp_ports_events.port_deny(sec_node, snode_lvs_port)
                 blocked_peers.append(sec_node)
-            except Exception:
-                rpc_result = _handle_rpc_failure_on_peer(snode, sec_node, lvs_jm_vuid, lvs_name=lvs_name)
-                if rpc_result == "abort":
-                    _abort_restart_and_unblock(
-                        f"peer {sec_node.get_id()} fabric-connected but mgmt unresponsive during port block")
-                disconnected_peers.add(sec_node.get_id())
+            except Exception as e:
+                # Same rationale as the leader port-block: cannot safely
+                # decide "peer gone" vs "peer slow" before snode has
+                # reconnected to peer hublvols. A non-leader peer left
+                # serving on snode_lvs_port during the leader flap can
+                # accept client IO whose hublvol redirect is mid-transition,
+                # producing a writer conflict.
+                _abort_restart_and_unblock(
+                    f"Failed to port-block non-leader peer {sec_node.get_id()}: {e}")
 
         if current_leader and current_leader in blocked_peers:
             # --- Inside port-blocked window: timeout=0.2s, retry=0, abort on failure ---
