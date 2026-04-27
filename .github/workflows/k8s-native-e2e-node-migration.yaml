@@ -7,7 +7,7 @@ on:
       simplyblock_csi_branch:
         description: 'Branch for simplyblock-csi'
         required: true
-        default: 'add_sbcli_operator_helm'
+        default: 'master'
       simplyblock_image:
         description: 'Simplyblock image tag'
         required: true
@@ -41,7 +41,7 @@ on:
       data_nics:
         description: 'Data network interface'
         required: false
-        default: 'ens16'
+        default: 'enp1s0'
       ssh_user:
         description: 'SSH user for client nodes'
         required: false
@@ -116,7 +116,7 @@ jobs:
         name: Checkout simplyblock-csi
         with:
           repository: simplyblock-io/simplyblock-csi
-          ref: refs/heads/${{ github.event.inputs.simplyblock_csi_branch || 'add_sbcli_operator_helm' }}
+          ref: refs/heads/${{ github.event.inputs.simplyblock_csi_branch || 'master' }}
           path: 'simplyblock-csi'
 
       - name: Resolve KEY_PATH and validate key exists
@@ -443,10 +443,13 @@ jobs:
           SB_REPO="${{ github.event.inputs.simplyblock_repository || 'public.ecr.aws/simply-block/simplyblock' }}"
           SB_TAG="${{ github.event.inputs.simplyblock_image }}"
           SPDK_IMAGE="${{ github.event.inputs.spdk_image }}"
-          DATA_NICS="${{ github.event.inputs.data_nics || 'ens16' }}"
+          DATA_NICS="${{ github.event.inputs.data_nics || 'enp1s0' }}"
           PARTITIONS="${{ github.event.inputs.partitions || '0' }}"
           JM_COUNT="${{ github.event.inputs.journal_manager_count || '3' }}"
           OPENSHIFT_CLUSTER="${{ github.event.inputs.cluster_environment == 'aws-openshift' && 'true' || 'false' }}"
+          CORE_PERCENTAGE="${{ github.event.inputs.cluster_environment == 'aws-openshift' && '50' || github.event.inputs.cluster_environment == 'local' && '35' || '65' }}"
+          SKIP_KUBELET_CONFIG="${{ github.event.inputs.cluster_environment == 'aws-openshift' && 'false' || 'true' }}"
+          FORCE_FORMAT_4K="${{ github.event.inputs.cluster_environment == 'aws-openshift' && 'true' || 'false' }}"
 
           # Build workerNodes YAML list from all worker nodes
           WORKER_YAML=""
@@ -502,16 +505,16 @@ jobs:
               - ${DATA_NICS}
             maxLogicalVolumeCount: 30
             partitions: ${PARTITIONS}
-            corePercentage: 65
+            corePercentage: ${CORE_PERCENTAGE}
             coreIsolation: false
             journalManager:
               count: ${JM_COUNT}
               percentPerDevice: 3
-            skipKubeletConfiguration: true
+            skipKubeletConfiguration: ${SKIP_KUBELET_CONFIG}
             enableCpuTopology: true
             openShiftCluster: ${OPENSHIFT_CLUSTER}
             ubuntuHost: false
-            forceFormat4K: false
+            forceFormat4K: ${FORCE_FORMAT_4K}
             workerNodes:
           ${WORKER_YAML}
           EOF
