@@ -247,6 +247,31 @@ def spdk_process_kill(query: utils.RPCPortParams):
     return utils.get_response(True)
 
 
+# Tight client timeout for the dockerd fall-through in spdk_process_is_up.
+# The docker-py default is 60s, which under post-outage Swarm reconciliation
+# (incident 2026-04-24, vm205) caused this endpoint to take 76-80s. The
+# fast path now answers most calls without consulting dockerd at all; this
+# bound only applies when the TCP probe fails and we genuinely need to
+# distinguish "container exited" from "proxy port closed".
+_SPDK_IS_UP_DOCKERD_TIMEOUT = 5
+
+
+def _spdk_proxy_tcp_open(rpc_port, host="127.0.0.1", timeout=1.0):
+    """True if something is accepting TCP on host:rpc_port.
+
+    The SPDK proxy container binds to that port and is started/stopped
+    together with the SPDK container, so an open socket is a sufficient
+    "is SPDK process up" signal for the auto-restart pre-checks. Sub-
+    millisecond in the happy case and never touches the docker socket,
+    so it can't get queued behind a dockerd swarm-reconciliation backlog.
+    """
+    try:
+        with socket.create_connection((host, rpc_port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
 @api.get('/spdk_process_is_up', responses={
     200: {'content': {'application/json': {'schema': utils.response_schema({
         'type': 'boolean'
@@ -255,21 +280,36 @@ def spdk_process_kill(query: utils.RPCPortParams):
 def spdk_process_is_up(query: utils.RPCPortParams):
     req_unique_id = time.time_ns()
     logger.debug(f"function:spdk_process_is_up start f{req_unique_id}")
+
+    # Fast path: TCP-probe the SPDK proxy. Bypasses dockerd entirely; a
+    # wedged docker daemon can't stall this endpoint anymore.
+    if _spdk_proxy_tcp_open(query.rpc_port):
+        total_time = int((time.time_ns() - req_unique_id) / (1000 * 1000 * 1000))
+        logger.debug(f"function:spdk_process_is_up tcp-fast-path total time {total_time}")
+        return utils.get_response(True)
+
+    # Slow path: TCP probe failed — fall through to dockerd to distinguish
+    # "container exited" from "container running but proxy port closed".
+    # Bounded client timeout so dockerd cannot hang the caller for a
+    # minute when its API queue is backlogged after a peer outage.
     try:
-        node_docker = get_docker_client()
-        for cont in node_docker.containers.list(all=True):
-            logger.debug(f"Container: {cont.attrs['Name']} status: {cont.attrs['State']}")
-            if cont.attrs['Name'] == f"/spdk_{query.rpc_port}":
-                status = cont.attrs['State']["Status"]
-                is_running = cont.attrs['State']["Running"]
-                logger.debug("function:spdk_process_is_up end")
-                if is_running:
-                    return utils.get_response(True)
-                else:
-                    return utils.get_response(False, f"SPDK container status: {status}, is running: {is_running}")
+        node_docker = get_docker_client(timeout=_SPDK_IS_UP_DOCKERD_TIMEOUT)
+        try:
+            cont = node_docker.containers.get(f"spdk_{query.rpc_port}")
+        except docker.errors.NotFound:
+            cont = None
+        if cont is not None:
+            state = cont.attrs.get("State", {}) or {}
+            is_running = bool(state.get("Running"))
+            status = state.get("Status", "unknown")
+            logger.debug(f"Container: /spdk_{query.rpc_port} status: {state}")
+            if is_running:
+                return utils.get_response(True)
+            return utils.get_response(False,
+                f"SPDK container status: {status}, is running: {is_running}")
     except Exception as e:
-        logger.error(e)
-    logger.debug(f"function:spdk_process_is_up end f{req_unique_id}")
+        logger.error(f"docker probe for spdk_{query.rpc_port} failed: {e}")
+
     total_time = int((time.time_ns() - req_unique_id) / (1000 * 1000 * 1000))
     logger.debug(f"function:spdk_process_is_up total time {total_time}")
     return utils.get_response(False, f"container not found: /spdk_{query.rpc_port}")
