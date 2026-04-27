@@ -2962,7 +2962,7 @@ def get_master_lvols_by_pool_uuid(pool_id, is_json=False):
     data = []
 
     for lvol in lvols:
-        if lvol.deleted is True and all is False:
+        if lvol.deleted:
             continue
         if lvol.namespace:
             continue
