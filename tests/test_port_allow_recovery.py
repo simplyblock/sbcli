@@ -138,14 +138,6 @@ class _BasePortAllowTest(unittest.TestCase):
         self.fw_node = fw_node
         self.fw_sec = fw_sec
 
-        # RPCClient(...) constructor is called explicitly for peer demote
-        # — always return self.sec_rpc for the peer's ip, otherwise a fresh
-        # MagicMock.
-        def _rpc_ctor(ip, port, *a, **kw):
-            if ip == self.sec.mgmt_ip:
-                return self.sec_rpc
-            return self.node_rpc
-
         # Shared patches applied to every test
         self._patches = [
             patch(
@@ -194,10 +186,6 @@ class _BasePortAllowTest(unittest.TestCase):
             patch(
                 "simplyblock_core.services.tasks_runner_port_allow.FirewallClient",
                 side_effect=_firewall_side_effect,
-            ),
-            patch(
-                "simplyblock_core.services.tasks_runner_port_allow.RPCClient",
-                side_effect=_rpc_ctor,
             ),
             patch(
                 "simplyblock_core.services.tasks_runner_port_allow.tcp_ports_events.port_deny",
