@@ -633,9 +633,9 @@ def main():
     # Create output directory
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    # Decide fetch strategy
-    use_opensearch = not graylog_ok
-    fetch_via = "OpenSearch" if use_opensearch else "Graylog"
+    # Fetch strategy: prefer OpenSearch (scroll API handles large windows),
+    # fall back to Graylog only when OpenSearch is unavailable.
+    fetch_via = "OpenSearch" if os_ok else "Graylog"
     print(f"\n[3] Fetching logs for {len(pairs)} (container, source) pairs "
           f"via {fetch_via} -> {OUTPUT_DIR}")
     print("-" * 64)
@@ -659,7 +659,7 @@ def main():
 
         label = f"{container_name}@{source}" if source else container_name
         try:
-            if use_opensearch:
+            if os_ok:
                 n = os_fetch_container_logs(
                     container_name, source, out_path,
                     probe_cache=os_probe_cache,

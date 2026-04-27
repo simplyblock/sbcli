@@ -1739,48 +1739,48 @@ class TestClusterBase:
             os_url = self._opensearch_base_url()
             os_session = self._build_opensearch_session()
 
-            # Check if Graylog is reachable -- determines fetch strategy
+            # Check OpenSearch reachability
+            opensearch_ok = False
+            try:
+                r = os_session.get(
+                    f"{os_url}/_cluster/health", timeout=10
+                )
+                if r.status_code == 200:
+                    opensearch_ok = True
+                    self.logger.info("[graylog-export] OpenSearch is reachable")
+                else:
+                    self.logger.warning(
+                        f"[graylog-export] OpenSearch returned HTTP "
+                        f"{r.status_code}"
+                    )
+            except Exception as exc:
+                self.logger.warning(
+                    f"[graylog-export] OpenSearch unreachable ({exc})"
+                )
+
+            # Check Graylog reachability (used for fallback discovery)
             graylog_ok = False
             try:
                 r = session.get(f"{base_url}/system", timeout=10)
                 if r.status_code == 200:
                     graylog_ok = True
                     self.logger.info("[graylog-export] Graylog is reachable")
-                else:
-                    self.logger.warning(
-                        f"[graylog-export] Graylog returned HTTP "
-                        f"{r.status_code}, will use OpenSearch for fetching"
-                    )
-            except Exception as exc:
+            except Exception:
+                pass
+
+            if not opensearch_ok and not graylog_ok:
                 self.logger.warning(
-                    f"[graylog-export] Graylog unreachable ({exc}), "
-                    f"will use OpenSearch for fetching"
+                    "[graylog-export] Neither OpenSearch nor Graylog "
+                    "is reachable, skipping export"
                 )
+                return
 
             # Discover (container_name, source) pairs
             # _graylog_discover_containers tries:
             #   1) OpenSearch nested agg  2) Graylog time-slice sampling
-            if graylog_ok:
-                pairs = self._graylog_discover_containers(
-                    session, base_url, from_iso, to_iso
-                )
-            else:
-                self.logger.info(
-                    "[graylog-export] Using OpenSearch for container discovery"
-                )
-                from_ms = int(
-                    datetime.fromisoformat(
-                        from_iso.replace("Z", "+00:00")
-                    ).timestamp() * 1000
-                )
-                to_ms = int(
-                    datetime.fromisoformat(
-                        to_iso.replace("Z", "+00:00")
-                    ).timestamp() * 1000
-                )
-                pairs = self._os_discover_containers(
-                    os_session, os_url, from_ms, to_ms
-                )
+            pairs = self._graylog_discover_containers(
+                session, base_url, from_iso, to_iso
+            )
 
             if not pairs:
                 self.logger.warning(
@@ -1793,7 +1793,9 @@ class TestClusterBase:
             graylog_dir = os.path.join(self.docker_logs_path, "graylog_logs")
             os.makedirs(graylog_dir, exist_ok=True)
 
-            use_opensearch = not graylog_ok
+            # Prefer OpenSearch scroll for fetching (handles large time
+            # windows reliably); fall back to Graylog only if needed.
+            use_opensearch = opensearch_ok
             self.logger.info(
                 f"[graylog-export] Fetching logs for {len(pairs)} "
                 f"(container, source) pairs -> {graylog_dir}  "
