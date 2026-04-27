@@ -774,7 +774,7 @@ class K8sUtils:
             f"      containers:\n"
             f"      - name: fio-benchmark\n"
             f"        image: {image}\n"
-            f"        imagePullPolicy: Always\n"
+            f"        imagePullPolicy: IfNotPresent\n"
             f"        command: [\"fio\", \"--eta=always\", \"--status-interval=5\", \"/fio/fio.cfg\"]\n"
             f"        volumeMounts:\n"
             f"        - mountPath: /spdkvol\n"
