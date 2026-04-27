@@ -705,6 +705,17 @@ jobs:
       - name: Grant OpenShift SCC and restart storage daemonset (post-CR)
         if: ${{ github.event.inputs.cluster_environment == 'aws-openshift' }}
         run: |
+          echo "Waiting for simplyblock-storage-node-sa service account..."
+          for i in $(seq 1 60); do
+            if kubectl get sa simplyblock-storage-node-sa -n simplyblock &>/dev/null; then
+              echo "Service account simplyblock-storage-node-sa found"
+              break
+            fi
+            echo "Attempt $i/60: SA not found yet, waiting 10s..."
+            sleep 10
+          done
+
+          echo "Granting privileged SCC to all service accounts..."
           for sa in $(oc get sa -n simplyblock -o name | cut -d/ -f2); do
             oc adm policy add-scc-to-user privileged -z $sa -n simplyblock
             echo "Granted privileged SCC to $sa"
