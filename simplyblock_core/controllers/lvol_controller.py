@@ -2955,7 +2955,7 @@ def remove_host_from_lvol(lvol_id, host_nqn):
     return True, None
 
 
-def get_master_lvols_by_pool_uuid(pool_id, is_json):
+def get_master_lvols_by_pool_uuid(pool_id, is_json=False):
     db_controller = DBController()
     lvols = db_controller.get_lvols_by_pool_id(pool_id)
 
