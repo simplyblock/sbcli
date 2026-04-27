@@ -92,9 +92,12 @@ class NoExistingController(unittest.TestCase):
 
     def test_fresh_attach_calls_attach_per_peer_ip_and_no_detach(self):
         rpc = MagicMock()
-        # Two successive list calls: first (observe) returns empty,
-        # second (verify after attach) returns enabled with the attached IP.
+        # List calls:
+        #   1. coordinator's initial settle (observe): empty
+        #   2. _ensure_attach_ready before the path's attach: empty
+        #   3. verify-after-attach (final settle): enabled with the IP
         rpc.bdev_nvme_controller_list.side_effect = [
+            None,
             None,
             [{"ctrlrs": [{"state": "enabled", "trid": {"traddr": "10.0.0.1"}}]}],
         ]
@@ -117,6 +120,7 @@ class NoExistingController(unittest.TestCase):
         what opens the cntlid-duplicated race)."""
         rpc = MagicMock()
         rpc.bdev_nvme_controller_list.side_effect = [
+            None,
             None,
             [{"ctrlrs": [{"state": "enabled", "trid": {"traddr": "10.0.0.1"}}]}],
         ]
@@ -202,10 +206,12 @@ class DetachAndWaitGoneBeforeReattach(unittest.TestCase):
         # Observed state: failed (settled non-enabled).
         # Then detach-wait polls: first call still shows the ctrlr,
         # second shows it gone.
+        # Then _ensure_attach_ready before the fresh attach (gone).
         # Final observation after attach: enabled.
         observed = [
             [{"ctrlrs": [{"state": "failed", "trid": {"traddr": "10.0.0.1"}}]}],
             [{"ctrlrs": [{"state": "failed", "trid": {"traddr": "10.0.0.1"}}]}],
+            None,
             None,
             [{"ctrlrs": [{"state": "enabled", "trid": {"traddr": "10.0.0.1"}}]}],
         ]
@@ -316,9 +322,14 @@ class CooldownCoalescesRapidCalls(unittest.TestCase):
 
     def test_second_call_is_noop_inside_cooldown(self):
         rpc = MagicMock()
-        # First call: no ctrlr → attach → verify enabled.
-        # Second call: the controller is already enabled with the peer path.
+        # First call list calls:
+        #   1. initial settle: empty
+        #   2. _ensure_attach_ready before attach: empty
+        #   3. verify-after-attach: enabled with peer path
+        # Second call (inside cooldown):
+        #   4. cooldown branch's enabled-check: already enabled → return True
         rpc.bdev_nvme_controller_list.side_effect = [
+            None,
             None,
             [{"ctrlrs": [{"state": "enabled", "trid": {"traddr": "10.0.0.1"}}]}],
             [{"ctrlrs": [{"state": "enabled", "trid": {"traddr": "10.0.0.1"}}]}],
@@ -336,6 +347,154 @@ class CooldownCoalescesRapidCalls(unittest.TestCase):
             "second caller inside cooldown must coalesce to a no-op; "
             "issuing a second attach is how the duplicate-cntlid race "
             "opens")
+
+
+# ---------------------------------------------------------------------------
+# Multipath attach race prevention
+# ---------------------------------------------------------------------------
+
+class MultipathAttachRacePrevention(unittest.TestCase):
+    """When the coordinator fans out attaches across multiple peer IPs in a
+    single reconcile (fresh-create or top-up), each attach must:
+
+      - check the controller's current state via _ensure_attach_ready
+        before issuing the next bdev_nvme_attach_controller, and
+      - wait at least INTER_ATTACH_SLEEP_SEC since the prior attach so SPDK
+        can finalise per-controller state.
+
+    This is the LVS_5918 race (2026-04-25 12:47:18,671 → 12:47:18,770):
+    the coordinator's previous loop fired both paths back-to-back ~99 ms
+    apart and SPDK's bdev_nvme_check_multipath rejected the second with
+    ``cntlid 2 are duplicated``.
+    """
+
+    def setUp(self):
+        _fresh_process_state()
+        # Keep tests fast: stub time.sleep so the inter-attach wait is
+        # observable but doesn't actually block. We track its calls so the
+        # test can assert that the wait was applied.
+        self._sleep_calls = []
+        self._real_sleep = hublvol_reconnect.time.sleep
+        hublvol_reconnect.time.sleep = self._sleep_calls.append
+
+    def tearDown(self):
+        hublvol_reconnect.time.sleep = self._real_sleep
+
+    def test_fresh_two_path_attach_checks_state_and_sleeps_between(self):
+        """Fresh multipath attach with two peer IPs:
+        - first iteration: list shows empty -> attach path 1
+        - inter-attach: time.sleep(>= INTER_ATTACH_SLEEP_SEC) applied
+        - second iteration: list shows enabled with path 1; path 2 missing
+          -> attach path 2
+        - both attach calls actually fired
+        - NO detach called (no controller was ever in non-enabled state)
+        """
+        # Each list call returns the next state in the sequence.
+        states = [
+            None,                                                          # initial settle: empty
+            None,                                                          # ensure_ready before path 1: empty
+            [{"ctrlrs": [{"state": "enabled",
+                          "trid": {"traddr": "10.0.0.1"}}]}],              # ensure_ready before path 2
+            [{"ctrlrs": [{"state": "enabled",
+                          "trid": {"traddr": "10.0.0.1"},
+                          "alternate_trids": [{"traddr": "10.0.0.2"}]}]}], # verify-end
+        ]
+        rpc = MagicMock()
+        rpc.bdev_nvme_controller_list.side_effect = states
+        rpc.bdev_nvme_attach_controller.return_value = ["x"]
+        node = _make_node(rpc=rpc)
+
+        primary = _make_primary(ip="10.0.0.1")
+        failover = _make_peer("fo", "10.0.0.2")
+
+        coord = _coordinator()
+        ok = coord.reconcile(node, primary, [primary, failover])
+
+        self.assertTrue(ok)
+        self.assertEqual(rpc.bdev_nvme_attach_controller.call_count, 2,
+                         "both peer paths must be attached")
+        self.assertEqual(rpc.bdev_nvme_detach_controller.call_count, 0,
+                         "no detach when no prior controller exists")
+
+        # The inter-attach gap must have been honored at least once
+        # (we have 2 paths, so 1 inter-iteration gap).
+        long_sleeps = [s for s in self._sleep_calls
+                       if isinstance(s, (int, float)) and
+                       s >= hublvol_reconnect.INTER_ATTACH_SLEEP_SEC * 0.5]
+        self.assertTrue(long_sleeps,
+                        f"expected an inter-attach sleep of at least "
+                        f"{hublvol_reconnect.INTER_ATTACH_SLEEP_SEC}s; "
+                        f"observed sleeps: {self._sleep_calls}")
+
+    def test_skip_when_path_already_enabled(self):
+        """If between two attach iterations the controller comes up with
+        the next path already attached (e.g. another caller raced us), the
+        coordinator must skip the redundant attach rather than reissuing
+        bdev_nvme_attach_controller."""
+        states = [
+            None,                                                          # initial settle: empty
+            None,                                                          # ensure_ready before path 1
+            # Between attach 1 and attach 2, BOTH paths happen to be present
+            # (e.g. a path-add raced in via SNodeAPI / health):
+            [{"ctrlrs": [{"state": "enabled",
+                          "trid": {"traddr": "10.0.0.1"},
+                          "alternate_trids": [{"traddr": "10.0.0.2"}]}]}], # ensure_ready before path 2 -> skip
+            [{"ctrlrs": [{"state": "enabled",
+                          "trid": {"traddr": "10.0.0.1"},
+                          "alternate_trids": [{"traddr": "10.0.0.2"}]}]}], # verify-end
+        ]
+        rpc = MagicMock()
+        rpc.bdev_nvme_controller_list.side_effect = states
+        rpc.bdev_nvme_attach_controller.return_value = ["x"]
+        node = _make_node(rpc=rpc)
+
+        primary = _make_primary(ip="10.0.0.1")
+        failover = _make_peer("fo", "10.0.0.2")
+
+        coord = _coordinator()
+        ok = coord.reconcile(node, primary, [primary, failover])
+
+        self.assertTrue(ok)
+        self.assertEqual(rpc.bdev_nvme_attach_controller.call_count, 1,
+                         "second attach must be skipped when its path is "
+                         "already attached on an enabled controller")
+
+    def test_hung_controller_between_paths_triggers_detach_and_retry(self):
+        """If between iterations the controller settles into a non-enabled
+        terminal state (e.g. failed reset), the coordinator must detach,
+        wait for it to be gone, then reattach instead of issuing another
+        attach against a hung controller (which is what produces the
+        cntlid-duplicated symptom)."""
+        states = [
+            None,                                                          # initial settle: empty
+            None,                                                          # ensure_ready before path 1
+            # Before path 2: the just-attached controller has settled into
+            # "failed" — not transient — must trigger detach.
+            [{"ctrlrs": [{"state": "failed",
+                          "trid": {"traddr": "10.0.0.1"}}]}],              # ensure_ready terminal-non-enabled
+            [{"ctrlrs": [{"state": "failed",
+                          "trid": {"traddr": "10.0.0.1"}}]}],              # _wait_for_settled in ensure_ready
+            None,                                                          # _detach_and_wait_gone first poll: gone
+            [{"ctrlrs": [{"state": "enabled",
+                          "trid": {"traddr": "10.0.0.2"}}]}],              # verify-end
+        ]
+        rpc = MagicMock()
+        rpc.bdev_nvme_controller_list.side_effect = states
+        rpc.bdev_nvme_attach_controller.return_value = ["x"]
+        node = _make_node(rpc=rpc)
+
+        primary = _make_primary(ip="10.0.0.1")
+        failover = _make_peer("fo", "10.0.0.2")
+
+        coord = _coordinator()
+        ok = coord.reconcile(node, primary, [primary, failover])
+
+        self.assertTrue(ok)
+        self.assertEqual(rpc.bdev_nvme_detach_controller.call_count, 1,
+                         "hung non-enabled controller must trigger exactly "
+                         "one detach during the multipath fan-out")
+        self.assertEqual(rpc.bdev_nvme_attach_controller.call_count, 2,
+                         "first attach + post-detach reattach for path 2")
 
 
 if __name__ == "__main__":

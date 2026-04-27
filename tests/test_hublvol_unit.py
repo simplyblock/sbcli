@@ -243,6 +243,61 @@ class TestCreateSecondaryHublvolUnit(unittest.TestCase):
         self.secondary.create_secondary_hublvol(self.primary, _CLUSTER_NQN)
         self.rpc.bdev_lvol_create_hublvol.assert_not_called()
 
+    def test_secondary_subsystem_uses_disjoint_cntlid_range(self):
+        """Secondary's hublvol subsystem must be created with min_cntlid >= 1000.
+
+        The primary's hublvol subsystem uses min_cntlid=1 (default). When the
+        tertiary attaches multipath to BOTH targets (same NQN), each target's
+        subsystem independently allocates a cntlid for the inbound Connect
+        starting from its min_cntlid. If both started at 1, both first paths
+        end up with the same cntlid and SPDK rejects the second with
+        ``bdev_nvme_check_multipath: cntlid N are duplicated`` (LVS_5918
+        incident, 2026-04-25 12:47:18).
+        """
+        self.secondary.create_secondary_hublvol(self.primary, _CLUSTER_NQN)
+        create_call = self.rpc.subsystem_create.call_args
+        self.assertIsNotNone(create_call,
+                              "subsystem_create must be invoked by create_secondary_hublvol")
+        min_cntlid = create_call.kwargs.get('min_cntlid')
+        self.assertIsNotNone(
+            min_cntlid,
+            "create_secondary_hublvol must pass an explicit min_cntlid to "
+            "avoid the default (1) that overlaps with the primary's range")
+        self.assertGreaterEqual(
+            min_cntlid, 1000,
+            f"Secondary hublvol min_cntlid must be >= 1000 (mirroring the "
+            f"LVol pattern at lvol_controller.py:841-848); got {min_cntlid}")
+
+
+# ---------------------------------------------------------------------------
+# TestPrimaryHublvolCntlidRange
+# ---------------------------------------------------------------------------
+
+class TestPrimaryHublvolCntlidRange(unittest.TestCase):
+    """The primary's hublvol subsystem stays at min_cntlid=1 (default)."""
+
+    def setUp(self):
+        self.primary = _make_node(_PRIMARY_IP, _PRIMARY_LVS, jm_vuid=100)
+        self.rpc = _mock_rpc()
+        patcher = patch(
+            'simplyblock_core.models.storage_node.RPCClient',
+            return_value=self.rpc,
+        )
+        self.addCleanup(patcher.stop)
+        patcher.start()
+        # Suppress DB write (no FDB in unit tests)
+        self.primary.write_to_db = MagicMock()
+
+    def test_primary_subsystem_uses_min_cntlid_one(self):
+        self.primary.create_hublvol(cluster_nqn=_CLUSTER_NQN)
+        create_call = self.rpc.subsystem_create.call_args
+        self.assertIsNotNone(create_call)
+        # Either default (no kwarg) or explicit 1.
+        min_cntlid = create_call.kwargs.get('min_cntlid', 1)
+        self.assertEqual(
+            min_cntlid, 1,
+            f"Primary hublvol must use min_cntlid=1 (default); got {min_cntlid}")
+
 
 # ---------------------------------------------------------------------------
 # TestRecreateHublvolUnit

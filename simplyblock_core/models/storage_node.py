@@ -157,7 +157,8 @@ class StorageNode(BaseNodeObject):
             self.mgmt_ip, self.rpc_port,
             self.rpc_username, self.rpc_password, **kwargs)
 
-    def expose_bdev(self, nqn, bdev_name, model_number, uuid, nguid, port, ana_state=None):
+    def expose_bdev(self, nqn, bdev_name, model_number, uuid, nguid, port,
+                    ana_state=None, min_cntlid=1):
         """Expose `bdev_name` via NVMe-oF on `nqn` at `port`, one listener per data NIC.
 
         Idempotent: if the subsystem, a matching listener, or the namespace (by uuid)
@@ -166,6 +167,15 @@ class StorageNode(BaseNodeObject):
         paths (secondary hublvol shares the primary's NQN; multi-NIC nodes loop per
         NIC), and unconditional create_listener / add_ns would return -32602
         "Listener already exists" / "Invalid parameters" for state that is correct.
+
+        ``min_cntlid`` controls the lowest controller-id the subsystem will hand
+        out on Connect. When two nodes expose the SAME shared hublvol NQN
+        (primary + sec_1 with ANA multipath), they must allocate from
+        non-overlapping cntlid ranges so a downstream multipath attach to
+        both targets does not produce ``bdev_nvme_check_multipath: cntlid N
+        are duplicated``. Mirror of the lvol_controller pattern at
+        lvol_controller.py:841-848 (primary=1, sec=1000, tert=2000). The
+        primary's hublvol stays at 1; sec_1's hublvol uses 1000.
         """
         rpc_client = self.rpc_client()
 
@@ -177,6 +187,7 @@ class StorageNode(BaseNodeObject):
                         nqn=nqn,
                         serial_number='sbcli-cn',
                         model_number=model_number,
+                        min_cntlid=min_cntlid,
                 ):
                     logger.error(f"Failed to create subsystem for {nqn}")
                     raise RPCException(f'Failed to create subsystem for {nqn}')
@@ -322,6 +333,12 @@ class StorageNode(BaseNodeObject):
         nqn = self.hublvol_nqn_for_lvstore(cluster_nqn, lvstore_name)
         hublvol_port = primary_node.hublvol.nvmf_port
 
+        # The secondary's hublvol subsystem MUST use a cntlid range
+        # disjoint from the primary's, otherwise a tertiary (downstream
+        # multipath consumer) attaching to both will get the same cntlid
+        # from each independent target subsystem and SPDK will reject the
+        # second path with ``bdev_nvme_check_multipath: cntlid N are
+        # duplicated`` (LVS_5918 incident, 2026-04-25 12:47:18).
         self.expose_bdev(
             nqn=nqn,
             bdev_name=bdev_name,
@@ -330,6 +347,7 @@ class StorageNode(BaseNodeObject):
             nguid=primary_node.hublvol.nguid,
             port=hublvol_port,
             ana_state="non_optimized",
+            min_cntlid=1000,
         )
         logger.info(f'Secondary hublvol exposed: {nqn} on port {hublvol_port}')
         return nqn
