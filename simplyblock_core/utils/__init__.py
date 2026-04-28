@@ -2626,7 +2626,7 @@ def patch_prometheus_configmap(username: str, password: str):
 
     try:
         cm = v1.read_namespaced_config_map(
-            name="sbcli-simplyblock-prometheus-config",
+            name="simplyblock-prometheus-config",
             namespace=constants.K8S_NAMESPACE
         )
     except client.exceptions.ApiException as e:
@@ -2653,12 +2653,12 @@ def patch_prometheus_configmap(username: str, password: str):
         }
 
         v1.patch_namespaced_config_map(
-            name="sbcli-simplyblock-prometheus-config",
+            name="simplyblock-prometheus-config",
             namespace=constants.K8S_NAMESPACE,
             body=patch_body
         )
 
-        logger.info("Patched sbcli-simplyblock-prometheus-config ConfigMap with new credentials.")
+        logger.info("Patched simplyblock-prometheus-config ConfigMap with new credentials.")
         return True
 
     except client.exceptions.ApiException as e:
