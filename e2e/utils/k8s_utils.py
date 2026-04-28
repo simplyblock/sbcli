@@ -689,6 +689,64 @@ class K8sUtils:
             "capacity": parts[1] if len(parts) > 1 else "",
         }
 
+    def get_pvc_volume_handle(self, name: str, namespace: str = None) -> str:
+        """Return the CSI volumeHandle (lvol ID) backing a bound PVC, or ''."""
+        ns = namespace or self.namespace
+        # Get the PV name from the PVC
+        pv, _ = self._exec_kubectl(
+            f"kubectl get pvc {name} -n {ns} "
+            f"-o jsonpath='{{.spec.volumeName}}' 2>/dev/null || true",
+            supress_logs=True,
+        )
+        pv = pv.strip()
+        if not pv:
+            return ""
+        # Get the volumeHandle from the PV
+        handle, _ = self._exec_kubectl(
+            f"kubectl get pv {pv} "
+            f"-o jsonpath='{{.spec.csi.volumeHandle}}' 2>/dev/null || true",
+            supress_logs=True,
+        )
+        return handle.strip()
+
+    def log_fio_pvc_mapping(self, pvc_details: dict, clone_details: dict = None,
+                            extra_details: dict = None):
+        """Log a table mapping FIO Job → PVC → lvol ID for debugging.
+
+        Parameters
+        ----------
+        pvc_details : dict
+            ``{pvc_name: {"job_name": ..., ...}}``
+        clone_details : dict | None
+            Same structure for clone PVCs.
+        extra_details : dict | None
+            Any additional PVC sets (e.g. new-node PVCs).
+        """
+        all_entries = []
+        for label, details in [("pvc", pvc_details),
+                                ("clone", clone_details),
+                                ("extra", extra_details)]:
+            if not details:
+                continue
+            for name, info in details.items():
+                job = info.get("job_name", "N/A")
+                vol_handle = self.get_pvc_volume_handle(name)
+                all_entries.append((job, name, vol_handle or "N/A", label))
+
+        if not all_entries:
+            return
+
+        self.logger.info("=" * 120)
+        self.logger.info("FIO Job → PVC → Lvol Mapping")
+        self.logger.info("-" * 120)
+        self.logger.info(
+            f"{'FIO Job':<40} {'PVC':<40} {'Lvol ID (volumeHandle)':<42} {'Type':<8}"
+        )
+        self.logger.info("-" * 120)
+        for job, pvc, handle, typ in all_entries:
+            self.logger.info(f"{job:<40} {pvc:<40} {handle:<42} {typ:<8}")
+        self.logger.info("=" * 120)
+
     # ── VolumeSnapshot operations ────────────────────────────────────────────
 
     def create_volume_snapshot(self, name: str, pvc_name: str,

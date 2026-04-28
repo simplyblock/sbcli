@@ -672,6 +672,8 @@ class K8sNativeFailoverTest(TestClusterBase):
                 self.node_vs_pvc.setdefault(node_id, []).append(pvc_name)
             sleep_n_sec(5)
 
+        self.k8s_utils.log_fio_pvc_mapping(self.pvc_details, self.clone_details)
+
     # ── Snapshot & Clone creation ────────────────────────────────────────────
 
     def create_snapshots_and_clones(self):
@@ -807,6 +809,8 @@ class K8sNativeFailoverTest(TestClusterBase):
                 f"resized to {self.int_pvc_size}Gi"
             )
             sleep_n_sec(10)
+
+        self.k8s_utils.log_fio_pvc_mapping(self.pvc_details, self.clone_details)
 
     # ── Delete PVCs ──────────────────────────────────────────────────────────
 

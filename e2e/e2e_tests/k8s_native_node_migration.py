@@ -167,6 +167,21 @@ class K8sNativeNodeMigrationTest(TestClusterBase):
             f"[job1]\n"
         )
 
+    def _save_fio_pod_logs(self, job_name: str, resource_name: str):
+        """Save FIO pod logs to log directory for post-mortem debugging."""
+        try:
+            pod_name = self.k8s_utils.get_job_pod_name(job_name)
+            if not pod_name:
+                return
+            logs = self.k8s_utils.get_pod_logs(pod_name, tail=2000)
+            if logs:
+                log_file = os.path.join(self.log_path, f"{resource_name}_fio.log")
+                with open(log_file, "w") as f:
+                    f.write(logs)
+                self.logger.info(f"Saved FIO logs for {resource_name} to {log_file}")
+        except Exception as exc:
+            self.logger.warning(f"Could not save FIO logs for {resource_name}: {exc}")
+
     # ── Main test flow ────────────────────────────────────────────────────────
 
     def run(self):
@@ -230,6 +245,8 @@ class K8sNativeNodeMigrationTest(TestClusterBase):
             }
             sleep_n_sec(5)
 
+        self.k8s_utils.log_fio_pvc_mapping(self.pvc_details)
+
         # ── Step 3: Create snapshots + clones with FIO ───────────────────
         self.logger.info("Step 3: Creating snapshots and clones on existing PVCs")
 
@@ -272,6 +289,8 @@ class K8sNativeNodeMigrationTest(TestClusterBase):
                 "configmap_name": clone_cm,
             }
             sleep_n_sec(5)
+
+        self.k8s_utils.log_fio_pvc_mapping(self.pvc_details, self.clone_details)
 
         sleep_n_sec(30)
 
@@ -337,11 +356,13 @@ class K8sNativeNodeMigrationTest(TestClusterBase):
         # Validate FIO on PVCs
         for pvc_name, detail in self.pvc_details.items():
             self.logger.info(f"Validating FIO job for PVC: {pvc_name}")
+            self._save_fio_pod_logs(detail["job_name"], pvc_name)
             self.k8s_utils.validate_fio_job(detail["job_name"])
 
         # Validate FIO on clones
         for clone_name, detail in self.clone_details.items():
             self.logger.info(f"Validating FIO job for clone: {clone_name}")
+            self._save_fio_pod_logs(detail["job_name"], clone_name)
             self.k8s_utils.validate_fio_job(detail["job_name"])
 
         # Validate all nodes healthy
