@@ -298,7 +298,6 @@ class TestSpdkProcessIsUpDockerdFallback(unittest.TestCase):
 class TestSnodeAPIMountInvariant(unittest.TestCase):
 
     def test_storage_node_api_container_mounts_ramdisk(self):
-        import os
         path = os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             "simplyblock_core", "storage_node_ops.py",

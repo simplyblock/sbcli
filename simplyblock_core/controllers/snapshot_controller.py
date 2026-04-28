@@ -629,7 +629,7 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     else:
         master_lvol = source_lvol
 
-    if master_lvol.namespace and master_lvol.max_namespace_per_subsys > 1 :
+    if master_lvol.max_namespace_per_subsys > 1 :
         # Count how many lvols currently share this master's subsystem
         ns_count = 0
         for lv in db_controller.get_lvols(cluster.get_id()):

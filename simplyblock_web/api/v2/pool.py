@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
 
 from simplyblock_core.db_controller import DBController
-from simplyblock_core.controllers import pool_controller
+from simplyblock_core.controllers import pool_controller, lvol_controller
 from simplyblock_core import utils as core_utils
 from simplyblock_core.models.pool import Pool as PoolModel
 
@@ -162,3 +162,8 @@ def remove_host(cluster: Cluster, pool: StoragePool, parameters: PoolHostParams)
     if not ok:
         raise HTTPException(400, err)
     return Response(status_code=204)
+
+
+@instance_api.get('/master-lvols', name='clusters:storage-pools:master-lvols')
+def master_lvols(cluster: Cluster, pool: StoragePool):
+    return lvol_controller.get_master_lvols_by_pool_uuid(pool.get_id(), is_json=True)
