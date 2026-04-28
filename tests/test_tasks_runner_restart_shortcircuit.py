@@ -165,7 +165,7 @@ class TestShortCircuitRejectsUnhealthyNode(unittest.TestCase):
             mock_health._check_node_ping.return_value = False
             mock_health._check_node_api.return_value = False
             mock_health._check_ping_from_node.return_value = False
-            ret = mod.task_runner_node(task)
+            _ = mod.task_runner_node(task)
         self.assertNotEqual(task.status, JobSchedule.STATUS_DONE)
 
 

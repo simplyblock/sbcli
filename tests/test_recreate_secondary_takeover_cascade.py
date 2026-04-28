@@ -31,7 +31,6 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from simplyblock_core.models.cluster import Cluster
-from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.hublvol import HubLVol

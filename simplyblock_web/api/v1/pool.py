@@ -237,7 +237,7 @@ def lvol_iostats(pool_uuid):
 @bp.route('/pool/get-master-lvols/<string:pool_uuid>', methods=['GET'])
 def get_master_lvols(pool_uuid):
     try:
-        pool = db.get_pool_by_id(pool_uuid)
+        _ = db.get_pool_by_id(pool_uuid)
     except KeyError:
         return utils.get_response_error(f"Pool not found: {pool_uuid}", 404)
 
