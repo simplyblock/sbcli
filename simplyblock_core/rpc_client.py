@@ -1533,8 +1533,9 @@ class RPCClient:
         Args:
             name: S3 bdev name (e.g. 's3_LVS_1234')
             bucket_name: S3/MinIO bucket name to use for data storage
+        Returns (result, error) tuple.
         """
-        return self._request("bdev_s3_add_bucket_name", {
+        return self._request2("bdev_s3_add_bucket_name", {
             "name": name,
             "bucket_name": bucket_name,
         })

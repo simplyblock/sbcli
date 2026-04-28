@@ -199,8 +199,8 @@ def create_s3_bdev(node, backup_config):
         return False
 
     try:
-        ret = rpc_client.bdev_s3_add_bucket_name(s3_bdev_name, bucket_name)
-        if not ret:
+        ret, err = rpc_client.bdev_s3_add_bucket_name(s3_bdev_name, bucket_name)
+        if not ret and not (err and err.get("code") == -17):
             logger.warning(f"Failed to set bucket name on S3 bdev {s3_bdev_name}")
             return False
         logger.info(f"S3 bdev bucket set: {bucket_name} on {s3_bdev_name}")
@@ -745,8 +745,8 @@ def switch_backup_source(cluster_id, source_cluster_id):
         try:
             rpc_client = node.rpc_client()
             s3_bdev_name = f"s3_{node.lvstore}"
-            ret = rpc_client.bdev_s3_add_bucket_name(s3_bdev_name, bucket_name)
-            if not ret:
+            ret, err = rpc_client.bdev_s3_add_bucket_name(s3_bdev_name, bucket_name)
+            if not ret and not (err and err.get("code") == -17):
                 errors.append(f"Node {node.get_id()}: failed to set bucket")
             else:
                 logger.info(f"Switched S3 bucket to {bucket_name} on node {node.get_id()}")
