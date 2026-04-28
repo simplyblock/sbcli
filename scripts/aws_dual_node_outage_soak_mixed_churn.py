@@ -823,12 +823,14 @@ class SoakRunner:
     def _create_one_volume(self, volume_name, node_uuid, index):
         """Create one lvol bound to ``node_uuid`` and return its volume dict.
 
-        Retries inside the rebalance window if the LVStore is being recreated,
-        matching the behaviour of the bulk ``create_volumes`` path.
+        Retries inside the rebalance window if the LVStore is being recreated
+        or while a rebalance / data migration is in flight, matching the
+        behaviour of the bulk ``create_volumes`` path.
         """
         volume_id = None
         started = time.time()
         while time.time() - started < self.args.rebalance_timeout:
+            self.wait_for_all_online(timeout=self.args.restart_timeout)
             self.wait_for_cluster_stable()
             output = self.sbctl(
                 f"lvol add {volume_name} {self.args.volume_size} {self.args.pool} --host-id {node_uuid}"
@@ -952,7 +954,7 @@ class SoakRunner:
                 f"fio --name={fio_name} --directory={shlex.quote(volume['mount_point'])} "
                 "--direct=1 --rw=randrw --bs=4K --group_reporting --time_based "
                 f"--numjobs={FIO_NUMJOBS} --iodepth=4 --size=4G --runtime={self.args.runtime} "
-                "--ioengine=aiolib --max_latency=5s "
+                "--ioengine=aiolib --max_latency=5s --exitall_on_error=1 "
                 f"--output={shlex.quote(volume['fio_log'])}; "
                 "rc=$?; "
                 f"echo $rc > {shlex.quote(volume['rc_file'])}"
@@ -1584,6 +1586,7 @@ class SoakRunner:
             time.sleep(duration)
         finally:
             self._enable_nic_on_all_nodes(nic)
+        self.wait_for_all_online(timeout=self.args.restart_timeout)
         self.wait_for_cluster_stable()
 
     def _network_outage(self, node_id, duration):
@@ -1916,7 +1919,10 @@ class SoakRunner:
         self.ensure_prerequisites()
         nodes = self.ensure_expected_nodes()
         self.wait_for_all_online(timeout=self.args.restart_timeout)
+        # Wait for the cluster to be fully stable (no in-flight rebalance
+        # or data migration) before starting iterations.
         self.wait_for_cluster_stable()
+        self.wait_for_data_migration_complete("test start")
         mount_root = self.prepare_client()
         # Saved so the churn cycle can mount its newly-created volume back
         # into the same workspace tree.
@@ -2042,20 +2048,22 @@ class SoakRunner:
                     # SIGTERM/SIGKILL — fio keeps running into the next
                     # iteration and across the upcoming churn cycles.
                     self.check_fio()
-                    # All-nodes-online is the only post-outage gate: no
-                    # rebalance / migration wait. Background reconciliation
-                    # is left to keep running across iterations.
+                    # Wait for the cluster to settle: all nodes online AND
+                    # rebalance / data-migration drained before the next
+                    # outage pair fires.
                     self.wait_for_all_online(timeout=self.args.restart_timeout)
+                    self.wait_for_cluster_stable()
+                    self.wait_for_data_migration_complete("next outage pair")
 
                 self._inter_iteration_nic_chaos()
                 # Re-check for any churn fault that fired during the NIC
                 # chaos / cluster wait so we exit at the next sync point.
                 self.reraise_churn_error()
-                # Fixed 60 s grace window between outages so client IO and
-                # in-cluster reconciliation can settle without us blocking
-                # on rebalance / migration completion.
-                self.logger.log("Sleeping 60 s grace window before next iteration")
-                time.sleep(60)
+                # Wait for rebalance / data-migration to complete before
+                # starting the next iteration (main branch: device-migration
+                # runners are active and we gate on `is_re_balancing`).
+                self.wait_for_cluster_stable()
+                self.wait_for_data_migration_complete("next iteration")
 
 
 def main():
