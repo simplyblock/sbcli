@@ -73,7 +73,7 @@ class K8sNativeFailoverTest(TestClusterBase):
         self.pvc_size = "10Gi"
         self.int_pvc_size = 10
         self.fio_size = "1G"
-        self.FIO_RUNTIME = 2000
+        self.FIO_RUNTIME = 2400
 
         # Counts — total_pvcs is set dynamically to len(sn_nodes) in run()
         self.total_pvcs = 6
@@ -1242,12 +1242,7 @@ class K8sNativeFailoverTest(TestClusterBase):
                 self.sbcli_utils.wait_for_storage_node_status(node, "online", timeout=300)
                 self.log_outage_event(node, outage_type, "Node restarted", outage_time=2)
 
-        # Wait for health check
-        try:
-            self.sbcli_utils.wait_for_health_status(node, True, timeout=300)
-        except Exception as exc:
-            self.logger.warning(f"Health check did not pass for {node}: {exc}")
-
+        # Health check deferred to after all outage nodes are online
         self.outage_end_time = int(datetime.now().timestamp())
 
     # ── IO Stats Validation ──────────────────────────────────────────────────
@@ -1462,7 +1457,7 @@ class K8sNativeFailoverTest(TestClusterBase):
                 self.create_snapshots_and_clones()
                 sleep_n_sec(280)
 
-                # ── Recovery phase ──
+                # ── Recovery phase: bring all nodes online ──
                 for node, outage_type, node_outage_dur in outage_events:
                     self.current_outage_node = node
                     if outage_type == "container_stop" and self.npcs > 1:
@@ -1471,6 +1466,13 @@ class K8sNativeFailoverTest(TestClusterBase):
                         self.restart_nodes_after_failover(outage_type)
                     self.logger.info("Waiting for fallback recovery.")
                     sleep_n_sec(100)
+
+                # ── Health check after all nodes are online ──
+                for node, outage_type, node_outage_dur in outage_events:
+                    try:
+                        self.sbcli_utils.wait_for_health_status(node, True, timeout=300)
+                    except Exception as exc:
+                        self.logger.warning(f"Health check did not pass for {node}: {exc}")
 
                 self.collect_outage_diagnostics("post_recovery")
 
@@ -1732,7 +1734,7 @@ class K8sNativeBasicFailoverTest(K8sNativeFailoverTest):
                 outage_events = self.perform_n_plus_k_outages()
                 sleep_n_sec(280)
 
-                # Recovery phase
+                # Recovery phase: bring all nodes online
                 for node, outage_type, node_outage_dur in outage_events:
                     self.current_outage_node = node
                     if outage_type == "container_stop" and self.npcs > 1:
@@ -1741,6 +1743,13 @@ class K8sNativeBasicFailoverTest(K8sNativeFailoverTest):
                         self.restart_nodes_after_failover(outage_type)
                     self.logger.info("Waiting for fallback recovery.")
                     sleep_n_sec(100)
+
+                # Health check after all nodes are online
+                for node, outage_type, node_outage_dur in outage_events:
+                    try:
+                        self.sbcli_utils.wait_for_health_status(node, True, timeout=300)
+                    except Exception as exc:
+                        self.logger.warning(f"Health check did not pass for {node}: {exc}")
 
                 self.collect_outage_diagnostics("post_recovery")
 

@@ -922,6 +922,13 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                 self.logger.info("Waiting for fallback recovery.")
                 sleep_n_sec(100)
 
+            # Health check after all outage nodes are online
+            for node, outage_type, node_outage_dur in outage_events:
+                try:
+                    self.sbcli_utils.wait_for_health_status(node, True, timeout=300)
+                except Exception as exc:
+                    self.logger.warning(f"Health check did not pass for {node}: {exc}")
+
             # Reconnect multipath NICs after all node outages are recovered
             self._reconnect_multipath_nics()
 

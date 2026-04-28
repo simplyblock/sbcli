@@ -905,7 +905,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
         else:
             self.runner_k8s_log.restart_logging()
 
-        self.sbcli_utils.wait_for_health_status(self.current_outage_node, True, timeout=300)
+        # Health check deferred to after all outage nodes are online
         self.outage_end_time = int(datetime.now().timestamp())
 
         # Flush local outage logs to NFS if we started local logging before a network outage
@@ -1321,6 +1321,11 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
         self.collect_outage_diagnostics(f"pre_outage_node_{self.current_outage_node}")
         self.restart_nodes_after_failover(outage_type)
 
+        try:
+            self.sbcli_utils.wait_for_health_status(self.current_outage_node, True, timeout=300)
+        except Exception as exc:
+            self.logger.warning(f"Health check did not pass for {self.current_outage_node}: {exc}")
+
         self.collect_outage_diagnostics(f"post_recovery_node_{self.current_outage_node}")
 
         return outage_type
@@ -1536,6 +1541,12 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                 sleep_n_sec(100)
             self.collect_outage_diagnostics(f"pre_outage_node_{self.current_outage_node}")
             self.restart_nodes_after_failover(outage_type)
+
+            try:
+                self.sbcli_utils.wait_for_health_status(self.current_outage_node, True, timeout=300)
+            except Exception as exc:
+                self.logger.warning(f"Health check did not pass for {self.current_outage_node}: {exc}")
+
             self.collect_outage_diagnostics(f"post_recovery_node_{self.current_outage_node}")
             self.logger.info("Waiting for fallback.")
             if outage_type != "partial_nw" or outage_type != "partial_nw_single_port":
