@@ -60,12 +60,12 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
         self.test_name = "n_plus_k_failover_multi_client_ha"
         self.outage_types = [
             "graceful_shutdown",
-            # "interface_full_network_interrupt"
+            "interface_full_network_interrupt"
         ]
         self.outage_types2 = [
             "container_stop",
             "graceful_shutdown",
-            # "interface_full_network_interrupt"
+            "interface_full_network_interrupt"
         ]
         self._stop_spdk_mem_thread = False
         self.spdk_mem_thread = None
@@ -366,7 +366,7 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
     def _disconnect_full_interface(self, node, node_ip):
         self.logger.info("Handling full interface based network interruption...")
         active_interfaces = self.ssh_obj.get_active_interfaces(node_ip)
-        outage_dur = random.choice([300, 600])  # 5 or 10 minutes
+        outage_dur = random.choice([30, 300, 600])  # 5 or 10 minutes
         self.logger.info(f"Selected Outage seconds for n/w outage: {outage_dur}")
         self.disconnect_thread = threading.Thread(
             target=self.ssh_obj.disconnect_all_active_interfaces,
