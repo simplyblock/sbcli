@@ -603,11 +603,17 @@ jobs:
       # ── Wait for cluster readiness ──────────────────────────────────────────
 
       - name: Wait for cluster to become active
-        timeout-minutes: 25
+        timeout-minutes: ${{ github.event.inputs.cluster_environment == 'local' && 25 || 80 }}
         id: cluster_status
         run: |
           NAMESPACE=simplyblock
           ADMIN_POD=""
+          CLUSTER_ENV="${{ github.event.inputs.cluster_environment || 'local' }}"
+          if [ "$CLUSTER_ENV" = "local" ]; then
+            MAX_POLL=180
+          else
+            MAX_POLL=720
+          fi
 
           echo "=== Waiting for admin pod to be ready ==="
           for i in $(seq 1 60); do
@@ -638,9 +644,9 @@ jobs:
           # Expected number of snode-spdk pods = number of initial worker nodes
           IFS=',' read -ra NODES <<< "${{ github.event.inputs.worker_nodes }}"
           EXPECTED_SNODES=${#NODES[@]}
-          echo "=== Waiting for $EXPECTED_SNODES snode-spdk pods to be ready (max 30 min) ==="
+          echo "=== Waiting for $EXPECTED_SNODES snode-spdk pods to be ready (MAX_POLL=$MAX_POLL) ==="
 
-          for i in $(seq 1 180); do
+          for i in $(seq 1 $MAX_POLL); do
             TOTAL=$(kubectl -n $NAMESPACE get pods -l role=simplyblock-storage-node --no-headers 2>/dev/null | wc -l)
             READY=$(kubectl -n $NAMESPACE get pods -l role=simplyblock-storage-node --no-headers 2>/dev/null | grep -c "Running" || true)
 
@@ -649,9 +655,9 @@ jobs:
               break
             fi
 
-            echo "snode-spdk pods: $READY/$EXPECTED_SNODES Running (total=$TOTAL) ($i/180)"
-            if [ "$i" -eq 180 ]; then
-              echo "ERROR: snode-spdk pods did not become ready within 30 minutes"
+            echo "snode-spdk pods: $READY/$EXPECTED_SNODES Running (total=$TOTAL) ($i/$MAX_POLL)"
+            if [ "$i" -eq "$MAX_POLL" ]; then
+              echo "ERROR: snode-spdk pods did not become ready within timeout"
               kubectl -n $NAMESPACE get pods
               exit 1
             fi
@@ -684,8 +690,8 @@ jobs:
             exit 1
           fi
 
-          echo "=== Polling cluster status ==="
-          for i in $(seq 1 90); do
+          echo "=== Polling cluster status (MAX_POLL=$MAX_POLL) ==="
+          for i in $(seq 1 $MAX_POLL); do
             # Re-resolve admin pod each iteration in case it gets recreated
             NEW_POD=$(kubectl -n $NAMESPACE get pods \
               -l app=simplyblock-admin-control \
@@ -697,10 +703,10 @@ jobs:
               ADMIN_POD="$NEW_POD"
             fi
 
-            echo "[poll $i/90] Using admin pod: $ADMIN_POD"
+            echo "[poll $i/$MAX_POLL] Using admin pod: $ADMIN_POD"
             OUTPUT=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
               sbctl cluster list 2>&1) || true
-            echo "[poll $i/90] sbctl cluster list output:"
+            echo "[poll $i/$MAX_POLL] sbctl cluster list output:"
             echo "$OUTPUT"
 
             if echo "$OUTPUT" | grep -qi "active"; then
@@ -726,7 +732,7 @@ jobs:
               exit 0
             fi
 
-            echo "Cluster not active yet ($i/90)..."
+            echo "Cluster not active yet ($i/$MAX_POLL)..."
             sleep 10
           done
 
