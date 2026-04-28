@@ -210,7 +210,7 @@ def exec_port_allow_task(task):
             for sec_id in sec_ids:
                 sec_node = db.get_storage_node_by_id(sec_id)
                 if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
-                    secondary_hublvol_check = health_controller._check_sec_node_hublvol(sec_node, auto_fix=True)
+                    secondary_hublvol_check = health_controller._check_sec_node_hublvol(sec_node, auto_fix=True, primary_node_id=node.get_id())
                     if not secondary_hublvol_check:
                         msg = f"Secondary node {sec_id} hublvol check fail, retry later"
                         logger.warning(msg)
