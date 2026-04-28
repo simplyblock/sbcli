@@ -150,7 +150,15 @@ CLIENT_QPAIR_COUNT=3
 NVME_TIMEOUT_US=8000000
 NVMF_MAX_SUBSYSTEMS=50000
 KATO=10000
-ACK_TO=11
+# transport_ack_timeout exponent: server tears down a client qpair if it
+# stays silent for ~2^ACK_TO ms. ACK_TO=11 (~2 s) is shorter than the LVS
+# tertiary rejoin freeze window (≈ 4 s today) — the server kills healthy
+# qpairs on the alive primary mid-freeze and clients see a multi-second
+# stall on reissue. Bumped to 12 (~4 s) so the freeze fits inside the
+# budget. Long-term, the freeze itself is being shortened (single-path
+# hublvol attach + deferred failover); this stays as belt-and-braces so
+# a stragglier rejoin doesn't immediately re-trip the bug.
+ACK_TO=12
 BDEV_RETRY=0
 # Used when the storage node has >1 data NIC (NVMe multipath active). Per the
 # SPDK NVMe multipath docs, bdev_retry_count must be non-zero so aborted IOs

@@ -439,7 +439,8 @@ class StorageNode(BaseNodeObject):
                 logger.error("Error establishing hublvol: %s", e.message)
                 return False
 
-    def connect_to_hublvol(self, primary_node, failover_node=None, role="secondary", timeout=None):
+    def connect_to_hublvol(self, primary_node, failover_node=None, role="secondary",
+                           timeout=None, rpc_timeout=None):
         """Connect to a primary node's hublvol, optionally with multipath failover.
 
         If failover_node is provided (typically sec_1), sets up NVMe ANA
@@ -457,13 +458,17 @@ class StorageNode(BaseNodeObject):
         :class:`HublvolReconnectCoordinator`, which serializes across
         control-plane services on an FDB advisory lock keyed on
         ``(self.id, primary.lvstore)`` and enforces a cooldown between
-        attempts. The ``timeout`` kwarg is accepted for back-compat but
-        is no longer wired through — the coordinator uses SPDK reset
-        tuning (ctrlr_loss_timeout_sec, reconnect_delay_sec,
-        fast_io_fail_timeout_sec) that makes per-call RPC timeouts
-        redundant.
+        attempts.
+
+        ``rpc_timeout`` (seconds) bounds each underlying SPDK
+        ``bdev_nvme_attach_controller`` HTTP call. The LVS rejoin uses
+        a sub-second value so a single in-freeze attach must land fast
+        or abort fast — the freeze must not hang on a stale listener.
+        ``timeout`` is the legacy alias for the same intent and is honored
+        when ``rpc_timeout`` is not provided.
         """
-        del timeout  # kept in the signature for back-compat; see docstring
+        if rpc_timeout is None and timeout is not None:
+            rpc_timeout = timeout
         logger.info(f'Connecting node {self.get_id()} to hublvol on {primary_node.get_id()}'
                      + (f' with failover to {failover_node.get_id()}' if failover_node else ''))
 
@@ -490,7 +495,8 @@ class StorageNode(BaseNodeObject):
             )
             peers = [primary_node] + ([failover_node] if failover_node else [])
             coordinator = HublvolReconnectCoordinator(DBController())
-            if not coordinator.reconcile(self, primary_node, peers, role=role):
+            if not coordinator.reconcile(self, primary_node, peers, role=role,
+                                         rpc_timeout=rpc_timeout):
                 logger.error(
                     "Hublvol reconcile failed for %s on %s (role=%s)",
                     primary_node.hublvol.bdev_name, self.get_id(), role,

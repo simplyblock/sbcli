@@ -487,7 +487,12 @@ _FTT2_DISPATCH = {
 
     # NVMe controllers
     'bdev_nvme_attach_controller':           _bdev_nvme_attach_controller,
-    'bdev_nvme_controller_list':             _bdev_nvme_controller_list,
+    # Real SPDK RPC method name; ``RPCClient.bdev_nvme_controller_list``
+    # is just a Python wrapper that issues this method, so the dispatch
+    # key must match the wire name. Registering the wrapper name here
+    # falls through the unknown-method path and returns ``True``, which
+    # then crashes the helper at ``_ctrlrs_from_list`` (``ret[0]`` on a bool).
+    'bdev_nvme_get_controllers':             _bdev_nvme_controller_list,
     'bdev_nvme_set_options':                 _STATIC_TRUE,
 
     # Compression

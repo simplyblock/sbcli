@@ -317,14 +317,20 @@ def _expected_ips_for_peer(peer):
 
 
 def _do_attach(rpc, ctrl_name, nqn, ip, port, trtype,
-               multipath, attach_timeout_sec=1):
-    """Single ``bdev_nvme_attach_controller`` with hublvol timeout tuning."""
+               multipath, attach_timeout_sec=1, rpc_timeout=None):
+    """Single ``bdev_nvme_attach_controller`` with hublvol timeout tuning.
+
+    ``rpc_timeout`` (seconds) bounds the underlying SPDK RPC HTTP call.
+    Used by the LVS rejoin to keep a single in-freeze attach under a hard
+    sub-second budget; falls through to the rpc client's default when None.
+    """
     return rpc.bdev_nvme_attach_controller(
         ctrl_name, nqn, ip, port, trtype,
         multipath=multipath,
         ctrlr_loss_timeout_sec=HUBLVOL_CTRLR_LOSS_TIMEOUT_SEC,
         reconnect_delay_sec=HUBLVOL_RECONNECT_DELAY_SEC,
         fast_io_fail_timeout_sec=HUBLVOL_FAST_IO_FAIL_TIMEOUT_SEC,
+        request_timeout=rpc_timeout,
     )
 
 
@@ -406,11 +412,19 @@ class HublvolReconnectCoordinator:
         self._cooldown = cooldown_sec
         self._lock_ttl = lock_ttl_sec
 
-    def reconcile(self, node, primary_node, peer_nodes, role="secondary"):
+    def reconcile(self, node, primary_node, peer_nodes, role="secondary",
+                  rpc_timeout=None):
         """Observe, then converge, the hublvol controller state.
 
         Returns True if the controller ends up with at least one
         ``enabled`` path covering every ``peer_node``, False otherwise.
+
+        ``rpc_timeout`` (seconds) bounds each underlying SPDK
+        ``bdev_nvme_attach_controller`` HTTP RPC. The LVS rejoin uses a
+        sub-second value so a single in-freeze attach must land fast or
+        abort fast. ``None`` (default) leaves the rpc client's own
+        timeout in place — appropriate for post-freeze background
+        reconciliation.
         """
         if primary_node.hublvol is None:
             raise ValueError(
@@ -473,27 +487,28 @@ class HublvolReconnectCoordinator:
             # 4. Act.
             if not ctrlrs:
                 ok = self._fresh_multipath_attach(
-                    rpc, ctrl_name, nqn, port, expected, node, role)
+                    rpc, ctrl_name, nqn, port, expected, node, role,
+                    rpc_timeout=rpc_timeout)
             else:
                 # Already enabled — top up any missing peer paths. Adding
                 # a path to an existing enabled controller is the intended
                 # multipath extension and does not race with destroys.
                 ok = self._add_missing_paths(
                     rpc, ctrl_name, nqn, port, expected, ctrlrs,
-                    node, role)
+                    node, role, rpc_timeout=rpc_timeout)
 
             if ok:
                 lock.stamp_attach()
             return ok
 
     def _fresh_multipath_attach(self, rpc, ctrl_name, nqn, port, expected,
-                                node, role):
+                                node, role, rpc_timeout=None):
         return self._attach_paths_safely(
             rpc, ctrl_name, nqn, port, expected, node, role,
-            verify_at_end=True)
+            verify_at_end=True, rpc_timeout=rpc_timeout)
 
     def _add_missing_paths(self, rpc, ctrl_name, nqn, port, expected,
-                           ctrlrs, node, role):
+                           ctrlrs, node, role, rpc_timeout=None):
         attached = _attached_ips(ctrlrs)
         missing = {ip: trtype for ip, trtype in expected.items()
                    if ip not in attached}
@@ -505,10 +520,10 @@ class HublvolReconnectCoordinator:
             len(attached), len(expected), list(missing))
         return self._attach_paths_safely(
             rpc, ctrl_name, nqn, port, missing, node, role,
-            verify_at_end=False)
+            verify_at_end=False, rpc_timeout=rpc_timeout)
 
     def _attach_paths_safely(self, rpc, ctrl_name, nqn, port, paths,
-                             node, role, verify_at_end):
+                             node, role, verify_at_end, rpc_timeout=None):
         """Drive ``bdev_nvme_attach_controller`` for each ``(ip, trtype)`` in
         ``paths`` against ``ctrl_name``, applying:
 
@@ -549,7 +564,8 @@ class HublvolReconnectCoordinator:
 
             try:
                 ret = _do_attach(rpc, ctrl_name, nqn, ip, port, trtype,
-                                 multipath="multipath")
+                                 multipath="multipath",
+                                 rpc_timeout=rpc_timeout)
                 last_attach_at = time.monotonic()
                 if ret:
                     any_attached = True

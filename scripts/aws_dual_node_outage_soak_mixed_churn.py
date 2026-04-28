@@ -1005,13 +1005,29 @@ class SoakRunner:
 
     # ----- fio fault detection --------------------------------------------
 
-    def _check_fio_exited(self, job):
-        """Return the rc string if fio has written its rc_file, else None.
+    # Any line in fio_stderr matching one of these (case-sensitive, fixed
+    # string) is treated as a fio fault — even if fio is still running.
+    # ``--max_latency`` violations in particular log "fio: latency of …
+    # exceeds specified max" and do NOT always terminate fio when run
+    # with --group_reporting + --numjobs>1, so a process-still-alive
+    # check alone misses them.
+    FIO_STDERR_ERROR_MARKERS = (
+        "fio: latency of",     # --max_latency violation
+        "fio: io_u error",     # io_u submission/completion error
+        "fio: pid=",           # generic fio per-job error dump
+        "io_u error on file",  # alternate io_u error format
+        "verify failed",       # data verification fault
+        "fio: verify",         # alternate verify error
+        "fio: error",          # generic fio error
+        "Killed",              # bash reports fio got SIGKILL
+        "Terminated",          # bash reports fio got SIGTERM (no churn here)
+    )
 
-        ``rc_file`` is the single source of truth: bash writes it only
-        after ``fio`` returns. Any content — including ``0`` — mid-soak
-        is a fault because fio's --runtime is far longer than an outage
-        iteration.
+    def _read_rc_file(self, job):
+        """Return the rc string if fio's wrapping bash wrote rc_file, else None.
+
+        ``rc_file`` is one of three independent fault signals; see
+        ``_check_fio_fault``.
         """
         probe = (
             f"if [ -f {shlex.quote(job.rc_file)} ]; then "
@@ -1025,6 +1041,84 @@ class SoakRunner:
         )
         rc = (stdout_text or "").strip()
         return rc or None
+
+    def _wrapper_alive(self, job):
+        """Return True iff the wrapping bash that runs fio is still alive.
+
+        ``job.pid`` is the pid printed by ``echo $!`` at start_fio time
+        (the nohup'd bash, parent of fio). If that pid is gone AND no
+        rc_file was written, fio was signalled away and bash never got
+        to record an exit code — that case is a fault, not "still running".
+        """
+        probe = (
+            f"if kill -0 {int(job.pid)} 2>/dev/null; then echo alive; fi"
+        )
+        _, stdout_text, _ = self.client.run(
+            f"bash -lc {shlex.quote(probe)}",
+            timeout=15,
+            check=False,
+            label=f"check wrapper pid {job.volume_name}",
+        )
+        return stdout_text.strip() == "alive"
+
+    def _scan_fio_stderr_for_errors(self, job):
+        """Return matching error lines from fio_stderr (up to 20), or "".
+
+        See FIO_STDERR_ERROR_MARKERS for the list. ``--max_latency``
+        violations in particular are reported here even while fio
+        continues running, so this catches faults the rc_file / pid
+        checks would miss.
+        """
+        if not self.FIO_STDERR_ERROR_MARKERS:
+            return ""
+        grep_args = " ".join(
+            f"-e {shlex.quote(p)}" for p in self.FIO_STDERR_ERROR_MARKERS
+        )
+        grep_cmd = (
+            f"grep -F -m 20 {grep_args} "
+            f"{shlex.quote(job.fio_stderr)} 2>/dev/null || true"
+        )
+        _, stdout_text, _ = self.client.run(
+            f"bash -lc {shlex.quote(grep_cmd)}",
+            timeout=15,
+            check=False,
+            label=f"scan stderr {job.volume_name}",
+        )
+        return stdout_text.strip()
+
+    def _check_fio_fault(self, job):
+        """Detect any fio fault for ``job``. Returns ``(kind, detail)`` or None.
+
+        Three independent signals — ANY one is a fault:
+          * ``exited``: fio's wrapping bash wrote rc_file (any rc, including 0,
+            is a fault mid-run because fio's --runtime is orders of magnitude
+            longer than an outage iteration).
+          * ``missing``: the wrapping bash pid is gone and no rc_file was
+            written — fio was signalled away (or its wrapper died) without
+            recording an exit code.
+          * ``stderr_error``: fio_stderr contains a known fio error marker
+            (max_latency violation, io_u error, verify failure, etc.) — fio
+            may still be running but is degraded; treat it as a fault.
+
+        ``detail`` is a human-readable one-liner. The full stderr/output
+        is dumped via ``_dump_fio_streams`` by the callers.
+        """
+        rc = self._read_rc_file(job)
+        if rc is not None:
+            return ("exited", f"fio exited rc={rc}")
+
+        if not self._wrapper_alive(job):
+            return (
+                "missing",
+                f"fio wrapper pid {job.pid} is gone and no rc_file was written",
+            )
+
+        err = self._scan_fio_stderr_for_errors(job)
+        if err:
+            first_line = err.splitlines()[0][:240]
+            return ("stderr_error", f"stderr error marker: {first_line}")
+
+        return None
 
     def _dump_fio_streams(self, job, context):
         """Write fio's captured stderr and --output summary into the soak
@@ -1052,27 +1146,33 @@ class SoakRunner:
                 )
 
     def check_fio(self):
-        """Raise if any tracked fio has exited (rc_file written).
+        """Raise if any tracked fio shows a fault.
 
-        Called by ``ensure_fio_running`` right after start and by
-        ``stop_fio`` before the between-iterations kill. Any rc — clean
-        or not — is a fault mid-run: fio's ``--runtime`` is orders of
-        magnitude longer than a single outage iteration.
+        Three independent signals are evaluated per ``_check_fio_fault``:
+        rc_file written (fio exited), wrapper pid gone with no rc_file
+        (signalled away), or a fio error marker in stderr (max_latency
+        violation, io_u/verify error, etc.). ANY of these is a fault —
+        fio's ``--runtime`` is orders of magnitude longer than a single
+        outage iteration, and a degraded-but-running fio is just as
+        invalid a result as a dead one.
 
-        On fault, dumps each faulting job's captured stderr and summary
-        into the soak log so the exact fio error lines are visible.
+        On fault, every faulting job's captured stderr and --output
+        summary are dumped into the soak log so the exact fio error
+        lines are visible next to the iteration that triggered them.
         """
         faulted = []
         for job in self.fio_jobs:
-            rc = self._check_fio_exited(job)
-            if rc is not None:
-                faulted.append((job, rc))
+            fault = self._check_fio_fault(job)
+            if fault is not None:
+                faulted.append((job, fault))
         if not faulted:
             return
-        for job, rc in faulted:
-            self._dump_fio_streams(job, context=f"fio exited rc={rc}")
-        details = ", ".join(f"{j.volume_name}=rc:{rc}" for j, rc in faulted)
-        raise TestRunError(f"fio exited prematurely: {details}")
+        for job, (kind, detail) in faulted:
+            self._dump_fio_streams(job, context=f"fio fault [{kind}] {detail}")
+        details = ", ".join(
+            f"{j.volume_name}={kind}:{detail}" for j, (kind, detail) in faulted
+        )
+        raise TestRunError(f"fio fault detected: {details}")
 
     def ensure_fio_running(self):
         self.check_fio()
@@ -1119,18 +1219,19 @@ class SoakRunner:
     # ----- single-volume fio + churn ---------------------------------------
 
     def _check_one_fio(self, job, context):
-        """Pre-churn fio-running check for one job. Same contract as
-        ``check_fio`` (any rc_file presence is a fault) but scoped to a
-        single job so a healthy churn doesn't get blocked by an unrelated
-        already-faulted job that the post-outage check would surface
-        separately.
+        """Pre-churn fio fault check for one job. Same contract as
+        ``check_fio`` (rc_file / wrapper-gone / stderr error is a fault)
+        but scoped to a single job so a healthy churn doesn't get
+        blocked by an unrelated already-faulted job that the post-outage
+        check would surface separately.
         """
-        rc = self._check_fio_exited(job)
-        if rc is None:
+        fault = self._check_fio_fault(job)
+        if fault is None:
             return
-        self._dump_fio_streams(job, context=f"{context} fio exited rc={rc}")
+        kind, detail = fault
+        self._dump_fio_streams(job, context=f"{context} fio fault [{kind}] {detail}")
         raise TestRunError(
-            f"fio for {job.volume_name} exited prematurely rc={rc} ({context})"
+            f"fio for {job.volume_name} fault [{kind}]: {detail} ({context})"
         )
 
     def _stop_fio_for_job(self, job):
@@ -1895,18 +1996,10 @@ class SoakRunner:
                 # might mask it (a churn-broken volume's fio rc_file would
                 # otherwise be dumped under the wrong context here).
                 self.reraise_churn_error()
-                # After an outage iteration a node typically transitions
-                # online → unreachable → down → online before the control
-                # plane settles. wait_for_cluster_stable() polls until every
-                # node reports "online" AND the cluster is active and not
-                # rebalancing, so those transient states are tolerated here.
-                # It is called both before and after the migration-wait so
-                # we can't race a late transition between the two.
-                self.wait_for_cluster_stable()
-                self.wait_for_data_migration_complete(
-                    f"starting outage iteration {iteration}"
-                )
-                self.wait_for_cluster_stable()
+                # No pre-iteration waiting for rebalance / data migration:
+                # the post-iteration grace below (wait_for_all_online +
+                # 60 s pause) is the only inter-iteration quiet window.
+                # Background reconciliation continues across iterations.
 
                 # Safety: all data NICs must be up during an outage iteration.
                 # NIC chaos runs only in the quiet window between iterations.
@@ -1949,12 +2042,20 @@ class SoakRunner:
                     # SIGTERM/SIGKILL — fio keeps running into the next
                     # iteration and across the upcoming churn cycles.
                     self.check_fio()
-                    self.wait_for_cluster_stable()
+                    # All-nodes-online is the only post-outage gate: no
+                    # rebalance / migration wait. Background reconciliation
+                    # is left to keep running across iterations.
+                    self.wait_for_all_online(timeout=self.args.restart_timeout)
 
                 self._inter_iteration_nic_chaos()
                 # Re-check for any churn fault that fired during the NIC
                 # chaos / cluster wait so we exit at the next sync point.
                 self.reraise_churn_error()
+                # Fixed 60 s grace window between outages so client IO and
+                # in-cluster reconciliation can settle without us blocking
+                # on rebalance / migration completion.
+                self.logger.log("Sleeping 60 s grace window before next iteration")
+                time.sleep(60)
 
 
 def main():

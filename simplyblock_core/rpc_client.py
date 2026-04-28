@@ -124,17 +124,22 @@ class RPCClient:
                 _rpc_cache[cache_key] = (now, result)
         return result
 
-    def _request(self, method, params=None):
-        ret, _ = self._request2(method, params)
+    def _request(self, method, params=None, request_timeout=None):
+        ret, _ = self._request2(method, params, request_timeout=request_timeout)
         return ret
 
-    def _request2(self, method, params=None):
+    def _request2(self, method, params=None, request_timeout=None):
         payload = {'id': 1, 'method': method}
         if params:
             payload['params'] = params
+        # Per-call override of the client-level HTTP timeout. Used by callers
+        # that must bound a single SPDK RPC tighter than ``self.timeout``
+        # (e.g. ``bdev_nvme_attach_controller`` inside the LVS rejoin freeze
+        # window, where a single attach has to land within hundreds of ms).
+        effective_timeout = request_timeout if request_timeout is not None else self.timeout
         try:
             logger.debug("From: %s, Requesting method: %s, params: %s", self.ip_address, method, params)
-            response = self.session.post(self.url, data=json.dumps(payload), timeout=self.timeout)
+            response = self.session.post(self.url, data=json.dumps(payload), timeout=effective_timeout)
         except Exception:
             raise RPCException("connection error")
 
@@ -724,7 +729,8 @@ class RPCClient:
     def bdev_nvme_attach_controller(self, name, nqn, traddr, trsvcid, trtype, multipath=False,
                                     ctrlr_loss_timeout_sec=None,
                                     reconnect_delay_sec=None,
-                                    fast_io_fail_timeout_sec=None):
+                                    fast_io_fail_timeout_sec=None,
+                                    request_timeout=None):
         """Attach an NVMe-oF controller.
 
         multipath: False/"disable", True/"failover", or "multipath" (ANA-based).
@@ -734,6 +740,11 @@ class RPCClient:
         own defaults untouched. For hublvol controllers the coordinator
         passes higher values so a short peer blip becomes a successful
         reset instead of a destroy→reattach cycle.
+
+        request_timeout: per-call HTTP timeout for the underlying SPDK RPC.
+        Used by the LVS rejoin to bound a single attach inside the
+        leader-port-block freeze window — a slow connect against a stale
+        listener must abort fast rather than hold IO frozen.
         """
         params = {
             "name": name,
@@ -755,7 +766,8 @@ class RPCClient:
             params["reconnect_delay_sec"] = int(reconnect_delay_sec)
         if fast_io_fail_timeout_sec is not None:
             params["fast_io_fail_timeout_sec"] = int(fast_io_fail_timeout_sec)
-        return self._request("bdev_nvme_attach_controller", params)
+        return self._request("bdev_nvme_attach_controller", params,
+                             request_timeout=request_timeout)
 
     def bdev_split(self, base_bdev, split_count):
         params = {
