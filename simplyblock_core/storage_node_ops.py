@@ -3776,7 +3776,13 @@ def start_storage_node_api_container(node_ip, cluster_ip=None):
             '/var/run:/var/run',
             '/dev:/dev',
             '/lib/modules/:/lib/modules/',
-            '/sys:/sys'],
+            '/sys:/sys',
+            # Bind-mount the SPDK ramdisk so the spdk_process_is_up endpoint
+            # can probe SPDK's JSON-RPC Unix socket directly at
+            # /mnt/ramdisk/spdk_<port>/spdk.sock. Without this, the endpoint
+            # has to fall through to dockerd, which can stall for 60-80s
+            # during post-outage Swarm reconciliation (incident 2026-04-24).
+            '/mnt/ramdisk:/mnt/ramdisk'],
         restart_policy={"Name": "always"},
         environment=[
             f"DOCKER_IP={node_ip}",
@@ -5438,11 +5444,28 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
                 _abort_restart_and_unblock("Failed to recover lvstore")
 
     ### 7- take leadership
+    # Derive the kernel-side role from snode's topology relative to lvs_node.
+    # On takeover snode is acting as leader, but its kernel role must still
+    # reflect topology so the peer view of the original primary stays
+    # coherent. Hardcoding role="primary" caused the LVS_9060 follow-on
+    # incident (2026-04-25 11:28:50 run): when the original primary later
+    # rejoins, peers disagree on who the primary is and a writer conflict
+    # follows.
+    if snode.get_id() == lvs_node.get_id():
+        snode_lvs_role = "primary"
+    elif snode.get_id() == lvs_node.secondary_node_id:
+        snode_lvs_role = "secondary"
+    elif snode.get_id() == lvs_node.tertiary_node_id:
+        snode_lvs_role = "tertiary"
+    else:
+        _abort_restart_and_unblock(
+            f"snode {snode.get_id()} is not a registered peer of "
+            f"lvstore {lvs_name} (lvs_node={lvs_node.get_id()})")
     ret = rpc_client.bdev_lvol_set_lvs_opts(
         lvs_name,
         groupid=lvs_jm_vuid,
         subsystem_port=lvs_node.get_lvol_subsys_port(lvs_name),
-        role="primary"
+        role=snode_lvs_role,
     )
     ret = rpc_client.bdev_lvol_set_leader(lvs_name, leader=True)
     leader_restored = False
@@ -5486,21 +5509,52 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
         # spdk_lvs_trigger_leadership_switch, re-promoting the old leader and
         # causing a writer conflict.
         cluster = db_controller.get_cluster_by_id(snode.cluster_id)
-        sec1 = sec_nodes[0] if sec_nodes else None
-        if sec1 and sec1.get_id() not in disconnected_peers:
+
+        # Identify the topological secondary owner (sec_1) of this LVS by
+        # looking at lvs_node, NOT by sec_nodes ordering. The previous
+        # index-based code (sec_nodes[0]) routed sec_1 work to whichever
+        # peer happened to be first after disconnected_peers filtering —
+        # which on the LVS_9060 takeover (2026-04-25 11:28:50) wasn't even
+        # the right LVS, since create_secondary_hublvol read the lvstore
+        # name off snode.lvstore (snode's own primary, not the LVS being
+        # taken over).
+        sec1_id = lvs_node.secondary_node_id
+        sec1_node = next((s for s in sec_nodes if s.get_id() == sec1_id), None)
+        sec1_online = bool(sec1_node and sec1_node.get_id() not in disconnected_peers)
+
+        # Create the sec_1 hublvol only if sec_1 is a peer (not snode itself)
+        # and it's online. When snode IS the topological sec_1 (secondary
+        # owner taking leadership), there is no separate node to expose
+        # the secondary hublvol on — the leader's primary hublvol on snode
+        # is the only path until the original primary returns.
+        if sec1_online:
             try:
-                sec1.create_secondary_hublvol(snode, cluster.nqn)
+                sec1_node.create_secondary_hublvol(lvs_node, cluster.nqn)
             except Exception as e:
                 logger.error("Error creating secondary hublvol on sec_1: %s", e)
                 _abort_restart_and_unblock(
-                    f"create_secondary_hublvol on {sec1.get_id()} raised: {e}")
+                    f"create_secondary_hublvol on {sec1_node.get_id()} raised: {e}")
 
-        for i, sec_node in enumerate(sec_nodes):
+        for sec_node in sec_nodes:
             if sec_node.get_id() in disconnected_peers:
                 continue
-            sec1 = sec_nodes[0] if sec_nodes else None
-            failover_node = sec1 if i >= 1 and sec1 and sec1.get_id() not in disconnected_peers else None
-            sec_role = "tertiary" if i >= 1 else "secondary"
+            # Role and failover are determined by topology, not by index.
+            # An index-based assignment (sec_nodes[0] -> 'secondary',
+            # rest -> 'tertiary') breaks when the original primary is
+            # filtered out via disconnected_peers and shifts the
+            # remaining peers up one slot.
+            if sec_node.get_id() == lvs_node.secondary_node_id:
+                sec_role = "secondary"
+                failover_node = None
+            elif sec_node.get_id() == lvs_node.tertiary_node_id:
+                sec_role = "tertiary"
+                failover_node = sec1_node if sec1_online else None
+            else:
+                logger.warning(
+                    "Skipping hublvol connect for %s: not a registered "
+                    "peer of %s (lvs_node=%s)",
+                    sec_node.get_id(), lvs_name, lvs_node.get_id())
+                continue
             try:
                 ok = sec_node.connect_to_hublvol(snode, failover_node=failover_node, role=sec_role,
                                                  timeout=0.5)

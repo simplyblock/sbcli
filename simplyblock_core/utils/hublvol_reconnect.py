@@ -79,6 +79,16 @@ DEFAULT_TRANSIENT_WAIT_SEC = 12.0
 #: ``bdev_nvme_check_multipath: cntlid N are duplicated``.
 DEFAULT_DETACH_WAIT_SEC = 10.0
 
+#: Mandatory sleep between successive attach RPCs against the same
+#: ``ctrl_name`` within a single reconcile (e.g. multipath path-by-path
+#: attach). Even when the prior attach reports its controller as enabled
+#: in ``bdev_nvme_controller_list``, SPDK may still be finalising
+#: per-controller state for a short while. A small extra gap absorbs
+#: that finalisation window. Combined with ``_ensure_attach_ready``
+#: this prevents the back-to-back attach race that produces
+#: ``cntlid N are duplicated`` (LVS_5918 incident, 2026-04-25 12:47:18).
+INTER_ATTACH_SLEEP_SEC = 3.0
+
 #: How long the FDB advisory lock lives if the holder crashes without
 #: releasing. Must be >> typical reconcile runtime (including detach-wait).
 #: Other callers block on the lock, not on the SPDK RPC, so this only bounds
@@ -318,6 +328,57 @@ def _do_attach(rpc, ctrl_name, nqn, ip, port, trtype,
     )
 
 
+def _ensure_attach_ready(rpc, ctrl_name, ip):
+    """Inspect ``ctrl_name``'s current state and decide what to do for the
+    next attach of ``ip`` (a single path).
+
+    Returns one of:
+
+      ``"skip"``   — controller exists, all paths are ``enabled``, and ``ip``
+                     is already among the attached paths. Caller must NOT
+                     issue another attach.
+      ``"attach"`` — caller may proceed with ``bdev_nvme_attach_controller``
+                     for this ``ip``: either the controller is absent (fresh
+                     create) or it is enabled and missing this path
+                     (multipath path-add).
+      ``"failed"`` — controller is hung in a non-enabled terminal state and
+                     could not be torn down. Caller must abort.
+
+    Behavior matches the contract requested in the LVS_5918 follow-up:
+
+      - enabled + path present  -> skip (no-op)
+      - enabled + path missing  -> attach (path-add)
+      - in transient state      -> wait for terminal state, then re-decide
+      - absent                  -> attach (fresh create)
+      - hung in non-enabled     -> detach-and-wait-gone, then attach
+    """
+    ctrlrs = _ctrlrs_from_list(rpc, ctrl_name)
+
+    if not ctrlrs:
+        return "attach"
+
+    if all(c.get("state") == "enabled" for c in ctrlrs):
+        return "skip" if ip in _attached_ips(ctrlrs) else "attach"
+
+    # Some path is in resetting/connecting/other transient — wait for the
+    # controller to converge to a terminal state before deciding.
+    ctrlrs = _wait_for_settled(rpc, ctrl_name)
+    if not ctrlrs:
+        return "attach"
+    if all(c.get("state") == "enabled" for c in ctrlrs):
+        return "skip" if ip in _attached_ips(ctrlrs) else "attach"
+
+    # Hangs in a terminal non-enabled state (e.g. failed reset, disconnected
+    # without destroy). Tear down for a clean retry.
+    logger.warning(
+        "hublvol %s: controller hung in non-enabled state %s; "
+        "detaching for clean retry",
+        ctrl_name, [c.get("state") for c in ctrlrs])
+    if not _detach_and_wait_gone(rpc, ctrl_name):
+        return "failed"
+    return "attach"
+
+
 class HublvolReconnectCoordinator:
     """Single entry point for (re)attaching a hublvol NVMe-oF controller.
 
@@ -427,32 +488,9 @@ class HublvolReconnectCoordinator:
 
     def _fresh_multipath_attach(self, rpc, ctrl_name, nqn, port, expected,
                                 node, role):
-        any_attached = False
-        for ip, trtype in expected.items():
-            try:
-                ret = _do_attach(rpc, ctrl_name, nqn, ip, port, trtype,
-                                 multipath="multipath")
-                if ret:
-                    any_attached = True
-                    logger.info(
-                        "hublvol %s on %s (%s): attached path %s",
-                        ctrl_name, node.get_id(), role, ip)
-                else:
-                    logger.warning(
-                        "hublvol %s on %s: attach returned falsy for %s",
-                        ctrl_name, node.get_id(), ip)
-            except Exception as e:
-                logger.warning(
-                    "hublvol %s on %s: attach path %s raised: %s",
-                    ctrl_name, node.get_id(), ip, e)
-        if not any_attached:
-            logger.error(
-                "hublvol %s on %s: no path attached (expected=%s)",
-                ctrl_name, node.get_id(), list(expected))
-            return False
-        # Verify the controller really came up.
-        ctrlrs = _wait_for_settled(rpc, ctrl_name)
-        return bool(ctrlrs) and any(c.get("state") == "enabled" for c in ctrlrs)
+        return self._attach_paths_safely(
+            rpc, ctrl_name, nqn, port, expected, node, role,
+            verify_at_end=True)
 
     def _add_missing_paths(self, rpc, ctrl_name, nqn, port, expected,
                            ctrlrs, node, role):
@@ -465,14 +503,77 @@ class HublvolReconnectCoordinator:
             "hublvol %s on %s (%s): %d/%d paths present, adding %s",
             ctrl_name, node.get_id(), role,
             len(attached), len(expected), list(missing))
-        added_any = False
-        for ip, trtype in missing.items():
+        return self._attach_paths_safely(
+            rpc, ctrl_name, nqn, port, missing, node, role,
+            verify_at_end=False)
+
+    def _attach_paths_safely(self, rpc, ctrl_name, nqn, port, paths,
+                             node, role, verify_at_end):
+        """Drive ``bdev_nvme_attach_controller`` for each ``(ip, trtype)`` in
+        ``paths`` against ``ctrl_name``, applying:
+
+          1. State-aware gating: before each attach, consult
+             ``_ensure_attach_ready`` so an already-enabled path is a no-op
+             and a hung controller is detached for a clean retry.
+          2. A mandatory inter-attach sleep so SPDK has a window to
+             finalise per-controller state between back-to-back path
+             attaches in a single multipath fan-out. This protects against
+             the race that produces ``cntlid N are duplicated`` even when
+             the previous attach has reported the controller as registered.
+
+        Returns True if at least one path is in the desired enabled state
+        after the loop. With ``verify_at_end=True`` (fresh create case), a
+        final ``_wait_for_settled`` confirms the controller is actually up.
+        """
+        any_attached = False
+        last_attach_at = 0.0
+        for ip, trtype in paths.items():
+            now = time.monotonic()
+            since = now - last_attach_at
+            if last_attach_at and since < INTER_ATTACH_SLEEP_SEC:
+                time.sleep(INTER_ATTACH_SLEEP_SEC - since)
+
+            decision = _ensure_attach_ready(rpc, ctrl_name, ip)
+            if decision == "failed":
+                logger.error(
+                    "hublvol %s on %s (%s): cannot prepare controller for "
+                    "path %s, aborting",
+                    ctrl_name, node.get_id(), role, ip)
+                return False
+            if decision == "skip":
+                logger.debug(
+                    "hublvol %s on %s (%s): path %s already enabled, skip",
+                    ctrl_name, node.get_id(), role, ip)
+                any_attached = True
+                continue
+
             try:
-                if _do_attach(rpc, ctrl_name, nqn, ip, port, trtype,
-                              multipath="multipath"):
-                    added_any = True
+                ret = _do_attach(rpc, ctrl_name, nqn, ip, port, trtype,
+                                 multipath="multipath")
+                last_attach_at = time.monotonic()
+                if ret:
+                    any_attached = True
+                    logger.info(
+                        "hublvol %s on %s (%s): attached path %s",
+                        ctrl_name, node.get_id(), role, ip)
+                else:
+                    logger.warning(
+                        "hublvol %s on %s: attach returned falsy for %s",
+                        ctrl_name, node.get_id(), ip)
             except Exception as e:
+                last_attach_at = time.monotonic()
                 logger.warning(
-                    "hublvol %s on %s: add path %s raised: %s",
+                    "hublvol %s on %s: attach path %s raised: %s",
                     ctrl_name, node.get_id(), ip, e)
-        return added_any or not missing
+
+        if not any_attached:
+            logger.error(
+                "hublvol %s on %s: no path attached (expected=%s)",
+                ctrl_name, node.get_id(), list(paths))
+            return False
+
+        if verify_at_end:
+            ctrlrs = _wait_for_settled(rpc, ctrl_name)
+            return bool(ctrlrs) and any(
+                c.get("state") == "enabled" for c in ctrlrs)
+        return True
