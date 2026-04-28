@@ -1950,7 +1950,7 @@ class SshUtils:
             )
 
 
-    def restart_docker_logging(self, node_ip, containers, log_dir, test_name):
+    def restart_docker_logging(self, node_ip, containers, log_dir, test_name, timeout=60, max_retries=2):
         """
         Restart Docker logs collection after an outage.
 
@@ -1959,9 +1959,12 @@ class SshUtils:
             containers (list): List of container names to log.
             log_dir (str): Directory to save log files.
             test_name (str): Name of the test for log identification.
+            timeout (int): SSH command timeout in seconds (default 60).
+            max_retries (int): Max SSH retries per command (default 2).
         """
         try:
-            self.exec_command(node_ip, f"sudo mkdir -p {log_dir} && sudo chmod 777 {log_dir}")
+            self.exec_command(node_ip, f"sudo mkdir -p {log_dir} && sudo chmod 777 {log_dir}",
+                             timeout=timeout, max_retries=max_retries)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             for container in containers:
                 log_file = f"{log_dir}/{container}_{test_name}_{node_ip}_{timestamp}_after_outage.txt"
@@ -1972,16 +1975,8 @@ class SshUtils:
                     f"\"docker logs --follow {container} > {log_file} 2>&1\""
                 )
                 self.logger.info(f"Restarting Docker log collection for container '{container}' on {node_ip}. Command: {command_logs}")
-                self.exec_command(node_ip, command_logs)
-                # # Verify if the process is running (optional but helpful for debugging)
-                # verify_command = f"ps aux | grep 'docker logs --follow {container}'"
-                # output, _ = self.exec_command(node_ip, verify_command)
-                # if output:
-                #     output = output.strip()
+                self.exec_command(node_ip, command_logs, timeout=timeout, max_retries=max_retries)
 
-                # if not output:
-                #     raise RuntimeError("Docker logging process failed to start.")
-                
                 print(f"Docker logging started successfully for container '{container}'.")
         except Exception as e:
             self.logger.error(f"Failed to restart Docker log collection on node {node_ip}: {e}")
@@ -3794,6 +3789,7 @@ class RunnerK8sLog:
             "simplyblock-tasks",
             "simplyblock-webappapi",
             "snode-spdk-pod",
+            "fio-",
         )
         for pod in pods:
             # Filter pods based on prefixes
@@ -3890,6 +3886,7 @@ class RunnerK8sLog:
             "simplyblock-tasks",
             "simplyblock-webappapi",
             "snode-spdk-pod",
+            "fio-",
         )
 
         def _monitor():

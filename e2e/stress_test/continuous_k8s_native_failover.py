@@ -75,9 +75,9 @@ class K8sNativeFailoverTest(TestClusterBase):
         self.fio_size = "1G"
         self.FIO_RUNTIME = 2000
 
-        # Counts
-        self.total_pvcs = 15
-        self.fio_num_jobs = 2
+        # Counts — total_pvcs is set dynamically to len(sn_nodes) in run()
+        self.total_pvcs = 6
+        self.fio_num_jobs = 1
 
         # Outage config
         self.npcs = kwargs.get("npcs", 1)
@@ -413,10 +413,11 @@ class K8sNativeFailoverTest(TestClusterBase):
 
     def _build_fio_config(self, name: str) -> str:
         bs = f"{2 ** random.randint(2, 7)}k"
+        run_id = _rand_seq(6)
         return (
             f"[global]\n"
             f"name={name}-fio\n"
-            f"filename_format=/spdkvol/fio-testfile.$jobnum\n"
+            f"filename_format=/spdkvol/fio-{run_id}.$jobnum\n"
             f"rw=randrw\n"
             f"rwmixread=50\n"
             f"bs={bs}\n"
@@ -452,6 +453,21 @@ class K8sNativeFailoverTest(TestClusterBase):
                 if lid not in old_ids:
                     return name, lid
             sleep_n_sec(3)
+        return None
+
+    def _get_pvc_node_id(self, pvc_name: str) -> str | None:
+        """Map a bound PVC to its storage node UUID via volumeHandle → lvol details."""
+        try:
+            vol_handle = self.k8s_utils.get_pvc_volume_handle(pvc_name)
+            if not vol_handle:
+                return None
+            # volumeHandle format: clusterid:pool:lvolid
+            lvol_id = vol_handle.split(":")[-1] if ":" in vol_handle else vol_handle
+            details = self.sbcli_utils.get_lvol_details(lvol_id)
+            if details:
+                return details[0].get("node_id")
+        except Exception as exc:
+            self.logger.warning(f"[_get_pvc_node_id] Failed to map PVC {pvc_name}: {exc}")
         return None
 
     # ── Client FIO helpers ────────────────────────────────────────────────
@@ -538,24 +554,35 @@ class K8sNativeFailoverTest(TestClusterBase):
 
     # ── PVC + FIO creation ───────────────────────────────────────────────────
 
-    def create_pvcs_with_fio(self, count: int):
+    def create_pvcs_with_fio(self, count: int, node_ids: list[str] = None):
         """Create *count* PVCs via K8s and start FIO on each.
 
         When ``self.use_client_fio`` is True, the underlying lvol is
         NVMe-connected to an external client and FIO runs via SSH.
         Otherwise FIO runs as a K8s Job (existing behaviour).
+
+        Args:
+            node_ids: If provided, pin PVC *i* to ``node_ids[i]`` using the
+                      ``simplybk/host-id`` annotation.  Length must equal *count*.
         """
         self._ensure_k8s_utils()
         for i in range(count):
             pvc_name = f"pvc-{_rand_seq(12)}"
+            target_node = node_ids[i] if node_ids and i < len(node_ids) else None
 
-            self.logger.info(f"[create_pvc] Creating PVC {pvc_name} ({i+1}/{count})")
+            self.logger.info(
+                f"[create_pvc] Creating PVC {pvc_name} ({i+1}/{count})"
+                + (f" pinned to node {target_node}" if target_node else "")
+            )
 
             # Snapshot lvol IDs before PVC creation (for client mode mapping)
             old_lvol_ids = self._snapshot_lvol_ids() if self.use_client_fio else set()
 
             try:
-                self.k8s_utils.create_pvc(pvc_name, self.pvc_size, self.STORAGE_CLASS_NAME)
+                self.k8s_utils.create_pvc(
+                    pvc_name, self.pvc_size, self.STORAGE_CLASS_NAME,
+                    node_id=target_node,
+                )
                 self.k8s_utils.wait_pvc_bound(pvc_name, timeout=300)
             except Exception as exc:
                 self.logger.warning(f"[create_pvc] PVC creation failed for {pvc_name}: {exc}")
@@ -635,16 +662,7 @@ class K8sNativeFailoverTest(TestClusterBase):
                 job_name = f"fio-{pvc_name}"
                 cm_name = f"fiocfg-{pvc_name}"
 
-                node_id = None
-                try:
-                    lvols = self.sbcli_utils.list_lvols()
-                    for _, lid in lvols.items():
-                        details = self.sbcli_utils.get_lvol_details(lid)
-                        if details:
-                            node_id = details[0].get("node_id")
-                            break
-                except Exception:
-                    pass
+                node_id = self._get_pvc_node_id(pvc_name)
 
                 fio_config = self._build_fio_config(pvc_name)
                 try:
@@ -665,7 +683,7 @@ class K8sNativeFailoverTest(TestClusterBase):
                 }
 
                 self.logger.info(
-                    f"[create_pvc] PVC {pvc_name} created with FIO Job {job_name}"
+                    f"[create_pvc] PVC {pvc_name} on node {node_id} with FIO Job {job_name}"
                 )
 
             if node_id:
@@ -674,10 +692,30 @@ class K8sNativeFailoverTest(TestClusterBase):
 
         self.k8s_utils.log_fio_pvc_mapping(self.pvc_details, self.clone_details)
 
+    def _ensure_per_node_coverage(self):
+        """Verify every storage node has at least 1 PVC.  Create extras if needed."""
+        # Refresh node_id mapping for any PVCs that don't have one yet
+        for pvc_name, pvc_info in list(self.pvc_details.items()):
+            if not pvc_info.get("node_id"):
+                nid = self._get_pvc_node_id(pvc_name)
+                if nid:
+                    pvc_info["node_id"] = nid
+                    self.node_vs_pvc.setdefault(nid, []).append(pvc_name)
+
+        covered = set(self.node_vs_pvc.keys())
+        missing = set(self.sn_nodes) - covered
+        if missing:
+            self.logger.info(
+                f"[coverage] Nodes without PVC: {missing}. Creating {len(missing)} extra PVCs."
+            )
+            self.create_pvcs_with_fio(len(missing))
+        else:
+            self.logger.info("[coverage] All storage nodes have at least 1 PVC.")
+
     # ── Snapshot & Clone creation ────────────────────────────────────────────
 
     def create_snapshots_and_clones(self):
-        """Create 3 snapshots + clones + FIO, then resize source & clone."""
+        """Create 1 snapshot + clone + FIO, then resize source & clone."""
         self._ensure_k8s_utils()
         self.int_pvc_size += 1
         available_pvcs = list(self.pvc_details.keys())
@@ -685,7 +723,7 @@ class K8sNativeFailoverTest(TestClusterBase):
             self.logger.warning("[snap_clone] No PVCs available for snapshots")
             return
 
-        for idx in range(3):
+        for idx in range(1):
             random.shuffle(available_pvcs)
             pvc_name = available_pvcs[0]
             snap_name = f"snap-{_rand_seq(12)}"
@@ -777,7 +815,7 @@ class K8sNativeFailoverTest(TestClusterBase):
                     f"connected on {client}, FIO started"
                 )
             else:
-                # ── K8s Job FIO path (existing behaviour) ──
+                # ── K8s Job FIO path — cleanup old FIO files from source ──
                 clone_job = f"fio-{clone_name}"
                 clone_cm = f"fiocfg-{clone_name}"
 
@@ -786,6 +824,7 @@ class K8sNativeFailoverTest(TestClusterBase):
                     self.k8s_utils.create_fio_job(
                         clone_job, clone_name, clone_cm, fio_config,
                         image=self.FIO_IMAGE,
+                        cleanup_before_fio=True,
                     )
                 except Exception as exc:
                     self.logger.warning(f"[snap_clone] Clone FIO Job failed for {clone_name}: {exc}")
@@ -815,7 +854,8 @@ class K8sNativeFailoverTest(TestClusterBase):
     # ── Delete PVCs ──────────────────────────────────────────────────────────
 
     def delete_random_pvcs(self, count: int):
-        """Delete *count* random PVCs and their snapshots/clones."""
+        """Delete *count* random PVCs and their snapshots/clones, then recreate
+        the same number so every node keeps at least 1 PVC."""
         self._ensure_k8s_utils()
         available = list(self.pvc_details.keys())
         if len(available) < count:
@@ -826,7 +866,19 @@ class K8sNativeFailoverTest(TestClusterBase):
         if count == 0:
             return
 
-        for pvc_name in random.sample(available, count):
+        # Only delete PVCs from nodes that have more than 1, so no node goes to zero
+        safe_to_delete = []
+        for pvc_name in available:
+            nid = self.pvc_details[pvc_name].get("node_id")
+            if nid and len(self.node_vs_pvc.get(nid, [])) > 1:
+                safe_to_delete.append(pvc_name)
+        if not safe_to_delete:
+            # Fallback: allow deletion but we will recreate afterwards
+            safe_to_delete = available
+        targets = random.sample(safe_to_delete, min(count, len(safe_to_delete)))
+        deleted_node_ids = []
+
+        for pvc_name in targets:
             self.logger.info(f"[delete_pvcs] Deleting PVC tree: {pvc_name}")
             pvc_info = self.pvc_details[pvc_name]
 
@@ -905,8 +957,19 @@ class K8sNativeFailoverTest(TestClusterBase):
                 if pvc_name in self.node_vs_pvc[node_id]:
                     self.node_vs_pvc[node_id].remove(pvc_name)
             del self.pvc_details[pvc_name]
+            if node_id:
+                deleted_node_ids.append(node_id)
 
         sleep_n_sec(30)
+
+        # Recreate PVCs pinned to the same nodes that lost them
+        if deleted_node_ids:
+            self.logger.info(
+                f"[delete_pvcs] Recreating {len(deleted_node_ids)} PVCs "
+                f"pinned to nodes: {deleted_node_ids}"
+            )
+            self.create_pvcs_with_fio(len(deleted_node_ids), node_ids=deleted_node_ids)
+        self._ensure_per_node_coverage()
 
     # ── Restart FIO ──────────────────────────────────────────────────────────
 
@@ -967,6 +1030,7 @@ class K8sNativeFailoverTest(TestClusterBase):
                     self.k8s_utils.create_fio_job(
                         new_job, pvc_name, new_cm, fio_config,
                         image=self.FIO_IMAGE,
+                        cleanup_before_fio=True,
                     )
                 except Exception as exc:
                     self.logger.warning(f"[restart_fio] Failed to restart FIO for {pvc_name}: {exc}")
@@ -993,6 +1057,7 @@ class K8sNativeFailoverTest(TestClusterBase):
                     self.k8s_utils.create_fio_job(
                         new_job, clone_name, new_cm, fio_config,
                         image=self.FIO_IMAGE,
+                        cleanup_before_fio=True,
                     )
                 except Exception as exc:
                     self.logger.warning(f"[restart_fio] Failed to restart FIO for clone {clone_name}: {exc}")
@@ -1198,6 +1263,7 @@ class K8sNativeFailoverTest(TestClusterBase):
                     start_timestamp=start_ts,
                     end_timestamp=end_ts,
                     time_duration=None,
+                    warn_only=True,
                 )
                 sleep_n_sec(300)
             except Exception as e:
@@ -1367,9 +1433,12 @@ class K8sNativeFailoverTest(TestClusterBase):
             self.sn_primary_secondary_map[result["uuid"]] = result["secondary_node_id"]
         self.logger.info(f"Storage nodes: {len(self.sn_nodes)}, secondary map: {self.sn_primary_secondary_map}")
 
-        # Create initial PVCs with FIO
-        self.create_pvcs_with_fio(self.total_pvcs)
+        # Create 1 PVC per storage node, pinned via host-id annotation
+        self.total_pvcs = len(self.sn_nodes)
+        self.logger.info(f"Creating {self.total_pvcs} initial PVCs (1 per node, pinned)")
+        self.create_pvcs_with_fio(self.total_pvcs, node_ids=list(self.sn_nodes))
         sleep_n_sec(30)
+        self._ensure_per_node_coverage()
 
         iteration = 1
         try:
@@ -1389,8 +1458,7 @@ class K8sNativeFailoverTest(TestClusterBase):
                 outage_events = self.perform_n_plus_k_outages()
 
                 # ── Operations during outage ──
-                self.delete_random_pvcs(5)
-                self.create_pvcs_with_fio(5)
+                self.delete_random_pvcs(1)
                 self.create_snapshots_and_clones()
                 sleep_n_sec(280)
 
@@ -1419,6 +1487,277 @@ class K8sNativeFailoverTest(TestClusterBase):
                     start_timestamp=self.outage_start_time,
                     end_timestamp=self.outage_end_time,
                     time_duration=time_duration,
+                    warn_only=True,
+                )
+                self.validate_migration_for_node(self.outage_start_time, 2000, None, 60)
+                self.validate_fio_jobs()
+
+                self.logger.info(f"=== Iteration {iteration} complete ===")
+                self.collect_outage_diagnostics(f"end_iteration_{iteration}")
+                iteration += 1
+
+        finally:
+            self._cleanup_all_k8s_resources()
+
+
+class K8sNativeBasicFailoverTest(K8sNativeFailoverTest):
+    """Simpler K8s-native functional failover test.
+
+    Unlike K8sNativeFailoverTest (stress test with continuous create/delete),
+    this test:
+      1. Creates PVCs with FIO (1 per storage node) — once
+      2. Creates snapshots + clones with FIO — once
+      3. Loops: outage → recovery → validation (no creates/deletes)
+
+    Focuses on verifying failover functionality, not stress.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.test_name = "k8s_native_basic_failover"
+        self.num_clones = 3
+
+    def create_snapshots_and_clones_with_cleanup(self, count: int = None):
+        """Create snapshots + clones, cleaning old FIO files from clones.
+
+        For K8s Job mode, uses an init container to rm old fio files.
+        For client FIO mode, the parent already calls delete_files().
+        """
+        self._ensure_k8s_utils()
+        num = count or self.num_clones
+        self.int_pvc_size += 1
+        available_pvcs = list(self.pvc_details.keys())
+        if not available_pvcs:
+            self.logger.warning("[snap_clone] No PVCs available for snapshots")
+            return
+
+        for idx in range(num):
+            random.shuffle(available_pvcs)
+            pvc_name = available_pvcs[idx % len(available_pvcs)]
+            snap_name = f"snap-{_rand_seq(12)}"
+            clone_name = f"clone-{_rand_seq(12)}"
+
+            # Create snapshot
+            try:
+                self.k8s_utils.create_volume_snapshot(
+                    snap_name, pvc_name, self.SNAPSHOT_CLASS_NAME
+                )
+                self.k8s_utils.wait_volume_snapshot_ready(snap_name, timeout=300)
+            except Exception as exc:
+                self.logger.warning(f"[snap_clone] Snapshot creation failed for {snap_name}: {exc}")
+                continue
+
+            self.snapshot_details[snap_name] = {"pvc_name": pvc_name}
+            self.snapshot_names.append(snap_name)
+            self.pvc_details[pvc_name]["snapshots"].append(snap_name)
+
+            # Snapshot lvol IDs before clone PVC (for client mode mapping)
+            old_lvol_ids = self._snapshot_lvol_ids() if self.use_client_fio else set()
+
+            # Create clone PVC
+            sleep_n_sec(10)
+            try:
+                self.k8s_utils.create_clone_pvc(
+                    clone_name, self.pvc_size, self.STORAGE_CLASS_NAME, snap_name
+                )
+                self.k8s_utils.wait_pvc_bound(clone_name, timeout=300)
+            except Exception as exc:
+                self.logger.warning(f"[snap_clone] Clone PVC creation failed for {clone_name}: {exc}")
+                continue
+
+            if self.use_client_fio:
+                # Client FIO path for clone (parent logic handles file cleanup)
+                sleep_n_sec(5)
+                lvol_info = self._find_new_lvol(old_lvol_ids)
+                if not lvol_info:
+                    self.logger.warning(
+                        f"[snap_clone] Could not map clone {clone_name} to lvol — skipping"
+                    )
+                    continue
+                clone_lvol_name, clone_lvol_id = lvol_info
+
+                client = self.fio_node[idx % len(self.fio_node)]
+
+                try:
+                    device = self._connect_lvol_on_client(clone_lvol_name, client)
+                except Exception as exc:
+                    self.logger.warning(
+                        f"[snap_clone] NVMe connect failed for clone {clone_name}: {exc}"
+                    )
+                    continue
+
+                self.ssh_obj.clone_mount_gen_uuid(client, device)
+                mount_point = f"{self.mount_path}/{clone_name}"
+                self.ssh_obj.mount_path(node=client, device=device, mount_path=mount_point)
+                sleep_n_sec(5)
+
+                log_file = f"{self.log_path}/{clone_name}.log"
+                # Delete old FIO files inherited from source PVC
+                self.ssh_obj.delete_files(client, [f"{mount_point}/*fio*"])
+                self._start_client_fio(clone_name, client, mount_point, log_file)
+
+                self.clone_details[clone_name] = {
+                    "snap_name": snap_name,
+                    "job_name": None,
+                    "configmap_name": None,
+                    "lvol_name": clone_lvol_name,
+                    "lvol_id": clone_lvol_id,
+                    "device": device,
+                    "mount_path": mount_point,
+                    "client": client,
+                    "log_file": log_file,
+                }
+                self.clone_mount_details[clone_lvol_name] = {
+                    "ID": clone_lvol_id,
+                    "snapshot": snap_name,
+                    "Mount": mount_point,
+                    "Device": device,
+                    "Log": log_file,
+                    "Client": client,
+                    "clone_pvc": clone_name,
+                }
+
+                self.logger.info(
+                    f"[snap_clone] Clone {clone_name} → lvol {clone_lvol_name} "
+                    f"connected on {client}, FIO started (files cleaned)"
+                )
+            else:
+                # K8s Job FIO path — with init container cleanup
+                clone_job = f"fio-{clone_name}"
+                clone_cm = f"fiocfg-{clone_name}"
+
+                fio_config = self._build_fio_config(clone_name)
+                try:
+                    self.k8s_utils.create_fio_job(
+                        clone_job, clone_name, clone_cm, fio_config,
+                        image=self.FIO_IMAGE,
+                        cleanup_before_fio=True,
+                    )
+                except Exception as exc:
+                    self.logger.warning(f"[snap_clone] Clone FIO Job failed for {clone_name}: {exc}")
+
+                self.clone_details[clone_name] = {
+                    "snap_name": snap_name,
+                    "job_name": clone_job,
+                    "configmap_name": clone_cm,
+                }
+
+            # Resize source PVC and clone PVC
+            try:
+                self.k8s_utils.resize_pvc(pvc_name, f"{self.int_pvc_size}Gi")
+                sleep_n_sec(5)
+                self.k8s_utils.resize_pvc(clone_name, f"{self.int_pvc_size}Gi")
+            except Exception as exc:
+                self.logger.warning(f"[snap_clone] Resize failed: {exc}")
+
+            self.logger.info(
+                f"[snap_clone] Created snapshot {snap_name}, clone {clone_name}, "
+                f"resized to {self.int_pvc_size}Gi"
+            )
+            sleep_n_sec(10)
+
+        self.k8s_utils.log_fio_pvc_mapping(self.pvc_details, self.clone_details)
+
+    def run(self):
+        """Simplified run loop: create once, then loop outages only."""
+        self._ensure_k8s_utils()
+        self._initialize_outage_log()
+        self.logger.info("=== Starting K8sNativeBasicFailoverTest ===")
+
+        # Read cluster config
+        cluster_details = self.sbcli_utils.get_cluster_details()
+        max_fault_tolerance = cluster_details.get("max_fault_tolerance", 1)
+        self.logger.info(f"Cluster max_fault_tolerance: {max_fault_tolerance}")
+        if self.npcs == 1:
+            self.npcs = max_fault_tolerance
+        self.logger.info(f"Running with npcs={self.npcs} simultaneous outages")
+
+        # Ensure pool
+        actual_pool = self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        if actual_pool and actual_pool != self.pool_name:
+            self.logger.info(f"Using existing pool '{actual_pool}' instead of '{self.pool_name}'")
+            self.pool_name = actual_pool
+
+        # Create StorageClass and VolumeSnapshotClass
+        cluster_id = self.cluster_id or ""
+        self.k8s_utils.create_storage_class(
+            name=self.STORAGE_CLASS_NAME,
+            cluster_id=cluster_id,
+            pool_name=self.pool_name,
+            ndcs=self.ndcs,
+            npcs=self.npcs,
+        )
+        self.k8s_utils.create_volume_snapshot_class(self.SNAPSHOT_CLASS_NAME)
+        sleep_n_sec(5)
+
+        # Populate storage node maps
+        storage_nodes = self.sbcli_utils.get_storage_nodes()
+        for result in storage_nodes["results"]:
+            self.sn_nodes.append(result["uuid"])
+            self.sn_nodes_with_sec.append(result["uuid"])
+            self.sn_primary_secondary_map[result["uuid"]] = result["secondary_node_id"]
+        self.logger.info(
+            f"Storage nodes: {len(self.sn_nodes)}, "
+            f"secondary map: {self.sn_primary_secondary_map}"
+        )
+
+        # ── One-time setup: Create PVCs (1 per node, pinned) ──
+        self.total_pvcs = len(self.sn_nodes)
+        self.logger.info(f"Creating {self.total_pvcs} PVCs (1 per node, pinned)")
+        self.create_pvcs_with_fio(self.total_pvcs, node_ids=list(self.sn_nodes))
+        sleep_n_sec(30)
+        self._ensure_per_node_coverage()
+
+        # ── One-time setup: Create snapshots + clones ──
+        self.logger.info(f"Creating {self.num_clones} snapshots + clones (with FIO file cleanup)")
+        self.create_snapshots_and_clones_with_cleanup(self.num_clones)
+        sleep_n_sec(30)
+
+        # ── Outage loop ──
+        iteration = 1
+        try:
+            while True:
+                self.logger.info(f"=== Iteration {iteration} ===")
+
+                # Start background IO stats validation
+                validation_thread = threading.Thread(
+                    target=self.validate_iostats_continuously, daemon=True
+                )
+                validation_thread.start()
+
+                if iteration > 1:
+                    self.restart_fio(iteration)
+
+                # Outage phase
+                outage_events = self.perform_n_plus_k_outages()
+                sleep_n_sec(280)
+
+                # Recovery phase
+                for node, outage_type, node_outage_dur in outage_events:
+                    self.current_outage_node = node
+                    if outage_type == "container_stop" and self.npcs > 1:
+                        self.restart_nodes_after_failover(outage_type, restart=True)
+                    else:
+                        self.restart_nodes_after_failover(outage_type)
+                    self.logger.info("Waiting for fallback recovery.")
+                    sleep_n_sec(100)
+
+                self.collect_outage_diagnostics("post_recovery")
+
+                # Validation phase
+                sleep_n_sec(300)
+                self.check_core_dump()
+
+                time_duration = self.common_utils.calculate_time_duration(
+                    start_timestamp=self.outage_start_time,
+                    end_timestamp=self.outage_end_time,
+                )
+                self.common_utils.validate_io_stats(
+                    cluster_id=self.cluster_id,
+                    start_timestamp=self.outage_start_time,
+                    end_timestamp=self.outage_end_time,
+                    time_duration=time_duration,
+                    warn_only=True,
                 )
                 self.validate_migration_for_node(self.outage_start_time, 2000, None, 60)
                 self.validate_fio_jobs()

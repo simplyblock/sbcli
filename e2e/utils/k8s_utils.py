@@ -596,15 +596,27 @@ class K8sUtils:
     # ── PVC operations ───────────────────────────────────────────────────────
 
     def create_pvc(self, name: str, size: str, storage_class: str,
-                   namespace: str = None):
-        """Create a PersistentVolumeClaim (provisions an lvol via CSI)."""
+                   namespace: str = None, node_id: str = None):
+        """Create a PersistentVolumeClaim (provisions an lvol via CSI).
+
+        Args:
+            node_id: If provided, adds ``simplybk/host-id`` annotation to pin
+                     the PVC to a specific storage node.
+        """
         ns = namespace or self.namespace
+        annotations = ""
+        if node_id:
+            annotations = (
+                f"  annotations:\n"
+                f"    simplybk/host-id: {node_id}\n"
+            )
         yaml_content = (
             f"apiVersion: v1\n"
             f"kind: PersistentVolumeClaim\n"
             f"metadata:\n"
             f"  name: {name}\n"
             f"  namespace: {ns}\n"
+            f"{annotations}"
             f"spec:\n"
             f"  accessModes:\n"
             f"  - ReadWriteOnce\n"
@@ -613,7 +625,7 @@ class K8sUtils:
             f"      storage: {size}\n"
             f"  storageClassName: {storage_class}\n"
         )
-        self.logger.info(f"[K8sUtils] Creating PVC '{name}' size={size}")
+        self.logger.info(f"[K8sUtils] Creating PVC '{name}' size={size} node={node_id or 'auto'}")
         self.apply_yaml(yaml_content, namespace=ns)
 
     def create_clone_pvc(self, name: str, size: str, storage_class: str,
@@ -803,13 +815,31 @@ class K8sUtils:
 
     def create_fio_job(self, job_name: str, pvc_name: str, configmap_name: str,
                        fio_config: str, namespace: str = None,
-                       image: str = "dockerpinata/fio:2.1"):
-        """Create a ConfigMap with FIO config and a Job that runs FIO against a PVC."""
+                       image: str = "dockerpinata/fio:2.1",
+                       cleanup_before_fio: bool = False):
+        """Create a ConfigMap with FIO config and a Job that runs FIO against a PVC.
+
+        Args:
+            cleanup_before_fio: If True, add an init container that removes old
+                FIO data files from the volume before FIO starts. Useful for
+                clone PVCs that inherit files from the source.
+        """
         ns = namespace or self.namespace
         # Indent fio_config for YAML embedding (each line indented by 8 spaces)
         indented_cfg = "\n".join(
             f"      {line}" for line in fio_config.strip().splitlines()
         )
+        init_containers = ""
+        if cleanup_before_fio:
+            init_containers = (
+                f"      initContainers:\n"
+                f"      - name: cleanup-old-fio\n"
+                f"        image: busybox\n"
+                f"        command: [\"sh\", \"-c\", \"rm -f /spdkvol/*fio*\"]\n"
+                f"        volumeMounts:\n"
+                f"        - mountPath: /spdkvol\n"
+                f"          name: benchmark-volume\n"
+            )
         yaml_content = (
             f"apiVersion: v1\n"
             f"kind: ConfigMap\n"
@@ -829,6 +859,7 @@ class K8sUtils:
             f"  backoffLimit: 4\n"
             f"  template:\n"
             f"    spec:\n"
+            f"{init_containers}"
             f"      containers:\n"
             f"      - name: fio-benchmark\n"
             f"        image: {image}\n"

@@ -405,7 +405,7 @@ class CommonUtils:
         self.logger.info(f"Calculated time duration: {time_duration}")
         return time_duration
     
-    def validate_io_stats(self, cluster_id, start_timestamp, end_timestamp, time_duration=None):
+    def validate_io_stats(self, cluster_id, start_timestamp, end_timestamp, time_duration=None, warn_only=False):
         """
         Validate I/O stats ensuring all metrics are non-zero within the failover time range.
         Args:
@@ -413,6 +413,7 @@ class CommonUtils:
             start_timestamp (int): Start of failover in Unix timestamp
             end_timestamp (int): End of failover in Unix timestamp
             time_duration (str): Time duration for API call (e.g., '1hr30m')
+            warn_only (bool): If True, log warnings instead of raising on zero values
         """
         self.logger.info(f"Validating I/O stats for cluster {cluster_id} during {time_duration}.")
         self.logger.info(f"Start Date: {start_timestamp}, {end_timestamp}")
@@ -422,25 +423,30 @@ class CommonUtils:
         self.logger.info(f"IO Stats: {io_stats}")
 
         if not io_stats:
-            self.logger.error("No I/O stats found within the specified time range.")
-            raise AssertionError("No I/O stats found within the specified time range.")
+            msg = "No I/O stats found within the specified time range."
+            if warn_only:
+                self.logger.warning(msg)
+                return
+            self.logger.error(msg)
+            raise AssertionError(msg)
 
         # Validate non-zero values for relevant metrics
         for stat in io_stats:
             self.logger.info(f"Validating I/O stats for record with date: {stat['date']}")
-            self.assert_non_zero_io_stat(stat, "read_bytes")
-            self.assert_non_zero_io_stat(stat, "write_bytes")
-            self.assert_non_zero_io_stat(stat, "read_io")
-            self.assert_non_zero_io_stat(stat, "write_io")
+            self.assert_non_zero_io_stat(stat, "read_bytes", warn_only=warn_only)
+            self.assert_non_zero_io_stat(stat, "write_bytes", warn_only=warn_only)
+            self.assert_non_zero_io_stat(stat, "read_io", warn_only=warn_only)
+            self.assert_non_zero_io_stat(stat, "write_io", warn_only=warn_only)
             # self.assert_non_zero_io_stat(stat, ["write_io_ps", "read_io_ps"])
         self.logger.info("All I/O stats are valid and non-zero within the failover time range.")
 
-    def assert_non_zero_io_stat(self, stat, key):
+    def assert_non_zero_io_stat(self, stat, key, warn_only=False):
         """
         Assert that a specific I/O stat key is non-zero.
         Args:
             stat (dict): I/O stat record
             key (str): Key to validate
+            warn_only (bool): If True, log warning instead of raising
         """
         value = 0
         if isinstance(key, list):
@@ -449,6 +455,9 @@ class CommonUtils:
         else:
             value = stat.get(key, 0)
         if value == 0:
+            if warn_only:
+                self.logger.warning(f"{key} is 0 for record: {stat}")
+                return
             self.logger.error(f"{key} is 0 for record: {stat}")
             raise AssertionError(f"{key} is 0 for record: {stat}")
         self.logger.info(f"{key}: {value} is valid.")

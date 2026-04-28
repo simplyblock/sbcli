@@ -60,7 +60,7 @@ from stress_test.continuous_failover_ha_2node import RandomMultiClient2NodeFailo
 from stress_test.continuous_failover_ha_rdma import RandomRDMAFailoverTest
 from stress_test.continuous_failover_ha_rdma_multi_outage import RandomRDMAMultiFailoverTest
 from stress_test.continuous_failover_ha_k8s import RandomK8sMultiOutageFailoverTest
-from stress_test.continuous_k8s_native_failover import K8sNativeFailoverTest
+from stress_test.continuous_k8s_native_failover import K8sNativeFailoverTest, K8sNativeBasicFailoverTest
 from stress_test.continuous_failover_ha_multi_client_quick_outage import (
     RandomRapidFailoverNoGap,
     RandomRapidFailoverNoGapV2WithMigration,
@@ -246,6 +246,7 @@ ALL_TESTS = [
     TestBackupCrossClusterRestore,
     # K8s-native failover stress test
     K8sNativeFailoverTest,
+    K8sNativeBasicFailoverTest,
 ]
 
 def get_all_tests(custom=True, ha_test=False):
@@ -352,6 +353,7 @@ def get_stress_tests():
         RandomMultiClientFailoverNamespaceTest,
         RandomMultiClientSingleNodeTest,
         K8sNativeFailoverTest,
+        K8sNativeBasicFailoverTest,
     ]
     return tests
 

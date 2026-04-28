@@ -659,13 +659,12 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
             # Retry mechanism for restarting the node
             for attempt in range(max_retries):
                 if not self.k8s_test:
-                    for node in self.storage_nodes:
-                        self.ssh_obj.restart_docker_logging(
-                            node_ip=node,
-                            containers=self.container_nodes[node],
-                            log_dir=os.path.join(self.docker_logs_path, node),
-                            test_name=self.test_name
-                        )
+                    self.ssh_obj.restart_docker_logging(
+                        node_ip=node_ip,
+                        containers=self.container_nodes.get(node_ip, []),
+                        log_dir=os.path.join(self.docker_logs_path, node_ip),
+                        test_name=self.test_name
+                    )
                 else:
                     self.runner_k8s_log.restart_logging()
                 try:
@@ -681,16 +680,13 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                         self.ssh_obj.restart_node(node=self.mgmt_nodes[0],
                                                   node_id=self.current_outage_node,
                                                   force=force)
-                    # else:
-                    #     self.sbcli_utils.restart_node(node_uuid=self.current_outage_node, expected_error_code=[503])
                     if not self.k8s_test:
-                        for node in self.storage_nodes:
-                            self.ssh_obj.restart_docker_logging(
-                                node_ip=node,
-                                containers=self.container_nodes[node],
-                                log_dir=os.path.join(self.docker_logs_path, node),
-                                test_name=self.test_name
-                            )
+                        self.ssh_obj.restart_docker_logging(
+                            node_ip=node_ip,
+                            containers=self.container_nodes.get(node_ip, []),
+                            log_dir=os.path.join(self.docker_logs_path, node_ip),
+                            test_name=self.test_name
+                        )
                     else:
                         self.runner_k8s_log.restart_logging()
                     self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "online", timeout=300)
@@ -735,13 +731,12 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                 retry_delay = 10  # seconds
                 try:
                     if not self.k8s_test:
-                        for node in self.storage_nodes:
-                            self.ssh_obj.restart_docker_logging(
-                                node_ip=node,
-                                containers=self.container_nodes[node],
-                                log_dir=os.path.join(self.docker_logs_path, node),
-                                test_name=self.test_name
-                            )
+                        self.ssh_obj.restart_docker_logging(
+                            node_ip=node_ip,
+                            containers=self.container_nodes.get(node_ip, []),
+                            log_dir=os.path.join(self.docker_logs_path, node_ip),
+                            test_name=self.test_name
+                        )
                     else:
                         self.runner_k8s_log.restart_logging()
                     self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "online", timeout=60)
@@ -753,13 +748,12 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                     # Retry mechanism for restarting the node
                     for attempt in range(max_retries):
                         if not self.k8s_test:
-                            for node in self.storage_nodes:
-                                self.ssh_obj.restart_docker_logging(
-                                    node_ip=node,
-                                    containers=self.container_nodes[node],
-                                    log_dir=os.path.join(self.docker_logs_path, node),
-                                    test_name=self.test_name
-                                )
+                            self.ssh_obj.restart_docker_logging(
+                                node_ip=node_ip,
+                                containers=self.container_nodes.get(node_ip, []),
+                                log_dir=os.path.join(self.docker_logs_path, node_ip),
+                                test_name=self.test_name
+                            )
                         else:
                             self.runner_k8s_log.restart_logging()
                         try:
@@ -775,16 +769,13 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                                 self.ssh_obj.restart_node(node=self.mgmt_nodes[0],
                                                         node_id=self.current_outage_node,
                                                         force=force)
-                            # else:
-                            #     self.sbcli_utils.restart_node(node_uuid=self.current_outage_node, expected_error_code=[503])
                             if not self.k8s_test:
-                                for node in self.storage_nodes:
-                                    self.ssh_obj.restart_docker_logging(
-                                        node_ip=node,
-                                        containers=self.container_nodes[node],
-                                        log_dir=os.path.join(self.docker_logs_path, node),
-                                        test_name=self.test_name
-                                    )
+                                self.ssh_obj.restart_docker_logging(
+                                    node_ip=node_ip,
+                                    containers=self.container_nodes.get(node_ip, []),
+                                    log_dir=os.path.join(self.docker_logs_path, node_ip),
+                                    test_name=self.test_name
+                                )
                             else:
                                 self.runner_k8s_log.restart_logging()
                             self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "online", timeout=300)
@@ -804,13 +795,12 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                     self.log_outage_event(self.current_outage_node, outage_type, "Node restarted", outage_time=0)
             else:
                 if not self.k8s_test:
-                    for node in self.storage_nodes:
-                        self.ssh_obj.restart_docker_logging(
-                            node_ip=node,
-                            containers=self.container_nodes[node],
-                            log_dir=os.path.join(self.docker_logs_path, node),
-                            test_name=self.test_name
-                        )
+                    self.ssh_obj.restart_docker_logging(
+                        node_ip=node_ip,
+                        containers=self.container_nodes.get(node_ip, []),
+                        log_dir=os.path.join(self.docker_logs_path, node_ip),
+                        test_name=self.test_name
+                    )
                 else:
                     self.runner_k8s_log.restart_logging()
                 self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "online", timeout=300)
@@ -823,13 +813,12 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                 retry_delay = 10  # seconds
                 try:
                     if not self.k8s_test:
-                        for node in self.storage_nodes:
-                            self.ssh_obj.restart_docker_logging(
-                                node_ip=node,
-                                containers=self.container_nodes[node],
-                                log_dir=os.path.join(self.docker_logs_path, node),
-                                test_name=self.test_name
-                            )
+                        self.ssh_obj.restart_docker_logging(
+                            node_ip=node_ip,
+                            containers=self.container_nodes.get(node_ip, []),
+                            log_dir=os.path.join(self.docker_logs_path, node_ip),
+                            test_name=self.test_name
+                        )
                     else:
                         self.runner_k8s_log.restart_logging()
                     self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "online", timeout=100)
@@ -848,13 +837,12 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                         for attempt in range(max_retries):
                             try:
                                 if not self.k8s_test:
-                                    for node in self.storage_nodes:
-                                        self.ssh_obj.restart_docker_logging(
-                                            node_ip=node,
-                                            containers=self.container_nodes[node],
-                                            log_dir=os.path.join(self.docker_logs_path, node),
-                                            test_name=self.test_name
-                                        )
+                                    self.ssh_obj.restart_docker_logging(
+                                        node_ip=node_ip,
+                                        containers=self.container_nodes.get(node_ip, []),
+                                        log_dir=os.path.join(self.docker_logs_path, node_ip),
+                                        test_name=self.test_name
+                                    )
                                 else:
                                     self.runner_k8s_log.restart_logging()
                                 force=False
@@ -870,13 +858,12 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                                                             node_id=self.current_outage_node,
                                                             force=force)
                                 if not self.k8s_test:
-                                    for node in self.storage_nodes:
-                                        self.ssh_obj.restart_docker_logging(
-                                            node_ip=node,
-                                            containers=self.container_nodes[node],
-                                            log_dir=os.path.join(self.docker_logs_path, node),
-                                            test_name=self.test_name
-                                        )
+                                    self.ssh_obj.restart_docker_logging(
+                                        node_ip=node_ip,
+                                        containers=self.container_nodes.get(node_ip, []),
+                                        log_dir=os.path.join(self.docker_logs_path, node_ip),
+                                        test_name=self.test_name
+                                    )
                                 else:
                                     self.runner_k8s_log.restart_logging()
                                 self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "online", timeout=300)
@@ -896,27 +883,25 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                         self.log_outage_event(self.current_outage_node, outage_type, "Node restarted", outage_time=0)
             else:
                 if not self.k8s_test:
-                    for node in self.storage_nodes:
-                        self.ssh_obj.restart_docker_logging(
-                            node_ip=node,
-                            containers=self.container_nodes[node],
-                            log_dir=os.path.join(self.docker_logs_path, node),
-                            test_name=self.test_name
-                        )
+                    self.ssh_obj.restart_docker_logging(
+                        node_ip=node_ip,
+                        containers=self.container_nodes.get(node_ip, []),
+                        log_dir=os.path.join(self.docker_logs_path, node_ip),
+                        test_name=self.test_name
+                    )
                 else:
                     self.runner_k8s_log.restart_logging()
                 self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "online", timeout=300)
                 # Log the restart event
                 self.log_outage_event(self.current_outage_node, outage_type, "Node restarted", outage_time=(self.outage_dur//60)+1)
-        
+
         if not self.k8s_test:
-            for node in self.storage_nodes:
-                self.ssh_obj.restart_docker_logging(
-                    node_ip=node,
-                    containers=self.container_nodes[node],
-                    log_dir=os.path.join(self.docker_logs_path, node),
-                    test_name=self.test_name
-                )
+            self.ssh_obj.restart_docker_logging(
+                node_ip=node_ip,
+                containers=self.container_nodes.get(node_ip, []),
+                log_dir=os.path.join(self.docker_logs_path, node_ip),
+                test_name=self.test_name
+            )
         else:
             self.runner_k8s_log.restart_logging()
 
