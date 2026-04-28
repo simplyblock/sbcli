@@ -4878,6 +4878,14 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
         logger.error("bdev_lvol_set_lvs_opts(%s) failed for %s on %s",
                      sec_role, primary_node.lvstore, snode.get_id())
 
+    # Track the deferred failover-path attach so we can run it AFTER the
+    # leader port is unblocked. The in-freeze attach below uses a single
+    # path only; the second path (if any) is reconciled out-of-band so the
+    # 3 s INTER_ATTACH_SLEEP_SEC inside the coordinator never sits inside
+    # the IO-impact window.
+    deferred_failover_target = None
+    deferred_failover_via = None
+
     if not activation_mode:
         ### 6- create hublvol on secondary (non-leader) for multipath failover
         # Secondary creates its own hublvol so the tertiary can use it as a failover path.
@@ -4890,26 +4898,50 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
             except Exception as e:
                 logger.error("Error creating secondary hublvol on restarting node: %s", e)
 
-        ### 7- connect to leader's hublvol (with fallback to secondary for tertiary)
+        ### 7- single-path hublvol attach inside the freeze
+        # Pre-flight reachability up front: the second path must NEVER be
+        # attempted inside the leader-port-block window, and the single
+        # attached path must target a known-alive peer. If the original
+        # leader is offline (no quorum) we attach directly to the secondary
+        # — the dead leader's IP is not even tried.
         try:
             if is_tertiary:
-                # Tertiary: connect to leader's hublvol with secondary as failover.
-                # If leader is unreachable, fall back to connecting to secondary's hublvol.
-                failover_node = secondary_node if (secondary_node and
-                    not _check_peer_disconnected(secondary_node, lvs_peer_ids=lvs_peer_ids_excl_snode)) else None
-                connected = snode.connect_to_hublvol(leader_node, failover_node=failover_node,
-                                                    role=sec_role, timeout=0.5)
-                if not connected and secondary_node and secondary_node.hublvol:
-                    # Leader unreachable — connect to secondary's hublvol as primary path
-                    logger.info("Leader %s unreachable, connecting tertiary %s to secondary %s hublvol for %s",
+                secondary_alive = (secondary_node and not _check_peer_disconnected(
+                    secondary_node, lvs_peer_ids=lvs_peer_ids_excl_snode))
+                # leader_has_quorum was computed earlier (line ~4722). When
+                # the leader has lost quorum, attaching to it would burn up
+                # to fast_io_fail_timeout_sec (5s) inside the freeze.
+                if leader_has_quorum:
+                    sync_target = leader_node
+                    if secondary_alive and secondary_node.get_id() != leader_node.get_id():
+                        deferred_failover_target = secondary_node
+                        deferred_failover_via = leader_node
+                elif secondary_alive and secondary_node.hublvol:
+                    logger.info("Leader %s offline (no quorum); tertiary %s "
+                                "connecting directly to secondary %s hublvol for %s",
                                 leader_node.get_id(), snode.get_id(),
                                 secondary_node.get_id(), primary_node.lvstore)
-                    snode.connect_to_hublvol(secondary_node, failover_node=None,
-                                            role=sec_role, timeout=0.5)
+                    sync_target = secondary_node
+                    # No deferred path: there is no live alternative peer
+                    # to add as a failover. Once the original leader comes
+                    # back online, its periodic hublvol reconciliation will
+                    # add it as a path.
+                else:
+                    sync_target = None
+                    logger.error(
+                        "Tertiary %s rejoin %s: no reachable hublvol target "
+                        "(leader=%s alive=%s, secondary alive=%s)",
+                        snode.get_id(), primary_node.lvstore,
+                        leader_node.get_id(), leader_has_quorum, secondary_alive)
+
+                if sync_target is not None:
+                    snode.connect_to_hublvol(sync_target, failover_node=None,
+                                             role=sec_role, rpc_timeout=0.2)
             else:
-                # Secondary: connect to leader (primary) hublvol
+                # Secondary: connect to leader (primary) hublvol — single path,
+                # short timeout, no deferred failover (secondaries don't carry one).
                 snode.connect_to_hublvol(leader_node, failover_node=None,
-                                        role=sec_role, timeout=0.5)
+                                         role=sec_role, rpc_timeout=0.2)
         except Exception as e:
             logger.error("Error connecting to hublvol: %s", e)
 
@@ -4948,6 +4980,28 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
 
     # Set restart phase: post_unblock — delayed sync deletes and registrations can now proceed
     _set_restart_phase(snode, primary_node.lvstore, StorageNode.RESTART_PHASE_POST_UNBLOCK, db_controller)
+
+    ### 8b- deferred failover-path attach (tertiary only, leader was alive)
+    # The in-freeze attach above used a single path. Now that the leader
+    # port is unblocked and IO is flowing again, top up the second path on
+    # the multipath hublvol controller so a future primary loss has an
+    # immediate failover. The coordinator's INTER_ATTACH_SLEEP_SEC (3 s)
+    # cost lives here, OUTSIDE the IO-impact window — it doesn't sit inside
+    # the leader-port-block freeze any more, so client IO is unaffected.
+    if deferred_failover_target is not None and deferred_failover_via is not None:
+        try:
+            if snode.add_hublvol_failover_path(deferred_failover_via, deferred_failover_target):
+                logger.info("Added deferred hublvol failover path to %s (via %s) on %s for %s",
+                            deferred_failover_target.get_id(),
+                            deferred_failover_via.get_id(),
+                            snode.get_id(), primary_node.lvstore)
+            else:
+                logger.warning("Failed to add deferred hublvol failover path to %s on %s for %s",
+                               deferred_failover_target.get_id(),
+                               snode.get_id(), primary_node.lvstore)
+        except Exception as e:
+            logger.error("Error adding deferred hublvol failover path on %s: %s",
+                         snode.get_id(), e)
 
     ### 9- add lvols to subsystems (always non_optimized for non-leader)
     executor = ThreadPoolExecutor(max_workers=50)
