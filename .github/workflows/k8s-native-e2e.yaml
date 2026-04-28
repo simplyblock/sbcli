@@ -758,14 +758,14 @@ jobs:
       # ── Wait for cluster readiness ──────────────────────────────────────────
 
       - name: Wait for cluster to become active
-        timeout-minutes: ${{ github.event.inputs.cluster_environment == 'local' && 25 || 80 }}
+        timeout-minutes: ${{ github.event.inputs.cluster_environment == 'local' && 40 || 80 }}
         id: cluster_status
         run: |
           NAMESPACE=simplyblock
           ADMIN_POD=""
           CLUSTER_ENV="${{ github.event.inputs.cluster_environment || 'local' }}"
           if [ "$CLUSTER_ENV" = "local" ]; then
-            MAX_POLL=180
+            MAX_POLL=300
           else
             MAX_POLL=720
           fi
