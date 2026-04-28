@@ -336,7 +336,7 @@ def process_records(records, records_count, keys=None):
 
 def ping_host(ip):
     logger.debug(f"Pinging ip ... {ip}")
-    response = os.system(f"ping -c 1 -W 2 {ip} > /dev/null")
+    response = os.system(f"sudo ping -c 1 -W 2 {ip} > /dev/null")
     if response == 0:
         logger.debug(f"{ip} is UP")
         return True
@@ -2190,7 +2190,7 @@ def render_and_deploy_alerting_configs(contact_point, grafana_endpoint, cluster_
         ALERT_TYPE = "email"
     else:
         ALERT_TYPE = "slack"
-        contact_point = 'https://hooks.slack.com/services/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'
+        contact_point = 'https://hooks.slack.com/services/'
 
     values = {
         'CONTACT_POINT': contact_point,
