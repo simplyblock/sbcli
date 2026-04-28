@@ -4913,10 +4913,11 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
                 # to fast_io_fail_timeout_sec (5s) inside the freeze.
                 if leader_has_quorum:
                     sync_target = leader_node
-                    if secondary_alive and secondary_node.get_id() != leader_node.get_id():
+                    if (secondary_alive and secondary_node is not None
+                            and secondary_node.get_id() != leader_node.get_id()):
                         deferred_failover_target = secondary_node
                         deferred_failover_via = leader_node
-                elif secondary_alive and secondary_node.hublvol:
+                elif secondary_alive and secondary_node is not None and secondary_node.hublvol:
                     logger.info("Leader %s offline (no quorum); tertiary %s "
                                 "connecting directly to secondary %s hublvol for %s",
                                 leader_node.get_id(), snode.get_id(),
@@ -5581,13 +5582,20 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
         # owner taking leadership), there is no separate node to expose
         # the secondary hublvol on — the leader's primary hublvol on snode
         # is the only path until the original primary returns.
-        if sec1_online:
+        if sec1_online and sec1_node is not None:
             try:
                 sec1_node.create_secondary_hublvol(lvs_node, cluster.nqn)
             except Exception as e:
                 logger.error("Error creating secondary hublvol on sec_1: %s", e)
                 _abort_restart_and_unblock(
                     f"create_secondary_hublvol on {sec1_node.get_id()} raised: {e}")
+
+        # Track tertiary→secondary failover-path attaches to run AFTER the
+        # peer port unblock — keeping the in-freeze attach single-path with
+        # a 0.2 s RPC budget and pushing the second-path INTER_ATTACH_SLEEP
+        # outside the IO-impact window. ``deferred_tertiary_paths`` holds
+        # ``(tert_node, primary_node, sec1_node)`` tuples to apply later.
+        deferred_tertiary_paths = []
 
         for sec_node in sec_nodes:
             if sec_node.get_id() in disconnected_peers:
@@ -5599,10 +5607,12 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
             # remaining peers up one slot.
             if sec_node.get_id() == lvs_node.secondary_node_id:
                 sec_role = "secondary"
-                failover_node = None
             elif sec_node.get_id() == lvs_node.tertiary_node_id:
                 sec_role = "tertiary"
-                failover_node = sec1_node if sec1_online else None
+                # Defer the tertiary→secondary path; in-freeze attach is
+                # single-path against the (returning) primary only.
+                if sec1_online:
+                    deferred_tertiary_paths.append((sec_node, snode, sec1_node))
             else:
                 logger.warning(
                     "Skipping hublvol connect for %s: not a registered "
@@ -5610,8 +5620,11 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
                     sec_node.get_id(), lvs_name, lvs_node.get_id())
                 continue
             try:
-                ok = sec_node.connect_to_hublvol(snode, failover_node=failover_node, role=sec_role,
-                                                 timeout=0.5)
+                # Single-path attach against ``snode`` (the leader). The
+                # secondary failover for tertiary is appended in a
+                # post-unblock pass via ``add_hublvol_failover_path``.
+                ok = sec_node.connect_to_hublvol(snode, failover_node=None, role=sec_role,
+                                                 rpc_timeout=0.2)
             except Exception as e:
                 logger.error("Error establishing hublvol on %s: %s", sec_node.get_id(), e)
                 _abort_restart_and_unblock(
@@ -5632,6 +5645,31 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
 
     # Phase transition: post_unblock — delayed sync deletes and registrations can now proceed
     _set_restart_phase(snode, lvs_name, StorageNode.RESTART_PHASE_POST_UNBLOCK, db_controller)
+
+    ### 10b- deferred tertiary→secondary hublvol failover paths
+    # The in-freeze attach above used a single path (tertiary → primary).
+    # Now that every peer's port is unblocked and IO is flowing again,
+    # top up the multipath controller on each tertiary so a future primary
+    # loss has an immediate failover. The coordinator's
+    # INTER_ATTACH_SLEEP_SEC (3 s) cost lives here, OUTSIDE the IO-impact
+    # window — it doesn't sit inside the leader-port-block freeze any more.
+    if not activation_mode and deferred_tertiary_paths:
+        for tert_node, primary_node, sec1_failover in deferred_tertiary_paths:
+            if sec1_failover is None:
+                # Only appended when ``sec1_online`` was True (meaning
+                # ``sec1_node`` was non-None at the time), so this branch
+                # should be unreachable in practice — guard for mypy.
+                continue
+            try:
+                if tert_node.add_hublvol_failover_path(primary_node, sec1_failover):
+                    logger.info("Added deferred secondary %s hublvol path on tertiary %s for %s",
+                                sec1_failover.get_id(), tert_node.get_id(), lvs_name)
+                else:
+                    logger.warning("Failed to add deferred secondary %s hublvol path on tertiary %s for %s",
+                                   sec1_failover.get_id(), tert_node.get_id(), lvs_name)
+            except Exception as e:
+                logger.error("Error adding deferred hublvol failover path on tertiary %s: %s",
+                             tert_node.get_id(), e)
 
     if not activation_mode:
         ### 11- demote old leader's subsystems to non_optimized (async)

@@ -157,10 +157,13 @@ class TestRecreateAllLvstoresStep2Cascade(unittest.TestCase):
             "db_cls": mocks[3],
         }
 
-    def test_primary_offline_tertiary_online_uses_non_leader_path(self):
-        """LVS_9060 incident scenario: snode is secondary, primary is
-        offline, tertiary is online and was the active leader. Step 2
-        must call recreate_lvstore_on_non_leader with leader=tertiary."""
+    def test_primary_offline_secondary_takes_leadership(self):
+        """Per the leadership hierarchy primary > secondary > tertiary,
+        the rejoining secondary (snode) takes leadership unconditionally
+        whenever the primary is disconnected — regardless of whether the
+        tertiary happens to be online. This protects against split-brain
+        where the secondary would defer to a tertiary that itself only
+        ever gets to lead in the primary-AND-secondary-offline case."""
         from simplyblock_core import storage_node_ops
 
         patches = self._patches()
@@ -179,23 +182,19 @@ class TestRecreateAllLvstoresStep2Cascade(unittest.TestCase):
         ok = storage_node_ops.recreate_all_lvstores(nodes["snode"])
         self.assertTrue(ok)
 
-        # Step 2 must NOT have invoked the takeover path (recreate_lvstore
-        # with lvs_primary kwarg). Step 1 calls recreate_lvstore for the
-        # node's own primary; we filter that out by lvs_primary presence.
+        # Step 2 MUST have taken leadership: primary is offline, so the
+        # secondary (next in hierarchy) takes over. Filter by lvs_primary
+        # presence to ignore Step 1 (snode's own primary recreation).
         takeover_calls = [c for c in m["recreate"].call_args_list
                           if c.kwargs.get("lvs_primary") is not None]
-        self.assertEqual(takeover_calls, [],
-                         f"Unexpected takeover invocation: {takeover_calls}")
+        self.assertEqual(len(takeover_calls), 1,
+                         f"Expected exactly one takeover call, got {takeover_calls}")
+        call_args = takeover_calls[0]
+        self.assertEqual(call_args.args[0].get_id(), "snode")
+        self.assertEqual(call_args.kwargs["lvs_primary"].get_id(), "lvs_owner")
 
-        # Must have invoked the non-leader path with leader=tertiary
-        m["recreate_non_leader"].assert_called_once()
-        call_args = m["recreate_non_leader"].call_args
-        snode_arg = call_args.args[0]
-        leader_arg = call_args.args[1]
-        primary_arg = call_args.args[2]
-        self.assertEqual(snode_arg.get_id(), "snode")
-        self.assertEqual(leader_arg.get_id(), "tert")
-        self.assertEqual(primary_arg.get_id(), "lvs_owner")
+        # Non-leader path NOT used in Step 2 — secondary outranks tertiary.
+        m["recreate_non_leader"].assert_not_called()
 
     def test_primary_offline_tertiary_offline_uses_takeover(self):
         """When both primary and tertiary are unreachable, snode (the
@@ -562,7 +561,7 @@ class TestRecreateLvstoreStep8bHublvolWiring(unittest.TestCase):
             n.create_secondary_hublvol = lambda primary_node, cluster_nqn, _self=n: \
                 fake_create_sec(_self, primary_node, cluster_nqn)
             n.connect_to_hublvol = lambda primary_node, failover_node=None, role=None, \
-                                          timeout=None, _self=n: \
+                                          timeout=None, rpc_timeout=None, _self=n: \
                 fake_connect(_self, primary_node, failover_node=failover_node,
                              role=role, timeout=timeout)
             n.client = MagicMock(return_value=MagicMock())

@@ -135,15 +135,15 @@ class TestConnectLvolPort(unittest.TestCase):
                       lvstore_ports={})  # missing LVS_100!
 
         cluster = _cluster()
-        lvol = _lvol("vol-1", "cluster-1/node-1", lvs_name="LVS_100",
-                     nodes=["cluster-1/node-1", "cluster-1/node-2", "cluster-1/node-3"])
+        lvol = _lvol("vol-1", "node-1", lvs_name="LVS_100",
+                     nodes=["node-1", "node-2", "node-3"])
 
         db = mock_db_cls.return_value
 
         def get_node(nid):
-            return {"cluster-1/node-1": primary,
-                    "cluster-1/node-2": sec1,
-                    "cluster-1/node-3": sec2}[nid]
+            return {"node-1": primary,
+                    "node-2": sec1,
+                    "node-3": sec2}[nid]
 
         db.get_lvol_by_id.return_value = lvol
         db.get_storage_node_by_id.side_effect = get_node
@@ -166,8 +166,8 @@ class TestConnectLvolPort(unittest.TestCase):
         primary = _node("node-1", mgmt_ip="10.10.10.1", lvol_subsys_port=9090,
                          lvstore_ports={"LVS_100": {"lvol_subsys_port": 4420, "hublvol_port": 4425}})
         cluster = _cluster()
-        lvol = _lvol("vol-1", "cluster-1/node-1", lvs_name="LVS_100",
-                     nodes=["cluster-1/node-1"], ha_type="single")
+        lvol = _lvol("vol-1", "node-1", lvs_name="LVS_100",
+                     nodes=["node-1"], ha_type="single")
 
         db = mock_db_cls.return_value
         db.get_lvol_by_id.return_value = lvol
@@ -192,29 +192,29 @@ class TestRecreateLvstoreDualSecondary(unittest.TestCase):
         nodes = {}
         nodes["node-1"] = _node(
             "node-1", lvstore="LVS_100",
-            secondary_node_id="cluster-1/node-2",
-            tertiary_node_id="cluster-1/node-3",
+            secondary_node_id="node-2",
+            tertiary_node_id="node-3",
             lvstore_ports={"LVS_100": {"lvol_subsys_port": 4420, "hublvol_port": 4425}},
             lvstore_stack_secondary="", lvstore_stack_tertiary="",
             mgmt_ip="10.0.0.1")
         nodes["node-2"] = _node(
             "node-2", lvstore="LVS_200",
-            secondary_node_id="cluster-1/node-3",
-            tertiary_node_id="cluster-1/node-4",
+            secondary_node_id="node-3",
+            tertiary_node_id="node-4",
             lvstore_ports={"LVS_200": {"lvol_subsys_port": 4426, "hublvol_port": 4427},
                            "LVS_100": {"lvol_subsys_port": 4420, "hublvol_port": 4425}},
             mgmt_ip="10.0.0.2")
         nodes["node-3"] = _node(
             "node-3", lvstore="LVS_300",
-            secondary_node_id="cluster-1/node-4",
-            tertiary_node_id="cluster-1/node-1",
+            secondary_node_id="node-4",
+            tertiary_node_id="node-1",
             lvstore_ports={"LVS_300": {"lvol_subsys_port": 4428, "hublvol_port": 4429},
                            "LVS_100": {"lvol_subsys_port": 4420, "hublvol_port": 4425}},
             mgmt_ip="10.0.0.3")
         nodes["node-4"] = _node(
             "node-4", lvstore="LVS_400",
-            secondary_node_id="cluster-1/node-1",
-            tertiary_node_id="cluster-1/node-2",
+            secondary_node_id="node-1",
+            tertiary_node_id="node-2",
             status=StorageNode.STATUS_OFFLINE,
             mgmt_ip="10.0.0.4")
         return nodes
@@ -359,7 +359,12 @@ class TestRecreateLvstoreDualSecondary(unittest.TestCase):
             n.rpc_client = MagicMock(return_value=rpc)
             n.wait_for_jm_rep_tasks_to_finish = MagicMock(return_value=True)
             n.recreate_hublvol = MagicMock()
-            n.connect_to_hublvol = MagicMock()
+            n.connect_to_hublvol = MagicMock(return_value=True)
+            n.create_secondary_hublvol = MagicMock()
+            # Deferred tertiary→secondary failover-path attach runs after
+            # port_unblock; mock so the test doesn't dive into the real
+            # HublvolReconnectCoordinator.
+            n.add_hublvol_failover_path = MagicMock(return_value=True)
             n.write_to_db = MagicMock()
 
         mock_recreate_on_non_leader.return_value = True
@@ -369,12 +374,16 @@ class TestRecreateLvstoreDualSecondary(unittest.TestCase):
         result = recreate_lvstore(snode)
         self.assertTrue(result)
 
-        # Both sec1 (node-2) and sec2 (node-3) should have connect_to_hublvol called
-        # sec1 gets role="secondary", sec2 gets role="tertiary" with failover to sec1
+        # Both sec1 (node-2) and sec2 (node-3) should have connect_to_hublvol
+        # called with a SINGLE path against snode (the new leader). The
+        # tertiary→secondary failover path is deferred to after port_unblock
+        # via ``add_hublvol_failover_path`` (asserted separately below).
         nodes["node-2"].connect_to_hublvol.assert_called_once_with(
-            snode, failover_node=None, role="secondary", timeout=0.5)
+            snode, failover_node=None, role="secondary", rpc_timeout=0.2)
         nodes["node-3"].connect_to_hublvol.assert_called_once_with(
-            snode, failover_node=nodes["node-2"], role="tertiary", timeout=0.5)
+            snode, failover_node=None, role="tertiary", rpc_timeout=0.2)
+        nodes["node-3"].add_hublvol_failover_path.assert_called_once_with(
+            snode, nodes["node-2"])
 
     @patch("simplyblock_core.storage_node_ops._check_peer_disconnected", return_value=False)
     @patch("simplyblock_core.storage_node_ops._set_restart_phase")
@@ -553,7 +562,7 @@ class TestRecreateLvstoreDualSecondary(unittest.TestCase):
         nodes["node-3"].status = StorageNode.STATUS_UNREACHABLE
 
         db = mock_db_cls.return_value
-        lvol = _lvol("vol-1", "cluster-1/node-1")
+        lvol = _lvol("vol-1", "node-1")
 
         def get_node(nid):
             key = nid.split("/")[-1] if "/" in nid else nid
@@ -656,7 +665,7 @@ class TestRemoteDevicesRaceCondition(unittest.TestCase):
         snode.write_to_db = MagicMock()
         snode.rpc_client = MagicMock()
 
-        set_node_status("cluster-1/node-1", StorageNode.STATUS_ONLINE)
+        set_node_status("node-1", StorageNode.STATUS_ONLINE)
 
         # The other node should have been re-read from DB (get_storage_node_by_id)
         # before write_to_db was called

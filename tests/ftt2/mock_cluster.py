@@ -362,11 +362,23 @@ def _nvmf_delete_subsystem(s, p):
 
 def _bdev_nvme_attach_controller(s, p):
     name = p.get('name', '')
+    # Each entry mirrors what real SPDK returns under the
+    # ``ctrlrs`` key of ``bdev_nvme_get_controllers``: a per-path dict
+    # with ``state`` (``enabled`` / ``resetting`` / ``connecting`` / …),
+    # ``trid`` for transport addressing and an optional
+    # ``alternate_trids`` list for multipath. Production helpers
+    # (``_ensure_attach_ready``, ``_wait_for_settled``, ``_attached_ips``)
+    # rely on those keys being present; without ``state`` they
+    # mis-identify a fresh attach as a hung controller and abort.
     path = {
-        'nqn': p.get('subnqn', ''),
-        'traddr': p.get('traddr', ''),
-        'trsvcid': p.get('trsvcid', ''),
-        'trtype': p.get('trtype', 'TCP'),
+        'state': 'enabled',
+        'trid': {
+            'subnqn': p.get('subnqn', ''),
+            'traddr': p.get('traddr', ''),
+            'trsvcid': p.get('trsvcid', ''),
+            'trtype': p.get('trtype', 'TCP'),
+        },
+        'alternate_trids': [],
         'multipath': p.get('multipath', 'disable'),
     }
     if name not in s.nvme_controller_paths:
@@ -374,10 +386,10 @@ def _bdev_nvme_attach_controller(s, p):
     s.nvme_controller_paths[name].append(path)
     s.nvme_controllers[name] = {
         'name': name,
-        'nqn': path['nqn'],
-        'traddr': path['traddr'],
-        'trsvcid': path['trsvcid'],
-        'trtype': path['trtype'],
+        'nqn': p.get('subnqn', ''),
+        'traddr': p.get('traddr', ''),
+        'trsvcid': p.get('trsvcid', ''),
+        'trtype': p.get('trtype', 'TCP'),
         'ctrlrs': s.nvme_controller_paths[name],
     }
     return [f"{name}n1"]

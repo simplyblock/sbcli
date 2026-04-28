@@ -296,12 +296,22 @@ class TestSecondaryConnect:
             f"Attached path must target primary IP 10.0.0.1; got {params.get('traddr')!r}"
 
     def test_no_multipath_on_secondary(self):
-        """Secondary with no failover must not request multipath mode."""
+        """All hublvol attaches use ``multipath='multipath'`` unconditionally
+        — even a single-path secondary attach. SPDK cannot widen a
+        non-multipath controller to multipath later
+        (bdev_nvme.c:5849 returns ``-EINVAL``), so attaching with
+        ``multipath='disable'`` / ``'failover'`` would force a
+        detach+reattach to add a failover peer later, reopening the
+        ``cntlid duplicated`` race the coordinator closes. This contract
+        is mirrored in ``tests/test_hublvol_unit.py``'s
+        ``test_secondary_no_multipath_mode``."""
         calls = _attach_calls(self.env['servers'][1], 'hublvol')
         assert calls
         _, _, params = calls[0]
-        assert params.get('multipath') != 'multipath', \
-            f"Secondary must not use multipath mode; got multipath={params.get('multipath')!r}"
+        assert params.get('multipath') == 'multipath', \
+            f"Secondary must use multipath='multipath' (single-path attach " \
+            f"still uses multipath mode so a failover path can be added " \
+            f"later without detach+reattach); got multipath={params.get('multipath')!r}"
 
     def test_set_lvs_opts_role_secondary(self):
         """Step 2: bdev_lvol_set_lvs_opts must set role=secondary on secondary server."""

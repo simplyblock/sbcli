@@ -433,7 +433,7 @@ class HublvolReconnectCoordinator:
         nqn = primary_node.hublvol.nqn
         port = primary_node.hublvol.nvmf_port
 
-        expected = {}
+        expected: dict[str, str] = {}
         for peer in peer_nodes:
             for ip, trtype in _expected_ips_for_peer(peer):
                 expected.setdefault(ip, trtype)
@@ -542,6 +542,14 @@ class HublvolReconnectCoordinator:
         """
         any_attached = False
         last_attach_at = 0.0
+        # Always use ``"multipath"``: SPDK cannot widen a non-multipath
+        # controller to multipath after the fact (bdev_nvme.c:5849 returns
+        # -EINVAL), so even a single-path attach (secondary's hublvol, or
+        # a tertiary's first-path attach with the failover deferred) must
+        # start in multipath mode — otherwise the deferred failover-path
+        # add would need a detach+reattach, which reopens the
+        # ``cntlid duplicated`` race the coordinator was built to close.
+        attach_mode = "multipath"
         for ip, trtype in paths.items():
             now = time.monotonic()
             since = now - last_attach_at
@@ -564,7 +572,7 @@ class HublvolReconnectCoordinator:
 
             try:
                 ret = _do_attach(rpc, ctrl_name, nqn, ip, port, trtype,
-                                 multipath="multipath",
+                                 multipath=attach_mode,
                                  rpc_timeout=rpc_timeout)
                 last_attach_at = time.monotonic()
                 if ret:
