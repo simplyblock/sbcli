@@ -627,15 +627,16 @@ def import_backups(s3_metadata_list, cluster_id=None):
         if not backup_id:
             continue
 
-        # Check if already exists
-        try:
-            db_controller.get_backup_by_id(backup_id)
-            continue  # already imported
-        except KeyError:
-            pass
-
         source_cluster = meta.get("cluster_id", "")
         target_cluster = cluster_id or source_cluster
+
+        # Skip only if already registered for the target cluster
+        try:
+            existing = db_controller.get_backup_by_id(backup_id)
+            if existing.cluster_id == target_cluster:
+                continue  # already imported for this cluster
+        except KeyError:
+            pass
 
         backup = Backup()
         backup.uuid = backup_id
