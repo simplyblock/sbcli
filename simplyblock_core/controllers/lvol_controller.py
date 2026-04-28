@@ -544,7 +544,8 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
         lvol.namespace = namespace or ""
     else:
         lvol.nqn = cl.nqn + ":lvol:" + lvol.uuid
-        lvol.max_namespace_per_subsys = max_namespace_per_subsys
+
+    lvol.max_namespace_per_subsys = max_namespace_per_subsys
 
     if not host_node:
         nodes = _get_next_3_nodes(cl.get_id(), lvol.size)
@@ -846,7 +847,7 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
         allow_any = not bool(lvol.allowed_hosts)
         logger.info("creating subsystem %s (allow_any_host=%s)", lvol.nqn, allow_any)
         ret = rpc_client.subsystem_create(lvol.nqn, lvol.ha_type, lvol.uuid, min_cntlid,
-                                          max_namespaces=constants.LVO_MAX_NAMESPACES_PER_SUBSYS,
+                                          max_namespaces=lvol.max_namespace_per_subsys,
                                           allow_any_host=allow_any)
 
         # add allowed hosts to subsystem
