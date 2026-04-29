@@ -3148,21 +3148,6 @@ def shutdown_storage_node(node_id, force=False):
 
     logger.info("Node found: %s in state: %s", snode.hostname, snode.status)
 
-    # If node is not yet suspended and force is not used, run suspend first
-    if snode.status != StorageNode.STATUS_SUSPENDED:
-        if force:
-            logger.warning("Node is not in suspended state, proceeding with force")
-        elif snode.status == StorageNode.STATUS_ONLINE:
-            logger.info("Node is online, suspending before shutdown")
-            ret = suspend_storage_node(node_id, force=False)
-            if not ret:
-                logger.error("Failed to suspend node, cannot proceed with shutdown")
-                return False
-            snode = db_controller.get_storage_node_by_id(node_id)
-        else:
-            logger.error("Node is not in suspended or online state, use --force")
-            return False
-
     # FTT check (suspend already checked this, but verify again for direct shutdown calls)
     if not force:
         allowed, reason = _check_ftt_allows_node_removal(node_id, db_controller)
@@ -3214,6 +3199,22 @@ def shutdown_storage_node(node_id, force=False):
     set_node_status(node_id, StorageNode.STATUS_IN_SHUTDOWN)
     time.sleep(3)
 
+    # If node is not yet suspended and force is not used, run suspend first
+    if snode.status != StorageNode.STATUS_SUSPENDED:
+        if force:
+            logger.warning("Node is not in suspended state, proceeding with force")
+        elif snode.status == StorageNode.STATUS_ONLINE:
+            logger.info("Node is online, suspending before shutdown")
+            ret = suspend_storage_node(node_id, force=False, change_node_status=False)
+            if not ret:
+                logger.error("Failed to suspend node, cannot proceed with shutdown")
+                return False
+            snode = db_controller.get_storage_node_by_id(node_id)
+        else:
+            logger.error("Node is not in suspended or online state, use --force")
+            return False
+
+
     if snode.jm_device and snode.jm_device.status != JMDevice.STATUS_REMOVED:
         logger.info("Setting JM unavailable")
         device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
@@ -3263,7 +3264,7 @@ def shutdown_storage_node(node_id, force=False):
     return True
 
 
-def suspend_storage_node(node_id, force=False):
+def suspend_storage_node(node_id, force=False, change_node_status=True):
     db_controller = DBController()
     try:
         snode = db_controller.get_storage_node_by_id(node_id)
@@ -3360,8 +3361,9 @@ def suspend_storage_node(node_id, force=False):
         _revert_blocked_ports()
         return False
 
-    logger.info("Setting node status to suspended")
-    set_node_status(snode.get_id(), StorageNode.STATUS_SUSPENDED)
+    if change_node_status:
+        logger.info("Setting node status to suspended")
+        set_node_status(snode.get_id(), StorageNode.STATUS_SUSPENDED)
 
     logger.info("Done")
     return True
