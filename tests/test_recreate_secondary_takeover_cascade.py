@@ -329,7 +329,7 @@ class TestRecreateLvstoreRoleDerivation(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
     @patch("simplyblock_core.storage_node_ops.storage_events")
     @patch("simplyblock_core.storage_node_ops.FirewallClient")
-    @patch("simplyblock_core.storage_node_ops.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._connect_to_remote_jm_devs", return_value=[])
     @patch("simplyblock_core.storage_node_ops._connect_to_remote_devs", return_value=[])
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack", return_value=(True, None))
@@ -575,7 +575,7 @@ class TestRecreateLvstoreStep8bHublvolWiring(unittest.TestCase):
              patch("simplyblock_core.storage_node_ops.storage_events"), \
              patch("simplyblock_core.storage_node_ops.FirewallClient",
                    return_value=MagicMock()), \
-             patch("simplyblock_core.storage_node_ops.RPCClient",
+             patch("simplyblock_core.rpc_client.RPCClient",
                    return_value=MagicMock(
                        bdev_lvol_get_lvstores=MagicMock(return_value=[
                            {"lvs leadership": True}]))), \

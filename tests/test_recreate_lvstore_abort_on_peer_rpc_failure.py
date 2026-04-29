@@ -162,7 +162,7 @@ class TestRecreateLvstoreAbortsOnPeerRPCFailure(unittest.TestCase):
             patch("simplyblock_core.storage_node_ops.tcp_ports_events"),
             patch("simplyblock_core.storage_node_ops.storage_events"),
             patch("simplyblock_core.storage_node_ops.FirewallClient"),
-            patch("simplyblock_core.storage_node_ops.RPCClient"),
+            patch("simplyblock_core.models.storage_node.RPCClient"),
             patch("simplyblock_core.storage_node_ops._connect_to_remote_jm_devs"),
             patch("simplyblock_core.storage_node_ops._connect_to_remote_devs"),
             patch("simplyblock_core.storage_node_ops._create_bdev_stack"),
