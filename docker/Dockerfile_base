@@ -22,16 +22,16 @@ RUN if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
         echo "ARM64 version"; \
     	wget https://github.com/apple/foundationdb/releases/download/7.3.69/foundationdb-clients-7.3.69-1.el9.aarch64.rpm; \
         rpm -ivh --nodigest --nofiledigest foundationdb-clients-7* ; \
-        yum install https://www.rpmfind.net/linux/centos-stream/10-stream/BaseOS/aarch64/os/Packages/parted-3.6-7.el10.aarch64.rpm -y ; \
-        yum install https://www.rpmfind.net/linux/centos-stream/10-stream/BaseOS/aarch64/os/Packages/libnvme-1.16.1-3.el10.aarch64.rpm -y ; \
-        yum install https://www.rpmfind.net/linux/centos-stream/10-stream/BaseOS/aarch64/os/Packages/nvme-cli-2.16-2.el10.aarch64.rpm -y ; \
+        dnf install https://www.rpmfind.net/linux/centos-stream/10-stream/BaseOS/aarch64/os/Packages/parted-3.6-7.el10.aarch64.rpm -y ; \
+        dnf install https://www.rpmfind.net/linux/centos-stream/10-stream/BaseOS/aarch64/os/Packages/libnvme-1.16.1-3.el10.aarch64.rpm -y ; \
+        dnf install https://www.rpmfind.net/linux/centos-stream/10-stream/BaseOS/aarch64/os/Packages/nvme-cli-2.16-2.el10.aarch64.rpm -y ; \
     else \
         echo "AMD64 version"; \
         wget https://github.com/apple/foundationdb/releases/download/7.3.69/foundationdb-clients-7.3.69-1.el7.x86_64.rpm; \
         rpm -ivh --nodigest --nofiledigest foundationdb-clients-7* ; \
-        yum install https://www.rpmfind.net/linux/centos-stream/10-stream/BaseOS/x86_64/os/Packages/parted-3.6-7.el10.x86_64.rpm -y ; \
-        yum install https://www.rpmfind.net/linux/centos-stream/10-stream/BaseOS/x86_64/os/Packages/libnvme-1.16.1-3.el10.x86_64.rpm -y ; \
-        yum install https://www.rpmfind.net/linux/centos-stream/10-stream/BaseOS/x86_64/os/Packages/nvme-cli-2.16-2.el10.x86_64.rpm -y ; \
+        dnf install https://www.rpmfind.net/linux/centos-stream/10-stream/BaseOS/x86_64/os/Packages/parted-3.6-7.el10.x86_64.rpm -y ; \
+        dnf install https://www.rpmfind.net/linux/centos-stream/10-stream/BaseOS/x86_64/os/Packages/libnvme-1.16.1-3.el10.x86_64.rpm -y ; \
+        dnf install https://www.rpmfind.net/linux/centos-stream/10-stream/BaseOS/x86_64/os/Packages/nvme-cli-2.16-2.el10.x86_64.rpm -y ; \
     fi
 
 COPY LICENSE /licenses/LICENSE
