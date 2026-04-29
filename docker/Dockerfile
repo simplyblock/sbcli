@@ -17,4 +17,6 @@ RUN rm -rf /app/tests
 
 RUN python3 setup.py install
 
+RUN chown -R simplyblock:simplyblock /app
+
 USER simplyblock
