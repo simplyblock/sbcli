@@ -88,5 +88,5 @@ jobs:
         fi
         if [ "${{ inputs.push_to_quay }}" == "true" ]; then
           docker buildx build --platform linux/amd64,linux/arm64 -t quay.io/simplyblock-io/simplyblock:$TAG -f docker/Dockerfile . --push
-          echo "::notice title=AWS-ECR::quay.io/simplyblock-io/simplyblock:$TAG"
+          echo "::notice title=Quay.io::quay.io/simplyblock-io/simplyblock:$TAG"
         fi
