@@ -827,7 +827,6 @@ class RPCClient:
         transport_retry = (
             constants.TRANSPORT_RETRY_MULTIPATH if multipath else constants.TRANSPORT_RETRY)
         params = {
-            # "action_on_timeout": "abort",
             "bdev_retry_count": bdev_retry,
             "transport_retry_count": transport_retry,
             "ctrlr_loss_timeout_sec": constants.CTRL_LOSS_TO,
@@ -836,7 +835,14 @@ class RPCClient:
             "keep_alive_timeout_ms": constants.KATO,
             "timeout_us": constants.NVME_TIMEOUT_US,
             "transport_ack_timeout": constants.ACK_TO,
-            "action_on_timeout": "abort"
+            # action_on_timeout=abort caused multi-minute IO hangs when a
+            # remote target wedged: the timeout_cb sent an NVMe abort that
+            # itself never completed against the wedged qpair, and the bdev
+            # IO sat pending until something else (keep-alive, reset on
+            # abort_cpl failure) eventually disconnected the qpair. reset
+            # tears down the qpair immediately, which fails the in-flight
+            # IOs back up to the bdev/distrib layer with a clean error.
+            "action_on_timeout": "reset"
         }
         return self._request("bdev_nvme_set_options", params)
 

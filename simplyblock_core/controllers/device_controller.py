@@ -2,6 +2,13 @@ import time
 import logging
 import uuid
 
+# Debounce window for the per-device flap counter: two countable
+# online→not-online transitions within this many seconds are treated as
+# one error storm and only advance the counter once. Anything that lasts
+# longer than the typical SPDK timeout/reset cycle is sufficient — 10 s
+# comfortably exceeds the 4 s timeout_us + reset round-trip.
+DEVICE_FLAP_DEBOUNCE_SEC = 10.0
+
 from simplyblock_core import distr_controller, utils, storage_node_ops
 from simplyblock_core.controllers import device_events, tasks_controller
 from simplyblock_core.db_controller import DBController
@@ -23,7 +30,41 @@ def get_storage_node_by_jm_device(db_controller: DBController, id) -> StorageNod
         raise KeyError(f'No storage node with JM device {id}')
 
 
-def device_set_state(device_id, state):
+# Maximum number of `online → not-online` transitions caused by a local IO
+# error report from the device's home node before the device is force-failed.
+# Counter is per-device and resets only on explicit device restart.
+DEVICE_FLAP_LIMIT = 2
+
+# Allowed values for the `cause` argument of device_set_state.
+#
+# CAUSE_OTHER (default): operator-driven actions (`sn remove_device`) and
+# node-driven cascades (shutdown, restart task, health_controller pulling
+# devices when their node went offline, etc.). Does not count toward the
+# flap budget; cannot exit STATUS_FAILED.
+#
+# CAUSE_LOCAL_FAILURE: the device's home node SPDK spontaneously reported
+# an unsolicited per-device failure event — IO error (error_write,
+# error_read, error_unmap, error_write_cannot_allocate) OR a REMOVE /
+# error_open event. SPDK fires SPDK_BDEV_EVENT_REMOVE identically for
+# PCIe surprise-removal, controller destruct after timeout-driven reset
+# failures, and AER namespace-removed; we don't try to tell those apart.
+# Any unsolicited transition out of online reported by the home node is a
+# failure event for the flap counter. The opt-in is gated in
+# main_distr_event_collector by `event_node == device_node`.
+#
+# CAUSE_DEVICE_RESTART: explicit operator restart (`sn restart_device` /
+# `sn reset_device`). One of the two allowed exits from STATUS_FAILED;
+# clears flap_count when bringing the device back online.
+#
+# CAUSE_FAILURE_MIGRATION: failure data migration completed. The other
+# allowed exit from STATUS_FAILED (→ STATUS_FAILED_AND_MIGRATED).
+CAUSE_OTHER = "other"
+CAUSE_LOCAL_FAILURE = "local_failure"
+CAUSE_DEVICE_RESTART = "device_restart"
+CAUSE_FAILURE_MIGRATION = "failure_migration"
+
+
+def device_set_state(device_id, state, cause=CAUSE_OTHER):
     db_controller = DBController()
     try:
         dev = db_controller.get_storage_device_by_id(device_id)
@@ -47,8 +88,97 @@ def device_set_state(device_id, state):
         logger.error("device not found")
         return False
 
+    # Failed is a terminal state. The only allowed exits are:
+    #   STATUS_FAILED → STATUS_FAILED_AND_MIGRATED  (failure data migration)
+    #   STATUS_FAILED → STATUS_ONLINE               (explicit device restart)
+    # Any other transition out of failed is rejected so that automatic
+    # recovery paths (device_monitor, storage_node_monitor, distrib events)
+    # can't pull a known-bad device back into rotation.
+    if device.status == NVMeDevice.STATUS_FAILED:
+        if state == NVMeDevice.STATUS_FAILED_AND_MIGRATED:
+            if cause != CAUSE_FAILURE_MIGRATION:
+                logger.error(
+                    f"Device {device_id} is failed; transition to "
+                    f"failed_and_migrated requires failure migration "
+                    f"(cause={cause})"
+                )
+                return False
+        elif state == NVMeDevice.STATUS_ONLINE:
+            if cause != CAUSE_DEVICE_RESTART:
+                logger.error(
+                    f"Device {device_id} is failed; only an explicit device "
+                    f"restart can bring it back online (cause={cause})"
+                )
+                return False
+        elif state != NVMeDevice.STATUS_FAILED:
+            logger.error(
+                f"Device {device_id} is failed; rejecting transition to "
+                f"{state} (cause={cause})"
+            )
+            return False
+
+    # Per-device flap counter. Increment ONLY when the device's home node
+    # spontaneously reported an unsolicited failure event against its own
+    # device — IO error or REMOVE/error_open. Anything else (remote-node
+    # observations, node cascades, operator-driven CLI commands, restarts)
+    # uses a different `cause` and is not counted. Belt-and-braces: also
+    # require the home node to currently be online; if the parent node is
+    # already in some non-online state then we are in a node-cascade window
+    # by definition and any device transition is collateral.
+    force_fail = False
+    countable = (
+        device.status == NVMeDevice.STATUS_ONLINE
+        and state not in (
+            NVMeDevice.STATUS_ONLINE,
+            NVMeDevice.STATUS_FAILED,
+            NVMeDevice.STATUS_FAILED_AND_MIGRATED,
+        )
+        and cause == CAUSE_LOCAL_FAILURE
+        and snode.status == StorageNode.STATUS_ONLINE
+    )
+    if countable:
+        # Debounce: error storms fire many error events in quick succession
+        # against a single underlying device problem. We only advance the
+        # counter for transitions that are at least DEVICE_FLAP_DEBOUNCE_SEC
+        # apart, so a single hung-device incident (potentially hundreds of
+        # error_write events) only burns one slot of the budget.
+        now = time.time()
+        if device.last_flap_tsc and (now - device.last_flap_tsc) < DEVICE_FLAP_DEBOUNCE_SEC:
+            logger.info(
+                f"Device {device_id} flap dedup: "
+                f"only {now - device.last_flap_tsc:.1f}s since last flap "
+                f"(< {DEVICE_FLAP_DEBOUNCE_SEC}s window); not counting"
+            )
+        else:
+            next_count = device.flap_count + 1
+            device.last_flap_tsc = now
+            if next_count > DEVICE_FLAP_LIMIT:
+                logger.warning(
+                    f"Device {device_id} exceeded flap limit "
+                    f"({next_count} > {DEVICE_FLAP_LIMIT}); forcing to failed "
+                    f"instead of {state}. Use device-restart to recover."
+                )
+                state = NVMeDevice.STATUS_FAILED
+                force_fail = True
+            else:
+                device.flap_count = next_count
+                logger.info(
+                    f"Device {device_id} flap_count={device.flap_count}/"
+                    f"{DEVICE_FLAP_LIMIT} (online→{state})"
+                )
+
     if state == NVMeDevice.STATUS_ONLINE:
         device.retries_exhausted = False
+        if cause == CAUSE_DEVICE_RESTART:
+            # Explicit operator-initiated restart is the only path that
+            # forgives prior flapping. Both the counter and the debounce
+            # timestamp are wiped — the device gets a fresh budget.
+            if device.flap_count != 0:
+                logger.info(
+                    f"Device {device_id} flap_count reset on device-restart"
+                )
+            device.flap_count = 0
+            device.last_flap_tsc = 0.0
 
     if state == NVMeDevice.STATUS_REMOVED:
         device.deleted = True
@@ -75,6 +205,21 @@ def device_set_state(device_id, state):
 
     distr_controller.send_dev_status_event(device, device.status)
 
+    if force_fail:
+        # Mirror the post-failed bookkeeping that device_set_failed() does:
+        # remove this device's storage_id from peer cluster maps and queue a
+        # failure-migration task. Wrapped in try/except so a partial cluster
+        # outage doesn't keep the device stuck mid-failure.
+        try:
+            for node in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
+                if node.status == StorageNode.STATUS_ONLINE:
+                    node.rpc_client().distr_replace_id_in_map_prob(
+                        device.cluster_device_order, -1)
+            tasks_controller.add_device_failed_mig_task(device_id)
+        except Exception:
+            logger.exception(
+                f"Post-failed bookkeeping for {device_id} hit an error")
+
     return True
 
 
@@ -100,16 +245,16 @@ def device_set_io_error(device_id, is_error):
     return True
 
 
-def device_set_unavailable(device_id):
-    return device_set_state(device_id, NVMeDevice.STATUS_UNAVAILABLE)
+def device_set_unavailable(device_id, cause=CAUSE_OTHER):
+    return device_set_state(device_id, NVMeDevice.STATUS_UNAVAILABLE, cause=cause)
 
 
-def device_set_read_only(device_id):
-    return device_set_state(device_id, NVMeDevice.STATUS_READONLY)
+def device_set_read_only(device_id, cause=CAUSE_OTHER):
+    return device_set_state(device_id, NVMeDevice.STATUS_READONLY, cause=cause)
 
 
-def device_set_online(device_id):
-    ret = device_set_state(device_id, NVMeDevice.STATUS_ONLINE)
+def device_set_online(device_id, cause=CAUSE_OTHER):
+    ret = device_set_state(device_id, NVMeDevice.STATUS_ONLINE, cause=cause)
     if ret:
         logger.info("Adding task to device data migration")
         dev = DBController().get_storage_device_by_id(device_id)
@@ -223,8 +368,12 @@ def restart_device(device_id, force=False):
         logger.error("device not found")
         return False
 
-    if dev.status != NVMeDevice.STATUS_REMOVED:
-        logger.error("Device must be in removed status")
+    # restart_device is one of the two allowed exits from STATUS_FAILED
+    # (the other being failure migration via device_set_failed_and_migrated).
+    if dev.status not in (NVMeDevice.STATUS_REMOVED, NVMeDevice.STATUS_FAILED):
+        logger.error(
+            f"Device must be in removed or failed status, current: {dev.status}"
+        )
         if not force:
             return False
 
@@ -251,7 +400,7 @@ def restart_device(device_id, force=False):
 
     logger.info(f"Restarting device {device_id}")
     device_set_retries_exhausted(device_id, True)
-    device_set_unavailable(device_id)
+    device_set_unavailable(device_id, cause=CAUSE_DEVICE_RESTART)
 
     if not snode.rpc_client().bdev_nvme_controller_list(device_obj.nvme_controller):
         try:
@@ -274,7 +423,7 @@ def restart_device(device_id, force=False):
     logger.info("Setting device io_error to False")
     device_set_io_error(device_id, False)
     logger.info("Setting device online")
-    device_set_online(device_id)
+    device_set_online(device_id, cause=CAUSE_DEVICE_RESTART)
     device_events.device_restarted(device_obj)
 
     if snode.jm_device:
@@ -350,7 +499,23 @@ def set_device_testing_mode(device_id, mode):
 #     return ret
 
 
-def device_remove(device_id, force=True):
+def device_remove(device_id, force=True, cause=CAUSE_OTHER):
+    """
+    Remove a device. Two distinct callers:
+      * operator CLI (`sn remove_device`) — passes default cause=CAUSE_OTHER,
+        does NOT count toward the per-device flap budget.
+      * main_distr_event_collector reacting to a REMOVE/error_open event from
+        the device's home node — passes cause=CAUSE_LOCAL_FAILURE so the
+        catastrophic-failure path counts toward the budget exactly like
+        error_write/error_read do.
+
+    From the bdev event itself we cannot tell PCIe surprise-removal,
+    controller-fatal-status-after-failed-reset, and AER-driven namespace
+    removal apart — they all arrive as SPDK_BDEV_EVENT_REMOVE. That's fine
+    for the flap counter: any unsolicited REMOVE on a previously-online
+    device is a per-device failure event, indistinguishable in intent from
+    a write/read error storm that destructed the controller.
+    """
     db_controller = DBController()
     try:
         dev = db_controller.get_storage_device_by_id(device_id)
@@ -382,7 +547,11 @@ def device_remove(device_id, force=True):
             return False
 
     logger.info("Setting device unavailable")
-    device_set_unavailable(device_id)
+    # The unavailable→removed walk inside this function is internal
+    # bookkeeping. Pass the caller's cause through so a SPDK-event-driven
+    # remove counts toward the flap budget, while an operator-initiated
+    # `sn remove_device` does not.
+    device_set_unavailable(device_id, cause=cause)
 
     logger.info("Disconnecting device from all nodes")
     distr_controller.disconnect_device(device)
@@ -434,7 +603,10 @@ def device_remove(device_id, force=True):
             if not force:
                 return False
 
-    device_set_state(device_id, NVMeDevice.STATUS_REMOVED)
+    # Final unavailable→removed transition. Cause is no longer relevant for
+    # the flap counter (online→unavailable above already counted it if this
+    # was a SPDK-event-driven remove), but we pass it through for symmetry.
+    device_set_state(device_id, NVMeDevice.STATUS_REMOVED, cause=cause)
 
     if not snode.jm_device.raid_bdev:
         remove_jm_device(snode.jm_device.get_id())
@@ -601,7 +773,11 @@ def reset_storage_device(dev_id):
         logger.error(e)
         return False
 
-    if device.status in [NVMeDevice.STATUS_REMOVED, NVMeDevice.STATUS_FAILED, NVMeDevice.STATUS_FAILED_AND_MIGRATED]:
+    # reset_storage_device is one of the two allowed exits from STATUS_FAILED
+    # (the other being failure migration). FAILED_AND_MIGRATED stays terminal —
+    # the device's data has moved elsewhere, the operator must add a fresh
+    # device, not reset this one.
+    if device.status in [NVMeDevice.STATUS_REMOVED, NVMeDevice.STATUS_FAILED_AND_MIGRATED]:
         logger.error(f"Unsupported device status: {device.status}")
         return False
 
@@ -611,7 +787,7 @@ def reset_storage_device(dev_id):
         return False
 
     logger.info("Setting devices to unavailable")
-    device_set_unavailable(dev_id)
+    device_set_unavailable(dev_id, cause=CAUSE_DEVICE_RESTART)
     # devs = []
     # for dev in snode.nvme_devices:
     #     if dev.get_id() == device.get_id():
@@ -634,7 +810,7 @@ def reset_storage_device(dev_id):
     device_set_io_error(dev_id, False)
     device_set_retries_exhausted(dev_id, False)
     # set device to online
-    device_set_online(dev_id)
+    device_set_online(dev_id, cause=CAUSE_DEVICE_RESTART)
     device_events.device_reset(device)
     return True
 
@@ -740,7 +916,10 @@ def add_device(device_id, add_migration_task=True):
 
 def device_set_failed_and_migrated(device_id):
     db_controller = DBController()
-    device_set_state(device_id, NVMeDevice.STATUS_FAILED_AND_MIGRATED)
+    device_set_state(
+        device_id, NVMeDevice.STATUS_FAILED_AND_MIGRATED,
+        cause=CAUSE_FAILURE_MIGRATION,
+    )
     dev = db_controller.get_storage_device_by_id(device_id)
     for node in db_controller.get_storage_nodes_by_cluster_id(dev.cluster_id):
         if node.status == StorageNode.STATUS_ONLINE:

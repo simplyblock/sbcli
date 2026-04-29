@@ -215,6 +215,8 @@ def set_node_online(node):
         # set devices online
         for dev in node.nvme_devices:
             if dev.status == NVMeDevice.STATUS_UNAVAILABLE:
+                # Default cause is correct: this is node-driven recovery,
+                # not a per-device IO-error report.
                 device_controller.device_set_online(dev.get_id())
 
         # start migration tasks on node online status change
@@ -254,6 +256,8 @@ def set_node_offline(node):
             for dev in node.nvme_devices:
                 if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY,
                                   NVMeDevice.STATUS_CANNOT_ALLOCATE]:
+                    # Default cause is correct: node going offline cascades
+                    # to all its devices, that does not count as a flap.
                     device_controller.device_set_unavailable(dev.get_id())
             update_cluster_status(cluster_id)
 

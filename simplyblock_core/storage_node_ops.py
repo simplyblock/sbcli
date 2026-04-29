@@ -3222,6 +3222,8 @@ def shutdown_storage_node(node_id, force=False):
     for dev in snode.nvme_devices:
         if dev.status in [NVMeDevice.STATUS_UNAVAILABLE, NVMeDevice.STATUS_ONLINE,
                           NVMeDevice.STATUS_CANNOT_ALLOCATE, NVMeDevice.STATUS_READONLY]:
+            # Default cause (CAUSE_OTHER) is correct here: a node-driven
+            # shutdown must not count against the per-device flap budget.
             device_controller.device_set_unavailable(dev.get_id())
 
     time.sleep(1)

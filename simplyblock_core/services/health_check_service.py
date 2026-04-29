@@ -4,7 +4,7 @@ import time
 from datetime import datetime
 
 from simplyblock_core import utils
-from simplyblock_core.controllers import health_controller, storage_events, device_events, tasks_controller
+from simplyblock_core.controllers import health_controller, storage_events, device_events, tasks_controller, device_controller
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
@@ -45,6 +45,31 @@ def set_device_health_check(cluster_id, device, health_check_status):
                     fresh_node.write_to_db()
                     device_events.device_health_check_change(
                         dev, health_check_status, old_status, caused_by="monitor")
+
+                    # If the home-node bdev/subsystem probes failed for a
+                    # currently-online device on an online node, treat that
+                    # as a local-failure signal that feeds the flap counter.
+                    # The probes (bdev existence, subsystem registration)
+                    # run on the home node without needing user IO, so this
+                    # closes the case where the device is truly broken but
+                    # no traffic is reaching it to elicit error_write/read
+                    # events. The stuck-removal failure mode where the
+                    # underlying NVMe controller is wedged but bdev_nvme
+                    # never destructs would *not* trigger this branch (the
+                    # bdev is still registered and the subsystem too) —
+                    # peer-quorum is what catches that case.
+                    if (health_check_status is False
+                            and dev.status == NVMeDevice.STATUS_ONLINE
+                            and node.status == StorageNode.STATUS_ONLINE):
+                        logger.warning(
+                            f"Device {dev.get_id()} health_check flipped "
+                            f"True→False on online node {node.get_id()}; "
+                            f"escalating to unavailable as local failure"
+                        )
+                        device_controller.device_set_unavailable(
+                            dev.get_id(),
+                            cause=device_controller.CAUSE_LOCAL_FAILURE,
+                        )
                     return
 
 
