@@ -107,7 +107,7 @@ on:
 
 jobs:
   e2e-add-node:
-    runs-on: self-hosted
+    runs-on: ${{ github.event.inputs.cluster_environment == 'aws-openshift' && 'vm-runner-43' || 'self-hosted' }}
     concurrency:
       group: ${{ github.workflow }}
       cancel-in-progress: false
