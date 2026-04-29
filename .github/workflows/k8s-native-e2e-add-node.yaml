@@ -445,7 +445,9 @@ jobs:
             --set csiConfig.simplybk.ip="http://simplyblock-webappapi.simplyblock:5000" \
             --set prometheus.server.persistentVolume.storageClass=local-hostpath \
             --set controlplane.observability.enabled=true \
-            --set opensearch.persistence.storageClass=local-hostpath
+            --set opensearch.persistence.storageClass=local-hostpath \
+            --set image.simplyblock.pullPolicy=IfNotPresent \
+            --set image.operator.pullPolicy=IfNotPresent
 
       - name: Grant OpenShift SCC to all service accounts (post-helm)
         if: ${{ github.event.inputs.use_existing_cluster != 'true' && github.event.inputs.cluster_environment == 'aws-openshift' }}
