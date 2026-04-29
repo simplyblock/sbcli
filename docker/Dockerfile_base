@@ -41,7 +41,5 @@ RUN pip3 install -r requirements.txt
 
 RUN dnf clean all
 
-RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.13 20
-
 RUN useradd -ms /bin/bash simplyblock
 RUN echo "simplyblock  ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
