@@ -1429,10 +1429,12 @@ class K8sNativeFailoverTest(TestClusterBase):
             self.sn_primary_secondary_map[result["uuid"]] = result["secondary_node_id"]
         self.logger.info(f"Storage nodes: {len(self.sn_nodes)}, secondary map: {self.sn_primary_secondary_map}")
 
-        # Create 1 PVC per storage node, pinned via host-id annotation
-        self.total_pvcs = len(self.sn_nodes)
-        self.logger.info(f"Creating {self.total_pvcs} initial PVCs (1 per node, pinned)")
-        self.create_pvcs_with_fio(self.total_pvcs, node_ids=list(self.sn_nodes))
+        # Create initial PVCs: first 1 per storage node (pinned), then extras unpinned
+        initial_pvcs = max(self.total_pvcs, len(self.sn_nodes))
+        self.logger.info(f"Creating {initial_pvcs} initial PVCs ({len(self.sn_nodes)} pinned + {initial_pvcs - len(self.sn_nodes)} extra)")
+        self.create_pvcs_with_fio(len(self.sn_nodes), node_ids=list(self.sn_nodes))
+        if initial_pvcs > len(self.sn_nodes):
+            self.create_pvcs_with_fio(initial_pvcs - len(self.sn_nodes))
         sleep_n_sec(30)
         self._ensure_per_node_coverage()
 
@@ -1455,8 +1457,17 @@ class K8sNativeFailoverTest(TestClusterBase):
                 outage_events = self.perform_n_plus_k_outages()
 
                 # ── Operations during outage ──
-                self.delete_random_pvcs(1)
+                # Scale deletes: 1 in iter 1, 2 in iter 2, 3 in iter 3, ...
+                delete_count = min(iteration, len(self.pvc_details) - len(self.sn_nodes))
+                delete_count = max(delete_count, 1)
+                self.logger.info(f"[scale] Deleting {delete_count} PVCs (iteration {iteration})")
+                self.delete_random_pvcs(delete_count)
                 self.create_snapshots_and_clones()
+
+                # Scale up: add 2 more PVCs each iteration (net growth = 2)
+                create_count = delete_count + 2
+                self.logger.info(f"[scale] Creating {create_count} PVCs (total will be ~{len(self.pvc_details) + create_count})")
+                self.create_pvcs_with_fio(create_count)
                 sleep_n_sec(280)
 
                 # ── Recovery phase: bring all nodes online ──
