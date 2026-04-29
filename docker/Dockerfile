@@ -3,7 +3,7 @@ FROM simplyblock/simplyblock:base_image
 
 USER root
 
-RUN yum install -y iproute
+RUN dnf install -y iproute
 
 WORKDIR /app
 
