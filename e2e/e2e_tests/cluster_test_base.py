@@ -411,7 +411,7 @@ class TestClusterBase:
             t.start()
 
         for t in threads:
-            t.join(timeout=600)
+            t.join(timeout=180)
 
         self.logger.info(f"[node_dumps] Completed parallel dumps for {len(nodes)} nodes → {dump_dir}")
 
@@ -645,10 +645,9 @@ class TestClusterBase:
         for node in all_nodes:
             base_path = os.path.join(self.docker_logs_path, node)
             cmd = f"journalctl -k --no-tail >& {base_path}/jounalctl_{node}-final.txt"
-
-            self.ssh_obj.exec_command(node, cmd)
+            self.ssh_obj.exec_command(node, cmd, timeout=120, max_retries=1)
             cmd = f"dmesg -T >& {base_path}/dmesg_{node}-final.txt"
-            self.ssh_obj.exec_command(node, cmd)
+            self.ssh_obj.exec_command(node, cmd, timeout=120, max_retries=1)
 
         try:
             if hasattr(self, "_stop_spdk_mem_thread"):
