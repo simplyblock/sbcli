@@ -118,7 +118,7 @@ jobs:
   stress-test:
     runs-on: self-hosted
     concurrency:
-      group: ${{ github.workflow }}
+      group: ${{ github.workflow }}-${{ github.event.inputs.cluster_environment || 'local' }}
       cancel-in-progress: false
     env:
       TESTNAME: ${{ github.event.inputs.testname || 'K8sNativeFailoverTest' }}
