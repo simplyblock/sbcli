@@ -350,12 +350,13 @@ class RPCClient:
             params = {"name": name}
         return self._request2("bdev_nvme_get_controllers", params)
 
-    def bdev_nvme_controller_attach(self, name, pci_addr):
+    def bdev_nvme_controller_attach(self, name, pci_addr, max_bdevs=1024):
         return self._request3(
-                "bdev_nvme_attach_controller", 
+                "bdev_nvme_attach_controller",
                 name=name,
                 trtype='pcie',
                 traddr=pci_addr,
+                max_bdevs=max_bdevs,
         )
 
     def alloc_bdev_controller_attach(self, name, pci_addr):
