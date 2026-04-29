@@ -25,7 +25,7 @@ class SNodeClient:
         self.timeout = timeout
         self.session = requests.session()
         if settings.tls_enabled:
-            self.session.verify = str(settings.certificate_authority)
+            self.session.verify = str(settings.tls_certificate_authority)
         self.session.headers['Content-Type'] = "application/json"
         retries = Retry(total=retry, backoff_factor=1, connect=retry, read=retry)
         self.session.mount("http://", HTTPAdapter(max_retries=retries))

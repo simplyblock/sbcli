@@ -106,7 +106,7 @@ class RPCClient:
         self.timeout = timeout
         self.session = requests.session()
         if settings.tls_enabled:
-            self.session.verify = str(settings.certificate_authority)
+            self.session.verify = str(settings.tls_certificate_authority)
         self.session.auth = (self.username, self.password)
         retries = Retry(total=retry, backoff_factor=1, connect=retry, read=retry,
                         allowed_methods=self.DEFAULT_ALLOWED_METHODS)
