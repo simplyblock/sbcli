@@ -147,6 +147,10 @@ class K8sNativeAddNodeTest(TestClusterBase):
         )
         self.logger.info(f"[K8s] K8sUtils initialized for mgmt_node={mgmt_node!r}")
 
+        # Clean up leftover K8s resources from any previous run
+        self.k8s_utils.cleanup_stale_fio_resources()
+        sleep_n_sec(5)
+
     # ── FIO config ────────────────────────────────────────────────────────────
 
     def _build_fio_config(self, name: str) -> str:
@@ -253,12 +257,14 @@ class K8sNativeAddNodeTest(TestClusterBase):
 
         for pvc_name, detail in self.pvc_details.items():
             fio_config = self._build_fio_config(pvc_name)
+            avoid = self.k8s_utils.get_pvc_primary_k8s_node(pvc_name, self.sbcli_utils)
             self.k8s_utils.create_fio_job(
                 job_name=detail["job_name"],
                 pvc_name=pvc_name,
                 configmap_name=detail["configmap_name"],
                 fio_config=fio_config,
                 image=self.FIO_IMAGE,
+                avoid_node=avoid,
             )
             sleep_n_sec(5)
 
@@ -292,12 +298,14 @@ class K8sNativeAddNodeTest(TestClusterBase):
             self.k8s_utils.wait_pvc_bound(clone_name, timeout=300)
 
             fio_config = self._build_fio_config(clone_name)
+            avoid = self.k8s_utils.get_pvc_primary_k8s_node(clone_name, self.sbcli_utils)
             self.k8s_utils.create_fio_job(
                 job_name=clone_job,
                 pvc_name=clone_name,
                 configmap_name=clone_cm,
                 fio_config=fio_config,
                 image=self.FIO_IMAGE,
+                avoid_node=avoid,
             )
 
             self.clone_details[clone_name] = {
@@ -395,12 +403,14 @@ class K8sNativeAddNodeTest(TestClusterBase):
             self.k8s_utils.wait_pvc_bound(pvc_name, timeout=300)
 
             fio_config = self._build_fio_config(pvc_name)
+            avoid = self.k8s_utils.get_pvc_primary_k8s_node(pvc_name, self.sbcli_utils)
             self.k8s_utils.create_fio_job(
                 job_name=job_name,
                 pvc_name=pvc_name,
                 configmap_name=cm_name,
                 fio_config=fio_config,
                 image=self.FIO_IMAGE,
+                avoid_node=avoid,
             )
 
             new_pvc_details[pvc_name] = {

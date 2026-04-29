@@ -193,6 +193,9 @@ class K8sNativeFailoverTest(TestClusterBase):
         )
         self.logger.info(f"[K8s] K8sUtils initialized for mgmt_node={mgmt_node!r}")
 
+        # 6b. Clean up leftover K8s resources from any previous run
+        self._cleanup_stale_k8s_resources()
+
         # 7. Client-based FIO mode: set up SSH connections to external clients
         client_ip_raw = os.environ.get("CLIENT_IP", "").strip()
         if client_ip_raw:
@@ -470,6 +473,19 @@ class K8sNativeFailoverTest(TestClusterBase):
             self.logger.warning(f"[_get_pvc_node_id] Failed to map PVC {pvc_name}: {exc}")
         return None
 
+    def _get_k8s_node_for_storage_node(self, storage_node_id: str) -> str | None:
+        """Resolve a storage node UUID to its K8s node hostname."""
+        try:
+            details = self.sbcli_utils.get_storage_node_details(storage_node_id)
+            if details:
+                node_ip = details[0]["mgmt_ip"]
+                return self.k8s_utils._get_k8s_node_name(node_ip)
+        except Exception as exc:
+            self.logger.warning(
+                f"[_get_k8s_node] Failed to resolve k8s node for {storage_node_id}: {exc}"
+            )
+        return None
+
     # ── Client FIO helpers ────────────────────────────────────────────────
 
     def _connect_lvol_on_client(self, lvol_name: str, client: str):
@@ -663,12 +679,14 @@ class K8sNativeFailoverTest(TestClusterBase):
                 cm_name = f"fiocfg-{pvc_name}"
 
                 node_id = self._get_pvc_node_id(pvc_name)
+                avoid = self._get_k8s_node_for_storage_node(node_id) if node_id else None
 
                 fio_config = self._build_fio_config(pvc_name)
                 try:
                     self.k8s_utils.create_fio_job(
                         job_name, pvc_name, cm_name, fio_config,
                         image=self.FIO_IMAGE,
+                        avoid_node=avoid,
                     )
                 except Exception as exc:
                     self.logger.warning(
@@ -818,6 +836,8 @@ class K8sNativeFailoverTest(TestClusterBase):
                 # ── K8s Job FIO path — cleanup old FIO files from source ──
                 clone_job = f"fio-{clone_name}"
                 clone_cm = f"fiocfg-{clone_name}"
+                clone_node_id = self._get_pvc_node_id(clone_name)
+                avoid = self._get_k8s_node_for_storage_node(clone_node_id) if clone_node_id else None
 
                 fio_config = self._build_fio_config(clone_name)
                 try:
@@ -825,6 +845,7 @@ class K8sNativeFailoverTest(TestClusterBase):
                         clone_job, clone_name, clone_cm, fio_config,
                         image=self.FIO_IMAGE,
                         cleanup_before_fio=True,
+                        avoid_node=avoid,
                     )
                 except Exception as exc:
                     self.logger.warning(f"[snap_clone] Clone FIO Job failed for {clone_name}: {exc}")
@@ -1026,11 +1047,14 @@ class K8sNativeFailoverTest(TestClusterBase):
                     pass
 
                 fio_config = self._build_fio_config(pvc_name)
+                nid = pvc_info.get("node_id")
+                avoid = self._get_k8s_node_for_storage_node(nid) if nid else None
                 try:
                     self.k8s_utils.create_fio_job(
                         new_job, pvc_name, new_cm, fio_config,
                         image=self.FIO_IMAGE,
                         cleanup_before_fio=True,
+                        avoid_node=avoid,
                     )
                 except Exception as exc:
                     self.logger.warning(f"[restart_fio] Failed to restart FIO for {pvc_name}: {exc}")
@@ -1053,11 +1077,14 @@ class K8sNativeFailoverTest(TestClusterBase):
                     pass
 
                 fio_config = self._build_fio_config(clone_name)
+                clone_nid = self._get_pvc_node_id(clone_name)
+                avoid = self._get_k8s_node_for_storage_node(clone_nid) if clone_nid else None
                 try:
                     self.k8s_utils.create_fio_job(
                         new_job, clone_name, new_cm, fio_config,
                         image=self.FIO_IMAGE,
                         cleanup_before_fio=True,
+                        avoid_node=avoid,
                     )
                 except Exception as exc:
                     self.logger.warning(f"[restart_fio] Failed to restart FIO for clone {clone_name}: {exc}")
@@ -1310,6 +1337,12 @@ class K8sNativeFailoverTest(TestClusterBase):
                 self.k8s_utils.validate_fio_job(clone_info["job_name"], timeout=fio_timeout)
 
     # ── Cleanup ──────────────────────────────────────────────────────────────
+
+    def _cleanup_stale_k8s_resources(self):
+        """Remove leftover FIO Jobs, ConfigMaps, PVCs, and VolumeSnapshots
+        from any previous test run so we start clean."""
+        self.k8s_utils.cleanup_stale_fio_resources()
+        sleep_n_sec(5)
 
     def _cleanup_all_k8s_resources(self):
         """Best-effort cleanup of all test K8s resources."""
@@ -1646,6 +1679,8 @@ class K8sNativeBasicFailoverTest(K8sNativeFailoverTest):
                 # K8s Job FIO path — with init container cleanup
                 clone_job = f"fio-{clone_name}"
                 clone_cm = f"fiocfg-{clone_name}"
+                clone_node_id = self._get_pvc_node_id(clone_name)
+                avoid = self._get_k8s_node_for_storage_node(clone_node_id) if clone_node_id else None
 
                 fio_config = self._build_fio_config(clone_name)
                 try:
@@ -1653,6 +1688,7 @@ class K8sNativeBasicFailoverTest(K8sNativeFailoverTest):
                         clone_job, clone_name, clone_cm, fio_config,
                         image=self.FIO_IMAGE,
                         cleanup_before_fio=True,
+                        avoid_node=avoid,
                     )
                 except Exception as exc:
                     self.logger.warning(f"[snap_clone] Clone FIO Job failed for {clone_name}: {exc}")

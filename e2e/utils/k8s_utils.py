@@ -738,6 +738,35 @@ class K8sUtils:
         )
         return handle.strip()
 
+    def get_pvc_primary_k8s_node(self, pvc_name: str, sbcli_utils,
+                                namespace: str = None) -> str | None:
+        """Return the K8s node hostname where the primary storage node of a PVC lives.
+
+        Resolves PVC → volumeHandle → lvol → storage node → mgmt_ip → K8s node name.
+        Returns None if any step fails.
+        """
+        try:
+            vol_handle = self.get_pvc_volume_handle(pvc_name, namespace=namespace)
+            if not vol_handle:
+                return None
+            lvol_id = vol_handle.split(":")[-1] if ":" in vol_handle else vol_handle
+            lvol_details = sbcli_utils.get_lvol_details(lvol_id)
+            if not lvol_details:
+                return None
+            node_id = lvol_details[0].get("node_id")
+            if not node_id:
+                return None
+            node_details = sbcli_utils.get_storage_node_details(node_id)
+            if not node_details:
+                return None
+            node_ip = node_details[0]["mgmt_ip"]
+            return self._get_k8s_node_name(node_ip)
+        except Exception as exc:
+            self.logger.warning(
+                f"[K8sUtils] Failed to resolve primary k8s node for PVC {pvc_name}: {exc}"
+            )
+            return None
+
     def log_fio_pvc_mapping(self, pvc_details: dict, clone_details: dict = None,
                             extra_details: dict = None):
         """Log a table mapping FIO Job → PVC → lvol ID for debugging.
@@ -828,18 +857,32 @@ class K8sUtils:
         self.logger.info(f"[K8sUtils] Deleting VolumeSnapshot '{name}'")
         self.delete_resource("volumesnapshot", name, namespace=ns)
 
+    def has_client_nodes(self) -> bool:
+        """Return True if any K8s node has the 'client' role label."""
+        out, _ = self._exec_kubectl(
+            "kubectl get nodes -l node-role.kubernetes.io/client "
+            "--no-headers 2>/dev/null | wc -l",
+            supress_logs=True,
+        )
+        return int(out.strip() or "0") > 0
+
     # ── FIO Job operations ───────────────────────────────────────────────────
 
     def create_fio_job(self, job_name: str, pvc_name: str, configmap_name: str,
                        fio_config: str, namespace: str = None,
                        image: str = "dockerpinata/fio:2.1",
-                       cleanup_before_fio: bool = False):
+                       cleanup_before_fio: bool = False,
+                       avoid_node: str = None):
         """Create a ConfigMap with FIO config and a Job that runs FIO against a PVC.
 
         Args:
             cleanup_before_fio: If True, add an init container that removes old
                 FIO data files from the volume before FIO starts. Useful for
                 clone PVCs that inherit files from the source.
+            avoid_node: Optional K8s node hostname to avoid scheduling the FIO
+                pod on (typically the primary storage node for the lvol).
+                When set, a nodeAffinity rule excludes that node so the FIO
+                pod runs on a secondary / non-primary node instead.
         """
         ns = namespace or self.namespace
         # Indent fio_config for YAML embedding (each line indented by 8 spaces)
@@ -856,6 +899,35 @@ class K8sUtils:
                 f"        volumeMounts:\n"
                 f"        - mountPath: /spdkvol\n"
                 f"          name: benchmark-volume\n"
+            )
+        node_affinity_block = ""
+        client_nodes_exist = self.has_client_nodes()
+        if client_nodes_exist:
+            # Hard-pin FIO pods to client-role nodes
+            node_affinity_block = (
+                f"        nodeAffinity:\n"
+                f"          requiredDuringSchedulingIgnoredDuringExecution:\n"
+                f"            nodeSelectorTerms:\n"
+                f"            - matchExpressions:\n"
+                f"              - key: node-role.kubernetes.io/client\n"
+                f"                operator: Exists\n"
+            )
+            self.logger.info(
+                f"[K8sUtils] Client nodes detected — FIO job '{job_name}' "
+                f"pinned to client nodes"
+            )
+        elif avoid_node:
+            # No client nodes — at least avoid the primary storage node
+            node_affinity_block = (
+                f"        nodeAffinity:\n"
+                f"          preferredDuringSchedulingIgnoredDuringExecution:\n"
+                f"          - weight: 100\n"
+                f"            preference:\n"
+                f"              matchExpressions:\n"
+                f"              - key: kubernetes.io/hostname\n"
+                f"                operator: NotIn\n"
+                f"                values:\n"
+                f"                - {avoid_node}\n"
             )
         yaml_content = (
             f"apiVersion: v1\n"
@@ -888,6 +960,7 @@ class K8sUtils:
             f"                matchLabels:\n"
             f"                  app: fio-benchmark\n"
             f"              topologyKey: kubernetes.io/hostname\n"
+            f"{node_affinity_block}"
             f"{init_containers}"
             f"      containers:\n"
             f"      - name: fio-benchmark\n"
@@ -974,6 +1047,34 @@ class K8sUtils:
         """Delete a ConfigMap."""
         ns = namespace or self.namespace
         self.delete_resource("configmap", name, namespace=ns)
+
+    def cleanup_stale_fio_resources(self, namespace: str = None):
+        """Remove leftover FIO Jobs, ConfigMaps, PVCs, and VolumeSnapshots
+        from any previous test run so tests start clean."""
+        ns = namespace or self.namespace
+        self.logger.info(f"[K8sUtils] Cleaning stale test resources in namespace {ns}...")
+        cmds = [
+            # Delete FIO jobs by label
+            f"kubectl delete jobs -n {ns} -l app=fio-benchmark --ignore-not-found",
+            # Delete FIO configmaps (prefixed fiocfg- or fio-cfg-)
+            f"kubectl get configmaps -n {ns} --no-headers -o custom-columns=NAME:.metadata.name "
+            f"2>/dev/null | grep -E '^(fiocfg-|fio-cfg-)' | xargs -r kubectl delete configmap -n {ns} --ignore-not-found",
+            # Delete clone PVCs (prefixed clone-)
+            f"kubectl get pvc -n {ns} --no-headers -o custom-columns=NAME:.metadata.name "
+            f"2>/dev/null | grep '^clone-' | xargs -r kubectl delete pvc -n {ns} --ignore-not-found",
+            # Delete VolumeSnapshots (prefixed snap-)
+            f"kubectl get volumesnapshot -n {ns} --no-headers -o custom-columns=NAME:.metadata.name "
+            f"2>/dev/null | grep '^snap-' | xargs -r kubectl delete volumesnapshot -n {ns} --ignore-not-found",
+            # Delete test PVCs (various prefixes)
+            f"kubectl get pvc -n {ns} --no-headers -o custom-columns=NAME:.metadata.name "
+            f"2>/dev/null | grep -E '^(pvc-|mig-pvc-|add-pvc-)' | xargs -r kubectl delete pvc -n {ns} --ignore-not-found",
+        ]
+        for cmd in cmds:
+            try:
+                self._exec_kubectl(cmd)
+            except Exception as exc:
+                self.logger.warning(f"[K8sUtils] Stale resource cleanup step failed: {exc}")
+        self.logger.info("[K8sUtils] Stale test resource cleanup done.")
 
     # ── CRD patch operations (StorageNode / StorageCluster) ────────────────
 
