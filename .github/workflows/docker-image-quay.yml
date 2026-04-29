@@ -13,6 +13,7 @@ jobs:
       - name: Set docker image tag
         id: get_info
         run: |
+          cp /docker/Dockerfile /
           if [[ "${{github.ref}}" == refs/pull/* ]]; then
             tag=${GITHUB_REF/\/merge/}
             echo "TAG=$(echo pr-${tag:10})" >> $GITHUB_ENV
@@ -29,4 +30,4 @@ jobs:
           quay_password: ${{ secrets.QUAY_PASSWORD }}
           repository_name: simplyblock-io/simplyblock
           image_tag: ${{ env.TAG }}
-          context: ./docker/Dockerfile
+          context: /
