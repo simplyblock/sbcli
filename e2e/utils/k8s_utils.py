@@ -113,6 +113,9 @@ class K8sUtils:
         """
         Execute *command* inside the simplyblock-admin-control pod via kubectl exec.
 
+        If the cached admin pod no longer exists (NotFound), the pod name is
+        re-resolved and the command is retried once.
+
         Returns the same (stdout, stderr) tuple as SshUtils.exec_command.
         """
         if not supress_logs:
@@ -122,7 +125,21 @@ class K8sUtils:
             f"kubectl exec -n {self.namespace} {admin_pod} -- "
             f"bash -c {shlex.quote(command)}"
         )
-        return self._exec_kubectl(kubectl_cmd, supress_logs=supress_logs)
+        stdout, stderr = self._exec_kubectl(kubectl_cmd, supress_logs=supress_logs)
+
+        # If the admin pod was recreated (e.g. during outage), retry with fresh pod
+        if "NotFound" in (stderr or ""):
+            self.logger.warning(
+                f"[K8sUtils] Admin pod '{admin_pod}' not found, re-resolving..."
+            )
+            admin_pod = self.get_admin_pod(refresh=True)
+            kubectl_cmd = (
+                f"kubectl exec -n {self.namespace} {admin_pod} -- "
+                f"bash -c {shlex.quote(command)}"
+            )
+            stdout, stderr = self._exec_kubectl(kubectl_cmd, supress_logs=supress_logs)
+
+        return stdout, stderr
 
     # ── K8s node name resolution ─────────────────────────────────────────────
 
@@ -858,7 +875,19 @@ class K8sUtils:
             f"spec:\n"
             f"  backoffLimit: 4\n"
             f"  template:\n"
+            f"    metadata:\n"
+            f"      labels:\n"
+            f"        app: fio-benchmark\n"
             f"    spec:\n"
+            f"      affinity:\n"
+            f"        podAntiAffinity:\n"
+            f"          preferredDuringSchedulingIgnoredDuringExecution:\n"
+            f"          - weight: 100\n"
+            f"            podAffinityTerm:\n"
+            f"              labelSelector:\n"
+            f"                matchLabels:\n"
+            f"                  app: fio-benchmark\n"
+            f"              topologyKey: kubernetes.io/hostname\n"
             f"{init_containers}"
             f"      containers:\n"
             f"      - name: fio-benchmark\n"
