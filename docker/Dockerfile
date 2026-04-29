@@ -3,7 +3,7 @@ FROM simplyblock/simplyblock:base_image
 
 USER root
 
-RUN dnf install -y iproute
+RUN dnf install -y iproute procps-ng
 
 WORKDIR /app
 
