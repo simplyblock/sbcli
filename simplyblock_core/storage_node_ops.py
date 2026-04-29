@@ -1009,7 +1009,8 @@ def _prepare_cluster_devices_on_restart(snode, clear_data=False):
 
 def _connect_to_remote_devs(
         this_node: StorageNode, /,
-        reattach: bool = True, force_connect_restarting_nodes: bool = False
+        reattach: bool = True, force_connect_restarting_nodes: bool = False,
+        force_connect_suspended_nodes: bool = False
 ):
     db_controller = DBController()
 
@@ -1030,6 +1031,9 @@ def _connect_to_remote_devs(
     if force_connect_restarting_nodes:
         allowed_node_statuses.append(StorageNode.STATUS_RESTARTING)
         allowed_dev_statuses.append(NVMeDevice.STATUS_UNAVAILABLE)
+
+    if force_connect_suspended_nodes:
+        allowed_node_statuses.append(StorageNode.STATUS_SUSPENDED)
 
     devices_to_connect = []
     connect_threads = []

@@ -94,7 +94,7 @@ def exec_port_allow_task(task):
                     node_bdev_names[al] = b
         else:
             node_bdev_names = {}
-        remote_devices = storage_node_ops._connect_to_remote_devs(node, reattach=False)
+        remote_devices = storage_node_ops._connect_to_remote_devs(node, reattach=False, force_connect_suspended_nodes=True)
         if not remote_devices:
             msg = "Node unable to connect to remote devs, retry task"
             logger.info(msg)
