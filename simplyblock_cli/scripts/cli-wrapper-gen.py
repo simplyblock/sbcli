@@ -68,6 +68,20 @@ def escape_strings(text):
     return text
 
 
+def apply_deprecated_warning(item):
+    deprecated = item.get("deprecated")
+    if not deprecated:
+        return ""
+
+    since = deprecated.get("since")
+    replaced_by = deprecated.get("replaced-by")
+
+    if not since:
+        raise ValueError("deprecated item must have a since")
+
+    return f"**Deprecated since: {since}**{ '' if not replaced_by else f' Replaced by: {replaced_by}'}" + "\\n\\n"
+
+
 def make_identifier(name):
     if name.startswith("--"):
         name = name[2:]
@@ -125,6 +139,25 @@ def nargs(item):
     return value if isinstance(value, int) else f"'{value}'"
 
 
+def validate_deprecated_parameters(items):
+    for item in items:
+        if "deprecated" in item:
+            since = item["deprecated"].get("since")
+            if not since:
+                raise ValueError("deprecated parameter must have a since")
+
+            if "replaced-by" in item["deprecated"]:
+                found = False
+                replaced_by = item["deprecated"]["replaced-by"]
+                for replacement in items:
+                    if replacement.get("name") == replaced_by:
+                        found = True
+                if not found:
+                    raise ValueError(f"replaced-by parameter '{replaced_by}' not found in parameters")
+
+            item.pop("default", None)
+
+
 base_path = sys.argv[1]
 with open("%s/cli-reference.yaml" % base_path) as stream:
     try:
@@ -145,6 +178,7 @@ with open("%s/cli-reference.yaml" % base_path) as stream:
                 if "arguments" in subcommand:
                     arguments = select_arguments(subcommand["arguments"])
                     parameters = select_parameters(subcommand["arguments"])
+                    validate_deprecated_parameters(parameters)
                     subcommand["arguments"] = arguments
                     subcommand["parameters"] = parameters
 
@@ -157,6 +191,7 @@ with open("%s/cli-reference.yaml" % base_path) as stream:
         environment.filters["get_description"] = get_description
         environment.filters["escape_strings"] = escape_strings
         environment.filters["make_identifier"] = make_identifier
+        environment.filters["apply_deprecated_warning"] = apply_deprecated_warning
         environment.filters["bool_value"] = bool_value
         environment.filters["escape_python_string"] = escape_python_string
         environment.filters["nargs"] = nargs
