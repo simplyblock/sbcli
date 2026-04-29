@@ -21,6 +21,11 @@ spec:
         - name: host-proc
           hostPath:
             path: /proc
+        {% if TLS_CONNECT == "authenticated" %}
+        - name: tls
+          secret:
+            secretName: simplyblock-spdk-proxy-tls
+        {% endif %}
       containers:
         - name: init-setup
           image: simplyblock/alpine-tools:3.21.3
@@ -29,6 +34,11 @@ spec:
           volumeMounts:
             - name: host-proc
               mountPath: /proc
+            {% if TLS_CONNECT == "authenticated" %}
+            - name: tls
+              mountPath: /etc/simplyblock/tls
+              readOnly: true
+            {% endif %}
           command: ["/bin/sh", "-c"]
           args:
             - |
@@ -47,7 +57,17 @@ spec:
 
               echo "--- Sending config to $NODE_IP ---"
               if [ "$OS_ID" != "talos" ]; then
-                RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" -X POST {% if TLS_ENABLED %}-k https{% else %}http{% endif %}://$NODE_IP:5000/snode/apply_config -H "Content-Type: application/json" -d '{}')
+                {% if TLS_CONNECT == "disabled" %}
+                {% set SCHEME = "http" %}
+                {% set CURL_TLS_FLAGS = "" %}
+                {% elif TLS_CONNECT == "anonymous" %}
+                {% set SCHEME = "https" %}
+                {% set CURL_TLS_FLAGS = "-k" %}
+                {% else %}
+                {% set SCHEME = "https" %}
+                {% set CURL_TLS_FLAGS = "-k --cert /etc/simplyblock/tls/tls.crt --key /etc/simplyblock/tls/tls.key" %}
+                {% endif %}
+                RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" -X POST {{ CURL_TLS_FLAGS }} {{ SCHEME }}://$NODE_IP:5000/snode/apply_config -H "Content-Type: application/json" -d '{}')
                 echo "HTTP status: $RESPONSE"
                 if [ "$RESPONSE" -lt 200 ] || [ "$RESPONSE" -ge 300 ]; then
                   echo "Failed to apply config"

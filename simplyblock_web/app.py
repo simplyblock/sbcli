@@ -93,8 +93,10 @@ def main() -> None:
         access_log=False,
         proxy_headers=True,
         forwarded_allow_ips='192.168.1.0/24',
-        ssl_certfile=settings.tls_certificate if settings.tls_enabled else None,
-        ssl_keyfile=settings.tls_key if settings.tls_enabled else None,
+        ssl_certfile=settings.tls_certificate if settings.tls_serve else None,
+        ssl_keyfile=settings.tls_key if settings.tls_serve else None,
+        ssl_ca_certs=settings.tls_certificate_authority if settings.tls_client_auth != "disabled" else None,
+        ssl_cert_reqs=settings.tls_client_auth,
     )
     server: uvicorn.Server = uvicorn.Server(config)
     server.run()
