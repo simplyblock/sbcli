@@ -14,9 +14,6 @@ RUN dnf install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-10.
 RUN dnf install -y wget dmidecode pciutils sudo nano gdisk openssh-clients util-linux pkg-config hostname\
     ca-certificates curl kmod python3.13 python3-pip iputils iproute iscsi-initiator-utils
 
-RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.13 10
-RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.13 20
-
 ARG TARGETPLATFORM
 RUN if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
         echo "ARM64 version"; \
@@ -43,6 +40,8 @@ RUN yum remove python-urllib3 -y
 RUN pip3 install -r requirements.txt
 
 RUN dnf clean all
+
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.13 20
 
 RUN useradd -ms /bin/bash simplyblock
 RUN echo "simplyblock  ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
