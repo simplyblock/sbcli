@@ -141,6 +141,11 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                     or self.lvol_mount_details.get(name)
                 )
                 if not details:
+                    # Lvol was deleted — no point retrying
+                    self.logger.info(
+                        f"[retry] Skipping deleted lvol {name} — removing from retry queue"
+                    )
+                    del self.failed_nvme_connects[name]
                     continue
 
                 client = details["Client"]
@@ -166,7 +171,12 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                 self.clone_mount_details.get(name)
                 or self.lvol_mount_details.get(name)
             )
-            total = len(details["Command"]) if details else len(cmds)
+            if not details:
+                # Lvol was deleted during retry window — skip
+                self.logger.info(f"[retry] Lvol {name} deleted — dropping from failed list")
+                del self.failed_nvme_connects[name]
+                continue
+            total = len(details["Command"])
             remaining = len(cmds)
             succeeded = total - remaining
             if succeeded >= total - max_fault_tolerance and succeeded >= 1:
