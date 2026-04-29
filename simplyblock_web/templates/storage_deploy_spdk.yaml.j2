@@ -132,6 +132,8 @@ spec:
       image: {{ SIMPLYBLOCK_DOCKER_IMAGE }}
       imagePullPolicy: "Always"
       command: ["python3", "simplyblock_core/services/spdk_http_proxy_server.py"]
+      securityContext:
+        privileged: true
       volumeMounts:
         - name: socket-dir
           mountPath: /mnt/ramdisk
