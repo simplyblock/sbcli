@@ -150,7 +150,7 @@ class StorageNode(BaseNodeObject):
         """Return API client to this node
         """
         host = self.api_endpoint
-        if Settings().tls_enabled:
+        if Settings().tls_connect != "disabled":
             port = self.api_endpoint.rsplit(":", 1)[1]
             host = f"{self._k8s_node_label()}.simplyblock-storage-node-api.{self.cr_namespace}.svc.cluster.local:{port}"
         return SNodeClient(host, **kwargs)
@@ -159,7 +159,7 @@ class StorageNode(BaseNodeObject):
         """Return rpc client to this node
         """
         host = self.mgmt_ip
-        if Settings().tls_enabled:
+        if Settings().tls_connect != "disabled":
             host = f"{self._k8s_node_label()}.simplyblock-spdk-proxy.{self.cr_namespace}.svc.cluster.local"
         return RPCClient(
             host, self.rpc_port,
