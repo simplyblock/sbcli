@@ -56,8 +56,12 @@ spec:
     - name: dockercontainerlogdirectory
       hostPath:
         path: /var/log/pods
-    {% if TLS_ENABLED %}
+    {% if TLS_SERVE or TLS_CONNECT != "disabled" %}
     - name: tls
+    {% if TLS_PROVIDER == "cert-manager" %}
+      secret:
+        secretName: simplyblock-spdk-proxy-tls
+    {% else %}
       projected:
         sources:
           - secret:
@@ -67,6 +71,7 @@ spec:
               items:
                 - key: service-ca.crt
                   path: ca.crt
+    {% endif %}
     {% endif %}
 
   containers:
@@ -137,7 +142,7 @@ spec:
       volumeMounts:
         - name: socket-dir
           mountPath: /mnt/ramdisk
-        {% if TLS_ENABLED %}
+        {% if TLS_SERVE or TLS_CONNECT != "disabled" %}
         - name: tls
           mountPath: /etc/simplyblock/tls
           readOnly: true
@@ -155,6 +160,14 @@ spec:
           value: "True"
         - name: TIMEOUT
           value: "300"
+        - name: SB_TLS_SERVE
+          value: "{{ TLS_SERVE }}"
+        - name: SB_TLS_CONNECT
+          value: "{{ TLS_CONNECT }}"
+        - name: SB_TLS_CLIENT_AUTH
+          value: "{{ TLS_CLIENT_AUTH }}"
+        - name: SB_TLS_PROVIDER
+          value: "{{ TLS_PROVIDER }}"
       {% if CPU_TOPOLOGY_ENABLED %}
       resources:
         limits:
