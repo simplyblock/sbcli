@@ -3195,10 +3195,6 @@ def shutdown_storage_node(node_id, force=False):
             logger.error(f"Migration task found: {len(tasks)}, can not shutdown storage node or use --force")
             return False
 
-    logger.info("Shutting down node")
-    set_node_status(node_id, StorageNode.STATUS_IN_SHUTDOWN)
-    time.sleep(3)
-
     # If node is not yet suspended and force is not used, run suspend first
     if snode.status != StorageNode.STATUS_SUSPENDED:
         if force:
@@ -3214,6 +3210,9 @@ def shutdown_storage_node(node_id, force=False):
             logger.error("Node is not in suspended or online state, use --force")
             return False
 
+    logger.info("Shutting down node")
+    set_node_status(node_id, StorageNode.STATUS_IN_SHUTDOWN)
+    time.sleep(3)
 
     if snode.jm_device and snode.jm_device.status != JMDevice.STATUS_REMOVED:
         logger.info("Setting JM unavailable")
@@ -3273,7 +3272,7 @@ def suspend_storage_node(node_id, force=False, change_node_status=True):
         return False
 
     logger.info("Node found: %s in state: %s", snode.hostname, snode.status)
-    if snode.status != StorageNode.STATUS_ONLINE:
+    if snode.status != StorageNode.STATUS_ONLINE and change_node_status:
         logger.error("Node is not in online state")
         if force is False:
             return False
