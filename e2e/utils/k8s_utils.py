@@ -1092,13 +1092,14 @@ class K8sUtils:
         out, err = self._exec_kubectl(cmd)
         return out, err
 
-    def validate_fio_job(self, job_name: str, namespace: str = None) -> bool:
+    def validate_fio_job(self, job_name: str, namespace: str = None,
+                         timeout: int = 600) -> bool:
         """Check Job succeeded and pod logs have no FIO error keywords.
 
         Returns True if valid.  Raises RuntimeError on failure.
         """
         ns = namespace or self.namespace
-        status = self.wait_job_complete(job_name, namespace=ns)
+        status = self.wait_job_complete(job_name, namespace=ns, timeout=timeout)
         if status != "succeeded":
             raise RuntimeError(
                 f"FIO Job '{job_name}' did not succeed (status={status})"

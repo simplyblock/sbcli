@@ -1300,13 +1300,14 @@ class K8sNativeFailoverTest(TestClusterBase):
                     clone_info["client"], log_file=clone_info["log_file"]
                 )
         else:
+            fio_timeout = self.FIO_RUNTIME + 300  # extra buffer over FIO runtime
             for pvc_name, pvc_info in self.pvc_details.items():
                 self._save_fio_pod_logs(pvc_info["job_name"], pvc_name)
-                self.k8s_utils.validate_fio_job(pvc_info["job_name"])
+                self.k8s_utils.validate_fio_job(pvc_info["job_name"], timeout=fio_timeout)
 
             for clone_name, clone_info in self.clone_details.items():
                 self._save_fio_pod_logs(clone_info["job_name"], clone_name)
-                self.k8s_utils.validate_fio_job(clone_info["job_name"])
+                self.k8s_utils.validate_fio_job(clone_info["job_name"], timeout=fio_timeout)
 
     # ── Cleanup ──────────────────────────────────────────────────────────────
 
@@ -1436,6 +1437,7 @@ class K8sNativeFailoverTest(TestClusterBase):
         self._ensure_per_node_coverage()
 
         iteration = 1
+        test_failed = False
         try:
             while True:
                 self.logger.info(f"=== Iteration {iteration} ===")
@@ -1498,8 +1500,14 @@ class K8sNativeFailoverTest(TestClusterBase):
                 self.collect_outage_diagnostics(f"end_iteration_{iteration}")
                 iteration += 1
 
+        except Exception:
+            test_failed = True
+            raise
         finally:
-            self._cleanup_all_k8s_resources()
+            if test_failed:
+                self.logger.info("[cleanup] Test failed — skipping resource cleanup to preserve state for debugging")
+            else:
+                self._cleanup_all_k8s_resources()
 
 
 class K8sNativeBasicFailoverTest(K8sNativeFailoverTest):
@@ -1717,6 +1725,7 @@ class K8sNativeBasicFailoverTest(K8sNativeFailoverTest):
 
         # ── Outage loop ──
         iteration = 1
+        test_failed = False
         try:
             while True:
                 self.logger.info(f"=== Iteration {iteration} ===")
@@ -1775,5 +1784,11 @@ class K8sNativeBasicFailoverTest(K8sNativeFailoverTest):
                 self.collect_outage_diagnostics(f"end_iteration_{iteration}")
                 iteration += 1
 
+        except Exception:
+            test_failed = True
+            raise
         finally:
-            self._cleanup_all_k8s_resources()
+            if test_failed:
+                self.logger.info("[cleanup] Test failed — skipping resource cleanup to preserve state for debugging")
+            else:
+                self._cleanup_all_k8s_resources()
