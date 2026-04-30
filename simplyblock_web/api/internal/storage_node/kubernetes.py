@@ -374,7 +374,7 @@ def spdk_process_start(body: SPDKParams):
             'FW_PORT': body.firewall_port,
             'CPU_TOPOLOGY_ENABLED': cpu_topology_enabled,
             'RESERVED_SYSTEM_CPUS': reserved_system_cpus,
-            'TLS_ENABLED': settings.tls_enabled,
+            'TLS_ENABLED': settings.tls_serve,
             'TLS_PROVIDER': settings.tls_provider,
         }
 

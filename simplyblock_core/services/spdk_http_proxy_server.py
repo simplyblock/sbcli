@@ -258,7 +258,7 @@ def run_server(host, port, user, password, is_threading_enabled=False):
         ServerHandler.key = key
         httpd = (ThreadingHTTPServer if is_threading_enabled else HTTPServer)((host, port), ServerHandler)
         settings = Settings()
-        if settings.tls_enabled:
+        if settings.tls_serve:
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             context.load_cert_chain(settings.tls_certificate, settings.tls_key)
             httpd.socket = context.wrap_socket(httpd.socket, server_side=True)
