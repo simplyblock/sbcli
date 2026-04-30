@@ -343,6 +343,12 @@ def spdk_process_start(body: SPDKParams):
          node_prepration_core_name += node_name
     logger.debug(f"deploying k8s job to prepare worker: {node_name}")
 
+    fluentd_image = constants.get_config_var("FLUENTD_IMAGE", "public.ecr.aws/simply-block/fluentd-kubernetes-daemonset:v1.17.1-debian-graylog-1.2")
+    ubuntu_image = constants.get_config_var("UBUNTU_IMAGE", "ubuntu:22.04")
+    alpine_tools_image = constants.get_config_var("ALPINE_TOOLS_IMAGE", "quay.io/simplyblock-io/alpine-tools:3.21.3")
+    alpine_image = constants.get_config_var("ALPINE_IMAGE", "quay.io/simplyblock-io/alpine:3.20")
+    kubectl_image = constants.get_config_var("KUBECTL_IMAGE", "quay.io/simplyblock-io/kubectl:1.34.1")
+
     try:
         env = Environment(loader=PackageLoader('simplyblock_web', 'templates'), trim_blocks=True, lstrip_blocks=True)
         values = {
@@ -374,6 +380,11 @@ def spdk_process_start(body: SPDKParams):
             'CPU_TOPOLOGY_ENABLED': cpu_topology_enabled,
             'RESERVED_SYSTEM_CPUS': reserved_system_cpus,
             'TLS_ENABLED': Settings().tls_enabled,
+            'FLUENTD_IMAGE': fluentd_image,
+            'UBUNTU_IMAGE': ubuntu_image,
+            'ALPINE_TOOLS_IMAGE': alpine_tools_image,
+            'ALPINE_IMAGE': alpine_image,
+            'KUBECTL_IMAGE': kubectl_image,
         }
 
         if ubuntu_host:

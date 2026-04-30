@@ -62,7 +62,7 @@ spec:
             path: /var/simplyblock
       containers:
         - name: init-setup
-          image: ubuntu:22.04
+          image: ${{ UBUNTU_IMAGE }}
           securityContext:
             privileged: true
           volumeMounts:

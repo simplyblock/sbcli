@@ -23,7 +23,7 @@ spec:
             path: /var/simplyblock
       containers:
         - name: init-setup
-          image: alpine/kubectl:1.34.1
+          image: ${{ KUBECTL_IMAGE }}
           securityContext:
             privileged: true
           volumeMounts:

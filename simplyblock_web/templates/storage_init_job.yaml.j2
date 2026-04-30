@@ -23,7 +23,7 @@ spec:
             path: /proc
       containers:
         - name: init-setup
-          image: simplyblock/alpine-tools:3.21.3
+          image: ${{ ALPINE_TOOLS_IMAGE }}
           securityContext:
             privileged: true
           volumeMounts:
