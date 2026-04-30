@@ -122,8 +122,13 @@ def parse_args():
     parser.add_argument(
         "--nic-chaos-duration",
         type=int,
-        default=20,
-        help="Seconds to hold a data NIC down between iterations (multipath only).",
+        default=30,
+        help=(
+            "Seconds to hold a data NIC down between iterations (multipath only). "
+            "Per cycle, ONE of the two data NICs is picked at random and dropped on "
+            "ALL storage nodes simultaneously — never a mix where some nodes drop "
+            "eth1 while others drop eth2."
+        ),
     )
     parser.add_argument(
         "--no-nic-chaos",
@@ -1571,6 +1576,18 @@ class SoakRunner:
             self._enable_nic_on_all_nodes(nic)
 
     def _inter_iteration_nic_chaos(self):
+        """Drop one data NIC on every storage node for nic_chaos_duration s,
+        then bring it back up. Active only between outage iterations on a
+        multipath cluster with at least two data NICs.
+
+        Invariant: a single NIC name (eth1 OR eth2) is chosen once via
+        random.choice and applied uniformly across all storage nodes — we
+        NEVER concurrently drop eth1 on some nodes and eth2 on others, so
+        each node always retains a live data path through the surviving
+        NIC. _ensure_all_data_nics_up at the start of every outage
+        iteration plus the try/finally re-enable here together guarantee
+        no NIC stays down across the iteration boundary.
+        """
         if self.args.no_nic_chaos or not self._is_multipath():
             return
         data_nics = self._get_data_nics()
@@ -1579,7 +1596,8 @@ class SoakRunner:
         duration = max(0, self.args.nic_chaos_duration)
         nic = random.choice(data_nics)
         self.logger.log(
-            f"Inter-iteration NIC chaos: dropping {nic} on all nodes for {duration}s"
+            f"Inter-iteration NIC chaos: dropping {nic} on all nodes for {duration}s "
+            f"(other data NICs stay up; eth1/eth2 are never dropped concurrently)"
         )
         try:
             self._disable_nic_on_all_nodes(nic)
