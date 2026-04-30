@@ -2219,6 +2219,13 @@ commands:
             help: "The host NQN to remove."
             dest: host_nqn
             type: str
+      - name: get-master-lvols
+        help: "Return a list of master lvols (not namespaced lvol) from a storage pool."
+        arguments:
+          - name: "pool_id"
+            help: "The storage pool id."
+            dest: pool_id
+            type: str
   - name: "snapshot"
     help: "Snapshot Commands"
     weight: 600

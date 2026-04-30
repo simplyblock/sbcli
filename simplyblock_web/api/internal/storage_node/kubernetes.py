@@ -16,6 +16,7 @@ import yaml
 from pydantic import BaseModel, Field
 
 from simplyblock_core import constants, shell_utils, utils as core_utils
+from simplyblock_core.settings import Settings
 from simplyblock_web import utils, node_utils, node_utils_k8s
 from simplyblock_web.node_utils_k8s import namespace_id_file
 
@@ -371,7 +372,8 @@ def spdk_process_start(body: SPDKParams):
             'NSOCKET': body.socket,
             'FW_PORT': body.firewall_port,
             'CPU_TOPOLOGY_ENABLED': cpu_topology_enabled,
-            'RESERVED_SYSTEM_CPUS': reserved_system_cpus
+            'RESERVED_SYSTEM_CPUS': reserved_system_cpus,
+            'TLS_ENABLED': Settings().tls_enabled,
         }
 
         if ubuntu_host:
@@ -481,10 +483,19 @@ def spdk_process_start(body: SPDKParams):
             )
             logger.info(f"Job deleted: '{core_resp.metadata.name}' in namespace '{namespace}")
 
+        k8s_core_v1 = core_utils.get_k8s_core_client()
+        for attempt in range(56):
+            node_obj = k8s_core_v1.read_node(node_name)
+            if not node_obj.spec.unschedulable:
+                break
+            if attempt == 55:
+                return utils.get_response(False, f"Node '{node_name}' remained cordoned after 6 minutes")
+            logger.info(f"Node '{node_name}' is cordoned, waiting for uncordon... attempt {attempt + 1}/36")
+            time.sleep(10)
+
         env = Environment(loader=PackageLoader('simplyblock_web', 'templates'), trim_blocks=True, lstrip_blocks=True)
         template = env.get_template('storage_deploy_spdk.yaml.j2')
         docs = yaml.safe_load_all(template.render(values))
-        k8s_core_v1 = core_utils.get_k8s_core_client()
         for dep in docs:
             logger.debug(dep)
             resp = k8s_core_v1.create_namespaced_pod(body=dep, namespace=namespace)

@@ -3,7 +3,7 @@ import threading
 import time
 from datetime import datetime
 
-from simplyblock_core import constants, db_controller, utils, rpc_client, distr_controller
+from simplyblock_core import constants, db_controller, utils, distr_controller
 from simplyblock_core.controllers import events_controller, device_controller
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
@@ -145,21 +145,47 @@ def process_device_event(event, logger):
 
 
         if device_node_obj.get_id() == event_node_obj.get_id():
+            # The device's home node itself reported an IO error against its
+            # local device — this is the only path that may count toward the
+            # per-device flap budget. The CAUSE_LOCAL_FAILURE opt-in is
+            # gated by the equality check above (event_node == device_node).
             if event.message in ['SPDK_BDEV_EVENT_REMOVE', 'error_open']:
+                # Catastrophic-failure path: the local SPDK fired a REMOVE
+                # (or error_open) on this device, which means either the
+                # NVMe controller was destructed after timeout-driven reset
+                # failures, or the underlying device was hot-removed, or
+                # AER reported the namespace gone. From here we cannot tell
+                # those apart — but for the flap counter all three are
+                # legitimate per-device failure events from the home node,
+                # so we count them. (CLI-initiated removes use the default
+                # cause and are not counted.)
                 logger.info(f"Removing storage id: {storage_id} from node: {node_id}")
-                device_controller.device_remove(device_obj.get_id())
+                device_controller.device_remove(
+                    device_obj.get_id(),
+                    cause=device_controller.CAUSE_LOCAL_FAILURE,
+                )
 
             elif event.message in ['error_write', 'error_unmap']:
                 logger.info("Setting device to read-only")
-                device_controller.device_set_read_only(device_obj.get_id())
+                device_controller.device_set_read_only(
+                    device_obj.get_id(),
+                    cause=device_controller.CAUSE_LOCAL_FAILURE,
+                )
 
             elif event.message == 'error_write_cannot_allocate':
                 logger.info("Setting device to cannot_allocate")
-                device_controller.device_set_state(device_obj.get_id(), NVMeDevice.STATUS_CANNOT_ALLOCATE)
+                device_controller.device_set_state(
+                    device_obj.get_id(),
+                    NVMeDevice.STATUS_CANNOT_ALLOCATE,
+                    cause=device_controller.CAUSE_LOCAL_FAILURE,
+                )
 
             else:
                 logger.info("Setting device to unavailable")
-                device_controller.device_set_unavailable(device_obj.get_id())
+                device_controller.device_set_unavailable(
+                    device_obj.get_id(),
+                    cause=device_controller.CAUSE_LOCAL_FAILURE,
+                )
                 device_controller.device_set_io_error(device_obj.get_id(), True)
         else:
             distr_controller.send_dev_status_event(device_obj, NVMeDevice.STATUS_UNAVAILABLE, event_node_obj)
@@ -194,12 +220,7 @@ def start_event_collector_on_node(node_id):
 
     logger.info(f"Starting Distr event collector on node: {node_id}")
 
-    client = rpc_client.RPCClient(
-        snode.mgmt_ip,
-        snode.rpc_port,
-        snode.rpc_username,
-        snode.rpc_password,
-        timeout=2, retry=2)
+    client = snode.rpc_client(timeout=2, retry=2)
 
     try:
         while True:

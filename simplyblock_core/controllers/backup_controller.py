@@ -11,7 +11,6 @@ from simplyblock_core.controllers import backup_events, tasks_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.backup import Backup, BackupPolicy, BackupPolicyAttachment
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.rpc_client import RPCClient
 
 logger = logging.getLogger()
 
@@ -135,9 +134,7 @@ def create_s3_bdev(node, backup_config):
     """
     if not node.lvstore:
         return False
-    rpc_client = RPCClient(
-        node.mgmt_ip, node.rpc_port,
-        node.rpc_username, node.rpc_password)
+    rpc_client = node.rpc_client()
     s3_bdev_name = f"s3_{node.lvstore}"
 
     bdb_lcpu_mask, s3_lcpu_mask = _compute_s3_cpu_masks(node)
@@ -202,8 +199,8 @@ def create_s3_bdev(node, backup_config):
         return False
 
     try:
-        ret = rpc_client.bdev_s3_add_bucket_name(s3_bdev_name, bucket_name)
-        if not ret:
+        ret, err = rpc_client.bdev_s3_add_bucket_name(s3_bdev_name, bucket_name)
+        if not ret and not (err and err.get("code") == -17):
             logger.warning(f"Failed to set bucket name on S3 bdev {s3_bdev_name}")
             return False
         logger.info(f"S3 bdev bucket set: {bucket_name} on {s3_bdev_name}")
@@ -539,9 +536,7 @@ def delete_backups(lvol_id):
 
     # Call S3 delete RPC (dummy for now)
     if snode.status == StorageNode.STATUS_ONLINE:
-        rpc_client = RPCClient(
-            snode.mgmt_ip, snode.rpc_port,
-            snode.rpc_username, snode.rpc_password)
+        rpc_client = snode.rpc_client()
         s3_ids = [b.s3_id for b in completed]
         try:
             rpc_client.bdev_lvol_s3_delete(s3_ids)
@@ -627,15 +622,16 @@ def import_backups(s3_metadata_list, cluster_id=None):
         if not backup_id:
             continue
 
-        # Check if already exists
-        try:
-            db_controller.get_backup_by_id(backup_id)
-            continue  # already imported
-        except KeyError:
-            pass
-
         source_cluster = meta.get("cluster_id", "")
         target_cluster = cluster_id or source_cluster
+
+        # Skip only if already registered for the target cluster
+        try:
+            existing = db_controller.get_backup_by_id(backup_id)
+            if existing.cluster_id == target_cluster:
+                continue  # already imported for this cluster
+        except KeyError:
+            pass
 
         backup = Backup()
         backup.uuid = backup_id
@@ -747,12 +743,10 @@ def switch_backup_source(cluster_id, source_cluster_id):
         if node.status != StorageNode.STATUS_ONLINE or not node.lvstore:
             continue
         try:
-            rpc_client = RPCClient(
-                node.mgmt_ip, node.rpc_port,
-                node.rpc_username, node.rpc_password)
+            rpc_client = node.rpc_client()
             s3_bdev_name = f"s3_{node.lvstore}"
-            ret = rpc_client.bdev_s3_add_bucket_name(s3_bdev_name, bucket_name)
-            if not ret:
+            ret, err = rpc_client.bdev_s3_add_bucket_name(s3_bdev_name, bucket_name)
+            if not ret and not (err and err.get("code") == -17):
                 errors.append(f"Node {node.get_id()}: failed to set bucket")
             else:
                 logger.info(f"Switched S3 bucket to {bucket_name} on node {node.get_id()}")

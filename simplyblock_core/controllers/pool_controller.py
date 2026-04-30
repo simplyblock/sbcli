@@ -13,7 +13,6 @@ from simplyblock_core.controllers import pool_events, lvol_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.prom_client import PromClient
-from simplyblock_core.rpc_client import RPCClient
 
 logger = lg.getLogger()
 
@@ -129,6 +128,9 @@ def add_host_to_pool(pool_id, host_nqn):
     pool.allowed_hosts = list(pool.allowed_hosts) + [host_nqn]
     pool.write_to_db(db_controller.kv_store)
     logger.info(f"Added host {host_nqn} to pool {pool_id}")
+    for lvol in db_controller.get_lvols_by_pool_id(pool_id):
+        logger.info(f"Adding host {host_nqn} to lvol {lvol.get_id()}")
+        lvol_controller.add_host_to_lvol(lvol.get_id(), host_nqn)
     return True, None
 
 
@@ -153,6 +155,9 @@ def remove_host_from_pool(pool_id, host_nqn):
     pool.allowed_hosts = [h for h in pool.allowed_hosts if h != host_nqn]
     pool.write_to_db(db_controller.kv_store)
     logger.info(f"Removed host {host_nqn} from pool {pool_id}")
+    for lvol in db_controller.get_lvols_by_pool_id(pool_id):
+        logger.info(f"Removing host {host_nqn} from lvol {lvol.get_id()}")
+        lvol_controller.remove_host_from_lvol(lvol.get_id(), host_nqn)
     return True, None
 
 
@@ -301,7 +306,7 @@ def set_pool(uuid, pool_max=0, lvol_max=0, max_rw_iops=0,
     # Apply QoS settings via RPC
     for hostname in db_controller.get_hostnames_by_pool_id(uuid):
         for sn in db_controller.get_storage_nodes_by_hostname(hostname):
-            client = RPCClient(sn.mgmt_ip, sn.rpc_port, sn.rpc_username, sn.rpc_password)
+            client = sn.rpc_client()
             if not client.bdev_lvol_set_qos_limit(pool.numeric_id, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes):
                 logger.error("RPC failed bdev_lvol_set_qos_limit")
                 return False, "RPC failed"

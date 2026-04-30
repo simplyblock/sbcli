@@ -8,7 +8,7 @@ from simplyblock_core import constants, db_controller, cluster_ops, storage_node
 from simplyblock_core.controllers import health_controller, device_controller, tasks_controller, storage_events
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
-from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
+from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 
 logger = utils.get_logger(__name__)
@@ -201,44 +201,43 @@ def update_cluster_status(cluster_id):
         cluster_ops.set_cluster_status(cluster_id, next_current_status)
 
 
-def set_node_online(node):
-    node = db.get_storage_node_by_id(node.get_id())
-    if node.status in [StorageNode.STATUS_UNREACHABLE, StorageNode.STATUS_SCHEDULABLE, StorageNode.STATUS_DOWN]:
-
-        # set node online
-        storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_ONLINE)
-
-        # set jm dev online
-        if node.jm_device.status in [JMDevice.STATUS_UNAVAILABLE, JMDevice.STATUS_ONLINE]:
-            device_controller.set_jm_device_state(node.jm_device.get_id(), JMDevice.STATUS_ONLINE)
-
-        # set devices online
-        for dev in node.nvme_devices:
-            if dev.status == NVMeDevice.STATUS_UNAVAILABLE:
-                device_controller.device_set_online(dev.get_id())
-
-        # start migration tasks on node online status change
-        online_devices_list = []
-        for dev in node.nvme_devices:
-            if dev.status in [NVMeDevice.STATUS_ONLINE,
-                              NVMeDevice.STATUS_CANNOT_ALLOCATE,
-                              NVMeDevice.STATUS_FAILED_AND_MIGRATED]:
-                online_devices_list.append(dev.get_id())
-        if online_devices_list:
-            logger.info(f"Starting migration task for node {node.get_id()}")
-            tasks_controller.add_device_mig_task_for_node(node.get_id())
-
-        update_cluster_status(cluster_id)
+# Note: a `set_node_online` helper used to live here. It flipped DOWN /
+# UNREACHABLE / SCHEDULABLE -> ONLINE on health-check pass. That violated
+# the state-machine rule that ONLINE may only be reached from RESTARTING
+# (or IN_CREATION / SUSPENDED via the dedicated paths) and contributed
+# to the iteration-77 hang where a half-completed restart left the node
+# DB-online while peer reconnects had silently failed.
+#
+# Recovery for nodes stuck in DOWN / UNREACHABLE / SCHEDULABLE now flows
+# exclusively through the auto-restart task (FN_NODE_RESTART) -> the
+# restart impl, which is the only authority for the ONLINE flip.
 
 
 def set_node_offline(node):
     node = db.get_storage_node_by_id(node.get_id())
-    if node.status not in [StorageNode.STATUS_OFFLINE, StorageNode.STATUS_IN_SHUTDOWN]:
+    # Do not flip to OFFLINE while the node is mid-restart / mid-shutdown:
+    # the runner owns the status transitions during those phases, and an
+    # external flip here would race with it. Observed failure mode:
+    # HealthCheck/monitor's spdk_process_is_up probe catches the runner's
+    # shutdown→restart window and returns False, so set_node_offline fires
+    # with status==IN_RESTART and clobbers the runner's progress — also
+    # marking devices unavailable, which then fails the runner's
+    # post-restart check and forces a full retry loop.
+    #
+    # UNREACHABLE is intentionally NOT in this skip list: the legitimate
+    # escalation path UNREACHABLE → OFFLINE runs through here (via
+    # _check_data_plane_and_escalate). Skipping it leaves the node stuck
+    # in UNREACHABLE and auto-restart never gets queued.
+    if node.status not in [StorageNode.STATUS_OFFLINE,
+                           StorageNode.STATUS_IN_SHUTDOWN,
+                           StorageNode.STATUS_RESTARTING]:
         try:
             storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_OFFLINE)
             for dev in node.nvme_devices:
                 if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY,
                                   NVMeDevice.STATUS_CANNOT_ALLOCATE]:
+                    # Default cause is correct: node going offline cascades
+                    # to all its devices, that does not count as a flap.
                     device_controller.device_set_unavailable(dev.get_id())
             update_cluster_status(cluster_id)
 
@@ -258,7 +257,12 @@ def set_node_offline(node):
 
 
 def set_node_unreachable(node):
-    if node.status != StorageNode.STATUS_UNREACHABLE:
+    # Same rationale as set_node_offline: when the runner owns the node's
+    # status transitions (IN_SHUTDOWN → OFFLINE → IN_RESTART → ONLINE), the
+    # monitor must not race those writes with its own UNREACHABLE flip.
+    if node.status not in [StorageNode.STATUS_UNREACHABLE,
+                           StorageNode.STATUS_IN_SHUTDOWN,
+                           StorageNode.STATUS_RESTARTING]:
         try:
             storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_UNREACHABLE)
             update_cluster_status(cluster_id)
@@ -296,6 +300,21 @@ def is_node_data_plane_disconnected_quorum(node, lvs_peer_ids=None):
 def _count_data_plane_votes(node):
     """Query all other online storage nodes for *node*'s JM connectivity.
 
+    For each online peer, check the state of its NVMe controller that points
+    at *node*'s JM subsystem (controller name = ``remote_jm_{node_id}``).
+    A peer reports "connected" only if the controller exists AND is in the
+    ``enabled`` SPDK state (``deleting``/``failed``/``resetting``/
+    ``reconnect_is_delayed``/``disabled`` all count as disconnected).
+
+    Peers that never attached a controller for *node* (no topology link)
+    are ignored — they don't have a meaningful vote.
+
+    Why not ``jc_get_jm_status``: that RPC reads ``mjm_stat``, a sync-health
+    map updated only by the JC's replication/leveling state machine. It is
+    never flipped to ``false`` when the underlying NVMe controller is lost
+    (bdev-remove / keep-alive timeout / peer death), so a quietly-dead peer
+    perpetually votes "connected" and the quorum gets stuck.
+
     Returns (disconnected_count, total_peers_checked).
     """
     node_id = node.get_id()
@@ -312,27 +331,62 @@ def _count_data_plane_votes(node):
         logger.debug("No online peers to verify data plane for %s", node_id)
         return 0, 0
 
-    remote_jm_key = f"remote_jm_{node_id}n1"
+    ctrl_name = f"remote_jm_{node_id}"
+    bdev_name = f"{ctrl_name}n1"
     disconnected = 0
     total = 0
 
     for peer in online_peers:
-        try:
-            ret = peer.rpc_client(timeout=5, retry=1).jc_get_jm_status(peer.jm_vuid)
-            if not ret or remote_jm_key not in ret:
-                logger.debug("Data-plane check: peer %s has no status for %s JM; ignoring vote",
-                             peer.get_id(), node_id)
-                continue
+        peer_rpc = peer.rpc_client(timeout=5, retry=1)
 
-            total += 1
-            if ret[remote_jm_key] is True:
-                logger.info("Data-plane check: peer %s still sees %s JM as connected",
-                            peer.get_id(), node_id)
-            else:
-                disconnected += 1
+        # Fast path: does the namespace bdev still exist on the peer?
+        # A missing bdev means the controller has been torn down / is being
+        # torn down, which is unambiguously "disconnected". We check this
+        # first because bdev_get_bdevs is a pure registry lookup and can't
+        # block on a degraded controller's internal state, whereas
+        # bdev_nvme_get_controllers on a `resetting` / `reconnect_is_delayed`
+        # ctrlr can sit on locks during reset.
+        try:
+            bdevs = peer_rpc.get_bdevs(bdev_name)
         except Exception as e:
-            logger.debug("jc_get_jm_status on peer %s failed: %s", peer.get_id(), e)
+            logger.debug("get_bdevs(%s) on peer %s failed: %s", bdev_name, peer.get_id(), e)
             continue
+
+        if not bdevs:
+            # If the peer never had a topology link to this node, it never
+            # created this bdev either. We can't distinguish "never had it"
+            # from "had it and it's gone" just from a missing bdev, so abstain
+            # -- callers that know the topology (lvs_peer_ids) are the right
+            # place to assert "this peer SHOULD have seen it".
+            logger.debug("Data-plane check: peer %s has no %s bdev; abstaining",
+                         peer.get_id(), bdev_name)
+            continue
+
+        # Bdev exists -> controller must exist too. Now check its state.
+        try:
+            ret = peer_rpc.bdev_nvme_controller_list(ctrl_name)
+        except Exception as e:
+            logger.debug("bdev_nvme_controller_list(%s) on peer %s failed: %s",
+                         ctrl_name, peer.get_id(), e)
+            continue
+
+        total += 1
+        if not ret:
+            logger.info("Data-plane check: peer %s has %s bdev but no controller -> disconnected",
+                        peer.get_id(), bdev_name)
+            disconnected += 1
+            continue
+
+        paths = ret[0].get("ctrlrs") or []
+        enabled = any((p.get("state") == "enabled") for p in paths)
+        if enabled:
+            logger.info("Data-plane check: peer %s sees %s controller enabled",
+                        peer.get_id(), node_id)
+        else:
+            states = [p.get("state") for p in paths] or ["no-paths"]
+            logger.info("Data-plane check: peer %s reports %s controller state=%s -> disconnected",
+                        peer.get_id(), node_id, states)
+            disconnected += 1
 
     logger.info("Data-plane check for %s: %d/%d peers report disconnected", node_id, disconnected, total)
     return disconnected, total
@@ -504,8 +558,7 @@ def check_node(snode):
         return False
 
     # 4- check node rpc interface
-    node_rpc_check, node_rpc_check_1 = health_controller._check_node_rpc(
-        snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=20, retry=1)
+    node_rpc_check, node_rpc_check_1 = health_controller.check_node_rpc(snode, timeout=20, retry=1)
     logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}")
 
     #if RPC times out, we dont know if its due to node becoming unavailable or spdk hanging
@@ -536,7 +589,20 @@ def check_node(snode):
             set_node_down(snode)
             return True
 
-    set_node_online(snode)
+    # Health checks pass. The monitor must NOT flip the node to ONLINE
+    # itself: the state-machine rule restricts ONLINE writes to the
+    # restart / add_node / resume paths. If the node is currently DOWN /
+    # UNREACHABLE / SCHEDULABLE, queue an auto-restart so the regular
+    # restart impl drives the IN_RESTART -> ONLINE transition.
+    if snode.status in (StorageNode.STATUS_UNREACHABLE,
+                        StorageNode.STATUS_SCHEDULABLE,
+                        StorageNode.STATUS_DOWN):
+        logger.info(
+            "Health checks pass for %s but status is %s; queueing auto-restart "
+            "(only the restart path may write ONLINE)",
+            snode.get_id(), snode.status,
+        )
+        tasks_controller.add_node_to_auto_restart(snode)
 
 
 def loop_for_node(snode):

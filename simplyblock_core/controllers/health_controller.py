@@ -11,10 +11,24 @@ from simplyblock_core.fw_api_client import FirewallClient
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice, RemoteDevice
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core.controllers import device_controller
 
 logger = utils.get_logger(__name__)
+
+
+def _restart_owns_lvs(primary_node) -> bool:
+    """True if the restart task currently owns ``primary_node.lvstore``.
+
+    While ``primary_node.restart_phases[lvs]`` is set (pre_block / blocked /
+    post_unblock), the restart runner is the exclusive author of hublvol
+    attach/detach on that LVS. The periodic health repair must stand aside
+    so it doesn't issue a parallel bdev_nvme_attach_controller on the same
+    subnqn — that was the class of race that produced
+    "bdev_nvme_check_multipath: cntlid N are duplicated" and left the
+    tertiary without a hublvol to primary.
+    """
+    phases = getattr(primary_node, "restart_phases", None) or {}
+    return bool(phases.get(primary_node.lvstore))
 
 
 def check_bdev(name, *, rpc_client=None, bdev_names=None) -> bool:
@@ -100,11 +114,9 @@ def check_cluster(cluster_id):
     return result
 
 
-def _check_node_rpc(rpc_ip, rpc_port, rpc_username, rpc_password, timeout=5, retry=2):
+def check_node_rpc(node, timeout=5, retry=2):
     try:
-        rpc_client = RPCClient(
-            rpc_ip, rpc_port, rpc_username, rpc_password,
-            timeout=timeout, retry=retry)
+        rpc_client = node.rpc_client(timeout=timeout, retry=retry)
         ret = rpc_client.get_version()
         if ret:
             logger.debug(f"SPDK version: {ret['version']}")
@@ -197,8 +209,7 @@ def _check_node_hublvol(node: StorageNode, node_bdev_names=None, node_lvols_nqns
 
     passed = True
     try:
-        rpc_client = RPCClient(
-            node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=5, retry=1)
+        rpc_client = node.rpc_client(timeout=5, retry=1)
 
         if not node_bdev_names:
             node_bdev_names = {}
@@ -279,8 +290,7 @@ def _check_sec_node_hublvol(node: StorageNode, node_bdev=None, node_lvols_nqns=N
 
     passed = True
     try:
-        rpc_client = RPCClient(
-            node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=5, retry=1)
+        rpc_client = node.rpc_client(timeout=5, retry=1)
 
         if not node_bdev:
             node_bdev = {}
@@ -330,7 +340,7 @@ def _check_sec_node_hublvol(node: StorageNode, node_bdev=None, node_lvols_nqns=N
             # Controller exists but may only have the optimized path; ensure secondary path is present
             # ret is [{..., "ctrlrs": [path1, path2, ...]}, ...] — paths are inside ctrlrs
             ctrlrs = ret[0].get("ctrlrs", []) if ret else []
-            if len(ctrlrs) < 2:
+            if len(ctrlrs) < 2 and not _restart_owns_lvs(primary_node):
                 try:
                     sec1 = db_controller.get_storage_node_by_id(primary_node.secondary_node_id)
                     if sec1.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
@@ -353,9 +363,12 @@ def _check_sec_node_hublvol(node: StorageNode, node_bdev=None, node_lvols_nqns=N
                 node_bdev = []
 
         # Repair degraded multipath on hublvol controller: each NIC should
-        # contribute one path.  If a NIC went down and came back, the path may
-        # not have been re-established.
-        if passed and auto_fix and ret:
+        # contribute one path. If a NIC went down and came back, the path may
+        # not have been re-established. Skip entirely while the restart task
+        # owns this LVS — the restart flow is the exclusive author of hublvol
+        # (re)attaches during its phases, and running a concurrent repair
+        # here is what created the attach-during-destroy race in the past.
+        if passed and auto_fix and ret and not _restart_owns_lvs(primary_node):
             ctrlrs = ret[0].get("ctrlrs", [])
             for ct in ctrlrs:
                 if ct.get("state") != "enabled":
@@ -371,18 +384,37 @@ def _check_sec_node_hublvol(node: StorageNode, node_bdev=None, node_lvols_nqns=N
                         expected_ips.add(iface.ip4_address)
                 missing_ips = expected_ips - attached_ips
                 if missing_ips:
-                    logger.info("Hublvol %s on %s missing paths: %s, re-attaching",
+                    logger.info("Hublvol %s on %s missing paths: %s, reconciling via coordinator",
                                 primary_node.hublvol.bdev_name, node.get_id(), missing_ips)
-                    tr_type = "RDMA" if primary_node.active_rdma else "TCP"
-                    for ip in missing_ips:
-                        try:
-                            rpc_client.bdev_nvme_attach_controller(
-                                primary_node.hublvol.bdev_name, primary_node.hublvol.nqn,
-                                ip, primary_node.hublvol.nvmf_port,
-                                tr_type, multipath="multipath")
-                            logger.info("Re-attached hublvol path %s on %s", ip, node.get_id())
-                        except Exception as e:
-                            logger.error("Failed to re-attach hublvol path %s: %s", ip, e)
+                    try:
+                        # All hublvol (re)attach goes through the single
+                        # cross-process coordinator. Even though we just
+                        # guarded on _restart_owns_lvs above, the coordinator
+                        # still serializes against any other non-restart
+                        # caller and enforces the attach cooldown, which
+                        # removes the "cntlid N are duplicated" race window.
+                        from simplyblock_core.utils.hublvol_reconnect import (
+                            HublvolReconnectCoordinator,
+                        )
+                        coordinator = HublvolReconnectCoordinator(db_controller)
+                        peers = [primary_node]
+                        if is_sec2 and primary_node.secondary_node_id:
+                            try:
+                                sec1 = db_controller.get_storage_node_by_id(
+                                    primary_node.secondary_node_id)
+                                if sec1.status in (
+                                        StorageNode.STATUS_ONLINE,
+                                        StorageNode.STATUS_DOWN):
+                                    peers.append(sec1)
+                            except Exception:
+                                pass
+                        coordinator.reconcile(
+                            node, primary_node, peers,
+                            role="tertiary" if is_sec2 else "secondary")
+                    except Exception as e:
+                        logger.error(
+                            "Failed to reconcile hublvol on %s: %s",
+                            node.get_id(), e)
 
         passed &= check_bdev(primary_node.hublvol.get_remote_bdev_name(), bdev_names=node_bdev)
         if not passed:
@@ -600,7 +632,22 @@ def check_node(node_id, with_devices=True):
         logger.exception("node not found")
         return False
 
-    if snode.status in [StorageNode.STATUS_OFFLINE, StorageNode.STATUS_REMOVED]:
+    # Skip HealthCheck entirely while the node is in a transient state.
+    # During IN_SHUTDOWN / RESTARTING / UNREACHABLE / SUSPENDED / IN_CREATION
+    # the upper stack is being torn down or rebuilt by the runner (or the
+    # operator) and the data-plane state read back here — distrib cluster_map
+    # on peers, lvstore_stack comparisons, remote device reachability — is
+    # momentarily inconsistent with FDB. Acting on that mismatch (e.g.
+    # device_set_unavailable, recreate secondary hublvol) clobbers the
+    # in-progress restart. Lower-stack self-heal during a restart is the
+    # runner's job.
+    if snode.status in [StorageNode.STATUS_OFFLINE,
+                        StorageNode.STATUS_REMOVED,
+                        StorageNode.STATUS_IN_SHUTDOWN,
+                        StorageNode.STATUS_RESTARTING,
+                        StorageNode.STATUS_UNREACHABLE,
+                        StorageNode.STATUS_SUSPENDED,
+                        StorageNode.STATUS_IN_CREATION]:
         logger.info(f"Skipping ,node status is {snode.status}")
         return True
 
@@ -619,8 +666,7 @@ def check_node(node_id, with_devices=True):
     logger.info(f"Check: node API {snode.mgmt_ip}:5000 ... {node_api_check}")
 
     # 3- check node RPC
-    node_rpc_check, _ = _check_node_rpc(
-        snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+    node_rpc_check, _ = check_node_rpc(snode)
     logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}")
 
     data_nics_check = True
@@ -675,10 +721,7 @@ def check_node(node_id, with_devices=True):
 
         logger.info(f"Node remote device: {len(snode.remote_devices)}")
         print("*" * 100)
-        rpc_client = RPCClient(
-            snode.mgmt_ip, snode.rpc_port,
-            snode.rpc_username, snode.rpc_password,
-            timeout=5, retry=1)
+        rpc_client = snode.rpc_client(timeout=5, retry=1)
         for remote_device in snode.remote_devices:
             node_remote_devices_check &= check_remote_device(remote_device.get_id(), snode)
             print("*" * 100)
@@ -745,9 +788,7 @@ def check_node(node_id, with_devices=True):
                 if second_node_1.status == StorageNode.STATUS_ONLINE:
                     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
                     try:
-                        sec1_rpc = RPCClient(
-                            second_node_1.mgmt_ip, second_node_1.rpc_port,
-                            second_node_1.rpc_username, second_node_1.rpc_password, timeout=5, retry=1)
+                        sec1_rpc = second_node_1.rpc_client(timeout=5, retry=1)
                         if snode.hublvol and not sec1_rpc.subsystem_list(snode.hublvol.nqn):
                             logger.info("Secondary hublvol NQN missing on sec_1 %s, recreating",
                                         second_node_1.get_id())
@@ -797,9 +838,7 @@ def check_device(device_id):
 
     passed = True
     try:
-        rpc_client = RPCClient(
-            snode.mgmt_ip, snode.rpc_port,
-            snode.rpc_username, snode.rpc_password)
+        rpc_client = snode.rpc_client()
 
         if snode.enable_test_device:
             bdevs_stack = [device.nvme_bdev, device.testing_bdev, device.alceml_bdev, device.pt_bdev]
@@ -859,7 +898,7 @@ def check_remote_device(device_id, target_node=None):
             if node.get_id() == snode.get_id():
                 continue
             logger.info(f"Checking device: {device_id}")
-            rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=5, retry=1)
+            rpc_client = node.rpc_client(timeout=5, retry=1)
             name = f'remote_{device.alceml_bdev}n1'
             bdev_info = rpc_client.get_bdevs(name)
             logger.log(DEBUG if bdev_info else ERROR, f"Checking bdev: {name} ... " + ('ok' if bdev_info else 'failed'))
@@ -897,9 +936,7 @@ def check_lvol_on_node(lvol_id, node_id, node_bdev_names=None, node_lvols_nqns=N
     except KeyError:
         return False
 
-    rpc_client = RPCClient(
-        snode.mgmt_ip, snode.rpc_port,
-        snode.rpc_username, snode.rpc_password, timeout=5, retry=1)
+    rpc_client = snode.rpc_client(timeout=5, retry=1)
 
     if not node_bdev_names:
         node_bdev_names = {}
@@ -1006,9 +1043,7 @@ def check_jm_device(device_id):
 
     passed = True
     try:
-        rpc_client = RPCClient(
-            snode.mgmt_ip, snode.rpc_port,
-            snode.rpc_username, snode.rpc_password, timeout=5, retry=2)
+        rpc_client = snode.rpc_client(timeout=5, retry=2)
 
         passed &= check_bdev(jm_device.jm_bdev, rpc_client=rpc_client)
         if snode.enable_ha_jm:

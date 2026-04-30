@@ -10,13 +10,14 @@ import jsonschema
 from jsonschema.exceptions import ValidationError
 
 from simplyblock_core import utils, constants
+from simplyblock_core.settings import Settings
 from requests.adapters import HTTPAdapter
 from urllib3 import Retry
 
 logger = utils.get_logger()
 
 # Shared per-node cache for expensive read-only RPCs (e.g. bdev_get_bdevs, nvmf_get_subsystems).
-# Key: (ip_address, port, method_name), Value: (timestamp, result)
+# Key: (host, port, method_name), Value: (timestamp, result)
 _rpc_cache: dict[tuple, tuple[float, Any]] = {}
 _rpc_cache_lock = threading.Lock()
 RPC_CACHE_TTL_SEC = 15  # cached results are valid for this many seconds
@@ -94,29 +95,33 @@ class RPCClient:
     # ref: https://spdk.io/doc/jsonrpc.html
     DEFAULT_ALLOWED_METHODS = ["HEAD", "GET", "PUT", "DELETE", "OPTIONS", "TRACE", "POST"]
 
-    def __init__(self, ip_address, port, username, password, timeout=180, retry=3):
-        self.ip_address = ip_address
+    def __init__(self, host, port, username, password, timeout=180, retry=3):
+        self.host = host
         self.port = port
-        self.url = 'http://%s:%s/' % (self.ip_address, self.port)
+        settings = Settings()
+        scheme = "https" if settings.tls_enabled else "http"
+        self.url = '%s://%s:%s/' % (scheme, self.host, self.port)
         self.username = username
         self.password = password
         self.timeout = timeout
         self.session = requests.session()
+        if settings.tls_enabled:
+            self.session.verify = str(settings.certificate_authority)
         self.session.auth = (self.username, self.password)
-        self.session.verify = False
         retries = Retry(total=retry, backoff_factor=1, connect=retry, read=retry,
                         allowed_methods=self.DEFAULT_ALLOWED_METHODS)
         self.session.mount("http://", HTTPAdapter(max_retries=retries))
+        self.session.mount("https://", HTTPAdapter(max_retries=retries))
 
     def _request_cached(self, method, params=None, cache_ttl=RPC_CACHE_TTL_SEC):
         """Like _request but returns a cached result if one exists within cache_ttl seconds."""
-        cache_key = (self.ip_address, self.port, method, json.dumps(params, sort_keys=True) if params else None)
+        cache_key = (self.host, self.port, method, json.dumps(params, sort_keys=True) if params else None)
         now = time.monotonic()
         with _rpc_cache_lock:
             if cache_key in _rpc_cache:
                 ts, cached_result = _rpc_cache[cache_key]
                 if now - ts < cache_ttl:
-                    logger.debug("Cache hit for %s on %s:%s", method, self.ip_address, self.port)
+                    logger.debug("Cache hit for %s on %s:%s", method, self.host, self.port)
                     return cached_result
         result = self._request(method, params)
         if result is not None:
@@ -124,17 +129,22 @@ class RPCClient:
                 _rpc_cache[cache_key] = (now, result)
         return result
 
-    def _request(self, method, params=None):
-        ret, _ = self._request2(method, params)
+    def _request(self, method, params=None, request_timeout=None):
+        ret, _ = self._request2(method, params, request_timeout=request_timeout)
         return ret
 
-    def _request2(self, method, params=None):
+    def _request2(self, method, params=None, request_timeout=None):
         payload = {'id': 1, 'method': method}
         if params:
             payload['params'] = params
+        # Per-call override of the client-level HTTP timeout. Used by callers
+        # that must bound a single SPDK RPC tighter than ``self.timeout``
+        # (e.g. ``bdev_nvme_attach_controller`` inside the LVS rejoin freeze
+        # window, where a single attach has to land within hundreds of ms).
+        effective_timeout = request_timeout if request_timeout is not None else self.timeout
         try:
-            logger.debug("From: %s, Requesting method: %s, params: %s", self.ip_address, method, params)
-            response = self.session.post(self.url, data=json.dumps(payload), timeout=self.timeout)
+            logger.debug("From: %s, Requesting method: %s, params: %s", self.host, method, params)
+            response = self.session.post(self.url, data=json.dumps(payload), timeout=effective_timeout)
         except Exception:
             raise RPCException("connection error")
 
@@ -340,12 +350,13 @@ class RPCClient:
             params = {"name": name}
         return self._request2("bdev_nvme_get_controllers", params)
 
-    def bdev_nvme_controller_attach(self, name, pci_addr):
+    def bdev_nvme_controller_attach(self, name, pci_addr, max_bdevs=1024):
         return self._request3(
-                "bdev_nvme_attach_controller", 
+                "bdev_nvme_attach_controller",
                 name=name,
                 trtype='pcie',
                 traddr=pci_addr,
+                max_bdevs=max_bdevs,
         )
 
     def alloc_bdev_controller_attach(self, name, pci_addr):
@@ -721,10 +732,25 @@ class RPCClient:
         # ultra/DISTR_v2/src_code_app_spdk/specs/message_format_rpcs__distrib__v5.txt#L396C1-L396C27
         return self._request("distr_status_events_update", params)
 
-    def bdev_nvme_attach_controller(self, name, nqn, traddr, trsvcid, trtype, multipath=False):
+    def bdev_nvme_attach_controller(self, name, nqn, traddr, trsvcid, trtype, multipath=False,
+                                    ctrlr_loss_timeout_sec=None,
+                                    reconnect_delay_sec=None,
+                                    fast_io_fail_timeout_sec=None,
+                                    request_timeout=None):
         """Attach an NVMe-oF controller.
 
         multipath: False/"disable", True/"failover", or "multipath" (ANA-based).
+
+        ctrlr_loss_timeout_sec / reconnect_delay_sec / fast_io_fail_timeout_sec
+        tune SPDK's controller reset window. Defaults (None) leave SPDK's
+        own defaults untouched. For hublvol controllers the coordinator
+        passes higher values so a short peer blip becomes a successful
+        reset instead of a destroy→reattach cycle.
+
+        request_timeout: per-call HTTP timeout for the underlying SPDK RPC.
+        Used by the LVS rejoin to bound a single attach inside the
+        leader-port-block freeze window — a slow connect against a stale
+        listener must abort fast rather than hold IO frozen.
         """
         params = {
             "name": name,
@@ -740,7 +766,14 @@ class RPCClient:
             params["multipath"] = "failover"
         else:
             params["multipath"] = "disable"
-        return self._request("bdev_nvme_attach_controller", params)
+        if ctrlr_loss_timeout_sec is not None:
+            params["ctrlr_loss_timeout_sec"] = int(ctrlr_loss_timeout_sec)
+        if reconnect_delay_sec is not None:
+            params["reconnect_delay_sec"] = int(reconnect_delay_sec)
+        if fast_io_fail_timeout_sec is not None:
+            params["fast_io_fail_timeout_sec"] = int(fast_io_fail_timeout_sec)
+        return self._request("bdev_nvme_attach_controller", params,
+                             request_timeout=request_timeout)
 
     def bdev_split(self, base_bdev, split_count):
         params = {
@@ -794,7 +827,6 @@ class RPCClient:
         transport_retry = (
             constants.TRANSPORT_RETRY_MULTIPATH if multipath else constants.TRANSPORT_RETRY)
         params = {
-            # "action_on_timeout": "abort",
             "bdev_retry_count": bdev_retry,
             "transport_retry_count": transport_retry,
             "ctrlr_loss_timeout_sec": constants.CTRL_LOSS_TO,
@@ -803,7 +835,14 @@ class RPCClient:
             "keep_alive_timeout_ms": constants.KATO,
             "timeout_us": constants.NVME_TIMEOUT_US,
             "transport_ack_timeout": constants.ACK_TO,
-            "action_on_timeout": "abort"
+            # action_on_timeout=abort caused multi-minute IO hangs when a
+            # remote target wedged: the timeout_cb sent an NVMe abort that
+            # itself never completed against the wedged qpair, and the bdev
+            # IO sat pending until something else (keep-alive, reset on
+            # abort_cpl failure) eventually disconnected the qpair. reset
+            # tears down the qpair immediately, which fails the in-flight
+            # IOs back up to the bdev/distrib layer with a clean error.
+            "action_on_timeout": "reset"
         }
         return self._request("bdev_nvme_set_options", params)
 
@@ -1501,8 +1540,9 @@ class RPCClient:
         Args:
             name: S3 bdev name (e.g. 's3_LVS_1234')
             bucket_name: S3/MinIO bucket name to use for data storage
+        Returns (result, error) tuple.
         """
-        return self._request("bdev_s3_add_bucket_name", {
+        return self._request2("bdev_s3_add_bucket_name", {
             "name": name,
             "bucket_name": bucket_name,
         })

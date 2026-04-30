@@ -8,7 +8,6 @@ from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.rpc_client import RPCClient
 
 logger = utils.get_logger(__name__)
 
@@ -137,8 +136,7 @@ def task_runner(task):
         task.write_to_db(db.kv_store)
 
 
-    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password,
-                           timeout=5, retry=2)
+    rpc_client = snode.rpc_client(timeout=5, retry=2)
 
     # Only start migration on a node that is the leader for its primary LVS.
     # Migration IO triggers auto-leader promotion in the data plane, so
@@ -296,8 +294,7 @@ while True:
                                 if n.status != StorageNode.STATUS_ONLINE:
                                     logger.warning("Not all nodes are online, can not resume JC compression")
                                     continue
-                            rpc_client = RPCClient(
-                                node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=5, retry=2)
+                            rpc_client = node.rpc_client(timeout=5, retry=2)
                             try:
                                 ret, err = rpc_client.jc_suspend_compression(jm_vuid=node.jm_vuid, suspend=False)
                                 if err:

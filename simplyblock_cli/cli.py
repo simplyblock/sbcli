@@ -819,6 +819,7 @@ class CLIWrapper(CLIWrapperBase):
         self.init_storage_pool__get_io_stats(subparser)
         self.init_storage_pool__add_host(subparser)
         self.init_storage_pool__remove_host(subparser)
+        self.init_storage_pool__get_master_lvols(subparser)
 
 
     def init_storage_pool__add(self, subparser):
@@ -885,6 +886,10 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'remove-host', 'Remove an allowed host NQN from a storage pool.')
         subcommand.add_argument('pool_id', help='The storage pool id.', type=str)
         subcommand.add_argument('host_nqn', help='The host NQN to remove.', type=str)
+
+    def init_storage_pool__get_master_lvols(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'get-master-lvols', 'Return a list of master lvols (not namespaced lvol) from a storage pool.')
+        subcommand.add_argument('pool_id', help='The storage pool id.', type=str)
 
 
     def init_snapshot(self):
@@ -1420,6 +1425,8 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.storage_pool__add_host(sub_command, args)
                 elif sub_command in ['remove-host']:
                     ret = self.storage_pool__remove_host(sub_command, args)
+                elif sub_command in ['get-master-lvols']:
+                    ret = self.storage_pool__get_master_lvols(sub_command, args)
                 else:
                     self.parser.print_help()
 

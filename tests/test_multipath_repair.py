@@ -292,7 +292,7 @@ class TestHealthCheckMultipathIntegration(unittest.TestCase):
         return db_mock, cluster
 
     @patch("simplyblock_core.services.health_check_service.time.sleep")
-    @patch("simplyblock_core.services.health_check_service.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.services.health_check_service.storage_node_ops")
     @patch("simplyblock_core.services.health_check_service.health_controller")
     @patch("simplyblock_core.services.health_check_service.db")
@@ -352,7 +352,7 @@ class TestHealthCheckMultipathIntegration(unittest.TestCase):
         self.assertEqual(args[0][2], snode)
 
     @patch("simplyblock_core.services.health_check_service.time.sleep")
-    @patch("simplyblock_core.services.health_check_service.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.services.health_check_service.storage_node_ops")
     @patch("simplyblock_core.services.health_check_service.health_controller")
     @patch("simplyblock_core.services.health_check_service.db")
@@ -398,7 +398,7 @@ class TestHealthCheckMultipathIntegration(unittest.TestCase):
         mock_sn_ops.repair_multipath_controller.assert_not_called()
 
     @patch("simplyblock_core.services.health_check_service.time.sleep")
-    @patch("simplyblock_core.services.health_check_service.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.services.health_check_service.storage_node_ops")
     @patch("simplyblock_core.services.health_check_service.health_controller")
     @patch("simplyblock_core.services.health_check_service.db")
@@ -453,10 +453,12 @@ class TestHealthCheckMultipathIntegration(unittest.TestCase):
 class TestHublvolMultipathRepair(unittest.TestCase):
     """Test _check_sec_node_hublvol multipath path repair logic."""
 
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.controllers.health_controller.DBController")
-    @patch("simplyblock_core.controllers.health_controller.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.controllers.health_controller.check_bdev")
-    def test_repairs_missing_primary_nic_path(self, mock_check_bdev, mock_rpc_cls, mock_db_cls):
+    def test_repairs_missing_primary_nic_path(self, mock_check_bdev, mock_rpc_cls, mock_db_cls,
+                                              mock_node_rpc_cls):
         """When a primary NIC path is missing, it should be re-attached."""
         from simplyblock_core.controllers.health_controller import _check_sec_node_hublvol
 
@@ -481,9 +483,18 @@ class TestHublvolMultipathRepair(unittest.TestCase):
         mock_db_cls.return_value.get_storage_node_by_id.return_value = primary_node
         mock_db_cls.return_value.get_cluster_by_id.return_value = MagicMock(
             blk_size=4096, page_size_in_blocks=1024)
+        # Force the HublvolReconnectCoordinator down its in-process-lock
+        # path (no FDB in unit tests): kv_store=None triggers the fallback
+        # threading.Lock + module-level last_attach_at dict.
+        mock_db_cls.return_value.kv_store = None
 
         rpc = MagicMock()
         mock_rpc_cls.return_value = rpc
+        # The HublvolReconnectCoordinator acquires its rpc via
+        # node.rpc_client(), which constructs an RPCClient via the model
+        # module (not health_controller) — patch that path too so the
+        # coordinator's attach lands on the same mock we assert against.
+        mock_node_rpc_cls.return_value = rpc
 
         # Controller exists with only one path (10.0.0.50); 10.0.0.51 is missing
         controller_resp = _controller_list_response("10.0.0.50", alternate_ips=[])
@@ -512,12 +523,18 @@ class TestHublvolMultipathRepair(unittest.TestCase):
         result = _check_sec_node_hublvol(sec_node, auto_fix=True)
 
         self.assertTrue(result)
-        # Should have called attach for the missing IP 10.0.0.51
-        rpc.bdev_nvme_attach_controller.assert_called_once_with(
-            "hublvol0", "nqn.hub", "10.0.0.51", 4420, "TCP", multipath="multipath")
+        # The health repair now routes through the hublvol reconnect
+        # coordinator, which performs a single bdev_nvme_attach_controller
+        # per missing peer path with SPDK reset-window tuning kwargs. The
+        # contract pinned here: one attach, targeting the missing IP,
+        # with multipath enabled.
+        rpc.bdev_nvme_attach_controller.assert_called_once()
+        call = rpc.bdev_nvme_attach_controller.call_args
+        self.assertEqual(call.args[:5], ("hublvol0", "nqn.hub", "10.0.0.51", 4420, "TCP"))
+        self.assertEqual(call.kwargs.get("multipath"), "multipath")
 
     @patch("simplyblock_core.controllers.health_controller.DBController")
-    @patch("simplyblock_core.controllers.health_controller.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.controllers.health_controller.check_bdev")
     def test_no_repair_when_all_paths_present(self, mock_check_bdev, mock_rpc_cls, mock_db_cls):
         """When all primary NIC paths are attached, no attach call is made."""
@@ -575,10 +592,12 @@ class TestHublvolMultipathRepair(unittest.TestCase):
         self.assertTrue(result)
         rpc.bdev_nvme_attach_controller.assert_not_called()
 
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.controllers.health_controller.DBController")
-    @patch("simplyblock_core.controllers.health_controller.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.controllers.health_controller.check_bdev")
-    def test_rdma_nic_repair(self, mock_check_bdev, mock_rpc_cls, mock_db_cls):
+    def test_rdma_nic_repair(self, mock_check_bdev, mock_rpc_cls, mock_db_cls,
+                             mock_node_rpc_cls):
         """When primary uses RDMA, only RDMA NICs are considered and RDMA transport is used."""
         from simplyblock_core.controllers.health_controller import _check_sec_node_hublvol
 
@@ -607,9 +626,14 @@ class TestHublvolMultipathRepair(unittest.TestCase):
         mock_db_cls.return_value.get_storage_node_by_id.return_value = primary_node
         mock_db_cls.return_value.get_cluster_by_id.return_value = MagicMock(
             blk_size=4096, page_size_in_blocks=1024)
+        # Force the coordinator down its in-process-lock path (see other
+        # test for rationale).
+        mock_db_cls.return_value.kv_store = None
 
         rpc = MagicMock()
         mock_rpc_cls.return_value = rpc
+        # Route the coordinator's node.rpc_client() through the same mock.
+        mock_node_rpc_cls.return_value = rpc
 
         # Only first RDMA NIC attached; second RDMA NIC missing
         controller_resp = _controller_list_response("10.0.0.50", alternate_ips=[])
@@ -634,9 +658,13 @@ class TestHublvolMultipathRepair(unittest.TestCase):
         result = _check_sec_node_hublvol(sec_node, auto_fix=True)
 
         self.assertTrue(result)
-        # Only the missing RDMA IP should be re-attached, TCP NIC ignored
-        rpc.bdev_nvme_attach_controller.assert_called_once_with(
-            "hublvol0", "nqn.hub", "10.0.0.51", 4420, "RDMA", multipath="multipath")
+        # Only the missing RDMA IP should be re-attached, TCP NIC ignored.
+        # Coordinator adds SPDK timeout kwargs; pin the contract on the
+        # positional args + multipath/transport.
+        rpc.bdev_nvme_attach_controller.assert_called_once()
+        call = rpc.bdev_nvme_attach_controller.call_args
+        self.assertEqual(call.args[:5], ("hublvol0", "nqn.hub", "10.0.0.51", 4420, "RDMA"))
+        self.assertEqual(call.kwargs.get("multipath"), "multipath")
 
 
 if __name__ == "__main__":

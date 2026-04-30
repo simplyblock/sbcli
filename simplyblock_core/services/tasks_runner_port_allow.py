@@ -8,7 +8,6 @@ from simplyblock_core.fw_api_client import FirewallClient
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.rpc_client import RPCClient
 
 logger = utils.get_logger(__name__)
 
@@ -16,9 +15,19 @@ logger = utils.get_logger(__name__)
 db = db_controller.DBController()
 
 
-def _get_lvs_leader(lvs_name, candidates):
+def _get_lvs_leader(lvs_name, candidates, local_node_id=None):
+    # The recovering node is DB-marked DOWN while its own port_allow task
+    # runs, so the STATUS_ONLINE filter would skip it on the post-takeover
+    # verify and falsely report "no leader" even after SPDK accepted
+    # bdev_lvol_set_leader(True). When local_node_id is supplied, exempt
+    # that node from the filter and trust the SPDK query (is_node_leader)
+    # for it. Peers are still filtered to avoid RPC to nodes the controller
+    # already knows are unreachable.
     for candidate in candidates:
-        if not candidate or candidate.status != StorageNode.STATUS_ONLINE:
+        if not candidate:
+            continue
+        if candidate.get_id() != local_node_id and candidate.status != StorageNode.STATUS_ONLINE:
+            logger.info(f"Skipping candidate {candidate.get_id()} because status is {candidate.status}",)
             continue
         try:
             if lvol_controller.is_node_leader(candidate, lvs_name):
@@ -200,7 +209,7 @@ def exec_port_allow_task(task):
             for sec_id in sec_ids:
                 sec_node = db.get_storage_node_by_id(sec_id)
                 if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
-                    secondary_hublvol_check = health_controller._check_sec_node_hublvol(sec_node, auto_fix=True)
+                    secondary_hublvol_check = health_controller._check_sec_node_hublvol(sec_node, auto_fix=True, primary_node_id=node.get_id())
                     if not secondary_hublvol_check:
                         msg = f"Secondary node {sec_id} hublvol check fail, retry later"
                         logger.warning(msg)
@@ -246,11 +255,7 @@ def exec_port_allow_task(task):
                 tcp_ports_events.port_deny(peer, port_number)
                 time.sleep(0.5)
 
-                peer_rpc = RPCClient(
-                    peer.mgmt_ip, peer.rpc_port,
-                    peer.rpc_username, peer.rpc_password,
-                    timeout=0.2, retry=0,
-                )
+                peer_rpc = peer.rpc_client(timeout=0.2, retry=0)
                 try:
                     peer_rpc.bdev_lvol_set_leader(node.lvstore, leader=False, bs_nonleadership=True)
                     peer_rpc.bdev_distrib_force_to_non_leader(node.jm_vuid)
@@ -268,15 +273,14 @@ def exec_port_allow_task(task):
                     task.write_to_db(db.kv_store)
                     return
 
-                logger.info("Draining inflight IO on peer leader %s for %s",
-                            peer.get_id(), node.lvstore)
-                for _ in range(100):
-                    try:
-                        if not peer_rpc.bdev_distrib_check_inflight_io(node.jm_vuid):
-                            break
-                    except Exception:
-                        break
-                    time.sleep(0.1)
+                # Fixed 0.5s quiesce window instead of polling
+                # bdev_distrib_check_inflight_io. Distrib-inflight includes
+                # data-migration IO that the port block does not pause, so
+                # the poll can hold clients blocked beyond their latency
+                # budget. Migration IO does not touch lvstore metadata, so
+                # a short fixed wait is sufficient for the examine to see
+                # a consistent superblock.
+                time.sleep(0.5)
                 secs_to_unblock.append(peer)
                 # Fall through to the local take-leadership path below.
                 current_leader = None
@@ -291,7 +295,7 @@ def exec_port_allow_task(task):
                     role="primary"
                 )
                 node.rpc_client().bdev_lvol_set_leader(node.lvstore, leader=True)
-                current_leader = _get_lvs_leader(node.lvstore, [node])
+                current_leader = _get_lvs_leader(node.lvstore, [node], local_node_id=node.get_id())
                 if not current_leader:
                     msg = f"No leader available for {node.lvstore}, retry task"
                     logger.warning(msg)
@@ -327,18 +331,9 @@ def exec_port_allow_task(task):
 
                 sn_rpc.bdev_lvol_set_leader(node.lvstore, leader=False, bs_nonleadership=True)
                 sn_rpc.bdev_distrib_force_to_non_leader(node.jm_vuid)
-                logger.info(f"Checking for inflight IO from node: {sn.get_id()}")
-                for i in range(100):
-                    is_inflight = sn_rpc.bdev_distrib_check_inflight_io(node.jm_vuid)
-                    if is_inflight:
-                        logger.info("Inflight IO found, retry in 100ms")
-                        time.sleep(0.1)
-                    else:
-                        logger.info("Inflight IO NOT found, continuing")
-                        break
-                else:
-                    logger.error(
-                        f"Timeout while checking for inflight IO after 10 seconds on node {sn.get_id()}")
+                # Fixed 0.5s quiesce (see above): draining distrib-inflight
+                # would wait out migration IO and breach client latency.
+                time.sleep(0.5)
 
                 secs_to_unblock.append(sn)
 

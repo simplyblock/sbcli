@@ -15,7 +15,7 @@ from simplyblock_core.models.backup import Backup
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.rpc_client import RPCClient, RPCException
+from simplyblock_core.rpc_client import RPCException
 
 logger = utils.get_logger(__name__)
 
@@ -66,9 +66,7 @@ def _run_backup(task):
         task.write_to_db(db.kv_store)
         return
 
-    rpc_client = RPCClient(
-        snode.mgmt_ip, snode.rpc_port,
-        snode.rpc_username, snode.rpc_password, timeout=30)
+    rpc_client = snode.rpc_client(timeout=30)
 
     # Resolve snapshot bdev name (needed for both kick-off and polling)
     try:
@@ -154,6 +152,22 @@ def _set_lvol_online(task):
         logger.warning(f"Restored lvol {lvol_id} not found in DB")
 
 
+def _set_lvol_restore_failed(task, reason):
+    """Mark restored lvol as restore_failed after exhausting all retries."""
+    lvol_id = task.function_params.get("lvol_id")
+    if not lvol_id:
+        return
+    try:
+        from simplyblock_core.models.lvol_model import LVol
+        lvol = db.get_lvol_by_id(lvol_id)
+        if lvol.status == LVol.STATUS_RESTORING:
+            lvol.status = LVol.STATUS_RESTORE_FAILED
+            lvol.write_to_db()
+            logger.error(f"Restore of lvol {lvol_id} failed: {reason}")
+    except KeyError:
+        logger.warning(f"Restored lvol {lvol_id} not found in DB")
+
+
 def _run_restore(task):
     backup_id = task.function_params.get("backup_id")
     lvol_name = task.function_params.get("lvol_name")
@@ -175,9 +189,7 @@ def _run_restore(task):
         task.write_to_db(db.kv_store)
         return
 
-    rpc_client = RPCClient(
-        snode.mgmt_ip, snode.rpc_port,
-        snode.rpc_username, snode.rpc_password, timeout=30)
+    rpc_client = snode.rpc_client(timeout=30)
 
     # Check that the target lvol still exists in DB before doing any RPC work
     lvol_id = task.function_params.get("lvol_id")
@@ -244,8 +256,18 @@ def _run_restore(task):
         elif state == "Failed":
             fail_count = task.function_params.get("fail_count", 0) + 1
             task.function_params["fail_count"] = fail_count
-            task.function_result = f"Restore failed on data plane (attempt {fail_count})"
+            reason = f"S3 transfer failed on data plane (attempt {fail_count})"
+            task.function_result = reason
             if fail_count >= 3:
+                _set_lvol_restore_failed(task, reason)
+                try:
+                    backup = db.get_backup_by_id(backup_id)
+                    backup_events.backup_restore_failed(
+                        task.cluster_id, node_id, backup, lvol_name, reason)
+                except KeyError:
+                    logger.warning(
+                        "Backup %s not found in DB; restore-failed event skipped for lvol %s",
+                        backup_id, lvol_name)
                 task.status = JobSchedule.STATUS_DONE
             else:
                 task.retry += 1
@@ -296,9 +318,7 @@ def _run_merge(task):
         task.write_to_db(db.kv_store)
         return
 
-    rpc_client = RPCClient(
-        snode.mgmt_ip, snode.rpc_port,
-        snode.rpc_username, snode.rpc_password, timeout=30)
+    rpc_client = snode.rpc_client(timeout=30)
 
     if not merge_started:
         try:

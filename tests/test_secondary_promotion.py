@@ -179,7 +179,7 @@ class TestSecondaryPromotion(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.storage_events")
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
     @patch("simplyblock_core.storage_node_ops.FirewallClient")
-    @patch("simplyblock_core.storage_node_ops.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._connect_to_remote_jm_devs")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack", return_value=(True, None))
     @patch("simplyblock_core.storage_node_ops.DBController")
@@ -231,6 +231,7 @@ class TestSecondaryPromotion(unittest.TestCase):
         for n in [secondary, tertiary, primary]:
             n.rpc_client = MagicMock(return_value=mock_rpc)
             n.create_hublvol = MagicMock()
+            n.adopt_hublvol = MagicMock()
             n.create_secondary_hublvol = MagicMock()
             n.recreate_hublvol = MagicMock()
             n.connect_to_hublvol = MagicMock()
@@ -249,15 +250,24 @@ class TestSecondaryPromotion(unittest.TestCase):
         # Should have called set_leader with leader=True
         mock_rpc.bdev_lvol_set_leader.assert_called_with("LVS_100", leader=True)
 
-        # In takeover, snode creates a primary hublvol (it's becoming leader)
-        secondary.create_hublvol.assert_called_once()
+        # In takeover, snode adopts the offline primary's hublvol under the
+        # original primary's lvstore name/NQN/port (same-name invariant) —
+        # NOT create_hublvol on self's own primary.
+        secondary.adopt_hublvol.assert_called_once()
+        secondary.create_hublvol.assert_not_called()
+        # Adoption must pass the offline primary node (so lvs_node.lvstore
+        # drives the bdev name, keeping the primary→takeover hublvol name
+        # identical).
+        adopt_args = secondary.adopt_hublvol.call_args
+        adopted_peer = adopt_args.args[0] if adopt_args.args else adopt_args.kwargs.get("lvs_node")
+        self.assertIs(adopted_peer, primary)
 
     @patch("simplyblock_core.storage_node_ops._check_peer_disconnected", return_value=False)
     @patch("simplyblock_core.storage_node_ops._set_restart_phase")
     @patch("simplyblock_core.storage_node_ops._handle_rpc_failure_on_peer", return_value="skip")
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
     @patch("simplyblock_core.storage_node_ops.FirewallClient")
-    @patch("simplyblock_core.storage_node_ops.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack", return_value=(True, None))
     @patch("simplyblock_core.storage_node_ops.DBController")
     def test_no_promotion_when_primary_online(
@@ -320,7 +330,7 @@ class TestSecondaryPromotion(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops._handle_rpc_failure_on_peer", return_value="skip")
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
     @patch("simplyblock_core.storage_node_ops.FirewallClient")
-    @patch("simplyblock_core.storage_node_ops.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack", return_value=(True, None))
     @patch("simplyblock_core.storage_node_ops.DBController")
     def test_always_creates_secondary_hublvol_on_sec1(
@@ -391,7 +401,7 @@ class TestPrimaryEscalation(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.storage_events")
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
     @patch("simplyblock_core.storage_node_ops.FirewallClient")
-    @patch("simplyblock_core.storage_node_ops.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._connect_to_remote_jm_devs")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack", return_value=(True, None))
     @patch("simplyblock_core.storage_node_ops.DBController")

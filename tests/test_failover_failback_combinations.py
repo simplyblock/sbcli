@@ -249,7 +249,7 @@ class TestAnaFailover(unittest.TestCase):
 
     def _run_failover(self, nodes, offline_node_key, lvols):
         with patch("simplyblock_core.storage_node_ops.DBController") as mock_db_cls, \
-             patch("simplyblock_core.storage_node_ops.RPCClient") as mock_rpc_cls:
+             patch("simplyblock_core.models.storage_node.RPCClient") as mock_rpc_cls:
             db = _make_db_mock(nodes, lvols)
             mock_db_cls.return_value = db
             rpc = _mock_rpc()
@@ -333,7 +333,7 @@ class TestAnaFailback(unittest.TestCase):
 
     def _run_failback(self, nodes, restarting_node_key, lvols):
         with patch("simplyblock_core.storage_node_ops.DBController") as mock_db_cls, \
-             patch("simplyblock_core.storage_node_ops.RPCClient") as mock_rpc_cls:
+             patch("simplyblock_core.models.storage_node.RPCClient") as mock_rpc_cls:
             db = _make_db_mock(nodes, lvols)
             mock_db_cls.return_value = db
             rpc = _mock_rpc()
@@ -405,7 +405,7 @@ _RECREATE_PATCHES = [
     "simplyblock_core.storage_node_ops.storage_events",
     "simplyblock_core.storage_node_ops.tasks_controller",
     "simplyblock_core.storage_node_ops.FirewallClient",
-    "simplyblock_core.storage_node_ops.RPCClient",
+    "simplyblock_core.models.storage_node.RPCClient",
     "simplyblock_core.storage_node_ops._connect_to_remote_jm_devs",
     "simplyblock_core.storage_node_ops._create_bdev_stack",
     "simplyblock_core.storage_node_ops.DBController",
@@ -465,8 +465,11 @@ class TestRecreateLvstoreFTT1(unittest.TestCase):
         self.assertGreaterEqual(len(force_calls), 2,
                                 "force_to_non_leader on secondary + primary self")
 
-        # Verify inflight IO check on secondary
-        rpc.bdev_distrib_check_inflight_io.assert_called()
+        # The former bdev_distrib_check_inflight_io drain poll on the
+        # secondary was replaced with a fixed 0.5s quiesce (see
+        # storage_node_ops.py). Migration IO kept distrib-inflight non-zero
+        # through the whole port-block window and breached client latency,
+        # so we no longer poll it.
 
 
 class TestRecreateLvstoreFTT2(unittest.TestCase):
@@ -481,7 +484,7 @@ class TestRecreateLvstoreFTT2(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.storage_events")
     @patch("simplyblock_core.storage_node_ops.tasks_controller")
     @patch("simplyblock_core.storage_node_ops.FirewallClient")
-    @patch("simplyblock_core.storage_node_ops.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._connect_to_remote_jm_devs")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
@@ -528,7 +531,7 @@ class TestRecreateLvstoreFTT2(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.storage_events")
     @patch("simplyblock_core.storage_node_ops.tasks_controller")
     @patch("simplyblock_core.storage_node_ops.FirewallClient")
-    @patch("simplyblock_core.storage_node_ops.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._connect_to_remote_jm_devs")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
@@ -579,7 +582,7 @@ class TestRecreateLvstoreOnSecPrimaryOnline(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.storage_events")
     @patch("simplyblock_core.storage_node_ops.tasks_controller")
     @patch("simplyblock_core.storage_node_ops.FirewallClient")
-    @patch("simplyblock_core.storage_node_ops.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
     def test_primary_online_port_blocked_drain_io_no_leadership_drop(
@@ -625,8 +628,8 @@ class TestRecreateLvstoreOnSecPrimaryOnline(unittest.TestCase):
         self.assertEqual(len(leader_set_leader_calls), 0,
                          "Non-leader restart must not drop leadership on current leader")
 
-        # Inflight IO check must be called (drain only)
-        rpc.bdev_distrib_check_inflight_io.assert_any_call(primary.jm_vuid)
+        # The former bdev_distrib_check_inflight_io drain was replaced with
+        # a fixed 0.5s quiesce; see storage_node_ops.py.
 
 
 class TestRecreateLvstoreOnSecPrimaryOffline(unittest.TestCase):
@@ -640,7 +643,7 @@ class TestRecreateLvstoreOnSecPrimaryOffline(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.storage_events")
     @patch("simplyblock_core.storage_node_ops.tasks_controller")
     @patch("simplyblock_core.storage_node_ops.FirewallClient")
-    @patch("simplyblock_core.storage_node_ops.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
     @patch("simplyblock_core.storage_node_ops.health_controller")
@@ -696,8 +699,8 @@ class TestRecreateLvstoreOnSecPrimaryOffline(unittest.TestCase):
         self.assertEqual(len(leader_set_leader_calls), 0,
                          "Non-leader restart must not drop leadership on current leader")
 
-        # Inflight IO check on leader (drain only, no demotion)
-        rpc.bdev_distrib_check_inflight_io.assert_any_call(nodes["node-1"].jm_vuid)
+        # The former bdev_distrib_check_inflight_io drain was replaced with
+        # a fixed 0.5s quiesce; see storage_node_ops.py.
 
     @patch("simplyblock_core.storage_node_ops._check_peer_disconnected", side_effect=lambda peer, **kw: peer.status in ["offline"])
     @patch("simplyblock_core.storage_node_ops._set_restart_phase")
@@ -706,7 +709,7 @@ class TestRecreateLvstoreOnSecPrimaryOffline(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.storage_events")
     @patch("simplyblock_core.storage_node_ops.tasks_controller")
     @patch("simplyblock_core.storage_node_ops.FirewallClient")
-    @patch("simplyblock_core.storage_node_ops.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
     @patch("simplyblock_core.storage_node_ops.health_controller")
@@ -771,7 +774,7 @@ class TestRecreateLvstoreOnSecPrimaryOffline(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.storage_events")
     @patch("simplyblock_core.storage_node_ops.tasks_controller")
     @patch("simplyblock_core.storage_node_ops.FirewallClient")
-    @patch("simplyblock_core.storage_node_ops.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
     def test_second_sec_restarts_primary_offline_no_failback_on_first_sec_for_that_group(
@@ -834,7 +837,7 @@ class TestRecreateLvstoreOnSecANAFailback(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.storage_events")
     @patch("simplyblock_core.storage_node_ops.tasks_controller")
     @patch("simplyblock_core.storage_node_ops.FirewallClient")
-    @patch("simplyblock_core.storage_node_ops.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
     @patch("simplyblock_core.storage_node_ops.health_controller")
@@ -890,7 +893,7 @@ class TestSequentialFailbackScenario(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.storage_events")
     @patch("simplyblock_core.storage_node_ops.tasks_controller")
     @patch("simplyblock_core.storage_node_ops.FirewallClient")
-    @patch("simplyblock_core.storage_node_ops.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._connect_to_remote_jm_devs")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
@@ -983,12 +986,14 @@ class TestPortAllowTask(unittest.TestCase):
             return f.read()
 
     def test_port_allow_code_has_force_to_non_leader(self):
-        """Verify the fixed code calls force_to_non_leader and check_inflight_io."""
+        """Verify the fixed code calls force_to_non_leader and still has a quiesce step."""
         src = self._read_source()
         self.assertIn("bdev_distrib_force_to_non_leader", src,
                        "exec_port_allow_task must call force_to_non_leader")
-        self.assertIn("bdev_distrib_check_inflight_io", src,
-                       "exec_port_allow_task must call check_inflight_io")
+        # The former bdev_distrib_check_inflight_io poll was replaced with
+        # a fixed 0.5s quiesce window. Just verify a quiesce still exists.
+        self.assertIn("time.sleep(0.5)", src,
+                       "exec_port_allow_task must keep a quiesce window")
         self.assertIn("secs_to_unblock", src,
                        "exec_port_allow_task must track secondaries to unblock")
 
@@ -1134,7 +1139,7 @@ class TestRecreateLvstoreNonLeaderLvolMismatch(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.set_node_status")
     @patch("simplyblock_core.storage_node_ops.SNodeClient")
     @patch("simplyblock_core.storage_node_ops.FirewallClient")
-    @patch("simplyblock_core.storage_node_ops.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
     def test_missing_lvol_bdev_aborts_when_not_force(
@@ -1166,7 +1171,7 @@ class TestRecreateLvstoreNonLeaderLvolMismatch(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.set_node_status")
     @patch("simplyblock_core.storage_node_ops.SNodeClient")
     @patch("simplyblock_core.storage_node_ops.FirewallClient")
-    @patch("simplyblock_core.storage_node_ops.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
     def test_missing_lvol_bdev_succeeds_with_force(
@@ -1194,7 +1199,7 @@ class TestRecreateLvstoreNonLeaderLvolMismatch(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.set_node_status")
     @patch("simplyblock_core.storage_node_ops.SNodeClient")
     @patch("simplyblock_core.storage_node_ops.FirewallClient")
-    @patch("simplyblock_core.storage_node_ops.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
     def test_lvol_present_passes(
@@ -1259,15 +1264,24 @@ class TestRecreateLvstoreNonLeaderPortBlockFailure(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.set_node_status")
     @patch("simplyblock_core.storage_node_ops.SNodeClient")
     @patch("simplyblock_core.storage_node_ops.FirewallClient")
-    @patch("simplyblock_core.storage_node_ops.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
     def test_block_fails_all_attempts_aborts_without_force(
             self, mock_db_cls, mock_create_bdev, mock_rpc_cls, mock_fw_cls,
             mock_snode_client, mock_set_status, mock_tasks, mock_tcp_events,
             mock_storage_events, _mock_disc, _mock_phase, _mock_handle, _mock_sleep):
-        """All 5 port-block attempts fail → restart aborts, leader kept
-        untouched, node goes offline. No continuing with an unblocked leader."""
+        """All port-block attempts fail → restart aborts, leader kept
+        untouched, node goes offline. No continuing with an unblocked leader.
+
+        The attempt budget was tightened from 5 to 3 (PR #996) — an aborted
+        iteration now costs ~15 s instead of ~140 s, giving the outer retry
+        loop more chances to re-evaluate _check_peer_disconnected after
+        NVMe-TCP keep-alive propagates. The FDB-status short-circuit in
+        _check_peer_disconnected should route dead-mgmt peers to takeover
+        before we ever reach this code; the reduced budget protects the
+        remaining fabric-partition-while-mgmt-reachable case.
+        """
         secondary, primary, _rpc, fw = self._setup(
             mock_rpc_cls, mock_db_cls, mock_create_bdev, mock_fw_cls,
             fw_set_port_side_effect=ConnectionRefusedError("Connection refused"),
@@ -1277,8 +1291,8 @@ class TestRecreateLvstoreNonLeaderPortBlockFailure(unittest.TestCase):
             recreate_lvstore_on_non_leader(
                 secondary, leader_node=primary, primary_node=primary, force=False)
         self.assertIn("Failed to block leader", str(cm.exception))
-        # All 5 attempts must have been tried
-        self.assertEqual(fw.firewall_set_port.call_count, 5)
+        # All 3 attempts must have been tried
+        self.assertEqual(fw.firewall_set_port.call_count, 3)
         # Abort path sets the restarting node offline
         mock_set_status.assert_any_call(secondary.get_id(), StorageNode.STATUS_OFFLINE)
 
@@ -1293,15 +1307,16 @@ class TestRecreateLvstoreNonLeaderPortBlockFailure(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.set_node_status")
     @patch("simplyblock_core.storage_node_ops.SNodeClient")
     @patch("simplyblock_core.storage_node_ops.FirewallClient")
-    @patch("simplyblock_core.storage_node_ops.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
     def test_block_fails_all_attempts_proceeds_with_force(
             self, mock_db_cls, mock_create_bdev, mock_rpc_cls, mock_fw_cls,
             mock_snode_client, mock_set_status, mock_tasks, mock_tcp_events,
             mock_storage_events, _mock_disc, _mock_phase, _mock_handle, _mock_sleep):
-        """With force=True, 5 failed block attempts don't abort — restart
-        proceeds despite the race risk (operator explicit choice)."""
+        """With force=True, all failed block attempts don't abort — restart
+        proceeds despite the race risk (operator explicit choice). Attempt
+        count was tightened from 5 to 3 (PR #996)."""
         secondary, primary, _rpc, fw = self._setup(
             mock_rpc_cls, mock_db_cls, mock_create_bdev, mock_fw_cls,
             fw_set_port_side_effect=ConnectionRefusedError("Connection refused"),
@@ -1313,7 +1328,7 @@ class TestRecreateLvstoreNonLeaderPortBlockFailure(unittest.TestCase):
         result = recreate_lvstore_on_non_leader(
             secondary, leader_node=primary, primary_node=primary, force=True)
         self.assertTrue(result)
-        self.assertEqual(fw.firewall_set_port.call_count, 5)
+        self.assertEqual(fw.firewall_set_port.call_count, 3)
 
     @patch("simplyblock_core.storage_node_ops.time.sleep", return_value=None)
     @patch("simplyblock_core.storage_node_ops._check_peer_disconnected",
@@ -1326,7 +1341,7 @@ class TestRecreateLvstoreNonLeaderPortBlockFailure(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.set_node_status")
     @patch("simplyblock_core.storage_node_ops.SNodeClient")
     @patch("simplyblock_core.storage_node_ops.FirewallClient")
-    @patch("simplyblock_core.storage_node_ops.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
     def test_block_succeeds_on_retry(
