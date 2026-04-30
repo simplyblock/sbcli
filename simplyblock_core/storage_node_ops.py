@@ -656,12 +656,22 @@ def _create_storage_device_stack(rpc_client, nvme, snode, after_restart):
 
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
 
+    checksum_method, cache_size, cache_eviction_threshold = utils.alceml_checksum_params(cluster, nvme)
+    if cluster.inline_checksum and not nvme.md_supported:
+        logger.warning(
+            f"Inline checksum: device {nvme.get_id()} ({nvme.pcie_address}) has no NVMe metadata; "
+            f"alceml will run in fallback mode (extra md page, ~1.17%% capacity overhead)."
+        )
+
     ret = snode.create_alceml(
         alceml_name, nvme_bdev, alceml_id,
         pba_init_mode=1 if (after_restart and nvme.status != NVMeDevice.STATUS_NEW) else 3,
         write_protection=cluster.distr_ndcs > 1,
         pba_page_size=cluster.page_size_in_blocks,
-        full_page_unmap=cluster.full_page_unmap
+        full_page_unmap=cluster.full_page_unmap,
+        checksum_method=checksum_method,
+        cache_size=cache_size,
+        cache_eviction_threshold=cache_eviction_threshold,
     )
 
     if not ret:
@@ -1940,7 +1950,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         # logger.info("Done")
 
         logger.info("Setting node status to Active")
-        set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE, reconnect_on_online=False)
+        set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE, caused_by="add_node")
 
         for dev in snode.nvme_devices:
             if dev.status == NVMeDevice.STATUS_ONLINE:
@@ -2143,22 +2153,47 @@ def restart_storage_node(
     except Exception:
         logger.exception("restart_storage_node raised unexpectedly")
     finally:
-        skip_cleanup_pre = (
-            StorageNode.STATUS_RESTARTING,
-            StorageNode.STATUS_IN_SHUTDOWN,
-            None,
-        )
-        if not result and pre_status not in skip_cleanup_pre:
-            try:
-                post_node = db_ctrl.get_storage_node_by_id(node_id)
-                if post_node.status == StorageNode.STATUS_RESTARTING:
-                    logger.warning(
-                        f"Restart of {node_id} failed; resetting from "
-                        f"RESTARTING → OFFLINE to unblock future attempts"
-                    )
-                    set_node_status(node_id, StorageNode.STATUS_OFFLINE)
-            except Exception as cleanup_exc:
-                logger.error(f"Failed to reset node {node_id} after failed restart: {cleanup_exc}")
+        # Trust the DB. If the impl raised after the ONLINE write was
+        # already committed, the node IS factually online — peers see
+        # ONLINE, IO is being served — and the only thing that "failed"
+        # was a post-flip side-effect that bubbled an exception. Treating
+        # that as failure caused the iteration-77 hang where the script
+        # spent 8 minutes retrying restarts of an already-online node.
+        try:
+            post_node = db_ctrl.get_storage_node_by_id(node_id)
+            if not result and post_node.status == StorageNode.STATUS_ONLINE:
+                logger.warning(
+                    f"Restart of {node_id} returned False but DB shows ONLINE; "
+                    f"trusting the DB and treating as success."
+                )
+                result = True
+            elif not result and pre_status not in (StorageNode.STATUS_RESTARTING,
+                                                    StorageNode.STATUS_IN_SHUTDOWN,
+                                                    None):
+                # We owned the lock (pre_status was OFFLINE / DOWN / etc.),
+                # the impl failed before reaching the ONLINE flip. Reset to
+                # OFFLINE regardless of current status — a failed restart
+                # can leave RESTARTING, but it can also leave intermediate
+                # states; OFFLINE is the only safe wedge-free landing for
+                # the next retry.
+                logger.warning(
+                    f"Restart of {node_id} failed (post-status={post_node.status}); "
+                    f"resetting to OFFLINE to unblock future attempts"
+                )
+                # Force the OFFLINE write — bypass the state-machine guard
+                # in set_node_status (which only restricts ONLINE writes
+                # anyway, but we use a direct write here to avoid any
+                # second-order effects from the helper).
+                post_node.status = StorageNode.STATUS_OFFLINE
+                post_node.updated_at = str(datetime.datetime.now(datetime.timezone.utc))
+                post_node.online_since = ""
+                post_node.write_to_db(db_ctrl.kv_store)
+                storage_events.snode_status_change(
+                    post_node, StorageNode.STATUS_OFFLINE, post_node.status,
+                    caused_by="restart_cleanup")
+                distr_controller.send_node_status_event(post_node, StorageNode.STATUS_OFFLINE)
+        except Exception as cleanup_exc:
+            logger.error(f"Failed to reset node {node_id} after failed restart: {cleanup_exc}")
     return result
 
 
@@ -2556,6 +2591,9 @@ def _restart_storage_node_impl(
                 db_dev.nvme_bdev = found_dev.nvme_bdev
                 db_dev.nvme_controller = found_dev.nvme_controller
                 db_dev.pcie_address = found_dev.pcie_address
+            # Refresh md detection so a re-format between restarts is reflected
+            db_dev.md_size = found_dev.md_size
+            db_dev.md_supported = found_dev.md_supported
 
             # if db_dev.status in [ NVMeDevice.STATUS_ONLINE]:
             #     db_dev.status = NVMeDevice.STATUS_UNAVAILABLE
@@ -2678,7 +2716,7 @@ def _restart_storage_node_impl(
 
         logger.info("Cluster is not ready yet")
         logger.info("Setting node status to Online")
-        set_node_status(node_id, StorageNode.STATUS_ONLINE, reconnect_on_online=False)
+        set_node_status(node_id, StorageNode.STATUS_ONLINE, caused_by="restart")
         _refresh_cluster_maps_after_node_recovery(snode)
 
         online_devices_list = []
@@ -2776,7 +2814,7 @@ def _restart_storage_node_impl(
             logger.error("ANA failback during restart of %s failed: %s", snode.get_id(), ana_e)
 
         logger.info("Setting node status to Online")
-        set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE)
+        set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE, caused_by="restart")
 
         logger.info("Sending device status event")
         snode = db_controller.get_storage_node_by_id(snode.get_id())
@@ -3446,7 +3484,7 @@ def resume_storage_node(node_id):
         return False
 
     logger.info("Setting node status to online")
-    set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE)
+    set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE, caused_by="resume")
     logger.info("Done")
     return True
 
@@ -3644,7 +3682,7 @@ def upgrade_automated_deployment_config():
 
 def generate_automated_deployment_config(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_allowed, pci_blocked,
                                          cores_percentage=0, force=False, device_model="", size_range="", nvme_names=None, k8s=False,
-                                         calculate_hp_only=False, number_of_devices=0):
+                                         calculate_hp_only=False, number_of_devices=0, inline_checksum=False):
     if calculate_hp_only:
         minimum_hp_memory = utils.calculate_hp_only(max_lvol, number_of_devices, sockets_to_use, nodes_per_socket, cores_percentage)
         hp_number = math.ceil(minimum_hp_memory / 2)
@@ -3662,7 +3700,8 @@ def generate_automated_deployment_config(max_lvol, max_prov, sockets_to_use, nod
 
         nodes_config, system_info = utils.generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket,
                                                            pci_allowed, pci_blocked, cores_percentage, force=force,
-                                                           device_model=device_model, size_range=size_range, nvme_names=nvme_names)
+                                                           device_model=device_model, size_range=size_range, nvme_names=nvme_names,
+                                                           inline_checksum=inline_checksum)
         if not nodes_config or not nodes_config.get("nodes"):
             return False
         utils.store_config_file(nodes_config, constants.NODES_CONFIG_FILE, create_read_only_file=True)
@@ -3940,90 +3979,64 @@ def get(node_id):
     return json.dumps(data, indent=2, sort_keys=True)
 
 
-def set_node_status(node_id, status, reconnect_on_online=True):
+# States from which a node may legally transition INTO STATUS_ONLINE.
+# Going online is the most consequential write in the state machine: it
+# tells peers the node is serving IO. To prevent stale paths (e.g. the
+# monitor briefly losing then regaining health checks) from re-flipping
+# a half-broken node to ONLINE, the only legal predecessors are the
+# transient "active operation in progress" states. Anything else is an
+# illegal transition and rejected.
+_ALLOWED_PRE_STATUSES_FOR_ONLINE = (
+    StorageNode.STATUS_RESTARTING,
+    StorageNode.STATUS_IN_CREATION,
+    StorageNode.STATUS_SUSPENDED,
+)
+
+
+def set_node_status(node_id, status, caused_by="monitor"):
+    """Write a status transition for the node. Pure bookkeeping: emits
+    the event, broadcasts to peers, and (on ONLINE) cancels any pending
+    auto-restart tasks for this node. Does NOT do peer connects, hublvol
+    wiring, or device-event broadcasts — those are the caller's job
+    (the restart impl, resume_storage_node, etc. all already do them
+    before calling this function)."""
+    from simplyblock_core.controllers import tasks_controller
+
     db_controller = DBController()
     snode = db_controller.get_storage_node_by_id(node_id)
-    if snode.status != status:
-        old_status = snode.status
-        snode.status = status
-        snode.updated_at = str(datetime.datetime.now(datetime.timezone.utc))
-        if status == StorageNode.STATUS_ONLINE:
-            snode.online_since = str(datetime.datetime.now(datetime.timezone.utc))
-        else:
-            snode.online_since = ""
-        snode.write_to_db(db_controller.kv_store)
-        storage_events.snode_status_change(snode, snode.status, old_status, caused_by="monitor")
-        distr_controller.send_node_status_event(snode, status)
+    if snode.status == status:
+        return True
 
-    if snode.status == StorageNode.STATUS_ONLINE and reconnect_on_online:
-        snode = db_controller.get_storage_node_by_id(node_id)
-        logger.info("Connecting to remote devices")
+    if status == StorageNode.STATUS_ONLINE and snode.status not in _ALLOWED_PRE_STATUSES_FOR_ONLINE:
+        # Hard reject: ONLINE may only be reached from RESTARTING (restart
+        # path), IN_CREATION (add_node path), or SUSPENDED (resume path).
+        # Other paths must route through one of those states first.
+        logger.error(
+            f"Refusing illegal status transition for {node_id}: "
+            f"{snode.status} -> ONLINE. Only {_ALLOWED_PRE_STATUSES_FOR_ONLINE} -> ONLINE is allowed."
+        )
+        return False
+
+    old_status = snode.status
+    snode.status = status
+    snode.updated_at = str(datetime.datetime.now(datetime.timezone.utc))
+    if status == StorageNode.STATUS_ONLINE:
+        snode.online_since = str(datetime.datetime.now(datetime.timezone.utc))
+    else:
+        snode.online_since = ""
+    snode.write_to_db(db_controller.kv_store)
+    storage_events.snode_status_change(snode, snode.status, old_status, caused_by=caused_by)
+    distr_controller.send_node_status_event(snode, status)
+
+    if status == StorageNode.STATUS_ONLINE:
+        # The node is back online; obsolete auto-restart tasks must not
+        # linger in the queue, or the dedup guard in
+        # _validate_new_task_node_restart blocks every subsequent restart
+        # attempt until the task runner happens to pick the orphan up.
         try:
-            snode.remote_devices = _connect_to_remote_devs(snode)
-        except RuntimeError:
-            logger.error('Failed to connect to remote devices')
-            return False
-        if snode.enable_ha_jm:
-            snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
-        snode.write_to_db(db_controller.kv_store)
-
-        # Send device status events to update peers on device availability
-        for db_dev in snode.nvme_devices:
-            distr_controller.send_dev_status_event(db_dev, db_dev.status)
-
-        for node in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
-            if node.get_id() == snode.get_id():
-                continue
-            if node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
-                try:
-                    node = db_controller.get_storage_node_by_id(node.get_id())
-                    node.remote_devices = _connect_to_remote_devs(node)
-                    node.write_to_db()
-                except RuntimeError:
-                    logger.error(f'Failed to connect to remote devices from node: {node.get_id()}')
-                    continue
-
-        cluster = db_controller.get_cluster_by_id(snode.cluster_id)
-        if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
-            for sec_id, sec_role in [(snode.secondary_node_id, "secondary"), (snode.tertiary_node_id, "tertiary")]:
-                if not sec_id:
-                    continue
-                sec_node = db_controller.get_storage_node_by_id(sec_id)
-                if sec_node and snode.lvstore_status == "ready":
-                    if sec_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
-                        try:
-                            failover_node = None
-                            if sec_role == "tertiary" and snode.secondary_node_id:
-                                try:
-                                    sec1 = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-                                    if sec1.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
-                                        failover_node = sec1
-                                except KeyError:
-                                    pass
-                            sec_node.connect_to_hublvol(snode, failover_node=failover_node, role=sec_role)
-                        except Exception as e:
-                            logger.error("Error establishing hublvol: %s", e)
-
-            for sec_attr in ['lvstore_stack_secondary', 'lvstore_stack_tertiary']:
-                primary_id = getattr(snode, sec_attr, None)
-                if not primary_id:
-                    continue
-                primary_node = db_controller.get_storage_node_by_id(primary_id)
-                if primary_node and primary_node.lvstore_status == "ready":
-                    if primary_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
-                        try:
-                            failover_node = None
-                            if sec_attr == 'lvstore_stack_tertiary' and primary_node.secondary_node_id:
-                                try:
-                                    sec1 = db_controller.get_storage_node_by_id(primary_node.secondary_node_id)
-                                    if sec1.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
-                                        failover_node = sec1
-                                except KeyError:
-                                    pass
-                            sec_role = "tertiary" if sec_attr == 'lvstore_stack_tertiary' else "secondary"
-                            snode.connect_to_hublvol(primary_node, failover_node=failover_node, role=sec_role)
-                        except Exception as e:
-                            logger.error("Error establishing hublvol: %s", e)
+            tasks_controller.cancel_pending_node_restart_tasks(snode.cluster_id, node_id)
+        except Exception as e:
+            logger.error(f"Failed to cancel pending node_restart tasks for {node_id}: {e}")
 
     return True
 
