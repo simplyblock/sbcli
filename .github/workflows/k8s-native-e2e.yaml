@@ -117,6 +117,7 @@ on:
 jobs:
   stress-test:
     runs-on: ${{ github.event.inputs.cluster_environment == 'aws-openshift' && 'vm-runner-43' || 'self-hosted' }}
+    timeout-minutes: 4320
     concurrency:
       group: ${{ github.workflow }}-${{ github.event.inputs.cluster_environment || 'local' }}
       cancel-in-progress: false

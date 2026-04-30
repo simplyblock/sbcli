@@ -108,6 +108,7 @@ on:
 jobs:
   e2e-node-migration:
     runs-on: ${{ github.event.inputs.cluster_environment == 'aws-openshift' && 'vm-runner-43' || 'self-hosted' }}
+    timeout-minutes: 4320
     concurrency:
       group: ${{ github.workflow }}
       cancel-in-progress: false
