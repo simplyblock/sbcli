@@ -209,6 +209,9 @@ class Cluster(BaseModel):
     # Deploy-time only — set at cluster create/add, never toggled at runtime;
     # an existing cluster must be redeployed to gain the feature.
     enable_failure_domain: bool = False
+    # Inline CRC checksum validation for silent-data-error protection.
+    # Frozen at cluster create time; no upgrade path for existing clusters.
+    inline_checksum: bool = False
     snapshot_replication_target_cluster: str = ""
     snapshot_replication_target_pool: str = ""
     snapshot_replication_timeout: int = 60*10
