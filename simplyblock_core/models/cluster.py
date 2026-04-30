@@ -241,6 +241,9 @@ class Cluster(BaseModel):
     # only — set at cluster create/add, never toggled at runtime. Inter-node
     # fabric (nvme-tcp/rdma) is unaffected by this mode.
     device_mode: str = "nvme"
+    # Inline CRC checksum validation for silent-data-error protection.
+    # Frozen at cluster create time; no upgrade path for existing clusters.
+    inline_checksum: bool = False
     snapshot_replication_target_cluster: str = ""
     snapshot_replication_target_pool: str = ""
     snapshot_replication_timeout: int = 60*10

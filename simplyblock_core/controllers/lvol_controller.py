@@ -582,6 +582,11 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
                 if dev.status == dev.STATUS_ONLINE:
                     dev_count += 1
                     cluster_size_total_raw += dev.size
+                    # Inline-checksum fallback layout reserves 6 of every 510 data blocks
+                    # per 2 MiB extent for the extended md page + filler. Charge that as
+                    # initial utilization rather than reducing reported raw capacity.
+                    if cl.inline_checksum and not dev.md_supported:
+                        cluster_size_prov += utils.alceml_fallback_overhead_bytes(cl, dev.size)
     # NVMeDevice.size is RAW (physical, parity-inclusive); cluster_size_prov is
     # the sum of provisioned lvol sizes, which is EFFECTIVE. Comparing them
     # directly understated provisioned utilisation by (ndcs+npcs)/ndcs -- 1.5x on

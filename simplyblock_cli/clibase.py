@@ -177,7 +177,8 @@ class CLIWrapperBase:
             pci_allowed, pci_blocked, force=args.force, device_model=args.device_model,
             size_range=args.size_range, vcpu_count=vcpu_count, nvme_names=nvme_names,
             calculate_hp_only=args.calculate_hp_only, number_of_devices=number_of_devices,
-            lblk_selection=lblk_selection, jm_percent=int(getattr(args, 'jm_percent', 3) or 3))
+            lblk_selection=lblk_selection, jm_percent=int(getattr(args, 'jm_percent', 3) or 3),
+            inline_checksum=getattr(args, 'inline_checksum', False))
 
     def storage_node__deploy_cleaner(self, sub_command, args):
         storage_ops.deploy_cleaner()
@@ -1374,6 +1375,7 @@ class CLIWrapperBase:
         client_data_nic = args.client_data_nic
         enable_failure_domain = getattr(args, 'enable_failure_domain', False)
         device_mode = getattr(args, 'device_mode', 'nvme')
+        inline_checksum = getattr(args, 'inline_checksum', False)
 
         max_fault_tolerance = min(distr_npcs, 2) if distr_npcs >= 1 else 1
 
@@ -1391,6 +1393,7 @@ class CLIWrapperBase:
             hashicorp_vault_settings=HashicorpVaultSettings({"base_url": args.hashicorp_vault_url}) if args.hashicorp_vault_url else None,
             enable_failure_domain=enable_failure_domain,
             device_mode=device_mode,
+            inline_checksum=inline_checksum,
         )
 
     def cluster_create(self, args):
@@ -1431,6 +1434,7 @@ class CLIWrapperBase:
         device_mode = getattr(args, 'device_mode', 'nvme')
         # Private (developer-mode-only) arg: absent unless sbctl was run with --dev.
         enable_hang_device = getattr(args, "enable_hang_device", False)
+        inline_checksum = getattr(args, 'inline_checksum', False)
 
         max_fault_tolerance = min(distr_npcs, 2) if distr_npcs >= 1 else 1
 
@@ -1458,6 +1462,7 @@ class CLIWrapperBase:
             spdk_vcpu_count=args.vcpu_count or 0,
             alert_config=parse_alerting_config(
                 Path(args.alerting_config_path) if args.alerting_config_path else None),
+            inline_checksum=inline_checksum,
         )
 
     def query_yes_no(self, question, default="yes"):
