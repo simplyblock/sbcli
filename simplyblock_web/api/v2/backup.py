@@ -1,6 +1,6 @@
 from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException, Response
+from fastapi import APIRouter, HTTPException, Query, Response
 from pydantic import BaseModel
 
 from simplyblock_core.db_controller import DBController
@@ -55,9 +55,46 @@ class _ImportParams(BaseModel):
 
 
 @api.post('/import', name='clusters:backups:import')
-def import_backups(parameters: _ImportParams):
-    count = backup_controller.import_backups(parameters.metadata)
+def import_backups(cluster: Cluster, parameters: _ImportParams):
+    count = backup_controller.import_backups(parameters.metadata, cluster_id=cluster.get_id())
     return {"imported": count}
+
+
+@api.get('/export', name='clusters:backups:export')
+def export_backups(
+    cluster: Cluster,
+    backup_id: Optional[str] = Query(None, description="Export only the chain containing this backup UUID"),
+    lvol_name: Optional[str] = Query(None, description="Export all completed backups for this lvol name"),
+):
+    lvol_name_filter = lvol_name
+    if backup_id and not lvol_name_filter:
+        try:
+            backup = db.get_backup_by_id(backup_id)
+            lvol_name_filter = backup.lvol_name
+        except KeyError:
+            raise HTTPException(404, f"Backup {backup_id} not found")
+    data = backup_controller.export_backups(
+        cluster_id=cluster.get_id(), lvol_name=lvol_name_filter)
+    return data
+
+
+class _BackupSourceSwitchParams(BaseModel):
+    source_cluster_id: str
+
+
+@api.post('/source-switch', name='clusters:backups:source-switch')
+def source_switch(cluster: Cluster, parameters: _BackupSourceSwitchParams):
+    success, error = backup_controller.switch_backup_source(
+        cluster.get_id(), parameters.source_cluster_id)
+    if error:
+        raise HTTPException(400, error)
+    return {"source_cluster_id": parameters.source_cluster_id}
+
+
+@api.get('/sources', name='clusters:backups:sources')
+def list_sources(cluster: Cluster):
+    sources = backup_controller.get_backup_sources(cluster.get_id())
+    return sources
 
 
 @api.delete('/{lvol_id}', name='clusters:backups:delete', status_code=204, responses={204: {"content": None}})
