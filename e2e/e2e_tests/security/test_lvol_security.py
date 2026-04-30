@@ -2840,6 +2840,13 @@ class TestLvolSecurityCombinations(SecurityTestBase):
             assert lvol_id, f"Could not find ID for {lvol_name}"
             self.lvol_mount_details[lvol_name] = {"ID": lvol_id, "Mount": None}
 
+            # Validate connect string contains DHCHAP secrets
+            cs_ls, _ = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
+            cs_str = " ".join(cs_ls) if isinstance(cs_ls, list) else str(cs_ls)
+            assert "dhchap-secret" in cs_str.lower(), \
+                f"{tc}: Expected DHCHAP keys in connect string for {tag}; got: {cs_str}"
+            self.logger.info(f"{tc}: Connect string contains DHCHAP keys")
+
             lvol_device, _ = self._connect_and_get_device(lvol_name, lvol_id, host_nqn=host_nqn)
             mount_point = f"{self.mount_path}/{lvol_name}"
             self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type=self._pick_fs_type())
@@ -2884,8 +2891,13 @@ class TestLvolDynamicHostManagement(SecurityTestBase):
         assert lvol_id
         self.lvol_mount_details[lvol_name] = {"ID": lvol_id, "Mount": None}
 
-        # TC-NEW-010: connect + FIO
+        # TC-NEW-010: validate connect string has DHCHAP, then connect + FIO
         self.logger.info("TC-NEW-010: Connecting and running FIO …")
+        connect_ls, err = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
+        connect_str = " ".join(connect_ls) if isinstance(connect_ls, list) else str(connect_ls)
+        assert "dhchap-secret" in connect_str.lower(), \
+            f"TC-NEW-010: Expected DHCHAP keys in connect string for registered host; got: {connect_str}"
+        self.logger.info("TC-NEW-010: Connect string contains DHCHAP keys")
         lvol_device, _ = self._connect_and_get_device(lvol_name, lvol_id, host_nqn=host_nqn)
         mount_point = f"{self.mount_path}/{lvol_name}"
         self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type=self._pick_fs_type())
@@ -2920,6 +2932,11 @@ class TestLvolDynamicHostManagement(SecurityTestBase):
         self.logger.info("TC-NEW-012: Re-adding host to pool …")
         self.ssh_obj.add_host_to_pool(self.mgmt_nodes[0], pool_id, host_nqn)
         sleep_n_sec(3)
+        connect_ls2, err2 = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
+        connect_str2 = " ".join(connect_ls2) if isinstance(connect_ls2, list) else str(connect_ls2)
+        assert "dhchap-secret" in connect_str2.lower(), \
+            f"TC-NEW-012: Expected DHCHAP keys after re-adding host; got: {connect_str2}"
+        self.logger.info("TC-NEW-012: Connect string contains DHCHAP keys after re-add")
         lvol_device2, _ = self._connect_and_get_device(lvol_name, lvol_id, host_nqn=host_nqn)
         self.ssh_obj.mount_path(node=self.fio_node, device=lvol_device2, mount_path=mount_point)
         self.lvol_mount_details[lvol_name]["Mount"] = mount_point
@@ -2967,7 +2984,13 @@ class TestLvolCryptoWithDhchap(SecurityTestBase):
         self.lvol_mount_details[lvol_name] = {"ID": lvol_id, "Mount": None}
         self.logger.info("TC-NEW-021: Encrypted lvol created PASSED")
 
-        # TC-NEW-022
+        # TC-NEW-022: validate connect string has DHCHAP, then connect + FIO
+        cs_ls, _ = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
+        cs_str = " ".join(cs_ls) if isinstance(cs_ls, list) else str(cs_ls)
+        assert "dhchap-secret" in cs_str.lower(), \
+            f"TC-NEW-022: Expected DHCHAP keys in connect string; got: {cs_str}"
+        self.logger.info("TC-NEW-022: Connect string contains DHCHAP keys")
+
         lvol_device, _ = self._connect_and_get_device(lvol_name, lvol_id, host_nqn=host_nqn)
         mount_point = f"{self.mount_path}/{lvol_name}"
         self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type=self._pick_fs_type())
@@ -3013,7 +3036,15 @@ class TestLvolDhchapBidirectional(SecurityTestBase):
         assert lvol_id
         self.lvol_mount_details[lvol_name] = {"ID": lvol_id, "Mount": None}
 
-        # TC-NEW-031: connect
+        # TC-NEW-031: validate connect string has bidirectional DHCHAP, then connect
+        cs_ls, _ = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
+        cs_str = " ".join(cs_ls) if isinstance(cs_ls, list) else str(cs_ls)
+        assert "dhchap-secret" in cs_str.lower(), \
+            f"TC-NEW-031: Expected DHCHAP key in connect string; got: {cs_str}"
+        assert "dhchap-ctrl-secret" in cs_str.lower(), \
+            f"TC-NEW-031: Expected bidirectional DHCHAP (ctrl-secret) in connect string; got: {cs_str}"
+        self.logger.info("TC-NEW-031: Connect string contains bidirectional DHCHAP keys")
+
         lvol_device, _ = self._connect_and_get_device(lvol_name, lvol_id, host_nqn=host_nqn)
         self.logger.info("TC-NEW-031: Connected with host-nqn PASSED")
 
@@ -3136,6 +3167,13 @@ class TestLvolSecuritySnapshotClone(SecurityTestBase):
         assert lvol_id
         self.lvol_mount_details[lvol_name] = {"ID": lvol_id, "Mount": None}
 
+        # Validate source lvol connect string has DHCHAP
+        cs_ls, _ = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
+        cs_str = " ".join(cs_ls) if isinstance(cs_ls, list) else str(cs_ls)
+        assert "dhchap-secret" in cs_str.lower(), \
+            f"TC-NEW-050: Expected DHCHAP keys in source lvol connect string; got: {cs_str}"
+        self.logger.info("TC-NEW-050: Source lvol connect string contains DHCHAP keys")
+
         lvol_device, _ = self._connect_and_get_device(lvol_name, lvol_id, host_nqn=host_nqn)
         mount_point = f"{self.mount_path}/{lvol_name}"
         # Use ext4 explicitly: xfs clones share the source UUID and cannot be
@@ -3174,8 +3212,13 @@ class TestLvolSecuritySnapshotClone(SecurityTestBase):
         self.lvol_mount_details[clone_name] = {"ID": clone_id, "Mount": None}
         self.logger.info("TC-NEW-051: Snapshot+clone PASSED")
 
-        # TC-NEW-052: connect clone with pool-level auth
+        # TC-NEW-052: validate clone connect string has DHCHAP, then connect
         self.logger.info("TC-NEW-052: Connecting clone with host-nqn …")
+        clone_cs_ls, _ = self._get_connect_str_cli(clone_id, host_nqn=host_nqn)
+        clone_cs_str = " ".join(clone_cs_ls) if isinstance(clone_cs_ls, list) else str(clone_cs_ls)
+        assert "dhchap-secret" in clone_cs_str.lower(), \
+            f"TC-NEW-052: Expected DHCHAP keys in clone connect string; got: {clone_cs_str}"
+        self.logger.info("TC-NEW-052: Clone connect string contains DHCHAP keys")
         clone_device, _ = self._connect_and_get_device(clone_name, clone_id, host_nqn=host_nqn)
         clone_mount = f"{self.mount_path}/{clone_name}"
         self.ssh_obj.mount_path(node=self.fio_node, device=clone_device, mount_path=clone_mount)
@@ -3294,8 +3337,13 @@ class TestLvolSecurityStorageNodeOutage(SecurityTestBase):
         self.lvol_mount_details[lvol_name] = {"ID": lvol_id, "Mount": None}
         self.logger.info("TC-SEC-070: DHCHAP pool + HA lvol PASSED")
 
-        # TC-SEC-071: connect, format, mount, start FIO in thread
+        # TC-SEC-071: validate DHCHAP in connect string, then connect + FIO
         self.logger.info("TC-SEC-071: Connecting and starting long-running FIO …")
+        cs_ls, _ = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
+        cs_str = " ".join(cs_ls) if isinstance(cs_ls, list) else str(cs_ls)
+        assert "dhchap-secret" in cs_str.lower(), \
+            f"TC-SEC-071: Expected DHCHAP keys in connect string; got: {cs_str}"
+        self.logger.info("TC-SEC-071: Connect string contains DHCHAP keys")
         lvol_device, _ = self._connect_and_get_device(lvol_name, lvol_id, host_nqn=host_nqn)
         mount_point = f"{self.mount_path}/{lvol_name}"
         self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type=self._pick_fs_type())
@@ -3637,6 +3685,12 @@ class TestLvolSecurityNetworkInterrupt(SecurityTestBase):
         assert lvol_id
         self.lvol_mount_details[lvol_name] = {"ID": lvol_id, "Mount": None}
 
+        cs_ls, _ = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
+        cs_str = " ".join(cs_ls) if isinstance(cs_ls, list) else str(cs_ls)
+        assert "dhchap-secret" in cs_str.lower(), \
+            f"TC-SEC-090: Expected DHCHAP keys in connect string; got: {cs_str}"
+        self.logger.info("TC-SEC-090: Connect string contains DHCHAP keys")
+
         lvol_device, _ = self._connect_and_get_device(lvol_name, lvol_id, host_nqn=host_nqn)
         mount_point = f"{self.mount_path}/{lvol_name}"
         self.ssh_obj.format_disk(node=self.fio_node, device=lvol_device, fs_type=self._pick_fs_type())
@@ -3696,6 +3750,13 @@ class TestLvolSecurityNetworkInterrupt(SecurityTestBase):
         self._disconnect_lvol(lvol_id)
         sleep_n_sec(2)
         self.lvol_mount_details[lvol_name]["Mount"] = None
+
+        # Validate DHCHAP still present in connect string after network interrupt
+        post_cs_ls, _ = self._get_connect_str_cli(lvol_id, host_nqn=host_nqn)
+        post_cs_str = " ".join(post_cs_ls) if isinstance(post_cs_ls, list) else str(post_cs_ls)
+        assert "dhchap-secret" in post_cs_str.lower(), \
+            f"TC-SEC-094: Expected DHCHAP keys in reconnect string; got: {post_cs_str}"
+        self.logger.info("TC-SEC-094: Reconnect string contains DHCHAP keys")
 
         lvol_device2, _ = self._connect_and_get_device(lvol_name, lvol_id, host_nqn=host_nqn)
         assert lvol_device2, "Reconnect after network interrupt failed"
