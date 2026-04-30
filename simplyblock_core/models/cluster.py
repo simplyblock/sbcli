@@ -86,6 +86,12 @@ class Cluster(BaseModel):
     snode_api_port: int = 50001
     container_image_prefix: str = ""
 
+    # Single-node-expansion resumability cursor. Empty dict means no expansion
+    # is in flight. Populated/advanced/cleared via the helpers in
+    # ``simplyblock_core.cluster_expand_planner``. See the feature plan
+    # ``single_node_expansion_plan.md`` for the schema.
+    expand_state: dict = {}
+
     def get_status_code(self):
         if self.status in self.STATUS_CODE_MAP:
             return self.STATUS_CODE_MAP[self.status]

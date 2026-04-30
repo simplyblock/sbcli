@@ -367,6 +367,19 @@ class RPCClient:
         params = {"name": name}
         return self._request2("bdev_nvme_detach_controller", params)
 
+    def bdev_nvme_remove_trid(self, name, traddr, trsvcid, trtype="TCP"):
+        """Remove a single transport path from an NVMe controller without
+        detaching the whole controller. Used during single-node cluster
+        expansion to prune the dead failover path on a sibling sec_2 node
+        after its sec_1 was re-homed to a different node."""
+        params = {
+            "name": name,
+            "traddr": traddr,
+            "trsvcid": str(trsvcid),
+            "trtype": trtype,
+        }
+        return self._request2("bdev_nvme_remove_trid", params)
+
     def ultra21_alloc_ns_init(self, pci_addr):
         params = {
             "traddr": pci_addr,
