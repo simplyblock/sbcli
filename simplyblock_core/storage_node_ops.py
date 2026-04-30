@@ -1164,12 +1164,22 @@ def _create_storage_device_stack(rpc_client, nvme, snode: StorageNode, after_res
 
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
 
+    checksum_method, cache_size, cache_eviction_threshold = utils.alceml_checksum_params(cluster, nvme)
+    if cluster.inline_checksum and not nvme.md_supported:
+        logger.warning(
+            f"Inline checksum: device {nvme.get_id()} ({nvme.pcie_address}) has no NVMe metadata; "
+            f"alceml will run in fallback mode (extra md page, ~1.17%% capacity overhead)."
+        )
+
     ret = snode.create_alceml(
         alceml_name, nvme_bdev, alceml_id,
         pba_init_mode=1 if (after_restart and nvme.status != NVMeDevice.STATUS_NEW) else 3,
         write_protection=cluster.distr_ndcs > 1,
         pba_page_size=cluster.page_size_in_blocks,
         full_page_unmap=cluster.full_page_unmap,
+        checksum_method=checksum_method,
+        cache_size=cache_size,
+        cache_eviction_threshold=cache_eviction_threshold,
     )
 
     if not ret:
@@ -5051,6 +5061,9 @@ def _restart_storage_node_impl(
                 db_dev.nvme_bdev = found_dev.nvme_bdev
                 db_dev.nvme_controller = found_dev.nvme_controller
                 db_dev.pcie_address = found_dev.pcie_address
+            # Refresh md detection so a re-format between restarts is reflected
+            db_dev.md_size = found_dev.md_size
+            db_dev.md_supported = found_dev.md_supported
 
             # if db_dev.status in [ NVMeDevice.STATUS_ONLINE]:
             #     db_dev.status = NVMeDevice.STATUS_UNAVAILABLE
@@ -6437,7 +6450,7 @@ def upgrade_automated_deployment_config():
 
 def generate_automated_deployment_config(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_allowed, pci_blocked,
                                          vcpu_count=0, force=False, device_model="", size_range="", nvme_names=None, k8s=False,
-                                         calculate_hp_only=False, number_of_devices=0):
+                                         calculate_hp_only=False, number_of_devices=0, inline_checksum=False):
     # Reject an over-cap max_lvol here rather than only in the CLI: this is the
     # single entry point shared by `sn configure` and the k8s node-configure
     # job, and the value it writes into NODES_CONFIG_FILE becomes the node's
@@ -6465,7 +6478,8 @@ def generate_automated_deployment_config(max_lvol, max_prov, sockets_to_use, nod
 
         nodes_config, system_info = utils.generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket,
                                                            pci_allowed, pci_blocked, vcpu_count, force=force,
-                                                           device_model=device_model, size_range=size_range, nvme_names=nvme_names)
+                                                           device_model=device_model, size_range=size_range, nvme_names=nvme_names,
+                                                           inline_checksum=inline_checksum)
         if not nodes_config or not nodes_config.get("nodes"):
             return False
         utils.store_config_file(nodes_config, constants.NODES_CONFIG_FILE, create_read_only_file=True)

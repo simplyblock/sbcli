@@ -158,7 +158,8 @@ class CLIWrapperBase:
             max_lvol, max_prov, sockets_to_use, args.nodes_per_socket,
             pci_allowed, pci_blocked, force=args.force, device_model=args.device_model,
             size_range=args.size_range, vcpu_count=vcpu_count, nvme_names=nvme_names,
-            calculate_hp_only=args.calculate_hp_only, number_of_devices=number_of_devices)
+            calculate_hp_only=args.calculate_hp_only, number_of_devices=number_of_devices,
+            inline_checksum=args.inline_checksum)
 
     def storage_node__deploy_cleaner(self, sub_command, args):
         storage_ops.deploy_cleaner()
@@ -1318,6 +1319,7 @@ class CLIWrapperBase:
         is_single_node = args.is_single_node
         client_data_nic = args.client_data_nic
         enable_failure_domain = getattr(args, 'enable_failure_domain', False)
+        inline_checksum = getattr(args, 'inline_checksum', False)
 
         max_fault_tolerance = min(distr_npcs, 2) if distr_npcs >= 1 else 1
 
@@ -1334,6 +1336,7 @@ class CLIWrapperBase:
             nvmf_base_port=args.nvmf_base_port, rpc_base_port=args.rpc_base_port, snode_api_port=args.snode_api_port,
             hashicorp_vault_settings=HashicorpVaultSettings({"base_url": args.hashicorp_vault_url}) if args.hashicorp_vault_url else None,
             enable_failure_domain=enable_failure_domain,
+            inline_checksum=inline_checksum,
         )
 
     def cluster_create(self, args):
@@ -1373,6 +1376,7 @@ class CLIWrapperBase:
         enable_failure_domain = getattr(args, 'enable_failure_domain', False)
         # Private (developer-mode-only) arg: absent unless sbctl was run with --dev.
         enable_hang_device = getattr(args, "enable_hang_device", False)
+        inline_checksum = getattr(args, 'inline_checksum', False)
 
         max_fault_tolerance = min(distr_npcs, 2) if distr_npcs >= 1 else 1
 
@@ -1397,6 +1401,7 @@ class CLIWrapperBase:
             max_subsys=args.max_subsys or 0,
             hugepages_mem=utils.parse_size(args.hugepages_mem) if args.hugepages_mem else 0,
             spdk_vcpu_count=args.vcpu_count or 0,
+            inline_checksum=inline_checksum,
         )
 
     def query_yes_no(self, question, default="yes"):
