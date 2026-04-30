@@ -497,9 +497,6 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     else:
         vuid = distr_vuid
 
-    # round size to the nearest 1G ceiling
-    size = math.ceil(size/(1024*1024*1024))*1024*1024*1024
-
     if max_size > 0:
         if max_size < size:
             return False, f"Max size:{max_size} must be larger than size {size}"
@@ -1781,9 +1778,6 @@ def resize_lvol(id, new_size):
         msg = f"Pool is disabled {pool.get_id()}"
         logger.error(msg)
         return False, msg
-
-    # round size to the nearest 1G ceiling
-    new_size = math.ceil(new_size/(1024*1024*1024))*1024*1024*1024
 
     if lvol.size >= new_size:
         msg = f"New size {utils.humanbytes(new_size)} must be higher than the original size {utils.humanbytes(lvol.size)}"
