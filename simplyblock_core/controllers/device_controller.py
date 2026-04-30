@@ -2,19 +2,19 @@ import time
 import logging
 import uuid
 
-# Debounce window for the per-device flap counter: two countable
-# online→not-online transitions within this many seconds are treated as
-# one error storm and only advance the counter once. Anything that lasts
-# longer than the typical SPDK timeout/reset cycle is sufficient — 10 s
-# comfortably exceeds the 4 s timeout_us + reset round-trip.
-DEVICE_FLAP_DEBOUNCE_SEC = 10.0
-
 from simplyblock_core import distr_controller, utils, storage_node_ops
 from simplyblock_core.controllers import device_events, tasks_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.prom_client import PromClient
+
+# Debounce window for the per-device flap counter: two countable
+# online→not-online transitions within this many seconds are treated as
+# one error storm and only advance the counter once. Anything that lasts
+# longer than the typical SPDK timeout/reset cycle is sufficient — 10 s
+# comfortably exceeds the 4 s timeout_us + reset round-trip.
+DEVICE_FLAP_DEBOUNCE_SEC = 10.0
 
 logger = logging.getLogger()
 
