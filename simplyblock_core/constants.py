@@ -147,7 +147,21 @@ LVOL_NVME_KEEP_ALIVE_TO=10
 LVOL_NVME_KEEP_ALIVE_TO_TCP=7
 QPAIR_COUNT=32
 CLIENT_QPAIR_COUNT=3
-NVME_TIMEOUT_US=4000000
+# 8 s, not 4 s. 4 s false-positives during a peer-reset reactor stall:
+# when a peer dies, bdev_nvme's per-controller reset state machines run on
+# the same SPDK reactor thread that polls JM/heartbeat qpairs to other
+# peers, and the reactor can spend ~4 s in that bookkeeping. With a 4 s
+# timeout, in-flight heartbeats to *healthy* peers age past the threshold
+# during that stall, timeout_cb fires on every controller in lock-step,
+# and the JC marks N JM slots blocked simultaneously — dropping
+# n_safe_jms below the FT threshold and triggering a JCERR / DISTRIBD
+# write fail (observed 2026-04-30 14:14:22 on a dual-outage soak step,
+# stall measured at 4.144 s). 8 s absorbs the worst observed stall and
+# still fast-fails wedged targets ~10× faster than the previous abort-
+# hang path (multi-minute, the 2026-04-27 incident that motivated the
+# action_on_timeout=reset switch — that switch stays; only the threshold
+# reverts).
+NVME_TIMEOUT_US=8000000
 NVMF_MAX_SUBSYSTEMS=50000
 KATO=10000
 # transport_ack_timeout exponent: server tears down a client qpair if it
