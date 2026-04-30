@@ -16,6 +16,7 @@ export GRAFANA_ENDPOINT=${10}
 export DISABLE_MONITORING=${11}
 export DIR="$(dirname "$(realpath "$0")")"
 
+set -a
 source "$DIR"/../env_var
 
 if [ -s "/etc/foundationdb/fdb.cluster" ]
