@@ -983,6 +983,12 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
     ret = tgt_rpc.create_lvol(lvol.lvol_bdev, _bytes_to_mib(lvol.size), tgt_node.lvstore)
     if not ret:
         return False, True, f"Failed to create target lvol {tgt_lvol_composite}"
+    logger.info(f"[MIGRATION SIZE CHECK] lvol={lvol.lvol_bdev} source_size_bytes={lvol.size} target_size_mib={_bytes_to_mib(lvol.size)}")
+
+    ret = tgt_rpc.bdev_lvol_set_migration_flag(tgt_lvol_composite)
+    if not ret:
+        _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc)
+        return False, True, f"bdev_lvol_set_migration_flag failed for target lvol {tgt_lvol_composite}"
 
     # Step 1b: expose via NVMe-oF using the SOURCE's NQN (clients follow same NQN)
     # Multiple volumes may share the same subsystem (namespace sharing group):
@@ -1018,26 +1024,26 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         return False, True, "Failed to add namespace to target subsystem"
     tgt_ns_id = int(ns_ret) if ns_ret else lvol.ns_id
 
-    # Step 2: get map_id of the newly created target lvol (required by bdev_lvol_final_migration)
+    # Step 2: get blobid of the newly created target lvol (passed as lvol_id to bdev_lvol_final_migration)
     lvols_list = tgt_rpc.bdev_lvol_get_lvols(tgt_node.lvstore)
     if not lvols_list:
         tgt_rpc.subsystem_delete(nqn)
         _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc)
         return False, True, "bdev_lvol_get_lvols returned empty result from target"
 
-    tgt_map_id = None
+    tgt_blobid = None
     tgt_lvol_uuid = lvol.lvol_uuid  # fallback to source UUID
     for entry in lvols_list:
         entry_name = entry.get('name', '') or entry.get('lvol_name', '')
         if entry_name in (lvol.lvol_bdev, tgt_lvol_composite):
-            tgt_map_id = entry.get('map_id')
+            tgt_blobid = entry.get('blobid')
             tgt_lvol_uuid = entry.get('uuid', lvol.lvol_uuid)
             break
 
-    if tgt_map_id is None:
+    if tgt_blobid is None:
         tgt_rpc.subsystem_delete(nqn)
         _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc)
-        return False, True, f"Could not find map_id for {lvol.lvol_bdev} on target"
+        return False, True, f"Could not find blobid for {lvol.lvol_bdev} on target"
 
     # Step 3: connect source to target hub lvol
     ctrl_name = f"mighub_{migration.uuid[:8]}"
@@ -1071,7 +1077,7 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
 
     # Step 5: start final migration (async) – I/O is frozen for the small delta
     ret = src_rpc.bdev_lvol_final_migration(
-        src_lvol_composite, tgt_map_id, src_snap_composite, 2, hub_bdev)
+        src_lvol_composite, tgt_blobid, src_snap_composite, 2, hub_bdev)
     if ret is None:
         src_rpc.bdev_nvme_detach_controller(ctrl_name)
         tgt_rpc.subsystem_delete(nqn)
@@ -1087,7 +1093,7 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         'subsystem_created_on_target': subsystem_created_on_target,
     }
     migration.write_to_db(db.kv_store)
-    logger.info(f"Started final migration: lvol={lvol.uuid} map_id={tgt_map_id}")
+    logger.info(f"Started final migration: lvol={lvol.uuid} map_id={tgt_blobid}")
     return False, False, None
 
 
