@@ -127,7 +127,7 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/simplyBlockDeploy
           terraform validate
-      
+
       - name: Set parameters based on branch and input
         run: |
           echo "SBCLI_CMD=sbctl" >> $GITHUB_ENV
@@ -220,7 +220,6 @@ jobs:
             --set logicalVolume.distr_ndcs="${NDCS}" \
             --set logicalVolume.distr_npcs="${NPCS}" \
             --set storagenode.create=true \
-            --set cachingnode.create=false \
             --set logicalVolume.encryption=true
         env:
           NDCS: ${{ env.NDCS }}

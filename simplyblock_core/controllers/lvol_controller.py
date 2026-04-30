@@ -20,7 +20,6 @@ from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.prom_client import PromClient
-from simplyblock_core.rpc_client import RPCClient
 
 logger = lg.getLogger()
 
@@ -498,9 +497,6 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     else:
         vuid = distr_vuid
 
-    # round size to the nearest 1G ceiling
-    size = math.ceil(size/(1024*1024*1024))*1024*1024*1024
-
     if max_size > 0:
         if max_size < size:
             return False, f"Max size:{max_size} must be larger than size {size}"
@@ -544,7 +540,8 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
         lvol.namespace = namespace or ""
     else:
         lvol.nqn = cl.nqn + ":lvol:" + lvol.uuid
-        lvol.max_namespace_per_subsys = max_namespace_per_subsys
+
+    lvol.max_namespace_per_subsys = max_namespace_per_subsys
 
     if not host_node:
         nodes = _get_next_3_nodes(cl.get_id(), lvol.size)
@@ -778,7 +775,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
 
 
 def _create_bdev_stack(lvol, snode, is_primary=True):
-    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+    rpc_client = snode.rpc_client()
 
     created_bdevs = []
     for bdev in lvol.bdev_stack:
@@ -830,7 +827,7 @@ def _create_bdev_stack(lvol, snode, is_primary=True):
 
 
 def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
-    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+    rpc_client = snode.rpc_client()
 
     ret, msg = _create_bdev_stack(lvol, snode, is_primary=is_primary)
     if not ret:
@@ -846,7 +843,7 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
         allow_any = not bool(lvol.allowed_hosts)
         logger.info("creating subsystem %s (allow_any_host=%s)", lvol.nqn, allow_any)
         ret = rpc_client.subsystem_create(lvol.nqn, lvol.ha_type, lvol.uuid, min_cntlid,
-                                          max_namespaces=constants.LVO_MAX_NAMESPACES_PER_SUBSYS,
+                                          max_namespaces=lvol.max_namespace_per_subsys,
                                           allow_any_host=allow_any)
 
         # add allowed hosts to subsystem
@@ -933,7 +930,7 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
         return False, "Failed to get lvol bdev"
 
 def is_node_leader(snode, lvs_name):
-    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+    rpc_client = snode.rpc_client()
     ret = rpc_client.bdev_lvol_get_lvstores(lvs_name)
     if ret and len(ret) > 0 and "lvs leadership" in ret[0]:
         is_leader = ret[0]["lvs leadership"]
@@ -941,7 +938,7 @@ def is_node_leader(snode, lvs_name):
     return False
 
 def recreate_lvol_on_node(lvol, snode, ha_inode_self=0, ana_state=None):
-    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+    rpc_client = snode.rpc_client()
 
     base=f"{lvol.lvs_name}/{lvol.lvol_bdev}"
 
@@ -1114,7 +1111,7 @@ def delete_lvol_from_node(lvol_id, node_id, clear_data=True, del_async=False, fo
     # action == "proceed" — execute now
 
     logger.info(f"Deleting LVol:{lvol.get_id()} from node:{snode.get_id()}")
-    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=5, retry=2)
+    rpc_client = snode.rpc_client(timeout=5, retry=2)
 
     pool = db_controller.get_pool_by_id(lvol.pool_uuid)
     if pool.has_qos():
@@ -1338,12 +1335,7 @@ def connect_lvol_to_pool(uuid):
         return False
 
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
-    # creating RPCClient instance
-    rpc_client = RPCClient(
-        snode.mgmt_ip,
-        snode.rpc_port,
-        snode.rpc_username,
-        snode.rpc_password)
+    rpc_client = snode.rpc_client()
 
     if pool.has_qos():
         ret = rpc_client.bdev_lvol_add_to_group(pool.numeric_id, [lvol.top_bdev])
@@ -1383,12 +1375,7 @@ def set_lvol(uuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, name=
         lvol.lvol_name = name
 
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
-    # creating RPCClient instance
-    rpc_client = RPCClient(
-        snode.mgmt_ip,
-        snode.rpc_port,
-        snode.rpc_username,
-        snode.rpc_password)
+    rpc_client = snode.rpc_client()
 
     if max_rw_iops < 0:
         msg = "max_rw_iops can not be negative"
@@ -1807,9 +1794,6 @@ def resize_lvol(id, new_size):
         logger.error(msg)
         return False, msg
 
-    # round size to the nearest 1G ceiling
-    new_size = math.ceil(new_size/(1024*1024*1024))*1024*1024*1024
-
     if lvol.size >= new_size:
         msg = f"New size {utils.humanbytes(new_size)} must be higher than the original size {utils.humanbytes(lvol.size)}"
         logger.error(msg)
@@ -1843,8 +1827,7 @@ def resize_lvol(id, new_size):
 
     size_in_mib = utils.convert_size(new_size, 'MiB')
 
-    rpc_client = RPCClient(
-        snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+    rpc_client = snode.rpc_client()
 
     if lvol.ha_type == "single":
 
@@ -1896,16 +1879,14 @@ def resize_lvol(id, new_size):
             elif action == "queue":
                 queue_for_restart_drain(
                     candidate.get_id(), lvol.lvs_name,
-                    lambda c=candidate: RPCClient(c.mgmt_ip, c.rpc_port, c.rpc_username,
-                                                  c.rpc_password).bdev_lvol_resize(
+                    lambda c=candidate: c.rpc_client().bdev_lvol_resize(
                             f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib),
                         f"resize lvol {lvol.uuid} on {candidate.get_id()[:8]}")
             # "skip" — disconnected or pre_block, skip
 
         if primary_node:
             logger.info(f"Resizing LVol: {lvol.get_id()} on node: {primary_node.get_id()}")
-            rpc_client = RPCClient(primary_node.mgmt_ip, primary_node.rpc_port,
-                                   primary_node.rpc_username, primary_node.rpc_password)
+            rpc_client = primary_node.rpc_client()
             ret = rpc_client.bdev_lvol_resize(f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib)
             if not ret:
                 msg = f"Error resizing lvol on node: {primary_node.get_id()}"
@@ -1914,8 +1895,7 @@ def resize_lvol(id, new_size):
 
         for sec in secondary_nodes:
             logger.info(f"Resizing LVol: {lvol.get_id()} on node: {sec.get_id()}")
-            sec_rpc_client = RPCClient(sec.mgmt_ip, sec.rpc_port, sec.rpc_username,
-                                       sec.rpc_password)
+            sec_rpc_client = sec.rpc_client()
             ret = sec_rpc_client.bdev_lvol_resize(f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib)
             if not ret:
                 msg = f"Error resizing lvol on node: {sec.get_id()}"
@@ -1948,12 +1928,7 @@ def set_read_only(id):
 
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
 
-    # creating RPCClient instance
-    rpc_client = RPCClient(
-        snode.mgmt_ip,
-        snode.rpc_port,
-        snode.rpc_username,
-        snode.rpc_password)
+    rpc_client = snode.rpc_client()
 
     ret = rpc_client.lvol_read_only(lvol.lvol_bdev)
     if not ret:
@@ -2192,12 +2167,7 @@ def inflate_lvol(lvol_id):
     logger.info(f"Inflating LVol: {lvol.get_id()}")
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
 
-    # creating RPCClient instance
-    rpc_client = RPCClient(
-        snode.mgmt_ip,
-        snode.rpc_port,
-        snode.rpc_username,
-        snode.rpc_password)
+    rpc_client = snode.rpc_client()
     ret = rpc_client.bdev_lvol_inflate(lvol.top_bdev)
     if ret:
         lvol.cloned_from_snap = ""
@@ -2842,7 +2812,7 @@ def add_host_to_lvol(lvol_id, host_nqn):
             snode = db_controller.get_storage_node_by_id(node_id)
             if snode.status != StorageNode.STATUS_ONLINE:
                 continue
-            rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+            rpc_client = snode.rpc_client()
             pool_key_names = _register_pool_dhchap_keys_on_node(pool, snode, rpc_client)
             ret = rpc_client.subsystem_add_host(
                 lvol.nqn, host_nqn,
@@ -2876,7 +2846,7 @@ def add_host_to_lvol(lvol_id, host_nqn):
             snode = db_controller.get_storage_node_by_id(node_id)
             if snode.status != StorageNode.STATUS_ONLINE:
                 continue
-            rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+            rpc_client = snode.rpc_client()
             if has_keys:
                 key_names = _register_dhchap_keys_on_node(snode, host_nqn, entry, rpc_client)
                 ret = rpc_client.subsystem_add_host(
@@ -2949,7 +2919,7 @@ def remove_host_from_lvol(lvol_id, host_nqn):
         snode = db_controller.get_storage_node_by_id(node_id)
         if snode.status != StorageNode.STATUS_ONLINE:
             continue
-        rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+        rpc_client = snode.rpc_client()
         ret = rpc_client.subsystem_remove_host(lvol.nqn, host_nqn)
         if not ret:
             logger.error("Failed to remove host %s from node %s", host_nqn, node_id)
@@ -2968,3 +2938,32 @@ def remove_host_from_lvol(lvol_id, host_nqn):
     if errors:
         return True, f"Warning: SPDK remove_host failed on nodes: {', '.join(errors)}"
     return True, None
+
+
+def get_master_lvols_by_pool_uuid(pool_id, is_json=False):
+    db_controller = DBController()
+    lvols = db_controller.get_lvols_by_pool_id(pool_id)
+
+    data = []
+
+    for lvol in lvols:
+        if lvol.deleted:
+            continue
+        if lvol.namespace:
+            continue
+
+        lvol_data = {
+            "Id": lvol.uuid,
+            "Name": lvol.lvol_name,
+            "Size": utils.humanbytes(lvol.size),
+            "Hostname": lvol.hostname,
+            "Status": lvol.status,
+            "Namespaces": len(db_controller.get_lvols_by_namespace(lvol.uuid)),
+            "MaxNamespaces": lvol.max_namespace_per_subsys,
+        }
+        data.append(lvol_data)
+
+    if is_json:
+        return json.dumps(data, indent=2)
+    else:
+        return utils.print_table(data)

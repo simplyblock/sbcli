@@ -410,7 +410,7 @@ def _mock_db_for_host_ops(lvol, node, cluster, pool=None):
 class TestAddHostToLvol(unittest.TestCase):
 
     @patch("simplyblock_core.controllers.lvol_controller._register_dhchap_keys_on_node")
-    @patch("simplyblock_core.controllers.lvol_controller.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.controllers.lvol_controller.DBController")
     def test_add_host_success(self, MockDBCtrl, MockRPC, mock_register):
         from simplyblock_core.controllers.lvol_controller import add_host_to_lvol
@@ -443,7 +443,7 @@ class TestAddHostToLvol(unittest.TestCase):
             self.assertEqual(len(lvol.allowed_hosts), 1)
             mock_write.assert_called_once()
 
-    @patch("simplyblock_core.controllers.lvol_controller.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.controllers.lvol_controller.DBController")
     def test_add_host_without_tls_succeeds(self, MockDBCtrl, MockRPC):
         """Adding a host without TLS is allowed (TLS and DHCHAP are independent)."""
@@ -464,7 +464,7 @@ class TestAddHostToLvol(unittest.TestCase):
         self.assertIsNone(err)
         self.assertEqual(result["nqn"], "nqn:host")
 
-    @patch("simplyblock_core.controllers.lvol_controller.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.controllers.lvol_controller.DBController")
     def test_add_duplicate_host_rejected(self, MockDBCtrl, MockRPC):
         cl = _cluster(tls=True)
@@ -481,7 +481,7 @@ class TestAddHostToLvol(unittest.TestCase):
         self.assertIn("already allowed", err)
 
     @patch("simplyblock_core.controllers.lvol_controller._register_dhchap_keys_on_node")
-    @patch("simplyblock_core.controllers.lvol_controller.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.controllers.lvol_controller.DBController")
     def test_add_host_rpc_failure(self, MockDBCtrl, MockRPC, mock_register):
         cl = _cluster(tls=True)
@@ -504,7 +504,7 @@ class TestAddHostToLvol(unittest.TestCase):
         self.assertIn("Failed to add host", err)
 
     @patch("simplyblock_core.controllers.lvol_controller._register_dhchap_keys_on_node")
-    @patch("simplyblock_core.controllers.lvol_controller.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.controllers.lvol_controller.DBController")
     def test_add_host_with_dhchap_keys(self, MockDBCtrl, MockRPC, mock_register):
         cl = _cluster(tls=True)
@@ -534,7 +534,7 @@ class TestAddHostToLvol(unittest.TestCase):
         self.assertEqual(call_kwargs[1].get("dhchap_key"), "kn_dhchap")
         self.assertEqual(call_kwargs[1].get("dhchap_ctrlr_key"), "kn_ctrlr")
 
-    @patch("simplyblock_core.controllers.lvol_controller.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.controllers.lvol_controller.DBController")
     def test_add_host_multi_node(self, MockDBCtrl, MockRPC):
         """Host ACL applied to all online nodes."""
@@ -570,7 +570,7 @@ class TestAddHostToLvol(unittest.TestCase):
 
 class TestRemoveHostFromLvol(unittest.TestCase):
 
-    @patch("simplyblock_core.controllers.lvol_controller.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.controllers.lvol_controller.DBController")
     def test_remove_host_success(self, MockDBCtrl, MockRPC):
         node = _node()
@@ -613,7 +613,7 @@ class TestRemoveHostFromLvol(unittest.TestCase):
         self.assertFalse(result)
         self.assertIn("not in the allowed list", err)
 
-    @patch("simplyblock_core.controllers.lvol_controller.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.controllers.lvol_controller.DBController")
     def test_remove_host_rpc_failure(self, MockDBCtrl, MockRPC):
         node = _node()
@@ -1011,7 +1011,7 @@ class TestRecreateSubsystemSecurity(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.FirewallClient")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.tasks_controller")
-    @patch("simplyblock_core.storage_node_ops.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops.DBController")
     def test_recreate_lvstore_on_non_leader_passes_allow_any_false(
             self, MockDB, MockRPC, mock_tasks, mock_bdev_stack,
@@ -1060,6 +1060,7 @@ class TestRecreateSubsystemSecurity(unittest.TestCase):
         mock_rpc_inst.subsystem_list.return_value = []
         # The inflight-IO drain check on the leader must not time out.
         mock_rpc_inst.bdev_distrib_check_inflight_io.return_value = False
+        mock_rpc_inst.jc_suspend_compression.return_value = (True, None)
         # Post-examine verification scans get_bdevs() for each expected lvol
         # (by uuid or lvs/bdev alias); without this the check aborts.
         mock_rpc_inst.get_bdevs.return_value = [
@@ -1070,17 +1071,13 @@ class TestRecreateSubsystemSecurity(unittest.TestCase):
         ]
         MockRPC.return_value = mock_rpc_inst
 
-        # Mock secondary_node.rpc_client() for jc_suspend_compression
-        sec_node_rpc = MagicMock()
-        sec_node_rpc.jc_suspend_compression.return_value = (True, None)
-        with patch.object(sec_node, 'rpc_client', return_value=sec_node_rpc):
-            with patch.object(sec_node, 'connect_to_hublvol'):
-                with patch.object(primary_node, 'write_to_db'):
-                    mock_bdev_stack.return_value = (True, None)
-                    mock_fw_inst = MagicMock()
-                    MockFW.return_value = mock_fw_inst
+        with patch.object(sec_node, 'connect_to_hublvol'):
+            with patch.object(primary_node, 'write_to_db'):
+                mock_bdev_stack.return_value = (True, None)
+                mock_fw_inst = MagicMock()
+                MockFW.return_value = mock_fw_inst
 
-                    snode_ops.recreate_lvstore_on_non_leader(sec_node, leader_node=primary_node, primary_node=primary_node)
+                snode_ops.recreate_lvstore_on_non_leader(sec_node, leader_node=primary_node, primary_node=primary_node)
 
         # Verify subsystem_create calls
         create_calls = mock_rpc_inst.subsystem_create.call_args_list
@@ -1128,7 +1125,7 @@ class TestRecreateSubsystemSecurity(unittest.TestCase):
         mock_rpc.ultra21_util_get_malloc_stats.return_value = {}
         mock_rpc.get_bdevs.return_value = [{"uuid": "u1", "driver_specific": {}}]
 
-        with patch("simplyblock_core.controllers.lvol_controller.RPCClient",
+        with patch("simplyblock_core.models.storage_node.RPCClient",
                     return_value=mock_rpc):
             with patch("simplyblock_core.controllers.lvol_controller._register_dhchap_keys_on_node",
                         return_value={"dhchap_key": "kn_dhchap"}) as mock_reg:
@@ -1151,7 +1148,7 @@ class TestRecreateSubsystemSecurity(unittest.TestCase):
 class TestRemoveHostKeyringCleanup(unittest.TestCase):
     """Verify remove_host_from_lvol cleans up keyring keys."""
 
-    @patch("simplyblock_core.controllers.lvol_controller.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.controllers.lvol_controller.DBController")
     def test_remove_host_cleans_keyring(self, MockDBCtrl, MockRPC):
         node = _node()
@@ -1186,7 +1183,7 @@ class TestRemoveHostKeyringCleanup(unittest.TestCase):
         self.assertIn(f"dhchap_key_{safe}", key_names)
         self.assertIn(f"dhchap_ctrlr_key_{safe}", key_names)
 
-    @patch("simplyblock_core.controllers.lvol_controller.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.controllers.lvol_controller.DBController")
     def test_remove_host_succeeds_even_if_spdk_fails(self, MockDBCtrl, MockRPC):
         """DB is updated even if SPDK remove_host returns error (host already gone)."""

@@ -8,7 +8,7 @@ from simplyblock_core import constants, db_controller, cluster_ops, storage_node
 from simplyblock_core.controllers import health_controller, device_controller, tasks_controller, storage_events
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
-from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
+from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 
 logger = utils.get_logger(__name__)
@@ -201,34 +201,16 @@ def update_cluster_status(cluster_id):
         cluster_ops.set_cluster_status(cluster_id, next_current_status)
 
 
-def set_node_online(node):
-    node = db.get_storage_node_by_id(node.get_id())
-    if node.status in [StorageNode.STATUS_UNREACHABLE, StorageNode.STATUS_SCHEDULABLE, StorageNode.STATUS_DOWN]:
-
-        # set node online
-        storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_ONLINE)
-
-        # set jm dev online
-        if node.jm_device.status in [JMDevice.STATUS_UNAVAILABLE, JMDevice.STATUS_ONLINE]:
-            device_controller.set_jm_device_state(node.jm_device.get_id(), JMDevice.STATUS_ONLINE)
-
-        # set devices online
-        for dev in node.nvme_devices:
-            if dev.status == NVMeDevice.STATUS_UNAVAILABLE:
-                device_controller.device_set_online(dev.get_id())
-
-        # start migration tasks on node online status change
-        online_devices_list = []
-        for dev in node.nvme_devices:
-            if dev.status in [NVMeDevice.STATUS_ONLINE,
-                              NVMeDevice.STATUS_CANNOT_ALLOCATE,
-                              NVMeDevice.STATUS_FAILED_AND_MIGRATED]:
-                online_devices_list.append(dev.get_id())
-        if online_devices_list:
-            logger.info(f"Starting migration task for node {node.get_id()}")
-            tasks_controller.add_device_mig_task_for_node(node.get_id())
-
-        update_cluster_status(cluster_id)
+# Note: a `set_node_online` helper used to live here. It flipped DOWN /
+# UNREACHABLE / SCHEDULABLE -> ONLINE on health-check pass. That violated
+# the state-machine rule that ONLINE may only be reached from RESTARTING
+# (or IN_CREATION / SUSPENDED via the dedicated paths) and contributed
+# to the iteration-77 hang where a half-completed restart left the node
+# DB-online while peer reconnects had silently failed.
+#
+# Recovery for nodes stuck in DOWN / UNREACHABLE / SCHEDULABLE now flows
+# exclusively through the auto-restart task (FN_NODE_RESTART) -> the
+# restart impl, which is the only authority for the ONLINE flip.
 
 
 def set_node_offline(node):
@@ -254,6 +236,8 @@ def set_node_offline(node):
             for dev in node.nvme_devices:
                 if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY,
                                   NVMeDevice.STATUS_CANNOT_ALLOCATE]:
+                    # Default cause is correct: node going offline cascades
+                    # to all its devices, that does not count as a flap.
                     device_controller.device_set_unavailable(dev.get_id())
             update_cluster_status(cluster_id)
 
@@ -574,8 +558,7 @@ def check_node(snode):
         return False
 
     # 4- check node rpc interface
-    node_rpc_check, node_rpc_check_1 = health_controller._check_node_rpc(
-        snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=20, retry=1)
+    node_rpc_check, node_rpc_check_1 = health_controller.check_node_rpc(snode, timeout=20, retry=1)
     logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}")
 
     #if RPC times out, we dont know if its due to node becoming unavailable or spdk hanging
@@ -606,7 +589,20 @@ def check_node(snode):
             set_node_down(snode)
             return True
 
-    set_node_online(snode)
+    # Health checks pass. The monitor must NOT flip the node to ONLINE
+    # itself: the state-machine rule restricts ONLINE writes to the
+    # restart / add_node / resume paths. If the node is currently DOWN /
+    # UNREACHABLE / SCHEDULABLE, queue an auto-restart so the regular
+    # restart impl drives the IN_RESTART -> ONLINE transition.
+    if snode.status in (StorageNode.STATUS_UNREACHABLE,
+                        StorageNode.STATUS_SCHEDULABLE,
+                        StorageNode.STATUS_DOWN):
+        logger.info(
+            "Health checks pass for %s but status is %s; queueing auto-restart "
+            "(only the restart path may write ONLINE)",
+            snode.get_id(), snode.status,
+        )
+        tasks_controller.add_node_to_auto_restart(snode)
 
 
 def loop_for_node(snode):

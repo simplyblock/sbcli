@@ -6,7 +6,6 @@ from flask import Blueprint
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core import db_controller
-from simplyblock_core.rpc_client import RPCClient
 
 
 from prometheus_client import generate_latest
@@ -147,10 +146,7 @@ def get_data():
                 logger.error("No devices found in node: %s", node.get_id())
                 continue
             
-            rpc_client = RPCClient(
-                node.mgmt_ip, node.rpc_port,
-                node.rpc_username, node.rpc_password,
-                timeout=3*60, retry=10)
+            rpc_client = node.rpc_client(timeout=3*60, retry=10)
 
             reactor_data = rpc_client.framework_get_reactors()
             thread_data = rpc_client.thread_get_stats()

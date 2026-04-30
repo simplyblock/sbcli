@@ -32,7 +32,7 @@ from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.prom_client import PromClient
-from simplyblock_core.rpc_client import RPCClient, RPCException
+from simplyblock_core.rpc_client import RPCException
 from simplyblock_core.snode_client import SNodeClient, SNodeClientException
 from simplyblock_web import node_utils
 from simplyblock_core.utils import addNvmeDevices
@@ -146,7 +146,7 @@ def _reapply_allowed_hosts(lvol, snode, rpc_client):
 
 def _set_lvol_ana_on_node(lvol, node, ana_state):
     """Set ANA state for a single lvol's listeners on a given node."""
-    rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=10, retry=2)
+    rpc_client = node.rpc_client(timeout=10, retry=2)
     listener_port = node.get_lvol_subsys_port(lvol.lvs_name)
     for iface in node.data_nics:
         if iface.ip4_address and (lvol.fabric == iface.trtype.lower() or (lvol.fabric == "tcp" and node.active_tcp)):
@@ -262,10 +262,7 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names:
     rpc_client = node.rpc_client()
     if attach_timeout is None or attach_timeout > _ATTACH_CONTROLLER_MAX_TIMEOUT_SEC:
         attach_timeout = _ATTACH_CONTROLLER_MAX_TIMEOUT_SEC
-    attach_rpc_client = RPCClient(
-        node.mgmt_ip, node.rpc_port,
-        node.rpc_username, node.rpc_password,
-        timeout=attach_timeout, retry=0)
+    attach_rpc_client = node.rpc_client(timeout=attach_timeout, retry=0)
     # check connection status
     if device.is_connection_in_progress_to_node(node.get_id()):
         logger.warning("This device is being connected to from other node, sleep for 5 seconds")
@@ -664,7 +661,7 @@ def _create_storage_device_stack(rpc_client, nvme, snode, after_restart):
         pba_init_mode=1 if (after_restart and nvme.status != NVMeDevice.STATUS_NEW) else 3,
         write_protection=cluster.distr_ndcs > 1,
         pba_page_size=cluster.page_size_in_blocks,
-        full_page_unmap=cluster.full_page_unmap
+        full_page_unmap=cluster.full_page_unmap,
     )
 
     if not ret:
@@ -843,7 +840,7 @@ def _prepare_cluster_devices_jm_on_dev(snode, devices):
 
     # Set device cluster order
     dev_order = get_next_cluster_device_order(db_controller, snode.cluster_id)
-    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+    rpc_client = snode.rpc_client()
     new_devices = []
     for index, nvme in enumerate(devices):
         if nvme.status == "not_found":
@@ -880,9 +877,7 @@ def _prepare_cluster_devices_on_restart(snode, clear_data=False):
 
     new_devices = []
 
-    rpc_client = RPCClient(
-        snode.mgmt_ip, snode.rpc_port,
-        snode.rpc_username, snode.rpc_password, timeout=5 * 60)
+    rpc_client = snode.rpc_client(timeout=5 * 60)
 
     thread_list = []
     for index, nvme in enumerate(snode.nvme_devices):
@@ -1018,9 +1013,7 @@ def _connect_to_remote_devs(
 ):
     db_controller = DBController()
 
-    rpc_client = RPCClient(
-        this_node.mgmt_ip, this_node.rpc_port,
-        this_node.rpc_username, this_node.rpc_password, timeout=5, retry=1)
+    rpc_client = this_node.rpc_client(timeout=5, retry=1)
 
     node_bdevs = rpc_client.get_bdevs()
     if node_bdevs:
@@ -1135,9 +1128,7 @@ def sync_remote_devices_from_spdk(this_node: StorageNode, node_bdev_names=None):
     """Persist remote data bdevs that already exist in SPDK for this node."""
     db_controller = DBController()
     if node_bdev_names is None:
-        rpc_client = RPCClient(
-            this_node.mgmt_ip, this_node.rpc_port,
-            this_node.rpc_username, this_node.rpc_password, timeout=5, retry=1)
+        rpc_client = this_node.rpc_client(timeout=5, retry=1)
         node_bdevs = rpc_client.get_bdevs()
         node_bdev_names = [b["name"] for b in node_bdevs] if node_bdevs else []
     elif isinstance(node_bdev_names, dict):
@@ -1225,9 +1216,7 @@ def _peer_reachable_via_jm_quorum(target_node_id, this_node, peer_probe_timeout=
 def _connect_to_remote_jm_devs(this_node, jm_ids=None):
     db_controller = DBController()
 
-    rpc_client = RPCClient(
-        this_node.mgmt_ip, this_node.rpc_port,
-        this_node.rpc_username, this_node.rpc_password, timeout=5, retry=2)
+    rpc_client = this_node.rpc_client(timeout=5, retry=2)
 
     node_bdevs = rpc_client.get_bdevs()
     if node_bdevs:
@@ -1749,10 +1738,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         if partition_size:
             snode.partition_size = utils.parse_size(partition_size)
 
-        # creating RPCClient instance
-        rpc_client = RPCClient(
-            snode.mgmt_ip, snode.rpc_port,
-            snode.rpc_username, snode.rpc_password, timeout=3 * 60, retry=10)
+        rpc_client = snode.rpc_client(timeout=3 * 60, retry=10)
 
         # 1- set iobuf options
         if (snode.iobuf_small_pool_count or snode.iobuf_large_pool_count or
@@ -1825,9 +1811,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         # bdev_nvme_set_options is a pure local SPDK config call; bound it at
         # 5 s so a stuck proxy can't consume the 3 min startup RPC budget.
         mp = bool(snode.data_nics and len(snode.data_nics) > 1)
-        set_opts_rpc = RPCClient(
-            snode.mgmt_ip, snode.rpc_port,
-            snode.rpc_username, snode.rpc_password, timeout=5, retry=0)
+        set_opts_rpc = snode.rpc_client(timeout=5, retry=0)
         ret = set_opts_rpc.bdev_nvme_set_options(multipath=mp)
         if not ret:
             logger.error("Failed to set nvme options")
@@ -1956,7 +1940,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         # logger.info("Done")
 
         logger.info("Setting node status to Active")
-        set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE, reconnect_on_online=False)
+        set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE, caused_by="add_node")
 
         for dev in snode.nvme_devices:
             if dev.status == NVMeDevice.STATUS_ONLINE:
@@ -2159,22 +2143,47 @@ def restart_storage_node(
     except Exception:
         logger.exception("restart_storage_node raised unexpectedly")
     finally:
-        skip_cleanup_pre = (
-            StorageNode.STATUS_RESTARTING,
-            StorageNode.STATUS_IN_SHUTDOWN,
-            None,
-        )
-        if not result and pre_status not in skip_cleanup_pre:
-            try:
-                post_node = db_ctrl.get_storage_node_by_id(node_id)
-                if post_node.status == StorageNode.STATUS_RESTARTING:
-                    logger.warning(
-                        f"Restart of {node_id} failed; resetting from "
-                        f"RESTARTING → OFFLINE to unblock future attempts"
-                    )
-                    set_node_status(node_id, StorageNode.STATUS_OFFLINE)
-            except Exception as cleanup_exc:
-                logger.error(f"Failed to reset node {node_id} after failed restart: {cleanup_exc}")
+        # Trust the DB. If the impl raised after the ONLINE write was
+        # already committed, the node IS factually online — peers see
+        # ONLINE, IO is being served — and the only thing that "failed"
+        # was a post-flip side-effect that bubbled an exception. Treating
+        # that as failure caused the iteration-77 hang where the script
+        # spent 8 minutes retrying restarts of an already-online node.
+        try:
+            post_node = db_ctrl.get_storage_node_by_id(node_id)
+            if not result and post_node.status == StorageNode.STATUS_ONLINE:
+                logger.warning(
+                    f"Restart of {node_id} returned False but DB shows ONLINE; "
+                    f"trusting the DB and treating as success."
+                )
+                result = True
+            elif not result and pre_status not in (StorageNode.STATUS_RESTARTING,
+                                                    StorageNode.STATUS_IN_SHUTDOWN,
+                                                    None):
+                # We owned the lock (pre_status was OFFLINE / DOWN / etc.),
+                # the impl failed before reaching the ONLINE flip. Reset to
+                # OFFLINE regardless of current status — a failed restart
+                # can leave RESTARTING, but it can also leave intermediate
+                # states; OFFLINE is the only safe wedge-free landing for
+                # the next retry.
+                logger.warning(
+                    f"Restart of {node_id} failed (post-status={post_node.status}); "
+                    f"resetting to OFFLINE to unblock future attempts"
+                )
+                # Force the OFFLINE write — bypass the state-machine guard
+                # in set_node_status (which only restricts ONLINE writes
+                # anyway, but we use a direct write here to avoid any
+                # second-order effects from the helper).
+                post_node.status = StorageNode.STATUS_OFFLINE
+                post_node.updated_at = str(datetime.datetime.now(datetime.timezone.utc))
+                post_node.online_since = ""
+                post_node.write_to_db(db_ctrl.kv_store)
+                storage_events.snode_status_change(
+                    post_node, StorageNode.STATUS_OFFLINE, post_node.status,
+                    caused_by="restart_cleanup")
+                distr_controller.send_node_status_event(post_node, StorageNode.STATUS_OFFLINE)
+        except Exception as cleanup_exc:
+            logger.error(f"Failed to reset node {node_id} after failed restart: {cleanup_exc}")
     return result
 
 
@@ -2224,53 +2233,54 @@ def _restart_storage_node_impl(
         return False
     snode = db_controller.get_storage_node_by_id(node_id)
 
+    if  node_address == snode.api_endpoint:
+        node_address = None
+
     if node_address:
-        if node_address != snode.api_endpoint:
-            logger.info(f"Restarting on new node with ip: {node_address}")
-            snode_api = SNodeClient(node_address, timeout=5 * 60, retry=3)
-            node_info, _ = snode_api.info()
-            if not node_info:
-                logger.error("Failed to get node info!")
+        logger.info(f"Restarting on new node with ip: {node_address}")
+        snode_api = SNodeClient(node_address, timeout=5 * 60, retry=3)
+        node_info, _ = snode_api.info()
+        if not node_info:
+            logger.error("Failed to get node info!")
+            return False
+        snode.api_endpoint = node_address
+        snode.mgmt_ip = utils.resolve_address(node_address)
+        data_nics = []
+        for nic in snode.data_nics:
+            if_name = nic["if_name"]
+            device = node_info['network_interface'][if_name]
+            data_nics.append(
+                IFace({
+                    'uuid': str(uuid.uuid4()),
+                    'if_name': if_name,
+                    'ip4_address': device['ip'],
+                    'status': device['status'],
+                    'net_type': device['net_type']}))
+        snode.data_nics = data_nics
+        snode.hostname = node_info['hostname']
+
+        if snode.num_partitions_per_dev == 0 and reattach_volume:
+            new_cloud_instance_id = node_info['cloud_instance']['id']
+            detached_volumes = node_utils.detach_ebs_volumes(snode.cloud_instance_id)
+            if not detached_volumes:
+                logger.error("No volumes with matching tags were detached.")
                 return False
-            snode.api_endpoint = node_address
-            snode.mgmt_ip = node_address.split(":")[0]
-            data_nics = []
-            for nic in snode.data_nics:
-                if_name = nic["if_name"]
-                device = node_info['network_interface'][if_name]
-                data_nics.append(
-                    IFace({
-                        'uuid': str(uuid.uuid4()),
-                        'if_name': if_name,
-                        'ip4_address': device['ip'],
-                        'status': device['status'],
-                        'net_type': device['net_type']}))
-            snode.data_nics = data_nics
-            snode.hostname = node_info['hostname']
 
-            if snode.num_partitions_per_dev == 0 and reattach_volume:
-                new_cloud_instance_id = node_info['cloud_instance']['id']
-                detached_volumes = node_utils.detach_ebs_volumes(snode.cloud_instance_id)
-                if not detached_volumes:
-                    logger.error("No volumes with matching tags were detached.")
-                    return False
+            attached_volumes = node_utils.attach_ebs_volumes(new_cloud_instance_id, detached_volumes)
+            if not attached_volumes:
+                logger.error("Failed to attach volumes.")
+                return False
 
-                attached_volumes = node_utils.attach_ebs_volumes(new_cloud_instance_id, detached_volumes)
-                if not attached_volumes:
-                    logger.error("Failed to attach volumes.")
-                    return False
+            snode.cloud_instance_id = new_cloud_instance_id
+            known_sn = [dev.serial_number for dev in snode.nvme_devices]
+            if snode.jm_device and 'serial_number' in snode.jm_device.device_data_dict:
+                known_sn.append(snode.jm_device.device_data_dict['serial_number'])
 
-                snode.cloud_instance_id = new_cloud_instance_id
-                known_sn = [dev.serial_number for dev in snode.nvme_devices]
-                if snode.jm_device and 'serial_number' in snode.jm_device.device_data_dict:
-                    known_sn.append(snode.jm_device.device_data_dict['serial_number'])
+            node_info, _ = snode_api.info()
+            for dev in node_info['nvme_devices']:
+                if dev['serial_number'] in known_sn:
+                    snode_api.bind_device_to_spdk(dev['address'])
 
-                node_info, _ = snode_api.info()
-                for dev in node_info['nvme_devices']:
-                    if dev['serial_number'] in known_sn:
-                        snode_api.bind_device_to_spdk(dev['address'])
-        else:
-            node_address = None
     active_tcp = False
     active_rdma = False
     fabric_tcp = cluster.fabric_tcp
@@ -2436,11 +2446,7 @@ def _restart_storage_node_impl(
 
     snode.write_to_db(db_controller.kv_store)
 
-    # creating RPCClient instance
-    rpc_client = RPCClient(
-        snode.mgmt_ip, snode.rpc_port,
-        snode.rpc_username, snode.rpc_password,
-        timeout=10 * 60, retry=10)
+    rpc_client = snode.rpc_client(timeout=10 * 60, retry=10)
 
     # 1- set iobuf options
     if (snode.iobuf_small_pool_count or snode.iobuf_large_pool_count or
@@ -2511,9 +2517,7 @@ def _restart_storage_node_impl(
     # bdev_nvme_set_options is a pure local SPDK config call; bound it at
     # 5 s so a stuck proxy can't consume the 10 min restart RPC budget.
     mp = bool(snode.data_nics and len(snode.data_nics) > 1)
-    set_opts_rpc = RPCClient(
-        snode.mgmt_ip, snode.rpc_port,
-        snode.rpc_username, snode.rpc_password, timeout=5, retry=0)
+    set_opts_rpc = snode.rpc_client(timeout=5, retry=0)
     ret = set_opts_rpc.bdev_nvme_set_options(multipath=mp)
     if not ret:
         logger.error("Failed to set nvme options")
@@ -2699,7 +2703,7 @@ def _restart_storage_node_impl(
 
         logger.info("Cluster is not ready yet")
         logger.info("Setting node status to Online")
-        set_node_status(node_id, StorageNode.STATUS_ONLINE, reconnect_on_online=False)
+        set_node_status(node_id, StorageNode.STATUS_ONLINE, caused_by="restart")
         _refresh_cluster_maps_after_node_recovery(snode)
 
         online_devices_list = []
@@ -2797,7 +2801,7 @@ def _restart_storage_node_impl(
             logger.error("ANA failback during restart of %s failed: %s", snode.get_id(), ana_e)
 
         logger.info("Setting node status to Online")
-        set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE)
+        set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE, caused_by="restart")
 
         logger.info("Sending device status event")
         snode = db_controller.get_storage_node_by_id(snode.get_id())
@@ -3169,21 +3173,6 @@ def shutdown_storage_node(node_id, force=False):
 
     logger.info("Node found: %s in state: %s", snode.hostname, snode.status)
 
-    # If node is not yet suspended and force is not used, run suspend first
-    if snode.status != StorageNode.STATUS_SUSPENDED:
-        if force:
-            logger.warning("Node is not in suspended state, proceeding with force")
-        elif snode.status == StorageNode.STATUS_ONLINE:
-            logger.info("Node is online, suspending before shutdown")
-            ret = suspend_storage_node(node_id, force=False)
-            if not ret:
-                logger.error("Failed to suspend node, cannot proceed with shutdown")
-                return False
-            snode = db_controller.get_storage_node_by_id(node_id)
-        else:
-            logger.error("Node is not in suspended or online state, use --force")
-            return False
-
     # FTT check (suspend already checked this, but verify again for direct shutdown calls)
     if not force:
         allowed, reason = _check_ftt_allows_node_removal(node_id, db_controller)
@@ -3231,6 +3220,21 @@ def shutdown_storage_node(node_id, force=False):
             logger.error(f"Migration task found: {len(tasks)}, can not shutdown storage node or use --force")
             return False
 
+    # If node is not yet suspended and force is not used, run suspend first
+    if snode.status != StorageNode.STATUS_SUSPENDED:
+        if force:
+            logger.warning("Node is not in suspended state, proceeding with force")
+        elif snode.status == StorageNode.STATUS_ONLINE:
+            logger.info("Node is online, suspending before shutdown")
+            ret = suspend_storage_node(node_id, force=False, change_node_status=False)
+            if not ret:
+                logger.error("Failed to suspend node, cannot proceed with shutdown")
+                return False
+            snode = db_controller.get_storage_node_by_id(node_id)
+        else:
+            logger.error("Node is not in suspended or online state, use --force")
+            return False
+
     logger.info("Shutting down node")
     set_node_status(node_id, StorageNode.STATUS_IN_SHUTDOWN)
     time.sleep(3)
@@ -3243,6 +3247,8 @@ def shutdown_storage_node(node_id, force=False):
     for dev in snode.nvme_devices:
         if dev.status in [NVMeDevice.STATUS_UNAVAILABLE, NVMeDevice.STATUS_ONLINE,
                           NVMeDevice.STATUS_CANNOT_ALLOCATE, NVMeDevice.STATUS_READONLY]:
+            # Default cause (CAUSE_OTHER) is correct here: a node-driven
+            # shutdown must not count against the per-device flap budget.
             device_controller.device_set_unavailable(dev.get_id())
 
     time.sleep(1)
@@ -3284,7 +3290,7 @@ def shutdown_storage_node(node_id, force=False):
     return True
 
 
-def suspend_storage_node(node_id, force=False):
+def suspend_storage_node(node_id, force=False, change_node_status=True):
     db_controller = DBController()
     try:
         snode = db_controller.get_storage_node_by_id(node_id)
@@ -3293,7 +3299,7 @@ def suspend_storage_node(node_id, force=False):
         return False
 
     logger.info("Node found: %s in state: %s", snode.hostname, snode.status)
-    if snode.status != StorageNode.STATUS_ONLINE:
+    if snode.status != StorageNode.STATUS_ONLINE and change_node_status:
         logger.error("Node is not in online state")
         if force is False:
             return False
@@ -3381,8 +3387,9 @@ def suspend_storage_node(node_id, force=False):
         _revert_blocked_ports()
         return False
 
-    logger.info("Setting node status to suspended")
-    set_node_status(snode.get_id(), StorageNode.STATUS_SUSPENDED)
+    if change_node_status:
+        logger.info("Setting node status to suspended")
+        set_node_status(snode.get_id(), StorageNode.STATUS_SUSPENDED)
 
     logger.info("Done")
     return True
@@ -3464,7 +3471,7 @@ def resume_storage_node(node_id):
         return False
 
     logger.info("Setting node status to online")
-    set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE)
+    set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE, caused_by="resume")
     logger.info("Done")
     return True
 
@@ -3763,7 +3770,7 @@ def start_storage_node_api_container(node_ip, cluster_ip=None):
 
     node_docker.containers.run(
         constants.SIMPLY_BLOCK_DOCKER_IMAGE,
-        "python simplyblock_web/node_webapp.py storage_node",
+        "sudo -E python3 simplyblock_web/node_webapp.py storage_node",
         detach=True,
         privileged=True,
         name="SNodeAPI",
@@ -3776,7 +3783,13 @@ def start_storage_node_api_container(node_ip, cluster_ip=None):
             '/var/run:/var/run',
             '/dev:/dev',
             '/lib/modules/:/lib/modules/',
-            '/sys:/sys'],
+            '/sys:/sys',
+            # Bind-mount the SPDK ramdisk so the spdk_process_is_up endpoint
+            # can probe SPDK's JSON-RPC Unix socket directly at
+            # /mnt/ramdisk/spdk_<port>/spdk.sock. Without this, the endpoint
+            # has to fall through to dockerd, which can stall for 60-80s
+            # during post-outage Swarm reconciliation (incident 2026-04-24).
+            '/mnt/ramdisk:/mnt/ramdisk'],
         restart_policy={"Name": "always"},
         environment=[
             f"DOCKER_IP={node_ip}",
@@ -3857,10 +3870,7 @@ def health_check(node_id):
 
     try:
         logger.info("Connecting to node's SPDK")
-        rpc_client = RPCClient(
-            snode.mgmt_ip, snode.rpc_port,
-            snode.rpc_username, snode.rpc_password,
-            timeout=3, retry=1)
+        rpc_client = snode.rpc_client(timeout=3, retry=1)
 
         ret = rpc_client.get_version()
         logger.info(f"SPDK version: {ret['version']}")
@@ -3927,7 +3937,7 @@ def get_spdk_info(node_id):
         logger.exception("Can not find storage node")
         return False
 
-    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+    rpc_client = snode.rpc_client()
     ret = rpc_client.ultra21_util_get_malloc_stats()
     if not ret:
         logger.error(f"Failed to get SPDK info for node {node_id}")
@@ -3955,90 +3965,64 @@ def get(node_id):
     return json.dumps(data, indent=2, sort_keys=True)
 
 
-def set_node_status(node_id, status, reconnect_on_online=True):
+# States from which a node may legally transition INTO STATUS_ONLINE.
+# Going online is the most consequential write in the state machine: it
+# tells peers the node is serving IO. To prevent stale paths (e.g. the
+# monitor briefly losing then regaining health checks) from re-flipping
+# a half-broken node to ONLINE, the only legal predecessors are the
+# transient "active operation in progress" states. Anything else is an
+# illegal transition and rejected.
+_ALLOWED_PRE_STATUSES_FOR_ONLINE = (
+    StorageNode.STATUS_RESTARTING,
+    StorageNode.STATUS_IN_CREATION,
+    StorageNode.STATUS_SUSPENDED,
+)
+
+
+def set_node_status(node_id, status, caused_by="monitor"):
+    """Write a status transition for the node. Pure bookkeeping: emits
+    the event, broadcasts to peers, and (on ONLINE) cancels any pending
+    auto-restart tasks for this node. Does NOT do peer connects, hublvol
+    wiring, or device-event broadcasts — those are the caller's job
+    (the restart impl, resume_storage_node, etc. all already do them
+    before calling this function)."""
+    from simplyblock_core.controllers import tasks_controller
+
     db_controller = DBController()
     snode = db_controller.get_storage_node_by_id(node_id)
-    if snode.status != status:
-        old_status = snode.status
-        snode.status = status
-        snode.updated_at = str(datetime.datetime.now(datetime.timezone.utc))
-        if status == StorageNode.STATUS_ONLINE:
-            snode.online_since = str(datetime.datetime.now(datetime.timezone.utc))
-        else:
-            snode.online_since = ""
-        snode.write_to_db(db_controller.kv_store)
-        storage_events.snode_status_change(snode, snode.status, old_status, caused_by="monitor")
-        distr_controller.send_node_status_event(snode, status)
+    if snode.status == status:
+        return True
 
-    if snode.status == StorageNode.STATUS_ONLINE and reconnect_on_online:
-        snode = db_controller.get_storage_node_by_id(node_id)
-        logger.info("Connecting to remote devices")
+    if status == StorageNode.STATUS_ONLINE and snode.status not in _ALLOWED_PRE_STATUSES_FOR_ONLINE:
+        # Hard reject: ONLINE may only be reached from RESTARTING (restart
+        # path), IN_CREATION (add_node path), or SUSPENDED (resume path).
+        # Other paths must route through one of those states first.
+        logger.error(
+            f"Refusing illegal status transition for {node_id}: "
+            f"{snode.status} -> ONLINE. Only {_ALLOWED_PRE_STATUSES_FOR_ONLINE} -> ONLINE is allowed."
+        )
+        return False
+
+    old_status = snode.status
+    snode.status = status
+    snode.updated_at = str(datetime.datetime.now(datetime.timezone.utc))
+    if status == StorageNode.STATUS_ONLINE:
+        snode.online_since = str(datetime.datetime.now(datetime.timezone.utc))
+    else:
+        snode.online_since = ""
+    snode.write_to_db(db_controller.kv_store)
+    storage_events.snode_status_change(snode, snode.status, old_status, caused_by=caused_by)
+    distr_controller.send_node_status_event(snode, status)
+
+    if status == StorageNode.STATUS_ONLINE:
+        # The node is back online; obsolete auto-restart tasks must not
+        # linger in the queue, or the dedup guard in
+        # _validate_new_task_node_restart blocks every subsequent restart
+        # attempt until the task runner happens to pick the orphan up.
         try:
-            snode.remote_devices = _connect_to_remote_devs(snode)
-        except RuntimeError:
-            logger.error('Failed to connect to remote devices')
-            return False
-        if snode.enable_ha_jm:
-            snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
-        snode.write_to_db(db_controller.kv_store)
-
-        # Send device status events to update peers on device availability
-        for db_dev in snode.nvme_devices:
-            distr_controller.send_dev_status_event(db_dev, db_dev.status)
-
-        for node in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
-            if node.get_id() == snode.get_id():
-                continue
-            if node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
-                try:
-                    node = db_controller.get_storage_node_by_id(node.get_id())
-                    node.remote_devices = _connect_to_remote_devs(node)
-                    node.write_to_db()
-                except RuntimeError:
-                    logger.error(f'Failed to connect to remote devices from node: {node.get_id()}')
-                    continue
-
-        cluster = db_controller.get_cluster_by_id(snode.cluster_id)
-        if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
-            for sec_id, sec_role in [(snode.secondary_node_id, "secondary"), (snode.tertiary_node_id, "tertiary")]:
-                if not sec_id:
-                    continue
-                sec_node = db_controller.get_storage_node_by_id(sec_id)
-                if sec_node and snode.lvstore_status == "ready":
-                    if sec_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
-                        try:
-                            failover_node = None
-                            if sec_role == "tertiary" and snode.secondary_node_id:
-                                try:
-                                    sec1 = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-                                    if sec1.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
-                                        failover_node = sec1
-                                except KeyError:
-                                    pass
-                            sec_node.connect_to_hublvol(snode, failover_node=failover_node, role=sec_role)
-                        except Exception as e:
-                            logger.error("Error establishing hublvol: %s", e)
-
-            for sec_attr in ['lvstore_stack_secondary', 'lvstore_stack_tertiary']:
-                primary_id = getattr(snode, sec_attr, None)
-                if not primary_id:
-                    continue
-                primary_node = db_controller.get_storage_node_by_id(primary_id)
-                if primary_node and primary_node.lvstore_status == "ready":
-                    if primary_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
-                        try:
-                            failover_node = None
-                            if sec_attr == 'lvstore_stack_tertiary' and primary_node.secondary_node_id:
-                                try:
-                                    sec1 = db_controller.get_storage_node_by_id(primary_node.secondary_node_id)
-                                    if sec1.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
-                                        failover_node = sec1
-                                except KeyError:
-                                    pass
-                            sec_role = "tertiary" if sec_attr == 'lvstore_stack_tertiary' else "secondary"
-                            snode.connect_to_hublvol(primary_node, failover_node=failover_node, role=sec_role)
-                        except Exception as e:
-                            logger.error("Error establishing hublvol: %s", e)
+            tasks_controller.cancel_pending_node_restart_tasks(snode.cluster_id, node_id)
+        except Exception as e:
+            logger.error(f"Failed to cancel pending node_restart tasks for {node_id}: {e}")
 
     return True
 
@@ -4205,9 +4189,7 @@ def _is_node_rpc_responsive(node, lvs_name, timeout=5, retry=2):
     beyond the defined retries.
     """
     try:
-        rpc = RPCClient(node.mgmt_ip, node.rpc_port,
-                        node.rpc_username, node.rpc_password,
-                        timeout=timeout, retry=retry)
+        rpc = node.rpc_client(timeout=timeout, retry=retry)
         ret = rpc.bdev_lvol_get_lvstores(lvs_name)
         return ret is not None
     except Exception:
@@ -4300,9 +4282,7 @@ def find_leader_with_failover(all_nodes, lvs_name):
     # but data plane is healthy). The signal tells the leader's SPDK to drop
     # leadership for this LVS.
     try:
-        rpc = RPCClient(failover_target.mgmt_ip, failover_target.rpc_port,
-                        failover_target.rpc_username, failover_target.rpc_password,
-                        timeout=5, retry=2)
+        rpc = failover_target.rpc_client(timeout=5, retry=2)
         rpc.bdev_lvol_set_lvs_signal(lvs_name)
         time.sleep(2)
         logger.info("Sent bdev_lvol_set_lvs_signal(%s) from %s to leader %s via fabric",
@@ -4502,8 +4482,7 @@ def _check_hublvol_connected(snode, peer_node):
     Returns True if hublvol is connected, False if disconnected.
     """
     try:
-        rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port,
-                               snode.rpc_username, snode.rpc_password, timeout=5, retry=1)
+        rpc_client = snode.rpc_client(timeout=5, retry=1)
         if peer_node.hublvol and peer_node.hublvol.bdev_name:
             remote_bdev = f"{peer_node.hublvol.bdev_name}n1"
             bdevs = rpc_client.get_bdevs(remote_bdev)
@@ -4551,8 +4530,7 @@ def _handle_rpc_failure_on_peer(snode, peer_node, lvs_jm_vuid, lvs_name=None):
         logger.error("_handle_rpc_failure_on_peer: lvs_name required for fabric signal")
         return "abort"
     try:
-        rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port,
-                               snode.rpc_username, snode.rpc_password, timeout=5, retry=1)
+        rpc_client = snode.rpc_client(timeout=5, retry=1)
         ret = rpc_client.bdev_lvol_set_lvs_signal(lvs_name)
         if ret:
             logger.info("Sent bdev_lvol_set_lvs_signal(%s) from %s to peer %s via fabric, waiting 2s",
@@ -4590,9 +4568,7 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
             cluster_activate() where not all LVS are ready yet.
     """
     db_controller = DBController()
-    snode_rpc_client = RPCClient(
-        snode.mgmt_ip, snode.rpc_port,
-        snode.rpc_username, snode.rpc_password)
+    snode_rpc_client = snode.rpc_client()
 
     if activation_mode:
         # Soft prelude: reconnect any missing remote devices + remote JMs
@@ -4872,6 +4848,14 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
         logger.error("bdev_lvol_set_lvs_opts(%s) failed for %s on %s",
                      sec_role, primary_node.lvstore, snode.get_id())
 
+    # Track the deferred failover-path attach so we can run it AFTER the
+    # leader port is unblocked. The in-freeze attach below uses a single
+    # path only; the second path (if any) is reconciled out-of-band so the
+    # 3 s INTER_ATTACH_SLEEP_SEC inside the coordinator never sits inside
+    # the IO-impact window.
+    deferred_failover_target = None
+    deferred_failover_via = None
+
     if not activation_mode:
         ### 6- create hublvol on secondary (non-leader) for multipath failover
         # Secondary creates its own hublvol so the tertiary can use it as a failover path.
@@ -4884,26 +4868,51 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
             except Exception as e:
                 logger.error("Error creating secondary hublvol on restarting node: %s", e)
 
-        ### 7- connect to leader's hublvol (with fallback to secondary for tertiary)
+        ### 7- single-path hublvol attach inside the freeze
+        # Pre-flight reachability up front: the second path must NEVER be
+        # attempted inside the leader-port-block window, and the single
+        # attached path must target a known-alive peer. If the original
+        # leader is offline (no quorum) we attach directly to the secondary
+        # — the dead leader's IP is not even tried.
         try:
             if is_tertiary:
-                # Tertiary: connect to leader's hublvol with secondary as failover.
-                # If leader is unreachable, fall back to connecting to secondary's hublvol.
-                failover_node = secondary_node if (secondary_node and
-                    not _check_peer_disconnected(secondary_node, lvs_peer_ids=lvs_peer_ids_excl_snode)) else None
-                connected = snode.connect_to_hublvol(leader_node, failover_node=failover_node,
-                                                    role=sec_role, timeout=0.5)
-                if not connected and secondary_node and secondary_node.hublvol:
-                    # Leader unreachable — connect to secondary's hublvol as primary path
-                    logger.info("Leader %s unreachable, connecting tertiary %s to secondary %s hublvol for %s",
+                secondary_alive = (secondary_node and not _check_peer_disconnected(
+                    secondary_node, lvs_peer_ids=lvs_peer_ids_excl_snode))
+                # leader_has_quorum was computed earlier (line ~4722). When
+                # the leader has lost quorum, attaching to it would burn up
+                # to fast_io_fail_timeout_sec (5s) inside the freeze.
+                if leader_has_quorum:
+                    sync_target = leader_node
+                    if (secondary_alive and secondary_node is not None
+                            and secondary_node.get_id() != leader_node.get_id()):
+                        deferred_failover_target = secondary_node
+                        deferred_failover_via = leader_node
+                elif secondary_alive and secondary_node is not None and secondary_node.hublvol:
+                    logger.info("Leader %s offline (no quorum); tertiary %s "
+                                "connecting directly to secondary %s hublvol for %s",
                                 leader_node.get_id(), snode.get_id(),
                                 secondary_node.get_id(), primary_node.lvstore)
-                    snode.connect_to_hublvol(secondary_node, failover_node=None,
-                                            role=sec_role, timeout=0.5)
+                    sync_target = secondary_node
+                    # No deferred path: there is no live alternative peer
+                    # to add as a failover. Once the original leader comes
+                    # back online, its periodic hublvol reconciliation will
+                    # add it as a path.
+                else:
+                    sync_target = None
+                    logger.error(
+                        "Tertiary %s rejoin %s: no reachable hublvol target "
+                        "(leader=%s alive=%s, secondary alive=%s)",
+                        snode.get_id(), primary_node.lvstore,
+                        leader_node.get_id(), leader_has_quorum, secondary_alive)
+
+                if sync_target is not None:
+                    snode.connect_to_hublvol(sync_target, failover_node=None,
+                                             role=sec_role, rpc_timeout=0.2)
             else:
-                # Secondary: connect to leader (primary) hublvol
+                # Secondary: connect to leader (primary) hublvol — single path,
+                # short timeout, no deferred failover (secondaries don't carry one).
                 snode.connect_to_hublvol(leader_node, failover_node=None,
-                                        role=sec_role, timeout=0.5)
+                                         role=sec_role, rpc_timeout=0.2)
         except Exception as e:
             logger.error("Error connecting to hublvol: %s", e)
 
@@ -4942,6 +4951,28 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
 
     # Set restart phase: post_unblock — delayed sync deletes and registrations can now proceed
     _set_restart_phase(snode, primary_node.lvstore, StorageNode.RESTART_PHASE_POST_UNBLOCK, db_controller)
+
+    ### 8b- deferred failover-path attach (tertiary only, leader was alive)
+    # The in-freeze attach above used a single path. Now that the leader
+    # port is unblocked and IO is flowing again, top up the second path on
+    # the multipath hublvol controller so a future primary loss has an
+    # immediate failover. The coordinator's INTER_ATTACH_SLEEP_SEC (3 s)
+    # cost lives here, OUTSIDE the IO-impact window — it doesn't sit inside
+    # the leader-port-block freeze any more, so client IO is unaffected.
+    if deferred_failover_target is not None and deferred_failover_via is not None:
+        try:
+            if snode.add_hublvol_failover_path(deferred_failover_via, deferred_failover_target):
+                logger.info("Added deferred hublvol failover path to %s (via %s) on %s for %s",
+                            deferred_failover_target.get_id(),
+                            deferred_failover_via.get_id(),
+                            snode.get_id(), primary_node.lvstore)
+            else:
+                logger.warning("Failed to add deferred hublvol failover path to %s on %s for %s",
+                               deferred_failover_target.get_id(),
+                               snode.get_id(), primary_node.lvstore)
+        except Exception as e:
+            logger.error("Error adding deferred hublvol failover path on %s: %s",
+                         snode.get_id(), e)
 
     ### 9- add lvols to subsystems (always non_optimized for non-leader)
     executor = ThreadPoolExecutor(max_workers=50)
@@ -5141,8 +5172,7 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
             if sec_node.get_id() in disconnected_peers:
                 continue
             try:
-                sec_rpc = RPCClient(sec_node.mgmt_ip, sec_node.rpc_port,
-                                    sec_node.rpc_username, sec_node.rpc_password, timeout=5, retry=2)
+                sec_rpc = sec_node.rpc_client(timeout=5, retry=2)
                 ret = sec_rpc.bdev_lvol_get_lvstores(lvs_name)
                 if ret and len(ret) > 0 and ret[0].get("lvs leadership"):
                     current_leader = sec_node
@@ -5191,9 +5221,7 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
         _set_restart_phase(snode, lvs_name, "", db_controller)
         return False
 
-    rpc_client = RPCClient(
-        snode.mgmt_ip, snode.rpc_port,
-        snode.rpc_username, snode.rpc_password)
+    rpc_client = snode.rpc_client()
 
     lvol_list = []
     for lv in db_controller.get_lvols_by_node_id(lvs_node.get_id()):
@@ -5364,10 +5392,7 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
 
         if current_leader and current_leader in blocked_peers:
             # --- Inside port-blocked window: timeout=0.2s, retry=0, abort on failure ---
-            leader_rpc = RPCClient(
-                current_leader.mgmt_ip, current_leader.rpc_port,
-                current_leader.rpc_username, current_leader.rpc_password,
-                timeout=0.2, retry=0)
+            leader_rpc = current_leader.rpc_client(timeout=0.2, retry=0)
 
             time.sleep(0.5)
 
@@ -5438,11 +5463,28 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
                 _abort_restart_and_unblock("Failed to recover lvstore")
 
     ### 7- take leadership
+    # Derive the kernel-side role from snode's topology relative to lvs_node.
+    # On takeover snode is acting as leader, but its kernel role must still
+    # reflect topology so the peer view of the original primary stays
+    # coherent. Hardcoding role="primary" caused the LVS_9060 follow-on
+    # incident (2026-04-25 11:28:50 run): when the original primary later
+    # rejoins, peers disagree on who the primary is and a writer conflict
+    # follows.
+    if snode.get_id() == lvs_node.get_id():
+        snode_lvs_role = "primary"
+    elif snode.get_id() == lvs_node.secondary_node_id:
+        snode_lvs_role = "secondary"
+    elif snode.get_id() == lvs_node.tertiary_node_id:
+        snode_lvs_role = "tertiary"
+    else:
+        _abort_restart_and_unblock(
+            f"snode {snode.get_id()} is not a registered peer of "
+            f"lvstore {lvs_name} (lvs_node={lvs_node.get_id()})")
     ret = rpc_client.bdev_lvol_set_lvs_opts(
         lvs_name,
         groupid=lvs_jm_vuid,
         subsystem_port=lvs_node.get_lvol_subsys_port(lvs_name),
-        role="primary"
+        role=snode_lvs_role,
     )
     ret = rpc_client.bdev_lvol_set_leader(lvs_name, leader=True)
     leader_restored = False
@@ -5486,24 +5528,67 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
         # spdk_lvs_trigger_leadership_switch, re-promoting the old leader and
         # causing a writer conflict.
         cluster = db_controller.get_cluster_by_id(snode.cluster_id)
-        sec1 = sec_nodes[0] if sec_nodes else None
-        if sec1 and sec1.get_id() not in disconnected_peers:
+
+        # Identify the topological secondary owner (sec_1) of this LVS by
+        # looking at lvs_node, NOT by sec_nodes ordering. The previous
+        # index-based code (sec_nodes[0]) routed sec_1 work to whichever
+        # peer happened to be first after disconnected_peers filtering —
+        # which on the LVS_9060 takeover (2026-04-25 11:28:50) wasn't even
+        # the right LVS, since create_secondary_hublvol read the lvstore
+        # name off snode.lvstore (snode's own primary, not the LVS being
+        # taken over).
+        sec1_id = lvs_node.secondary_node_id
+        sec1_node = next((s for s in sec_nodes if s.get_id() == sec1_id), None)
+        sec1_online = bool(sec1_node and sec1_node.get_id() not in disconnected_peers)
+
+        # Create the sec_1 hublvol only if sec_1 is a peer (not snode itself)
+        # and it's online. When snode IS the topological sec_1 (secondary
+        # owner taking leadership), there is no separate node to expose
+        # the secondary hublvol on — the leader's primary hublvol on snode
+        # is the only path until the original primary returns.
+        if sec1_online and sec1_node is not None:
             try:
-                sec1.create_secondary_hublvol(snode, cluster.nqn)
+                sec1_node.create_secondary_hublvol(lvs_node, cluster.nqn)
             except Exception as e:
                 logger.error("Error creating secondary hublvol on sec_1: %s", e)
                 _abort_restart_and_unblock(
-                    f"create_secondary_hublvol on {sec1.get_id()} raised: {e}")
+                    f"create_secondary_hublvol on {sec1_node.get_id()} raised: {e}")
 
-        for i, sec_node in enumerate(sec_nodes):
+        # Track tertiary→secondary failover-path attaches to run AFTER the
+        # peer port unblock — keeping the in-freeze attach single-path with
+        # a 0.2 s RPC budget and pushing the second-path INTER_ATTACH_SLEEP
+        # outside the IO-impact window. ``deferred_tertiary_paths`` holds
+        # ``(tert_node, primary_node, sec1_node)`` tuples to apply later.
+        deferred_tertiary_paths = []
+
+        for sec_node in sec_nodes:
             if sec_node.get_id() in disconnected_peers:
                 continue
-            sec1 = sec_nodes[0] if sec_nodes else None
-            failover_node = sec1 if i >= 1 and sec1 and sec1.get_id() not in disconnected_peers else None
-            sec_role = "tertiary" if i >= 1 else "secondary"
+            # Role and failover are determined by topology, not by index.
+            # An index-based assignment (sec_nodes[0] -> 'secondary',
+            # rest -> 'tertiary') breaks when the original primary is
+            # filtered out via disconnected_peers and shifts the
+            # remaining peers up one slot.
+            if sec_node.get_id() == lvs_node.secondary_node_id:
+                sec_role = "secondary"
+            elif sec_node.get_id() == lvs_node.tertiary_node_id:
+                sec_role = "tertiary"
+                # Defer the tertiary→secondary path; in-freeze attach is
+                # single-path against the (returning) primary only.
+                if sec1_online:
+                    deferred_tertiary_paths.append((sec_node, snode, sec1_node))
+            else:
+                logger.warning(
+                    "Skipping hublvol connect for %s: not a registered "
+                    "peer of %s (lvs_node=%s)",
+                    sec_node.get_id(), lvs_name, lvs_node.get_id())
+                continue
             try:
-                ok = sec_node.connect_to_hublvol(snode, failover_node=failover_node, role=sec_role,
-                                                 timeout=0.5)
+                # Single-path attach against ``snode`` (the leader). The
+                # secondary failover for tertiary is appended in a
+                # post-unblock pass via ``add_hublvol_failover_path``.
+                ok = sec_node.connect_to_hublvol(snode, failover_node=None, role=sec_role,
+                                                 rpc_timeout=0.2)
             except Exception as e:
                 logger.error("Error establishing hublvol on %s: %s", sec_node.get_id(), e)
                 _abort_restart_and_unblock(
@@ -5525,6 +5610,31 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
     # Phase transition: post_unblock — delayed sync deletes and registrations can now proceed
     _set_restart_phase(snode, lvs_name, StorageNode.RESTART_PHASE_POST_UNBLOCK, db_controller)
 
+    ### 10b- deferred tertiary→secondary hublvol failover paths
+    # The in-freeze attach above used a single path (tertiary → primary).
+    # Now that every peer's port is unblocked and IO is flowing again,
+    # top up the multipath controller on each tertiary so a future primary
+    # loss has an immediate failover. The coordinator's
+    # INTER_ATTACH_SLEEP_SEC (3 s) cost lives here, OUTSIDE the IO-impact
+    # window — it doesn't sit inside the leader-port-block freeze any more.
+    if not activation_mode and deferred_tertiary_paths:
+        for tert_node, primary_node, sec1_failover in deferred_tertiary_paths:
+            if sec1_failover is None:
+                # Only appended when ``sec1_online`` was True (meaning
+                # ``sec1_node`` was non-None at the time), so this branch
+                # should be unreachable in practice — guard for mypy.
+                continue
+            try:
+                if tert_node.add_hublvol_failover_path(primary_node, sec1_failover):
+                    logger.info("Added deferred secondary %s hublvol path on tertiary %s for %s",
+                                sec1_failover.get_id(), tert_node.get_id(), lvs_name)
+                else:
+                    logger.warning("Failed to add deferred secondary %s hublvol path on tertiary %s for %s",
+                                   sec1_failover.get_id(), tert_node.get_id(), lvs_name)
+            except Exception as e:
+                logger.error("Error adding deferred hublvol failover path on tertiary %s: %s",
+                             tert_node.get_id(), e)
+
     if not activation_mode:
         ### 11- demote old leader's subsystems to non_optimized (async)
         # Per design: after restarting node takes leadership, the old leader must
@@ -5533,8 +5643,7 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
             if sec_node.get_id() in disconnected_peers:
                 continue
             try:
-                sec_rpc = RPCClient(sec_node.mgmt_ip, sec_node.rpc_port,
-                                    sec_node.rpc_username, sec_node.rpc_password, timeout=10, retry=2)
+                sec_rpc = sec_node.rpc_client(timeout=10, retry=2)
                 for lvol in lvol_list:
                     listener_port = sec_node.get_lvol_subsys_port(lvol.lvs_name)
                     for iface in sec_node.data_nics:
@@ -5574,9 +5683,7 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
 def add_lvol_thread(lvol, snode, lvol_ana_state="optimized"):
     db_controller = DBController()
 
-    rpc_client = RPCClient(
-        snode.mgmt_ip, snode.rpc_port,
-        snode.rpc_username, snode.rpc_password, timeout=10, retry=2)
+    rpc_client = snode.rpc_client(timeout=10, retry=2)
 
     if "crypto" in lvol.lvol_type:
         base = f"{lvol.lvs_name}/{lvol.lvol_bdev}"
@@ -5871,7 +5978,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
         logger.error(err)
         return False
 
-    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+    rpc_client = snode.rpc_client()
     ret = rpc_client.bdev_lvol_set_lvs_opts(
         snode.lvstore,
         groupid=snode.jm_vuid,
@@ -5961,7 +6068,7 @@ def _create_bdev_stack(snode, lvstore_stack=None, primary_node=None):
         if not ret:
             logger.error("Failed to send cluster map")
 
-    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+    rpc_client = snode.rpc_client()
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     created_bdevs: list = []
@@ -6095,7 +6202,7 @@ def get_cluster_map(node_id):
 
     for node in nodes:
         logger.info(f"getting cluster map from node: {node.get_id()}")
-        rpc_client = RPCClient(node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password)
+        rpc_client = node.rpc_client()
         for distr in distribs_list:
             ret = rpc_client.distr_get_cluster_map(distr)
             if not ret:
@@ -6150,7 +6257,7 @@ def dump_lvstore(node_id):
         logger.error("Storage node does not have lvstore")
         return False
 
-    rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=120)
+    rpc_client = snode.rpc_client(timeout=120)
     logger.info(f"Dumping lvstore data on node: {snode.get_id()}")
     file_name = f"LVS_dump_{snode.hostname}_{snode.lvstore}_{str(datetime.datetime.now().isoformat())}.txt"
     file_path = f"/etc/simplyblock/{file_name}"

@@ -4,11 +4,10 @@ import time
 from datetime import datetime
 
 from simplyblock_core import utils
-from simplyblock_core.controllers import health_controller, storage_events, device_events, tasks_controller
+from simplyblock_core.controllers import health_controller, storage_events, device_events, tasks_controller, device_controller
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core import constants, db_controller, storage_node_ops
 
 
@@ -46,6 +45,31 @@ def set_device_health_check(cluster_id, device, health_check_status):
                     fresh_node.write_to_db()
                     device_events.device_health_check_change(
                         dev, health_check_status, old_status, caused_by="monitor")
+
+                    # If the home-node bdev/subsystem probes failed for a
+                    # currently-online device on an online node, treat that
+                    # as a local-failure signal that feeds the flap counter.
+                    # The probes (bdev existence, subsystem registration)
+                    # run on the home node without needing user IO, so this
+                    # closes the case where the device is truly broken but
+                    # no traffic is reaching it to elicit error_write/read
+                    # events. The stuck-removal failure mode where the
+                    # underlying NVMe controller is wedged but bdev_nvme
+                    # never destructs would *not* trigger this branch (the
+                    # bdev is still registered and the subsystem too) —
+                    # peer-quorum is what catches that case.
+                    if (health_check_status is False
+                            and dev.status == NVMeDevice.STATUS_ONLINE
+                            and node.status == StorageNode.STATUS_ONLINE):
+                        logger.warning(
+                            f"Device {dev.get_id()} health_check flipped "
+                            f"True→False on online node {node.get_id()}; "
+                            f"escalating to unavailable as local failure"
+                        )
+                        device_controller.device_set_unavailable(
+                            dev.get_id(),
+                            cause=device_controller.CAUSE_LOCAL_FAILURE,
+                        )
                     return
 
 
@@ -84,8 +108,7 @@ def check_node(snode):
     logger.info(f"Check: node API {snode.mgmt_ip}:5000 ... {node_api_check}")
 
     # 3- check node RPC
-    node_rpc_check = health_controller._check_node_rpc(
-        snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+    node_rpc_check = health_controller.check_node_rpc(snode)
     logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}")
 
     is_node_online = ping_check and node_api_check and node_rpc_check
@@ -96,10 +119,7 @@ def check_node(snode):
         node_devices_check = True
         node_remote_devices_check = True
 
-        rpc_client = RPCClient(
-            snode.mgmt_ip, snode.rpc_port,
-            snode.rpc_username, snode.rpc_password,
-            timeout=3, retry=2)
+        rpc_client = snode.rpc_client(timeout=3, retry=2)
         connected_devices = []
 
         node_bdevs = rpc_client.get_bdevs()

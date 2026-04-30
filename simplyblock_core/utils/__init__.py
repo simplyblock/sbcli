@@ -6,6 +6,7 @@ import math
 import os
 import random
 import re
+import socket
 import string
 import subprocess
 import sys
@@ -336,7 +337,7 @@ def process_records(records, records_count, keys=None):
 
 def ping_host(ip):
     logger.debug(f"Pinging ip ... {ip}")
-    response = os.system(f"ping -c 1 -W 2 {ip} > /dev/null")
+    response = os.system(f"sudo ping -c 1 -W 2 {ip} > /dev/null")
     if response == 0:
         logger.debug(f"{ip} is UP")
         return True
@@ -1221,6 +1222,27 @@ def addNvmeDevices(rpc_client, snode, devs):
             nvme_driver_data = nvme_dict['driver_specific']['nvme'][0]
             model_number = nvme_driver_data['ctrlr_data']['model_number']
             total_size = nvme_dict['block_size'] * nvme_dict['num_blocks']
+
+            # Skip zero-size NVMe namespaces. On AWS i3en the underlying
+            # physical SSD is reused across tenants; AWS scrubs the data
+            # but does NOT reset NVMe namespace structure. Drives drawn
+            # from the pool can therefore arrive with leftover empty
+            # namespaces from a previous tenant who used `nvme create-ns`.
+            # Treating those as devices fans the per-device init loop out
+            # to dozens of phantom slots, exhausts /dev/nbd<N>
+            # (default nbds_max=16) in `_create_device_partitions`, and
+            # fails add-node with -ENOENT on nbd_start_disk for
+            # bdevs that genuinely exist on SPDK but have no usable LBA
+            # range. Observed 2026-04-27 on a node where AWS handed us
+            # a drive with 83 namespaces (1 real, 82 zero-size).
+            if total_size == 0:
+                logger.info(
+                    "Skipping zero-size NVMe namespace %s (PCI %s, NSID %s)",
+                    nvme_bdev,
+                    nvme_driver_data.get('pci_address'),
+                    nvme_driver_data.get('ns_data', {}).get('id'),
+                )
+                continue
 
             serial_number = nvme_driver_data['ctrlr_data']['serial_number']
             if snode.id_device_by_nqn:
@@ -2169,7 +2191,7 @@ def render_and_deploy_alerting_configs(contact_point, grafana_endpoint, cluster_
         ALERT_TYPE = "email"
     else:
         ALERT_TYPE = "slack"
-        contact_point = 'https://hooks.slack.com/services/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'
+        contact_point = 'https://hooks.slack.com/services/'
 
     values = {
         'CONTACT_POINT': contact_point,
@@ -2604,7 +2626,7 @@ def patch_prometheus_configmap(username: str, password: str):
 
     try:
         cm = v1.read_namespaced_config_map(
-            name="sbcli-simplyblock-prometheus-config",
+            name="simplyblock-prometheus-config",
             namespace=constants.K8S_NAMESPACE
         )
     except client.exceptions.ApiException as e:
@@ -2631,12 +2653,12 @@ def patch_prometheus_configmap(username: str, password: str):
         }
 
         v1.patch_namespaced_config_map(
-            name="sbcli-simplyblock-prometheus-config",
+            name="simplyblock-prometheus-config",
             namespace=constants.K8S_NAMESPACE,
             body=patch_body
         )
 
-        logger.info("Patched sbcli-simplyblock-prometheus-config ConfigMap with new credentials.")
+        logger.info("Patched simplyblock-prometheus-config ConfigMap with new credentials.")
         return True
 
     except client.exceptions.ApiException as e:
@@ -3102,3 +3124,31 @@ def recalculate_cores_distribution(cores, number_of_alcemls):
         "distrib_cpu_cores": get_core_indexes(core_to_index, distribution[5]),
         "jc_singleton_core": get_core_indexes(core_to_index, distribution[6]),
         "lvol_poller_core": get_core_indexes(core_to_index, distribution[7])}
+
+
+def resolve_address(host_port: str) -> str:
+    """Resolves an host:port string to its IP address
+
+    Resilient to IPv4, IPv6, hostnames, and an optional port suffix.
+    """
+
+    default_port = 1234
+    # Check for bracketed IPv6: [::1] or [::1]:8080
+    if host_port.startswith("["):
+        bracket_end = host_port.index("]")
+        host = host_port[1:bracket_end]
+        rest = host_port[bracket_end + 1:]
+        port = int(rest[1:]) if rest.startswith(":") else default_port
+    # Plain IPv4 or hostname: 1.2.3.4, 1.2.3.4:8080, example.com, example.com:8080
+    elif ":" in host_port:
+        host, port_str = host_port.rsplit(":", 1)
+        port = int(port_str)
+    else:
+        host = host_port
+        port = default_port
+
+    results = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    ip = results[0][4][0]
+    if not isinstance(ip, str):
+        raise ValueError(f"Invalid return value {ip}")
+    return ip

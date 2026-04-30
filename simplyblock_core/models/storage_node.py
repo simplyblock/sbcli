@@ -11,6 +11,7 @@ from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice, RemoteDevice, RemoteJMDevice
 from simplyblock_core.rpc_client import RPCClient, RPCException
+from simplyblock_core.settings import Settings
 from simplyblock_core.snode_client import SNodeClient
 
 logger = utils.get_logger(__name__)
@@ -148,16 +149,27 @@ class StorageNode(BaseNodeObject):
     def client(self, **kwargs):
         """Return API client to this node
         """
-        return SNodeClient(self.api_endpoint, **kwargs)
+        host = self.api_endpoint
+        if Settings().tls_enabled:
+            port = self.api_endpoint.rsplit(":", 1)[1]
+            host = f"{self._k8s_node_label()}.simplyblock-storage-node-api.{self.cr_namespace}.svc.cluster.local:{port}"
+        return SNodeClient(host, **kwargs)
 
     def rpc_client(self, **kwargs):
         """Return rpc client to this node
         """
+        host = self.mgmt_ip
+        if Settings().tls_enabled:
+            host = f"{self._k8s_node_label()}.simplyblock-spdk-proxy.{self.cr_namespace}.svc.cluster.local"
         return RPCClient(
-            self.mgmt_ip, self.rpc_port,
+            host, self.rpc_port,
             self.rpc_username, self.rpc_password, **kwargs)
 
-    def expose_bdev(self, nqn, bdev_name, model_number, uuid, nguid, port, ana_state=None):
+    def _k8s_node_label(self) -> str:
+        return self.hostname.removesuffix(f"_{self.rpc_port}")
+
+    def expose_bdev(self, nqn, bdev_name, model_number, uuid, nguid, port,
+                    ana_state=None, min_cntlid=1):
         """Expose `bdev_name` via NVMe-oF on `nqn` at `port`, one listener per data NIC.
 
         Idempotent: if the subsystem, a matching listener, or the namespace (by uuid)
@@ -166,6 +178,15 @@ class StorageNode(BaseNodeObject):
         paths (secondary hublvol shares the primary's NQN; multi-NIC nodes loop per
         NIC), and unconditional create_listener / add_ns would return -32602
         "Listener already exists" / "Invalid parameters" for state that is correct.
+
+        ``min_cntlid`` controls the lowest controller-id the subsystem will hand
+        out on Connect. When two nodes expose the SAME shared hublvol NQN
+        (primary + sec_1 with ANA multipath), they must allocate from
+        non-overlapping cntlid ranges so a downstream multipath attach to
+        both targets does not produce ``bdev_nvme_check_multipath: cntlid N
+        are duplicated``. Mirror of the lvol_controller pattern at
+        lvol_controller.py:841-848 (primary=1, sec=1000, tert=2000). The
+        primary's hublvol stays at 1; sec_1's hublvol uses 1000.
         """
         rpc_client = self.rpc_client()
 
@@ -177,6 +198,7 @@ class StorageNode(BaseNodeObject):
                         nqn=nqn,
                         serial_number='sbcli-cn',
                         model_number=model_number,
+                        min_cntlid=min_cntlid,
                 ):
                     logger.error(f"Failed to create subsystem for {nqn}")
                     raise RPCException(f'Failed to create subsystem for {nqn}')
@@ -322,6 +344,12 @@ class StorageNode(BaseNodeObject):
         nqn = self.hublvol_nqn_for_lvstore(cluster_nqn, lvstore_name)
         hublvol_port = primary_node.hublvol.nvmf_port
 
+        # The secondary's hublvol subsystem MUST use a cntlid range
+        # disjoint from the primary's, otherwise a tertiary (downstream
+        # multipath consumer) attaching to both will get the same cntlid
+        # from each independent target subsystem and SPDK will reject the
+        # second path with ``bdev_nvme_check_multipath: cntlid N are
+        # duplicated`` (LVS_5918 incident, 2026-04-25 12:47:18).
         self.expose_bdev(
             nqn=nqn,
             bdev_name=bdev_name,
@@ -330,6 +358,7 @@ class StorageNode(BaseNodeObject):
             nguid=primary_node.hublvol.nguid,
             port=hublvol_port,
             ana_state="non_optimized",
+            min_cntlid=1000,
         )
         logger.info(f'Secondary hublvol exposed: {nqn} on port {hublvol_port}')
         return nqn
@@ -421,7 +450,8 @@ class StorageNode(BaseNodeObject):
                 logger.error("Error establishing hublvol: %s", e.message)
                 return False
 
-    def connect_to_hublvol(self, primary_node, failover_node=None, role="secondary", timeout=None):
+    def connect_to_hublvol(self, primary_node, failover_node=None, role="secondary",
+                           timeout=None, rpc_timeout=None):
         """Connect to a primary node's hublvol, optionally with multipath failover.
 
         If failover_node is provided (typically sec_1), sets up NVMe ANA
@@ -439,13 +469,17 @@ class StorageNode(BaseNodeObject):
         :class:`HublvolReconnectCoordinator`, which serializes across
         control-plane services on an FDB advisory lock keyed on
         ``(self.id, primary.lvstore)`` and enforces a cooldown between
-        attempts. The ``timeout`` kwarg is accepted for back-compat but
-        is no longer wired through — the coordinator uses SPDK reset
-        tuning (ctrlr_loss_timeout_sec, reconnect_delay_sec,
-        fast_io_fail_timeout_sec) that makes per-call RPC timeouts
-        redundant.
+        attempts.
+
+        ``rpc_timeout`` (seconds) bounds each underlying SPDK
+        ``bdev_nvme_attach_controller`` HTTP call. The LVS rejoin uses
+        a sub-second value so a single in-freeze attach must land fast
+        or abort fast — the freeze must not hang on a stale listener.
+        ``timeout`` is the legacy alias for the same intent and is honored
+        when ``rpc_timeout`` is not provided.
         """
-        del timeout  # kept in the signature for back-compat; see docstring
+        if rpc_timeout is None and timeout is not None:
+            rpc_timeout = timeout
         logger.info(f'Connecting node {self.get_id()} to hublvol on {primary_node.get_id()}'
                      + (f' with failover to {failover_node.get_id()}' if failover_node else ''))
 
@@ -472,7 +506,8 @@ class StorageNode(BaseNodeObject):
             )
             peers = [primary_node] + ([failover_node] if failover_node else [])
             coordinator = HublvolReconnectCoordinator(DBController())
-            if not coordinator.reconcile(self, primary_node, peers, role=role):
+            if not coordinator.reconcile(self, primary_node, peers, role=role,
+                                         rpc_timeout=rpc_timeout):
                 logger.error(
                     "Hublvol reconcile failed for %s on %s (role=%s)",
                     primary_node.hublvol.bdev_name, self.get_id(), role,

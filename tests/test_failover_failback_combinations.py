@@ -249,7 +249,7 @@ class TestAnaFailover(unittest.TestCase):
 
     def _run_failover(self, nodes, offline_node_key, lvols):
         with patch("simplyblock_core.storage_node_ops.DBController") as mock_db_cls, \
-             patch("simplyblock_core.storage_node_ops.RPCClient") as mock_rpc_cls:
+             patch("simplyblock_core.models.storage_node.RPCClient") as mock_rpc_cls:
             db = _make_db_mock(nodes, lvols)
             mock_db_cls.return_value = db
             rpc = _mock_rpc()
@@ -333,7 +333,7 @@ class TestAnaFailback(unittest.TestCase):
 
     def _run_failback(self, nodes, restarting_node_key, lvols):
         with patch("simplyblock_core.storage_node_ops.DBController") as mock_db_cls, \
-             patch("simplyblock_core.storage_node_ops.RPCClient") as mock_rpc_cls:
+             patch("simplyblock_core.models.storage_node.RPCClient") as mock_rpc_cls:
             db = _make_db_mock(nodes, lvols)
             mock_db_cls.return_value = db
             rpc = _mock_rpc()
@@ -405,7 +405,7 @@ _RECREATE_PATCHES = [
     "simplyblock_core.storage_node_ops.storage_events",
     "simplyblock_core.storage_node_ops.tasks_controller",
     "simplyblock_core.storage_node_ops.FirewallClient",
-    "simplyblock_core.storage_node_ops.RPCClient",
+    "simplyblock_core.models.storage_node.RPCClient",
     "simplyblock_core.storage_node_ops._connect_to_remote_jm_devs",
     "simplyblock_core.storage_node_ops._create_bdev_stack",
     "simplyblock_core.storage_node_ops.DBController",
@@ -484,7 +484,7 @@ class TestRecreateLvstoreFTT2(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.storage_events")
     @patch("simplyblock_core.storage_node_ops.tasks_controller")
     @patch("simplyblock_core.storage_node_ops.FirewallClient")
-    @patch("simplyblock_core.storage_node_ops.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._connect_to_remote_jm_devs")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
@@ -531,7 +531,7 @@ class TestRecreateLvstoreFTT2(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.storage_events")
     @patch("simplyblock_core.storage_node_ops.tasks_controller")
     @patch("simplyblock_core.storage_node_ops.FirewallClient")
-    @patch("simplyblock_core.storage_node_ops.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._connect_to_remote_jm_devs")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
@@ -582,7 +582,7 @@ class TestRecreateLvstoreOnSecPrimaryOnline(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.storage_events")
     @patch("simplyblock_core.storage_node_ops.tasks_controller")
     @patch("simplyblock_core.storage_node_ops.FirewallClient")
-    @patch("simplyblock_core.storage_node_ops.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
     def test_primary_online_port_blocked_drain_io_no_leadership_drop(
@@ -643,7 +643,7 @@ class TestRecreateLvstoreOnSecPrimaryOffline(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.storage_events")
     @patch("simplyblock_core.storage_node_ops.tasks_controller")
     @patch("simplyblock_core.storage_node_ops.FirewallClient")
-    @patch("simplyblock_core.storage_node_ops.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
     @patch("simplyblock_core.storage_node_ops.health_controller")
@@ -709,7 +709,7 @@ class TestRecreateLvstoreOnSecPrimaryOffline(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.storage_events")
     @patch("simplyblock_core.storage_node_ops.tasks_controller")
     @patch("simplyblock_core.storage_node_ops.FirewallClient")
-    @patch("simplyblock_core.storage_node_ops.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
     @patch("simplyblock_core.storage_node_ops.health_controller")
@@ -774,7 +774,7 @@ class TestRecreateLvstoreOnSecPrimaryOffline(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.storage_events")
     @patch("simplyblock_core.storage_node_ops.tasks_controller")
     @patch("simplyblock_core.storage_node_ops.FirewallClient")
-    @patch("simplyblock_core.storage_node_ops.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
     def test_second_sec_restarts_primary_offline_no_failback_on_first_sec_for_that_group(
@@ -837,7 +837,7 @@ class TestRecreateLvstoreOnSecANAFailback(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.storage_events")
     @patch("simplyblock_core.storage_node_ops.tasks_controller")
     @patch("simplyblock_core.storage_node_ops.FirewallClient")
-    @patch("simplyblock_core.storage_node_ops.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
     @patch("simplyblock_core.storage_node_ops.health_controller")
@@ -893,7 +893,7 @@ class TestSequentialFailbackScenario(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.storage_events")
     @patch("simplyblock_core.storage_node_ops.tasks_controller")
     @patch("simplyblock_core.storage_node_ops.FirewallClient")
-    @patch("simplyblock_core.storage_node_ops.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._connect_to_remote_jm_devs")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
@@ -1139,7 +1139,7 @@ class TestRecreateLvstoreNonLeaderLvolMismatch(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.set_node_status")
     @patch("simplyblock_core.storage_node_ops.SNodeClient")
     @patch("simplyblock_core.storage_node_ops.FirewallClient")
-    @patch("simplyblock_core.storage_node_ops.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
     def test_missing_lvol_bdev_aborts_when_not_force(
@@ -1171,7 +1171,7 @@ class TestRecreateLvstoreNonLeaderLvolMismatch(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.set_node_status")
     @patch("simplyblock_core.storage_node_ops.SNodeClient")
     @patch("simplyblock_core.storage_node_ops.FirewallClient")
-    @patch("simplyblock_core.storage_node_ops.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
     def test_missing_lvol_bdev_succeeds_with_force(
@@ -1199,7 +1199,7 @@ class TestRecreateLvstoreNonLeaderLvolMismatch(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.set_node_status")
     @patch("simplyblock_core.storage_node_ops.SNodeClient")
     @patch("simplyblock_core.storage_node_ops.FirewallClient")
-    @patch("simplyblock_core.storage_node_ops.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
     def test_lvol_present_passes(
@@ -1264,7 +1264,7 @@ class TestRecreateLvstoreNonLeaderPortBlockFailure(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.set_node_status")
     @patch("simplyblock_core.storage_node_ops.SNodeClient")
     @patch("simplyblock_core.storage_node_ops.FirewallClient")
-    @patch("simplyblock_core.storage_node_ops.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
     def test_block_fails_all_attempts_aborts_without_force(
@@ -1307,7 +1307,7 @@ class TestRecreateLvstoreNonLeaderPortBlockFailure(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.set_node_status")
     @patch("simplyblock_core.storage_node_ops.SNodeClient")
     @patch("simplyblock_core.storage_node_ops.FirewallClient")
-    @patch("simplyblock_core.storage_node_ops.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
     def test_block_fails_all_attempts_proceeds_with_force(
@@ -1341,7 +1341,7 @@ class TestRecreateLvstoreNonLeaderPortBlockFailure(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.set_node_status")
     @patch("simplyblock_core.storage_node_ops.SNodeClient")
     @patch("simplyblock_core.storage_node_ops.FirewallClient")
-    @patch("simplyblock_core.storage_node_ops.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
     def test_block_succeeds_on_retry(

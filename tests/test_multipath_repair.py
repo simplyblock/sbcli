@@ -292,7 +292,7 @@ class TestHealthCheckMultipathIntegration(unittest.TestCase):
         return db_mock, cluster
 
     @patch("simplyblock_core.services.health_check_service.time.sleep")
-    @patch("simplyblock_core.services.health_check_service.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.services.health_check_service.storage_node_ops")
     @patch("simplyblock_core.services.health_check_service.health_controller")
     @patch("simplyblock_core.services.health_check_service.db")
@@ -352,7 +352,7 @@ class TestHealthCheckMultipathIntegration(unittest.TestCase):
         self.assertEqual(args[0][2], snode)
 
     @patch("simplyblock_core.services.health_check_service.time.sleep")
-    @patch("simplyblock_core.services.health_check_service.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.services.health_check_service.storage_node_ops")
     @patch("simplyblock_core.services.health_check_service.health_controller")
     @patch("simplyblock_core.services.health_check_service.db")
@@ -398,7 +398,7 @@ class TestHealthCheckMultipathIntegration(unittest.TestCase):
         mock_sn_ops.repair_multipath_controller.assert_not_called()
 
     @patch("simplyblock_core.services.health_check_service.time.sleep")
-    @patch("simplyblock_core.services.health_check_service.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.services.health_check_service.storage_node_ops")
     @patch("simplyblock_core.services.health_check_service.health_controller")
     @patch("simplyblock_core.services.health_check_service.db")
@@ -455,7 +455,7 @@ class TestHublvolMultipathRepair(unittest.TestCase):
 
     @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.controllers.health_controller.DBController")
-    @patch("simplyblock_core.controllers.health_controller.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.controllers.health_controller.check_bdev")
     def test_repairs_missing_primary_nic_path(self, mock_check_bdev, mock_rpc_cls, mock_db_cls,
                                               mock_node_rpc_cls):
@@ -534,7 +534,7 @@ class TestHublvolMultipathRepair(unittest.TestCase):
         self.assertEqual(call.kwargs.get("multipath"), "multipath")
 
     @patch("simplyblock_core.controllers.health_controller.DBController")
-    @patch("simplyblock_core.controllers.health_controller.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.controllers.health_controller.check_bdev")
     def test_no_repair_when_all_paths_present(self, mock_check_bdev, mock_rpc_cls, mock_db_cls):
         """When all primary NIC paths are attached, no attach call is made."""
@@ -594,7 +594,7 @@ class TestHublvolMultipathRepair(unittest.TestCase):
 
     @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.controllers.health_controller.DBController")
-    @patch("simplyblock_core.controllers.health_controller.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.controllers.health_controller.check_bdev")
     def test_rdma_nic_repair(self, mock_check_bdev, mock_rpc_cls, mock_db_cls,
                              mock_node_rpc_cls):

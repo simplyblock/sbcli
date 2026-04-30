@@ -255,8 +255,8 @@ class TestRecreateLvstoreRoles(unittest.TestCase):
         nodes = {}
         nodes["node-1"] = _node(
             "node-1", lvstore="LVS_100",
-            secondary_node_id="cluster-1/node-2",
-            tertiary_node_id="cluster-1/node-3",
+            secondary_node_id="node-2",
+            tertiary_node_id="node-3",
             lvstore_ports={"LVS_100": {"lvol_subsys_port": 4420, "hublvol_port": 4421}},
             mgmt_ip="10.0.0.1")
         nodes["node-2"] = _node(
@@ -277,7 +277,7 @@ class TestRecreateLvstoreRoles(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
     @patch("simplyblock_core.storage_node_ops.storage_events")
     @patch("simplyblock_core.storage_node_ops.FirewallClient")
-    @patch("simplyblock_core.storage_node_ops.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._connect_to_remote_jm_devs")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
@@ -344,7 +344,7 @@ class TestRecreateLvstoreRoles(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
     @patch("simplyblock_core.storage_node_ops.storage_events")
     @patch("simplyblock_core.storage_node_ops.FirewallClient")
-    @patch("simplyblock_core.storage_node_ops.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._connect_to_remote_jm_devs")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
@@ -385,8 +385,12 @@ class TestRecreateLvstoreRoles(unittest.TestCase):
             n.rpc_client = MagicMock(return_value=rpc)
             n.wait_for_jm_rep_tasks_to_finish = MagicMock(return_value=True)
             n.recreate_hublvol = MagicMock()
-            n.connect_to_hublvol = MagicMock()
+            n.connect_to_hublvol = MagicMock(return_value=True)
             n.create_secondary_hublvol = MagicMock()
+            # Deferred tertiary→secondary failover-path attach runs after
+            # port_unblock; mock so the test doesn't dive into the real
+            # HublvolReconnectCoordinator.
+            n.add_hublvol_failover_path = MagicMock(return_value=True)
             n.write_to_db = MagicMock()
 
         mock_recreate_on_non_leader.return_value = True
@@ -396,11 +400,16 @@ class TestRecreateLvstoreRoles(unittest.TestCase):
         result = recreate_lvstore(snode)
         self.assertTrue(result)
 
-        # sec1 (node-2) → secondary, sec2 (node-3) → tertiary
+        # sec1 (node-2) → secondary, single-path attach (no failover).
+        # sec2 (node-3) → tertiary, single-path attach against snode only;
+        # the secondary failover (node-2) is added asynchronously
+        # post-port-unblock via ``add_hublvol_failover_path``.
         nodes["node-2"].connect_to_hublvol.assert_called_once_with(
-            snode, failover_node=None, role="secondary", timeout=0.5)
+            snode, failover_node=None, role="secondary", rpc_timeout=0.2)
         nodes["node-3"].connect_to_hublvol.assert_called_once_with(
-            snode, failover_node=nodes["node-2"], role="tertiary", timeout=0.5)
+            snode, failover_node=None, role="tertiary", rpc_timeout=0.2)
+        nodes["node-3"].add_hublvol_failover_path.assert_called_once_with(
+            snode, nodes["node-2"])
 
     @patch("simplyblock_core.storage_node_ops._check_peer_disconnected", return_value=False)
     @patch("simplyblock_core.storage_node_ops._set_restart_phase")
@@ -410,7 +419,7 @@ class TestRecreateLvstoreRoles(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
     @patch("simplyblock_core.storage_node_ops.storage_events")
     @patch("simplyblock_core.storage_node_ops.FirewallClient")
-    @patch("simplyblock_core.storage_node_ops.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._connect_to_remote_jm_devs")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
@@ -464,9 +473,10 @@ class TestRecreateLvstoreRoles(unittest.TestCase):
         result = recreate_lvstore(snode)
         self.assertTrue(result)
 
-        # Only sec1 should be called, with role="secondary"
+        # Only sec1 should be called, with role="secondary".
+        # FTT=1 ⇒ no tertiary in topology ⇒ no deferred failover-path attach.
         nodes["node-2"].connect_to_hublvol.assert_called_once_with(
-            snode, failover_node=None, role="secondary", timeout=0.5)
+            snode, failover_node=None, role="secondary", rpc_timeout=0.2)
         nodes["node-3"].connect_to_hublvol.assert_not_called()
 
 
@@ -502,7 +512,7 @@ class TestRecreateLvstoreOnSecRoles(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops._handle_rpc_failure_on_peer", return_value="skip")
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
     @patch("simplyblock_core.storage_node_ops.FirewallClient")
-    @patch("simplyblock_core.storage_node_ops.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._connect_to_remote_jm_devs")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
@@ -557,7 +567,7 @@ class TestRecreateLvstoreOnSecRoles(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops._handle_rpc_failure_on_peer", return_value="skip")
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
     @patch("simplyblock_core.storage_node_ops.FirewallClient")
-    @patch("simplyblock_core.storage_node_ops.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._connect_to_remote_jm_devs")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
@@ -625,20 +635,20 @@ class TestSetNodeOnlineRoles(unittest.TestCase):
         #                            (snode.tertiary_node_id, "tertiary")]:
         primary = _node(
             "node-1", lvstore="LVS_100",
-            secondary_node_id="cluster-1/node-2",
-            tertiary_node_id="cluster-1/node-3")
+            secondary_node_id="node-2",
+            tertiary_node_id="node-3")
 
         role_map = [(primary.secondary_node_id, "secondary"),
                     (primary.tertiary_node_id, "tertiary")]
 
-        self.assertEqual(role_map[0], ("cluster-1/node-2", "secondary"))
-        self.assertEqual(role_map[1], ("cluster-1/node-3", "tertiary"))
+        self.assertEqual(role_map[0], ("node-2", "secondary"))
+        self.assertEqual(role_map[1], ("node-3", "tertiary"))
 
     def test_single_secondary_no_tertiary(self):
         """With only one secondary, the tertiary entry should be skipped."""
         primary = _node(
             "node-1", lvstore="LVS_100",
-            secondary_node_id="cluster-1/node-2",
+            secondary_node_id="node-2",
             tertiary_node_id="")
 
         role_map = [(primary.secondary_node_id, "secondary"),
@@ -646,7 +656,7 @@ class TestSetNodeOnlineRoles(unittest.TestCase):
 
         active = [(sid, role) for sid, role in role_map if sid]
         self.assertEqual(len(active), 1)
-        self.assertEqual(active[0], ("cluster-1/node-2", "secondary"))
+        self.assertEqual(active[0], ("node-2", "secondary"))
 
 
 if __name__ == "__main__":

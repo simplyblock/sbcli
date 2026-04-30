@@ -542,7 +542,7 @@ class TestLvolInheritsDhchapFromPool(unittest.TestCase):
 class TestAddHostToLvolDhchapPool(unittest.TestCase):
 
     @patch("simplyblock_core.controllers.lvol_controller._register_pool_dhchap_keys_on_node")
-    @patch("simplyblock_core.controllers.lvol_controller.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.controllers.lvol_controller.DBController")
     def test_uses_pool_keys_not_per_host_keys(self, MockDB, MockRPC, mock_pool_reg):
         """add_host_to_lvol on a DHCHAP pool must use pool key names, not generate new ones."""
@@ -580,6 +580,7 @@ class TestAddHostToLvolDhchapPool(unittest.TestCase):
 
         mock_rpc = MockRPC.return_value
         mock_rpc.subsystem_add_host.return_value = True
+        node.rpc_client.return_value = mock_rpc
 
         result, err = add_host_to_lvol("lvol-1", "nqn:new-host")
 
@@ -593,7 +594,7 @@ class TestAddHostToLvolDhchapPool(unittest.TestCase):
         self.assertEqual(call_kwargs["dhchap_group"], "ffdhe2048")
 
     @patch("simplyblock_core.controllers.lvol_controller._register_pool_dhchap_keys_on_node")
-    @patch("simplyblock_core.controllers.lvol_controller.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.controllers.lvol_controller.DBController")
     def test_no_per_host_key_generation_for_dhchap_pool(self, MockDB, MockRPC, mock_pool_reg):
         """For DHCHAP pools, generate_dhchap_key must never be called."""

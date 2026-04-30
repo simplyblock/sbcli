@@ -164,6 +164,29 @@ def add_node_to_auto_restart(node):
     return _add_task(JobSchedule.FN_NODE_RESTART, node.cluster_id, node.get_id(), "", max_retry=11)
 
 
+def cancel_pending_node_restart_tasks(cluster_id, node_id):
+    # Called from set_node_status the moment a node transitions to ONLINE.
+    # Without this, an obsolete FN_NODE_RESTART row left over from the
+    # outage stays in `new`/`running` and blocks every subsequent restart
+    # via the dedup guard in `_validate_new_task_node_restart` until the
+    # task runner happens to pick it up — observed as a 5-minute window
+    # of failing manual restarts after the node was already back online.
+    canceled = 0
+    for task in db.get_job_tasks(cluster_id):
+        if (task.function_name == JobSchedule.FN_NODE_RESTART
+                and task.node_id == node_id
+                and task.status != JobSchedule.STATUS_DONE
+                and not task.canceled):
+            task.canceled = True
+            task.status = JobSchedule.STATUS_DONE
+            task.function_result = "canceled: node back online"
+            task.write_to_db(db.kv_store)
+            canceled += 1
+            logger.info(
+                f"Canceled obsolete node_restart task {task.get_id()} (node {node_id} back online)")
+    return canceled
+
+
 def list_tasks(cluster_id, is_json=False, limit=50, **kwargs):
     try:
         db.get_cluster_by_id(cluster_id)

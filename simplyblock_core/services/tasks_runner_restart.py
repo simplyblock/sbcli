@@ -240,12 +240,16 @@ def task_runner_node(task):
         storage_node_ops.set_node_status(task.node_id, StorageNode.STATUS_OFFLINE)
         return True
 
-    if node.status in [StorageNode.STATUS_REMOVED, StorageNode.STATUS_SCHEDULABLE, StorageNode.STATUS_DOWN]:
+    if node.status in [StorageNode.STATUS_REMOVED, StorageNode.STATUS_SCHEDULABLE]:
         logger.info(f"Node is {node.status}, stopping task")
         task.function_result = f"Node is {node.status}, stopping"
         task.status = JobSchedule.STATUS_DONE
         task.write_to_db(db.kv_store)
         return True
+    # DOWN used to short-circuit here too. After removing the monitor's
+    # set_node_online (which previously did DOWN -> ONLINE on health-check
+    # pass), DOWN must be handled by this runner: shutdown + restart drives
+    # the node through IN_RESTART -> ONLINE, which is the only legal path.
 
     # The node-restart task is meant to fix the NODE, not individual devices.
     # Previously this short-circuit also required `unavailable_devices_count

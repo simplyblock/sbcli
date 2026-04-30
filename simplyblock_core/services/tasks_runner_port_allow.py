@@ -8,7 +8,6 @@ from simplyblock_core.fw_api_client import FirewallClient
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.rpc_client import RPCClient
 
 logger = utils.get_logger(__name__)
 
@@ -27,7 +26,7 @@ def _get_lvs_leader(lvs_name, candidates, local_node_id=None):
     for candidate in candidates:
         if not candidate:
             continue
-        if candidate.get_id() != local_node_id and candidate.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
+        if candidate.get_id() != local_node_id and candidate.status != StorageNode.STATUS_ONLINE:
             logger.info(f"Skipping candidate {candidate.get_id()} because status is {candidate.status}",)
             continue
         try:
@@ -210,7 +209,7 @@ def exec_port_allow_task(task):
             for sec_id in sec_ids:
                 sec_node = db.get_storage_node_by_id(sec_id)
                 if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
-                    secondary_hublvol_check = health_controller._check_sec_node_hublvol(sec_node, auto_fix=True)
+                    secondary_hublvol_check = health_controller._check_sec_node_hublvol(sec_node, auto_fix=True, primary_node_id=node.get_id())
                     if not secondary_hublvol_check:
                         msg = f"Secondary node {sec_id} hublvol check fail, retry later"
                         logger.warning(msg)
@@ -256,11 +255,7 @@ def exec_port_allow_task(task):
                 tcp_ports_events.port_deny(peer, port_number)
                 time.sleep(0.5)
 
-                peer_rpc = RPCClient(
-                    peer.mgmt_ip, peer.rpc_port,
-                    peer.rpc_username, peer.rpc_password,
-                    timeout=0.2, retry=0,
-                )
+                peer_rpc = peer.rpc_client(timeout=0.2, retry=0)
                 try:
                     peer_rpc.bdev_lvol_set_leader(node.lvstore, leader=False, bs_nonleadership=True)
                     peer_rpc.bdev_distrib_force_to_non_leader(node.jm_vuid)

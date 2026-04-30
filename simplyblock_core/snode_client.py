@@ -6,6 +6,8 @@ import logging
 from requests.adapters import HTTPAdapter
 from urllib3 import Retry
 
+from simplyblock_core.settings import Settings
+
 logger = logging.getLogger()
 
 
@@ -16,15 +18,18 @@ class SNodeClientException(Exception):
 
 class SNodeClient:
 
-    def __init__(self, ip_address, timeout=300, retry=5):
-        self.ip_address = ip_address
-        self.url = 'http://%s/snode/' % self.ip_address
+    def __init__(self, host, timeout=300, retry=5):
+        settings = Settings()
+        scheme = "https" if settings.tls_enabled else "http"
+        self.url = f'{scheme}://{host}/snode/'
         self.timeout = timeout
         self.session = requests.session()
-        self.session.verify = False
+        if settings.tls_enabled:
+            self.session.verify = str(settings.certificate_authority)
         self.session.headers['Content-Type'] = "application/json"
         retries = Retry(total=retry, backoff_factor=1, connect=retry, read=retry)
         self.session.mount("http://", HTTPAdapter(max_retries=retries))
+        self.session.mount("https://", HTTPAdapter(max_retries=retries))
 
     def _request(self, method, path, payload=None):
         try:
