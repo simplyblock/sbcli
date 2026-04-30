@@ -3,3 +3,19 @@ SIMPLY_BLOCK_VERSION=19.2.34
 
 SIMPLY_BLOCK_DOCKER_IMAGE=public.ecr.aws/simply-block/simplyblock:main
 SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=public.ecr.aws/simply-block/ultra:main-latest
+
+# external images
+FDB_IMAGE=foundationdb/foundationdb:7.3.63
+HAPROXY_IMAGE=haproxytech/haproxy-debian:latest
+MONGODB_IMAGE=mongo:5.0
+OPENSEARCH_IMAGE=opensearchproject/opensearch:2.4.0
+GRAYLOG_IMAGE=graylog/graylog:5.0
+PROMETHEUS_IMAGE=prom/prometheus:v2.44.0
+THANOS_IMAGE=thanosio/thanos:v0.31.0
+NODE_EXPORTER_IMAGE=prom/node-exporter:v1.7.0
+GRAFANA_IMAGE=grafana/grafana:10.0.12
+FLUENTD_IMAGE=public.ecr.aws/simply-block/fluentd-kubernetes-daemonset:v1.17.1-debian-graylog-1.2
+KUBECTL_IMAGE=alpine/kubectl:1.34.1
+UBUNTU_IMAGE=ubuntu:22.04
+ALPINE_IMAGE=alpine:3.20
+ALPINE_TOOLS_IMAGE=simplyblock/alpine-tools:3.21.3

@@ -30,7 +30,7 @@ spec:
 
       containers:
         - name: kubelet-cpu-topology
-          image: alpine:3.20
+          image: ${{ ALPINE_IMAGE }}
           securityContext:
             privileged: true
           volumeMounts:
