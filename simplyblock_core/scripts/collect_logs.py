@@ -1339,6 +1339,7 @@ def collect_logs(start_time, duration_minutes, output_dir, use_opensearch, clust
         print(f"  Tarball : {tarball_path}")
         print(f"  Size    : {size_mb:.2f} MB")
         print(f"{'=' * 64}\n")
+        return True
 
 
 if __name__ == "__main__":
