@@ -25,6 +25,7 @@ Prerequisites:
 
 import json
 import logging
+import os
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -42,7 +43,7 @@ logging.getLogger("paramiko.transport").setLevel(logging.CRITICAL)
 # ──────────────────── Configuration ──────────────────────────────────────────
 AMI_ID       = "ami-0dfc569a8686b9320"   # Rocky 9 us-east-1
 KEY_NAME     = "mtes01"
-KEY_PATH     = r"C:\ssh\mtes01.pem"
+KEY_PATH     = os.path.expanduser("~/.ssh/mtes01.pem")
 AZ           = "us-east-1a"
 # eth0 stays on the mgmt subnet with the default/shared SG
 MGMT_SUBNET_ID = "subnet-0593459d6b931ee4c"
