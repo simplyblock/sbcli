@@ -12,6 +12,7 @@ SPDK three-step sequence for secondary/tertiary:
   3. bdev_lvol_connect_hublvol    – binds lvstore to hub bdev
 """
 
+import time
 import unittest
 import uuid
 from unittest.mock import MagicMock, patch
@@ -564,8 +565,27 @@ class TestConnectToHublvolUnit(unittest.TestCase):
     # --- tertiary (with failover) ---
 
     def test_tertiary_attaches_two_paths(self):
-        """Tertiary must attach 2 NVMe paths: primary IP + sec_1 IP."""
+        """Tertiary must attach 2 NVMe paths: primary IP + sec_1 IP.
+
+        Post hublvol-defer-redundant-attach hotfix: the first attach runs
+        synchronously, the second is deferred to a daemon thread so the
+        failback critical path doesn't block on redundant-path setup. Both
+        attaches must still happen — we patch ``INTER_ATTACH_SLEEP_SEC`` to
+        0 so the background completes promptly, then poll for the second.
+        """
+        from simplyblock_core.utils import hublvol_reconnect as _hr
+        prev_sleep = _hr.INTER_ATTACH_SLEEP_SEC
+        _hr.INTER_ATTACH_SLEEP_SEC = 0.0
+        self.addCleanup(setattr, _hr, "INTER_ATTACH_SLEEP_SEC", prev_sleep)
+
         self.tertiary.connect_to_hublvol(self.primary, failover_node=self.sec1, role="tertiary")
+
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            if len(self.rpc.bdev_nvme_attach_controller.call_args_list) >= 2:
+                break
+            time.sleep(0.05)
+
         attach_calls = self.rpc.bdev_nvme_attach_controller.call_args_list
         assert len(attach_calls) == 2, \
             f"Tertiary must call attach_controller twice (primary + sec_1); got {len(attach_calls)}"
@@ -614,14 +634,20 @@ class TestConnectToHublvolUnit(unittest.TestCase):
              "all attach_controller calls must precede connect_hublvol")
 
     def test_attach_before_connect_hublvol_on_tertiary(self):
-        """Same SPDK sequence requirement on tertiary with 2 paths."""
+        """SPDK requires the bdev to exist before connect_hublvol. With the
+        hublvol-defer-redundant-attach hotfix, the *first* attach must
+        precede connect_hublvol; the second redundant attach is deferred
+        to a daemon thread and may land afterwards (or be racing
+        connect_hublvol on the mock). The contract here is that at least
+        one attach has happened before connect_hublvol fires."""
         self.tertiary.connect_to_hublvol(self.primary, failover_node=self.sec1, role="tertiary")
         attach_positions = self._call_order('bdev_nvme_attach_controller')
         connect_positions = self._call_order('bdev_lvol_connect_hublvol')
-        assert len(attach_positions) == 2, f"Expected 2 attach calls; got {len(attach_positions)}"
+        assert attach_positions, "attach_controller not called"
         assert connect_positions, "connect_hublvol not called"
-        assert max(attach_positions) < min(connect_positions), \
-            "All attach_controller calls must precede connect_hublvol on tertiary"
+        assert min(attach_positions) < min(connect_positions), \
+            ("First attach_controller call must precede connect_hublvol — "
+             "SPDK requires the bdev to exist before connect_hublvol")
 
     def test_set_opts_before_connect_hublvol_on_secondary(self):
         """set_lvs_opts must run BEFORE connect_hublvol.

@@ -16,6 +16,7 @@ Topology used:
   LVS_0: primary=n0 (srv[0]), secondary=n1 (srv[1]), tertiary=n2 (srv[2])
 """
 
+import time
 import uuid as _uuid_mod
 from unittest.mock import patch
 
@@ -373,8 +374,22 @@ class TestTertiaryConnect:
             'nguid': n0.hublvol.nguid,
             'nvmf_port': n0.hublvol.nvmf_port,
         })
-        # Tertiary connects via n0 primary, with n1 as failover
-        n2.connect_to_hublvol(n0, failover_node=n1, role="tertiary")
+        # Tertiary connects via n0 primary, with n1 as failover.
+        # Post hublvol-defer-redundant-attach hotfix the second attach
+        # runs in a daemon thread; patch the inter-attach sleep so the
+        # background lands quickly, then wait for both attaches.
+        from simplyblock_core.utils import hublvol_reconnect as _hr
+        prev_sleep = _hr.INTER_ATTACH_SLEEP_SEC
+        _hr.INTER_ATTACH_SLEEP_SEC = 0.0
+        try:
+            n2.connect_to_hublvol(n0, failover_node=n1, role="tertiary")
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                if len(_attach_calls(env['servers'][2], 'hublvol')) >= 2:
+                    break
+                time.sleep(0.05)
+        finally:
+            _hr.INTER_ATTACH_SLEEP_SEC = prev_sleep
 
     def test_attach_controller_called(self):
         """Step 1: bdev_nvme_attach_controller must land on tertiary server."""
@@ -416,14 +431,19 @@ class TestTertiaryConnect:
         assert self.env['servers'][2].was_called('bdev_lvol_connect_hublvol'), \
             "bdev_lvol_connect_hublvol not received by tertiary server"
 
-    def test_spdk_sequence_all_attaches_before_connect(self):
-        """SPDK constraint: all attach_controller calls must precede connect_hublvol."""
+    def test_spdk_sequence_first_attach_before_connect(self):
+        """SPDK constraint: the bdev must exist before connect_hublvol fires.
+
+        Post hublvol-defer-redundant-attach hotfix: the *first* attach must
+        precede connect_hublvol; the second redundant attach is deferred
+        to a daemon thread and may land after connect_hublvol.
+        """
         attach_pos = _call_order(self.env['servers'][2], 'bdev_nvme_attach_controller')
         connect_pos = _call_order(self.env['servers'][2], 'bdev_lvol_connect_hublvol')
-        assert len(attach_pos) == 2, f"Expected 2 attach calls; got {len(attach_pos)}"
-        assert connect_pos
-        assert max(attach_pos) < min(connect_pos), \
-            "All attach_controller calls must precede connect_hublvol on tertiary"
+        assert attach_pos, "attach_controller not called on tertiary server"
+        assert connect_pos, "connect_hublvol not called on tertiary server"
+        assert min(attach_pos) < min(connect_pos), \
+            "First attach_controller must precede connect_hublvol on tertiary"
 
 
 # ---------------------------------------------------------------------------
@@ -447,8 +467,24 @@ class TestFullActivateSequence:
         # Secondary connects to primary's hublvol
         n1.connect_to_hublvol(n0, failover_node=None, role="secondary")
 
-        # Tertiary connects with both paths
-        n2.connect_to_hublvol(n0, failover_node=n1, role="tertiary")
+        # Tertiary connects with both paths.
+        # Post hublvol-defer-redundant-attach hotfix the second attach
+        # runs in a daemon thread; patch the inter-attach sleep so the
+        # background lands quickly, then wait for both attaches.
+        from simplyblock_core.utils import hublvol_reconnect as _hr
+        prev_sleep = _hr.INTER_ATTACH_SLEEP_SEC
+        _hr.INTER_ATTACH_SLEEP_SEC = 0.0
+        try:
+            n2.connect_to_hublvol(n0, failover_node=n1, role="tertiary")
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                paths = env['servers'][2].state.nvme_controller_paths.get(
+                    f'{_LVS}/hublvol', [])
+                if len(paths) >= 2:
+                    break
+                time.sleep(0.05)
+        finally:
+            _hr.INTER_ATTACH_SLEEP_SEC = prev_sleep
 
     def test_primary_and_secondary_share_nqn(self):
         """Primary and sec_1 must expose the same NQN for NVMe ANA multipath."""
