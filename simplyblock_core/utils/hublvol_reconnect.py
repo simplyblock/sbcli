@@ -536,11 +536,24 @@ class HublvolReconnectCoordinator:
              the race that produces ``cntlid N are duplicated`` even when
              the previous attach has reported the controller as registered.
 
+        Foreground/background split: as soon as one path is in the desired
+        enabled state, the remaining redundant paths are completed
+        asynchronously in a daemon thread that still honours
+        ``INTER_ATTACH_SLEEP_SEC`` (so the cntlid-duplicated race is still
+        avoided), and we return ``True`` immediately. The caller — typically
+        the failback flow on a non-leader replica — can then proceed to
+        ``bdev_lvol_set_lvs_opts`` / ``bdev_lvol_connect_hublvol`` and the
+        port-unblock signal without waiting for redundant-path setup.
+
+        If the very first path fails, we fall through synchronously to the
+        next path (still respecting the inter-attach sleep). Only when
+        every path tried in the foreground fails do we return ``False``
+        and abort the restart.
+
         Returns True if at least one path is in the desired enabled state
         after the loop. With ``verify_at_end=True`` (fresh create case), a
-        final ``_wait_for_settled`` confirms the controller is actually up.
+        final ``_wait_for_settled`` confirms that path is actually up.
         """
-        any_attached = False
         last_attach_at = 0.0
         # Always use ``"multipath"``: SPDK cannot widen a non-multipath
         # controller to multipath after the fact (bdev_nvme.c:5849 returns
@@ -550,7 +563,8 @@ class HublvolReconnectCoordinator:
         # add would need a detach+reattach, which reopens the
         # ``cntlid duplicated`` race the coordinator was built to close.
         attach_mode = "multipath"
-        for ip, trtype in paths.items():
+        paths_list = list(paths.items())
+        for i, (ip, trtype) in enumerate(paths_list):
             now = time.monotonic()
             since = now - last_attach_at
             if last_attach_at and since < INTER_ATTACH_SLEEP_SEC:
@@ -560,15 +574,25 @@ class HublvolReconnectCoordinator:
             if decision == "failed":
                 logger.error(
                     "hublvol %s on %s (%s): cannot prepare controller for "
-                    "path %s, aborting",
+                    "path %s, trying next",
                     ctrl_name, node.get_id(), role, ip)
-                return False
+                last_attach_at = time.monotonic()
+                continue
             if decision == "skip":
                 logger.debug(
                     "hublvol %s on %s (%s): path %s already enabled, skip",
                     ctrl_name, node.get_id(), role, ip)
-                any_attached = True
-                continue
+                if verify_at_end:
+                    ctrlrs = _wait_for_settled(rpc, ctrl_name)
+                    ok = bool(ctrlrs) and any(
+                        c.get("state") == "enabled" for c in ctrlrs)
+                else:
+                    ok = True
+                if ok:
+                    self._defer_remaining_attaches(
+                        rpc, ctrl_name, nqn, port, paths_list[i + 1:],
+                        attach_mode, last_attach_at, node, role, rpc_timeout)
+                return ok
 
             try:
                 ret = _do_attach(rpc, ctrl_name, nqn, ip, port, trtype,
@@ -576,28 +600,115 @@ class HublvolReconnectCoordinator:
                                  rpc_timeout=rpc_timeout)
                 last_attach_at = time.monotonic()
                 if ret:
-                    any_attached = True
+                    remaining = paths_list[i + 1:]
                     logger.info(
-                        "hublvol %s on %s (%s): attached path %s",
-                        ctrl_name, node.get_id(), role, ip)
-                else:
-                    logger.warning(
-                        "hublvol %s on %s: attach returned falsy for %s",
-                        ctrl_name, node.get_id(), ip)
+                        "hublvol %s on %s (%s): attached path %s; deferring "
+                        "%d redundant path(s) to background",
+                        ctrl_name, node.get_id(), role, ip, len(remaining))
+                    if verify_at_end:
+                        ctrlrs = _wait_for_settled(rpc, ctrl_name)
+                        ok = bool(ctrlrs) and any(
+                            c.get("state") == "enabled" for c in ctrlrs)
+                    else:
+                        ok = True
+                    # Defer redundant paths AFTER verify_at_end so the
+                    # background thread doesn't race with the verify on
+                    # the same controller-list RPC.
+                    if ok:
+                        self._defer_remaining_attaches(
+                            rpc, ctrl_name, nqn, port, remaining,
+                            attach_mode, last_attach_at, node, role,
+                            rpc_timeout)
+                    return ok
+                logger.warning(
+                    "hublvol %s on %s: attach returned falsy for %s, "
+                    "trying next path",
+                    ctrl_name, node.get_id(), ip)
             except Exception as e:
                 last_attach_at = time.monotonic()
                 logger.warning(
-                    "hublvol %s on %s: attach path %s raised: %s",
+                    "hublvol %s on %s: attach path %s raised: %s, "
+                    "trying next path",
                     ctrl_name, node.get_id(), ip, e)
 
-        if not any_attached:
-            logger.error(
-                "hublvol %s on %s: no path attached (expected=%s)",
-                ctrl_name, node.get_id(), list(paths))
-            return False
+        logger.error(
+            "hublvol %s on %s: no path attached (expected=%s)",
+            ctrl_name, node.get_id(), [p[0] for p in paths_list])
+        return False
 
-        if verify_at_end:
-            ctrlrs = _wait_for_settled(rpc, ctrl_name)
-            return bool(ctrlrs) and any(
-                c.get("state") == "enabled" for c in ctrlrs)
-        return True
+    def _defer_remaining_attaches(self, rpc, ctrl_name, nqn, port,
+                                  remaining, attach_mode, last_attach_at,
+                                  node, role, rpc_timeout):
+        """Run redundant-path attaches in a daemon thread.
+
+        Called once the foreground loop has secured at least one path. The
+        remaining paths still respect ``INTER_ATTACH_SLEEP_SEC`` (relative
+        to the last foreground attach) so the cntlid-duplicated race stays
+        closed, but the wait happens off the failback critical path. The
+        caller can return immediately and proceed to
+        ``bdev_lvol_connect_hublvol`` / port-unblock.
+
+        The background thread logs success/failure per path and never
+        propagates exceptions.
+        """
+        if not remaining:
+            return
+
+        node_id = node.get_id()
+
+        def _worker():
+            local_last = last_attach_at
+            for ip, trtype in remaining:
+                now = time.monotonic()
+                since = now - local_last
+                if local_last and since < INTER_ATTACH_SLEEP_SEC:
+                    time.sleep(INTER_ATTACH_SLEEP_SEC - since)
+
+                try:
+                    decision = _ensure_attach_ready(rpc, ctrl_name, ip)
+                except Exception as e:
+                    local_last = time.monotonic()
+                    logger.warning(
+                        "hublvol %s on %s (%s) bg: ensure_attach_ready "
+                        "raised for path %s: %s",
+                        ctrl_name, node_id, role, ip, e)
+                    continue
+
+                if decision == "failed":
+                    local_last = time.monotonic()
+                    logger.warning(
+                        "hublvol %s on %s (%s) bg: cannot prepare path %s",
+                        ctrl_name, node_id, role, ip)
+                    continue
+                if decision == "skip":
+                    logger.debug(
+                        "hublvol %s on %s (%s) bg: path %s already enabled",
+                        ctrl_name, node_id, role, ip)
+                    continue
+
+                try:
+                    ret = _do_attach(rpc, ctrl_name, nqn, ip, port, trtype,
+                                     multipath=attach_mode,
+                                     rpc_timeout=rpc_timeout)
+                    local_last = time.monotonic()
+                    if ret:
+                        logger.info(
+                            "hublvol %s on %s (%s) bg: attached redundant "
+                            "path %s",
+                            ctrl_name, node_id, role, ip)
+                    else:
+                        logger.warning(
+                            "hublvol %s on %s (%s) bg: attach returned "
+                            "falsy for %s",
+                            ctrl_name, node_id, role, ip)
+                except Exception as e:
+                    local_last = time.monotonic()
+                    logger.warning(
+                        "hublvol %s on %s (%s) bg: attach path %s raised: %s",
+                        ctrl_name, node_id, role, ip, e)
+
+        threading.Thread(
+            target=_worker,
+            name=f"hublvol-bg-attach-{ctrl_name}",
+            daemon=True,
+        ).start()
