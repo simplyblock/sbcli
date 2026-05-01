@@ -72,30 +72,85 @@ ec2_client   = boto3.client("ec2", region_name="us-east-1")
 
 # ──────────────────── SSH helpers ────────────────────────────────────────────
 
-def wait_for_ssh(ip, timeout=300):
-    print(f"  Waiting for SSH on {ip}...")
+def _ssh_connect(ip, jump_ip=None, timeout=None, banner_timeout=None):
+    """Open a paramiko SSHClient to ``ip``. When ``jump_ip`` is given,
+    tunnel through it via ``direct-tcpip`` (ProxyJump): the jump host
+    only needs a standard sshd — it acts as a TCP forwarder while the
+    second SSH handshake terminates at ``ip``. All paramiko operations
+    happen on the local workstation; the jump host has no paramiko.
+
+    Storage nodes and clients in the multipath layout have no public
+    IPs — their SSH must hop via mgmt (``jump_ip=mgmt_ip``).
+    """
+    ssh = paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    if jump_ip is None or jump_ip == ip:
+        kwargs = dict(username=USER, key_filename=KEY_PATH,
+                      allow_agent=False, look_for_keys=False)
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+        if banner_timeout is not None:
+            kwargs["banner_timeout"] = banner_timeout
+        ssh.connect(ip, **kwargs)
+        return ssh
+    jump = paramiko.SSHClient()
+    jump.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    jump_kwargs = dict(username=USER, key_filename=KEY_PATH,
+                       allow_agent=False, look_for_keys=False)
+    if timeout is not None:
+        jump_kwargs["timeout"] = timeout
+    if banner_timeout is not None:
+        jump_kwargs["banner_timeout"] = banner_timeout
+    jump.connect(jump_ip, **jump_kwargs)
+    transport = jump.get_transport()
+    channel = transport.open_channel(
+        "direct-tcpip",
+        dest_addr=(ip, 22),
+        src_addr=("127.0.0.1", 0),
+        timeout=timeout if timeout is not None else 30,
+    )
+    target_kwargs = dict(username=USER, key_filename=KEY_PATH,
+                         allow_agent=False, look_for_keys=False, sock=channel)
+    if timeout is not None:
+        target_kwargs["timeout"] = timeout
+    if banner_timeout is not None:
+        target_kwargs["banner_timeout"] = banner_timeout
+    ssh.connect(ip, **target_kwargs)
+    # Stash the jump client on the target client so we can close both.
+    ssh._jump_client = jump
+    return ssh
+
+
+def _ssh_close(ssh):
+    jump = getattr(ssh, "_jump_client", None)
+    try:
+        ssh.close()
+    finally:
+        if jump is not None:
+            try:
+                jump.close()
+            except Exception:
+                pass
+
+
+def wait_for_ssh(ip, timeout=300, jump_ip=None):
+    label = f"{ip} (via {jump_ip})" if jump_ip and jump_ip != ip else ip
+    print(f"  Waiting for SSH on {label}...")
     start = time.time()
     while time.time() - start < timeout:
-        ssh = paramiko.SSHClient()
-        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         try:
-            ssh.connect(ip, username=USER, key_filename=KEY_PATH,
-                        timeout=5, banner_timeout=10,
-                        allow_agent=False, look_for_keys=False)
-            ssh.close()
-            print(f"  SSH ready: {ip}")
+            ssh = _ssh_connect(ip, jump_ip=jump_ip, timeout=5, banner_timeout=10)
+            _ssh_close(ssh)
+            print(f"  SSH ready: {label}")
             return True
         except Exception:
             pass
         time.sleep(3)
-    raise RuntimeError(f"SSH timeout: {ip}")
+    raise RuntimeError(f"SSH timeout: {label}")
 
 
-def ssh_exec(ip, cmds, get_output=False, check=False):
-    ssh = paramiko.SSHClient()
-    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    ssh.connect(ip, username=USER, key_filename=KEY_PATH,
-                allow_agent=False, look_for_keys=False)
+def ssh_exec(ip, cmds, get_output=False, check=False, jump_ip=None):
+    ssh = _ssh_connect(ip, jump_ip=jump_ip)
     results = []
     for cmd in cmds:
         print(f"  [{ip}] $ {cmd}")
@@ -111,21 +166,18 @@ def ssh_exec(ip, cmds, get_output=False, check=False):
             for line in tail:
                 print(f"    {line}")
             if check:
-                ssh.close()
+                _ssh_close(ssh)
                 raise RuntimeError(f"rc={rc}: {cmd}")
         else:
             for line in out.strip().splitlines()[-2:]:
                 if line.strip():
                     print(f"    {line}")
-    ssh.close()
+    _ssh_close(ssh)
     return results
 
 
-def ssh_exec_stream(ip, cmd, check=False):
-    ssh = paramiko.SSHClient()
-    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    ssh.connect(ip, username=USER, key_filename=KEY_PATH,
-                allow_agent=False, look_for_keys=False)
+def ssh_exec_stream(ip, cmd, check=False, jump_ip=None):
+    ssh = _ssh_connect(ip, jump_ip=jump_ip)
     print(f"  [{ip}] $ {cmd}")
     stdin, stdout, stderr = ssh.exec_command(cmd, timeout=600)
     channel = stdout.channel
@@ -143,7 +195,7 @@ def ssh_exec_stream(ip, cmd, check=False):
             break
         time.sleep(0.1)
     rc = channel.recv_exit_status()
-    ssh.close()
+    _ssh_close(ssh)
     if rc != 0 and check:
         raise RuntimeError(f"rc={rc}: {cmd}")
     return "".join(out_buf), "".join(err_buf)
@@ -151,74 +203,68 @@ def ssh_exec_stream(ip, cmd, check=False):
 
 # ──────────────────── AWS instance helpers ───────────────────────────────────
 
-def _build_nic_specs(num_nics, subnet, sg):
-    """Build NetworkInterfaces list for create_instances (up to num_nics).
+def _build_nic_specs(num_nics, public_ip):
+    """Build NetworkInterfaces list for create_instances.
 
-    AWS does not allow AssociatePublicIpAddress inside a NIC spec when
-    multiple network interfaces are present.  Public IPs are assigned
-    post-launch via Elastic IPs instead (see _assign_public_ips).
+    Two cases:
+      * ``num_nics == 1`` and ``public_ip`` — single eth0 in the mgmt
+        subnet with ``AssociatePublicIpAddress=True``. Yields a regular
+        auto-assigned public IP (no EIP, no separate billable address).
+      * ``num_nics > 1`` and ``public_ip is False`` — eth0 in the mgmt
+        subnet plus eth1/eth2 in their isolated data subnets (forces
+        inter-node data-plane traffic through the intended NIC). AWS
+        forbids ``AssociatePublicIpAddress`` on a multi-NIC launch, so
+        none of the NICs get a public IP. Reach these instances via
+        their private IPs (run setup from inside the VPC or via VPN).
 
-    Data NICs (eth1, eth2) are placed into their own isolated subnets/SGs
-    so inter-node data-plane traffic is forced through the intended NIC.
-    Single-NIC instances (mgmt) stay on the mgmt subnet/SG.
+    Storage nodes and clients fall in the second case; the mgmt node in
+    the first.
     """
+    if num_nics == 1:
+        return [{
+            "DeviceIndex": 0,
+            "SubnetId": SUBNET_ID,
+            "Groups": [STORAGE_SG],
+            "AssociatePublicIpAddress": bool(public_ip),
+        }]
+    if public_ip:
+        raise ValueError(
+            "AssociatePublicIpAddress is not allowed with multiple NICs at launch; "
+            "use num_nics=1 for the public-IP host (mgmt) and num_nics>1 with "
+            "public_ip=False for storage nodes and clients."
+        )
     nic_map = {
-        0: (subnet, sg),                      # eth0 mgmt
+        0: (SUBNET_ID, STORAGE_SG),           # eth0 mgmt
         1: (DATA1_SUBNET_ID, DATA1_SG),       # eth1 isolated
         2: (DATA2_SUBNET_ID, DATA2_SG),       # eth2 isolated
     }
     specs = []
     for idx in range(num_nics):
-        nic_subnet, nic_sg = nic_map.get(idx, (subnet, sg))
+        subnet, sg = nic_map[idx]
         specs.append({
             "DeviceIndex": idx,
-            "SubnetId": nic_subnet,
-            "Groups": [nic_sg],
+            "SubnetId": subnet,
+            "Groups": [sg],
         })
     return specs
 
 
-def _assign_public_ips(instances):
-    """Allocate an EIP for each instance and associate it with eth0.
-
-    Required because AssociatePublicIpAddress cannot be used with
-    multiple network interfaces at launch time.  For multi-NIC instances
-    the association must target the primary ENI (DeviceIndex=0) by its
-    NetworkInterfaceId, not the InstanceId.
+def launch_instances(count, instance_type, num_nics, tag_name, root_gb=30, public_ip=False):
+    """Launch EC2 instances. Only ``num_nics==1`` instances may receive
+    an auto-assigned public IP (``public_ip=True``) — used for the mgmt
+    node. Multi-NIC instances (storage nodes, clients) launch fully
+    private; reach them via their private IPs.
     """
-    for inst in instances:
-        inst.wait_until_running()
-        inst.reload()
-        # Find the primary ENI (DeviceIndex 0)
-        primary_eni = None
-        for ni in inst.network_interfaces:
-            if ni.attachment and ni.attachment.get("DeviceIndex") == 0:
-                primary_eni = ni.id
-                break
-        if not primary_eni:
-            # Fallback: first NIC in the list
-            primary_eni = inst.network_interfaces[0].id if inst.network_interfaces else None
-        eip = ec2_client.allocate_address(Domain="vpc")
-        assoc_params = {"AllocationId": eip["AllocationId"]}
-        if primary_eni and len(inst.network_interfaces) > 1:
-            assoc_params["NetworkInterfaceId"] = primary_eni
-        else:
-            assoc_params["InstanceId"] = inst.id
-        ec2_client.associate_address(**assoc_params)
-        print(f"  {inst.id}: assigned EIP {eip['PublicIp']} (eni={primary_eni})")
-
-
-def launch_instances(count, instance_type, num_nics, tag_name, root_gb=30):
-    """Launch EC2 instances with *num_nics* ENIs each."""
-    print(f"  Launching {count}× {instance_type}  ({num_nics} NICs)  tag={tag_name}")
-    instances = ec2_resource.create_instances(
+    print(f"  Launching {count}× {instance_type}  ({num_nics} NIC{'s' if num_nics != 1 else ''}, "
+          f"public_ip={public_ip})  tag={tag_name}")
+    return ec2_resource.create_instances(
         ImageId=AMI_ID,
         InstanceType=instance_type,
         MinCount=count,
         MaxCount=count,
         KeyName=KEY_NAME,
         Placement={"AvailabilityZone": AZ},
-        NetworkInterfaces=_build_nic_specs(num_nics, SUBNET_ID, STORAGE_SG),
+        NetworkInterfaces=_build_nic_specs(num_nics, public_ip),
         BlockDeviceMappings=[{
             "DeviceName": "/dev/sda1",
             "Ebs": {"VolumeSize": root_gb, "DeleteOnTermination": True, "VolumeType": "gp3"},
@@ -228,13 +274,11 @@ def launch_instances(count, instance_type, num_nics, tag_name, root_gb=30):
             "Tags": [{"Key": "Name", "Value": tag_name}],
         }],
     )
-    _assign_public_ips(instances)
-    return instances
 
 
 # ──────────────────── NIC configuration on instances ─────────────────────────
 
-def configure_secondary_nics(ip, nic_names):
+def configure_secondary_nics(ip, nic_names, jump_ip=None):
     """Ensure secondary NICs are UP with DHCP-assigned IPs on Rocky 9."""
     cmds = []
     for nic in nic_names:
@@ -248,16 +292,16 @@ def configure_secondary_nics(ip, nic_names):
     cmds.append("sleep 5")
     for nic in nic_names:
         cmds.append(f"ip -4 addr show {nic} | grep inet || echo 'WARNING: {nic} has no IP'")
-    ssh_exec(ip, cmds, check=False)
+    ssh_exec(ip, cmds, check=False, jump_ip=jump_ip)
 
 
-def discover_nic_ips(ip, nic_names):
+def discover_nic_ips(ip, nic_names, jump_ip=None):
     """Return {nic_name: ipv4_addr} for the given NICs."""
     cmd = "; ".join(
         f"echo {n}=$(ip -4 -o addr show {n} 2>/dev/null | awk '{{print $4}}' | cut -d/ -f1)"
         for n in nic_names
     )
-    out = ssh_exec(ip, [cmd], get_output=True)[0]
+    out = ssh_exec(ip, [cmd], get_output=True, jump_ip=jump_ip)[0]
     result = {}
     for line in out.strip().splitlines():
         if "=" in line:
@@ -393,10 +437,16 @@ def main():
     print("=" * 60)
 
     # ── Phase 1: Launch instances ────────────────────────────────────────
+    # Only the mgmt node gets a (regular auto-assigned) public IP. SNs and
+    # clients launch fully private; the workstation reaches them via
+    # paramiko ProxyJump through mgmt (jump_ip=mgmt_ip on every SSH).
     print("\n--- Phase 1: Launch instances ---")
-    mgmt_instances = launch_instances(1, MGMT_TYPE, num_nics=1, tag_name="SB-Mgmt-MP", root_gb=80)
-    sn_instances   = launch_instances(SN_COUNT, SN_TYPE, num_nics=3, tag_name="SB-SN-MP")
-    client_instances = launch_instances(CLIENT_COUNT, CLIENT_TYPE, num_nics=3, tag_name="SB-Client-MP")
+    mgmt_instances = launch_instances(1, MGMT_TYPE, num_nics=1, tag_name="SB-Mgmt-MP",
+                                      root_gb=80, public_ip=True)
+    sn_instances   = launch_instances(SN_COUNT, SN_TYPE, num_nics=3, tag_name="SB-SN-MP",
+                                      public_ip=False)
+    client_instances = launch_instances(CLIENT_COUNT, CLIENT_TYPE, num_nics=3,
+                                        tag_name="SB-Client-MP", public_ip=False)
 
     all_instances = mgmt_instances + sn_instances + client_instances
     print(f"  Waiting for {len(all_instances)} instances to reach running state...")
@@ -404,40 +454,41 @@ def main():
         inst.wait_until_running()
         inst.reload()
 
-    mgmt_ip     = mgmt_instances[0].public_ip_address
-    sn_pub_ips  = [i.public_ip_address for i in sn_instances]
-    sn_priv_ips = [i.private_ip_address for i in sn_instances]
-    client_pub_ips  = [i.public_ip_address for i in client_instances]
+    mgmt_ip      = mgmt_instances[0].public_ip_address
+    sn_priv_ips  = [i.private_ip_address for i in sn_instances]
+    client_priv_ips = [i.private_ip_address for i in client_instances]
 
-    print(f"  Mgmt:    {mgmt_ip}")
-    for idx, (pub, priv) in enumerate(zip(sn_pub_ips, sn_priv_ips)):
-        print(f"  SN-{idx}:   {pub} ({priv})")
-    for idx, pub in enumerate(client_pub_ips):
-        print(f"  Client-{idx}: {pub}")
+    print(f"  Mgmt:    {mgmt_ip}  (public)")
+    for idx, priv in enumerate(sn_priv_ips):
+        print(f"  SN-{idx}:   {priv}  (private; reached via mgmt)")
+    for idx, priv in enumerate(client_priv_ips):
+        print(f"  Client-{idx}: {priv}  (private; reached via mgmt)")
 
     # ── Phase 2: Wait for SSH + configure secondary NICs ─────────────────
     print("\n--- Phase 2: SSH readiness + NIC configuration ---")
-    all_ips = [mgmt_ip] + sn_pub_ips + client_pub_ips
-    for ip in all_ips:
-        wait_for_ssh(ip)
+    # Direct SSH to mgmt so we know the jump host is up before tunneling.
+    wait_for_ssh(mgmt_ip)
+    for ip in sn_priv_ips + client_priv_ips:
+        wait_for_ssh(ip, jump_ip=mgmt_ip)
 
     print("  Configuring secondary NICs on storage nodes + clients...")
-    multi_nic_ips = sn_pub_ips + client_pub_ips
+    multi_nic_ips = sn_priv_ips + client_priv_ips
     with ThreadPoolExecutor(max_workers=len(multi_nic_ips)) as pool:
-        futures = [pool.submit(configure_secondary_nics, ip, DATA_NICS) for ip in multi_nic_ips]
+        futures = [pool.submit(configure_secondary_nics, ip, DATA_NICS, jump_ip=mgmt_ip)
+                   for ip in multi_nic_ips]
         for f in futures:
             f.result()
 
     # Discover data NIC IPs (for metadata)
     print("  Discovering data NIC IPs...")
     sn_data_ips = {}
-    for ip in sn_pub_ips:
-        sn_data_ips[ip] = discover_nic_ips(ip, DATA_NICS)
+    for ip in sn_priv_ips:
+        sn_data_ips[ip] = discover_nic_ips(ip, DATA_NICS, jump_ip=mgmt_ip)
         print(f"    {ip}: {sn_data_ips[ip]}")
 
     client_data_ips = {}
-    for ip in client_pub_ips:
-        client_data_ips[ip] = discover_nic_ips(ip, DATA_NICS)
+    for ip in client_priv_ips:
+        client_data_ips[ip] = discover_nic_ips(ip, DATA_NICS, jump_ip=mgmt_ip)
         print(f"    {ip}: {client_data_ips[ip]}")
 
     # ── Phase 3: Install sbcli on all nodes ──────────────────────────────
@@ -450,9 +501,10 @@ def main():
         " --upgrade --force --ignore-installed requests",
         "echo 'export PATH=/usr/local/bin:$PATH' >> ~/.bashrc",
     ]
-    setup_ips = [mgmt_ip] + sn_pub_ips
-    with ThreadPoolExecutor(max_workers=len(setup_ips)) as pool:
-        futures = [pool.submit(ssh_exec, ip, install_cmds, check=True) for ip in setup_ips]
+    install_targets = [(mgmt_ip, None)] + [(ip, mgmt_ip) for ip in sn_priv_ips]
+    with ThreadPoolExecutor(max_workers=len(install_targets)) as pool:
+        futures = [pool.submit(ssh_exec, ip, install_cmds, check=True, jump_ip=jump)
+                   for ip, jump in install_targets]
         for f in futures:
             f.result()
     print("  sbcli installed on all nodes.")
@@ -476,34 +528,35 @@ def main():
 
     # ── Phase 5: Configure + deploy storage nodes ────────────────────────
     print("\n--- Phase 5: Configure + deploy storage nodes ---")
-    with ThreadPoolExecutor(max_workers=len(sn_pub_ips)) as pool:
+    with ThreadPoolExecutor(max_workers=len(sn_priv_ips)) as pool:
         futures = [pool.submit(ssh_exec, ip, [
             f"sudo /usr/local/bin/sbctl -d sn configure --max-lvol {MAX_LVOL}"
-        ], check=True) for ip in sn_pub_ips]
+        ], check=True, jump_ip=mgmt_ip) for ip in sn_priv_ips]
         for f in futures:
             f.result()
     print("  All SNs configured.")
 
-    with ThreadPoolExecutor(max_workers=len(sn_pub_ips)) as pool:
+    with ThreadPoolExecutor(max_workers=len(sn_priv_ips)) as pool:
         futures = [pool.submit(ssh_exec, ip, [
             f"sudo /usr/local/bin/sbctl -d sn deploy --isolate-cores --ifname {MGMT_IFACE}"
-        ], check=True) for ip in sn_pub_ips]
+        ], check=True, jump_ip=mgmt_ip) for ip in sn_priv_ips]
         for f in futures:
             f.result()
     print("  All SNs deployed. Rebooting...")
 
-    with ThreadPoolExecutor(max_workers=len(sn_pub_ips)) as pool:
-        [pool.submit(ssh_exec, ip, ["sudo reboot"]) for ip in sn_pub_ips]
+    with ThreadPoolExecutor(max_workers=len(sn_priv_ips)) as pool:
+        [pool.submit(ssh_exec, ip, ["sudo reboot"], jump_ip=mgmt_ip) for ip in sn_priv_ips]
 
     print("  Waiting for SN reboot...")
     time.sleep(30)
-    for ip in sn_pub_ips:
-        wait_for_ssh(ip)
+    for ip in sn_priv_ips:
+        wait_for_ssh(ip, jump_ip=mgmt_ip)
 
     # Re-configure secondary NICs after reboot (NetworkManager may need a nudge)
     print("  Re-configuring secondary NICs after reboot...")
-    with ThreadPoolExecutor(max_workers=len(sn_pub_ips)) as pool:
-        futures = [pool.submit(configure_secondary_nics, ip, DATA_NICS) for ip in sn_pub_ips]
+    with ThreadPoolExecutor(max_workers=len(sn_priv_ips)) as pool:
+        futures = [pool.submit(configure_secondary_nics, ip, DATA_NICS, jump_ip=mgmt_ip)
+                   for ip in sn_priv_ips]
         for f in futures:
             f.result()
 
@@ -561,8 +614,9 @@ def main():
         "sudo modprobe nvme-tcp",
         "echo 'nvme-tcp' | sudo tee /etc/modules-load.d/nvme-tcp.conf",
     ]
-    with ThreadPoolExecutor(max_workers=max(1, len(client_pub_ips))) as pool:
-        futures = [pool.submit(ssh_exec, ip, client_cmds, check=True) for ip in client_pub_ips]
+    with ThreadPoolExecutor(max_workers=max(1, len(client_priv_ips))) as pool:
+        futures = [pool.submit(ssh_exec, ip, client_cmds, check=True, jump_ip=mgmt_ip)
+                   for ip in client_priv_ips]
         for f in futures:
             f.result()
     print("  Clients ready.")
@@ -572,32 +626,34 @@ def main():
     verify_errors = verify_multipath(mgmt_ip, expected_nics=len(DATA_NICS))
 
     # ── Phase 10: Save metadata ──────────────────────────────────────────
+    # SN/client public_ip is intentionally None (no public IPs assigned).
+    # Metadata consumers (soak scripts) already prefer ``private_ip``;
+    # if you need to SSH to one from a workstation, use mgmt as a jump
+    # host (paramiko ProxyJump or ``ssh -J``).
     print("\n--- Phase 10: Save metadata ---")
     storage_metadata = []
     for idx, inst in enumerate(sn_instances):
         entry = {
             "instance_id": inst.id,
             "private_ip": inst.private_ip_address,
-            "public_ip": inst.public_ip_address,
+            "public_ip": inst.public_ip_address,  # None for multipath SNs
             "subnet_id": inst.subnet_id,
             "security_group_id": STORAGE_SG,
         }
-        pub = inst.public_ip_address
-        if pub in sn_data_ips:
-            entry["data_nics"] = sn_data_ips[pub]
+        if inst.private_ip_address in sn_data_ips:
+            entry["data_nics"] = sn_data_ips[inst.private_ip_address]
         storage_metadata.append(entry)
 
     client_metadata = []
     for inst in client_instances:
         entry = {
             "instance_id": inst.id,
-            "public_ip": inst.public_ip_address,
+            "public_ip": inst.public_ip_address,  # None for multipath clients
             "private_ip": inst.private_ip_address,
             "security_group_id": STORAGE_SG,
         }
-        pub = inst.public_ip_address
-        if pub in client_data_ips:
-            entry["data_nics"] = client_data_ips[pub]
+        if inst.private_ip_address in client_data_ips:
+            entry["data_nics"] = client_data_ips[inst.private_ip_address]
         client_metadata.append(entry)
 
     final_metadata = {
@@ -627,8 +683,8 @@ def main():
     print("Deployment complete.")
     print(f"  Cluster:  {cluster_uuid}")
     print(f"  Mgmt:     {mgmt_ip}")
-    print(f"  SNs:      {', '.join(sn_pub_ips)}")
-    print(f"  Clients:  {', '.join(client_pub_ips)}")
+    print(f"  SNs:      {', '.join(sn_priv_ips)}  (private; via mgmt jump)")
+    print(f"  Clients:  {', '.join(client_priv_ips)}  (private; via mgmt jump)")
     print(f"  Data NICs: {', '.join(DATA_NICS)}")
     print("  Metadata: cluster_metadata_mp.json")
     if verify_errors:
@@ -639,9 +695,9 @@ def main():
 
 
 def teardown(metadata_path="cluster_metadata_mp.json"):
-    """Terminate all instances and release associated Elastic IPs.
-
-    Reads instance IDs from the metadata JSON written by main().
+    """Terminate all instances. No EIPs to release — mgmt uses a regular
+    auto-assigned public IP (freed on terminate); SNs/clients have no
+    public IPs at all.
     """
     import pathlib
     meta = json.loads(pathlib.Path(metadata_path).read_text())
@@ -658,20 +714,6 @@ def teardown(metadata_path="cluster_metadata_mp.json"):
         print("No instances found in metadata.")
         return
 
-    # Release EIPs associated with any of these instances
-    print("Releasing Elastic IPs …")
-    addresses = ec2_client.describe_addresses().get("Addresses", [])
-    for addr in addresses:
-        if addr.get("InstanceId") in all_ids:
-            try:
-                if "AssociationId" in addr:
-                    ec2_client.disassociate_address(AssociationId=addr["AssociationId"])
-                ec2_client.release_address(AllocationId=addr["AllocationId"])
-                print(f"  Released EIP {addr['PublicIp']} (was on {addr['InstanceId']})")
-            except Exception as e:
-                print(f"  Warning: failed to release {addr.get('PublicIp')}: {e}")
-
-    # Terminate instances
     print(f"Terminating {len(all_ids)} instances …")
     ec2_client.terminate_instances(InstanceIds=all_ids)
     for iid in all_ids:
