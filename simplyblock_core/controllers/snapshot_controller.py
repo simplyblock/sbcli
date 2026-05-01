@@ -5,7 +5,8 @@ import math
 import time
 import uuid
 
-from simplyblock_core.controllers import lvol_controller, snapshot_events, pool_controller, tasks_controller
+from simplyblock_core.controllers import lvol_controller, snapshot_events, pool_controller, tasks_controller, \
+    migration_controller
 
 from simplyblock_core import utils, constants
 from simplyblock_core.db_controller import DBController
@@ -387,7 +388,6 @@ def delete(snapshot_uuid, force_delete=False):
         pass
 
     # Block deletion if the snapshot's parent volume is being migrated
-    from simplyblock_core.controllers import migration_controller
     active_mig = migration_controller.get_active_migration_for_lvol(
         snap.lvol.uuid, snap.cluster_id)
     if active_mig and not force_delete:
@@ -433,9 +433,14 @@ def delete(snapshot_uuid, force_delete=False):
     # delete-completion path will re-trigger snapshot_controller.delete
     # once SPDK has actually removed the bdev (deletion_status set).
     clones = []
+    in_deletion_clones = []
     for lvol in db_controller.get_lvols(snode.cluster_id):
         if not lvol.cloned_from_snap or lvol.cloned_from_snap != snapshot_uuid:
             continue
+
+        if lvol.status == LVol.STATUS_IN_DELETION:
+            in_deletion_clones.append(lvol)
+
         if lvol.status != LVol.STATUS_IN_DELETION:
             clones.append(lvol)
             continue
@@ -449,6 +454,17 @@ def delete(snapshot_uuid, force_delete=False):
         logger.warning(f"Soft delete snapshot with clones: {snapshot_uuid}")
         snap = db_controller.get_snapshot_by_id(snapshot_uuid)
         snap.deleted = True
+        snap.write_to_db(db_controller.kv_store)
+        return True
+
+    # if there are no active clones and clones in status in_deletion found, then we
+    # Defer delete the snapshot, meaning we switch snapshot status to in_deletion
+    # and rely on the snapshot monitor to initiate the delete process once the clones
+    # in deletion are fully deleted.
+    elif len(in_deletion_clones) >= 1:
+        logger.info(f"Defer deleting snapshot: {snapshot_uuid}")
+        snap = db_controller.get_snapshot_by_id(snapshot_uuid)
+        snap.status = SnapShot.STATUS_IN_DELETION
         snap.write_to_db(db_controller.kv_store)
         return True
 

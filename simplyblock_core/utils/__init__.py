@@ -358,37 +358,13 @@ def sum_records(records):
         return total
 
 
-_BDEV_NAME_NUMERIC_SUFFIX = re.compile(r'(?:^|[/_])(\d+)\s*$')
-
-
 def _used_bdev_name_numbers(db_controller):
-    """Collect all numeric suffixes already used in lvol/snapshot bdev
-    names cluster-wide (e.g. ``LVS_x/CLN_6900`` -> 6900,
-    ``LVS_x/SNAP_77047`` -> 77047). The clone- and snapshot-create
-    paths build their bdev name as ``CLN_<vuid>``/``SNAP_<vuid>``
-    where ``<vuid>`` comes from the random helpers below; if a fresh
-    random number lands on an already-used suffix SPDK rejects the
-    create with ``lvol with name ... already exists``. The mgmt
-    fallout from that failure is what produced the stuck-snapshot
-    metadata-inconsistency incident (parent's open_ref non-zero,
-    clone entries empty) so we dedupe up-front.
-    """
     used = set()
     for lvol in db_controller.get_lvols():
-        for name in (getattr(lvol, "lvol_bdev", None),
-                     getattr(lvol, "top_bdev", None)):
-            if not name:
-                continue
-            m = _BDEV_NAME_NUMERIC_SUFFIX.search(name)
-            if m:
-                used.add(int(m.group(1)))
+        used.add(lvol.vuid)
+
     for snap in db_controller.get_snapshots():
-        name = getattr(snap, "snap_bdev", None)
-        if not name:
-            continue
-        m = _BDEV_NAME_NUMERIC_SUFFIX.search(name)
-        if m:
-            used.add(int(m.group(1)))
+        used.add(snap.vuid)
     return used
 
 
