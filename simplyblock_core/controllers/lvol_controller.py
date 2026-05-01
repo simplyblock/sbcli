@@ -647,6 +647,11 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     # add_lvol_on_node can look up the pool for DHCHAP key registration.
     lvol.pool_uuid = pool.get_id()
     lvol.pool_name = pool.pool_name
+    logger.info("[DHCHAP-DEBUG] create_lvol: pool_uuid=%s, pool.dhchap=%s, "
+                "allowed_hosts=%s, pool.dhchap_key=%s",
+                lvol.pool_uuid, pool.dhchap,
+                lvol.allowed_hosts,
+                bool(pool.dhchap_key) if pool.dhchap else "N/A")
 
     lvol.write_to_db(db_controller.kv_store)
 
@@ -854,18 +859,34 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
             db_ctrl = DBController()
             cluster = db_ctrl.get_cluster_by_id(snode.cluster_id)
             pool = None
+            logger.info("[DHCHAP-DEBUG] add_lvol_on_node: lvol.pool_uuid=%s", lvol.pool_uuid)
             if lvol.pool_uuid:
                 try:
                     pool = db_ctrl.get_pool_by_id(lvol.pool_uuid)
+                    logger.info("[DHCHAP-DEBUG] add_lvol_on_node: pool found, "
+                                "pool.dhchap=%s, pool.dhchap_key=%s, pool.dhchap_ctrlr_key=%s",
+                                pool.dhchap, bool(pool.dhchap_key), bool(pool.dhchap_ctrlr_key))
                 except KeyError:
-                    pass
+                    logger.error("[DHCHAP-DEBUG] add_lvol_on_node: pool NOT FOUND for pool_uuid=%s",
+                                 lvol.pool_uuid)
+            else:
+                logger.warning("[DHCHAP-DEBUG] add_lvol_on_node: lvol.pool_uuid is EMPTY — "
+                               "DHCHAP target-side config will be SKIPPED")
             dhchap_group = _get_dhchap_group(cluster, pool)
             pool_key_names = {}
             if pool and pool.dhchap:
+                logger.info("[DHCHAP-DEBUG] add_lvol_on_node: DHCHAP path — registering pool keys on node %s",
+                            snode.get_id())
                 pool_key_names = _register_pool_dhchap_keys_on_node(pool, snode, rpc_client)
+                logger.info("[DHCHAP-DEBUG] add_lvol_on_node: pool_key_names=%s", pool_key_names)
+            else:
+                logger.info("[DHCHAP-DEBUG] add_lvol_on_node: NON-DHCHAP path (pool=%s, pool.dhchap=%s)",
+                            pool is not None, getattr(pool, 'dhchap', None))
             for host_entry in lvol.allowed_hosts:
                 logger.info("adding allowed host %s to subsystem %s", host_entry["nqn"], lvol.nqn)
                 if pool and pool.dhchap:
+                    logger.info("[DHCHAP-DEBUG] subsystem_add_host WITH dhchap_key=%s, dhchap_ctrlr_key=%s",
+                                pool_key_names.get("dhchap_key"), pool_key_names.get("dhchap_ctrlr_key"))
                     rpc_client.subsystem_add_host(
                         lvol.nqn, host_entry["nqn"],
                         dhchap_key=pool_key_names.get("dhchap_key"),
@@ -874,6 +895,8 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
                     )
                 else:
                     has_keys = any(host_entry.get(k) for k in ("dhchap_key", "dhchap_ctrlr_key", "psk"))
+                    logger.info("[DHCHAP-DEBUG] subsystem_add_host WITHOUT pool DHCHAP (has_keys=%s, host_entry_keys=%s)",
+                                has_keys, list(host_entry.keys()))
                     if has_keys:
                         key_names = _register_dhchap_keys_on_node(snode, host_entry["nqn"], host_entry, rpc_client)
                         rpc_client.subsystem_add_host(
@@ -884,6 +907,7 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
                             dhchap_group=dhchap_group,
                         )
                     else:
+                        logger.warning("[DHCHAP-DEBUG] subsystem_add_host PLAIN — no DHCHAP keys at all")
                         rpc_client.subsystem_add_host(lvol.nqn, host_entry["nqn"])
 
         if is_primary or lvol.node_id == snode.get_id():
@@ -1691,14 +1715,25 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
     # has no per-host keys, which is always the case for pool-level DHCHAP).
     pool_dhchap_key = None
     pool_dhchap_ctrlr_key = None
+    logger.info("[DHCHAP-DEBUG] connect_lvol: host_entry=%s, lvol.pool_uuid=%s",
+                host_entry is not None, lvol.pool_uuid)
     if host_entry and lvol.pool_uuid:
         try:
             pool = db_controller.get_pool_by_id(lvol.pool_uuid)
+            logger.info("[DHCHAP-DEBUG] connect_lvol: pool found, pool.dhchap=%s, "
+                        "has_dhchap_key=%s, has_dhchap_ctrlr_key=%s",
+                        pool.dhchap, bool(pool.dhchap_key), bool(pool.dhchap_ctrlr_key))
             if pool and pool.dhchap:
                 pool_dhchap_key = pool.dhchap_key
                 pool_dhchap_ctrlr_key = pool.dhchap_ctrlr_key
+                logger.info("[DHCHAP-DEBUG] connect_lvol: will add DHCHAP keys to connect string")
+            else:
+                logger.info("[DHCHAP-DEBUG] connect_lvol: pool.dhchap is False — no DHCHAP keys")
         except KeyError:
-            pass
+            logger.error("[DHCHAP-DEBUG] connect_lvol: pool NOT FOUND for pool_uuid=%s", lvol.pool_uuid)
+    else:
+        logger.info("[DHCHAP-DEBUG] connect_lvol: skipping pool DHCHAP lookup "
+                    "(host_entry=%s, pool_uuid=%s)", host_entry is not None, lvol.pool_uuid)
 
     for nodes_id in nodes_ids:
         snode = db_controller.get_storage_node_by_id(nodes_id)
