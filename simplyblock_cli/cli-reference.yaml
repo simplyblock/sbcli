@@ -1528,7 +1528,6 @@ commands:
             Pass an empty string to skip kubectl collection."
             dest: namespace
             type: str
-            default: "simplyblock"
           - name: "--diagnose"
             help: "Print a diagnostic report from OpenSearch (indices, field names, 
             sample documents, container names present in the time window) and exit without collecting logs. 
