@@ -48,6 +48,12 @@ AZ           = "us-east-1a"
 # eth0 stays on the mgmt subnet with the default/shared SG
 MGMT_SUBNET_ID = "subnet-0593459d6b931ee4c"
 MGMT_SG        = "sg-02e89a1372e9f39e9"
+# eth0 of SN/client lives in a private subnet whose route table sends
+# 0.0.0.0/0 to a NAT gateway. SNs/clients have no public IPs, but they
+# can still reach RHUI / GitHub / pip mirrors through NAT for the
+# bootstrap install. Mgmt stays in the public subnet (IGW route) so
+# its return SSH path uses its own public IP, not NAT's.
+PRIVATE_SUBNET_ID = "subnet-073c4e619eb3b69be"  # 172.31.98.0/24, NAT-routed
 # Each data NIC is in its own isolated subnet + SG — no cross-subnet routing,
 # forces inter-node data-plane traffic through the intended NIC.
 DATA1_SUBNET_ID = "subnet-0bc107204ccb6c2df"  # 172.31.96.0/24
@@ -247,24 +253,25 @@ def _build_nic_specs(num_nics, public_ip):
     """Build NetworkInterfaces list for create_instances.
 
     Two cases:
-      * ``num_nics == 1`` and ``public_ip`` — single eth0 in the mgmt
-        subnet with ``AssociatePublicIpAddress=True``. Yields a regular
-        auto-assigned public IP (no EIP, no separate billable address).
-      * ``num_nics > 1`` and ``public_ip is False`` — eth0 in the mgmt
-        subnet plus eth1/eth2 in their isolated data subnets (forces
-        inter-node data-plane traffic through the intended NIC). AWS
-        forbids ``AssociatePublicIpAddress`` on a multi-NIC launch, so
-        none of the NICs get a public IP. Reach these instances via
-        their private IPs (run setup from inside the VPC or via VPN).
+      * ``num_nics == 1`` and ``public_ip`` — single eth0 in the
+        public mgmt subnet (IGW-routed) with
+        ``AssociatePublicIpAddress=True``. Yields a regular
+        auto-assigned public IP, not an EIP.
+      * ``num_nics > 1`` and ``public_ip is False`` — eth0 in the
+        private NAT-routed subnet (so dnf / pip can reach the
+        internet without a public IP) plus eth1/eth2 in their
+        isolated data subnets. AWS forbids
+        ``AssociatePublicIpAddress`` on a multi-NIC launch, so none
+        of the NICs get a public IP. Reach the instance from the
+        workstation via mgmt as a ProxyJump.
 
-    Storage nodes and clients fall in the second case; the mgmt node in
-    the first.
+    Storage nodes and clients take the second case; mgmt the first.
     """
     if num_nics == 1:
         return [{
             "DeviceIndex": 0,
-            "SubnetId": SUBNET_ID,
-            "Groups": [STORAGE_SG],
+            "SubnetId": MGMT_SUBNET_ID,
+            "Groups": [MGMT_SG],
             "AssociatePublicIpAddress": bool(public_ip),
         }]
     if public_ip:
@@ -274,7 +281,7 @@ def _build_nic_specs(num_nics, public_ip):
             "public_ip=False for storage nodes and clients."
         )
     nic_map = {
-        0: (SUBNET_ID, STORAGE_SG),           # eth0 mgmt
+        0: (PRIVATE_SUBNET_ID, MGMT_SG),      # eth0 private (NAT-routed)
         1: (DATA1_SUBNET_ID, DATA1_SG),       # eth1 isolated
         2: (DATA2_SUBNET_ID, DATA2_SG),       # eth2 isolated
     }
