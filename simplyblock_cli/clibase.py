@@ -16,6 +16,7 @@ from simplyblock_core.controllers import pool_controller, lvol_controller, snaps
 from simplyblock_core.controllers import health_controller
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.scripts.collect_logs import collect_logs
 
 
 def range_type(min, max):
@@ -533,6 +534,10 @@ class CLIWrapperBase:
 
     def cluster__add_replication(self, sub_command, args):
         return cluster_ops.add_replication(args.cluster_id, args.target_cluster_id, args.timeout, args.target_pool)
+
+    def cluster__collect_logs(self, sub_command, args):
+        return collect_logs(args.start_time, args.duration_minutes, args.output_dir, args.use_opensearch,
+                            args.cluster_id, args.mgmt_ip, args.monitoring_secret, args.namespace, args.diagnose, args.mode)
 
     def volume__add(self, sub_command, args):
         import json as _json
