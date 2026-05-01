@@ -465,6 +465,7 @@ def delete(snapshot_uuid, force_delete=False):
         logger.info(f"Defer deleting snapshot: {snapshot_uuid}")
         snap = db_controller.get_snapshot_by_id(snapshot_uuid)
         snap.status = SnapShot.STATUS_IN_DELETION
+        snap.deletion_status = ""
         snap.write_to_db(db_controller.kv_store)
         return True
 

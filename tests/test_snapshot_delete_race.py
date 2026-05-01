@@ -352,10 +352,13 @@ class TestSnapshotDeleteWaitsForCloneInFlight(unittest.TestCase):
         ok = snapshot_controller.delete("snap-1")
 
         self.assertTrue(ok)
-        self.assertTrue(
-            snap.deleted,
-            "snapshot must be soft-deleted while an IN_DELETION clone's "
-            "SPDK bdev is still in flight (deletion_status not yet set)")
+        self.assertEqual(
+            snap.status, SnapShot.STATUS_IN_DELETION,
+            "snapshot must be defer deleted while an IN_DELETION clone's ")
+        self.assertEqual(
+            snap.deletion_status, "",
+            "snapshot must be defer deleted while an IN_DELETION clone's, "
+            "and deletion_status is unset")
 
     @patch("simplyblock_core.controllers.migration_controller.get_active_migration_for_lvol")
     @patch("simplyblock_core.controllers.snapshot_controller.db_controller")
