@@ -8,7 +8,7 @@ has 3 ENIs:
     eth1  – data-plane path A
     eth2  – data-plane path B
 
-Storage nodes are added with ``--data-nics eth1 eth2`` so all internal
+Storage nodes are added with ``--data-nics eth1,eth2`` so all internal
 connections (devices, JM, hublvol) and client connections are duplicated
 across both data NICs, providing true NVMe multipath.
 
@@ -623,7 +623,10 @@ def main():
 
     # ── Phase 6: Add nodes with --data-nics ──────────────────────────────
     print("\n--- Phase 6: Add storage nodes with multipath ---")
-    data_nics_arg = " ".join(DATA_NICS)
+    # sbctl --data-nics takes a single value: a comma-separated list of
+    # NIC names. Space-separating spills extra NICs into argv as
+    # positional args which sbctl rejects with "unrecognized arguments".
+    data_nics_arg = ",".join(DATA_NICS)
     for priv_ip in sn_priv_ips:
         for attempt in range(5):
             try:
