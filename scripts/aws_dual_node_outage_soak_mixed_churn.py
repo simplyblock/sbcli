@@ -146,6 +146,18 @@ def parse_args():
         help="Disable inter-iteration NIC chaos even on multipath clusters.",
     )
     parser.add_argument(
+        "--inter-iteration-seconds",
+        type=int,
+        default=120,
+        help=(
+            "Fixed wait between outage iterations (seconds). The window starts "
+            "once all nodes are back ONLINE after the outage; the inter-iteration "
+            "NIC chaos runs INSIDE this window and any remaining time is slept. "
+            "Replaces the previous 'wait for rebalance / data migration to drain' "
+            "gate — the cluster keeps draining in the background."
+        ),
+    )
+    parser.add_argument(
         "--auto-recover-wait",
         type=int,
         default=900,
@@ -499,13 +511,8 @@ class SoakRunner:
         # Serializes outage iterations and churn cycles. Both mutate cluster
         # state (outage takes nodes down; churn deletes/recreates volumes), so
         # they must not overlap. Held during run_outage_pair / check_fio /
-        # post-outage settle waits / _inter_iteration_nic_chaos / entire
-        # churn cycle. Churn must NOT run during NIC chaos either, since
-        # nvme disconnect/connect during a data-NIC-down window can race
-        # the kernel's multipath failover and leave the client in a
-        # partially-attached state. The only unlocked region in the main
-        # loop is the final per-iteration wait_for_cluster_stable /
-        # wait_for_data_migration_complete, which is a pure poller.
+        # entire churn cycle. NIC chaos and waiting loops run unlocked so a
+        # churn cycle can fire during them.
         self.serial_lock = threading.RLock()
         self.churn_thread = None
         self.churn_stop_event = threading.Event()
@@ -1620,7 +1627,6 @@ class SoakRunner:
         finally:
             self._enable_nic_on_all_nodes(nic)
         self.wait_for_all_online(timeout=self.args.restart_timeout)
-        self.wait_for_cluster_stable()
 
     def _network_outage(self, node_id, duration):
         """Take all data NICs down on one storage node for *duration* seconds,
@@ -2069,14 +2075,10 @@ class SoakRunner:
                     )
                     continue
 
-                # Serialize the outage AND the inter-iteration NIC chaos
-                # with the churn thread: while we hold the lock, no churn
-                # cycle can start (and any in-progress churn finishes
-                # first). Churn does lvol delete/create + nvme
-                # disconnect/connect, which must not overlap a NIC-down
-                # window — losing a data path mid-disconnect/connect
-                # masks failures, races the kernel's path-failover, and
-                # can leave the client in a partially-attached state.
+                # Serialize the outage with the churn thread: while we hold
+                # the lock, no churn cycle can start (and any in-progress
+                # churn finishes first). Outside the lock the churn thread
+                # is free to run — including during _inter_iteration_nic_chaos.
                 with self.serial_lock:
                     self.run_outage_pair(node1, node2, method1, method2)
                     # Post-outage fio check: any fio that exited during this
@@ -2085,22 +2087,34 @@ class SoakRunner:
                     # SIGTERM/SIGKILL — fio keeps running into the next
                     # iteration and across the upcoming churn cycles.
                     self.check_fio()
-                    # Wait for the cluster to settle: all nodes online AND
-                    # rebalance / data-migration drained before the next
-                    # outage pair fires.
+                    # Wait only for nodes to be back ONLINE before the next
+                    # outage. We deliberately do NOT wait for rebalance /
+                    # data-migration to drain — that gate produced multi-
+                    # minute (sometimes >12 min on iter 1) waits and is
+                    # unnecessary on a multipath FTT2 cluster. Instead a
+                    # fixed inter-iteration window (--inter-iteration-seconds)
+                    # bounds the time spent between outages.
                     self.wait_for_all_online(timeout=self.args.restart_timeout)
-                    self.wait_for_cluster_stable()
-                    self.wait_for_data_migration_complete("next outage pair")
-                    self._inter_iteration_nic_chaos()
 
-                # Re-check for any churn fault that may have fired
-                # before we acquired the lock; exit at the next sync point.
+                # Fixed inter-iteration window. NIC chaos runs INSIDE this
+                # window; any remaining time is slept so iterations advance
+                # at a predictable cadence regardless of how long NIC chaos
+                # took. Rebalance / data-migration keeps draining in the
+                # background.
+                window_start = time.time()
+                self._inter_iteration_nic_chaos()
+                # Re-check for any churn fault that fired during NIC chaos
+                # so we exit at the next sync point.
                 self.reraise_churn_error()
-                # Wait for rebalance / data-migration to complete before
-                # starting the next iteration (main branch: device-migration
-                # runners are active and we gate on `is_re_balancing`).
-                self.wait_for_cluster_stable()
-                self.wait_for_data_migration_complete("next iteration")
+                elapsed = time.time() - window_start
+                remaining = max(0.0, self.args.inter_iteration_seconds - elapsed)
+                if remaining > 0:
+                    self.logger.log(
+                        f"Inter-iteration wait: sleeping {remaining:.0f}s "
+                        f"(window={self.args.inter_iteration_seconds}s, "
+                        f"NIC chaos took {elapsed:.0f}s)"
+                    )
+                    time.sleep(remaining)
 
 
 def main():
