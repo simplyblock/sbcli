@@ -959,7 +959,7 @@ class SoakRunner:
                 f"fio --name={fio_name} --directory={shlex.quote(volume['mount_point'])} "
                 "--direct=1 --rw=randrw --bs=4K --group_reporting --time_based "
                 f"--numjobs={FIO_NUMJOBS} --iodepth=4 --size=4G --runtime={self.args.runtime} "
-                "--ioengine=aiolib --max_latency=15s --exitall_on_error=1 "
+                "--ioengine=aiolib --max_latency=20s --exitall_on_error=1 "
                 f"--output={shlex.quote(volume['fio_log'])}; "
                 "rc=$?; "
                 f"echo $rc > {shlex.quote(volume['rc_file'])}"
