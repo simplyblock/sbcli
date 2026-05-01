@@ -644,13 +644,14 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
             logger.error(msg)
             return False, msg
 
+    clone_vuid = utils.get_random_vuid()
     lvol = LVol()
     lvol.uuid = str(uuid.uuid4())
     lvol.lvol_name = clone_name
     lvol.size = snap.lvol.size
     lvol.max_size = snap.lvol.max_size
     lvol.base_bdev = snap.lvol.base_bdev
-    lvol.lvol_bdev = f"CLN_{utils.get_random_vuid()}"
+    lvol.lvol_bdev = f"CLN_{clone_vuid}"
     lvol.lvs_name = snap.lvol.lvs_name
     lvol.top_bdev = f"{lvol.lvs_name}/{lvol.lvol_bdev}"
     lvol.hostname = snode.hostname
@@ -662,7 +663,7 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     lvol.ha_type = snap.lvol.ha_type
     lvol.lvol_type = 'lvol'
     lvol.guid = utils.generate_hex_string(16)
-    lvol.vuid = snap.lvol.vuid
+    lvol.vuid = clone_vuid
     lvol.snapshot_name = snap.snap_bdev
     lvol.subsys_port = snap.lvol.subsys_port
     lvol.fabric = snap.fabric
