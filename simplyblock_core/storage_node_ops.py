@@ -315,11 +315,22 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names:
                 logger.error(msg)
                 raise RuntimeError(msg)
 
+        # nvmf_multipath is a bool on the device record; translate it into
+        # the SPDK string mode here. ``True`` must mean active-active
+        # (``"multipath"``), not failover — passing the bool through to
+        # rpc_client.bdev_nvme_attach_controller would coerce True ->
+        # ``"failover"`` (active-passive) and remote alceml/jm controllers
+        # would carry all IO on a single path. That's what produced the
+        # remote_alceml_*/remote_jm_* in failover mode (vs hublvols
+        # correctly in multipath) and made a single-NIC drop fatal: every
+        # outstanding JC write was on the dropped path, all aborted at
+        # once, all retried as duplicates.
+        attach_mode = "multipath" if device.nvmf_multipath else False
         for ip in device.nvmf_ip.split(","):
             try:
                 ret = attach_rpc_client.bdev_nvme_attach_controller(
                     name, device.nvmf_nqn, ip, device.nvmf_port, tr_type,
-                    multipath=device.nvmf_multipath)
+                    multipath=attach_mode)
                 if not bdev_name and ret and isinstance(ret, list):
                     bdev_name = ret[0]
             except Exception as e:
