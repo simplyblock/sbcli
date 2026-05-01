@@ -444,11 +444,11 @@ def delete(snapshot_uuid, force_delete=False):
         if lvol.status != LVol.STATUS_IN_DELETION:
             clones.append(lvol)
             continue
-        # IN_DELETION: only treat as gone if SPDK delete already
-        # completed for this clone (data-plane removed, just awaiting
-        # DB cleanup). Otherwise it's still in flight and blocks us.
-        if not getattr(lvol, "deletion_status", None):
-            clones.append(lvol)
+        # # IN_DELETION: only treat as gone if SPDK delete already
+        # # completed for this clone (data-plane removed, just awaiting
+        # # DB cleanup). Otherwise it's still in flight and blocks us.
+        # if not getattr(lvol, "deletion_status", None):
+        #     clones.append(lvol)
 
     if len(clones) >= 1:
         logger.warning(f"Soft delete snapshot with clones: {snapshot_uuid}")
