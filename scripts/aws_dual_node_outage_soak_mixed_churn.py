@@ -39,13 +39,13 @@ NQN_RE = re.compile(r"(?:--nqn[=\s]+|-n\s+)(\S+)")
 
 OUTAGE_METHODS = (
     "graceful", "forced", "container_kill", "host_reboot",
-    "network_outage_20", "network_outage_50",
+    "network_outage_30", "network_outage_50",
 )
 # Methods that leave the node in a state where it recovers on its own
 # (no sbctl restart required from the soak driver).
 AUTO_RECOVER_METHODS = (
     "container_kill", "host_reboot",
-    "network_outage_20", "network_outage_50",
+    "network_outage_30", "network_outage_50",
 )
 
 # Scenario enumeration:
