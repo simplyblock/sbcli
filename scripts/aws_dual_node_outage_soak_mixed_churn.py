@@ -489,23 +489,13 @@ class SoakRunner:
         self.created_volume_ids = []
         # Mixed-outage state
         self.methods = list(args.methods)
-        # On multipath clusters, network-layer coverage is provided by the
-        # inter-iteration single-NIC chaos. Dropping all data NICs on a node
-        # (network_outage_*) is a simple-cluster-only scenario.
-        if self._is_multipath():
-            filtered = [m for m in self.methods if not m.startswith("network_outage_")]
-            dropped = [m for m in self.methods if m not in filtered]
-            if dropped:
-                self.logger.log(
-                    f"multipath cluster detected: excluding {dropped} from outage methods"
-                )
-            if not filtered:
-                raise TestRunError(
-                    "No outage methods remain after excluding network_outage_* "
-                    "on multipath cluster; pass --methods with at least one "
-                    "non-network_outage method"
-                )
-            self.methods = filtered
+        # network_outage_* drops ALL data NICs on a single node — i.e. that
+        # one node loses every data path at once. This is a different shape
+        # from the inter-iteration single-NIC chaos (which dropped one NIC
+        # across ALL nodes simultaneously and tripped the JM duplicate-on-
+        # failover bug); it's safe and useful coverage on multipath too.
+        # No method filter applied here — all OUTAGE_METHODS run on every
+        # cluster type unless the operator overrides via --methods.
         self.node_hosts = {}  # uuid -> RemoteHost (private_ip of storage node)
         self.node_ip_map = self._build_node_ip_map()
         # Serializes outage iterations and churn cycles. Both mutate cluster
