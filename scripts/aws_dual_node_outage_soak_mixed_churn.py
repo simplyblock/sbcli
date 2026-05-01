@@ -1598,35 +1598,23 @@ class SoakRunner:
             self._enable_nic_on_all_nodes(nic)
 
     def _inter_iteration_nic_chaos(self):
-        """Drop one data NIC on every storage node for nic_chaos_duration s,
-        then bring it back up. Active only between outage iterations on a
-        multipath cluster with at least two data NICs.
+        """Inter-iteration single-NIC chaos. **Disabled.**
 
-        Invariant: a single NIC name (eth1 OR eth2) is chosen once via
-        random.choice and applied uniformly across all storage nodes — we
-        NEVER concurrently drop eth1 on some nodes and eth2 on others, so
-        each node always retains a live data path through the surviving
-        NIC. _ensure_all_data_nics_up at the start of every outage
-        iteration plus the try/finally re-enable here together guarantee
-        no NIC stays down across the iteration boundary.
+        Dropping one of two data NICs on all nodes simultaneously exposes
+        a JM-layer duplicate-on-failover bug: in-flight JC writes that
+        were aborted on the dropped NIC and retried via the surviving
+        NIC come back as INTERNAL_DEVICE_ERROR (00/06) — not retryable —
+        because the JM target rejects the retry as out-of-sequence.
+        bdev_retry_count=2 + multipath=failover do their job (writes are
+        re-issued on eth2 within ~80 ms), but the JM's non-retryable
+        error trips JC's n_success<2 rule and aborts the node.
+        Incident: 2026-05-01 18:22:28 on 05a390ca / jm_vuid=9398.
+
+        Re-enable once JM is idempotent on a duplicate ``irequest`` from
+        the same JC writer. Until then this returns immediately so the
+        soak just observes the fixed inter-iteration time window.
         """
-        if self.args.no_nic_chaos or not self._is_multipath():
-            return
-        data_nics = self._get_data_nics()
-        if len(data_nics) < 2:
-            return
-        duration = max(0, self.args.nic_chaos_duration)
-        nic = random.choice(data_nics)
-        self.logger.log(
-            f"Inter-iteration NIC chaos: dropping {nic} on all nodes for {duration}s "
-            f"(other data NICs stay up; eth1/eth2 are never dropped concurrently)"
-        )
-        try:
-            self._disable_nic_on_all_nodes(nic)
-            time.sleep(duration)
-        finally:
-            self._enable_nic_on_all_nodes(nic)
-        self.wait_for_all_online(timeout=self.args.restart_timeout)
+        return
 
     def _network_outage(self, node_id, duration):
         """Take all data NICs down on one storage node for *duration* seconds,
