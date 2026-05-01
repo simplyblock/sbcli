@@ -850,15 +850,15 @@ class SoakRunner:
     def _create_one_volume(self, volume_name, node_uuid, index):
         """Create one lvol bound to ``node_uuid`` and return its volume dict.
 
-        Retries inside the rebalance window if the LVStore is being recreated
-        or while a rebalance / data migration is in flight, matching the
-        behaviour of the bulk ``create_volumes`` path.
+        Retries on ``LVStore is being recreated`` / transient cluster-busy
+        responses. Does NOT wait for cluster-stable / data-migration drain
+        between attempts — on this branch device-level migrations are
+        disabled and the soak deliberately runs without rebalance gates.
         """
         volume_id = None
         started = time.time()
         while time.time() - started < self.args.rebalance_timeout:
             self.wait_for_all_online(timeout=self.args.restart_timeout)
-            self.wait_for_cluster_stable()
             output = self.sbctl(
                 f"lvol add {volume_name} {self.args.volume_size} {self.args.pool} --host-id {node_uuid}"
             )

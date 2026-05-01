@@ -268,19 +268,20 @@ services:
   #   environment:
   #     SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
 
-  TasksRunnerLVolMigration:
-    <<: *service-base
-    image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "python3 simplyblock_core/services/tasks_runner_lvol_migration.py"
-    deploy:
-      placement:
-        constraints: [node.role == manager]
-    volumes:
-      - "/etc/foundationdb:/etc/foundationdb"
-    networks:
-      - hostnet
-    environment:
-      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+  # TasksRunnerLVolMigration: disabled — data migration services turned off on this branch.
+  # TasksRunnerLVolMigration:
+  #   <<: *service-base
+  #   image: $SIMPLYBLOCK_DOCKER_IMAGE
+  #   command: "python3 simplyblock_core/services/tasks_runner_lvol_migration.py"
+  #   deploy:
+  #     placement:
+  #       constraints: [node.role == manager]
+  #   volumes:
+  #     - "/etc/foundationdb:/etc/foundationdb"
+  #   networks:
+  #     - hostnet
+  #   environment:
+  #     SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
 
   # TasksRunnerFailedMigration: disabled — data migration services turned off on this branch.
   # TasksRunnerFailedMigration:
