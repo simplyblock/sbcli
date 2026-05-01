@@ -24,12 +24,20 @@ Prerequisites:
 """
 
 import json
+import logging
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 
 import boto3
 import paramiko
+
+# Silence paramiko's Transport-thread tracebacks during cloud-init waits.
+# It logs "Error reading SSH protocol banner" at ERROR level whenever a
+# fresh sshd closes the connection mid-startup — the retry loop in
+# wait_for_ssh handles this fine, but the stack traces drown real output.
+logging.getLogger("paramiko").setLevel(logging.CRITICAL)
+logging.getLogger("paramiko.transport").setLevel(logging.CRITICAL)
 
 # ──────────────────── Configuration ──────────────────────────────────────────
 AMI_ID       = "ami-0dfc569a8686b9320"   # Rocky 9 us-east-1
@@ -133,20 +141,51 @@ def _ssh_close(ssh):
                 pass
 
 
-def wait_for_ssh(ip, timeout=300, jump_ip=None):
+def wait_for_ssh(ip, timeout=600, jump_ip=None):
     label = f"{ip} (via {jump_ip})" if jump_ip and jump_ip != ip else ip
     print(f"  Waiting for SSH on {label}...")
     start = time.time()
+    last_heartbeat = start
+    last_err = None
     while time.time() - start < timeout:
         try:
             ssh = _ssh_connect(ip, jump_ip=jump_ip, timeout=5, banner_timeout=10)
             _ssh_close(ssh)
-            print(f"  SSH ready: {label}")
+            print(f"  SSH ready: {label} ({int(time.time() - start)}s)")
             return True
-        except Exception:
-            pass
+        except Exception as e:
+            last_err = e
+        now = time.time()
+        if now - last_heartbeat > 30:
+            elapsed = int(now - start)
+            err_repr = f"{type(last_err).__name__}: {last_err}" if last_err else "?"
+            print(f"  ... still waiting for SSH on {label} ({elapsed}s) — last: {err_repr}")
+            last_heartbeat = now
         time.sleep(3)
     raise RuntimeError(f"SSH timeout: {label}")
+
+
+def wait_for_cloud_init(ip, jump_ip=None, timeout=600):
+    """Block until cloud-init has finished on the target. Without this, SSH
+    is reachable but the install / sbctl deploy steps can race against
+    cloud-init's own dnf locks and NetworkManager reconfigs. Rocky 9 ships
+    ``cloud-init status --wait`` which exits 0 once cloud-init is done
+    (even after it's been done for a while). Tolerates absence of
+    cloud-init by treating non-zero rc as 'not present, skip'.
+    """
+    label = f"{ip} (via {jump_ip})" if jump_ip and jump_ip != ip else ip
+    print(f"  Waiting for cloud-init on {label}...")
+    start = time.time()
+    out = ssh_exec(
+        ip,
+        [f"timeout {timeout} sudo cloud-init status --wait 2>&1 || true"],
+        get_output=True,
+        check=False,
+        jump_ip=jump_ip,
+    )
+    elapsed = int(time.time() - start)
+    tail = (out[0].strip().splitlines() or ["(no output)"])[-1]
+    print(f"  cloud-init done on {label} ({elapsed}s): {tail}")
 
 
 def ssh_exec(ip, cmds, get_output=False, check=False, jump_ip=None):
@@ -467,9 +506,18 @@ def main():
     # ── Phase 2: Wait for SSH + configure secondary NICs ─────────────────
     print("\n--- Phase 2: SSH readiness + NIC configuration ---")
     # Direct SSH to mgmt so we know the jump host is up before tunneling.
+    # cloud-init is what stretches launch-to-ready: poll explicitly so the
+    # subsequent install / configure steps don't race its dnf locks.
     wait_for_ssh(mgmt_ip)
+    wait_for_cloud_init(mgmt_ip)
     for ip in sn_priv_ips + client_priv_ips:
         wait_for_ssh(ip, jump_ip=mgmt_ip)
+    # cloud-init wait on SN/clients runs in parallel via the jump host.
+    with ThreadPoolExecutor(max_workers=len(sn_priv_ips) + len(client_priv_ips)) as pool:
+        futures = [pool.submit(wait_for_cloud_init, ip, mgmt_ip)
+                   for ip in sn_priv_ips + client_priv_ips]
+        for f in futures:
+            f.result()
 
     print("  Configuring secondary NICs on storage nodes + clients...")
     multi_nic_ips = sn_priv_ips + client_priv_ips
@@ -551,6 +599,8 @@ def main():
     time.sleep(30)
     for ip in sn_priv_ips:
         wait_for_ssh(ip, jump_ip=mgmt_ip)
+        # Post-reboot cloud-init final stage may still be running NIC setup.
+        wait_for_cloud_init(ip, jump_ip=mgmt_ip)
 
     # Re-configure secondary NICs after reboot (NetworkManager may need a nudge)
     print("  Re-configuring secondary NICs after reboot...")
