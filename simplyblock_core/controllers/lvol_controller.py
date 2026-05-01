@@ -1711,30 +1711,6 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
     primary_snode = db_controller.get_storage_node_by_id(lvol.node_id)
     lvstore_port = primary_snode.get_lvol_subsys_port(lvol.lvs_name)
 
-    # Look up pool-level DHCHAP keys once (used as fallback when host_entry
-    # has no per-host keys, which is always the case for pool-level DHCHAP).
-    pool_dhchap_key = None
-    pool_dhchap_ctrlr_key = None
-    logger.info("[DHCHAP-DEBUG] connect_lvol: host_entry=%s, lvol.pool_uuid=%s",
-                host_entry is not None, lvol.pool_uuid)
-    if host_entry and lvol.pool_uuid:
-        try:
-            pool = db_controller.get_pool_by_id(lvol.pool_uuid)
-            logger.info("[DHCHAP-DEBUG] connect_lvol: pool found, pool.dhchap=%s, "
-                        "has_dhchap_key=%s, has_dhchap_ctrlr_key=%s",
-                        pool.dhchap, bool(pool.dhchap_key), bool(pool.dhchap_ctrlr_key))
-            if pool and pool.dhchap:
-                pool_dhchap_key = pool.dhchap_key
-                pool_dhchap_ctrlr_key = pool.dhchap_ctrlr_key
-                logger.info("[DHCHAP-DEBUG] connect_lvol: will add DHCHAP keys to connect string")
-            else:
-                logger.info("[DHCHAP-DEBUG] connect_lvol: pool.dhchap is False — no DHCHAP keys")
-        except KeyError:
-            logger.error("[DHCHAP-DEBUG] connect_lvol: pool NOT FOUND for pool_uuid=%s", lvol.pool_uuid)
-    else:
-        logger.info("[DHCHAP-DEBUG] connect_lvol: skipping pool DHCHAP lookup "
-                    "(host_entry=%s, pool_uuid=%s)", host_entry is not None, lvol.pool_uuid)
-
     for nodes_id in nodes_ids:
         snode = db_controller.get_storage_node_by_id(nodes_id)
         cluster = db_controller.get_cluster_by_id(snode.cluster_id)
@@ -1760,12 +1736,10 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
                 host_auth_str = f" --hostnqn={host_nqn}"
                 if host_entry.get("psk"):
                     tls_str = " --tls"
-                dhchap_key = host_entry.get("dhchap_key") or pool_dhchap_key
-                dhchap_ctrlr_key = host_entry.get("dhchap_ctrlr_key") or pool_dhchap_ctrlr_key
-                if dhchap_key:
-                    host_auth_str += f" --dhchap-secret={dhchap_key}"
-                if dhchap_ctrlr_key:
-                    host_auth_str += f" --dhchap-ctrl-secret={dhchap_ctrlr_key}"
+                if host_entry.get("dhchap_key"):
+                    host_auth_str += f" --dhchap-secret={host_entry['dhchap_key']}"
+                if host_entry.get("dhchap_ctrlr_key"):
+                    host_auth_str += f" --dhchap-ctrl-secret={host_entry['dhchap_ctrlr_key']}"
             elif host_nqn:
                 host_auth_str = f" --hostnqn={host_nqn}"
 
