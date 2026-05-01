@@ -1958,10 +1958,10 @@ class SoakRunner:
         self.ensure_prerequisites()
         nodes = self.ensure_expected_nodes()
         self.wait_for_all_online(timeout=self.args.restart_timeout)
-        # Wait for the cluster to be fully stable (no in-flight rebalance
-        # or data migration) before starting iterations.
-        self.wait_for_cluster_stable()
-        self.wait_for_data_migration_complete("test start")
+        # Intentionally no wait_for_cluster_stable / wait_for_data_migration_complete
+        # here. Same rationale as the inter-iteration window: we don't gate on
+        # rebalance / migration drain. _create_one_volume retries internally
+        # if the cluster transiently rejects a create.
         mount_root = self.prepare_client()
         # Saved so the churn cycle can mount its newly-created volume back
         # into the same workspace tree.
