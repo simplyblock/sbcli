@@ -239,55 +239,6 @@ def _get_target_secondary_nodes(tgt_node):
     return sec_nodes, None
 
 
-def _register_snaps_on_secondary(migration, lvol, tgt_node, tgt_sec, tgt_rpc, sec_rpc):
-    """
-    Register all snapshots from PHASE_SNAP_COPY on the target secondary, now
-    that the lvol itself has been registered there via _expose_lvol_on_secondary.
-
-    The lvol bdev on the secondary serves as the parent for the first snapshot.
-    Each subsequent snapshot's parent is the previous one — preserving the same
-    ancestry chain that exists on the target primary.
-
-    Must be called after _expose_lvol_on_secondary succeeds.
-    Returns (ok: bool, error: str|None).
-    """
-    lvol_bdev_on_sec = f"{tgt_node.lvstore}/{lvol.lvol_bdev}"
-
-    for i, snap_uuid in enumerate(migration.snaps_migrated):
-        try:
-            snap = db.get_snapshot_by_id(snap_uuid)
-        except KeyError:
-            logger.warning(f"Snapshot {snap_uuid} not found in DB; skipping secondary registration")
-            continue
-
-        snap_short = _snap_short_name(snap)
-        tgt_composite = f"{tgt_node.lvstore}/{snap_short}"
-
-        bdev_info = tgt_rpc.get_bdevs(tgt_composite)
-        if not bdev_info:
-            return False, f"Cannot get bdev info for {tgt_composite} on target primary"
-
-        tgt_blobid = bdev_info[0]['driver_specific']['lvol']['blobid']
-        tgt_snap_uuid = bdev_info[0]['uuid']
-
-        if i == 0:
-            parent_name = lvol_bdev_on_sec
-        else:
-            try:
-                pred_snap = db.get_snapshot_by_id(migration.snaps_migrated[i - 1])
-                parent_name = f"{tgt_node.lvstore}/{_snap_short_name(pred_snap)}"
-            except KeyError:
-                parent_name = lvol_bdev_on_sec
-
-        ret = sec_rpc.bdev_lvol_snapshot_register(
-            parent_name, snap_short, tgt_snap_uuid, tgt_blobid)
-        if not ret:
-            return False, f"bdev_lvol_snapshot_register failed for snap {snap_uuid} on secondary"
-
-        logger.info(f"Registered snap {snap_uuid} on secondary {tgt_sec.get_id()}")
-
-    return True, None
-
 
 def _expose_lvol_on_secondary(lvol, tgt_node, tgt_sec, sec_rpc, tgt_blobid, tgt_lvol_uuid):
     """
@@ -413,14 +364,16 @@ def _rollback_parallel_transfers(src_rpc, tgt_rpc, transfers):
 
 
 def _setup_snap_transfer(snap, snap_index, migration, src_node, tgt_node,
-                         src_rpc, tgt_rpc, trtype, target_ip):
+                         src_rpc, tgt_rpc, trtype, target_ip,
+                         tgt_sec=None, sec_rpc=None):
     """
     Prepare a single snapshot for async transfer:
-      1. Create writable lvol on target (same UUID as source snap)
-      2. Set migration flag
-      3. Create temp NVMe-oF subsystem + listener + namespace on target
-      4. Attach NVMe-oF controller on source
-      5. Fire bdev_lvol_transfer (async)
+      1. Create writable lvol on target primary
+      2. Register on target secondary immediately (keeps secondary consistent)
+      3. Set migration flag on primary
+      4. Create temp NVMe-oF subsystem + listener + namespace on target
+      5. Attach NVMe-oF controller on source
+      6. Fire bdev_lvol_transfer (async)
 
     Returns a transfer-dict on success or (None, error_string) on failure.
     Callers are responsible for rolling back any previously launched transfers.
@@ -432,7 +385,7 @@ def _setup_snap_transfer(snap, snap_index, migration, src_node, tgt_node,
     temp_nqn = f"nqn.2023-02.io.simplyblock:mig:{migration.uuid[:8]}:{snap_index}"
     ctrl_name = f"mig_{migration.uuid[:8]}_{snap_index}"
 
-    # Step 1: create target lvol
+    # Step 1: create target lvol on primary
     # Note: SPDK's bdev_lvol_create 'uuid' param is for the lvol *store*, not
     # the new lvol.  Do not pass the snapshot UUID here.
     size_in_mib = _bytes_to_mib(snap.used_size)
@@ -440,7 +393,22 @@ def _setup_snap_transfer(snap, snap_index, migration, src_node, tgt_node,
     if not ret:
         return None, f"Failed to create target lvol for snap {snap_uuid}"
 
-    # Step 2: migration flag
+    # Step 2: register on secondary immediately so secondary stays consistent
+    if tgt_sec and sec_rpc:
+        bdev_info = tgt_rpc.get_bdevs(tgt_composite)
+        if bdev_info:
+            snap_blobid = bdev_info[0]['driver_specific']['lvol']['blobid']
+            snap_uuid_on_tgt = bdev_info[0]['uuid']
+            ret_sec = sec_rpc.bdev_lvol_register(
+                snap_short, tgt_node.lvstore, snap_uuid_on_tgt, snap_blobid,
+                snap.lvol.lvol_priority_class if hasattr(snap, 'lvol') else 0)
+            if not ret_sec:
+                logger.warning(
+                    f"bdev_lvol_register on secondary failed for snap {snap_uuid}; continuing")
+        else:
+            logger.warning(f"Could not get bdev info for {tgt_composite} to register on secondary")
+
+    # Step 3: migration flag
     ret = tgt_rpc.bdev_lvol_set_migration_flag(tgt_composite)
     if not ret:
         _delete_bdev_blocking(tgt_composite, tgt_rpc)
@@ -494,10 +462,11 @@ def _setup_snap_transfer(snap, snap_index, migration, src_node, tgt_node,
     }, None
 
 
-def _post_process_snap(snap, tgt_node, tgt_rpc, src_rpc, migration, t):
+def _post_process_snap(snap, tgt_node, tgt_rpc, src_rpc, migration, t,
+                       tgt_sec=None, sec_rpc=None):
     """
     Post-transfer steps for a single snapshot whose data has been fully copied:
-      add_clone → convert → register on secondary → cleanup temp plumbing.
+      add_clone → convert (on primary, then mirrored on secondary) → cleanup.
 
     Mutates ``migration.snaps_migrated`` and fires migration events on success.
     Returns (ok: bool, error: str|None).
@@ -506,7 +475,7 @@ def _post_process_snap(snap, tgt_node, tgt_rpc, src_rpc, migration, t):
     snap_short = t['snap_short']
     tgt_composite = f"{tgt_node.lvstore}/{snap_short}"
 
-    # Link to predecessor snapshot in target's ancestry chain
+    # Link to predecessor snapshot in target's ancestry chain (primary)
     if migration.snaps_migrated:
         pred_uuid = migration.snaps_migrated[-1]
         try:
@@ -515,18 +484,25 @@ def _post_process_snap(snap, tgt_node, tgt_rpc, src_rpc, migration, t):
             ret = tgt_rpc.bdev_lvol_add_clone(tgt_composite, pred_composite)
             if not ret:
                 return False, f"bdev_lvol_add_clone failed for {snap_uuid}"
+            # Mirror add_clone on secondary
+            if tgt_sec and sec_rpc:
+                sec_pred_composite = _snap_composite(tgt_node.lvstore, pred_snap)
+                ret_sec = sec_rpc.bdev_lvol_add_clone(tgt_composite, sec_pred_composite)
+                if not ret_sec:
+                    logger.warning(f"bdev_lvol_add_clone on secondary failed for {snap_uuid}")
         except KeyError:
             logger.warning(f"Predecessor snap {pred_uuid} not found; skipping add_clone")
 
-    # Convert writable lvol → immutable snapshot
+    # Convert writable lvol → immutable snapshot (primary)
     ret = tgt_rpc.bdev_lvol_convert(tgt_composite)
     if not ret:
         return False, f"bdev_lvol_convert failed for {snap_uuid}"
 
-    # Secondary registration is deferred to PHASE_LVOL_MIGRATE: the lvol must
-    # exist on the secondary before snapshots can be registered against it as
-    # children. _expose_lvol_on_secondary (Phase 2) registers the lvol first,
-    # then _register_snaps_on_secondary registers all migrated snapshots in order.
+    # Mirror convert on secondary
+    if tgt_sec and sec_rpc:
+        ret_sec = sec_rpc.bdev_lvol_convert(tgt_composite)
+        if not ret_sec:
+            logger.warning(f"bdev_lvol_convert on secondary failed for {snap_uuid}")
 
     # Cleanup temp NVMe-oF plumbing for this snapshot
     _cleanup_snap_transfer(src_rpc, tgt_rpc, t)
@@ -588,17 +564,21 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
 
         if unprocessed:
             # HA secondary gate – check once; all snaps belong to the same volume
+            tgt_sec = None
+            sec_rpc = None
             for snap_uuid in unprocessed:
                 try:
                     snap = db.get_snapshot_by_id(snap_uuid)
                 except KeyError:
                     return False, True, f"Snapshot {snap_uuid} not found in DB"
                 if snap.lvol.ha_type == "ha":
-                    _, sec_err = _get_target_secondary_node(tgt_node)
+                    tgt_sec, sec_err = _get_target_secondary_node(tgt_node)
                     if sec_err:
                         migration.error_message = sec_err
                         migration.write_to_db(db.kv_store)
                         return False, True, _WAIT
+                    if tgt_sec:
+                        sec_rpc = _make_rpc(tgt_sec)
                     break  # one check is enough
 
             transfers: list[dict] = []
@@ -650,7 +630,8 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
 
                 t, err = _setup_snap_transfer(
                     snap, snap_index, migration, src_node, tgt_node,
-                    src_rpc, tgt_rpc, trtype, target_ip)
+                    src_rpc, tgt_rpc, trtype, target_ip,
+                    tgt_sec=tgt_sec, sec_rpc=sec_rpc)
                 if t is None:
                     _rollback_parallel_transfers(src_rpc, tgt_rpc, transfers)
                     return False, True, err
@@ -679,6 +660,9 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
     # ── B. Poll all in-flight transfers; post-process completed ones ──────────
     if ctx.get('stage') == 'parallel_transfer':
         transfers = ctx['transfers']
+        # Resolve secondary once for the whole poll pass
+        tgt_sec, _sec_err = _get_target_secondary_node(tgt_node)
+        sec_rpc = _make_rpc(tgt_sec) if tgt_sec and not _sec_err else None
         # Process in snap_index order: add_clone requires predecessor to be
         # converted first.  prev_post_done tracks whether the predecessor has
         # been post-processed; if not, we must not post-process the current snap
@@ -731,7 +715,8 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                 continue
 
             ok, err = _post_process_snap(
-                snap, tgt_node, tgt_rpc, src_rpc, migration, t)
+                snap, tgt_node, tgt_rpc, src_rpc, migration, t,
+                tgt_sec=tgt_sec, sec_rpc=sec_rpc)
             if not ok:
                 _rollback_parallel_transfers(src_rpc, tgt_rpc, transfers)
                 migration.transfer_context = {}
@@ -953,14 +938,6 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                     return False, True, err
                 logger.info(
                     f"Lvol {lvol.uuid} registered and exposed on secondary {tgt_sec.get_id()}")
-
-                if migration.snaps_migrated:
-                    ok, err = _register_snaps_on_secondary(
-                        migration, lvol, tgt_node, tgt_sec, tgt_rpc, sec_rpc)
-                    if not ok:
-                        migration.transfer_context = {}
-                        migration.write_to_db(db.kv_store)
-                        return False, True, err
 
         migration.transfer_context = {}
 
