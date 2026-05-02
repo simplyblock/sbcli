@@ -901,6 +901,7 @@ class K8sUtils:
                 f"          name: benchmark-volume\n"
             )
         node_affinity_block = ""
+        tolerations_block = ""
         client_nodes_exist = self.has_client_nodes()
         if client_nodes_exist:
             # Hard-pin FIO pods to client-role nodes
@@ -912,9 +913,17 @@ class K8sUtils:
                 f"              - key: node-role.kubernetes.io/client\n"
                 f"                operator: Exists\n"
             )
+            # Tolerate the client-node taint so pods can schedule there
+            tolerations_block = (
+                f"      tolerations:\n"
+                f"      - key: \"node-role\"\n"
+                f"        operator: \"Equal\"\n"
+                f"        value: \"client\"\n"
+                f"        effect: \"NoSchedule\"\n"
+            )
             self.logger.info(
                 f"[K8sUtils] Client nodes detected — FIO job '{job_name}' "
-                f"pinned to client nodes"
+                f"pinned to client nodes (with toleration)"
             )
         elif avoid_node:
             # No client nodes — at least avoid the primary storage node
@@ -962,6 +971,7 @@ class K8sUtils:
             f"              topologyKey: kubernetes.io/hostname\n"
             f"{node_affinity_block}"
             f"{init_containers}"
+            f"{tolerations_block}"
             f"      containers:\n"
             f"      - name: fio-benchmark\n"
             f"        image: {image}\n"
