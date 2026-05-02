@@ -395,9 +395,9 @@ def get_random_vuid():
     # 1M brings that to <1%. Combined with the dedupe set we avoid the
     # SPDK ``lvol with name already exists`` rejection that triggered
     # the snapshot-delete-in-flight metadata corruption.
-    r = 1 + int(random.random() * 1000000)
+    r = 1 + int(random.random() * 10000)
     while r in used:
-        r = 1 + int(random.random() * 1000000)
+        r = 1 + int(random.random() * 10000)
     return r
 
 
