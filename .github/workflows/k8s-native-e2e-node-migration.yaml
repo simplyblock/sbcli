@@ -456,6 +456,26 @@ jobs:
             echo "Granted privileged SCC to $sa"
           done
 
+      - name: Patch fluent-bit daemonset (post-helm)
+        if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
+        run: |
+          NAMESPACE=simplyblock
+          echo "=== Waiting for simplyblock-fluent-bit daemonset (up to 5 min) ==="
+          PATCHED=false
+          for i in $(seq 1 30); do
+            if kubectl get daemonset simplyblock-fluent-bit -n $NAMESPACE &>/dev/null; then
+              echo "fluent-bit daemonset found, patching affinity..."
+              kubectl patch daemonset simplyblock-fluent-bit -n $NAMESPACE \
+                --type=merge -p '{"spec":{"template":{"spec":{"affinity":null}}}}'
+              echo "fluent-bit daemonset patched successfully"
+              PATCHED=true
+              break
+            fi
+            echo "fluent-bit daemonset not found yet ($i/30), waiting 10s..."
+            sleep 10
+          done
+          echo "FLUENTBIT_PATCHED=$PATCHED" >> $GITHUB_ENV
+
       # ── Apply custom resources ─────────────────────────────────────────────
 
       - name: Wait for operator pod to be ready
@@ -742,7 +762,26 @@ jobs:
           kubectl -n $NAMESPACE exec "$ADMIN_POD" -- sbctl cluster list 2>&1 || true
           exit 1
 
+      - name: Patch fluent-bit daemonset (post-cluster-active)
+        if: ${{ env.FLUENTBIT_PATCHED != 'true' }}
+        run: |
+          NAMESPACE=simplyblock
+          echo "=== fluent-bit was not patched after helm install, retrying now ==="
+          for i in $(seq 1 30); do
+            if kubectl get daemonset simplyblock-fluent-bit -n $NAMESPACE &>/dev/null; then
+              kubectl patch daemonset simplyblock-fluent-bit -n $NAMESPACE \
+                --type=merge -p '{"spec":{"template":{"spec":{"affinity":null}}}}'
+              echo "fluent-bit daemonset patched successfully"
+              break
+            fi
+            echo "fluent-bit daemonset not found yet ($i/30), waiting 10s..."
+            sleep 10
+          done
+
       # ── Run tests ───────────────────────────────────────────────────────────
+
+      - name: Set RUN_DIR_FILE
+        run: echo "RUN_DIR_FILE=/tmp/sb_k8s_run_dir_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}.txt" >> "$GITHUB_ENV"
 
       - name: Record Test Start Time
         run: echo "TEST_START_TIME=$(date +%s)" >> $GITHUB_ENV
@@ -772,8 +811,16 @@ jobs:
           CHUNK_BS: ${{ env.CHUNK_BS }}
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
           SKIP_NFS: ${{ github.event.inputs.skip_nfs || 'false' }}
+          RUN_DIR_FILE: ${{ env.RUN_DIR_FILE }}
 
       # ── Post-test: timing, logs, notifications ──────────────────────────────
+
+      - name: Export RUN_BASE_DIR from RUN_DIR_FILE
+        if: always()
+        run: |
+          test -f "${RUN_DIR_FILE}" || (echo "RUN_DIR_FILE not found — skipping"; exit 0)
+          RUN_BASE_DIR="$(cat "${RUN_DIR_FILE}" | tr -d '\r\n')"
+          [[ -n "${RUN_BASE_DIR}" ]] && echo "RUN_BASE_DIR=${RUN_BASE_DIR}" >> "$GITHUB_ENV" || true
 
       - name: Record Test End Time
         if: always()
@@ -790,6 +837,126 @@ jobs:
           echo "TEST_TIME_HOURS=$TEST_TIME_HOURS" >> $GITHUB_ENV
           echo "TEST_TIME_MINS=$TEST_TIME_MINS" >> $GITHUB_ENV
           echo "TEST_TIME_SECS=$TEST_TIME_SECS" >> $GITHUB_ENV
+
+      - name: Collect Graylog/OpenSearch logs
+        if: always()
+        timeout-minutes: 30
+        run: |
+          set +e
+          echo "=== Collecting Graylog/OpenSearch logs ==="
+          NAMESPACE=simplyblock
+
+          if [ -z "${TEST_START_TIME}" ] || [ -z "${TEST_END_TIME}" ]; then
+            echo "WARN: TEST_START_TIME or TEST_END_TIME not set, skipping"
+            exit 0
+          fi
+
+          # Convert epoch to ISO-8601, subtract 1 hour buffer before start
+          BUFFERED_START=$((TEST_START_TIME - 3600))
+          START_ISO=$(date -u -d "@${BUFFERED_START}" "+%Y-%m-%dT%H:%M:%S" 2>/dev/null)
+          if [ -z "${START_ISO}" ]; then
+            START_ISO=$(python3 -c "from datetime import datetime,timezone; print(datetime.fromtimestamp(${BUFFERED_START},tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%S'))")
+          fi
+
+          # Duration = elapsed + 1h before + 1h after (in minutes, rounded up)
+          ELAPSED=$((TEST_END_TIME - TEST_START_TIME))
+          if [ "${ELAPSED}" -le 0 ]; then
+            echo "WARN: Elapsed time is zero or negative, skipping"
+            exit 0
+          fi
+          DURATION_MINUTES=$(( (ELAPSED + 59) / 60 + 120 ))
+          echo "  Window: ${START_ISO} for ${DURATION_MINUTES}m (includes 1h before + 1h after)"
+
+          # Resolve admin pod
+          ADMIN_POD=""
+          for i in $(seq 1 12); do
+            ADMIN_POD=$(kubectl -n ${NAMESPACE} get pods \
+              -l app=simplyblock-admin-control \
+              -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) || true
+            if [ -n "${ADMIN_POD}" ]; then
+              PHASE=$(kubectl -n ${NAMESPACE} get pod "${ADMIN_POD}" \
+                -o jsonpath='{.status.phase}' 2>/dev/null) || true
+              [ "${PHASE}" = "Running" ] && break
+              ADMIN_POD=""
+            fi
+            sleep 10
+          done
+          if [ -z "${ADMIN_POD}" ]; then
+            echo "ERROR: No running admin pod found, skipping"
+            exit 0
+          fi
+          echo "  Admin pod: ${ADMIN_POD}"
+
+          # Get Graylog service ClusterIP for mgmt-ip
+          MGMT_IP=$(kubectl get svc -n ${NAMESPACE} | grep graylog | awk '{print $3}')
+          echo "  Graylog IP: ${MGMT_IP}"
+
+          # Determine output dir from RUN_BASE_DIR
+          OUTPUT_DIR=""
+          if [ -n "${RUN_BASE_DIR:-}" ] && [ -d "${RUN_BASE_DIR}" ]; then
+            OUTPUT_DIR="${RUN_BASE_DIR}/graylog_collected"
+          else
+            NFS_BASE="${NFS_MOUNTPOINT:-/mnt/nfs_share}"
+            TIMESTAMP=$(date -u "+%Y%m%d-%H%M%S")
+            OUTPUT_DIR="${NFS_BASE}/graylog_collected-${TIMESTAMP}"
+          fi
+          mkdir -p "${OUTPUT_DIR}" 2>/dev/null || true
+          echo "  Output: ${OUTPUT_DIR}"
+
+          # Create temp dir in pod + run collect_logs.py
+          POD_OUTPUT_DIR="/tmp/graylog_collect"
+          kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- mkdir -p "${POD_OUTPUT_DIR}" 2>/dev/null || true
+
+          kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- \
+            python3 /usr/local/lib/python3.12/site-packages/simplyblock_core/scripts/collect_logs.py \
+              "${START_ISO}" "${DURATION_MINUTES}" \
+              --mode kubernetes \
+              --namespace "${NAMESPACE}" \
+              --monitoring-secret "${MON_SECRET}" \
+              --output-dir "${POD_OUTPUT_DIR}" \
+              ${MGMT_IP:+--mgmt-ip "${MGMT_IP}"} \
+              ${CLUSTER_ID:+--cluster-id "${CLUSTER_ID}"} \
+          2>&1 || {
+            echo "WARN: Graylog collect failed, retrying with --use-opensearch..."
+            kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- \
+              python3 /usr/local/lib/python3.12/site-packages/simplyblock_core/scripts/collect_logs.py \
+                "${START_ISO}" "${DURATION_MINUTES}" \
+                --mode kubernetes \
+                --namespace "${NAMESPACE}" \
+                --monitoring-secret "${MON_SECRET}" \
+                --output-dir "${POD_OUTPUT_DIR}" \
+                --use-opensearch \
+                ${MGMT_IP:+--mgmt-ip "${MGMT_IP}"} \
+                ${CLUSTER_ID:+--cluster-id "${CLUSTER_ID}"} \
+            2>&1 || echo "WARN: OpenSearch fallback also failed"
+          }
+
+          # Copy tarballs from pod to NFS
+          TARBALLS=$(kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- \
+            find "${POD_OUTPUT_DIR}" -name "*.tar.gz" -type f 2>/dev/null) || true
+
+          if [ -n "${TARBALLS}" ]; then
+            for TB in ${TARBALLS}; do
+              TB_NAME=$(basename "${TB}")
+              echo "  Copying ${TB_NAME}..."
+              kubectl -n ${NAMESPACE} cp "${ADMIN_POD}:${TB}" "${OUTPUT_DIR}/${TB_NAME}" 2>&1 || true
+            done
+            for TB_FILE in "${OUTPUT_DIR}"/*.tar.gz; do
+              [ -f "${TB_FILE}" ] && tar -xzf "${TB_FILE}" -C "${OUTPUT_DIR}/" 2>/dev/null || true
+            done
+          else
+            echo "WARN: No tarballs found in pod"
+            kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- ls -laR "${POD_OUTPUT_DIR}/" 2>/dev/null || true
+          fi
+
+          # Cleanup pod
+          kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- rm -rf "${POD_OUTPUT_DIR}" 2>/dev/null || true
+
+          echo "=== Graylog collection complete: ${OUTPUT_DIR} ==="
+          ls -la "${OUTPUT_DIR}/" 2>/dev/null || true
+        env:
+          CLUSTER_ID: ${{ env.CLUSTER_ID }}
+          MON_SECRET: ${{ secrets.MON_SECRET }}
 
       - name: Upload automation logs to S3
         if: always()
