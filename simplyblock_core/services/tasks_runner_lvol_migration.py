@@ -251,7 +251,7 @@ def _register_snaps_on_secondary(migration, lvol, tgt_node, tgt_sec, tgt_rpc, se
     Must be called after _expose_lvol_on_secondary succeeds.
     Returns (ok: bool, error: str|None).
     """
-    lvol_bdev_on_sec = f"{tgt_sec.lvstore}/{lvol.lvol_bdev}"
+    lvol_bdev_on_sec = f"{tgt_node.lvstore}/{lvol.lvol_bdev}"
 
     for i, snap_uuid in enumerate(migration.snaps_migrated):
         try:
@@ -275,7 +275,7 @@ def _register_snaps_on_secondary(migration, lvol, tgt_node, tgt_sec, tgt_rpc, se
         else:
             try:
                 pred_snap = db.get_snapshot_by_id(migration.snaps_migrated[i - 1])
-                parent_name = f"{tgt_sec.lvstore}/{_snap_short_name(pred_snap)}"
+                parent_name = f"{tgt_node.lvstore}/{_snap_short_name(pred_snap)}"
             except KeyError:
                 parent_name = lvol_bdev_on_sec
 
@@ -289,7 +289,7 @@ def _register_snaps_on_secondary(migration, lvol, tgt_node, tgt_sec, tgt_rpc, se
     return True, None
 
 
-def _expose_lvol_on_secondary(lvol, tgt_sec, sec_rpc, tgt_blobid, tgt_lvol_uuid):
+def _expose_lvol_on_secondary(lvol, tgt_node, tgt_sec, sec_rpc, tgt_blobid, tgt_lvol_uuid):
     """
     Register the migrated lvol on the target secondary and expose it via
     the same NVMe-oF NQN (with non-optimized ANA state).
@@ -299,9 +299,11 @@ def _expose_lvol_on_secondary(lvol, tgt_sec, sec_rpc, tgt_blobid, tgt_lvol_uuid)
 
     This mirrors what add_lvol_on_node() does for is_primary=False.
     """
-    # Register the lvol bdev on secondary using the target primary's blobid/uuid
+    # The lvol blob lives in the target primary's lvstore; the secondary mirrors
+    # that same lvstore, so bdev_lvol_register must reference tgt_node.lvstore,
+    # not the secondary's own lvstore name (which is a different string).
     ret = sec_rpc.bdev_lvol_register(
-        lvol.lvol_bdev, tgt_sec.lvstore, tgt_lvol_uuid, tgt_blobid,
+        lvol.lvol_bdev, tgt_node.lvstore, tgt_lvol_uuid, tgt_blobid,
         lvol.lvol_priority_class)
     if not ret:
         return False, f"bdev_lvol_register failed on secondary {tgt_sec.get_id()}"
@@ -322,7 +324,7 @@ def _expose_lvol_on_secondary(lvol, tgt_sec, sec_rpc, tgt_blobid, tgt_lvol_uuid)
             if iface.ip4_address and lvol.fabric == iface.trtype.lower():
                 ret, err = sec_rpc.nvmf_subsystem_add_listener(
                     lvol.nqn, iface.trtype, iface.ip4_address,
-                    tgt_sec.get_lvol_subsys_port(lvol.lvs_name), "non_optimized")
+                    tgt_sec.get_lvol_subsys_port(tgt_node.lvstore), "non_optimized")
                 if not ret:
                     if err and isinstance(err, dict) and err.get("code") == -32602:
                         logger.warning("Listener already exists on secondary")
@@ -334,8 +336,8 @@ def _expose_lvol_on_secondary(lvol, tgt_sec, sec_rpc, tgt_blobid, tgt_lvol_uuid)
             f"Subsystem {lvol.nqn} already exists on secondary {tgt_sec.get_id()}; "
             "attaching namespace only")
 
-    # Add namespace
-    top_bdev = f"{tgt_sec.lvstore}/{lvol.lvol_bdev}"
+    # Add namespace using the target primary's lvstore for the composite bdev name
+    top_bdev = f"{tgt_node.lvstore}/{lvol.lvol_bdev}"
     ret = sec_rpc.nvmf_subsystem_add_ns(lvol.nqn, top_bdev, lvol.uuid, lvol.guid)
     if not ret:
         return False, f"nvmf_subsystem_add_ns failed on secondary {tgt_sec.get_id()}"
@@ -944,7 +946,7 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                         "Cannot get blobid from target for secondary registration")
                 sec_rpc = _make_rpc(tgt_sec)
                 ok, err = _expose_lvol_on_secondary(
-                    lvol, tgt_sec, sec_rpc, tgt_blobid, tgt_lvol_uuid)
+                    lvol, tgt_node, tgt_sec, sec_rpc, tgt_blobid, tgt_lvol_uuid)
                 if not ok:
                     migration.transfer_context = {}
                     migration.write_to_db(db.kv_store)
