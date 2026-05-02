@@ -1073,11 +1073,11 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc)
         return False, True, f"Last snapshot {last_snap_uuid} not found"
 
-    src_snap_composite = _snap_composite(src_node.lvstore, last_snap)
+    tgt_snap_composite = _snap_composite(tgt_node.lvstore, last_snap)
 
     # Step 5: start final migration (async) – I/O is frozen for the small delta
     ret = src_rpc.bdev_lvol_final_migration(
-        src_lvol_composite, tgt_map_id, src_snap_composite, 2, hub_bdev)
+        src_lvol_composite, tgt_map_id, tgt_snap_composite, 2, hub_bdev)
     if ret is None:
         src_rpc.bdev_nvme_detach_controller(ctrl_name)
         tgt_rpc.subsystem_delete(nqn)
