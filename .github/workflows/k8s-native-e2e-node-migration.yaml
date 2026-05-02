@@ -468,6 +468,12 @@ jobs:
               kubectl patch daemonset simplyblock-fluent-bit -n $NAMESPACE \
                 --type=merge -p '{"spec":{"template":{"spec":{"affinity":null}}}}'
               echo "fluent-bit daemonset patched successfully"
+              # Also patch CSI node daemonset with client toleration
+              if kubectl get daemonset simplyblock-csi-node -n $NAMESPACE &>/dev/null; then
+                kubectl patch daemonset simplyblock-csi-node -n $NAMESPACE \
+                  --type=merge -p '{"spec":{"template":{"spec":{"tolerations":[{"key":"node-role","operator":"Equal","value":"client","effect":"NoSchedule"}]}}}}'
+                echo "csi-node daemonset patched with client toleration"
+              fi
               PATCHED=true
               break
             fi
@@ -772,6 +778,12 @@ jobs:
               kubectl patch daemonset simplyblock-fluent-bit -n $NAMESPACE \
                 --type=merge -p '{"spec":{"template":{"spec":{"affinity":null}}}}'
               echo "fluent-bit daemonset patched successfully"
+              # Also patch CSI node daemonset with client toleration
+              if kubectl get daemonset simplyblock-csi-node -n $NAMESPACE &>/dev/null; then
+                kubectl patch daemonset simplyblock-csi-node -n $NAMESPACE \
+                  --type=merge -p '{"spec":{"template":{"spec":{"tolerations":[{"key":"node-role","operator":"Equal","value":"client","effect":"NoSchedule"}]}}}}'
+                echo "csi-node daemonset patched with client toleration"
+              fi
               break
             fi
             echo "fluent-bit daemonset not found yet ($i/30), waiting 10s..."
@@ -840,10 +852,10 @@ jobs:
 
       - name: Collect Graylog/OpenSearch logs
         if: always()
-        timeout-minutes: 30
+        timeout-minutes: 240
         run: |
           set +e
-          echo "=== Collecting Graylog/OpenSearch logs ==="
+          echo "=== Collecting Graylog/OpenSearch logs (per-hour chunks) ==="
           NAMESPACE=simplyblock
 
           if [ -z "${TEST_START_TIME}" ] || [ -z "${TEST_END_TIME}" ]; then
@@ -851,21 +863,18 @@ jobs:
             exit 0
           fi
 
-          # Convert epoch to ISO-8601, subtract 1 hour buffer before start
-          BUFFERED_START=$((TEST_START_TIME - 3600))
-          START_ISO=$(date -u -d "@${BUFFERED_START}" "+%Y-%m-%dT%H:%M:%S" 2>/dev/null)
-          if [ -z "${START_ISO}" ]; then
-            START_ISO=$(python3 -c "from datetime import datetime,timezone; print(datetime.fromtimestamp(${BUFFERED_START},tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%S'))")
-          fi
-
-          # Duration = elapsed + 1h before + 1h after (in minutes, rounded up)
           ELAPSED=$((TEST_END_TIME - TEST_START_TIME))
           if [ "${ELAPSED}" -le 0 ]; then
             echo "WARN: Elapsed time is zero or negative, skipping"
             exit 0
           fi
-          DURATION_MINUTES=$(( (ELAPSED + 59) / 60 + 120 ))
-          echo "  Window: ${START_ISO} for ${DURATION_MINUTES}m (includes 1h before + 1h after)"
+
+          # Total window: 1h before test start → 1h after test end
+          WINDOW_START=$((TEST_START_TIME - 3600))
+          WINDOW_END=$((TEST_END_TIME + 3600))
+          TOTAL_SECONDS=$((WINDOW_END - WINDOW_START))
+          TOTAL_HOURS=$(( (TOTAL_SECONDS + 3599) / 3600 ))
+          echo "  Total window: ${TOTAL_HOURS} hour(s) to collect"
 
           # Resolve admin pod
           ADMIN_POD=""
@@ -903,205 +912,267 @@ jobs:
           mkdir -p "${OUTPUT_DIR}" 2>/dev/null || true
           echo "  Output: ${OUTPUT_DIR}"
 
-          # Create temp dir in pod + run collect_logs.py
-          POD_OUTPUT_DIR="/tmp/graylog_collect"
-          kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- mkdir -p "${POD_OUTPUT_DIR}" 2>/dev/null || true
+          # Helper: convert epoch to ISO-8601
+          epoch_to_iso() {
+            local ep=$1
+            local iso
+            iso=$(date -u -d "@${ep}" "+%Y-%m-%dT%H:%M:%S" 2>/dev/null)
+            if [ -z "${iso}" ]; then
+              iso=$(python3 -c "from datetime import datetime,timezone; print(datetime.fromtimestamp(${ep},tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%S'))")
+            fi
+            echo "${iso}"
+          }
 
-          kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- \
-            python3 /usr/local/lib/python3.12/site-packages/simplyblock_core/scripts/collect_logs.py \
-              "${START_ISO}" "${DURATION_MINUTES}" \
-              --mode kubernetes \
-              --namespace "${NAMESPACE}" \
-              --monitoring-secret "${MON_SECRET}" \
-              --output-dir "${POD_OUTPUT_DIR}" \
-              ${MGMT_IP:+--mgmt-ip "${MGMT_IP}"} \
-              ${CLUSTER_ID:+--cluster-id "${CLUSTER_ID}"} \
-          2>&1 || {
-            echo "WARN: Graylog collect failed, retrying with --use-opensearch..."
+          # Collect logs one hour at a time
+          CHUNK=0
+          CURRENT=${WINDOW_START}
+          while [ ${CURRENT} -lt ${WINDOW_END} ]; do
+            CHUNK=$((CHUNK + 1))
+            CHUNK_END=$((CURRENT + 3600))
+            # Cap the last chunk at WINDOW_END
+            if [ ${CHUNK_END} -gt ${WINDOW_END} ]; then
+              CHUNK_END=${WINDOW_END}
+            fi
+            CHUNK_SECONDS=$((CHUNK_END - CURRENT))
+            CHUNK_MINUTES=$(( (CHUNK_SECONDS + 59) / 60 ))
+            CHUNK_ISO=$(epoch_to_iso ${CURRENT})
+
+            echo ""
+            echo "--- Chunk ${CHUNK}/${TOTAL_HOURS}: ${CHUNK_ISO} for ${CHUNK_MINUTES}m ---"
+
+            POD_OUTPUT_DIR="/tmp/graylog_collect_chunk${CHUNK}"
+            kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- mkdir -p "${POD_OUTPUT_DIR}" 2>/dev/null || true
+
             kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- \
               python3 /usr/local/lib/python3.12/site-packages/simplyblock_core/scripts/collect_logs.py \
-                "${START_ISO}" "${DURATION_MINUTES}" \
+                "${CHUNK_ISO}" "${CHUNK_MINUTES}" \
                 --mode kubernetes \
                 --namespace "${NAMESPACE}" \
                 --monitoring-secret "${MON_SECRET}" \
                 --output-dir "${POD_OUTPUT_DIR}" \
-                --use-opensearch \
                 ${MGMT_IP:+--mgmt-ip "${MGMT_IP}"} \
                 ${CLUSTER_ID:+--cluster-id "${CLUSTER_ID}"} \
-            2>&1 || echo "WARN: OpenSearch fallback also failed"
-          }
+            2>&1 || {
+              echo "WARN: Graylog collect failed for chunk ${CHUNK}, retrying with --use-opensearch..."
+              kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- \
+                python3 /usr/local/lib/python3.12/site-packages/simplyblock_core/scripts/collect_logs.py \
+                  "${CHUNK_ISO}" "${CHUNK_MINUTES}" \
+                  --mode kubernetes \
+                  --namespace "${NAMESPACE}" \
+                  --monitoring-secret "${MON_SECRET}" \
+                  --output-dir "${POD_OUTPUT_DIR}" \
+                  --use-opensearch \
+                  ${MGMT_IP:+--mgmt-ip "${MGMT_IP}"} \
+                  ${CLUSTER_ID:+--cluster-id "${CLUSTER_ID}"} \
+              2>&1 || echo "WARN: OpenSearch fallback also failed for chunk ${CHUNK}"
+            }
 
-          # Copy tarballs from pod to NFS
-          TARBALLS=$(kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- \
-            find "${POD_OUTPUT_DIR}" -name "*.tar.gz" -type f 2>/dev/null) || true
+            # Copy tarballs from pod to NFS for this chunk
+            TARBALLS=$(kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- \
+              find "${POD_OUTPUT_DIR}" -name "*.tar.gz" -type f 2>/dev/null) || true
 
-          if [ -n "${TARBALLS}" ]; then
-            for TB in ${TARBALLS}; do
-              TB_NAME=$(basename "${TB}")
-              echo "  Copying ${TB_NAME}..."
-              kubectl -n ${NAMESPACE} cp "${ADMIN_POD}:${TB}" "${OUTPUT_DIR}/${TB_NAME}" 2>&1 || true
-            done
-            for TB_FILE in "${OUTPUT_DIR}"/*.tar.gz; do
-              [ -f "${TB_FILE}" ] && tar -xzf "${TB_FILE}" -C "${OUTPUT_DIR}/" 2>/dev/null || true
-            done
-          else
-            echo "WARN: No tarballs found in pod"
-            kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- ls -laR "${POD_OUTPUT_DIR}/" 2>/dev/null || true
-          fi
+            if [ -n "${TARBALLS}" ]; then
+              for TB in ${TARBALLS}; do
+                TB_NAME=$(basename "${TB}")
+                echo "  Copying ${TB_NAME}..."
+                kubectl -n ${NAMESPACE} cp "${ADMIN_POD}:${TB}" "${OUTPUT_DIR}/${TB_NAME}" 2>&1 || true
+              done
+              for TB_FILE in "${OUTPUT_DIR}"/*.tar.gz; do
+                [ -f "${TB_FILE}" ] && tar -xzf "${TB_FILE}" -C "${OUTPUT_DIR}/" 2>/dev/null || true
+              done
+            else
+              echo "WARN: No tarballs found for chunk ${CHUNK}"
+            fi
 
-          # Cleanup pod
-          kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- rm -rf "${POD_OUTPUT_DIR}" 2>/dev/null || true
+            # Cleanup this chunk in pod
+            kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- rm -rf "${POD_OUTPUT_DIR}" 2>/dev/null || true
 
-          echo "=== Graylog collection complete: ${OUTPUT_DIR} ==="
+            CURRENT=${CHUNK_END}
+          done
+
+          echo ""
+          echo "=== Graylog collection complete (${CHUNK} chunks): ${OUTPUT_DIR} ==="
           ls -la "${OUTPUT_DIR}/" 2>/dev/null || true
         env:
           CLUSTER_ID: ${{ env.CLUSTER_ID }}
           MON_SECRET: ${{ secrets.MON_SECRET }}
 
-      - name: Upload automation logs to S3
-        if: always()
-        run: |
-          cd $GITHUB_WORKSPACE/e2e/logs
-          if [ -f upload_logs.sh ]; then
-            ./upload_logs.sh
-          fi
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_REGION: ${{ secrets.AWS_REGION }}
-          S3_BUCKET_NAME: "simplyblock-e2e-test-logs"
-          RUN_ID: ${{ github.run_id }}
-
-      - name: Set slack notification flag
-        if: always()
-        run: |
-          echo "send_slack_notification=${{ github.event.inputs.send_slack_notification || 'true' }}" >> $GITHUB_ENV
-
-      - name: Parse test results
-        if: always() && env.send_slack_notification == 'true'
-        id: parse_results
-        run: |
-          cd $GITHUB_WORKSPACE/e2e/logs
-          echo "Looking for the latest non-empty log file..."
-          COUNTER=0
-          MAX_ATTEMPTS=10
-          while [ $COUNTER -lt $MAX_ATTEMPTS ]; do
-            LATEST_LOG=$(ls -t *.log 2>/dev/null | head -n 1)
-            if [ -n "$LATEST_LOG" ] && [ -s "$LATEST_LOG" ]; then
-              echo "Found non-empty log file: $LATEST_LOG"
-              break
-            fi
-            echo "Attempt $((COUNTER + 1)): No non-empty log file found. Retrying..."
-            COUNTER=$((COUNTER + 1))
-            sleep 1
-          done
-          if [ -z "$LATEST_LOG" ] || [ ! -s "$LATEST_LOG" ]; then
-            echo "No non-empty log file found after $MAX_ATTEMPTS attempts"
-            exit 0
-          fi
-
-          TOTAL_TESTS=$(grep -i "Number of Total Cases" "$LATEST_LOG" | awk '{print $NF}')
-          PASSED_TESTS=$(grep -i "Number of Passed Cases" "$LATEST_LOG" | awk '{print $NF}')
-          FAILED_TESTS=$(grep -i "Number of Failed Cases" "$LATEST_LOG" | awk '{print $NF}')
-          PASSED_CASES=$(grep "PASSED CASE" "$LATEST_LOG" | awk -F 'INFO - | FAILED CASE' '{print $2}')
-          FAILED_CASES=$(grep "FAILED CASE" "$LATEST_LOG" | awk -F 'INFO - | FAILED CASE' '{print $2}')
-
-          PASSED_CASES_BULLETS=$(echo "$PASSED_CASES" | awk '{printf "    \u2022 %s\n", $0}')
-          FAILED_CASES_BULLETS=$(echo "$FAILED_CASES" | awk '{printf "    \u2022 %s\n", $0}')
-
-          echo "PASSED_TESTS=${PASSED_TESTS}" >> $GITHUB_ENV
-          echo "FAILED_TESTS=${FAILED_TESTS}" >> $GITHUB_ENV
-          echo "TOTAL_TESTS=${TOTAL_TESTS}" >> $GITHUB_ENV
-          echo "PASSED_CASES<<EOF" >> $GITHUB_ENV
-          echo "${PASSED_CASES}" >> $GITHUB_ENV
-          echo "EOF" >> $GITHUB_ENV
-          echo "FAILED_CASES<<EOF" >> $GITHUB_ENV
-          echo "${FAILED_CASES}" >> $GITHUB_ENV
-          echo "EOF" >> $GITHUB_ENV
-          echo "PASSED_CASES_BULLETS<<EOF" >> $GITHUB_ENV
-          echo "${PASSED_CASES_BULLETS}" >> $GITHUB_ENV
-          echo "EOF" >> $GITHUB_ENV
-          echo "FAILED_CASES_BULLETS<<EOF" >> $GITHUB_ENV
-          echo "${FAILED_CASES_BULLETS}" >> $GITHUB_ENV
-          echo "EOF" >> $GITHUB_ENV
-
       - name: Write Job Summary
         if: always()
+        shell: bash
         run: |
-          echo "## E2E Test: K8s Native Node Migration" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Setting | Value |" >> $GITHUB_STEP_SUMMARY
-          echo "|---------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| **Branch** | ${{ github.ref_name }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| **CSI Branch** | ${{ github.event.inputs.simplyblock_csi_branch }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| **SPDK Image** | ${{ github.event.inputs.spdk_image }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Workers** | ${{ github.event.inputs.worker_nodes }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Migrate To** | ${{ github.event.inputs.migrate_to_worker }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| **NDCS** | ${{ env.NDCS }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| **NPCS** | ${{ env.NPCS }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| **BS** | ${{ env.BS }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Chunk BS** | ${{ env.CHUNK_BS }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| **Runtime** | ${{ env.TEST_TIME_HOURS }}h ${{ env.TEST_TIME_MINS }}m ${{ env.TEST_TIME_SECS }}s |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Results" >> $GITHUB_STEP_SUMMARY
-          echo "- **Total**: ${{ env.TOTAL_TESTS }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Passed**: ${{ env.PASSED_TESTS }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Failed**: ${{ env.FAILED_TESTS }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          if [ -n "${{ env.PASSED_CASES }}" ]; then
-            echo "#### Passed" >> $GITHUB_STEP_SUMMARY
-            echo "${{ env.PASSED_CASES }}" | while IFS= read -r line; do
-              [ -n "$line" ] && echo "- $line" >> $GITHUB_STEP_SUMMARY
-            done
-            echo "" >> $GITHUB_STEP_SUMMARY
-          fi
-          if [ -n "${{ env.FAILED_CASES }}" ]; then
-            echo "#### Failed" >> $GITHUB_STEP_SUMMARY
-            echo "${{ env.FAILED_CASES }}" | while IFS= read -r line; do
-              [ -n "$line" ] && echo "- $line" >> $GITHUB_STEP_SUMMARY
-            done
-            echo "" >> $GITHUB_STEP_SUMMARY
-          fi
-          echo "[AWS Logs](https://s3.console.aws.amazon.com/s3/buckets/simplyblock-e2e-test-logs?prefix=${{ github.run_id }}/&region=us-east-2)" >> $GITHUB_STEP_SUMMARY
+          set +e
+          out_log="$GITHUB_WORKSPACE/e2e/output.log"
 
-      - name: Send Slack Notification
-        if: always() && env.send_slack_notification == 'true'
+          dur_fmt="${TEST_TIME_HOURS:-0}h ${TEST_TIME_MINS:-0}m ${TEST_TIME_SECS:-0}s"
+
+          total_cases="$(grep -E 'Number of Total Cases:' "${out_log}" 2>/dev/null | tail -n 1 | grep -oE '[0-9]+$' || echo '?')"
+          passed_cnt="$(grep -E 'Number of Passed Cases:' "${out_log}" 2>/dev/null | tail -n 1 | grep -oE '[0-9]+$' || echo '?')"
+          failed_cnt="$(grep -E 'Number of Failed Cases:' "${out_log}" 2>/dev/null | tail -n 1 | grep -oE '[0-9]+$' || echo '?')"
+          skipped_cnt="$(grep -E 'Number of Skipped Cases:' "${out_log}" 2>/dev/null | tail -n 1 | grep -oE '[0-9]+$' || echo '0')"
+          test_wise="$(grep -E '(PASSED|FAILED|SKIPPED) CASE' "${out_log}" 2>/dev/null \
+            | sed 's/\x1b\[[0-9;]*m//g' | sed 's/.*INFO - //' || true)"
+
+          failure_summary="(unknown)"
+          log_tail=""
+          if [[ -f "${out_log}" ]]; then
+            failure_summary="$(grep -oE 'MultipleExceptions: .+|SkippedTestsException: .+' "${out_log}" \
+              | tail -n 1 | sed 's/\x1b\[[0-9;]*m//g' || true)"
+            if [[ -z "${failure_summary}" ]]; then
+              failure_summary="$(grep -E 'RuntimeError:|AssertionError:|Error:' "${out_log}" \
+                | tail -n 1 | sed 's/\x1b\[[0-9;]*m//g' || true)"
+            fi
+            [[ -z "${failure_summary}" ]] && failure_summary="(no exception line found)"
+            log_tail="$(tail -n 50 "${out_log}" | sed 's/\x1b\[[0-9;]*m//g' || true)"
+          fi
+
+          conclusion="SUCCESS"
+          if [[ "${{ job.status }}" != "success" ]]; then
+            conclusion="FAILED"
+          fi
+
+          {
+            echo "## K8s Native Node Migration Summary"
+            echo ""
+            echo "**Result:** ${conclusion}"
+            echo ""
+            echo "### Run Info"
+            echo "- **Test class:** \`K8sNativeNodeMigrationTest\`"
+            echo "- **Cluster ID:** \`${CLUSTER_ID}\`"
+            echo "- **Branch:** \`${{ github.ref_name }}\`"
+            echo "- **CSI Branch:** \`${{ github.event.inputs.simplyblock_csi_branch }}\`"
+            echo "- **NDCS/NPCS:** \`${NDCS}/${NPCS}\`"
+            echo "- **BS/Chunk BS:** \`${BS}/${CHUNK_BS}\`"
+            echo "- **Workers:** \`${{ github.event.inputs.worker_nodes }}\`"
+            echo "- **Migrate To:** \`${{ github.event.inputs.migrate_to_worker }}\`"
+            echo "- **Duration:** ${dur_fmt}"
+            echo ""
+            echo "### Test Results"
+            echo "- **Total:** ${total_cases} | **Passed:** ${passed_cnt} | **Failed:** ${failed_cnt} | **Skipped:** ${skipped_cnt}"
+            if [[ -n "${test_wise}" ]]; then
+              echo '```'
+              printf '%s\n' "${test_wise}"
+              echo '```'
+            fi
+            echo ""
+            echo "### Failure Reason"
+            echo '```'
+            printf '%s\n' "${failure_summary}"
+            echo '```'
+            if [[ -n "${log_tail}" ]]; then
+              echo ""
+              echo "<details><summary>Last 50 lines of output.log</summary>"
+              echo ""
+              echo '```'
+              printf '%s\n' "${log_tail}"
+              echo '```'
+              echo "</details>"
+            fi
+            echo ""
+            echo "### NFS Log Locations"
+            echo "- **RUN_BASE_DIR:** \`${RUN_BASE_DIR:-not detected}\`"
+            echo "- Graylog logs: \`${RUN_BASE_DIR:-<run_dir>}/graylog_collected/\`"
+            if [[ -n "${RUN_BASE_DIR:-}" && -d "${RUN_BASE_DIR}" ]]; then
+              echo ""
+              echo "<details><summary>NFS directory listing</summary>"
+              echo ""
+              echo '```'
+              ls -la "${RUN_BASE_DIR}/" 2>/dev/null || echo "(empty)"
+              echo '```'
+              echo "</details>"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
         env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-          GITHUB_SERVER_URL: ${{ github.server_url }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          S3_BUCKET_NAME: "simplyblock-e2e-test-logs"
-          RUN_ID: ${{ github.run_id }}
-          PASSED_TESTS: ${{ env.PASSED_TESTS }}
-          FAILED_TESTS: ${{ env.FAILED_TESTS }}
-          TOTAL_TESTS: ${{ env.TOTAL_TESTS }}
-          PASSED_CASES_BULLETS: ${{ env.PASSED_CASES_BULLETS }}
-          FAILED_CASES_BULLETS: ${{ env.FAILED_CASES_BULLETS }}
-          TESTNAME: K8sNativeNodeMigrationTest
-          BRANCH_NAME: ${{ github.ref_name }}
+          CLUSTER_ID: ${{ env.CLUSTER_ID }}
+          NDCS: ${{ env.NDCS }}
+          NPCS: ${{ env.NPCS }}
+          BS: ${{ env.BS }}
+          CHUNK_BS: ${{ env.CHUNK_BS }}
+          RUN_BASE_DIR: ${{ env.RUN_BASE_DIR }}
           TEST_TIME_HOURS: ${{ env.TEST_TIME_HOURS }}
           TEST_TIME_MINS: ${{ env.TEST_TIME_MINS }}
           TEST_TIME_SECS: ${{ env.TEST_TIME_SECS }}
+
+      - name: Send Slack Notification
+        if: always() && (github.event.inputs.send_slack_notification || 'true') == 'true'
+        shell: bash
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          JOB_STATUS: ${{ job.status }}
+          SLACK_RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+          SLACK_WF_NAME: "K8s Native Node Migration"
+          TESTNAME: K8sNativeNodeMigrationTest
+          RUN_BASE_DIR: ${{ env.RUN_BASE_DIR }}
           NDCS: ${{ env.NDCS }}
           NPCS: ${{ env.NPCS }}
-          CHUNK_BS: ${{ env.CHUNK_BS }}
-          BS: ${{ env.BS }}
-          CLUSTER_ENV: ${{ github.event.inputs.cluster_environment || 'local' }}
+          TEST_START_TIME: ${{ env.TEST_START_TIME }}
+          TEST_END_TIME: ${{ env.TEST_END_TIME }}
         run: |
-          GITHUB_RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}"
-          AWS_LOGS_URL="https://s3.console.aws.amazon.com/s3/buckets/${S3_BUCKET_NAME}?prefix=${RUN_ID}/&region=us-east-2"
-          if [[ ${{ job.status }} == 'success' ]]; then
-            OVERALL_STATUS=":white_check_mark: Overall Status: SUCCESS"
-          else
-            OVERALL_STATUS=":x: Overall Status: FAILURE <!channel>"
-          fi
-
-          TIME_TAKEN="${TEST_TIME_HOURS}h ${TEST_TIME_MINS}m ${TEST_TIME_SECS}s"
-
-          MESSAGE="K8s Native E2E Node Migration | *${TESTNAME}* | ${CLUSTER_ENV} | NDCS:${NDCS} NPCS:${NPCS}\nBranch: *${BRANCH_NAME}* | CSI: *${{ github.event.inputs.simplyblock_csi_branch }}*\nCluster: *${CLUSTER_ENV}*\nWorkers: ${{ github.event.inputs.worker_nodes }} | Migrate To: ${{ github.event.inputs.migrate_to_worker }}\nTotal Time: ${TIME_TAKEN}\n\n${OVERALL_STATUS}\nGitHub Run: ${GITHUB_RUN_URL}\nAWS Logs: ${AWS_LOGS_URL}\n\n*Config*: NDCS: ${NDCS}, NPCS: ${NPCS}, BS: ${BS}, Chunk BS: ${CHUNK_BS}\n\nTotal Tests: *${TOTAL_TESTS}*, Passed: *${PASSED_TESTS}*, Failed: *${FAILED_TESTS}*\n\n-- Passed :white_check_mark:\n${PASSED_CASES_BULLETS}\n\n-- Failed :x:\n${FAILED_CASES_BULLETS}"
-
-          curl -X POST -H 'Content-type: application/json' \
-            --data "{\"text\":\"${MESSAGE}\"}" "$SLACK_WEBHOOK_URL"
+          python3 - <<'PYEOF'
+          import json, os, re, sys, urllib.request, urllib.error
+          webhook = os.environ.get("SLACK_WEBHOOK_URL", "")
+          if not webhook:
+              print("No SLACK_WEBHOOK_URL set, skipping.")
+              sys.exit(0)
+          out_log = os.path.join(os.environ.get("GITHUB_WORKSPACE", "."), "e2e", "output.log")
+          total = passed = failed = skipped = 0
+          if os.path.isfile(out_log):
+              content = open(out_log).read()
+              def px(pat):
+                  m = re.search(pat, content)
+                  return int(m.group(1)) if m else 0
+              total   = px(r'Number of Total Cases:\s*(\d+)')
+              passed  = px(r'Number of Passed Cases:\s*(\d+)')
+              failed  = px(r'Number of Failed Cases:\s*(\d+)')
+              skipped = px(r'Number of Skipped Cases:\s*(\d+)')
+          pass_pct = (passed * 100 // total) if total > 0 else 0
+          s    = int(os.environ.get("TEST_START_TIME", "0") or "0")
+          e    = int(os.environ.get("TEST_END_TIME",   "0") or "0")
+          secs = max(0, e - s) if e >= s > 0 else 0
+          dur  = f"{secs//3600}h {(secs%3600)//60}m {secs%60}s"
+          run_url  = os.environ.get("SLACK_RUN_URL",   "")
+          log_dir  = os.environ.get("RUN_BASE_DIR",    "N/A")
+          ndcs     = os.environ.get("NDCS",            "?")
+          npcs     = os.environ.get("NPCS",            "?")
+          test_cls = os.environ.get("TESTNAME",        "") or "all"
+          branch   = os.environ.get("GITHUB_REF_NAME", "?")
+          wf_name  = os.environ.get("SLACK_WF_NAME",   "Run")
+          ok       = os.environ.get("JOB_STATUS",      "") == "success"
+          icon    = ":white_check_mark:" if ok else ":x:"
+          status  = "SUCCESS" if ok else "FAILURE"
+          mention = "" if ok else " <!channel>"
+          lines = [
+              f"{icon} *SimplyBlock {wf_name}*{mention}",
+              f"*Status:* {status}  |  *Duration:* {dur}",
+              f"*Branch:* `{branch}`  |  *NDCS/NPCS:* `{ndcs}/{npcs}`  |  *Test class:* `{test_cls}`",
+              "",
+          ]
+          if total > 0:
+              lines += [
+                  f":white_check_mark: *Passed:*  {passed}/{total}  ({pass_pct}%)",
+                  f":x: *Failed:*  {failed}",
+                  f":fast_forward: *Skipped:*  {skipped}",
+              ]
+          else:
+              lines.append("_(test counts not found in log)_")
+          lines += [
+              "",
+              f":link: *Run:* <{run_url}|View on GitHub>",
+              f":file_folder: *Final Logs:* `{log_dir}`",
+          ]
+          payload = {"text": "\n".join(lines)}
+          req = urllib.request.Request(
+              webhook,
+              data=json.dumps(payload).encode(),
+              headers={"Content-Type": "application/json"},
+          )
+          try:
+              urllib.request.urlopen(req, timeout=15)
+              print("Slack notification sent.")
+          except Exception as exc:
+              print(f"WARN: Slack notification failed: {exc}", file=sys.stderr)
+          PYEOF
 
       - name: Cleanup build folder
         if: always()
