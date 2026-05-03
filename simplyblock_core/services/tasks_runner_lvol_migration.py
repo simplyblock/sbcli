@@ -758,12 +758,16 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         except KeyError:
             return False, True, f"Intermediate snapshot {snap_uuid} not found in DB"
 
+        tgt_sec = None
+        sec_rpc = None
         if snap.lvol.ha_type == "ha":
-            _, sec_err = _get_target_secondary_node(tgt_node)
+            tgt_sec, sec_err = _get_target_secondary_node(tgt_node)
             if sec_err:
                 migration.error_message = sec_err
                 migration.write_to_db(db.kv_store)
                 return False, True, _WAIT
+            if tgt_sec:
+                sec_rpc = _make_rpc(tgt_sec)
 
         snap_short = _snap_short_name(snap)
         src_composite = _snap_composite(src_node.lvstore, snap)
@@ -777,7 +781,8 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
 
         t, err = _setup_snap_transfer(
             snap, snap_index, migration, src_node, tgt_node,
-            src_rpc, tgt_rpc, trtype, target_ip)
+            src_rpc, tgt_rpc, trtype, target_ip,
+            tgt_sec=tgt_sec, sec_rpc=sec_rpc)
         if t is None:
             return False, True, err
 
@@ -790,7 +795,7 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             result = src_rpc.bdev_lvol_transfer_stat(src_composite)
             if result is None:
                 _cleanup_snap_transfer(src_rpc, tgt_rpc, t)
-                _delete_bdev_blocking(tgt_composite, tgt_rpc)
+                _delete_bdev_blocking(tgt_composite, tgt_rpc, secondary_rpc=sec_rpc)
                 return False, True, (
                     f"Transfer stat failed for intermediate snap {snap_uuid}")
             state = result.get('transfer_state', 'No process')
@@ -798,18 +803,19 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                 break
             if state in ('Failed', 'No process'):
                 _cleanup_snap_transfer(src_rpc, tgt_rpc, t)
-                _delete_bdev_blocking(tgt_composite, tgt_rpc)
+                _delete_bdev_blocking(tgt_composite, tgt_rpc, secondary_rpc=sec_rpc)
                 return False, True, (
                     f"Intermediate snap transfer {state} for {snap_uuid}")
             time.sleep(_INTERMEDIATE_POLL_INTERVAL_S)
         else:
             _cleanup_snap_transfer(src_rpc, tgt_rpc, t)
-            _delete_bdev_blocking(tgt_composite, tgt_rpc)
+            _delete_bdev_blocking(tgt_composite, tgt_rpc, secondary_rpc=sec_rpc)
             return False, True, (
                 f"Intermediate snap transfer timed out for {snap_uuid}")
 
         ok, err = _post_process_snap(
-            snap, tgt_node, tgt_rpc, src_rpc, migration, t)
+            snap, tgt_node, tgt_rpc, src_rpc, migration, t,
+            tgt_sec=tgt_sec, sec_rpc=sec_rpc)
         if not ok:
             if err is _WAIT:
                 migration.error_message = (
@@ -1046,8 +1052,19 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc, secondary_rpc=sec_setup_rpc)
             return False, True, "Failed to create listener on target"
     else:
+        # Subsystem pre-exists because this node was already the secondary mirror
+        # for this lvol (at the source's port, e.g. 4420).  After migration the
+        # lvol must be reachable at the target's primary port (e.g. 4427).  Add
+        # that listener now if it isn't already present.
+        tgt_primary_port = tgt_node.get_lvol_subsys_port(tgt_node.lvstore)
+        ret = tgt_rpc.listeners_create(nqn, trtype, target_ip, tgt_primary_port)
+        if not ret:
+            logger.warning(
+                f"Could not add primary-port listener {tgt_primary_port} to "
+                f"pre-existing subsystem {nqn} — may already exist")
         logger.info(
-            f"Subsystem {nqn} already exists on target; attaching namespace only")
+            f"Subsystem {nqn} already exists on target; added listener on "
+            f"{target_ip}:{tgt_primary_port} and attaching namespace")
 
     ns_ret = tgt_rpc.nvmf_subsystem_add_ns(nqn, tgt_lvol_composite, uuid=lvol.uuid)
     if not ns_ret:
