@@ -890,6 +890,22 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             return False, True, _WAIT
         if tgt_sec is not None:
             sec_rpc = _make_rpc(tgt_sec)
+
+            # Retry add_clone in case it failed on the previous attempt.
+            # bdev_lvol_add_clone is idempotent if the parent is already set.
+            if migration.snaps_migrated:
+                try:
+                    last_snap = db.get_snapshot_by_id(migration.snaps_migrated[-1])
+                    tgt_snap_composite = _snap_composite(tgt_node.lvstore, last_snap)
+                    ret = sec_rpc.bdev_lvol_add_clone(tgt_lvol_composite, tgt_snap_composite)
+                    if not ret:
+                        migration.write_to_db(db.kv_store)
+                        return False, True, (
+                            f"bdev_lvol_add_clone on secondary failed for {tgt_lvol_composite}")
+                except KeyError as e:
+                    migration.write_to_db(db.kv_store)
+                    return False, True, str(e)
+
             ok, err = _expose_lvol_on_secondary(
                 lvol, tgt_node, tgt_sec, sec_rpc, None, None,
                 already_registered=True)
@@ -925,8 +941,14 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         migration.current_job_id = ""
         migration.write_to_db(db.kv_store)
 
-        # Expose lvol on target secondary via NVMe-oF (bdev_lvol_register was
-        # already done in the setup section before final migration started).
+        # Chain the lvol to its parent snapshot on secondary, then expose via NVMe-oF.
+        #
+        # handle_snapshot_post_migration runs automatically on the target primary
+        # when hublvol_write() intercepts the migration completion signal.  The
+        # secondary also has migration_flag set, but the replication path from
+        # primary to secondary is not established until _expose_lvol_on_secondary
+        # runs (several seconds later), so the secondary never receives the
+        # forwarded signal.  We must therefore replicate the chaining explicitly.
         if lvol.ha_type == "ha":
             tgt_sec, sec_err = _get_target_secondary_node(tgt_node)
             if sec_err:
@@ -936,6 +958,27 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                 return False, True, _WAIT
             if tgt_sec is not None:
                 sec_rpc = _make_rpc(tgt_sec)
+
+                # Chain lvol → last migrated snapshot on secondary
+                if migration.snaps_migrated:
+                    try:
+                        last_snap = db.get_snapshot_by_id(migration.snaps_migrated[-1])
+                        tgt_snap_composite = _snap_composite(tgt_node.lvstore, last_snap)
+                        ret = sec_rpc.bdev_lvol_add_clone(tgt_lvol_composite, tgt_snap_composite)
+                        if not ret:
+                            logger.error(
+                                f"bdev_lvol_add_clone on secondary failed for "
+                                f"{tgt_lvol_composite} → {tgt_snap_composite}")
+                            migration.transfer_context = {'stage': 'secondary_register'}
+                            migration.write_to_db(db.kv_store)
+                            return False, True, (
+                                f"bdev_lvol_add_clone on secondary failed for {tgt_lvol_composite}")
+                    except KeyError as e:
+                        logger.error(f"Last snapshot not found for secondary chaining: {e}")
+                        migration.transfer_context = {'stage': 'secondary_register'}
+                        migration.write_to_db(db.kv_store)
+                        return False, True, str(e)
+
                 ok, err = _expose_lvol_on_secondary(
                     lvol, tgt_node, tgt_sec, sec_rpc, None, None,
                     already_registered=True)
@@ -989,13 +1032,11 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
 
     tgt_map_id = None
     tgt_blobid = None
-    tgt_lvol_uuid = lvol.lvol_uuid
     for entry in lvols_list:
         entry_name = entry.get('name', '') or entry.get('lvol_name', '')
         if entry_name in (lvol.lvol_bdev, tgt_lvol_composite):
             tgt_map_id = entry.get('map_id')
             tgt_blobid = entry.get('blobid')
-            tgt_lvol_uuid = entry.get('uuid', lvol.lvol_uuid)
             break
 
     if tgt_map_id is None:
@@ -1016,7 +1057,7 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         if tgt_sec_setup is not None:
             sec_setup_rpc = _make_rpc(tgt_sec_setup)
             ret = sec_setup_rpc.bdev_lvol_register(
-                lvol.lvol_bdev, tgt_node.lvstore, tgt_lvol_uuid, tgt_blobid,
+                lvol.lvol_bdev, tgt_node.lvstore, lvol.lvol_uuid, tgt_blobid,
                 lvol.lvol_priority_class)
             if not ret:
                 _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc)
