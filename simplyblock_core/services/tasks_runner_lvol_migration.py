@@ -268,6 +268,28 @@ def _expose_lvol_on_secondary(lvol, tgt_node, tgt_sec, sec_rpc, tgt_blobid, tgt_
         logger.info(
             f"Subsystem {lvol.nqn} already exists on secondary {tgt_sec.get_id()}; "
             "attaching namespace only")
+        # Remove any stale namespace for this lvol from the pre-existing subsystem
+        # (same LVS mismatch issue as on the primary: old mirror bdev on a different
+        # lvstore would produce zeros for clients still on that nsid).
+        try:
+            sub_list = sec_rpc.subsystem_list(lvol.nqn)
+            if sub_list:
+                sub = sub_list[0] if isinstance(sub_list, list) else sub_list
+                top_bdev_new = f"{tgt_node.lvstore}/{lvol.lvol_bdev}"
+                for ns in sub.get('namespaces', []):
+                    ns_bdev = ns.get('bdev_name') or ns.get('name', '')
+                    if (ns_bdev.endswith(f"/{lvol.lvol_bdev}")
+                            and ns_bdev != top_bdev_new):
+                        old_nsid = ns.get('nsid')
+                        sec_rpc.nvmf_subsystem_remove_ns(lvol.nqn, old_nsid)
+                        logger.info(
+                            f"Removed stale secondary namespace nsid={old_nsid} "
+                            f"bdev={ns_bdev} from subsystem {lvol.nqn} on "
+                            f"secondary {tgt_sec.get_id()}")
+        except Exception as e:
+            logger.warning(
+                f"Could not clean up stale namespace in {lvol.nqn} on secondary "
+                f"{tgt_sec.get_id()}: {e}")
 
     # Add namespace using the target primary's lvstore for the composite bdev name
     top_bdev = f"{tgt_node.lvstore}/{lvol.lvol_bdev}"
@@ -888,11 +910,10 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             migration.error_message = sec_err
             migration.write_to_db(db.kv_store)
             return False, True, _WAIT
+
         if tgt_sec is not None:
             sec_rpc = _make_rpc(tgt_sec)
 
-            # Retry add_clone in case it failed on the previous attempt.
-            # bdev_lvol_add_clone is idempotent if the parent is already set.
             if migration.snaps_migrated:
                 try:
                     last_snap = db.get_snapshot_by_id(migration.snaps_migrated[-1])
@@ -941,14 +962,13 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         migration.current_job_id = ""
         migration.write_to_db(db.kv_store)
 
-        # Chain the lvol to its parent snapshot on secondary, then expose via NVMe-oF.
-        #
-        # handle_snapshot_post_migration runs automatically on the target primary
-        # when hublvol_write() intercepts the migration completion signal.  The
-        # secondary also has migration_flag set, but the replication path from
-        # primary to secondary is not established until _expose_lvol_on_secondary
-        # runs (several seconds later), so the secondary never receives the
-        # forwarded signal.  We must therefore replicate the chaining explicitly.
+        # Chain lvol → last migrated snapshot on SECONDARY, then expose via NVMe-oF.
+        # On the primary, handle_snapshot_post_migration runs automatically via
+        # hublvol_write() intercepting the completion signal — SPDK sends the signal
+        # BEFORE setting XFER_DONE, so by the time we poll "Done" the primary chain
+        # is already established.  Calling bdev_lvol_add_clone on primary would fail
+        # with -EEXIST.  The secondary never receives the forwarded signal (its
+        # replication path is not up yet), so we must chain it explicitly here.
         if lvol.ha_type == "ha":
             tgt_sec, sec_err = _get_target_secondary_node(tgt_node)
             if sec_err:
@@ -1103,6 +1123,31 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             logger.warning(
                 f"Could not add primary-port listener {tgt_primary_port} to "
                 f"pre-existing subsystem {nqn} — may already exist")
+
+        # Remove old secondary-mirror namespace(s) for this lvol before we add
+        # the new primary namespace.  The secondary mirror used a bdev on the
+        # secondary's own lvstore (e.g. LVS_8171/LVOL_268); after migration the
+        # bdev lives on tgt_node.lvstore (e.g. LVS_8222/LVOL_268).  Leaving the
+        # old namespace in place means the subsystem has two namespaces for the
+        # same logical volume — clients that had connected to nsid 1 (the old
+        # mirror bdev with 0 allocated clusters) would continue reading zeros.
+        try:
+            sub_list = tgt_rpc.subsystem_list(nqn)
+            if sub_list:
+                sub = sub_list[0] if isinstance(sub_list, list) else sub_list
+                for ns in sub.get('namespaces', []):
+                    ns_bdev = ns.get('bdev_name') or ns.get('name', '')
+                    # Remove if it's this lvol's bdev on a different lvstore
+                    if (ns_bdev.endswith(f"/{lvol.lvol_bdev}")
+                            and not ns_bdev.startswith(f"{tgt_node.lvstore}/")):
+                        old_nsid = ns.get('nsid')
+                        tgt_rpc.nvmf_subsystem_remove_ns(nqn, old_nsid)
+                        logger.info(
+                            f"Removed stale secondary namespace nsid={old_nsid} "
+                            f"bdev={ns_bdev} from subsystem {nqn}")
+        except Exception as e:
+            logger.warning(f"Could not clean up stale secondary namespace in {nqn}: {e}")
+
         logger.info(
             f"Subsystem {nqn} already exists on target; added listener on "
             f"{target_ip}:{tgt_primary_port} and attaching namespace")
