@@ -395,7 +395,7 @@ def _setup_snap_transfer(snap, snap_index, migration, src_node, tgt_node,
     # Step 1: create target lvol on primary
     # Note: SPDK's bdev_lvol_create 'uuid' param is for the lvol *store*, not
     # the new lvol.  Do not pass the snapshot UUID here.
-    size_in_mib = _bytes_to_mib(snap.used_size)
+    size_in_mib = _bytes_to_mib(snap.size)
     ret = tgt_rpc.create_lvol(snap_short, size_in_mib, tgt_node.lvstore)
     if not ret:
         return None, f"Failed to create target lvol for snap {snap_uuid}"
