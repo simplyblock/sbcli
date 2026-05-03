@@ -213,62 +213,42 @@ def _get_target_secondary_node(tgt_node):
     )
 
 
-def _get_target_secondary_nodes(tgt_node):
+
+
+def _expose_lvol_on_secondary(lvol, tgt_node, tgt_sec, sec_rpc, tgt_blobid, tgt_lvol_uuid,
+                              already_registered=False):
     """
-    Return ``(sec_nodes_list, error_string)`` for all secondaries on the target.
-    Checks both secondary_node_id and tertiary_node_id.
-    """
-    sec_nodes = []
-    for peer_id in [tgt_node.secondary_node_id, tgt_node.tertiary_node_id]:
-        if not peer_id:
-            continue
-        try:
-            sec = db.get_storage_node_by_id(peer_id)
-        except KeyError:
-            continue
+    Expose the migrated lvol on the target secondary via NVMe-oF.
 
-        if sec.status == StorageNode.STATUS_ONLINE:
-            sec_nodes.append(sec)
-        elif sec.status == StorageNode.STATUS_OFFLINE:
-            continue
-        else:
-            return [], (
-                f"Target secondary node {peer_id} is in state "
-                f"'{sec.status}'; cannot create on target primary"
-            )
-    return sec_nodes, None
-
-
-
-def _expose_lvol_on_secondary(lvol, tgt_node, tgt_sec, sec_rpc, tgt_blobid, tgt_lvol_uuid):
-    """
-    Register the migrated lvol on the target secondary and expose it via
-    the same NVMe-oF NQN (with non-optimized ANA state).
-
-    ``tgt_blobid`` and ``tgt_lvol_uuid`` come from querying the target primary
-    after final migration (not from the DB record, which still reflects source).
+    When ``already_registered=True`` the bdev_lvol_register step is skipped
+    (the lvol was registered in the setup section before final migration started,
+    so it is already known to SPDK on the secondary).
 
     This mirrors what add_lvol_on_node() does for is_primary=False.
     """
-    # The lvol blob lives in the target primary's lvstore; the secondary mirrors
-    # that same lvstore, so bdev_lvol_register must reference tgt_node.lvstore,
-    # not the secondary's own lvstore name (which is a different string).
-    ret = sec_rpc.bdev_lvol_register(
-        lvol.lvol_bdev, tgt_node.lvstore, tgt_lvol_uuid, tgt_blobid,
-        lvol.lvol_priority_class)
-    if not ret:
-        return False, f"bdev_lvol_register failed on secondary {tgt_sec.get_id()}"
+    if not already_registered:
+        # The lvol blob lives in the target primary's lvstore; the secondary mirrors
+        # that same lvstore, so bdev_lvol_register must reference tgt_node.lvstore,
+        # not the secondary's own lvstore name (which is a different string).
+        ret = sec_rpc.bdev_lvol_register(
+            lvol.lvol_bdev, tgt_node.lvstore, tgt_lvol_uuid, tgt_blobid,
+            lvol.lvol_priority_class)
+        if not ret:
+            return False, f"bdev_lvol_register failed on secondary {tgt_sec.get_id()}"
 
     # Create subsystem with same NQN only if it doesn't already exist on secondary.
     # Multiple volumes may share the same subsystem (namespace sharing group); a
     # prior migration of a sibling volume may have already created it.
     existing_sec_sub = sec_rpc.subsystem_list(lvol.nqn)
+    subsystem_created_on_sec = False
     if not existing_sec_sub:
         ret = sec_rpc.subsystem_create(
             lvol.nqn, lvol.ha_type, lvol.uuid, min_cntlid=1000,
             max_namespaces=constants.LVO_MAX_NAMESPACES_PER_SUBSYS)
         if not ret:
-            logger.warning(f"subsystem_create on secondary may already exist: {lvol.nqn}")
+            sec_rpc.delete_lvol(lvol.lvol_bdev, del_async=True)
+            return False, f"subsystem_create on secondary failed: {lvol.nqn}"
+        subsystem_created_on_sec = True
 
         # Add listeners on each data NIC (non-optimized ANA since secondary is not primary)
         for iface in tgt_sec.data_nics:
@@ -280,7 +260,9 @@ def _expose_lvol_on_secondary(lvol, tgt_node, tgt_sec, sec_rpc, tgt_blobid, tgt_
                     if err and isinstance(err, dict) and err.get("code") == -32602:
                         logger.warning("Listener already exists on secondary")
                     else:
-                        logger.warning(
+                        sec_rpc.subsystem_delete(lvol.nqn)
+                        sec_rpc.delete_lvol(lvol.lvol_bdev, del_async=True)
+                        return False, (
                             f"Failed to add listener on secondary {tgt_sec.get_id()}: {err}")
     else:
         logger.info(
@@ -291,6 +273,9 @@ def _expose_lvol_on_secondary(lvol, tgt_node, tgt_sec, sec_rpc, tgt_blobid, tgt_
     top_bdev = f"{tgt_node.lvstore}/{lvol.lvol_bdev}"
     ret = sec_rpc.nvmf_subsystem_add_ns(lvol.nqn, top_bdev, lvol.uuid, lvol.guid)
     if not ret:
+        if subsystem_created_on_sec:
+            sec_rpc.subsystem_delete(lvol.nqn)
+        sec_rpc.delete_lvol(lvol.lvol_bdev, del_async=True)
         return False, f"nvmf_subsystem_add_ns failed on secondary {tgt_sec.get_id()}"
 
     return True, None
@@ -393,62 +378,69 @@ def _setup_snap_transfer(snap, snap_index, migration, src_node, tgt_node,
     if not ret:
         return None, f"Failed to create target lvol for snap {snap_uuid}"
 
-    # Step 2: register on secondary immediately so secondary stays consistent
+    # Step 2: register on secondary immediately so secondary stays consistent.
+    # If registration fails we clean up the primary bdev and abort — continuing
+    # with an unregistered secondary would leave the cluster in split state.
+    sec_registered = False
     if tgt_sec and sec_rpc:
         bdev_info = tgt_rpc.get_bdevs(tgt_composite)
-        if bdev_info:
-            snap_blobid = bdev_info[0]['driver_specific']['lvol']['blobid']
-            snap_uuid_on_tgt = bdev_info[0]['uuid']
-            ret_sec = sec_rpc.bdev_lvol_register(
-                snap_short, tgt_node.lvstore, snap_uuid_on_tgt, snap_blobid,
-                snap.lvol.lvol_priority_class if hasattr(snap, 'lvol') else 0)
-            if not ret_sec:
-                logger.warning(
-                    f"bdev_lvol_register on secondary failed for snap {snap_uuid}; continuing")
-        else:
-            logger.warning(f"Could not get bdev info for {tgt_composite} to register on secondary")
+        if not bdev_info:
+            _delete_bdev_blocking(tgt_composite, tgt_rpc)
+            return None, f"Could not get bdev info for {tgt_composite} after creation"
+        snap_blobid = bdev_info[0]['driver_specific']['lvol']['blobid']
+        snap_uuid_on_tgt = bdev_info[0]['uuid']
+        ret_sec = sec_rpc.bdev_lvol_register(
+            snap_short, tgt_node.lvstore, snap_uuid_on_tgt, snap_blobid,
+            snap.lvol.lvol_priority_class if hasattr(snap, 'lvol') else 0)
+        if not ret_sec:
+            _delete_bdev_blocking(tgt_composite, tgt_rpc)
+            return None, f"bdev_lvol_register on secondary failed for snap {snap_uuid}"
+        sec_registered = True
 
-    # Step 3: migration flag
+    # Helper: clean both primary and secondary (if registered) atomically
+    def _cleanup(subsystem=None):
+        if subsystem:
+            tgt_rpc.subsystem_delete(subsystem)
+        _delete_bdev_blocking(tgt_composite, tgt_rpc,
+                              secondary_rpc=sec_rpc if sec_registered else None)
+
+    # Step 3: migration flag on primary
     ret = tgt_rpc.bdev_lvol_set_migration_flag(tgt_composite)
     if not ret:
-        _delete_bdev_blocking(tgt_composite, tgt_rpc)
+        _cleanup()
         return None, f"bdev_lvol_set_migration_flag failed for snap {snap_uuid}"
 
-    # Step 3: expose via temp NVMe-oF subsystem
+    # Step 4: expose via temp NVMe-oF subsystem
     serial = f"SBMIG{snap_uuid[:10].upper().replace('-', '')}"
     ret = tgt_rpc.subsystem_create(temp_nqn, serial, "SimplyBlock Migration")
     if not ret:
-        _delete_bdev_blocking(tgt_composite, tgt_rpc)
+        _cleanup()
         return None, f"Failed to create migration subsystem for snap {snap_uuid}"
 
     tgt_lvs_port = tgt_node.get_lvol_subsys_port(tgt_node.lvstore)
     ret = tgt_rpc.listeners_create(temp_nqn, trtype, target_ip, tgt_lvs_port)
     if not ret:
-        tgt_rpc.subsystem_delete(temp_nqn)
-        _delete_bdev_blocking(tgt_composite, tgt_rpc)
+        _cleanup(subsystem=temp_nqn)
         return None, f"Failed to create migration listener for snap {snap_uuid}"
 
     ret = tgt_rpc.nvmf_subsystem_add_ns(temp_nqn, tgt_composite)
     if not ret:
-        tgt_rpc.subsystem_delete(temp_nqn)
-        _delete_bdev_blocking(tgt_composite, tgt_rpc)
+        _cleanup(subsystem=temp_nqn)
         return None, f"Failed to add ns to migration subsystem for snap {snap_uuid}"
 
-    # Step 4: connect source to target
+    # Step 5: connect source to target
     ret = src_rpc.bdev_nvme_attach_controller(
         ctrl_name, temp_nqn, target_ip, tgt_lvs_port, trtype)
     if not ret:
-        tgt_rpc.subsystem_delete(temp_nqn)
-        _delete_bdev_blocking(tgt_composite, tgt_rpc)
+        _cleanup(subsystem=temp_nqn)
         return None, f"Failed to attach migration controller for snap {snap_uuid}"
 
-    # Step 5: fire async transfer
+    # Step 6: fire async transfer
     remote_bdev = f"{ctrl_name}n1"
     ret = src_rpc.bdev_lvol_transfer(src_composite, 0, 16, remote_bdev, "migrate")
     if ret is None:
         src_rpc.bdev_nvme_detach_controller(ctrl_name)
-        tgt_rpc.subsystem_delete(temp_nqn)
-        _delete_bdev_blocking(tgt_composite, tgt_rpc)
+        _cleanup(subsystem=temp_nqn)
         return None, f"bdev_lvol_transfer failed for snap {snap_uuid}"
 
     return {
@@ -475,7 +467,9 @@ def _post_process_snap(snap, tgt_node, tgt_rpc, src_rpc, migration, t,
     snap_short = t['snap_short']
     tgt_composite = f"{tgt_node.lvstore}/{snap_short}"
 
-    # Link to predecessor snapshot in target's ancestry chain (primary)
+    # Link to predecessor snapshot in target's ancestry chain.
+    # add_clone must succeed on BOTH primary and secondary before we convert
+    # either — once convert runs the lvol is immutable and cannot be re-linked.
     if migration.snaps_migrated:
         pred_uuid = migration.snaps_migrated[-1]
         try:
@@ -484,25 +478,24 @@ def _post_process_snap(snap, tgt_node, tgt_rpc, src_rpc, migration, t,
             ret = tgt_rpc.bdev_lvol_add_clone(tgt_composite, pred_composite)
             if not ret:
                 return False, f"bdev_lvol_add_clone failed for {snap_uuid}"
-            # Mirror add_clone on secondary
             if tgt_sec and sec_rpc:
-                sec_pred_composite = _snap_composite(tgt_node.lvstore, pred_snap)
-                ret_sec = sec_rpc.bdev_lvol_add_clone(tgt_composite, sec_pred_composite)
+                ret_sec = sec_rpc.bdev_lvol_add_clone(tgt_composite, pred_composite)
                 if not ret_sec:
-                    logger.warning(f"bdev_lvol_add_clone on secondary failed for {snap_uuid}")
+                    return False, f"bdev_lvol_add_clone on secondary failed for {snap_uuid}"
         except KeyError:
             logger.warning(f"Predecessor snap {pred_uuid} not found; skipping add_clone")
 
-    # Convert writable lvol → immutable snapshot (primary)
+    # Convert writable lvol → immutable snapshot.
+    # Must succeed on both sides — a primary-only convert leaves secondary with
+    # a writable bdev where primary has a read-only snapshot (split state).
     ret = tgt_rpc.bdev_lvol_convert(tgt_composite)
     if not ret:
         return False, f"bdev_lvol_convert failed for {snap_uuid}"
 
-    # Mirror convert on secondary
     if tgt_sec and sec_rpc:
         ret_sec = sec_rpc.bdev_lvol_convert(tgt_composite)
         if not ret_sec:
-            logger.warning(f"bdev_lvol_convert on secondary failed for {snap_uuid}")
+            return False, f"bdev_lvol_convert on secondary failed for {snap_uuid}"
 
     # Cleanup temp NVMe-oF plumbing for this snapshot
     _cleanup_snap_transfer(src_rpc, tgt_rpc, t)
@@ -793,7 +786,7 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             f"({src_composite} → {tgt_composite})")
 
         # Busy-poll: spin at _INTERMEDIATE_POLL_INTERVAL_S until done or timeout
-        for _poll_i in range(_INTERMEDIATE_POLL_MAX):
+        for _ in range(_INTERMEDIATE_POLL_MAX):
             result = src_rpc.bdev_lvol_transfer_stat(src_composite)
             if result is None:
                 _cleanup_snap_transfer(src_rpc, tgt_rpc, t)
@@ -879,6 +872,28 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
     tgt_lvol_composite = f"{tgt_node.lvstore}/{lvol.lvol_bdev}"
     ctx = migration.transfer_context or {}
 
+    # --- Retry secondary registration after a completed transfer ---
+    # Transfer already finished on a previous run; only secondary registration
+    # remains.  Re-entering without this guard would re-create the lvol on the
+    # primary (collision), trigger cleanup, and lose the migrated data.
+    if ctx.get('stage') == 'secondary_register':
+        tgt_sec, sec_err = _get_target_secondary_node(tgt_node)
+        if sec_err:
+            migration.error_message = sec_err
+            migration.write_to_db(db.kv_store)
+            return False, True, _WAIT
+        if tgt_sec is not None:
+            sec_rpc = _make_rpc(tgt_sec)
+            ok, err = _expose_lvol_on_secondary(
+                lvol, tgt_node, tgt_sec, sec_rpc, None, None,
+                already_registered=True)
+            if not ok:
+                migration.write_to_db(db.kv_store)
+                return False, True, err
+        migration.transfer_context = {}
+        _update_ana_states(migration, src_node, tgt_node, src_rpc, tgt_rpc)
+        return True, False, None
+
     # --- Poll in-progress final migration ---
     if ctx.get('stage') == 'transfer':
         result = src_rpc.bdev_lvol_transfer_stat(src_lvol_composite)
@@ -904,7 +919,8 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         migration.current_job_id = ""
         migration.write_to_db(db.kv_store)
 
-        # Register lvol on target secondary (if ha type and secondary is online)
+        # Expose lvol on target secondary via NVMe-oF (bdev_lvol_register was
+        # already done in the setup section before final migration started).
         if lvol.ha_type == "ha":
             tgt_sec, sec_err = _get_target_secondary_node(tgt_node)
             if sec_err:
@@ -913,27 +929,15 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                 migration.write_to_db(db.kv_store)
                 return False, True, _WAIT
             if tgt_sec is not None:
-                # Re-query target to get the final blobid and SPDK uuid
-                lvols_list = tgt_rpc.bdev_lvol_get_lvols(tgt_node.lvstore)
-                tgt_blobid = None
-                tgt_lvol_uuid = lvol.lvol_uuid
-                if lvols_list:
-                    for entry in lvols_list:
-                        entry_name = entry.get('name', '') or entry.get('lvol_name', '')
-                        if entry_name in (lvol.lvol_bdev, tgt_lvol_composite):
-                            tgt_blobid = entry.get('blobid')
-                            tgt_lvol_uuid = entry.get('uuid', lvol.lvol_uuid)
-                            break
-                if tgt_blobid is None:
-                    migration.transfer_context = {}
-                    migration.write_to_db(db.kv_store)
-                    return False, True, (
-                        "Cannot get blobid from target for secondary registration")
                 sec_rpc = _make_rpc(tgt_sec)
                 ok, err = _expose_lvol_on_secondary(
-                    lvol, tgt_node, tgt_sec, sec_rpc, tgt_blobid, tgt_lvol_uuid)
+                    lvol, tgt_node, tgt_sec, sec_rpc, None, None,
+                    already_registered=True)
                 if not ok:
-                    migration.transfer_context = {}
+                    # Keep the primary lvol intact — transfer already completed.
+                    # Mark stage so retry skips re-creating and goes straight to
+                    # secondary registration.
+                    migration.transfer_context = {'stage': 'secondary_register'}
                     migration.write_to_db(db.kv_store)
                     return False, True, err
                 logger.info(
@@ -969,7 +973,57 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc)
         return False, True, f"bdev_lvol_set_migration_flag failed for target lvol {tgt_lvol_composite}"
 
-    # Step 1b: expose via NVMe-oF using the SOURCE's NQN (clients follow same NQN)
+    # Step 1b: query map_id / blobid / uuid — needed for secondary registration
+    # and for bdev_lvol_final_migration.  Do this once here rather than again
+    # after NVMe-oF setup to keep secondary state consistent from the start.
+    lvols_list = tgt_rpc.bdev_lvol_get_lvols(tgt_node.lvstore)
+    if not lvols_list:
+        _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc)
+        return False, True, "bdev_lvol_get_lvols returned empty result from target"
+
+    tgt_map_id = None
+    tgt_blobid = None
+    tgt_lvol_uuid = lvol.lvol_uuid
+    for entry in lvols_list:
+        entry_name = entry.get('name', '') or entry.get('lvol_name', '')
+        if entry_name in (lvol.lvol_bdev, tgt_lvol_composite):
+            tgt_map_id = entry.get('map_id')
+            tgt_blobid = entry.get('blobid')
+            tgt_lvol_uuid = entry.get('uuid', lvol.lvol_uuid)
+            break
+
+    if tgt_map_id is None:
+        _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc)
+        return False, True, f"Could not find map_id for {lvol.lvol_bdev} on target"
+
+    # Step 1c: register lvol on secondary and set migration flag there.
+    # The secondary's hublvol_write() checks migration_flag before deciding
+    # whether to treat the completion signal as a chain-parent operation.
+    # If the flag is not set the signal is treated as normal I/O and the
+    # secondary's lvol is never chained to its parent snapshot.
+    sec_setup_rpc = None
+    if lvol.ha_type == "ha":
+        tgt_sec_setup, sec_setup_err = _get_target_secondary_node(tgt_node)
+        if sec_setup_err:
+            _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc)
+            return False, True, sec_setup_err
+        if tgt_sec_setup is not None:
+            sec_setup_rpc = _make_rpc(tgt_sec_setup)
+            ret = sec_setup_rpc.bdev_lvol_register(
+                lvol.lvol_bdev, tgt_node.lvstore, tgt_lvol_uuid, tgt_blobid,
+                lvol.lvol_priority_class)
+            if not ret:
+                _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc)
+                return False, True, (
+                    f"bdev_lvol_register on secondary failed for {tgt_lvol_composite}")
+            ret = sec_setup_rpc.bdev_lvol_set_migration_flag(tgt_lvol_composite)
+            if not ret:
+                sec_setup_rpc.delete_lvol(lvol.lvol_bdev, del_async=True)
+                _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc)
+                return False, True, (
+                    f"bdev_lvol_set_migration_flag on secondary failed for {tgt_lvol_composite}")
+
+    # Step 2: expose via NVMe-oF using the SOURCE's NQN (clients follow same NQN)
     # Multiple volumes may share the same subsystem (namespace sharing group):
     # if the subsystem already exists on target (placed there by a prior migration
     # of a sibling volume), just add a new namespace to it.
@@ -982,14 +1036,14 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         serial = lvol.uuid[:20].upper().replace('-', '')
         ret = tgt_rpc.subsystem_create(nqn, serial, "SimplyBlock")
         if not ret:
-            _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc)
+            _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc, secondary_rpc=sec_setup_rpc)
             return False, True, f"Failed to create subsystem {nqn} on target"
         subsystem_created_on_target = True
 
         ret = tgt_rpc.listeners_create(nqn, trtype, target_ip, tgt_node.get_lvol_subsys_port(tgt_node.lvstore))
         if not ret:
             tgt_rpc.subsystem_delete(nqn)
-            _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc)
+            _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc, secondary_rpc=sec_setup_rpc)
             return False, True, "Failed to create listener on target"
     else:
         logger.info(
@@ -999,30 +1053,9 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
     if not ns_ret:
         if subsystem_created_on_target:
             tgt_rpc.subsystem_delete(nqn)
-        _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc)
+        _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc, secondary_rpc=sec_setup_rpc)
         return False, True, "Failed to add namespace to target subsystem"
     tgt_ns_id = int(ns_ret) if ns_ret else lvol.ns_id
-
-    # Step 2: get blobid of the newly created target lvol (passed as lvol_id to bdev_lvol_final_migration)
-    lvols_list = tgt_rpc.bdev_lvol_get_lvols(tgt_node.lvstore)
-    if not lvols_list:
-        tgt_rpc.subsystem_delete(nqn)
-        _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc)
-        return False, True, "bdev_lvol_get_lvols returned empty result from target"
-
-    tgt_map_id = None
-    tgt_lvol_uuid = lvol.lvol_uuid  # fallback to source UUID
-    for entry in lvols_list:
-        entry_name = entry.get('name', '') or entry.get('lvol_name', '')
-        if entry_name in (lvol.lvol_bdev, tgt_lvol_composite):
-            tgt_map_id = entry.get('map_id')
-            tgt_lvol_uuid = entry.get('uuid', lvol.lvol_uuid)
-            break
-
-    if tgt_map_id is None:
-        tgt_rpc.subsystem_delete(nqn)
-        _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc)
-        return False, True, f"Could not find map_id for {lvol.lvol_bdev} on target"
 
     # Step 3: connect source to target hub lvol
     ctrl_name = f"mighub_{migration.uuid[:8]}"
@@ -1031,16 +1064,16 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
     ret = src_rpc.bdev_nvme_attach_controller(ctrl_name, hub_nqn, target_ip, hub_port, trtype)
     if not ret:
         tgt_rpc.subsystem_delete(nqn)
-        _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc)
+        _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc, secondary_rpc=sec_setup_rpc)
         return False, True, "Failed to connect source to target hub"
 
     hub_bdev = f"{ctrl_name}n1"
 
-    # Step 4: locate the last migrated snapshot's composite name on the source
+    # Step 4: locate the last migrated snapshot's composite name on the target
     if not migration.snaps_migrated:
         src_rpc.bdev_nvme_detach_controller(ctrl_name)
         tgt_rpc.subsystem_delete(nqn)
-        _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc)
+        _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc, secondary_rpc=sec_setup_rpc)
         return False, True, "No snapshots migrated; cannot perform final migration"
 
     last_snap_uuid = migration.snaps_migrated[-1]
@@ -1049,7 +1082,7 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
     except KeyError:
         src_rpc.bdev_nvme_detach_controller(ctrl_name)
         tgt_rpc.subsystem_delete(nqn)
-        _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc)
+        _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc, secondary_rpc=sec_setup_rpc)
         return False, True, f"Last snapshot {last_snap_uuid} not found"
 
     tgt_snap_composite = _snap_composite(tgt_node.lvstore, last_snap)
@@ -1060,7 +1093,7 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
     if ret is None:
         src_rpc.bdev_nvme_detach_controller(ctrl_name)
         tgt_rpc.subsystem_delete(nqn)
-        _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc)
+        _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc, secondary_rpc=sec_setup_rpc)
         return False, True, "bdev_lvol_final_migration failed to start"
 
     migration.transfer_context = {
@@ -1142,19 +1175,6 @@ def _get_secondary_rpc(node):
     return None
 
 
-def _get_all_secondary_rpcs(node):
-    """Return list of RPC clients for all online secondaries of node."""
-    rpcs = []
-    for peer_id in [node.secondary_node_id, node.tertiary_node_id]:
-        if not peer_id:
-            continue
-        try:
-            sec = db.get_storage_node_by_id(peer_id)
-            if sec.status == StorageNode.STATUS_ONLINE:
-                rpcs.append(_make_rpc(sec))
-        except KeyError:
-            pass
-    return rpcs
 
 
 def _handle_cleanup_source(migration, src_node, src_rpc):
