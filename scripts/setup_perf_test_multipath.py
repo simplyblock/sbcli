@@ -63,7 +63,7 @@ DATA2_SG        = "sg-069a5f96309b8dbdd"      # allow only from 172.31.97.0/24
 # Kept for backwards compat with any existing consumer of these names.
 SUBNET_ID      = MGMT_SUBNET_ID
 STORAGE_SG     = MGMT_SG
-BRANCH       = "test_FTT2"
+BRANCH       = "main"
 USER         = "ec2-user"
 MGMT_IFACE   = "eth0"
 DATA_NICS    = ["eth1", "eth2"]          # Names the OS assigns to ENI index 1, 2
