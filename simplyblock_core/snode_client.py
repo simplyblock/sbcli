@@ -20,12 +20,12 @@ class SNodeClient:
 
     def __init__(self, host, timeout=300, retry=5):
         settings = Settings()
-        scheme = "https" if settings.tls_enabled else "http"
+        scheme = "https" if settings.tls_connect != "disabled" else "http"
         self.url = f'{scheme}://{host}/snode/'
         self.timeout = timeout
         self.session = requests.session()
-        if settings.tls_enabled:
-            self.session.verify = str(settings.certificate_authority)
+        if settings.tls_connect != "disabled":
+            self.session.verify = str(settings.tls_certificate_authority)
         self.session.headers['Content-Type'] = "application/json"
         retries = Retry(total=retry, backoff_factor=1, connect=retry, read=retry)
         self.session.mount("http://", HTTPAdapter(max_retries=retries))

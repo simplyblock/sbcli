@@ -44,5 +44,5 @@ if __name__ == '__main__':
         app.register_api(internal_api.storage_node.kubernetes.api)
 
     settings = Settings()
-    ssl_ctx = (settings.tls_certificate, settings.tls_key) if settings.tls_enabled else None
+    ssl_ctx = (settings.tls_certificate, settings.tls_key) if settings.tls_serve else None
     app.run(host='0.0.0.0', debug=constants.LOG_WEB_DEBUG, ssl_context=ssl_ctx)
