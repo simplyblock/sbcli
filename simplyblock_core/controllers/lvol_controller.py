@@ -513,7 +513,8 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     lvol.size = int(size)
     lvol.max_size = int(max_size)
     lvol.status = LVol.STATUS_IN_CREATION
-
+    lvol.pool_uuid = pool.get_id()
+    lvol.pool_name = pool.pool_name
     lvol.create_dt = str(datetime.now())
     lvol.ha_type = ha_type
     lvol.bdev_stack = []
@@ -752,8 +753,6 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
                     f"register create lvol {lvol.uuid} on {sec.get_id()[:8]}")
             # "skip", "reject" at this stage → already handled or skip
 
-    lvol.pool_uuid = pool.get_id()
-    lvol.pool_name = pool.pool_name
     lvol.status = LVol.STATUS_ONLINE
     lvol.write_to_db(db_controller.kv_store)
     lvol_events.lvol_create(lvol)
