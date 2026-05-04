@@ -5405,17 +5405,77 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
             # --- Inside port-blocked window: timeout=0.2s, retry=0, abort on failure ---
             leader_rpc = current_leader.rpc_client(timeout=0.2, retry=0)
 
-            time.sleep(0.5)
+            ### 4- drain in-flight IO BEFORE dropping leadership
+            #
+            # If we drop leadership while IO is still in distrib, those
+            # in-flight IOs land on a non-leader lvstore and either get
+            # redirected via the hub bdev (which may not be open yet on
+            # the new follower) or aborted — both produce client-visible
+            # IO errors and qpair tear-downs.  Concrete example: incident
+            # 2026-05-02 (k8s_native_failover_ha-20260502-101452), worker1.
+            # 123 state-9 IOs were in flight on its distribs at the moment
+            # set_leader=False fired; the open of LVS_4729/hublvoln1
+            # returned ENODEV; nvmf_tcp_qpair_set_recv_state floods and
+            # disconnects followed ~1.6 s later.
+            #
+            # The drain runs while the leader's lvol port is iptables-
+            # blocked, so we must not hold this open indefinitely.  The
+            # earlier fixed 0.5 s sleep was a workaround put in place
+            # after the original 10 s drain regression — but that
+            # regression was on the recreate_lvstore_on_non_leader path,
+            # where the blocked node is the configured primary and runs
+            # data migration (which never pauses on port block, hence the
+            # poll never settled).  *This* path blocks `current_leader`,
+            # which is a secondary or tertiary that became acting leader
+            # while the configured primary was out — and migration never
+            # runs on a secondary/tertiary, so the inflight counter
+            # genuinely drains.
+            #
+            # Bound at _DRAIN_BOUND_SEC anyway: a slow JM/distrib
+            # completion shouldn't be allowed to hold the leader's port
+            # blocked beyond client max_latency.  On timeout we proceed
+            # with the drop and accept the same residual class of error
+            # this is trying to prevent — but bounded.
+            _DRAIN_BOUND_SEC = 2.0
+            _DRAIN_POLL_SEC = 0.05
+            deadline = time.time() + _DRAIN_BOUND_SEC
+            drained = False
+            while time.time() < deadline:
+                try:
+                    still_inflight = leader_rpc.bdev_distrib_check_inflight_io(lvs_jm_vuid)
+                except Exception as e:
+                    logger.warning(
+                        "bdev_distrib_check_inflight_io poll failed for %s on %s: %s",
+                        lvs_name, current_leader.get_id(), e)
+                    break
+                if not still_inflight:
+                    drained = True
+                    break
+                time.sleep(_DRAIN_POLL_SEC)
+            if not drained:
+                # Continuing with the leadership drop while IO is still in
+                # the distrib pipeline produces exactly the failure this
+                # drain is meant to prevent (in-flight IO hitting a
+                # non-leader lvstore at the moment of transition: hub-bdev
+                # redirect failures, qpair tear-downs, client IO errors).
+                # Abort cleanly: _abort_restart_and_unblock kills the
+                # recovering node's SPDK, sets it OFFLINE, and unblocks
+                # every peer port we just blocked above. The restart task
+                # runner re-queues from there; on the next attempt the
+                # cluster may have settled enough for drain to complete
+                # within the bound.
+                _abort_restart_and_unblock(
+                    f"Inflight IO did not drain on acting-leader "
+                    f"{current_leader.get_id()} within {_DRAIN_BOUND_SEC}s; "
+                    f"refusing to drop leadership against a non-empty distrib "
+                    f"pipeline")
 
-            ### 4- drop leadership on current leader
+            ### 5- drop leadership on current leader (drain complete)
             try:
                 leader_rpc.bdev_lvol_set_leader(lvs_name, leader=False, bs_nonleadership=True)
                 leader_rpc.bdev_distrib_force_to_non_leader(lvs_jm_vuid)
             except Exception as e:
                 _abort_restart_and_unblock(f"Failed to demote leader {current_leader.get_id()}: {e}")
-
-            ### 4-1 fixed 0.5s quiesce window (see secondary/tertiary path above)
-            time.sleep(0.5)
 
         if disconnected_peers:
             logger.info(f"Peers disconnected {disconnected_peers}, forcing journal replication on node: {snode.get_id()}")
