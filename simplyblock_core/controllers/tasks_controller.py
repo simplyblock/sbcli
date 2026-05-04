@@ -149,6 +149,30 @@ def add_device_to_auto_restart(device):
 
 
 def add_node_to_auto_restart(node):
+    # Auto-restart kills SPDK and runs the full recreate path. That is
+    # only valid when SPDK is actually gone -- i.e. when the node has
+    # been moved to OFFLINE by the failure detector (set_node_offline,
+    # which is the canonical place that pairs the OFFLINE flip with
+    # this call).
+    #
+    # All other non-ONLINE states have a non-destructive recovery:
+    #   - DOWN: port-unblock; SPDK is still up.
+    #   - UNREACHABLE: clear flag; SPDK is reachable again.
+    #   - SCHEDULABLE: clear flag; RPC works again. (SCHEDULABLE is
+    #     functionally redundant with OFFLINE; see the note in
+    #     storage_node_monitor.set_node_schedulable.)
+    # Queueing a restart from those states turns a transient blip into
+    # a kill-and-replay, which on an already-stressed cluster can hit
+    # placement errors during lvstore-failover replay (see incident
+    # 2026-05-02).
+    if node.status != StorageNode.STATUS_OFFLINE:
+        logger.warning(
+            "Refusing to queue auto-restart for node %s in status %s "
+            "(only OFFLINE warrants a destructive SPDK restart)",
+            node.get_id(), node.status,
+        )
+        return False
+
     cluster = db.get_cluster_by_id(node.cluster_id)
     if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED,
                               Cluster.STATUS_READONLY, Cluster.STATUS_UNREADY, Cluster.STATUS_SUSPENDED]:
