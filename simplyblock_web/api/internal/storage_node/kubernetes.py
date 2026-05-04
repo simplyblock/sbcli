@@ -419,15 +419,20 @@ def spdk_process_start(body: SPDKParams):
         node_utils_k8s.wait_for_job_completion(job_resp.metadata.name, namespace)
         logger.info(f"Job '{job_resp.metadata.name}' completed successfully")
 
-        batch_v1.delete_namespaced_job(
-            name=job_resp.metadata.name,
-            namespace=namespace,
-            body=V1DeleteOptions(
-                propagation_policy='Foreground',
-                grace_period_seconds=0
+        try:
+            batch_v1.delete_namespaced_job(
+                name=job_resp.metadata.name,
+                namespace=namespace,
+                body=V1DeleteOptions(
+                    propagation_policy='Foreground',
+                    grace_period_seconds=0
+                )
             )
-        )
-        logger.info(f"Job deleted: '{job_resp.metadata.name}' in namespace '{namespace}")
+            logger.info(f"Job deleted: '{job_resp.metadata.name}' in namespace '{namespace}")
+        except ApiException as e:
+            if e.status != 404:
+                raise
+            logger.info(f"Job '{job_resp.metadata.name}' already gone, skipping delete")
         if (cpu_topology_enabled and not skip_kubelet_configuration) or (core_isolate and not cpu_topology_enabled):
             if cpu_topology_enabled and not skip_kubelet_configuration:
                 if not openshift:
