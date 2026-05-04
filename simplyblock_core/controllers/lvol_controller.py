@@ -1651,6 +1651,9 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
         for h in lvol.allowed_hosts:
             if h["nqn"] == host_nqn:
                 host_entry = h
+                pool = db_controller.get_pool_by_id(lvol.pool_uuid)
+                host_entry["dhchap_key"] = pool.dhchap_key
+                host_entry["dhchap_ctrlr_key"] = pool.dhchap_ctrlr_key
                 break
         if not host_entry:
             logger.error(f"Host NQN {host_nqn} not found in allowed hosts for volume {uuid}")
