@@ -5,7 +5,8 @@ import math
 import time
 import uuid
 
-from simplyblock_core.controllers import lvol_controller, snapshot_events, pool_controller, tasks_controller
+from simplyblock_core.controllers import lvol_controller, snapshot_events, pool_controller, tasks_controller, \
+    migration_controller
 
 from simplyblock_core import utils, constants
 from simplyblock_core.db_controller import DBController
@@ -48,6 +49,18 @@ def add(lvol_id, snapshot_name, backup=False, lock=True):
     except KeyError as e:
         logger.error(e)
         return False, str(e)
+
+    # Reject snapshot creation on an lvol that is being deleted. SPDK's
+    # blobstore reuses the lvol's metadata for the snapshot's parent
+    # pointer; if the lvol is mid-delete (async or sync), creating a
+    # snapshot from it can leave the resulting snapshot's parent_id
+    # dangling and produce the open_ref/clone-entries inconsistency
+    # that makes the snapshot undeletable until node restart.
+    if lvol.status == LVol.STATUS_IN_DELETION:
+        msg = (f"Cannot create snapshot from lvol {lvol_id}: "
+               f"lvol is in deletion")
+        logger.error(msg)
+        return False, msg
 
     # Block during restart Phase 5
     try:
@@ -375,7 +388,6 @@ def delete(snapshot_uuid, force_delete=False):
         pass
 
     # Block deletion if the snapshot's parent volume is being migrated
-    from simplyblock_core.controllers import migration_controller
     active_mig = migration_controller.get_active_migration_for_lvol(
         snap.lvol.uuid, snap.cluster_id)
     if active_mig and not force_delete:
@@ -409,15 +421,51 @@ def delete(snapshot_uuid, force_delete=False):
             return True
         return False
 
+    # A clone counts as "still blocking the snapshot" when either it's
+    # alive (status != IN_DELETION) OR its SPDK-side delete hasn't
+    # completed yet (deletion_status not set). The previous code only
+    # excluded IN_DELETION clones unconditionally — that allowed the
+    # snapshot's hard-delete to fire while SPDK still held the clone's
+    # bdev open, returning EBUSY (-16) "Cannot remove snapshot because
+    # it is open" and ultimately producing the open_ref / no-clone-
+    # entries metadata inconsistency that requires a node restart.
+    # Now we soft-delete the snapshot in that case; the clone's own
+    # delete-completion path will re-trigger snapshot_controller.delete
+    # once SPDK has actually removed the bdev (deletion_status set).
     clones = []
+    in_deletion_clones = []
     for lvol in db_controller.get_lvols(snode.cluster_id):
-        if lvol.cloned_from_snap and lvol.cloned_from_snap == snapshot_uuid and lvol.status != LVol.STATUS_IN_DELETION:
+        if not lvol.cloned_from_snap or lvol.cloned_from_snap != snapshot_uuid:
+            continue
+
+        if lvol.status == LVol.STATUS_IN_DELETION:
+            in_deletion_clones.append(lvol)
+
+        if lvol.status != LVol.STATUS_IN_DELETION:
             clones.append(lvol)
+            continue
+        # # IN_DELETION: only treat as gone if SPDK delete already
+        # # completed for this clone (data-plane removed, just awaiting
+        # # DB cleanup). Otherwise it's still in flight and blocks us.
+        # if not getattr(lvol, "deletion_status", None):
+        #     clones.append(lvol)
 
     if len(clones) >= 1:
         logger.warning(f"Soft delete snapshot with clones: {snapshot_uuid}")
         snap = db_controller.get_snapshot_by_id(snapshot_uuid)
         snap.deleted = True
+        snap.write_to_db(db_controller.kv_store)
+        return True
+
+    # if there are no active clones and clones in status in_deletion found, then we
+    # Defer delete the snapshot, meaning we switch snapshot status to in_deletion
+    # and rely on the snapshot monitor to initiate the delete process once the clones
+    # in deletion are fully deleted.
+    elif len(in_deletion_clones) >= 1:
+        logger.info(f"Defer deleting snapshot: {snapshot_uuid}")
+        snap = db_controller.get_snapshot_by_id(snapshot_uuid)
+        snap.status = SnapShot.STATUS_IN_DELETION
+        snap.deletion_status = ""
         snap.write_to_db(db_controller.kv_store)
         return True
 
@@ -500,6 +548,22 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     except KeyError as e:
         logger.error(e)
         return False, str(e)
+
+    # Reject cloning a snapshot that is in pending deletion. If a prior
+    # clone-create failed (e.g. an SPDK duplicate-name collision on the
+    # CLN_xxxx bdev) the mgmt layer issues an async snapshot delete; if
+    # we let a fresh clone slip through that window, SPDK ends up with
+    # the snapshot's parent metadata partially overwritten by the new
+    # clone's lineage. The later sync delete then leaves the original
+    # snapshot with non-zero open_ref but no clone entries, producing
+    # the "Cannot remove snapshot because it is open" / EBUSY (-16)
+    # state that requires a node restart to clear.
+    if snap.deleted or snap.status == SnapShot.STATUS_IN_DELETION:
+        msg = (f"Cannot clone snapshot {snapshot_id}: "
+               f"snapshot is in deletion (deleted={snap.deleted}, "
+               f"status={snap.status})")
+        logger.error(msg)
+        return False, msg
 
     try:
         pool = db_controller.get_pool_by_id(snap.lvol.pool_uuid)
