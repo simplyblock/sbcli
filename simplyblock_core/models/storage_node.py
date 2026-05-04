@@ -451,13 +451,27 @@ class StorageNode(BaseNodeObject):
                 return False
 
     def connect_to_hublvol(self, primary_node, failover_node=None, role="secondary",
-                           timeout=None, rpc_timeout=None):
+                           timeout=None, rpc_timeout=None, lvs_node=None):
         """Connect to a primary node's hublvol, optionally with multipath failover.
 
         If failover_node is provided (typically sec_1), sets up NVMe ANA
         multipath so that IO automatically fails over from the primary path
         (optimized) to the failover path (non_optimized) when the primary
         becomes unreachable.
+
+        ``lvs_node`` separates the LVS metadata source from the hublvol
+        attach target. Defaults to ``primary_node`` (the common case where
+        the configured primary is also the hublvol target). Pass an
+        explicit ``lvs_node`` when the hublvol target is a *peer* that
+        took over leadership for an LVS not owned by it — typical example
+        is a tertiary (re)connecting through the secondary (sec_1) when
+        the configured primary is offline. In that case ``primary_node``
+        is the peer (acting leader, host of the takeover hublvol bdev),
+        but the LVS-name / jm_vuid / port / subsystem-NQN must come from
+        the configured primary of the LVS we're connecting for. Without
+        this distinction the call uses ``primary_node``'s OWN primary-LVS
+        metadata, producing e.g. ``Set groupid 4729`` while we're trying
+        to wire up LVS_6207 (incident 2026-05-02, 15:53:42).
 
         Returns True iff all three required steps succeed:
           1. at least one NVMe controller attach established the remote bdev
@@ -480,14 +494,28 @@ class StorageNode(BaseNodeObject):
         """
         if rpc_timeout is None and timeout is not None:
             rpc_timeout = timeout
-        logger.info(f'Connecting node {self.get_id()} to hublvol on {primary_node.get_id()}'
-                     + (f' with failover to {failover_node.get_id()}' if failover_node else ''))
 
-        if primary_node.hublvol is None:
-            raise ValueError(f"HubLVol of primary node {primary_node.get_id()} is not present")
+        if lvs_node is None:
+            lvs_node = primary_node
+
+        logger.info(
+            f'Connecting node {self.get_id()} to hublvol on {primary_node.get_id()}'
+            f' for {lvs_node.lvstore}'
+            + (f' (lvs_node={lvs_node.get_id()})' if lvs_node is not primary_node else '')
+            + (f' with failover to {failover_node.get_id()}' if failover_node else '')
+        )
+
+        if lvs_node.hublvol is None:
+            raise ValueError(
+                f"HubLVol of lvs_node {lvs_node.get_id()} is not present "
+                f"(lvstore={lvs_node.lvstore})")
 
         rpc_client = self.rpc_client()
-        remote_bdev = f"{primary_node.hublvol.bdev_name}n1"
+        # Remote bdev / subsystem-NQN are keyed by LVS name, not by the
+        # peer's identity. The takeover hublvol on a peer that became
+        # acting leader uses the *original* lvstore name (and the same
+        # NQN/port/UUID) — see create_secondary_hublvol.
+        remote_bdev = f"{lvs_node.hublvol.bdev_name}n1"
 
         if not rpc_client.get_bdevs(remote_bdev):
             # All hublvol NVMe-oF attach/detach now flows through a single
@@ -506,27 +534,27 @@ class StorageNode(BaseNodeObject):
             )
             peers = [primary_node] + ([failover_node] if failover_node else [])
             coordinator = HublvolReconnectCoordinator(DBController())
-            if not coordinator.reconcile(self, primary_node, peers, role=role,
+            if not coordinator.reconcile(self, lvs_node, peers, role=role,
                                          rpc_timeout=rpc_timeout):
                 logger.error(
                     "Hublvol reconcile failed for %s on %s (role=%s)",
-                    primary_node.hublvol.bdev_name, self.get_id(), role,
+                    lvs_node.hublvol.bdev_name, self.get_id(), role,
                 )
                 return False
 
         if not rpc_client.bdev_lvol_set_lvs_opts(
-                primary_node.lvstore,
-                groupid=primary_node.jm_vuid,
-                subsystem_port=primary_node.get_lvol_subsys_port(primary_node.lvstore),
+                lvs_node.lvstore,
+                groupid=lvs_node.jm_vuid,
+                subsystem_port=lvs_node.get_lvol_subsys_port(lvs_node.lvstore),
                 role=role,
         ):
             logger.error("bdev_lvol_set_lvs_opts failed for %s on %s",
-                         primary_node.lvstore, self.get_id())
+                         lvs_node.lvstore, self.get_id())
             return False
 
-        if not rpc_client.bdev_lvol_connect_hublvol(primary_node.lvstore, remote_bdev):
+        if not rpc_client.bdev_lvol_connect_hublvol(lvs_node.lvstore, remote_bdev):
             logger.error("bdev_lvol_connect_hublvol failed for %s on %s",
-                         primary_node.lvstore, self.get_id())
+                         lvs_node.lvstore, self.get_id())
             return False
 
         return True
