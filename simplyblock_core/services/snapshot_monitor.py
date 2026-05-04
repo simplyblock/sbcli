@@ -150,6 +150,12 @@ def process_snap_delete(snap, snode):
     if not leader_node:
         raise Exception("Failed to get leader node")
 
+    for lvol in db.get_lvols():
+        if lvol.cloned_from_snap and lvol.cloned_from_snap == snap.get_id():
+            if lvol.status == SnapShot.STATUS_IN_DELETION:
+                logger.error("Cannot delete snapshot while it's clone is in deletion")
+                return False
+
     if snap.deletion_status == "" or snap.deletion_status != leader_node.get_id():
 
         ret, _ = leader_node.rpc_client().delete_lvol(snap.snap_bdev)
