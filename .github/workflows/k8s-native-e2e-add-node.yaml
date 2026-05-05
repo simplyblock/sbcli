@@ -126,7 +126,7 @@ jobs:
         name: Checkout simplyblock-csi
         with:
           repository: simplyblock-io/simplyblock-csi
-          ref: refs/heads/${{ github.event.inputs.simplyblock_csi_branch || 'master' }}
+          ref: ${{ github.event.inputs.simplyblock_csi_branch || 'master' }}
           path: 'simplyblock-csi'
 
       - name: Resolve KEY_PATH and validate key exists
