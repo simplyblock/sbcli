@@ -173,18 +173,16 @@ KATO=10000
 # hublvol attach + deferred failover); this stays as belt-and-braces so
 # a stragglier rejoin doesn't immediately re-trip the bug.
 ACK_TO=12
-BDEV_RETRY=0
-# Used when the storage node has >1 data NIC (NVMe multipath active). Per the
-# SPDK NVMe multipath docs, bdev_retry_count must be non-zero so aborted IOs
-# from a failed path are retried on the alternate path instead of returning
-# as errors to the caller. Kept minimal: one fast retry is enough to cover
-# a brief path-switch window without compounding latency on genuine outages.
-BDEV_RETRY_MULTIPATH=2
-TRANSPORT_RETRY=3
-# With NVMe multipath active the alternate path already provides redundancy,
-# so transport_retry_count can be tightened from 3 to 1 to fail an IO faster
-# onto the other path instead of burning the per-path retry budget first.
-TRANSPORT_RETRY_MULTIPATH=1
+# bdev_retry_count must be non-zero for SPDK bdev_nvme to retry an aborted
+# IO on the alternate path of an NVMe-oF multipath bdev (per the SPDK
+# multipath docs). Multipath is in play whenever a node consumes a hublvol
+# bdev that has both a primary-target and a secondary-target listener
+# (i.e. any FTT≥1 cluster), independent of how many local NICs the node has.
+# So we set the retries unconditionally rather than gating on data_nics.
+# Worst-case retry budget: (1+BDEV_RETRY) * (1+TRANSPORT_RETRY) = 3*2 = 6
+# transport submissions per failing IO before EIO bubbles to the caller.
+BDEV_RETRY=2
+TRANSPORT_RETRY=1
 CTRL_LOSS_TO=1
 FAST_FAIL_TO=0
 RECONNECT_DELAY_CLUSTER=1

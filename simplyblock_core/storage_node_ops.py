@@ -1852,9 +1852,8 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         # 6- set nvme bdev options
         # bdev_nvme_set_options is a pure local SPDK config call; bound it at
         # 5 s so a stuck proxy can't consume the 3 min startup RPC budget.
-        mp = bool(snode.data_nics and len(snode.data_nics) > 1)
         set_opts_rpc = snode.rpc_client(timeout=5, retry=0)
-        ret = set_opts_rpc.bdev_nvme_set_options(multipath=mp)
+        ret = set_opts_rpc.bdev_nvme_set_options()
         if not ret:
             logger.error("Failed to set nvme options")
             return False
@@ -2558,9 +2557,8 @@ def _restart_storage_node_impl(
     # 6- set nvme bdev options
     # bdev_nvme_set_options is a pure local SPDK config call; bound it at
     # 5 s so a stuck proxy can't consume the 10 min restart RPC budget.
-    mp = bool(snode.data_nics and len(snode.data_nics) > 1)
     set_opts_rpc = snode.rpc_client(timeout=5, retry=0)
-    ret = set_opts_rpc.bdev_nvme_set_options(multipath=mp)
+    ret = set_opts_rpc.bdev_nvme_set_options()
     if not ret:
         logger.error("Failed to set nvme options")
         return False
