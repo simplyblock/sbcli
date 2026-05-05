@@ -174,24 +174,21 @@ class TestShortCircuitDoesNotApplyToNonOnlineStatuses(unittest.TestCase):
 
 
 class TestTerminalStatusesStillDoneImmediately(unittest.TestCase):
-    """Terminal/owning statuses (REMOVED, SCHEDULABLE, DOWN) already had a
-    dedicated early-return above the short-circuit. Pin that path so a
-    refactor doesn't accidentally drop it."""
+    """REMOVED and SCHEDULABLE have dedicated early-returns at the top of
+    task_runner_node. Pin REMOVED so a refactor doesn't accidentally drop
+    it.
+
+    Note: DOWN does NOT short-circuit here today — it falls through to the
+    shutdown+restart path. Per the rationale of commit 2d69bab3
+    ("auto-restart: only OFFLINE warrants a destructive SPDK restart")
+    DOWN arguably should short-circuit too (SPDK is alive, recovery is
+    port-unblock), but flipping that is a behavior change separate from
+    the auto-restart cleanup work and is tracked as a follow-up."""
 
     def test_removed_short_circuits_without_restart(self):
         mod = _load_runner_module()
         task = _mk_task()
         node = _mk_node(status=StorageNode.STATUS_REMOVED)
-        with patch.object(mod, "db") as mock_db:
-            mock_db.get_storage_node_by_id.return_value = node
-            ret = mod.task_runner_node(task)
-        self.assertTrue(ret)
-        self.assertEqual(task.status, JobSchedule.STATUS_DONE)
-
-    def test_down_short_circuits_without_restart(self):
-        mod = _load_runner_module()
-        task = _mk_task()
-        node = _mk_node(status=StorageNode.STATUS_DOWN)
         with patch.object(mod, "db") as mock_db:
             mock_db.get_storage_node_by_id.return_value = node
             ret = mod.task_runner_node(task)

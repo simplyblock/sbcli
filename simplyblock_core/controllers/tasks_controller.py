@@ -149,26 +149,31 @@ def add_device_to_auto_restart(device):
 
 
 def add_node_to_auto_restart(node):
-    # Auto-restart kills SPDK and runs the full recreate path. That is
-    # only valid when SPDK is actually gone -- i.e. when the node has
-    # been moved to OFFLINE by the failure detector (set_node_offline,
-    # which is the canonical place that pairs the OFFLINE flip with
-    # this call).
+    # Auto-restart kills SPDK and runs the full recreate path. The
+    # legitimate triggers are:
+    #   - OFFLINE: SPDK is gone (set_node_offline pairs the OFFLINE
+    #     flip with this call).
+    #   - UNREACHABLE: peer JM connections and remote-device records
+    #     on other nodes have been torn down on their side; passively
+    #     clearing the flag would leave the data-plane view
+    #     inconsistent. The full restart impl is the path that
+    #     re-establishes peer relationships and commits ONLINE.
+    #   - SCHEDULABLE: SPDK RPC was unresponsive; restart drives a
+    #     coordinated recreate.
     #
-    # All other non-ONLINE states have a non-destructive recovery:
-    #   - DOWN: port-unblock; SPDK is still up.
-    #   - UNREACHABLE: clear flag; SPDK is reachable again.
-    #   - SCHEDULABLE: clear flag; RPC works again. (SCHEDULABLE is
-    #     functionally redundant with OFFLINE; see the note in
-    #     storage_node_monitor.set_node_schedulable.)
-    # Queueing a restart from those states turns a transient blip into
-    # a kill-and-replay, which on an already-stressed cluster can hit
-    # placement errors during lvstore-failover replay (see incident
-    # 2026-05-02).
-    if node.status != StorageNode.STATUS_OFFLINE:
+    # DOWN intentionally does NOT trigger auto-restart: SPDK is still
+    # up and cluster-internal traffic works; only the client-facing
+    # port is blocked. Recovery is port-unblock, not a destructive
+    # kill-and-replay.
+    _AUTO_RESTART_OK = (
+        StorageNode.STATUS_OFFLINE,
+        StorageNode.STATUS_UNREACHABLE,
+        StorageNode.STATUS_SCHEDULABLE,
+    )
+    if node.status not in _AUTO_RESTART_OK:
         logger.warning(
             "Refusing to queue auto-restart for node %s in status %s "
-            "(only OFFLINE warrants a destructive SPDK restart)",
+            "(only OFFLINE / UNREACHABLE / SCHEDULABLE are valid triggers)",
             node.get_id(), node.status,
         )
         return False

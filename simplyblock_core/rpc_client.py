@@ -828,20 +828,18 @@ class RPCClient:
         }
         return self._request("bdev_passtest_delete", params)
 
-    def bdev_nvme_set_options(self, multipath=False):
-        # Multipath failover requires a non-zero bdev_retry_count per SPDK docs:
-        # https://spdk.io/doc/nvme_multipath.html
-        # Otherwise aborted IOs (e.g. from a NIC going down) are returned as
-        # errors to the caller instead of being retried on the alternate path.
-        # In multipath mode transport_retry_count is tightened too: the
-        # alternate path already provides redundancy, so failing fast onto
-        # the other path beats burning the per-path retry budget first.
-        bdev_retry = constants.BDEV_RETRY_MULTIPATH if multipath else constants.BDEV_RETRY
-        transport_retry = (
-            constants.TRANSPORT_RETRY_MULTIPATH if multipath else constants.TRANSPORT_RETRY)
+    def bdev_nvme_set_options(self):
+        # bdev_retry_count must be non-zero so SPDK's bdev_nvme retries an
+        # aborted IO on the alternate path of an NVMe-oF multipath bdev,
+        # per https://spdk.io/doc/nvme_multipath.html. Hublvol bdevs are
+        # multipath whenever an FTT≥1 cluster exists, regardless of how
+        # many data NICs the local node has — so the retries are set
+        # unconditionally. See ``constants.BDEV_RETRY`` /
+        # ``constants.TRANSPORT_RETRY`` for the chosen values and the
+        # worst-case retry budget.
         params = {
-            "bdev_retry_count": bdev_retry,
-            "transport_retry_count": transport_retry,
+            "bdev_retry_count": constants.BDEV_RETRY,
+            "transport_retry_count": constants.TRANSPORT_RETRY,
             "ctrlr_loss_timeout_sec": constants.CTRL_LOSS_TO,
             "fast_io_fail_timeout_sec" : constants.FAST_FAIL_TO,
             "reconnect_delay_sec": constants.RECONNECT_DELAY_CLUSTER,

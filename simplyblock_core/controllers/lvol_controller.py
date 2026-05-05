@@ -1650,9 +1650,21 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
         for h in lvol.allowed_hosts:
             if h["nqn"] == host_nqn:
                 host_entry = h
-                pool = db_controller.get_pool_by_id(lvol.pool_uuid)
-                host_entry["dhchap_key"] = pool.dhchap_key
-                host_entry["dhchap_ctrlr_key"] = pool.dhchap_ctrlr_key
+                # Note: an earlier change (sfam-2722) unconditionally
+                # injected ``pool.dhchap_key`` / ``pool.dhchap_ctrlr_key``
+                # into ``host_entry`` here. That broke three contracts:
+                #   - it overrode existing host-level keys
+                #   - it injected pool keys when the pool had no DHCHAP
+                #     configured (pool.dhchap_key=None)
+                #   - it emitted ``--dhchap-secret`` for hosts using PSK
+                #     (TLS auth), which conflicts with the host's chosen
+                #     auth mode
+                # Pool-level DHCHAP keys are retrieved by clients via a
+                # separate path (see ``_register_pool_dhchap_keys_on_node``);
+                # the connect command must not embed them. If sfam-2722
+                # needs pool keys propagated for a specific case, add a
+                # guarded code path that gates on ``pool.dhchap`` and
+                # only sets keys the host_entry doesn't already have.
                 break
         if not host_entry:
             logger.error(f"Host NQN {host_nqn} not found in allowed hosts for volume {uuid}")

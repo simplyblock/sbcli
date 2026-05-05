@@ -617,62 +617,18 @@ class TestRecreateLvstoreDualSecondary(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 3. Race condition: remote_devices loops re-read before write
+# 3. (removed) set_node_status peer remote_devices loop
+#
+# The original test asserted that set_node_status iterated peer nodes,
+# re-read each from DB, and called write_to_db on the fresh copy. That
+# loop was moved out of set_node_status into _connect_to_remote_devs and
+# its callers; set_node_status is now pure bookkeeping (own status write,
+# event emit, distr broadcast, optional auto-restart cancellation). The
+# old test asserted behavior that no longer belongs in this function and
+# has been removed. Coverage for the re-read-before-write contract on
+# peer remote_devices belongs alongside _connect_to_remote_devs callers
+# (e.g. add_node, restart_storage_node) — not here.
 # ---------------------------------------------------------------------------
-
-class TestRemoteDevicesRaceCondition(unittest.TestCase):
-    """Bug 2 fix: when updating remote_devices for other nodes, each node
-    must be re-read from DB immediately before writing to avoid overwriting
-    concurrent lvstore_ports changes."""
-
-    @patch("simplyblock_core.storage_node_ops.distr_controller")
-    @patch("simplyblock_core.storage_node_ops._connect_to_remote_devs")
-    @patch("simplyblock_core.storage_node_ops.DBController")
-    def test_set_node_status_rereads_before_write(
-            self, mock_db_cls, mock_connect_devs, mock_distr):
-        """set_node_status remote_devices loop should call get_storage_node_by_id
-        for each node before modifying and writing."""
-        from simplyblock_core.storage_node_ops import set_node_status
-
-        snode = _node("node-1", mgmt_ip="10.0.0.1")
-        other_node = _node("node-2", mgmt_ip="10.0.0.2",
-                           lvstore_ports={"LVS_100": {"lvol_subsys_port": 4420}})
-
-        cluster = _cluster()
-        db = mock_db_cls.return_value
-        db.get_cluster_by_id.return_value = cluster
-
-        # Track which objects get_storage_node_by_id returns
-        fresh_other = _node("node-2", mgmt_ip="10.0.0.2",
-                            lvstore_ports={"LVS_100": {"lvol_subsys_port": 4420},
-                                           "LVS_200": {"lvol_subsys_port": 4426}})
-        fresh_other.write_to_db = MagicMock()
-        fresh_other.rpc_client = MagicMock()
-
-        call_count = [0]
-        def get_node(nid):
-            call_count[0] += 1
-            if "node-1" in nid:
-                return snode
-            # Return the "fresh" version with updated ports
-            return fresh_other
-
-        db.get_storage_node_by_id.side_effect = get_node
-        db.get_storage_nodes_by_cluster_id.return_value = [snode, other_node]
-        mock_connect_devs.return_value = []
-
-        # Mock to prevent actual status change side effects
-        snode.write_to_db = MagicMock()
-        snode.rpc_client = MagicMock()
-
-        set_node_status("node-1", StorageNode.STATUS_ONLINE)
-
-        # The other node should have been re-read from DB (get_storage_node_by_id)
-        # before write_to_db was called
-        fresh_other.write_to_db.assert_called()
-        # Verify the fresh version (with LVS_200) was written, not the stale one
-        self.assertIn("LVS_200", fresh_other.lvstore_ports)
-
 
 
 # ---------------------------------------------------------------------------
