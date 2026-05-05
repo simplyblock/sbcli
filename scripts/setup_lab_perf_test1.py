@@ -548,12 +548,22 @@ PY"""
     ], check=True)
     print("Phase 2a: DONE - cluster created.")
 
+    # sn configure --force always prompts "Type YES/Y to continue" before
+    # formatting NVMes (see simplyblock_core/utils/__init__.py:~1789). The
+    # prompt is for interactive safety; here we feed YES on stdin so the
+    # automated deploy doesn't hang the full SSH timeout (10 min) on the
+    # confirmation. Wrap with `echo YES | ...` instead of plumbing stdin
+    # through ssh_exec because it's localized to this one command.
     print("Phase 2b: Configuring storage nodes...")
+    configure_cmd = (
+        f"/usr/local/bin/sbctl -d sn configure --max-lvol {shlex.quote(args.max_lvol)}"
+        + checksum_flag + (" --force" if inline_checksum else "")
+    )
+    if inline_checksum:
+        configure_cmd = f"echo YES | {configure_cmd}"
     with ThreadPoolExecutor(max_workers=len(sn_ips)) as executor:
-        tasks = [executor.submit(ssh_exec, ip, [
-            f"/usr/local/bin/sbctl -d sn configure --max-lvol {shlex.quote(args.max_lvol)}"
-            + checksum_flag + (" --force" if inline_checksum else "")
-        ], check=True) for ip in sn_ips]
+        tasks = [executor.submit(ssh_exec, ip, [configure_cmd], check=True)
+                 for ip in sn_ips]
         for t in tasks:
             t.result()
     print("Phase 2b: DONE - all SNs configured.")
