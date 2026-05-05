@@ -471,22 +471,43 @@ def _search_for_partitions(rpc_client, nvme_device):
 
 
 def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
+    # When the two NVMes on a node format to different LBAFs (e.g.
+    # heterogeneous hardware where one drive supports an md-capable LBAF
+    # and the other doesn't), the resulting partition bdevs end up with
+    # different md_size and SPDK's RAID1 layer rejects the mirror with
+    # EINVAL ("different metadata format than base bdev"). For lab
+    # configurations where we deliberately want to exercise both
+    # md-on-device and fallback alceml modes in the same cluster, fall
+    # back to a single-bdev JM (no mirror) on the first partition so
+    # the deploy can proceed. We persist only that first bdev in
+    # jm_nvme_bdev_list so the restart path takes the existing single-
+    # bdev recreate branch and doesn't try to rebuild the RAID.
     if snode.jm_device and snode.jm_device.raid_bdev:
         raid_bdev = snode.jm_device.raid_bdev
         if raid_bdev.startswith("raid_jm_"):
             raid_level = "1"
             ret = rpc_client.bdev_raid_create(raid_bdev, jm_nvme_bdevs, raid_level)
             if not ret:
-                logger.error(f"Failed to create raid_jm_{snode.get_id()}")
-                return False
+                logger.warning(
+                    f"RAID create failed for {raid_bdev} on bdevs {jm_nvme_bdevs} "
+                    f"(likely heterogeneous metadata format); falling back to "
+                    f"single-bdev JM on {jm_nvme_bdevs[0]}"
+                )
+                raid_bdev = jm_nvme_bdevs[0]
+                jm_nvme_bdevs = [jm_nvme_bdevs[0]]
     else:
         if len(jm_nvme_bdevs) > 1:
             raid_bdev = f"raid_jm_{snode.get_id()}"
             raid_level = "1"
             ret = rpc_client.bdev_raid_create(raid_bdev, jm_nvme_bdevs, raid_level)
             if not ret:
-                logger.error(f"Failed to create raid_jm_{snode.get_id()}")
-                return False
+                logger.warning(
+                    f"RAID create failed for {raid_bdev} on bdevs {jm_nvme_bdevs} "
+                    f"(likely heterogeneous metadata format); falling back to "
+                    f"single-bdev JM on {jm_nvme_bdevs[0]}"
+                )
+                raid_bdev = jm_nvme_bdevs[0]
+                jm_nvme_bdevs = [jm_nvme_bdevs[0]]
         else:
             raid_bdev = jm_nvme_bdevs[0]
 
