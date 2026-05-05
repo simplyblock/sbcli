@@ -42,7 +42,7 @@ USER = "root"
 IFACE = "eth0"
 DATA_IFACE = "eth1"
 BRANCH = "inline-checksum-validation"
-MAX_LVOL = "100"
+MAX_LVOL = "25"
 
 # Same volume plan layout as the AWS variant; consumed by downstream perf tooling.
 VOLUME_PLAN = [
@@ -459,6 +459,42 @@ def main():
         for t in tasks:
             t.result()
     print("Phase 1.5b: DONE.")
+
+    # NVMe partition cleanup. deploy-cleaner already pulls SPDK off the
+    # drives, but a prior deploy may have left GPT tables / filesystem
+    # signatures / leftover namespace state behind. Wipe signatures, then
+    # nvme-format every non-root NVMe so the data plane sees a clean slate.
+    # sn configure --enable-inline-checksum --force will reformat to a
+    # metadata-capable LBAF on top of this. Storage nodes only -- the mgmt
+    # node is never used for SPDK data devices.
+    print("Phase 1.5d: Wiping partitions and formatting NVMes on storage nodes...")
+    nvme_cleanup_script = r"""set -u
+root_src=$(findmnt -no SOURCE / 2>/dev/null || true)
+root_dev=$(echo "$root_src" | sed -E 's|p?[0-9]+$||')
+echo "Root NVMe (will be skipped): $root_dev"
+for d in $(lsblk -dno NAME,TYPE | awk '$2=="disk" && $1 ~ /^nvme/ {print "/dev/"$1}'); do
+    [ -b "$d" ] || continue
+    if [ "$d" = "$root_dev" ]; then
+        echo "Skip $d (root)"
+        continue
+    fi
+    for p in ${d}p*; do
+        [ -b "$p" ] || continue
+        umount -f "$p" 2>/dev/null || true
+    done
+    echo "Wiping $d (wipefs)"
+    wipefs -af "$d" 2>/dev/null || true
+    echo "Formatting $d (nvme format -s 0)"
+    nvme format "$d" -f -s 0 2>/dev/null || \
+        echo "  WARN: nvme format failed on $d (continuing; sn configure will retry)"
+done
+"""
+    with ThreadPoolExecutor(max_workers=len(sn_ips)) as executor:
+        tasks = [executor.submit(ssh_exec, ip, [nvme_cleanup_script], check=False)
+                 for ip in sn_ips]
+        for t in tasks:
+            t.result()
+    print("Phase 1.5d: DONE.")
 
     print("Phase 1.5c: Fresh-pulling simplyblock + ultra images on every node...")
     pull_script = """python3 - <<'PY'
