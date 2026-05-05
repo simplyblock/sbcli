@@ -208,16 +208,13 @@ def update_cluster_status(cluster_id):
 # to the iteration-77 hang where a half-completed restart left the node
 # DB-online while peer reconnects had silently failed.
 #
-# Recovery for nodes stuck in SCHEDULABLE flows through the
-# auto-restart task (FN_NODE_RESTART) -> the restart impl, which is
-# the only authority for the ONLINE flip when SPDK has actually
-# hung.
+# Recovery for nodes stuck in OFFLINE / UNREACHABLE / SCHEDULABLE flows
+# through the auto-restart task (FN_NODE_RESTART) -> the restart impl,
+# which is the only authority for the ONLINE flip.
 #
-# DOWN and UNREACHABLE are NOT routed through auto-restart: in both
-# states SPDK is (or, on health-check pass, has just been confirmed)
-# alive and cluster-internal connections work. Recovery is the
-# corresponding non-destructive path -- port-unblock for DOWN,
-# clearing the unreachable flag for UNREACHABLE.
+# DOWN is NOT routed through auto-restart: SPDK is still alive and
+# cluster-internal traffic works -- only the client-facing port is
+# blocked. Recovery is port-unblock, not a destructive restart.
 
 
 def set_node_offline(node):
@@ -596,21 +593,34 @@ def check_node(snode):
             set_node_down(snode)
             return True
 
-    # Health checks pass. No auto-restart is queued here: the only
-    # state for which a destructive SPDK restart is correct is OFFLINE,
-    # and OFFLINE is handled by the early return above (and queued for
-    # restart by set_node_offline() when the failure was detected).
+    # Health checks pass. The monitor must NOT flip the node to ONLINE
+    # itself: ONLINE may only be reached from the restart / add_node /
+    # resume paths.
     #
-    # For the other non-ONLINE states reached here:
-    #   - DOWN: SPDK is alive, cluster-internal traffic works; only
-    #     the client-facing port is blocked. Recovery is port-unblock.
-    #   - UNREACHABLE: by definition, all health checks (ping / node
-    #     API / SPDK process / RPC / ports) have just passed, so SPDK
-    #     is reachable. Recovery is just clearing the UNREACHABLE flag.
-    #   - SCHEDULABLE: only ever set when RPC fails twice -- if we
-    #     reached this point, RPC passed, so the SCHEDULABLE flag is
-    #     stale. Recovery is clearing the flag.
-    # None of these warrant killing SPDK.
+    # UNREACHABLE is the one state we *do* re-enter the restart path for
+    # even after health checks recover: by the time we reach UNREACHABLE,
+    # peer JM connections and remote-device records on other nodes have
+    # already been torn down on their side, so a passive flag-clear
+    # would leave the cluster's data-plane view inconsistent with this
+    # node. The full restart impl (set_node_restarting -> impl) is the
+    # canonical path that re-establishes those peer relationships and
+    # then commits the ONLINE flip.
+    #
+    # DOWN and SCHEDULABLE intentionally do NOT trigger auto-restart
+    # here:
+    #   - DOWN: SPDK is alive, cluster-internal traffic works; only the
+    #     client-facing port is blocked. Recovery is port-unblock.
+    #   - SCHEDULABLE: set when RPC fails twice; if we reached this
+    #     point RPC passed, so the flag is stale. Recovery is clearing
+    #     the flag.
+    if snode.status == StorageNode.STATUS_UNREACHABLE:
+        logger.info(
+            "Health checks pass for %s but status is UNREACHABLE; "
+            "queueing auto-restart so peer-side reconnects rebuild "
+            "cleanly via the restart impl",
+            snode.get_id(),
+        )
+        tasks_controller.add_node_to_auto_restart(snode)
 
 
 def loop_for_node(snode):
