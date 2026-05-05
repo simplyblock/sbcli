@@ -497,8 +497,11 @@ done
     print("Phase 1.5d: DONE.")
 
     print("Phase 1.5c: Fresh-pulling simplyblock + ultra images on every node...")
+    # Pull with retry: public.ecr.aws occasionally returns transient errors
+    # (IPv6 source-address races, S3 signed-URL hiccups, etc.). Retry up to
+    # 6 times with 15s backoff so one node's blip doesn't abort the deploy.
     pull_script = """python3 - <<'PY'
-import os, subprocess, sys
+import os, subprocess, sys, time
 import simplyblock_core
 envf = os.path.join(os.path.dirname(simplyblock_core.__file__), 'env_var')
 images = []
@@ -514,9 +517,16 @@ if not images:
     sys.exit(1)
 for img in images:
     print(f'Pulling {img}', flush=True)
-    rc = subprocess.call(['docker', 'pull', img])
-    if rc != 0:
-        sys.exit(rc)
+    last_rc = 1
+    for attempt in range(1, 7):
+        last_rc = subprocess.call(['docker', 'pull', img])
+        if last_rc == 0:
+            break
+        print(f'  pull failed (rc={last_rc}), attempt {attempt}/6 - retry in 15s', flush=True)
+        time.sleep(15)
+    if last_rc != 0:
+        print(f'  giving up on {img} after 6 attempts', file=sys.stderr)
+        sys.exit(last_rc)
 PY"""
     with ThreadPoolExecutor(max_workers=len(all_setup_ips)) as executor:
         tasks = [executor.submit(ssh_exec, ip, [pull_script], check=True)
