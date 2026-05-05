@@ -337,14 +337,16 @@ def process_records(records, records_count, keys=None):
 
 def ping_host(ip):
     logger.debug(f"Pinging ip ... {ip}")
-    response = os.system(f"sudo ping -c 1 -W 2 {ip} > /dev/null")
-    if response == 0:
-        logger.debug(f"{ip} is UP")
-        return True
-    else:
-        logger.debug(f"{ip} is DOWN")
-        return False
-
+    try:
+        result = subprocess.run(
+            ["ping", "-c", "2", "-W", "2", ip],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        up = result.returncode == 0
+    except Exception as e:
+        logger.debug(f"ping error for {ip}: {e}")
+        up = False
+    logger.debug(f"{ip} is {'UP' if up else 'DOWN'}")
+    return up
 
 def sum_records(records):
     if len(records) == 0:
