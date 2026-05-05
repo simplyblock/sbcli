@@ -140,7 +140,8 @@ class CLIWrapperBase:
             args.max_lvol, max_prov, sockets_to_use,args.nodes_per_socket,
             pci_allowed, pci_blocked, force=args.force, device_model=args.device_model,
             size_range=args.size_range, cores_percentage=cores_percentage, nvme_names=nvme_names,
-            calculate_hp_only=args.calculate_hp_only, number_of_devices=number_of_devices)
+            calculate_hp_only=args.calculate_hp_only, number_of_devices=number_of_devices,
+            inline_checksum=args.inline_checksum)
 
     def storage_node__deploy_cleaner(self, sub_command, args):
         storage_ops.deploy_cleaner()
@@ -1003,12 +1004,14 @@ class CLIWrapperBase:
             with open(args.use_backup, 'r') as f:
                 backup_config = _json.load(f)
 
+        inline_checksum = getattr(args, 'inline_checksum', False)
         return cluster_ops.add_cluster(
             blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
             distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity,
             qpair_count, max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name, fabric,
             client_data_nic, max_fault_tolerance=max_fault_tolerance, backup_config=backup_config,
-            nvmf_base_port=args.nvmf_base_port, rpc_base_port=args.rpc_base_port, snode_api_port=args.snode_api_port)
+            nvmf_base_port=args.nvmf_base_port, rpc_base_port=args.rpc_base_port, snode_api_port=args.snode_api_port,
+            inline_checksum=inline_checksum)
 
     def cluster_create(self, args):
         import json as _json
@@ -1045,6 +1048,7 @@ class CLIWrapperBase:
         is_single_node = args.is_single_node
         fabric = args.fabric
         client_data_nic = args.client_data_nic
+        inline_checksum = getattr(args, 'inline_checksum', False)
 
         max_fault_tolerance = min(distr_npcs, 2) if distr_npcs >= 1 else 1
 
@@ -1062,7 +1066,8 @@ class CLIWrapperBase:
             strict_node_anti_affinity, name, tls_secret, ingress_host_source, dns_name, fabric, is_single_node, client_data_nic,
             max_fault_tolerance=max_fault_tolerance,
             backup_config=backup_config,
-            nvmf_base_port=args.nvmf_base_port, rpc_base_port=args.rpc_base_port, snode_api_port=args.snode_api_port)
+            nvmf_base_port=args.nvmf_base_port, rpc_base_port=args.rpc_base_port, snode_api_port=args.snode_api_port,
+            inline_checksum=inline_checksum)
 
     def query_yes_no(self, question, default="yes"):
         """Ask a yes/no question via raw_input() and return their answer.

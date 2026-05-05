@@ -297,12 +297,21 @@ def _def_create_device_stack(device_obj, snode, force=False, clear_data=False):
 
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     if alceml_name not in bdev_names:
+        checksum_method, cache_size, cache_eviction_threshold = utils.alceml_checksum_params(cluster, device_obj)
+        if cluster.inline_checksum and not device_obj.md_supported:
+            logger.warning(
+                f"Inline checksum: device {device_obj.get_id()} ({device_obj.pcie_address}) has no NVMe metadata; "
+                f"alceml will run in fallback mode (extra md page, ~1.17%% capacity overhead)."
+            )
         ret = snode.create_alceml(
             alceml_name, nvme_bdev, alceml_id,
             pba_init_mode=3 if clear_data else 2,
             write_protection=cluster.distr_ndcs > 1,
             pba_page_size=cluster.page_size_in_blocks,
-            full_page_unmap=cluster.full_page_unmap
+            full_page_unmap=cluster.full_page_unmap,
+            checksum_method=checksum_method,
+            cache_size=cache_size,
+            cache_eviction_threshold=cache_eviction_threshold,
         )
 
         if not ret:

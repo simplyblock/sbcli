@@ -1207,6 +1207,41 @@ def validate_sec_options(sec_options):
     return True, None
 
 
+def alceml_fallback_overhead_bytes(cluster, device_size_bytes):
+    """Bytes of capacity charged as initial utilization when alceml runs in
+    cv_fallback_method on a device. Per 2 MiB extent the layout shrinks from
+    510 to 504 data blocks (1 extended-md block + 5 filler), so we lose 6
+    blocks per page. Returns 0 when inline_checksum is off, when device size
+    is unknown, or when the device runs in md-on-device mode (caller must
+    have already filtered for md_supported=False).
+    """
+    if not getattr(cluster, 'inline_checksum', False):
+        return 0
+    if not device_size_bytes or device_size_bytes <= 0:
+        return 0
+    blk_size = cluster.blk_size or 4096
+    page_size = cluster.page_size_in_blocks or (2 * 1024 * 1024)
+    pages = device_size_bytes // page_size
+    return int(pages * 6 * blk_size)
+
+
+def alceml_checksum_params(cluster, nvme_device):
+    """Pick the inline-checksum method and tunables for bdev_alceml_create.
+
+    Returns (method, cache_size, cache_eviction_threshold). method:
+      0 = off (cluster.inline_checksum False)
+      1 = md-on-device (cv_md_method, no read/write amplification)
+      2 = fallback (cv_fallback_method, extra md page per 2 MiB extent)
+    cache_size and cache_eviction_threshold default to 0 so the data plane
+    keeps its built-in defaults (2000 entries, 90% eviction trigger).
+    """
+    if not getattr(cluster, 'inline_checksum', False):
+        return 0, 0, 0
+    if getattr(nvme_device, 'md_supported', False):
+        return 1, 0, 0
+    return 2, 0, 0
+
+
 def addNvmeDevices(rpc_client, snode, devs):
     devices = []
     ret = rpc_client.bdev_nvme_controller_list()
@@ -1269,6 +1304,12 @@ def addNvmeDevices(rpc_client, snode, devs):
                 else:
                     logger.error(f"No subsystem nqn found for device: {nvme_driver_data['pci_address']}")
 
+            # SPDK exposes per-namespace metadata size as a top-level uint32 in bdev_get_bdevs JSON
+            # (lib/bdev/bdev_rpc.c writes "md_size" via spdk_bdev_get_md_size). >=8 means alceml can run
+            # in cv_md_method on this device; 0 means it must run in cv_fallback_method.
+            md_size = int(nvme_dict.get('md_size', 0) or 0)
+            md_supported = md_size >= 8
+
             devices.append(
                 NVMeDevice({
                     'uuid': str(uuid.uuid4()),
@@ -1282,7 +1323,9 @@ def addNvmeDevices(rpc_client, snode, devs):
                     'nvme_controller': nvme_controller,
                     'node_id': snode.get_id(),
                     'cluster_id': snode.cluster_id,
-                    'status': NVMeDevice.STATUS_ONLINE
+                    'status': NVMeDevice.STATUS_ONLINE,
+                    'md_size': md_size,
+                    'md_supported': md_supported,
                 }))
     return devices
 
@@ -1770,7 +1813,8 @@ def regenerate_config(new_config, old_config, force=False):
 
 
 def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_allowed, pci_blocked,
-                     cores_percentage=0, force=False, device_model="", size_range="", nvme_names=None):
+                     cores_percentage=0, force=False, device_model="", size_range="", nvme_names=None,
+                     inline_checksum=False):
     system_info = {}
     nodes_config: dict = {"nodes": []}
 
@@ -1795,8 +1839,24 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
             nvme_device_path = f"/dev/{nvme_device}n1"
             clean_partitions(nvme_device_path)
             nvme_json_string = get_idns(nvme_device_path)
-            lbaf_id = find_lbaf_id(nvme_json_string, 0, 12)
-            format_nvme_device(nvme_device_path, lbaf_id)
+            lbaf_id = None
+            md_lbaf = False
+            if inline_checksum:
+                # Prefer an LBAF with metadata so alceml can run in cv_md_method on this drive.
+                lbaf_id = find_md_lbaf_id(nvme_json_string, target_ds=12, min_ms=8)
+                if lbaf_id is None:
+                    logger.warning(
+                        f"--enable-inline-checksum: device {nvme_device_path} exposes no 4K LBAF with >=8B metadata; "
+                        f"formatting plain 4K. alceml will run in fallback mode on this drive."
+                    )
+                else:
+                    md_lbaf = True
+                    logger.info(f"Formatting {nvme_device_path} with md-capable LBAF index {lbaf_id}")
+            if lbaf_id is None:
+                lbaf_id = find_lbaf_id(nvme_json_string, 0, 12)
+            # When switching to an md-capable LBAF, the namespace SectorSize stays 4096,
+            # so the in-list 4K early-out would skip the reformat. Force it.
+            format_nvme_device(nvme_device_path, lbaf_id, force_reformat=md_lbaf)
 
     for nid in sockets_to_use:
         if nid in cores_by_numa:
@@ -2822,6 +2882,26 @@ def find_lbaf_id(json_data: str, target_ms: int, target_ds: int) -> int:
     return 0
 
 
+def find_md_lbaf_id(json_data: str, target_ds: int = 12, min_ms: int = 8):
+    """Return the LBAF index for a format with data-size==target_ds (log2, 12=4K)
+    and metadata-size>=min_ms. Among matches, prefer the smallest ms to avoid
+    wasting space on 64B-md formats. Returns None if no such LBAF exists.
+    """
+    try:
+        data = json.loads(json_data)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    candidates = []
+    for index, lbaf in enumerate(data.get('lbafs', [])):
+        ms = lbaf.get('ms', 0)
+        if lbaf.get('ds') == target_ds and ms >= min_ms:
+            candidates.append((ms, index))
+    if not candidates:
+        return None
+    candidates.sort()
+    return candidates[0][1]
+
+
 def get_idns(nvme_device: str):
     command = ['nvme', 'id-ns', nvme_device, '--output-format', 'json']
     try:
@@ -2893,8 +2973,11 @@ def is_namespace_4k_from_nvme_list(device_path: str) -> bool:
         return False
 
 
-def format_nvme_device(nvme_device: str, lbaf_id: int):
-    if is_namespace_4k_from_nvme_list(nvme_device):
+def format_nvme_device(nvme_device: str, lbaf_id: int, force_reformat: bool = False):
+    # The 4K early-out only checks SectorSize, not metadata size, so it would
+    # silently skip a reformat needed to switch a 4K-no-md namespace to 4K-with-md.
+    # Callers that need a specific LBAF (e.g. md-capable) pass force_reformat=True.
+    if not force_reformat and is_namespace_4k_from_nvme_list(nvme_device):
         logger.debug(f"Device {nvme_device} already formatted with 4K...skipping")
         return
     command = ['nvme', 'format', nvme_device, f"--lbaf={lbaf_id}", '--force']

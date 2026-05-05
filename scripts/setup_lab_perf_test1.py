@@ -42,7 +42,7 @@ USER = "root"
 IFACE = "eth0"
 DATA_IFACE = "eth1"
 BRANCH = "inline-checksum-validation"
-MAX_LVOL = "100"
+MAX_LVOL = "25"
 
 # Same volume plan layout as the AWS variant; consumed by downstream perf tooling.
 VOLUME_PLAN = [
@@ -280,6 +280,78 @@ PY"""
     return json.loads(output)
 
 
+def fetch_alceml_modes(mgmt_ip, cluster_uuid):
+    """Return per-alceml mode info for every storage device in the cluster.
+
+    Mirrors simplyblock_core.utils.alceml_checksum_params:
+      0 = off                   (cluster.inline_checksum False)
+      1 = md-on-device          (cluster ON, device md_supported)
+      2 = fallback / emulation  (cluster ON, device has no md-capable LBAF)
+    """
+    script = f"""python3 - <<'PY'
+import json
+from simplyblock_core.db_controller import DBController
+
+db = DBController()
+cluster = db.get_cluster_by_id({cluster_uuid!r})
+nodes = db.get_storage_nodes_by_cluster_id({cluster_uuid!r}) or []
+inline = bool(getattr(cluster, "inline_checksum", False))
+
+rows = []
+for node in nodes:
+    label = getattr(node, "hostname", "") or node.get_id()
+    for dev in (getattr(node, "nvme_devices", None) or []):
+        md_supported = bool(getattr(dev, "md_supported", False))
+        md_size = int(getattr(dev, "md_size", 0) or 0)
+        if not inline:
+            method, mode_label = 0, "off"
+        elif md_supported:
+            method, mode_label = 1, "md-on-device"
+        else:
+            method, mode_label = 2, "fallback (emulation)"
+        rows.append({{
+            "node": label,
+            "alceml": getattr(dev, "alceml_name", "") or getattr(dev, "uuid", ""),
+            "method": method,
+            "mode": mode_label,
+            "md_supported": md_supported,
+            "md_size": md_size,
+        }})
+
+print(json.dumps({{"inline_checksum": inline, "devices": rows}}, indent=2))
+PY"""
+    output = ssh_exec(mgmt_ip, [script], get_output=True, check=True)[0]
+    return json.loads(output)
+
+
+def print_alceml_summary(summary):
+    inline = summary.get("inline_checksum", False)
+    devices = summary.get("devices", [])
+    print("\n--- ALCEML inline-checksum modes ---")
+    print(f"Cluster inline_checksum: {'ENABLED' if inline else 'disabled'}")
+    if not devices:
+        print("  (no devices reported)")
+        return
+    by_node = {}
+    for row in devices:
+        by_node.setdefault(row["node"], []).append(row)
+    for node, rows in sorted(by_node.items()):
+        print(f"  {node}:")
+        for row in rows:
+            print(
+                f"    - {row['alceml'] or '(unnamed)':<40} "
+                f"method={row['method']} {row['mode']:<22} "
+                f"md_size={row['md_size']} md_supported={row['md_supported']}"
+            )
+    md_count = sum(1 for r in devices if r["method"] == 1)
+    fb_count = sum(1 for r in devices if r["method"] == 2)
+    off_count = sum(1 for r in devices if r["method"] == 0)
+    print(
+        f"Totals: md-on-device={md_count}  fallback={fb_count}  off={off_count}  "
+        f"(of {len(devices)} devices)"
+    )
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
@@ -295,6 +367,16 @@ def parse_args():
         "--metadata-out",
         default="cluster_metadata_base.json",
         help="Where to write the cluster metadata JSON (default: ./cluster_metadata_base.json).",
+    )
+    parser.add_argument(
+        "--no-inline-checksum",
+        action="store_true",
+        help=(
+            "Disable inline CRC checksum validation. By default the cluster is "
+            "created with --enable-inline-checksum (matching the inline-checksum-"
+            "validation branch + ultra:checksum-validation-latest image). The "
+            "flag is frozen at create time and cannot be changed later."
+        ),
     )
     return parser.parse_args()
 
@@ -348,19 +430,140 @@ def main():
             t.result()
     print("Phase 1: DONE - all nodes have sbcli installed.")
 
+    # --- Phase 1.5: cleanup leftover state from any prior deploy ---
+    # Order matters:
+    #   1. sn deploy-cleaner first (tears down SPDK containers + NVMe state).
+    #   2. docker rm -f any stragglers, then `docker system prune -af --volumes`.
+    #      Per the deployment notes: SAFE before cluster create (no active FDB
+    #      volumes yet); NEVER run after activate (it would wipe FDB).
+    #   3. Fresh `docker pull` of the simplyblock + ultra images named in the
+    #      installed env_var, so we don't reuse a stale cached layer.
+    print("Phase 1.5a: Running sbctl sn deploy-cleaner on every node...")
+    deploy_cleaner_cmds = ["/usr/local/bin/sbctl -d sn deploy-cleaner"]
+    with ThreadPoolExecutor(max_workers=len(all_setup_ips)) as executor:
+        tasks = [executor.submit(ssh_exec, ip, deploy_cleaner_cmds, check=False)
+                 for ip in all_setup_ips]
+        for t in tasks:
+            t.result()
+    print("Phase 1.5a: DONE.")
+
+    print("Phase 1.5b: Removing any straggler containers and pruning Docker...")
+    docker_cleanup_cmds = [
+        "containers=$(docker ps -aq); "
+        "if [ -n \"$containers\" ]; then docker rm -f $containers; fi",
+        "docker system prune -af --volumes",
+    ]
+    with ThreadPoolExecutor(max_workers=len(all_setup_ips)) as executor:
+        tasks = [executor.submit(ssh_exec, ip, docker_cleanup_cmds, check=False)
+                 for ip in all_setup_ips]
+        for t in tasks:
+            t.result()
+    print("Phase 1.5b: DONE.")
+
+    # NVMe partition cleanup. deploy-cleaner already pulls SPDK off the
+    # drives, but a prior deploy may have left GPT tables / filesystem
+    # signatures / leftover namespace state behind. Wipe signatures, then
+    # nvme-format every non-root NVMe so the data plane sees a clean slate.
+    # sn configure --enable-inline-checksum --force will reformat to a
+    # metadata-capable LBAF on top of this. Storage nodes only -- the mgmt
+    # node is never used for SPDK data devices.
+    print("Phase 1.5d: Wiping partitions and formatting NVMes on storage nodes...")
+    nvme_cleanup_script = r"""set -u
+root_src=$(findmnt -no SOURCE / 2>/dev/null || true)
+root_dev=$(echo "$root_src" | sed -E 's|p?[0-9]+$||')
+echo "Root NVMe (will be skipped): $root_dev"
+for d in $(lsblk -dno NAME,TYPE | awk '$2=="disk" && $1 ~ /^nvme/ {print "/dev/"$1}'); do
+    [ -b "$d" ] || continue
+    if [ "$d" = "$root_dev" ]; then
+        echo "Skip $d (root)"
+        continue
+    fi
+    for p in ${d}p*; do
+        [ -b "$p" ] || continue
+        umount -f "$p" 2>/dev/null || true
+    done
+    echo "Wiping $d (wipefs)"
+    wipefs -af "$d" 2>/dev/null || true
+    echo "Formatting $d (nvme format -s 0)"
+    nvme format "$d" -f -s 0 2>/dev/null || \
+        echo "  WARN: nvme format failed on $d (continuing; sn configure will retry)"
+done
+"""
+    with ThreadPoolExecutor(max_workers=len(sn_ips)) as executor:
+        tasks = [executor.submit(ssh_exec, ip, [nvme_cleanup_script], check=False)
+                 for ip in sn_ips]
+        for t in tasks:
+            t.result()
+    print("Phase 1.5d: DONE.")
+
+    print("Phase 1.5c: Fresh-pulling simplyblock + ultra images on every node...")
+    # Pull with retry: public.ecr.aws occasionally returns transient errors
+    # (IPv6 source-address races, S3 signed-URL hiccups, etc.). Retry up to
+    # 6 times with 15s backoff so one node's blip doesn't abort the deploy.
+    pull_script = """python3 - <<'PY'
+import os, subprocess, sys, time
+import simplyblock_core
+envf = os.path.join(os.path.dirname(simplyblock_core.__file__), 'env_var')
+images = []
+with open(envf) as f:
+    for line in f:
+        if '=' not in line:
+            continue
+        k, v = line.strip().split('=', 1)
+        if k in ('SIMPLY_BLOCK_DOCKER_IMAGE', 'SIMPLY_BLOCK_SPDK_ULTRA_IMAGE') and v:
+            images.append(v)
+if not images:
+    print('no images found in env_var', file=sys.stderr)
+    sys.exit(1)
+for img in images:
+    print(f'Pulling {img}', flush=True)
+    last_rc = 1
+    for attempt in range(1, 7):
+        last_rc = subprocess.call(['docker', 'pull', img])
+        if last_rc == 0:
+            break
+        print(f'  pull failed (rc={last_rc}), attempt {attempt}/6 - retry in 15s', flush=True)
+        time.sleep(15)
+    if last_rc != 0:
+        print(f'  giving up on {img} after 6 attempts', file=sys.stderr)
+        sys.exit(last_rc)
+PY"""
+    with ThreadPoolExecutor(max_workers=len(all_setup_ips)) as executor:
+        tasks = [executor.submit(ssh_exec, ip, [pull_script], check=True)
+                 for ip in all_setup_ips]
+        for t in tasks:
+            t.result()
+    print("Phase 1.5c: DONE - all nodes have fresh images.")
+
+    inline_checksum = not args.no_inline_checksum
+    checksum_flag = " --enable-inline-checksum" if inline_checksum else ""
+    print(f"Inline checksum validation: {'ENABLED' if inline_checksum else 'disabled'}")
+
     # --- Phase 2: cluster create + sn configure/deploy ---
     print("Phase 2a: Creating cluster on management node...")
     ssh_exec(mgmt_ip, [
         "/usr/local/bin/sbctl -d cluster create --enable-node-affinity"
         " --data-chunks-per-stripe 2 --parity-chunks-per-stripe 2"
+        + checksum_flag
     ], check=True)
     print("Phase 2a: DONE - cluster created.")
 
+    # sn configure --force always prompts "Type YES/Y to continue" before
+    # formatting NVMes (see simplyblock_core/utils/__init__.py:~1789). The
+    # prompt is for interactive safety; here we feed YES on stdin so the
+    # automated deploy doesn't hang the full SSH timeout (10 min) on the
+    # confirmation. Wrap with `echo YES | ...` instead of plumbing stdin
+    # through ssh_exec because it's localized to this one command.
     print("Phase 2b: Configuring storage nodes...")
+    configure_cmd = (
+        f"/usr/local/bin/sbctl -d sn configure --max-lvol {shlex.quote(args.max_lvol)}"
+        + checksum_flag + (" --force" if inline_checksum else "")
+    )
+    if inline_checksum:
+        configure_cmd = f"echo YES | {configure_cmd}"
     with ThreadPoolExecutor(max_workers=len(sn_ips)) as executor:
-        tasks = [executor.submit(ssh_exec, ip, [
-            f"/usr/local/bin/sbctl -d sn configure --max-lvol {shlex.quote(args.max_lvol)}"
-        ], check=True) for ip in sn_ips]
+        tasks = [executor.submit(ssh_exec, ip, [configure_cmd], check=True)
+                 for ip in sn_ips]
         for t in tasks:
             t.result()
     print("Phase 2b: DONE - all SNs configured.")
@@ -468,6 +671,12 @@ def main():
 
     with open(args.metadata_out, "w") as f:
         json.dump(final_metadata, f, indent=4)
+
+    try:
+        alceml_summary = fetch_alceml_modes(mgmt_ip, cluster_uuid)
+        print_alceml_summary(alceml_summary)
+    except Exception as exc:
+        print(f"WARNING: failed to fetch ALCEML mode summary: {exc}")
 
     print("\n--- Setup Complete ---")
     print(f"Cluster {cluster_uuid} is active. Metadata saved to {args.metadata_out}.")

@@ -568,7 +568,8 @@ class RPCClient:
 
     def bdev_alceml_create(self, alceml_name, nvme_name, uuid, pba_init_mode=3,
                            alceml_cpu_mask="", alceml_worker_cpu_mask="", pba_page_size=2097152,
-                           write_protection=False, full_page_unmap=False):
+                           write_protection=False, full_page_unmap=False,
+                           checksum_method=0, cache_size=0, cache_eviction_threshold=0):
         params = {
             "name": alceml_name,
             "cntr_path": nvme_name,
@@ -592,6 +593,15 @@ class RPCClient:
             params["write_protection"] = True
         if full_page_unmap:
             params["use_map_whole_page_on_1st_write"] = True
+        # Inline CRC checksum validation. method: 0=off, 1=md-on-device, 2=fallback (extra md page).
+        # The data plane reads md_size from spdk_bdev_get_md_size and refuses method=1 when md_size==0,
+        # so the caller must pick method=2 for devices without NVMe metadata support.
+        if checksum_method:
+            params["checksum_validation_method"] = int(checksum_method)
+            if cache_size:
+                params["cache_size"] = int(cache_size)
+            if cache_eviction_threshold:
+                params["cache_eviction_threshold"] = int(cache_eviction_threshold)
         return self._request("bdev_alceml_create", params)
        
     def bdev_distrib_create(self, name, vuid, ndcs, npcs, num_blocks, block_size, jm_names,
