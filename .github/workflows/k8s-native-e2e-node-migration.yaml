@@ -87,6 +87,7 @@ on:
         options:
           - local
           - aws-openshift
+          - openshift-local
           - gcp
       skip_nfs:
         description: 'Skip NFS mounting (use local logs directory instead)'
@@ -171,6 +172,7 @@ jobs:
         env:
           KUBECONFIG_DATA: ${{
             github.event.inputs.cluster_environment == 'aws-openshift' && secrets.KUBECONFIG_AWS_OPENSHIFT ||
+            github.event.inputs.cluster_environment == 'openshift-local' && secrets.KUBECONFIG_OPENSHIFT_LOCAL ||
             github.event.inputs.cluster_environment == 'gcp' && secrets.KUBECONFIG_GCP ||
             secrets.KUBECONFIG_LOCAL || secrets.KUBECONFIG_CONTENT
             }}
@@ -372,7 +374,7 @@ jobs:
           CLUSTER_ENV="${{ github.event.inputs.cluster_environment || 'local' }}"
           IFS=',' read -ra NODES <<< "${{ github.event.inputs.worker_nodes }}"
           for NODE in "${NODES[@]}"; do
-            if [ "$CLUSTER_ENV" = "local" ]; then
+            if [ "$CLUSTER_ENV" = "local" ] || [ "$CLUSTER_ENV" = "openshift-local" ]; then
               echo "Labeling node $NODE with zone=default (local cluster)"
               kubectl label node "$NODE" topology.kubernetes.io/zone=default --overwrite
             else
@@ -387,7 +389,7 @@ jobs:
           CLUSTER_ENV="${{ github.event.inputs.cluster_environment || 'local' }}"
           NODE="${{ github.event.inputs.migrate_to_worker }}"
           echo "Labeling migration target node $NODE"
-          if [ "$CLUSTER_ENV" = "local" ]; then
+          if [ "$CLUSTER_ENV" = "local" ] || [ "$CLUSTER_ENV" = "openshift-local" ]; then
             kubectl label node "$NODE" topology.kubernetes.io/zone=default --overwrite
           else
             echo "Skipping zone label for migration target $NODE (cloud cluster: $CLUSTER_ENV)"
@@ -407,7 +409,7 @@ jobs:
             --overwrite
 
       - name: Configure OpenShift SCC policies
-        if: ${{ github.event.inputs.use_existing_cluster != 'true' && github.event.inputs.cluster_environment == 'aws-openshift' }}
+        if: ${{ github.event.inputs.use_existing_cluster != 'true' && (github.event.inputs.cluster_environment == 'aws-openshift' || github.event.inputs.cluster_environment == 'openshift-local') }}
         run: |
           oc adm policy add-scc-to-user privileged -z default -n simplyblock
           oc adm policy add-scc-to-user anyuid -z default -n simplyblock
@@ -449,7 +451,7 @@ jobs:
             --set image.operator.pullPolicy=IfNotPresent
 
       - name: Grant OpenShift SCC to all service accounts (post-helm)
-        if: ${{ github.event.inputs.use_existing_cluster != 'true' && github.event.inputs.cluster_environment == 'aws-openshift' }}
+        if: ${{ github.event.inputs.use_existing_cluster != 'true' && (github.event.inputs.cluster_environment == 'aws-openshift' || github.event.inputs.cluster_environment == 'openshift-local') }}
         run: |
           for sa in $(oc get sa -n simplyblock -o name | cut -d/ -f2); do
             oc adm policy add-scc-to-user privileged -z $sa -n simplyblock
@@ -516,10 +518,10 @@ jobs:
           DATA_NICS="${{ github.event.inputs.data_nics || 'enp1s0' }}"
           PARTITIONS="${{ github.event.inputs.partitions || '0' }}"
           JM_COUNT="${{ github.event.inputs.journal_manager_count || '3' }}"
-          OPENSHIFT_CLUSTER="${{ github.event.inputs.cluster_environment == 'aws-openshift' && 'true' || 'false' }}"
-          CORE_PERCENTAGE="${{ github.event.inputs.cluster_environment == 'aws-openshift' && '50' || github.event.inputs.cluster_environment == 'local' && '35' || '65' }}"
-          SKIP_KUBELET_CONFIG="${{ github.event.inputs.cluster_environment == 'aws-openshift' && 'false' || 'true' }}"
-          FORCE_FORMAT_4K="${{ github.event.inputs.cluster_environment == 'aws-openshift' && 'true' || 'false' }}"
+          OPENSHIFT_CLUSTER="${{ (github.event.inputs.cluster_environment == 'aws-openshift' || github.event.inputs.cluster_environment == 'openshift-local') && 'true' || 'false' }}"
+          CORE_PERCENTAGE="${{ github.event.inputs.cluster_environment == 'aws-openshift' && '50' || github.event.inputs.cluster_environment == 'openshift-local' && '50' || github.event.inputs.cluster_environment == 'local' && '35' || '65' }}"
+          SKIP_KUBELET_CONFIG="${{ (github.event.inputs.cluster_environment == 'aws-openshift' || github.event.inputs.cluster_environment == 'openshift-local') && 'false' || 'true' }}"
+          FORCE_FORMAT_4K="${{ (github.event.inputs.cluster_environment == 'aws-openshift' || github.event.inputs.cluster_environment == 'openshift-local') && 'true' || 'false' }}"
 
           # Build workerNodes YAML list from all worker nodes
           WORKER_YAML=""
