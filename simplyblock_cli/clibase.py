@@ -216,6 +216,7 @@ class CLIWrapperBase:
                 ha_jm_count=ha_jm_count,
                 format_4k=format_4k,
                 spdk_proxy_image=getattr(args, 'spdk_proxy_image', None),
+                expansion=expansion,
             )
         except Exception as e:
             print(e)
@@ -229,6 +230,7 @@ class CLIWrapperBase:
             from simplyblock_core.cluster_expand_executor import (
                 integrate_new_node_into_cluster,
             )
+            from simplyblock_core.models.nvme_device import NVMeDevice
             db = DBController()
             cluster = db.get_cluster_by_id(cluster_id)
             after = db.get_storage_nodes_by_cluster_id(cluster_id)
@@ -244,6 +246,16 @@ class CLIWrapperBase:
             except Exception as e:
                 print(f"--expansion integration failed: {e}")
                 return False
+
+            # Replaces the trigger that the OLD path runs inside add_node.
+            # Done here, post-integration, so tasks are queued against the
+            # post-rotation lvstore_stack (which now includes the newcomer's
+            # primary distr) and against an ACTIVE cluster (the runner
+            # suspends FN_NEW_DEV_MIG while status is IN_EXPANSION).
+            new_snode = db.get_storage_node_by_id(new_snodes[0].get_id())
+            for dev in new_snode.nvme_devices:
+                if dev.status == NVMeDevice.STATUS_ONLINE:
+                    tasks_controller.add_new_device_mig_task(dev.get_id())
 
         return out
 
