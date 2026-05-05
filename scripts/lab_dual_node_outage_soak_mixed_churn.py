@@ -3,16 +3,34 @@
 
 Designed to run from the simplyblock jump host against the bare-metal lab
 cluster (mgmt 192.168.10.210, storage .201-.204) deployed by
-setup_lab_perf_test1.py. Two changes vs. the AWS variant:
+setup_lab_perf_test1.py.
 
-  1. SSH uses a single shared root password (CLI flag, env var, or prompt),
-     not an EC2 keypair. Install paramiko if you can ("pip3 install --user
-     paramiko" on the jump host); otherwise the script falls back to
-     `sshpass + ssh`, which is slower because every command opens a fresh
-     connection.
-  2. Defaults match the lab topology: --expected-node-count 4, metadata
-     file cluster_metadata_base.json (the file setup_lab_perf_test1.py
-     writes), mount root /root/lab_outage_soak_*.
+Iteration pattern (load during outage, unload during settle):
+  1. start fio on every volume
+  2. apply the dual-node outage pair (fio takes the hit)
+  3. wait for both nodes back online + post-outage check_fio (fault gate)
+  4. stop fio
+  5. optionally rebuild one randomly-selected volume
+     (every --churn-every-n-iters iterations)
+  6. wait_for_cluster_stable + wait_for_data_migration_complete -- now
+     UNLOADED, so migration drains fast
+  7. next iteration
+
+This trades the AWS-variant's "fio runs continuously across outages plus
+a 3-20 minute background churn timer" for a deterministic per-iteration
+pattern: settling never happens under fio load, so iteration time drops
+to whatever rebalance takes on a quiet cluster. There is no inter-
+iteration NIC chaos.
+
+Differences vs. the AWS variant beyond the iteration pattern:
+  - SSH uses a single shared root password (CLI flag, env var, or prompt),
+    not an EC2 keypair. Install paramiko if you can ("pip3 install --user
+    paramiko" on the jump host); otherwise the script falls back to
+    `sshpass + ssh`, which is slower because every command opens a fresh
+    connection.
+  - Defaults match the lab topology: --expected-node-count 4, metadata
+    file cluster_metadata_base.json (the file setup_lab_perf_test1.py
+    writes), mount root /root/lab_outage_soak_*.
 
 Typical invocation (from the jump host, after setup_lab_perf_test1.py has
 created the cluster and written cluster_metadata_base.json next to this
@@ -108,11 +126,11 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description=(
             "Run a long fio soak against the lab cluster while cycling random "
-            "two-node outages with mixed outage methods. Unlike the base mixed "
-            "soak, fio is kept running across outage cycles; in parallel, a "
-            "background thread randomly churns one volume at a time (stop fio "
-            "-> unmount -> disconnect -> delete -> recreate -> connect -> format "
-            "-> mount -> restart fio) every 3-20 minutes."
+            "two-node outages with mixed outage methods. Each iteration: start "
+            "fio on every volume, apply the outage pair, fault-check fio, "
+            "stop fio, optionally rebuild one volume, then wait for the cluster "
+            "to settle UNLOADED (no IO pressure on rebalance/data-migration). "
+            "Trades 'fio always running' for fast iteration time."
         )
     )
     parser.add_argument("--metadata", default=str(default_metadata), help="Path to cluster metadata JSON.")
@@ -158,22 +176,6 @@ def parse_args():
         ),
     )
     parser.add_argument(
-        "--nic-chaos-duration",
-        type=int,
-        default=30,
-        help=(
-            "Seconds to hold a data NIC down between iterations (multipath only). "
-            "Per cycle, ONE of the two data NICs is picked at random and dropped on "
-            "ALL storage nodes simultaneously — never a mix where some nodes drop "
-            "eth1 while others drop eth2."
-        ),
-    )
-    parser.add_argument(
-        "--no-nic-chaos",
-        action="store_true",
-        help="Disable inter-iteration NIC chaos even on multipath clusters.",
-    )
-    parser.add_argument(
         "--auto-recover-wait",
         type=int,
         default=900,
@@ -213,21 +215,19 @@ def parse_args():
         ),
     )
     parser.add_argument(
-        "--churn-min-seconds",
+        "--churn-every-n-iters",
         type=int,
-        default=180,
-        help="Minimum delay between volume churn cycles (seconds). Default 180 (3 min).",
-    )
-    parser.add_argument(
-        "--churn-max-seconds",
-        type=int,
-        default=1200,
-        help="Maximum delay between volume churn cycles (seconds). Default 1200 (20 min).",
+        default=3,
+        help=(
+            "Rebuild one randomly-chosen volume every N outage iterations, "
+            "in the unloaded window between fio-stop and rebalance-wait. "
+            "Default 3. Set to 0 to disable; --no-churn is an explicit alias."
+        ),
     )
     parser.add_argument(
         "--no-churn",
         action="store_true",
-        help="Disable the background volume churn thread (run plain mixed soak with fio kept running across outages).",
+        help="Disable per-iteration volume churn entirely.",
     )
     args = parser.parse_args()
     methods = [m.strip() for m in args.methods.split(",") if m.strip()]
@@ -237,10 +237,8 @@ def parse_args():
     if not methods:
         parser.error("At least one outage method must be enabled")
     args.methods = methods
-    if args.churn_min_seconds < 1:
-        parser.error("--churn-min-seconds must be >= 1")
-    if args.churn_max_seconds < args.churn_min_seconds:
-        parser.error("--churn-max-seconds must be >= --churn-min-seconds")
+    if args.churn_every_n_iters < 0:
+        parser.error("--churn-every-n-iters must be >= 0")
     args.password = resolve_password(args.password)
     if not args.password:
         parser.error("Empty root password; supply --password, SBCLI_ROOT_PASSWORD, or answer the prompt.")
@@ -515,25 +513,13 @@ class SoakRunner:
             self.methods = filtered
         self.node_hosts = {}  # uuid -> RemoteHost (private_ip of storage node)
         self.node_ip_map = self._build_node_ip_map()
-        # Serializes outage iterations and churn cycles. Both mutate cluster
-        # state (outage takes nodes down; churn deletes/recreates volumes), so
-        # they must not overlap. Held during run_outage_pair / check_fio /
-        # entire churn cycle. NIC chaos and waiting loops run unlocked so a
-        # churn cycle can fire during them.
-        self.serial_lock = threading.RLock()
-        self.churn_thread = None
-        self.churn_stop_event = threading.Event()
-        self.churn_error = None
+        # Counter incremented by every churn cycle; embedded in fio --name and
+        # the rebuilt volume name so logs/pkill targets remain unique across
+        # iterations even when the same volume index is rebuilt repeatedly.
         self.churn_counter = 0
         self.mount_root = None
 
     def close(self):
-        # Stop the churn thread first so it doesn't try to use SSH clients
-        # we're about to close.
-        try:
-            self.stop_churn_thread()
-        except Exception:
-            pass
         self.client.close()
         self.mgmt.close()
         for host in self.node_hosts.values():
@@ -1255,51 +1241,6 @@ class SoakRunner:
 
     # ----- single-volume fio + churn ---------------------------------------
 
-    def _check_one_fio(self, job, context):
-        """Pre-churn fio fault check for one job. Same contract as
-        ``check_fio`` (rc_file / wrapper-gone / stderr error is a fault)
-        but scoped to a single job so a healthy churn doesn't get
-        blocked by an unrelated already-faulted job that the post-outage
-        check would surface separately.
-        """
-        fault = self._check_fio_fault(job)
-        if fault is None:
-            return
-        kind, detail = fault
-        self._dump_fio_streams(job, context=f"{context} fio fault [{kind}] {detail}")
-        raise TestRunError(
-            f"fio for {job.volume_name} fault [{kind}]: {detail} ({context})"
-        )
-
-    def _stop_fio_for_job(self, job):
-        """Kill the single fio matching this job's exact ``--name=`` arg.
-
-        Names embed the volume index AND a churn counter (e.g.
-        ``aws_dual_soak_v3_c0``), so an exact ``fio --name=<name> ``
-        match never collides with sibling jobs.
-        """
-        # The space after <name> guarantees we don't accidentally kill a
-        # later-churn-cycle job whose name shares the same prefix (e.g.
-        # ``..._c0`` vs ``..._c10`` — without the space this could match).
-        pattern = f"fio --name={job.fio_name} "
-        kill_script = (
-            "set +e\n"
-            f"sudo pkill -TERM -f {shlex.quote(pattern)} 2>/dev/null || true\n"
-            "for i in $(seq 1 15); do\n"
-            f"  if ! pgrep -f {shlex.quote(pattern)} >/dev/null; then\n"
-            "    exit 0\n"
-            "  fi\n"
-            "  sleep 2\n"
-            "done\n"
-            f"sudo pkill -KILL -f {shlex.quote(pattern)} 2>/dev/null || true\n"
-        )
-        self.client.run(
-            f"bash -lc {shlex.quote(kill_script)}",
-            timeout=90,
-            check=False,
-            label=f"stop fio {job.fio_name}",
-        )
-
     def _disconnect_one_volume(self, volume):
         nqn = volume.get("nqn")
         if not nqn:
@@ -1351,137 +1292,46 @@ class SoakRunner:
             self.created_volume_ids.remove(volume["volume_id"])
 
     def _churn_one_volume(self):
-        """Churn a single random volume end-to-end.
+        """Rebuild one randomly-selected volume.
 
-        Holds ``serial_lock`` for the whole cycle so it can't overlap an
-        outage iteration (which mutates cluster state in conflicting ways:
-        an in-progress lvol create on an offline node will fail).
+        Called between iterations, AFTER stop_fio. fio is not running, so
+        no per-job teardown is needed — we just delete + recreate +
+        remount the volume. The next iteration's start_fio() will pick up
+        the fresh volume and start a new fio job for it.
         """
-        with self.serial_lock:
-            if not self.fio_jobs or not self.volumes:
-                return
-            idx = random.randrange(len(self.volumes))
-            old_volume = self.volumes[idx]
-            job = next(
-                (j for j in self.fio_jobs if j.volume_id == old_volume["volume_id"]),
-                None,
-            )
-            if job is None:
-                self.logger.log(
-                    f"churn: no fio job for {old_volume['volume_name']}; skipping"
-                )
-                return
-
-            # Pre-churn fio check: same contract as the post-outage check —
-            # any fio rc (clean or not) mid-run is a fault that must abort
-            # the soak.
-            self._check_one_fio(job, context="churn pre-check")
-
-            self.churn_counter += 1
-            churn_id = self.churn_counter
-            new_name = f"aws_dual_soak_{self.run_id}_v{old_volume['index']}_c{churn_id}"
-            self.logger.log(
-                f"churn {churn_id}: rebuilding {old_volume['volume_name']} "
-                f"({old_volume['volume_id']}) on node {old_volume['node_uuid']} "
-                f"-> {new_name}"
-            )
-
-            # 1. stop fio for this volume only (others keep running)
-            self._stop_fio_for_job(job)
-            # 2. unmount
-            self._unmount_one_volume(old_volume)
-            # 3. nvme disconnect
-            self._disconnect_one_volume(old_volume)
-            # 4. delete lvol
-            self._delete_one_lvol(old_volume)
-
-            # 5. recreate lvol on the SAME storage node so the topology used
-            # by the outage scenario list (which is pinned at startup off
-            # role-representative pairs) doesn't drift.
-            new_volume = self._create_one_volume(
-                new_name,
-                old_volume["node_uuid"],
-                old_volume["index"],
-            )
-            # 6. connect, mkfs, mount — populates mount_point/nqn/etc.
-            self._connect_and_mount_one(new_volume, self.mount_root)
-            # 7. restart fio with a fresh, churn-counter-tagged name
-            new_fio_name = self._build_fio_name(new_volume["index"], churn_id)
-            new_job = self._start_fio_for_volume(new_volume, new_fio_name)
-
-            # 8. swap in the new volume + job atomically under the lock
-            self.volumes[idx] = new_volume
-            self.fio_jobs = [
-                j for j in self.fio_jobs if j.volume_id != old_volume["volume_id"]
-            ] + [new_job]
-            self.logger.log(
-                f"churn {churn_id}: complete; {new_name} ({new_volume['volume_id']}) "
-                f"running fio name={new_fio_name}"
-            )
-
-    def _churn_loop(self):
-        """Background loop: sleep random(churn_min, churn_max), then churn one
-        volume. Exits cleanly when ``churn_stop_event`` is set.
-
-        Any exception is captured into ``self.churn_error`` and the event is
-        set so the main thread re-raises it on its next sync point — the
-        soak is meant to halt on any fio fault or churn failure.
-        """
-        rng = random.Random()
-        while not self.churn_stop_event.is_set():
-            wait = rng.uniform(self.args.churn_min_seconds, self.args.churn_max_seconds)
-            self.logger.log(f"churn loop: next churn in {wait:.0f}s")
-            if self.churn_stop_event.wait(wait):
-                return
-            try:
-                self._churn_one_volume()
-            except (TestRunError, RemoteCommandError, ValueError) as exc:
-                self.logger.log(f"ERROR in churn cycle: {exc}")
-                self.churn_error = exc
-                self.churn_stop_event.set()
-                return
-            except Exception as exc:  # noqa: BLE001 — catch-all is intentional
-                self.logger.log(f"UNEXPECTED ERROR in churn cycle: {exc!r}")
-                self.churn_error = exc
-                self.churn_stop_event.set()
-                return
-
-    def start_churn_thread(self):
-        if self.args.no_churn:
-            self.logger.log("churn thread disabled (--no-churn)")
+        if not self.volumes:
             return
-        self.churn_stop_event.clear()
-        self.churn_error = None
-        self.churn_thread = threading.Thread(
-            target=self._churn_loop,
-            name="churn-loop",
-            daemon=True,
-        )
-        self.churn_thread.start()
+        idx = random.randrange(len(self.volumes))
+        old_volume = self.volumes[idx]
+
+        self.churn_counter += 1
+        churn_id = self.churn_counter
+        new_name = f"aws_dual_soak_{self.run_id}_v{old_volume['index']}_c{churn_id}"
         self.logger.log(
-            f"churn thread started (interval {self.args.churn_min_seconds}-"
-            f"{self.args.churn_max_seconds}s)"
+            f"churn {churn_id}: rebuilding {old_volume['volume_name']} "
+            f"({old_volume['volume_id']}) on node {old_volume['node_uuid']} "
+            f"-> {new_name}"
         )
 
-    def stop_churn_thread(self):
-        if self.churn_thread is None:
-            return
-        self.churn_stop_event.set()
-        self.churn_thread.join(timeout=120)
-        if self.churn_thread.is_alive():
-            self.logger.log("WARNING: churn thread did not exit within 120s")
-        self.churn_thread = None
+        self._unmount_one_volume(old_volume)
+        self._disconnect_one_volume(old_volume)
+        self._delete_one_lvol(old_volume)
 
-    def reraise_churn_error(self):
-        """Re-raise any error captured by the churn thread on the main thread.
+        # Recreate on the SAME storage node so the topology used by the
+        # outage scenario list (pinned at startup off role-representative
+        # pairs) doesn't drift.
+        new_volume = self._create_one_volume(
+            new_name,
+            old_volume["node_uuid"],
+            old_volume["index"],
+        )
+        self._connect_and_mount_one(new_volume, self.mount_root)
 
-        Called at outage-iteration sync points so churn faults surface in
-        the same exit path as outage / fio faults.
-        """
-        if self.churn_error is not None:
-            err = self.churn_error
-            self.churn_error = None
-            raise err
+        self.volumes[idx] = new_volume
+        self.logger.log(
+            f"churn {churn_id}: complete; {new_name} ({new_volume['volume_id']}) "
+            f"will be picked up by next start_fio"
+        )
 
     # ----- outage methods ---------------------------------------------------
 
@@ -1565,83 +1415,6 @@ class SoakRunner:
         if iface:
             return [iface]
         return []
-
-    def _get_all_node_ips(self):
-        """Return list of (uuid, private_ip) for all storage nodes."""
-        result = []
-        for sn in self.metadata.get("storage_nodes", []):
-            ip = sn.get("private_ip")
-            # Find uuid from topology
-            uuid = None
-            for tn in (self.metadata.get("topology") or {}).get("nodes", []):
-                if tn.get("management_ip") == ip:
-                    uuid = tn.get("uuid")
-                    break
-            if ip:
-                result.append((uuid, ip))
-        return result
-
-    def _disable_nic_on_all_nodes(self, nic_name):
-        """Bring down a data NIC on all storage nodes."""
-        self.logger.log(f"Multipath NIC chaos: disabling {nic_name} on all nodes")
-        for uuid, ip in self._get_all_node_ips():
-            try:
-                host = self._node_host(uuid) if uuid else RemoteHost(
-                    ip, self.user, self.password, self.logger, f"sn[{ip}]")
-                host.run(f"sudo ip link set {nic_name} down", timeout=10, check=False,
-                         label=f"disable {nic_name} on {ip}")
-            except Exception as e:
-                self.logger.log(f"WARNING: failed to disable {nic_name} on {ip}: {e}")
-
-    def _enable_nic_on_all_nodes(self, nic_name):
-        """Bring up a data NIC on all storage nodes."""
-        self.logger.log(f"Multipath NIC chaos: re-enabling {nic_name} on all nodes")
-        for uuid, ip in self._get_all_node_ips():
-            try:
-                host = self._node_host(uuid) if uuid else RemoteHost(
-                    ip, self.user, self.password, self.logger, f"sn[{ip}]")
-                host.run(f"sudo ip link set {nic_name} up", timeout=10, check=False,
-                         label=f"enable {nic_name} on {ip}")
-            except Exception as e:
-                self.logger.log(f"WARNING: failed to enable {nic_name} on {ip}: {e}")
-
-    def _ensure_all_data_nics_up(self):
-        if not self._is_multipath():
-            return
-        for nic in self._get_data_nics():
-            self._enable_nic_on_all_nodes(nic)
-
-    def _inter_iteration_nic_chaos(self):
-        """Drop one data NIC on every storage node for nic_chaos_duration s,
-        then bring it back up. Active only between outage iterations on a
-        multipath cluster with at least two data NICs.
-
-        Invariant: a single NIC name (eth1 OR eth2) is chosen once via
-        random.choice and applied uniformly across all storage nodes — we
-        NEVER concurrently drop eth1 on some nodes and eth2 on others, so
-        each node always retains a live data path through the surviving
-        NIC. _ensure_all_data_nics_up at the start of every outage
-        iteration plus the try/finally re-enable here together guarantee
-        no NIC stays down across the iteration boundary.
-        """
-        if self.args.no_nic_chaos or not self._is_multipath():
-            return
-        data_nics = self._get_data_nics()
-        if len(data_nics) < 2:
-            return
-        duration = max(0, self.args.nic_chaos_duration)
-        nic = random.choice(data_nics)
-        self.logger.log(
-            f"Inter-iteration NIC chaos: dropping {nic} on all nodes for {duration}s "
-            f"(other data NICs stay up; eth1/eth2 are never dropped concurrently)"
-        )
-        try:
-            self._disable_nic_on_all_nodes(nic)
-            time.sleep(duration)
-        finally:
-            self._enable_nic_on_all_nodes(nic)
-        self.wait_for_all_online(timeout=self.args.restart_timeout)
-        self.wait_for_cluster_stable()
 
     def _network_outage(self, node_id, duration):
         """Take all data NICs down on one storage node for *duration* seconds,
@@ -1812,10 +1585,8 @@ class SoakRunner:
             target_nodes={node1, node2}, timeout=wait_timeout
         )
         # Intentionally no check_fio / wait_for_cluster_stable here: the
-        # outer loop calls check_fio under serial_lock right after this
-        # returns, then waits for cluster stability — and the churn thread
-        # is also serialized via that lock, so any natural fio completion
-        # (e.g. runtime expired) is surfaced consistently in one place.
+        # outer loop calls check_fio right after this returns, then
+        # stop_fio, then waits for cluster stability unloaded.
 
     # ----- topology & scenario enumeration ---------------------------------
 
@@ -1987,16 +1758,8 @@ class SoakRunner:
         self.volumes = volumes
         self.connect_and_mount_volumes(volumes, mount_root)
 
-        # Start fio once, at the top of the soak. Unlike the base mixed
-        # soak (which stops fio between iterations so rebalancing runs
-        # unloaded), this variant keeps fio running across every outage —
-        # the realism goal is "outages happen while live IO is in flight".
-        # Per-volume churn rebuilds individual fio jobs without ever
-        # tearing down the rest.
-        self.start_fio(self.volumes)
-
         # Pin the topology once, before any outages. Leader takeover during
-        # the soak can permanently shift role assignments, but the 4
+        # the soak can permanently shift role assignments, but the
         # representative pairs are fixed at startup so each cycle targets
         # the same pairs for the same role categories.
         self.topology = self.discover_topology()
@@ -2013,11 +1776,14 @@ class SoakRunner:
                 f"{len(self.scenarios)}; nothing to run"
             )
 
-        # Background churn thread: random(churn_min, churn_max) seconds
-        # between rebuilds of one randomly-selected volume. Started after
-        # start_fio so self.fio_jobs is populated; stopped in the outer
-        # main() finally via close().
-        self.start_churn_thread()
+        churn_every = 0 if self.args.no_churn else self.args.churn_every_n_iters
+        if churn_every > 0:
+            self.logger.log(
+                f"Volume churn enabled: rebuild one random volume every "
+                f"{churn_every} iteration(s) in the unloaded settle window"
+            )
+        else:
+            self.logger.log("Volume churn disabled")
 
         # iteration counter is aligned to scenario_idx: when --start-at N is
         # used, the first executed scenario logs as iteration=N so post-hoc
@@ -2052,18 +1818,6 @@ class SoakRunner:
                 if scenario_idx < cycle_start_at:
                     continue
                 iteration += 1
-                # Surface any churn-thread fault before doing anything that
-                # might mask it (a churn-broken volume's fio rc_file would
-                # otherwise be dumped under the wrong context here).
-                self.reraise_churn_error()
-                # No pre-iteration waiting for rebalance / data migration:
-                # the post-iteration grace below (wait_for_all_online +
-                # 60 s pause) is the only inter-iteration quiet window.
-                # Background reconciliation continues across iterations.
-
-                # Safety: all data NICs must be up during an outage iteration.
-                # NIC chaos runs only in the quiet window between iterations.
-                self._ensure_all_data_nics_up()
 
                 node1, node2 = self.pick_pair_for_category(scenario["category"])
                 method1 = scenario["method_a"]
@@ -2090,32 +1844,28 @@ class SoakRunner:
                     )
                     continue
 
-                # Serialize the outage with the churn thread: while we hold
-                # the lock, no churn cycle can start (and any in-progress
-                # churn finishes first). Outside the lock the churn thread
-                # is free to run — including during _inter_iteration_nic_chaos.
-                with self.serial_lock:
-                    self.run_outage_pair(node1, node2, method1, method2)
-                    # Post-outage fio check: any fio that exited during this
-                    # iteration is a fault. Same contract as the base mixed
-                    # soak's pre-stop check, but WITHOUT the subsequent
-                    # SIGTERM/SIGKILL — fio keeps running into the next
-                    # iteration and across the upcoming churn cycles.
-                    self.check_fio()
-                    # Wait for the cluster to settle: all nodes online AND
-                    # rebalance / data-migration drained before the next
-                    # outage pair fires.
-                    self.wait_for_all_online(timeout=self.args.restart_timeout)
-                    self.wait_for_cluster_stable()
-                    self.wait_for_data_migration_complete("next outage pair")
+                # Load during outage: start fresh fio so the outage hits
+                # live IO. This is the only window where fio runs.
+                self.start_fio(self.volumes)
 
-                self._inter_iteration_nic_chaos()
-                # Re-check for any churn fault that fired during the NIC
-                # chaos / cluster wait so we exit at the next sync point.
-                self.reraise_churn_error()
-                # Wait for rebalance / data-migration to complete before
-                # starting the next iteration (main branch: device-migration
-                # runners are active and we gate on `is_re_balancing`).
+                self.run_outage_pair(node1, node2, method1, method2)
+
+                # Fault gate: any fio that exited / faulted during the
+                # outage is a real failure. check_fio raises on faults.
+                self.check_fio()
+
+                # Unload before settle: stop fio so the rebalance / data-
+                # migration drain runs without IO pressure. This is what
+                # makes the iteration cycle short.
+                self.stop_fio()
+
+                # Optional volume rebuild. fio is already stopped, so we
+                # don't need any per-job teardown — just delete + recreate
+                # + remount; the next iteration's start_fio picks it up.
+                if churn_every > 0 and iteration % churn_every == 0:
+                    self._churn_one_volume()
+
+                self.wait_for_all_online(timeout=self.args.restart_timeout)
                 self.wait_for_cluster_stable()
                 self.wait_for_data_migration_complete("next iteration")
 
