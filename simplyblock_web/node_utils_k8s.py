@@ -18,10 +18,12 @@ logger = logging.getLogger(__name__)
 
 
 def get_namespace():
+    env_ns = os.environ.get("NAMESPACE")
+    if env_ns:
+        return env_ns
     if os.path.exists(namespace_id_file):
         with open(namespace_id_file, 'r') as f:
-            out = f.read()
-            return out
+            return f.read().strip()
     return default_namespace
 
 def wait_for_job_completion(job_name, namespace, timeout=480):
