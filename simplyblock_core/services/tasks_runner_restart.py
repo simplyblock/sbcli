@@ -264,8 +264,19 @@ def task_runner_node(task):
     #
     # Device-level recovery has its own task type (add_device_to_auto_restart
     # / FN_DEV_RESTART); this one only needs the NODE to be healthy.
-    if node.status == StorageNode.STATUS_ONLINE and getattr(node, "health_check", True):
-        logger.info(f"Node is online and healthy: {node.get_id()}")
+    #
+    # CRITICAL: short-circuit on ANY ONLINE status, regardless of health_check.
+    # health_check=False can be set by the health service for many non-fatal
+    # reasons (peer-side device records, port checks, transient lvstore
+    # consistency blips). A destructive SPDK kill+restart on a serving node is
+    # never the right remedy for those — they have dedicated tasks
+    # (FN_DEV_RESTART, FN_PORT_ALLOW, peer-side recreate_lvstore). Requiring
+    # health_check==True here caused observable online → in_shutdown → offline
+    # cycles when an FN_NODE_RESTART task queued during a legitimate OFFLINE
+    # window was consumed later, after the node had come back ONLINE but with
+    # a still-False health_check from auxiliary checks.
+    if node.status == StorageNode.STATUS_ONLINE:
+        logger.info(f"Node is online: {node.get_id()}")
         task.function_result = "Node is online"
         task.status = JobSchedule.STATUS_DONE
         task.write_to_db(db.kv_store)
@@ -343,14 +354,15 @@ def task_runner_node(task):
 
         time.sleep(3)
         node = db.get_storage_node_by_id(task.node_id)
-        # Same relaxation as the task-entry short-circuit above: success of
-        # THIS task is "node is online and healthy". Residual per-device
-        # UNAVAILABLE flags are the responsibility of FN_DEV_RESTART, not
-        # this runner — accepting them here prevents an endless shutdown/
-        # restart cycle when a device stays UNAVAILABLE for reasons outside
-        # this node's control (peer-side records, timing, etc.).
-        if node.status == StorageNode.STATUS_ONLINE and getattr(node, "health_check", True):
-            logger.info(f"Node is online and healthy: {node.get_id()}")
+        # Mirrors the task-entry short-circuit: success of THIS task is
+        # "node is ONLINE". health_check / residual device UNAVAILABLE flags
+        # are the responsibility of other recovery paths (FN_DEV_RESTART,
+        # health service auto-fix, peer-side recreate_lvstore). Requiring
+        # health_check==True here would cause repeat shutdown+restart cycles
+        # of an already-serving node when an auxiliary check happens to be
+        # False at the moment we re-read the DB.
+        if node.status == StorageNode.STATUS_ONLINE:
+            logger.info(f"Node is online: {node.get_id()}")
             task.function_result = "done"
             task.status = JobSchedule.STATUS_DONE
             task.write_to_db(db.kv_store)

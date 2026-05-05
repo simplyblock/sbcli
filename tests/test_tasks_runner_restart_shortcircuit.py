@@ -4,20 +4,23 @@ test_tasks_runner_restart_shortcircuit.py — regression tests for the
 FN_NODE_RESTART task-runner short-circuit in
 ``simplyblock_core.services.tasks_runner_restart.task_runner_node``.
 
-Background: before this change, the runner treated a queued node_restart
-task as "still needs work" unless BOTH ``status == ONLINE`` AND
-``unavailable_devices_count == 0`` held. Any residual UNAVAILABLE device
-record (routine transient after an outage — peer nodes mark remote device
-records as unavailable, and that flag is cleared asynchronously by a
-different code path) caused the runner to fire another
-``shutdown_storage_node(force=True) + restart_storage_node`` cycle on a
-node that was already serving IO. Observed as an endless
+Background: the runner used to treat a queued node_restart task as "still
+needs work" unless BOTH ``status == ONLINE`` AND ``health_check == True``
+held. The first iteration of this fix relaxed the device-count requirement
+but kept ``health_check == True``. That residual requirement still let the
+runner fire ``shutdown_storage_node(force=True) + restart_storage_node`` on
+a node that was already serving IO whenever an auxiliary check (peer-side
+remote-device records, port checks, transient lvstore consistency, etc.)
+had flipped ``health_check`` to False. Observed as an endless
 online → in_shutdown → offline → in_restart → online loop in the event
 log.
 
-The fix: the short-circuit now only requires ``status == ONLINE and
-health_check`` — device-level recovery is the responsibility of
-FN_DEV_RESTART, not this runner.
+The current contract: the short-circuit fires on **any** ``STATUS_ONLINE``
+status, regardless of ``health_check``. An ONLINE node is, by definition,
+serving IO from the data plane — and a destructive SPDK kill+restart is
+never the right remedy for the auxiliary-check failures that flip
+``health_check`` to False. Those have dedicated tasks (FN_DEV_RESTART,
+FN_PORT_ALLOW, peer-side recreate_lvstore, health-service auto-fix).
 
 Note on import:
   The module has a ``while True:`` at module level (the service main loop),
@@ -97,10 +100,11 @@ def _mk_node(status=StorageNode.STATUS_ONLINE, health_check=True,
     return n
 
 
-class TestShortCircuitSkipsRestartForHealthyNode(unittest.TestCase):
-    """If the node is ONLINE and health_check=True, the runner should mark
-    the task DONE immediately — regardless of what the devices look like.
-    This is the core anti-cycling guarantee."""
+class TestShortCircuitSkipsRestartForOnlineNode(unittest.TestCase):
+    """ONLINE is the universal short-circuit signal: regardless of
+    health_check or device flags, an ONLINE node never gets put through
+    a destructive shutdown+restart by this runner. This is the core
+    anti-cycling guarantee."""
 
     def test_online_and_healthy_with_no_devices_skips_restart(self):
         mod = _load_runner_module()
@@ -115,10 +119,9 @@ class TestShortCircuitSkipsRestartForHealthyNode(unittest.TestCase):
         self.assertIn("online", task.function_result.lower())
 
     def test_online_and_healthy_with_unavailable_devices_still_skips(self):
-        """The critical regression this test pins: devices flagged UNAVAILABLE
-        must NOT block task short-circuit. Device recovery is a separate
-        task; spinning the node through another shutdown+restart here is
-        exactly the bug."""
+        """Devices flagged UNAVAILABLE must NOT block task short-circuit.
+        Device recovery is a separate task; spinning the node through
+        another shutdown+restart here is exactly the bug."""
         mod = _load_runner_module()
         task = _mk_task()
         bad_dev = MagicMock()
@@ -132,28 +135,29 @@ class TestShortCircuitSkipsRestartForHealthyNode(unittest.TestCase):
         self.assertTrue(ret)
         self.assertEqual(task.status, JobSchedule.STATUS_DONE)
 
-
-class TestShortCircuitRejectsUnhealthyNode(unittest.TestCase):
-    """If the node is NOT actually healthy, the task must not short-circuit
-    — it must continue to the shutdown+restart path."""
-
-    def test_online_but_unhealthy_does_not_short_circuit(self):
+    def test_online_but_unhealthy_still_skips_restart(self):
+        """Critical regression: an ONLINE node with health_check=False
+        (set by the health service for peer-side / port / lvstore-consistency
+        reasons that don't warrant killing SPDK) must short-circuit. Failing
+        to short-circuit here was the root cause of observed
+        online → in_shutdown → offline cycles in soak iteration 32."""
         mod = _load_runner_module()
         task = _mk_task()
         node = _mk_node(status=StorageNode.STATUS_ONLINE, health_check=False,
                         nvme_devices=[])
-        with patch.object(mod, "db") as mock_db, \
-             patch.object(mod, "health_controller") as mock_health:
+        with patch.object(mod, "db") as mock_db:
             mock_db.get_storage_node_by_id.return_value = node
-            # Fail the reachability checks immediately so we don't proceed
-            # into the shutdown path — we only need to assert the function
-            # didn't return True from the short-circuit.
-            mock_health._check_node_ping.return_value = False
-            mock_health._check_node_api.return_value = False
-            mock_health._check_ping_from_node.return_value = False
             ret = mod.task_runner_node(task)
-        self.assertNotEqual(task.status, JobSchedule.STATUS_DONE)
-        self.assertFalse(ret)
+        self.assertTrue(ret)
+        self.assertEqual(task.status, JobSchedule.STATUS_DONE)
+        self.assertIn("online", task.function_result.lower())
+
+
+class TestShortCircuitDoesNotApplyToNonOnlineStatuses(unittest.TestCase):
+    """Statuses other than ONLINE must continue to the shutdown+restart path
+    (or be handled by their own dedicated early-returns above). This pins
+    the boundary so the ONLINE-only relaxation doesn't accidentally swallow
+    OFFLINE/DOWN/UNREACHABLE tasks."""
 
     def test_offline_does_not_short_circuit(self):
         mod = _load_runner_module()
