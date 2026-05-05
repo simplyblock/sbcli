@@ -787,9 +787,9 @@ class K8sUtils:
             if not details:
                 continue
             for name, info in details.items():
-                job = info.get("job_name", "N/A")
+                job = info.get("job_name") or "N/A"
                 vol_handle = self.get_pvc_volume_handle(name)
-                all_entries.append((job, name, vol_handle or "N/A", label))
+                all_entries.append((job, name or "N/A", vol_handle or "N/A", label))
 
         if not all_entries:
             return
