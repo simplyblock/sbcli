@@ -149,31 +149,33 @@ def add_device_to_auto_restart(device):
 
 
 def add_node_to_auto_restart(node):
-    # Auto-restart kills SPDK and runs the full recreate path. The
-    # legitimate triggers are:
-    #   - OFFLINE: SPDK is gone (set_node_offline pairs the OFFLINE
-    #     flip with this call).
-    #   - UNREACHABLE: peer JM connections and remote-device records
-    #     on other nodes have been torn down on their side; passively
-    #     clearing the flag would leave the data-plane view
-    #     inconsistent. The full restart impl is the path that
-    #     re-establishes peer relationships and commits ONLINE.
-    #   - SCHEDULABLE: SPDK RPC was unresponsive; restart drives a
-    #     coordinated recreate.
+    # Auto-restart kills SPDK and runs the full recreate path. Only states
+    # where SPDK itself is the problem warrant that:
+    #   - OFFLINE: SnodeAPI confirmed SPDK is gone.
+    #   - SCHEDULABLE: SPDK RPC double-timed-out — SPDK is sick.
     #
-    # DOWN intentionally does NOT trigger auto-restart: SPDK is still
-    # up and cluster-internal traffic works; only the client-facing
-    # port is blocked. Recovery is port-unblock, not a destructive
-    # kill-and-replay.
+    # UNREACHABLE does NOT trigger auto-restart: while UNREACHABLE we cannot
+    # reach SnodeAPI to perform the restart anyway. Once the node is
+    # reachable again, check_node naturally drops it to OFFLINE (if SPDK
+    # died) — which then triggers auto-restart — or flips it back to
+    # ONLINE (if SPDK was alive throughout).
+    #
+    # DOWN does NOT trigger auto-restart: SPDK is still up and
+    # cluster-internal traffic works; only the client-facing port is
+    # blocked. Recovery is port-unblock, not a destructive kill-and-replay.
     _AUTO_RESTART_OK = (
         StorageNode.STATUS_OFFLINE,
-        StorageNode.STATUS_UNREACHABLE,
         StorageNode.STATUS_SCHEDULABLE,
     )
+    # Re-fetch from DB: callers commonly do `set_node_status(...,
+    # OFFLINE/SCHEDULABLE)` immediately before this and pass their stale
+    # local node object whose .status is still ONLINE — which would trip
+    # the guard below and silently drop the restart.
+    node = db.get_storage_node_by_id(node.get_id())
     if node.status not in _AUTO_RESTART_OK:
         logger.warning(
             "Refusing to queue auto-restart for node %s in status %s "
-            "(only OFFLINE / UNREACHABLE / SCHEDULABLE are valid triggers)",
+            "(only OFFLINE / SCHEDULABLE are valid triggers)",
             node.get_id(), node.status,
         )
         return False
