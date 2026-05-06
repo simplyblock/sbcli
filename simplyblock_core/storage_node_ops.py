@@ -3366,26 +3366,37 @@ def suspend_storage_node(node_id, force=False, change_node_status=True):
                 logger.error(f"Failed to revert port block for port {port}: {revert_e}")
 
     try:
-        # Block per-lvstore ports for secondary lvstores hosted on this node
+        # Block per-lvstore ports for secondary lvstores hosted on this node.
+        # Order: client (lvs) port FIRST, then 1 s for peers to drain in-flight
+        # IO via the still-open hublvol back to the acting leader, then the
+        # hublvol port. Reversing this order — blocking the hublvol port while
+        # the client port is still open — kills the redirect path while clients
+        # may still be funneling IO into the secondary, forcing the secondary's
+        # lvstore layer to auto-promote (lvol.c:3508 "Leadership changed due
+        # to receive new IO"), which races the in-flight leader and produces
+        # a writer conflict (incident 2026-05-06 iter 2, jm_vuid=4450).
         if snode.lvstore_stack_secondary or snode.lvstore_stack_tertiary:
             nodes = db_controller.get_primary_storage_nodes_by_secondary_node_id(node_id)
             if nodes:
                 for node in nodes:
                     sec_lvs_port = node.get_lvol_subsys_port(node.lvstore)
                     sec_hub_port = node.get_hublvol_port(node.lvstore)
+                    _block_port(sec_lvs_port)
+                    time.sleep(1)
                     if sec_hub_port:
                         _block_port(sec_hub_port)
-                    _block_port(sec_lvs_port)
                     time.sleep(0.5)
                     rpc_client.bdev_lvol_set_leader(node.lvstore, leader=False)
                     rpc_client.bdev_distrib_force_to_non_leader(node.jm_vuid)
 
         # Block per-lvstore ports for this node's own primary lvstore
+        # (same client-port-first ordering — see comment above).
         own_lvs_port = snode.get_lvol_subsys_port(snode.lvstore)
         own_hub_port = snode.get_hublvol_port(snode.lvstore)
+        _block_port(own_lvs_port)
+        time.sleep(1)
         if own_hub_port:
             _block_port(own_hub_port)
-        _block_port(own_lvs_port)
         time.sleep(0.5)
         rpc_client.bdev_lvol_set_leader(snode.lvstore, leader=False)
         rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
@@ -5256,8 +5267,18 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
                     retries -= 1
                     logger.info(f"JC compression active on leader {current_leader.get_id()}, retrying in 60 seconds")
                     time.sleep(60)
+                    # Poll the SAME jm_vuid as the first read above — the LVS
+                    # being recovered (lvs_jm_vuid). Was previously
+                    # current_leader.jm_vuid, which is the leader-node's own
+                    # configured-primary LVS jm_vuid (a different LVS), so the
+                    # poll watched the wrong subsystem and could either exit
+                    # too early (false clear) or block here for the full
+                    # 10×60 s when the leader's own primary LVS happened to
+                    # be compressing. Incident 2026-05-06: 70850783 was
+                    # acting leader of LVS_4450 *and* configured primary of
+                    # LVS_5676; jm_vuid=5676 stayed active → 5 min hang.
                     jc_compression_is_active = current_leader.rpc_client().jc_compression_get_status(
-                        current_leader.jm_vuid)
+                        lvs_jm_vuid)
             except Exception as e:
                 raise Exception(
                     f"Abort restart: jc_compression check on leader {current_leader.get_id()} failed: {e}")
