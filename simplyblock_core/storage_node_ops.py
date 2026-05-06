@@ -4472,6 +4472,25 @@ def _check_peer_disconnected(peer_node, lvs_peer_ids=None):
     """
     from simplyblock_core.services.storage_node_monitor import is_node_data_plane_disconnected_quorum
 
+    # Refresh from FDB before reading peer_node.status. Callers commonly
+    # build a sec_nodes list at the top of recreate_lvstore (line ~5223)
+    # and then run this check seconds later. If the peer's status flipped
+    # to OFFLINE in that window (e.g. monitor's set_node_offline after a
+    # container_kill), the cached object's .status is still ONLINE and
+    # the FDB-status short-circuit below silently misses. The function
+    # then falls through to JM-quorum, which itself can vote "connected"
+    # when peers have already torn down their NVMe controllers for the
+    # dead peer's JM (`0/0 peers report disconnected` — abstain from all).
+    # The caller proceeds to port-block the peer via its mgmt firewall API
+    # and hits ECONNREFUSED, aborting the entire restart with a misleading
+    # "LVStore recovery failed" event. Lab incident 2026-05-06 iter 2.
+    db_ctrl = DBController()
+    try:
+        peer_node = db_ctrl.get_storage_node_by_id(peer_node.get_id())
+    except KeyError:
+        # Peer has been fully removed from the cluster — definitely disconnected.
+        return True
+
     if peer_node.status in (StorageNode.STATUS_OFFLINE,
                             StorageNode.STATUS_REMOVED,
                             StorageNode.STATUS_UNREACHABLE):
