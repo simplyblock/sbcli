@@ -138,7 +138,7 @@ def delete_last_snapshot_if_needed(this_task, lvol):
         snaps = sorted(snaps, key=lambda x: x.created_at)
         snapshot = snaps[-1]
         logger.info("Deleting snapshot: %s", snapshot.get_id())
-        ret = snapshot_controller.delete(snapshot)
+        ret = snapshot_controller.delete(snapshot.get_id())
         logger.debug(ret)
 
 
