@@ -243,10 +243,10 @@ def replication_stop(cluster: Cluster, pool: StoragePool, volume: Volume) -> Res
 
 @instance_api.get('/connect', name='clusters:storage-pools:volumes:connect')
 def connect(cluster: Cluster, pool: StoragePool, volume: Volume):
-    details_or_false = lvol_controller.connect_lvol(volume.get_id())
-    if details_or_false == False:  # noqa
-        raise ValueError('Failed to query connection details')
-    return details_or_false
+    details, err = lvol_controller.connect_lvol(volume.get_id())
+    if err:
+        raise ValueError(err)
+    return details
 
 
 @instance_api.get('/capacity', name='clusters:storage-pools:volumes:capacity')
