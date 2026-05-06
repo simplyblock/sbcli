@@ -3663,17 +3663,25 @@ class _InterruptedTestBase(BackupTestBase):
         return random.choice(sn_ids)
 
     def _do_outage(self, node_id: str, outage_type: str):
-        """Execute one outage cycle (trigger → wait → recover).
+        """Execute one outage cycle: trigger → wait for offline → recover → online → healthy.
 
         Follows the same pattern as TestSingleNodeOutage /
         continuous_failover_ha: uses the management API for graceful
         shutdown and ``ssh_obj.stop_spdk_process`` for container_stop.
+
+        For graceful_shutdown the node is explicitly restarted via CLI.
+        For container_stop the SPDK auto-restart brings the node back.
+        In both cases the method waits for the node to be online,
+        health_check == True, and migration tasks to complete before
+        returning.
         """
+        outage_ts = int(time.time())
         self.logger.info(f"[outage] {outage_type} on node {node_id}")
         node_details = self.sbcli_utils.get_storage_node_details(node_id)
         sn_node_ip = node_details[0]["mgmt_ip"]
         node_rpc_port = node_details[0]["rpc_port"]
 
+        # ── trigger ───────────────────────────────────────────────────
         if outage_type == "graceful_shutdown":
             self.logger.info(
                 f"Issuing graceful shutdown for node {node_id}")
@@ -3700,7 +3708,58 @@ class _InterruptedTestBase(BackupTestBase):
         elif outage_type == "container_stop":
             self.ssh_obj.stop_spdk_process(
                 sn_node_ip, node_rpc_port, self.cluster_id)
+
         sleep_n_sec(30)
+
+        # ── restart (graceful_shutdown needs explicit restart) ─────────
+        if outage_type == "graceful_shutdown":
+            self.logger.info(f"[outage] restarting node {node_id}")
+            max_retries = 10
+            for attempt in range(max_retries):
+                try:
+                    if attempt == max_retries - 1:
+                        self.logger.info(
+                            "[outage] restarting via CLI (API failed)")
+                        self.ssh_obj.restart_node(
+                            node=self.mgmt_nodes[0],
+                            node_id=node_id, force=True)
+                    else:
+                        self.sbcli_utils.restart_node(
+                            node_uuid=node_id,
+                            expected_error_code=[503])
+                    self.sbcli_utils.wait_for_storage_node_status(
+                        node_id, "online", timeout=1000)
+                    break
+                except Exception as e:
+                    if attempt < max_retries - 1:
+                        self.logger.info(
+                            f"[outage] restart attempt {attempt + 1} "
+                            f"failed: {e} — retrying in 10s")
+                        sleep_n_sec(10)
+                    else:
+                        raise
+
+        # ── wait for online + healthy ─────────────────────────────────
+        self.logger.info(f"[outage] waiting for node {node_id} online")
+        self.sbcli_utils.wait_for_storage_node_status(
+            node_id, "online", timeout=1000)
+
+        self.logger.info(f"[outage] waiting for health_check == True")
+        self.sbcli_utils.wait_for_health_status(
+            node_id, True, timeout=1000)
+
+        # ── wait for migration / balancing tasks ──────────────────────
+        self.logger.info(f"[outage] waiting for migration tasks")
+        try:
+            self.validate_migration_for_node(
+                timestamp=outage_ts, timeout=600,
+                node_id=None, check_interval=30,
+                no_task_ok=True)
+        except Exception as e:
+            self.logger.warning(
+                f"[outage] migration validation: {e} (non-fatal)")
+
+        self.logger.info(f"[outage] node {node_id} fully recovered")
 
     def _wait_for_backup_terminal(self, backup_id: str,
                                    timeout: int = 600) -> str:
