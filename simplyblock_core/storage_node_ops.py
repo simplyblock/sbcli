@@ -6316,13 +6316,15 @@ def teardown_non_leader_lvstore(donor_node, primary_node, slot=None):
         not actually a sec/tert for this primary (no-op refused) or the
         bdev stack delete returned an error.
     """
-    if slot in ("_1", "_2"):
-        sec_attr = f"lvstore_stack_secondary{slot}"
+    if slot  == "_1":
+        sec_attr = f"lvstore_stack_secondary"
+    elif slot == "_2":
+        sec_attr = f"lvstore_stack_tertiary"
     elif slot is None:
         if primary_node.secondary_node_id == donor_node.get_id():
-            sec_attr = 'lvstore_stack_secondary_1'
-        elif primary_node.secondary_node_id_2 == donor_node.get_id():
-            sec_attr = 'lvstore_stack_secondary_2'
+            sec_attr = 'lvstore_stack_secondary'
+        elif primary_node.lvstore_stack_tertiary == donor_node.get_id():
+            sec_attr = 'lvstore_stack_tertiary'
         else:
             logger.error(
                 f"teardown_non_leader_lvstore: donor {donor_node.get_id()} "
@@ -6335,9 +6337,7 @@ def teardown_non_leader_lvstore(donor_node, primary_node, slot=None):
             f"got {slot!r}")
 
     db_controller = DBController()
-    rpc_client = RPCClient(
-        donor_node.mgmt_ip, donor_node.rpc_port,
-        donor_node.rpc_username, donor_node.rpc_password)
+    rpc_client = donor_node.rpc_client()
 
     # 1. Delete per-lvol subsystems on the donor.
     for lvol in db_controller.get_lvols_by_node_id(primary_node.get_id()):
