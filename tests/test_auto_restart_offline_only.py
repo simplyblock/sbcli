@@ -1,24 +1,30 @@
 # coding=utf-8
 """
 test_auto_restart_offline_only.py – guard tests for
-``simplyblock_core.controllers.tasks_controller.add_node_to_auto_restart``.
+``simplyblock_core.controllers.tasks_controller.add_node_to_auto_restart``
+and the recovery tail in ``storage_node_monitor.check_node``.
 
 Background: the storage_node_monitor used to queue an auto-restart task
 on any node whose status fell into {DOWN, UNREACHABLE, SCHEDULABLE}.
 The DOWN branch turned a port-block (SPDK still alive, recovery is
-port-unblock) into a destructive kill-and-replay, and on a stressed
-cluster that kill-and-replay hit placement errors during lvstore-
-failover replay (incident 2026-05-02: worker5 crash-looped 16 times
-in 52 minutes after a writer-conflict DOWN got queued for restart and
-the restart hit unreachable peers).
+port-unblock) into a destructive kill-and-replay; on a stressed cluster
+that kill-and-replay hit placement errors during lvstore-failover
+replay (incident 2026-05-02: worker5 crash-looped 16 times in 52
+minutes after a writer-conflict DOWN got queued for restart and the
+restart hit unreachable peers).
 
-The accepted-state set is therefore tightened to {OFFLINE, UNREACHABLE,
-SCHEDULABLE} — DOWN no longer triggers auto-restart. UNREACHABLE
-remains because by the time UNREACHABLE is set, peer JM connections
-and remote-device records on other nodes have already been torn down
-on their side; clearing the flag passively would leave the data-plane
-view inconsistent with this node, so the full restart impl is the
-correct re-integration path.
+Subsequent incident 2026-05-06 showed UNREACHABLE shouldn't trigger
+auto-restart either: while UNREACHABLE the node's SnodeAPI is by
+definition not reachable, so a restart can't run. The natural path is
+UNREACHABLE → (mgmt-plane returns) → either ONLINE (if SPDK was alive
+throughout) or OFFLINE (SnodeAPI authoritatively reports SPDK gone) →
+auto-restart from OFFLINE. So the accepted state set is now just
+{OFFLINE, SCHEDULABLE}.
+
+The check_node tail no longer queues auto-restart at all. When health
+checks pass on an UNREACHABLE/DOWN node, it flips directly to ONLINE —
+SPDK is alive end-to-end and peer NVMe keep-alive rebuilds the data
+plane links without a destructive restart.
 """
 
 import unittest
@@ -46,8 +52,8 @@ def _make_node(status, uuid="node-under-test", cluster_id="cluster-1",
 
 
 class TestAddNodeToAutoRestartGuard(unittest.TestCase):
-    """add_node_to_auto_restart enqueues only for OFFLINE / UNREACHABLE
-    / SCHEDULABLE; everything else is rejected."""
+    """add_node_to_auto_restart enqueues only for OFFLINE / SCHEDULABLE;
+    everything else (including DOWN and UNREACHABLE) is rejected."""
 
     def _call(self, node, peers=None, cluster=None):
         """Invoke add_node_to_auto_restart with patched DB + _add_task.
@@ -63,6 +69,12 @@ class TestAddNodeToAutoRestartGuard(unittest.TestCase):
              patch.object(tasks_controller, "_add_task") as mock_add_task:
             mock_db.get_cluster_by_id.return_value = cluster
             mock_db.get_storage_nodes_by_cluster_id.return_value = peers
+            # The function re-fetches the node from DB to defend against
+            # callers passing stale local objects (the typical bug:
+            # set_node_status flips DB to OFFLINE but the caller's local
+            # node.status is still ONLINE). Returning the same test node
+            # is fine — its .status reflects the scenario under test.
+            mock_db.get_storage_node_by_id.return_value = node
             mock_add_task.return_value = "task-uuid"
             result = tasks_controller.add_node_to_auto_restart(node)
             return result, mock_add_task
@@ -71,6 +83,16 @@ class TestAddNodeToAutoRestartGuard(unittest.TestCase):
 
     def test_rejects_DOWN(self):
         node = _make_node(StorageNode.STATUS_DOWN)
+        result, add_task = self._call(node)
+        self.assertFalse(result)
+        add_task.assert_not_called()
+
+    def test_rejects_UNREACHABLE(self):
+        # UNREACHABLE is no longer an auto-restart trigger: while
+        # UNREACHABLE, SnodeAPI cannot be reached so a restart can't
+        # run. The node converges to OFFLINE (or back to ONLINE) on its
+        # own; auto-restart is paired with the OFFLINE flip there.
+        node = _make_node(StorageNode.STATUS_UNREACHABLE)
         result, add_task = self._call(node)
         self.assertFalse(result)
         add_task.assert_not_called()
@@ -114,9 +136,6 @@ class TestAddNodeToAutoRestartGuard(unittest.TestCase):
 
     def test_accepts_OFFLINE_and_enqueues(self):
         self._assert_enqueued(StorageNode.STATUS_OFFLINE)
-
-    def test_accepts_UNREACHABLE_and_enqueues(self):
-        self._assert_enqueued(StorageNode.STATUS_UNREACHABLE)
 
     def test_accepts_SCHEDULABLE_and_enqueues(self):
         self._assert_enqueued(StorageNode.STATUS_SCHEDULABLE)
@@ -179,15 +198,12 @@ class TestSetNodeOfflinePairing(unittest.TestCase):
                       "set_node_offline must still queue auto-restart")
 
 
-class TestCheckNodeTailQueuesOnlyForUnreachable(unittest.TestCase):
+class TestCheckNodeTail(unittest.TestCase):
     """Source-level guard: the tail of check_node() in storage_node_monitor
-    queues auto-restart only for UNREACHABLE — not for DOWN, not for
-    SCHEDULABLE. (The DOWN branch was the iteration-77 / 2026-05-02
-    regression: a port-block was being escalated to a kill-and-replay.)
-
-    UNREACHABLE remains because peer JM connections / remote-device
-    records on other nodes were torn down on their side; passively
-    clearing the flag would leave the data plane inconsistent.
+    no longer queues auto-restart at all. Instead, when an UNREACHABLE
+    or DOWN node passes every health probe, the tail flips it directly
+    to STATUS_ONLINE — SPDK is alive end-to-end and peer NVMe keep-alive
+    handles data-plane reconnect.
 
     Assertion is source-level rather than runtime because the service
     module has a ``while True`` and pulling it in requires the full
@@ -206,35 +222,34 @@ class TestCheckNodeTailQueuesOnlyForUnreachable(unittest.TestCase):
         nxt = src.index("\ndef ", start + 1)
         return src[start:nxt]
 
-    def test_tail_queues_auto_restart_for_UNREACHABLE(self):
+    def test_tail_flips_UNREACHABLE_or_DOWN_to_ONLINE(self):
         body = self._check_node_body()
-        # The tail must contain a path that gates on UNREACHABLE and
-        # calls add_node_to_auto_restart. Use the LAST occurrence of
-        # STATUS_UNREACHABLE — earlier occurrences are in the
-        # early-skip / state-classification blocks at the head of
-        # check_node and aren't the auto-restart trigger.
+        # The tail's recovery branch must mention BOTH STATUS_UNREACHABLE
+        # and STATUS_DOWN, and call set_node_status with STATUS_ONLINE.
         self.assertIn("STATUS_UNREACHABLE", body)
+        self.assertIn("STATUS_DOWN", body)
+        # Use the LAST occurrence of STATUS_UNREACHABLE — earlier
+        # occurrences are in the early-skip / state-classification
+        # blocks at the head of check_node and aren't the recovery branch.
         idx = body.rindex("STATUS_UNREACHABLE")
         window = body[idx:idx + 2000]
-        self.assertIn("add_node_to_auto_restart", window)
+        self.assertIn("STATUS_ONLINE", window,
+                      "tail recovery branch must flip to STATUS_ONLINE")
+        self.assertIn("set_node_status", window,
+                      "tail recovery branch must call set_node_status")
 
-    def test_tail_does_not_queue_for_DOWN_or_SCHEDULABLE(self):
+    def test_tail_does_not_queue_auto_restart(self):
         body = self._check_node_body()
-        # Find the tail (after the port-check block) and confirm there's
-        # no DOWN/SCHEDULABLE-gated auto-restart enqueue in it. We do this
-        # by grepping for a tuple/in-list pattern that mentions DOWN
-        # together with add_node_to_auto_restart.
-        tail = body[body.index("node_port_check_fun"):] if "node_port_check_fun" in body else body
-        # The previous buggy form clustered all three states into one
-        # tuple. Ensure that pattern is gone.
-        self.assertNotIn("STATUS_DOWN", tail.split("add_node_to_auto_restart")[0]
-                         + tail.split("add_node_to_auto_restart")[-1]
-                         if tail.count("add_node_to_auto_restart") == 1 else "STATUS_DOWN_DUMMY",
-                         "auto-restart tail must not gate on DOWN")
+        # The check_node tail (after node_port_check_fun) must not call
+        # add_node_to_auto_restart for any state. Auto-restart is paired
+        # at its own state-flip site (set_node_offline / set_node_schedulable).
+        self.assertIn("node_port_check_fun", body)
+        tail = body[body.index("node_port_check_fun"):]
         self.assertNotIn(
-            "STATUS_SCHEDULABLE",
-            tail.split("add_node_to_auto_restart")[0] if tail.count("add_node_to_auto_restart") == 1 else "",
-            "auto-restart tail must not gate on SCHEDULABLE inside check_node",
+            "add_node_to_auto_restart", tail,
+            "auto-restart must not be queued from the check_node tail; "
+            "the legitimate triggers (OFFLINE, SCHEDULABLE) pair with the "
+            "state flip at their own call sites",
         )
 
     def test_set_node_offline_branch_still_intact(self):
