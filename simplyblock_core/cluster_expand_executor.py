@@ -127,7 +127,6 @@ class SpdkMoveExecutor(MoveExecutor):
             max_size,
         )
         snode = db.get_storage_node_by_id(snode.get_id())
-        snode.jm_ids = list(set(jm_ids+snode.jm_ids))
         if not ok:
             snode.lvstore_status = "failed"
             snode.write_to_db()
@@ -196,11 +195,9 @@ class SpdkMoveExecutor(MoveExecutor):
         #    primary isn't yet pointing at — recoverable on resume by
         #    re-running the same move.
         recipient.lvstore_stack_secondary = primary.get_id()
-        recipient.jm_ids = list(set(primary.jm_ids+recipient.jm_ids))
         recipient.write_to_db()
 
         setattr(primary, primary_ptr_attr, recipient.get_id())
-        primary.jm_ids = list(set(recipient.jm_ids+primary.jm_ids))
         primary.write_to_db()
 
         # 2. Build the new sec/tert stack on recipient. The function
