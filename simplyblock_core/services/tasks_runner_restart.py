@@ -238,6 +238,20 @@ def task_runner_node(task):
         task.status = JobSchedule.STATUS_DONE
         task.write_to_db(db.kv_store)
         storage_node_ops.set_node_status(task.node_id, StorageNode.STATUS_OFFLINE)
+        # Re-queue a fresh auto-restart task so the node does not get
+        # stranded in OFFLINE forever. Without this, the legitimate
+        # auto-restart trigger (set_node_offline) won't fire either —
+        # it skips when status is already OFFLINE — so the only path
+        # back is operator intervention. Hours-of-backoff exhaustion
+        # almost always means a long peer-side recovery is in flight;
+        # once it clears, the new task can succeed.
+        try:
+            node_obj = db.get_storage_node_by_id(task.node_id)
+            tasks_controller.add_node_to_auto_restart(node_obj)
+        except KeyError:
+            pass
+        except Exception as exc:
+            logger.error(f"Failed to re-queue auto-restart for {task.node_id}: {exc}")
         return True
 
     if node.status in [StorageNode.STATUS_REMOVED, StorageNode.STATUS_SCHEDULABLE]:
@@ -297,6 +311,27 @@ def task_runner_node(task):
             return True
         task.status = JobSchedule.STATUS_RUNNING
         task.write_to_db(db.kv_store)
+
+    # Peer-restart mutual-exclusion pre-check: if any peer is RESTARTING
+    # or IN_SHUTDOWN we cannot proceed (try_set_node_restarting in the
+    # restart impl uses an FDB-tx with the same predicate and would fail
+    # acquisition). This is purely transient — burning a retry on a lock
+    # we know we can't acquire just collapses the backoff budget. Return
+    # False without incrementing task.retry; the runner's outer loop
+    # will sleep with exponential backoff and re-call us. Once the peer
+    # finishes its transition, this check passes and we proceed with a
+    # fresh budget.
+    for peer in db.get_storage_nodes_by_cluster_id(node.cluster_id):
+        if peer.get_id() == node.get_id():
+            continue
+        if peer.status in (StorageNode.STATUS_RESTARTING,
+                           StorageNode.STATUS_IN_SHUTDOWN):
+            msg = (f"Peer {peer.get_id()[:8]} is {peer.status}; "
+                   f"deferring (no retry consumed)")
+            logger.info(msg)
+            task.function_result = msg
+            task.write_to_db(db.kv_store)
+            return False
 
     # is node reachable?
     ping_check = health_controller._check_node_ping(node.mgmt_ip)

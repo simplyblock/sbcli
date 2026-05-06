@@ -5617,30 +5617,21 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
         subsystem_port=lvs_node.get_lvol_subsys_port(lvs_name),
         role=snode_lvs_role,
     )
-    # Only the actual leader of this LVS may hold lvs->leader=true. That's
-    # snode iff it is the topology primary, or this is an active takeover
-    # (secondary/tertiary acting as leader while the primary is unavailable).
-    # Setting leader=true on a follower role leaves SPDK in a state that
-    # only ever exits via spdk_lvs_change_leader_state -> block_port on
-    # the next legitimate change_leadership from JC, with no CP-side
-    # path to unblock the listener (lab incident 2026-05-06: vm201's
-    # LVS_441 secondary stuck DOWN after peer recovered).
-    if snode_lvs_role == "primary" or is_takeover:
-        ret = rpc_client.bdev_lvol_set_leader(lvs_name, leader=True)
-        leader_restored = False
-        for _ in range(10):
-            try:
-                ret = rpc_client.bdev_lvol_get_lvstores(lvs_name)
-                if ret and len(ret) > 0 and ret[0].get("lvs leadership"):
-                    leader_restored = True
-                    break
-            except Exception:
-                pass
-            time.sleep(0.2)
-        if not leader_restored:
-            logger.error("Failed to restore leadership for %s on node %s", lvs_name, snode.get_id())
-            if not force:
-                _abort_restart_and_unblock(f"Failed to restore leadership for {lvs_name}")
+    ret = rpc_client.bdev_lvol_set_leader(lvs_name, leader=True)
+    leader_restored = False
+    for _ in range(10):
+        try:
+            ret = rpc_client.bdev_lvol_get_lvstores(lvs_name)
+            if ret and len(ret) > 0 and ret[0].get("lvs leadership"):
+                leader_restored = True
+                break
+        except Exception:
+            pass
+        time.sleep(0.2)
+    if not leader_restored:
+        logger.error("Failed to restore leadership for %s on node %s", lvs_name, snode.get_id())
+        if not force:
+            _abort_restart_and_unblock(f"Failed to restore leadership for {lvs_name}")
 
     if not activation_mode:
         ### 8- create hublvol and expose via subsystem with listeners

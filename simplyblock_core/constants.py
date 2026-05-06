@@ -88,7 +88,15 @@ TASK_EXEC_RETRY_COUNT = 8
 # window.  See incident 2026-04-20: 83 s end-to-end recovery, ~60 s of which
 # was TASK_EXEC_INTERVAL doubling between redundant retries.
 RESTART_TASK_EXEC_INTERVAL_SEC = 3
-RESTART_TASK_EXEC_INTERVAL_MAX_SEC = 15
+# Cap exponential backoff at 1 h. Peer-side recovery (lvstore replay
+# across a slow remote-NVMe link, JC reconnect against a peer coming
+# back from host_reboot, or simply mutual-exclusion contention while a
+# different peer is mid-restart) can legitimately take longer than
+# minutes. With max_retry=11 the doubling sequence (3,6,12,24,48,96,
+# 192,384,768,1536,3072→capped) reaches the cap on the 10th attempt,
+# giving a total budget in the hours range — the right scale for
+# transient peer-recovery waits without giving up prematurely.
+RESTART_TASK_EXEC_INTERVAL_MAX_SEC = 3600
 
 SIMPLY_BLOCK_SPDK_CORE_IMAGE = "simplyblock/spdk-core:v24.05-tag-latest"
 SIMPLY_BLOCK_DOCKER_IMAGE = get_config_var(
