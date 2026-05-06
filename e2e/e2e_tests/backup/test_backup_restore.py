@@ -169,7 +169,14 @@ class BackupTestBase(TestClusterBase):
     # ── snapshot/backup helpers ───────────────────────────────────────────────
 
     def _create_snapshot(self, lvol_id: str, name: str, backup: bool = False) -> str:
-        """Create snapshot and return snapshot ID."""
+        """Create snapshot and return snapshot ID.
+
+        When *backup=True*, the command output also contains a line like
+        ``Backup created: <uuid>``.  The backup ID is stored in
+        ``self._last_backup_id`` so callers can use it with
+        ``_wait_for_backup()`` instead of polling by snapshot name.
+        """
+        self._last_backup_id = None
         flag = "--backup" if backup else ""
         out, err = self._sbcli(f"-d snapshot add {lvol_id} {name} {flag}".strip())
         assert not (err and "error" in err.lower()), \
@@ -178,6 +185,11 @@ class BackupTestBase(TestClusterBase):
         snap_id = out.strip().split()[-1] if out.strip() else ""
         assert snap_id, f"No snapshot ID returned: {out}"
         self.created_snapshots.append(snap_id)
+        # Extract backup ID when --backup was used
+        if backup and out:
+            match = re.search(r"Backup created:\s*([0-9a-f-]{36})", out)
+            if match:
+                self._last_backup_id = match.group(1)
         return snap_id
 
     def _snapshot_backup(self, snapshot_id: str) -> str:
@@ -211,6 +223,35 @@ class BackupTestBase(TestClusterBase):
             sleep_n_sec(_POLL_INTERVAL)
         raise TimeoutError(
             f"Backup {backup_id} did not complete within {timeout}s")
+
+    def _wait_for_backup_by_snapshot(self, snap_name: str,
+                                     timeout: int = _BACKUP_COMPLETE_TIMEOUT) -> str:
+        """Poll backup list until a backup for *snap_name* reaches completed.
+
+        Returns the backup ID.  Unlike ``_wait_for_backup`` (which needs a
+        backup ID up-front), this variant matches by the Snapshot column —
+        useful when the backup was triggered via ``snapshot add --backup``
+        which does not return the backup ID directly.
+        """
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            for b in self._list_backups():
+                snap = b.get("Snapshot") or b.get("snapshot") or ""
+                if snap_name not in snap:
+                    continue
+                status = (b.get("status") or b.get("Status") or "").lower()
+                if status in ("done", "complete", "completed"):
+                    bid = (b.get("id") or b.get("ID")
+                           or b.get("uuid") or "")
+                    assert bid, (
+                        f"Backup for {snap_name} completed but has no ID: {b}")
+                    return bid
+                if status in ("failed", "error"):
+                    raise AssertionError(
+                        f"Backup for {snap_name} failed: {b}")
+            sleep_n_sec(_POLL_INTERVAL)
+        raise TimeoutError(
+            f"No completed backup for snapshot {snap_name} within {timeout}s")
 
     def _restore_backup(self, backup_id: str, lvol_name: str, pool_name: str = None) -> str:
         """Restore a backup to a new lvol; return the new lvol name."""
@@ -3610,38 +3651,56 @@ class _InterruptedTestBase(BackupTestBase):
     # ── outage helpers ─────────────────────────────────────────────────────
 
     def _get_random_sn(self) -> str:
-        """Return a random online storage-node UUID."""
-        nodes = self.sbcli_utils.get_all_nodes_ip()
+        """Return a random online (non-secondary) storage-node UUID."""
+        data = self.sbcli_utils.get_storage_nodes()
         sn_ids = [
             n["uuid"]
-            for n in nodes.get("results", [])
+            for n in data.get("results", [])
             if n.get("status") == "online"
+            and not n.get("is_secondary_node", False)
         ]
         assert sn_ids, "No online storage nodes found"
         return random.choice(sn_ids)
 
     def _do_outage(self, node_id: str, outage_type: str):
-        """Execute one outage cycle (trigger → wait → recover)."""
+        """Execute one outage cycle (trigger → wait → recover).
+
+        Follows the same pattern as TestSingleNodeOutage /
+        continuous_failover_ha: uses the management API for graceful
+        shutdown and ``ssh_obj.stop_spdk_process`` for container_stop.
+        """
         self.logger.info(f"[outage] {outage_type} on node {node_id}")
-        sn_node_ip = self.sbcli_utils.get_node_without_lvols(node_id)
+        node_details = self.sbcli_utils.get_storage_node_details(node_id)
+        sn_node_ip = node_details[0]["mgmt_ip"]
+        node_rpc_port = node_details[0]["rpc_port"]
 
         if outage_type == "graceful_shutdown":
-            self.ssh_obj.exec_command(
-                sn_node_ip,
-                "systemctl stop simplyblock-storage || true")
-            sleep_n_sec(30)
-            self.ssh_obj.exec_command(
-                sn_node_ip,
-                "systemctl start simplyblock-storage || true")
+            self.logger.info(
+                f"Issuing graceful shutdown for node {node_id}")
+            deadline = time.time() + 300
+            while True:
+                try:
+                    self.sbcli_utils.shutdown_node(
+                        node_uuid=node_id, force=False)
+                except Exception as e:
+                    self.logger.warning(
+                        f"shutdown_node raised (may already be shutting "
+                        f"down): {e}")
+                sleep_n_sec(20)
+                nd = self.sbcli_utils.get_storage_node_details(node_id)
+                if nd[0]["status"] == "offline":
+                    self.logger.info(f"Node {node_id} is offline.")
+                    break
+                if time.time() >= deadline:
+                    raise RuntimeError(
+                        f"Node {node_id} did not go offline within "
+                        f"5 minutes of graceful shutdown.")
+                self.logger.info(
+                    f"Node {node_id} not yet offline; retrying shutdown...")
         elif outage_type == "container_stop":
-            self.ssh_obj.exec_command(
-                sn_node_ip,
-                "docker stop $(docker ps -q --filter name=spdk) || true")
-            sleep_n_sec(30)
-            self.ssh_obj.exec_command(
-                sn_node_ip,
-                "docker start $(docker ps -aq --filter name=spdk) || true")
-        sleep_n_sec(10)
+            self.ssh_obj.stop_spdk_process(
+                sn_node_ip, node_rpc_port, self.cluster_id)
+        sleep_n_sec(30)
 
     def _wait_for_backup_terminal(self, backup_id: str,
                                    timeout: int = 600) -> str:
@@ -3891,15 +3950,15 @@ class TestBackupInterruptedRestore(_InterruptedTestBase):
 
         snap_name = f"intr_rst_snap_{_rand_suffix()}"
         self._create_snapshot(lvol_id, snap_name, backup=True)
-        self.logger.info("Setup: waiting for backup to complete before restore test")
-        sleep_n_sec(30)
-        backups = self._list_backups()
-        assert backups, "Setup: no backups available for interrupted restore test"
-        backup_id = (
-            backups[0].get("id") or backups[0].get("ID")
-            or backups[0].get("uuid") or ""
-        )
-        assert backup_id, "Setup: could not extract backup_id"
+        backup_id = self._last_backup_id
+        if backup_id:
+            self.logger.info(f"Setup: backup_id={backup_id} from snapshot output, "
+                             "waiting for completion")
+            self._wait_for_backup(backup_id)
+        else:
+            self.logger.info("Setup: backup_id not in snapshot output, "
+                             "polling by snapshot name")
+            backup_id = self._wait_for_backup_by_snapshot(snap_name)
         self.logger.info(f"Setup: backup_id={backup_id} — ready for interrupt test")
 
         # ── TC-BCK-090..095: Plain lvol, graceful_shutdown interrupt ───────
@@ -3977,43 +4036,45 @@ class TestBackupInterruptedRestore(_InterruptedTestBase):
 
         c_snap = f"intr_rst_c_snap_{_rand_suffix()}"
         self._create_snapshot(crypto_id, c_snap, backup=True)
-        sleep_n_sec(20)
-        c_backups = self._list_backups()
-        if c_backups:
-            c_bk_id = (
-                c_backups[-1].get("id") or c_backups[-1].get("ID")
-                or c_backups[-1].get("uuid") or None
-            )
-            if c_bk_id:
-                c_rst_name = f"intr_rst_c1_{_rand_suffix()}"
-                self._restore_backup(c_bk_id, c_rst_name)
-                try:
-                    sn_id2 = self._get_random_sn()
-                    self._do_outage(sn_id2, "container_stop")
-                except Exception as e:
-                    self.logger.warning(f"TC-BCK-097: outage error (non-fatal): {e}")
+        c_bk_id = self._last_backup_id
+        if c_bk_id:
+            self.logger.info(f"TC-BCK-097: backup_id={c_bk_id} from snapshot output, "
+                             "waiting for completion")
+            self._wait_for_backup(c_bk_id)
+        else:
+            self.logger.info("TC-BCK-097: backup_id not in snapshot output, "
+                             "polling by snapshot name")
+            c_bk_id = self._wait_for_backup_by_snapshot(c_snap)
+        if c_bk_id:
+            c_rst_name = f"intr_rst_c1_{_rand_suffix()}"
+            self._restore_backup(c_bk_id, c_rst_name)
+            try:
+                sn_id2 = self._get_random_sn()
+                self._do_outage(sn_id2, "container_stop")
+            except Exception as e:
+                self.logger.warning(f"TC-BCK-097: outage error (non-fatal): {e}")
 
-                sleep_n_sec(30)
-                c_rst_status = self._wait_for_restore_or_error(c_rst_name, timeout=120)
-                self.logger.info(
-                    f"TC-BCK-097: crypto restore status={c_rst_status!r}")
+            sleep_n_sec(30)
+            c_rst_status = self._wait_for_restore_or_error(c_rst_name, timeout=120)
+            self.logger.info(
+                f"TC-BCK-097: crypto restore status={c_rst_status!r}")
 
-                if c_rst_status not in ("absent", "timeout"):
-                    self._cleanup_lvol(c_rst_name)
+            if c_rst_status not in ("absent", "timeout"):
+                self._cleanup_lvol(c_rst_name)
 
-                # Retry crypto restore
-                c_rst_retry = f"intr_rst_c2_{_rand_suffix()}"
-                self._restore_backup(c_bk_id, c_rst_retry)
-                self._wait_for_restore(c_rst_retry)
-                c_rest_id = self.sbcli_utils.get_lvol_id(lvol_name=c_rst_retry)
-                c_r_device, c_r_mount = self._connect_and_mount(
-                    c_rst_retry, c_rest_id,
-                    mount=f"{self.mount_path}/icr2_{_rand_suffix()}",
-                    format_disk=False)
-                c_r_files = self.ssh_obj.find_files(self.fio_node, c_r_mount)
-                self.ssh_obj.verify_checksums(
-                    self.fio_node, c_r_files, c_checksums,
-                    message="TC-BCK-097: checksum mismatch on interrupted crypto restore retry", by_name=True)
-                self.logger.info("TC-BCK-097: crypto interrupted restore retry ✓")
+            # Retry crypto restore
+            c_rst_retry = f"intr_rst_c2_{_rand_suffix()}"
+            self._restore_backup(c_bk_id, c_rst_retry)
+            self._wait_for_restore(c_rst_retry)
+            c_rest_id = self.sbcli_utils.get_lvol_id(lvol_name=c_rst_retry)
+            c_r_device, c_r_mount = self._connect_and_mount(
+                c_rst_retry, c_rest_id,
+                mount=f"{self.mount_path}/icr2_{_rand_suffix()}",
+                format_disk=False)
+            c_r_files = self.ssh_obj.find_files(self.fio_node, c_r_mount)
+            self.ssh_obj.verify_checksums(
+                self.fio_node, c_r_files, c_checksums,
+                message="TC-BCK-097: checksum mismatch on interrupted crypto restore retry", by_name=True)
+            self.logger.info("TC-BCK-097: crypto interrupted restore retry ✓")
 
         self.logger.info("=== TestBackupInterruptedRestore PASSED ===")
