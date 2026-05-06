@@ -4011,15 +4011,23 @@ def get(node_id):
 
 # States from which a node may legally transition INTO STATUS_ONLINE.
 # Going online is the most consequential write in the state machine: it
-# tells peers the node is serving IO. To prevent stale paths (e.g. the
-# monitor briefly losing then regaining health checks) from re-flipping
-# a half-broken node to ONLINE, the only legal predecessors are the
-# transient "active operation in progress" states. Anything else is an
-# illegal transition and rejected.
+# tells peers the node is serving IO. The transient "active operation
+# in progress" predecessors are obvious:
+#   - RESTARTING : restart impl finished, ready to commit ONLINE.
+#   - IN_CREATION: add_node finished provisioning the new node.
+#   - SUSPENDED  : resume_storage_node lifting the suspension.
+# UNREACHABLE / DOWN are also legal: the monitor's check_node tail
+# only flips them when *every* health probe (ping, SnodeAPI,
+# spdk_process, RPC, port_check) just passed. SPDK is alive and the
+# listener is reachable — the node is in fact serving. Without this,
+# transient mgmt-plane blips and port flaps strand the node forever
+# (lab incident 2026-05-06).
 _ALLOWED_PRE_STATUSES_FOR_ONLINE = (
     StorageNode.STATUS_RESTARTING,
     StorageNode.STATUS_IN_CREATION,
     StorageNode.STATUS_SUSPENDED,
+    StorageNode.STATUS_UNREACHABLE,
+    StorageNode.STATUS_DOWN,
 )
 
 
