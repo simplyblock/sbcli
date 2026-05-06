@@ -99,19 +99,21 @@ class RPCClient:
         self.host = host
         self.port = port
         settings = Settings()
-        scheme = "https" if settings.tls_enabled else "http"
+        scheme = "https" if settings.tls_connect != "disabled" else "http"
         self.url = '%s://%s:%s/' % (scheme, self.host, self.port)
         self.username = username
         self.password = password
         self.timeout = timeout
         self.session = requests.session()
-        if settings.tls_enabled:
-            self.session.verify = str(settings.certificate_authority)
+        if settings.tls_connect != "disabled":
+            self.session.verify = str(settings.tls_certificate_authority)
         self.session.auth = (self.username, self.password)
         retries = Retry(total=retry, backoff_factor=1, connect=retry, read=retry,
                         allowed_methods=self.DEFAULT_ALLOWED_METHODS)
         self.session.mount("http://", HTTPAdapter(max_retries=retries))
         self.session.mount("https://", HTTPAdapter(max_retries=retries))
+        if settings.tls_connect == "authenticated":
+            self.session.cert = (str(settings.tls_certificate), str(settings.tls_key))
 
     def _request_cached(self, method, params=None, cache_ttl=RPC_CACHE_TTL_SEC):
         """Like _request but returns a cached result if one exists within cache_ttl seconds."""

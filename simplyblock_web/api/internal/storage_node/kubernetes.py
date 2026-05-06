@@ -281,6 +281,7 @@ class SPDKParams(BaseModel):
     })}}},
 })
 def spdk_process_start(body: SPDKParams):
+    settings = Settings()
     ssd_pcie_params = " ".join(" -A " + addr for addr in body.ssd_pcie) if body.ssd_pcie else "none"
     ssd_pcie_list = " ".join(body.ssd_pcie)
 
@@ -373,7 +374,10 @@ def spdk_process_start(body: SPDKParams):
             'FW_PORT': body.firewall_port,
             'CPU_TOPOLOGY_ENABLED': cpu_topology_enabled,
             'RESERVED_SYSTEM_CPUS': reserved_system_cpus,
-            'TLS_ENABLED': Settings().tls_enabled,
+            'TLS_SERVE': settings.tls_serve,
+            'TLS_CONNECT': settings.tls_connect,
+            'TLS_CLIENT_AUTH': settings.model_dump()["tls_client_auth"],
+            'TLS_PROVIDER': settings.tls_provider,
         }
 
         if ubuntu_host:
