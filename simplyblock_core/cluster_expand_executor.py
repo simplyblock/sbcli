@@ -45,7 +45,7 @@ logger = utils.get_logger(__name__)
 # this map — the create-primary path bypasses it.
 _SEC_SLOT_BY_ROLE = {
     ROLE_SECONDARY: ("_1", "secondary_node_id"),
-    ROLE_TERTIARY: ("_2", "secondary_node_id_2"),
+    ROLE_TERTIARY: ("_2", "tertiary_node_id"),
 }
 
 
@@ -116,6 +116,7 @@ class SpdkMoveExecutor(MoveExecutor):
         max_size = self._get_max_size()
 
         snode = db.get_storage_node_by_id(move.to_node_id)
+        jm_ids = snode.jm_ids
         ok = storage_node_ops.create_lvstore(
             snode,
             cluster.distr_ndcs,
@@ -146,7 +147,8 @@ class SpdkMoveExecutor(MoveExecutor):
 
         # 1. Set holder's back-reference (string field that
         #    recreate_lvstore_on_sec uses to discover its iteration set).
-        setattr(holder, f"lvstore_stack_secondary{slot_suffix}", primary.get_id())
+        holder.lvstore_stack_secondary = primary.get_id()
+        holder.jm_ids = list(set(primary.jm_ids+holder.jm_ids))
         holder.write_to_db()
 
         # 2. Update primary's pointer.
@@ -157,7 +159,7 @@ class SpdkMoveExecutor(MoveExecutor):
         #    node that just gained this role); recreate iterates by the
         #    back-references we just set, so this is surgical.
         holder = db.get_storage_node_by_id(holder.get_id())
-        ok = storage_node_ops.recreate_lvstore_on_sec(holder)
+        ok = storage_node_ops.recreate_lvstore_on_non_leader(holder, primary, primary, activation_mode=True)
         if ok is False:
             raise RuntimeError(
                 f"recreate_lvstore_on_sec failed on {holder.get_id()} "
@@ -192,8 +194,7 @@ class SpdkMoveExecutor(MoveExecutor):
         #    leaves the recipient's record claiming to host a role its
         #    primary isn't yet pointing at — recoverable on resume by
         #    re-running the same move.
-        setattr(recipient,
-                f"lvstore_stack_secondary{slot_suffix}", primary.get_id())
+        recipient.lvstore_stack_secondary = primary.get_id()
         recipient.write_to_db()
 
         setattr(primary, primary_ptr_attr, recipient.get_id())
@@ -203,7 +204,8 @@ class SpdkMoveExecutor(MoveExecutor):
         #    iterates by DB back-references, which now include this
         #    primary.
         recipient = db.get_storage_node_by_id(recipient.get_id())
-        ok = storage_node_ops.recreate_lvstore_on_sec(recipient)
+        ok = storage_node_ops.recreate_lvstore_on_non_leader(
+            recipient, primary, primary, activation_mode=True)
         if ok is False:
             raise RuntimeError(
                 f"recreate_lvstore_on_sec failed on recipient "
@@ -225,8 +227,8 @@ class SpdkMoveExecutor(MoveExecutor):
         #    this problem (sec_1 was unchanged; only sec_2 itself moved).
         if slot_suffix == "_1":
             primary = db.get_storage_node_by_id(primary.get_id())
-            if primary.secondary_node_id_2:
-                sibling = db.get_storage_node_by_id(primary.secondary_node_id_2)
+            if primary.tertiary_node_id:
+                sibling = db.get_storage_node_by_id(primary.tertiary_node_id)
                 if sibling.status == StorageNode.STATUS_ONLINE:
                     storage_node_ops.reattach_sibling_failover(
                         sibling, primary,
