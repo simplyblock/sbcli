@@ -3992,6 +3992,7 @@ _ALLOWED_PRE_STATUSES_FOR_ONLINE = (
     StorageNode.STATUS_RESTARTING,
     StorageNode.STATUS_IN_CREATION,
     StorageNode.STATUS_SUSPENDED,
+    StorageNode.STATUS_DOWN,
 )
 
 
