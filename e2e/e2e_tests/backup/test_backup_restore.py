@@ -350,8 +350,9 @@ class BackupTestBase(TestClusterBase):
                     restore_tasks.append(parts)
 
                 if restore_tasks:
-                    # Check the most recent restore task (last in the list)
-                    latest = restore_tasks[-1]
+                    # Check the most recent restore task (first in the list —
+                    # table is sorted descending by Updated At)
+                    latest = restore_tasks[0]
                     status = latest[4]
                     result = latest[5] if len(latest) > 5 else ""
                     if status == "done":
