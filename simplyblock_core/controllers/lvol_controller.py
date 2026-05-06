@@ -2658,6 +2658,7 @@ def replicate_lvol_on_source_cluster(lvol_id, cluster_id=None, pool_uuid=None):
                 snaps.append(snap)
 
         if snaps:
+            logger.debug(snaps)
             snaps = sorted(snaps, key=lambda x: x.created_at)
             snapshot = snaps[-1]
             snapshot = db_controller.get_snapshot_by_id(snapshot.target_replicated_snap_uuid)
