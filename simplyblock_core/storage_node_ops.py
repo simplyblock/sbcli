@@ -4608,12 +4608,24 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
                            snode.get_id(), e)
 
     # Ensure snode has per-lvstore ports from primary
-    if primary_node.lvstore_ports and primary_node.lvstore in primary_node.lvstore_ports:
-        if not snode.lvstore_ports:
-            snode.lvstore_ports = {}
-        snode.lvstore_ports[primary_node.lvstore] = \
-            primary_node.lvstore_ports[primary_node.lvstore].copy()
-        snode.write_to_db()
+    lvstore_ports = {snode.lvstore: {
+        "lvol_subsys_port": snode.lvol_subsys_port,
+        "hublvol_port": snode.hublvol.nvmf_port,
+    }}
+    if snode.lvstore_stack_secondary:
+        nd = db_controller.get_storage_node_by_id(snode.lvstore_stack_secondary)
+        lvstore_ports[nd.lvstore] = {
+            "lvol_subsys_port": nd.lvol_subsys_port,
+            "hublvol_port": nd.hublvol.nvmf_port,
+        }
+    if snode.lvstore_stack_tertiary:
+        nd = db_controller.get_storage_node_by_id(snode.lvstore_stack_tertiary)
+        lvstore_ports[nd.lvstore] = {
+            "lvol_subsys_port": nd.lvol_subsys_port,
+            "hublvol_port": nd.hublvol.nvmf_port,
+        }
+    snode.lvstore_ports = lvstore_ports
+    snode.write_to_db()
 
     lvol_list = []
     for lv in db_controller.get_lvols_by_node_id(primary_node.get_id()):
@@ -4637,6 +4649,12 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
         primary_node.lvstore_status = "ready"
         primary_node.write_to_db()
         return False
+
+    try:
+        snode.connect_to_hublvol(primary_node, failover_node=None)
+    except Exception as e:
+        logger.error("Error establishing hublvol: %s", e)
+        # return False
 
     # Resume JC compression for this LVS group on the restarting node
     ret, err = snode.rpc_client().jc_suspend_compression(jm_vuid=primary_node.jm_vuid, suspend=False)
@@ -6118,14 +6136,14 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
         sec_node.write_to_db()
 
     # Create hublvol on primary after all secondaries have their stacks
-    if secondary_ids:
-        cluster = db_controller.get_cluster_by_id(snode.cluster_id)
-        try:
-            snode.create_hublvol(cluster_nqn=cluster.nqn)
-        except RPCException as e:
-            logger.error("Error establishing hublvol: %s", e.message)
-            # return False
+    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+    try:
+        snode.create_hublvol(cluster_nqn=cluster.nqn)
+    except RPCException as e:
+        logger.error("Error establishing hublvol: %s", e.message)
+        # return False
 
+    if secondary_ids:
         # Create secondary hublvol on sec_1 so tertiary can multipath
         sec1 = db_controller.get_storage_node_by_id(secondary_ids[0])
         if sec1 and sec1.status == StorageNode.STATUS_ONLINE:
@@ -6316,13 +6334,15 @@ def teardown_non_leader_lvstore(donor_node, primary_node, slot=None):
         not actually a sec/tert for this primary (no-op refused) or the
         bdev stack delete returned an error.
     """
-    if slot in ("_1", "_2"):
-        sec_attr = f"lvstore_stack_secondary{slot}"
+    if slot  == "_1":
+        sec_attr = f"lvstore_stack_secondary"
+    elif slot == "_2":
+        sec_attr = f"lvstore_stack_tertiary"
     elif slot is None:
         if primary_node.secondary_node_id == donor_node.get_id():
-            sec_attr = 'lvstore_stack_secondary_1'
-        elif primary_node.secondary_node_id_2 == donor_node.get_id():
-            sec_attr = 'lvstore_stack_secondary_2'
+            sec_attr = 'lvstore_stack_secondary'
+        elif primary_node.lvstore_stack_tertiary == donor_node.get_id():
+            sec_attr = 'lvstore_stack_tertiary'
         else:
             logger.error(
                 f"teardown_non_leader_lvstore: donor {donor_node.get_id()} "
@@ -6335,9 +6355,7 @@ def teardown_non_leader_lvstore(donor_node, primary_node, slot=None):
             f"got {slot!r}")
 
     db_controller = DBController()
-    rpc_client = RPCClient(
-        donor_node.mgmt_ip, donor_node.rpc_port,
-        donor_node.rpc_username, donor_node.rpc_password)
+    rpc_client = donor_node.rpc_client()
 
     # 1. Delete per-lvol subsystems on the donor.
     for lvol in db_controller.get_lvols_by_node_id(primary_node.get_id()):
@@ -6350,17 +6368,7 @@ def teardown_non_leader_lvstore(donor_node, primary_node, slot=None):
                 f"teardown_non_leader_lvstore: subsystem_delete({lvol.nqn}) "
                 f"on {donor_node.get_id()} raised {e}; continuing")
 
-    # 2. Remove the bdev stack. The donor instantiated the stack from
-    #    primary_node.lvstore_stack; we use the same list as the structural
-    #    template so _remove_bdev_stack walks it in the right order.
-    if primary_node.lvstore_stack:
-        # _remove_bdev_stack mutates 'status' fields — work on a shallow copy
-        # of the dicts so we don't accidentally persist 'deleted' markers
-        # back into primary_node.lvstore_stack on subsequent writes.
-        stack_copy = [dict(b) for b in primary_node.lvstore_stack]
-        _remove_bdev_stack(stack_copy, rpc_client)
-
-    # 3. Best-effort: detach the hublvol nvme controller.
+    # 2. Best-effort: detach the hublvol nvme controller.
     if primary_node.hublvol and primary_node.hublvol.bdev_name:
         try:
             rpc_client.bdev_nvme_detach_controller(
@@ -6370,10 +6378,23 @@ def teardown_non_leader_lvstore(donor_node, primary_node, slot=None):
                 f"teardown_non_leader_lvstore: hublvol detach raised {e} "
                 f"(likely already detached)")
 
+    # 3. Remove the bdev stack. The donor instantiated the stack from
+    #    primary_node.lvstore_stack; we use the same list as the structural
+    #    template so _remove_bdev_stack walks it in the right order.
+    if primary_node.lvstore_stack:
+        # _remove_bdev_stack mutates 'status' fields — work on a shallow copy
+        # of the dicts so we don't accidentally persist 'deleted' markers
+        # back into primary_node.lvstore_stack on subsequent writes.
+        stack_copy = [dict(b) for b in primary_node.lvstore_stack]
+        _remove_bdev_stack(stack_copy, rpc_client)
+
+
     # 4. Clear the back-reference on the donor and persist. Re-fetch so we
     #    don't clobber unrelated concurrent edits to the donor record.
     fresh_donor = db_controller.get_storage_node_by_id(donor_node.get_id())
     setattr(fresh_donor, sec_attr, "")
+    if fresh_donor.lvstore_ports and primary_node.lvstore in fresh_donor.lvstore_ports:
+        del fresh_donor.lvstore_ports[primary_node.lvstore]
     fresh_donor.write_to_db()
 
     logger.info(

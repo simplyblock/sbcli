@@ -622,6 +622,13 @@ def check_node(snode):
         )
         tasks_controller.add_node_to_auto_restart(snode)
 
+    elif snode.status == StorageNode.STATUS_DOWN:
+        logger.info(
+            "Node in down status but all checks pass, setting node online %s",
+            snode.get_id(),
+        )
+        storage_node_ops.set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE)
+
 
 def loop_for_node(snode):
     # global logger
