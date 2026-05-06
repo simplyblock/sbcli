@@ -116,7 +116,6 @@ class SpdkMoveExecutor(MoveExecutor):
         max_size = self._get_max_size()
 
         snode = db.get_storage_node_by_id(move.to_node_id)
-        jm_ids = snode.jm_ids
         ok = storage_node_ops.create_lvstore(
             snode,
             cluster.distr_ndcs,

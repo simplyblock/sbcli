@@ -4609,10 +4609,12 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
                            snode.get_id(), e)
 
     # Ensure snode has per-lvstore ports from primary
-    lvstore_ports = {snode.lvstore: {
-        "lvol_subsys_port": snode.lvol_subsys_port,
-        "hublvol_port": snode.hublvol.nvmf_port,
-    }}
+    lvstore_ports = {}
+    if snode.lvstore:
+        lvstore_ports[snode.lvstore] = {
+            "lvol_subsys_port": snode.lvol_subsys_port,
+            "hublvol_port": snode.hublvol.nvmf_port,
+        }
     if snode.lvstore_stack_secondary:
         nd = db_controller.get_storage_node_by_id(snode.lvstore_stack_secondary)
         lvstore_ports[nd.lvstore] = {
@@ -6336,9 +6338,9 @@ def teardown_non_leader_lvstore(donor_node, primary_node, slot=None):
         bdev stack delete returned an error.
     """
     if slot  == "_1":
-        sec_attr = f"lvstore_stack_secondary"
+        sec_attr = "lvstore_stack_secondary"
     elif slot == "_2":
-        sec_attr = f"lvstore_stack_tertiary"
+        sec_attr = "lvstore_stack_tertiary"
     elif slot is None:
         if primary_node.secondary_node_id == donor_node.get_id():
             sec_attr = 'lvstore_stack_secondary'
