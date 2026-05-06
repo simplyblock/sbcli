@@ -602,19 +602,21 @@ def check_node(snode):
     # auto-restart triggers (OFFLINE, SCHEDULABLE) are paired at the call
     # site that flips the status (set_node_offline, set_node_schedulable).
     #
-    # UNREACHABLE → ONLINE: a node that was UNREACHABLE and now passes
-    # ping / SnodeAPI / spdk_process_is_up / RPC / port checks has SPDK
-    # alive end-to-end. Peer JM keep-alive / NVMe controller reconnect
-    # rebuilds the data-plane links on their own — no destructive
-    # restart needed. We flip ONLINE here because there is no other path
-    # that closes the loop for "mgmt-plane blip recovered with SPDK
-    # alive". (OFFLINE/DOWN/SCHEDULABLE are intentionally NOT cleared
-    # here — those have their own dedicated recovery paths.)
-    if snode.status == StorageNode.STATUS_UNREACHABLE:
+    # UNREACHABLE / DOWN → ONLINE: a node in either of these states that
+    # now passes ping / SnodeAPI / spdk_process_is_up / RPC / port checks
+    # has SPDK alive end-to-end and its client-facing port reachable.
+    # Peer JM keep-alive / NVMe controller reconnect rebuilds the
+    # data-plane links on their own — no destructive restart needed.
+    # We flip ONLINE here because nothing else closes the loop for a
+    # transient mgmt-plane blip (UNREACHABLE) or a transient port flap
+    # (DOWN, e.g. peer-restart cascade). OFFLINE and SCHEDULABLE are
+    # intentionally NOT cleared here — those have dedicated recovery
+    # via auto-restart.
+    if snode.status in (StorageNode.STATUS_UNREACHABLE, StorageNode.STATUS_DOWN):
         logger.info(
-            "Node %s health checks pass after UNREACHABLE; "
+            "Node %s health checks pass after %s; "
             "clearing to ONLINE (SPDK alive; peer keep-alive reconnects)",
-            snode.get_id(),
+            snode.get_id(), snode.status,
         )
         storage_node_ops.set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE)
 
