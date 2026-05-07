@@ -4890,6 +4890,7 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
             primary_node.lvstore,
             groupid=primary_node.jm_vuid,
             subsystem_port=primary_node.get_lvol_subsys_port(primary_node.lvstore),
+            hublvol_port=primary_node.get_hublvol_port(primary_node.lvstore),
             role=sec_role,
     ):
         logger.error("bdev_lvol_set_lvs_opts(%s) failed for %s on %s",
@@ -5620,6 +5621,7 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
         lvs_name,
         groupid=lvs_jm_vuid,
         subsystem_port=lvs_node.get_lvol_subsys_port(lvs_name),
+        hublvol_port=lvs_node.get_hublvol_port(lvs_name),
         role=snode_lvs_role,
     )
     ret = rpc_client.bdev_lvol_set_leader(lvs_name, leader=True)
@@ -6119,6 +6121,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
         snode.lvstore,
         groupid=snode.jm_vuid,
         subsystem_port=snode.get_lvol_subsys_port(snode.lvstore),
+        hublvol_port=snode.get_hublvol_port(snode.lvstore),
         role="primary"
     )
     ret = rpc_client.bdev_lvol_set_leader(snode.lvstore, leader=True)

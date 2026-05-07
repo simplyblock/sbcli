@@ -1233,17 +1233,20 @@ class RPCClient:
         }
         return self._request("nvmf_set_max_subsystems", params)
 
-    def bdev_lvol_set_lvs_opts(self, lvs, *, groupid, subsystem_port=9090, role="primary"):
+    def bdev_lvol_set_lvs_opts(self, lvs, *, groupid, subsystem_port=9090, hublvol_port=0, role="primary"):
         """Set lvstore options
 
         `lvs` must be either an ID or the lvstore name.
         `role` must be one of: "primary", "secondary", "tertiary".
+        `hublvol_port` is the NVMe-oF port the LVS exposes its hublvol on
+        (per-LVS, distinct from `subsystem_port` which serves lvols).
         """
 
         return self._request('bdev_lvol_set_lvs_opts', {
             "uuid" if utils.UUID_PATTERN.match(lvs) else "lvs_name": lvs,
             "groupid": groupid,
             "subsystem_port": subsystem_port,
+            "hublvol_port": hublvol_port,
             "role": role,
         })
 
