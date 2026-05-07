@@ -543,7 +543,7 @@ def delete(snapshot_uuid, force_delete=False):
 
 
 def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None, delete_snap_on_lvol_delete=False,
-          lock=True, namespaced=False):
+          lock=True, namespaced=True):
     try:
         snap = db_controller.get_snapshot_by_id(snapshot_id)
     except KeyError as e:

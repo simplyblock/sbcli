@@ -1774,7 +1774,7 @@ commands:
             help: "Adds this LVol as a namespace on any available subsystem, if not found then create a new subsystem. Default: `false`."
             dest: namespaced
             type: bool
-            default: false
+            default: true
       - name: move
         help: "Moves a full copy of the logical volume between nodes."
         private: true
@@ -2249,7 +2249,7 @@ commands:
             help: "Adds this LVol as a namespace on any available subsystem, if not found then create a new subsystem. Default: `false`."
             dest: namespaced
             type: bool
-            default: false
+            default: true
       - name: replication-status
         help: "Lists snapshots replication status"
         arguments:

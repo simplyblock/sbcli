@@ -57,7 +57,6 @@ class _CloneParams(BaseModel):
     name: str
     snapshot_id: Annotated[Optional[str], Field(pattern=core_utils.UUID_PATTERN)]
     size: util.Size = 0
-    namespaced: Optional[bool] = False
 
 
 @api.post('/', name='clusters:storage-pools:volumes:create', status_code=201, responses={201: {"content": None}})
@@ -105,7 +104,6 @@ def add(
             data.snapshot_id,
             data.name,
             data.size if data.size is not None else 0,
-            namespaced=data.namespaced,
         )
     else:
         raise AssertionError('unreachable')
