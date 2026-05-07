@@ -2658,7 +2658,6 @@ def replicate_lvol_on_source_cluster(lvol_id, cluster_id=None, pool_uuid=None):
                 snaps.append(snap)
 
         if snaps:
-            logger.debug(snaps)
             snaps = sorted(snaps, key=lambda x: x.created_at)
             snapshot = snaps[-1]
             snapshot = db_controller.get_snapshot_by_id(snapshot.target_replicated_snap_uuid)
@@ -2711,6 +2710,9 @@ def replicate_lvol_on_source_cluster(lvol_id, cluster_id=None, pool_uuid=None):
     new_lvol.write_to_db(db_controller.kv_store)
 
     logger.debug(f"new lvol from_source: {new_lvol.from_source}")
+
+    logger.debug(f"new_lvol: {new_lvol}")
+    logger.debug(f"source_node: {source_node}")
 
     lvol_bdev, error = add_lvol_on_node(new_lvol, source_node)
     if error:
