@@ -3366,26 +3366,37 @@ def suspend_storage_node(node_id, force=False, change_node_status=True):
                 logger.error(f"Failed to revert port block for port {port}: {revert_e}")
 
     try:
-        # Block per-lvstore ports for secondary lvstores hosted on this node
+        # Block per-lvstore ports for secondary lvstores hosted on this node.
+        # Order: client (lvs) port FIRST, then 1 s for peers to drain in-flight
+        # IO via the still-open hublvol back to the acting leader, then the
+        # hublvol port. Reversing this order — blocking the hublvol port while
+        # the client port is still open — kills the redirect path while clients
+        # may still be funneling IO into the secondary, forcing the secondary's
+        # lvstore layer to auto-promote (lvol.c:3508 "Leadership changed due
+        # to receive new IO"), which races the in-flight leader and produces
+        # a writer conflict (incident 2026-05-06 iter 2, jm_vuid=4450).
         if snode.lvstore_stack_secondary or snode.lvstore_stack_tertiary:
             nodes = db_controller.get_primary_storage_nodes_by_secondary_node_id(node_id)
             if nodes:
                 for node in nodes:
                     sec_lvs_port = node.get_lvol_subsys_port(node.lvstore)
                     sec_hub_port = node.get_hublvol_port(node.lvstore)
+                    _block_port(sec_lvs_port)
+                    time.sleep(1)
                     if sec_hub_port:
                         _block_port(sec_hub_port)
-                    _block_port(sec_lvs_port)
                     time.sleep(0.5)
                     rpc_client.bdev_lvol_set_leader(node.lvstore, leader=False)
                     rpc_client.bdev_distrib_force_to_non_leader(node.jm_vuid)
 
         # Block per-lvstore ports for this node's own primary lvstore
+        # (same client-port-first ordering — see comment above).
         own_lvs_port = snode.get_lvol_subsys_port(snode.lvstore)
         own_hub_port = snode.get_hublvol_port(snode.lvstore)
+        _block_port(own_lvs_port)
+        time.sleep(1)
         if own_hub_port:
             _block_port(own_hub_port)
-        _block_port(own_lvs_port)
         time.sleep(0.5)
         rpc_client.bdev_lvol_set_leader(snode.lvstore, leader=False)
         rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
@@ -4472,6 +4483,25 @@ def _check_peer_disconnected(peer_node, lvs_peer_ids=None):
     """
     from simplyblock_core.services.storage_node_monitor import is_node_data_plane_disconnected_quorum
 
+    # Refresh from FDB before reading peer_node.status. Callers commonly
+    # build a sec_nodes list at the top of recreate_lvstore (line ~5223)
+    # and then run this check seconds later. If the peer's status flipped
+    # to OFFLINE in that window (e.g. monitor's set_node_offline after a
+    # container_kill), the cached object's .status is still ONLINE and
+    # the FDB-status short-circuit below silently misses. The function
+    # then falls through to JM-quorum, which itself can vote "connected"
+    # when peers have already torn down their NVMe controllers for the
+    # dead peer's JM (`0/0 peers report disconnected` — abstain from all).
+    # The caller proceeds to port-block the peer via its mgmt firewall API
+    # and hits ECONNREFUSED, aborting the entire restart with a misleading
+    # "LVStore recovery failed" event. Lab incident 2026-05-06 iter 2.
+    db_ctrl = DBController()
+    try:
+        peer_node = db_ctrl.get_storage_node_by_id(peer_node.get_id())
+    except KeyError:
+        # Peer has been fully removed from the cluster — definitely disconnected.
+        return True
+
     if peer_node.status in (StorageNode.STATUS_OFFLINE,
                             StorageNode.STATUS_REMOVED,
                             StorageNode.STATUS_UNREACHABLE):
@@ -4860,6 +4890,7 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
             primary_node.lvstore,
             groupid=primary_node.jm_vuid,
             subsystem_port=primary_node.get_lvol_subsys_port(primary_node.lvstore),
+            hublvol_port=primary_node.get_hublvol_port(primary_node.lvstore),
             role=sec_role,
     ):
         logger.error("bdev_lvol_set_lvs_opts(%s) failed for %s on %s",
@@ -5237,8 +5268,18 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
                     retries -= 1
                     logger.info(f"JC compression active on leader {current_leader.get_id()}, retrying in 60 seconds")
                     time.sleep(60)
+                    # Poll the SAME jm_vuid as the first read above — the LVS
+                    # being recovered (lvs_jm_vuid). Was previously
+                    # current_leader.jm_vuid, which is the leader-node's own
+                    # configured-primary LVS jm_vuid (a different LVS), so the
+                    # poll watched the wrong subsystem and could either exit
+                    # too early (false clear) or block here for the full
+                    # 10×60 s when the leader's own primary LVS happened to
+                    # be compressing. Incident 2026-05-06: 70850783 was
+                    # acting leader of LVS_4450 *and* configured primary of
+                    # LVS_5676; jm_vuid=5676 stayed active → 5 min hang.
                     jc_compression_is_active = current_leader.rpc_client().jc_compression_get_status(
-                        current_leader.jm_vuid)
+                        lvs_jm_vuid)
             except Exception as e:
                 raise Exception(
                     f"Abort restart: jc_compression check on leader {current_leader.get_id()} failed: {e}")
@@ -5580,6 +5621,7 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
         lvs_name,
         groupid=lvs_jm_vuid,
         subsystem_port=lvs_node.get_lvol_subsys_port(lvs_name),
+        hublvol_port=lvs_node.get_hublvol_port(lvs_name),
         role=snode_lvs_role,
     )
     ret = rpc_client.bdev_lvol_set_leader(lvs_name, leader=True)
@@ -6079,6 +6121,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
         snode.lvstore,
         groupid=snode.jm_vuid,
         subsystem_port=snode.get_lvol_subsys_port(snode.lvstore),
+        hublvol_port=snode.get_hublvol_port(snode.lvstore),
         role="primary"
     )
     ret = rpc_client.bdev_lvol_set_leader(snode.lvstore, leader=True)

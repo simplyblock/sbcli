@@ -108,6 +108,7 @@ class TestRpcClientRoleParam(unittest.TestCase):
             "lvs_name": "LVS_100",
             "groupid": 42,
             "subsystem_port": 4420,
+            "hublvol_port": 0,
             "role": "primary",
         })
 
@@ -124,6 +125,7 @@ class TestRpcClientRoleParam(unittest.TestCase):
             "lvs_name": "LVS_100",
             "groupid": 42,
             "subsystem_port": 4420,
+            "hublvol_port": 0,
             "role": "secondary",
         })
 
@@ -140,6 +142,7 @@ class TestRpcClientRoleParam(unittest.TestCase):
             "lvs_name": "LVS_100",
             "groupid": 42,
             "subsystem_port": 4420,
+            "hublvol_port": 0,
             "role": "tertiary",
         })
 
@@ -333,6 +336,7 @@ class TestRecreateLvstoreRoles(unittest.TestCase):
             snode.lvstore,
             groupid=snode.jm_vuid,
             subsystem_port=4420,
+            hublvol_port=4421,
             role="primary"
         )
 

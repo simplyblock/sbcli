@@ -541,13 +541,13 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     else:
         lvol.nqn = cl.nqn + ":lvol:" + lvol.uuid
 
-    lvol.max_namespace_per_subsys = max_namespace_per_subsys
-
     if not host_node:
         nodes = _get_next_3_nodes(cl.get_id(), lvol.size)
         if not nodes:
             return False, "No nodes found with enough resources to create the LVol"
         host_node = nodes[0]
+
+    lvol.max_namespace_per_subsys = host_node.max_lvol
 
     s_node = db_controller.get_storage_node_by_id(host_node.secondary_node_id)
     attr_name = f"active_{fabric}"
@@ -1637,16 +1637,15 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
     db_controller = DBController()
     try:
         lvol = db_controller.get_lvol_by_id(uuid)
-    except KeyError as e:
-        logger.error(e)
-        return False
+    except KeyError:
+        logger.exception("Failed to get lvol by id: %s", uuid)
+        return False, "Failed to find volume"
 
     # Look up host entry for secrets when host_nqn is provided
     host_entry = None
     if lvol.allowed_hosts:
         if not host_nqn:
-            logger.error(f"Volume {uuid} has allowed hosts configured; --host-nqn is required")
-            return False
+            return False, f"Volume {uuid} has allowed hosts configured; --host-nqn is required"
         for h in lvol.allowed_hosts:
             if h["nqn"] == host_nqn:
                 host_entry = h
@@ -1667,8 +1666,7 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
                 # only sets keys the host_entry doesn't already have.
                 break
         if not host_entry:
-            logger.error(f"Host NQN {host_nqn} not found in allowed hosts for volume {uuid}")
-            return False
+            return False, f"Host NQN {host_nqn} not found in allowed hosts for volume {uuid}"
     elif host_nqn:
         # host_nqn provided but no allowed_hosts — volume allows any host,
         # so just pass host_nqn through without secrets
@@ -1758,7 +1756,7 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
                 entry["allowed_hosts"] = [h["nqn"] for h in lvol.allowed_hosts]
 
             out.append(entry)
-    return out
+    return out, None
 
 
 def resize_lvol(id, new_size):

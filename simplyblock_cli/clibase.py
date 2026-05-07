@@ -606,7 +606,9 @@ class CLIWrapperBase:
         if args.host_nqn:
             kwargs['host_nqn'] = args.host_nqn
 
-        data = lvol_controller.connect_lvol(args.volume_id, **kwargs)
+        data, err = lvol_controller.connect_lvol(args.volume_id, **kwargs)
+        if err:
+            return err
         if data:
             return "\n".join(con['connect'] for con in data)
 

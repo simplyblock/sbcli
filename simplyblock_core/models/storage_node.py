@@ -546,6 +546,7 @@ class StorageNode(BaseNodeObject):
                 lvs_node.lvstore,
                 groupid=lvs_node.jm_vuid,
                 subsystem_port=lvs_node.get_lvol_subsys_port(lvs_node.lvstore),
+                hublvol_port=lvs_node.get_hublvol_port(lvs_node.lvstore),
                 role=role,
         ):
             logger.error("bdev_lvol_set_lvs_opts failed for %s on %s",

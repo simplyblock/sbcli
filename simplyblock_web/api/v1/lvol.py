@@ -278,7 +278,9 @@ def connect_lvol(uuid):
     except KeyError as e:
         return utils.get_response_error(str(e), 404)
 
-    ret = lvol_controller.connect_lvol(uuid)
+    ret, err = lvol_controller.connect_lvol(uuid)
+    if err:
+        return utils.get_response_error(err, 400)
     return utils.get_response(ret)
 
 
