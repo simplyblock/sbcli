@@ -80,7 +80,7 @@ spec:
           if [ ! -e /dev/fd ]; then
             ln -s /proc/self/fd /dev/fd
           fi
-          /root/scripts/run_distr_with_ssd.sh "{{ L_CORES }}" "{{ SPDK_MEM }}"
+          sudo -E /root/scripts/run_distr_with_ssd.sh "{{ L_CORES }}" "{{ SPDK_MEM }}"
       env:
         - name: SSD_PCIE
           value: "{{ SSD_PCIE }}"
@@ -97,7 +97,7 @@ spec:
       lifecycle:
         postStart:
           exec:
-            command: ["/bin/sh", "-c", "sudo modprobe nbd || echo failed to modprobe nbd"]
+            command: ["/bin/sh", "-c", "sudo -E modprobe nbd || echo failed to modprobe nbd"]
       securityContext:
         privileged: true
       volumeMounts:
