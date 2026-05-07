@@ -571,7 +571,7 @@ class CLIWrapperBase:
             crypto_key1=args.crypto_key1,
             crypto_key2=args.crypto_key2,
             lvol_priority_class=lvol_priority_class,
-            uid=args.uid, pvc_name=args.pvc_name, namespace=args.namespace,
+            uid=args.uid, pvc_name=args.pvc_name, namespaced=args.namespaced,
             max_namespace_per_subsys=args.max_namespace_per_subsys, ndcs=ndcs, npcs=npcs, fabric=args.fabric,
             allowed_hosts=allowed_hosts,
             do_replicate=args.replicate)
@@ -626,9 +626,7 @@ class CLIWrapperBase:
         return snapshot_id if not error else error
 
     def volume__clone(self, sub_command, args):
-        new_size = args.resize
-
-        clone_id, error = snapshot_controller.clone(args.snapshot_id, args.clone_name, new_size)
+        clone_id, error = snapshot_controller.clone(args.snapshot_id, args.clone_name, args.resize, args.namespaced)
         return clone_id if not error else error
 
     def volume__move(self, sub_command, args):
@@ -809,9 +807,7 @@ class CLIWrapperBase:
         return health_controller.check_snap(args.snapshot_id)
 
     def snapshot__clone(self, sub_command, args):
-        new_size = args.resize
-
-        clone_id, error = snapshot_controller.clone(args.snapshot_id, args.lvol_name, new_size)
+        clone_id, error = snapshot_controller.clone(args.snapshot_id, args.lvol_name, args.resize, args.namespaced)
         return clone_id if not error else error
 
     def snapshot__replication_status(self, sub_command, args):

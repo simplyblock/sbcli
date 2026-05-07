@@ -42,7 +42,7 @@ class _CreateParams(BaseModel):
     ha_type: Optional[Literal['single', 'ha']] = None
     host_id: Optional[str] = None
     priority_class: Literal[0, 1] = 0
-    namespace: Optional[str] = None
+    namespaced: Optional[bool] = False
     pvc_name: Optional[str] = None
     ndcs: util.Unsigned = 0
     npcs: util.Unsigned = 0
@@ -57,6 +57,7 @@ class _CloneParams(BaseModel):
     name: str
     snapshot_id: Annotated[Optional[str], Field(pattern=core_utils.UUID_PATTERN)]
     size: util.Size = 0
+    namespaced: Optional[bool] = False
 
 
 @api.post('/', name='clusters:storage-pools:volumes:create', status_code=201, responses={201: {"content": None}})
@@ -89,7 +90,7 @@ def add(
             use_comp=False,
             distr_vuid=0,
             lvol_priority_class=data.priority_class,
-            namespace=data.namespace,
+            namespaced=data.namespaced,
             pvc_name=data.pvc_name,
             ndcs=data.ndcs,
             npcs=data.npcs,
@@ -104,6 +105,7 @@ def add(
             data.snapshot_id,
             data.name,
             data.size if data.size is not None else 0,
+            namespaced=data.namespaced,
         )
     else:
         raise AssertionError('unreachable')
