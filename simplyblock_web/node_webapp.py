@@ -5,7 +5,6 @@ import argparse
 
 from flask_openapi3 import OpenAPI
 
-from simplyblock_core import constants
 from simplyblock_core.settings import Settings
 from simplyblock_web import utils
 from simplyblock_web.api import internal as internal_api
@@ -44,4 +43,4 @@ if __name__ == '__main__':
         app.register_api(internal_api.storage_node.kubernetes.api)
 
     settings = Settings()
-    app.run(host='0.0.0.0', debug=constants.LOG_WEB_DEBUG, ssl_context=settings.make_server_ssl_context())
+    app.run(host='0.0.0.0', debug=False, ssl_context=settings.make_server_ssl_context())
