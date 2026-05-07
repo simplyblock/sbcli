@@ -541,13 +541,13 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     else:
         lvol.nqn = cl.nqn + ":lvol:" + lvol.uuid
 
-    lvol.max_namespace_per_subsys = max_namespace_per_subsys
-
     if not host_node:
         nodes = _get_next_3_nodes(cl.get_id(), lvol.size)
         if not nodes:
             return False, "No nodes found with enough resources to create the LVol"
         host_node = nodes[0]
+
+    lvol.max_namespace_per_subsys = host_node.max_lvol
 
     s_node = db_controller.get_storage_node_by_id(host_node.secondary_node_id)
     attr_name = f"active_{fabric}"
