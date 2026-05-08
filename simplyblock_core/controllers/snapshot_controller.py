@@ -675,7 +675,7 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
 
     # Create a new subsystem by default unless namespaced is set
     lvol.nqn = cluster.nqn + ":lvol:" + lvol.uuid
-    lvol.max_namespace_per_subsys = snode.max_lvol
+    lvol.max_namespace_per_subsys = snap.lvol.max_namespace_per_subsys
 
     if namespaced:
         # search for an existing subsystem with a free namespace slot on the same node
