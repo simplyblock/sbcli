@@ -4,6 +4,7 @@ import logging as lg
 import math
 import time
 import uuid
+from datetime import datetime
 
 from simplyblock_core.controllers import lvol_controller, snapshot_events, pool_controller, tasks_controller, \
     migration_controller
@@ -648,6 +649,7 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     clone_vuid = utils.get_random_vuid()
     lvol = LVol()
     lvol.uuid = str(uuid.uuid4())
+    lvol.create_dt = str(datetime.now())
     lvol.lvol_name = clone_name
     lvol.size = snap.lvol.size
     lvol.max_size = snap.lvol.max_size
