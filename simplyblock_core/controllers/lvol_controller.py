@@ -9,6 +9,8 @@ import uuid
 from datetime import datetime
 from typing import List, Tuple
 
+from fdb.impl import FDBError
+
 from simplyblock_core import utils, constants
 from simplyblock_core.controllers import snapshot_controller, pool_controller, lvol_events
 from simplyblock_core.db_controller import DBController
@@ -520,89 +522,92 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
 
     lvol.write_to_db(db_controller.kv_store)
 
-    if ha_type == "single":
-        if host_node.status == StorageNode.STATUS_ONLINE:
-            lvol_bdev, error = add_lvol_on_node(lvol, host_node)
-            if error:
-                lvol.remove(db_controller.kv_store)
-                return False, error
-
-            lvol.nodes = [host_node.get_id()]
-            lvol.lvol_uuid = lvol_bdev['uuid']
-            lvol.blobid = lvol_bdev['driver_specific']['lvol']['blobid']
-        else:
-            msg = f"Host node in not online: {host_node.get_id()}"
-            logger.error(msg)
-            lvol.remove(db_controller.kv_store)
-            return False, msg
-
-    if ha_type == "ha":
-        lvol.nodes = [host_node.get_id(), host_node.secondary_node_id]
-        primary_node = None
-        secondary_node = None
-        sec_node = db_controller.get_storage_node_by_id(host_node.secondary_node_id)
-        if host_node.status == StorageNode.STATUS_ONLINE:
-
-            if is_node_leader(host_node, lvol.lvs_name):
-                primary_node = host_node
-                if sec_node.status == StorageNode.STATUS_DOWN:
-                    msg = "Secondary node is in down status, can not create lvol"
-                    logger.error(msg)
-                    lvol.remove(db_controller.kv_store)
-                    return False, msg
-                elif sec_node.status == StorageNode.STATUS_ONLINE:
-                    secondary_node = sec_node
-
-            elif sec_node.status == StorageNode.STATUS_ONLINE:
-                if is_node_leader(sec_node, lvol.lvs_name):
-                    primary_node = sec_node
-                    secondary_node = host_node
-                else:
-                    # both nodes are non leaders and online, set primary as leader
-                    primary_node = host_node
-                    secondary_node = sec_node
-
-            else:
-                # sec node is not online, set primary as leader
-                primary_node = host_node
-                secondary_node = None
-
-        elif sec_node.status == StorageNode.STATUS_ONLINE:
-            # primary is not online but secondary is, create on secondary and set leader if needed,
-            secondary_node = None
-            primary_node = sec_node
-
-        else:
-            # both primary and secondary are not online
-            msg = "Host nodes are not online"
-            logger.error(msg)
-            lvol.remove(db_controller.kv_store)
-            return False, msg
-
-
-        if primary_node:
-            lvol_bdev, error = add_lvol_on_node(lvol, primary_node)
-            if error:
-                logger.error(error)
-                lvol.remove(db_controller.kv_store)
-                return False, error
-
-            lvol.lvol_uuid = lvol_bdev['uuid']
-            lvol.blobid = lvol_bdev['driver_specific']['lvol']['blobid']
-
-
-        if secondary_node:
-            secondary_node = db_controller.get_storage_node_by_id(secondary_node.get_id())
-            if secondary_node.status == StorageNode.STATUS_ONLINE:
-                lvol_bdev, error = add_lvol_on_node(lvol, secondary_node, is_primary=False)
+    try:
+        if ha_type == "single":
+            if host_node.status == StorageNode.STATUS_ONLINE:
+                lvol_bdev, error = add_lvol_on_node(lvol, host_node)
                 if error:
-                    logger.error(error)
-                    # remove lvol from primary
-                    ret = delete_lvol_from_node(lvol.get_id(), primary_node.get_id())
-                    if not ret:
-                        logger.error("")
                     lvol.remove(db_controller.kv_store)
                     return False, error
+
+                lvol.nodes = [host_node.get_id()]
+                lvol.lvol_uuid = lvol_bdev['uuid']
+                lvol.blobid = lvol_bdev['driver_specific']['lvol']['blobid']
+            else:
+                msg = f"Host node in not online: {host_node.get_id()}"
+                logger.error(msg)
+                lvol.remove(db_controller.kv_store)
+                return False, msg
+
+        if ha_type == "ha":
+            lvol.nodes = [host_node.get_id(), host_node.secondary_node_id]
+            primary_node = None
+            secondary_node = None
+            sec_node = db_controller.get_storage_node_by_id(host_node.secondary_node_id)
+            if host_node.status == StorageNode.STATUS_ONLINE:
+
+                if is_node_leader(host_node, lvol.lvs_name):
+                    primary_node = host_node
+                    if sec_node.status == StorageNode.STATUS_DOWN:
+                        msg = "Secondary node is in down status, can not create lvol"
+                        logger.error(msg)
+                        lvol.remove(db_controller.kv_store)
+                        return False, msg
+                    elif sec_node.status == StorageNode.STATUS_ONLINE:
+                        secondary_node = sec_node
+
+                elif sec_node.status == StorageNode.STATUS_ONLINE:
+                    if is_node_leader(sec_node, lvol.lvs_name):
+                        primary_node = sec_node
+                        secondary_node = host_node
+                    else:
+                        # both nodes are non leaders and online, set primary as leader
+                        primary_node = host_node
+                        secondary_node = sec_node
+
+                else:
+                    # sec node is not online, set primary as leader
+                    primary_node = host_node
+                    secondary_node = None
+
+            elif sec_node.status == StorageNode.STATUS_ONLINE:
+                # primary is not online but secondary is, create on secondary and set leader if needed,
+                secondary_node = None
+                primary_node = sec_node
+
+            else:
+                # both primary and secondary are not online
+                msg = "Host nodes are not online"
+                logger.error(msg)
+                lvol.remove(db_controller.kv_store)
+                return False, msg
+
+            if primary_node:
+                lvol_bdev, error = add_lvol_on_node(lvol, primary_node)
+                if error:
+                    logger.error(error)
+                    lvol.remove(db_controller.kv_store)
+                    return False, error
+
+                lvol.lvol_uuid = lvol_bdev['uuid']
+                lvol.blobid = lvol_bdev['driver_specific']['lvol']['blobid']
+
+            if secondary_node:
+                secondary_node = db_controller.get_storage_node_by_id(secondary_node.get_id())
+                if secondary_node.status == StorageNode.STATUS_ONLINE:
+                    lvol_bdev, error = add_lvol_on_node(lvol, secondary_node, is_primary=False)
+                    if error:
+                        logger.error(error)
+                        # remove lvol from primary
+                        ret = delete_lvol_from_node(lvol.get_id(), primary_node.get_id())
+                        if not ret:
+                            logger.error("")
+                        lvol.remove(db_controller.kv_store)
+                        return False, error
+    except FDBError as e:
+        logger.error(f"Failed to create LVol bdev stack, error: {e}")
+        lvol.remove(db_controller.kv_store)
+        return False, f"Failed to create LVol bdev stack, error: {e}"
 
     lvol.pool_uuid = pool.get_id()
     lvol.pool_name = pool.pool_name
