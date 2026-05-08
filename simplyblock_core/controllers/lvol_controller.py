@@ -524,6 +524,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     # Create a new subsystem by default unless namespaced is set
     lvol.nqn = cl.nqn + ":lvol:" + lvol.uuid
     lvol.max_namespace_per_subsys = host_node.max_lvol
+    namespace = None
 
     if namespaced:
         result = get_next_available_subsystem_on_node(host_node.get_id())
