@@ -88,7 +88,7 @@ class Settings(BaseSettings):
 
     def make_server_ssl_context(self):
         """Return an SSLContext requiring client certificates, or None if TLS is not configured."""
-        if self.tls_client_auth == "disabled":
+        if not self.tls_serve and self.tls_client_auth == ssl.CERT_NONE:
             return None
 
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
