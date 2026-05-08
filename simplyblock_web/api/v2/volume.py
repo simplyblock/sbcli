@@ -242,8 +242,8 @@ def replication_stop(cluster: Cluster, pool: StoragePool, volume: Volume) -> Res
     return Response(status_code=204)
 
 @instance_api.get('/connect', name='clusters:storage-pools:volumes:connect')
-def connect(cluster: Cluster, pool: StoragePool, volume: Volume):
-    details, err = lvol_controller.connect_lvol(volume.get_id())
+def connect(cluster: Cluster, pool: StoragePool, volume: Volume, host_nqn: Optional[str] = None):
+    details, err = lvol_controller.connect_lvol(volume.get_id(), host_nqn=host_nqn)
     if err:
         raise ValueError(err)
     return details
