@@ -47,6 +47,7 @@ class Settings(BaseSettings):
     tls_provider: Annotated[
         Optional[Literal["openshift", "cert-manager"]],
         Field(description="Provider for TLS certificates in the cluster."),
+        BeforeValidator(lambda x: None if x == "None" else x),
     ] = None
     tls_certificate: Path = Path("/etc/simplyblock/tls/tls.crt")
     tls_key: Path = Path("/etc/simplyblock/tls/tls.key")
@@ -88,11 +89,12 @@ class Settings(BaseSettings):
 
     def make_server_ssl_context(self):
         """Return an SSLContext requiring client certificates, or None if TLS is not configured."""
-        if self.tls_client_auth == "disabled":
+        if not self.tls_serve:
             return None
 
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ctx.load_cert_chain(self.tls_certificate, self.tls_key)
         ctx.verify_mode = self.tls_client_auth
-        ctx.load_verify_locations(self.tls_certificate_authority)
+        if self.tls_client_auth != ssl.CERT_NONE:
+            ctx.load_verify_locations(self.tls_certificate_authority)
         return ctx
