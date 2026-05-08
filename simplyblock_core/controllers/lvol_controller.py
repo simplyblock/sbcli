@@ -2654,6 +2654,17 @@ def replicate_lvol_on_source_cluster(lvol_id, cluster_id=None, pool_uuid=None):
         logger.error(f"Snapshot for replication not found for lvol: {lvol_id}")
         return False
 
+    # bdev_lvol_clone must run on the same SPDK that owns the snapshot's LVS
+    try:
+        snap_node = db_controller.get_storage_node_by_id(snapshot.lvol.node_id)
+        if snap_node.status == StorageNode.STATUS_ONLINE:
+            source_node = snap_node
+        else:
+            logger.error(f"Snapshot node {snapshot.lvol.node_id} is not online")
+            return False
+    except KeyError:
+        logger.warning(f"Could not find snapshot node {snapshot.lvol.node_id}, using current source_node")
+
     # create lvol on target node
     new_lvol = copy.deepcopy(lvol)
     new_lvol.cloned_from_snap = snapshot.get_id()
@@ -2726,7 +2737,7 @@ def replicate_lvol_on_source_cluster(lvol_id, cluster_id=None, pool_uuid=None):
     new_lvol.status = LVol.STATUS_ONLINE
     new_lvol.from_source = True
     new_lvol.write_to_db(db_controller.kv_store)
-    lvol_events.lvol_replicated(lvol, new_lvol)
+    lvol_events.lvol_replicated(new_lvol, new_lvol)
     logger.debug(f"new lvol from_source: {new_lvol.from_source}")
 
     return new_lvol.lvol_uuid
