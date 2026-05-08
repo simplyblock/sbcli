@@ -396,8 +396,6 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
                     lvol.pvc_name = pvc_name
                 if name:
                     lvol.lvol_name = name
-                if namespace:
-                    lvol.namespace = namespace
                 lvol.write_to_db()
                 return uid, None
 

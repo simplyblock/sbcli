@@ -1771,7 +1771,7 @@ commands:
             type: size
             default: "0"
           - name: "--namespaced"
-            help: "Adds this LVol as a namespace on any available subsystem, if not found then create a new subsystem. Default: `false`."
+            help: "Adds this LVol as a namespace on any available subsystem, if not found then create a new subsystem. Default: `true`."
             dest: namespaced
             type: bool
             default: true

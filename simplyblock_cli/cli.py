@@ -694,7 +694,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('snapshot_id', help='The snapshot id.', type=str)
         subcommand.add_argument('clone_name', help='The clone name.', type=str)
         argument = subcommand.add_argument('--resize', help='New logical volume size: 10M, 10G, 10(bytes). Can only increase. Default: `0`.', type=size_type(), default='0', dest='resize')
-        argument = subcommand.add_argument('--namespaced', help='Adds this LVol as a namespace on any available subsystem, if not found then create a new subsystem. Default: `false`.', type=bool, default=True, dest='namespaced')
+        argument = subcommand.add_argument('--namespaced', help='Adds this LVol as a namespace on any available subsystem, if not found then create a new subsystem. Default: `true`.', type=bool, default=True, dest='namespaced')
 
     def init_volume__move(self, subparser):
         subcommand = self.add_sub_command(subparser, 'move', 'Moves a full copy of the logical volume between nodes.')
