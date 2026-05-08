@@ -4,6 +4,7 @@ import logging as lg
 import math
 import time
 import uuid
+from datetime import datetime
 
 from simplyblock_core.controllers import lvol_controller, snapshot_events, pool_controller, tasks_controller, \
     migration_controller
@@ -542,7 +543,8 @@ def delete(snapshot_uuid, force_delete=False):
     return True
 
 
-def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None, delete_snap_on_lvol_delete=False, lock=True):
+def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None, delete_snap_on_lvol_delete=False,
+          lock=True, namespaced=True):
     try:
         snap = db_controller.get_snapshot_by_id(snapshot_id)
     except KeyError as e:
@@ -647,6 +649,7 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     clone_vuid = utils.get_random_vuid()
     lvol = LVol()
     lvol.uuid = str(uuid.uuid4())
+    lvol.create_dt = str(datetime.now())
     lvol.lvol_name = clone_name
     lvol.size = snap.lvol.size
     lvol.max_size = snap.lvol.max_size
@@ -672,33 +675,17 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     lvol.ndcs = snap.lvol.ndcs
     lvol.npcs = snap.lvol.npcs
 
-    # Inherit namespace sharing from the source lvol.  Find the master
-    # lvol that owns the subsystem (either the source itself or its master
-    # if the source is already a namespace member).
-    source_lvol = snap.lvol
-    if source_lvol.namespace:
-        try:
-            master_lvol = db_controller.get_lvol_by_id(source_lvol.namespace)
-        except KeyError:
-            master_lvol = source_lvol
-    else:
-        master_lvol = source_lvol
+    # Create a new subsystem by default unless namespaced is set
+    lvol.nqn = cluster.nqn + ":lvol:" + lvol.uuid
+    lvol.max_namespace_per_subsys = snap.lvol.max_namespace_per_subsys
 
-    if master_lvol.max_namespace_per_subsys > 1 :
-        # Count how many lvols currently share this master's subsystem
-        ns_count = 0
-        for lv in db_controller.get_lvols(cluster.get_id()):
-            if lv.nqn == master_lvol.nqn and lv.status not in [LVol.STATUS_IN_DELETION]:
-                ns_count += 1
-        if ns_count < master_lvol.max_namespace_per_subsys:
-            lvol.nqn = master_lvol.nqn
-            lvol.namespace = master_lvol.get_id()
-        else:
-            # Subsystem full — create a new one but keep the same capacity
-            lvol.nqn = cluster.nqn + ":lvol:" + lvol.uuid
-            lvol.max_namespace_per_subsys = master_lvol.max_namespace_per_subsys
-    else:
-        lvol.nqn = cluster.nqn + ":lvol:" + lvol.uuid
+    if namespaced:
+        # search for an existing subsystem with a free namespace slot on the same node
+        result = lvol_controller.get_next_available_subsystem_on_node(lvol.node_id)
+        if result:
+            namespace, free_nqn = result
+            lvol.nqn = free_nqn
+            lvol.namespace = namespace
 
     if pvc_name:
         lvol.pvc_name = pvc_name
