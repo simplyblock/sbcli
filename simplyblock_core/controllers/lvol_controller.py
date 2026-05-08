@@ -2285,9 +2285,9 @@ def clone_lvol(lvol_id, clone_name, new_size=None, pvc_name=None):
         return False, str(e)
 
     host_node = db_controller.get_storage_node_by_id(lvol.node_id)
-    lvol_count = len(db_controller.get_lvols_by_node_id(lvol.node_id))
-    if lvol_count >= host_node.max_lvol:
-        error = f"Too many lvols on node: {host_node.get_id()}, max lvols reached: {lvol_count}"
+    subsys_count = len(set(lv.nqn for lv in db_controller.get_lvols_by_node_id(lvol.node_id)))
+    if subsys_count >= host_node.max_lvol:
+        error = f"Too many subsystems on node: {host_node.get_id()}, max subsystems reached: {subsys_count}"
         logger.error(error)
         return False, error
 
