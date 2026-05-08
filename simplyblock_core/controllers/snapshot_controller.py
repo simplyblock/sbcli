@@ -679,8 +679,9 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
 
     if namespaced:
         # search for an existing subsystem with a free namespace slot on the same node
-        namespace, free_nqn = lvol_controller.get_next_available_subsystem_on_node(lvol.node_id)
-        if namespace and free_nqn:
+        result = lvol_controller.get_next_available_subsystem_on_node(lvol.node_id)
+        if result:
+            namespace, free_nqn = result
             lvol.nqn = free_nqn
             lvol.namespace = namespace
             lvol.max_namespace_per_subsys = 0
