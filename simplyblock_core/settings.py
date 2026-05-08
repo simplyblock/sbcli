@@ -47,6 +47,7 @@ class Settings(BaseSettings):
     tls_provider: Annotated[
         Optional[Literal["openshift", "cert-manager"]],
         Field(description="Provider for TLS certificates in the cluster."),
+        BeforeValidator(lambda x: None if x == "None" else x),
     ] = None
     tls_certificate: Path = Path("/etc/simplyblock/tls/tls.crt")
     tls_key: Path = Path("/etc/simplyblock/tls/tls.key")
