@@ -526,8 +526,9 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     lvol.max_namespace_per_subsys = host_node.max_lvol
 
     if namespaced:
-        namespace, free_nqn = get_next_available_subsystem_on_node(host_node.get_id())
-        if namespace and free_nqn:
+        result = get_next_available_subsystem_on_node(host_node.get_id())
+        if result:
+            namespace, free_nqn = result
             lvol.nqn = free_nqn
             lvol.namespace = namespace
             lvol.max_namespace_per_subsys = 0
