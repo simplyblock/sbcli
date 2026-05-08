@@ -9,4 +9,4 @@ RUN pip3 install -r requirements.txt
 
 COPY . /app
 
-RUN python setup.py install
+RUN python3 setup.py install
