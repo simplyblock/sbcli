@@ -684,7 +684,6 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
             namespace, free_nqn = result
             lvol.nqn = free_nqn
             lvol.namespace = namespace
-            lvol.max_namespace_per_subsys = 0
 
     if pvc_name:
         lvol.pvc_name = pvc_name
