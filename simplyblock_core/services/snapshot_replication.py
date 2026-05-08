@@ -80,12 +80,20 @@ def process_snap_replicate_start(task, snapshot):
             if not ret:
                 msg = "controller attach failed"
                 logger.error(msg)
-                raise RuntimeError(msg)
+                task.function_result = msg
+                task.status = JobSchedule.STATUS_SUSPENDED
+                task.retry += 1
+                task.write_to_db()
+                return
             bdev_name = ret[0]
             if not bdev_name:
                 msg = "Bdev name not returned from controller attach"
                 logger.error(msg)
-                raise RuntimeError(msg)
+                task.function_result = msg
+                task.status = JobSchedule.STATUS_SUSPENDED
+                task.retry += 1
+                task.write_to_db()
+                return
             bdev_found = False
             for i in range(5):
                 ret = snode.rpc_client().get_bdevs(bdev_name)
@@ -96,8 +104,13 @@ def process_snap_replicate_start(task, snapshot):
                     time.sleep(1)
 
             if not bdev_found:
+                msg = f"Failed to connect to lvol: {remote_lv.get_id()}"
                 logger.error("lvol Bdev not found after 5 attempts")
-                raise RuntimeError(f"Failed to connect to lvol: {remote_lv.get_id()}")
+                task.function_result = msg
+                task.status = JobSchedule.STATUS_SUSPENDED
+                task.retry += 1
+                task.write_to_db()
+                return
 
     offset = 0
     if "offset" in task.function_params and task.function_params["offset"]:
@@ -360,7 +373,15 @@ while True:
                     if task.status != JobSchedule.STATUS_DONE:
                         # get new task object because it could be changed from cancel task
                         task = db.get_task_by_id(task.uuid)
-                        res = task_runner(task)
+                        try:
+                            res = task_runner(task)
+                        except Exception as e:
+                            logger.exception("task_runner raised for task %s: %s", task.uuid, e)
+                            task.function_result = str(e)
+                            task.status = JobSchedule.STATUS_SUSPENDED
+                            task.retry += 1
+                            task.write_to_db(db.kv_store)
+                            res = False
                         if not res:
                             time.sleep(3)
 
