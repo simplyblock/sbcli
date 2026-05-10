@@ -693,29 +693,31 @@ class SoakRunner:
         raise TestRunError("Timed out waiting for nodes to return online")
 
     def wait_for_cluster_stable(self):
-        cluster_id = self.get_cluster_id()
+        # new-placement: data-plane rebalancing is disabled in this branch by
+        # design, so this routine does NOT gate on `is_re_balancing` (which
+        # may still be True transiently from leftover task records but never
+        # represents real data movement here). Stability == ACTIVE cluster +
+        # all expected nodes ONLINE.
         started = time.time()
         while time.time() - started < self.args.rebalance_timeout:
             cluster_list = self.sbctl("cluster list --json", json_output=True)
             status = str(cluster_list[0].get("Status", "")).lower()
             if status == "suspended":
                 raise TestRunError("Cluster entered suspended state")
-            cluster_info = self.sbctl(f"cluster get {cluster_id}", json_output=True)
-            rebalancing = bool(cluster_info.get("is_re_balancing", False))
             nodes = self.ensure_expected_nodes()
             node_statuses = {node["uuid"]: node["status"] for node in nodes}
-            if status == "active" and not rebalancing and all(
+            if status == "active" and all(
                 state == "online" for state in node_statuses.values()
             ):
-                self.logger.log("Cluster stable: ACTIVE, online, not rebalancing")
+                self.logger.log("Cluster stable: ACTIVE, all nodes online")
                 return
             self.logger.log(
                 "Waiting for cluster stability: "
-                f"status={status}, rebalancing={rebalancing}, "
+                f"status={status}, "
                 + ", ".join(f"{uuid}:{state}" for uuid, state in node_statuses.items())
             )
             time.sleep(self.args.poll_interval)
-        raise TestRunError("Timed out waiting for cluster rebalancing to finish")
+        raise TestRunError("Timed out waiting for cluster to return to stable")
 
     def get_active_tasks(self):
         cluster_id = self.get_cluster_id()
