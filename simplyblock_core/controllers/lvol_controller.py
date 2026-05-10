@@ -126,11 +126,27 @@ def _create_crypto_lvol(rpc_client, name, base_name, key1, key2):
     if not ret:
         logger.error(f"Failed to find LVol bdev {base_name}")
         return False
+
+    # Idempotent: if the crypto bdev already exists from a prior partial
+    # activation/restart pass, skip the key + crypto-bdev creates. SPDK
+    # rejects duplicate creates with hard errors that would otherwise
+    # break re-activation convergence.
+    if rpc_client.get_bdevs(name):
+        logger.info("crypto LVol %s already exists, skipping create", name)
+        return True
+
     key_name = f'key_{name}'
     ret = rpc_client.lvol_crypto_key_create(key_name, key1, key2)
     if not ret:
-        logger.error("failed to create crypto key")
-        return False
+        # SPDK returns failure when the key name already exists. On
+        # re-activation that's the same node re-issuing the same key —
+        # treat existing key as benign and proceed to the crypto-bdev
+        # create below. If creation genuinely failed for another reason,
+        # the next call will surface it.
+        logger.warning(
+            "lvol_crypto_key_create returned failure for %s; if the key "
+            "already exists from a prior pass this is expected — "
+            "proceeding to crypto bdev create", key_name)
     ret = rpc_client.lvol_crypto_create(name, base_name, key_name)
     if not ret:
         logger.error(f"failed to create crypto LVol {name}")
