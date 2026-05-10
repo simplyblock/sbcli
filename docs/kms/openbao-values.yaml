@@ -1,0 +1,66 @@
+global:
+  openshift: true
+  tlsDisable: false
+
+server:
+  dataStorage:
+    storageClass: ssd-csi
+
+  extraEnvironmentVars:
+    BAO_CACERT: /openbao/tls/ca.crt
+
+  volumes:
+    - name: tls-cert
+      secret:
+        secretName: openbao-server-tls
+
+  volumeMounts:
+    - name: tls-cert
+      mountPath: /openbao/tls
+      readOnly: true
+
+  standalone:
+    enabled: true
+    config: |
+      ui = true
+
+      listener "tcp" {
+        tls_disable     = 0
+        address         = "[::]:8200"
+        cluster_address = "[::]:8201"
+        tls_cert_file   = "/openbao/tls/tls.crt"
+        tls_key_file    = "/openbao/tls/tls.key"
+        tls_min_version = "tls12"
+      }
+
+      storage "file" {
+        path = "/openbao/data"
+      }
+
+injector:
+  enabled: false
+
+extraObjects:
+  - apiVersion: cert-manager.io/v1
+    kind: Certificate
+    metadata:
+      name: openbao-server-tls
+    spec:
+      secretName: openbao-server-tls
+      duration: 8760h
+      renewBefore: 720h
+      privateKey:
+        algorithm: ECDSA
+        size: 256
+      dnsNames:
+        - openbao
+        - openbao.{{ .Release.Namespace }}
+        - openbao.{{ .Release.Namespace }}.svc
+        - openbao.{{ .Release.Namespace }}.svc.cluster.local
+        - openbao-internal
+        - openbao-internal.{{ .Release.Namespace }}
+        - openbao-internal.{{ .Release.Namespace }}.svc
+        - openbao-internal.{{ .Release.Namespace }}.svc.cluster.local
+      issuerRef:
+        name: simplyblock-certificate-authority-issuer
+        kind: ClusterIssuer
