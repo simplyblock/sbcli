@@ -519,15 +519,15 @@ class SbcliUtils:
                     self.logger.info(f"Lvol {lvol_name} is not in the lvol list as error. Checking again!")
                     lvols = self.list_lvols()
                     continue
-                if cur_state == "online":
-                    self.logger.info(f"Lvol {lvol_name} in online state. Retrying Delete!")
+                if cur_state in ("online", "in_deletion"):
+                    self.logger.info(f"Lvol {lvol_name} in {cur_state} state. Retrying Delete!")
                     data = self.delete_request(api_url=f"/lvol/{lvol_id}")
                     self.logger.info(f"Delete lvol resp: {data}")
             if attempt > max_attempt:
                 if skip_error:
                     return False
                 raise Exception(f"Lvol {lvol_name} is not getting deleted!!")
-            
+
             attempt += 1
             self.logger.info(f"Lvol {lvol_name} is in_deletion. Checking again!")
             sleep_n_sec(5)

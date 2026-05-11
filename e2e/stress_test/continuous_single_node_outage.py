@@ -373,7 +373,7 @@ class RandomMultiClientSingleNodeTest(TestLvolHACluster):
                     nqn = lvol_details[0]["nqn"]
                     self.ssh_obj.disconnect_nvme(node=client, nqn_grep=nqn)
                     self.logger.info(f"Connecting clone {clone_name} has error: {error}. Disconnecting and cleaning up.")
-                    self.sbcli_utils.delete_lvol(lvol_name=clone_name, max_attempt=20, skip_error=True)
+                    self.sbcli_utils.delete_lvol(lvol_name=clone_name, max_attempt=120, skip_error=True)
                     sleep_n_sec(30)
                     del self.clone_mount_details[clone_name]
                     continue
@@ -476,7 +476,7 @@ class RandomMultiClientSingleNodeTest(TestLvolHACluster):
                     sleep_n_sec(10)
                     self.ssh_obj.unmount_path(clone_details["Client"], f"/mnt/{clone_name}")
                     self.ssh_obj.remove_dir(clone_details["Client"], dir_path=f"/mnt/{clone_name}")
-                    self.sbcli_utils.delete_lvol(clone_name, max_attempt=20, skip_error=True)
+                    self.sbcli_utils.delete_lvol(clone_name, max_attempt=120, skip_error=True)
                     sleep_n_sec(30)
                     to_delete.append(clone_name)
                     self.ssh_obj.delete_files(clone_details["Client"], [f"{self.log_path}/local-{clone_name}_fio*"])
@@ -516,7 +516,7 @@ class RandomMultiClientSingleNodeTest(TestLvolHACluster):
             sleep_n_sec(10)
             self.ssh_obj.unmount_path(self.lvol_mount_details[lvol]["Client"], f"/mnt/{lvol}")
             self.ssh_obj.remove_dir(self.lvol_mount_details[lvol]["Client"], dir_path=f"/mnt/{lvol}")
-            self.sbcli_utils.delete_lvol(lvol, max_attempt=20, skip_error=True)
+            self.sbcli_utils.delete_lvol(lvol, max_attempt=120, skip_error=True)
             self.ssh_obj.delete_files(self.lvol_mount_details[lvol]["Client"], [f"{self.log_path}/local-{lvol}_fio*"])
             self.ssh_obj.delete_files(self.lvol_mount_details[lvol]["Client"], [f"{self.log_path}/{lvol}_fio_iolog*"])
             self.ssh_obj.delete_files(self.lvol_mount_details[lvol]["Client"], [f"/mnt/{lvol}/*"])

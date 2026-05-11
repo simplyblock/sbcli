@@ -1,5 +1,5 @@
-name: K8s Native E2E Tests
-run-name: "K8s Native E2E Tests | ${{ inputs.testname || 'all' }} | ${{ inputs.cluster_environment || 'local' }} | NDCS:${{ inputs.ndcs || '1' }} NPCS:${{ inputs.npcs || '1' }}"
+name: K8s Native E2E - Add Node
+run-name: "K8s Native E2E - Add Node | ${{ inputs.cluster_environment || 'local' }} | NDCS:${{ inputs.ndcs || '1' }} NPCS:${{ inputs.npcs || '1' }}"
 
 on:
   workflow_dispatch:
@@ -29,7 +29,10 @@ on:
         required: true
         default: 'simplyblock/spdk:main-latest'
       worker_nodes:
-        description: 'Comma-separated K8s worker node names'
+        description: 'Comma-separated initial K8s worker node names'
+        required: true
+      new_worker_nodes:
+        description: 'Comma-separated new K8s worker node names to add during test (at least 2, multiples of 2)'
         required: true
       mgmt_ifc:
         description: 'Management network interface'
@@ -47,32 +50,6 @@ on:
         description: "SSH private key path on runner (default: /home/ec2-user/.ssh/simplyblock-us-east-2.pem)"
         required: true
         default: "/home/ec2-user/.ssh/simplyblock-us-east-2.pem"
-      client_ips:
-        description: 'Space-separated client IPs for external FIO (empty = FIO runs on first mgmt node)'
-        required: false
-        default: ''
-      nfs_mountpoint:
-        description: 'NFS mountpoint on client nodes'
-        required: false
-        default: '/mnt/nfs_share/'
-      testname:
-        description: 'Test category to run (empty = default e2e suite)'
-        required: false
-        default: ''
-        type: choice
-        options:
-          - ''
-          - backup
-          - backup-stress
-          - security
-      cluster_security:
-        description: "Cluster setup mode. 'backup' deploys MinIO and enables backup on StorageCluster. Auto-enabled when testname is backup/backup-stress."
-        required: false
-        type: choice
-        default: "none"
-        options:
-          - none
-          - backup
       send_slack_notification:
         description: 'Send Slack notification?'
         required: false
@@ -130,17 +107,15 @@ on:
           - 'true'
 
 jobs:
-  e2e-test:
+  e2e-add-node:
     runs-on: ${{ github.event.inputs.cluster_environment == 'aws-openshift' && 'vm-runner-43' || 'self-hosted' }}
     timeout-minutes: 4320
     concurrency:
-      group: k8s-native-e2e-${{ github.event.inputs.cluster_environment || 'local' }}
+      group: ${{ github.workflow }}
       cancel-in-progress: false
     env:
-      TESTNAME: ${{ github.event.inputs.testname || '' }}
+      TESTNAME: K8sNativeAddNodeTest
       KEY_PATH: ${{ github.event.inputs.key_path || '/home/ec2-user/.ssh/simplyblock-us-east-2.pem' }}
-      CLIENT_IPS: ${{ github.event.inputs.client_ips || '' }}
-      NFS_MOUNTPOINT: ${{ github.event.inputs.nfs_mountpoint || '/mnt/nfs_share/' }}
       SSH_USER: ${{ github.event.inputs.ssh_user || 'root' }}
       SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
     steps:
@@ -154,14 +129,14 @@ jobs:
           ref: ${{ github.event.inputs.helm_charts_branch || 'main' }}
           path: 'helm-charts'
 
-      - name: Resolve KEY_PATH (handles .ssh/, ~/.ssh/, quoted ~) and validate key exists
+      - name: Resolve KEY_PATH and validate key exists
         shell: bash
         run: |
           set -euxo pipefail
 
           kp="${KEY_PATH}"
 
-          # Strip wrapping quotes if user typed "~/.ssh/..." with quotes
+          # Strip wrapping quotes
           kp="${kp%\"}"; kp="${kp#\"}"
           kp="${kp%\'}"; kp="${kp#\'}"
 
@@ -175,11 +150,6 @@ jobs:
             kp="${HOME}/${kp#~/}"
           fi
 
-          # Also handle "~.ssh/.." (unlikely, but safe)
-          if [[ "$kp" == "~.ssh/"* ]]; then
-            kp="${HOME}/.${kp#~.}"
-          fi
-
           echo "Resolved KEY_PATH=$kp"
           echo "KEY_PATH=$kp" >> "$GITHUB_ENV"
 
@@ -190,68 +160,9 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          # KEY_PATH is already resolved and exported to $GITHUB_ENV in previous step
           key_name="$(basename "${KEY_PATH}")"
           echo "KEY_NAME=${key_name}" >> "$GITHUB_ENV"
           echo "Exported KEY_NAME=${key_name}"
-
-      # ============================================================
-      # PRE-BOOTSTRAP CLEANUP (remote ops only)
-      # Targets = CLIENTNODES
-      # ============================================================
-      - name: Pre-clean kill fio/tmux and unmount NFS on clients
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          run_remote() {
-            local ip="$1"
-            local script="$2"
-            sshpass -p "${SSH_PASSWORD}" ssh \
-              -o StrictHostKeyChecking=no \
-              -o UserKnownHostsFile=/dev/null \
-              "${SSH_USER}@${ip}" "bash -s" <<< "$script"
-          }
-
-          run_remote_with_retry() {
-            local ip="$1"
-            local script="$2"
-            local max=5
-            for attempt in $(seq 1 $max); do
-              run_remote "$ip" "$script" && return 0
-              echo "Attempt $attempt/$max failed for $ip, retrying in 5s..."
-              sleep 5
-            done
-            echo "All $max attempts failed for $ip, continuing..."
-            return 0
-          }
-
-          # Support comma-separated and/or space-separated input
-          normalized_targets="$(echo "${CLIENT_IPS}" | tr ',' ' ' | xargs -n1 | sort -u | xargs || true)"
-
-          if [ -z "${normalized_targets}" ]; then
-            echo "No client IPs provided, skipping client cleanup."
-            exit 0
-          fi
-
-          for ip in ${normalized_targets}; do
-            echo "---- ${ip}: kill fio/tmux + disconnect NVMe + umount ${NFS_MOUNTPOINT} ----"
-            run_remote_with_retry "${ip}" "set -euxo pipefail;
-              pkill -9 fio || true;
-              pkill -9 tmux || true;
-              # Disconnect stale NVMe-oF connections from previous runs
-              for nqn in \$(nvme list-subsys -o json 2>/dev/null | jq -r '.Subsystems[]?.NQN // empty' | grep lvol || true); do
-                nvme disconnect -n \"\$nqn\" || true;
-              done;
-              mp='${NFS_MOUNTPOINT}';
-              if mountpoint -q \"\$mp\"; then
-                umount -f \"\$mp\" || umount \"\$mp\" || true;
-              else
-                if mount | grep -q \" \$mp \"; then
-                  umount -f \"\$mp\" || umount \"\$mp\" || true;
-                fi
-              fi"
-          done
 
       - name: Setup kubeconfig
         run: |
@@ -287,7 +198,7 @@ jobs:
 
       - name: Set parameters
         run: |
-          echo "NDCS=${{ github.event.inputs.ndcs || 2 }}" >> $GITHUB_ENV
+          echo "NDCS=${{ github.event.inputs.ndcs || 1 }}" >> $GITHUB_ENV
           echo "NPCS=${{ github.event.inputs.npcs || 1 }}" >> $GITHUB_ENV
           echo "BS=${{ github.event.inputs.bs || 4096 }}" >> $GITHUB_ENV
           echo "CHUNK_BS=${{ github.event.inputs.chunk_bs || 4096 }}" >> $GITHUB_ENV
@@ -455,10 +366,9 @@ jobs:
 
           echo "=== Cleanup complete ==="
 
+      # ── Label nodes ─────────────────────────────────────────────────────────
 
-      # ── Label nodes (after cluster is active) ───────────────────────────────
-
-      - name: Label worker nodes
+      - name: Label initial worker nodes
         if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
         run: |
           CLUSTER_ENV="${{ github.event.inputs.cluster_environment || 'local' }}"
@@ -473,7 +383,22 @@ jobs:
             kubectl label node "$NODE" simplyblock.io/role=mgmt-plane --overwrite
           done
 
-      # ── Prepare namespace ─────────────────────────────────────────────────
+      - name: Label new worker nodes
+        if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
+        run: |
+          CLUSTER_ENV="${{ github.event.inputs.cluster_environment || 'local' }}"
+          IFS=',' read -ra NODES <<< "${{ github.event.inputs.new_worker_nodes }}"
+          for NODE in "${NODES[@]}"; do
+            if [ "$CLUSTER_ENV" = "local" ] || [ "$CLUSTER_ENV" = "openshift-local" ]; then
+              echo "Labeling new node $NODE with zone=default (local cluster)"
+              kubectl label node "$NODE" topology.kubernetes.io/zone=default --overwrite
+            else
+              echo "Skipping zone label for new node $NODE (cloud cluster: $CLUSTER_ENV)"
+            fi
+            kubectl label node "$NODE" simplyblock.io/role=mgmt-plane --overwrite
+          done
+
+      # ── Prepare namespace ───────────────────────────────────────────────────
 
       - name: Create namespace and set pod-security labels
         if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
@@ -495,64 +420,6 @@ jobs:
             pod-security.kubernetes.io/audit=privileged \
             pod-security.kubernetes.io/warn=privileged \
             --overwrite
-
-      # ── Deploy MinIO for backup tests (conditional) ────────────────────────
-
-      - name: Deploy MinIO for backup tests
-        if: >-
-          ${{
-            github.event.inputs.use_existing_cluster != 'true' &&
-            (github.event.inputs.cluster_security == 'backup' ||
-             github.event.inputs.testname == 'backup' ||
-             github.event.inputs.testname == 'backup-stress')
-          }}
-        run: |
-          set -euxo pipefail
-          NAMESPACE=simplyblock
-
-          echo "=== Setting up MinIO for backup tests ==="
-
-          # 1. Create minio namespace + deployment + service
-          kubectl create ns minio --dry-run=client -o yaml | kubectl apply -f -
-
-          kubectl -n minio create deployment minio \
-            --image=minio/minio \
-            -- /bin/sh -c "minio server /data --console-address :9001" \
-            --dry-run=client -o yaml | kubectl apply -f -
-
-          kubectl -n minio expose deploy/minio --port 9000 \
-            --dry-run=client -o yaml | kubectl apply -f -
-
-          kubectl -n minio set env deploy/minio \
-            MINIO_ROOT_USER=minioadmin \
-            MINIO_ROOT_PASSWORD=minioadmin123
-
-          # 2. Wait for MinIO pod to be ready (up to 5 min)
-          echo "Waiting for MinIO pod to be ready..."
-          for i in $(seq 1 30); do
-            READY=$(kubectl -n minio get pods --no-headers 2>/dev/null | grep -c "Running" || true)
-            if [ "$READY" -ge 1 ]; then
-              echo "MinIO pod is running"
-              break
-            fi
-            echo "MinIO not ready yet ($i/30)..."
-            sleep 10
-          done
-
-          # 3. Create backup-credentials K8s Secret in cluster namespace
-          cat <<CREDEOF | kubectl apply -f -
-          apiVersion: v1
-          kind: Secret
-          metadata:
-            name: backup-credentials
-            namespace: ${NAMESPACE}
-          type: Opaque
-          stringData:
-            access_key_id: minioadmin
-            secret_access_key: minioadmin123
-          CREDEOF
-
-          echo "=== MinIO and backup credentials setup complete ==="
 
       - name: Wait before helm install
         if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
@@ -581,7 +448,9 @@ jobs:
             --set csiConfig.simplybk.ip="http://simplyblock-webappapi.simplyblock:5000" \
             --set prometheus.server.persistentVolume.storageClass=local-hostpath \
             --set controlplane.observability.enabled=true \
-            --set opensearch.persistence.storageClass=local-hostpath
+            --set opensearch.persistence.storageClass=local-hostpath \
+            --set image.simplyblock.pullPolicy=IfNotPresent \
+            --set image.operator.pullPolicy=IfNotPresent
 
       - name: Grant OpenShift SCC to all service accounts (post-helm)
         if: ${{ github.event.inputs.use_existing_cluster != 'true' && (github.event.inputs.cluster_environment == 'aws-openshift' || github.event.inputs.cluster_environment == 'openshift-local') }}
@@ -617,7 +486,7 @@ jobs:
           done
           echo "FLUENTBIT_PATCHED=$PATCHED" >> $GITHUB_ENV
 
-      # ── Apply custom resources ────────────────────────────────────────────
+      # ── Apply custom resources (initial nodes only) ────────────────────────
 
       - name: Wait for operator pod to be ready
         if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
@@ -656,91 +525,14 @@ jobs:
           SKIP_KUBELET_CONFIG="${{ (github.event.inputs.cluster_environment == 'aws-openshift' || github.event.inputs.cluster_environment == 'openshift-local') && 'false' || 'true' }}"
           FORCE_FORMAT_4K="${{ (github.event.inputs.cluster_environment == 'aws-openshift' || github.event.inputs.cluster_environment == 'openshift-local') && 'true' || 'false' }}"
 
-          # Build workerNodes YAML list from comma-separated input
+          # Build workerNodes YAML list from initial worker nodes only
           WORKER_YAML=""
           IFS=',' read -ra NODES <<< "${{ github.event.inputs.worker_nodes }}"
           for NODE in "${NODES[@]}"; do
             WORKER_YAML="${WORKER_YAML}    - ${NODE}"$'\n'
           done
 
-          # Conditionally build backup spec block
-          BACKUP_SPEC=""
-          CLUSTER_SEC="${{ github.event.inputs.cluster_security || 'none' }}"
-          TESTNAME_INPUT="${{ github.event.inputs.testname || '' }}"
-          if [ "$CLUSTER_SEC" = "backup" ] || [ "$TESTNAME_INPUT" = "backup" ] || [ "$TESTNAME_INPUT" = "backup-stress" ]; then
-            BACKUP_SPEC="  backup:
-              credentialsSecretRef:
-                name: backup-credentials
-              localEndpoint: http://minio.minio.svc.cluster.local:9000
-              localTesting: true
-              secondaryTarget: 0
-              snapshotBackups: true
-              withCompression: false"
-          fi
-
-          echo "=== Custom resource YAML to apply ==="
-          cat <<EOF
-          apiVersion: storage.simplyblock.io/v1alpha1
-          kind: StorageCluster
-          metadata:
-            name: simplyblock-cluster
-            namespace: ${NAMESPACE}
-          spec:
-            clusterName: simplyblock-cluster
-            mgmtIfname: ${MGMT_IFC}
-            fabricType: tcp
-            isSingleNode: false
-            enableNodeAffinity: true
-            strictNodeAntiAffinity: false
-            stripe:
-              dataChunks: ${NDCS}
-              parityChunks: ${NPCS}
-            warningThreshold:
-              capacity: 95
-              provisionedCapacity: 97
-            criticalThreshold:
-              capacity: 96
-              provisionedCapacity: 98
-          ${BACKUP_SPEC}
-          ---
-          apiVersion: storage.simplyblock.io/v1alpha1
-          kind: Pool
-          metadata:
-            name: simplyblock-pool
-            namespace: ${NAMESPACE}
-          spec:
-            name: simplyblock-pool
-            clusterName: simplyblock-cluster
-          ---
-          apiVersion: storage.simplyblock.io/v1alpha1
-          kind: StorageNode
-          metadata:
-            name: simplyblock-node
-            namespace: ${NAMESPACE}
-          spec:
-            clusterName: simplyblock-cluster
-            clusterImage: "${SB_REPO}:${SB_TAG}"
-            spdkImage: "${SPDK_IMAGE}"
-            mgmtIfname: ${MGMT_IFC}
-            dataIfname:
-              - ${DATA_NICS}
-            maxLogicalVolumeCount: 30
-            partitions: ${PARTITIONS}
-            corePercentage: ${CORE_PERCENTAGE}
-            coreIsolation: false
-            journalManager:
-              count: ${JM_COUNT}
-              percentPerDevice: 3
-            skipKubeletConfiguration: ${SKIP_KUBELET_CONFIG}
-            enableCpuTopology: true
-            openShiftCluster: ${OPENSHIFT_CLUSTER}
-            ubuntuHost: false
-            forceFormat4K: ${FORCE_FORMAT_4K}
-            workerNodes:
-          ${WORKER_YAML}
-          EOF
-
-          echo "=== Applying custom resources ==="
+          echo "=== Applying custom resources (initial ${#NODES[@]} workers) ==="
           cat <<EOF | kubectl apply -f -
           apiVersion: storage.simplyblock.io/v1alpha1
           kind: StorageCluster
@@ -763,7 +555,6 @@ jobs:
             criticalThreshold:
               capacity: 96
               provisionedCapacity: 98
-          ${BACKUP_SPEC}
           ---
           apiVersion: storage.simplyblock.io/v1alpha1
           kind: Pool
@@ -802,7 +593,7 @@ jobs:
           ${WORKER_YAML}
           EOF
 
-          echo "Custom resources applied"
+          echo "Custom resources applied with initial workers"
           sleep 10
         env:
           NDCS: ${{ env.NDCS }}
@@ -843,14 +634,14 @@ jobs:
       # ── Wait for cluster readiness ──────────────────────────────────────────
 
       - name: Wait for cluster to become active
-        timeout-minutes: ${{ github.event.inputs.cluster_environment == 'local' && 40 || 80 }}
+        timeout-minutes: ${{ github.event.inputs.cluster_environment == 'local' && 25 || 80 }}
         id: cluster_status
         run: |
           NAMESPACE=simplyblock
           ADMIN_POD=""
           CLUSTER_ENV="${{ github.event.inputs.cluster_environment || 'local' }}"
           if [ "$CLUSTER_ENV" = "local" ]; then
-            MAX_POLL=300
+            MAX_POLL=180
           else
             MAX_POLL=720
           fi
@@ -881,7 +672,7 @@ jobs:
             exit 1
           fi
 
-          # Expected number of snode-spdk pods = number of worker nodes
+          # Expected number of snode-spdk pods = number of initial worker nodes
           IFS=',' read -ra NODES <<< "${{ github.event.inputs.worker_nodes }}"
           EXPECTED_SNODES=${#NODES[@]}
           echo "=== Waiting for $EXPECTED_SNODES snode-spdk pods to be ready (MAX_POLL=$MAX_POLL) ==="
@@ -991,6 +782,7 @@ jobs:
               kubectl patch daemonset simplyblock-fluent-bit -n $NAMESPACE \
                 --type=merge -p '{"spec":{"template":{"spec":{"affinity":null}}}}'
               echo "fluent-bit daemonset patched successfully"
+              # Also patch CSI node daemonset with client toleration
               if kubectl get daemonset simplyblock-csi-node -n $NAMESPACE &>/dev/null; then
                 kubectl patch daemonset simplyblock-csi-node -n $NAMESPACE \
                   --type=merge -p '{"spec":{"template":{"spec":{"tolerations":[{"key":"node-role","operator":"Equal","value":"client","effect":"NoSchedule"}]}}}}'
@@ -1023,12 +815,9 @@ jobs:
           export K8S_LOCAL_KUBECTL=1
           export SBCLI_CMD=sbctl
 
-          TESTNAME_ARG=""
-          if [ -n "${{ github.event.inputs.testname }}" ]; then
-            TESTNAME_ARG="--testname ${{ github.event.inputs.testname }}"
-          fi
-
-          python3 -u e2e.py $TESTNAME_ARG \
+          python3 -u e2e.py \
+            --testname K8sNativeAddNodeTest \
+            --new_worker_nodes "${{ github.event.inputs.new_worker_nodes }}" \
             --ndcs $NDCS --npcs $NPCS --bs $BS --chunk_bs $CHUNK_BS \
             --run_k8s True 2>&1 | tee output.log
         env:
@@ -1037,7 +826,6 @@ jobs:
           BS: ${{ env.BS }}
           CHUNK_BS: ${{ env.CHUNK_BS }}
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
-          CLIENT_IP: ${{ github.event.inputs.client_ips }}
           SKIP_NFS: ${{ github.event.inputs.skip_nfs || 'false' }}
           RUN_DIR_FILE: ${{ env.RUN_DIR_FILE }}
 
@@ -1085,12 +873,14 @@ jobs:
             exit 0
           fi
 
+          # Total window: 1h before test start → 1h after test end
           WINDOW_START=$((TEST_START_TIME - 3600))
           WINDOW_END=$((TEST_END_TIME + 3600))
           TOTAL_SECONDS=$((WINDOW_END - WINDOW_START))
           TOTAL_HOURS=$(( (TOTAL_SECONDS + 3599) / 3600 ))
           echo "  Total window: ${TOTAL_HOURS} hour(s) to collect"
 
+          # Resolve admin pod
           ADMIN_POD=""
           for i in $(seq 1 12); do
             ADMIN_POD=$(kubectl -n ${NAMESPACE} get pods \
@@ -1110,9 +900,11 @@ jobs:
           fi
           echo "  Admin pod: ${ADMIN_POD}"
 
+          # Get Graylog service ClusterIP for mgmt-ip
           MGMT_IP=$(kubectl get svc -n ${NAMESPACE} | grep graylog | awk '{print $3}')
           echo "  Graylog IP: ${MGMT_IP}"
 
+          # Determine output dir from RUN_BASE_DIR
           OUTPUT_DIR=""
           if [ -n "${RUN_BASE_DIR:-}" ] && [ -d "${RUN_BASE_DIR}" ]; then
             OUTPUT_DIR="${RUN_BASE_DIR}/graylog_collected"
@@ -1124,6 +916,7 @@ jobs:
           mkdir -p "${OUTPUT_DIR}" 2>/dev/null || true
           echo "  Output: ${OUTPUT_DIR}"
 
+          # Helper: convert epoch to ISO-8601
           epoch_to_iso() {
             local ep=$1
             local iso
@@ -1134,11 +927,13 @@ jobs:
             echo "${iso}"
           }
 
+          # Collect logs one hour at a time
           CHUNK=0
           CURRENT=${WINDOW_START}
           while [ ${CURRENT} -lt ${WINDOW_END} ]; do
             CHUNK=$((CHUNK + 1))
             CHUNK_END=$((CURRENT + 3600))
+            # Cap the last chunk at WINDOW_END
             if [ ${CHUNK_END} -gt ${WINDOW_END} ]; then
               CHUNK_END=${WINDOW_END}
             fi
@@ -1176,6 +971,7 @@ jobs:
               2>&1 || echo "WARN: OpenSearch fallback also failed for chunk ${CHUNK}"
             }
 
+            # Copy tarballs from pod to NFS for this chunk
             TARBALLS=$(kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- \
               find "${POD_OUTPUT_DIR}" -name "*.tar.gz" -type f 2>/dev/null) || true
 
@@ -1192,6 +988,7 @@ jobs:
               echo "WARN: No tarballs found for chunk ${CHUNK}"
             fi
 
+            # Cleanup this chunk in pod
             kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- rm -rf "${POD_OUTPUT_DIR}" 2>/dev/null || true
 
             CURRENT=${CHUNK_END}
@@ -1213,7 +1010,6 @@ jobs:
 
           dur_fmt="${TEST_TIME_HOURS:-0}h ${TEST_TIME_MINS:-0}m ${TEST_TIME_SECS:-0}s"
 
-          # --- test result counts ---
           total_cases="$(grep -E 'Number of Total Cases:' "${out_log}" 2>/dev/null | tail -n 1 | grep -oE '[0-9]+$' || echo '?')"
           passed_cnt="$(grep -E 'Number of Passed Cases:' "${out_log}" 2>/dev/null | tail -n 1 | grep -oE '[0-9]+$' || echo '?')"
           failed_cnt="$(grep -E 'Number of Failed Cases:' "${out_log}" 2>/dev/null | tail -n 1 | grep -oE '[0-9]+$' || echo '?')"
@@ -1221,7 +1017,6 @@ jobs:
           test_wise="$(grep -E '(PASSED|FAILED|SKIPPED) CASE' "${out_log}" 2>/dev/null \
             | sed 's/\x1b\[[0-9;]*m//g' | sed 's/.*INFO - //' || true)"
 
-          # --- failure reason ---
           failure_summary="(unknown)"
           log_tail=""
           if [[ -f "${out_log}" ]]; then
@@ -1241,17 +1036,19 @@ jobs:
           fi
 
           {
-            echo "## K8s Native E2E Run Summary"
+            echo "## K8s Native Add Node Summary"
             echo ""
             echo "**Result:** ${conclusion}"
             echo ""
             echo "### Run Info"
-            echo "- **Test class:** \`${TESTNAME:-all}\`"
+            echo "- **Test class:** \`K8sNativeAddNodeTest\`"
             echo "- **Cluster ID:** \`${CLUSTER_ID}\`"
             echo "- **Branch:** \`${{ github.ref_name }}\`"
             echo "- **Helm Charts Branch:** \`${{ github.event.inputs.helm_charts_branch }}\`"
             echo "- **NDCS/NPCS:** \`${NDCS}/${NPCS}\`"
             echo "- **BS/Chunk BS:** \`${BS}/${CHUNK_BS}\`"
+            echo "- **Initial Workers:** \`${{ github.event.inputs.worker_nodes }}\`"
+            echo "- **New Workers:** \`${{ github.event.inputs.new_worker_nodes }}\`"
             echo "- **Duration:** ${dur_fmt}"
             echo ""
             echo "### Test Results"
@@ -1290,7 +1087,6 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
         env:
-          TESTNAME: ${{ env.TESTNAME }}
           CLUSTER_ID: ${{ env.CLUSTER_ID }}
           NDCS: ${{ env.NDCS }}
           NPCS: ${{ env.NPCS }}
@@ -1309,8 +1105,8 @@ jobs:
           JOB_STATUS: ${{ job.status }}
           SLACK_RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           GITHUB_REF_NAME: ${{ github.ref_name }}
-          SLACK_WF_NAME: "K8s Native E2E"
-          TESTNAME: ${{ env.TESTNAME }}
+          SLACK_WF_NAME: "K8s Native Add Node"
+          TESTNAME: K8sNativeAddNodeTest
           RUN_BASE_DIR: ${{ env.RUN_BASE_DIR }}
           NDCS: ${{ env.NDCS }}
           NPCS: ${{ env.NPCS }}
@@ -1381,10 +1177,6 @@ jobs:
           except Exception as exc:
               print(f"WARN: Slack notification failed: {exc}", file=sys.stderr)
           PYEOF
-
-      - name: Cleanup MinIO namespace (if deployed)
-        if: always()
-        run: kubectl delete namespace minio --wait=false 2>/dev/null || true
 
       - name: Cleanup build folder
         if: always()

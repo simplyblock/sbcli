@@ -526,7 +526,7 @@ class RandomMultiClientFailoverNamespaceTest(RandomMultiClientFailoverTest):
 
             # API delete (same)
             try:
-                self.sbcli_utils.delete_lvol(lvol_name, max_attempt=20, skip_error=True)
+                self.sbcli_utils.delete_lvol(lvol_name, max_attempt=120, skip_error=True)
             except Exception as e:
                 self.logger.warning(f"[NS] delete_lvol failed for {lvol_name}: {e}")
                 self.record_pending_lvol_delete(lvol_name, lvol_id)

@@ -184,7 +184,7 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
         )
 
         def _bring_down(mgmt_ip, iface):
-            cmd = f"nmcli connection down {iface}"
+            cmd = f"ip link set {iface} down"
             try:
                 self.ssh_obj.exec_command(node=mgmt_ip, command=cmd, max_retries=1, timeout=20)
             except Exception as e:
@@ -217,7 +217,7 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
         )
 
         def _bring_up(mgmt_ip, iface):
-            cmd = f"nmcli connection up {iface}"
+            cmd = f"ip link set {iface} up"
             try:
                 self.ssh_obj.exec_command(node=mgmt_ip, command=cmd, max_retries=3, timeout=20)
                 self.logger.info(f"  Reconnected {iface} on {mgmt_ip}")
@@ -366,7 +366,7 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
     def _disconnect_full_interface(self, node, node_ip):
         self.logger.info("Handling full interface based network interruption...")
         active_interfaces = self.ssh_obj.get_active_interfaces(node_ip)
-        outage_dur = random.choice([300, 30])
+        outage_dur = random.choice([30, 300, 600])  # 5 or 10 minutes
         self.logger.info(f"Selected Outage seconds for n/w outage: {outage_dur}")
         self.disconnect_thread = threading.Thread(
             target=self.ssh_obj.disconnect_all_active_interfaces,
@@ -419,7 +419,7 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                     if self.k8s_test and clone_details.get("pending_connect"):
                         # Clone was never connected/mounted — skip FIO/unmount/disconnect
                         self.logger.info(f"[pending_connect] Deleting deferred clone '{clone_name}' (no FIO/mount to clean up).")
-                        deleted = self.sbcli_utils.delete_lvol(clone_name, max_attempt=20, skip_error=True)
+                        deleted = self.sbcli_utils.delete_lvol(clone_name, max_attempt=120, skip_error=True)
                         if not deleted:
                             self.record_pending_lvol_delete(clone_name, clone_details['ID'])
                         if clone_name in self.lvols_without_sec_connect:
@@ -456,7 +456,7 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                         self.disconnect_lvol(clone_details['ID'])
                         self.ssh_obj.unmount_path(clone_details["Client"], f"/mnt/{clone_name}")
                         self.ssh_obj.remove_dir(clone_details["Client"], dir_path=f"/mnt/{clone_name}")
-                        deleted = self.sbcli_utils.delete_lvol(clone_name, max_attempt=20, skip_error=True)
+                        deleted = self.sbcli_utils.delete_lvol(clone_name, max_attempt=120, skip_error=True)
                         if not deleted:
                             self.record_pending_lvol_delete(clone_name, clone_details['ID'])
                         sleep_n_sec(30)
@@ -509,7 +509,7 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
             self.disconnect_lvol(self.lvol_mount_details[lvol]['ID'])
             self.ssh_obj.unmount_path(self.lvol_mount_details[lvol]["Client"], f"/mnt/{lvol}")
             self.ssh_obj.remove_dir(self.lvol_mount_details[lvol]["Client"], dir_path=f"/mnt/{lvol}")
-            deleted = self.sbcli_utils.delete_lvol(lvol, max_attempt=20, skip_error=True)
+            deleted = self.sbcli_utils.delete_lvol(lvol, max_attempt=120, skip_error=True)
             if not deleted:
                 self.record_pending_lvol_delete(lvol, self.lvol_mount_details[lvol]['ID'])
             self.ssh_obj.delete_files(self.lvol_mount_details[lvol]["Client"], [f"{self.log_path}/local-{lvol}_fio*"])
@@ -921,6 +921,13 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
 
                 self.logger.info("Waiting for fallback recovery.")
                 sleep_n_sec(100)
+
+            # Health check after all outage nodes are online
+            for node, outage_type, node_outage_dur in outage_events:
+                try:
+                    self.sbcli_utils.wait_for_health_status(node, True, timeout=300)
+                except Exception as exc:
+                    self.logger.warning(f"Health check did not pass for {node}: {exc}")
 
             # Reconnect multipath NICs after all node outages are recovered
             self._reconnect_multipath_nics()
