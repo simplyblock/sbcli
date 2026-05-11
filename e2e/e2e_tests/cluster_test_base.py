@@ -1699,7 +1699,7 @@ class TestClusterBase:
         so that it never disrupts the teardown sequence.
         """
         try:
-            import requests  # noqa: F811
+            import requests  # noqa: F401
         except ImportError:
             self.logger.warning(
                 "[graylog-export] 'requests' library not available, skipping"

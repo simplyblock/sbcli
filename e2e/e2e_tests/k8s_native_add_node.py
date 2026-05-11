@@ -14,7 +14,6 @@ from __future__ import annotations
 import os
 import random
 import string
-import time
 from datetime import datetime
 
 from e2e_tests.cluster_test_base import TestClusterBase

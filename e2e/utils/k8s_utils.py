@@ -922,20 +922,20 @@ class K8sUtils:
         if client_nodes_exist:
             # Hard-pin FIO pods to client-role nodes
             node_affinity_block = (
-                f"        nodeAffinity:\n"
-                f"          requiredDuringSchedulingIgnoredDuringExecution:\n"
-                f"            nodeSelectorTerms:\n"
-                f"            - matchExpressions:\n"
-                f"              - key: node-role.kubernetes.io/client\n"
-                f"                operator: Exists\n"
+                "        nodeAffinity:\n"
+                "          requiredDuringSchedulingIgnoredDuringExecution:\n"
+                "            nodeSelectorTerms:\n"
+                "            - matchExpressions:\n"
+                "              - key: node-role.kubernetes.io/client\n"
+                "                operator: Exists\n"
             )
             # Tolerate the client-node taint so pods can schedule there
             tolerations_block = (
-                f"      tolerations:\n"
-                f"      - key: \"node-role\"\n"
-                f"        operator: \"Equal\"\n"
-                f"        value: \"client\"\n"
-                f"        effect: \"NoSchedule\"\n"
+                "      tolerations:\n"
+                "      - key: \"node-role\"\n"
+                "        operator: \"Equal\"\n"
+                "        value: \"client\"\n"
+                "        effect: \"NoSchedule\"\n"
             )
             self.logger.info(
                 f"[K8sUtils] Client nodes detected — FIO job '{job_name}' "
@@ -1498,19 +1498,19 @@ class K8sUtils:
         node_affinity_block = ""
         if self.has_client_nodes():
             node_affinity_block = (
-                f"    nodeAffinity:\n"
-                f"      requiredDuringSchedulingIgnoredDuringExecution:\n"
-                f"        nodeSelectorTerms:\n"
-                f"        - matchExpressions:\n"
-                f"          - key: node-role.kubernetes.io/client\n"
-                f"            operator: Exists\n"
+                "    nodeAffinity:\n"
+                "      requiredDuringSchedulingIgnoredDuringExecution:\n"
+                "        nodeSelectorTerms:\n"
+                "        - matchExpressions:\n"
+                "          - key: node-role.kubernetes.io/client\n"
+                "            operator: Exists\n"
             )
             tolerations_block = (
-                f"  tolerations:\n"
-                f"  - key: \"node-role\"\n"
-                f"    operator: \"Equal\"\n"
-                f"    value: \"client\"\n"
-                f"    effect: \"NoSchedule\"\n"
+                "  tolerations:\n"
+                "  - key: \"node-role\"\n"
+                "    operator: \"Equal\"\n"
+                "    value: \"client\"\n"
+                "    effect: \"NoSchedule\"\n"
             )
         affinity_block = ""
         if node_affinity_block:

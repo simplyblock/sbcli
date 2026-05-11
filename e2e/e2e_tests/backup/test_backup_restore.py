@@ -218,7 +218,7 @@ class BackupTestBase(TestClusterBase):
                 os.path.basename(k): v for k, v in actual.items()
             }
             assert actual_by_name, (
-                f"No files found in restored PVC for checksum verification"
+                "No files found in restored PVC for checksum verification"
             )
             for fname, cksum in expected_by_name.items():
                 assert fname in actual_by_name, (
@@ -542,7 +542,7 @@ class BackupTestBase(TestClusterBase):
         """
         if self.k8s_test:
             # In k8s mode, search StorageBackup list by snapshot name or CRD name
-            k8s = self._ensure_k8s_utils()
+            self._ensure_k8s_utils()
             snap_norm = self._k8s_normalize_name(snap_name)
             deadline = time.time() + timeout
             while time.time() < deadline:
@@ -4464,12 +4464,12 @@ class _InterruptedTestBase(BackupTestBase):
         self.sbcli_utils.wait_for_storage_node_status(
             node_id, "online", timeout=1000)
 
-        self.logger.info(f"[outage] waiting for health_check == True")
+        self.logger.info("[outage] waiting for health_check == True")
         self.sbcli_utils.wait_for_health_status(
             node_id, True, timeout=1000)
 
         # ── wait for migration / balancing tasks ──────────────────────
-        self.logger.info(f"[outage] waiting for migration tasks")
+        self.logger.info("[outage] waiting for migration tasks")
         try:
             self.validate_migration_for_node(
                 timestamp=outage_ts, timeout=600,
