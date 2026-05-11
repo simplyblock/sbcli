@@ -4,10 +4,10 @@ run-name: "K8s Native E2E - Add Node | ${{ inputs.cluster_environment || 'local'
 on:
   workflow_dispatch:
     inputs:
-      simplyblock_csi_branch:
-        description: 'Branch for simplyblock-csi'
+      helm_charts_branch:
+        description: 'Branch for helm-charts'
         required: true
-        default: 'master'
+        default: 'main'
       simplyblock_image:
         description: 'Simplyblock image tag'
         required: true
@@ -123,11 +123,11 @@ jobs:
         uses: actions/checkout@v4
 
       - uses: actions/checkout@master
-        name: Checkout simplyblock-csi
+        name: Checkout helm-charts
         with:
-          repository: simplyblock-io/simplyblock-csi
-          ref: ${{ github.event.inputs.simplyblock_csi_branch || 'master' }}
-          path: 'simplyblock-csi'
+          repository: simplyblock/helm-charts
+          ref: ${{ github.event.inputs.helm_charts_branch || 'main' }}
+          path: 'helm-charts'
 
       - name: Resolve KEY_PATH and validate key exists
         shell: bash
@@ -427,10 +427,10 @@ jobs:
 
       # ── Deploy CSI stack ────────────────────────────────────────────────────
 
-      - name: Install Helm Chart for simplyblock-csi
+      - name: Install Helm Chart for simplyblock-operator
         if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
         run: |
-          cd $GITHUB_WORKSPACE/simplyblock-csi/charts/spdk-csi/latest/spdk-csi/
+          cd $GITHUB_WORKSPACE/helm-charts/charts/simplyblock-operator/
 
           helm upgrade --install spdk-csi ./ \
             --namespace simplyblock \
@@ -1044,7 +1044,7 @@ jobs:
             echo "- **Test class:** \`K8sNativeAddNodeTest\`"
             echo "- **Cluster ID:** \`${CLUSTER_ID}\`"
             echo "- **Branch:** \`${{ github.ref_name }}\`"
-            echo "- **CSI Branch:** \`${{ github.event.inputs.simplyblock_csi_branch }}\`"
+            echo "- **Helm Charts Branch:** \`${{ github.event.inputs.helm_charts_branch }}\`"
             echo "- **NDCS/NPCS:** \`${NDCS}/${NPCS}\`"
             echo "- **BS/Chunk BS:** \`${BS}/${CHUNK_BS}\`"
             echo "- **Initial Workers:** \`${{ github.event.inputs.worker_nodes }}\`"

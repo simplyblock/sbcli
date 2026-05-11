@@ -234,8 +234,13 @@ class K8sNativeFailoverTest(TestClusterBase):
             for client in self.fio_node:
                 self.ssh_obj.make_directory(node=client, dir_name=self.log_path)
 
-            # Pre-clean on clients
+            # Pre-clean on clients: disconnect stale NVMe, unmount
             for client in self.fio_node:
+                try:
+                    self.ssh_obj.disconnect_nvme(node=client, nqn_grep="lvol")
+                except Exception as exc:
+                    self.logger.warning(f"[setup] NVMe disconnect on {client}: {exc}")
+                sleep_n_sec(2)
                 self.ssh_obj.unmount_path(node=client, device=self.mount_path)
                 sleep_n_sec(2)
 
@@ -417,6 +422,7 @@ class K8sNativeFailoverTest(TestClusterBase):
     def _build_fio_config(self, name: str) -> str:
         bs = f"{2 ** random.randint(2, 7)}k"
         run_id = _rand_seq(6)
+        randseed = random.randint(1, 2**63)
         return (
             f"[global]\n"
             f"name={name}-fio\n"
@@ -435,6 +441,7 @@ class K8sNativeFailoverTest(TestClusterBase):
             f"verify=md5\n"
             f"verify_dump=1\n"
             f"verify_fatal=1\n"
+            f"randseed={randseed}\n"
             f"\n"
             f"[job1]\n"
         )
@@ -639,6 +646,16 @@ class K8sNativeFailoverTest(TestClusterBase):
                 mount_point = f"{self.mount_path}/{pvc_name}"
                 self.ssh_obj.mount_path(node=client, device=device, mount_path=mount_point)
                 sleep_n_sec(5)
+
+                # Pre-fill volume to overwrite stale FIO verify headers from
+                # previous lvols on thin-provisioned storage.
+                try:
+                    self.ssh_obj.create_random_files(
+                        client, mount_point, self.fio_size
+                    )
+                    self.ssh_obj.delete_files(client, [f"{mount_point}/random_file_*"])
+                except Exception as exc:
+                    self.logger.warning(f"[create_pvc] Volume pre-fill failed for {pvc_name}: {exc}")
 
                 log_file = f"{self.log_path}/{pvc_name}.log"
                 self.ssh_obj.delete_files(client, [f"{mount_point}/*fio*"])

@@ -1031,11 +1031,17 @@ class SshUtils:
         log_opt     = f"--log_avg_msec={log_avg_ms}" if log_avg_ms else ""
         latency = f" --max_latency={max_latency}" if use_latency else ""
 
+        # Unique seed per FIO process to prevent identical IO patterns
+        # across concurrent processes (FIO defaults to time-based seeding
+        # which collides when multiple processes start simultaneously).
+        randseed = kwargs.get("randseed", random.randint(1, 2**63))
+
         # raw fio command
         fio_cmd = (
             f"fio --name={name} {location} --ioengine={ioengine} --direct=1 --iodepth={iodepth} "
             f"{time_based} --runtime={runtime} --rw={rw} {latency} --bs={bs} --size={size} --rwmixread={rwmixread} "
-            f"--verify=md5 --verify_dump=1 --verify_fatal=1 --numjobs={numjobs} --nrfiles={nrfiles} "
+            f"--verify=md5 --verify_dump=1 --verify_fatal=1 --randseed={randseed} "
+            f"--numjobs={numjobs} --nrfiles={nrfiles} "
             f"{log_opt} {iolog_opt} {output_fmt}{output_file}"
         ).strip()
 

@@ -872,7 +872,8 @@ class K8sUtils:
                        fio_config: str, namespace: str = None,
                        image: str = "dockerpinata/fio:2.1",
                        cleanup_before_fio: bool = False,
-                       avoid_node: str = None):
+                       avoid_node: str = None,
+                       prefill_volume: bool = True):
         """Create a ConfigMap with FIO config and a Job that runs FIO against a PVC.
 
         Args:
@@ -889,10 +890,22 @@ class K8sUtils:
         indented_cfg = "\n".join(
             f"      {line}" for line in fio_config.strip().splitlines()
         )
-        init_containers = ""
+        init_containers_list = []
+        if prefill_volume:
+            # Pre-fill volume with random data to overwrite stale FIO verify
+            # headers from previous lvols on thin-provisioned storage.
+            init_containers_list.append(
+                f"      - name: prefill-volume\n"
+                f"        image: busybox\n"
+                f"        command: [\"sh\", \"-c\", "
+                f"\"dd if=/dev/urandom of=/spdkvol/prefill bs=1M count=1024 2>/dev/null; "
+                f"rm -f /spdkvol/prefill\"]\n"
+                f"        volumeMounts:\n"
+                f"        - mountPath: /spdkvol\n"
+                f"          name: benchmark-volume\n"
+            )
         if cleanup_before_fio:
-            init_containers = (
-                f"      initContainers:\n"
+            init_containers_list.append(
                 f"      - name: cleanup-old-fio\n"
                 f"        image: busybox\n"
                 f"        command: [\"sh\", \"-c\", \"rm -f /spdkvol/*fio*\"]\n"
@@ -900,6 +913,9 @@ class K8sUtils:
                 f"        - mountPath: /spdkvol\n"
                 f"          name: benchmark-volume\n"
             )
+        init_containers = ""
+        if init_containers_list:
+            init_containers = "      initContainers:\n" + "".join(init_containers_list)
         node_affinity_block = ""
         tolerations_block = ""
         client_nodes_exist = self.has_client_nodes()
@@ -1259,6 +1275,346 @@ class K8sUtils:
                     f"FIO Job '{job_name}' pod logs contain '{word}'"
                 )
         return True
+
+    # ── StorageBackup CRD operations ─────────────────────────────────────────
+
+    def create_storage_backup(self, name: str, pvc_name: str,
+                              cluster_name: str = "simplyblock-cluster",
+                              namespace: str = None):
+        """Create a StorageBackup CRD that triggers an S3 backup from a PVC."""
+        ns = namespace or self.namespace
+        yaml_content = (
+            f"apiVersion: storage.simplyblock.io/v1alpha1\n"
+            f"kind: StorageBackup\n"
+            f"metadata:\n"
+            f"  name: {name}\n"
+            f"  namespace: {ns}\n"
+            f"spec:\n"
+            f"  clusterName: {cluster_name}\n"
+            f"  pvcRef:\n"
+            f"    name: {pvc_name}\n"
+        )
+        self.logger.info(
+            f"[K8sUtils] Creating StorageBackup '{name}' for PVC '{pvc_name}'"
+        )
+        self.apply_yaml(yaml_content, namespace=ns)
+
+    def wait_storage_backup_done(self, name: str, timeout: int = 300,
+                                  namespace: str = None) -> dict:
+        """Poll until StorageBackup phase is ``Done``.  Returns resource JSON."""
+        ns = namespace or self.namespace
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            res = self.get_resource_json("storagebackup", name, namespace=ns)
+            status = res.get("status", {})
+            phase = (status.get("phase") or "").lower()
+            if phase == "done":
+                self.logger.info(f"[K8sUtils] StorageBackup '{name}' is Done")
+                return res
+            if phase == "failed":
+                raise AssertionError(
+                    f"StorageBackup '{name}' failed: {status}")
+            self.logger.info(
+                f"[K8sUtils] Waiting for StorageBackup '{name}' "
+                f"(phase={status.get('phase', 'unknown')})"
+            )
+            time.sleep(10)
+        raise TimeoutError(
+            f"StorageBackup '{name}' not Done within {timeout}s"
+        )
+
+    def get_storage_backup_id(self, name: str,
+                               namespace: str = None) -> str:
+        """Return the backupId from a StorageBackup's status field."""
+        ns = namespace or self.namespace
+        res = self.get_resource_json("storagebackup", name, namespace=ns)
+        return res.get("status", {}).get("backupId", "")
+
+    def list_storage_backups(self, namespace: str = None) -> list:
+        """List all StorageBackup resources.  Returns list of resource dicts."""
+        ns = namespace or self.namespace
+        out, _ = self._exec_kubectl(
+            f"kubectl get storagebackup -n {ns} -o json 2>/dev/null || true",
+            supress_logs=True,
+        )
+        try:
+            data = json.loads(out.strip()) if out.strip() else {}
+            return data.get("items", [])
+        except Exception:
+            return []
+
+    def delete_storage_backup(self, name: str, namespace: str = None):
+        """Delete a StorageBackup CRD."""
+        ns = namespace or self.namespace
+        self.logger.info(f"[K8sUtils] Deleting StorageBackup '{name}'")
+        self.delete_resource("storagebackup", name, namespace=ns)
+
+    # ── BackupRestore CRD operations ─────────────────────────────────────────
+
+    def create_backup_restore(self, name: str, backup_ref_name: str,
+                              pvc_name: str, pvc_size: str,
+                              cluster_name: str = "simplyblock-cluster",
+                              storage_class: str = None,
+                              target_pool: str = None,
+                              namespace: str = None):
+        """Create a BackupRestore CRD to restore a backup into a new PVC."""
+        ns = namespace or self.namespace
+        sc_line = ""
+        if storage_class:
+            sc_line = f"      storageClassName: {storage_class}\n"
+        pool_line = ""
+        if target_pool:
+            pool_line = f"  targetPool: {target_pool}\n"
+        yaml_content = (
+            f"apiVersion: storage.simplyblock.io/v1alpha1\n"
+            f"kind: BackupRestore\n"
+            f"metadata:\n"
+            f"  name: {name}\n"
+            f"  namespace: {ns}\n"
+            f"spec:\n"
+            f"  clusterName: {cluster_name}\n"
+            f"{pool_line}"
+            f"  backupRef:\n"
+            f"    name: {backup_ref_name}\n"
+            f"  pvcTemplate:\n"
+            f"    metadata:\n"
+            f"      name: {pvc_name}\n"
+            f"    spec:\n"
+            f"      accessModes:\n"
+            f"      - ReadWriteOnce\n"
+            f"      resources:\n"
+            f"        requests:\n"
+            f"          storage: {pvc_size}\n"
+            f"{sc_line}"
+        )
+        self.logger.info(
+            f"[K8sUtils] Creating BackupRestore '{name}' from backup "
+            f"'{backup_ref_name}' -> PVC '{pvc_name}'"
+        )
+        self.apply_yaml(yaml_content, namespace=ns)
+
+    def wait_backup_restore_done(self, name: str, timeout: int = 300,
+                                  namespace: str = None) -> dict:
+        """Poll until BackupRestore phase is ``Done``.
+
+        Phases: InProgress -> PVCBinding -> Done
+        Returns resource JSON.
+        """
+        ns = namespace or self.namespace
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            res = self.get_resource_json("backuprestore", name, namespace=ns)
+            phase = (res.get("status", {}).get("phase") or "").lower()
+            if phase == "done":
+                self.logger.info(f"[K8sUtils] BackupRestore '{name}' is Done")
+                return res
+            if phase == "failed":
+                raise AssertionError(
+                    f"BackupRestore '{name}' failed: {res.get('status')}")
+            self.logger.info(
+                f"[K8sUtils] Waiting for BackupRestore '{name}' "
+                f"(phase={res.get('status', {}).get('phase', 'unknown')})"
+            )
+            time.sleep(10)
+        raise TimeoutError(
+            f"BackupRestore '{name}' not Done within {timeout}s"
+        )
+
+    def delete_backup_restore(self, name: str, namespace: str = None):
+        """Delete a BackupRestore CRD."""
+        ns = namespace or self.namespace
+        self.logger.info(f"[K8sUtils] Deleting BackupRestore '{name}'")
+        self.delete_resource("backuprestore", name, namespace=ns)
+
+    # ── BackupPolicy CRD operations ──────────────────────────────────────────
+
+    def create_backup_policy(self, name: str,
+                             cluster_name: str = "simplyblock-cluster",
+                             max_versions: int = 0, max_age: str = "",
+                             schedule: str = "", namespace: str = None):
+        """Create a BackupPolicy CRD."""
+        ns = namespace or self.namespace
+        spec_lines = f"  clusterName: {cluster_name}\n"
+        if max_versions:
+            spec_lines += f"  maxVersions: {max_versions}\n"
+        if max_age:
+            spec_lines += f'  maxAge: "{max_age}"\n'
+        if schedule:
+            spec_lines += f'  schedule: "{schedule}"\n'
+        yaml_content = (
+            f"apiVersion: storage.simplyblock.io/v1alpha1\n"
+            f"kind: BackupPolicy\n"
+            f"metadata:\n"
+            f"  name: {name}\n"
+            f"  namespace: {ns}\n"
+            f"spec:\n"
+            f"{spec_lines}"
+        )
+        self.logger.info(f"[K8sUtils] Creating BackupPolicy '{name}'")
+        self.apply_yaml(yaml_content, namespace=ns)
+
+    def delete_backup_policy(self, name: str, namespace: str = None):
+        """Delete a BackupPolicy CRD."""
+        ns = namespace or self.namespace
+        self.logger.info(f"[K8sUtils] Deleting BackupPolicy '{name}'")
+        self.delete_resource("backuppolicy", name, namespace=ns)
+
+    # ── PVC annotation helpers ───────────────────────────────────────────────
+
+    def annotate_pvc_backup_policy(self, pvc_name: str, policy_name: str,
+                                    namespace: str = None):
+        """Attach a BackupPolicy to a PVC via annotation."""
+        ns = namespace or self.namespace
+        self.logger.info(
+            f"[K8sUtils] Annotating PVC '{pvc_name}' with "
+            f"backup-policy='{policy_name}'"
+        )
+        self._exec_kubectl(
+            f"kubectl annotate pvc {pvc_name} -n {ns} "
+            f"simplybk/backup-policy={policy_name} --overwrite"
+        )
+
+    def remove_pvc_backup_policy_annotation(self, pvc_name: str,
+                                             namespace: str = None):
+        """Remove BackupPolicy annotation from a PVC."""
+        ns = namespace or self.namespace
+        self.logger.info(
+            f"[K8sUtils] Removing backup-policy annotation from PVC "
+            f"'{pvc_name}'"
+        )
+        self._exec_kubectl(
+            f"kubectl annotate pvc {pvc_name} -n {ns} simplybk/backup-policy-"
+        )
+
+    # ── Utility pod operations (checksums) ───────────────────────────────────
+
+    def create_utility_pod(self, pod_name: str, pvc_name: str,
+                           mount_path: str = "/spdkvol",
+                           namespace: str = None):
+        """Create an alpine utility pod that mounts a PVC for checksum operations."""
+        ns = namespace or self.namespace
+        # Build tolerations + nodeAffinity to match FIO job scheduling
+        tolerations_block = ""
+        node_affinity_block = ""
+        if self.has_client_nodes():
+            node_affinity_block = (
+                f"    nodeAffinity:\n"
+                f"      requiredDuringSchedulingIgnoredDuringExecution:\n"
+                f"        nodeSelectorTerms:\n"
+                f"        - matchExpressions:\n"
+                f"          - key: node-role.kubernetes.io/client\n"
+                f"            operator: Exists\n"
+            )
+            tolerations_block = (
+                f"  tolerations:\n"
+                f"  - key: \"node-role\"\n"
+                f"    operator: \"Equal\"\n"
+                f"    value: \"client\"\n"
+                f"    effect: \"NoSchedule\"\n"
+            )
+        affinity_block = ""
+        if node_affinity_block:
+            affinity_block = (
+                f"  affinity:\n"
+                f"{node_affinity_block}"
+            )
+        yaml_content = (
+            f"apiVersion: v1\n"
+            f"kind: Pod\n"
+            f"metadata:\n"
+            f"  name: {pod_name}\n"
+            f"  namespace: {ns}\n"
+            f"spec:\n"
+            f"{affinity_block}"
+            f"{tolerations_block}"
+            f"  containers:\n"
+            f"  - name: alpine\n"
+            f"    image: alpine:3\n"
+            f"    imagePullPolicy: IfNotPresent\n"
+            f"    command: [\"sleep\", \"3600\"]\n"
+            f"    volumeMounts:\n"
+            f"    - mountPath: {mount_path}\n"
+            f"      name: data-volume\n"
+            f"  volumes:\n"
+            f"  - name: data-volume\n"
+            f"    persistentVolumeClaim:\n"
+            f"      claimName: {pvc_name}\n"
+            f"  restartPolicy: Never\n"
+        )
+        self.logger.info(
+            f"[K8sUtils] Creating utility pod '{pod_name}' with PVC "
+            f"'{pvc_name}' at {mount_path}"
+        )
+        self.apply_yaml(yaml_content, namespace=ns)
+
+    def wait_pod_running(self, pod_name: str, timeout: int = 300,
+                         namespace: str = None) -> bool:
+        """Wait until pod is ``Running``.  Returns True on success."""
+        ns = namespace or self.namespace
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            out, _ = self._exec_kubectl(
+                f"kubectl get pod {pod_name} -n {ns} "
+                f"-o jsonpath='{{.status.phase}}' 2>/dev/null || true",
+                supress_logs=True,
+            )
+            phase = out.strip()
+            if phase == "Running":
+                self.logger.info(f"[K8sUtils] Pod '{pod_name}' is Running")
+                return True
+            if phase in ("Failed", "Error"):
+                raise RuntimeError(
+                    f"Pod '{pod_name}' entered {phase} state")
+            time.sleep(5)
+        raise TimeoutError(
+            f"Pod '{pod_name}' not Running within {timeout}s"
+        )
+
+    def exec_in_pod(self, pod_name: str, command: str,
+                    namespace: str = None) -> tuple:
+        """Execute a command inside a running pod.  Returns (stdout, stderr)."""
+        ns = namespace or self.namespace
+        return self._exec_kubectl(
+            f"kubectl exec {pod_name} -n {ns} -- "
+            f"sh -c {shlex.quote(command)}"
+        )
+
+    def find_files_in_pvc(self, pod_name: str,
+                          mount_path: str = "/spdkvol",
+                          namespace: str = None) -> list:
+        """Find regular files in mount_path inside the pod."""
+        out, _ = self.exec_in_pod(
+            pod_name, f"find {mount_path} -maxdepth 2 -type f",
+            namespace=namespace,
+        )
+        return [f.strip() for f in out.splitlines() if f.strip()]
+
+    def generate_checksums_in_pvc(self, pod_name: str, files: list,
+                                   namespace: str = None) -> dict:
+        """Generate md5 checksums for files inside the pod.
+
+        Returns ``{filepath: md5hash}`` dict.
+        """
+        if not files:
+            return {}
+        # Batch all files into a single md5sum call for efficiency
+        file_list = " ".join(shlex.quote(f) for f in files)
+        out, _ = self.exec_in_pod(
+            pod_name, f"md5sum {file_list}",
+            namespace=namespace,
+        )
+        checksums = {}
+        for line in out.splitlines():
+            parts = line.strip().split(None, 1)
+            if len(parts) == 2:
+                checksums[parts[1]] = parts[0]
+        return checksums
+
+    def delete_pod(self, pod_name: str, namespace: str = None):
+        """Delete a pod."""
+        ns = namespace or self.namespace
+        self.logger.info(f"[K8sUtils] Deleting pod '{pod_name}'")
+        self.delete_resource("pod", pod_name, namespace=ns)
 
 
 # ── K8s-native sbcli_utils replacement ──────────────────────────────────────

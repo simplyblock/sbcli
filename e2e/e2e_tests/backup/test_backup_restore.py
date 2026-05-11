@@ -104,8 +104,10 @@ class BackupTestBase(TestClusterBase):
     """
     Shared helpers for all backup/restore E2E tests.
 
-    All sbcli commands are executed via self.ssh_obj.exec_command on
-    self.mgmt_nodes[0] using self.base_cmd (default: sbcli-dev).
+    In Docker mode, sbcli commands are executed via self.ssh_obj.exec_command
+    on self.mgmt_nodes[0] using self.base_cmd (default: sbcli-dev).
+    In K8s-native mode, sbcli commands are routed through kubectl exec
+    into the admin pod via self.sbcli_utils.k8s.exec_sbcli().
     """
 
     def __init__(self, **kwargs):
@@ -124,15 +126,143 @@ class BackupTestBase(TestClusterBase):
         self.mounted: list[tuple[str, str]] = [] # (node, mount_point)
         self.connected: list[str] = []           # lvol IDs that were NVMe-connected
 
+        # K8s-native resource tracking for cleanup (only used when k8s_test=True)
+        self.created_pvcs: list[str] = []
+        self.created_volume_snapshots: list[str] = []
+        self.created_storage_backups: list[str] = []
+        self.created_backup_restores: list[str] = []
+        self.created_backup_policies_k8s: list[str] = []
+        self.created_fio_jobs: list[str] = []
+        self.created_configmaps: list[str] = []
+        self.created_utility_pods: list[str] = []
+
+        # K8s config (used when k8s_test=True)
+        self._storage_class_name: str = "simplyblock-csi-sc"
+        self._snapshot_class_name: str = "simplyblock-csi-snapshotclass"
+        self._cluster_name: str = "simplyblock-cluster"
+
+        # Crypto keys for lvols
+        self.lvol_crypt_keys = [
+            "7b3695268e2a6611a25ac4b1ee15f27f9bf6ea9783dada66a4a730ebf0492bfd",
+            "78505636c8133d9be42e347f82785b81a879cd8133046f8fc0b36f17b078ad0c",
+        ]
+
+    # ── K8s helpers ──────────────────────────────────────────────────────────
+
+    def _ensure_k8s_utils(self):
+        """Return the K8sUtils instance (available only in k8s mode)."""
+        k8s = getattr(self.sbcli_utils, "k8s", None)
+        if not k8s:
+            raise RuntimeError("K8sUtils not available -- was k8s_run=True passed?")
+        return k8s
+
+    def _k8s_setup_storage_class(self):
+        """In k8s mode, create StorageClass + VolumeSnapshotClass for backup tests."""
+        if not self.k8s_test:
+            return
+        k8s = self._ensure_k8s_utils()
+        k8s.create_storage_class(
+            name=self._storage_class_name,
+            cluster_id=self.cluster_id,
+            pool_name=self.pool_name,
+            ndcs=getattr(self, "ndcs", 1),
+            npcs=getattr(self, "npcs", 0),
+        )
+        k8s.create_volume_snapshot_class(name=self._snapshot_class_name)
+
+    def _k8s_normalize_name(self, name: str) -> str:
+        """Normalize a name for use as a K8s resource name (lowercase, hyphens)."""
+        return name.lower().replace("_", "-")
+
+    def _get_pvc_for_lvol(self, lvol_id_or_name: str) -> str:
+        """In k8s mode, resolve PVC name from a lvol identifier.
+
+        In our design _create_lvol() returns (name, lvol_id) where name IS
+        the PVC name.  This method searches created_pvcs for a match, or
+        returns the input normalized.
+        """
+        if not self.k8s_test:
+            return lvol_id_or_name
+        # Check if it's already a known PVC name
+        if lvol_id_or_name in self.created_pvcs:
+            return lvol_id_or_name
+        normalized = self._k8s_normalize_name(lvol_id_or_name)
+        if normalized in self.created_pvcs:
+            return normalized
+        # Try matching by volume handle
+        k8s = self._ensure_k8s_utils()
+        for pvc in self.created_pvcs:
+            try:
+                handle = k8s.get_pvc_volume_handle(pvc)
+                if handle and (lvol_id_or_name in handle or handle in lvol_id_or_name):
+                    return pvc
+            except Exception:
+                continue
+        return normalized
+
+    def _verify_checksums(self, node_or_pvc, mount, expected_checksums,
+                          by_name=True):
+        """Verify checksums in both docker and k8s mode.
+
+        In docker mode: uses SSH find_files + verify_checksums.
+        In k8s mode: creates a utility pod on the PVC, captures checksums,
+        and compares by filename.
+        """
+        if self.k8s_test:
+            actual = self._get_checksums(node_or_pvc, mount)
+            # Compare by filename (basename) only
+            expected_by_name = {
+                os.path.basename(k): v for k, v in expected_checksums.items()
+            }
+            actual_by_name = {
+                os.path.basename(k): v for k, v in actual.items()
+            }
+            assert actual_by_name, (
+                f"No files found in restored PVC for checksum verification"
+            )
+            for fname, cksum in expected_by_name.items():
+                assert fname in actual_by_name, (
+                    f"File {fname} not found in restored data"
+                )
+                assert actual_by_name[fname] == cksum, (
+                    f"Checksum mismatch for {fname}: "
+                    f"expected {cksum}, got {actual_by_name[fname]}"
+                )
+        else:
+            files = self.ssh_obj.find_files(node_or_pvc, mount)
+            self.ssh_obj.verify_checksums(
+                node_or_pvc, files, expected_checksums, by_name=by_name)
+
     # ── checksum / disconnect helpers ────────────────────────────────────────
 
     def _get_checksums(self, node, mount):
-        """Find files in *mount* and return their checksums."""
+        """Find files in *mount* and return their checksums.
+
+        In docker mode: *node* is an SSH host IP, *mount* is a filesystem path.
+        In k8s mode:    *node* is ignored, *mount* is the PVC name.
+        """
+        if self.k8s_test:
+            k8s = self._ensure_k8s_utils()
+            pvc_name = mount  # In k8s mode, _connect_and_mount returns PVC name
+            pod_name = f"cksum-{_rand_suffix().lower()}"
+            k8s.create_utility_pod(pod_name, pvc_name)
+            self.created_utility_pods.append(pod_name)
+            try:
+                k8s.wait_pod_running(pod_name)
+                files = k8s.find_files_in_pvc(pod_name)
+                checksums = k8s.generate_checksums_in_pvc(pod_name, files)
+            finally:
+                k8s.delete_pod(pod_name)
+                if pod_name in self.created_utility_pods:
+                    self.created_utility_pods.remove(pod_name)
+            return checksums
         files = self.ssh_obj.find_files(node, mount)
         return self.ssh_obj.generate_checksums(node, files)
 
     def _disconnect_lvol(self, lvol_id):
-        """Disconnect an NVMe lvol by ID."""
+        """Disconnect an NVMe lvol by ID (no-op in k8s mode)."""
+        if self.k8s_test:
+            return
         self.disconnect_lvol(lvol_id)
 
     def _unmount_and_disconnect(self, node, mount, lvol_id):
@@ -141,12 +271,87 @@ class BackupTestBase(TestClusterBase):
         XFS refuses to mount a filesystem while another with the same UUID is
         already mounted.  Call this on the source lvol before connecting any
         restored lvol to avoid UUID conflicts.
+
+        In k8s mode this is a no-op — PVCs are released when pods are deleted.
         """
+        if self.k8s_test:
+            self.logger.info("[k8s] _unmount_and_disconnect is a no-op for PVC")
+            return
         self.logger.info(f"Unmounting {mount} and disconnecting {lvol_id} (XFS safety)")
         self.ssh_obj.unmount_path(node=node, device=mount)
         self.mounted = [(n, m) for n, m in self.mounted if m != mount]
         self._disconnect_lvol(lvol_id=lvol_id)
         self.connected = [c for c in self.connected if c != lvol_id]
+
+    def _safe_unmount(self, mount):
+        """Unmount a path and update tracking. No-op in k8s mode."""
+        if self.k8s_test:
+            return
+        self.ssh_obj.unmount_path(self.fio_node, mount)
+        self.mounted = [(n, m) for n, m in self.mounted if m != mount]
+
+    def _get_lvol_id(self, lvol_name: str) -> str:
+        """Get lvol ID for the given name.
+
+        In k8s mode: returns the normalized PVC name (lvol_id is not used
+        by _connect_and_mount in k8s mode).
+        In docker mode: resolves via sbcli lvol list.
+        """
+        if self.k8s_test:
+            return self._k8s_normalize_name(lvol_name)
+        return self.sbcli_utils.get_lvol_id(lvol_name=lvol_name)
+
+    def _exec_on_volume(self, mount, command):
+        """Execute a shell command on a volume's filesystem.
+
+        In docker mode: runs the command via SSH on fio_node.
+        In k8s mode: ``mount`` is actually the PVC name (from
+        ``_connect_and_mount``). A temporary utility pod is created with
+        the PVC mounted at ``/spdkvol``, the command is executed inside
+        the pod (with the PVC name replaced by ``/spdkvol``), and the pod
+        is deleted before returning.
+        """
+        if self.k8s_test:
+            k8s = self._ensure_k8s_utils()
+            pvc_name = mount  # In k8s mode, mount is the PVC name
+            pod_mount = "/spdkvol"
+            actual_cmd = command.replace(mount, pod_mount)
+            pod_name = f"vol-exec-{_rand_suffix()}"
+            k8s.create_utility_pod(pod_name, pvc_name, mount_path=pod_mount)
+            k8s.wait_pod_running(pod_name)
+            self.created_utility_pods.append(pod_name)
+            try:
+                out, err = k8s.exec_in_pod(pod_name, actual_cmd)
+            finally:
+                k8s.delete_pod(pod_name)
+                self.created_utility_pods = [
+                    p for p in self.created_utility_pods if p != pod_name
+                ]
+            return out, err
+        else:
+            return self.ssh_obj.exec_command(self.fio_node, command)
+
+    def _delete_lvol(self, lvol_name: str, skip_error: bool = True):
+        """Delete a lvol / PVC in the appropriate mode.
+
+        In k8s mode: deletes the PVC via kubectl.
+        In docker mode: uses sbcli_utils.delete_lvol.
+        """
+        if self.k8s_test:
+            k8s = self._ensure_k8s_utils()
+            pvc_name = self._k8s_normalize_name(lvol_name)
+            try:
+                k8s.delete_pvc(pvc_name)
+            except Exception as e:
+                if not skip_error:
+                    raise
+                self.logger.warning(f"[k8s] PVC delete warning for {pvc_name}: {e}")
+            if pvc_name in self.created_pvcs:
+                self.created_pvcs.remove(pvc_name)
+        else:
+            self.sbcli_utils.delete_lvol(lvol_name=lvol_name, skip_error=skip_error)
+        if lvol_name in self.created_lvols:
+            self.created_lvols.remove(lvol_name)
 
     # ── CLI helpers ───────────────────────────────────────────────────────────
 
@@ -157,10 +362,35 @@ class BackupTestBase(TestClusterBase):
         return out, err
 
     def _sbcli(self, subcmd: str, node: str = None) -> tuple[str, str]:
+        if self.k8s_test and node is None:
+            # In k8s-native mode, route sbcli commands through kubectl exec
+            # into the admin pod via K8sUtils.exec_sbcli().
+            cmd = f"{self.base_cmd} {subcmd}"
+            out, err = self.sbcli_utils.k8s.exec_sbcli(cmd)
+            self.logger.debug(f"CMD (k8s): {cmd}\nOUT: {out}\nERR: {err}")
+            return out, err
         return self._run(f"{self.base_cmd} {subcmd}", node=node)
 
     def _delete_backups(self, lvol_id: str) -> None:
-        """Delete all S3 backups for lvol_id via `backup delete <lvol_id>`."""
+        """Delete all S3 backups for lvol_id.
+
+        In k8s mode: deletes matching StorageBackup CRDs.
+        In docker mode: uses ``sbcli backup delete <lvol_id>``.
+        """
+        if self.k8s_test:
+            k8s = self._ensure_k8s_utils()
+            # Delete StorageBackup CRDs that reference this PVC
+            pvc_name = self._get_pvc_for_lvol(lvol_id)
+            backups = k8s.list_storage_backups()
+            for b in backups:
+                pvc_ref = b.get("spec", {}).get("pvcRef", {}).get("name", "")
+                if pvc_ref == pvc_name or lvol_id in str(b):
+                    bname = b.get("metadata", {}).get("name", "")
+                    if bname:
+                        k8s.delete_storage_backup(bname)
+                        if bname in self.created_storage_backups:
+                            self.created_storage_backups.remove(bname)
+            return
         out, err = self._sbcli(f"-d backup delete {lvol_id}")
         assert not (err and "error" in err.lower()), \
             f"backup delete failed: {err}"
@@ -171,12 +401,39 @@ class BackupTestBase(TestClusterBase):
     def _create_snapshot(self, lvol_id: str, name: str, backup: bool = False) -> str:
         """Create snapshot and return snapshot ID.
 
-        When *backup=True*, the command output also contains a line like
-        ``Backup created: <uuid>``.  The backup ID is stored in
-        ``self._last_backup_id`` so callers can use it with
-        ``_wait_for_backup()`` instead of polling by snapshot name.
+        In docker mode: ``sbcli snapshot add [--backup]``.
+        In k8s mode:
+          - If backup=True: creates a StorageBackup CRD (operator auto-creates
+            snapshot from PVC).  Returns the StorageBackup CRD name.
+          - If backup=False: creates a VolumeSnapshot.  Returns the snapshot name.
         """
         self._last_backup_id = None
+
+        if self.k8s_test:
+            k8s = self._ensure_k8s_utils()
+            pvc_name = self._get_pvc_for_lvol(lvol_id)
+            snap_name = self._k8s_normalize_name(name)
+
+            if backup:
+                # StorageBackup auto-creates snapshot from PVC
+                backup_name = f"bck-{snap_name}"
+                k8s.create_storage_backup(
+                    backup_name, pvc_name,
+                    cluster_name=self._cluster_name)
+                self.created_storage_backups.append(backup_name)
+                self._last_backup_id = backup_name
+                self.created_snapshots.append(backup_name)
+                return backup_name
+            else:
+                # Snapshot only, no backup
+                k8s.create_volume_snapshot(
+                    snap_name, pvc_name,
+                    snapshot_class=self._snapshot_class_name)
+                k8s.wait_volume_snapshot_ready(snap_name)
+                self.created_volume_snapshots.append(snap_name)
+                self.created_snapshots.append(snap_name)
+                return snap_name
+
         flag = "--backup" if backup else ""
         out, err = self._sbcli(f"-d snapshot add {lvol_id} {name} {flag}".strip())
         assert not (err and "error" in err.lower()), \
@@ -193,7 +450,27 @@ class BackupTestBase(TestClusterBase):
         return snap_id
 
     def _snapshot_backup(self, snapshot_id: str) -> str:
-        """Trigger S3 backup for an existing snapshot; return backup_id."""
+        """Trigger S3 backup for an existing snapshot; return backup_id.
+
+        In k8s mode: creates a StorageBackup CRD referencing the PVC
+        (resolved from the VolumeSnapshot's source).
+        """
+        if self.k8s_test:
+            k8s = self._ensure_k8s_utils()
+            # Get PVC name from VolumeSnapshot source
+            snap_res = k8s.get_resource_json("volumesnapshot", snapshot_id)
+            pvc_name = snap_res.get("spec", {}).get("source", {}).get(
+                "persistentVolumeClaimName", "")
+            if not pvc_name:
+                # If snapshot was created by operator, try finding PVC from created_pvcs
+                pvc_name = self.created_pvcs[0] if self.created_pvcs else ""
+            backup_name = f"bck-{snapshot_id}-{_rand_suffix().lower()}"
+            k8s.create_storage_backup(
+                backup_name, pvc_name,
+                cluster_name=self._cluster_name)
+            self.created_storage_backups.append(backup_name)
+            return backup_name
+
         out, err = self._sbcli(f"-d snapshot backup {snapshot_id}")
         assert not (err and "error" in err.lower()), \
             f"snapshot backup failed: {err}"
@@ -203,12 +480,45 @@ class BackupTestBase(TestClusterBase):
         return backup_id
 
     def _list_backups(self) -> list[dict]:
-        """Return parsed list of backups."""
+        """Return parsed list of backups.
+
+        In k8s mode: returns StorageBackup CRD items converted to a
+        consistent dict format matching the sbcli table output.
+        """
+        if self.k8s_test:
+            k8s = self._ensure_k8s_utils()
+            items = k8s.list_storage_backups()
+            result = []
+            for item in items:
+                meta = item.get("metadata", {})
+                spec = item.get("spec", {})
+                status = item.get("status", {})
+                result.append({
+                    "id": status.get("backupId", meta.get("name", "")),
+                    "ID": status.get("backupId", meta.get("name", "")),
+                    "uuid": status.get("backupId", ""),
+                    "name": meta.get("name", ""),
+                    "status": status.get("phase", ""),
+                    "Status": status.get("phase", ""),
+                    "Snapshot": status.get("snapshot", ""),
+                    "snapshot": status.get("snapshot", ""),
+                    "LVol": spec.get("pvcRef", {}).get("name", ""),
+                    "lvol": spec.get("pvcRef", {}).get("name", ""),
+                })
+            return result
+
         out, _ = self._sbcli("-d backup list")
         return self._parse_table(out)
 
     def _wait_for_backup(self, backup_id: str, timeout: int = _BACKUP_COMPLETE_TIMEOUT) -> dict:
-        """Poll backup list until backup_id status is 'done'/'complete'."""
+        """Poll until backup reaches 'done'/'complete'.
+
+        In k8s mode: polls StorageBackup CRD status.
+        """
+        if self.k8s_test:
+            k8s = self._ensure_k8s_utils()
+            return k8s.wait_storage_backup_done(backup_id, timeout=timeout)
+
         deadline = time.time() + timeout
         while time.time() < deadline:
             backups = self._list_backups()
@@ -228,11 +538,29 @@ class BackupTestBase(TestClusterBase):
                                      timeout: int = _BACKUP_COMPLETE_TIMEOUT) -> str:
         """Poll backup list until a backup for *snap_name* reaches completed.
 
-        Returns the backup ID.  Unlike ``_wait_for_backup`` (which needs a
-        backup ID up-front), this variant matches by the Snapshot column —
-        useful when the backup was triggered via ``snapshot add --backup``
-        which does not return the backup ID directly.
+        Returns the backup ID.
         """
+        if self.k8s_test:
+            # In k8s mode, search StorageBackup list by snapshot name or CRD name
+            k8s = self._ensure_k8s_utils()
+            snap_norm = self._k8s_normalize_name(snap_name)
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                for b in self._list_backups():
+                    snap_field = b.get("Snapshot") or b.get("snapshot") or ""
+                    crd_name = b.get("name") or ""
+                    if (snap_norm in snap_field or snap_norm in crd_name
+                            or snap_name in snap_field or snap_name in crd_name):
+                        status = (b.get("status") or b.get("Status") or "").lower()
+                        if status == "done":
+                            return crd_name or b.get("id") or ""
+                        if status == "failed":
+                            raise AssertionError(
+                                f"Backup for {snap_name} failed: {b}")
+                sleep_n_sec(_POLL_INTERVAL)
+            raise TimeoutError(
+                f"No completed backup for snapshot {snap_name} within {timeout}s")
+
         deadline = time.time() + timeout
         while time.time() < deadline:
             for b in self._list_backups():
@@ -254,7 +582,34 @@ class BackupTestBase(TestClusterBase):
             f"No completed backup for snapshot {snap_name} within {timeout}s")
 
     def _restore_backup(self, backup_id: str, lvol_name: str, pool_name: str = None) -> str:
-        """Restore a backup to a new lvol; return the new lvol name."""
+        """Restore a backup to a new lvol; return the new lvol name.
+
+        In k8s mode: creates a BackupRestore CRD that provisions a new PVC
+        from the StorageBackup.
+        """
+        if self.k8s_test:
+            k8s = self._ensure_k8s_utils()
+            self.logger.info(
+                f"Waiting 60s before restoring backup {backup_id} to {lvol_name}")
+            sleep_n_sec(60)
+            pvc_name = self._k8s_normalize_name(lvol_name)
+            restore_name = f"rst-{pvc_name}"
+            pvc_size = self.lvol_size
+            if "Gi" not in pvc_size:
+                pvc_size = pvc_size.replace("G", "Gi")
+            k8s.create_backup_restore(
+                name=restore_name,
+                backup_ref_name=backup_id,
+                pvc_name=pvc_name,
+                pvc_size=pvc_size,
+                cluster_name=self._cluster_name,
+                target_pool=pool_name,
+            )
+            self.created_backup_restores.append(restore_name)
+            self.created_pvcs.append(pvc_name)
+            self.created_lvols.append(pvc_name)
+            return pvc_name
+
         self.logger.info(f"Waiting 60s before restoring backup {backup_id} to {lvol_name}")
         sleep_n_sec(60)
         pool = pool_name or self.pool_name
@@ -262,6 +617,9 @@ class BackupTestBase(TestClusterBase):
             f"-d backup restore {backup_id} --lvol {lvol_name} --pool {pool}")
         assert not (err and "error" in err.lower()), \
             f"backup restore failed: {err}"
+        if out and "Error:" in out:
+            raise AssertionError(
+                f"backup restore returned error in output: {out}")
         self.logger.info(f"Restore output: {out}")
         self.created_lvols.append(lvol_name)
         return lvol_name
@@ -339,7 +697,30 @@ class BackupTestBase(TestClusterBase):
         interrupted-restore tests where a suspended task is tolerated).
         Raises RuntimeError if a new suspended s3_backup_restore task is detected
         (indicating the restore failed on the data plane).
+
+        In k8s mode: waits for the BackupRestore CRD to reach 'Done' phase
+        and for the restored PVC to become Bound.
         """
+        if self.k8s_test:
+            k8s = self._ensure_k8s_utils()
+            pvc_name = self._k8s_normalize_name(lvol_name)
+            restore_name = f"rst-{pvc_name}"
+            try:
+                k8s.wait_backup_restore_done(restore_name, timeout=timeout)
+            except Exception as e:
+                if expect_failure:
+                    self.logger.warning(
+                        f"[k8s] BackupRestore {restore_name} did not reach Done "
+                        f"(expect_failure=True): {e}")
+                    return
+                raise
+            # Wait for restored PVC to become Bound
+            k8s.wait_pvc_bound(pvc_name, timeout=120)
+            self.logger.info(
+                f"[k8s] Restore complete: BackupRestore={restore_name}, "
+                f"PVC={pvc_name} is Bound")
+            return
+
         suspended_before: set = set()
         if not expect_failure:
             suspended_before = self._get_suspended_restore_task_ids()
@@ -457,8 +838,27 @@ class BackupTestBase(TestClusterBase):
 
     # ── policy helpers ────────────────────────────────────────────────────────
 
-    def _add_policy(self, name: str, versions: int = 0, age: str = "") -> str:
-        """Create a backup policy; return policy ID."""
+    def _add_policy(self, name: str, versions: int = 0, age: str = "",
+                    schedule: str = "") -> str:
+        """Create a backup policy; return policy ID.
+
+        In k8s mode: creates a BackupPolicy CRD and returns the CRD name.
+        In docker mode: uses ``sbcli backup policy-add``.
+        """
+        if self.k8s_test:
+            k8s = self._ensure_k8s_utils()
+            policy_name = self._k8s_normalize_name(name)
+            k8s.create_backup_policy(
+                name=policy_name,
+                cluster_name=self._cluster_name,
+                max_versions=versions,
+                max_age=age,
+                schedule=schedule,
+            )
+            self.created_backup_policies_k8s.append(policy_name)
+            self.created_policies.append(policy_name)
+            return policy_name
+
         import re as _re
         cmd = f"-d backup policy-add {self.cluster_id} {name}"
         if versions:
@@ -477,17 +877,54 @@ class BackupTestBase(TestClusterBase):
         return policy_id
 
     def _attach_policy(self, policy_id: str, target_type: str, target_id: str):
+        """Attach a backup policy to a target (lvol or pool).
+
+        In k8s mode for lvol targets: annotates the PVC with
+        ``simplybk/backup-policy=<policy_name>``.
+        Pool-level attach and docker mode: uses sbcli.
+        """
+        if self.k8s_test and target_type == "lvol":
+            k8s = self._ensure_k8s_utils()
+            pvc_name = self._get_pvc_for_lvol(target_id)
+            k8s.annotate_pvc_backup_policy(pvc_name, policy_id)
+            return
         _, err = self._sbcli(f"backup policy-attach {policy_id} {target_type} {target_id}")
         assert not (err and "error" in err.lower()), \
             f"policy-attach failed: {err}"
 
     def _detach_policy(self, policy_id: str, target_type: str, target_id: str):
+        """Detach a backup policy from a target.
+
+        In k8s mode for lvol targets: removes the PVC annotation.
+        Pool-level detach and docker mode: uses sbcli.
+        """
+        if self.k8s_test and target_type == "lvol":
+            k8s = self._ensure_k8s_utils()
+            pvc_name = self._get_pvc_for_lvol(target_id)
+            k8s.remove_pvc_backup_policy_annotation(pvc_name)
+            return
         _, err = self._sbcli(
             f"-d backup policy-detach {policy_id} {target_type} {target_id}")
         assert not (err and "error" in err.lower()), \
             f"policy-detach failed: {err}"
 
     def _remove_policy(self, policy_id: str):
+        """Remove a backup policy.
+
+        In k8s mode: deletes the BackupPolicy CRD.
+        """
+        if self.k8s_test:
+            k8s = self._ensure_k8s_utils()
+            try:
+                k8s.delete_backup_policy(policy_id)
+            except Exception as e:
+                self.logger.warning(f"[k8s] delete_backup_policy {policy_id}: {e}")
+            if policy_id in self.created_policies:
+                self.created_policies.remove(policy_id)
+            if policy_id in self.created_backup_policies_k8s:
+                self.created_backup_policies_k8s.remove(policy_id)
+            return
+
         _, err = self._sbcli(f"backup policy-remove {policy_id}")
         assert not (err and "error" in err.lower()), \
             f"policy-remove failed: {err}"
@@ -495,6 +932,34 @@ class BackupTestBase(TestClusterBase):
             self.created_policies.remove(policy_id)
 
     def _list_policies(self) -> list[dict]:
+        """List backup policies.
+
+        In k8s mode: lists BackupPolicy CRDs and converts to dict format.
+        """
+        if self.k8s_test:
+            k8s = self._ensure_k8s_utils()
+            out, _ = k8s._exec_kubectl(
+                "get backuppolicy -o json", namespace=k8s.namespace)
+            import json
+            try:
+                data = json.loads(out)
+            except Exception:
+                return []
+            result = []
+            for item in data.get("items", []):
+                meta = item.get("metadata", {})
+                spec = item.get("spec", {})
+                result.append({
+                    "id": meta.get("name", ""),
+                    "ID": meta.get("name", ""),
+                    "name": spec.get("name", meta.get("name", "")),
+                    "Name": spec.get("name", meta.get("name", "")),
+                    "max_versions": spec.get("maxVersions", 0),
+                    "max_age": spec.get("maxAge", ""),
+                    "schedule": spec.get("schedule", ""),
+                })
+            return result
+
         out, _ = self._sbcli("backup policy-list")
         return self._parse_table(out)
 
@@ -502,9 +967,41 @@ class BackupTestBase(TestClusterBase):
 
     def _create_lvol(self, name: str = None, size: str = None,
                      crypto: bool = False, ndcs: int = None, npcs: int = None) -> str:
-        """Create an lvol and return its ID."""
+        """Create an lvol and return (name, lvol_id).
+
+        In docker mode: creates via sbcli.
+        In k8s mode: creates a PVC (and a dedicated StorageClass if
+        crypto/custom geometry is requested).
+        """
         name = name or f"bck_{_rand_suffix()}"
         size = size or self.lvol_size
+
+        if self.k8s_test:
+            k8s = self._ensure_k8s_utils()
+            pvc_name = self._k8s_normalize_name(name)
+
+            # Create a dedicated StorageClass for non-default configs
+            sc_name = self._storage_class_name
+            if ndcs is not None or npcs is not None or crypto:
+                sc_name = f"sc-{pvc_name}"
+                k8s.create_storage_class(
+                    name=sc_name,
+                    cluster_id=self.cluster_id,
+                    pool_name=self.pool_name,
+                    ndcs=ndcs if ndcs is not None else getattr(self, "ndcs", 1),
+                    npcs=npcs if npcs is not None else getattr(self, "npcs", 0),
+                    encryption=crypto,
+                )
+
+            # Normalize size for k8s ("5G" -> "5Gi")
+            pvc_size = size if "Gi" in size else size.replace("G", "Gi")
+            k8s.create_pvc(name=pvc_name, size=pvc_size, storage_class=sc_name)
+            k8s.wait_pvc_bound(pvc_name)
+            lvol_id = k8s.get_pvc_volume_handle(pvc_name)
+            self.created_pvcs.append(pvc_name)
+            self.created_lvols.append(pvc_name)
+            return pvc_name, lvol_id
+
         kwargs = dict(
             lvol_name=name,
             pool_name=self.pool_name,
@@ -518,7 +1015,7 @@ class BackupTestBase(TestClusterBase):
         if npcs is not None:
             kwargs["distr_npcs"] = npcs
         self.sbcli_utils.add_lvol(**kwargs)
-        lvol_id = self.sbcli_utils.get_lvol_id(lvol_name=name)
+        lvol_id = self._get_lvol_id(name)
         self.created_lvols.append(name)
         return name, lvol_id
 
@@ -529,7 +1026,18 @@ class BackupTestBase(TestClusterBase):
 
         Set format_disk=False for restored lvols — they already carry a
         filesystem and formatting would destroy the backed-up data.
+
+        In k8s mode this is a no-op.  PVCs are consumed directly by FIO
+        Jobs and utility pods.  Returns ``(pvc_name, pvc_name)`` so that
+        downstream helpers (``_run_fio``, ``_get_checksums``) receive the
+        PVC name where they would normally get a mount path.
         """
+        if self.k8s_test:
+            pvc_name = self._k8s_normalize_name(lvol_name)
+            self.logger.info(
+                f"[k8s] _connect_and_mount no-op for PVC '{pvc_name}'")
+            return pvc_name, pvc_name
+
         mount = mount or f"{self.mount_path}/{lvol_name}"
         initial = self.ssh_obj.get_devices(node=self.fio_node)
         connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)
@@ -556,13 +1064,70 @@ class BackupTestBase(TestClusterBase):
         Supports two calling conventions:
           _run_fio(mount, runtime=30)                          # original
           _run_fio(name, mount, log_file, rw="write", runtime=20)  # extended
+
+        In k8s mode the first positional arg (or *mount*) is the PVC name.
+        A Kubernetes FIO Job + ConfigMap are created, the job is awaited,
+        and then both are deleted so the PVC is free for subsequent pods.
         """
+        if self.k8s_test:
+            k8s = self._ensure_k8s_utils()
+            # Resolve PVC name from arguments
+            if mount is None:
+                pvc_name = name_or_mount
+                fio_name = f"bck-fio-{_rand_suffix().lower()}"
+            else:
+                fio_name = self._k8s_normalize_name(name_or_mount)
+                pvc_name = mount
+
+            size = size or self.fio_size
+            rw = kwargs.get("rw", "randrw")
+            bs = kwargs.get("bs", "4K")
+            iodepth = kwargs.get("iodepth", 1)
+            numjobs = kwargs.get("numjobs", 2)
+            nrfiles = kwargs.get("nrfiles", 4)
+
+            job_name = f"fio-{fio_name[:20]}-{_rand_suffix().lower()}"
+            cm_name = f"fiocfg-{job_name}"
+
+            fio_config = (
+                f"[global]\n"
+                f"ioengine=libaio\n"
+                f"direct=1\n"
+                f"bs={bs}\n"
+                f"iodepth={iodepth}\n"
+                f"numjobs={numjobs}\n"
+                f"time_based\n"
+                f"runtime={runtime}\n"
+                f"\n"
+                f"[{fio_name[:20]}]\n"
+                f"rw={rw}\n"
+                f"size={size}\n"
+                f"directory=/spdkvol\n"
+                f"nrfiles={nrfiles}\n"
+            )
+
+            k8s.create_fio_job(job_name, pvc_name, cm_name, fio_config)
+            self.created_fio_jobs.append(job_name)
+            self.created_configmaps.append(cm_name)
+
+            status = k8s.wait_job_complete(job_name, timeout=runtime + 120)
+            assert status == "succeeded", (
+                f"FIO job {job_name} did not succeed (status={status})")
+
+            # Delete job + configmap to release PVC for next pod
+            k8s.delete_job(job_name)
+            k8s.delete_configmap(cm_name)
+            if job_name in self.created_fio_jobs:
+                self.created_fio_jobs.remove(job_name)
+            if cm_name in self.created_configmaps:
+                self.created_configmaps.remove(cm_name)
+            return
+
+        # ── Docker / SSH mode (unchanged) ─────────────────────────────────
         if mount is None:
-            # Original calling convention: first arg is mount path
             mount = name_or_mount
             fio_name = "bck_fio"
         else:
-            # Extended: first arg is the FIO job name
             fio_name = name_or_mount
 
         size = size or self.fio_size
@@ -638,7 +1203,20 @@ class BackupTestBase(TestClusterBase):
     def _wait_for_restore_tasks_to_finish(self, timeout: int = 300) -> None:
         """Wait for all in-progress s3_backup_restore tasks to reach a terminal
         state before deleting lvols.  Avoids the stuck-task loop caused by
-        deleting an lvol while its restore is still running."""
+        deleting an lvol while its restore is still running.
+
+        In k8s mode: waits for all tracked BackupRestore CRDs to reach Done.
+        """
+        if self.k8s_test:
+            k8s = self._ensure_k8s_utils()
+            for rst_name in list(self.created_backup_restores):
+                try:
+                    k8s.wait_backup_restore_done(rst_name, timeout=timeout)
+                except Exception as e:
+                    self.logger.warning(
+                        f"[k8s] BackupRestore {rst_name} did not reach Done "
+                        f"during teardown wait: {e}")
+            return
         _POLL = 15
         deadline = time.time() + timeout
         while time.time() < deadline:
@@ -680,50 +1258,12 @@ class BackupTestBase(TestClusterBase):
             # to prevent the restore task from looping forever on a deleted device.
             self._wait_for_restore_tasks_to_finish(timeout=300)
 
-            # Unmount
-            for node, mnt in list(self.mounted):
-                try:
-                    self.ssh_obj.unmount_path(node, mnt)
-                except Exception as e:
-                    self.logger.warning(f"Unmount error {mnt}: {e}")
-            self.mounted.clear()
+            if self.k8s_test:
+                self._k8s_teardown()
+            else:
+                self._docker_teardown()
 
-            # Disconnect NVMe
-            for lvol_id in list(self.connected):
-                try:
-                    details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
-                    if details:
-                        nqn = details[0]["nqn"]
-                        self.ssh_obj.disconnect_nvme(node=self.fio_node, nqn_grep=nqn)
-                except Exception as e:
-                    self.logger.warning(f"Disconnect error {lvol_id}: {e}")
-            self.connected.clear()
-
-            # Delete snapshots (force)
-            for snap_id in list(self.created_snapshots):
-                try:
-                    self._sbcli(f"snapshot delete {snap_id} --force")
-                except Exception as e:
-                    self.logger.warning(f"Snapshot delete error {snap_id}: {e}")
-            self.created_snapshots.clear()
-
-            # Delete backup policies
-            for pid in list(self.created_policies):
-                try:
-                    self._remove_policy(pid)
-                except Exception as e:
-                    self.logger.warning(f"Policy remove error {pid}: {e}")
-            self.created_policies.clear()
-
-            # Delete lvols
-            for name in list(self.created_lvols):
-                try:
-                    self.sbcli_utils.delete_lvol(lvol_name=name, skip_error=True)
-                except Exception as e:
-                    self.logger.warning(f"Lvol delete error {name}: {e}")
-            self.created_lvols.clear()
-
-            # Delete pool
+            # Delete pool (same for both modes — sbcli call)
             try:
                 self.sbcli_utils.delete_storage_pools(
                     pool_name=self.pool_name, skip_error=True)
@@ -731,6 +1271,129 @@ class BackupTestBase(TestClusterBase):
                 pass
 
         super().teardown(delete_lvols=delete_lvols, close_ssh=close_ssh)
+
+    def _k8s_teardown(self):
+        """Delete all K8s resources created during the test."""
+        k8s = self._ensure_k8s_utils()
+
+        # 1. Delete utility pods (so PVCs are released)
+        for pod_name in list(self.created_utility_pods):
+            try:
+                k8s.delete_pod(pod_name)
+            except Exception as e:
+                self.logger.warning(f"[k8s] utility pod delete error {pod_name}: {e}")
+        self.created_utility_pods.clear()
+
+        # 2. Delete FIO jobs + configmaps (so PVCs are released)
+        for job_name in list(self.created_fio_jobs):
+            try:
+                k8s.delete_job(job_name)
+            except Exception as e:
+                self.logger.warning(f"[k8s] FIO job delete error {job_name}: {e}")
+        self.created_fio_jobs.clear()
+
+        for cm_name in list(self.created_configmaps):
+            try:
+                k8s.delete_configmap(cm_name)
+            except Exception as e:
+                self.logger.warning(f"[k8s] ConfigMap delete error {cm_name}: {e}")
+        self.created_configmaps.clear()
+
+        # 3. Delete BackupRestore CRDs
+        for rst_name in list(self.created_backup_restores):
+            try:
+                k8s.delete_backup_restore(rst_name)
+            except Exception as e:
+                self.logger.warning(f"[k8s] BackupRestore delete error {rst_name}: {e}")
+        self.created_backup_restores.clear()
+
+        # 4. Delete StorageBackup CRDs
+        for bck_name in list(self.created_storage_backups):
+            try:
+                k8s.delete_storage_backup(bck_name)
+            except Exception as e:
+                self.logger.warning(f"[k8s] StorageBackup delete error {bck_name}: {e}")
+        self.created_storage_backups.clear()
+
+        # 5. Delete BackupPolicy CRDs
+        for pol_name in list(self.created_backup_policies_k8s):
+            try:
+                k8s.delete_backup_policy(pol_name)
+            except Exception as e:
+                self.logger.warning(f"[k8s] BackupPolicy delete error {pol_name}: {e}")
+        self.created_backup_policies_k8s.clear()
+        self.created_policies.clear()
+
+        # 6. Delete VolumeSnapshots
+        for snap_name in list(self.created_volume_snapshots):
+            try:
+                k8s.delete_resource("volumesnapshot", snap_name)
+            except Exception as e:
+                self.logger.warning(f"[k8s] VolumeSnapshot delete error {snap_name}: {e}")
+        self.created_volume_snapshots.clear()
+        self.created_snapshots.clear()
+
+        # 7. Delete snapshots via sbcli (for operator-created snapshots not tracked as VolumeSnapshots)
+        for snap_id in list(self.created_snapshots):
+            try:
+                self._sbcli(f"snapshot delete {snap_id} --force")
+            except Exception as e:
+                self.logger.warning(f"[k8s] sbcli snapshot delete error {snap_id}: {e}")
+        self.created_snapshots.clear()
+
+        # 8. Delete PVCs
+        for pvc_name in list(self.created_pvcs):
+            try:
+                k8s.delete_resource("pvc", pvc_name)
+            except Exception as e:
+                self.logger.warning(f"[k8s] PVC delete error {pvc_name}: {e}")
+        self.created_pvcs.clear()
+        self.created_lvols.clear()
+
+    def _docker_teardown(self):
+        """Delete all docker/SSH resources created during the test."""
+        # Unmount
+        for node, mnt in list(self.mounted):
+            try:
+                self.ssh_obj.unmount_path(node, mnt)
+            except Exception as e:
+                self.logger.warning(f"Unmount error {mnt}: {e}")
+        self.mounted.clear()
+
+        # Disconnect NVMe
+        for lvol_id in list(self.connected):
+            try:
+                details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
+                if details:
+                    nqn = details[0]["nqn"]
+                    self.ssh_obj.disconnect_nvme(node=self.fio_node, nqn_grep=nqn)
+            except Exception as e:
+                self.logger.warning(f"Disconnect error {lvol_id}: {e}")
+        self.connected.clear()
+
+        # Delete snapshots (force)
+        for snap_id in list(self.created_snapshots):
+            try:
+                self._sbcli(f"snapshot delete {snap_id} --force")
+            except Exception as e:
+                self.logger.warning(f"Snapshot delete error {snap_id}: {e}")
+        self.created_snapshots.clear()
+
+        # Delete backup policies
+        for pid in list(self.created_policies):
+            try:
+                self._remove_policy(pid)
+            except Exception as e:
+                self.logger.warning(f"Policy remove error {pid}: {e}")
+        self.created_policies.clear()
+
+        # Delete lvols
+        for name in list(self.created_lvols):
+            try:
+                self.sbcli_utils.delete_lvol(lvol_name=name, skip_error=True)
+            except Exception as e:
+                self.logger.warning(f"Lvol delete error {name}: {e}")
+        self.created_lvols.clear()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -764,6 +1427,7 @@ class TestBackupBasicPositive(BackupTestBase):
         self.logger.info("=== TestBackupBasicPositive START ===")
         self.fio_node = self.fio_node[0]
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self._k8s_setup_storage_class()
 
         # --- TC-BCK-001: Create lvol, write data, snapshot + backup flag ---
         lvol_name, lvol_id = self._create_lvol()
@@ -772,8 +1436,7 @@ class TestBackupBasicPositive(BackupTestBase):
 
         # Capture checksums now for TC-BCK-010 integrity check later
         self.logger.info("Capturing original checksums for TC-BCK-010")
-        _ck_files = self.ssh_obj.find_files(self.fio_node, mount)
-        original_checksums = self.ssh_obj.generate_checksums(self.fio_node, _ck_files)
+        original_checksums = self._get_checksums(self.fio_node, mount)
 
         snap1_name = f"snap1_{_rand_suffix()}"
         self.logger.info(f"TC-BCK-001: snapshot add {lvol_id} {snap1_name} --backup")
@@ -926,14 +1589,12 @@ class TestBackupBasicPositive(BackupTestBase):
         self._wait_for_restore(rest10_name)
 
         # Connect restored lvol and verify checksums match original data
-        rest10_id = self.sbcli_utils.get_lvol_id(lvol_name=rest10_name)
+        rest10_id = self._get_lvol_id(rest10_name)
         r10_device, r10_mount = self._connect_and_mount(
             rest10_name, rest10_id,
             mount=f"{self.mount_path}/rest10_{_rand_suffix()}",
             format_disk=False)
-        r10_files = self.ssh_obj.find_files(self.fio_node, r10_mount)
-        self.ssh_obj.verify_checksums(
-            self.fio_node, r10_files, original_checksums, by_name=True)
+        self._verify_checksums(self.fio_node, r10_mount, original_checksums)
         self.logger.info("TC-BCK-010: delete-snapshot-then-restore checksums match ✓")
 
         self.logger.info("=== TestBackupBasicPositive PASSED ===")
@@ -967,6 +1628,7 @@ class TestBackupRestoreDataIntegrity(BackupTestBase):
         self.logger.info("=== TestBackupRestoreDataIntegrity START ===")
         self.fio_node = self.fio_node[0]
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self._k8s_setup_storage_class()
 
         # Setup: create lvol, write known data, record checksums
         lvol_name, lvol_id = self._create_lvol()
@@ -974,8 +1636,7 @@ class TestBackupRestoreDataIntegrity(BackupTestBase):
         self._run_fio(mount, runtime=30)
 
         self.logger.info("TC-BCK-011: generating checksums before backup")
-        files = self.ssh_obj.find_files(self.fio_node, mount)
-        original_checksums = self.ssh_obj.generate_checksums(self.fio_node, files)
+        original_checksums = self._get_checksums(self.fio_node, mount)
         self.logger.info(f"Checksums captured: {len(original_checksums)} files")
 
         # Take snapshot + backup
@@ -1010,7 +1671,7 @@ class TestBackupRestoreDataIntegrity(BackupTestBase):
 
         # --- TC-BCK-013: Restored lvol is connectable ---
         self.logger.info("TC-BCK-013: connect and mount restored lvol")
-        restored_id = self.sbcli_utils.get_lvol_id(lvol_name=restored_name)
+        restored_id = self._get_lvol_id(restored_name)
         r_device, r_mount = self._connect_and_mount(
             restored_name, restored_id,
             mount=f"{self.mount_path}/restored_{_rand_suffix()}",
@@ -1018,10 +1679,7 @@ class TestBackupRestoreDataIntegrity(BackupTestBase):
 
         # --- TC-BCK-014: Checksum validation ---
         self.logger.info("TC-BCK-014: verifying checksums on restored lvol")
-        restored_files = self.ssh_obj.find_files(self.fio_node, r_mount)
-        self.ssh_obj.generate_checksums(self.fio_node, restored_files)
-        self.ssh_obj.verify_checksums(
-            self.fio_node, restored_files, original_checksums, by_name=True)
+        self._verify_checksums(self.fio_node, r_mount, original_checksums)
         self.logger.info("TC-BCK-014: checksums match ✓")
 
         # --- TC-BCK-015: FIO on restored lvol ---
@@ -1031,9 +1689,7 @@ class TestBackupRestoreDataIntegrity(BackupTestBase):
         # --- TC-BCK-016: Disaster recovery — delete original lvol, restore ---
         self.logger.info("TC-BCK-016: disaster recovery path")
         # Source was already unmounted+disconnected before TC-BCK-012
-        self.sbcli_utils.delete_lvol(lvol_name=lvol_name, skip_error=True)
-        if lvol_name in self.created_lvols:
-            self.created_lvols.remove(lvol_name)
+        self._delete_lvol(lvol_name)
 
         # Also delete the source snapshot — restore must work with both lvol and snapshot gone
         self.logger.info(f"TC-BCK-016: deleting source snapshot {snap_id} (backup must remain restorable)")
@@ -1047,13 +1703,11 @@ class TestBackupRestoreDataIntegrity(BackupTestBase):
         self.logger.info(f"TC-BCK-016: restoring to {dr_name} after original lvol+snapshot deletion")
         self._restore_backup(backup_id, dr_name)
         self._wait_for_restore(dr_name)
-        dr_id = self.sbcli_utils.get_lvol_id(lvol_name=dr_name)
+        dr_id = self._get_lvol_id(dr_name)
         dr_device, dr_mount = self._connect_and_mount(
             dr_name, dr_id, mount=f"{self.mount_path}/dr_{_rand_suffix()}",
             format_disk=False)
-        dr_files = self.ssh_obj.find_files(self.fio_node, dr_mount)
-        self.ssh_obj.verify_checksums(
-            self.fio_node, dr_files, original_checksums, by_name=True)
+        self._verify_checksums(self.fio_node, dr_mount, original_checksums)
         self.logger.info("TC-BCK-016: disaster recovery checksums match ✓")
 
         # --- TC-BCK-017: Restore to a second pool; verify checksum ---
@@ -1064,21 +1718,24 @@ class TestBackupRestoreDataIntegrity(BackupTestBase):
             self.sbcli_utils.add_storage_pool(pool_name=self.pool_name2)
             self._restore_backup(backup_id, pool2_name, pool_name=self.pool_name2)
             self._wait_for_restore(pool2_name)
-            pool2_id = self.sbcli_utils.get_lvol_id(lvol_name=pool2_name)
+            pool2_id = self._get_lvol_id(pool2_name)
             self._connect_and_mount(pool2_name, pool2_id, mount=p2_mount, format_disk=False)
-            p2_files = self.ssh_obj.find_files(self.fio_node, p2_mount)
-            self.ssh_obj.verify_checksums(
-                self.fio_node, p2_files, original_checksums, by_name=True)
+            self._verify_checksums(self.fio_node, p2_mount, original_checksums)
             self.logger.info("TC-BCK-017: restore to second pool checksums match ✓")
         finally:
             try:
-                self.ssh_obj.unmount_path(self.fio_node, p2_mount)
-                if (self.fio_node, p2_mount) in self.mounted:
-                    self.mounted.remove((self.fio_node, p2_mount))
+                self._safe_unmount(p2_mount)
             except Exception:
                 pass
             try:
-                self.sbcli_utils.delete_lvol(lvol_name=pool2_name, skip_error=True)
+                if self.k8s_test:
+                    k8s = self._ensure_k8s_utils()
+                    pvc_name = self._k8s_normalize_name(pool2_name)
+                    k8s.delete_pvc(pvc_name)
+                    if pvc_name in self.created_pvcs:
+                        self.created_pvcs.remove(pvc_name)
+                else:
+                    self.sbcli_utils.delete_lvol(lvol_name=pool2_name, skip_error=True)
                 if pool2_name in self.created_lvols:
                     self.created_lvols.remove(pool2_name)
             except Exception:
@@ -1096,24 +1753,30 @@ class TestBackupRestoreDataIntegrity(BackupTestBase):
         self._run_fio(tc18_mount, runtime=30)
 
         self.logger.info("TC-BCK-018: capturing checksums before backup")
-        tc18_files = self.ssh_obj.find_files(self.fio_node, tc18_mount)
-        tc18_checksums = self.ssh_obj.generate_checksums(self.fio_node, tc18_files)
+        tc18_checksums = self._get_checksums(self.fio_node, tc18_mount)
 
         tc18_snap_name = f"tc18_snap_{_rand_suffix()}"
         tc18_snap_id = self._create_snapshot(tc18_lvol_id, tc18_snap_name, backup=True)
         self.logger.info(f"TC-BCK-018: snapshot {tc18_snap_id} + backup triggered — deleting lvol immediately")
 
         # Delete lvol before backup completes (backup reads from snapshot, not live lvol)
-        self.ssh_obj.unmount_path(self.fio_node, tc18_mount)
-        if (self.fio_node, tc18_mount) in self.mounted:
-            self.mounted.remove((self.fio_node, tc18_mount))
-        tc18_details = self.sbcli_utils.get_lvol_details(lvol_id=tc18_lvol_id)
-        if tc18_details:
-            tc18_nqn = tc18_details[0]["nqn"]
-            self.ssh_obj.disconnect_nvme(node=self.fio_node, nqn_grep=tc18_nqn)
-        if tc18_lvol_id in self.connected:
-            self.connected.remove(tc18_lvol_id)
-        self.sbcli_utils.delete_lvol(lvol_name=tc18_lvol_name, skip_error=True)
+        if self.k8s_test:
+            k8s = self._ensure_k8s_utils()
+            pvc_name = self._k8s_normalize_name(tc18_lvol_name)
+            k8s.delete_pvc(pvc_name)
+            if pvc_name in self.created_pvcs:
+                self.created_pvcs.remove(pvc_name)
+        else:
+            self.ssh_obj.unmount_path(self.fio_node, tc18_mount)
+            if (self.fio_node, tc18_mount) in self.mounted:
+                self.mounted.remove((self.fio_node, tc18_mount))
+            tc18_details = self.sbcli_utils.get_lvol_details(lvol_id=tc18_lvol_id)
+            if tc18_details:
+                tc18_nqn = tc18_details[0]["nqn"]
+                self.ssh_obj.disconnect_nvme(node=self.fio_node, nqn_grep=tc18_nqn)
+            if tc18_lvol_id in self.connected:
+                self.connected.remove(tc18_lvol_id)
+            self.sbcli_utils.delete_lvol(lvol_name=tc18_lvol_name, skip_error=True)
         if tc18_lvol_name in self.created_lvols:
             self.created_lvols.remove(tc18_lvol_name)
         self.logger.info("TC-BCK-018: lvol deleted; waiting for backup to complete")
@@ -1126,13 +1789,12 @@ class TestBackupRestoreDataIntegrity(BackupTestBase):
         tc18_restored_name = f"tc18_restored_{_rand_suffix()}"
         self._restore_backup(tc18_bk_id, tc18_restored_name)
         self._wait_for_restore(tc18_restored_name)
-        tc18_restored_id = self.sbcli_utils.get_lvol_id(lvol_name=tc18_restored_name)
+        tc18_restored_id = self._get_lvol_id(tc18_restored_name)
         _, tc18_r_mount = self._connect_and_mount(
             tc18_restored_name, tc18_restored_id,
             mount=f"{self.mount_path}/tc18_{_rand_suffix()}",
             format_disk=False)
-        tc18_r_files = self.ssh_obj.find_files(self.fio_node, tc18_r_mount)
-        self.ssh_obj.verify_checksums(self.fio_node, tc18_r_files, tc18_checksums, by_name=True)
+        self._verify_checksums(self.fio_node, tc18_r_mount, tc18_checksums)
         self.logger.info("TC-BCK-018: checksums match after restore from in-progress backup ✓")
 
         self.logger.info("=== TestBackupRestoreDataIntegrity PASSED ===")
@@ -1176,6 +1838,7 @@ class TestBackupPolicy(BackupTestBase):
         self.logger.info("=== TestBackupPolicy START ===")
         self.fio_node = self.fio_node[0]
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self._k8s_setup_storage_class()
         pool_id = self.sbcli_utils.get_storage_pool_id(pool_name=self.pool_name)
 
         # --- TC-BCK-020: policy-add --versions 3 --age 1d ---
@@ -1295,6 +1958,7 @@ class TestBackupNegative(BackupTestBase):
         self.logger.info("=== TestBackupNegative START ===")
         self.fio_node = self.fio_node[0]
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self._k8s_setup_storage_class()
 
         # --- TC-BCK-030: restore invalid backup_id → error ---
         self.logger.info("TC-BCK-030: restore invalid backup_id")
@@ -1341,28 +2005,30 @@ class TestBackupNegative(BackupTestBase):
             "TC-BCK-034: expected error removing non-existent policy"
         self.logger.info("TC-BCK-034: got expected error ✓")
 
-        # --- TC-BCK-035: backup import with malformed JSON ---
-        self.logger.info("TC-BCK-035: backup import malformed JSON")
-        bad_json = "/tmp/bad_backup.json"
-        self.ssh_obj.exec_command(
-            self.mgmt_nodes[0],
-            f"echo '{{not valid json}}' > {bad_json}")
-        out, err = self._sbcli(f"backup import {bad_json}")
-        assert err or "error" in out.lower(), \
-            "TC-BCK-035: expected error for malformed JSON import"
-        self.logger.info("TC-BCK-035: got expected error ✓")
+        # --- TC-BCK-035/036: backup import tests (CLI-only, no CRD equivalent) ---
+        if not self.k8s_test:
+            self.logger.info("TC-BCK-035: backup import malformed JSON")
+            bad_json = "/tmp/bad_backup.json"
+            self.ssh_obj.exec_command(
+                self.mgmt_nodes[0],
+                f"echo '{{not valid json}}' > {bad_json}")
+            out, err = self._sbcli(f"backup import {bad_json}")
+            assert err or "error" in out.lower(), \
+                "TC-BCK-035: expected error for malformed JSON import"
+            self.logger.info("TC-BCK-035: got expected error ✓")
 
-        # --- TC-BCK-036: backup import valid metadata file ---
-        self.logger.info("TC-BCK-036: backup import valid (empty) metadata file")
-        good_json = "/tmp/good_backup.json"
-        self.ssh_obj.exec_command(
-            self.mgmt_nodes[0],
-            f"echo '[]' > {good_json}")
-        out, err = self._sbcli(f"backup import {good_json}")
-        # Empty list → 0 imported; should not error
-        assert "error" not in out.lower() or "0" in out, \
-            f"TC-BCK-036: unexpected error for empty-list import: {err}"
-        self.logger.info("TC-BCK-036: import handled ✓")
+            self.logger.info("TC-BCK-036: backup import valid (empty) metadata file")
+            good_json = "/tmp/good_backup.json"
+            self.ssh_obj.exec_command(
+                self.mgmt_nodes[0],
+                f"echo '[]' > {good_json}")
+            out, err = self._sbcli(f"backup import {good_json}")
+            # Empty list → 0 imported; should not error
+            assert "error" not in out.lower() or "0" in out, \
+                f"TC-BCK-036: unexpected error for empty-list import: {err}"
+            self.logger.info("TC-BCK-036: import handled ✓")
+        else:
+            self.logger.info("TC-BCK-035/036: skipped (backup import is CLI-only)")
 
         # --- TC-BCK-037: duplicate snapshot backup → idempotent or clear error ---
         self.logger.info("TC-BCK-037: duplicate snapshot backup")
@@ -1427,6 +2093,7 @@ class TestBackupCryptoLvol(BackupTestBase):
         self.logger.info("=== TestBackupCryptoLvol START ===")
         self.fio_node = self.fio_node[0]
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self._k8s_setup_storage_class()
 
         # --- TC-BCK-050: create crypto lvol ---
         self.logger.info("TC-BCK-050: create encrypted lvol")
@@ -1436,8 +2103,7 @@ class TestBackupCryptoLvol(BackupTestBase):
         self._run_fio(mount, runtime=30)
 
         # Capture checksums before backup
-        files = self.ssh_obj.find_files(self.fio_node, mount)
-        orig_checksums = self.ssh_obj.generate_checksums(self.fio_node, files)
+        orig_checksums = self._get_checksums(self.fio_node, mount)
 
         # --- TC-BCK-051: snapshot + backup of crypto lvol ---
         self.logger.info("TC-BCK-051: snapshot + backup of crypto lvol")
@@ -1468,7 +2134,7 @@ class TestBackupCryptoLvol(BackupTestBase):
 
         # --- TC-BCK-053: restored crypto lvol is connectable ---
         self.logger.info("TC-BCK-053: connect restored crypto lvol")
-        rest_id = self.sbcli_utils.get_lvol_id(lvol_name=restored_name)
+        rest_id = self._get_lvol_id(restored_name)
         r_device, r_mount = self._connect_and_mount(
             restored_name, rest_id,
             mount=f"{self.mount_path}/cr_{_rand_suffix()}",
@@ -1476,9 +2142,7 @@ class TestBackupCryptoLvol(BackupTestBase):
 
         # --- TC-BCK-054: checksum validation on restored crypto lvol ---
         self.logger.info("TC-BCK-054: checksum validation on restored crypto lvol")
-        r_files = self.ssh_obj.find_files(self.fio_node, r_mount)
-        self.ssh_obj.verify_checksums(
-            self.fio_node, r_files, orig_checksums, by_name=True)
+        self._verify_checksums(self.fio_node, r_mount, orig_checksums)
         self.logger.info("TC-BCK-054: checksums match ✓")
 
         # --- TC-BCK-055: FIO on restored crypto lvol ---
@@ -1510,6 +2174,7 @@ class TestBackupCustomGeometry(BackupTestBase):
         self.logger.info("=== TestBackupCustomGeometry START ===")
         self.fio_node = self.fio_node[0]
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self._k8s_setup_storage_class()
 
         for ndcs, npcs in self._geometries:
             self.logger.info(f"--- geometry ndcs={ndcs} npcs={npcs} ---")
@@ -1519,8 +2184,7 @@ class TestBackupCustomGeometry(BackupTestBase):
             device, mount = self._connect_and_mount(lvol_name, lvol_id)
             self._run_fio(mount, runtime=20)
 
-            files = self.ssh_obj.find_files(self.fio_node, mount)
-            orig_checksums = self.ssh_obj.generate_checksums(self.fio_node, files)
+            orig_checksums = self._get_checksums(self.fio_node, mount)
 
             snap_name = f"geom_snap_{ndcs}_{npcs}_{_rand_suffix()}"
             self._create_snapshot(lvol_id, snap_name, backup=True)
@@ -1553,14 +2217,12 @@ class TestBackupCustomGeometry(BackupTestBase):
             restored_name = f"geom_rest_{ndcs}_{npcs}_{_rand_suffix()}"
             self._restore_backup(bk_id, restored_name)
             self._wait_for_restore(restored_name)
-            rest_id = self.sbcli_utils.get_lvol_id(lvol_name=restored_name)
+            rest_id = self._get_lvol_id(restored_name)
             r_device, r_mount = self._connect_and_mount(
                 restored_name, rest_id,
                 mount=f"{self.mount_path}/geom_{ndcs}_{npcs}_{_rand_suffix()}",
                 format_disk=False)
-            r_files = self.ssh_obj.find_files(self.fio_node, r_mount)
-            self.ssh_obj.verify_checksums(
-                self.fio_node, r_files, orig_checksums, by_name=True)
+            self._verify_checksums(self.fio_node, r_mount, orig_checksums)
             self.logger.info(f"TC-BCK-060: ndcs={ndcs} npcs={npcs} ✓")
 
         self.logger.info("=== TestBackupCustomGeometry PASSED ===")
@@ -1592,6 +2254,7 @@ class TestBackupDeleteAndRestore(BackupTestBase):
         self.logger.info("=== TestBackupDeleteAndRestore START ===")
         self.fio_node = self.fio_node[0]
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self._k8s_setup_storage_class()
 
         # ── TC-BCK-077: Setup — lvol + 3 chain backups ────────────────────
         self.logger.info("TC-BCK-077: create lvol, write data, build 3-backup chain")
@@ -1599,8 +2262,7 @@ class TestBackupDeleteAndRestore(BackupTestBase):
         _, mount = self._connect_and_mount(lvol_name, lvol_id)
         self._run_fio(mount, runtime=30)
 
-        files = self.ssh_obj.find_files(self.fio_node, mount)
-        original_checksums = self.ssh_obj.generate_checksums(self.fio_node, files)
+        original_checksums = self._get_checksums(self.fio_node, mount)
 
         collected_bk_ids = []
         for i in range(3):
@@ -1652,13 +2314,12 @@ class TestBackupDeleteAndRestore(BackupTestBase):
         fresh_restored = f"del_fresh_rst_{_rand_suffix()}"
         self._restore_backup(fresh_bk_id, fresh_restored)
         self._wait_for_restore(fresh_restored)
-        fresh_rst_id = self.sbcli_utils.get_lvol_id(lvol_name=fresh_restored)
+        fresh_rst_id = self._get_lvol_id(fresh_restored)
         _, fr_mount = self._connect_and_mount(
             fresh_restored, fresh_rst_id,
             mount=f"{self.mount_path}/del_fr_{_rand_suffix()}",
             format_disk=False)
-        fr_files = self.ssh_obj.find_files(self.fio_node, fr_mount)
-        self.ssh_obj.verify_checksums(self.fio_node, fr_files, original_checksums, by_name=True)
+        self._verify_checksums(self.fio_node, fr_mount, original_checksums)
         self.logger.info("TC-BCK-080: fresh post-delete backup → restore → checksums match ✓")
 
         # Clean up TC-BCK-080 restored lvol before TC-BCK-081 connects more
@@ -1699,13 +2360,12 @@ class TestBackupDeleteAndRestore(BackupTestBase):
             rst_name = f"ret_rst_{_rand_suffix()}"
             self._restore_backup(bk_id, rst_name)
             self._wait_for_restore(rst_name)
-            rst_id = self.sbcli_utils.get_lvol_id(lvol_name=rst_name)
+            rst_id = self._get_lvol_id(rst_name)
             _, rst_mount = self._connect_and_mount(
                 rst_name, rst_id,
                 mount=f"{self.mount_path}/ret_{_rand_suffix()}",
                 format_disk=False)
-            rst_files = self.ssh_obj.find_files(self.fio_node, rst_mount)
-            self.ssh_obj.verify_checksums(self.fio_node, rst_files, original_checksums, by_name=True)
+            self._verify_checksums(self.fio_node, rst_mount, original_checksums)
             self.logger.info(f"TC-BCK-081: retained backup {bk_id} → restore → checksums match ✓")
             # Clean up before connecting next restored lvol
             self._unmount_and_disconnect(self.fio_node, rst_mount, rst_id)
@@ -1818,6 +2478,11 @@ class TestBackupCrossClusterRestore(BackupTestBase):
 
     def run(self):
         self.logger.info("=== TestBackupCrossClusterRestore START ===")
+        if self.k8s_test:
+            self.logger.info(
+                "TestBackupCrossClusterRestore requires CLI-only operations "
+                "(export/import/source-switch) — skipping in K8s mode.")
+            return
 
         # TC-BCK-070: check prerequisites
         self._check_prerequisites()
@@ -1826,6 +2491,7 @@ class TestBackupCrossClusterRestore(BackupTestBase):
 
         self.fio_node = self.fio_node[0]
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self._k8s_setup_storage_class()
 
         # ── Cluster-1: write data → snapshot + backup → wait ──────────────────
 
@@ -1836,8 +2502,7 @@ class TestBackupCrossClusterRestore(BackupTestBase):
         device, mount = self._connect_and_mount(lvol_name, lvol_id)
         self._run_fio(mount, runtime=30)
 
-        files = self.ssh_obj.find_files(self.fio_node, mount)
-        orig_checksums = self.ssh_obj.generate_checksums(self.fio_node, files)
+        orig_checksums = self._get_checksums(self.fio_node, mount)
         self.logger.info(
             f"TC-BCK-071: {len(orig_checksums)} checksum(s) captured on Cluster-1")
 
@@ -1939,9 +2604,7 @@ class TestBackupCrossClusterRestore(BackupTestBase):
             self.ssh_obj.mount_path(node=self.fio_node, device=r_device, mount_path=r_mount)
             self.mounted.append((self.fio_node, r_mount))
 
-            r_files = self.ssh_obj.find_files(self.fio_node, r_mount)
-            self.ssh_obj.verify_checksums(
-                self.fio_node, r_files, orig_checksums, by_name=True)
+            self._verify_checksums(self.fio_node, r_mount, orig_checksums)
             self.logger.info("TC-BCK-076: cross-cluster restore checksums match ✓")
 
         finally:
@@ -1975,12 +2638,13 @@ class TestBackupCrossClusterRestore(BackupTestBase):
                     self.logger.warning(f"Cluster-2 lvol delete error {name}: {e}")
             self._c2_lvols.clear()
 
-            # Clean up metadata file from mgmt node
-            try:
-                self.ssh_obj.exec_command(
-                    self.mgmt_nodes[0], f"rm -f {self._meta_file}")
-            except Exception:
-                pass
+            # Clean up metadata file from mgmt node (CLI-only, skip in k8s)
+            if not self.k8s_test:
+                try:
+                    self.ssh_obj.exec_command(
+                        self.mgmt_nodes[0], f"rm -f {self._meta_file}")
+                except Exception:
+                    pass
 
         super().teardown(delete_lvols=delete_lvols, close_ssh=close_ssh)
 
@@ -2008,6 +2672,7 @@ class TestBackupConcurrentIO(BackupTestBase):
         self.logger.info("=== TestBackupConcurrentIO START ===")
         self.fio_node = self.fio_node[0]
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self._k8s_setup_storage_class()
 
         # TC-BCK-100: create lvol + mount
         self.logger.info("TC-BCK-100: create lvol and mount")
@@ -2040,13 +2705,13 @@ class TestBackupConcurrentIO(BackupTestBase):
         restored_name = f"concurrent_rest_{_rand_suffix()}"
         self._restore_backup(bk_id, restored_name)
         self._wait_for_restore(restored_name)
-        rest_id = self.sbcli_utils.get_lvol_id(lvol_name=restored_name)
+        rest_id = self._get_lvol_id(restored_name)
         _, r_mount = self._connect_and_mount(
             restored_name, rest_id,
             mount=f"{self.mount_path}/conc_r_{_rand_suffix()}",
             format_disk=False)
-        r_files = self.ssh_obj.find_files(self.fio_node, r_mount)
-        assert r_files is not None, "TC-BCK-103: restored lvol should be readable"
+        r_checksums = self._get_checksums(self.fio_node, r_mount)
+        assert r_checksums is not None, "TC-BCK-103: restored lvol should be readable"
         self.logger.info("TC-BCK-103: restored lvol from concurrent-IO backup is readable ✓")
 
         self.logger.info("=== TestBackupConcurrentIO PASSED ===")
@@ -2075,14 +2740,14 @@ class TestBackupMultipleRestores(BackupTestBase):
         self.logger.info("=== TestBackupMultipleRestores START ===")
         self.fio_node = self.fio_node[0]
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self._k8s_setup_storage_class()
 
         # TC-BCK-104: create lvol + write data + backup
         self.logger.info("TC-BCK-104: create lvol + write data + backup")
         lvol_name, lvol_id = self._create_lvol()
         device, mount = self._connect_and_mount(lvol_name, lvol_id)
         self._run_fio(mount, runtime=30)
-        files = self.ssh_obj.find_files(self.fio_node, mount)
-        orig_checksums = self.ssh_obj.generate_checksums(self.fio_node, files)
+        orig_checksums = self._get_checksums(self.fio_node, mount)
         snap_name = f"multi_rst_snap_{_rand_suffix()}"
         self._create_snapshot(lvol_id, snap_name, backup=True)
         bk_id = self._wait_for_backup_by_snap(snap_name, "TC-BCK-104")
@@ -2107,13 +2772,12 @@ class TestBackupMultipleRestores(BackupTestBase):
         # TC-BCK-107: checksums match on all 3
         self.logger.info("TC-BCK-107: verify checksums on all 3 restored copies")
         for i, rname in enumerate(restored_names):
-            rid = self.sbcli_utils.get_lvol_id(lvol_name=rname)
+            rid = self._get_lvol_id(rname)
             _, r_mount = self._connect_and_mount(
                 rname, rid,
                 mount=f"{self.mount_path}/mr_{i}_{_rand_suffix()}",
                 format_disk=False)
-            r_files = self.ssh_obj.find_files(self.fio_node, r_mount)
-            self.ssh_obj.verify_checksums(self.fio_node, r_files, orig_checksums, by_name=True)
+            self._verify_checksums(self.fio_node, r_mount, orig_checksums)
             self.logger.info(f"TC-BCK-107[{i}]: {rname} checksums match ✓")
 
         self.logger.info("=== TestBackupMultipleRestores PASSED ===")
@@ -2144,14 +2808,14 @@ class TestBackupDeltaChainPointInTime(BackupTestBase):
         self.logger.info("=== TestBackupDeltaChainPointInTime START ===")
         self.fio_node = self.fio_node[0]
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self._k8s_setup_storage_class()
 
         lvol_name, lvol_id = self._create_lvol()
         device, mount = self._connect_and_mount(lvol_name, lvol_id)
 
         # TC-BCK-108: write v1 marker + backup
         self.logger.info("TC-BCK-108: write v1 marker + backup")
-        self.ssh_obj.exec_command(
-            self.fio_node, f"echo 'version1' > {mount}/v1.txt && sync")
+        self._exec_on_volume(mount, f"echo 'version1' > {mount}/v1.txt && sync")
         snap1 = f"pit_snap1_{_rand_suffix()}"
         self._create_snapshot(lvol_id, snap1, backup=True)
         bk1 = self._wait_for_backup_by_snap(snap1, "TC-BCK-108")
@@ -2159,8 +2823,7 @@ class TestBackupDeltaChainPointInTime(BackupTestBase):
 
         # TC-BCK-109: add v2 marker (keep v1) + backup
         self.logger.info("TC-BCK-109: add v2 marker + backup")
-        self.ssh_obj.exec_command(
-            self.fio_node, f"echo 'version2' > {mount}/v2.txt && sync")
+        self._exec_on_volume(mount, f"echo 'version2' > {mount}/v2.txt && sync")
         snap2 = f"pit_snap2_{_rand_suffix()}"
         self._create_snapshot(lvol_id, snap2, backup=True)
         bk2 = self._wait_for_backup_by_snap(snap2, "TC-BCK-109")
@@ -2168,8 +2831,8 @@ class TestBackupDeltaChainPointInTime(BackupTestBase):
 
         # TC-BCK-110: add v3 marker + delete v1 + backup
         self.logger.info("TC-BCK-110: add v3 + delete v1 + backup")
-        self.ssh_obj.exec_command(
-            self.fio_node,
+        self._exec_on_volume(
+            mount,
             f"echo 'version3' > {mount}/v3.txt && rm -f {mount}/v1.txt && sync")
         snap3 = f"pit_snap3_{_rand_suffix()}"
         self._create_snapshot(lvol_id, snap3, backup=True)
@@ -2184,12 +2847,12 @@ class TestBackupDeltaChainPointInTime(BackupTestBase):
         r1 = f"pit_r1_{_rand_suffix()}"
         self._restore_backup(bk1, r1)
         self._wait_for_restore(r1)
-        r1_id = self.sbcli_utils.get_lvol_id(lvol_name=r1)
+        r1_id = self._get_lvol_id(r1)
         _, r1_mount = self._connect_and_mount(
             r1, r1_id,
             mount=f"{self.mount_path}/pit1_{_rand_suffix()}",
             format_disk=False)
-        out1, _ = self.ssh_obj.exec_command(self.fio_node, f"ls {r1_mount}/")
+        out1, _ = self._exec_on_volume(r1_mount, f"ls {r1_mount}/")
         assert "v1.txt" in out1, \
             f"TC-BCK-111: v1.txt missing in bk1 restore: {out1}"
         assert "v2.txt" not in out1, \
@@ -2203,12 +2866,12 @@ class TestBackupDeltaChainPointInTime(BackupTestBase):
         r2 = f"pit_r2_{_rand_suffix()}"
         self._restore_backup(bk2, r2)
         self._wait_for_restore(r2)
-        r2_id = self.sbcli_utils.get_lvol_id(lvol_name=r2)
+        r2_id = self._get_lvol_id(r2)
         _, r2_mount = self._connect_and_mount(
             r2, r2_id,
             mount=f"{self.mount_path}/pit2_{_rand_suffix()}",
             format_disk=False)
-        out2, _ = self.ssh_obj.exec_command(self.fio_node, f"ls {r2_mount}/")
+        out2, _ = self._exec_on_volume(r2_mount, f"ls {r2_mount}/")
         assert "v1.txt" in out2, \
             f"TC-BCK-112: v1.txt missing in bk2 restore: {out2}"
         assert "v2.txt" in out2, \
@@ -2222,12 +2885,12 @@ class TestBackupDeltaChainPointInTime(BackupTestBase):
         r3 = f"pit_r3_{_rand_suffix()}"
         self._restore_backup(bk3, r3)
         self._wait_for_restore(r3)
-        r3_id = self.sbcli_utils.get_lvol_id(lvol_name=r3)
+        r3_id = self._get_lvol_id(r3)
         _, r3_mount = self._connect_and_mount(
             r3, r3_id,
             mount=f"{self.mount_path}/pit3_{_rand_suffix()}",
             format_disk=False)
-        out3, _ = self.ssh_obj.exec_command(self.fio_node, f"ls {r3_mount}/")
+        out3, _ = self._exec_on_volume(r3_mount, f"ls {r3_mount}/")
         assert "v1.txt" not in out3, \
             f"TC-BCK-113: v1.txt should not exist in bk3 restore (was deleted): {out3}"
         assert "v2.txt" in out3, \
@@ -2262,6 +2925,7 @@ class TestBackupEmptyLvol(BackupTestBase):
         self.logger.info("=== TestBackupEmptyLvol START ===")
         self.fio_node = self.fio_node[0]
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self._k8s_setup_storage_class()
 
         # TC-BCK-114: create + format (no user data) + backup
         self.logger.info("TC-BCK-114: create lvol, format ext4 (no data write), backup")
@@ -2284,12 +2948,12 @@ class TestBackupEmptyLvol(BackupTestBase):
 
         # TC-BCK-116: connect + mount without reformat → filesystem is readable
         self.logger.info("TC-BCK-116: mount restored empty lvol without reformat")
-        rest_id = self.sbcli_utils.get_lvol_id(lvol_name=restored_name)
+        rest_id = self._get_lvol_id(restored_name)
         _, r_mount = self._connect_and_mount(
             restored_name, rest_id,
             mount=f"{self.mount_path}/emp_{_rand_suffix()}",
             format_disk=False)
-        out, _ = self.ssh_obj.exec_command(self.fio_node, f"ls {r_mount}/")
+        out, _ = self._exec_on_volume(r_mount, f"ls {r_mount}/")
         self.logger.info(
             f"TC-BCK-116: restored empty lvol mounted successfully, "
             f"dir listing: {out.strip()} ✓")
@@ -2321,14 +2985,14 @@ class TestBackupPoolRecreateRestore(BackupTestBase):
         self.logger.info("=== TestBackupPoolRecreateRestore START ===")
         self.fio_node = self.fio_node[0]
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self._k8s_setup_storage_class()
 
         # TC-BCK-117: create lvol + write data + backup
         self.logger.info("TC-BCK-117: create lvol + write data + backup")
         lvol_name, lvol_id = self._create_lvol()
         device, mount = self._connect_and_mount(lvol_name, lvol_id)
         self._run_fio(mount, runtime=30)
-        files = self.ssh_obj.find_files(self.fio_node, mount)
-        orig_checksums = self.ssh_obj.generate_checksums(self.fio_node, files)
+        orig_checksums = self._get_checksums(self.fio_node, mount)
         snap_name = f"pool_snap_{_rand_suffix()}"
         snap_id = self._create_snapshot(lvol_id, snap_name, backup=True)
         bk_id = self._wait_for_backup_by_snap(snap_name, "TC-BCK-117")
@@ -2336,22 +3000,46 @@ class TestBackupPoolRecreateRestore(BackupTestBase):
 
         # TC-BCK-118: unmount + disconnect + delete snapshot + lvol + pool
         self.logger.info("TC-BCK-118: unmount, disconnect, delete pool resources")
-        self.ssh_obj.unmount_path(self.fio_node, mount)
-        if (self.fio_node, mount) in self.mounted:
-            self.mounted.remove((self.fio_node, mount))
-        details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
-        if details:
-            nqn = details[0]["nqn"]
-            self.ssh_obj.disconnect_nvme(node=self.fio_node, nqn_grep=nqn)
-        if lvol_id in self.connected:
-            self.connected.remove(lvol_id)
-        try:
-            self._sbcli(f"snapshot delete {snap_id} --force")
-        except Exception as e:
-            self.logger.warning(f"Snapshot delete warning: {e}")
-        if snap_id in self.created_snapshots:
-            self.created_snapshots.remove(snap_id)
-        self.sbcli_utils.delete_lvol(lvol_name=lvol_name, skip_error=True)
+        if self.k8s_test:
+            k8s = self._ensure_k8s_utils()
+            pvc_name = self._k8s_normalize_name(lvol_name)
+            # Delete StorageBackup CRD
+            for sb_name in list(self.created_storage_backups):
+                try:
+                    k8s.delete_storage_backup(sb_name)
+                    self.created_storage_backups.remove(sb_name)
+                except Exception as e:
+                    self.logger.warning(f"StorageBackup delete warning: {e}")
+            # Delete VolumeSnapshot
+            if snap_id in self.created_volume_snapshots:
+                try:
+                    k8s.delete_resource("volumesnapshot", snap_id)
+                    self.created_volume_snapshots.remove(snap_id)
+                except Exception:
+                    pass
+            if snap_id in self.created_snapshots:
+                self.created_snapshots.remove(snap_id)
+            # Delete PVC
+            k8s.delete_pvc(pvc_name)
+            if pvc_name in self.created_pvcs:
+                self.created_pvcs.remove(pvc_name)
+        else:
+            self.ssh_obj.unmount_path(self.fio_node, mount)
+            if (self.fio_node, mount) in self.mounted:
+                self.mounted.remove((self.fio_node, mount))
+            details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
+            if details:
+                nqn = details[0]["nqn"]
+                self.ssh_obj.disconnect_nvme(node=self.fio_node, nqn_grep=nqn)
+            if lvol_id in self.connected:
+                self.connected.remove(lvol_id)
+            try:
+                self._sbcli(f"snapshot delete {snap_id} --force")
+            except Exception as e:
+                self.logger.warning(f"Snapshot delete warning: {e}")
+            if snap_id in self.created_snapshots:
+                self.created_snapshots.remove(snap_id)
+            self.sbcli_utils.delete_lvol(lvol_name=lvol_name, skip_error=True)
         if lvol_name in self.created_lvols:
             self.created_lvols.remove(lvol_name)
         self.sbcli_utils.delete_storage_pool(pool_name=self.pool_name)
@@ -2360,6 +3048,7 @@ class TestBackupPoolRecreateRestore(BackupTestBase):
         # TC-BCK-119: recreate pool with same name
         self.logger.info("TC-BCK-119: recreate storage pool")
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self._k8s_setup_storage_class()
         self.logger.info("TC-BCK-119: pool recreated ✓")
 
         # TC-BCK-120: restore backup into new pool
@@ -2371,13 +3060,12 @@ class TestBackupPoolRecreateRestore(BackupTestBase):
 
         # TC-BCK-121: verify checksums
         self.logger.info("TC-BCK-121: verify checksums after pool-recreate restore")
-        rest_id = self.sbcli_utils.get_lvol_id(lvol_name=restored_name)
+        rest_id = self._get_lvol_id(restored_name)
         _, r_mount = self._connect_and_mount(
             restored_name, rest_id,
             mount=f"{self.mount_path}/pool_r_{_rand_suffix()}",
             format_disk=False)
-        r_files = self.ssh_obj.find_files(self.fio_node, r_mount)
-        self.ssh_obj.verify_checksums(self.fio_node, r_files, orig_checksums, by_name=True)
+        self._verify_checksums(self.fio_node, r_mount, orig_checksums)
         self.logger.info("TC-BCK-121: checksums match after pool recreate + restore ✓")
 
         self.logger.info("=== TestBackupPoolRecreateRestore PASSED ===")
@@ -2408,6 +3096,7 @@ class TestBackupPolicyAgeOnly(BackupTestBase):
         self.logger.info("=== TestBackupPolicyAgeOnly START ===")
         self.fio_node = self.fio_node[0]
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self._k8s_setup_storage_class()
 
         # TC-BCK-122: create policy with age-only retention
         self.logger.info("TC-BCK-122: create policy with --age 7d (no --versions)")
@@ -2425,8 +3114,7 @@ class TestBackupPolicyAgeOnly(BackupTestBase):
         lvol_name, lvol_id = self._create_lvol()
         device, mount = self._connect_and_mount(lvol_name, lvol_id)
         self._run_fio(mount, runtime=30)
-        files = self.ssh_obj.find_files(self.fio_node, mount)
-        orig_checksums = self.ssh_obj.generate_checksums(self.fio_node, files)
+        orig_checksums = self._get_checksums(self.fio_node, mount)
         snap_name = f"age_snap_{_rand_suffix()}"
         self._create_snapshot(lvol_id, snap_name, backup=True)
         self.logger.info("TC-BCK-124: snapshot triggered with age-only policy attached ✓")
@@ -2441,13 +3129,12 @@ class TestBackupPolicyAgeOnly(BackupTestBase):
         restored_name = f"age_rest_{_rand_suffix()}"
         self._restore_backup(bk_id, restored_name)
         self._wait_for_restore(restored_name)
-        rest_id = self.sbcli_utils.get_lvol_id(lvol_name=restored_name)
+        rest_id = self._get_lvol_id(restored_name)
         _, r_mount = self._connect_and_mount(
             restored_name, rest_id,
             mount=f"{self.mount_path}/age_{_rand_suffix()}",
             format_disk=False)
-        r_files = self.ssh_obj.find_files(self.fio_node, r_mount)
-        self.ssh_obj.verify_checksums(self.fio_node, r_files, orig_checksums, by_name=True)
+        self._verify_checksums(self.fio_node, r_mount, orig_checksums)
         self.logger.info("TC-BCK-126: age-policy backup restore checksums match ✓")
 
         self.logger.info("=== TestBackupPolicyAgeOnly PASSED ===")
@@ -2477,14 +3164,14 @@ class TestBackupSnapshotClone(BackupTestBase):
         self.logger.info("=== TestBackupSnapshotClone START ===")
         self.fio_node = self.fio_node[0]
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self._k8s_setup_storage_class()
 
         # TC-BCK-127: create source lvol + write data + snapshot
         self.logger.info("TC-BCK-127: create source lvol + snapshot")
         src_name, src_id = self._create_lvol(name=f"clone_src_{_rand_suffix()}")
         device, mount = self._connect_and_mount(src_name, src_id)
         self._run_fio(mount, runtime=30)
-        files = self.ssh_obj.find_files(self.fio_node, mount)
-        orig_checksums = self.ssh_obj.generate_checksums(self.fio_node, files)
+        orig_checksums = self._get_checksums(self.fio_node, mount)
         snap_name = f"clone_snap_{_rand_suffix()}"
         snap_id = self._create_snapshot(src_id, snap_name, backup=False)
         self.logger.info(f"TC-BCK-127: source snapshot {snap_id} created ✓")
@@ -2492,11 +3179,21 @@ class TestBackupSnapshotClone(BackupTestBase):
         # TC-BCK-128: clone from snapshot
         self.logger.info("TC-BCK-128: clone lvol from snapshot")
         clone_name = f"clone_lvol_{_rand_suffix()}"
-        self.ssh_obj.add_clone(self.mgmt_nodes[0], snap_id, clone_name)
-        # Wait for clone to appear in lvol list (reuses restore-wait logic)
-        self._wait_for_restore(clone_name, expect_failure=True)
-        self.created_lvols.append(clone_name)
-        clone_id = self.sbcli_utils.get_lvol_id(lvol_name=clone_name)
+        if self.k8s_test:
+            k8s = self._ensure_k8s_utils()
+            pvc_name = self._k8s_normalize_name(clone_name)
+            pvc_size = self.lvol_size.replace("G", "Gi") if "Gi" not in self.lvol_size else self.lvol_size
+            k8s.create_clone_pvc(pvc_name, pvc_size, self._storage_class_name, snap_id)
+            k8s.wait_pvc_bound(pvc_name)
+            self.created_pvcs.append(pvc_name)
+            self.created_lvols.append(pvc_name)
+            clone_name = pvc_name
+        else:
+            self.ssh_obj.add_clone(self.mgmt_nodes[0], snap_id, clone_name)
+            # Wait for clone to appear in lvol list (reuses restore-wait logic)
+            self._wait_for_restore(clone_name, expect_failure=True)
+            self.created_lvols.append(clone_name)
+        clone_id = self._get_lvol_id(clone_name)
         assert clone_id, f"TC-BCK-128: clone {clone_name} has no lvol ID"
         self.logger.info(f"TC-BCK-128: clone {clone_name} created from snapshot ✓")
 
@@ -2519,13 +3216,12 @@ class TestBackupSnapshotClone(BackupTestBase):
 
         # TC-BCK-131: verify checksums match original source
         self.logger.info("TC-BCK-131: verify checksums on restored clone")
-        rest_id = self.sbcli_utils.get_lvol_id(lvol_name=restored_clone)
+        rest_id = self._get_lvol_id(restored_clone)
         _, r_mount = self._connect_and_mount(
             restored_clone, rest_id,
             mount=f"{self.mount_path}/clr_{_rand_suffix()}",
             format_disk=False)
-        r_files = self.ssh_obj.find_files(self.fio_node, r_mount)
-        self.ssh_obj.verify_checksums(self.fio_node, r_files, orig_checksums, by_name=True)
+        self._verify_checksums(self.fio_node, r_mount, orig_checksums)
         self.logger.info("TC-BCK-131: clone backup restore checksums match original source ✓")
 
         self.logger.info("=== TestBackupSnapshotClone PASSED ===")
@@ -2552,7 +3248,16 @@ class TestBackupFilesystemXFS(BackupTestBase):
         self.test_name = "backup_filesystem_xfs"
 
     def _connect_format_mount_xfs(self, lvol_name: str, lvol_id: str) -> tuple[str, str]:
-        """Connect lvol, format with XFS, and mount. Returns (device, mount_point)."""
+        """Connect lvol, format with XFS, and mount. Returns (device, mount_point).
+
+        In k8s mode: PVC was already created with an XFS StorageClass so
+        no formatting is needed.  Returns ``(pvc_name, pvc_name)`` just
+        like ``_connect_and_mount``.
+        """
+        if self.k8s_test:
+            pvc_name = self._k8s_normalize_name(lvol_name)
+            self.logger.info(f"[k8s] _connect_format_mount_xfs no-op for PVC {pvc_name}")
+            return pvc_name, pvc_name
         mount = f"{self.mount_path}/{lvol_name}"
         initial = self.ssh_obj.get_devices(node=self.fio_node)
         connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)
@@ -2574,14 +3279,28 @@ class TestBackupFilesystemXFS(BackupTestBase):
         self.logger.info("=== TestBackupFilesystemXFS START ===")
         self.fio_node = self.fio_node[0]
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self._k8s_setup_storage_class()
+        if self.k8s_test:
+            # Create a dedicated XFS StorageClass so the PVC is formatted
+            # with XFS by the CSI driver instead of the default ext4.
+            k8s = self._ensure_k8s_utils()
+            xfs_sc = f"{self._storage_class_name}-xfs"
+            k8s.create_storage_class(
+                name=xfs_sc,
+                cluster_id=self.cluster_id,
+                pool_name=self.pool_name,
+                ndcs=getattr(self, "ndcs", 1),
+                npcs=getattr(self, "npcs", 0),
+                fs_type="xfs",
+            )
+            self._storage_class_name = xfs_sc
 
         # TC-BCK-132: create lvol + format XFS + write data + snapshot
         self.logger.info("TC-BCK-132: create lvol + format XFS + write data + snapshot")
         lvol_name, lvol_id = self._create_lvol()
         device, mount = self._connect_format_mount_xfs(lvol_name, lvol_id)
         self._run_fio(mount, runtime=30)
-        files = self.ssh_obj.find_files(self.fio_node, mount)
-        orig_checksums = self.ssh_obj.generate_checksums(self.fio_node, files)
+        orig_checksums = self._get_checksums(self.fio_node, mount)
         snap_name = f"xfs_snap_{_rand_suffix()}"
         self._create_snapshot(lvol_id, snap_name, backup=True)
         self.logger.info("TC-BCK-132: XFS lvol snapshotted + backup triggered ✓")
@@ -2598,7 +3317,7 @@ class TestBackupFilesystemXFS(BackupTestBase):
         restored_name = f"xfs_rest_{_rand_suffix()}"
         self._restore_backup(bk_id, restored_name)
         self._wait_for_restore(restored_name)
-        rest_id = self.sbcli_utils.get_lvol_id(lvol_name=restored_name)
+        rest_id = self._get_lvol_id(restored_name)
         _, r_mount = self._connect_and_mount(
             restored_name, rest_id,
             mount=f"{self.mount_path}/xfs_r_{_rand_suffix()}",
@@ -2606,8 +3325,7 @@ class TestBackupFilesystemXFS(BackupTestBase):
         self.logger.info("TC-BCK-134: XFS restored lvol mounted without reformat ✓")
 
         # TC-BCK-135: verify checksums
-        r_files = self.ssh_obj.find_files(self.fio_node, r_mount)
-        self.ssh_obj.verify_checksums(self.fio_node, r_files, orig_checksums, by_name=True)
+        self._verify_checksums(self.fio_node, r_mount, orig_checksums)
         self.logger.info("TC-BCK-135: XFS restore checksums match ✓")
 
         self.logger.info("=== TestBackupFilesystemXFS PASSED ===")
@@ -2636,14 +3354,14 @@ class TestBackupLargeLvol(BackupTestBase):
         self.logger.info("=== TestBackupLargeLvol START ===")
         self.fio_node = self.fio_node[0]
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self._k8s_setup_storage_class()
 
         # TC-BCK-136: create 20G lvol + write 3G data + backup
         self.logger.info("TC-BCK-136: create 20G lvol + write 3G data + backup")
         lvol_name, lvol_id = self._create_lvol(size="20G")
         device, mount = self._connect_and_mount(lvol_name, lvol_id)
         self._run_fio(mount, size="3G", runtime=120)
-        files = self.ssh_obj.find_files(self.fio_node, mount)
-        orig_checksums = self.ssh_obj.generate_checksums(self.fio_node, files)
+        orig_checksums = self._get_checksums(self.fio_node, mount)
         snap_name = f"large_snap_{_rand_suffix()}"
         self._create_snapshot(lvol_id, snap_name, backup=True)
         sleep_n_sec(5)
@@ -2668,13 +3386,12 @@ class TestBackupLargeLvol(BackupTestBase):
 
         # TC-BCK-138: connect + verify checksums
         self.logger.info("TC-BCK-138: connect restored large lvol + verify checksums")
-        rest_id = self.sbcli_utils.get_lvol_id(lvol_name=restored_name)
+        rest_id = self._get_lvol_id(restored_name)
         _, r_mount = self._connect_and_mount(
             restored_name, rest_id,
             mount=f"{self.mount_path}/large_r_{_rand_suffix()}",
             format_disk=False)
-        r_files = self.ssh_obj.find_files(self.fio_node, r_mount)
-        self.ssh_obj.verify_checksums(self.fio_node, r_files, orig_checksums, by_name=True)
+        self._verify_checksums(self.fio_node, r_mount, orig_checksums)
         self.logger.info("TC-BCK-138: large lvol restore checksums match ✓")
 
         self.logger.info("=== TestBackupLargeLvol PASSED ===")
@@ -2704,6 +3421,7 @@ class TestBackupDeleteInProgress(BackupTestBase):
         self.logger.info("=== TestBackupDeleteInProgress START ===")
         self.fio_node = self.fio_node[0]
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self._k8s_setup_storage_class()
 
         # TC-BCK-139: create lvol + write data + trigger backup (NO wait)
         self.logger.info("TC-BCK-139: create lvol + trigger backup without waiting")
@@ -2766,6 +3484,7 @@ class TestBackupPolicyMultipleLvols(BackupTestBase):
         self.logger.info("=== TestBackupPolicyMultipleLvols START ===")
         self.fio_node = self.fio_node[0]
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self._k8s_setup_storage_class()
 
         # TC-BCK-143: create 3 lvols + write data + record checksums
         self.logger.info("TC-BCK-143: create 3 lvols with data")
@@ -2775,8 +3494,7 @@ class TestBackupPolicyMultipleLvols(BackupTestBase):
             name, lid = self._create_lvol(name=f"mpol_lv{i}_{_rand_suffix()}")
             dev, mnt = self._connect_and_mount(name, lid)
             self._run_fio(mnt, runtime=20)
-            fls = self.ssh_obj.find_files(self.fio_node, mnt)
-            checksums[name] = self.ssh_obj.generate_checksums(self.fio_node, fls)
+            checksums[name] = self._get_checksums(self.fio_node, mnt)
             lvols.append((name, lid))
         self.logger.info("TC-BCK-143: 3 lvols created with data ✓")
 
@@ -2821,14 +3539,12 @@ class TestBackupPolicyMultipleLvols(BackupTestBase):
         self.logger.info("TC-BCK-148: detach policy + verify checksums on 3 restored lvols")
         self._detach_policy(policy_id, "pool", pool_id)
         for name, rname in restored.items():
-            rid = self.sbcli_utils.get_lvol_id(lvol_name=rname)
+            rid = self._get_lvol_id(rname)
             _, r_mnt = self._connect_and_mount(
                 rname, rid,
                 mount=f"{self.mount_path}/mpol_{rname[-6:]}_{_rand_suffix()}",
                 format_disk=False)
-            r_files = self.ssh_obj.find_files(self.fio_node, r_mnt)
-            self.ssh_obj.verify_checksums(
-                self.fio_node, r_files, checksums[name], by_name=True)
+            self._verify_checksums(self.fio_node, r_mnt, checksums[name])
             self.logger.info(f"TC-BCK-148: {rname} checksums match original {name} ✓")
 
         self.logger.info("=== TestBackupPolicyMultipleLvols PASSED ===")
@@ -2875,6 +3591,7 @@ class TestBackupSecurityLvol(BackupTestBase):
         self.logger.info("=== TestBackupSecurityLvol START ===")
         self.fio_node = self.fio_node[0]
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self._k8s_setup_storage_class()
 
         # TC-BCK-150: create DHCHAP+crypto lvol and write data
         self.logger.info("TC-BCK-150: Creating DHCHAP+crypto lvol …")
@@ -2884,8 +3601,7 @@ class TestBackupSecurityLvol(BackupTestBase):
         self._run_fio(lvol_name, mount, log_file, rw="write", runtime=20)
 
         checksums = self._get_checksums(self.fio_node, mount)
-        self.ssh_obj.unmount_path(self.fio_node, mount)
-        self.mounted = [(n, m) for n, m in self.mounted if m != mount]
+        self._safe_unmount(mount)
         sleep_n_sec(2)
         self._disconnect_lvol(lvol_id=lvol_id)
         self.connected = [x for x in self.connected if x != lvol_id]
@@ -2918,8 +3634,7 @@ class TestBackupSecurityLvol(BackupTestBase):
         _, r_mount = self._connect_and_mount(restored_name, restored_id,
                                               mount=f"{self.mount_path}/r{restored_name[-8:]}",
                                               format_disk=False)
-        r_files = self.ssh_obj.find_files(self.fio_node, r_mount)
-        self.ssh_obj.verify_checksums(self.fio_node, r_files, checksums, by_name=True)
+        self._verify_checksums(self.fio_node, r_mount, checksums)
         self.logger.info("TC-BCK-154: Data integrity PASSED")
 
         self.logger.info("=== TestBackupSecurityLvol PASSED ===")
@@ -2948,6 +3663,7 @@ class TestBackupPolicyVersionsOne(BackupTestBase):
         self.logger.info("=== TestBackupPolicyVersionsOne START ===")
         self.fio_node = self.fio_node[0]
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self._k8s_setup_storage_class()
 
         # TC-BCK-155: create lvol + policy with versions=1
         self.logger.info("TC-BCK-155: Creating lvol and versions=1 policy …")
@@ -2958,8 +3674,7 @@ class TestBackupPolicyVersionsOne(BackupTestBase):
         device, mount = self._connect_and_mount(lvol_name, lvol_id)
         log_file = f"{self.log_path}/{lvol_name}_w.log"
         self._run_fio(lvol_name, mount, log_file, rw="write", runtime=15)
-        self.ssh_obj.unmount_path(self.fio_node, mount)
-        self.mounted = [(n, m) for n, m in self.mounted if m != mount]
+        self._safe_unmount(mount)
         sleep_n_sec(2)
         self._disconnect_lvol(lvol_id=lvol_id)
         self.connected = [x for x in self.connected if x != lvol_id]
@@ -3031,6 +3746,7 @@ class TestBackupPolicyMultipleOnSameLvol(BackupTestBase):
         self.logger.info("=== TestBackupPolicyMultipleOnSameLvol START ===")
         self.fio_node = self.fio_node[0]
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self._k8s_setup_storage_class()
 
         # TC-BCK-159: create lvol + two policies
         self.logger.info("TC-BCK-159: Creating lvol + 2 policies …")
@@ -3044,8 +3760,7 @@ class TestBackupPolicyMultipleOnSameLvol(BackupTestBase):
         device, mount = self._connect_and_mount(lvol_name, lvol_id)
         log_file = f"{self.log_path}/{lvol_name}_w.log"
         self._run_fio(lvol_name, mount, log_file, rw="write", runtime=15)
-        self.ssh_obj.unmount_path(self.fio_node, mount)
-        self.mounted = [(n, m) for n, m in self.mounted if m != mount]
+        self._safe_unmount(mount)
         sleep_n_sec(2)
         self._disconnect_lvol(lvol_id=lvol_id)
         self.connected = [x for x in self.connected if x != lvol_id]
@@ -3113,6 +3828,7 @@ class TestBackupPolicyLvolLevel(BackupTestBase):
         self.logger.info("=== TestBackupPolicyLvolLevel START ===")
         self.fio_node = self.fio_node[0]
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self._k8s_setup_storage_class()
 
         # TC-BCK-164: two lvols; policy on lvol_A only
         self.logger.info("TC-BCK-164: Creating 2 lvols + attaching policy to lvol_A only …")
@@ -3124,8 +3840,7 @@ class TestBackupPolicyLvolLevel(BackupTestBase):
         device_a, mount_a = self._connect_and_mount(lvol_a, lvol_a_id)
         log_a = f"{self.log_path}/{lvol_a}_w.log"
         self._run_fio(lvol_a, mount_a, log_a, rw="write", runtime=15)
-        self.ssh_obj.unmount_path(self.fio_node, mount_a)
-        self.mounted = [(n, m) for n, m in self.mounted if m != mount_a]
+        self._safe_unmount(mount_a)
         sleep_n_sec(2)
         self._disconnect_lvol(lvol_id=lvol_a_id)
         self.connected = [x for x in self.connected if x != lvol_a_id]
@@ -3183,6 +3898,7 @@ class TestBackupResizedLvol(BackupTestBase):
         self.logger.info("=== TestBackupResizedLvol START ===")
         self.fio_node = self.fio_node[0]
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self._k8s_setup_storage_class()
 
         # TC-BCK-168: 5G lvol, FIO, backup v1
         self.logger.info("TC-BCK-168: Creating 5G lvol and backup v1 …")
@@ -3191,8 +3907,7 @@ class TestBackupResizedLvol(BackupTestBase):
         log_file = f"{self.log_path}/{lvol_name}_w1.log"
         self._run_fio(lvol_name, mount, log_file, rw="write", runtime=20)
         checksums_v1 = self._get_checksums(self.fio_node, mount)
-        self.ssh_obj.unmount_path(self.fio_node, mount)
-        self.mounted = [(n, m) for n, m in self.mounted if m != mount]
+        self._safe_unmount(mount)
         sleep_n_sec(2)
         self._disconnect_lvol(lvol_id=lvol_id)
         self.connected = [x for x in self.connected if x != lvol_id]
@@ -3205,7 +3920,12 @@ class TestBackupResizedLvol(BackupTestBase):
 
         # TC-BCK-169: resize to 10G
         self.logger.info("TC-BCK-169: Resizing lvol to 10G …")
-        self.sbcli_utils.resize_lvol(lvol_id, "10G")
+        if self.k8s_test:
+            k8s = self._ensure_k8s_utils()
+            pvc_name = self._get_pvc_for_lvol(lvol_id)
+            k8s.resize_pvc(pvc_name, "10Gi")
+        else:
+            self.sbcli_utils.resize_lvol(lvol_id, "10G")
         sleep_n_sec(5)
         self.logger.info("TC-BCK-169: Resize PASSED")
 
@@ -3218,8 +3938,7 @@ class TestBackupResizedLvol(BackupTestBase):
         log_file2 = f"{self.log_path}/{lvol_name}_w2.log"
         self._run_fio(lvol_name, mount2, log_file2, rw="write", runtime=20)
         checksums_v2 = self._get_checksums(self.fio_node, mount2)
-        self.ssh_obj.unmount_path(self.fio_node, mount2)
-        self.mounted = [(n, m) for n, m in self.mounted if m != mount2]
+        self._safe_unmount(mount2)
         sleep_n_sec(2)
         self._disconnect_lvol(lvol_id=lvol_id)
         self.connected = [x for x in self.connected if x != lvol_id]
@@ -3241,8 +3960,7 @@ class TestBackupResizedLvol(BackupTestBase):
             rst_v1, rst_v1_id,
             mount=f"{self.mount_path}/rv1{rst_v1[-6:]}",
             format_disk=False)
-        r1_files = self.ssh_obj.find_files(self.fio_node, rst_v1_mnt)
-        self.ssh_obj.verify_checksums(self.fio_node, r1_files, checksums_v1, by_name=True)
+        self._verify_checksums(self.fio_node, rst_v1_mnt, checksums_v1)
         self.logger.info("TC-BCK-171: v1 restore data integrity PASSED")
 
         # TC-BCK-172: restore v2, verify
@@ -3256,8 +3974,7 @@ class TestBackupResizedLvol(BackupTestBase):
             rst_v2, rst_v2_id,
             mount=f"{self.mount_path}/rv2{rst_v2[-6:]}",
             format_disk=False)
-        r2_files = self.ssh_obj.find_files(self.fio_node, rst_v2_mnt)
-        self.ssh_obj.verify_checksums(self.fio_node, r2_files, checksums_v2, by_name=True)
+        self._verify_checksums(self.fio_node, rst_v2_mnt, checksums_v2)
         self.logger.info("TC-BCK-172: v2 restore data integrity PASSED")
 
         self.logger.info("=== TestBackupResizedLvol PASSED ===")
@@ -3286,6 +4003,7 @@ class TestBackupListFields(BackupTestBase):
         self.logger.info("=== TestBackupListFields START ===")
         self.fio_node = self.fio_node[0]
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self._k8s_setup_storage_class()
 
         # TC-BCK-173: create lvol + backup
         self.logger.info("TC-BCK-173: Creating lvol and backup …")
@@ -3293,8 +4011,7 @@ class TestBackupListFields(BackupTestBase):
         device, mount = self._connect_and_mount(lvol_name, lvol_id)
         log_file = f"{self.log_path}/{lvol_name}_w.log"
         self._run_fio(lvol_name, mount, log_file, rw="write", runtime=15)
-        self.ssh_obj.unmount_path(self.fio_node, mount)
-        self.mounted = [(n, m) for n, m in self.mounted if m != mount]
+        self._safe_unmount(mount)
         sleep_n_sec(2)
         self._disconnect_lvol(lvol_id=lvol_id)
         self.connected = [x for x in self.connected if x != lvol_id]
@@ -3359,6 +4076,7 @@ class TestBackupUpgradeCompatibility(BackupTestBase):
         self.logger.info("=== TestBackupUpgradeCompatibility START ===")
         self.fio_node = self.fio_node[0]
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self._k8s_setup_storage_class()
 
         # TC-BCK-177: create backup
         self.logger.info("TC-BCK-177: Creating lvol and backup …")
@@ -3367,8 +4085,7 @@ class TestBackupUpgradeCompatibility(BackupTestBase):
         log_file = f"{self.log_path}/{lvol_name}_w.log"
         self._run_fio(lvol_name, mount, log_file, rw="write", runtime=20)
         checksums = self._get_checksums(self.fio_node, mount)
-        self.ssh_obj.unmount_path(self.fio_node, mount)
-        self.mounted = [(n, m) for n, m in self.mounted if m != mount]
+        self._safe_unmount(mount)
         sleep_n_sec(2)
         self._disconnect_lvol(lvol_id=lvol_id)
         self.connected = [x for x in self.connected if x != lvol_id]
@@ -3411,8 +4128,7 @@ class TestBackupUpgradeCompatibility(BackupTestBase):
             rst_name, rst_id,
             mount=f"{self.mount_path}/rupg{rst_name[-6:]}",
             format_disk=False)
-        r_files = self.ssh_obj.find_files(self.fio_node, rst_mnt)
-        self.ssh_obj.verify_checksums(self.fio_node, r_files, checksums, by_name=True)
+        self._verify_checksums(self.fio_node, rst_mnt, checksums)
         self.logger.info("TC-BCK-180: Data integrity after restart PASSED")
 
         self.logger.info("=== TestBackupUpgradeCompatibility PASSED ===")
@@ -3441,14 +4157,14 @@ class TestBackupRestoreEdgeCases(BackupTestBase):
         self.logger.info("=== TestBackupRestoreEdgeCases START ===")
         self.fio_node = self.fio_node[0]
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self._k8s_setup_storage_class()
 
         # Create one backup to use across all TCs
         lvol_name, lvol_id = self._create_lvol()
         device, mount = self._connect_and_mount(lvol_name, lvol_id)
         log_file = f"{self.log_path}/{lvol_name}_w.log"
         self._run_fio(lvol_name, mount, log_file, rw="write", runtime=15)
-        self.ssh_obj.unmount_path(self.fio_node, mount)
-        self.mounted = [(n, m) for n, m in self.mounted if m != mount]
+        self._safe_unmount(mount)
         sleep_n_sec(2)
         self._disconnect_lvol(lvol_id=lvol_id)
         self.connected = [x for x in self.connected if x != lvol_id]
@@ -3484,9 +4200,8 @@ class TestBackupRestoreEdgeCases(BackupTestBase):
         # TC-BCK-183: restore to same name as deleted source
         self.logger.info("TC-BCK-183: Restore to name of deleted lvol …")
         deleted_lvol_name = lvol_name
-        self.sbcli_utils.delete_lvol(lvol_name=lvol_name)
+        self._delete_lvol(lvol_name, skip_error=False)
         sleep_n_sec(3)
-        self.created_lvols = [n for n in self.created_lvols if n != deleted_lvol_name]
         out, err = self._sbcli(
             f"-d backup restore {bk_id} --lvol {deleted_lvol_name} --pool {self.pool_name}")
         if not (err and "error" in err.lower()):
@@ -3546,6 +4261,7 @@ class TestBackupSourceSwitch(BackupTestBase):
         self.logger.info("=== TestBackupSourceSwitch START ===")
         self.fio_node = self.fio_node[0]
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self._k8s_setup_storage_class()
 
         # TC-BCK-186: create first backup (primary target)
         self.logger.info("TC-BCK-186: Creating lvol and first backup …")
@@ -3554,8 +4270,7 @@ class TestBackupSourceSwitch(BackupTestBase):
         log_file = f"{self.log_path}/{lvol_name}_w1.log"
         self._run_fio(lvol_name, mount, log_file, rw="write", runtime=20)
         checksums_1 = self._get_checksums(self.fio_node, mount)
-        self.ssh_obj.unmount_path(self.fio_node, mount)
-        self.mounted = [(n, m) for n, m in self.mounted if m != mount]
+        self._safe_unmount(mount)
         sleep_n_sec(2)
         self._disconnect_lvol(lvol_id=lvol_id)
         self.connected = [x for x in self.connected if x != lvol_id]
@@ -3588,8 +4303,7 @@ class TestBackupSourceSwitch(BackupTestBase):
         log_file2 = f"{self.log_path}/{lvol_name}_w2.log"
         self._run_fio(lvol_name, mount2, log_file2, rw="write", runtime=15)
         checksums_2 = self._get_checksums(self.fio_node, mount2)
-        self.ssh_obj.unmount_path(self.fio_node, mount2)
-        self.mounted = [(n, m) for n, m in self.mounted if m != mount2]
+        self._safe_unmount(mount2)
         sleep_n_sec(2)
         self._disconnect_lvol(lvol_id=lvol_id)
         self.connected = [x for x in self.connected if x != lvol_id]
@@ -3611,8 +4325,7 @@ class TestBackupSourceSwitch(BackupTestBase):
             rst_1, rst_1_id,
             mount=f"{self.mount_path}/rsw1{rst_1[-6:]}",
             format_disk=False)
-        r1_files = self.ssh_obj.find_files(self.fio_node, rst_1_mnt)
-        self.ssh_obj.verify_checksums(self.fio_node, r1_files, checksums_1, by_name=True)
+        self._verify_checksums(self.fio_node, rst_1_mnt, checksums_1)
         self.logger.info("TC-BCK-189: First backup restore data integrity PASSED")
 
         # TC-BCK-190: restore second backup
@@ -3626,8 +4339,7 @@ class TestBackupSourceSwitch(BackupTestBase):
             rst_2, rst_2_id,
             mount=f"{self.mount_path}/rsw2{rst_2[-6:]}",
             format_disk=False)
-        r2_files = self.ssh_obj.find_files(self.fio_node, rst_2_mnt)
-        self.ssh_obj.verify_checksums(self.fio_node, r2_files, checksums_2, by_name=True)
+        self._verify_checksums(self.fio_node, rst_2_mnt, checksums_2)
         self.logger.info("TC-BCK-190: Second backup restore data integrity PASSED")
 
         self.logger.info("=== TestBackupSourceSwitch PASSED ===")
@@ -3706,8 +4418,12 @@ class _InterruptedTestBase(BackupTestBase):
                 self.logger.info(
                     f"Node {node_id} not yet offline; retrying shutdown...")
         elif outage_type == "container_stop":
-            self.ssh_obj.stop_spdk_process(
-                sn_node_ip, node_rpc_port, self.cluster_id)
+            if self.k8s_test:
+                # K8s mode: delete the SPDK pod (auto-restarts via DaemonSet)
+                self.sbcli_utils.k8s.stop_spdk_pod(sn_node_ip)
+            else:
+                self.ssh_obj.stop_spdk_process(
+                    sn_node_ip, node_rpc_port, self.cluster_id)
 
         sleep_n_sec(30)
 
@@ -3720,9 +4436,13 @@ class _InterruptedTestBase(BackupTestBase):
                     if attempt == max_retries - 1:
                         self.logger.info(
                             "[outage] restarting via CLI (API failed)")
-                        self.ssh_obj.restart_node(
-                            node=self.mgmt_nodes[0],
-                            node_id=node_id, force=True)
+                        if self.k8s_test:
+                            self.sbcli_utils.restart_node(
+                                node_uuid=node_id, force=True)
+                        else:
+                            self.ssh_obj.restart_node(
+                                node=self.mgmt_nodes[0],
+                                node_id=node_id, force=True)
                     else:
                         self.sbcli_utils.restart_node(
                             node_uuid=node_id,
@@ -3793,6 +4513,9 @@ class _InterruptedTestBase(BackupTestBase):
 
     def _force_delete_lvol(self, lvol_name: str):
         """Delete lvol; try sbcli --force if the first attempt fails."""
+        if self.k8s_test:
+            self._delete_lvol(lvol_name, skip_error=True)
+            return
         try:
             self.sbcli_utils.delete_lvol(lvol_name=lvol_name, skip_error=False)
         except Exception as e:
@@ -3824,6 +4547,7 @@ class TestBackupInterruptedBackup(_InterruptedTestBase):
         self.logger.info("=== TestBackupInterruptedBackup START ===")
         self.fio_node = self.fio_node[0]
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self._k8s_setup_storage_class()
 
         # ── Plain lvol scenario ────────────────────────────────────────────
 
@@ -3833,8 +4557,7 @@ class TestBackupInterruptedBackup(_InterruptedTestBase):
             name=f"intr_bck_{_rand_suffix()}", size=self.lvol_size)
         device, mount = self._connect_and_mount(lvol_name, lvol_id)
         self._run_fio(mount, runtime=40)
-        files = self.ssh_obj.find_files(self.fio_node, mount)
-        orig_checksums = self.ssh_obj.generate_checksums(self.fio_node, files)
+        orig_checksums = self._get_checksums(self.fio_node, mount)
         self.logger.info(
             f"TC-BCK-080: {len(orig_checksums)} checksum(s) captured")
 
@@ -3865,32 +4588,30 @@ class TestBackupInterruptedBackup(_InterruptedTestBase):
         self.logger.info("TC-BCK-083: fresh snapshot+backup after recovery")
         snap2_name = f"intr_plain_snap2_{_rand_suffix()}"
         self._create_snapshot(lvol_id, snap2_name, backup=True)
-        sleep_n_sec(20)
-        backups_after = self._list_backups()
-        assert backups_after, "TC-BCK-083: no backups after recovery"
-        fresh_bk_id = (
-            backups_after[-1].get("id") or backups_after[-1].get("ID")
-            or backups_after[-1].get("uuid") or ""
-        )
-        assert fresh_bk_id, "TC-BCK-083: could not get fresh backup_id"
-        self.logger.info(
-            f"TC-BCK-083: fresh backup {fresh_bk_id} available "
-            f"({len(backups_after)} total) ✓")
+        fresh_bk_id = self._last_backup_id
+        if fresh_bk_id:
+            self.logger.info(
+                f"TC-BCK-083: backup_id={fresh_bk_id} from snapshot "
+                "output, waiting for completion")
+            self._wait_for_backup(fresh_bk_id)
+        else:
+            self.logger.info(
+                "TC-BCK-083: backup_id not in snapshot output, "
+                "polling by snapshot name")
+            fresh_bk_id = self._wait_for_backup_by_snapshot(snap2_name)
+        self.logger.info(f"TC-BCK-083: fresh backup {fresh_bk_id} ready ✓")
 
         # TC-BCK-084: Restore fresh backup → verify checksums
         self.logger.info("TC-BCK-084: restore fresh backup and verify checksums")
         restored_name = f"intr_plain_rest_{_rand_suffix()}"
         self._restore_backup(fresh_bk_id, restored_name)
         self._wait_for_restore(restored_name)
-        rest_id = self.sbcli_utils.get_lvol_id(lvol_name=restored_name)
+        rest_id = self._get_lvol_id(restored_name)
         r_device, r_mount = self._connect_and_mount(
             restored_name, rest_id,
             mount=f"{self.mount_path}/intr_rest_{_rand_suffix()}",
             format_disk=False)
-        r_files = self.ssh_obj.find_files(self.fio_node, r_mount)
-        self.ssh_obj.verify_checksums(
-            self.fio_node, r_files, orig_checksums,
-            message="TC-BCK-084: checksum mismatch after interrupted backup restore", by_name=True)
+        self._verify_checksums(self.fio_node, r_mount, orig_checksums)
         self.logger.info("TC-BCK-084: checksums match after interrupted backup ✓")
 
         # TC-BCK-085: FIO on the restored lvol
@@ -3906,8 +4627,7 @@ class TestBackupInterruptedBackup(_InterruptedTestBase):
             name=f"intr_crypto_{_rand_suffix()}", crypto=True)
         c_device, c_mount = self._connect_and_mount(crypto_name, crypto_id)
         self._run_fio(c_mount, runtime=30)
-        c_files = self.ssh_obj.find_files(self.fio_node, c_mount)
-        c_checksums = self.ssh_obj.generate_checksums(self.fio_node, c_files)
+        c_checksums = self._get_checksums(self.fio_node, c_mount)
 
         c_snap = f"intr_c_snap_{_rand_suffix()}"
         c_snap_id = self._create_snapshot(crypto_id, c_snap, backup=False)
@@ -3927,27 +4647,27 @@ class TestBackupInterruptedBackup(_InterruptedTestBase):
         # Fresh backup after recovery
         c_snap2 = f"intr_c_snap2_{_rand_suffix()}"
         self._create_snapshot(crypto_id, c_snap2, backup=True)
-        sleep_n_sec(20)
-        c_backups = self._list_backups()
-        if c_backups:
-            c_fresh_id = (
-                c_backups[-1].get("id") or c_backups[-1].get("ID")
-                or c_backups[-1].get("uuid") or ""
-            )
-            if c_fresh_id:
-                c_rest_name = f"intr_c_rest_{_rand_suffix()}"
-                self._restore_backup(c_fresh_id, c_rest_name)
-                self._wait_for_restore(c_rest_name)
-                c_rest_id = self.sbcli_utils.get_lvol_id(lvol_name=c_rest_name)
-                c_r_device, c_r_mount = self._connect_and_mount(
-                    c_rest_name, c_rest_id,
-                    mount=f"{self.mount_path}/icr_{_rand_suffix()}",
-                    format_disk=False)
-                c_r_files = self.ssh_obj.find_files(self.fio_node, c_r_mount)
-                self.ssh_obj.verify_checksums(
-                    self.fio_node, c_r_files, c_checksums,
-                    message="TC-BCK-086: checksum mismatch on crypto interrupted backup", by_name=True)
-                self.logger.info("TC-BCK-086: crypto interrupted backup restore ✓")
+        c_fresh_id = self._last_backup_id
+        if c_fresh_id:
+            self.logger.info(
+                f"TC-BCK-086: crypto fresh backup_id={c_fresh_id} from "
+                "snapshot output, waiting for completion")
+            self._wait_for_backup(c_fresh_id)
+        else:
+            self.logger.info(
+                "TC-BCK-086: backup_id not in snapshot output, "
+                "polling by snapshot name")
+            c_fresh_id = self._wait_for_backup_by_snapshot(c_snap2)
+        c_rest_name = f"intr_c_rest_{_rand_suffix()}"
+        self._restore_backup(c_fresh_id, c_rest_name)
+        self._wait_for_restore(c_rest_name)
+        c_rest_id = self._get_lvol_id(c_rest_name)
+        c_r_device, c_r_mount = self._connect_and_mount(
+            c_rest_name, c_rest_id,
+            mount=f"{self.mount_path}/icr_{_rand_suffix()}",
+            format_disk=False)
+        self._verify_checksums(self.fio_node, c_r_mount, c_checksums)
+        self.logger.info("TC-BCK-086: crypto interrupted backup restore ✓")
 
         self.logger.info("=== TestBackupInterruptedBackup PASSED ===")
 
@@ -3995,6 +4715,7 @@ class TestBackupInterruptedRestore(_InterruptedTestBase):
         self.logger.info("=== TestBackupInterruptedRestore START ===")
         self.fio_node = self.fio_node[0]
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self._k8s_setup_storage_class()
 
         # ── Setup: complete backup to use as restore source ────────────────
 
@@ -4003,8 +4724,7 @@ class TestBackupInterruptedRestore(_InterruptedTestBase):
             name=f"intr_rst_src_{_rand_suffix()}", size=self.lvol_size)
         device, mount = self._connect_and_mount(lvol_name, lvol_id)
         self._run_fio(mount, runtime=40)
-        files = self.ssh_obj.find_files(self.fio_node, mount)
-        orig_checksums = self.ssh_obj.generate_checksums(self.fio_node, files)
+        orig_checksums = self._get_checksums(self.fio_node, mount)
         self.logger.info(f"Setup: {len(orig_checksums)} checksum(s) captured")
 
         snap_name = f"intr_rst_snap_{_rand_suffix()}"
@@ -4067,15 +4787,12 @@ class TestBackupInterruptedRestore(_InterruptedTestBase):
 
         # TC-BCK-095: Verify checksums on retried restore
         self.logger.info("TC-BCK-095: verify checksums on retried restore")
-        retry_id = self.sbcli_utils.get_lvol_id(lvol_name=retry_name)
+        retry_id = self._get_lvol_id(retry_name)
         r_device, r_mount = self._connect_and_mount(
             retry_name, retry_id,
             mount=f"{self.mount_path}/intr_rr_{_rand_suffix()}",
             format_disk=False)
-        r_files = self.ssh_obj.find_files(self.fio_node, r_mount)
-        self.ssh_obj.verify_checksums(
-            self.fio_node, r_files, orig_checksums,
-            message="TC-BCK-095: checksum mismatch on retried restore", by_name=True)
+        self._verify_checksums(self.fio_node, r_mount, orig_checksums)
         self.logger.info("TC-BCK-095: retry restore checksums match ✓")
 
         # TC-BCK-096: FIO on the retried restore
@@ -4090,8 +4807,7 @@ class TestBackupInterruptedRestore(_InterruptedTestBase):
             name=f"intr_rst_c_{_rand_suffix()}", crypto=True)
         c_device, c_mount = self._connect_and_mount(crypto_name, crypto_id)
         self._run_fio(c_mount, runtime=30)
-        c_files = self.ssh_obj.find_files(self.fio_node, c_mount)
-        c_checksums = self.ssh_obj.generate_checksums(self.fio_node, c_files)
+        c_checksums = self._get_checksums(self.fio_node, c_mount)
 
         c_snap = f"intr_rst_c_snap_{_rand_suffix()}"
         self._create_snapshot(crypto_id, c_snap, backup=True)
@@ -4125,15 +4841,12 @@ class TestBackupInterruptedRestore(_InterruptedTestBase):
             c_rst_retry = f"intr_rst_c2_{_rand_suffix()}"
             self._restore_backup(c_bk_id, c_rst_retry)
             self._wait_for_restore(c_rst_retry)
-            c_rest_id = self.sbcli_utils.get_lvol_id(lvol_name=c_rst_retry)
+            c_rest_id = self._get_lvol_id(c_rst_retry)
             c_r_device, c_r_mount = self._connect_and_mount(
                 c_rst_retry, c_rest_id,
                 mount=f"{self.mount_path}/icr2_{_rand_suffix()}",
                 format_disk=False)
-            c_r_files = self.ssh_obj.find_files(self.fio_node, c_r_mount)
-            self.ssh_obj.verify_checksums(
-                self.fio_node, c_r_files, c_checksums,
-                message="TC-BCK-097: checksum mismatch on interrupted crypto restore retry", by_name=True)
+            self._verify_checksums(self.fio_node, c_r_mount, c_checksums)
             self.logger.info("TC-BCK-097: crypto interrupted restore retry ✓")
 
         self.logger.info("=== TestBackupInterruptedRestore PASSED ===")
