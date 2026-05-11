@@ -1439,7 +1439,6 @@ class K8sNativeFailoverTest(TestClusterBase):
                         sleep_n_sec(10)
                     else:
                         raise
-            self.sbcli_utils.wait_for_storage_node_status(node, "online", timeout=300)
             self.log_outage_event(node, outage_type, "Node restarted")
 
         elif outage_type == "container_stop":
@@ -1463,7 +1462,6 @@ class K8sNativeFailoverTest(TestClusterBase):
                                 sleep_n_sec(10)
                             else:
                                 raise
-                    self.sbcli_utils.wait_for_storage_node_status(node, "online", timeout=300)
                     self.log_outage_event(node, outage_type, "Node restarted")
             else:
                 self.sbcli_utils.wait_for_storage_node_status(node, "online", timeout=300)
