@@ -2477,7 +2477,9 @@ def replicate_lvol_on_target_cluster(lvol_id):
     new_lvol.write_to_db(db_controller.kv_store)
     lvol = db_controller.get_lvol_by_id(lvol_id)
     lvol.from_source = False
+    lvol.do_replicate = False
     lvol.write_to_db()
+    replication_stop(lvol_id)
     lvol_events.lvol_replicated(lvol, new_lvol)
 
     return new_lvol.lvol_uuid
