@@ -28,7 +28,9 @@ from __future__ import annotations
 
 import os
 import random
+import shutil
 import string
+import subprocess
 import threading
 import time
 import traceback
@@ -152,9 +154,13 @@ class K8sNativeFailoverTest(TestClusterBase):
         self.client_machines = []
         self.fio_node = []
 
-        # 3. Set up local log directories
+        # 3. Set up log directories with NFS retry + fallback
+        #    Try the configured NFS path with retries (handles stale mounts
+        #    by remounting).  Fall back to ~/e2e-logs if NFS stays unusable.
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        self.docker_logs_path = os.path.join(self.nfs_log_base, f"{self.test_name}-{timestamp}")
+        log_base = self._prepare_log_base(self.nfs_log_base, retries=3)
+        self.nfs_log_base = log_base
+        self.docker_logs_path = os.path.join(log_base, f"{self.test_name}-{timestamp}")
         self.log_path = os.path.join(self.docker_logs_path, "ClientLogs")
         os.makedirs(self.log_path, exist_ok=True)
         os.makedirs(self.docker_logs_path, exist_ok=True)
@@ -193,8 +199,8 @@ class K8sNativeFailoverTest(TestClusterBase):
         )
         self.logger.info(f"[K8s] K8sUtils initialized for mgmt_node={mgmt_node!r}")
 
-        # 6b. Clean up leftover K8s resources from any previous run
-        self._cleanup_stale_k8s_resources()
+        # 6b. Kill orphaned K8s Jobs/resources from any previous run
+        self._kill_orphaned_k8s_resources()
 
         # 7. Client-based FIO mode: set up SSH connections to external clients
         client_ip_raw = os.environ.get("CLIENT_IP", "").strip()
@@ -255,10 +261,121 @@ class K8sNativeFailoverTest(TestClusterBase):
                 "[K8s] k8s_utils not initialised — was setup() called with k8s_run=True?"
             )
 
+    # ── Helpers ───────────────────────────────────────────────────────────────
+
+    def _prepare_log_base(self, nfs_path: str, retries: int = 3) -> str:
+        """Try to make *nfs_path* writable, retrying with a remount on failure.
+
+        On each retry:
+          1. Create a small temp dir under *nfs_path* to test write access.
+          2. If it fails (PermissionError / OSError), attempt to remount.
+          3. After all retries are exhausted, fall back to ``~/e2e-logs``.
+
+        Returns the usable log base path.
+        """
+        for attempt in range(1, retries + 1):
+            probe = os.path.join(nfs_path, ".probe_write_test")
+            try:
+                os.makedirs(probe, exist_ok=True)
+                shutil.rmtree(probe, ignore_errors=True)
+                self.logger.info(f"[NFS] Log base {nfs_path} is writable (attempt {attempt})")
+                return nfs_path
+            except OSError as exc:
+                self.logger.warning(
+                    f"[NFS] {nfs_path} not writable (attempt {attempt}/{retries}): {exc}"
+                )
+                # Try to remount — stale mounts need umount + mount
+                self._try_remount_nfs(nfs_path)
+                sleep_n_sec(5)
+
+        # All retries failed — fall back to local directory
+        fallback = os.path.join(os.path.expanduser("~"), "e2e-logs")
+        self.logger.warning(
+            f"[NFS] All {retries} attempts failed for {nfs_path} "
+            f"— falling back to {fallback}"
+        )
+        os.makedirs(fallback, exist_ok=True)
+        return fallback
+
+    def _try_remount_nfs(self, mount_point: str):
+        """Best-effort remount of an NFS mount point.
+
+        Handles stale NFS mounts by force-unmounting first, then mounting
+        using the NFS server/path from environment or known defaults.
+        """
+        nfs_server = os.environ.get("NFS_SERVER", "10.10.10.140")
+        nfs_export = os.environ.get("NFS_EXPORT", "/srv/nfs_share")
+
+        try:
+            # Check if already mounted (possibly stale)
+            result = subprocess.run(
+                ["mountpoint", "-q", mount_point],
+                capture_output=True, timeout=10,
+            )
+            if result.returncode == 0:
+                self.logger.info(f"[NFS] {mount_point} is mounted — force unmounting stale mount")
+                subprocess.run(
+                    ["sudo", "umount", "-f", "-l", mount_point],
+                    capture_output=True, timeout=30,
+                )
+                sleep_n_sec(2)
+
+            # Ensure mount point directory exists
+            subprocess.run(
+                ["sudo", "mkdir", "-p", mount_point],
+                capture_output=True, timeout=10,
+            )
+
+            # Mount
+            self.logger.info(f"[NFS] Mounting {nfs_server}:{nfs_export} → {mount_point}")
+            result = subprocess.run(
+                ["sudo", "mount", "-t", "nfs", f"{nfs_server}:{nfs_export}", mount_point],
+                capture_output=True, timeout=30,
+            )
+            if result.returncode == 0:
+                self.logger.info(f"[NFS] Successfully remounted {mount_point}")
+            else:
+                stderr = result.stderr.decode(errors="replace").strip()
+                self.logger.warning(f"[NFS] mount failed (rc={result.returncode}): {stderr}")
+        except Exception as exc:
+            self.logger.warning(f"[NFS] Remount attempt failed: {exc}")
+
+    def _kill_orphaned_k8s_resources(self):
+        """Kill orphaned FIO Jobs and other stale K8s resources from previous
+        test runs that could interfere with the current run."""
+        self.logger.info("[cleanup] Killing orphaned K8s resources from previous runs...")
+        self.k8s_utils.cleanup_stale_fio_resources()
+        sleep_n_sec(5)
+        # Force-delete any pods stuck in Terminating for FIO jobs
+        try:
+            self.k8s_utils._exec_kubectl(
+                f"kubectl delete pods -n {self.k8s_utils.namespace} "
+                f"--field-selector=status.phase=Failed -l app=fio-benchmark "
+                f"--ignore-not-found"
+            )
+        except Exception as exc:
+            self.logger.warning(f"[cleanup] Failed pod cleanup: {exc}")
+        try:
+            self.k8s_utils._exec_kubectl(
+                f"kubectl delete pods -n {self.k8s_utils.namespace} "
+                f"--field-selector=status.phase=Succeeded -l app=fio-benchmark "
+                f"--ignore-not-found"
+            )
+        except Exception as exc:
+            self.logger.warning(f"[cleanup] Succeeded pod cleanup: {exc}")
+        self.logger.info("[cleanup] Orphaned K8s resource cleanup done.")
+
     def teardown(self, delete_lvols=True, close_ssh=True):
         """K8s-native teardown, with optional client cleanup."""
         self.logger.info("Inside K8sNativeFailoverTest.teardown()")
         self.stop_root_monitor()
+
+        # Kill orphaned K8s FIO Jobs so they don't interfere with next run
+        if self.k8s_utils:
+            try:
+                self._kill_orphaned_k8s_resources()
+            except Exception as exc:
+                self.logger.warning(f"[teardown] Orphaned job cleanup failed: {exc}")
 
         # Disconnect NVMe on clients if in client FIO mode
         if self.use_client_fio:
@@ -1354,12 +1471,6 @@ class K8sNativeFailoverTest(TestClusterBase):
                 self.k8s_utils.validate_fio_job(clone_info["job_name"], timeout=fio_timeout)
 
     # ── Cleanup ──────────────────────────────────────────────────────────────
-
-    def _cleanup_stale_k8s_resources(self):
-        """Remove leftover FIO Jobs, ConfigMaps, PVCs, and VolumeSnapshots
-        from any previous test run so we start clean."""
-        self.k8s_utils.cleanup_stale_fio_resources()
-        sleep_n_sec(5)
 
     def _cleanup_all_k8s_resources(self):
         """Best-effort cleanup of all test K8s resources."""
