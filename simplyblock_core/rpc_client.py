@@ -99,19 +99,21 @@ class RPCClient:
         self.host = host
         self.port = port
         settings = Settings()
-        scheme = "https" if settings.tls_enabled else "http"
+        scheme = "https" if settings.tls_connect != "disabled" else "http"
         self.url = '%s://%s:%s/' % (scheme, self.host, self.port)
         self.username = username
         self.password = password
         self.timeout = timeout
         self.session = requests.session()
-        if settings.tls_enabled:
-            self.session.verify = str(settings.certificate_authority)
+        if settings.tls_connect != "disabled":
+            self.session.verify = str(settings.tls_certificate_authority)
         self.session.auth = (self.username, self.password)
         retries = Retry(total=retry, backoff_factor=1, connect=retry, read=retry,
                         allowed_methods=self.DEFAULT_ALLOWED_METHODS)
         self.session.mount("http://", HTTPAdapter(max_retries=retries))
         self.session.mount("https://", HTTPAdapter(max_retries=retries))
+        if settings.tls_connect == "authenticated":
+            self.session.cert = (str(settings.tls_certificate), str(settings.tls_key))
 
     def _request_cached(self, method, params=None, cache_ttl=RPC_CACHE_TTL_SEC):
         """Like _request but returns a cached result if one exists within cache_ttl seconds."""
@@ -815,20 +817,18 @@ class RPCClient:
         }
         return self._request("bdev_passtest_delete", params)
 
-    def bdev_nvme_set_options(self, multipath=False):
-        # Multipath failover requires a non-zero bdev_retry_count per SPDK docs:
-        # https://spdk.io/doc/nvme_multipath.html
-        # Otherwise aborted IOs (e.g. from a NIC going down) are returned as
-        # errors to the caller instead of being retried on the alternate path.
-        # In multipath mode transport_retry_count is tightened too: the
-        # alternate path already provides redundancy, so failing fast onto
-        # the other path beats burning the per-path retry budget first.
-        bdev_retry = constants.BDEV_RETRY_MULTIPATH if multipath else constants.BDEV_RETRY
-        transport_retry = (
-            constants.TRANSPORT_RETRY_MULTIPATH if multipath else constants.TRANSPORT_RETRY)
+    def bdev_nvme_set_options(self):
+        # bdev_retry_count must be non-zero so SPDK's bdev_nvme retries an
+        # aborted IO on the alternate path of an NVMe-oF multipath bdev,
+        # per https://spdk.io/doc/nvme_multipath.html. Hublvol bdevs are
+        # multipath whenever an FTT≥1 cluster exists, regardless of how
+        # many data NICs the local node has — so the retries are set
+        # unconditionally. See ``constants.BDEV_RETRY`` /
+        # ``constants.TRANSPORT_RETRY`` for the chosen values and the
+        # worst-case retry budget.
         params = {
-            "bdev_retry_count": bdev_retry,
-            "transport_retry_count": transport_retry,
+            "bdev_retry_count": constants.BDEV_RETRY,
+            "transport_retry_count": constants.TRANSPORT_RETRY,
             "ctrlr_loss_timeout_sec": constants.CTRL_LOSS_TO,
             "fast_io_fail_timeout_sec" : constants.FAST_FAIL_TO,
             "reconnect_delay_sec": constants.RECONNECT_DELAY_CLUSTER,
@@ -1235,17 +1235,20 @@ class RPCClient:
         }
         return self._request("nvmf_set_max_subsystems", params)
 
-    def bdev_lvol_set_lvs_opts(self, lvs, *, groupid, subsystem_port=9090, role="primary"):
+    def bdev_lvol_set_lvs_opts(self, lvs, *, groupid, subsystem_port=9090, hublvol_port=0, role="primary"):
         """Set lvstore options
 
         `lvs` must be either an ID or the lvstore name.
         `role` must be one of: "primary", "secondary", "tertiary".
+        `hublvol_port` is the NVMe-oF port the LVS exposes its hublvol on
+        (per-LVS, distinct from `subsystem_port` which serves lvols).
         """
 
         return self._request('bdev_lvol_set_lvs_opts', {
             "uuid" if utils.UUID_PATTERN.match(lvs) else "lvs_name": lvs,
             "groupid": groupid,
             "subsystem_port": subsystem_port,
+            "hublvol_port": hublvol_port,
             "role": role,
         })
 

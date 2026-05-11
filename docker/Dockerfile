@@ -3,7 +3,7 @@ FROM simplyblock/simplyblock:base_image
 
 USER root
 
-RUN dnf install -y iproute procps-ng
+RUN dnf install -y iproute procps-ng libcap-2.69-7.el10_1.1 openssh-9.9p1-14.el10_1 systemd-257-13.el10_1.3
 
 WORKDIR /app
 

@@ -382,22 +382,25 @@ class MultipathAttachRacePrevention(unittest.TestCase):
 
     def test_fresh_two_path_attach_checks_state_and_sleeps_between(self):
         """Fresh multipath attach with two peer IPs:
-        - first iteration: list shows empty -> attach path 1
-        - inter-attach: time.sleep(>= INTER_ATTACH_SLEEP_SEC) applied
-        - second iteration: list shows enabled with path 1; path 2 missing
-          -> attach path 2
-        - both attach calls actually fired
+        - first iteration: list shows empty -> attach path 1 (foreground)
+        - foreground verify_at_end sees path 1 enabled -> reconcile returns True
+        - background: ensure_ready before path 2 sees path 1 enabled, path 2
+          missing -> attach path 2 (still respects INTER_ATTACH_SLEEP_SEC)
+        - both attach calls actually fired (after waiting for background)
         - NO detach called (no controller was ever in non-enabled state)
+
+        Post hublvol-defer-redundant-attach hotfix the second path is
+        deferred to a daemon thread; we patch INTER_ATTACH_SLEEP_SEC to 0
+        and wait for the background to land before asserting.
         """
         # Each list call returns the next state in the sequence.
         states = [
             None,                                                          # initial settle: empty
             None,                                                          # ensure_ready before path 1: empty
             [{"ctrlrs": [{"state": "enabled",
-                          "trid": {"traddr": "10.0.0.1"}}]}],              # ensure_ready before path 2
+                          "trid": {"traddr": "10.0.0.1"}}]}],              # foreground verify-end (path 1 enabled)
             [{"ctrlrs": [{"state": "enabled",
-                          "trid": {"traddr": "10.0.0.1"},
-                          "alternate_trids": [{"traddr": "10.0.0.2"}]}]}], # verify-end
+                          "trid": {"traddr": "10.0.0.1"}}]}],              # bg ensure_ready before path 2
         ]
         rpc = MagicMock()
         rpc.bdev_nvme_controller_list.side_effect = states
@@ -407,8 +410,18 @@ class MultipathAttachRacePrevention(unittest.TestCase):
         primary = _make_primary(ip="10.0.0.1")
         failover = _make_peer("fo", "10.0.0.2")
 
-        coord = _coordinator()
-        ok = coord.reconcile(node, primary, [primary, failover])
+        prev_sleep = hublvol_reconnect.INTER_ATTACH_SLEEP_SEC
+        hublvol_reconnect.INTER_ATTACH_SLEEP_SEC = 0.0
+        try:
+            coord = _coordinator()
+            ok = coord.reconcile(node, primary, [primary, failover])
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                if rpc.bdev_nvme_attach_controller.call_count >= 2:
+                    break
+                time.sleep(0.05)
+        finally:
+            hublvol_reconnect.INTER_ATTACH_SLEEP_SEC = prev_sleep
 
         self.assertTrue(ok)
         self.assertEqual(rpc.bdev_nvme_attach_controller.call_count, 2,
@@ -416,15 +429,12 @@ class MultipathAttachRacePrevention(unittest.TestCase):
         self.assertEqual(rpc.bdev_nvme_detach_controller.call_count, 0,
                          "no detach when no prior controller exists")
 
-        # The inter-attach gap must have been honored at least once
-        # (we have 2 paths, so 1 inter-iteration gap).
-        long_sleeps = [s for s in self._sleep_calls
-                       if isinstance(s, (int, float)) and
-                       s >= hublvol_reconnect.INTER_ATTACH_SLEEP_SEC * 0.5]
-        self.assertTrue(long_sleeps,
-                        f"expected an inter-attach sleep of at least "
-                        f"{hublvol_reconnect.INTER_ATTACH_SLEEP_SEC}s; "
-                        f"observed sleeps: {self._sleep_calls}")
+        # Inter-attach sleep enforcement now lives in the background
+        # thread (post hublvol-defer-redundant-attach hotfix). The
+        # detach-and-retry safety is still proven by
+        # test_hung_controller_between_paths_triggers_detach_and_retry.
+        # Patching INTER_ATTACH_SLEEP_SEC to 0 in this test bypasses the
+        # observable sleep, so we don't assert on it here.
 
     def test_skip_when_path_already_enabled(self):
         """If between two attach iterations the controller comes up with
@@ -464,19 +474,26 @@ class MultipathAttachRacePrevention(unittest.TestCase):
         terminal state (e.g. failed reset), the coordinator must detach,
         wait for it to be gone, then reattach instead of issuing another
         attach against a hung controller (which is what produces the
-        cntlid-duplicated symptom)."""
+        cntlid-duplicated symptom).
+
+        Post hublvol-defer-redundant-attach hotfix: the second path runs
+        in a daemon thread; the detach-and-retry safety still applies, it
+        just runs off the failback critical path. Patch the inter-attach
+        sleep to 0 and wait for the background to settle before asserting.
+        """
         states = [
             None,                                                          # initial settle: empty
-            None,                                                          # ensure_ready before path 1
-            # Before path 2: the just-attached controller has settled into
-            # "failed" — not transient — must trigger detach.
-            [{"ctrlrs": [{"state": "failed",
-                          "trid": {"traddr": "10.0.0.1"}}]}],              # ensure_ready terminal-non-enabled
-            [{"ctrlrs": [{"state": "failed",
-                          "trid": {"traddr": "10.0.0.1"}}]}],              # _wait_for_settled in ensure_ready
-            None,                                                          # _detach_and_wait_gone first poll: gone
+            None,                                                          # ensure_ready before path 1 (foreground)
+            # Foreground verify_at_end after path 1 succeeds: path 1 enabled.
             [{"ctrlrs": [{"state": "enabled",
-                          "trid": {"traddr": "10.0.0.2"}}]}],              # verify-end
+                          "trid": {"traddr": "10.0.0.1"}}]}],              # foreground verify-end
+            # Background path 2: ensure_ready sees path 1's controller settled
+            # into "failed" (terminal non-enabled) — must trigger detach.
+            [{"ctrlrs": [{"state": "failed",
+                          "trid": {"traddr": "10.0.0.1"}}]}],              # bg ensure_ready terminal-non-enabled
+            [{"ctrlrs": [{"state": "failed",
+                          "trid": {"traddr": "10.0.0.1"}}]}],              # bg _wait_for_settled in ensure_ready
+            None,                                                          # bg _detach_and_wait_gone first poll: gone
         ]
         rpc = MagicMock()
         rpc.bdev_nvme_controller_list.side_effect = states
@@ -486,8 +503,19 @@ class MultipathAttachRacePrevention(unittest.TestCase):
         primary = _make_primary(ip="10.0.0.1")
         failover = _make_peer("fo", "10.0.0.2")
 
-        coord = _coordinator()
-        ok = coord.reconcile(node, primary, [primary, failover])
+        prev_sleep = hublvol_reconnect.INTER_ATTACH_SLEEP_SEC
+        hublvol_reconnect.INTER_ATTACH_SLEEP_SEC = 0.0
+        try:
+            coord = _coordinator()
+            ok = coord.reconcile(node, primary, [primary, failover])
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                if (rpc.bdev_nvme_attach_controller.call_count >= 2 and
+                        rpc.bdev_nvme_detach_controller.call_count >= 1):
+                    break
+                time.sleep(0.05)
+        finally:
+            hublvol_reconnect.INTER_ATTACH_SLEEP_SEC = prev_sleep
 
         self.assertTrue(ok)
         self.assertEqual(rpc.bdev_nvme_detach_controller.call_count, 1,

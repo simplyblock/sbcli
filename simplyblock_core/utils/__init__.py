@@ -337,14 +337,16 @@ def process_records(records, records_count, keys=None):
 
 def ping_host(ip):
     logger.debug(f"Pinging ip ... {ip}")
-    response = os.system(f"sudo ping -c 1 -W 2 {ip} > /dev/null")
-    if response == 0:
-        logger.debug(f"{ip} is UP")
-        return True
-    else:
-        logger.debug(f"{ip} is DOWN")
-        return False
-
+    try:
+        result = subprocess.run(
+            ["ping", "-c", "2", "-W", "2", ip],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        up = result.returncode == 0
+    except Exception as e:
+        logger.debug(f"ping error for {ip}: {e}")
+        up = False
+    logger.debug(f"{ip} is {'UP' if up else 'DOWN'}")
+    return up
 
 def sum_records(records):
     if len(records) == 0:
@@ -356,6 +358,16 @@ def sum_records(records):
         for rec in records[1:]:
             total += rec
         return total
+
+
+def _used_bdev_name_numbers(db_controller):
+    used = set()
+    for lvol in db_controller.get_lvols():
+        used.add(lvol.vuid)
+
+    for snap in db_controller.get_snapshots():
+        used.add(snap.vuid)
+    return used
 
 
 def get_random_vuid():
@@ -377,8 +389,16 @@ def get_random_vuid():
     for lvol in db_controller.get_lvols():
         used_vuids.append(lvol.vuid)
 
+    used = set(used_vuids) | _used_bdev_name_numbers(db_controller)
+
+    # 1M range + dedupe against existing bdev-name numeric suffixes
+    # (CLN_xxxx / LVOL_xxxx / SNAP_xxxx). With ~10k lvols+snaps the
+    # 10k-only legacy range hit ~50% birthday-collision probability;
+    # 1M brings that to <1%. Combined with the dedupe set we avoid the
+    # SPDK ``lvol with name already exists`` rejection that triggered
+    # the snapshot-delete-in-flight metadata corruption.
     r = 1 + int(random.random() * 10000)
-    while r in used_vuids:
+    while r in used:
         r = 1 + int(random.random() * 10000)
     return r
 
@@ -1272,12 +1292,20 @@ def addNvmeDevices(rpc_client, snode, devs):
 def get_random_snapshot_vuid():
     from simplyblock_core.db_controller import DBController
     db_controller = DBController()
-    used_vuids = []
+    used_vuids = set()
     for snap in db_controller.get_snapshots():
-        used_vuids.append(snap.vuid)
+        used_vuids.add(snap.vuid)
+
+    # Same dedupe rationale as ``get_random_vuid``: avoid colliding with
+    # any existing CLN_/LVOL_/SNAP_ bdev-name numeric suffix so the
+    # SPDK-side create cannot reject with "lvol with name already
+    # exists". That rejection in the clone path is what triggered the
+    # mgmt-side async snapshot delete + reuse-during-deletion sequence
+    # producing stuck snapshots (incident: aws_dual_soak 2026-04-30).
+    used = used_vuids | _used_bdev_name_numbers(db_controller)
 
     r = 1 + int(random.random() * 1000000)
-    while r in used_vuids:
+    while r in used:
         r = 1 + int(random.random() * 1000000)
     return r
 

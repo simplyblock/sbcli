@@ -42,7 +42,7 @@ class _CreateParams(BaseModel):
     ha_type: Optional[Literal['single', 'ha']] = None
     host_id: Optional[str] = None
     priority_class: Literal[0, 1] = 0
-    namespace: Optional[str] = None
+    namespaced: Optional[bool] = False
     pvc_name: Optional[str] = None
     ndcs: util.Unsigned = 0
     npcs: util.Unsigned = 0
@@ -89,7 +89,7 @@ def add(
             use_comp=False,
             distr_vuid=0,
             lvol_priority_class=data.priority_class,
-            namespace=data.namespace,
+            namespaced=data.namespaced,
             pvc_name=data.pvc_name,
             ndcs=data.ndcs,
             npcs=data.npcs,
@@ -242,11 +242,11 @@ def replication_stop(cluster: Cluster, pool: StoragePool, volume: Volume) -> Res
     return Response(status_code=204)
 
 @instance_api.get('/connect', name='clusters:storage-pools:volumes:connect')
-def connect(cluster: Cluster, pool: StoragePool, volume: Volume):
-    details_or_false = lvol_controller.connect_lvol(volume.get_id())
-    if details_or_false == False:  # noqa
-        raise ValueError('Failed to query connection details')
-    return details_or_false
+def connect(cluster: Cluster, pool: StoragePool, volume: Volume, host_nqn: Optional[str] = None):
+    details, err = lvol_controller.connect_lvol(volume.get_id(), host_nqn=host_nqn)
+    if err:
+        raise ValueError(err)
+    return details
 
 
 @instance_api.get('/capacity', name='clusters:storage-pools:volumes:capacity')

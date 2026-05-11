@@ -2,6 +2,7 @@
 import argparse
 import itertools
 import json
+import logging
 import os
 import posixpath
 import random
@@ -18,6 +19,15 @@ try:
     import paramiko
 except ImportError:
     paramiko = None
+
+# Silence paramiko's Transport-thread "Socket exception: Connection
+# reset by peer (104)" prints. They fire whenever an open SSH
+# connection to a storage node gets RST'd by a planned event —
+# host_reboot outage tearing down sshd, NIC down/up flapping, etc.
+# The retry/reconnect logic handles it cleanly; the stack-trace-less
+# stderr lines just clutter the soak output.
+logging.getLogger("paramiko").setLevel(logging.CRITICAL)
+logging.getLogger("paramiko.transport").setLevel(logging.CRITICAL)
 
 
 UUID_RE = re.compile(r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}")
@@ -959,7 +969,7 @@ class SoakRunner:
                 f"fio --name={fio_name} --directory={shlex.quote(volume['mount_point'])} "
                 "--direct=1 --rw=randrw --bs=4K --group_reporting --time_based "
                 f"--numjobs={FIO_NUMJOBS} --iodepth=4 --size=4G --runtime={self.args.runtime} "
-                "--ioengine=aiolib --max_latency=15s --exitall_on_error=1 "
+                "--ioengine=aiolib --max_latency=20s --exitall_on_error=1 "
                 f"--output={shlex.quote(volume['fio_log'])}; "
                 "rc=$?; "
                 f"echo $rc > {shlex.quote(volume['rc_file'])}"

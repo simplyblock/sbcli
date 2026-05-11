@@ -149,6 +149,37 @@ def add_device_to_auto_restart(device):
 
 
 def add_node_to_auto_restart(node):
+    # Auto-restart kills SPDK and runs the full recreate path. Only states
+    # where SPDK itself is the problem warrant that:
+    #   - OFFLINE: SnodeAPI confirmed SPDK is gone.
+    #   - SCHEDULABLE: SPDK RPC double-timed-out — SPDK is sick.
+    #
+    # UNREACHABLE does NOT trigger auto-restart: while UNREACHABLE we cannot
+    # reach SnodeAPI to perform the restart anyway. Once the node is
+    # reachable again, check_node naturally drops it to OFFLINE (if SPDK
+    # died) — which then triggers auto-restart — or flips it back to
+    # ONLINE (if SPDK was alive throughout).
+    #
+    # DOWN does NOT trigger auto-restart: SPDK is still up and
+    # cluster-internal traffic works; only the client-facing port is
+    # blocked. Recovery is port-unblock, not a destructive kill-and-replay.
+    _AUTO_RESTART_OK = (
+        StorageNode.STATUS_OFFLINE,
+        StorageNode.STATUS_SCHEDULABLE,
+    )
+    # Re-fetch from DB: callers commonly do `set_node_status(...,
+    # OFFLINE/SCHEDULABLE)` immediately before this and pass their stale
+    # local node object whose .status is still ONLINE — which would trip
+    # the guard below and silently drop the restart.
+    node = db.get_storage_node_by_id(node.get_id())
+    if node.status not in _AUTO_RESTART_OK:
+        logger.warning(
+            "Refusing to queue auto-restart for node %s in status %s "
+            "(only OFFLINE / SCHEDULABLE are valid triggers)",
+            node.get_id(), node.status,
+        )
+        return False
+
     cluster = db.get_cluster_by_id(node.cluster_id)
     if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED,
                               Cluster.STATUS_READONLY, Cluster.STATUS_UNREADY, Cluster.STATUS_SUSPENDED]:

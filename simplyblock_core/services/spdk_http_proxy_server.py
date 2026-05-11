@@ -5,7 +5,6 @@ import json
 import logging
 import os
 import socket
-import ssl
 import sys
 import threading
 import time
@@ -258,9 +257,8 @@ def run_server(host, port, user, password, is_threading_enabled=False):
         ServerHandler.key = key
         httpd = (ThreadingHTTPServer if is_threading_enabled else HTTPServer)((host, port), ServerHandler)
         settings = Settings()
-        if settings.tls_enabled:
-            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-            context.load_cert_chain(settings.tls_certificate, settings.tls_key)
+        context = settings.make_server_ssl_context()
+        if context is not None:
             httpd.socket = context.wrap_socket(httpd.socket, server_side=True)
         httpd.timeout = TIMEOUT
         logger.info('Started RPC http proxy server')

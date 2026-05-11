@@ -1586,10 +1586,11 @@ commands:
             dest: lvol_priority_class
             type: int
             default: 0
-          - name: "--namespace"
-            help: "Sets the NVMe namespace for the logical volume (namespace must already exist)."
-            dest: namespace
-            type: str
+          - name: "--namespaced"
+            help: "Adds this LVol as a namespace on any available subsystem, if not found then create a new subsystem. Default: `false`."
+            dest: namespaced
+            type: bool
+            default: false
           - name: "--uid"
             help: "Set logical volume id."
             dest: uid
@@ -1769,6 +1770,11 @@ commands:
             dest: resize
             type: size
             default: "0"
+          - name: "--namespaced"
+            help: "Adds this LVol as a namespace on any available subsystem, if not found then create a new subsystem. Default: `true`."
+            dest: namespaced
+            type: bool
+            default: true
       - name: move
         help: "Moves a full copy of the logical volume between nodes."
         private: true
@@ -2239,6 +2245,11 @@ commands:
             dest: resize
             type: size
             default: "0"
+          - name: "--namespaced"
+            help: "Adds this LVol as a namespace on any available subsystem, if not found then create a new subsystem. Default: `false`."
+            dest: namespaced
+            type: bool
+            default: true
       - name: replication-status
         help: "Lists snapshots replication status"
         arguments:

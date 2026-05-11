@@ -97,8 +97,8 @@ def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes,
 
     pool.dhchap = bool(dhchap)
     if pool.dhchap:
-        pool.dhchap_key = utils.generate_dhchap_key(length=36)
-        pool.dhchap_ctrlr_key = utils.generate_dhchap_key(length=36)
+        pool.dhchap_key = utils.generate_dhchap_key(length=32)
+        pool.dhchap_ctrlr_key = utils.generate_dhchap_key(length=32)
 
     pool.status = "active"
     pool.write_to_db(db_controller.kv_store)

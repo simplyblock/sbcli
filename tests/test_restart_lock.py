@@ -341,19 +341,29 @@ class TestRestartWrapperCleanupSafety(unittest.TestCase):
         self.assertFalse(result)
         mock_set_status.assert_not_called()
 
+    @patch("simplyblock_core.storage_node_ops.distr_controller")
+    @patch("simplyblock_core.storage_node_ops.storage_events")
     @patch("simplyblock_core.storage_node_ops.set_node_status")
     @patch("simplyblock_core.storage_node_ops._restart_storage_node_impl")
     @patch("simplyblock_core.storage_node_ops.DBController")
     def test_cleanup_runs_when_pre_offline_and_post_restarting(
-            self, mock_db_cls, mock_impl, mock_set_status):
-        """Original positive case: WE acquired RESTARTING (pre=OFFLINE) and
-        a later step failed (impl returned False). Cleanup must reset to
-        OFFLINE so future attempts can proceed."""
+            self, mock_db_cls, mock_impl, mock_set_status,
+            mock_events, mock_distr):
+        """WE acquired RESTARTING (pre=OFFLINE) and a later step failed
+        (impl returned False). Cleanup must reset the node to OFFLINE so
+        future attempts can proceed.
+
+        The wrapper does this with a direct DB write rather than
+        ``set_node_status`` (deliberately, to avoid second-order effects
+        from the helper). The contract this test pins is therefore: on
+        the failure path, ``post_node.write_to_db`` is invoked and the
+        post_node's status is set to OFFLINE before the write."""
         from simplyblock_core.storage_node_ops import restart_storage_node
 
         pre_node = self._node(StorageNode.STATUS_OFFLINE)
         post_node = self._node(StorageNode.STATUS_RESTARTING)
-        # First read = pre-call; second read = post-call (in the finally).
+        post_node.write_to_db = MagicMock()
+
         mock_db_cls.return_value.get_storage_node_by_id.side_effect = [
             pre_node, post_node,
         ]
@@ -361,8 +371,12 @@ class TestRestartWrapperCleanupSafety(unittest.TestCase):
 
         result = restart_storage_node("node-1")
         self.assertFalse(result)
-        mock_set_status.assert_called_once_with(
-            "node-1", StorageNode.STATUS_OFFLINE)
+        # The wrapper does not route the cleanup write through
+        # set_node_status.
+        mock_set_status.assert_not_called()
+        # It writes the post_node directly with status flipped to OFFLINE.
+        post_node.write_to_db.assert_called_once()
+        self.assertEqual(post_node.status, StorageNode.STATUS_OFFLINE)
 
     @patch("simplyblock_core.storage_node_ops.set_node_status")
     @patch("simplyblock_core.storage_node_ops._restart_storage_node_impl")
