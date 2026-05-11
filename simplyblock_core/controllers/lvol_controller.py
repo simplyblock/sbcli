@@ -1726,6 +1726,7 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
 
             entry = {
                 "ns_id": lvol.ns_id,
+                "model": lvol.uuid,
                 "transport": transport,
                 "ip": ip,
                 "port": port,
