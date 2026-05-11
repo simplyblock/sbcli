@@ -105,6 +105,14 @@ on:
         options:
           - 'false'
           - 'true'
+      client_ips:
+        description: 'Comma-separated client IPs for external FIO (empty = FIO runs as K8s Jobs)'
+        required: false
+        default: ''
+      nfs_mountpoint:
+        description: 'NFS mountpoint on client nodes'
+        required: false
+        default: '/mnt/nfs_share/'
 
 jobs:
   e2e-add-node:
@@ -205,6 +213,65 @@ jobs:
 
       - name: Verify kubectl connectivity
         run: kubectl get nodes
+
+      - name: Pre-clean clients (kill fio, NVMe disconnect, unmount NFS, remove mount dirs)
+        if: ${{ github.event.inputs.client_ips != '' }}
+        shell: bash
+        run: |
+          set +e
+          NFS_MOUNTPOINT="${{ github.event.inputs.nfs_mountpoint || '/mnt/nfs_share/' }}"
+
+          run_remote_with_retry() {
+            local ip="$1"; shift
+            local cmd="$*"
+            local max=5
+            for attempt in $(seq 1 $max); do
+              echo "  [attempt $attempt/$max] ssh ${SSH_USER}@${ip} ..."
+              if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -i "${KEY_PATH}" \
+                    "${SSH_USER}@${ip}" "${cmd}"; then
+                return 0
+              fi
+              echo "  SSH failed, retrying in 5s..."
+              sleep 5
+            done
+            echo "All $max attempts failed for $ip, continuing..."
+            return 0
+          }
+
+          normalized_targets="$(echo "${{ github.event.inputs.client_ips }}" | tr ',' ' ' | xargs -n1 | sort -u | xargs || true)"
+
+          if [ -z "${normalized_targets}" ]; then
+            echo "No client IPs provided, skipping client cleanup."
+            exit 0
+          fi
+
+          for ip in ${normalized_targets}; do
+            echo "---- ${ip}: kill fio/tmux + disconnect NVMe + umount ${NFS_MOUNTPOINT} + clean mount dirs ----"
+            run_remote_with_retry "${ip}" "set -euxo pipefail;
+              pkill -9 fio || true;
+              pkill -9 tmux || true;
+              # Disconnect stale NVMe-oF connections from previous runs
+              for nqn in \$(nvme list-subsys -o json 2>/dev/null | jq -r '.Subsystems[]?.NQN // empty' | grep lvol || true); do
+                nvme disconnect -n \"\$nqn\" || true;
+              done;
+              # Unmount NFS
+              mp='${NFS_MOUNTPOINT}';
+              if mountpoint -q \"\$mp\" 2>/dev/null; then
+                umount -f \"\$mp\" || umount \"\$mp\" || true;
+              elif mount | grep -q \"\$mp\"; then
+                umount -f \"\$mp\" || umount \"\$mp\" || true;
+              fi;
+              # Unmount and remove test mount dirs
+              for mp in /mnt/test_location/*; do
+                [ -e \"\$mp\" ] || continue;
+                if mountpoint -q \"\$mp\" 2>/dev/null; then
+                  umount -f \"\$mp\" || umount \"\$mp\" || true;
+                elif mount | grep -q \"\$mp\"; then
+                  umount -f \"\$mp\" || umount \"\$mp\" || true;
+                fi;
+              done;
+              rm -rf /mnt/test_location/* 2>/dev/null || true"
+          done
 
       # ── Cleanup old deployment ──────────────────────────────────────────────
 

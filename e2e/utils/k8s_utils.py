@@ -873,7 +873,7 @@ class K8sUtils:
                        image: str = "dockerpinata/fio:2.1",
                        cleanup_before_fio: bool = False,
                        avoid_node: str = None,
-                       prefill_volume: bool = True):
+                       warmup_config: str = None):
         """Create a ConfigMap with FIO config and a Job that runs FIO against a PVC.
 
         Args:
@@ -884,26 +884,25 @@ class K8sUtils:
                 pod on (typically the primary storage node for the lvol).
                 When set, a nodeAffinity rule excludes that node so the FIO
                 pod runs on a secondary / non-primary node instead.
+            warmup_config: Optional FIO config for a write-only warmup pass.
+                When provided, an init container runs FIO with this config
+                to pre-fill all data files with valid verify headers (same
+                randseed, filenames, size) before the main randrw test.
+                This prevents false err=84 from stale FIO headers on
+                thin-provisioned storage.
         """
         ns = namespace or self.namespace
         # Indent fio_config for YAML embedding (each line indented by 8 spaces)
         indented_cfg = "\n".join(
             f"      {line}" for line in fio_config.strip().splitlines()
         )
-        init_containers_list = []
-        if prefill_volume:
-            # Pre-fill volume with random data to overwrite stale FIO verify
-            # headers from previous lvols on thin-provisioned storage.
-            init_containers_list.append(
-                "      - name: prefill-volume\n"
-                "        image: busybox\n"
-                "        command: [\"sh\", \"-c\", "
-                "\"dd if=/dev/urandom of=/spdkvol/prefill bs=1M count=1024 2>/dev/null; "
-                "rm -f /spdkvol/prefill\"]\n"
-                "        volumeMounts:\n"
-                "        - mountPath: /spdkvol\n"
-                "          name: benchmark-volume\n"
+        # Indent warmup config for YAML embedding
+        indented_warmup = ""
+        if warmup_config:
+            indented_warmup = "\n".join(
+                f"      {line}" for line in warmup_config.strip().splitlines()
             )
+        init_containers_list = []
         if cleanup_before_fio:
             init_containers_list.append(
                 "      - name: cleanup-old-fio\n"
@@ -912,6 +911,20 @@ class K8sUtils:
                 "        volumeMounts:\n"
                 "        - mountPath: /spdkvol\n"
                 "          name: benchmark-volume\n"
+            )
+        if warmup_config:
+            # FIO warmup init container: sequential write pass to pre-fill
+            # all data files with valid verify headers matching the main config.
+            init_containers_list.append(
+                "      - name: fio-warmup\n"
+                f"        image: {image}\n"
+                "        imagePullPolicy: IfNotPresent\n"
+                "        command: [\"fio\", \"/fio/fio-warmup.cfg\"]\n"
+                "        volumeMounts:\n"
+                "        - mountPath: /spdkvol\n"
+                "          name: benchmark-volume\n"
+                "        - mountPath: /fio\n"
+                "          name: fio-config\n"
             )
         init_containers = ""
         if init_containers_list:
@@ -954,6 +967,12 @@ class K8sUtils:
                 f"                values:\n"
                 f"                - {avoid_node}\n"
             )
+        warmup_cfg_entry = ""
+        if warmup_config:
+            warmup_cfg_entry = (
+                f"  fio-warmup.cfg: |\n"
+                f"{indented_warmup}\n"
+            )
         yaml_content = (
             f"apiVersion: v1\n"
             f"kind: ConfigMap\n"
@@ -963,6 +982,7 @@ class K8sUtils:
             f"data:\n"
             f"  fio.cfg: |\n"
             f"{indented_cfg}\n"
+            f"{warmup_cfg_entry}"
             f"---\n"
             f"apiVersion: batch/v1\n"
             f"kind: Job\n"
