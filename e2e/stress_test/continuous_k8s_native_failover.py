@@ -536,11 +536,21 @@ class K8sNativeFailoverTest(TestClusterBase):
 
     # ── FIO config builder ───────────────────────────────────────────────────
 
-    def _build_fio_config(self, name: str) -> str:
+    def _build_fio_config(self, name: str) -> tuple[str, str]:
+        """Build FIO main and warmup configs for a benchmark run.
+
+        Returns:
+            (main_config, warmup_config) — the warmup config does a sequential
+            write pass to the exact same files with the same randseed, so every
+            block has a valid verify header before the randrw verify test begins.
+            This prevents false err=84 (EILSEQ) from stale FIO headers left on
+            thin-provisioned storage blocks by previously deleted lvols.
+        """
         bs = f"{2 ** random.randint(2, 7)}k"
         run_id = _rand_seq(6)
         randseed = random.randint(1, 2**63)
-        return (
+
+        main_config = (
             f"[global]\n"
             f"name={name}-fio\n"
             f"filename_format=/spdkvol/fio-{run_id}.$jobnum\n"
@@ -562,6 +572,30 @@ class K8sNativeFailoverTest(TestClusterBase):
             f"\n"
             f"[job1]\n"
         )
+
+        # Warmup: sequential write to the SAME files with the SAME randseed.
+        # Uses do_verify=0 so FIO writes verify headers without checking reads.
+        # No time_based/runtime — finishes once the full file is written.
+        warmup_config = (
+            f"[global]\n"
+            f"name={name}-warmup\n"
+            f"filename_format=/spdkvol/fio-{run_id}.$jobnum\n"
+            f"rw=write\n"
+            f"bs={bs}\n"
+            f"iodepth=32\n"
+            f"direct=1\n"
+            f"ioengine=libaio\n"
+            f"size={self.fio_size}\n"
+            f"numjobs={self.fio_num_jobs}\n"
+            f"group_reporting\n"
+            f"verify=md5\n"
+            f"do_verify=0\n"
+            f"randseed={randseed}\n"
+            f"\n"
+            f"[job1]\n"
+        )
+
+        return main_config, warmup_config
 
     # ── PVC → lvol mapping helpers ─────────────────────────────────────────
 
@@ -636,9 +670,32 @@ class K8sNativeFailoverTest(TestClusterBase):
             f"LVOL {lvol_name} did not appear as device on {client}"
         )
 
+    def _run_fio_warmup_ssh(self, name: str, client: str, mount_point: str,
+                            bs: str, randseed: int):
+        """Run a blocking FIO write-only warmup on *client* via SSH.
+
+        Writes to the same files (same nrfiles, size, randseed) that the main
+        FIO run will use, so every block has a valid verify header.  This
+        prevents false err=84 from stale FIO headers on thin-provisioned storage.
+        """
+        warmup_cmd = (
+            f"fio --name={name}_warmup --directory={mount_point} "
+            f"--ioengine=libaio --direct=1 --iodepth=32 "
+            f"--rw=write --bs={bs} --size={self.fio_size} "
+            f"--verify=md5 --do_verify=0 --randseed={randseed} "
+            f"--numjobs={self.fio_num_jobs} --nrfiles=6"
+        )
+        self.logger.info(f"[warmup] Running FIO warmup on {client}: {name}")
+        self.ssh_obj.exec_command(node=client, command=warmup_cmd, timeout=300)
+        self.logger.info(f"[warmup] FIO warmup complete on {client}: {name}")
+
     def _start_client_fio(self, name: str, client: str, mount_point: str,
-                          log_file: str):
+                          log_file: str, bs: str = None, randseed: int = None):
         """Launch FIO in a background thread on *client* via SSH/tmux."""
+        if bs is None:
+            bs = f"{2 ** random.randint(2, 7)}K"
+        if randseed is None:
+            randseed = random.randint(1, 2**63)
         fio_thread = threading.Thread(
             target=self.ssh_obj.run_fio_test,
             args=(client, None, mount_point, log_file),
@@ -646,12 +703,13 @@ class K8sNativeFailoverTest(TestClusterBase):
                 "size": self.fio_size,
                 "name": f"{name}_fio",
                 "rw": "randrw",
-                "bs": f"{2 ** random.randint(2, 7)}K",
+                "bs": bs,
                 "nrfiles": 6,
                 "iodepth": 1,
                 "numjobs": self.fio_num_jobs,
                 "time_based": True,
                 "runtime": self.FIO_RUNTIME,
+                "randseed": randseed,
             },
         )
         fio_thread.start()
@@ -764,19 +822,21 @@ class K8sNativeFailoverTest(TestClusterBase):
                 self.ssh_obj.mount_path(node=client, device=device, mount_path=mount_point)
                 sleep_n_sec(5)
 
-                # Pre-fill volume to overwrite stale FIO verify headers from
-                # previous lvols on thin-provisioned storage.
-                try:
-                    self.ssh_obj.create_random_files(
-                        client, mount_point, self.fio_size
-                    )
-                    self.ssh_obj.delete_files(client, [f"{mount_point}/random_file_*"])
-                except Exception as exc:
-                    self.logger.warning(f"[create_pvc] Volume pre-fill failed for {pvc_name}: {exc}")
-
                 log_file = f"{self.log_path}/{pvc_name}.log"
                 self.ssh_obj.delete_files(client, [f"{mount_point}/*fio*"])
-                self._start_client_fio(pvc_name, client, mount_point, log_file)
+
+                # FIO warmup: write-only pass to pre-fill all data files with
+                # valid verify headers, preventing false err=84 from stale FIO
+                # headers on thin-provisioned storage blocks.
+                bs = f"{2 ** random.randint(2, 7)}K"
+                randseed = random.randint(1, 2**63)
+                try:
+                    self._run_fio_warmup_ssh(pvc_name, client, mount_point, bs, randseed)
+                except Exception as exc:
+                    self.logger.warning(f"[create_pvc] FIO warmup failed for {pvc_name}: {exc}")
+
+                self._start_client_fio(pvc_name, client, mount_point, log_file,
+                                       bs=bs, randseed=randseed)
 
                 self.pvc_details[pvc_name] = {
                     "job_name": None,
@@ -815,12 +875,13 @@ class K8sNativeFailoverTest(TestClusterBase):
                 node_id = self._get_pvc_node_id(pvc_name)
                 avoid = self._get_k8s_node_for_storage_node(node_id) if node_id else None
 
-                fio_config = self._build_fio_config(pvc_name)
+                fio_config, warmup_config = self._build_fio_config(pvc_name)
                 try:
                     self.k8s_utils.create_fio_job(
                         job_name, pvc_name, cm_name, fio_config,
                         image=self.FIO_IMAGE,
                         avoid_node=avoid,
+                        warmup_config=warmup_config,
                     )
                 except Exception as exc:
                     self.logger.warning(
@@ -975,13 +1036,14 @@ class K8sNativeFailoverTest(TestClusterBase):
                 clone_node_id = self._get_pvc_node_id(clone_name)
                 avoid = self._get_k8s_node_for_storage_node(clone_node_id) if clone_node_id else None
 
-                fio_config = self._build_fio_config(clone_name)
+                fio_config, warmup_config = self._build_fio_config(clone_name)
                 try:
                     self.k8s_utils.create_fio_job(
                         clone_job, clone_name, clone_cm, fio_config,
                         image=self.FIO_IMAGE,
                         cleanup_before_fio=True,
                         avoid_node=avoid,
+                        warmup_config=warmup_config,
                     )
                 except Exception as exc:
                     self.logger.warning(f"[snap_clone] Clone FIO Job failed for {clone_name}: {exc}")
@@ -1182,7 +1244,7 @@ class K8sNativeFailoverTest(TestClusterBase):
                 except Exception:
                     pass
 
-                fio_config = self._build_fio_config(pvc_name)
+                fio_config, warmup_config = self._build_fio_config(pvc_name)
                 nid = pvc_info.get("node_id")
                 avoid = self._get_k8s_node_for_storage_node(nid) if nid else None
                 try:
@@ -1191,6 +1253,7 @@ class K8sNativeFailoverTest(TestClusterBase):
                         image=self.FIO_IMAGE,
                         cleanup_before_fio=True,
                         avoid_node=avoid,
+                        warmup_config=warmup_config,
                     )
                 except Exception as exc:
                     self.logger.warning(f"[restart_fio] Failed to restart FIO for {pvc_name}: {exc}")
@@ -1212,7 +1275,7 @@ class K8sNativeFailoverTest(TestClusterBase):
                 except Exception:
                     pass
 
-                fio_config = self._build_fio_config(clone_name)
+                fio_config, warmup_config = self._build_fio_config(clone_name)
                 clone_nid = self._get_pvc_node_id(clone_name)
                 avoid = self._get_k8s_node_for_storage_node(clone_nid) if clone_nid else None
                 try:
@@ -1221,6 +1284,7 @@ class K8sNativeFailoverTest(TestClusterBase):
                         image=self.FIO_IMAGE,
                         cleanup_before_fio=True,
                         avoid_node=avoid,
+                        warmup_config=warmup_config,
                     )
                 except Exception as exc:
                     self.logger.warning(f"[restart_fio] Failed to restart FIO for clone {clone_name}: {exc}")
@@ -1812,13 +1876,14 @@ class K8sNativeBasicFailoverTest(K8sNativeFailoverTest):
                 clone_node_id = self._get_pvc_node_id(clone_name)
                 avoid = self._get_k8s_node_for_storage_node(clone_node_id) if clone_node_id else None
 
-                fio_config = self._build_fio_config(clone_name)
+                fio_config, warmup_config = self._build_fio_config(clone_name)
                 try:
                     self.k8s_utils.create_fio_job(
                         clone_job, clone_name, clone_cm, fio_config,
                         image=self.FIO_IMAGE,
                         cleanup_before_fio=True,
                         avoid_node=avoid,
+                        warmup_config=warmup_config,
                     )
                 except Exception as exc:
                     self.logger.warning(f"[snap_clone] Clone FIO Job failed for {clone_name}: {exc}")
