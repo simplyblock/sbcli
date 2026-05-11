@@ -751,7 +751,6 @@ class K8sNativeFailoverTest(TestClusterBase):
     # ── PVC + FIO creation ───────────────────────────────────────────────────
 
     def create_pvcs_with_fio(self, count: int, node_ids: list[str] = None):
-    def create_pvcs_with_fio(self, count: int, node_ids: list[str] = None):
         """Create *count* PVCs via K8s and start FIO on each.
 
         When ``self.use_client_fio`` is True, the underlying lvol is
