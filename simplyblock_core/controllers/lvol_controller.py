@@ -2618,6 +2618,7 @@ def replicate_lvol_on_source_cluster(lvol_id, cluster_id=None, pool_uuid=None):
 
     if snaps:
         snaps = sorted(snaps, key=lambda x: x.created_at)
+        logger.debug(f"sorted snapshots: {snaps}")
         snapshot = snaps[-1]
 
     if not snapshot:
