@@ -895,23 +895,23 @@ class K8sUtils:
             # Pre-fill volume with random data to overwrite stale FIO verify
             # headers from previous lvols on thin-provisioned storage.
             init_containers_list.append(
-                f"      - name: prefill-volume\n"
-                f"        image: busybox\n"
-                f"        command: [\"sh\", \"-c\", "
-                f"\"dd if=/dev/urandom of=/spdkvol/prefill bs=1M count=1024 2>/dev/null; "
-                f"rm -f /spdkvol/prefill\"]\n"
-                f"        volumeMounts:\n"
-                f"        - mountPath: /spdkvol\n"
-                f"          name: benchmark-volume\n"
+                "      - name: prefill-volume\n"
+                "        image: busybox\n"
+                "        command: [\"sh\", \"-c\", "
+                "\"dd if=/dev/urandom of=/spdkvol/prefill bs=1M count=1024 2>/dev/null; "
+                "rm -f /spdkvol/prefill\"]\n"
+                "        volumeMounts:\n"
+                "        - mountPath: /spdkvol\n"
+                "          name: benchmark-volume\n"
             )
         if cleanup_before_fio:
             init_containers_list.append(
-                f"      - name: cleanup-old-fio\n"
-                f"        image: busybox\n"
-                f"        command: [\"sh\", \"-c\", \"rm -f /spdkvol/*fio*\"]\n"
-                f"        volumeMounts:\n"
-                f"        - mountPath: /spdkvol\n"
-                f"          name: benchmark-volume\n"
+                "      - name: cleanup-old-fio\n"
+                "        image: busybox\n"
+                "        command: [\"sh\", \"-c\", \"rm -f /spdkvol/*fio*\"]\n"
+                "        volumeMounts:\n"
+                "        - mountPath: /spdkvol\n"
+                "          name: benchmark-volume\n"
             )
         init_containers = ""
         if init_containers_list:
