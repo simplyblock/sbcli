@@ -265,7 +265,13 @@ def process_snap_replicate_finish(task, snapshot):
 
 
 def task_runner(task: JobSchedule):
-    snapshot = db.get_snapshot_by_id(task.function_params["snapshot_id"])
+    try:
+        snapshot = db.get_snapshot_by_id(task.function_params["snapshot_id"])
+    except KeyError:
+        task.function_result = "snapshot not found"
+        task.status = JobSchedule.STATUS_DONE
+        task.write_to_db(db.kv_store)
+        return True
     if not snapshot:
         task.function_result = "snapshot not found"
         task.status = JobSchedule.STATUS_DONE
