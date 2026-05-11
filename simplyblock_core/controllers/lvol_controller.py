@@ -1665,7 +1665,7 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
     if cluster.status == Cluster.STATUS_SUSPENDED and cluster.snapshot_replication_target_cluster:
         logger.error("Cluster is suspended, looking for replicated lvol")
         for lv in db_controller.get_lvols(cluster.snapshot_replication_target_cluster):
-            if lv.nqn == lvol.nqn:
+            if lv.nqn.split(":lvol:")[-1] == lvol.nqn.split(":lvol:")[-1]:
                 logger.info(f"LVol with same nqn already exists on target cluster: {lv.get_id()}")
                 lvol = lv
                 break
