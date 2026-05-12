@@ -2477,7 +2477,6 @@ def replicate_lvol_on_target_cluster(lvol_id):
     new_lvol.write_to_db(db_controller.kv_store)
     lvol = db_controller.get_lvol_by_id(lvol_id)
     lvol.from_source = False
-    lvol.do_replicate = False
     lvol.write_to_db()
     replication_stop(lvol_id)
     lvol_events.lvol_replicated(lvol, new_lvol)
@@ -2736,7 +2735,6 @@ def replicate_lvol_on_source_cluster(lvol_id, cluster_id=None, pool_uuid=None):
 
     new_lvol.status = LVol.STATUS_ONLINE
     new_lvol.from_source = True
-    new_lvol.do_replicate = True
     new_lvol.write_to_db(db_controller.kv_store)
     lvol_events.lvol_replicated(new_lvol, new_lvol)
     logger.debug(f"new lvol from_source: {new_lvol.from_source}")
