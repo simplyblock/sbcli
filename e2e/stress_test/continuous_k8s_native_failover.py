@@ -240,14 +240,27 @@ class K8sNativeFailoverTest(TestClusterBase):
             for client in self.fio_node:
                 self.ssh_obj.make_directory(node=client, dir_name=self.log_path)
 
-            # Pre-clean on clients: disconnect stale NVMe, unmount
+            # Pre-clean on clients: unmount test dirs first, then NVMe disconnect
             for client in self.fio_node:
+                # Unmount all subdirs under mount_path BEFORE NVMe disconnect
+                # (NVMe disconnect fails silently if device is still mounted)
+                try:
+                    self.ssh_obj.exec_command(
+                        node=client,
+                        command=(
+                            f"for mp in {self.mount_path}/*; do "
+                            f"  mountpoint -q \"$mp\" 2>/dev/null && umount -f \"$mp\" || true; "
+                            f"done; "
+                            f"rm -rf {self.mount_path}/* 2>/dev/null || true"
+                        ),
+                    )
+                except Exception as exc:
+                    self.logger.warning(f"[setup] Unmount test dirs on {client}: {exc}")
+                sleep_n_sec(2)
                 try:
                     self.ssh_obj.disconnect_nvme(node=client, nqn_grep="lvol")
                 except Exception as exc:
                     self.logger.warning(f"[setup] NVMe disconnect on {client}: {exc}")
-                sleep_n_sec(2)
-                self.ssh_obj.unmount_path(node=client, device=self.mount_path)
                 sleep_n_sec(2)
 
         self.logger.info(
@@ -679,7 +692,7 @@ class K8sNativeFailoverTest(TestClusterBase):
         prevents false err=84 from stale FIO headers on thin-provisioned storage.
         """
         warmup_cmd = (
-            f"fio --name={name}_warmup --directory={mount_point} "
+            f"fio --name={name}_fio --directory={mount_point} "
             f"--ioengine=libaio --direct=1 --iodepth=32 "
             f"--rw=write --bs={bs} --size={self.fio_size} "
             f"--verify=md5 --do_verify=0 --randseed={randseed} "

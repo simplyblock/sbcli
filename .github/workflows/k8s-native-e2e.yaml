@@ -235,14 +235,25 @@ jobs:
           fi
 
           for ip in ${normalized_targets}; do
-            echo "---- ${ip}: kill fio/tmux + disconnect NVMe + umount ${NFS_MOUNTPOINT} ----"
+            echo "---- ${ip}: kill fio/tmux + umount + disconnect NVMe + umount NFS ----"
             run_remote_with_retry "${ip}" "set -euxo pipefail;
               pkill -9 fio || true;
               pkill -9 tmux || true;
+              # Unmount test mount dirs BEFORE NVMe disconnect (device busy otherwise)
+              for mp in /mnt/test_location/*; do
+                [ -e \"\$mp\" ] || continue;
+                if mountpoint -q \"\$mp\" 2>/dev/null; then
+                  umount -f \"\$mp\" || umount \"\$mp\" || true;
+                elif mount | grep -q \"\$mp\"; then
+                  umount -f \"\$mp\" || umount \"\$mp\" || true;
+                fi;
+              done;
+              rm -rf /mnt/test_location/* 2>/dev/null || true;
               # Disconnect stale NVMe-oF connections from previous runs
               for nqn in \$(nvme list-subsys -o json 2>/dev/null | jq -r '.Subsystems[]?.NQN // empty' | grep lvol || true); do
                 nvme disconnect -n \"\$nqn\" || true;
               done;
+              # Unmount NFS
               mp='${NFS_MOUNTPOINT}';
               if mountpoint -q \"\$mp\"; then
                 umount -f \"\$mp\" || umount \"\$mp\" || true;
