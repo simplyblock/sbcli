@@ -700,7 +700,7 @@ class TestConnectLvolDhchap(unittest.TestCase):
         }
         patcher, _ = _make_connect_ctx([host_entry])
         try:
-            result = connect_lvol("lvol-1", host_nqn="nqn:host-a")
+            result, _err = connect_lvol("lvol-1", host_nqn="nqn:host-a")
         finally:
             patcher.stop()
 
@@ -726,7 +726,7 @@ class TestConnectLvolDhchap(unittest.TestCase):
         }
         patcher, _ = _make_connect_ctx([host_entry])
         try:
-            result = connect_lvol("lvol-1", host_nqn="nqn:host-a")
+            result, _err = connect_lvol("lvol-1", host_nqn="nqn:host-a")
         finally:
             patcher.stop()
 
@@ -745,7 +745,7 @@ class TestConnectLvolDhchap(unittest.TestCase):
 
         patcher, _ = _make_connect_ctx([{"nqn": "nqn:host-a"}])
         try:
-            result = connect_lvol("lvol-1", host_nqn=None)
+            result, _err = connect_lvol("lvol-1", host_nqn=None)
         finally:
             patcher.stop()
         self.assertFalse(result)
@@ -756,7 +756,7 @@ class TestConnectLvolDhchap(unittest.TestCase):
 
         patcher, _ = _make_connect_ctx([{"nqn": "nqn:host-a"}])
         try:
-            result = connect_lvol("lvol-1", host_nqn="nqn:intruder")
+            result, _err = connect_lvol("lvol-1", host_nqn="nqn:intruder")
         finally:
             patcher.stop()
         self.assertFalse(result)
@@ -768,7 +768,7 @@ class TestConnectLvolDhchap(unittest.TestCase):
 
         patcher, _ = _make_connect_ctx([])
         try:
-            result = connect_lvol("lvol-1", host_nqn="nqn:whoever")
+            result, _err = connect_lvol("lvol-1", host_nqn="nqn:whoever")
         finally:
             patcher.stop()
 
@@ -791,7 +791,7 @@ class TestConnectLvolDhchap(unittest.TestCase):
         # Pool-level DHCHAP: lvol.allowed_hosts contains only nqn, no keys.
         patcher, _ = _make_connect_ctx([{"nqn": "nqn:host-a"}])
         try:
-            result = connect_lvol("lvol-1", host_nqn="nqn:host-a")
+            result, _err = connect_lvol("lvol-1", host_nqn="nqn:host-a")
         finally:
             patcher.stop()
 

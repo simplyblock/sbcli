@@ -3444,7 +3444,6 @@ def suspend_storage_node(node_id, force=False, change_node_status=True):
 
     logger.info("Suspending node")
 
-    rpc_client = snode.rpc_client()
     fw_api = FirewallClient(snode, timeout=20, retry=1)
     port_type = "tcp"
     if snode.active_rdma:
