@@ -699,7 +699,7 @@ class K8sNativeFailoverTest(TestClusterBase):
             f"--numjobs={self.fio_num_jobs} --nrfiles=6"
         )
         self.logger.info(f"[warmup] Running FIO warmup on {client}: {name}")
-        self.ssh_obj.exec_command(node=client, command=warmup_cmd, timeout=300)
+        self.ssh_obj.exec_command(node=client, command=warmup_cmd, timeout=900)
         self.logger.info(f"[warmup] FIO warmup complete on {client}: {name}")
 
     def _start_client_fio(self, name: str, client: str, mount_point: str,
@@ -846,7 +846,8 @@ class K8sNativeFailoverTest(TestClusterBase):
                 try:
                     self._run_fio_warmup_ssh(pvc_name, client, mount_point, bs, randseed)
                 except Exception as exc:
-                    self.logger.warning(f"[create_pvc] FIO warmup failed for {pvc_name}: {exc}")
+                    self.logger.warning(f"[create_pvc] FIO warmup failed for {pvc_name}: {exc} — skipping FIO start")
+                    continue
 
                 self._start_client_fio(pvc_name, client, mount_point, log_file,
                                        bs=bs, randseed=randseed)
@@ -1226,8 +1227,19 @@ class K8sNativeFailoverTest(TestClusterBase):
                 self.ssh_obj.delete_files(client, [f"{self.log_path}/local-{pvc_name}*"])
                 sleep_n_sec(5)
 
-                pvc_info["log_file"] = log_file
-                self._start_client_fio(pvc_name, client, mount_point, log_file)
+                bs = f"{2 ** random.randint(2, 7)}K"
+                randseed = random.randint(1, 2**63)
+                warmup_ok = True
+                try:
+                    self._run_fio_warmup_ssh(pvc_name, client, mount_point, bs, randseed)
+                except Exception as exc:
+                    self.logger.error(f"[restart_fio] FIO warmup failed for {pvc_name}: {exc} — verify errors likely")
+                    warmup_ok = False
+
+                if warmup_ok:
+                    pvc_info["log_file"] = log_file
+                    self._start_client_fio(pvc_name, client, mount_point, log_file,
+                                           bs=bs, randseed=randseed)
                 sleep_n_sec(10)
 
             for clone_name, clone_info in self.clone_details.items():
@@ -1240,8 +1252,19 @@ class K8sNativeFailoverTest(TestClusterBase):
                 self.ssh_obj.delete_files(client, [f"{self.log_path}/local-{clone_name}*"])
                 sleep_n_sec(5)
 
-                clone_info["log_file"] = log_file
-                self._start_client_fio(clone_name, client, mount_point, log_file)
+                bs = f"{2 ** random.randint(2, 7)}K"
+                randseed = random.randint(1, 2**63)
+                warmup_ok = True
+                try:
+                    self._run_fio_warmup_ssh(clone_name, client, mount_point, bs, randseed)
+                except Exception as exc:
+                    self.logger.error(f"[restart_fio] FIO warmup failed for {clone_name}: {exc} — verify errors likely")
+                    warmup_ok = False
+
+                if warmup_ok:
+                    clone_info["log_file"] = log_file
+                    self._start_client_fio(clone_name, client, mount_point, log_file,
+                                           bs=bs, randseed=randseed)
                 sleep_n_sec(10)
         else:
             # ── K8s Job FIO restart (existing behaviour) ──
