@@ -2488,17 +2488,25 @@ def list_replication_tasks(lvol_id):
     db_controller = DBController()
     lvol = db_controller.get_lvol_by_id(lvol_id)
     node = db_controller.get_storage_node_by_id(lvol.node_id)
+    logger.info("list_replication_tasks: lvol=%s node=%s cluster=%s do_replicate=%s",
+                lvol_id, node.get_id(), node.cluster_id, lvol.do_replicate)
     tasks = []
-    for task in db_controller.get_job_tasks(node.cluster_id):
+    all_tasks = db_controller.get_job_tasks(node.cluster_id)
+    logger.info("list_replication_tasks: total cluster tasks=%d", len(all_tasks))
+    for task in all_tasks:
         if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION:
             try:
                 snap = db_controller.get_snapshot_by_id(task.function_params["snapshot_id"])
             except KeyError:
+                logger.warning("list_replication_tasks: snapshot not found for task=%s", task.uuid)
                 continue
             if snap.lvol.get_id() != lvol_id:
                 continue
+            logger.info("list_replication_tasks: matched task=%s snap=%s status=%s",
+                        task.uuid, snap.get_id(), task.status)
             tasks.append(task)
 
+    logger.info("list_replication_tasks: returning %d tasks for lvol=%s", len(tasks), lvol_id)
     return tasks
 
 
