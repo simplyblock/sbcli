@@ -148,7 +148,7 @@ def parse_args():
     parser.add_argument(
         "--inter-iteration-seconds",
         type=int,
-        default=120,
+        default=60,
         help=(
             "Fixed wait between outage iterations (seconds). The window starts "
             "once all nodes are back ONLINE after the outage; the inter-iteration "
@@ -1938,10 +1938,12 @@ class SoakRunner:
         self.ensure_prerequisites()
         nodes = self.ensure_expected_nodes()
         self.wait_for_all_online(timeout=self.args.restart_timeout)
-        # Intentionally no wait_for_cluster_stable / wait_for_data_migration_complete
-        # here. Same rationale as the inter-iteration window: we don't gate on
-        # rebalance / migration drain. _create_one_volume retries internally
-        # if the cluster transiently rejects a create.
+        # Fixed 60 s grace at startup, mirroring the inter-iteration window.
+        # We deliberately do NOT wait for rebalance / data-migration to drain:
+        # device-level migration runners are disabled on this branch and
+        # ``is_re_balancing`` can stay set indefinitely on stale tasks.
+        self.logger.log("Sleeping 60 s grace window before starting iterations")
+        time.sleep(60)
         mount_root = self.prepare_client()
         # Saved so the churn cycle can mount its newly-created volume back
         # into the same workspace tree.
