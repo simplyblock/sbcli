@@ -586,9 +586,11 @@ class K8sNativeFailoverTest(TestClusterBase):
             f"[job1]\n"
         )
 
-        # Warmup: sequential write to the SAME files with the SAME randseed.
-        # Uses do_verify=0 so FIO writes verify headers without checking reads.
-        # No time_based/runtime — finishes once the full file is written.
+        # Warmup: sequential write of zeros to the SAME files, wiping any
+        # stale FIO_HDR_MAGIC left on thin-provisioned blocks.  We must NOT
+        # use --verify here because FIO's verify rand_seed is PRNG-sequence-
+        # dependent — a sequential warmup produces different seeds than the
+        # main FIO's random IO, causing false err=84.
         warmup_config = (
             f"[global]\n"
             f"name={name}-warmup\n"
@@ -601,9 +603,7 @@ class K8sNativeFailoverTest(TestClusterBase):
             f"size={self.fio_size}\n"
             f"numjobs={self.fio_num_jobs}\n"
             f"group_reporting\n"
-            f"verify=md5\n"
-            f"do_verify=0\n"
-            f"randseed={randseed}\n"
+            f"zero_buffers\n"
             f"\n"
             f"[job1]\n"
         )
@@ -684,18 +684,26 @@ class K8sNativeFailoverTest(TestClusterBase):
         )
 
     def _run_fio_warmup_ssh(self, name: str, client: str, mount_point: str,
-                            bs: str, randseed: int):
+                            bs: str):
         """Run a blocking FIO write-only warmup on *client* via SSH.
 
-        Writes to the same files (same nrfiles, size, randseed) that the main
-        FIO run will use, so every block has a valid verify header.  This
-        prevents false err=84 from stale FIO headers on thin-provisioned storage.
+        Overwrites every block in the files the main FIO run will use with
+        zeros, wiping any stale FIO_HDR_MAGIC left on thin-provisioned
+        storage blocks by previously deleted lvols.  The main FIO will then
+        skip verification on first read (no magic) and write its own verify
+        headers on first write.
+
+        NOTE: we must NOT use --verify=md5 here.  FIO's verify rand_seed is
+        PRNG-sequence-dependent — the seed assigned to each block depends on
+        the order of IO operations, not just the offset.  A sequential warmup
+        (rw=write) produces a different PRNG sequence than the main FIO's
+        random IO (rw=randrw), causing rand_seed mismatch and false err=84.
         """
         warmup_cmd = (
             f"fio --name={name}_fio --directory={mount_point} "
             f"--ioengine=libaio --direct=1 --iodepth=32 "
             f"--rw=write --bs={bs} --size={self.fio_size} "
-            f"--verify=md5 --do_verify=0 --randseed={randseed} "
+            f"--zero_buffers "
             f"--numjobs={self.fio_num_jobs} --nrfiles=6"
         )
         self.logger.info(f"[warmup] Running FIO warmup on {client}: {name}")
@@ -838,18 +846,16 @@ class K8sNativeFailoverTest(TestClusterBase):
                 log_file = f"{self.log_path}/{pvc_name}.log"
                 self.ssh_obj.delete_files(client, [f"{mount_point}/*fio*"])
 
-                # FIO warmup: write-only pass to pre-fill all data files with
-                # valid verify headers, preventing false err=84 from stale FIO
-                # headers on thin-provisioned storage blocks.
+                # FIO warmup: write zeros to all blocks, wiping stale
+                # FIO_HDR_MAGIC from thin-provisioned storage blocks.
                 bs = f"{2 ** random.randint(2, 7)}K"
-                randseed = random.randint(1, 2**63)
                 try:
-                    self._run_fio_warmup_ssh(pvc_name, client, mount_point, bs, randseed)
+                    self._run_fio_warmup_ssh(pvc_name, client, mount_point, bs)
                 except Exception as exc:
                     self.logger.warning(f"[create_pvc] FIO warmup failed for {pvc_name}: {exc}")
 
                 self._start_client_fio(pvc_name, client, mount_point, log_file,
-                                       bs=bs, randseed=randseed)
+                                       bs=bs)
 
                 self.pvc_details[pvc_name] = {
                     "job_name": None,
