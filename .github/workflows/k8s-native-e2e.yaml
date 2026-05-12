@@ -239,13 +239,12 @@ jobs:
             run_remote_with_retry "${ip}" "set -euxo pipefail;
               pkill -9 fio || true;
               pkill -9 tmux || true;
-              # Unmount test mount dirs BEFORE NVMe disconnect (device busy otherwise)
+              # Unmount test mount dirs BEFORE NVMe disconnect (device busy otherwise).
+              # Use timeout+lazy fallback so a hung NVMe-oF device cannot block cleanup.
               for mp in /mnt/test_location/*; do
                 [ -e \"\$mp\" ] || continue;
-                if mountpoint -q \"\$mp\" 2>/dev/null; then
-                  umount -f \"\$mp\" || umount \"\$mp\" || true;
-                elif mount | grep -q \"\$mp\"; then
-                  umount -f \"\$mp\" || umount \"\$mp\" || true;
+                if mountpoint -q \"\$mp\" 2>/dev/null || mount | grep -q \"\$mp\"; then
+                  timeout 10 umount -f \"\$mp\" 2>/dev/null || umount -l \"\$mp\" 2>/dev/null || true;
                 fi;
               done;
               rm -rf /mnt/test_location/* 2>/dev/null || true;
@@ -255,12 +254,8 @@ jobs:
               done;
               # Unmount NFS
               mp='${NFS_MOUNTPOINT}';
-              if mountpoint -q \"\$mp\"; then
-                umount -f \"\$mp\" || umount \"\$mp\" || true;
-              else
-                if mount | grep -q \" \$mp \"; then
-                  umount -f \"\$mp\" || umount \"\$mp\" || true;
-                fi
+              if mountpoint -q \"\$mp\" 2>/dev/null || mount | grep -q \" \$mp \"; then
+                timeout 10 umount -f \"\$mp\" 2>/dev/null || umount -l \"\$mp\" 2>/dev/null || true;
               fi"
           done
 

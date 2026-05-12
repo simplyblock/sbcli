@@ -1036,11 +1036,22 @@ class SshUtils:
         # which collides when multiple processes start simultaneously).
         randseed = kwargs.get("randseed", random.randint(1, 2**63))
 
+        # verify_backlog: required for rw/randrw + verify=md5 to avoid false
+        # err=84.  FIO's rand_seed PRNG is shared between writes and verify-
+        # reads; in rw modes the interleaving makes seeds unpredictable.
+        # Setting verify_backlog enables TD_F_VER_BACKLOG which bypasses the
+        # rand_seed check while still verifying data via MD5.  Auto-enable
+        # for mixed read-write workloads unless the caller explicitly opts out.
+        verify_backlog = kwargs.get("verify_backlog")
+        if verify_backlog is None and rw in ("rw", "randrw", "readwrite"):
+            verify_backlog = 128
+        vbacklog_opt = f" --verify_backlog={verify_backlog}" if verify_backlog else ""
+
         # raw fio command
         fio_cmd = (
             f"fio --name={name} {location} --ioengine={ioengine} --direct=1 --iodepth={iodepth} "
             f"{time_based} --runtime={runtime} --rw={rw} {latency} --bs={bs} --size={size} --rwmixread={rwmixread} "
-            f"--verify=md5 --verify_dump=1 --verify_fatal=1 --randseed={randseed} "
+            f"--verify=md5 --verify_dump=1 --verify_fatal=1 --randseed={randseed}{vbacklog_opt} "
             f"--numjobs={numjobs} --nrfiles={nrfiles} "
             f"{log_opt} {iolog_opt} {output_fmt}{output_file}"
         ).strip()

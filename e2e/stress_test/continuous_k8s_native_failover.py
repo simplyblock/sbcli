@@ -249,7 +249,9 @@ class K8sNativeFailoverTest(TestClusterBase):
                         node=client,
                         command=(
                             f"for mp in {self.mount_path}/*; do "
-                            f"  mountpoint -q \"$mp\" 2>/dev/null && umount -f \"$mp\" || true; "
+                            f"  if mountpoint -q \"$mp\" 2>/dev/null; then "
+                            f"    timeout 10 umount -f \"$mp\" 2>/dev/null || umount -l \"$mp\" 2>/dev/null || true; "
+                            f"  fi; "
                             f"done; "
                             f"rm -rf {self.mount_path}/* 2>/dev/null || true"
                         ),
@@ -556,7 +558,9 @@ class K8sNativeFailoverTest(TestClusterBase):
             (main_config, warmup_config) — the warmup config does a sequential
             write pass of zeros to the same files, wiping any stale
             FIO_HDR_MAGIC left on thin-provisioned blocks by previously deleted
-            lvols.  This prevents false err=84 (EILSEQ) on first read.
+            lvols.  The main config uses ``verify_backlog`` so that FIO bypasses
+            the rand_seed PRNG check (broken in rw modes) while still
+            performing full MD5 data-integrity verification.
         """
         bs = f"{2 ** random.randint(2, 7)}k"
         run_id = _rand_seq(6)
@@ -580,16 +584,15 @@ class K8sNativeFailoverTest(TestClusterBase):
             f"verify=md5\n"
             f"verify_dump=1\n"
             f"verify_fatal=1\n"
+            f"verify_backlog=128\n"
             f"randseed={randseed}\n"
             f"\n"
             f"[job1]\n"
         )
 
         # Warmup: sequential write of zeros to the SAME files, wiping any
-        # stale FIO_HDR_MAGIC left on thin-provisioned blocks.  We must NOT
-        # use --verify here because FIO's verify rand_seed is PRNG-sequence-
-        # dependent — a sequential warmup produces different seeds than the
-        # main FIO's random IO, causing false err=84.
+        # stale FIO_HDR_MAGIC left on thin-provisioned blocks so that stale
+        # but self-consistent headers from prior lvols don't mask corruption.
         warmup_config = (
             f"[global]\n"
             f"name={name}-warmup\n"
@@ -688,15 +691,13 @@ class K8sNativeFailoverTest(TestClusterBase):
 
         Overwrites every block in the files the main FIO run will use with
         zeros, wiping any stale FIO_HDR_MAGIC left on thin-provisioned
-        storage blocks by previously deleted lvols.  The main FIO will then
-        skip verification on first read (no magic) and write its own verify
-        headers on first write.
+        storage blocks by previously deleted lvols.  Without this, the main
+        FIO may read stale verify headers that look valid (correct magic +
+        self-consistent MD5) and miss real corruption.
 
-        NOTE: we must NOT use --verify=md5 here.  FIO's verify rand_seed is
-        PRNG-sequence-dependent — the seed assigned to each block depends on
-        the order of IO operations, not just the offset.  A sequential warmup
-        (rw=write) produces a different PRNG sequence than the main FIO's
-        random IO (rw=randrw), causing rand_seed mismatch and false err=84.
+        The main FIO uses ``--verify_backlog`` to bypass FIO's broken
+        rand_seed PRNG check in rw modes while keeping MD5 integrity
+        verification active.
         """
         warmup_cmd = (
             f"fio --name={name}_fio --directory={mount_point} "
@@ -1662,13 +1663,14 @@ class K8sNativeFailoverTest(TestClusterBase):
             self.npcs = max_fault_tolerance
         self.logger.info(f"Running with npcs={self.npcs} simultaneous outages")
 
-        # Ensure pool
-        actual_pool = self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
-        if actual_pool and actual_pool != self.pool_name:
-            self.logger.info(f"Using existing pool '{actual_pool}' instead of '{self.pool_name}'")
-            self.pool_name = actual_pool
+        # Clean slate: delete stale pool / StorageClass / SnapshotClass from
+        # previous runs, then recreate so parameters are always up-to-date.
+        try:
+            self.sbcli_utils.delete_storage_pool(self.pool_name)
+        except Exception:
+            pass
+        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
 
-        # Create StorageClass and VolumeSnapshotClass
         cluster_id = self.cluster_id or ""
         self.k8s_utils.create_storage_class(
             name=self.STORAGE_CLASS_NAME,
@@ -1677,6 +1679,7 @@ class K8sNativeFailoverTest(TestClusterBase):
             ndcs=self.ndcs,
             npcs=self.npcs,
         )
+        self.k8s_utils.delete_volume_snapshot_class(self.SNAPSHOT_CLASS_NAME)
         self.k8s_utils.create_volume_snapshot_class(self.SNAPSHOT_CLASS_NAME)
         sleep_n_sec(5)
 
@@ -1956,13 +1959,14 @@ class K8sNativeBasicFailoverTest(K8sNativeFailoverTest):
             self.npcs = max_fault_tolerance
         self.logger.info(f"Running with npcs={self.npcs} simultaneous outages")
 
-        # Ensure pool
-        actual_pool = self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
-        if actual_pool and actual_pool != self.pool_name:
-            self.logger.info(f"Using existing pool '{actual_pool}' instead of '{self.pool_name}'")
-            self.pool_name = actual_pool
+        # Clean slate: delete stale pool / StorageClass / SnapshotClass from
+        # previous runs, then recreate so parameters are always up-to-date.
+        try:
+            self.sbcli_utils.delete_storage_pool(self.pool_name)
+        except Exception:
+            pass
+        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
 
-        # Create StorageClass and VolumeSnapshotClass
         cluster_id = self.cluster_id or ""
         self.k8s_utils.create_storage_class(
             name=self.STORAGE_CLASS_NAME,
@@ -1971,6 +1975,7 @@ class K8sNativeBasicFailoverTest(K8sNativeFailoverTest):
             ndcs=self.ndcs,
             npcs=self.npcs,
         )
+        self.k8s_utils.delete_volume_snapshot_class(self.SNAPSHOT_CLASS_NAME)
         self.k8s_utils.create_volume_snapshot_class(self.SNAPSHOT_CLASS_NAME)
         sleep_n_sec(5)
 

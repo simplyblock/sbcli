@@ -256,18 +256,15 @@ jobs:
               done;
               # Unmount NFS
               mp='${NFS_MOUNTPOINT}';
-              if mountpoint -q \"\$mp\" 2>/dev/null; then
-                umount -f \"\$mp\" || umount \"\$mp\" || true;
-              elif mount | grep -q \"\$mp\"; then
-                umount -f \"\$mp\" || umount \"\$mp\" || true;
+              if mountpoint -q \"\$mp\" 2>/dev/null || mount | grep -q \"\$mp\"; then
+                timeout 10 umount -f \"\$mp\" 2>/dev/null || umount -l \"\$mp\" 2>/dev/null || true;
               fi;
-              # Unmount and remove test mount dirs
+              # Unmount and remove test mount dirs.
+              # Use timeout+lazy fallback so a hung NVMe-oF device cannot block cleanup.
               for mp in /mnt/test_location/*; do
                 [ -e \"\$mp\" ] || continue;
-                if mountpoint -q \"\$mp\" 2>/dev/null; then
-                  umount -f \"\$mp\" || umount \"\$mp\" || true;
-                elif mount | grep -q \"\$mp\"; then
-                  umount -f \"\$mp\" || umount \"\$mp\" || true;
+                if mountpoint -q \"\$mp\" 2>/dev/null || mount | grep -q \"\$mp\"; then
+                  timeout 10 umount -f \"\$mp\" 2>/dev/null || umount -l \"\$mp\" 2>/dev/null || true;
                 fi;
               done;
               rm -rf /mnt/test_location/* 2>/dev/null || true"
