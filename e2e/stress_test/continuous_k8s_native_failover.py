@@ -1679,7 +1679,8 @@ class K8sNativeFailoverTest(TestClusterBase):
             self.sbcli_utils.delete_storage_pool(self.pool_name)
         except Exception:
             pass
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        pool_test = self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self.pool_name = self.pool_name if pool_test == self.pool_name else pool_test
 
         cluster_id = self.cluster_id or ""
         self.k8s_utils.create_storage_class(
