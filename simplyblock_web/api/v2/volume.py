@@ -220,7 +220,7 @@ def inflate(cluster: Cluster, pool: StoragePool, volume: Volume) -> Response:
 
     return Response(status_code=204)
 
-@instance_api.post('/replication_trigger', name='clusters:storage-pools:volumes:replication_start', status_code=204, responses={204: {"content": None}})
+@instance_api.post('/replication_trigger', name='clusters:storage-pools:volumes:replication_trigger', status_code=204, responses={204: {"content": None}})
 def replication_trigger(cluster: Cluster, pool: StoragePool, volume: Volume) -> Response:
     if not lvol_controller.replication_trigger(volume.get_id()):
         raise HTTPException(400, 'Failed to trigger volume snapshot replication')
