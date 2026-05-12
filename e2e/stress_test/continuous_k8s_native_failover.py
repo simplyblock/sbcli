@@ -554,10 +554,9 @@ class K8sNativeFailoverTest(TestClusterBase):
 
         Returns:
             (main_config, warmup_config) — the warmup config does a sequential
-            write pass to the exact same files with the same randseed, so every
-            block has a valid verify header before the randrw verify test begins.
-            This prevents false err=84 (EILSEQ) from stale FIO headers left on
-            thin-provisioned storage blocks by previously deleted lvols.
+            write pass of zeros to the same files, wiping any stale
+            FIO_HDR_MAGIC left on thin-provisioned blocks by previously deleted
+            lvols.  This prevents false err=84 (EILSEQ) on first read.
         """
         bs = f"{2 ** random.randint(2, 7)}k"
         run_id = _rand_seq(6)
@@ -1232,8 +1231,17 @@ class K8sNativeFailoverTest(TestClusterBase):
                 self.ssh_obj.delete_files(client, [f"{self.log_path}/local-{pvc_name}*"])
                 sleep_n_sec(5)
 
+                # Warmup: write zeros to wipe stale FIO_HDR_MAGIC before
+                # new FIO starts — mirrors the create_pvcs_with_fio flow.
+                bs = f"{2 ** random.randint(2, 7)}K"
+                try:
+                    self._run_fio_warmup_ssh(pvc_name, client, mount_point, bs)
+                except Exception as exc:
+                    self.logger.warning(f"[restart_fio] FIO warmup failed for {pvc_name}: {exc}")
+
                 pvc_info["log_file"] = log_file
-                self._start_client_fio(pvc_name, client, mount_point, log_file)
+                self._start_client_fio(pvc_name, client, mount_point, log_file,
+                                       bs=bs)
                 sleep_n_sec(10)
 
             for clone_name, clone_info in self.clone_details.items():
@@ -1246,8 +1254,15 @@ class K8sNativeFailoverTest(TestClusterBase):
                 self.ssh_obj.delete_files(client, [f"{self.log_path}/local-{clone_name}*"])
                 sleep_n_sec(5)
 
+                bs = f"{2 ** random.randint(2, 7)}K"
+                try:
+                    self._run_fio_warmup_ssh(clone_name, client, mount_point, bs)
+                except Exception as exc:
+                    self.logger.warning(f"[restart_fio] FIO warmup failed for {clone_name}: {exc}")
+
                 clone_info["log_file"] = log_file
-                self._start_client_fio(clone_name, client, mount_point, log_file)
+                self._start_client_fio(clone_name, client, mount_point, log_file,
+                                       bs=bs)
                 sleep_n_sec(10)
         else:
             # ── K8s Job FIO restart (existing behaviour) ──
