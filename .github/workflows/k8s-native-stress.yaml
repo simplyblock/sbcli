@@ -226,12 +226,10 @@ jobs:
               pkill -9 fio || true;
               pkill -9 tmux || true;
               # Unmount test mount dirs BEFORE NVMe disconnect (device busy otherwise).
-              # Use timeout+lazy fallback so a hung NVMe-oF device cannot block cleanup.
+              # Try umount unconditionally — if not mounted it just fails silently.
               for mp in /mnt/test_location/*; do
                 [ -e \"\$mp\" ] || continue;
-                if mountpoint -q \"\$mp\" 2>/dev/null || mount | grep -q \"\$mp\"; then
-                  timeout 10 umount -f \"\$mp\" 2>/dev/null || umount -l \"\$mp\" 2>/dev/null || true;
-                fi;
+                timeout 10 umount -f \"\$mp\" 2>/dev/null || umount -l \"\$mp\" 2>/dev/null || true;
               done;
               rm -rf /mnt/test_location/* 2>/dev/null || true;
               # Disconnect stale NVMe-oF connections from previous runs
@@ -240,9 +238,7 @@ jobs:
               done;
               # Unmount NFS
               mp='${NFS_MOUNTPOINT}';
-              if mountpoint -q \"\$mp\" 2>/dev/null || mount | grep -q \" \$mp \"; then
-                timeout 10 umount -f \"\$mp\" 2>/dev/null || umount -l \"\$mp\" 2>/dev/null || true;
-              fi"
+              timeout 10 umount -f \"\$mp\" 2>/dev/null || umount -l \"\$mp\" 2>/dev/null || true"
           done
 
       - name: Setup kubeconfig
