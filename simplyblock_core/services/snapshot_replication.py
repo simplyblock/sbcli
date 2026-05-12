@@ -247,6 +247,7 @@ def process_snap_replicate_finish(task, snapshot):
         except Exception as e:
             logger.error(e)
 
+    new_snapshot.source_lvol_id = snapshot.lvol.get_id()
     new_snapshot.write_to_db()
 
     if snapshot.status == SnapShot.STATUS_IN_REPLICATION:

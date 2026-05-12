@@ -2397,7 +2397,7 @@ def replicate_lvol_on_target_cluster(lvol_id):
             except KeyError:
                 continue
 
-            if snap.lvol.get_id() != lvol_id:
+            if snap.source_lvol_id != lvol_id:
                 continue
             snaps.append(snap)
 
@@ -2496,11 +2496,11 @@ def list_replication_tasks(lvol_id):
     for task in all_tasks:
         if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION:
             try:
-                snap = db_controller.get_snapshot_by_id(task.function_result)
+                snap = db_controller.get_snapshot_by_id(task.function_params["snapshot_id"])
             except KeyError:
                 logger.warning("list_replication_tasks: snapshot not found for task=%s", task.uuid)
                 continue
-            if snap.lvol.get_id() != lvol_id:
+            if snap.source_lvol_id != lvol_id:
                 continue
             logger.info("list_replication_tasks: matched task=%s snap=%s status=%s",
                         task.uuid, snap.get_id(), task.status)
@@ -2643,19 +2643,22 @@ def replicate_lvol_on_source_cluster(lvol_id, cluster_id=None, pool_uuid=None):
     for task in db_controller.get_job_tasks(target_cluster_id):
         if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION:
             logger.debug(task)
+            if not task.function_params.get("replicate_to_source"):
+                continue
+            if task.status != JobSchedule.STATUS_DONE:
+                continue
             try:
                 snap = db_controller.get_snapshot_by_id(task.function_result)
             except KeyError:
                 continue
 
-            if snap.lvol.get_id() != target_lvol_id:
+            if snap.source_lvol_id != target_lvol_id:
                 continue
             snaps.append(snap)
 
     if snaps:
         snaps = sorted(snaps, key=lambda x: x.created_at)
-        last_snapshot = snaps[-1]
-        snapshot = db_controller.get_snapshot_by_id(last_snapshot.source_replicated_snap_uuid)
+        snapshot = snaps[-1]
 
     if not snapshot:
         logger.error(f"Snapshot for replication not found for lvol: {lvol_id}")
