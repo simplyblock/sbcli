@@ -795,32 +795,42 @@ class SoakRunner:
         return rc, stdout_text, stderr_text
 
     def shutdown_with_migration_retry(self, node_id):
-        while True:
+        # On new-placement we deliberately do NOT loop on migration / rebalance
+        # markers: device-level migration runners are disabled and
+        # ``is_re_balancing`` can stay set indefinitely on stale tasks, so the
+        # graceful shutdown is permanently rejected by the controller. Try
+        # once; if rejected on a migration marker, fall back to ``--force``
+        # immediately so iterations proceed at fixed cadence.
+        rc, stdout_text, stderr_text = self.sbctl_allow_failure(
+            f"sn shutdown {node_id}",
+            timeout=300,
+        )
+        if rc == 0:
+            return
+        output = f"{stdout_text}\n{stderr_text}".lower()
+        migration_markers = (
+            "migration",
+            "migrat",
+            "rebalanc",
+            "active task",
+            "running task",
+            "in_progress",
+            "in progress",
+        )
+        if any(marker in output for marker in migration_markers):
+            self.logger.log(
+                f"Graceful shutdown of {node_id} rejected on stale migration/rebalance "
+                f"marker; falling back to --force (new-placement: runners disabled)"
+            )
             rc, stdout_text, stderr_text = self.sbctl_allow_failure(
-                f"sn shutdown {node_id}",
+                f"sn shutdown {node_id} --force",
                 timeout=300,
             )
             if rc == 0:
                 return
-            output = f"{stdout_text}\n{stderr_text}".lower()
-            retry_markers = (
-                "migration",
-                "migrat",
-                "rebalanc",
-                "active task",
-                "running task",
-                "in_progress",
-                "in progress",
-            )
-            if any(marker in output for marker in retry_markers):
-                self.logger.log(
-                    f"Shutdown of {node_id} blocked by migration/rebalance/task; retrying in 15s"
-                )
-                time.sleep(15)
-                continue
-            raise RemoteCommandError(
-                f"mgmt: command failed with rc={rc}: sbctl sn shutdown {node_id}"
-            )
+        raise RemoteCommandError(
+            f"mgmt: command failed with rc={rc}: sbctl sn shutdown {node_id}"
+        )
 
     def prepare_client(self):
         mount_root = posixpath.join("/home", self.user, f"aws_outage_soak_{self.run_id}")
