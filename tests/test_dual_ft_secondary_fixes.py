@@ -149,7 +149,7 @@ class TestConnectLvolPort(unittest.TestCase):
         db.get_storage_node_by_id.side_effect = get_node
         db.get_cluster_by_id.return_value = cluster
 
-        result = connect_lvol("vol-1")
+        result, _err = connect_lvol("vol-1")
         self.assertTrue(result)
         self.assertEqual(len(result), 3)
 
@@ -174,7 +174,7 @@ class TestConnectLvolPort(unittest.TestCase):
         db.get_storage_node_by_id.return_value = primary
         db.get_cluster_by_id.return_value = cluster
 
-        result = connect_lvol("vol-1")
+        result, _err = connect_lvol("vol-1")
         self.assertTrue(result)
         self.assertEqual(result[0]["port"], 4420)
 

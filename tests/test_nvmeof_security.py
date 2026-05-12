@@ -671,7 +671,7 @@ class TestConnectLvolTls(unittest.TestCase):
         mock_db.get_cluster_by_id.return_value = cl
         MockDBCtrl.return_value = mock_db
 
-        result = connect_lvol("lvol-1", host_nqn="nqn:host1")
+        result, _err = connect_lvol("lvol-1", host_nqn="nqn:host1")
         self.assertTrue(len(result) > 0)
         entry = result[0]
         self.assertIn("--tls", entry["connect"])
@@ -696,7 +696,7 @@ class TestConnectLvolTls(unittest.TestCase):
         mock_db.get_cluster_by_id.return_value = cl
         MockDBCtrl.return_value = mock_db
 
-        result = connect_lvol("lvol-1")
+        result, _err = connect_lvol("lvol-1")
         self.assertTrue(len(result) > 0)
         entry = result[0]
         self.assertNotIn("tls", entry)

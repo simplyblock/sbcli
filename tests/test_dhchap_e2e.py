@@ -441,7 +441,7 @@ class TestDHCHAPE2E(unittest.TestCase):
 
         with patch("simplyblock_core.controllers.lvol_controller.DBController",
                     return_value=mock_db):
-            result = lvol_ctl.connect_lvol("lvol-1", host_nqn=host_nqn)
+            result, _err = lvol_ctl.connect_lvol("lvol-1", host_nqn=host_nqn)
 
         self.assertTrue(len(result) > 0)
         cmd = result[0]["connect"]
@@ -495,7 +495,7 @@ class TestDHCHAPE2E(unittest.TestCase):
 
         with patch("simplyblock_core.controllers.lvol_controller.DBController",
                     return_value=mock_db):
-            result = lvol_ctl.connect_lvol("lvol-1", host_nqn=host_nqn)
+            result, _err = lvol_ctl.connect_lvol("lvol-1", host_nqn=host_nqn)
 
         cmd = result[0]["connect"]
         self.assertIn("--tls", cmd)
@@ -546,7 +546,7 @@ class TestDHCHAPE2E(unittest.TestCase):
 
         with patch("simplyblock_core.controllers.lvol_controller.DBController",
                     return_value=mock_db):
-            result = lvol_ctl.connect_lvol("lvol-1")
+            result, _err = lvol_ctl.connect_lvol("lvol-1")
 
         self.assertFalse(result)
 
