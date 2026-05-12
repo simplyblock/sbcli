@@ -39,14 +39,19 @@ def _node(uuid="peer-1", status=StorageNode.STATUS_ONLINE):
 class TestCheckPeerDisconnected(unittest.TestCase):
 
     def _run(self, status, quorum_result=False):
-        # _check_peer_disconnected imports ``is_node_data_plane_disconnected_quorum``
-        # locally from the services module at call time, so the patch must target
-        # the source module (where the symbol lives).
+        # _check_peer_disconnected refreshes peer_node from FDB at entry, then
+        # imports ``is_node_data_plane_disconnected_quorum`` locally from the
+        # services module at call time. Both must be patched: DBController so
+        # the refresh returns our test peer (preserving the injected status),
+        # and the quorum at its source module.
         from simplyblock_core import storage_node_ops as mod
         peer = _node(status=status)
-        with patch(
-            "simplyblock_core.services.storage_node_monitor.is_node_data_plane_disconnected_quorum",
-            return_value=quorum_result) as q:
+        db_ctrl = MagicMock()
+        db_ctrl.get_storage_node_by_id.return_value = peer
+        with patch.object(mod, "DBController", return_value=db_ctrl), \
+             patch(
+                "simplyblock_core.services.storage_node_monitor.is_node_data_plane_disconnected_quorum",
+                return_value=quorum_result) as q:
             return mod._check_peer_disconnected(peer), q
 
     # -----------------------------------------------------------------
