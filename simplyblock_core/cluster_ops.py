@@ -15,7 +15,8 @@ import requests
 
 from docker.errors import DockerException
 from simplyblock_core import utils, scripts, constants, mgmt_node_ops, storage_node_ops
-from simplyblock_core.controllers import backup_controller, cluster_events, device_controller, qos_controller, tasks_controller
+from simplyblock_core.controllers import backup_controller, cluster_events, device_controller, qos_controller, tasks_controller, tcp_ports_events
+from simplyblock_core.fw_api_client import FirewallClient
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
@@ -607,6 +608,22 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
         ols_status = Cluster.STATUS_UNREADY
     else:
         set_cluster_status(cl_id, Cluster.STATUS_IN_ACTIVATION)
+
+    # First-time activation runs while no primary LVS is serving fabric I/O
+    # yet, so the recreate paths run with activation_mode=True (peer LVS /
+    # leader / hublvol RPCs short-circuited — peer stacks aren't fully built
+    # during this phase, so they would not be safe to call). Re-activation
+    # (e.g. suspended → in_activation after JCERR, or force-reactivating an
+    # active/degraded cluster) is different: every primary's SPDK and lvstore
+    # are still alive and serving I/O — the secondary's examine of its non-
+    # leader raid0 races the live leader's blob-metadata writes and fails
+    # with bs_load_cur_extent_page_valid CRC mismatch on every retry
+    # (observed 2026-05-11, LVS_6769 on node 8084 — 22+ minute examine loop).
+    # We keep activation_mode=True (so peer LVS/hublvol RPCs stay disabled)
+    # and add only a firewall-only port-block on the live leader around the
+    # non-leader recreate in Pass 2. Port-block is benign on peers whose
+    # service isn't listening, so it's safe even against not-fully-built peers.
+    is_fresh_activation = (ols_status == Cluster.STATUS_UNREADY)
     snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     online_nodes = []
     dev_count = 0
@@ -744,16 +761,61 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
         for primary_node in primary_nodes:
             primary_node.lvstore_status = "in_creation"
             primary_node.write_to_db()
+
+            # On re-activation the primary's LVS is still alive and serving
+            # client I/O — snode's examine of its non-leader raid0 will race
+            # the leader's blob-metadata writes unless we quiesce the leader
+            # first. We do this with a firewall-only port-block on the leader:
+            # it has no effect on a peer whose service isn't listening (per
+            # design, safe even when peer stacks aren't fully built yet) but
+            # it stops the live leader from issuing writes that race the
+            # examine. We deliberately do NOT switch the helper out of
+            # activation_mode here: that would enable peer leader/distrib/
+            # lvstore/hublvol RPCs which presume the peer's full stack is up.
+            leader_blocked = False
+            leader_port = None
+            leader_ptype = "tcp"
+            if not is_fresh_activation and primary_node.status == StorageNode.STATUS_ONLINE:
+                try:
+                    leader_port = primary_node.get_lvol_subsys_port(primary_node.lvstore)
+                    leader_ptype = "udp" if primary_node.active_rdma else "tcp"
+                    FirewallClient(primary_node, timeout=3, retry=1).firewall_set_port(
+                        leader_port, leader_ptype, "block", primary_node.rpc_port)
+                    tcp_ports_events.port_deny(primary_node, leader_port)
+                    leader_blocked = True
+                    time.sleep(0.5)
+                except Exception as e:
+                    logger.warning(
+                        "Re-activation: port-block on leader %s for %s failed: %s — "
+                        "proceeding without block (secondary examine may race live leader writes)",
+                        primary_node.get_id(), primary_node.lvstore, e)
+
             try:
-                r = storage_node_ops.recreate_lvstore_on_non_leader(
-                    snode, primary_node, primary_node, activation_mode=True)
-            except storage_node_ops.LVSRestartRequiredError as e:
-                logger.error(e)
-                set_cluster_status(cl_id, ols_status)
-                raise ValueError(
-                    f"Failed to activate cluster: node {e.node_id} holds "
-                    f"partial state for LVS {e.lvs_name} (non-leader). "
-                    f"Restart node {e.node_id} before activating.")
+                try:
+                    r = storage_node_ops.recreate_lvstore_on_non_leader(
+                        snode, primary_node, primary_node, activation_mode=True)
+                except storage_node_ops.LVSRestartRequiredError as e:
+                    logger.error(e)
+                    set_cluster_status(cl_id, ols_status)
+                    raise ValueError(
+                        f"Failed to activate cluster: node {e.node_id} holds "
+                        f"partial state for LVS {e.lvs_name} (non-leader). "
+                        f"Restart node {e.node_id} before activating.")
+            finally:
+                if leader_blocked:
+                    try:
+                        FirewallClient(primary_node, timeout=3, retry=1).firewall_set_port(
+                            leader_port, leader_ptype, "allow", primary_node.rpc_port)
+                        tcp_ports_events.port_allowed(primary_node, leader_port)
+                    except Exception as ue:
+                        logger.error(
+                            "Failed to unblock leader %s:%s after non-leader recreate: %s — scheduling port_allow",
+                            primary_node.get_id(), leader_port, ue)
+                        try:
+                            tasks_controller.add_port_allow_task(
+                                primary_node.cluster_id, primary_node.get_id(), leader_port)
+                        except Exception as se:
+                            logger.error("Failed to schedule port_allow fallback: %s", se)
             if not r:
                 ret = False
 

@@ -3468,25 +3468,25 @@ def suspend_storage_node(node_id, force=False, change_node_status=True):
         # Block per-lvstore ports for secondary lvstores hosted on this node.
         # Per-LVS order:
         #   1. block client (lvs) port — multipath clients fail over to peers
-        #   2. drop our leadership immediately (set_leader=False +
-        #      force_to_non_leader) while the hublvol is still open, so JC
-        #      consensus elects a new leader on a peer whose hub path back
-        #      to us is still healthy and the lvstore-layer transitions
-        #      cleanly via mgmt-driven stepdown (not via a failed redirect)
-        #   3. sleep so the new leader is in effect on peers
-        #   4. block the hublvol port
-        # Closing the hublvol before dropping leadership lets the peer's
-        # lvstore auto-promote on the first failed redirect (lvol.c:3606
-        # spdk_lvs_trigger_leadership_switch "Leadership changed due to
-        # receive new IO"), which races our mgmt-driven stepdown and
-        # produces a writer conflict. Prior incidents:
-        #   2026-05-06 iter 2, jm_vuid=4450 — hub closed before client
-        #     (fixed by client-first ordering at the time).
-        #   2026-05-10 iter 3, jm_vuid=4245 — client-first was not enough:
-        #     multipath kept refilling the secondary's pipeline during the
-        #     1 s drain, so the secondary still auto-promoted the instant
-        #     the hub closed. Fixed by dropping leadership between the
-        #     two port blocks.
+        #   2. sleep so any pre-block in-flight IO already on our distrib
+        #      pipeline can complete locally before we close the hublvol
+        #   3. block the hublvol port — surviving peer detects "no redirect
+        #      target", JC consensus + auto-promotion on the peer elects the
+        #      new leader cleanly (the in-flight IO that triggered earlier
+        #      revisions of this code is already drained by step 2).
+        # We deliberately do NOT issue an explicit
+        # bdev_lvol_set_leader(leader=False) / bdev_distrib_force_to_non_leader
+        # at any point inside this loop. Prior incidents:
+        #   2026-05-06 iter 2, jm_vuid=4450 — hub closed before client; fixed
+        #     by client-first ordering.
+        #   2026-05-10 iter 3, jm_vuid=4245 — multipath refilled the
+        #     secondary's pipeline during the drain; tried "demote between
+        #     the two blocks" (3ae2a9b0). Still produced a writer conflict
+        #     because the explicit demote races pre-block IO still being
+        #     processed on the local distrib (port block does not halt
+        #     internal distrib processing of already-queued requests); the
+        #     IO completes as non-leader → conflict. Dropped the demote
+        #     entirely and rely on the peer's auto-promotion path.
         if snode.lvstore_stack_secondary or snode.lvstore_stack_tertiary:
             nodes = db_controller.get_primary_storage_nodes_by_secondary_node_id(node_id)
             if nodes:
@@ -3494,8 +3494,6 @@ def suspend_storage_node(node_id, force=False, change_node_status=True):
                     sec_lvs_port = node.get_lvol_subsys_port(node.lvstore)
                     sec_hub_port = node.get_hublvol_port(node.lvstore)
                     _block_port(sec_lvs_port)
-                    rpc_client.bdev_lvol_set_leader(node.lvstore, leader=False)
-                    rpc_client.bdev_distrib_force_to_non_leader(node.jm_vuid)
                     time.sleep(1)
                     if sec_hub_port:
                         _block_port(sec_hub_port)
@@ -3506,8 +3504,6 @@ def suspend_storage_node(node_id, force=False, change_node_status=True):
         own_lvs_port = snode.get_lvol_subsys_port(snode.lvstore)
         own_hub_port = snode.get_hublvol_port(snode.lvstore)
         _block_port(own_lvs_port)
-        rpc_client.bdev_lvol_set_leader(snode.lvstore, leader=False)
-        rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
         time.sleep(1)
         if own_hub_port:
             _block_port(own_hub_port)
