@@ -1572,7 +1572,7 @@ def get_replication_info(lvol_id_or_name):
         if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION:
             logger.debug(task)
             try:
-                snap = db_controller.get_snapshot_by_id(task.function_result)
+                snap = db_controller.get_snapshot_by_id(task.function_params["snapshot_id"])
             except KeyError:
                 continue
 
@@ -1588,7 +1588,7 @@ def get_replication_info(lvol_id_or_name):
         out["tasks"] = [t.to_dict() for t in tasks]
         out["replicated_count"] = len(snaps)
         last_task = tasks[-1]
-        last_snap = db_controller.get_snapshot_by_id(last_task.function_result)
+        last_snap = db_controller.get_snapshot_by_id(last_task.function_params["snapshot_id"])
         out["last_snapshot_id"] = last_snap.get_id()
         out["last_replication_time"] = last_task.updated_at
         if "end_time" in last_task.function_params and "start_time" in last_task.function_params:
@@ -2184,7 +2184,7 @@ def replication_trigger(lvol_id):
         if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION:
             logger.debug(task)
             try:
-                snap = db_controller.get_snapshot_by_id(task.function_result)
+                snap = db_controller.get_snapshot_by_id(task.function_params["snapshot_id"])
             except KeyError:
                 continue
 
@@ -2200,7 +2200,7 @@ def replication_trigger(lvol_id):
         out["tasks"] = tasks
         out["replicated_count"] = len(snaps)
         last_task = tasks[-1]
-        last_snap = db_controller.get_snapshot_by_id(last_task.function_result)
+        last_snap = db_controller.get_snapshot_by_id(last_task.function_params["snapshot_id"])
         out["last_snapshot_id"] = last_snap.get_id()
         out["last_replication_time"] = last_task.updated_at
         duration = ""
@@ -2350,7 +2350,7 @@ def replication_stop(lvol_id, delete=False):
 
     for task in tasks:
         if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION and task.status != JobSchedule.STATUS_DONE:
-            snap = db_controller.get_snapshot_by_id(task.function_result)
+            snap = db_controller.get_snapshot_by_id(task.function_params["snapshot_id"])
             if snap.lvol.uuid == lvol.uuid:
                 tasks_controller.cancel_task(task.uuid)
 
@@ -2393,7 +2393,7 @@ def replicate_lvol_on_target_cluster(lvol_id):
         if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION:
             logger.debug(task)
             try:
-                snap = db_controller.get_snapshot_by_id(task.function_result)
+                snap = db_controller.get_snapshot_by_id(task.function_params["snapshot_id"])
             except KeyError:
                 continue
 
