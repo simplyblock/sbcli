@@ -1916,24 +1916,20 @@ class K8sSbcliUtils:
         cluster_details = self.get_cluster_details(cluster_id=cid)
         cluster_name = cluster_details.get("name") or cluster_details.get("Name", cid)
 
-        k8s_resource_name = f"simplyblock-{pool_name.lower().replace('_', '-')}"
-        ns = self.k8s.namespace
-
         yaml_content = (
-            f"apiVersion: simplyblock.simplyblock.io/v1alpha1\n"
-            f"kind: SimplyBlockPool\n"
+            f"apiVersion: storage.simplyblock.io/v1alpha1\n"
+            f"kind: Pool\n"
             f"metadata:\n"
-            f"  name: {k8s_resource_name}\n"
-            f"  namespace: {ns}\n"
-            f"spec:\n"
-            f"  capacityLimit: 100Gi\n"
-            f"  clusterName: {cluster_name}\n"
             f"  name: {pool_name}\n"
+            f"  namespace: default\n"
+            f"spec:\n"
+            f"  name: {pool_name}\n"
+            f"  clusterName: {cluster_name}\n"
         )
 
         self.logger.info(
             f"[pool] No pools found — creating '{pool_name}' via kubectl apply "
-            f"(cluster={cluster_name}, resource={k8s_resource_name})"
+            f"(cluster={cluster_name})"
         )
         yaml_escaped = yaml_content.replace("'", "'\\''")
         self.k8s._exec_kubectl(f"echo '{yaml_escaped}' | kubectl apply -f -")
@@ -1966,10 +1962,33 @@ class K8sSbcliUtils:
         return out
 
     def delete_storage_pool(self, pool_name):
-        self.logger.info(f"[pool] K8s mode: skipping delete of pool '{pool_name}'")
+        """Delete a storage pool by removing its K8s CRD resource."""
+        self.logger.info(f"[pool] Deleting pool CRD '{pool_name}'")
+        self.k8s._exec_kubectl(
+            f"kubectl delete pools {pool_name} -n default "
+            f"--timeout=60s 2>/dev/null || true"
+        )
+        # Wait for pool to disappear from sbcli
+        for _ in range(12):
+            if not self.list_storage_pools():
+                self.logger.info(f"[pool] Pool '{pool_name}' deleted")
+                return
+            sleep_n_sec(5)
+        self.logger.warning(f"[pool] Pool '{pool_name}' may not be fully removed")
 
     def delete_all_storage_pools(self):
-        self.logger.info("[pool] K8s mode: skipping delete_all_storage_pools")
+        """Delete all storage pool CRD resources."""
+        out, _ = self.k8s._exec_kubectl(
+            "kubectl get pools -n default --no-headers "
+            "-o custom-columns=NAME:.metadata.name 2>/dev/null || true"
+        )
+        resources = [r.strip() for r in out.strip().splitlines() if r.strip()]
+        for res in resources:
+            self.logger.info(f"[pool] Deleting pool CRD '{res}'")
+            self.k8s._exec_kubectl(
+                f"kubectl delete pools {res} -n default "
+                f"--timeout=60s 2>/dev/null || true"
+            )
 
     # ── cluster methods ──────────────────────────────────────────────────────
 

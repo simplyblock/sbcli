@@ -1663,8 +1663,18 @@ class K8sNativeFailoverTest(TestClusterBase):
             self.npcs = max_fault_tolerance
         self.logger.info(f"Running with npcs={self.npcs} simultaneous outages")
 
-        # Clean slate: delete stale pool / StorageClass / SnapshotClass from
-        # previous runs, then recreate so parameters are always up-to-date.
+        # Clean slate: delete stale resources from previous runs, then
+        # recreate so parameters are always up-to-date.
+        # Order matters: snapshots → lvols → pool (pool can't be deleted
+        # while lvols or snapshots reference it).
+        try:
+            self.sbcli_utils.delete_all_snapshots()
+        except Exception:
+            pass
+        try:
+            self.sbcli_utils.delete_all_lvols()
+        except Exception:
+            pass
         try:
             self.sbcli_utils.delete_storage_pool(self.pool_name)
         except Exception:
@@ -1959,8 +1969,18 @@ class K8sNativeBasicFailoverTest(K8sNativeFailoverTest):
             self.npcs = max_fault_tolerance
         self.logger.info(f"Running with npcs={self.npcs} simultaneous outages")
 
-        # Clean slate: delete stale pool / StorageClass / SnapshotClass from
-        # previous runs, then recreate so parameters are always up-to-date.
+        # Clean slate: delete stale resources from previous runs, then
+        # recreate so parameters are always up-to-date.
+        # Order matters: snapshots → lvols → pool (pool can't be deleted
+        # while lvols or snapshots reference it).
+        try:
+            self.sbcli_utils.delete_all_snapshots()
+        except Exception:
+            pass
+        try:
+            self.sbcli_utils.delete_all_lvols()
+        except Exception:
+            pass
         try:
             self.sbcli_utils.delete_storage_pool(self.pool_name)
         except Exception:

@@ -310,20 +310,20 @@ jobs:
 
           echo "=== Phase 2: Patch finalizers and delete CRs ==="
           RESOURCES=(
-            "simplyblockpool.simplyblock.simplyblock.io simplyblock-pool"
-            "simplyblockpool.simplyblock.simplyblock.io simplyblock-pool2"
-            "simplyblocklvol.simplyblock.simplyblock.io simplyblock-lvol"
-            "simplyblocktask.simplyblock.simplyblock.io simplyblock-task"
-            "simplyblockdevices.simplyblock.simplyblock.io simplyblock-devices"
-            "simplyblockdevices.simplyblock.simplyblock.io simplyblock-device-action"
-            "simplyblockstoragenodes.simplyblock.simplyblock.io simplyblock-node"
-            "simplyblockstoragenodes.simplyblock.simplyblock.io simplyblock-node2"
-            "simplyblockstoragenodes.simplyblock.simplyblock.io simplyblock-node-action"
-            "simplyblockstorageclusters.simplyblock.simplyblock.io simplyblock-cluster"
-            "simplyblockstorageclusters.simplyblock.simplyblock.io simplyblock-cluster2"
-            "simplyblockstorageclusters.simplyblock.simplyblock.io simplyblock-cluster-activate"
-            "simplyblocksnapshotreplications.simplyblock.simplyblock.io simplyblock-snap-replication"
-            "simplyblocksnapshotreplications.simplyblock.simplyblock.io simplyblock-snap-replication-failback"
+            "simplyblockpool.storage.simplyblock.io simplyblock-pool"
+            "simplyblockpool.storage.simplyblock.io simplyblock-pool2"
+            "simplyblocklvol.storage.simplyblock.io simplyblock-lvol"
+            "simplyblocktask.storage.simplyblock.io simplyblock-task"
+            "simplyblockdevices.storage.simplyblock.io simplyblock-devices"
+            "simplyblockdevices.storage.simplyblock.io simplyblock-device-action"
+            "simplyblockstoragenodes.storage.simplyblock.io simplyblock-node"
+            "simplyblockstoragenodes.storage.simplyblock.io simplyblock-node2"
+            "simplyblockstoragenodes.storage.simplyblock.io simplyblock-node-action"
+            "simplyblockstorageclusters.storage.simplyblock.io simplyblock-cluster"
+            "simplyblockstorageclusters.storage.simplyblock.io simplyblock-cluster2"
+            "simplyblockstorageclusters.storage.simplyblock.io simplyblock-cluster-activate"
+            "simplyblocksnapshotreplications.storage.simplyblock.io simplyblock-snap-replication"
+            "simplyblocksnapshotreplications.storage.simplyblock.io simplyblock-snap-replication-failback"
             "pool.storage.simplyblock.io simplyblock-pool"
             "pool.storage.simplyblock.io simplyblock-pool2"
             "lvol.storage.simplyblock.io simplyblock-lvol"
@@ -416,10 +416,10 @@ jobs:
           echo ""
           echo "CRDs:"
           for CR_TYPE in \
-            "simplyblockpool.simplyblock.simplyblock.io" \
-            "simplyblocklvol.simplyblock.simplyblock.io" \
-            "simplyblockstoragenodes.simplyblock.simplyblock.io" \
-            "simplyblockstorageclusters.simplyblock.simplyblock.io" \
+            "simplyblockpool.storage.simplyblock.io" \
+            "simplyblocklvol.storage.simplyblock.io" \
+            "simplyblockstoragenodes.storage.simplyblock.io" \
+            "simplyblockstorageclusters.storage.simplyblock.io" \
             "pool.storage.simplyblock.io" \
             "lvol.storage.simplyblock.io" \
             "storagenodes.storage.simplyblock.io" \
