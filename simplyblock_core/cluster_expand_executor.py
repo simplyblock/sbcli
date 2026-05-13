@@ -229,10 +229,17 @@ class SpdkMoveExecutor(MoveExecutor):
             if primary.tertiary_node_id:
                 sibling = db.get_storage_node_by_id(primary.tertiary_node_id)
                 if sibling.status == StorageNode.STATUS_ONLINE:
-                    storage_node_ops.reattach_sibling_failover(
-                        sibling, primary,
-                        old_failover_node=donor,
-                        new_failover_node=recipient)
+                    try:
+                        storage_node_ops.reattach_sibling_failover(
+                            sibling, primary,
+                            old_failover_node=donor,
+                            new_failover_node=recipient)
+                    except Exception as e:
+                        logger.error(
+                            f"reattach_sibling_failover failed for sec_2 "
+                            f"{sibling.get_id()} of LVS@{primary.get_id()}: "
+                            f"{e!r} (will be re-established when sibling "
+                            f"restarts)")
                 else:
                     logger.warning(
                         f"re-home sec_1 for LVS@{primary.get_id()}: sibling "
