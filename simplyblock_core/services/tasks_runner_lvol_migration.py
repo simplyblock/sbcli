@@ -250,6 +250,10 @@ def _expose_lvol_on_secondary(lvol, tgt_node, tgt_sec, sec_rpc, tgt_blobid, tgt_
             return False, f"subsystem_create on secondary failed: {lvol.nqn}"
         subsystem_created_on_sec = True
 
+        if lvol.allowed_hosts:
+            from simplyblock_core.storage_node_ops import _reapply_allowed_hosts
+            _reapply_allowed_hosts(lvol, tgt_sec, sec_rpc)
+
         # Add listeners on each data NIC (non-optimized ANA since secondary is not primary)
         for iface in tgt_sec.data_nics:
             if iface.ip4_address and lvol.fabric == iface.trtype.lower():
@@ -293,7 +297,7 @@ def _expose_lvol_on_secondary(lvol, tgt_node, tgt_sec, sec_rpc, tgt_blobid, tgt_
 
     # Add namespace using the target primary's lvstore for the composite bdev name
     top_bdev = f"{tgt_node.lvstore}/{lvol.lvol_bdev}"
-    ret = sec_rpc.nvmf_subsystem_add_ns(lvol.nqn, top_bdev, lvol.uuid, lvol.guid)
+    ret = sec_rpc.nvmf_subsystem_add_ns(lvol.nqn, top_bdev, lvol.uuid, lvol.guid, nsid=lvol.ns_id)
     if not ret:
         if subsystem_created_on_sec:
             sec_rpc.subsystem_delete(lvol.nqn)
@@ -519,6 +523,19 @@ def _post_process_snap(snap, tgt_node, tgt_rpc, src_rpc, migration, t,
         if not ret_sec:
             return False, f"bdev_lvol_convert on secondary failed for {snap_uuid}"
 
+    # Update DB so the snapshot shows on the target node immediately after
+    # convert — before apply_migration_to_db() runs at end of cleanup.
+    try:
+        snap_rec = db.get_snapshot_by_id(snap_uuid)
+        if snap_rec.lvol.uuid == migration.lvol_id:
+            snap_rec.lvol.node_id = tgt_node.get_id()
+            if snap_rec.snap_bdev and '/' in snap_rec.snap_bdev:
+                short_name = snap_rec.snap_bdev.split('/', 1)[1]
+                snap_rec.snap_bdev = f"{tgt_node.lvstore}/{short_name}"
+            snap_rec.write_to_db(db.kv_store)
+    except KeyError:
+        logger.warning(f"Snapshot {snap_uuid} not found in DB for early node update")
+
     # Cleanup temp NVMe-oF plumbing for this snapshot
     _cleanup_snap_transfer(src_rpc, tgt_rpc, t)
     migration.snaps_migrated.append(snap_uuid)
@@ -629,19 +646,25 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                     })
                     continue
 
-                # Pre-existence: already on target from a sibling migration
+                # Check for a bdev already present on the target.
+                # Two distinct cases must be handled:
+                #   1. Genuinely pre-existing (placed by a sibling migration that
+                #      already ran) — snap is already in snaps_migrated → skip.
+                #   2. Leftover from a previous failed attempt of THIS migration —
+                #      snap is NOT yet in snaps_migrated → delete and retry, so we
+                #      do not resume from a partially-written bdev.
                 if tgt_rpc.get_bdevs(tgt_composite):
+                    if snap_uuid in migration.snaps_migrated:
+                        logger.info(
+                            f"Snapshot {snap_uuid} already on target; skipping transfer")
+                        migration.snaps_preexisting_on_target.append(snap_uuid)
+                        continue
                     logger.info(
-                        f"Snapshot {snap_uuid} already on target; skipping transfer")
-                    migration.snaps_preexisting_on_target.append(snap_uuid)
-                    migration.snaps_migrated.append(snap_uuid)
-                    continue
-
-                # Pre-cleanup: remove leftover from a previous failed attempt
-                try:
-                    _delete_bdev_blocking(tgt_composite, tgt_rpc)
-                except Exception:
-                    pass
+                        f"Removing leftover target bdev {tgt_composite} from failed attempt")
+                    try:
+                        _delete_bdev_blocking(tgt_composite, tgt_rpc)
+                    except Exception as e:
+                        logger.warning(f"Pre-cleanup of {tgt_composite} failed (continuing): {e}")
 
                 t, err = _setup_snap_transfer(
                     snap, snap_index, migration, src_node, tgt_node,
@@ -1052,11 +1075,13 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
 
     tgt_map_id = None
     tgt_blobid = None
+    tgt_uuid = None
     for entry in lvols_list:
         entry_name = entry.get('name', '') or entry.get('lvol_name', '')
         if entry_name in (lvol.lvol_bdev, tgt_lvol_composite):
             tgt_map_id = entry.get('map_id')
             tgt_blobid = entry.get('blobid')
+            tgt_uuid = entry.get('uuid')
             break
 
     if tgt_map_id is None:
@@ -1077,7 +1102,7 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         if tgt_sec_setup is not None:
             sec_setup_rpc = _make_rpc(tgt_sec_setup)
             ret = sec_setup_rpc.bdev_lvol_register(
-                lvol.lvol_bdev, tgt_node.lvstore, lvol.lvol_uuid, tgt_blobid,
+                lvol.lvol_bdev, tgt_node.lvstore, tgt_uuid, tgt_blobid,
                 lvol.lvol_priority_class)
             if not ret:
                 _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc)
@@ -1280,7 +1305,7 @@ def _get_secondary_rpc(node):
 
 
 
-def _handle_cleanup_source(migration, src_node, src_rpc):
+def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
     """
     Delete snapshots from the source node that are exclusively owned by the
     migrated volume, using a non-blocking async state machine so the task
@@ -1311,6 +1336,23 @@ def _handle_cleanup_source(migration, src_node, src_rpc):
     # --- First entry: initialize cleanup state ---
     if ctx.get('stage') != 'cleanup_src':
         to_delete = migration_controller.get_snaps_safe_to_delete_on_source(migration)
+
+        # Verify each snapshot to be deleted physically exists on the target
+        # before we remove anything from the source.
+        tgt_lvols = tgt_rpc.bdev_lvol_get_lvols(tgt_node.lvstore) or []
+        tgt_names = {e.get('name', '').split('/')[-1] for e in tgt_lvols}
+        for snap_uuid in to_delete:
+            try:
+                snap = db.get_snapshot_by_id(snap_uuid)
+                snap_short = _snap_short_name(snap)
+                if snap_short not in tgt_names:
+                    return False, False, (
+                        f"Target missing snapshot {snap_short} ({snap_uuid}) "
+                        "— aborting source cleanup to prevent data loss"
+                    )
+            except KeyError:
+                pass  # already gone from DB; safe to skip
+
         ctx = {'stage': 'cleanup_src', 'pending': list(to_delete), 'current_bdev': None}
         migration.transfer_context = ctx
         migration.write_to_db(db.kv_store)
@@ -1341,6 +1383,12 @@ def _handle_cleanup_source(migration, src_node, src_rpc):
             snap = db.get_snapshot_by_id(snap_uuid)
             snap_short = _snap_short_name(snap)
             bdev_name = f"{src_node.lvstore}/{snap_short}"
+            # Mark as migration-source before deletion so SPDK only drops the
+            # blob reference without freeing the physical clusters (data lives
+            # on the target now).
+            src_rpc.bdev_lvol_set_migration_flag(bdev_name)
+            if src_sec_rpc:
+                src_sec_rpc.bdev_lvol_set_migration_flag(bdev_name)
             ret, _ = src_rpc.delete_lvol(bdev_name)
             if not ret:
                 return False, False, f"delete_lvol async start failed for {bdev_name}"
@@ -1589,7 +1637,7 @@ def task_runner(task):
             next_phase = LVolMigration.PHASE_CLEANUP_SOURCE
 
         elif phase == LVolMigration.PHASE_CLEANUP_SOURCE:
-            done, suspend, error = _handle_cleanup_source(migration, src_node, src_rpc)
+            done, suspend, error = _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc)
             next_phase = LVolMigration.PHASE_COMPLETED
 
         elif phase == LVolMigration.PHASE_CLEANUP_TARGET:
