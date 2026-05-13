@@ -603,6 +603,11 @@ class K8sNativeFailoverTest(TestClusterBase):
             f"verify_fatal=1\n"
             f"verify_backlog=128\n"
             f"randseed={randseed}\n"
+            f"write_iolog=/spdkvol/{name}-iolog.log\n"
+            f"log_avg_msec=1000\n"
+            f"write_bw_log=/spdkvol/{name}-fio\n"
+            f"write_lat_log=/spdkvol/{name}-fio\n"
+            f"write_iops_log=/spdkvol/{name}-fio\n"
             f"\n"
             f"[job1]\n"
         )
@@ -734,6 +739,11 @@ class K8sNativeFailoverTest(TestClusterBase):
             bs = f"{2 ** random.randint(2, 7)}K"
         if randseed is None:
             randseed = random.randint(1, 2**63)
+
+        # iolog and fio bw/lat/iops logs sit next to the fio output log
+        iolog_file = log_file.replace(".log", "_iolog.log") if log_file else None
+        fio_log_file = log_file.replace(".log", "_fio") if log_file else None
+
         fio_thread = threading.Thread(
             target=self.ssh_obj.run_fio_test,
             args=(client, None, mount_point, log_file),
@@ -748,6 +758,8 @@ class K8sNativeFailoverTest(TestClusterBase):
                 "time_based": True,
                 "runtime": self.FIO_RUNTIME,
                 "randseed": randseed,
+                "iolog_file": iolog_file,
+                "fio_log_file": fio_log_file,
             },
         )
         fio_thread.start()
