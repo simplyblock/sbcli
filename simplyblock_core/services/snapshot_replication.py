@@ -138,6 +138,8 @@ def delete_last_snapshot_if_needed(this_task, lvol):
         if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION:
             if task.get_id() == this_task.get_id():
                 continue
+            if task.status != JobSchedule.STATUS_DONE:
+                continue
             logger.debug(task)
             try:
                 snap = db.get_snapshot_by_id(task.function_params["snapshot_id"])

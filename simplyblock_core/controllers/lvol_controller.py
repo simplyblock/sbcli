@@ -2393,7 +2393,7 @@ def replicate_lvol_on_target_cluster(lvol_id):
         if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION:
             logger.debug(task)
             try:
-                snap = db_controller.get_snapshot_by_id(task.function_params["snapshot_id"])
+                snap = db_controller.get_snapshot_by_id(task.function_result)
             except KeyError:
                 continue
 
@@ -2403,9 +2403,7 @@ def replicate_lvol_on_target_cluster(lvol_id):
 
     if snaps:
         snaps = sorted(snaps, key=lambda x: x.created_at)
-        last_snapshot = snaps[-1]
-        rep_snap = db_controller.get_snapshot_by_id(last_snapshot.target_replicated_snap_uuid)
-        snapshot = rep_snap
+        snapshot = snaps[-1]
 
     if not snapshot:
         logger.error(f"Snapshot for replication not found for lvol: {lvol_id}")
