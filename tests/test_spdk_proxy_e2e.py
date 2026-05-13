@@ -24,6 +24,11 @@ import requests
 if sys.platform == "win32":
     raise unittest.SkipTest("AF_UNIX not available on Windows")
 
+# Make sure the env defaults needed by spdk_http_proxy_server are set
+# before the module is imported below.
+sys.path.insert(0, os.path.dirname(__file__))
+import conftest_proxy  # noqa: F401
+
 # ---------------------------------------------------------------------------
 # Mock SPDK unix socket server
 # ---------------------------------------------------------------------------
@@ -104,7 +109,8 @@ def _start_proxy(sock_path, http_port, max_concurrent=4, timeout=5):
     We import and configure the module, then run the server.
     Returns a thread + a stop event.
     """
-    import simplyblock_core.services.spdk_http_proxy_server as mod
+    from conftest_proxy import import_proxy_module
+    mod = import_proxy_module()
 
     # Reconfigure module globals
     mod.rpc_sock = sock_path
@@ -256,6 +262,37 @@ class TestProxyE2E(unittest.TestCase):
             self._post("spdk_get_version")
         time.sleep(0.2)
         self.assertEqual(len(self._mod.ServerHandler.server_session), 0)
+
+    def test_crypto_key_endpoint_unwraps_and_forwards(self):
+        """POST /v1/crypto_key should unwrap with the per-request KMS and forward accel_crypto_key_create."""
+        wrapped = {"type": "local", "keys": ["a" * 64, "b" * 64]}
+        r = requests.post(
+            f"http://127.0.0.1:{self._http_port}/v1/crypto_key",
+            data=json.dumps({"name": "key_crypto_test", "wrapped_keys": wrapped}),
+            auth=("test", "test"),
+            timeout=5,
+        )
+        self.assertEqual(r.status_code, 200)
+        # Mock SPDK returns True for unknown method; assert it received the expected call.
+        self.assertIn("accel_crypto_key_create", self._spdk_server.call_log)
+
+    def test_crypto_key_endpoint_rejects_malformed_body(self):
+        r = requests.post(
+            f"http://127.0.0.1:{self._http_port}/v1/crypto_key",
+            data="not json",
+            auth=("test", "test"),
+            timeout=5,
+        )
+        self.assertEqual(r.status_code, 400)
+
+    def test_crypto_key_endpoint_requires_auth(self):
+        r = requests.post(
+            f"http://127.0.0.1:{self._http_port}/v1/crypto_key",
+            data=json.dumps({"name": "x", "wrapped_keys": {"type": "local", "keys": ["a" * 64, "b" * 64]}}),
+            auth=("wrong", "creds"),
+            timeout=5,
+        )
+        self.assertEqual(r.status_code, 401)
 
 
 class TestProxyReadinessGate(unittest.TestCase):

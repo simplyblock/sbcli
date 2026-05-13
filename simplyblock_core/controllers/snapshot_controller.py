@@ -793,8 +793,7 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     if snap.lvol.crypto_bdev:
         with create_kms_connection(cluster) as kms:
             try:
-                key1, key2 = kms.get_data_encryption_keys(snap.lvol)
-                kms.import_data_encryption_keys(lvol, (key1, key2))
+                kms.copy_data_encryption_keys(snap.lvol, lvol)
             except KMSException:
                 msg = f"Failed to copy encryption keys for clone {lvol.crypto_bdev}"
                 logger.exception(msg)

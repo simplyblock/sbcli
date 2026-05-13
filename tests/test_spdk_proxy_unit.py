@@ -188,6 +188,7 @@ class TestDoPostBrokenPipe(unittest.TestCase):
         handler = proxy_mod.ServerHandler.__new__(proxy_mod.ServerHandler)
         proxy_mod.ServerHandler.server_session = []
         handler.key = "dGVzdDp0ZXN0"
+        handler.path = "/"
 
         body = json.dumps({"id": 1, "method": "test"}).encode()
         header_map = {

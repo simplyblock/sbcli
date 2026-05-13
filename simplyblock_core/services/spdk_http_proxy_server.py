@@ -13,6 +13,10 @@ from http.server import HTTPServer
 from http.server import ThreadingHTTPServer
 from http.server import BaseHTTPRequestHandler
 
+from simplyblock_core.kms import (
+    KMSException,
+    create_kms_connection_for_wrapped,
+)
 from simplyblock_core.settings import Settings
 
 
@@ -126,6 +130,24 @@ def rpc_call(req):
     finally:
         spdk_semaphore.release()
 
+
+def rpc_call_redacted(req):
+    """Forward an RPC to SPDK without logging request params.
+
+    Used when the JSON-RPC params contain key material (e.g.
+    ``accel_crypto_key_create``) that must not be persisted to logs.
+    """
+    logger.info(f"active threads: {threading.active_count()}")
+    logger.info(f"active unix sockets: {len(unix_sockets)}")
+    req_data = json.loads(req.decode('ascii'))
+    req_time = time.time_ns()
+    logger.info(f"Request:{req_time} function: {str(req_data['method'])} (params redacted)")
+    spdk_semaphore.acquire()
+    try:
+        return _rpc_call_inner(req, req_data, req_time)
+    finally:
+        spdk_semaphore.release()
+
 def _rpc_call_inner(req, req_data, req_time):
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     unix_sockets.append(sock)
@@ -176,6 +198,9 @@ def _rpc_call_inner(req, req_data, req_time):
             pass
 
 
+CRYPTO_KEY_PATH = "/v1/crypto_key"
+
+
 class ServerHandler(BaseHTTPRequestHandler):
     server_session: list[int] = []
     key = ""
@@ -200,6 +225,28 @@ class ServerHandler(BaseHTTPRequestHandler):
         self.send_header('Content-type', 'text/html')
         self.end_headers()
 
+    def _send_status(self, status: int):
+        self.send_response(status)
+        self.send_header('Content-type', 'text/html')
+        self.end_headers()
+
+    def _read_body(self) -> bytes:
+        if "Content-Length" in self.headers:
+            return self.rfile.read(int(self.headers['Content-Length']))
+        if "chunked" in self.headers.get("Transfer-Encoding", ""):
+            data_string = b''
+            while True:
+                line = self.rfile.readline().strip()
+                chunk_length = int(line, 16)
+                if chunk_length != 0:
+                    chunk = self.rfile.read(chunk_length)
+                    data_string += chunk
+                self.rfile.readline()
+                if chunk_length == 0:
+                    break
+            return data_string
+        return b''
+
     def do_POST(self):
         req_time = time.time_ns()
         self.server_session.append(req_time)
@@ -207,44 +254,88 @@ class ServerHandler(BaseHTTPRequestHandler):
         logger.info(f"active server session: {len(self.server_session)}")
         if self.headers['Authorization'] != 'Basic ' + self.key:
             self.do_AUTHHEAD()
-        else:
+            self.server_session.remove(req_time)
+            return
+
+        try:
             read_line_time_start = time.time_ns()
-            if "Content-Length" in self.headers:
-                data_string = self.rfile.read(int(self.headers['Content-Length']))
-            elif "chunked" in self.headers.get("Transfer-Encoding", ""):
-                data_string = b''
-                while True:
-                    line = self.rfile.readline().strip()
-                    chunk_length = int(line, 16)
-
-                    if chunk_length != 0:
-                        chunk = self.rfile.read(chunk_length)
-                        data_string += chunk
-
-                    # Each chunk is followed by an additional empty newline
-                    # that we have to consume.
-                    self.rfile.readline()
-
-                    # Finally, a chunk size of 0 is an end indication
-                    if chunk_length == 0:
-                        break
+            data_string = self._read_body()
             read_line_time_end = time.time_ns()
             time_diff = read_line_time_end - read_line_time_start
             logger.info(f"read_line_time_diff: {time_diff}")
             read_line_time_diff[read_line_time_start] = time_diff
-            try:
-                response = rpc_call(data_string)
-                if response is not None:
-                    self.do_HEAD()
-                    self.wfile.write(bytes(response.encode(encoding='ascii')))
-                else:
-                    self.do_HEAD_no_content()
 
-            except BrokenPipeError:
-                logger.warning(f"BrokenPipeError: client disconnected before response could be sent (request {req_time})")
-            except ValueError:
-                self.do_INTERNALERROR()
-        self.server_session.remove(req_time)
+            if self.path == CRYPTO_KEY_PATH:
+                self._handle_crypto_key(data_string, req_time)
+            else:
+                self._handle_rpc_passthrough(data_string, req_time)
+        finally:
+            self.server_session.remove(req_time)
+
+    def _handle_rpc_passthrough(self, data_string: bytes, req_time: int):
+        try:
+            response = rpc_call(data_string)
+            if response is not None:
+                self.do_HEAD()
+                self.wfile.write(bytes(response.encode(encoding='ascii')))
+            else:
+                self.do_HEAD_no_content()
+        except BrokenPipeError:
+            logger.warning(f"BrokenPipeError: client disconnected before response could be sent (request {req_time})")
+        except ValueError:
+            self.do_INTERNALERROR()
+
+    def _handle_crypto_key(self, data_string: bytes, req_time: int):
+        """Unwrap a DEK pair via the proxy's KMS and forward to ``accel_crypto_key_create``.
+
+        Request body: ``{"name": "<spdk-keyring-name>", "wrapped_keys": {...}}``
+        where the ``wrapped_keys`` payload was produced by
+        ``KMS.get_wrapped_data_encryption_keys`` on the control plane.
+        Neither the wrapped payload nor the unwrapped plaintext is
+        ever written to logs from this endpoint.
+        """
+        try:
+            payload = json.loads(data_string.decode('ascii'))
+            name = payload['name']
+            wrapped = payload['wrapped_keys']
+        except (ValueError, KeyError, TypeError) as e:
+            logger.warning(f"Malformed crypto_key request (req {req_time}): {type(e).__name__}")
+            self._send_status(400)
+            return
+
+        try:
+            with create_kms_connection_for_wrapped(wrapped) as kms:
+                key1, key2 = kms.unwrap_data_encryption_keys(wrapped)
+        except KMSException as e:
+            logger.error(f"KMS unwrap failed for crypto_key {name} (req {req_time}): {e}")
+            self._send_status(502)
+            return
+
+        rpc_payload = json.dumps({
+            'id': 1,
+            'method': 'accel_crypto_key_create',
+            'params': {
+                'cipher': 'AES_XTS',
+                'name': name,
+                'key': key1,
+                'key2': key2,
+            },
+        }).encode('ascii')
+
+        try:
+            response = rpc_call_redacted(rpc_payload)
+        except BrokenPipeError:
+            logger.warning(f"BrokenPipeError on crypto_key (req {req_time})")
+            return
+        except ValueError:
+            self.do_INTERNALERROR()
+            return
+
+        if response is not None:
+            self.do_HEAD()
+            self.wfile.write(response.encode('ascii'))
+        else:
+            self.do_HEAD_no_content()
 
 
 def run_server(host, port, user, password, is_threading_enabled=False):

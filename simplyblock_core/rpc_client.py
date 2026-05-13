@@ -584,15 +584,44 @@ class RPCClient:
         }
         return self._request("bdev_crypto_create", params)
 
-    def lvol_crypto_key_create(self, name, key, key2):
-        # todo: mask the keys so that they don't show up in logs
-        params = {
-            "cipher": "AES_XTS",
-            "key": key,
-            "key2": key2,
-            "name": name
-        }
-        return self._request("accel_crypto_key_create", params)
+    def lvol_crypto_key_create(self, name, wrapped_keys):
+        """Create an AES-XTS keyring entry in SPDK from a wrapped DEK payload.
+
+        The ``wrapped_keys`` dict is produced by
+        ``KMS.get_wrapped_data_encryption_keys`` on the control plane
+        and is opaque to this client. It is forwarded verbatim to the
+        SPDK proxy's ``/v1/crypto_key`` endpoint, which unwraps it
+        (decrypting against Vault when the proxy's KMS backend is
+        ``vault``) and then issues ``accel_crypto_key_create`` to
+        SPDK. The core therefore never observes plaintext DEKs.
+        """
+        url = f"{self.url.rstrip('/')}/v1/crypto_key"
+        try:
+            response = self.session.post(
+                url,
+                data=json.dumps({"name": name, "wrapped_keys": wrapped_keys}),
+                timeout=self.timeout,
+            )
+        except Exception:
+            raise RPCException("connection error")
+
+        if response.status_code != 200:
+            logger.error("crypto_key create failed: HTTP %s", response.status_code)
+            return None
+
+        ret_content = response.content
+        try:
+            data = response.json()
+        except Exception:
+            return ret_content
+
+        if isinstance(data, dict):
+            if 'error' in data and data['error'] is not None:
+                logger.error("crypto_key create returned error: %s", data['error'])
+                return None
+            if 'result' in data:
+                return data['result']
+        return data
 
     def lvol_crypto_delete(self, name):
         params = {"name": name}
