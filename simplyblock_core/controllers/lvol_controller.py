@@ -2744,6 +2744,7 @@ def replicate_lvol_on_source_cluster(lvol_id, cluster_id=None, pool_uuid=None):
 
     new_lvol.status = LVol.STATUS_ONLINE
     new_lvol.from_source = True
+    new_lvol.do_replicate = True
     new_lvol.write_to_db(db_controller.kv_store)
     lvol_events.lvol_replicated(new_lvol, new_lvol)
     logger.debug(f"new lvol from_source: {new_lvol.from_source}")
