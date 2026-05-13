@@ -672,6 +672,7 @@ jobs:
             clusterName: simplyblock-cluster
             clusterImage: "${SB_REPO}:${SB_TAG}"
             spdkImage: "${SPDK_IMAGE}"
+            spdkProxyImage: "${SB_REPO}:${SB_TAG}"
             mgmtIfname: ${MGMT_IFC}
             dataIfname:
               - ${DATA_NICS}
@@ -734,8 +735,6 @@ jobs:
             clusterImage: "${SB_REPO}:${SB_TAG}"
             spdkImage: "${SPDK_IMAGE}"
             spdkProxyImage: "${SB_REPO}:${SB_TAG}"
-            deviceModel: "SAMSUNG MZQLB1T9HAJR-00007"
-            sizeRange: "1.7T-2T"
             mgmtIfname: ${MGMT_IFC}
             dataIfname:
               - ${DATA_NICS}
