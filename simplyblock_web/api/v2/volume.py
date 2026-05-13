@@ -57,6 +57,9 @@ class _CloneParams(BaseModel):
     name: str
     snapshot_id: Annotated[Optional[str], Field(pattern=core_utils.UUID_PATTERN)]
     size: util.Size = 0
+    pvc_name: Optional[str] = None
+    pvc_namespace: Optional[str] = None
+    delete_snap_on_lvol_delete: bool = False
 
 
 @api.post('/', name='clusters:storage-pools:volumes:create', status_code=201, responses={201: {"content": None}})
@@ -104,6 +107,9 @@ def add(
             data.snapshot_id,
             data.name,
             data.size if data.size is not None else 0,
+            pvc_name=data.pvc_name,
+            pvc_namespace=data.pvc_namespace,
+            delete_snap_on_lvol_delete=data.delete_snap_on_lvol_delete,
         )
     else:
         raise AssertionError('unreachable')
@@ -332,5 +338,16 @@ def resume(cluster: Cluster, pool: StoragePool, volume: Volume) -> bool:
     return lvol_controller.resume_lvol(volume.get_id())
 
 @instance_api.get('/clone', name='clusters:storage-pools:volumes:clone')
-def clone(cluster: Cluster, pool: StoragePool, volume: Volume, clone_name: str) -> bool:
-    return lvol_controller.clone_lvol(volume.get_id(), clone_name)
+def clone(
+        cluster: Cluster, pool: StoragePool, volume: Volume,
+        clone_name: str,
+        new_size: Optional[str] = None,
+        pvc_name: Optional[str] = None,
+) -> bool:
+    size = None
+    if new_size is not None:
+        try:
+            size = core_utils.parse_size(new_size)
+        except Exception:
+            raise HTTPException(400, f'Invalid new_size value: {new_size!r}')
+    return lvol_controller.clone_lvol(volume.get_id(), clone_name, size, pvc_name)
