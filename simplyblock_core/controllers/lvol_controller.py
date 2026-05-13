@@ -2641,8 +2641,6 @@ def replicate_lvol_on_source_cluster(lvol_id, cluster_id=None, pool_uuid=None):
     for task in db_controller.get_job_tasks(target_cluster_id):
         if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION:
             logger.debug(task)
-            if not task.function_params.get("replicate_to_source"):
-                continue
             if task.status != JobSchedule.STATUS_DONE:
                 continue
             try:
