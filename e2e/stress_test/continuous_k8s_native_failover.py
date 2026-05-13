@@ -385,6 +385,23 @@ class K8sNativeFailoverTest(TestClusterBase):
         self.logger.info("Inside K8sNativeFailoverTest.teardown()")
         self.stop_root_monitor()
 
+        # Kill fio on client hosts BEFORE deleting PVCs to avoid IO errors
+        # from volumes being deleted while fio is still running
+        if self.use_client_fio and self.ssh_obj:
+            self.logger.info("[teardown] Killing fio processes on client hosts...")
+            for client in self.fio_node:
+                try:
+                    self.ssh_obj.exec_command(
+                        node=client,
+                        command="sudo pkill -9 fio 2>/dev/null; "
+                                "sudo tmux kill-server 2>/dev/null || true"
+                    )
+                except Exception as exc:
+                    self.logger.warning(
+                        f"[teardown] Failed to kill fio on {client}: {exc}"
+                    )
+            sleep_n_sec(5)
+
         # Kill orphaned K8s FIO Jobs so they don't interfere with next run
         if self.k8s_utils:
             try:
@@ -1525,6 +1542,64 @@ class K8sNativeFailoverTest(TestClusterBase):
                 self.logger.error(f"IO stats validation error: {e}")
                 break
 
+    # ── Wait for FIO completion ─────────────────────────────────────────────
+
+    def wait_for_fio_complete(self, timeout: int = None):
+        """Wait for all active FIO workloads to finish naturally.
+
+        Client mode: poll fio processes on client hosts until none remain.
+        K8s mode: wait for all FIO K8s Jobs to reach completion.
+
+        Args:
+            timeout: Max seconds to wait. Defaults to FIO_RUNTIME + 300.
+        """
+        if timeout is None:
+            timeout = self.FIO_RUNTIME + 300
+
+        if self.use_client_fio:
+            self.logger.info(
+                f"[wait_fio] Waiting for FIO to complete on client hosts "
+                f"(timeout={timeout}s) ..."
+            )
+            # Join FIO launch threads first
+            for t in self.fio_threads:
+                t.join(timeout=10)
+            self.fio_threads = []
+
+            self.common_utils.manage_fio_threads(
+                self.fio_node, [], timeout=timeout
+            )
+            self.logger.info("[wait_fio] All client FIO processes finished.")
+        else:
+            self._ensure_k8s_utils()
+            self.logger.info(
+                f"[wait_fio] Waiting for FIO K8s Jobs to complete "
+                f"(timeout={timeout}s) ..."
+            )
+            for pvc_name, pvc_info in self.pvc_details.items():
+                job_name = pvc_info.get("job_name")
+                if job_name:
+                    try:
+                        self.k8s_utils.wait_job_complete(
+                            job_name, timeout=timeout
+                        )
+                    except Exception as exc:
+                        self.logger.warning(
+                            f"[wait_fio] Job {job_name} did not complete: {exc}"
+                        )
+            for clone_name, clone_info in self.clone_details.items():
+                job_name = clone_info.get("job_name")
+                if job_name:
+                    try:
+                        self.k8s_utils.wait_job_complete(
+                            job_name, timeout=timeout
+                        )
+                    except Exception as exc:
+                        self.logger.warning(
+                            f"[wait_fio] Job {job_name} did not complete: {exc}"
+                        )
+            self.logger.info("[wait_fio] All K8s FIO Jobs finished.")
+
     # ── FIO Validation ───────────────────────────────────────────────────────
 
     def _save_fio_pod_logs(self, job_name: str, resource_name: str):
@@ -1778,6 +1853,7 @@ class K8sNativeFailoverTest(TestClusterBase):
                     warn_only=True,
                 )
                 self.validate_migration_for_node(self.outage_start_time, 2000, None, 60)
+                self.wait_for_fio_complete()
                 self.validate_fio_jobs()
 
                 self.logger.info(f"=== Iteration {iteration} complete ===")
@@ -2078,6 +2154,7 @@ class K8sNativeBasicFailoverTest(K8sNativeFailoverTest):
                     warn_only=True,
                 )
                 self.validate_migration_for_node(self.outage_start_time, 2000, None, 60)
+                self.wait_for_fio_complete()
                 self.validate_fio_jobs()
 
                 self.logger.info(f"=== Iteration {iteration} complete ===")

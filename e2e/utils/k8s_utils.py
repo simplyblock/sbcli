@@ -1912,24 +1912,17 @@ class K8sSbcliUtils:
             return actual
 
         # No pools at all — create one via kubectl apply
-        cid = cluster_id or self.cluster_id
-        cluster_details = self.get_cluster_details(cluster_id=cid)
-        cluster_name = cluster_details.get("name") or cluster_details.get("Name", cid)
-
         yaml_content = (
             f"apiVersion: storage.simplyblock.io/v1alpha1\n"
             f"kind: Pool\n"
             f"metadata:\n"
             f"  name: {pool_name}\n"
             f"  namespace: default\n"
-            f"spec:\n"
-            f"  name: {pool_name}\n"
-            f"  clusterName: {cluster_name}\n"
+            f"spec: {{}}\n"
         )
 
         self.logger.info(
-            f"[pool] No pools found — creating '{pool_name}' via kubectl apply "
-            f"(cluster={cluster_name})"
+            f"[pool] No pools found — creating '{pool_name}' via kubectl apply"
         )
         yaml_escaped = yaml_content.replace("'", "'\\''")
         self.k8s._exec_kubectl(f"echo '{yaml_escaped}' | kubectl apply -f -")
