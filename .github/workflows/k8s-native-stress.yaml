@@ -733,6 +733,7 @@ jobs:
             clusterName: simplyblock-cluster
             clusterImage: "${SB_REPO}:${SB_TAG}"
             spdkImage: "${SPDK_IMAGE}"
+            spdkProxyImage: "${SB_REPO}:${SB_TAG}"
             mgmtIfname: ${MGMT_IFC}
             dataIfname:
               - ${DATA_NICS}
