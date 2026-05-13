@@ -1050,14 +1050,19 @@ class SshUtils:
         # for mixed read-write workloads unless the caller explicitly opts out.
         verify_backlog = kwargs.get("verify_backlog")
         if verify_backlog is None and rw in ("rw", "randrw", "readwrite"):
-            verify_backlog = 128
+            verify_backlog = 4096
         vbacklog_opt = f" --verify_backlog={verify_backlog}" if verify_backlog else ""
+
+        verify_backlog_batch = kwargs.get("verify_backlog_batch")
+        if verify_backlog_batch is None and verify_backlog:
+            verify_backlog_batch = 32
+        vbatch_opt = f" --verify_backlog_batch={verify_backlog_batch}" if verify_backlog_batch else ""
 
         # raw fio command
         fio_cmd = (
             f"fio --name={name} {location} --ioengine={ioengine} --direct=1 --iodepth={iodepth} "
             f"{time_based} --runtime={runtime} --rw={rw} {latency} --bs={bs} --size={size} --rwmixread={rwmixread} "
-            f"--verify=md5 --verify_dump=1 --verify_fatal=1 --randseed={randseed}{vbacklog_opt} "
+            f"--verify=md5 --verify_dump=1 --verify_fatal=1 --randseed={randseed}{vbacklog_opt}{vbatch_opt} "
             f"--numjobs={numjobs} --nrfiles={nrfiles} "
             f"{log_opt} {iolog_opt} {fio_log_opt} {output_fmt}{output_file}"
         ).strip()

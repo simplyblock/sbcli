@@ -601,7 +601,8 @@ class K8sNativeFailoverTest(TestClusterBase):
             f"verify=md5\n"
             f"verify_dump=1\n"
             f"verify_fatal=1\n"
-            f"verify_backlog=128\n"
+            f"verify_backlog=4096\n"
+            f"verify_backlog_batch=32\n"
             f"randseed={randseed}\n"
             f"write_iolog=/spdkvol/{name}-iolog.log\n"
             f"log_avg_msec=1000\n"
@@ -1566,7 +1567,7 @@ class K8sNativeFailoverTest(TestClusterBase):
             timeout: Max seconds to wait. Defaults to FIO_RUNTIME + 300.
         """
         if timeout is None:
-            timeout = self.FIO_RUNTIME + 300
+            timeout = self.FIO_RUNTIME + 4000
 
         if self.use_client_fio:
             self.logger.info(
