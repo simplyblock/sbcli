@@ -2320,6 +2320,173 @@
         }
       }
     },
+    "/api/v2/clusters/{cluster_id}/storage-pools/{pool_id}/host": {
+      "post": {
+        "summary": "Clusters:Storage-Pools:Add-Host",
+        "operationId": "clusters_storage_pools_add_host_api_v2_clusters__cluster_id__storage_pools__pool_id__host_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Cluster Id"
+            }
+          },
+          {
+            "name": "pool_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Pool Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PoolHostParams"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "summary": "Clusters:Storage-Pools:Remove-Host",
+        "operationId": "clusters_storage_pools_remove_host_api_v2_clusters__cluster_id__storage_pools__pool_id__host_delete",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Cluster Id"
+            }
+          },
+          {
+            "name": "pool_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Pool Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PoolHostParams"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/clusters/{cluster_id}/storage-pools/{pool_id}/master-lvols": {
+      "get": {
+        "summary": "Clusters:Storage-Pools:Master-Lvols",
+        "operationId": "clusters_storage_pools_master_lvols_api_v2_clusters__cluster_id__storage_pools__pool_id__master_lvols_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Cluster Id"
+            }
+          },
+          {
+            "name": "pool_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Pool Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v2/clusters/{cluster_id}/storage-pools/{pool_id}/volumes/": {
       "get": {
         "summary": "Clusters:Storage-Pools:Volumes:List",
@@ -3167,6 +3334,22 @@
               "type": "string",
               "format": "uuid",
               "title": "Volume Id"
+            }
+          },
+          {
+            "name": "host_nqn",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Host Nqn"
             }
           }
         ],
@@ -4167,14 +4350,8 @@
             "in": "path",
             "required": true,
             "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "string",
+              "format": "uuid",
               "title": "Cluster Id"
             }
           }
@@ -4189,6 +4366,181 @@
             }
           }
         },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/clusters/{cluster_id}/backups/export": {
+      "get": {
+        "summary": "Clusters:Backups:Export",
+        "operationId": "clusters_backups_export_api_v2_clusters__cluster_id__backups_export_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Cluster Id"
+            }
+          },
+          {
+            "name": "backup_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Export only the chain containing this backup UUID",
+              "title": "Backup Id"
+            },
+            "description": "Export only the chain containing this backup UUID"
+          },
+          {
+            "name": "lvol_name",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Export all completed backups for this lvol name",
+              "title": "Lvol Name"
+            },
+            "description": "Export all completed backups for this lvol name"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/clusters/{cluster_id}/backups/source-switch": {
+      "post": {
+        "summary": "Clusters:Backups:Source-Switch",
+        "operationId": "clusters_backups_source_switch_api_v2_clusters__cluster_id__backups_source_switch_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Cluster Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/_BackupSourceSwitchParams"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/clusters/{cluster_id}/backups/sources": {
+      "get": {
+        "summary": "Clusters:Backups:Sources",
+        "operationId": "clusters_backups_sources_api_v2_clusters__cluster_id__backups_sources_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Cluster Id"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -5448,6 +5800,10 @@
           "completed_at": {
             "type": "integer",
             "title": "Completed At"
+          },
+          "source_cluster_id": {
+            "type": "string",
+            "title": "Source Cluster Id"
           }
         },
         "type": "object",
@@ -5464,7 +5820,8 @@
           "size",
           "allowed_hosts",
           "created_at",
-          "completed_at"
+          "completed_at",
+          "source_cluster_id"
         ],
         "title": "BackupDTO"
       },
@@ -5614,15 +5971,15 @@
             "minimum": 0.0,
             "title": "Utilization Warning"
           },
-          "provisioned_cacacity_critical": {
+          "provisioned_capacity_critical": {
             "type": "integer",
             "minimum": 0.0,
-            "title": "Provisioned Cacacity Critical"
+            "title": "Provisioned Capacity Critical"
           },
-          "provisioned_cacacity_warning": {
+          "provisioned_capacity_warning": {
             "type": "integer",
             "minimum": 0.0,
-            "title": "Provisioned Cacacity Warning"
+            "title": "Provisioned Capacity Warning"
           },
           "node_affinity": {
             "type": "boolean",
@@ -5665,8 +6022,8 @@
           "ha",
           "utliziation_critical",
           "utilization_warning",
-          "provisioned_cacacity_critical",
-          "provisioned_cacacity_warning",
+          "provisioned_capacity_critical",
+          "provisioned_capacity_warning",
           "node_affinity",
           "anti_affinity",
           "secret",
@@ -5862,6 +6219,32 @@
             "format": "uuid",
             "title": "Id"
           },
+          "cluster_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Cluster Id"
+          },
+          "storage_node_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Storage Node Id"
+          },
+          "model": {
+            "type": "string",
+            "title": "Model"
+          },
+          "serial_number": {
+            "type": "string",
+            "title": "Serial Number"
+          },
+          "nvme_controller": {
+            "type": "string",
+            "title": "Nvme Controller"
+          },
+          "pcie_address": {
+            "type": "string",
+            "title": "Pcie Address"
+          },
           "status": {
             "type": "string",
             "title": "Status"
@@ -5870,9 +6253,18 @@
             "type": "boolean",
             "title": "Health Check"
           },
+          "retries_exhausted": {
+            "type": "boolean",
+            "title": "Retries Exhausted"
+          },
           "size": {
             "type": "integer",
             "title": "Size"
+          },
+          "cluster_device_order": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Cluster Device Order"
           },
           "io_error": {
             "type": "boolean",
@@ -5907,9 +6299,17 @@
         "type": "object",
         "required": [
           "id",
+          "cluster_id",
+          "storage_node_id",
+          "model",
+          "serial_number",
+          "nvme_controller",
+          "pcie_address",
           "status",
           "health_check",
+          "retries_exhausted",
           "size",
+          "cluster_device_order",
           "io_error",
           "is_partition",
           "nvmf_ips",
@@ -6034,6 +6434,19 @@
         ],
         "title": "MigrationDTO"
       },
+      "PoolHostParams": {
+        "properties": {
+          "host_nqn": {
+            "type": "string",
+            "title": "Host Nqn"
+          }
+        },
+        "type": "object",
+        "required": [
+          "host_nqn"
+        ],
+        "title": "PoolHostParams"
+      },
       "ReplicateLVolParams": {
         "properties": {
           "lvol_id": {
@@ -6127,17 +6540,83 @@
             "format": "uuid",
             "title": "Id"
           },
+          "cluster_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Cluster Id"
+          },
+          "secondary_node_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Secondary Node Id"
+          },
           "status": {
             "type": "string",
+            "enum": [
+              "online",
+              "offline",
+              "suspended",
+              "in_shutdown",
+              "removed",
+              "in_restart",
+              "in_creation",
+              "unreachable",
+              "schedulable",
+              "down"
+            ],
             "title": "Status"
+          },
+          "uptime": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "duration"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Uptime"
           },
           "hostname": {
             "type": "string",
             "title": "Hostname"
           },
-          "cpu": {
+          "host_nqn": {
+            "type": "string",
+            "title": "Host Nqn"
+          },
+          "cpu_total_count": {
             "type": "integer",
-            "title": "Cpu"
+            "minimum": 0.0,
+            "title": "Cpu Total Count"
+          },
+          "cpu_spdk_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Cpu Spdk Count"
+          },
+          "cpu_poller_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Cpu Poller Count"
+          },
+          "memory": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Memory"
+          },
+          "hugepage_memory": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Hugepage Memory"
           },
           "spdk_mem": {
             "type": "integer",
@@ -6147,16 +6626,38 @@
             "type": "integer",
             "title": "Lvols"
           },
+          "lvols_max": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Lvols Max"
+          },
+          "snapshots_max": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Snapshots Max"
+          },
           "rpc_port": {
             "type": "integer",
+            "exclusiveMaximum": 65536.0,
+            "minimum": 0.0,
             "title": "Rpc Port"
           },
           "lvol_subsys_port": {
             "type": "integer",
+            "exclusiveMaximum": 65536.0,
+            "minimum": 0.0,
             "title": "Lvol Subsys Port"
+          },
+          "hublvol_port": {
+            "type": "integer",
+            "exclusiveMaximum": 65536.0,
+            "minimum": 0.0,
+            "title": "Hublvol Port"
           },
           "nvmf_port": {
             "type": "integer",
+            "exclusiveMaximum": 65536.0,
+            "minimum": 0.0,
             "title": "Nvmf Port"
           },
           "mgmt_ip": {
@@ -6168,9 +6669,13 @@
             "type": "boolean",
             "title": "Health Check"
           },
-          "online_devices": {
-            "type": "string",
-            "title": "Online Devices"
+          "device_count": {
+            "type": "integer",
+            "title": "Device Count"
+          },
+          "online_device_count": {
+            "type": "integer",
+            "title": "Online Device Count"
           },
           "capacity": {
             "$ref": "#/components/schemas/CapacityStatDTO"
@@ -6179,17 +6684,29 @@
         "type": "object",
         "required": [
           "id",
+          "cluster_id",
+          "secondary_node_id",
           "status",
+          "uptime",
           "hostname",
-          "cpu",
+          "host_nqn",
+          "cpu_total_count",
+          "cpu_spdk_count",
+          "cpu_poller_count",
+          "memory",
+          "hugepage_memory",
           "spdk_mem",
           "lvols",
+          "lvols_max",
+          "snapshots_max",
           "rpc_port",
           "lvol_subsys_port",
+          "hublvol_port",
           "nvmf_port",
           "mgmt_ip",
           "health_check",
-          "online_devices",
+          "device_count",
+          "online_device_count",
           "capacity"
         ],
         "title": "StorageNodeDTO"
@@ -6198,8 +6715,7 @@
         "properties": {
           "node_address": {
             "type": "string",
-            "title": "Node Address",
-            "default": "^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}$"
+            "title": "Node Address"
           },
           "interface_name": {
             "type": "string",
@@ -6321,9 +6837,15 @@
             "default": ""
           },
           "ha_jm_count": {
-            "type": "integer",
-            "title": "Ha Jm Count",
-            "default": 3
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ha Jm Count"
           },
           "format_4k": {
             "type": "boolean",
@@ -6344,6 +6866,7 @@
         },
         "type": "object",
         "required": [
+          "node_address",
           "interface_name"
         ],
         "title": "StorageNodeParams"
@@ -6354,6 +6877,11 @@
             "type": "string",
             "format": "uuid",
             "title": "Id"
+          },
+          "cluster_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Cluster Id"
           },
           "name": {
             "type": "string",
@@ -6400,16 +6928,24 @@
           "capacity": {
             "$ref": "#/components/schemas/CapacityStatDTO"
           },
-          "sec_options": {
-            "additionalProperties": true,
-            "type": "object",
-            "title": "Sec Options",
-            "default": {}
+          "dhchap": {
+            "type": "boolean",
+            "title": "Dhchap",
+            "default": false
+          },
+          "allowed_hosts": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Allowed Hosts",
+            "default": []
           }
         },
         "type": "object",
         "required": [
           "id",
+          "cluster_id",
           "name",
           "status",
           "max_size",
@@ -6464,19 +7000,10 @@
             "title": "Max W Mbytes",
             "default": 0
           },
-          "sec_options": {
-            "anyOf": [
-              {
-                "additionalProperties": {
-                  "type": "boolean"
-                },
-                "type": "object"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Sec Options"
+          "dhchap": {
+            "type": "boolean",
+            "title": "Dhchap",
+            "default": false
           },
           "cr_name": {
             "type": "string",
@@ -6507,8 +7034,43 @@
             "format": "uuid",
             "title": "Id"
           },
+          "cluster_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Cluster Id"
+          },
+          "device_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Device Id"
+          },
+          "storage_node_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Storage Node Id"
+          },
           "status": {
             "type": "string",
+            "enum": [
+              "new",
+              "running",
+              "suspended",
+              "done"
+            ],
             "title": "Status"
           },
           "canceled": {
@@ -6517,6 +7079,25 @@
           },
           "function_name": {
             "type": "string",
+            "enum": [
+              "device_restart",
+              "node_restart",
+              "device_migration",
+              "failed_device_migration",
+              "new_device_migration",
+              "node_add",
+              "port_allow",
+              "balancing_on_restart",
+              "balancing_on_dev_rem",
+              "balancing_on_dev_add",
+              "jc_comp_resume",
+              "snapshot_replication",
+              "lvol_sync_del",
+              "lvol_migration",
+              "s3_backup",
+              "s3_backup_restore",
+              "s3_backup_merge"
+            ],
             "title": "Function Name"
           },
           "function_params": {
@@ -6528,26 +7109,37 @@
             "type": "string",
             "title": "Function Result"
           },
+          "max_retry": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Retry"
+          },
           "retry": {
             "type": "integer",
             "minimum": 0.0,
             "title": "Retry"
-          },
-          "max_retry": {
-            "type": "integer",
-            "title": "Max Retry"
           }
         },
         "type": "object",
         "required": [
           "id",
+          "cluster_id",
+          "device_id",
+          "storage_node_id",
           "status",
           "canceled",
           "function_name",
           "function_params",
           "function_result",
-          "retry",
-          "max_retry"
+          "max_retry",
+          "retry"
         ],
         "title": "TaskDTO"
       },
@@ -6783,6 +7375,16 @@
             "format": "uuid",
             "title": "Id"
           },
+          "cluster_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Cluster Id"
+          },
+          "storage_node_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Storage Node Id"
+          },
           "name": {
             "type": "string",
             "title": "Name"
@@ -6795,6 +7397,10 @@
             "type": "boolean",
             "title": "Health Check"
           },
+          "io_error": {
+            "type": "boolean",
+            "title": "Io Error"
+          },
           "migrating": {
             "type": "boolean",
             "title": "Migrating"
@@ -6806,6 +7412,19 @@
           "hostname": {
             "type": "string",
             "title": "Hostname"
+          },
+          "priority_class": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Priority Class"
+          },
+          "access_mode": {
+            "type": "string",
+            "title": "Access Mode"
+          },
+          "namespace": {
+            "type": "string",
+            "title": "Namespace"
           },
           "fabric": {
             "type": "string",
@@ -6899,11 +7518,6 @@
             "type": "boolean",
             "title": "High Availability"
           },
-          "lvol_priority_class": {
-            "type": "integer",
-            "minimum": 0.0,
-            "title": "Lvol Priority Class"
-          },
           "do_replicate": {
             "type": "boolean",
             "title": "Do Replicate",
@@ -6968,12 +7582,18 @@
         "type": "object",
         "required": [
           "id",
+          "cluster_id",
+          "storage_node_id",
           "name",
           "status",
           "health_check",
+          "io_error",
           "migrating",
           "nqn",
           "hostname",
+          "priority_class",
+          "access_mode",
+          "namespace",
           "fabric",
           "nodes",
           "port",
@@ -6987,7 +7607,6 @@
           "cloned_from",
           "crypto_key",
           "high_availability",
-          "lvol_priority_class",
           "max_namespace_per_subsys",
           "max_rw_iops",
           "max_rw_mbytes",
@@ -7042,6 +7661,19 @@
           "snapshot_id"
         ],
         "title": "_BackupSnapshotParams"
+      },
+      "_BackupSourceSwitchParams": {
+        "properties": {
+          "source_cluster_id": {
+            "type": "string",
+            "title": "Source Cluster Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "source_cluster_id"
+        ],
+        "title": "_BackupSourceSwitchParams"
       },
       "_CloneParams": {
         "properties": {
@@ -7166,16 +7798,17 @@
             "title": "Priority Class",
             "default": 0
           },
-          "namespace": {
+          "namespaced": {
             "anyOf": [
               {
-                "type": "string"
+                "type": "boolean"
               },
               {
                 "type": "null"
               }
             ],
-            "title": "Namespace"
+            "title": "Namespaced",
+            "default": false
           },
           "pvc_name": {
             "anyOf": [
@@ -7383,8 +8016,7 @@
           "node_address": {
             "anyOf": [
               {
-                "type": "string",
-                "pattern": "^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}$"
+                "type": "string"
               },
               {
                 "type": "null"
@@ -7409,6 +8041,17 @@
           "pool": {
             "type": "string",
             "title": "Pool"
+          },
+          "target_node_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Node Id"
           }
         },
         "type": "object",

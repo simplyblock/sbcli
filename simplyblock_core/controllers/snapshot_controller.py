@@ -47,9 +47,9 @@ def _rollback_lvol_creation(lvol, node_ids):
 def add(lvol_id, snapshot_name, backup=False, lock=True):
     try:
         lvol = db_controller.get_lvol_by_id(lvol_id)
-    except KeyError as e:
-        logger.error(e)
-        return False, str(e)
+    except KeyError:
+        logger.exception("Volume lookup failed for snapshot request: %s", lvol_id)
+        return False, "Volume not found"
 
     # Reject snapshot creation on an lvol that is being deleted. SPDK's
     # blobstore reuses the lvol's metadata for the snapshot's parent
@@ -547,9 +547,9 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
           lock=True, namespaced=True):
     try:
         snap = db_controller.get_snapshot_by_id(snapshot_id)
-    except KeyError as e:
-        logger.error(e)
-        return False, str(e)
+    except KeyError:
+        logger.exception("Snapshot lookup failed for clone request: %s", snapshot_id)
+        return False, "Snapshot not found"
 
     # Reject cloning a snapshot that is in pending deletion. If a prior
     # clone-create failed (e.g. an SPDK duplicate-name collision on the
