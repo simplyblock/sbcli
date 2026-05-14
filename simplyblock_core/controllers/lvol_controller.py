@@ -1745,6 +1745,7 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
             connect_cmd = (
                 f"sudo nvme connect --reconnect-delay={constants.LVOL_NVME_CONNECT_RECONNECT_DELAY} "
                 f"--ctrl-loss-tmo={ctrl_loss_tmo} "
+                f"--fast-io-fail-tmo={constants.LVOL_NVME_CONNECT_FAST_IO_FAIL_TO} "
                 f"--nr-io-queues={cluster.client_qpair_count} "
                 f"--keep-alive-tmo={keep_alive_to} "
                 f"--transport={transport} --traddr={ip} --trsvcid={port} --nqn={lvol.nqn} "
@@ -1759,6 +1760,7 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
                 "nqn": lvol.nqn,
                 "reconnect-delay": constants.LVOL_NVME_CONNECT_RECONNECT_DELAY,
                 "ctrl-loss-tmo": ctrl_loss_tmo,
+                "fast-io-fail-tmo": constants.LVOL_NVME_CONNECT_FAST_IO_FAIL_TO,
                 "nr-io-queues": cluster.client_qpair_count,
                 "keep-alive-tmo": keep_alive_to,
                 "host-iface": cluster.client_data_nic,
