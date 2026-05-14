@@ -455,6 +455,9 @@ jobs:
             kubectl delete pv "$pv" --ignore-not-found 2>/dev/null || true
           done
 
+          echo "=== Phase 8: Delete CRDs ==="
+          kubectl delete -f $GITHUB_WORKSPACE/helm-charts/charts/simplyblock-operator/crds/ --ignore-not-found 2>/dev/null || true
+
           echo "=== Cleanup complete ==="
 
 
