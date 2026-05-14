@@ -115,6 +115,8 @@ class K8sNativeFailoverTest(TestClusterBase):
             "pvcs": {},        # pvc_name -> pvc_info dict
         }
         self.failed_nvme_connects: dict[str, dict] = {}  # resource_name -> connect_info
+        # Per-resource list of connect commands that failed (partial multipath)
+        self.failed_secondary_connects: dict[str, list[str]] = {}  # resource_name -> [cmd, ...]
 
         # Client-based FIO mode (when CLIENT_IP env is set)
         self.use_client_fio = False  # set in setup()
@@ -694,11 +696,19 @@ class K8sNativeFailoverTest(TestClusterBase):
     # ── Client FIO helpers ────────────────────────────────────────────────
 
     def _connect_lvol_on_client(self, lvol_name: str, client: str):
-        """NVMe-connect *lvol_name* on *client*, return device path or raise."""
+        """NVMe-connect *lvol_name* on *client*, return (device_path, failed_cmds).
+
+        Attempts every connect string for the lvol.  If some fail but at
+        least one succeeds (device appears), returns the device path together
+        with the list of failed connect commands so the caller can defer
+        them for retry after recovery.  Raises LvolNotConnectException only
+        when *no* path connects at all.
+        """
         connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)
         if not connect_ls:
             raise RuntimeError(f"No connect strings for lvol {lvol_name}")
 
+        failed_cmds: list[str] = []
         initial_devices = self.ssh_obj.get_devices(node=client)
         for connect_str in connect_ls:
             _, error = self.ssh_obj.exec_command(node=client, command=connect_str)
@@ -706,12 +716,18 @@ class K8sNativeFailoverTest(TestClusterBase):
                 self.logger.warning(
                     f"[client_fio] NVMe connect error on {client}: {error}"
                 )
+                failed_cmds.append(connect_str)
 
         sleep_n_sec(3)
         final_devices = self.ssh_obj.get_devices(node=client)
         for device in final_devices:
             if device not in initial_devices:
-                return f"/dev/{device.strip()}"
+                if failed_cmds:
+                    self.logger.warning(
+                        f"[client_fio] {lvol_name}: {len(failed_cmds)}/{len(connect_ls)} "
+                        f"connect paths failed — only partial multipath on {client}"
+                    )
+                return f"/dev/{device.strip()}", failed_cmds
 
         raise LvolNotConnectException(
             f"LVOL {lvol_name} did not appear as device on {client}"
@@ -835,6 +851,73 @@ class K8sNativeFailoverTest(TestClusterBase):
         )
         self.failed_nvme_connects[name] = connect_info
 
+    def record_failed_secondary_connects(self, name: str, client: str,
+                                         failed_cmds: list[str]):
+        """Record partial-multipath connect failures for later retry."""
+        self.logger.warning(
+            f"[DEFERRED] {len(failed_cmds)} secondary connect(s) failed for "
+            f"{name} on {client} — will retry after recovery"
+        )
+        self.failed_secondary_connects[name] = {
+            "client": client,
+            "cmds": list(failed_cmds),
+        }
+
+    def retry_failed_secondary_connects(self, timeout=120, interval=10):
+        """Retry deferred secondary NVMe connects (missing multipath paths).
+
+        Unlike retry_failed_nvme_connects (which retries full connects for
+        volumes that never appeared), this retries individual connect
+        commands that failed while the primary path succeeded — restoring
+        full multipath.
+        """
+        if not self.failed_secondary_connects:
+            self.logger.info("[retry_secondary] No deferred secondary connects pending")
+            return
+
+        self.logger.info(
+            f"[retry_secondary] Retrying secondary connects for "
+            f"{len(self.failed_secondary_connects)} volume(s)"
+        )
+        start = time.time()
+
+        while time.time() - start < timeout:
+            for name in list(self.failed_secondary_connects):
+                info = self.failed_secondary_connects[name]
+                client = info["client"]
+                still_failed = []
+                for cmd in info["cmds"]:
+                    _, error = self.ssh_obj.exec_command(node=client, command=cmd)
+                    if error:
+                        still_failed.append(cmd)
+                    else:
+                        self.logger.info(
+                            f"[retry_secondary] Reconnected secondary path "
+                            f"for {name} on {client}"
+                        )
+                if still_failed:
+                    self.failed_secondary_connects[name]["cmds"] = still_failed
+                else:
+                    del self.failed_secondary_connects[name]
+
+            if not self.failed_secondary_connects:
+                self.logger.info(
+                    "[retry_secondary] All secondary paths reconnected"
+                )
+                return
+
+            sleep_n_sec(interval)
+
+        remaining = {
+            n: len(i["cmds"])
+            for n, i in self.failed_secondary_connects.items()
+        }
+        self.logger.warning(
+            f"[retry_secondary] Could not restore all secondary paths within "
+            f"{timeout}s. Remaining: {remaining}"
+        )
+        self.failed_secondary_connects.clear()
+
     # ── PVC + FIO creation ───────────────────────────────────────────────────
 
     def create_pvcs_with_fio(self, count: int, node_ids: list[str] = None):
@@ -895,7 +978,9 @@ class K8sNativeFailoverTest(TestClusterBase):
                 fs_type = random.choice(["ext4", "xfs"])
 
                 try:
-                    device = self._connect_lvol_on_client(lvol_name, client)
+                    device, failed_cmds = self._connect_lvol_on_client(lvol_name, client)
+                    if failed_cmds:
+                        self.record_failed_secondary_connects(pvc_name, client, failed_cmds)
                 except Exception as exc:
                     self.logger.warning(
                         f"[create_pvc] NVMe connect failed for {pvc_name}/{lvol_name}: {exc}"
@@ -1092,7 +1177,9 @@ class K8sNativeFailoverTest(TestClusterBase):
                 client = self.fio_node[idx % len(self.fio_node)]
 
                 try:
-                    device = self._connect_lvol_on_client(clone_lvol_name, client)
+                    device, failed_cmds = self._connect_lvol_on_client(clone_lvol_name, client)
+                    if failed_cmds:
+                        self.record_failed_secondary_connects(clone_name, client, failed_cmds)
                 except Exception as exc:
                     self.logger.warning(
                         f"[snap_clone] NVMe connect failed for clone {clone_name}: {exc}"
@@ -1783,7 +1870,9 @@ class K8sNativeFailoverTest(TestClusterBase):
                 client = info["client"]
 
                 try:
-                    device = self._connect_lvol_on_client(lvol_name, client)
+                    device, failed_cmds = self._connect_lvol_on_client(lvol_name, client)
+                    if failed_cmds:
+                        self.record_failed_secondary_connects(name, client, failed_cmds)
                 except Exception as exc:
                     self.logger.warning(
                         f"[retry_nvme] Connect still failing for {name}: {exc}"
@@ -2192,6 +2281,7 @@ class K8sNativeFailoverTest(TestClusterBase):
                 # ── Process deferred operations ──
                 if self.use_client_fio:
                     self.retry_failed_nvme_connects()
+                    self.retry_failed_secondary_connects()
                 self.validate_pending_deletions()
 
                 # ── Validation phase ──
@@ -2306,7 +2396,9 @@ class K8sNativeBasicFailoverTest(K8sNativeFailoverTest):
                 client = self.fio_node[idx % len(self.fio_node)]
 
                 try:
-                    device = self._connect_lvol_on_client(clone_lvol_name, client)
+                    device, failed_cmds = self._connect_lvol_on_client(clone_lvol_name, client)
+                    if failed_cmds:
+                        self.record_failed_secondary_connects(clone_name, client, failed_cmds)
                 except Exception as exc:
                     self.logger.warning(
                         f"[snap_clone] NVMe connect failed for clone {clone_name}: {exc}"
@@ -2509,6 +2601,7 @@ class K8sNativeBasicFailoverTest(K8sNativeFailoverTest):
                 # Process deferred operations
                 if self.use_client_fio:
                     self.retry_failed_nvme_connects()
+                    self.retry_failed_secondary_connects()
                 self.validate_pending_deletions()
 
                 # Validation phase
