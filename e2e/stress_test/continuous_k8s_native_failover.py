@@ -106,6 +106,15 @@ class K8sNativeFailoverTest(TestClusterBase):
         self.outage_start_time: int | None = None
         self.outage_end_time: int | None = None
         self.snapshot_names: list[str] = []
+        self.max_fault_tolerance: int = 1  # updated in run()
+
+        # Deferred operation tracking
+        self.pending_deletions: dict[str, dict] = {
+            "clones": {},      # clone_name -> clone_info dict
+            "snapshots": {},   # snap_name -> snap_info dict
+            "pvcs": {},        # pvc_name -> pvc_info dict
+        }
+        self.failed_nvme_connects: dict[str, dict] = {}  # resource_name -> connect_info
 
         # Client-based FIO mode (when CLIENT_IP env is set)
         self.use_client_fio = False  # set in setup()
@@ -801,6 +810,31 @@ class K8sNativeFailoverTest(TestClusterBase):
                 f"[client_fio] Failed to disconnect {lvol_name} on {client}: {exc}"
             )
 
+    # ── Deferred operation recording ─────────────────────────────────────────
+
+    def record_pending_clone_delete(self, clone_name: str, clone_info: dict):
+        """Record a clone PVC deletion that failed (expected during outage)."""
+        self.logger.warning(f"[DEFERRED] Adding clone to pending delete: {clone_name}")
+        self.pending_deletions["clones"][clone_name] = clone_info.copy()
+
+    def record_pending_snapshot_delete(self, snap_name: str, snap_info: dict):
+        """Record a VolumeSnapshot deletion that failed (expected during outage)."""
+        self.logger.warning(f"[DEFERRED] Adding snapshot to pending delete: {snap_name}")
+        self.pending_deletions["snapshots"][snap_name] = snap_info.copy()
+
+    def record_pending_pvc_delete(self, pvc_name: str, pvc_info: dict):
+        """Record a PVC deletion that failed (expected during outage)."""
+        self.logger.warning(f"[DEFERRED] Adding PVC to pending delete: {pvc_name}")
+        self.pending_deletions["pvcs"][pvc_name] = pvc_info.copy()
+
+    def record_failed_nvme_connect(self, name: str, connect_info: dict):
+        """Record a failed NVMe connect (client mode, expected during outage)."""
+        self.logger.warning(
+            f"[DEFERRED] NVMe connect failed for {name} "
+            f"on client {connect_info.get('client')} — will retry after recovery"
+        )
+        self.failed_nvme_connects[name] = connect_info
+
     # ── PVC + FIO creation ───────────────────────────────────────────────────
 
     def create_pvcs_with_fio(self, count: int, node_ids: list[str] = None):
@@ -866,6 +900,29 @@ class K8sNativeFailoverTest(TestClusterBase):
                     self.logger.warning(
                         f"[create_pvc] NVMe connect failed for {pvc_name}/{lvol_name}: {exc}"
                     )
+                    self.record_failed_nvme_connect(pvc_name, {
+                        "lvol_name": lvol_name,
+                        "lvol_id": lvol_id,
+                        "snap_name": None,
+                        "client": client,
+                        "fs_type": fs_type,
+                    })
+                    # Track PVC with placeholder fields — retry will fill them
+                    self.pvc_details[pvc_name] = {
+                        "job_name": None,
+                        "configmap_name": None,
+                        "snapshots": [],
+                        "node_id": node_id,
+                        "lvol_name": lvol_name,
+                        "lvol_id": lvol_id,
+                        "device": None,
+                        "mount_path": None,
+                        "client": client,
+                        "log_file": None,
+                        "fs_type": fs_type,
+                    }
+                    if node_id:
+                        self.node_vs_pvc.setdefault(node_id, []).append(pvc_name)
                     continue
 
                 self.ssh_obj.format_disk(node=client, device=device, fs_type=fs_type)
@@ -1040,6 +1097,24 @@ class K8sNativeFailoverTest(TestClusterBase):
                     self.logger.warning(
                         f"[snap_clone] NVMe connect failed for clone {clone_name}: {exc}"
                     )
+                    self.record_failed_nvme_connect(clone_name, {
+                        "lvol_name": clone_lvol_name,
+                        "lvol_id": clone_lvol_id,
+                        "snap_name": snap_name,
+                        "client": client,
+                    })
+                    # Track clone with placeholder fields — retry will fill them
+                    self.clone_details[clone_name] = {
+                        "snap_name": snap_name,
+                        "job_name": None,
+                        "configmap_name": None,
+                        "lvol_name": clone_lvol_name,
+                        "lvol_id": clone_lvol_id,
+                        "device": None,
+                        "mount_path": None,
+                        "client": client,
+                        "log_file": None,
+                    }
                     continue
 
                 # Clone volumes from snapshots already have data; regenerate UUID
@@ -1183,6 +1258,7 @@ class K8sNativeFailoverTest(TestClusterBase):
                         self.k8s_utils.delete_pvc(clone_name)
                     except Exception as exc:
                         self.logger.warning(f"[delete_pvcs] Clone PVC delete failed: {exc}")
+                        self.record_pending_clone_delete(clone_name, clone_info)
                     del self.clone_details[clone_name]
 
                 # Delete the snapshot
@@ -1190,6 +1266,9 @@ class K8sNativeFailoverTest(TestClusterBase):
                     self.k8s_utils.delete_volume_snapshot(snap_name)
                 except Exception as exc:
                     self.logger.warning(f"[delete_pvcs] Snapshot delete failed: {exc}")
+                    self.record_pending_snapshot_delete(
+                        snap_name, self.snapshot_details.get(snap_name, {})
+                    )
                 self.snapshot_details.pop(snap_name, None)
                 if snap_name in self.snapshot_names:
                     self.snapshot_names.remove(snap_name)
@@ -1218,6 +1297,7 @@ class K8sNativeFailoverTest(TestClusterBase):
                 self.k8s_utils.delete_pvc(pvc_name)
             except Exception as exc:
                 self.logger.warning(f"[delete_pvcs] PVC delete failed: {exc}")
+                self.record_pending_pvc_delete(pvc_name, pvc_info)
 
             # Clean up tracking
             node_id = pvc_info.get("node_id")
@@ -1420,18 +1500,36 @@ class K8sNativeFailoverTest(TestClusterBase):
             self.logger.info(f"Node {node} not yet offline; retrying shutdown...")
 
     def perform_n_plus_k_outages(self):
-        """Select K nodes and trigger outages simultaneously."""
-        primary_candidates = list(self.sn_primary_secondary_map.keys())
+        """Select K nodes and trigger outages simultaneously.
+
+        When max_fault_tolerance >= 2 the cluster can survive losing any two
+        nodes including a primary+secondary pair, so outage candidates include
+        ALL nodes (primary and secondary alike) and no primary/secondary
+        exclusion is applied.  For FTT=1, the original logic blocks the
+        secondary partner of each chosen node to avoid losing both copies of
+        the same replica group.
+        """
+        if self.max_fault_tolerance >= 2:
+            # FTT>=2: pick from ALL nodes, no exclusion needed
+            all_nodes = list(self.sn_nodes_with_sec)
+            candidates = all_nodes
+        else:
+            # FTT=1: pick from primaries only (secondary blocked)
+            candidates = list(self.sn_primary_secondary_map.keys())
+
         self.current_outage_nodes = []
 
-        if len(primary_candidates) < self.npcs:
+        if len(candidates) < self.npcs:
             raise Exception(
                 f"Need {self.npcs} outage nodes, but only "
-                f"{len(primary_candidates)} primary-role nodes exist."
+                f"{len(candidates)} candidate nodes exist."
             )
 
-        outage_nodes = self._pick_outage_nodes(primary_candidates, self.npcs)
-        self.logger.info(f"Selected outage nodes: {outage_nodes}")
+        if self.max_fault_tolerance >= 2:
+            outage_nodes = random.sample(candidates, self.npcs)
+        else:
+            outage_nodes = self._pick_outage_nodes(candidates, self.npcs)
+        self.logger.info(f"Selected outage nodes: {outage_nodes} (FTT={self.max_fault_tolerance})")
         self.collect_outage_diagnostics(f"pre_outage_nodes_{'_'.join(outage_nodes[:3])}")
 
         node_plans = []
@@ -1554,6 +1652,236 @@ class K8sNativeFailoverTest(TestClusterBase):
             except Exception as e:
                 self.logger.error(f"IO stats validation error: {e}")
                 break
+
+    # ── Deferred operation retry ─────────────────────────────────────────────
+
+    def validate_pending_deletions(self, timeout=600, interval=30):
+        """Retry deferred deletions after recovery, respecting dependency order.
+
+        Order: clones → snapshots → PVCs.
+        Clones must be deleted before their parent snapshots, and snapshots
+        before their parent PVCs.
+        """
+        self._ensure_k8s_utils()
+        pending = self.pending_deletions
+        if not any(pending[k] for k in pending):
+            self.logger.info("[deferred] No pending deletions")
+            return
+
+        self.logger.info(
+            f"[deferred] Retrying deletions: "
+            f"{len(pending['clones'])} clones, "
+            f"{len(pending['snapshots'])} snapshots, "
+            f"{len(pending['pvcs'])} PVCs"
+        )
+        start = time.time()
+
+        while time.time() - start < timeout:
+            # Phase 1: clones first
+            for clone_name in list(pending["clones"]):
+                try:
+                    resource = self.k8s_utils.get_resource_json("pvc", clone_name)
+                    if not resource:
+                        self.logger.info(f"[deferred] Clone {clone_name} already gone")
+                        del pending["clones"][clone_name]
+                        continue
+                    self.k8s_utils.delete_pvc(clone_name)
+                    self.logger.info(f"[deferred] Re-issued delete for clone {clone_name}")
+                    del pending["clones"][clone_name]
+                except Exception as exc:
+                    self.logger.warning(
+                        f"[deferred] Clone delete retry failed for {clone_name}: {exc}"
+                    )
+
+            # Phase 2: snapshots (only after all clones gone)
+            if not pending["clones"]:
+                for snap_name in list(pending["snapshots"]):
+                    try:
+                        resource = self.k8s_utils.get_resource_json(
+                            "volumesnapshot", snap_name
+                        )
+                        if not resource:
+                            self.logger.info(
+                                f"[deferred] Snapshot {snap_name} already gone"
+                            )
+                            del pending["snapshots"][snap_name]
+                            continue
+                        self.k8s_utils.delete_volume_snapshot(snap_name)
+                        self.logger.info(
+                            f"[deferred] Re-issued delete for snapshot {snap_name}"
+                        )
+                        del pending["snapshots"][snap_name]
+                    except Exception as exc:
+                        self.logger.warning(
+                            f"[deferred] Snapshot delete retry failed for {snap_name}: {exc}"
+                        )
+            else:
+                self.logger.info(
+                    f"[deferred] Skipping snapshot retry — "
+                    f"{len(pending['clones'])} clone(s) still pending"
+                )
+
+            # Phase 3: PVCs (only after snapshots gone)
+            if not pending["clones"] and not pending["snapshots"]:
+                for pvc_name in list(pending["pvcs"]):
+                    try:
+                        resource = self.k8s_utils.get_resource_json("pvc", pvc_name)
+                        if not resource:
+                            self.logger.info(
+                                f"[deferred] PVC {pvc_name} already gone"
+                            )
+                            del pending["pvcs"][pvc_name]
+                            continue
+                        self.k8s_utils.delete_pvc(pvc_name)
+                        self.logger.info(
+                            f"[deferred] Re-issued delete for PVC {pvc_name}"
+                        )
+                        del pending["pvcs"][pvc_name]
+                    except Exception as exc:
+                        self.logger.warning(
+                            f"[deferred] PVC delete retry failed for {pvc_name}: {exc}"
+                        )
+
+            if not any(pending[k] for k in pending):
+                self.logger.info("[deferred] All pending deletions completed")
+                return
+
+            sleep_n_sec(interval)
+
+        remaining = {k: list(v.keys()) for k, v in pending.items() if v}
+        self.logger.warning(
+            f"[deferred] Deletions did not fully converge within {timeout}s. "
+            f"Remaining: {remaining}"
+        )
+
+    def retry_failed_nvme_connects(self, timeout=600, interval=30):
+        """Retry deferred NVMe connects after recovery (client mode only).
+
+        For each deferred resource, retries the connect and completes the
+        mount + FIO setup that was skipped during the outage.
+        """
+        if not self.failed_nvme_connects:
+            self.logger.info("[retry_nvme] No deferred NVMe connects pending")
+            return
+        if not self.use_client_fio:
+            self.logger.warning(
+                "[retry_nvme] Not in client FIO mode — clearing deferred connects"
+            )
+            self.failed_nvme_connects.clear()
+            return
+
+        self.logger.info(
+            f"[retry_nvme] Retrying {len(self.failed_nvme_connects)} "
+            f"deferred NVMe connects"
+        )
+        start = time.time()
+
+        while time.time() - start < timeout:
+            for name in list(self.failed_nvme_connects):
+                info = self.failed_nvme_connects[name]
+                lvol_name = info["lvol_name"]
+                client = info["client"]
+
+                try:
+                    device = self._connect_lvol_on_client(lvol_name, client)
+                except Exception as exc:
+                    self.logger.warning(
+                        f"[retry_nvme] Connect still failing for {name}: {exc}"
+                    )
+                    continue
+
+                # Connect succeeded — complete the setup
+                try:
+                    snap_name = info.get("snap_name")
+                    lvol_id = info.get("lvol_id")
+
+                    if snap_name:
+                        # Clone: regenerate UUID before mounting
+                        self.ssh_obj.clone_mount_gen_uuid(client, device)
+                    else:
+                        # Direct PVC: format the disk
+                        fs_type = info.get("fs_type", "ext4")
+                        self.ssh_obj.format_disk(
+                            node=client, device=device, fs_type=fs_type
+                        )
+
+                    mount_point = f"{self.mount_path}/{name}"
+                    self.ssh_obj.mount_path(
+                        node=client, device=device, mount_path=mount_point
+                    )
+                    sleep_n_sec(5)
+
+                    log_file = f"{self.log_path}/{name}.log"
+                    self.ssh_obj.delete_files(client, [f"{mount_point}/*fio*"])
+
+                    # Warmup for direct PVCs
+                    bs = f"{2 ** random.randint(2, 7)}K"
+                    if not snap_name:
+                        try:
+                            self._run_fio_warmup_ssh(name, client, mount_point, bs)
+                        except Exception as exc:
+                            self.logger.warning(
+                                f"[retry_nvme] FIO warmup failed for {name}: {exc}"
+                            )
+
+                    self._start_client_fio(name, client, mount_point, log_file,
+                                           bs=bs)
+
+                    # Update tracking dicts
+                    if snap_name:
+                        self.clone_details[name].update({
+                            "device": device,
+                            "mount_path": mount_point,
+                            "log_file": log_file,
+                        })
+                        self.clone_mount_details[lvol_name] = {
+                            "ID": lvol_id,
+                            "snapshot": snap_name,
+                            "Mount": mount_point,
+                            "Device": device,
+                            "Log": log_file,
+                            "Client": client,
+                            "clone_pvc": name,
+                        }
+                    else:
+                        self.pvc_details[name].update({
+                            "device": device,
+                            "mount_path": mount_point,
+                            "log_file": log_file,
+                        })
+                        self.lvol_mount_details[lvol_name] = {
+                            "ID": lvol_id,
+                            "Command": None,
+                            "Mount": mount_point,
+                            "Device": device,
+                            "FS": info.get("fs_type", "ext4"),
+                            "Log": log_file,
+                            "Client": client,
+                        }
+
+                    self.logger.info(
+                        f"[retry_nvme] {name} connected on {client} at {device}"
+                    )
+                except Exception as exc:
+                    self.logger.warning(
+                        f"[retry_nvme] Post-connect setup failed for {name}: {exc}"
+                    )
+                    continue
+
+                del self.failed_nvme_connects[name]
+
+            if not self.failed_nvme_connects:
+                self.logger.info("[retry_nvme] All deferred NVMe connects completed")
+                return
+
+            sleep_n_sec(interval)
+
+        remaining = list(self.failed_nvme_connects.keys())
+        self.logger.warning(
+            f"[retry_nvme] Deferred NVMe connects did not converge within "
+            f"{timeout}s. Remaining: {remaining}"
+        )
+        self.failed_nvme_connects.clear()
 
     # ── Wait for FIO completion ─────────────────────────────────────────────
 
@@ -1745,10 +2073,21 @@ class K8sNativeFailoverTest(TestClusterBase):
 
         # Read cluster config
         cluster_details = self.sbcli_utils.get_cluster_details()
-        max_fault_tolerance = cluster_details.get("max_fault_tolerance", 1)
-        self.logger.info(f"Cluster max_fault_tolerance: {max_fault_tolerance}")
+        self.max_fault_tolerance = cluster_details.get("max_fault_tolerance", 1)
+        self.logger.info(f"Cluster max_fault_tolerance: {self.max_fault_tolerance}")
         if self.npcs == 1:
-            self.npcs = max_fault_tolerance
+            self.npcs = self.max_fault_tolerance
+        if self.npcs > self.max_fault_tolerance:
+            self.logger.warning(
+                f"npcs={self.npcs} exceeds max_fault_tolerance="
+                f"{self.max_fault_tolerance} — cluster may not survive "
+                f"all simultaneous outages!"
+            )
+        if self.max_fault_tolerance >= 2:
+            self.logger.info(
+                f"FTT={self.max_fault_tolerance} — outage candidates include "
+                f"ALL nodes (primary+secondary pairs allowed)"
+            )
         self.logger.info(f"Running with npcs={self.npcs} simultaneous outages")
 
         # Clean slate: delete stale resources from previous runs, then
@@ -1849,6 +2188,11 @@ class K8sNativeFailoverTest(TestClusterBase):
                         self.logger.warning(f"Health check did not pass for {node}: {exc}")
 
                 self.collect_outage_diagnostics("post_recovery")
+
+                # ── Process deferred operations ──
+                if self.use_client_fio:
+                    self.retry_failed_nvme_connects()
+                self.validate_pending_deletions()
 
                 # ── Validation phase ──
                 sleep_n_sec(300)
@@ -2053,10 +2397,21 @@ class K8sNativeBasicFailoverTest(K8sNativeFailoverTest):
 
         # Read cluster config
         cluster_details = self.sbcli_utils.get_cluster_details()
-        max_fault_tolerance = cluster_details.get("max_fault_tolerance", 1)
-        self.logger.info(f"Cluster max_fault_tolerance: {max_fault_tolerance}")
+        self.max_fault_tolerance = cluster_details.get("max_fault_tolerance", 1)
+        self.logger.info(f"Cluster max_fault_tolerance: {self.max_fault_tolerance}")
         if self.npcs == 1:
-            self.npcs = max_fault_tolerance
+            self.npcs = self.max_fault_tolerance
+        if self.npcs > self.max_fault_tolerance:
+            self.logger.warning(
+                f"npcs={self.npcs} exceeds max_fault_tolerance="
+                f"{self.max_fault_tolerance} — cluster may not survive "
+                f"all simultaneous outages!"
+            )
+        if self.max_fault_tolerance >= 2:
+            self.logger.info(
+                f"FTT={self.max_fault_tolerance} — outage candidates include "
+                f"ALL nodes (primary+secondary pairs allowed)"
+            )
         self.logger.info(f"Running with npcs={self.npcs} simultaneous outages")
 
         # Clean slate: delete stale resources from previous runs, then
@@ -2150,6 +2505,11 @@ class K8sNativeBasicFailoverTest(K8sNativeFailoverTest):
                         self.logger.warning(f"Health check did not pass for {node}: {exc}")
 
                 self.collect_outage_diagnostics("post_recovery")
+
+                # Process deferred operations
+                if self.use_client_fio:
+                    self.retry_failed_nvme_connects()
+                self.validate_pending_deletions()
 
                 # Validation phase
                 sleep_n_sec(300)

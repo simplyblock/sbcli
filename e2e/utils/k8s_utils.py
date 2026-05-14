@@ -1928,7 +1928,6 @@ class K8sSbcliUtils:
             f"spec:\n"
             f"  capacityLimit: 100Gi\n"
             f"  clusterName: {cluster_name}\n"
-            f"  name: {pool_name}\n"
         )
 
         self.logger.info(

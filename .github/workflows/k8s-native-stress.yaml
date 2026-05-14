@@ -638,7 +638,6 @@ jobs:
             name: simplyblock-cluster
             namespace: ${NAMESPACE}
           spec:
-            clusterName: simplyblock-cluster
             mgmtIfname: ${MGMT_IFC}
             fabricType: tcp
             isSingleNode: false
@@ -700,7 +699,6 @@ jobs:
             name: simplyblock-cluster
             namespace: ${NAMESPACE}
           spec:
-            clusterName: simplyblock-cluster
             mgmtIfname: ${MGMT_IFC}
             fabricType: tcp
             isSingleNode: false
