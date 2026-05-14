@@ -662,7 +662,6 @@ jobs:
             name: simplyblock-pool
             namespace: ${NAMESPACE}
           spec:
-            name: simplyblock-pool
             clusterName: simplyblock-cluster
           ---
           apiVersion: storage.simplyblock.io/v1alpha1
@@ -683,7 +682,6 @@ jobs:
             maxLogicalVolumeCount: 30
             partitions: ${PARTITIONS}
             corePercentage: ${CORE_PERCENTAGE}
-            coreIsolation: false
             journalManager:
               count: ${JM_COUNT}
               percentPerDevice: 3
@@ -725,7 +723,6 @@ jobs:
             name: simplyblock-pool
             namespace: ${NAMESPACE}
           spec:
-            name: simplyblock-pool
             clusterName: simplyblock-cluster
           ---
           apiVersion: storage.simplyblock.io/v1alpha1
@@ -746,7 +743,6 @@ jobs:
             maxLogicalVolumeCount: 30
             partitions: ${PARTITIONS}
             corePercentage: ${CORE_PERCENTAGE}
-            coreIsolation: false
             journalManager:
               count: ${JM_COUNT}
               percentPerDevice: 3
