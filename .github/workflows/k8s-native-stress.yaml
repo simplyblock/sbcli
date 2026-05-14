@@ -618,7 +618,7 @@ jobs:
 
           echo "=== Waiting for all pods to be Running ==="
           for i in $(seq 1 10); do
-            BAD_PODS=$(kubectl get pods -n $NAMESPACE --no-headers 2>/dev/null | grep -E 'ImagePullBackOff|ErrImagePull|Pending|ContainerCreating' | wc -l)
+            BAD_PODS=$(kubectl get pods -n $NAMESPACE --no-headers 2>/dev/null | grep -vE 'Running|Completed' | wc -l)
             if [ "$BAD_PODS" -eq 0 ]; then
               echo "All pods are Running"
               break
@@ -820,7 +820,7 @@ jobs:
 
           echo "=== Waiting for all pods to be Running ==="
           for i in $(seq 1 10); do
-            BAD_PODS=$(kubectl get pods -n $NAMESPACE --no-headers 2>/dev/null | grep -E 'ImagePullBackOff|ErrImagePull|Pending|ContainerCreating' | wc -l)
+            BAD_PODS=$(kubectl get pods -n $NAMESPACE --no-headers 2>/dev/null | grep -vE 'Running|Completed' | wc -l)
             if [ "$BAD_PODS" -eq 0 ]; then
               echo "All pods are Running"
               break
@@ -830,12 +830,13 @@ jobs:
             sleep 10
           done
 
-      - name: Grant OpenShift SCC and restart storage daemonset (post-CR)
-        if: ${{ github.event.inputs.use_existing_cluster != 'true' && (github.event.inputs.cluster_environment == 'aws-openshift' || github.event.inputs.cluster_environment == 'openshift-local') }}
+      - name: Wait for storage SA, patch secrets, grant SCC and restart daemonset
+        if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
         run: |
+          NAMESPACE=simplyblock
           echo "Waiting for simplyblock-storage-node-sa service account..."
           for i in $(seq 1 60); do
-            if kubectl get sa simplyblock-storage-node-sa -n simplyblock &>/dev/null; then
+            if kubectl get sa simplyblock-storage-node-sa -n $NAMESPACE &>/dev/null; then
               echo "Service account simplyblock-storage-node-sa found"
               break
             fi
@@ -843,34 +844,26 @@ jobs:
             sleep 10
           done
 
-          echo "Granting privileged SCC to all service accounts..."
-          for sa in $(oc get sa -n simplyblock -o name | cut -d/ -f2); do
-            oc adm policy add-scc-to-user privileged -z $sa -n simplyblock
-            echo "Granted privileged SCC to $sa"
+          echo "Patching service accounts with imagePullSecrets..."
+          for sa in $(kubectl get serviceaccounts -n $NAMESPACE --no-headers | awk '{print $1}'); do
+            kubectl patch serviceaccount "$sa" -n $NAMESPACE \
+              --patch '{"imagePullSecrets": [{"name": "regcred"}]}'
           done
 
-          echo "Waiting for storage node daemonset to be created..."
-          for i in $(seq 1 60); do
-            if kubectl get daemonset simplyblock-storage-node-ds-simplyblock-cluster -n simplyblock &>/dev/null; then
-              echo "Daemonset found, waiting for rollout to complete..."
-              kubectl rollout status daemonset simplyblock-storage-node-ds-simplyblock-cluster -n simplyblock --timeout=300s
-              echo "Restarting daemonset..."
-              kubectl rollout restart daemonset simplyblock-storage-node-ds-simplyblock-cluster -n simplyblock
-              break
-            fi
-            echo "Attempt $i/60: daemonset not found yet, waiting 10s..."
-            sleep 10
-          done
+          if [ "$CLUSTER_ENV" = "aws-openshift" ] || [ "$CLUSTER_ENV" = "openshift-local" ]; then
+            echo "Granting privileged SCC to all service accounts..."
+            for sa in $(oc get sa -n $NAMESPACE -o name | cut -d/ -f2); do
+              oc adm policy add-scc-to-user privileged -z $sa -n $NAMESPACE
+              echo "Granted privileged SCC to $sa"
+            done
+          fi
 
-      - name: Wait for storage daemonset and rollout restart
-        if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
-        run: |
-          NAMESPACE=simplyblock
           echo "=== Waiting for storage node daemonset ==="
           for i in $(seq 1 60); do
             if kubectl get daemonset simplyblock-storage-node-ds-simplyblock-cluster -n $NAMESPACE &>/dev/null; then
               echo "Daemonset found, waiting for rollout to complete..."
               kubectl rollout status daemonset simplyblock-storage-node-ds-simplyblock-cluster -n $NAMESPACE --timeout=300s || true
+              kubectl get pods -n $NAMESPACE
               echo "Restarting daemonset..."
               kubectl rollout restart -n $NAMESPACE ds simplyblock-storage-node-ds-simplyblock-cluster
               break
@@ -878,6 +871,8 @@ jobs:
             echo "Daemonset not found yet ($i/60), waiting 10s..."
             sleep 10
           done
+        env:
+          CLUSTER_ENV: ${{ github.event.inputs.cluster_environment }}
 
       # ── Wait for cluster readiness ──────────────────────────────────────────
 
