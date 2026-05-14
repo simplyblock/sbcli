@@ -337,7 +337,7 @@ def suspend(cluster: Cluster, pool: StoragePool, volume: Volume) -> bool:
 def resume(cluster: Cluster, pool: StoragePool, volume: Volume) -> bool:
     return lvol_controller.resume_lvol(volume.get_id())
 
-@instance_api.get('/clone', name='clusters:storage-pools:volumes:clone', status_code=201, responses={201: {"content": None}})
+@instance_api.post('/clone', name='clusters:storage-pools:volumes:clone', status_code=201, responses={201: {"content": None}})
 def clone(
         request: Request, cluster: Cluster, pool: StoragePool, volume: Volume,
         clone_name: str,
