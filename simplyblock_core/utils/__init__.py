@@ -881,6 +881,8 @@ def _get_all_nvmf_ports(cluster_id):
             used_ports.add(node.nvmf_port)
         if node.hublvol and node.hublvol.nvmf_port > 0:
             used_ports.add(node.hublvol.nvmf_port)
+        if node.rpc_port > 0:
+            used_ports.add(node.rpc_port)
         # Collect per-lvstore ports
         for lvs_name, ports in (node.lvstore_ports or {}).items():
             if isinstance(ports, dict):

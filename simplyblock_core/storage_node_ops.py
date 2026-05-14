@@ -1588,7 +1588,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
 
         mgmt_ip, mgmt_iface = mgmt_info
         firewall_port = utils.get_next_fw_port(cluster_id, mgmt_ip=mgmt_ip)
-        rpc_port = utils.get_next_rpc_port(cluster_id)
+        rpc_port = utils.get_next_nvmf_port(cluster_id)
         logger.info(f"mgmt interface is {mgmt_iface}")
 
         if not spdk_image:
