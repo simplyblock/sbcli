@@ -337,17 +337,26 @@ def suspend(cluster: Cluster, pool: StoragePool, volume: Volume) -> bool:
 def resume(cluster: Cluster, pool: StoragePool, volume: Volume) -> bool:
     return lvol_controller.resume_lvol(volume.get_id())
 
-@instance_api.get('/clone', name='clusters:storage-pools:volumes:clone')
+@instance_api.post('/clone', name='clusters:storage-pools:volumes:clone', status_code=201, responses={201: {"content": None}})
 def clone(
-        cluster: Cluster, pool: StoragePool, volume: Volume,
+        request: Request, cluster: Cluster, pool: StoragePool, volume: Volume,
         clone_name: str,
         new_size: Optional[str] = None,
         pvc_name: Optional[str] = None,
-) -> bool:
+) -> Response:
     size = None
     if new_size is not None:
         try:
             size = core_utils.parse_size(new_size)
         except Exception:
             raise HTTPException(400, f'Invalid new_size value: {new_size!r}')
-    return lvol_controller.clone_lvol(volume.get_id(), clone_name, size, pvc_name)
+    clone_id, error = lvol_controller.clone_lvol(volume.get_id(), clone_name, size, pvc_name)
+    if not clone_id:
+        raise ValueError(error or 'Failed to clone volume')
+    entity_url = request.app.url_path_for(
+        'clusters:storage-pools:volumes:detail',
+        cluster_id=cluster.get_id(),
+        pool_id=pool.get_id(),
+        volume_id=clone_id,
+    )
+    return Response(status_code=201, headers={'Location': str(entity_url)})
