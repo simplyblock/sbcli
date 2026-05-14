@@ -513,6 +513,19 @@ jobs:
             pod-security.kubernetes.io/audit=privileged \
             --overwrite
 
+      - name: Create Docker registry secret
+        if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
+        run: |
+          kubectl create secret docker-registry regcred \
+            --docker-server=https://index.docker.io/v1/ \
+            --docker-username=${DOCKER_USER} \
+            --docker-password=${DOCKER_PASSWORD} \
+            --docker-email=a@b.com \
+            -n simplyblock || true
+        env:
+          DOCKER_USER: ${{ secrets.DOCKER_USER }}
+          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+
       - name: Configure OpenShift SCC policies
         if: ${{ github.event.inputs.use_existing_cluster != 'true' && (github.event.inputs.cluster_environment == 'aws-openshift' || github.event.inputs.cluster_environment == 'openshift-local') }}
         run: |
@@ -586,6 +599,34 @@ jobs:
             sleep 10
           done
           echo "FLUENTBIT_PATCHED=$PATCHED" >> $GITHUB_ENV
+
+      - name: Patch service accounts with imagePullSecrets
+        if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
+        run: |
+          for sa in $(kubectl get serviceaccounts -n simplyblock --no-headers | awk '{print $1}'); do
+            kubectl patch serviceaccount "$sa" -n simplyblock \
+              --patch '{"imagePullSecrets": [{"name": "regcred"}]}'
+          done
+
+      - name: Delete ImagePullBackOff pods and wait for Running (pre-CRD)
+        if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
+        run: |
+          NAMESPACE=simplyblock
+          for pod in $(kubectl get pods -n $NAMESPACE --no-headers 2>/dev/null | grep ImagePullBackOff | awk '{print $1}'); do
+            kubectl delete pod -n $NAMESPACE "$pod" || true
+          done
+
+          echo "=== Waiting for all pods to be Running ==="
+          for i in $(seq 1 10); do
+            BAD_PODS=$(kubectl get pods -n $NAMESPACE --no-headers 2>/dev/null | grep -E 'ImagePullBackOff|ErrImagePull|Pending|ContainerCreating' | wc -l)
+            if [ "$BAD_PODS" -eq 0 ]; then
+              echo "All pods are Running"
+              break
+            fi
+            echo "Still $BAD_PODS pod(s) not ready ($i/10)..."
+            kubectl get pods -n $NAMESPACE --no-headers 2>/dev/null | grep -vE 'Running|Completed' || true
+            sleep 10
+          done
 
       # ── Apply custom resources ────────────────────────────────────────────
 
@@ -761,6 +802,34 @@ jobs:
           NDCS: ${{ env.NDCS }}
           NPCS: ${{ env.NPCS }}
 
+      - name: Patch service accounts with imagePullSecrets (post-CRD)
+        if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
+        run: |
+          for sa in $(kubectl get serviceaccounts -n simplyblock --no-headers | awk '{print $1}'); do
+            kubectl patch serviceaccount "$sa" -n simplyblock \
+              --patch '{"imagePullSecrets": [{"name": "regcred"}]}'
+          done
+
+      - name: Delete ImagePullBackOff pods and wait for Running (post-CRD)
+        if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
+        run: |
+          NAMESPACE=simplyblock
+          for pod in $(kubectl get pods -n $NAMESPACE --no-headers 2>/dev/null | grep ImagePullBackOff | awk '{print $1}'); do
+            kubectl delete pod -n $NAMESPACE "$pod" || true
+          done
+
+          echo "=== Waiting for all pods to be Running ==="
+          for i in $(seq 1 10); do
+            BAD_PODS=$(kubectl get pods -n $NAMESPACE --no-headers 2>/dev/null | grep -E 'ImagePullBackOff|ErrImagePull|Pending|ContainerCreating' | wc -l)
+            if [ "$BAD_PODS" -eq 0 ]; then
+              echo "All pods are Running"
+              break
+            fi
+            echo "Still $BAD_PODS pod(s) not ready ($i/10)..."
+            kubectl get pods -n $NAMESPACE --no-headers 2>/dev/null | grep -vE 'Running|Completed' || true
+            sleep 10
+          done
+
       - name: Grant OpenShift SCC and restart storage daemonset (post-CR)
         if: ${{ github.event.inputs.use_existing_cluster != 'true' && (github.event.inputs.cluster_environment == 'aws-openshift' || github.event.inputs.cluster_environment == 'openshift-local') }}
         run: |
@@ -793,6 +862,23 @@ jobs:
             sleep 10
           done
 
+      - name: Wait for storage daemonset and rollout restart
+        if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
+        run: |
+          NAMESPACE=simplyblock
+          echo "=== Waiting for storage node daemonset ==="
+          for i in $(seq 1 60); do
+            if kubectl get daemonset simplyblock-storage-node-ds-simplyblock-cluster -n $NAMESPACE &>/dev/null; then
+              echo "Daemonset found, waiting for rollout to complete..."
+              kubectl rollout status daemonset simplyblock-storage-node-ds-simplyblock-cluster -n $NAMESPACE --timeout=300s || true
+              echo "Restarting daemonset..."
+              kubectl rollout restart -n $NAMESPACE ds simplyblock-storage-node-ds-simplyblock-cluster
+              break
+            fi
+            echo "Daemonset not found yet ($i/60), waiting 10s..."
+            sleep 10
+          done
+
       # ── Wait for cluster readiness ──────────────────────────────────────────
 
       - name: Wait for cluster to become active
@@ -801,12 +887,7 @@ jobs:
         run: |
           NAMESPACE=simplyblock
           ADMIN_POD=""
-          CLUSTER_ENV="${{ github.event.inputs.cluster_environment || 'local' }}"
-          if [ "$CLUSTER_ENV" = "local" ]; then
-            MAX_POLL=300
-          else
-            MAX_POLL=720
-          fi
+          MAX_POLL=300
 
           echo "=== Waiting for admin pod to be ready ==="
           for i in $(seq 1 60); do
@@ -934,6 +1015,50 @@ jobs:
           kubectl -n $NAMESPACE get pods
           kubectl -n $NAMESPACE exec "$ADMIN_POD" -- sbctl cluster list 2>&1 || true
           exit 1
+
+      - name: Verify and force-activate cluster if needed
+        if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
+        run: |
+          NAMESPACE=simplyblock
+          ADMIN_POD=$(kubectl -n $NAMESPACE get pods \
+            -l app=simplyblock-admin-control \
+            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) || true
+
+          if [ -z "$ADMIN_POD" ]; then
+            echo "ERROR: No admin pod found"
+            exit 1
+          fi
+
+          echo "=== Verifying cluster activation ==="
+          OUTPUT=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
+            sbctl cluster list 2>&1) || true
+          echo "$OUTPUT"
+
+          if echo "$OUTPUT" | grep -qi "active"; then
+            echo "Cluster is active, no action needed"
+            exit 0
+          fi
+
+          echo "Cluster is NOT active, attempting forced activation..."
+          kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
+            sbctl -d cluster activate "${CLUSTER_ID}" 2>&1 || true
+
+          echo "Waiting 30s for activation to take effect..."
+          sleep 30
+
+          OUTPUT=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
+            sbctl cluster list 2>&1) || true
+          echo "$OUTPUT"
+
+          if echo "$OUTPUT" | grep -qi "active"; then
+            echo "Cluster is now active after forced activation"
+            exit 0
+          fi
+
+          echo "ERROR: Cluster is still not active after forced activation"
+          exit 1
+        env:
+          CLUSTER_ID: ${{ env.CLUSTER_ID }}
 
       - name: Patch fluent-bit daemonset (post-cluster-active)
         if: ${{ env.FLUENTBIT_PATCHED != 'true' }}
