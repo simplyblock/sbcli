@@ -1305,6 +1305,9 @@ def _get_secondary_rpc(node):
 
 
 
+_SKIP_CLEANUP_SOURCE = True  # DEBUG: set False to re-enable source cleanup
+
+
 def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
     """
     Delete snapshots from the source node that are exclusively owned by the
@@ -1331,6 +1334,11 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
 
     Returns (done: bool, suspend: bool, error: str|None).
     """
+    if _SKIP_CLEANUP_SOURCE:
+        logger.info("SKIP_CLEANUP_SOURCE flag is set — skipping source cleanup, applying DB only")
+        migration_controller.apply_migration_to_db(migration)
+        return True, False, None
+
     ctx = migration.transfer_context or {}
 
     # --- First entry: initialize cleanup state ---
