@@ -959,7 +959,7 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             if not ok:
                 migration.write_to_db(db.kv_store)
                 return False, True, err
-        migration.transfer_context = {}
+        migration.transfer_context = {'tgt_lvol_uuid': ctx.get('tgt_lvol_uuid')}
         _update_ana_states(migration, src_node, tgt_node, src_rpc, tgt_rpc)
         return True, False, None
 
@@ -995,11 +995,17 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         # is already established.  Calling bdev_lvol_add_clone on primary would fail
         # with -EEXIST.  The secondary never receives the forwarded signal (its
         # replication path is not up yet), so we must chain it explicitly here.
+        # tgt_uuid is needed by CLEANUP_SOURCE to update lvol.lvol_uuid in the DB.
+        # Carry it forward through every transfer_context write below so it
+        # survives the phase boundary even when retries via 'secondary_register'
+        # are needed.
+        tgt_uuid_carry = {'tgt_lvol_uuid': ctx.get('tgt_lvol_uuid')}
+
         if lvol.ha_type == "ha":
             tgt_sec, sec_err = _get_target_secondary_node(tgt_node)
             if sec_err:
                 migration.error_message = sec_err
-                migration.transfer_context = {}
+                migration.transfer_context = tgt_uuid_carry
                 migration.write_to_db(db.kv_store)
                 return False, True, _WAIT
             if tgt_sec is not None:
@@ -1015,13 +1021,13 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                             logger.error(
                                 f"bdev_lvol_add_clone on secondary failed for "
                                 f"{tgt_lvol_composite} → {tgt_snap_composite}")
-                            migration.transfer_context = {'stage': 'secondary_register'}
+                            migration.transfer_context = {'stage': 'secondary_register', **tgt_uuid_carry}
                             migration.write_to_db(db.kv_store)
                             return False, True, (
                                 f"bdev_lvol_add_clone on secondary failed for {tgt_lvol_composite}")
                     except KeyError as e:
                         logger.error(f"Last snapshot not found for secondary chaining: {e}")
-                        migration.transfer_context = {'stage': 'secondary_register'}
+                        migration.transfer_context = {'stage': 'secondary_register', **tgt_uuid_carry}
                         migration.write_to_db(db.kv_store)
                         return False, True, str(e)
 
@@ -1032,13 +1038,13 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                     # Keep the primary lvol intact — transfer already completed.
                     # Mark stage so retry skips re-creating and goes straight to
                     # secondary registration.
-                    migration.transfer_context = {'stage': 'secondary_register'}
+                    migration.transfer_context = {'stage': 'secondary_register', **tgt_uuid_carry}
                     migration.write_to_db(db.kv_store)
                     return False, True, err
                 logger.info(
                     f"Lvol {lvol.uuid} registered and exposed on secondary {tgt_sec.get_id()}")
 
-        migration.transfer_context = {}
+        migration.transfer_context = tgt_uuid_carry
 
         _update_ana_states(migration, src_node, tgt_node, src_rpc, tgt_rpc)
 
