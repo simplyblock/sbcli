@@ -431,7 +431,7 @@ def _collect_snap_ancestry(snap_uuid, out_set):
 # Post-migration DB updates
 # ---------------------------------------------------------------------------
 
-def apply_migration_to_db(migration):
+def apply_migration_to_db(migration, tgt_lvol_uuid=None):
     """
     Update control-plane DB records after a successful lvol migration:
     - Move the lvol's ``node_id``, ``nodes``, ``hostname``, and ``lvs_name``
@@ -457,6 +457,9 @@ def apply_migration_to_db(migration):
     lvol.node_id = tgt_node.get_id()
     lvol.hostname = tgt_node.hostname
     lvol.lvs_name = tgt_node.lvstore
+    lvol.top_bdev = f"{tgt_node.lvstore}/{lvol.lvol_bdev}"
+    if tgt_lvol_uuid:
+        lvol.lvol_uuid = tgt_lvol_uuid
 
     # Update the nodes list (primary + all secondaries)
     lvol.nodes = [tgt_node.get_id()]
