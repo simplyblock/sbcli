@@ -350,7 +350,7 @@ def _cleanup_final_migration(src_rpc, ctx, tgt_rpc=None, rollback_target=False):
                 _cleanup_subsystem_or_ns(nqn, tgt_ns_id, sub_created, tgt_rpc)
             except Exception as e:
                 logger.warning(f"cleanup target subsystem {nqn}: {e}")
-        if tgt_composite:
+        if tgt_composite and tgt_rpc.get_bdevs(tgt_composite):
             try:
                 _delete_bdev_blocking(tgt_composite, tgt_rpc)
             except Exception as e:
@@ -818,11 +818,14 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         src_composite = _snap_composite(src_node.lvstore, snap)
         tgt_composite = f"{tgt_node.lvstore}/{snap_short}"
 
-        # Pre-cleanup
-        try:
-            _delete_bdev_blocking(tgt_composite, tgt_rpc)
-        except Exception:
-            pass
+        # Pre-cleanup: only delete if the bdev actually exists on the target
+        # (stale from a previous crashed run). Deleting blindly masks real errors.
+        if tgt_rpc.get_bdevs(tgt_composite):
+            logger.info(f"Pre-cleanup: removing stale intermediate bdev {tgt_composite}")
+            try:
+                _delete_bdev_blocking(tgt_composite, tgt_rpc)
+            except Exception as e:
+                logger.warning(f"Pre-cleanup of {tgt_composite} failed (continuing): {e}")
 
         t, err = _setup_snap_transfer(
             snap, snap_index, migration, src_node, tgt_node,
@@ -1305,7 +1308,7 @@ def _get_secondary_rpc(node):
 
 
 
-_SKIP_CLEANUP_SOURCE = True  # DEBUG: set False to re-enable source cleanup
+_SKIP_CLEANUP_SOURCE = False  # DEBUG: set True to skip source cleanup
 
 
 def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
