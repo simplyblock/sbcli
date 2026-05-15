@@ -1441,16 +1441,13 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
         cluster_docker = utils.get_docker_client(cluster_id)
         logger.info(f"Pulling image {constants.SIMPLY_BLOCK_DOCKER_IMAGE}")
         pull_docker_image_with_retry(cluster_docker, constants.SIMPLY_BLOCK_DOCKER_IMAGE)
-        image_without_tag = constants.SIMPLY_BLOCK_DOCKER_IMAGE.split(":")[0]
-        image_without_tag = image_without_tag.split("/")
-        image_parts = "/".join(image_without_tag[-2:])
         service_image = constants.SIMPLY_BLOCK_DOCKER_IMAGE
         if mgmt_image:
             service_image = mgmt_image
         service_names = []
         for service in cluster_docker.services.list():
-            if image_parts in service.attrs['Spec']['Labels']['com.docker.stack.image'] or \
-            "simplyblock" in service.attrs['Spec']['Labels']['com.docker.stack.image']:
+            if "simplyblock-io/simplyblock" in service.attrs['Spec']['Labels']['com.docker.stack.image'] or \
+                "simplyblock/simplyblock" in service.attrs['Spec']['Labels']['com.docker.stack.image']:
                 if service.name in ["app_CachingNodeMonitor", "app_CachedLVolStatsCollector"]:
                     logger.info(f"Removing service {service.name}")
                     service.remove()
@@ -1498,7 +1495,7 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                 continue
             deployment_names.append(deploy.metadata.name)
             for c in deploy.spec.template.spec.containers:
-                if image_parts in c.image:
+                if "simplyblock-io/simplyblock" in c.image or "simplyblock/simplyblock" in c.image:
                     logger.info(f"Updating deployment {deploy.metadata.name} image to {service_image}")
                     c.image = service_image
                     annotations = deploy.spec.template.metadata.annotations or {}
