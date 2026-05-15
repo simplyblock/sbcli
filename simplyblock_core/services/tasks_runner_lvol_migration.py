@@ -1234,6 +1234,7 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         'tgt_lvol_composite': tgt_lvol_composite,
         'tgt_ns_id': tgt_ns_id,
         'subsystem_created_on_target': subsystem_created_on_target,
+        'tgt_lvol_uuid': tgt_uuid,
     }
     migration.write_to_db(db.kv_store)
     logger.info(f"Started final migration: lvol={lvol.uuid} map_id={tgt_map_id}")
@@ -1346,6 +1347,10 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
 
     # --- First entry: initialize cleanup state ---
     if ctx.get('stage') != 'cleanup_src':
+        # Preserve the target lvol UUID written by PHASE_LVOL_MIGRATE so we can
+        # update lvol.lvol_uuid in the DB after cleanup completes.
+        tgt_lvol_uuid = ctx.get('tgt_lvol_uuid')
+
         to_delete = migration_controller.get_snaps_safe_to_delete_on_source(migration)
 
         # Verify each snapshot to be deleted physically exists on the target
@@ -1364,7 +1369,12 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
             except KeyError:
                 pass  # already gone from DB; safe to skip
 
-        ctx = {'stage': 'cleanup_src', 'pending': list(to_delete), 'current_bdev': None}
+        ctx = {
+            'stage': 'cleanup_src',
+            'pending': list(to_delete),
+            'current_bdev': None,
+            'tgt_lvol_uuid': tgt_lvol_uuid,
+        }
         migration.transfer_context = ctx
         migration.write_to_db(db.kv_store)
 
@@ -1377,7 +1387,7 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
         if status == 1:
             return False, False, None  # still in progress
         if status in (0, 2):
-            src_rpc.delete_lvol(bdev_name, del_async=True)
+            # Async delete on source primary already completed — only finalize on secondary.
             if src_sec_rpc:
                 src_sec_rpc.delete_lvol(bdev_name, del_async=True)
             logger.info(f"Deleted source bdev {bdev_name}")
@@ -1419,8 +1429,9 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
     except Exception as e:
         logger.warning(f"Source subsystem cleanup failed (non-fatal): {e}")
 
+    tgt_lvol_uuid = ctx.get('tgt_lvol_uuid')
     migration.transfer_context = {}
-    if not migration_controller.apply_migration_to_db(migration):
+    if not migration_controller.apply_migration_to_db(migration, tgt_lvol_uuid=tgt_lvol_uuid):
         return False, False, "Failed to update DB records after source cleanup"
 
     return True, False, None
