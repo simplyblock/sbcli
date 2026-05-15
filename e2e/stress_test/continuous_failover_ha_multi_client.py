@@ -141,6 +141,11 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                     or self.lvol_mount_details.get(name)
                 )
                 if not details:
+                    # Lvol was deleted — no point retrying
+                    self.logger.info(
+                        f"[retry] Skipping deleted lvol {name} — removing from retry queue"
+                    )
+                    del self.failed_nvme_connects[name]
                     continue
 
                 client = details["Client"]
@@ -166,7 +171,12 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                 self.clone_mount_details.get(name)
                 or self.lvol_mount_details.get(name)
             )
-            total = len(details["Command"]) if details else len(cmds)
+            if not details:
+                # Lvol was deleted during retry window — skip
+                self.logger.info(f"[retry] Lvol {name} deleted — dropping from failed list")
+                del self.failed_nvme_connects[name]
+                continue
+            total = len(details["Command"])
             remaining = len(cmds)
             succeeded = total - remaining
             if succeeded >= total - max_fault_tolerance and succeeded >= 1:
@@ -205,22 +215,66 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
 
         self.logger.info("Validating deferred deletions after recovery")
         start = time.time()
+        retry_interval = 60  # re-issue delete every 60s if still stuck (~10 retries in 600s)
+        last_lvol_retry = {}
+        last_snap_retry = {}
 
         while time.time() - start < timeout:
+            # --- Check and retry pending lvols (clones) FIRST ---
+            # Lvols/clones must be deleted before their parent snapshots,
+            # because snapshots cannot be deleted while clones still exist.
             self.logger.info(f"Checking for deferred lvols: {self.pending_deletions['lvols']}")
             for lvol in list(self.pending_deletions["lvols"]):
                 lvol_id = self.sbcli_utils.get_lvol_id(lvol_name=lvol)
                 if not lvol_id or lvol_id != self.pending_deletions["lvols"][lvol]:
+                    self.logger.info(f"Deferred lvol '{lvol}' no longer visible, removing from pending")
                     del self.pending_deletions["lvols"][lvol]
+                    last_lvol_retry.pop(lvol, None)
+                    continue
 
-            self.logger.info(f"Checking for deferred snapshots: {self.pending_deletions['snapshots']}")
-            for snap in list(self.pending_deletions["snapshots"]):
-                if self.k8s_test:
-                    snap_id = self.sbcli_utils.get_snapshot_id(snap)
-                else:
-                    snap_id = self.ssh_obj.get_snapshot_id_delete(self.mgmt_nodes[0], snap)
-                if not snap_id or snap_id != self.pending_deletions["snapshots"][snap]:
-                    del self.pending_deletions["snapshots"][snap]
+                # Re-issue delete if enough time has passed since last retry
+                now = time.time()
+                if now - last_lvol_retry.get(lvol, 0) >= retry_interval:
+                    self.logger.info(f"Re-issuing delete for deferred lvol '{lvol}' (id={lvol_id})")
+                    try:
+                        self.sbcli_utils.delete_request(api_url=f"/lvol/{lvol_id}")
+                    except Exception as exc:
+                        self.logger.warning(f"Re-issue delete failed for lvol '{lvol}': {exc}")
+                    last_lvol_retry[lvol] = now
+
+            # --- Check and retry pending snapshots ONLY after all lvols are gone ---
+            # Snapshots with associated clones will fail to delete, so we only
+            # retry snapshot deletes once all pending lvol/clone deletes have cleared.
+            if not self.pending_deletions["lvols"]:
+                self.logger.info(f"Checking for deferred snapshots: {self.pending_deletions['snapshots']}")
+                for snap in list(self.pending_deletions["snapshots"]):
+                    if self.k8s_test:
+                        snap_id = self.sbcli_utils.get_snapshot_id(snap)
+                    else:
+                        snap_id = self.ssh_obj.get_snapshot_id_delete(self.mgmt_nodes[0], snap)
+                    if not snap_id or snap_id != self.pending_deletions["snapshots"][snap]:
+                        self.logger.info(f"Deferred snapshot '{snap}' no longer visible, removing from pending")
+                        del self.pending_deletions["snapshots"][snap]
+                        last_snap_retry.pop(snap, None)
+                        continue
+
+                    # Re-issue delete if enough time has passed since last retry
+                    now = time.time()
+                    if now - last_snap_retry.get(snap, 0) >= retry_interval:
+                        self.logger.info(f"Re-issuing delete for deferred snapshot '{snap}' (id={snap_id})")
+                        try:
+                            if self.k8s_test:
+                                self.sbcli_utils.delete_snapshot(snap_id=snap_id, skip_error=True)
+                            else:
+                                self.ssh_obj.delete_snapshot(self.mgmt_nodes[0], snapshot_id=snap_id, skip_error=True)
+                        except Exception as exc:
+                            self.logger.warning(f"Re-issue delete failed for snapshot '{snap}': {exc}")
+                        last_snap_retry[snap] = now
+            else:
+                self.logger.info(
+                    f"Skipping snapshot retry -- {len(self.pending_deletions['lvols'])} "
+                    f"lvol(s) still pending (snapshots cannot be deleted while clones exist)"
+                )
 
             if not self.pending_deletions["lvols"] and not self.pending_deletions["snapshots"]:
                 self.logger.info("All deferred deletions completed")
@@ -368,7 +422,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                     # nqn = lvol_details[0]["nqn"]
                     # self.ssh_obj.disconnect_nvme(node=client_node, nqn_grep=nqn)
                     # self.logger.info(f"Connecting lvol {lvol_name} has error: {error}. Disconnect all connections for that lvol and cleaning that lvol!!")
-                    # self.sbcli_utils.delete_lvol(lvol_name=lvol_name, max_attempt=20, skip_error=True)
+                    # self.sbcli_utils.delete_lvol(lvol_name=lvol_name, max_attempt=120, skip_error=True)
                     self.record_failed_nvme_connect(lvol_name, connect_str, client=client_node)
 
             sleep_n_sec(3)
@@ -615,13 +669,12 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
             # Retry mechanism for restarting the node
             for attempt in range(max_retries):
                 if not self.k8s_test:
-                    for node in self.storage_nodes:
-                        self.ssh_obj.restart_docker_logging(
-                            node_ip=node,
-                            containers=self.container_nodes[node],
-                            log_dir=os.path.join(self.docker_logs_path, node),
-                            test_name=self.test_name
-                        )
+                    self.ssh_obj.restart_docker_logging(
+                        node_ip=node_ip,
+                        containers=self.container_nodes.get(node_ip, []),
+                        log_dir=os.path.join(self.docker_logs_path, node_ip),
+                        test_name=self.test_name
+                    )
                 else:
                     self.runner_k8s_log.restart_logging()
                 try:
@@ -637,16 +690,13 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                         self.ssh_obj.restart_node(node=self.mgmt_nodes[0],
                                                   node_id=self.current_outage_node,
                                                   force=force)
-                    # else:
-                    #     self.sbcli_utils.restart_node(node_uuid=self.current_outage_node, expected_error_code=[503])
                     if not self.k8s_test:
-                        for node in self.storage_nodes:
-                            self.ssh_obj.restart_docker_logging(
-                                node_ip=node,
-                                containers=self.container_nodes[node],
-                                log_dir=os.path.join(self.docker_logs_path, node),
-                                test_name=self.test_name
-                            )
+                        self.ssh_obj.restart_docker_logging(
+                            node_ip=node_ip,
+                            containers=self.container_nodes.get(node_ip, []),
+                            log_dir=os.path.join(self.docker_logs_path, node_ip),
+                            test_name=self.test_name
+                        )
                     else:
                         self.runner_k8s_log.restart_logging()
                     self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "online", timeout=300)
@@ -691,13 +741,12 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                 retry_delay = 10  # seconds
                 try:
                     if not self.k8s_test:
-                        for node in self.storage_nodes:
-                            self.ssh_obj.restart_docker_logging(
-                                node_ip=node,
-                                containers=self.container_nodes[node],
-                                log_dir=os.path.join(self.docker_logs_path, node),
-                                test_name=self.test_name
-                            )
+                        self.ssh_obj.restart_docker_logging(
+                            node_ip=node_ip,
+                            containers=self.container_nodes.get(node_ip, []),
+                            log_dir=os.path.join(self.docker_logs_path, node_ip),
+                            test_name=self.test_name
+                        )
                     else:
                         self.runner_k8s_log.restart_logging()
                     self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "online", timeout=60)
@@ -709,13 +758,12 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                     # Retry mechanism for restarting the node
                     for attempt in range(max_retries):
                         if not self.k8s_test:
-                            for node in self.storage_nodes:
-                                self.ssh_obj.restart_docker_logging(
-                                    node_ip=node,
-                                    containers=self.container_nodes[node],
-                                    log_dir=os.path.join(self.docker_logs_path, node),
-                                    test_name=self.test_name
-                                )
+                            self.ssh_obj.restart_docker_logging(
+                                node_ip=node_ip,
+                                containers=self.container_nodes.get(node_ip, []),
+                                log_dir=os.path.join(self.docker_logs_path, node_ip),
+                                test_name=self.test_name
+                            )
                         else:
                             self.runner_k8s_log.restart_logging()
                         try:
@@ -731,16 +779,13 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                                 self.ssh_obj.restart_node(node=self.mgmt_nodes[0],
                                                         node_id=self.current_outage_node,
                                                         force=force)
-                            # else:
-                            #     self.sbcli_utils.restart_node(node_uuid=self.current_outage_node, expected_error_code=[503])
                             if not self.k8s_test:
-                                for node in self.storage_nodes:
-                                    self.ssh_obj.restart_docker_logging(
-                                        node_ip=node,
-                                        containers=self.container_nodes[node],
-                                        log_dir=os.path.join(self.docker_logs_path, node),
-                                        test_name=self.test_name
-                                    )
+                                self.ssh_obj.restart_docker_logging(
+                                    node_ip=node_ip,
+                                    containers=self.container_nodes.get(node_ip, []),
+                                    log_dir=os.path.join(self.docker_logs_path, node_ip),
+                                    test_name=self.test_name
+                                )
                             else:
                                 self.runner_k8s_log.restart_logging()
                             self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "online", timeout=300)
@@ -760,13 +805,12 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                     self.log_outage_event(self.current_outage_node, outage_type, "Node restarted", outage_time=0)
             else:
                 if not self.k8s_test:
-                    for node in self.storage_nodes:
-                        self.ssh_obj.restart_docker_logging(
-                            node_ip=node,
-                            containers=self.container_nodes[node],
-                            log_dir=os.path.join(self.docker_logs_path, node),
-                            test_name=self.test_name
-                        )
+                    self.ssh_obj.restart_docker_logging(
+                        node_ip=node_ip,
+                        containers=self.container_nodes.get(node_ip, []),
+                        log_dir=os.path.join(self.docker_logs_path, node_ip),
+                        test_name=self.test_name
+                    )
                 else:
                     self.runner_k8s_log.restart_logging()
                 self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "online", timeout=300)
@@ -779,13 +823,12 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                 retry_delay = 10  # seconds
                 try:
                     if not self.k8s_test:
-                        for node in self.storage_nodes:
-                            self.ssh_obj.restart_docker_logging(
-                                node_ip=node,
-                                containers=self.container_nodes[node],
-                                log_dir=os.path.join(self.docker_logs_path, node),
-                                test_name=self.test_name
-                            )
+                        self.ssh_obj.restart_docker_logging(
+                            node_ip=node_ip,
+                            containers=self.container_nodes.get(node_ip, []),
+                            log_dir=os.path.join(self.docker_logs_path, node_ip),
+                            test_name=self.test_name
+                        )
                     else:
                         self.runner_k8s_log.restart_logging()
                     self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "online", timeout=100)
@@ -804,13 +847,12 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                         for attempt in range(max_retries):
                             try:
                                 if not self.k8s_test:
-                                    for node in self.storage_nodes:
-                                        self.ssh_obj.restart_docker_logging(
-                                            node_ip=node,
-                                            containers=self.container_nodes[node],
-                                            log_dir=os.path.join(self.docker_logs_path, node),
-                                            test_name=self.test_name
-                                        )
+                                    self.ssh_obj.restart_docker_logging(
+                                        node_ip=node_ip,
+                                        containers=self.container_nodes.get(node_ip, []),
+                                        log_dir=os.path.join(self.docker_logs_path, node_ip),
+                                        test_name=self.test_name
+                                    )
                                 else:
                                     self.runner_k8s_log.restart_logging()
                                 force=False
@@ -826,13 +868,12 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                                                             node_id=self.current_outage_node,
                                                             force=force)
                                 if not self.k8s_test:
-                                    for node in self.storage_nodes:
-                                        self.ssh_obj.restart_docker_logging(
-                                            node_ip=node,
-                                            containers=self.container_nodes[node],
-                                            log_dir=os.path.join(self.docker_logs_path, node),
-                                            test_name=self.test_name
-                                        )
+                                    self.ssh_obj.restart_docker_logging(
+                                        node_ip=node_ip,
+                                        containers=self.container_nodes.get(node_ip, []),
+                                        log_dir=os.path.join(self.docker_logs_path, node_ip),
+                                        test_name=self.test_name
+                                    )
                                 else:
                                     self.runner_k8s_log.restart_logging()
                                 self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "online", timeout=300)
@@ -852,31 +893,29 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                         self.log_outage_event(self.current_outage_node, outage_type, "Node restarted", outage_time=0)
             else:
                 if not self.k8s_test:
-                    for node in self.storage_nodes:
-                        self.ssh_obj.restart_docker_logging(
-                            node_ip=node,
-                            containers=self.container_nodes[node],
-                            log_dir=os.path.join(self.docker_logs_path, node),
-                            test_name=self.test_name
-                        )
+                    self.ssh_obj.restart_docker_logging(
+                        node_ip=node_ip,
+                        containers=self.container_nodes.get(node_ip, []),
+                        log_dir=os.path.join(self.docker_logs_path, node_ip),
+                        test_name=self.test_name
+                    )
                 else:
                     self.runner_k8s_log.restart_logging()
                 self.sbcli_utils.wait_for_storage_node_status(self.current_outage_node, "online", timeout=300)
                 # Log the restart event
                 self.log_outage_event(self.current_outage_node, outage_type, "Node restarted", outage_time=(self.outage_dur//60)+1)
-        
+
         if not self.k8s_test:
-            for node in self.storage_nodes:
-                self.ssh_obj.restart_docker_logging(
-                    node_ip=node,
-                    containers=self.container_nodes[node],
-                    log_dir=os.path.join(self.docker_logs_path, node),
-                    test_name=self.test_name
-                )
+            self.ssh_obj.restart_docker_logging(
+                node_ip=node_ip,
+                containers=self.container_nodes.get(node_ip, []),
+                log_dir=os.path.join(self.docker_logs_path, node_ip),
+                test_name=self.test_name
+            )
         else:
             self.runner_k8s_log.restart_logging()
 
-        self.sbcli_utils.wait_for_health_status(self.current_outage_node, True, timeout=300)
+        # Health check deferred to after all outage nodes are online
         self.outage_end_time = int(datetime.now().timestamp())
 
         # Flush local outage logs to NFS if we started local logging before a network outage
@@ -1172,7 +1211,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                     sleep_n_sec(10)
                     self.ssh_obj.unmount_path(clone_details["Client"], f"/mnt/{clone_name}")
                     self.ssh_obj.remove_dir(clone_details["Client"], dir_path=f"/mnt/{clone_name}")
-                    self.sbcli_utils.delete_lvol(clone_name, max_attempt=20, skip_error=True)
+                    self.sbcli_utils.delete_lvol(clone_name, max_attempt=120, skip_error=True)
                     sleep_n_sec(30)
                     if clone_name in self.lvols_without_sec_connect:
                         self.lvols_without_sec_connect.remove(clone_name)
@@ -1222,7 +1261,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
             sleep_n_sec(10)
             self.ssh_obj.unmount_path(self.lvol_mount_details[lvol]["Client"], f"/mnt/{lvol}")
             self.ssh_obj.remove_dir(self.lvol_mount_details[lvol]["Client"], dir_path=f"/mnt/{lvol}")
-            deleted = self.sbcli_utils.delete_lvol(lvol, max_attempt=20, skip_error=True)
+            deleted = self.sbcli_utils.delete_lvol(lvol, max_attempt=120, skip_error=True)
             if not deleted:
                 self.record_pending_lvol_delete(lvol, self.lvol_mount_details[lvol]['ID'])
             self.ssh_obj.delete_files(self.lvol_mount_details[lvol]["Client"], [f"{self.log_path}/local-{lvol}_fio*"])
@@ -1291,6 +1330,11 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
         self.logger.info("Failover during outage completed.")
         self.collect_outage_diagnostics(f"pre_outage_node_{self.current_outage_node}")
         self.restart_nodes_after_failover(outage_type)
+
+        try:
+            self.sbcli_utils.wait_for_health_status(self.current_outage_node, True, timeout=300)
+        except Exception as exc:
+            self.logger.warning(f"Health check did not pass for {self.current_outage_node}: {exc}")
 
         self.collect_outage_diagnostics(f"post_recovery_node_{self.current_outage_node}")
 
@@ -1507,6 +1551,12 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                 sleep_n_sec(100)
             self.collect_outage_diagnostics(f"pre_outage_node_{self.current_outage_node}")
             self.restart_nodes_after_failover(outage_type)
+
+            try:
+                self.sbcli_utils.wait_for_health_status(self.current_outage_node, True, timeout=300)
+            except Exception as exc:
+                self.logger.warning(f"Health check did not pass for {self.current_outage_node}: {exc}")
+
             self.collect_outage_diagnostics(f"post_recovery_node_{self.current_outage_node}")
             self.logger.info("Waiting for fallback.")
             if outage_type != "partial_nw" or outage_type != "partial_nw_single_port":

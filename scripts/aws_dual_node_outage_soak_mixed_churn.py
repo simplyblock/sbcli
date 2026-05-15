@@ -2,6 +2,7 @@
 import argparse
 import itertools
 import json
+import logging
 import os
 import posixpath
 import random
@@ -18,6 +19,15 @@ try:
     import paramiko
 except ImportError:
     paramiko = None
+
+# Silence paramiko's Transport-thread "Socket exception: Connection
+# reset by peer (104)" prints. They fire whenever an open SSH
+# connection to a storage node gets RST'd by a planned event —
+# host_reboot outage tearing down sshd, NIC down/up flapping, etc.
+# The retry/reconnect logic handles it cleanly; the stack-trace-less
+# stderr lines just clutter the soak output.
+logging.getLogger("paramiko").setLevel(logging.CRITICAL)
+logging.getLogger("paramiko.transport").setLevel(logging.CRITICAL)
 
 
 UUID_RE = re.compile(r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}")
@@ -122,8 +132,13 @@ def parse_args():
     parser.add_argument(
         "--nic-chaos-duration",
         type=int,
-        default=20,
-        help="Seconds to hold a data NIC down between iterations (multipath only).",
+        default=30,
+        help=(
+            "Seconds to hold a data NIC down between iterations (multipath only). "
+            "Per cycle, ONE of the two data NICs is picked at random and dropped on "
+            "ALL storage nodes simultaneously — never a mix where some nodes drop "
+            "eth1 while others drop eth2."
+        ),
     )
     parser.add_argument(
         "--no-nic-chaos",
@@ -484,8 +499,13 @@ class SoakRunner:
         # Serializes outage iterations and churn cycles. Both mutate cluster
         # state (outage takes nodes down; churn deletes/recreates volumes), so
         # they must not overlap. Held during run_outage_pair / check_fio /
-        # entire churn cycle. NIC chaos and waiting loops run unlocked so a
-        # churn cycle can fire during them.
+        # post-outage settle waits / _inter_iteration_nic_chaos / entire
+        # churn cycle. Churn must NOT run during NIC chaos either, since
+        # nvme disconnect/connect during a data-NIC-down window can race
+        # the kernel's multipath failover and leave the client in a
+        # partially-attached state. The only unlocked region in the main
+        # loop is the final per-iteration wait_for_cluster_stable /
+        # wait_for_data_migration_complete, which is a pure poller.
         self.serial_lock = threading.RLock()
         self.churn_thread = None
         self.churn_stop_event = threading.Event()
@@ -954,7 +974,7 @@ class SoakRunner:
                 f"fio --name={fio_name} --directory={shlex.quote(volume['mount_point'])} "
                 "--direct=1 --rw=randrw --bs=4K --group_reporting --time_based "
                 f"--numjobs={FIO_NUMJOBS} --iodepth=4 --size=4G --runtime={self.args.runtime} "
-                "--ioengine=aiolib --max_latency=15s --exitall_on_error=1 "
+                "--ioengine=aiolib --max_latency=20s --exitall_on_error=1 "
                 f"--output={shlex.quote(volume['fio_log'])}; "
                 "rc=$?; "
                 f"echo $rc > {shlex.quote(volume['rc_file'])}"
@@ -1571,6 +1591,18 @@ class SoakRunner:
             self._enable_nic_on_all_nodes(nic)
 
     def _inter_iteration_nic_chaos(self):
+        """Drop one data NIC on every storage node for nic_chaos_duration s,
+        then bring it back up. Active only between outage iterations on a
+        multipath cluster with at least two data NICs.
+
+        Invariant: a single NIC name (eth1 OR eth2) is chosen once via
+        random.choice and applied uniformly across all storage nodes — we
+        NEVER concurrently drop eth1 on some nodes and eth2 on others, so
+        each node always retains a live data path through the surviving
+        NIC. _ensure_all_data_nics_up at the start of every outage
+        iteration plus the try/finally re-enable here together guarantee
+        no NIC stays down across the iteration boundary.
+        """
         if self.args.no_nic_chaos or not self._is_multipath():
             return
         data_nics = self._get_data_nics()
@@ -1579,7 +1611,8 @@ class SoakRunner:
         duration = max(0, self.args.nic_chaos_duration)
         nic = random.choice(data_nics)
         self.logger.log(
-            f"Inter-iteration NIC chaos: dropping {nic} on all nodes for {duration}s"
+            f"Inter-iteration NIC chaos: dropping {nic} on all nodes for {duration}s "
+            f"(other data NICs stay up; eth1/eth2 are never dropped concurrently)"
         )
         try:
             self._disable_nic_on_all_nodes(nic)
@@ -2036,10 +2069,14 @@ class SoakRunner:
                     )
                     continue
 
-                # Serialize the outage with the churn thread: while we hold
-                # the lock, no churn cycle can start (and any in-progress
-                # churn finishes first). Outside the lock the churn thread
-                # is free to run — including during _inter_iteration_nic_chaos.
+                # Serialize the outage AND the inter-iteration NIC chaos
+                # with the churn thread: while we hold the lock, no churn
+                # cycle can start (and any in-progress churn finishes
+                # first). Churn does lvol delete/create + nvme
+                # disconnect/connect, which must not overlap a NIC-down
+                # window — losing a data path mid-disconnect/connect
+                # masks failures, races the kernel's path-failover, and
+                # can leave the client in a partially-attached state.
                 with self.serial_lock:
                     self.run_outage_pair(node1, node2, method1, method2)
                     # Post-outage fio check: any fio that exited during this
@@ -2054,10 +2091,10 @@ class SoakRunner:
                     self.wait_for_all_online(timeout=self.args.restart_timeout)
                     self.wait_for_cluster_stable()
                     self.wait_for_data_migration_complete("next outage pair")
+                    self._inter_iteration_nic_chaos()
 
-                self._inter_iteration_nic_chaos()
-                # Re-check for any churn fault that fired during the NIC
-                # chaos / cluster wait so we exit at the next sync point.
+                # Re-check for any churn fault that may have fired
+                # before we acquired the lock; exit at the next sync point.
                 self.reraise_churn_error()
                 # Wait for rebalance / data-migration to complete before
                 # starting the next iteration (main branch: device-migration

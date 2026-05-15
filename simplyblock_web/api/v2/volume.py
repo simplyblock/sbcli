@@ -42,7 +42,7 @@ class _CreateParams(BaseModel):
     ha_type: Optional[Literal['single', 'ha']] = None
     host_id: Optional[str] = None
     priority_class: Literal[0, 1] = 0
-    namespace: Optional[str] = None
+    namespaced: Optional[bool] = False
     pvc_name: Optional[str] = None
     ndcs: util.Unsigned = 0
     npcs: util.Unsigned = 0
@@ -57,6 +57,9 @@ class _CloneParams(BaseModel):
     name: str
     snapshot_id: Annotated[Optional[str], Field(pattern=core_utils.UUID_PATTERN)]
     size: util.Size = 0
+    pvc_name: Optional[str] = None
+    pvc_namespace: Optional[str] = None
+    delete_snap_on_lvol_delete: bool = False
 
 
 @api.post('/', name='clusters:storage-pools:volumes:create', status_code=201, responses={201: {"content": None}})
@@ -89,7 +92,7 @@ def add(
             use_comp=False,
             distr_vuid=0,
             lvol_priority_class=data.priority_class,
-            namespace=data.namespace,
+            namespaced=data.namespaced,
             pvc_name=data.pvc_name,
             ndcs=data.ndcs,
             npcs=data.npcs,
@@ -104,6 +107,9 @@ def add(
             data.snapshot_id,
             data.name,
             data.size if data.size is not None else 0,
+            pvc_name=data.pvc_name,
+            pvc_namespace=data.pvc_namespace,
+            delete_snap_on_lvol_delete=data.delete_snap_on_lvol_delete,
         )
     else:
         raise AssertionError('unreachable')
@@ -242,11 +248,11 @@ def replication_stop(cluster: Cluster, pool: StoragePool, volume: Volume) -> Res
     return Response(status_code=204)
 
 @instance_api.get('/connect', name='clusters:storage-pools:volumes:connect')
-def connect(cluster: Cluster, pool: StoragePool, volume: Volume):
-    details_or_false = lvol_controller.connect_lvol(volume.get_id())
-    if details_or_false == False:  # noqa
-        raise ValueError('Failed to query connection details')
-    return details_or_false
+def connect(cluster: Cluster, pool: StoragePool, volume: Volume, host_nqn: Optional[str] = None):
+    details, err = lvol_controller.connect_lvol(volume.get_id(), host_nqn=host_nqn)
+    if err:
+        raise ValueError(err)
+    return details
 
 
 @instance_api.get('/capacity', name='clusters:storage-pools:volumes:capacity')
@@ -331,6 +337,26 @@ def suspend(cluster: Cluster, pool: StoragePool, volume: Volume) -> bool:
 def resume(cluster: Cluster, pool: StoragePool, volume: Volume) -> bool:
     return lvol_controller.resume_lvol(volume.get_id())
 
-@instance_api.get('/clone', name='clusters:storage-pools:volumes:clone')
-def clone(cluster: Cluster, pool: StoragePool, volume: Volume, clone_name: str) -> bool:
-    return lvol_controller.clone_lvol(volume.get_id(), clone_name)
+@instance_api.post('/clone', name='clusters:storage-pools:volumes:clone', status_code=201, responses={201: {"content": None}})
+def clone(
+        request: Request, cluster: Cluster, pool: StoragePool, volume: Volume,
+        clone_name: str,
+        new_size: Optional[str] = None,
+        pvc_name: Optional[str] = None,
+) -> Response:
+    size = None
+    if new_size is not None:
+        try:
+            size = core_utils.parse_size(new_size)
+        except Exception:
+            raise HTTPException(400, f'Invalid new_size value: {new_size!r}')
+    clone_id, error = lvol_controller.clone_lvol(volume.get_id(), clone_name, size, pvc_name)
+    if not clone_id:
+        raise ValueError(error or 'Failed to clone volume')
+    entity_url = request.app.url_path_for(
+        'clusters:storage-pools:volumes:detail',
+        cluster_id=cluster.get_id(),
+        pool_id=pool.get_id(),
+        volume_id=clone_id,
+    )
+    return Response(status_code=201, headers={'Location': str(entity_url)})

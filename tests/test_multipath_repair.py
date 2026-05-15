@@ -78,7 +78,12 @@ def _hublvol(bdev_name="hublvol0", nqn="nqn.hublvol", nvmf_port=4420):
 
 
 def _controller_list_response(primary_ip, alternate_ips=None, state="enabled"):
-    """Build a mock return value for bdev_nvme_controller_list."""
+    """Build a mock return value for bdev_nvme_controller_list (legacy shape).
+
+    Older SPDK builds folded all paths under one ``ctrlrs`` entry with the
+    secondary paths in ``alternate_trids``. Newer SPDK builds expose one
+    entry per path — see ``_controller_list_response_per_path``.
+    """
     alt_trids = [{"traddr": ip} for ip in (alternate_ips or [])]
     return [{
         "ctrlrs": [{
@@ -86,6 +91,22 @@ def _controller_list_response(primary_ip, alternate_ips=None, state="enabled"):
             "trid": {"traddr": primary_ip},
             "alternate_trids": alt_trids,
         }]
+    }]
+
+
+def _controller_list_response_per_path(ips, state="enabled"):
+    """Build a mock return value for bdev_nvme_controller_list (new shape).
+
+    Newer SPDK multipath returns one ``ctrlrs`` entry per attached path. Each
+    entry has its own ``trid`` and no ``alternate_trids``. This is the shape
+    observed in the 2026-05-14 soak run; before the fix the path-counting
+    treated each entry independently and falsely reported 1/2 missing on a
+    healthy 2/2 controller.
+    """
+    return [{
+        "ctrlrs": [
+            {"state": state, "trid": {"traddr": ip}} for ip in ips
+        ]
     }]
 
 
@@ -150,10 +171,12 @@ class TestRepairMultipathController(unittest.TestCase):
         target_node = _node(uuid="node-target", active_tcp=True, active_rdma=False)
         mock_db_cls.return_value.get_storage_node_by_id.return_value = target_node
 
-        # Only one IP attached -- 10.0.0.11 is missing
+        # Before: only one IP attached (10.0.0.11 missing). After: both attached.
         rpc = MagicMock()
-        rpc.bdev_nvme_controller_list.return_value = _controller_list_response(
-            "10.0.0.10", alternate_ips=[])
+        rpc.bdev_nvme_controller_list.side_effect = [
+            _controller_list_response("10.0.0.10", alternate_ips=[]),
+            _controller_list_response("10.0.0.10", alternate_ips=["10.0.0.11"]),
+        ]
         node = _node()
         node.rpc_client = MagicMock(return_value=rpc)
 
@@ -180,7 +203,13 @@ class TestRepairMultipathController(unittest.TestCase):
 
     @patch("simplyblock_core.storage_node_ops.DBController")
     def test_attach_failure_returns_false(self, mock_db_cls):
-        """When attach_controller raises an exception, return False."""
+        """When attach_controller raises and no path comes back, return False.
+
+        The function catches the per-IP attach exception (so a partial
+        success on a multi-missing-path repair still progresses) and re-reads
+        the controller state afterward. If nothing actually got attached we
+        return False so the caller (health service) records the failure.
+        """
         from simplyblock_core.storage_node_ops import repair_multipath_controller
 
         device = _device(nvmf_ip="10.0.0.10,10.0.0.11")
@@ -188,6 +217,8 @@ class TestRepairMultipathController(unittest.TestCase):
         mock_db_cls.return_value.get_storage_node_by_id.return_value = target_node
 
         rpc = MagicMock()
+        # Same state before and after: only one path. The attach raises, so
+        # no progress is made.
         rpc.bdev_nvme_controller_list.return_value = _controller_list_response(
             "10.0.0.10", alternate_ips=[])
         rpc.bdev_nvme_attach_controller.side_effect = RuntimeError("RPC failed")
@@ -207,8 +238,10 @@ class TestRepairMultipathController(unittest.TestCase):
         mock_db_cls.return_value.get_storage_node_by_id.return_value = target_node
 
         rpc = MagicMock()
-        rpc.bdev_nvme_controller_list.return_value = _controller_list_response(
-            "10.0.0.10", alternate_ips=[])
+        rpc.bdev_nvme_controller_list.side_effect = [
+            _controller_list_response("10.0.0.10", alternate_ips=[]),
+            _controller_list_response("10.0.0.10", alternate_ips=["10.0.0.11"]),
+        ]
         node = _node()
         node.rpc_client = MagicMock(return_value=rpc)
 
@@ -246,15 +279,157 @@ class TestRepairMultipathController(unittest.TestCase):
         mock_db_cls.return_value.get_storage_node_by_id.return_value = target_node
 
         rpc = MagicMock()
-        rpc.bdev_nvme_controller_list.return_value = _controller_list_response(
-            "10.0.0.10", alternate_ips=[], state="disabled")
+        # First call (path counting) sees a disabled entry; second call
+        # (post-attach verification) returns nothing changed.
+        rpc.bdev_nvme_controller_list.side_effect = [
+            _controller_list_response("10.0.0.10", alternate_ips=[], state="disabled"),
+            _controller_list_response("10.0.0.10", alternate_ips=[], state="disabled"),
+        ]
         node = _node()
         node.rpc_client = MagicMock(return_value=rpc)
 
         result = repair_multipath_controller("ctrl0", device, node)
-        # No attach should be called because the only controller entry is disabled
+        # Disabled entry means 0 attached → both IPs are "missing" → attach both.
+        # That's by design: a path stuck in non-enabled state should be brought
+        # back. Pin the contract.
+        self.assertEqual(rpc.bdev_nvme_attach_controller.call_count, 2)
+        # But the post-attach state is still disabled, so still_missing == expected
+        # and len(now_attached) does not grow → False.
+        self.assertFalse(result)
+
+    @patch("simplyblock_core.storage_node_ops.DBController")
+    def test_per_path_shape_both_present_no_attach(self, mock_db_cls):
+        """Newer SPDK shape: one ctrlrs entry per attached path. Both present → no attach.
+
+        Regression test for the soak-run bug: the previous code treated each
+        per-path entry separately and concluded each was missing the other,
+        firing ~1500 spurious bdev_nvme_attach_controller RPCs per node per
+        15-min window.
+        """
+        from simplyblock_core.storage_node_ops import repair_multipath_controller
+
+        device = _device(nvmf_ip="10.0.0.10,10.0.0.11")
+        target_node = _node(uuid="node-target")
+        mock_db_cls.return_value.get_storage_node_by_id.return_value = target_node
+
+        rpc = MagicMock()
+        rpc.bdev_nvme_controller_list.return_value = _controller_list_response_per_path(
+            ["10.0.0.10", "10.0.0.11"])
+        node = _node()
+        node.rpc_client = MagicMock(return_value=rpc)
+
+        result = repair_multipath_controller("ctrl0", device, node)
         self.assertTrue(result)
         rpc.bdev_nvme_attach_controller.assert_not_called()
+
+    @patch("simplyblock_core.storage_node_ops.DBController")
+    def test_per_path_shape_one_missing_attaches_other(self, mock_db_cls):
+        """Newer SPDK shape with one path missing — re-attach only the missing one."""
+        from simplyblock_core.storage_node_ops import repair_multipath_controller
+
+        device = _device(nvmf_ip="10.0.0.10,10.0.0.11")
+        target_node = _node(uuid="node-target", active_tcp=True, active_rdma=False)
+        mock_db_cls.return_value.get_storage_node_by_id.return_value = target_node
+
+        rpc = MagicMock()
+        # Before attach: only 10.0.0.10. After attach: both paths attached.
+        rpc.bdev_nvme_controller_list.side_effect = [
+            _controller_list_response_per_path(["10.0.0.10"]),
+            _controller_list_response_per_path(["10.0.0.10", "10.0.0.11"]),
+        ]
+        node = _node()
+        node.rpc_client = MagicMock(return_value=rpc)
+
+        result = repair_multipath_controller("ctrl0", device, node)
+        self.assertTrue(result)
+        rpc.bdev_nvme_attach_controller.assert_called_once_with(
+            "ctrl0", device.nvmf_nqn, "10.0.0.11", device.nvmf_port,
+            "TCP", multipath="multipath")
+
+    @patch("simplyblock_core.storage_node_ops.DBController")
+    def test_partial_success_recognized(self, mock_db_cls):
+        """A partial-success repair (some, not all, paths come back) is reported
+        as success.
+
+        Contract: ``repair_multipath_controller`` returns True whenever the
+        controller is in a strictly better state after the call than before
+        (more paths attached). A subsequent health cycle picks up whatever
+        remains missing. Returning False here would make the caller mark the
+        device unhealthy and short-circuit the cluster-level reachability
+        check, which is wrong when we just demonstrably improved availability.
+        """
+        from simplyblock_core.storage_node_ops import repair_multipath_controller
+
+        device = _device(nvmf_ip="10.0.0.10,10.0.0.11,10.0.0.12")
+        target_node = _node(uuid="node-target", active_tcp=True, active_rdma=False)
+        mock_db_cls.return_value.get_storage_node_by_id.return_value = target_node
+
+        rpc = MagicMock()
+        # Before: only .10 attached. After: .10 + .11 attached (.12 still missing).
+        rpc.bdev_nvme_controller_list.side_effect = [
+            _controller_list_response_per_path(["10.0.0.10"]),
+            _controller_list_response_per_path(["10.0.0.10", "10.0.0.11"]),
+        ]
+        node = _node()
+        node.rpc_client = MagicMock(return_value=rpc)
+
+        result = repair_multipath_controller("ctrl0", device, node)
+        # Strictly improving → True.
+        self.assertTrue(result)
+        # Both missing IPs got an attach RPC.
+        self.assertEqual(rpc.bdev_nvme_attach_controller.call_count, 2)
+
+    @patch("simplyblock_core.storage_node_ops.DBController")
+    def test_no_progress_returns_false(self, mock_db_cls):
+        """When the attach calls produce no improvement, return False."""
+        from simplyblock_core.storage_node_ops import repair_multipath_controller
+
+        device = _device(nvmf_ip="10.0.0.10,10.0.0.11")
+        target_node = _node(uuid="node-target", active_tcp=True, active_rdma=False)
+        mock_db_cls.return_value.get_storage_node_by_id.return_value = target_node
+
+        rpc = MagicMock()
+        # Same state both reads — attach succeeds at the RPC level but the
+        # path doesn't actually come up (e.g. peer NIC still down).
+        rpc.bdev_nvme_controller_list.return_value = (
+            _controller_list_response_per_path(["10.0.0.10"]))
+        node = _node()
+        node.rpc_client = MagicMock(return_value=rpc)
+
+        result = repair_multipath_controller("ctrl0", device, node)
+        self.assertFalse(result)
+
+    @patch("simplyblock_core.storage_node_ops.DBController")
+    def test_remote_jm_device_without_nvmf_ip_logged_not_raised(self, mock_db_cls):
+        """Passing a RemoteJMDevice (no nvmf_ip) must not raise AttributeError.
+
+        Regression test for the 2026-05-14 soak failure: the health service
+        was calling repair_multipath_controller(ctrl_name, remote_device,
+        snode) where remote_device was a RemoteJMDevice. RemoteJMDevice
+        inherits from RemoteDevice which intentionally strips nvmf_ip /
+        nvmf_nqn / nvmf_port (those live on the source JMDevice on the
+        owning node). The old code read device.nvmf_ip directly and
+        raised AttributeError every cycle, swallowed by a broad except
+        in the caller — so JM multipath was never repaired and progressive
+        path loss compounded across iterations. The contract now is: log a
+        clear warning and return False, never raise.
+        """
+        from simplyblock_core.models.nvme_device import RemoteJMDevice
+        from simplyblock_core.storage_node_ops import repair_multipath_controller
+
+        remote_jm = RemoteJMDevice()
+        remote_jm.nvmf_multipath = True
+        remote_jm.node_id = "node-target"
+        # Note: no nvmf_ip / nvmf_nqn / nvmf_port — by design.
+
+        node = _node()
+        node.rpc_client = MagicMock()
+
+        # Must not raise.
+        result = repair_multipath_controller("ctrl0", remote_jm, node)
+        self.assertFalse(result)
+        # And must not hit SPDK at all — there's no addressing info to use.
+        node.rpc_client.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -402,10 +577,15 @@ class TestHealthCheckMultipathIntegration(unittest.TestCase):
     @patch("simplyblock_core.services.health_check_service.storage_node_ops")
     @patch("simplyblock_core.services.health_check_service.health_controller")
     @patch("simplyblock_core.services.health_check_service.db")
-    def test_jm_repair_called_when_multipath_enabled(
+    def test_jm_repair_called_with_source_jm_device(
             self, mock_db_mod, mock_hc, mock_sn_ops, mock_rpc_cls, _mock_sleep):
-        """For remote JM devices with nvmf_multipath=True, repair is called."""
+        """JM multipath repair must resolve the source JMDevice (which carries
+        nvmf_ip / nvmf_nqn / nvmf_port). Passing the RemoteJMDevice directly
+        — as the old code did — raises AttributeError every cycle and JM
+        controllers that lose a path during NIC chaos are never repaired.
+        """
         from simplyblock_core.services import health_check_service
+        from simplyblock_core.models.nvme_device import JMDevice
 
         snode = _node(uuid="node-1", status=StorageNode.STATUS_ONLINE)
         snode.enable_ha_jm = True
@@ -415,6 +595,17 @@ class TestHealthCheckMultipathIntegration(unittest.TestCase):
         remote_jm.node_id = "node-jm"
         remote_jm.nvmf_multipath = True
 
+        # The owning node's source JMDevice carries the addressing info that
+        # repair_multipath_controller needs.
+        src_jm = JMDevice()
+        src_jm.nvmf_multipath = True
+        src_jm.nvmf_ip = "10.0.0.10,10.0.0.11"
+        src_jm.nvmf_nqn = "nqn.jm"
+        src_jm.nvmf_port = 4420
+        src_jm.node_id = "node-jm"
+        owning_node = _node(uuid="node-jm", status=StorageNode.STATUS_ONLINE)
+        owning_node.jm_device = src_jm
+
         snode.nvme_devices = []
         snode.remote_devices = []
         snode.remote_jm_devices = [remote_jm]
@@ -423,7 +614,9 @@ class TestHealthCheckMultipathIntegration(unittest.TestCase):
         snode.jm_device.jm_bdev = "local_jm_bdev"
         snode.jm_ids = []
 
-        mock_db_mod.get_storage_node_by_id.return_value = snode
+        def _get_node(node_id):
+            return owning_node if node_id == "node-jm" else snode
+        mock_db_mod.get_storage_node_by_id.side_effect = _get_node
         mock_db_mod.get_cluster_by_id.return_value = MagicMock(
             status="active", ha_type="ha")
 
@@ -439,10 +632,12 @@ class TestHealthCheckMultipathIntegration(unittest.TestCase):
 
         health_check_service.check_node(snode)
 
-        # repair should be called with ctrl_name = remote_bdev with "n1" replaced
         mock_sn_ops.repair_multipath_controller.assert_called_once()
         args = mock_sn_ops.repair_multipath_controller.call_args
         self.assertEqual(args[0][0], "jm_ctrl0")  # "jm_ctrl0n1".replace("n1","")
+        # The contract under test: the source JMDevice (with nvmf_ip) is
+        # passed, NOT the RemoteJMDevice (no nvmf_ip).
+        self.assertIs(args[0][1], src_jm)
         self.assertEqual(args[0][2], snode)
 
 

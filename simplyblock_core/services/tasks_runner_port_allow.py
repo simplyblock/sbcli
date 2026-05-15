@@ -3,7 +3,7 @@ import time
 
 
 from simplyblock_core import db_controller, utils, storage_node_ops, distr_controller
-from simplyblock_core.controllers import tcp_ports_events, health_controller, tasks_controller, lvol_controller
+from simplyblock_core.controllers import tcp_ports_events, health_controller, tasks_controller
 from simplyblock_core.fw_api_client import FirewallClient
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.cluster import Cluster
@@ -13,29 +13,6 @@ logger = utils.get_logger(__name__)
 
 # get DB controller
 db = db_controller.DBController()
-
-
-def _get_lvs_leader(lvs_name, candidates, local_node_id=None):
-    # The recovering node is DB-marked DOWN while its own port_allow task
-    # runs, so the STATUS_ONLINE filter would skip it on the post-takeover
-    # verify and falsely report "no leader" even after SPDK accepted
-    # bdev_lvol_set_leader(True). When local_node_id is supplied, exempt
-    # that node from the filter and trust the SPDK query (is_node_leader)
-    # for it. Peers are still filtered to avoid RPC to nodes the controller
-    # already knows are unreachable.
-    for candidate in candidates:
-        if not candidate:
-            continue
-        if candidate.get_id() != local_node_id and candidate.status != StorageNode.STATUS_ONLINE:
-            logger.info(f"Skipping candidate {candidate.get_id()} because status is {candidate.status}",)
-            continue
-        try:
-            if lvol_controller.is_node_leader(candidate, lvs_name):
-                return candidate
-        except Exception as e:
-            logger.warning("Failed to query leadership for %s on %s: %s",
-                           lvs_name, candidate.get_id(), e)
-    return None
 
 
 def exec_port_allow_task(task):
@@ -231,111 +208,40 @@ def exec_port_allow_task(task):
             lvol_sync_del_found = tasks_controller.get_lvol_sync_del_task(task.cluster_id, task.node_id)
 
         port_number = task.function_params["port_number"]
-        secs_to_unblock = []
-        primary_lvs_port = node.get_lvol_subsys_port(node.lvstore)
-        if port_number == primary_lvs_port:
-            candidates = [node] + [db.get_storage_node_by_id(sid) for sid in sec_ids]
-            current_leader = _get_lvs_leader(node.lvstore, candidates)
 
-            # On network-outage recovery of `node`, the current leader is
-            # typically a peer (the secondary/tertiary that took over while
-            # `node` was unreachable). The previous behaviour — skipping
-            # demotion when the leader is a peer — left the peer leading
-            # while this node's port got unblocked, allowing dual-leader IO
-            # and writer conflicts. Instead: block the peer leader's port,
-            # demote it and drain inflight IO, then take leadership locally
-            # and proceed to demote any remaining secondaries.
-            if current_leader and current_leader.get_id() != node.get_id():
-                peer = current_leader
-                logger.info("Current leader for %s is peer %s; demoting before port_allow on %s",
-                            node.lvstore, peer.get_id(), node.get_id())
-                peer_fw = FirewallClient(peer, timeout=5, retry=2)
-                peer_port_type = "udp" if peer.active_rdma else "tcp"
-                peer_fw.firewall_set_port(port_number, peer_port_type, "block", peer.rpc_port)
-                tcp_ports_events.port_deny(peer, port_number)
-                time.sleep(0.5)
-
-                peer_rpc = peer.rpc_client(timeout=0.2, retry=0)
-                try:
-                    peer_rpc.bdev_lvol_set_leader(node.lvstore, leader=False, bs_nonleadership=True)
-                    peer_rpc.bdev_distrib_force_to_non_leader(node.jm_vuid)
-                except Exception as e:
-                    logger.error("Failed to demote peer leader %s for %s: %s",
-                                 peer.get_id(), node.lvstore, e)
-                    try:
-                        peer_fw.firewall_set_port(port_number, peer_port_type, "allow", peer.rpc_port)
-                        tcp_ports_events.port_allowed(peer, port_number)
-                    except Exception:
-                        pass
-                    msg = "Failed to demote peer leader, retry task"
-                    task.function_result = msg
-                    task.status = JobSchedule.STATUS_SUSPENDED
-                    task.write_to_db(db.kv_store)
-                    return
-
-                # Fixed 0.5s quiesce window instead of polling
-                # bdev_distrib_check_inflight_io. Distrib-inflight includes
-                # data-migration IO that the port block does not pause, so
-                # the poll can hold clients blocked beyond their latency
-                # budget. Migration IO does not touch lvstore metadata, so
-                # a short fixed wait is sufficient for the examine to see
-                # a consistent superblock.
-                time.sleep(0.5)
-                secs_to_unblock.append(peer)
-                # Fall through to the local take-leadership path below.
-                current_leader = None
-
-            if current_leader is None:
-                logger.warning("No leader found for %s during port_allow on %s; attempting local restore",
-                               node.lvstore, node.get_id())
-                node.rpc_client().bdev_lvol_set_lvs_opts(
-                    node.lvstore,
-                    groupid=node.jm_vuid,
-                    subsystem_port=primary_lvs_port,
-                    role="primary"
-                )
-                node.rpc_client().bdev_lvol_set_leader(node.lvstore, leader=True)
-                current_leader = _get_lvs_leader(node.lvstore, [node], local_node_id=node.get_id())
-                if not current_leader:
-                    msg = f"No leader available for {node.lvstore}, retry task"
-                    logger.warning(msg)
-                    task.function_result = msg
-                    task.status = JobSchedule.STATUS_SUSPENDED
-                    task.write_to_db(db.kv_store)
-                    return
-
-            for sid in sec_ids:
-                sn = db.get_storage_node_by_id(sid)
-                if not sn or sn.status != StorageNode.STATUS_ONLINE:
-                    continue
-                # Skip the peer we already demoted + blocked above.
-                if any(s.get_id() == sn.get_id() for s in secs_to_unblock):
-                    continue
-
-                sn_rpc = sn.rpc_client()
-                ret = sn.wait_for_jm_rep_tasks_to_finish(node.jm_vuid)
-                if not ret:
-                    msg = f"JM replication task found on secondary {sn.get_id()}"
-                    logger.warning(msg)
-                    task.function_result = msg
-                    task.status = JobSchedule.STATUS_SUSPENDED
-                    task.write_to_db(db.kv_store)
-                    return
-
-                sn_fw = FirewallClient(sn, timeout=5, retry=2)
-                sn_port_type = "udp" if sn.active_rdma else "tcp"
-                sn_fw.firewall_set_port(port_number, sn_port_type, "block", sn.rpc_port)
-                tcp_ports_events.port_deny(sn, port_number)
-
-                time.sleep(0.5)
-
-                sn_rpc.bdev_lvol_set_leader(node.lvstore, leader=False, bs_nonleadership=True)
-                sn_rpc.bdev_distrib_force_to_non_leader(node.jm_vuid)
-                # Fixed 0.5s quiesce (see above): draining distrib-inflight
-                # would wait out migration IO and breach client latency.
-                time.sleep(0.5)
-
-                secs_to_unblock.append(sn)
+        # The previous implementation here did force-failback: if a peer
+        # was the current LVS leader (because of an earlier failover from
+        # `node`), it would block the peer's port, demote the peer, take
+        # leadership locally on `node`, and additionally walk every
+        # secondary and block + demote them too. That was wrong on two
+        # counts:
+        #
+        #   - A writer conflict / leadership contention only ever blocks
+        #     the *primary* (the JM heartbeat detects the dual-writer on
+        #     the primary's lvstore and the CP forces the primary's
+        #     distribs to non_leader). Secondaries are followers with
+        #     bs_nonleader=true and have nothing to demote.
+        #   - If a failover already succeeded and the peer is the
+        #     legitimately-elected new leader, the cluster is correctly
+        #     serving IO via the peer. There is no problem to solve.
+        #     Blocking the new leader's port cuts client IO that was
+        #     being served correctly, and the synchronous demote+take
+        #     opens a fresh writer-conflict window.
+        #
+        # See incident 2026-05-02 (k8s_native_failover_ha-20260502-101452):
+        # at 15:51:01 the JM forced worker5's LVS_4729 distribs to
+        # non_leader (writer conflict). Failover transferred leadership
+        # to worker1 (legitimate new primary). At 15:51:32 the
+        # health-check on worker5's port 4434 failed (worker5 was DOWN)
+        # and queued a port_allow. At 15:51:44.818 the runner here
+        # logged "Current leader for LVS_4729 is peer 46544aff…;
+        # demoting before port_allow on ad04496b…" and blocked
+        # worker1's port + force-demoted worker1 — directly producing
+        # client IO errors and a follow-on writer conflict.
+        #
+        # port_allow's correct scope is just allowing the port on the
+        # recovering node. Leadership belongs to the JM heartbeat /
+        # writer-conflict resolution mechanism, not to this task.
 
     except Exception as e:
         logger.error(e)
@@ -348,13 +254,6 @@ def exec_port_allow_task(task):
         port_type = "udp"
     fw_api.firewall_set_port(port_number, port_type, "allow", node.rpc_port)
     tcp_ports_events.port_allowed(node, port_number)
-
-    # Unblock ports on secondaries that were blocked above
-    for sn in secs_to_unblock:
-        sn_fw = FirewallClient(sn, timeout=5, retry=2)
-        sn_port_type = "udp" if sn.active_rdma else "tcp"
-        sn_fw.firewall_set_port(port_number, sn_port_type, "allow", sn.rpc_port)
-        tcp_ports_events.port_allowed(sn, port_number)
 
     task.function_result = f"Port {port_number} allowed on node"
     task.status = JobSchedule.STATUS_DONE

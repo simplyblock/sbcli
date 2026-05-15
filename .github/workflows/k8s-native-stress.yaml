@@ -1,5 +1,5 @@
-name: K8s Native E2E Tests
-run-name: "K8s Native E2E Tests | ${{ inputs.testname || 'all' }} | ${{ inputs.cluster_environment || 'local' }} | NDCS:${{ inputs.ndcs || '1' }} NPCS:${{ inputs.npcs || '1' }}"
+name: K8s Native Stress Tests
+run-name: "K8s Native Stress Tests | ${{ inputs.testname || 'K8sNativeFailoverTest' }} | ${{ inputs.cluster_environment || 'local' }} | NDCS:${{ inputs.ndcs || '1' }} NPCS:${{ inputs.npcs || '1' }}"
 
 on:
   workflow_dispatch:
@@ -48,7 +48,7 @@ on:
         required: true
         default: "/home/ec2-user/.ssh/simplyblock-us-east-2.pem"
       client_ips:
-        description: 'Space-separated client IPs for external FIO (empty = FIO runs on first mgmt node)'
+        description: 'Space-separated client IPs for external FIO (empty = FIO runs as K8s Jobs)'
         required: false
         default: ''
       nfs_mountpoint:
@@ -56,23 +56,9 @@ on:
         required: false
         default: '/mnt/nfs_share/'
       testname:
-        description: 'Test category to run (empty = default e2e suite)'
+        description: 'Test to run'
         required: false
-        default: ''
-        type: choice
-        options:
-          - ''
-          - backup
-          - backup-stress
-          - security
-      cluster_security:
-        description: "Cluster setup mode. 'backup' deploys MinIO and enables backup on StorageCluster. Auto-enabled when testname is backup/backup-stress."
-        required: false
-        type: choice
-        default: "none"
-        options:
-          - none
-          - backup
+        default: 'K8sNativeFailoverTest'
       send_slack_notification:
         description: 'Send Slack notification?'
         required: false
@@ -130,14 +116,14 @@ on:
           - 'true'
 
 jobs:
-  e2e-test:
+  stress-test:
     runs-on: ${{ github.event.inputs.cluster_environment == 'aws-openshift' && 'vm-runner-43' || 'self-hosted' }}
     timeout-minutes: 4320
     concurrency:
-      group: k8s-native-e2e-${{ github.event.inputs.cluster_environment || 'local' }}
+      group: ${{ github.workflow }}-${{ github.event.inputs.cluster_environment || 'local' }}
       cancel-in-progress: false
     env:
-      TESTNAME: ${{ github.event.inputs.testname || '' }}
+      TESTNAME: ${{ github.event.inputs.testname || 'K8sNativeFailoverTest' }}
       KEY_PATH: ${{ github.event.inputs.key_path || '/home/ec2-user/.ssh/simplyblock-us-east-2.pem' }}
       CLIENT_IPS: ${{ github.event.inputs.client_ips || '' }}
       NFS_MOUNTPOINT: ${{ github.event.inputs.nfs_mountpoint || '/mnt/nfs_share/' }}
@@ -153,7 +139,7 @@ jobs:
           repository: simplyblock/helm-charts
           ref: ${{ github.event.inputs.helm_charts_branch || 'main' }}
           path: 'helm-charts'
-
+      
       - name: Resolve KEY_PATH (handles .ssh/, ~/.ssh/, quoted ~) and validate key exists
         shell: bash
         run: |
@@ -369,25 +355,30 @@ jobs:
           patch_and_delete_crs
 
           echo "=== Phase 3a: Delete VolumeSnapshots & VolumeSnapshotContents ==="
+          # Delete snapshots first (they block PVC deletion)
           for VS in $(kubectl get volumesnapshot -n $NAMESPACE --no-headers -o custom-columns=:metadata.name 2>/dev/null); do
             kubectl -n $NAMESPACE patch volumesnapshot "$VS" \
               --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
             kubectl -n $NAMESPACE delete volumesnapshot "$VS" --wait=false 2>/dev/null || true
           done
 
+          # Delete VolumeSnapshotContents (cluster-scoped, may block snapshot deletion)
           for VSC in $(kubectl get volumesnapshotcontent --no-headers -o custom-columns=:metadata.name 2>/dev/null); do
             kubectl patch volumesnapshotcontent "$VSC" \
               --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
             kubectl delete volumesnapshotcontent "$VSC" --wait=false 2>/dev/null || true
           done
 
+          # Delete VolumeSnapshotClasses
           for VSCLASS in $(kubectl get volumesnapshotclass --no-headers -o custom-columns=:metadata.name 2>/dev/null); do
             kubectl delete volumesnapshotclass "$VSCLASS" --ignore-not-found 2>/dev/null || true
           done
 
           echo "=== Phase 3b: Delete PVCs (with timeout + retry) ==="
+          # First attempt: normal delete
           kubectl -n $NAMESPACE delete pvc --all --wait=false 2>/dev/null || true
 
+          # Wait up to 60s for PVCs to go away
           PVC_TIMEOUT=60
           while [ $PVC_TIMEOUT -gt 0 ]; do
             REMAINING=$(kubectl -n $NAMESPACE get pvc --no-headers 2>/dev/null | wc -l)
@@ -400,6 +391,7 @@ jobs:
             PVC_TIMEOUT=$((PVC_TIMEOUT - 5))
           done
 
+          # If PVCs are still stuck, patch finalizers and force delete
           for PVC in $(kubectl -n $NAMESPACE get pvc --no-headers -o custom-columns=:metadata.name 2>/dev/null); do
             echo "Force-deleting stuck PVC: $PVC"
             kubectl -n $NAMESPACE patch pvc "$PVC" \
@@ -418,6 +410,37 @@ jobs:
           for RTYPE in pod jobs service ds statefulset deployment replicaset secret sa configmap; do
             kubectl -n $NAMESPACE delete $RTYPE --all --force --grace-period=0 2>/dev/null || true
           done
+
+          # echo "=== Phase 4: Cleanup cluster-scoped resources ==="
+          # Delete StorageClasses
+          # for SC in $(kubectl get sc --no-headers -o custom-columns=:metadata.name 2>/dev/null | grep -i simplyblock 2>/dev/null); do
+          #   kubectl delete sc "$SC" --ignore-not-found 2>/dev/null || true
+          # done
+          # kubectl delete clusterrole simplyblock-storage-node-role --ignore-not-found 2>/dev/null || true
+          # kubectl delete clusterrolebinding simplyblock-storage-node-binding --ignore-not-found 2>/dev/null || true
+
+          # echo "=== Phase 4b: Cleanup leftover secrets, SAs, and kube-system resources ==="
+          # kubectl -n $NAMESPACE delete secret simplyblock-csi-secret-v2 --ignore-not-found 2>/dev/null || true
+          # kubectl -n $NAMESPACE delete sa simplyblock-storage-node-sa --ignore-not-found 2>/dev/null || true
+
+          # # Clean up kube-system resources from previous helm installs
+          # for RES in sa clusterrole clusterrolebinding; do
+          #   for NAME in $(kubectl get $RES -A --no-headers 2>/dev/null | grep -i simplyblock | awk '{print $1 ":" $2}' 2>/dev/null); do
+          #     NS=$(echo "$NAME" | cut -d: -f1)
+          #     RNAME=$(echo "$NAME" | cut -d: -f2)
+          #     if [ "$RES" = "sa" ]; then
+          #       kubectl -n "$NS" delete sa "$RNAME" --ignore-not-found 2>/dev/null || true
+          #     else
+          #       kubectl delete "$RES" "$RNAME" --ignore-not-found 2>/dev/null || true
+          #     fi
+          #   done
+          # done
+          # # Specifically clean numa-resource-plugin resources in kube-system
+          # kubectl -n kube-system delete ds simplyblock-numa-resource-plugin --ignore-not-found 2>/dev/null || true
+          # kubectl -n kube-system delete sa simplyblock-numa-resource-plugin --ignore-not-found 2>/dev/null || true
+          # kubectl -n kube-system delete cm simplyblock-numa-resource-plugin-config --ignore-not-found 2>/dev/null || true
+          # kubectl delete clusterrole simplyblock-numa-resource-plugin --ignore-not-found 2>/dev/null || true
+          # kubectl delete clusterrolebinding simplyblock-numa-resource-plugin --ignore-not-found 2>/dev/null || true
 
           echo "=== Phase 5: Verify nothing remains ==="
           echo "Namespaced resources:"
@@ -506,64 +529,6 @@ jobs:
             pod-security.kubernetes.io/audit=privileged \
             pod-security.kubernetes.io/warn=privileged \
             --overwrite
-
-      # ── Deploy MinIO for backup tests (conditional) ────────────────────────
-
-      - name: Deploy MinIO for backup tests
-        if: >-
-          ${{
-            github.event.inputs.use_existing_cluster != 'true' &&
-            (github.event.inputs.cluster_security == 'backup' ||
-             github.event.inputs.testname == 'backup' ||
-             github.event.inputs.testname == 'backup-stress')
-          }}
-        run: |
-          set -euxo pipefail
-          NAMESPACE=simplyblock
-
-          echo "=== Setting up MinIO for backup tests ==="
-
-          # 1. Create minio namespace + deployment + service
-          kubectl create ns minio --dry-run=client -o yaml | kubectl apply -f -
-
-          kubectl -n minio create deployment minio \
-            --image=minio/minio \
-            -- /bin/sh -c "minio server /data --console-address :9001" \
-            --dry-run=client -o yaml | kubectl apply -f -
-
-          kubectl -n minio expose deploy/minio --port 9000 \
-            --dry-run=client -o yaml | kubectl apply -f -
-
-          kubectl -n minio set env deploy/minio \
-            MINIO_ROOT_USER=minioadmin \
-            MINIO_ROOT_PASSWORD=minioadmin123
-
-          # 2. Wait for MinIO pod to be ready (up to 5 min)
-          echo "Waiting for MinIO pod to be ready..."
-          for i in $(seq 1 30); do
-            READY=$(kubectl -n minio get pods --no-headers 2>/dev/null | grep -c "Running" || true)
-            if [ "$READY" -ge 1 ]; then
-              echo "MinIO pod is running"
-              break
-            fi
-            echo "MinIO not ready yet ($i/30)..."
-            sleep 10
-          done
-
-          # 3. Create backup-credentials K8s Secret in cluster namespace
-          cat <<CREDEOF | kubectl apply -f -
-          apiVersion: v1
-          kind: Secret
-          metadata:
-            name: backup-credentials
-            namespace: ${NAMESPACE}
-          type: Opaque
-          stringData:
-            access_key_id: minioadmin
-            secret_access_key: minioadmin123
-          CREDEOF
-
-          echo "=== MinIO and backup credentials setup complete ==="
 
       - name: Wait before helm install
         if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
@@ -674,21 +639,6 @@ jobs:
             WORKER_YAML="${WORKER_YAML}    - ${NODE}"$'\n'
           done
 
-          # Conditionally build backup spec block
-          BACKUP_SPEC=""
-          CLUSTER_SEC="${{ github.event.inputs.cluster_security || 'none' }}"
-          TESTNAME_INPUT="${{ github.event.inputs.testname || '' }}"
-          if [ "$CLUSTER_SEC" = "backup" ] || [ "$TESTNAME_INPUT" = "backup" ] || [ "$TESTNAME_INPUT" = "backup-stress" ]; then
-            BACKUP_SPEC="  backup:
-              credentialsSecretRef:
-                name: backup-credentials
-              localEndpoint: http://minio.minio.svc.cluster.local:9000
-              localTesting: true
-              secondaryTarget: 0
-              snapshotBackups: true
-              withCompression: false"
-          fi
-
           echo "=== Custom resource YAML to apply ==="
           cat <<EOF
           apiVersion: storage.simplyblock.io/v1alpha1
@@ -712,7 +662,6 @@ jobs:
             criticalThreshold:
               capacity: 96
               provisionedCapacity: 98
-          ${BACKUP_SPEC}
           ---
           apiVersion: storage.simplyblock.io/v1alpha1
           kind: Pool
@@ -774,7 +723,6 @@ jobs:
             criticalThreshold:
               capacity: 96
               provisionedCapacity: 98
-          ${BACKUP_SPEC}
           ---
           apiVersion: storage.simplyblock.io/v1alpha1
           kind: Pool
@@ -964,6 +912,7 @@ jobs:
               echo "Cluster is active!"
 
               # Extract cluster ID and secret
+              # sbctl cluster list outputs a table; parse the data row
               CLUSTER_ID=$(echo "$OUTPUT" | awk 'NR==4{print $2}')
               CLUSTER_SECRET=$(echo "$OUTPUT" | awk 'NR==4{print $NF}')
 
@@ -1002,6 +951,7 @@ jobs:
               kubectl patch daemonset simplyblock-fluent-bit -n $NAMESPACE \
                 --type=merge -p '{"spec":{"template":{"spec":{"affinity":null}}}}'
               echo "fluent-bit daemonset patched successfully"
+              # Also patch CSI node daemonset with client toleration
               if kubectl get daemonset simplyblock-csi-node -n $NAMESPACE &>/dev/null; then
                 kubectl patch daemonset simplyblock-csi-node -n $NAMESPACE \
                   --type=merge -p '{"spec":{"template":{"spec":{"tolerations":[{"key":"node-role","operator":"Equal","value":"client","effect":"NoSchedule"}]}}}}'
@@ -1034,12 +984,12 @@ jobs:
           export K8S_LOCAL_KUBECTL=1
           export SBCLI_CMD=sbctl
 
-          TESTNAME_ARG=""
+          TESTNAME=""
           if [ -n "${{ github.event.inputs.testname }}" ]; then
-            TESTNAME_ARG="--testname ${{ github.event.inputs.testname }}"
+            TESTNAME="--testname ${{ github.event.inputs.testname }}"
           fi
 
-          python3 -u e2e.py $TESTNAME_ARG \
+          python3 -u stress.py $TESTNAME \
             --ndcs $NDCS --npcs $NPCS --bs $BS --chunk_bs $CHUNK_BS \
             --run_k8s True 2>&1 | tee output.log
         env:
@@ -1096,12 +1046,14 @@ jobs:
             exit 0
           fi
 
+          # Total window: 1h before test start → 1h after test end
           WINDOW_START=$((TEST_START_TIME - 3600))
           WINDOW_END=$((TEST_END_TIME + 3600))
           TOTAL_SECONDS=$((WINDOW_END - WINDOW_START))
           TOTAL_HOURS=$(( (TOTAL_SECONDS + 3599) / 3600 ))
           echo "  Total window: ${TOTAL_HOURS} hour(s) to collect"
 
+          # Resolve admin pod
           ADMIN_POD=""
           for i in $(seq 1 12); do
             ADMIN_POD=$(kubectl -n ${NAMESPACE} get pods \
@@ -1121,9 +1073,11 @@ jobs:
           fi
           echo "  Admin pod: ${ADMIN_POD}"
 
+          # Get Graylog service ClusterIP for mgmt-ip
           MGMT_IP=$(kubectl get svc -n ${NAMESPACE} | grep graylog | awk '{print $3}')
           echo "  Graylog IP: ${MGMT_IP}"
 
+          # Determine output dir from RUN_BASE_DIR
           OUTPUT_DIR=""
           if [ -n "${RUN_BASE_DIR:-}" ] && [ -d "${RUN_BASE_DIR}" ]; then
             OUTPUT_DIR="${RUN_BASE_DIR}/graylog_collected"
@@ -1135,6 +1089,7 @@ jobs:
           mkdir -p "${OUTPUT_DIR}" 2>/dev/null || true
           echo "  Output: ${OUTPUT_DIR}"
 
+          # Helper: convert epoch to ISO-8601
           epoch_to_iso() {
             local ep=$1
             local iso
@@ -1145,11 +1100,13 @@ jobs:
             echo "${iso}"
           }
 
+          # Collect logs one hour at a time
           CHUNK=0
           CURRENT=${WINDOW_START}
           while [ ${CURRENT} -lt ${WINDOW_END} ]; do
             CHUNK=$((CHUNK + 1))
             CHUNK_END=$((CURRENT + 3600))
+            # Cap the last chunk at WINDOW_END
             if [ ${CHUNK_END} -gt ${WINDOW_END} ]; then
               CHUNK_END=${WINDOW_END}
             fi
@@ -1187,6 +1144,7 @@ jobs:
               2>&1 || echo "WARN: OpenSearch fallback also failed for chunk ${CHUNK}"
             }
 
+            # Copy tarballs from pod to NFS for this chunk
             TARBALLS=$(kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- \
               find "${POD_OUTPUT_DIR}" -name "*.tar.gz" -type f 2>/dev/null) || true
 
@@ -1203,6 +1161,7 @@ jobs:
               echo "WARN: No tarballs found for chunk ${CHUNK}"
             fi
 
+            # Cleanup this chunk in pod
             kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- rm -rf "${POD_OUTPUT_DIR}" 2>/dev/null || true
 
             CURRENT=${CHUNK_END}
@@ -1252,12 +1211,12 @@ jobs:
           fi
 
           {
-            echo "## K8s Native E2E Run Summary"
+            echo "## K8s Native Stress Run Summary"
             echo ""
             echo "**Result:** ${conclusion}"
             echo ""
             echo "### Run Info"
-            echo "- **Test class:** \`${TESTNAME:-all}\`"
+            echo "- **Test class:** \`${TESTNAME}\`"
             echo "- **Cluster ID:** \`${CLUSTER_ID}\`"
             echo "- **Branch:** \`${{ github.ref_name }}\`"
             echo "- **Helm Charts Branch:** \`${{ github.event.inputs.helm_charts_branch }}\`"
@@ -1320,7 +1279,7 @@ jobs:
           JOB_STATUS: ${{ job.status }}
           SLACK_RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           GITHUB_REF_NAME: ${{ github.ref_name }}
-          SLACK_WF_NAME: "K8s Native E2E"
+          SLACK_WF_NAME: "K8s Native Stress"
           TESTNAME: ${{ env.TESTNAME }}
           RUN_BASE_DIR: ${{ env.RUN_BASE_DIR }}
           NDCS: ${{ env.NDCS }}
@@ -1392,10 +1351,6 @@ jobs:
           except Exception as exc:
               print(f"WARN: Slack notification failed: {exc}", file=sys.stderr)
           PYEOF
-
-      - name: Cleanup MinIO namespace (if deployed)
-        if: always()
-        run: kubectl delete namespace minio --wait=false 2>/dev/null || true
 
       - name: Cleanup build folder
         if: always()

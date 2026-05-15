@@ -31,7 +31,7 @@ def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes,
 
     pool_list = db_controller.get_pools()
     for p in pool_list:
-        if p.pool_name == name:
+        if p.pool_name == name and p.cluster_id == cluster_id:
             logger.error(f"Pool found with the same name: {name}")
             return False
 
@@ -97,8 +97,8 @@ def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes,
 
     pool.dhchap = bool(dhchap)
     if pool.dhchap:
-        pool.dhchap_key = utils.generate_dhchap_key(length=36)
-        pool.dhchap_ctrlr_key = utils.generate_dhchap_key(length=36)
+        pool.dhchap_key = utils.generate_dhchap_key(length=32)
+        pool.dhchap_ctrlr_key = utils.generate_dhchap_key(length=32)
 
     pool.status = "active"
     pool.write_to_db(db_controller.kv_store)
@@ -209,7 +209,7 @@ def set_pool(uuid, pool_max=0, lvol_max=0, max_rw_iops=0,
 
     if name and name != pool.pool_name:
         for p in db_controller.get_pools():
-            if p.pool_name == name:
+            if p.pool_name == name and p.cluster_id == pool.cluster_id:
                 msg = f"Pool found with the same name: {name}"
                 logger.error(msg)
                 return False, msg

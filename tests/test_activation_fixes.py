@@ -449,22 +449,28 @@ class TestAttachControllerTimeoutCap(unittest.TestCase):
 
 
 # ===========================================================================
-# 4. bdev_nvme_set_options transport_retry in multipath mode
+# 4. bdev_nvme_set_options retry counts (uniform, NIC-count-independent)
 # ===========================================================================
 
 class TestBdevNvmeSetOptionsRetries(unittest.TestCase):
-    """Task 12: in multipath mode, transport_retry_count must be
-    TRANSPORT_RETRY_MULTIPATH (1) so IOs fail over to the alternate path
-    quickly. Non-multipath keeps TRANSPORT_RETRY (3).
+    """``bdev_retry_count`` must be non-zero so SPDK's bdev_nvme retries an
+    aborted IO on the alternate path of an NVMe-oF multipath bdev (see
+    SPDK NVMe multipath docs). Hublvol bdevs are multipath whenever an
+    FTT≥1 cluster exists, regardless of how many local data NICs the
+    node has — so the retries are now applied unconditionally instead
+    of being gated on ``len(data_nics) > 1``.
+
+    Worst-case retry budget:
+        (1 + BDEV_RETRY) * (1 + TRANSPORT_RETRY) = 3 * 2 = 6
+    transport submissions per failing IO before EIO bubbles to the caller.
     """
 
-    def test_transport_retry_tightened_when_multipath(self):
+    def test_retries_are_unconditional_and_nonzero(self):
         from simplyblock_core.rpc_client import RPCClient
         from simplyblock_core import constants
 
-        self.assertEqual(constants.BDEV_RETRY_MULTIPATH, 2)
-        self.assertEqual(constants.TRANSPORT_RETRY_MULTIPATH, 1)
-        self.assertEqual(constants.TRANSPORT_RETRY, 3)
+        self.assertEqual(constants.BDEV_RETRY, 2)
+        self.assertEqual(constants.TRANSPORT_RETRY, 1)
 
         client = RPCClient.__new__(RPCClient)
         captured = {}
@@ -475,14 +481,9 @@ class TestBdevNvmeSetOptionsRetries(unittest.TestCase):
 
         client._request = _fake_request
 
-        client.bdev_nvme_set_options(multipath=True)
-        self.assertEqual(captured["bdev_nvme_set_options"]["transport_retry_count"], 1)
+        client.bdev_nvme_set_options()
         self.assertEqual(captured["bdev_nvme_set_options"]["bdev_retry_count"], 2)
-
-        captured.clear()
-        client.bdev_nvme_set_options(multipath=False)
-        self.assertEqual(captured["bdev_nvme_set_options"]["transport_retry_count"], 3)
-        self.assertEqual(captured["bdev_nvme_set_options"]["bdev_retry_count"], 0)
+        self.assertEqual(captured["bdev_nvme_set_options"]["transport_retry_count"], 1)
 
 
 if __name__ == "__main__":

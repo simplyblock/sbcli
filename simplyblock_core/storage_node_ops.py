@@ -122,6 +122,61 @@ def _rpc_lvstore_exists(rpc_client, lvs_name):
         return False
 
 
+def _kill_spdk_until_dead(snode, max_attempts=3, poll_per_attempt_sec=5,
+                           poll_interval=0.25):
+    """Kill SPDK on `snode` and return only after it is verifiably gone.
+
+    Per design: any abort during restart MUST kill SPDK so the next attempt
+    starts from a clean process — leftover bdevs (raid0_<vuid>, lvol
+    subsystems) cause "Duplicate bdev name" / "Subsystem already exists"
+    failures on retry that loop the auto-restart forever.
+
+    The previous behavior (single 5 s soft window, log warning, proceed)
+    silently left zombies behind. We now retry the kill until SPDK is
+    confirmed down. Bounded total wall-clock = max_attempts *
+    poll_per_attempt_sec so a wedged docker daemon cannot trap the caller.
+    Returns True if SPDK died, False if all attempts exhausted (caller is
+    responsible for whatever comes next; the node should still be marked
+    OFFLINE so it stops being treated as in_restart).
+    """
+    snode_api = snode.client(timeout=5, retry=5)
+    for attempt in range(1, max_attempts + 1):
+        try:
+            snode_api.spdk_process_kill(snode.rpc_port, snode.cluster_id)
+        except Exception as e:
+            logger.warning(
+                "spdk_process_kill RPC failed on %s (attempt %d/%d): %s",
+                snode.get_id(), attempt, max_attempts, e,
+            )
+
+        deadline = time.time() + poll_per_attempt_sec
+        while time.time() < deadline:
+            try:
+                up = snode_api.spdk_process_is_up(snode.rpc_port, snode.cluster_id)
+            except Exception:
+                up = False
+            if not up:
+                logger.info(
+                    "SPDK on %s confirmed down (kill attempt %d/%d)",
+                    snode.get_id(), attempt, max_attempts,
+                )
+                return True
+            time.sleep(poll_interval)
+
+        logger.warning(
+            "SPDK on %s still up after %ds (attempt %d/%d); re-issuing kill",
+            snode.get_id(), poll_per_attempt_sec, attempt, max_attempts,
+        )
+
+    logger.error(
+        "SPDK on %s did NOT die after %d kill attempts (%ds total) — "
+        "investigate snode_api / docker daemon health on %s",
+        snode.get_id(), max_attempts,
+        max_attempts * poll_per_attempt_sec, snode.mgmt_ip,
+    )
+    return False
+
+
 def _reapply_allowed_hosts(lvol, snode, rpc_client):
     """Re-register allowed hosts (with DHCHAP keys) on a subsystem after recreation."""
     from simplyblock_core.controllers.lvol_controller import _register_dhchap_keys_on_node, _get_dhchap_group
@@ -237,6 +292,33 @@ def trigger_ana_failback_for_node(restarting_node):
 _ATTACH_CONTROLLER_MAX_TIMEOUT_SEC = 1
 
 
+def _collect_attached_ips(ctrlr_list):
+    """Aggregate the set of currently-attached traddrs across every ctrlr entry.
+
+    SPDK multipath returns one ``ctrlrs`` entry per path (each with its own
+    ``trid`` and no ``alternate_trids``). Older shapes folded all paths under a
+    single entry's ``alternate_trids``. We accept both: walk every entry, and
+    for each enabled one merge ``trid.traddr`` plus any ``alternate_trids``.
+    Disabled / resetting paths are not counted as attached.
+    """
+    attached = set()
+    if not ctrlr_list:
+        return attached
+    for entry in ctrlr_list:
+        for ct in entry.get("ctrlrs", []):
+            if ct.get("state") != "enabled":
+                continue
+            trid = ct.get("trid") or {}
+            ip = trid.get("traddr")
+            if ip:
+                attached.add(ip)
+            for alt in ct.get("alternate_trids", []) or []:
+                alt_ip = (alt or {}).get("traddr")
+                if alt_ip:
+                    attached.add(alt_ip)
+    return attached
+
+
 def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names: List[str], reattach: bool,
                    attach_timeout: Optional[float] = None):
     """Connect snode to device
@@ -254,10 +336,24 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names:
     """
 
     logger.info(f'Connecting to {name}')
-    for bdev in bdev_names:
-        if bdev.startswith(name):
-            logger.debug(f"Already connected, bdev found in bdev_get_bdevs: {bdev}")
-            return bdev
+
+    expected_ips = [ip.strip() for ip in (device.nvmf_ip or "").split(",") if ip.strip()]
+    is_multipath = bool(device.nvmf_multipath) and len(expected_ips) >= 2
+
+    # Fast path: bdev already present in the caller's snapshot of get_bdevs().
+    # Only safe for single-path devices — for multipath the bdev can survive
+    # while one of its paths has been destructed (the surviving path still
+    # backs the namespace). Early-returning here was the silent failure mode
+    # for partial-path-loss recovery during NIC chaos: the bdev_get_bdevs
+    # snapshot taken by _connect_to_remote_devs/_connect_to_remote_jm_devs
+    # contains the bdev, so we used to skip the attach and never restore the
+    # missing path. With multipath we always go on to inspect the controller
+    # list and re-attach any missing path.
+    if not is_multipath:
+        for bdev in bdev_names:
+            if bdev.startswith(name):
+                logger.debug(f"Already connected, bdev found in bdev_get_bdevs: {bdev}")
+                return bdev
 
     rpc_client = node.rpc_client()
     if attach_timeout is None or attach_timeout > _ATTACH_CONTROLLER_MAX_TIMEOUT_SEC:
@@ -294,45 +390,44 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names:
                 counter = 5
             else:
                 counter += 1
+            # Refresh on retry so we don't loop on a stale snapshot.
+            ret = rpc_client.bdev_nvme_controller_list(name) or []
 
         # if reattach:
         #    rpc_client.bdev_nvme_detach_controller(name)
         #    time.sleep(1)
 
-    # only if the controller is really gone we try to reattach it
-    if not rpc_client.bdev_nvme_controller_list(name):
+    db_ctrl = DBController()
+    target_node = db_ctrl.get_storage_node_by_id(device.node_id)
+    if target_node is not None and target_node.active_rdma:
+        tr_type = "RDMA"
+    elif target_node is not None and target_node.active_tcp:
+        tr_type = "TCP"
+    else:
+        msg = "target node to connect has no active fabric."
+        logger.error(msg)
+        device.release_device_connection()
+        raise RuntimeError(msg)
+
+    # nvmf_multipath is a bool on the device record; translate it into
+    # the SPDK string mode here. ``True`` must mean active-active
+    # (``"multipath"``), not failover — passing the bool through to
+    # rpc_client.bdev_nvme_attach_controller would coerce True ->
+    # ``"failover"`` (active-passive) and remote alceml/jm controllers
+    # would carry all IO on a single path.
+    attach_mode = "multipath" if device.nvmf_multipath else False
+
+    final = rpc_client.bdev_nvme_controller_list(name)
+    if not final:
+        # Controller is fully gone — do a full multi-path attach.
         bdev_name = None
-
-        db_ctrl = DBController()
-        node = db_ctrl.get_storage_node_by_id(device.node_id)
-        if node.active_rdma:
-            tr_type = "RDMA"
-        else:
-            if node.active_tcp:
-                tr_type = "TCP"
-            else:
-                msg = "target node to connect has no active fabric."
-                logger.error(msg)
-                raise RuntimeError(msg)
-
-        # nvmf_multipath is a bool on the device record; translate it into
-        # the SPDK string mode here. ``True`` must mean active-active
-        # (``"multipath"``), not failover — passing the bool through to
-        # rpc_client.bdev_nvme_attach_controller would coerce True ->
-        # ``"failover"`` (active-passive) and remote alceml/jm controllers
-        # would carry all IO on a single path. That's what produced the
-        # remote_alceml_*/remote_jm_* in failover mode (vs hublvols
-        # correctly in multipath) and made a single-NIC drop fatal: every
-        # outstanding JC write was on the dropped path, all aborted at
-        # once, all retried as duplicates.
-        attach_mode = "multipath" if device.nvmf_multipath else False
-        for ip in device.nvmf_ip.split(","):
+        for ip in (expected_ips or [device.nvmf_ip]):
             try:
-                ret = attach_rpc_client.bdev_nvme_attach_controller(
+                resp = attach_rpc_client.bdev_nvme_attach_controller(
                     name, device.nvmf_nqn, ip, device.nvmf_port, tr_type,
                     multipath=attach_mode)
-                if not bdev_name and ret and isinstance(ret, list):
-                    bdev_name = ret[0]
+                if not bdev_name and resp and isinstance(resp, list):
+                    bdev_name = resp[0]
             except Exception as e:
                 logger.warning(f"Failed to attach controller {name} via {ip}: {e}")
 
@@ -342,6 +437,7 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names:
         if not bdev_name:
             msg = f"Bdev name not returned from controller attach for {name}"
             logger.error(msg)
+            device.release_device_connection()
             raise RuntimeError(msg)
         bdev_found = False
         for i in range(5):
@@ -359,24 +455,85 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names:
             raise RuntimeError(f"Failed to connect to device: {device.get_id()}")
 
         return bdev_name
+
+    # Controller still present. For multipath, check whether some paths went
+    # away (typical after a NIC chaos burst: one path's bdev_nvme_ctrlr was
+    # destructed within ctrlr_loss_timeout, the other survived and keeps the
+    # bdev up). Re-attach any missing path inline; partial success is OK —
+    # whatever paths come back leave the controller in a strictly better
+    # state than before, and the next health cycle picks up what's left.
+    bdev_name = f"{name}n1"
+    if is_multipath:
+        attached_ips = _collect_attached_ips(final)
+        missing_ips = [ip for ip in expected_ips if ip not in attached_ips]
+        if missing_ips:
+            logger.info(
+                "Controller %s has %d/%d paths attached, attaching missing: %s",
+                name, len(attached_ips), len(expected_ips), missing_ips)
+            for ip in missing_ips:
+                try:
+                    attach_rpc_client.bdev_nvme_attach_controller(
+                        name, device.nvmf_nqn, ip, device.nvmf_port, tr_type,
+                        multipath=attach_mode)
+                except Exception as e:
+                    logger.warning(
+                        "Failed to re-attach path %s on controller %s: %s",
+                        ip, name, e)
+            # Recognize partial success — re-read the controller list and
+                # report what remains missing for observability. We don't
+                # raise here: a 1/2 outcome still strictly improves over the
+                # incoming state and the next cycle will retry the rest.
+            post = rpc_client.bdev_nvme_controller_list(name) or []
+            now_attached = _collect_attached_ips(post)
+            still_missing = [ip for ip in expected_ips if ip not in now_attached]
+            if still_missing:
+                logger.warning(
+                    "Controller %s still missing paths after attach: %s (now %d/%d)",
+                    name, still_missing, len(now_attached), len(expected_ips))
+
+    device.release_device_connection()
+    # Return the bdev name if it exists; otherwise hint with the canonical
+    # ``<name>n1`` so callers (e.g. _connect_to_remote_jm_devs) can poll for
+    # it via get_bdevs.
+    for bdev in bdev_names:
+        if bdev.startswith(name):
+            return bdev
+    if rpc_client.get_bdevs(bdev_name):
+        return bdev_name
     return None
 
 
 def repair_multipath_controller(name: str, device, node: StorageNode):
     """Check a multipath NVMe controller and re-attach any missing paths.
 
-    For a multipath device the controller should have one primary trid plus
-    one alternate_trid per additional data NIC.  If the controller exists but
-    has fewer paths than expected (e.g. a NIC went down and came back but the
-    path was not re-established), re-attach the missing IPs.
+    For a multipath device the controller should have one path per data NIC.
+    Walks every entry in the ``bdev_nvme_get_controllers`` response (newer
+    SPDK exposes one ``ctrlrs`` entry per path; older shapes use one entry
+    with ``alternate_trids``) and aggregates the set of currently-attached
+    traddrs across all of them. Any expected IP that is not in that set is
+    a missing path and gets re-attached.
 
-    Returns True if all paths are healthy (or were repaired), False if repair
-    was not possible.
+    Partial repair is recognized: we re-read the controller state after
+    attaching and report what remains missing. Returns True if *all*
+    expected paths are now attached, False otherwise. The caller must pass
+    a device object that carries ``nvmf_ip`` / ``nvmf_nqn`` / ``nvmf_port``
+    (i.e. the source NVMeDevice / JMDevice on the target node — NOT a
+    ``RemoteJMDevice``, which strips those fields).
     """
-    if not device.nvmf_multipath:
+    if not getattr(device, 'nvmf_multipath', False):
         return True
 
-    expected_ips = set(ip.strip() for ip in device.nvmf_ip.split(",") if ip.strip())
+    nvmf_ip = getattr(device, 'nvmf_ip', None)
+    if not nvmf_ip:
+        # Caller passed a remote-side view without source addressing.
+        # Nothing we can do here — log so this regression is loud.
+        logger.warning(
+            "repair_multipath_controller called for %s with a device that "
+            "has no nvmf_ip; caller must pass the source NVMeDevice/JMDevice "
+            "from the target node", name)
+        return False
+
+    expected_ips = set(ip.strip() for ip in nvmf_ip.split(",") if ip.strip())
     if len(expected_ips) < 2:
         return True  # not actually multipath
 
@@ -387,6 +544,8 @@ def repair_multipath_controller(name: str, device, node: StorageNode):
 
     db_ctrl = DBController()
     target_node = db_ctrl.get_storage_node_by_id(device.node_id)
+    if target_node is None:
+        return False
     if target_node.active_rdma:
         tr_type = "RDMA"
     elif target_node.active_tcp:
@@ -394,36 +553,33 @@ def repair_multipath_controller(name: str, device, node: StorageNode):
     else:
         return False
 
-    for ctrl_entry in ret:
-        ctrlrs = ctrl_entry.get("ctrlrs", [])
-        for ct in ctrlrs:
-            state = ct.get("state", "")
-            if state != "enabled":
-                logger.warning("Controller %s path state=%s, skipping repair", name, state)
-                continue
+    attached_ips = _collect_attached_ips(ret)
+    missing_ips = expected_ips - attached_ips
+    if not missing_ips:
+        return True
 
-            # Collect all IPs currently attached (primary + alternates)
-            attached_ips = set()
-            attached_ips.add(ct["trid"]["traddr"])
-            for alt in ct.get("alternate_trids", []):
-                attached_ips.add(alt["traddr"])
+    logger.info(
+        "Controller %s has %d/%d paths attached, re-attaching missing: %s",
+        name, len(attached_ips), len(expected_ips), missing_ips)
+    for ip in missing_ips:
+        try:
+            rpc_client.bdev_nvme_attach_controller(
+                name, device.nvmf_nqn, ip, device.nvmf_port,
+                tr_type, multipath="multipath")
+        except Exception as e:
+            logger.error("Failed to re-attach path %s on controller %s: %s", ip, name, e)
 
-            missing_ips = expected_ips - attached_ips
-            if not missing_ips:
-                return True  # all paths present
-
-            logger.info("Controller %s has %d/%d paths, re-attaching: %s",
-                        name, len(attached_ips), len(expected_ips), missing_ips)
-            for ip in missing_ips:
-                try:
-                    rpc_client.bdev_nvme_attach_controller(
-                        name, device.nvmf_nqn, ip, device.nvmf_port,
-                        tr_type, multipath="multipath")
-                    logger.info("Re-attached path %s on controller %s", ip, name)
-                except Exception as e:
-                    logger.error("Failed to re-attach path %s on controller %s: %s", ip, name, e)
-                    return False
-
+    # Re-read and recognize partial success: a 1/2 outcome is still
+    # strictly better than the incoming state and the next health cycle
+    # picks up the remainder. Only return False when nothing improved.
+    post = rpc_client.bdev_nvme_controller_list(name) or []
+    now_attached = _collect_attached_ips(post)
+    still_missing = expected_ips - now_attached
+    if still_missing:
+        logger.warning(
+            "Controller %s still missing paths after re-attach: %s (now %d/%d)",
+            name, still_missing, len(now_attached), len(expected_ips))
+        return len(now_attached) > len(attached_ips)
     return True
 
 
@@ -1533,7 +1689,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
 
         mgmt_ip, mgmt_iface = mgmt_info
         firewall_port = utils.get_next_fw_port(cluster_id, mgmt_ip=mgmt_ip)
-        rpc_port = utils.get_next_rpc_port(cluster_id)
+        rpc_port = utils.get_next_nvmf_port(cluster_id)
         logger.info(f"mgmt interface is {mgmt_iface}")
 
         if not spdk_image:
@@ -1821,9 +1977,8 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         # 6- set nvme bdev options
         # bdev_nvme_set_options is a pure local SPDK config call; bound it at
         # 5 s so a stuck proxy can't consume the 3 min startup RPC budget.
-        mp = bool(snode.data_nics and len(snode.data_nics) > 1)
         set_opts_rpc = snode.rpc_client(timeout=5, retry=0)
-        ret = set_opts_rpc.bdev_nvme_set_options(multipath=mp)
+        ret = set_opts_rpc.bdev_nvme_set_options()
         if not ret:
             logger.error("Failed to set nvme options")
             return False
@@ -2181,6 +2336,36 @@ def restart_storage_node(
                     f"Restart of {node_id} failed (post-status={post_node.status}); "
                     f"resetting to OFFLINE to unblock future attempts"
                 )
+
+                # Abort contract: SPDK MUST be killed on every failed
+                # restart that owned the lock, so the next attempt starts
+                # from a clean process. Without this, _restart_storage_node_impl
+                # has ~20 different `return False` paths (per-device setup,
+                # examine, subsystem create, listener add, remote-dev
+                # connect, etc.) that all leave SPDK running with whatever
+                # bdevs the impl already set up — causing the next attempt
+                # to fail on "Duplicate bdev name for manual examine:
+                # raid0_<vuid>" / "Subsystem NQN ... already exists" and
+                # loop forever (incident 2026-05-10, b278fd62 restart
+                # attempts 1–3). Routing every owned-lock failure through
+                # _kill_spdk_until_dead closes those gaps in one place.
+                # Idempotent: a fast no-op when SPDK was never started in
+                # this attempt. Inner abort paths (recreate_lvstore's
+                # _abort_restart_and_unblock, restart_storage_node's
+                # _abort_restart) emit the snode_restart_failed event
+                # already; the wrapper does NOT re-emit it to avoid
+                # duplicate events and to avoid the FDB write that
+                # `snode_restart_failed` performs unconditionally (which
+                # would raise SystemExit through base_model.write_to_db
+                # on hosts without FDB — the wrapper must not depend on
+                # FDB liveness for cleanup correctness).
+                try:
+                    _kill_spdk_until_dead(post_node)
+                except Exception as kill_exc:
+                    logger.error(
+                        f"Restart cleanup: kill SPDK on {node_id} raised: {kill_exc}"
+                    )
+
                 # Force the OFFLINE write — bypass the state-machine guard
                 # in set_node_status (which only restricts ONLINE writes
                 # anyway, but we use a direct write here to avoid any
@@ -2527,9 +2712,8 @@ def _restart_storage_node_impl(
     # 6- set nvme bdev options
     # bdev_nvme_set_options is a pure local SPDK config call; bound it at
     # 5 s so a stuck proxy can't consume the 10 min restart RPC budget.
-    mp = bool(snode.data_nics and len(snode.data_nics) > 1)
     set_opts_rpc = snode.rpc_client(timeout=5, retry=0)
-    ret = set_opts_rpc.bdev_nvme_set_options(multipath=mp)
+    ret = set_opts_rpc.bdev_nvme_set_options()
     if not ret:
         logger.error("Failed to set nvme options")
         return False
@@ -2756,11 +2940,19 @@ def _restart_storage_node_impl(
         # Before each, perform disconnect checks on the other two nodes.
 
         def _abort_restart(reason):
-            """Kill SPDK and set offline on fatal error."""
+            """Kill SPDK and set offline on fatal error.
+
+            Contract: any abort during restart kills SPDK reliably (verified
+            down) before returning, so the next restart attempt starts from
+            a clean SPDK process. The previous implementation issued a
+            single fire-and-forget ``spdk_process_kill`` and proceeded —
+            which left zombie SPDK behind when docker-rm took >5 s,
+            causing the next attempt to fail with "Duplicate bdev name for
+            manual examine: raid0_<vuid>" and loop forever.
+            """
             logger.error(f"Restart abort: {reason}")
             storage_events.snode_restart_failed(snode)
-            snode_api_inner = snode.client(timeout=5, retry=5)
-            snode_api_inner.spdk_process_kill(snode.rpc_port, snode.cluster_id)
+            _kill_spdk_until_dead(snode)
             set_node_status(snode.get_id(), StorageNode.STATUS_OFFLINE)
 
         try:
@@ -2770,10 +2962,16 @@ def _restart_storage_node_impl(
             _abort_restart(f"LVS recreation failed: {e}")
             return False
         if not ret:
+            # Restart abort path. recreate_all_lvstores returning False is
+            # ALSO a restart abort and must honor the same kill+offline
+            # contract — otherwise SPDK keeps running with the partial
+            # bdev stack from this attempt (e.g. raid0_<vuid> created via
+            # auto-examine) and the next retry fails on "Duplicate bdev
+            # name". 10:58:11 in the AWS soak run hit exactly this gap.
             snode = db_controller.get_storage_node_by_id(snode.get_id())
             snode.lvstore_status = "failed"
             snode.write_to_db()
-            set_node_status(snode.get_id(), StorageNode.STATUS_OFFLINE)
+            _abort_restart("recreate_all_lvstores returned False")
             return False
 
         # === Phase 10: Finalization — post all LVS recreation ===
@@ -3347,7 +3545,6 @@ def suspend_storage_node(node_id, force=False, change_node_status=True):
 
     logger.info("Suspending node")
 
-    rpc_client = snode.rpc_client()
     fw_api = FirewallClient(snode, timeout=20, retry=1)
     port_type = "tcp"
     if snode.active_rdma:
@@ -3368,29 +3565,49 @@ def suspend_storage_node(node_id, force=False, change_node_status=True):
                 logger.error(f"Failed to revert port block for port {port}: {revert_e}")
 
     try:
-        # Block per-lvstore ports for secondary lvstores hosted on this node
+        # Block per-lvstore ports for secondary lvstores hosted on this node.
+        # Per-LVS order:
+        #   1. block client (lvs) port — multipath clients fail over to peers
+        #   2. sleep so any pre-block in-flight IO already on our distrib
+        #      pipeline can complete locally before we close the hublvol
+        #   3. block the hublvol port — surviving peer detects "no redirect
+        #      target", JC consensus + auto-promotion on the peer elects the
+        #      new leader cleanly (the in-flight IO that triggered earlier
+        #      revisions of this code is already drained by step 2).
+        # We deliberately do NOT issue an explicit
+        # bdev_lvol_set_leader(leader=False) / bdev_distrib_force_to_non_leader
+        # at any point inside this loop. Prior incidents:
+        #   2026-05-06 iter 2, jm_vuid=4450 — hub closed before client; fixed
+        #     by client-first ordering.
+        #   2026-05-10 iter 3, jm_vuid=4245 — multipath refilled the
+        #     secondary's pipeline during the drain; tried "demote between
+        #     the two blocks" (3ae2a9b0). Still produced a writer conflict
+        #     because the explicit demote races pre-block IO still being
+        #     processed on the local distrib (port block does not halt
+        #     internal distrib processing of already-queued requests); the
+        #     IO completes as non-leader → conflict. Dropped the demote
+        #     entirely and rely on the peer's auto-promotion path.
         if snode.lvstore_stack_secondary or snode.lvstore_stack_tertiary:
             nodes = db_controller.get_primary_storage_nodes_by_secondary_node_id(node_id)
             if nodes:
                 for node in nodes:
                     sec_lvs_port = node.get_lvol_subsys_port(node.lvstore)
                     sec_hub_port = node.get_hublvol_port(node.lvstore)
+                    _block_port(sec_lvs_port)
+                    time.sleep(1)
                     if sec_hub_port:
                         _block_port(sec_hub_port)
-                    _block_port(sec_lvs_port)
                     time.sleep(0.5)
-                    rpc_client.bdev_lvol_set_leader(node.lvstore, leader=False)
-                    rpc_client.bdev_distrib_force_to_non_leader(node.jm_vuid)
 
         # Block per-lvstore ports for this node's own primary lvstore
+        # (same per-LVS ordering — see comment above).
         own_lvs_port = snode.get_lvol_subsys_port(snode.lvstore)
         own_hub_port = snode.get_hublvol_port(snode.lvstore)
+        _block_port(own_lvs_port)
+        time.sleep(1)
         if own_hub_port:
             _block_port(own_hub_port)
-        _block_port(own_lvs_port)
         time.sleep(0.5)
-        rpc_client.bdev_lvol_set_leader(snode.lvstore, leader=False)
-        rpc_client.bdev_distrib_force_to_non_leader(snode.jm_vuid)
         time.sleep(1)
     except Exception as e:
         logger.error(f"Failed during suspend port blocking/leadership transfer: {e}")
@@ -3978,15 +4195,23 @@ def get(node_id):
 
 # States from which a node may legally transition INTO STATUS_ONLINE.
 # Going online is the most consequential write in the state machine: it
-# tells peers the node is serving IO. To prevent stale paths (e.g. the
-# monitor briefly losing then regaining health checks) from re-flipping
-# a half-broken node to ONLINE, the only legal predecessors are the
-# transient "active operation in progress" states. Anything else is an
-# illegal transition and rejected.
+# tells peers the node is serving IO. The transient "active operation
+# in progress" predecessors are obvious:
+#   - RESTARTING : restart impl finished, ready to commit ONLINE.
+#   - IN_CREATION: add_node finished provisioning the new node.
+#   - SUSPENDED  : resume_storage_node lifting the suspension.
+# UNREACHABLE / DOWN are also legal: the monitor's check_node tail
+# only flips them when *every* health probe (ping, SnodeAPI,
+# spdk_process, RPC, port_check) just passed. SPDK is alive and the
+# listener is reachable — the node is in fact serving. Without this,
+# transient mgmt-plane blips and port flaps strand the node forever
+# (lab incident 2026-05-06).
 _ALLOWED_PRE_STATUSES_FOR_ONLINE = (
     StorageNode.STATUS_RESTARTING,
     StorageNode.STATUS_IN_CREATION,
     StorageNode.STATUS_SUSPENDED,
+    StorageNode.STATUS_UNREACHABLE,
+    StorageNode.STATUS_DOWN,
 )
 
 
@@ -4466,6 +4691,25 @@ def _check_peer_disconnected(peer_node, lvs_peer_ids=None):
     """
     from simplyblock_core.services.storage_node_monitor import is_node_data_plane_disconnected_quorum
 
+    # Refresh from FDB before reading peer_node.status. Callers commonly
+    # build a sec_nodes list at the top of recreate_lvstore (line ~5223)
+    # and then run this check seconds later. If the peer's status flipped
+    # to OFFLINE in that window (e.g. monitor's set_node_offline after a
+    # container_kill), the cached object's .status is still ONLINE and
+    # the FDB-status short-circuit below silently misses. The function
+    # then falls through to JM-quorum, which itself can vote "connected"
+    # when peers have already torn down their NVMe controllers for the
+    # dead peer's JM (`0/0 peers report disconnected` — abstain from all).
+    # The caller proceeds to port-block the peer via its mgmt firewall API
+    # and hits ECONNREFUSED, aborting the entire restart with a misleading
+    # "LVStore recovery failed" event. Lab incident 2026-05-06 iter 2.
+    db_ctrl = DBController()
+    try:
+        peer_node = db_ctrl.get_storage_node_by_id(peer_node.get_id())
+    except KeyError:
+        # Peer has been fully removed from the cluster — definitely disconnected.
+        return True
+
     if peer_node.status in (StorageNode.STATUS_OFFLINE,
                             StorageNode.STATUS_REMOVED,
                             StorageNode.STATUS_UNREACHABLE):
@@ -4770,6 +5014,33 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
             "Raid %s and lvstore %s already present on %s; skipping examine",
             primary_node.raid, primary_node.lvstore, snode.get_id())
     else:
+        if raid_already and not lvstore_already:
+            # Same convergence trap as in recreate_lvstore: the raid was
+            # examined on a prior pass and the lvstore module did not
+            # surface it. SPDK rejects re-examine of an already-examined
+            # bdev with "Duplicate bdev name for manual examine", so a
+            # plain bdev_examine here is a silent no-op that loops the
+            # activation retry forever. Drop the raid and re-create via
+            # _create_bdev_stack (idempotent) so the next examine is
+            # against a freshly-registered raid.
+            logger.info(
+                "Raid %s present but lvstore %s did not surface on %s; "
+                "dropping raid for clean re-examine",
+                primary_node.raid, primary_node.lvstore, snode.get_id())
+            try:
+                snode_rpc_client.bdev_raid_delete(primary_node.raid)
+            except Exception as e:
+                logger.warning(
+                    "bdev_raid_delete(%s) raised: %s — proceeding to "
+                    "_create_bdev_stack which is idempotent",
+                    primary_node.raid, e)
+            ret, err = _create_bdev_stack(snode, primary_node.lvstore_stack,
+                                          primary_node=primary_node)
+            if not ret:
+                logger.error(
+                    "Failed to rebuild bdev stack on %s after raid drop: %s",
+                    snode.get_id(), err)
+
         # Examine is required whenever the lvstore isn't surfaced — whether
         # the raid was freshly created by _create_bdev_stack (normal restart
         # path) or pre-existing with stale state (activation retry).
@@ -4854,6 +5125,7 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
             primary_node.lvstore,
             groupid=primary_node.jm_vuid,
             subsystem_port=primary_node.get_lvol_subsys_port(primary_node.lvstore),
+            hublvol_port=primary_node.get_hublvol_port(primary_node.lvstore),
             role=sec_role,
     ):
         logger.error("bdev_lvol_set_lvs_opts(%s) failed for %s on %s",
@@ -4917,13 +5189,32 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
                         leader_node.get_id(), leader_has_quorum, secondary_alive)
 
                 if sync_target is not None:
+                    # Pass lvs_node=primary_node so LVS metadata (lvstore
+                    # name, jm_vuid, port, hublvol NQN/bdev) comes from
+                    # the configured primary of the LVS being recreated,
+                    # *not* from sync_target — when the configured
+                    # primary is offline and sync_target is a peer that
+                    # took over leadership, sync_target.hublvol points at
+                    # sync_target's OWN primary-LVS, which is the wrong
+                    # LVS for our connection. (incident 2026-05-02
+                    # 15:53:42: tertiary worker1 connecting through
+                    # acting-leader worker5 for LVS_6207 set
+                    # groupid=4729 — worker5's own primary — instead
+                    # of 6207.)
                     snode.connect_to_hublvol(sync_target, failover_node=None,
-                                             role=sec_role, rpc_timeout=0.2)
+                                             role=sec_role, rpc_timeout=0.2,
+                                             lvs_node=primary_node)
             else:
                 # Secondary: connect to leader (primary) hublvol — single path,
                 # short timeout, no deferred failover (secondaries don't carry one).
+                # Same lvs_node=primary_node rationale as the tertiary
+                # branch above: when ``leader_node`` is a peer that took
+                # over leadership of ``primary_node.lvstore``, its OWN
+                # hublvol metadata would label the connection with the
+                # wrong LVS.
                 snode.connect_to_hublvol(leader_node, failover_node=None,
-                                         role=sec_role, rpc_timeout=0.2)
+                                         role=sec_role, rpc_timeout=0.2,
+                                         lvs_node=primary_node)
         except Exception as e:
             logger.error("Error connecting to hublvol: %s", e)
 
@@ -5212,8 +5503,18 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
                     retries -= 1
                     logger.info(f"JC compression active on leader {current_leader.get_id()}, retrying in 60 seconds")
                     time.sleep(60)
+                    # Poll the SAME jm_vuid as the first read above — the LVS
+                    # being recovered (lvs_jm_vuid). Was previously
+                    # current_leader.jm_vuid, which is the leader-node's own
+                    # configured-primary LVS jm_vuid (a different LVS), so the
+                    # poll watched the wrong subsystem and could either exit
+                    # too early (false clear) or block here for the full
+                    # 10×60 s when the leader's own primary LVS happened to
+                    # be compressing. Incident 2026-05-06: 70850783 was
+                    # acting leader of LVS_4450 *and* configured primary of
+                    # LVS_5676; jm_vuid=5676 stayed active → 5 min hang.
                     jc_compression_is_active = current_leader.rpc_client().jc_compression_get_status(
-                        current_leader.jm_vuid)
+                        lvs_jm_vuid)
             except Exception as e:
                 raise Exception(
                     f"Abort restart: jc_compression check on leader {current_leader.get_id()} failed: {e}")
@@ -5246,19 +5547,28 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
 
     lvol_ana_state = "optimized"
 
-    ### 2- create lvols nvmf subsystems
+    ### 2- create lvols nvmf subsystems (idempotent: probe SPDK first; mirrors
+    ### the pattern in recreate_lvstore_on_non_leader so a re-activation that
+    ### finds the subsystem already present from a prior partial pass does not
+    ### emit "Subsystem NQN ... already exists" / "Unable to create subsystem".
     created_subsystems = []
     for lvol in lvol_list:
-        if lvol.nqn not in created_subsystems:
-            allow_any = not bool(lvol.allowed_hosts)
+        if lvol.nqn in created_subsystems:
+            continue
+        allow_any = not bool(lvol.allowed_hosts)
+        if _rpc_subsystem_exists(rpc_client, lvol.nqn):
+            logger.info("subsystem %s already exists on %s, skipping create",
+                        lvol.nqn, snode.get_id())
+            created_subsystems.append(lvol.nqn)
+        else:
             logger.info("creating subsystem %s (allow_any_host=%s)", lvol.nqn, allow_any)
             ret = rpc_client.subsystem_create(lvol.nqn, lvol.ha_type, lvol.uuid, 1,
                                               max_namespaces=constants.LVO_MAX_NAMESPACES_PER_SUBSYS,
                                               allow_any_host=allow_any)
             if ret:
                 created_subsystems.append(lvol.nqn)
-            if lvol.allowed_hosts:
-                _reapply_allowed_hosts(lvol, snode, rpc_client)
+        if lvol.allowed_hosts:
+            _reapply_allowed_hosts(lvol, snode, rpc_client)
 
     # ANA failback only when the original primary is coming back (not takeover)
     if not is_takeover and lvs_node.secondary_node_id and lvol_list:
@@ -5295,31 +5605,21 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
                 pass
 
     def _kill_app():
+        """Kill SPDK on snode and mark OFFLINE before peer ports unblock.
+
+        Holding the peer port blocks during this wait is intentional:
+        unblocking before SPDK is confirmed dead lets a residual primary
+        on snode race the acting-leader and produce a writer conflict.
+
+        Implemented via the module-level :func:`_kill_spdk_until_dead`
+        helper so the same hardened kill logic is used by every abort
+        path (recreate_lvstore aborts here; restart_storage_node aborts
+        in `_abort_restart`). On total kill failure we still mark the
+        node OFFLINE so it stops being treated as in_restart by the
+        cluster, and so peer ports get released by the caller.
+        """
         storage_events.snode_restart_failed(snode)
-        snode_api = snode.client(timeout=5, retry=5)
-        snode_api.spdk_process_kill(snode.rpc_port, snode.cluster_id)
-        # spdk_process_kill returns as soon as the HTTP request is
-        # queued — SPDK may keep serving IO for a short while after.
-        # Block here until SPDK is actually gone so the subsequent
-        # peer-port unblock in _abort_restart_and_unblock cannot race
-        # client IO back into the secondary while a still-alive primary
-        # on snode tries to serve as leader (→ writer conflict).
-        # We hold the peer port blocks during this wait; cap it at 5 s
-        # so a stuck kill does not leave peers permanently blocked.
-        deadline = time.time() + 5
-        while time.time() < deadline:
-            try:
-                up = snode_api.spdk_process_is_up(snode.rpc_port, snode.cluster_id)
-            except Exception:
-                up = False
-            if not up:
-                break
-            time.sleep(0.25)
-        else:
-            logger.warning(
-                "SPDK on %s still up 5s after kill signal; proceeding with unblock anyway",
-                snode.get_id(),
-            )
+        _kill_spdk_until_dead(snode)
         set_node_status(snode.get_id(), StorageNode.STATUS_OFFLINE)
 
     def _abort_restart_and_unblock(reason):
@@ -5405,17 +5705,77 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
             # --- Inside port-blocked window: timeout=0.2s, retry=0, abort on failure ---
             leader_rpc = current_leader.rpc_client(timeout=0.2, retry=0)
 
-            time.sleep(0.5)
+            ### 4- drain in-flight IO BEFORE dropping leadership
+            #
+            # If we drop leadership while IO is still in distrib, those
+            # in-flight IOs land on a non-leader lvstore and either get
+            # redirected via the hub bdev (which may not be open yet on
+            # the new follower) or aborted — both produce client-visible
+            # IO errors and qpair tear-downs.  Concrete example: incident
+            # 2026-05-02 (k8s_native_failover_ha-20260502-101452), worker1.
+            # 123 state-9 IOs were in flight on its distribs at the moment
+            # set_leader=False fired; the open of LVS_4729/hublvoln1
+            # returned ENODEV; nvmf_tcp_qpair_set_recv_state floods and
+            # disconnects followed ~1.6 s later.
+            #
+            # The drain runs while the leader's lvol port is iptables-
+            # blocked, so we must not hold this open indefinitely.  The
+            # earlier fixed 0.5 s sleep was a workaround put in place
+            # after the original 10 s drain regression — but that
+            # regression was on the recreate_lvstore_on_non_leader path,
+            # where the blocked node is the configured primary and runs
+            # data migration (which never pauses on port block, hence the
+            # poll never settled).  *This* path blocks `current_leader`,
+            # which is a secondary or tertiary that became acting leader
+            # while the configured primary was out — and migration never
+            # runs on a secondary/tertiary, so the inflight counter
+            # genuinely drains.
+            #
+            # Bound at _DRAIN_BOUND_SEC anyway: a slow JM/distrib
+            # completion shouldn't be allowed to hold the leader's port
+            # blocked beyond client max_latency.  On timeout we proceed
+            # with the drop and accept the same residual class of error
+            # this is trying to prevent — but bounded.
+            _DRAIN_BOUND_SEC = 2.0
+            _DRAIN_POLL_SEC = 0.05
+            deadline = time.time() + _DRAIN_BOUND_SEC
+            drained = False
+            while time.time() < deadline:
+                try:
+                    still_inflight = leader_rpc.bdev_distrib_check_inflight_io(lvs_jm_vuid)
+                except Exception as e:
+                    logger.warning(
+                        "bdev_distrib_check_inflight_io poll failed for %s on %s: %s",
+                        lvs_name, current_leader.get_id(), e)
+                    break
+                if not still_inflight:
+                    drained = True
+                    break
+                time.sleep(_DRAIN_POLL_SEC)
+            if not drained:
+                # Continuing with the leadership drop while IO is still in
+                # the distrib pipeline produces exactly the failure this
+                # drain is meant to prevent (in-flight IO hitting a
+                # non-leader lvstore at the moment of transition: hub-bdev
+                # redirect failures, qpair tear-downs, client IO errors).
+                # Abort cleanly: _abort_restart_and_unblock kills the
+                # recovering node's SPDK, sets it OFFLINE, and unblocks
+                # every peer port we just blocked above. The restart task
+                # runner re-queues from there; on the next attempt the
+                # cluster may have settled enough for drain to complete
+                # within the bound.
+                _abort_restart_and_unblock(
+                    f"Inflight IO did not drain on acting-leader "
+                    f"{current_leader.get_id()} within {_DRAIN_BOUND_SEC}s; "
+                    f"refusing to drop leadership against a non-empty distrib "
+                    f"pipeline")
 
-            ### 4- drop leadership on current leader
+            ### 5- drop leadership on current leader (drain complete)
             try:
                 leader_rpc.bdev_lvol_set_leader(lvs_name, leader=False, bs_nonleadership=True)
                 leader_rpc.bdev_distrib_force_to_non_leader(lvs_jm_vuid)
             except Exception as e:
                 _abort_restart_and_unblock(f"Failed to demote leader {current_leader.get_id()}: {e}")
-
-            ### 4-1 fixed 0.5s quiesce window (see secondary/tertiary path above)
-            time.sleep(0.5)
 
         if disconnected_peers:
             logger.info(f"Peers disconnected {disconnected_peers}, forcing journal replication on node: {snode.get_id()}")
@@ -5430,6 +5790,42 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
             "Raid %s and lvstore %s already present on %s; skipping examine",
             lvs_raid, lvs_name, snode.get_id())
     else:
+        if raid_already and not lvstore_already:
+            # Raid is present but the lvstore module never surfaced it on
+            # this SPDK process (e.g. a prior activation pass examined the
+            # raid and the lvstore-side examine failed/was incomplete).
+            # SPDK rejects re-examine of an already-examined bdev with
+            # "Duplicate bdev name for manual examine: <raid>", so calling
+            # bdev_examine again is a no-op that leaves the lvstore
+            # missing forever and burns the activation retry loop.
+            #
+            # Drop the raid so the underlying distribs are reusable, then
+            # re-create it via _create_bdev_stack (which is itself
+            # idempotent — it skips bdevs already present and only creates
+            # what's missing). The fresh bdev_examine below now runs
+            # against a newly-registered raid and the lvstore module gets
+            # a real chance to surface.
+            logger.info(
+                "Raid %s present but lvstore %s did not surface on %s; "
+                "dropping raid for clean re-examine",
+                lvs_raid, lvs_name, snode.get_id())
+            try:
+                rpc_client.bdev_raid_delete(lvs_raid)
+            except Exception as e:
+                logger.warning(
+                    "bdev_raid_delete(%s) raised: %s — proceeding to "
+                    "_create_bdev_stack which is idempotent", lvs_raid, e)
+            stack = lvs_node.lvstore_stack if is_takeover else None
+            if is_takeover:
+                ret, err = _create_bdev_stack(snode, stack, primary_node=lvs_node)
+            else:
+                ret, err = _create_bdev_stack(snode, [])
+            if not ret:
+                logger.error(
+                    "Failed to rebuild bdev stack on %s after raid drop: %s",
+                    snode.get_id(), err)
+                # Fall through; bdev_examine below will surface what we have.
+
         # Examine is required whenever the lvstore isn't surfaced — whether
         # the raid was freshly created by _create_bdev_stack (normal restart
         # path) or pre-existing with stale state (activation retry). The
@@ -5495,6 +5891,7 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
         lvs_name,
         groupid=lvs_jm_vuid,
         subsystem_port=lvs_node.get_lvol_subsys_port(lvs_name),
+        hublvol_port=lvs_node.get_hublvol_port(lvs_name),
         role=snode_lvs_role,
     )
     ret = rpc_client.bdev_lvol_set_leader(lvs_name, leader=True)
@@ -5994,6 +6391,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
         snode.lvstore,
         groupid=snode.jm_vuid,
         subsystem_port=snode.get_lvol_subsys_port(snode.lvstore),
+        hublvol_port=snode.get_hublvol_port(snode.lvstore),
         role="primary"
     )
     ret = rpc_client.bdev_lvol_set_leader(snode.lvstore, leader=True)

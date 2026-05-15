@@ -8,10 +8,10 @@ on:
         description: 'Branch for simplyBlockDeploy'
         required: true
         default: 'main'
-      simplyblock_csi_branch:
-        description: 'Branch for simplyblock-csi'
+      helm_charts_branch:
+        description: 'Branch for helm-charts'
         required: true
-        default: 'master'
+        default: 'main'
       testname:
         description: 'Name of test to run. Empty to run all'
         required: false
@@ -91,11 +91,11 @@ jobs:
           token: ${{ secrets.GH_ACCESS_KEY_ID_RAUNAK }}
 
       - uses: actions/checkout@master
-        name: Checkout code simplyblock_csi_branch
+        name: Checkout helm-charts
         with:
-          repository: simplyblock-io/simplyblock-csi
-          ref: refs/heads/${{ github.event.inputs.simplyblock_csi_branch || 'master'}}
-          path: 'simplyblock-csi'
+          repository: simplyblock/helm-charts
+          ref: refs/heads/${{ github.event.inputs.helm_charts_branch || 'main'}}
+          path: 'helm-charts'
           token: ${{ secrets.GH_ACCESS_KEY_ID_RAUNAK }}
 
       - name: Setup Terraform
@@ -201,9 +201,9 @@ jobs:
           scp -i "$HOME/.ssh/${{ steps.terraform_outputs.outputs.key_name }}" ec2-user@${{ steps.terraform_outputs.outputs.extra_node_public_ip }}:/etc/rancher/k3s/k3s.yaml $HOME/.kube/config
           sed -i "s/server: https:\/\/\(localhost\|127.0.0.1\)\(:[0-9]*\)/server: https:\/\/${{ steps.terraform_outputs.outputs.extra_node_public_ip }}\2/" $HOME/.kube/config
 
-      - name: Install Helm Chart for simplyblock-csi
+      - name: Install Helm Chart for simplyblock-operator
         run: |
-          cd $GITHUB_WORKSPACE/simplyblock-csi/charts/latest/spdk-csi/
+          cd $GITHUB_WORKSPACE/helm-charts/charts/simplyblock-operator/
           echo "Sleeping for 30 seconds before helm install"
           sleep 30
           helm install spdk-csi ./ \

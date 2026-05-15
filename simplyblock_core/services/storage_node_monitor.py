@@ -208,9 +208,13 @@ def update_cluster_status(cluster_id):
 # to the iteration-77 hang where a half-completed restart left the node
 # DB-online while peer reconnects had silently failed.
 #
-# Recovery for nodes stuck in DOWN / UNREACHABLE / SCHEDULABLE now flows
-# exclusively through the auto-restart task (FN_NODE_RESTART) -> the
-# restart impl, which is the only authority for the ONLINE flip.
+# Recovery for nodes stuck in OFFLINE / UNREACHABLE / SCHEDULABLE flows
+# through the auto-restart task (FN_NODE_RESTART) -> the restart impl,
+# which is the only authority for the ONLINE flip.
+#
+# DOWN is NOT routed through auto-restart: SPDK is still alive and
+# cluster-internal traffic works -- only the client-facing port is
+# blocked. Recovery is port-unblock, not a destructive restart.
 
 
 def set_node_offline(node):
@@ -423,7 +427,12 @@ def set_node_schedulable(node):
 
 
 def set_node_down(node):
-    if node.status not in [StorageNode.STATUS_DOWN, StorageNode.STATUS_SUSPENDED]:
+    # DOWN is reserved for "ONLINE node, client-facing port failed". Any
+    # other current state means another actor (shutdown, restart, monitor)
+    # owns the transition — flipping to DOWN from there clobbers the real
+    # in-flight state (e.g. IN_SHUTDOWN → DOWN was observed during
+    # graceful sbctl shutdown when port 4426 momentarily failed mid-tear-down).
+    if node.status == StorageNode.STATUS_ONLINE:
         storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_DOWN)
         update_cluster_status(cluster_id)
 
@@ -589,20 +598,27 @@ def check_node(snode):
             set_node_down(snode)
             return True
 
-    # Health checks pass. The monitor must NOT flip the node to ONLINE
-    # itself: the state-machine rule restricts ONLINE writes to the
-    # restart / add_node / resume paths. If the node is currently DOWN /
-    # UNREACHABLE / SCHEDULABLE, queue an auto-restart so the regular
-    # restart impl drives the IN_RESTART -> ONLINE transition.
-    if snode.status in (StorageNode.STATUS_UNREACHABLE,
-                        StorageNode.STATUS_SCHEDULABLE,
-                        StorageNode.STATUS_DOWN):
+    # Health checks pass. No auto-restart from this tail: the legitimate
+    # auto-restart triggers (OFFLINE, SCHEDULABLE) are paired at the call
+    # site that flips the status (set_node_offline, set_node_schedulable).
+    #
+    # UNREACHABLE / DOWN → ONLINE: a node in either of these states that
+    # now passes ping / SnodeAPI / spdk_process_is_up / RPC / port checks
+    # has SPDK alive end-to-end and its client-facing port reachable.
+    # Peer JM keep-alive / NVMe controller reconnect rebuilds the
+    # data-plane links on their own — no destructive restart needed.
+    # We flip ONLINE here because nothing else closes the loop for a
+    # transient mgmt-plane blip (UNREACHABLE) or a transient port flap
+    # (DOWN, e.g. peer-restart cascade). OFFLINE and SCHEDULABLE are
+    # intentionally NOT cleared here — those have dedicated recovery
+    # via auto-restart.
+    if snode.status in (StorageNode.STATUS_UNREACHABLE, StorageNode.STATUS_DOWN):
         logger.info(
-            "Health checks pass for %s but status is %s; queueing auto-restart "
-            "(only the restart path may write ONLINE)",
+            "Node %s health checks pass after %s; "
+            "clearing to ONLINE (SPDK alive; peer keep-alive reconnects)",
             snode.get_id(), snode.status,
         )
-        tasks_controller.add_node_to_auto_restart(snode)
+        storage_node_ops.set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE)
 
 
 def loop_for_node(snode):

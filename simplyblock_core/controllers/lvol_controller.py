@@ -2,7 +2,6 @@
 import copy
 import logging as lg
 import json
-import math
 import random
 import sys
 import time
@@ -127,11 +126,27 @@ def _create_crypto_lvol(rpc_client, name, base_name, key1, key2):
     if not ret:
         logger.error(f"Failed to find LVol bdev {base_name}")
         return False
+
+    # Idempotent: if the crypto bdev already exists from a prior partial
+    # activation/restart pass, skip the key + crypto-bdev creates. SPDK
+    # rejects duplicate creates with hard errors that would otherwise
+    # break re-activation convergence.
+    if rpc_client.get_bdevs(name):
+        logger.info("crypto LVol %s already exists, skipping create", name)
+        return True
+
     key_name = f'key_{name}'
     ret = rpc_client.lvol_crypto_key_create(key_name, key1, key2)
     if not ret:
-        logger.error("failed to create crypto key")
-        return False
+        # SPDK returns failure when the key name already exists. On
+        # re-activation that's the same node re-issuing the same key —
+        # treat existing key as benign and proceed to the crypto-bdev
+        # create below. If creation genuinely failed for another reason,
+        # the next call will surface it.
+        logger.warning(
+            "lvol_crypto_key_create returned failure for %s; if the key "
+            "already exists from a prior pass this is expected — "
+            "proceeding to crypto bdev create", key_name)
     ret = rpc_client.lvol_crypto_create(name, base_name, key_name)
     if not ret:
         logger.error(f"failed to create crypto LVol {name}")
@@ -348,7 +363,7 @@ def validate_aes_xts_keys(key1: str, key2: str) -> Tuple[bool, str]:
 def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=False, use_crypto=False,
                 distr_vuid=0, max_rw_iops=0, max_rw_mbytes=0, max_r_mbytes=0, max_w_mbytes=0,
                 with_snapshot=False, max_size=0, crypto_key1=None, crypto_key2=None, lvol_priority_class=0,
-                uid=None, pvc_name=None, namespace=None, max_namespace_per_subsys=1, fabric="tcp", ndcs=0, npcs=0,
+                uid=None, pvc_name=None, namespaced=None, max_namespace_per_subsys=1, fabric="tcp", ndcs=0, npcs=0,
                 allowed_hosts=None,
                 do_replicate=False, replication_cluster_id=None):
     db_controller = DBController()
@@ -365,25 +380,6 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
                 return False, f"Can not find storage node: {host_id_or_name}"
         if host_node.lvol_sync_del():
             logger.info(f"LVol sync delete task on node: {host_node.get_id()}, proceeding anyway")
-
-    if namespace:
-        try:
-            master_lvol = db_controller.get_lvol_by_id(namespace)
-        except KeyError as e:
-            logger.error(e)
-            return False
-
-        host_node = db_controller.get_storage_node_by_id(master_lvol.node_id)
-
-        lvols_count = 0
-        for lv in db_controller.get_lvols(host_node.cluster_id):
-            if lv.namespace == namespace:
-                lvols_count += 1
-
-        if lvols_count >= master_lvol.max_namespace_per_subsys:
-            msg = f"Max namespaces reached: {lvols_count}"
-            logger.error(msg)
-            return False, msg
 
     pool = None
     for p in db_controller.get_pools():
@@ -416,8 +412,6 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
                     lvol.pvc_name = pvc_name
                 if name:
                     lvol.lvol_name = name
-                if namespace:
-                    lvol.namespace = namespace
                 lvol.write_to_db()
                 return uid, None
 
@@ -514,7 +508,8 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     lvol.size = int(size)
     lvol.max_size = int(max_size)
     lvol.status = LVol.STATUS_IN_CREATION
-
+    lvol.pool_uuid = pool.get_id()
+    lvol.pool_name = pool.pool_name
     lvol.create_dt = str(datetime.now())
     lvol.ha_type = ha_type
     lvol.bdev_stack = []
@@ -534,20 +529,23 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
         lvol.lvol_priority_class = 0
     lvol.fabric = fabric
 
-    if namespace:
-        master_lvol = db_controller.get_lvol_by_id(namespace)
-        lvol.nqn = master_lvol.nqn
-        lvol.namespace = namespace or ""
-    else:
-        lvol.nqn = cl.nqn + ":lvol:" + lvol.uuid
-
-    lvol.max_namespace_per_subsys = max_namespace_per_subsys
-
     if not host_node:
         nodes = _get_next_3_nodes(cl.get_id(), lvol.size)
         if not nodes:
             return False, "No nodes found with enough resources to create the LVol"
         host_node = nodes[0]
+
+    # Create a new subsystem by default unless namespaced is set
+    lvol.nqn = cl.nqn + ":lvol:" + lvol.uuid
+    lvol.max_namespace_per_subsys = max_namespace_per_subsys
+    namespace = None
+
+    if namespaced:
+        result = get_next_available_subsystem_on_node(host_node.get_id())
+        if result:
+            namespace, free_nqn = result
+            lvol.nqn = free_nqn
+            lvol.namespace = namespace
 
     s_node = db_controller.get_storage_node_by_id(host_node.secondary_node_id)
     attr_name = f"active_{fabric}"
@@ -642,6 +640,16 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
             if isinstance(host_entries, tuple):
                 return host_entries  # (False, error_message)
             lvol.allowed_hosts = host_entries
+
+    # Set pool_uuid before write_to_db and add_lvol_on_node so that
+    # add_lvol_on_node can look up the pool for DHCHAP key registration.
+    lvol.pool_uuid = pool.get_id()
+    lvol.pool_name = pool.pool_name
+    logger.info("[DHCHAP-DEBUG] create_lvol: pool_uuid=%s, pool.dhchap=%s, "
+                "allowed_hosts=%s, pool.dhchap_key=%s",
+                lvol.pool_uuid, pool.dhchap,
+                lvol.allowed_hosts,
+                bool(pool.dhchap_key) if pool.dhchap else "N/A")
 
     lvol.write_to_db(db_controller.kv_store)
 
@@ -753,8 +761,6 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
                     f"register create lvol {lvol.uuid} on {sec.get_id()[:8]}")
             # "skip", "reject" at this stage → already handled or skip
 
-    lvol.pool_uuid = pool.get_id()
-    lvol.pool_name = pool.pool_name
     lvol.status = LVol.STATUS_ONLINE
     lvol.write_to_db(db_controller.kv_store)
     lvol_events.lvol_create(lvol)
@@ -851,18 +857,34 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
             db_ctrl = DBController()
             cluster = db_ctrl.get_cluster_by_id(snode.cluster_id)
             pool = None
+            logger.info("[DHCHAP-DEBUG] add_lvol_on_node: lvol.pool_uuid=%s", lvol.pool_uuid)
             if lvol.pool_uuid:
                 try:
                     pool = db_ctrl.get_pool_by_id(lvol.pool_uuid)
+                    logger.info("[DHCHAP-DEBUG] add_lvol_on_node: pool found, "
+                                "pool.dhchap=%s, pool.dhchap_key=%s, pool.dhchap_ctrlr_key=%s",
+                                pool.dhchap, bool(pool.dhchap_key), bool(pool.dhchap_ctrlr_key))
                 except KeyError:
-                    pass
+                    logger.error("[DHCHAP-DEBUG] add_lvol_on_node: pool NOT FOUND for pool_uuid=%s",
+                                 lvol.pool_uuid)
+            else:
+                logger.warning("[DHCHAP-DEBUG] add_lvol_on_node: lvol.pool_uuid is EMPTY — "
+                               "DHCHAP target-side config will be SKIPPED")
             dhchap_group = _get_dhchap_group(cluster, pool)
             pool_key_names = {}
             if pool and pool.dhchap:
+                logger.info("[DHCHAP-DEBUG] add_lvol_on_node: DHCHAP path — registering pool keys on node %s",
+                            snode.get_id())
                 pool_key_names = _register_pool_dhchap_keys_on_node(pool, snode, rpc_client)
+                logger.info("[DHCHAP-DEBUG] add_lvol_on_node: pool_key_names=%s", pool_key_names)
+            else:
+                logger.info("[DHCHAP-DEBUG] add_lvol_on_node: NON-DHCHAP path (pool=%s, pool.dhchap=%s)",
+                            pool is not None, getattr(pool, 'dhchap', None))
             for host_entry in lvol.allowed_hosts:
                 logger.info("adding allowed host %s to subsystem %s", host_entry["nqn"], lvol.nqn)
                 if pool and pool.dhchap:
+                    logger.info("[DHCHAP-DEBUG] subsystem_add_host WITH dhchap_key=%s, dhchap_ctrlr_key=%s",
+                                pool_key_names.get("dhchap_key"), pool_key_names.get("dhchap_ctrlr_key"))
                     rpc_client.subsystem_add_host(
                         lvol.nqn, host_entry["nqn"],
                         dhchap_key=pool_key_names.get("dhchap_key"),
@@ -871,6 +893,8 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
                     )
                 else:
                     has_keys = any(host_entry.get(k) for k in ("dhchap_key", "dhchap_ctrlr_key", "psk"))
+                    logger.info("[DHCHAP-DEBUG] subsystem_add_host WITHOUT pool DHCHAP (has_keys=%s, host_entry_keys=%s)",
+                                has_keys, list(host_entry.keys()))
                     if has_keys:
                         key_names = _register_dhchap_keys_on_node(snode, host_entry["nqn"], host_entry, rpc_client)
                         rpc_client.subsystem_add_host(
@@ -881,6 +905,7 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
                             dhchap_group=dhchap_group,
                         )
                     else:
+                        logger.warning("[DHCHAP-DEBUG] subsystem_add_host PLAIN — no DHCHAP keys at all")
                         rpc_client.subsystem_add_host(lvol.nqn, host_entry["nqn"])
 
         if is_primary or lvol.node_id == snode.get_id():
@@ -1639,23 +1664,31 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
     db_controller = DBController()
     try:
         lvol = db_controller.get_lvol_by_id(uuid)
-    except KeyError as e:
-        logger.error(e)
-        return False
+    except KeyError:
+        logger.exception("Failed to get lvol by id: %s", uuid)
+        return False, "Failed to find volume"
 
     # Look up host entry for secrets when host_nqn is provided
     host_entry = None
     if lvol.allowed_hosts:
         if not host_nqn:
-            logger.error(f"Volume {uuid} has allowed hosts configured; --host-nqn is required")
-            return False
+            return False, f"Volume {uuid} has allowed hosts configured; --host-nqn is required"
         for h in lvol.allowed_hosts:
             if h["nqn"] == host_nqn:
                 host_entry = h
+                # Do NOT inject pool DHCHAP keys into host_entry here.
+                # Pool-level keys are registered on the target's nvmf
+                # keyring via _register_pool_dhchap_keys_on_node and
+                # used during in-band auth; embedding them in the
+                # connect string overrides explicit host-level keys,
+                # injects keys when the pool has no DHCHAP configured,
+                # and conflicts with hosts using PSK/TLS. Contract is
+                # pinned by tests in tests/test_dhchap_pool_level.py
+                # (test_host_with_psk_sets_tls_flag,
+                # test_pool_level_dhchap_lvol_has_no_secret_in_connect_cmd).
                 break
         if not host_entry:
-            logger.error(f"Host NQN {host_nqn} not found in allowed hosts for volume {uuid}")
-            return False
+            return False, f"Host NQN {host_nqn} not found in allowed hosts for volume {uuid}"
     elif host_nqn:
         # host_nqn provided but no allowed_hosts — volume allows any host,
         # so just pass host_nqn through without secrets
@@ -1719,6 +1752,7 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
             connect_cmd = (
                 f"sudo nvme connect --reconnect-delay={constants.LVOL_NVME_CONNECT_RECONNECT_DELAY} "
                 f"--ctrl-loss-tmo={ctrl_loss_tmo} "
+                f"--fast_io_fail_tmo={constants.LVOL_NVME_CONNECT_FAST_IO_FAIL_TO} "
                 f"--nr-io-queues={cluster.client_qpair_count} "
                 f"--keep-alive-tmo={keep_alive_to} "
                 f"--transport={transport} --traddr={ip} --trsvcid={port} --nqn={lvol.nqn} "
@@ -1733,6 +1767,7 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
                 "nqn": lvol.nqn,
                 "reconnect-delay": constants.LVOL_NVME_CONNECT_RECONNECT_DELAY,
                 "ctrl-loss-tmo": ctrl_loss_tmo,
+                "fast_io_fail_tmo": constants.LVOL_NVME_CONNECT_FAST_IO_FAIL_TO,
                 "nr-io-queues": cluster.client_qpair_count,
                 "keep-alive-tmo": keep_alive_to,
                 "host-iface": cluster.client_data_nic,
@@ -1745,7 +1780,7 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
                 entry["allowed_hosts"] = [h["nqn"] for h in lvol.allowed_hosts]
 
             out.append(entry)
-    return out
+    return out, None
 
 
 def resize_lvol(id, new_size):
@@ -2297,14 +2332,14 @@ def clone_lvol(lvol_id, clone_name, new_size=None, pvc_name=None):
     db_controller = DBController()
     try:
         lvol = db_controller.get_lvol_by_id(lvol_id)
-    except KeyError as e:
-        logger.error(e)
-        return False, str(e)
+    except KeyError:
+        logger.exception("Volume lookup failed for clone request: %s", lvol_id)
+        return False, "Volume not found"
 
     host_node = db_controller.get_storage_node_by_id(lvol.node_id)
-    lvol_count = len(db_controller.get_lvols_by_node_id(lvol.node_id))
-    if lvol_count >= host_node.max_lvol:
-        error = f"Too many lvols on node: {host_node.get_id()}, max lvols reached: {lvol_count}"
+    subsys_count = len(set(lv.nqn for lv in db_controller.get_lvols_by_node_id(lvol.node_id)))
+    if subsys_count >= host_node.max_lvol:
+        error = f"Too many subsystems on node: {host_node.get_id()}, max subsystems reached: {subsys_count}"
         logger.error(error)
         return False, error
 
@@ -2321,7 +2356,7 @@ def clone_lvol(lvol_id, clone_name, new_size=None, pvc_name=None):
             logger.error(err)
             return False, str(err)
     new_lvol_uuid, err = snapshot_controller.clone(
-        snapshot_uuid, clone_name, new_size, pvc_name, delete_snap_on_lvol_delete=True, lock=False)
+        snapshot_uuid, clone_name, new_size, pvc_name, delete_snap_on_lvol_delete=True, lock=False, namespaced=True)
     if err:
         logger.error(err)
         if snapshot_uuid:
@@ -2952,3 +2987,22 @@ def get_master_lvols_by_pool_uuid(pool_id, is_json=False):
         return json.dumps(data, indent=2)
     else:
         return utils.print_table(data)
+
+
+def get_namespaces_per_lvol(lvol):
+    db_controller = DBController()
+    ns_count = 0
+    for lv in db_controller.get_lvols_by_node_id(lvol.node_id):
+        if lv.nqn == lvol.nqn and lv.status not in [LVol.STATUS_IN_DELETION, LVol.STATUS_DELETED]:
+            ns_count += 1
+    return ns_count
+
+
+def get_next_available_subsystem_on_node(node_id):
+    db_controller = DBController()
+    for lvol in db_controller.get_lvols_by_node_id(node_id):
+        if not lvol.namespace:
+            ns_count = get_namespaces_per_lvol(lvol)
+            if ns_count < lvol.max_namespace_per_subsys:
+                return lvol.get_id(), lvol.nqn
+    return None
