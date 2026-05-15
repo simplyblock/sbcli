@@ -644,7 +644,6 @@ jobs:
             name: simplyblock-cluster
             namespace: ${NAMESPACE}
           spec:
-            mgmtIfname: ${MGMT_IFC}
             fabricType: tcp
             isSingleNode: false
             enableNodeAffinity: true

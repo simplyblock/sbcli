@@ -75,7 +75,7 @@ class K8sNativeFailoverTest(TestClusterBase):
         self.pvc_size = "10Gi"
         self.int_pvc_size = 10
         self.fio_size = "1G"
-        self.FIO_RUNTIME = 2400
+        self.FIO_RUNTIME = 4000
 
         # Counts — total_pvcs is set dynamically to len(sn_nodes) in run()
         self.total_pvcs = 6
@@ -190,7 +190,11 @@ class K8sNativeFailoverTest(TestClusterBase):
         self.runner_k8s_log.monitor_pod_logs()
 
         # 5. Clean up old lvols/pools via sbcli (through kubectl exec)
+        #    Order: clones → snapshots → lvols → pools
+        #    (SPDK refuses to delete a snapshot that still has clones)
         try:
+            self.sbcli_utils.delete_all_clones()
+            sleep_n_sec(2)
             self.sbcli_utils.delete_all_snapshots()
             sleep_n_sec(2)
             self.sbcli_utils.delete_all_lvols()
@@ -430,6 +434,8 @@ class K8sNativeFailoverTest(TestClusterBase):
 
         if delete_lvols:
             try:
+                self.sbcli_utils.delete_all_clones()
+                sleep_n_sec(2)
                 self.sbcli_utils.delete_all_snapshots()
                 sleep_n_sec(2)
                 self.sbcli_utils.delete_all_lvols()
@@ -1397,13 +1403,38 @@ class K8sNativeFailoverTest(TestClusterBase):
 
         sleep_n_sec(30)
 
-        # Recreate PVCs pinned to the same nodes that lost them
+        # Recreate PVCs — only pin to nodes that are currently online
+        # (during an outage some of the deleted_node_ids may be offline,
+        #  causing PVC creation to time out).
         if deleted_node_ids:
-            self.logger.info(
-                f"[delete_pvcs] Recreating {len(deleted_node_ids)} PVCs "
-                f"pinned to nodes: {deleted_node_ids}"
-            )
-            self.create_pvcs_with_fio(len(deleted_node_ids), node_ids=deleted_node_ids)
+            online_ids = []
+            unpinned_count = 0
+            for nid in deleted_node_ids:
+                try:
+                    details = self.sbcli_utils.get_storage_node_details(nid)
+                    if details and details[0].get("status") == "online":
+                        online_ids.append(nid)
+                    else:
+                        unpinned_count += 1
+                        self.logger.warning(
+                            f"[delete_pvcs] Node {nid} not online — "
+                            f"will create replacement PVC without pinning"
+                        )
+                except Exception:
+                    unpinned_count += 1
+
+            if online_ids:
+                self.logger.info(
+                    f"[delete_pvcs] Recreating {len(online_ids)} PVCs "
+                    f"pinned to online nodes: {online_ids}"
+                )
+                self.create_pvcs_with_fio(len(online_ids), node_ids=online_ids)
+            if unpinned_count:
+                self.logger.info(
+                    f"[delete_pvcs] Recreating {unpinned_count} PVCs "
+                    f"without node pinning (original nodes offline)"
+                )
+                self.create_pvcs_with_fio(unpinned_count)
         self._ensure_per_node_coverage()
 
     # ── Restart FIO ──────────────────────────────────────────────────────────
@@ -1419,9 +1450,17 @@ class K8sNativeFailoverTest(TestClusterBase):
 
         if self.use_client_fio:
             # ── Client FIO restart ──
+            skipped = 0
             for pvc_name, pvc_info in self.pvc_details.items():
-                client = pvc_info["client"]
-                mount_point = pvc_info["mount_path"]
+                client = pvc_info.get("client")
+                mount_point = pvc_info.get("mount_path")
+                if not mount_point or not client:
+                    self.logger.warning(
+                        f"[restart_fio] Skipping {pvc_name}: "
+                        f"mount_path={mount_point}, client={client} (incomplete setup)"
+                    )
+                    skipped += 1
+                    continue
                 log_file = f"{self.log_path}/{pvc_name}-{iteration}.log"
 
                 self._kill_fio_on_client(pvc_name, client)
@@ -1443,8 +1482,15 @@ class K8sNativeFailoverTest(TestClusterBase):
                 sleep_n_sec(10)
 
             for clone_name, clone_info in self.clone_details.items():
-                client = clone_info["client"]
-                mount_point = clone_info["mount_path"]
+                client = clone_info.get("client")
+                mount_point = clone_info.get("mount_path")
+                if not mount_point or not client:
+                    self.logger.warning(
+                        f"[restart_fio] Skipping clone {clone_name}: "
+                        f"mount_path={mount_point}, client={client} (incomplete setup)"
+                    )
+                    skipped += 1
+                    continue
                 log_file = f"{self.log_path}/{clone_name}-{iteration}.log"
 
                 self._kill_fio_on_client(clone_name, client)
@@ -1966,11 +2012,14 @@ class K8sNativeFailoverTest(TestClusterBase):
             sleep_n_sec(interval)
 
         remaining = list(self.failed_nvme_connects.keys())
-        self.logger.warning(
+        self.logger.error(
             f"[retry_nvme] Deferred NVMe connects did not converge within "
             f"{timeout}s. Remaining: {remaining}"
         )
         self.failed_nvme_connects.clear()
+        raise AssertionError(
+            f"NVMe connects did not recover after {timeout}s: {remaining}"
+        )
 
     # ── Wait for FIO completion ─────────────────────────────────────────────
 
@@ -2181,8 +2230,13 @@ class K8sNativeFailoverTest(TestClusterBase):
 
         # Clean slate: delete stale resources from previous runs, then
         # recreate so parameters are always up-to-date.
-        # Order matters: snapshots → lvols → pool (pool can't be deleted
-        # while lvols or snapshots reference it).
+        # Order matters: clones → snapshots → lvols → pool
+        # (SPDK refuses to delete a snapshot that still has clones,
+        #  and pool can't be deleted while lvols reference it).
+        try:
+            self.sbcli_utils.delete_all_clones()
+        except Exception:
+            pass
         try:
             self.sbcli_utils.delete_all_snapshots()
         except Exception:
@@ -2280,7 +2334,11 @@ class K8sNativeFailoverTest(TestClusterBase):
 
                 # ── Process deferred operations ──
                 if self.use_client_fio:
-                    self.retry_failed_nvme_connects()
+                    try:
+                        self.retry_failed_nvme_connects()
+                    except AssertionError as exc:
+                        self.logger.error(f"[iteration {iteration}] {exc}")
+                        test_failed = True
                     self.retry_failed_secondary_connects()
                 self.validate_pending_deletions()
 
@@ -2292,19 +2350,34 @@ class K8sNativeFailoverTest(TestClusterBase):
                     start_timestamp=self.outage_start_time,
                     end_timestamp=self.outage_end_time,
                 )
-                self.common_utils.validate_io_stats(
-                    cluster_id=self.cluster_id,
-                    start_timestamp=self.outage_start_time,
-                    end_timestamp=self.outage_end_time,
-                    time_duration=time_duration,
-                    warn_only=True,
-                )
+                try:
+                    self.common_utils.validate_io_stats(
+                        cluster_id=self.cluster_id,
+                        start_timestamp=self.outage_start_time,
+                        end_timestamp=self.outage_end_time,
+                        time_duration=time_duration,
+                        warn_only=False,
+                    )
+                except AssertionError as exc:
+                    self.logger.error(
+                        f"[iteration {iteration}] IO validation failed — "
+                        f"zero IO detected: {exc}"
+                    )
+                    test_failed = True
                 self.validate_migration_for_node(self.outage_start_time, 2000, None, 60)
                 self.wait_for_fio_complete()
                 self.validate_fio_jobs()
 
                 self.logger.info(f"=== Iteration {iteration} complete ===")
                 self.collect_outage_diagnostics(f"end_iteration_{iteration}")
+
+                if test_failed:
+                    self.logger.error(
+                        f"[iteration {iteration}] Test marked as FAILED — "
+                        f"stopping stress loop"
+                    )
+                    break
+
                 iteration += 1
 
         except Exception:
@@ -2313,6 +2386,7 @@ class K8sNativeFailoverTest(TestClusterBase):
         finally:
             if test_failed:
                 self.logger.info("[cleanup] Test failed — skipping resource cleanup to preserve state for debugging")
+                raise AssertionError("Stress test failed — see errors above")
             else:
                 self._cleanup_all_k8s_resources()
 
@@ -2508,8 +2582,13 @@ class K8sNativeBasicFailoverTest(K8sNativeFailoverTest):
 
         # Clean slate: delete stale resources from previous runs, then
         # recreate so parameters are always up-to-date.
-        # Order matters: snapshots → lvols → pool (pool can't be deleted
-        # while lvols or snapshots reference it).
+        # Order matters: clones → snapshots → lvols → pool
+        # (SPDK refuses to delete a snapshot that still has clones,
+        #  and pool can't be deleted while lvols reference it).
+        try:
+            self.sbcli_utils.delete_all_clones()
+        except Exception:
+            pass
         try:
             self.sbcli_utils.delete_all_snapshots()
         except Exception:
@@ -2600,7 +2679,11 @@ class K8sNativeBasicFailoverTest(K8sNativeFailoverTest):
 
                 # Process deferred operations
                 if self.use_client_fio:
-                    self.retry_failed_nvme_connects()
+                    try:
+                        self.retry_failed_nvme_connects()
+                    except AssertionError as exc:
+                        self.logger.error(f"[iteration {iteration}] {exc}")
+                        test_failed = True
                     self.retry_failed_secondary_connects()
                 self.validate_pending_deletions()
 
@@ -2612,19 +2695,34 @@ class K8sNativeBasicFailoverTest(K8sNativeFailoverTest):
                     start_timestamp=self.outage_start_time,
                     end_timestamp=self.outage_end_time,
                 )
-                self.common_utils.validate_io_stats(
-                    cluster_id=self.cluster_id,
-                    start_timestamp=self.outage_start_time,
-                    end_timestamp=self.outage_end_time,
-                    time_duration=time_duration,
-                    warn_only=True,
-                )
+                try:
+                    self.common_utils.validate_io_stats(
+                        cluster_id=self.cluster_id,
+                        start_timestamp=self.outage_start_time,
+                        end_timestamp=self.outage_end_time,
+                        time_duration=time_duration,
+                        warn_only=False,
+                    )
+                except AssertionError as exc:
+                    self.logger.error(
+                        f"[iteration {iteration}] IO validation failed — "
+                        f"zero IO detected: {exc}"
+                    )
+                    test_failed = True
                 self.validate_migration_for_node(self.outage_start_time, 2000, None, 60)
                 self.wait_for_fio_complete()
                 self.validate_fio_jobs()
 
                 self.logger.info(f"=== Iteration {iteration} complete ===")
                 self.collect_outage_diagnostics(f"end_iteration_{iteration}")
+
+                if test_failed:
+                    self.logger.error(
+                        f"[iteration {iteration}] Test marked as FAILED — "
+                        f"stopping stress loop"
+                    )
+                    break
+
                 iteration += 1
 
         except Exception:
@@ -2633,5 +2731,6 @@ class K8sNativeBasicFailoverTest(K8sNativeFailoverTest):
         finally:
             if test_failed:
                 self.logger.info("[cleanup] Test failed — skipping resource cleanup to preserve state for debugging")
+                raise AssertionError("Stress test failed — see errors above")
             else:
                 self._cleanup_all_k8s_resources()

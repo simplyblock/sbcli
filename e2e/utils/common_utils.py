@@ -431,14 +431,22 @@ class CommonUtils:
             raise AssertionError(msg)
 
         # Validate non-zero values for relevant metrics
+        has_zero = False
         for stat in io_stats:
             self.logger.info(f"Validating I/O stats for record with date: {stat['date']}")
-            self.assert_non_zero_io_stat(stat, "read_bytes", warn_only=warn_only)
-            self.assert_non_zero_io_stat(stat, "write_bytes", warn_only=warn_only)
-            self.assert_non_zero_io_stat(stat, "read_io", warn_only=warn_only)
-            self.assert_non_zero_io_stat(stat, "write_io", warn_only=warn_only)
+            if not self.assert_non_zero_io_stat(stat, "read_bytes", warn_only=warn_only):
+                has_zero = True
+            if not self.assert_non_zero_io_stat(stat, "write_bytes", warn_only=warn_only):
+                has_zero = True
+            if not self.assert_non_zero_io_stat(stat, "read_io", warn_only=warn_only):
+                has_zero = True
+            if not self.assert_non_zero_io_stat(stat, "write_io", warn_only=warn_only):
+                has_zero = True
             # self.assert_non_zero_io_stat(stat, ["write_io_ps", "read_io_ps"])
-        self.logger.info("All I/O stats are valid and non-zero within the failover time range.")
+        if has_zero:
+            self.logger.warning("Some I/O stats are zero within the failover time range.")
+        else:
+            self.logger.info("All I/O stats are valid and non-zero within the failover time range.")
 
     def assert_non_zero_io_stat(self, stat, key, warn_only=False):
         """
@@ -447,6 +455,8 @@ class CommonUtils:
             stat (dict): I/O stat record
             key (str): Key to validate
             warn_only (bool): If True, log warning instead of raising
+        Returns:
+            bool: True if value is non-zero, False if zero
         """
         value = 0
         if isinstance(key, list):
@@ -457,10 +467,11 @@ class CommonUtils:
         if value == 0:
             if warn_only:
                 self.logger.warning(f"{key} is 0 for record: {stat}")
-                return
+                return False
             self.logger.error(f"{key} is 0 for record: {stat}")
             raise AssertionError(f"{key} is 0 for record: {stat}")
         self.logger.info(f"{key}: {value} is valid.")
+        return True
 
     def get_all_node_versions(self):
         """
