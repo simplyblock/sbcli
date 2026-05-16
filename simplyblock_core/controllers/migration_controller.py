@@ -431,13 +431,21 @@ def _collect_snap_ancestry(snap_uuid, out_set):
 # Post-migration DB updates
 # ---------------------------------------------------------------------------
 
-def apply_migration_to_db(migration, tgt_lvol_uuid=None):
+# Suffix appended to every bdev the task runner creates on the target node
+# during migration. Prevents accidental collision with real pre-existing target
+# bdevs on retry / initial attempts. Must match _MIGRATION_BDEV_SUFFIX in the
+# task runner.
+_MIGRATION_BDEV_SUFFIX = 'm'
+
+
+def apply_migration_to_db(migration, tgt_lvol_uuid=None, tgt_lvol_bdev=None):
     """
-    Update control-plane DB records after a successful lvol migration:
-    - Move the lvol's ``node_id``, ``nodes``, ``hostname``, and ``lvs_name``
-      to the target node.
-    - Update ``node_id`` on all migrated snapshots owned by this volume, plus
-      ``snap_bdev`` to reflect the target lvstore prefix.
+    Update control-plane DB records after a successful lvol migration.
+
+    Updates every field that is node- or lvstore-specific on the canonical
+    LVol record, its bdev_stack, and on every migrated SnapShot's own fields
+    plus the embedded snap.lvol copy — so that delete, clone, and health-check
+    paths all use correct target values with nothing stale.
 
     ANA state changes (optimized/non-optimized/inaccessible) on the NVMe-oF
     subsystems are handled by the task runner after this call.
@@ -454,12 +462,47 @@ def apply_migration_to_db(migration, tgt_lvol_uuid=None):
         logger.error(f"apply_migration_to_db: target node not found: {e}")
         return False
 
-    lvol.node_id = tgt_node.get_id()
+    # --- Query SPDK once for all bdevs on the target lvstore ---
+    # Used to update snap_uuid, blobid on snapshots and lvol.blobid.
+    # Degraded gracefully: if unreachable, location fields still get updated.
+    spdk_info = {}
+    try:
+        tgt_rpc = tgt_node.rpc_client()
+        raw = tgt_rpc.bdev_lvol_get_lvols(tgt_node.lvstore) or []
+        for entry in raw:
+            short = entry.get('name', '').split('/')[-1]
+            if short:
+                spdk_info[short] = {
+                    'uuid':   entry.get('uuid', ''),
+                    'blobid': entry.get('driver_specific', {}).get('lvol', {}).get('blobid', 0),
+                }
+        logger.info(f"apply_migration_to_db: queried {len(spdk_info)} bdevs from target lvstore {tgt_node.lvstore}")
+    except Exception as e:
+        logger.warning(f"apply_migration_to_db: could not query target SPDK — snap_uuid/blobid will not be updated: {e}")
+
+    # --- Update canonical LVol record ---
+    lvol.node_id  = tgt_node.get_id()
     lvol.hostname = tgt_node.hostname
     lvol.lvs_name = tgt_node.lvstore
-    lvol.top_bdev = f"{tgt_node.lvstore}/{lvol.lvol_bdev}"
     if tgt_lvol_uuid:
         lvol.lvol_uuid = tgt_lvol_uuid
+    # lvol_bdev may have the migration suffix on target (e.g. LVOL_7077m); update
+    # before top_bdev so top_bdev reflects the actual SPDK composite name.
+    if tgt_lvol_bdev:
+        lvol.lvol_bdev = tgt_lvol_bdev
+    lvol.top_bdev = f"{tgt_node.lvstore}/{lvol.lvol_bdev}"
+
+    # bdev_stack: the 'bdev_lvol' entry bakes in lvs_name AND name at creation
+    # time; _remove_bdev_stack() uses them to build the delete bdev composite,
+    # so both must reflect the target values or the delete hits the wrong node.
+    for entry in lvol.bdev_stack:
+        if entry.get('type') == 'bdev_lvol' and 'params' in entry:
+            entry['params']['lvs_name'] = tgt_node.lvstore
+            if tgt_lvol_bdev:
+                entry['params']['name'] = tgt_lvol_bdev
+
+    if lvol.lvol_bdev in spdk_info:
+        lvol.blobid = spdk_info[lvol.lvol_bdev]['blobid']
 
     # Update the nodes list (primary + all secondaries)
     lvol.nodes = [tgt_node.get_id()]
@@ -471,9 +514,11 @@ def apply_migration_to_db(migration, tgt_lvol_uuid=None):
     lvol.write_to_db(db.kv_store)
     logger.info(
         f"apply_migration_to_db: updated lvol {migration.lvol_id} "
-        f"node_id → {tgt_node.get_id()}, hostname → {tgt_node.hostname}, "
-        f"lvs_name → {tgt_node.lvstore}, nodes → {lvol.nodes}"
+        f"node_id={tgt_node.get_id()}, lvs_name={tgt_node.lvstore}, nodes={lvol.nodes}"
     )
+
+    # --- Update every migrated snapshot ---
+    tgt_subsys_port = tgt_node.get_lvol_subsys_port(tgt_node.lvstore)
 
     for snap_uuid in migration.snaps_migrated:
         try:
@@ -481,17 +526,41 @@ def apply_migration_to_db(migration, tgt_lvol_uuid=None):
         except KeyError:
             logger.warning(f"apply_migration_to_db: snapshot not found: {snap_uuid}")
             continue
-        # Only update node_id for snapshots owned by the migrating volume.
+
+        # Only fully update snapshots owned by the migrating volume.
         # Shared ancestry snaps (from a clone chain) belong to a different
-        # volume and must keep their current node_id until that volume is
-        # migrated too.
-        if snap.lvol.uuid == migration.lvol_id:
-            snap.lvol.node_id = tgt_node.get_id()
-            # Update snap_bdev lvstore prefix (e.g. lvs_src/snap_x → lvs_tgt/snap_x)
-            if snap.snap_bdev and '/' in snap.snap_bdev:
-                short_name = snap.snap_bdev.split('/', 1)[1]
-                snap.snap_bdev = f"{tgt_node.lvstore}/{short_name}"
-            snap.write_to_db(db.kv_store)
+        # volume and keep their current location until that volume migrates.
+        if snap.lvol.uuid != migration.lvol_id:
+            continue
+
+        # snap_bdev: update lvstore prefix and add migration suffix.
+        # On the target the bdev was created as <src_short> + _MIGRATION_BDEV_SUFFIX
+        # (e.g. SNAP_xxxm) to avoid collisions with real pre-existing target bdevs.
+        tgt_short = None
+        if snap.snap_bdev and '/' in snap.snap_bdev:
+            src_short = snap.snap_bdev.split('/', 1)[1]
+            tgt_short = src_short + _MIGRATION_BDEV_SUFFIX
+            snap.snap_bdev = f"{tgt_node.lvstore}/{tgt_short}"
+
+        # SPDK-specific fields: snap_uuid (SPDK bdev UUID) and blobid
+        if tgt_short and tgt_short in spdk_info:
+            snap.snap_uuid = spdk_info[tgt_short]['uuid']
+            snap.blobid    = spdk_info[tgt_short]['blobid']
+
+        # snap.lvol: embedded copy of the parent lvol — update all node/location fields
+        snap.lvol.node_id     = tgt_node.get_id()
+        snap.lvol.hostname    = tgt_node.hostname
+        snap.lvol.lvs_name    = tgt_node.lvstore
+        if tgt_lvol_bdev:
+            snap.lvol.lvol_bdev = tgt_lvol_bdev
+        snap.lvol.top_bdev    = f"{tgt_node.lvstore}/{snap.lvol.lvol_bdev}"
+        snap.lvol.nodes       = list(lvol.nodes)
+        snap.lvol.subsys_port = tgt_subsys_port
+        if tgt_lvol_uuid:
+            snap.lvol.lvol_uuid = tgt_lvol_uuid
+
+        snap.write_to_db(db.kv_store)
+        logger.debug(f"apply_migration_to_db: updated snapshot {snap_uuid} snap_bdev={snap.snap_bdev}")
 
     return True
 
