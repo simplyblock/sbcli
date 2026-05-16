@@ -447,6 +447,10 @@ def apply_migration_to_db(migration, tgt_lvol_uuid=None, tgt_lvol_bdev=None):
     plus the embedded snap.lvol copy — so that delete, clone, and health-check
     paths all use correct target values with nothing stale.
 
+    ``tgt_lvol_bdev`` is the actual SPDK bdev short name on the target (carries
+    the migration suffix, e.g. ``LVOL_2882m``).  When provided, ``lvol.lvol_bdev``
+    and ``bdev_stack['params']['name']`` are updated to match.
+
     ANA state changes (optimized/non-optimized/inaccessible) on the NVMe-oF
     subsystems are handled by the task runner after this call.
     """
@@ -484,17 +488,15 @@ def apply_migration_to_db(migration, tgt_lvol_uuid=None, tgt_lvol_bdev=None):
     lvol.node_id  = tgt_node.get_id()
     lvol.hostname = tgt_node.hostname
     lvol.lvs_name = tgt_node.lvstore
-    if tgt_lvol_uuid:
-        lvol.lvol_uuid = tgt_lvol_uuid
-    # lvol_bdev may have the migration suffix on target (e.g. LVOL_7077m); update
-    # before top_bdev so top_bdev reflects the actual SPDK composite name.
     if tgt_lvol_bdev:
         lvol.lvol_bdev = tgt_lvol_bdev
     lvol.top_bdev = f"{tgt_node.lvstore}/{lvol.lvol_bdev}"
+    if tgt_lvol_uuid:
+        lvol.lvol_uuid = tgt_lvol_uuid
 
-    # bdev_stack: the 'bdev_lvol' entry bakes in lvs_name AND name at creation
-    # time; _remove_bdev_stack() uses them to build the delete bdev composite,
-    # so both must reflect the target values or the delete hits the wrong node.
+    # bdev_stack: the 'bdev_lvol' entry bakes in lvs_name (and name) at creation
+    # time; _remove_bdev_stack() uses them to build the delete bdev composite, so
+    # both must reflect target values or the delete will hit the wrong bdev.
     for entry in lvol.bdev_stack:
         if entry.get('type') == 'bdev_lvol' and 'params' in entry:
             entry['params']['lvs_name'] = tgt_node.lvstore
