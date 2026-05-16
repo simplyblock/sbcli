@@ -150,9 +150,10 @@ SPDK_PROXY_MULTI_THREADING_ENABLED=True
 SPDK_PROXY_TIMEOUT=60*5
 LVOL_NVME_CONNECT_RECONNECT_DELAY=2
 LVOL_NVME_CONNECT_CTRL_LOSS_TMO=60*60
+LVOL_NVME_CONNECT_FAST_IO_FAIL_TO=1
 LVOL_NVME_CONNECT_NR_IO_QUEUES=3
-LVOL_NVME_KEEP_ALIVE_TO=10
-LVOL_NVME_KEEP_ALIVE_TO_TCP=7
+LVOL_NVME_KEEP_ALIVE_TO=4
+LVOL_NVME_KEEP_ALIVE_TO_TCP=4
 QPAIR_COUNT=32
 CLIENT_QPAIR_COUNT=3
 # 8 s, not 4 s. 4 s false-positives during a peer-reset reactor stall:
@@ -171,7 +172,7 @@ CLIENT_QPAIR_COUNT=3
 # reverts).
 NVME_TIMEOUT_US=8000000
 NVMF_MAX_SUBSYSTEMS=50000
-KATO=10000
+KATO=5000
 # transport_ack_timeout exponent: server tears down a client qpair if it
 # stays silent for ~2^ACK_TO ms. ACK_TO=11 (~2 s) is shorter than the LVS
 # tertiary rejoin freeze window (≈ 4 s today) — the server kills healthy

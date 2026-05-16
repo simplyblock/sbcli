@@ -499,8 +499,13 @@ class SoakRunner:
         # Serializes outage iterations and churn cycles. Both mutate cluster
         # state (outage takes nodes down; churn deletes/recreates volumes), so
         # they must not overlap. Held during run_outage_pair / check_fio /
-        # entire churn cycle. NIC chaos and waiting loops run unlocked so a
-        # churn cycle can fire during them.
+        # post-outage settle waits / _inter_iteration_nic_chaos / entire
+        # churn cycle. Churn must NOT run during NIC chaos either, since
+        # nvme disconnect/connect during a data-NIC-down window can race
+        # the kernel's multipath failover and leave the client in a
+        # partially-attached state. The only unlocked region in the main
+        # loop is the final per-iteration wait_for_cluster_stable /
+        # wait_for_data_migration_complete, which is a pure poller.
         self.serial_lock = threading.RLock()
         self.churn_thread = None
         self.churn_stop_event = threading.Event()
@@ -2064,10 +2069,14 @@ class SoakRunner:
                     )
                     continue
 
-                # Serialize the outage with the churn thread: while we hold
-                # the lock, no churn cycle can start (and any in-progress
-                # churn finishes first). Outside the lock the churn thread
-                # is free to run — including during _inter_iteration_nic_chaos.
+                # Serialize the outage AND the inter-iteration NIC chaos
+                # with the churn thread: while we hold the lock, no churn
+                # cycle can start (and any in-progress churn finishes
+                # first). Churn does lvol delete/create + nvme
+                # disconnect/connect, which must not overlap a NIC-down
+                # window — losing a data path mid-disconnect/connect
+                # masks failures, races the kernel's path-failover, and
+                # can leave the client in a partially-attached state.
                 with self.serial_lock:
                     self.run_outage_pair(node1, node2, method1, method2)
                     # Post-outage fio check: any fio that exited during this
@@ -2082,10 +2091,10 @@ class SoakRunner:
                     self.wait_for_all_online(timeout=self.args.restart_timeout)
                     self.wait_for_cluster_stable()
                     self.wait_for_data_migration_complete("next outage pair")
+                    self._inter_iteration_nic_chaos()
 
-                self._inter_iteration_nic_chaos()
-                # Re-check for any churn fault that fired during the NIC
-                # chaos / cluster wait so we exit at the next sync point.
+                # Re-check for any churn fault that may have fired
+                # before we acquired the lock; exit at the next sync point.
                 self.reraise_churn_error()
                 # Wait for rebalance / data-migration to complete before
                 # starting the next iteration (main branch: device-migration

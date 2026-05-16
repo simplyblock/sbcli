@@ -23,8 +23,8 @@ logging.getLogger().setLevel(constants.LOG_WEB_LEVEL)
 access_logger = logging.getLogger('simplyblock_web.access')
 _access_handler = logging.StreamHandler(stream=sys.stdout)
 _access_handler.setFormatter(logging.Formatter(
-    '%(asctime)s: %(thread)d: %(levelname)s: %(message)s'
-    ' %(status_code)s %(duration_ms).2fms'
+    '%(asctime)s %(levelname)s %(client_ip)s'
+    ' "%(message)s" %(status_code)s %(request_size)s %(response_size)s %(duration_ms).2fms "%(user_agent)s"'
 ))
 access_logger.addHandler(_access_handler)
 access_logger.propagate = False
@@ -35,15 +35,30 @@ core_utils.init_sentry_sdk()
 
 class AccessLogMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
+        client_ip = request.client.host if request.client else '-'
+        user_agent = request.headers.get('user-agent', '-')
+        request_size = request.headers.get('content-length', '-')
+
+        path = request.url.path
+        if request.url.query:
+            path = f'{path}?{request.url.query}'
+
         start = time.monotonic()
         response = await call_next(request)
         duration_ms = (time.monotonic() - start) * 1000
+
+        response_size = response.headers.get('content-length', '-')
+
         access_logger.info(
             '%s %s',
             request.method,
-            request.url.path,
+            path,
             extra={
+                'client_ip': client_ip,
+                'user_agent': user_agent,
+                'request_size': request_size,
                 'status_code': response.status_code,
+                'response_size': response_size,
                 'duration_ms': duration_ms,
             },
         )

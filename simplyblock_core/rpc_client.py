@@ -379,7 +379,51 @@ class RPCClient:
         }
         return self._request2("ultra21_alloc_ns_init", params)
 
-    def nvmf_subsystem_add_ns(self, nqn, dev_name, uuid=None, nguid=None, nsid=None, eui64=None):
+    def nvmf_subsystem_add_ns(self, nqn, dev_name, uuid=None, nguid=None, nsid=None, eui64=None,
+                              idempotent=True):
+        """Add a namespace to an NVMe-oF subsystem.
+
+        Idempotency: by default, looks up the subsystem first and if a
+        namespace already exists with a matching ``bdev_name`` (and matching
+        ``nsid`` / ``uuid`` if those were specified), returns the existing
+        nsid instead of issuing the RPC. This is safe for every call site —
+        SPDK would reject the duplicate with -EEXIST anyway, and a single
+        cluster_activate cycle in 2026-05-14 logs (suspend→activate on
+        cluster 3d4914e7-…) emitted ``nvmf_subsystem_add_ns`` twice for the
+        same lvol 12 seconds apart, indicating the activation flow can
+        legitimately re-enter the add path. Callers that need the strict
+        behavior (e.g. tests asserting on RPC traffic) can pass
+        ``idempotent=False``.
+
+        Returns the nsid as the SPDK RPC would, or the existing nsid when
+        the no-op branch fires.
+        """
+        if idempotent:
+            try:
+                subs = self.subsystem_list(nqn_name=nqn) or []
+                if subs:
+                    for ns in subs[0].get("namespaces", []) or []:
+                        if ns.get("bdev_name") != dev_name:
+                            continue
+                        if nsid is not None and ns.get("nsid") != nsid:
+                            continue
+                        if uuid is not None and ns.get("uuid") and ns.get("uuid") != uuid:
+                            # Same bdev at a different nsid is fine to no-op,
+                            # but a mismatched uuid on the same bdev is a real
+                            # conflict — fall through to let SPDK reject.
+                            continue
+                        existing_nsid = ns.get("nsid")
+                        logger.info(
+                            "nvmf_subsystem_add_ns: %s already has %s at nsid=%s, "
+                            "skipping duplicate add",
+                            nqn, dev_name, existing_nsid)
+                        return existing_nsid
+            except Exception as e:
+                # Don't let an idempotency probe block the legitimate add.
+                logger.debug(
+                    "nvmf_subsystem_add_ns idempotency probe failed for %s: %s — "
+                    "proceeding with add", nqn, e)
+
         params = {
             "nqn": nqn,
             "namespace": {

@@ -292,6 +292,33 @@ def trigger_ana_failback_for_node(restarting_node):
 _ATTACH_CONTROLLER_MAX_TIMEOUT_SEC = 1
 
 
+def _collect_attached_ips(ctrlr_list):
+    """Aggregate the set of currently-attached traddrs across every ctrlr entry.
+
+    SPDK multipath returns one ``ctrlrs`` entry per path (each with its own
+    ``trid`` and no ``alternate_trids``). Older shapes folded all paths under a
+    single entry's ``alternate_trids``. We accept both: walk every entry, and
+    for each enabled one merge ``trid.traddr`` plus any ``alternate_trids``.
+    Disabled / resetting paths are not counted as attached.
+    """
+    attached = set()
+    if not ctrlr_list:
+        return attached
+    for entry in ctrlr_list:
+        for ct in entry.get("ctrlrs", []):
+            if ct.get("state") != "enabled":
+                continue
+            trid = ct.get("trid") or {}
+            ip = trid.get("traddr")
+            if ip:
+                attached.add(ip)
+            for alt in ct.get("alternate_trids", []) or []:
+                alt_ip = (alt or {}).get("traddr")
+                if alt_ip:
+                    attached.add(alt_ip)
+    return attached
+
+
 def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names: List[str], reattach: bool,
                    attach_timeout: Optional[float] = None):
     """Connect snode to device
@@ -309,10 +336,24 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names:
     """
 
     logger.info(f'Connecting to {name}')
-    for bdev in bdev_names:
-        if bdev.startswith(name):
-            logger.debug(f"Already connected, bdev found in bdev_get_bdevs: {bdev}")
-            return bdev
+
+    expected_ips = [ip.strip() for ip in (device.nvmf_ip or "").split(",") if ip.strip()]
+    is_multipath = bool(device.nvmf_multipath) and len(expected_ips) >= 2
+
+    # Fast path: bdev already present in the caller's snapshot of get_bdevs().
+    # Only safe for single-path devices — for multipath the bdev can survive
+    # while one of its paths has been destructed (the surviving path still
+    # backs the namespace). Early-returning here was the silent failure mode
+    # for partial-path-loss recovery during NIC chaos: the bdev_get_bdevs
+    # snapshot taken by _connect_to_remote_devs/_connect_to_remote_jm_devs
+    # contains the bdev, so we used to skip the attach and never restore the
+    # missing path. With multipath we always go on to inspect the controller
+    # list and re-attach any missing path.
+    if not is_multipath:
+        for bdev in bdev_names:
+            if bdev.startswith(name):
+                logger.debug(f"Already connected, bdev found in bdev_get_bdevs: {bdev}")
+                return bdev
 
     rpc_client = node.rpc_client()
     if attach_timeout is None or attach_timeout > _ATTACH_CONTROLLER_MAX_TIMEOUT_SEC:
@@ -349,45 +390,44 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names:
                 counter = 5
             else:
                 counter += 1
+            # Refresh on retry so we don't loop on a stale snapshot.
+            ret = rpc_client.bdev_nvme_controller_list(name) or []
 
         # if reattach:
         #    rpc_client.bdev_nvme_detach_controller(name)
         #    time.sleep(1)
 
-    # only if the controller is really gone we try to reattach it
-    if not rpc_client.bdev_nvme_controller_list(name):
+    db_ctrl = DBController()
+    target_node = db_ctrl.get_storage_node_by_id(device.node_id)
+    if target_node is not None and target_node.active_rdma:
+        tr_type = "RDMA"
+    elif target_node is not None and target_node.active_tcp:
+        tr_type = "TCP"
+    else:
+        msg = "target node to connect has no active fabric."
+        logger.error(msg)
+        device.release_device_connection()
+        raise RuntimeError(msg)
+
+    # nvmf_multipath is a bool on the device record; translate it into
+    # the SPDK string mode here. ``True`` must mean active-active
+    # (``"multipath"``), not failover — passing the bool through to
+    # rpc_client.bdev_nvme_attach_controller would coerce True ->
+    # ``"failover"`` (active-passive) and remote alceml/jm controllers
+    # would carry all IO on a single path.
+    attach_mode = "multipath" if device.nvmf_multipath else False
+
+    final = rpc_client.bdev_nvme_controller_list(name)
+    if not final:
+        # Controller is fully gone — do a full multi-path attach.
         bdev_name = None
-
-        db_ctrl = DBController()
-        node = db_ctrl.get_storage_node_by_id(device.node_id)
-        if node.active_rdma:
-            tr_type = "RDMA"
-        else:
-            if node.active_tcp:
-                tr_type = "TCP"
-            else:
-                msg = "target node to connect has no active fabric."
-                logger.error(msg)
-                raise RuntimeError(msg)
-
-        # nvmf_multipath is a bool on the device record; translate it into
-        # the SPDK string mode here. ``True`` must mean active-active
-        # (``"multipath"``), not failover — passing the bool through to
-        # rpc_client.bdev_nvme_attach_controller would coerce True ->
-        # ``"failover"`` (active-passive) and remote alceml/jm controllers
-        # would carry all IO on a single path. That's what produced the
-        # remote_alceml_*/remote_jm_* in failover mode (vs hublvols
-        # correctly in multipath) and made a single-NIC drop fatal: every
-        # outstanding JC write was on the dropped path, all aborted at
-        # once, all retried as duplicates.
-        attach_mode = "multipath" if device.nvmf_multipath else False
-        for ip in device.nvmf_ip.split(","):
+        for ip in (expected_ips or [device.nvmf_ip]):
             try:
-                ret = attach_rpc_client.bdev_nvme_attach_controller(
+                resp = attach_rpc_client.bdev_nvme_attach_controller(
                     name, device.nvmf_nqn, ip, device.nvmf_port, tr_type,
                     multipath=attach_mode)
-                if not bdev_name and ret and isinstance(ret, list):
-                    bdev_name = ret[0]
+                if not bdev_name and resp and isinstance(resp, list):
+                    bdev_name = resp[0]
             except Exception as e:
                 logger.warning(f"Failed to attach controller {name} via {ip}: {e}")
 
@@ -397,6 +437,7 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names:
         if not bdev_name:
             msg = f"Bdev name not returned from controller attach for {name}"
             logger.error(msg)
+            device.release_device_connection()
             raise RuntimeError(msg)
         bdev_found = False
         for i in range(5):
@@ -414,24 +455,85 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names:
             raise RuntimeError(f"Failed to connect to device: {device.get_id()}")
 
         return bdev_name
+
+    # Controller still present. For multipath, check whether some paths went
+    # away (typical after a NIC chaos burst: one path's bdev_nvme_ctrlr was
+    # destructed within ctrlr_loss_timeout, the other survived and keeps the
+    # bdev up). Re-attach any missing path inline; partial success is OK —
+    # whatever paths come back leave the controller in a strictly better
+    # state than before, and the next health cycle picks up what's left.
+    bdev_name = f"{name}n1"
+    if is_multipath:
+        attached_ips = _collect_attached_ips(final)
+        missing_ips = [ip for ip in expected_ips if ip not in attached_ips]
+        if missing_ips:
+            logger.info(
+                "Controller %s has %d/%d paths attached, attaching missing: %s",
+                name, len(attached_ips), len(expected_ips), missing_ips)
+            for ip in missing_ips:
+                try:
+                    attach_rpc_client.bdev_nvme_attach_controller(
+                        name, device.nvmf_nqn, ip, device.nvmf_port, tr_type,
+                        multipath=attach_mode)
+                except Exception as e:
+                    logger.warning(
+                        "Failed to re-attach path %s on controller %s: %s",
+                        ip, name, e)
+            # Recognize partial success — re-read the controller list and
+                # report what remains missing for observability. We don't
+                # raise here: a 1/2 outcome still strictly improves over the
+                # incoming state and the next cycle will retry the rest.
+            post = rpc_client.bdev_nvme_controller_list(name) or []
+            now_attached = _collect_attached_ips(post)
+            still_missing = [ip for ip in expected_ips if ip not in now_attached]
+            if still_missing:
+                logger.warning(
+                    "Controller %s still missing paths after attach: %s (now %d/%d)",
+                    name, still_missing, len(now_attached), len(expected_ips))
+
+    device.release_device_connection()
+    # Return the bdev name if it exists; otherwise hint with the canonical
+    # ``<name>n1`` so callers (e.g. _connect_to_remote_jm_devs) can poll for
+    # it via get_bdevs.
+    for bdev in bdev_names:
+        if bdev.startswith(name):
+            return bdev
+    if rpc_client.get_bdevs(bdev_name):
+        return bdev_name
     return None
 
 
 def repair_multipath_controller(name: str, device, node: StorageNode):
     """Check a multipath NVMe controller and re-attach any missing paths.
 
-    For a multipath device the controller should have one primary trid plus
-    one alternate_trid per additional data NIC.  If the controller exists but
-    has fewer paths than expected (e.g. a NIC went down and came back but the
-    path was not re-established), re-attach the missing IPs.
+    For a multipath device the controller should have one path per data NIC.
+    Walks every entry in the ``bdev_nvme_get_controllers`` response (newer
+    SPDK exposes one ``ctrlrs`` entry per path; older shapes use one entry
+    with ``alternate_trids``) and aggregates the set of currently-attached
+    traddrs across all of them. Any expected IP that is not in that set is
+    a missing path and gets re-attached.
 
-    Returns True if all paths are healthy (or were repaired), False if repair
-    was not possible.
+    Partial repair is recognized: we re-read the controller state after
+    attaching and report what remains missing. Returns True if *all*
+    expected paths are now attached, False otherwise. The caller must pass
+    a device object that carries ``nvmf_ip`` / ``nvmf_nqn`` / ``nvmf_port``
+    (i.e. the source NVMeDevice / JMDevice on the target node — NOT a
+    ``RemoteJMDevice``, which strips those fields).
     """
-    if not device.nvmf_multipath:
+    if not getattr(device, 'nvmf_multipath', False):
         return True
 
-    expected_ips = set(ip.strip() for ip in device.nvmf_ip.split(",") if ip.strip())
+    nvmf_ip = getattr(device, 'nvmf_ip', None)
+    if not nvmf_ip:
+        # Caller passed a remote-side view without source addressing.
+        # Nothing we can do here — log so this regression is loud.
+        logger.warning(
+            "repair_multipath_controller called for %s with a device that "
+            "has no nvmf_ip; caller must pass the source NVMeDevice/JMDevice "
+            "from the target node", name)
+        return False
+
+    expected_ips = set(ip.strip() for ip in nvmf_ip.split(",") if ip.strip())
     if len(expected_ips) < 2:
         return True  # not actually multipath
 
@@ -442,6 +544,8 @@ def repair_multipath_controller(name: str, device, node: StorageNode):
 
     db_ctrl = DBController()
     target_node = db_ctrl.get_storage_node_by_id(device.node_id)
+    if target_node is None:
+        return False
     if target_node.active_rdma:
         tr_type = "RDMA"
     elif target_node.active_tcp:
@@ -449,36 +553,33 @@ def repair_multipath_controller(name: str, device, node: StorageNode):
     else:
         return False
 
-    for ctrl_entry in ret:
-        ctrlrs = ctrl_entry.get("ctrlrs", [])
-        for ct in ctrlrs:
-            state = ct.get("state", "")
-            if state != "enabled":
-                logger.warning("Controller %s path state=%s, skipping repair", name, state)
-                continue
+    attached_ips = _collect_attached_ips(ret)
+    missing_ips = expected_ips - attached_ips
+    if not missing_ips:
+        return True
 
-            # Collect all IPs currently attached (primary + alternates)
-            attached_ips = set()
-            attached_ips.add(ct["trid"]["traddr"])
-            for alt in ct.get("alternate_trids", []):
-                attached_ips.add(alt["traddr"])
+    logger.info(
+        "Controller %s has %d/%d paths attached, re-attaching missing: %s",
+        name, len(attached_ips), len(expected_ips), missing_ips)
+    for ip in missing_ips:
+        try:
+            rpc_client.bdev_nvme_attach_controller(
+                name, device.nvmf_nqn, ip, device.nvmf_port,
+                tr_type, multipath="multipath")
+        except Exception as e:
+            logger.error("Failed to re-attach path %s on controller %s: %s", ip, name, e)
 
-            missing_ips = expected_ips - attached_ips
-            if not missing_ips:
-                return True  # all paths present
-
-            logger.info("Controller %s has %d/%d paths, re-attaching: %s",
-                        name, len(attached_ips), len(expected_ips), missing_ips)
-            for ip in missing_ips:
-                try:
-                    rpc_client.bdev_nvme_attach_controller(
-                        name, device.nvmf_nqn, ip, device.nvmf_port,
-                        tr_type, multipath="multipath")
-                    logger.info("Re-attached path %s on controller %s", ip, name)
-                except Exception as e:
-                    logger.error("Failed to re-attach path %s on controller %s: %s", ip, name, e)
-                    return False
-
+    # Re-read and recognize partial success: a 1/2 outcome is still
+    # strictly better than the incoming state and the next health cycle
+    # picks up the remainder. Only return False when nothing improved.
+    post = rpc_client.bdev_nvme_controller_list(name) or []
+    now_attached = _collect_attached_ips(post)
+    still_missing = expected_ips - now_attached
+    if still_missing:
+        logger.warning(
+            "Controller %s still missing paths after re-attach: %s (now %d/%d)",
+            name, still_missing, len(now_attached), len(expected_ips))
+        return len(now_attached) > len(attached_ips)
     return True
 
 
@@ -1588,7 +1689,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
 
         mgmt_ip, mgmt_iface = mgmt_info
         firewall_port = utils.get_next_fw_port(cluster_id, mgmt_ip=mgmt_ip)
-        rpc_port = utils.get_next_rpc_port(cluster_id)
+        rpc_port = utils.get_next_nvmf_port(cluster_id)
         logger.info(f"mgmt interface is {mgmt_iface}")
 
         if not spdk_image:
@@ -3345,13 +3446,21 @@ def shutdown_storage_node(node_id, force=False):
 
     logger.info("Shutting down node")
     set_node_status(node_id, StorageNode.STATUS_IN_SHUTDOWN)
-    time.sleep(3)
+    # Non-force path keeps the original 3s+1s+1s settle window so the
+    # storage-node monitor can react to FDB status flips before SPDK is
+    # killed. --force is meant to terminate the peer immediately so the
+    # host side observes EPIPE within ~1s instead of waiting ~9s; the
+    # mgmt-side sleeps add ~5s of latency to peer detection with no IO
+    # safety benefit (the kill is SIGKILL via docker rm -f anyway).
+    if not force:
+        time.sleep(3)
 
     if snode.jm_device and snode.jm_device.status != JMDevice.STATUS_REMOVED:
         logger.info("Setting JM unavailable")
         device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
 
-    time.sleep(1)
+    if not force:
+        time.sleep(1)
     for dev in snode.nvme_devices:
         if dev.status in [NVMeDevice.STATUS_UNAVAILABLE, NVMeDevice.STATUS_ONLINE,
                           NVMeDevice.STATUS_CANNOT_ALLOCATE, NVMeDevice.STATUS_READONLY]:
@@ -3359,7 +3468,8 @@ def shutdown_storage_node(node_id, force=False):
             # shutdown must not count against the per-device flap budget.
             device_controller.device_set_unavailable(dev.get_id())
 
-    time.sleep(1)
+    if not force:
+        time.sleep(1)
     logger.info("Stopping SPDK")
     try:
         snode.client(timeout=10, retry=10).spdk_process_kill(snode.rpc_port, snode.cluster_id)

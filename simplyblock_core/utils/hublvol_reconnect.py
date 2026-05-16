@@ -71,7 +71,7 @@ DEFAULT_COOLDOWN_SEC = 5.0
 #: Max time to wait for a controller to transition out of an intermediate
 #: state (``resetting`` / ``connecting``) before we force a teardown.
 #: Sized against ``ctrlr_loss_timeout_sec`` below plus a small margin.
-DEFAULT_TRANSIENT_WAIT_SEC = 12.0
+DEFAULT_TRANSIENT_WAIT_SEC = 5.0
 
 #: Max time to wait for ``bdev_nvme_controller_list`` to report the
 #: controller absent after a detach. SPDK's destroy is asynchronous, so
@@ -96,14 +96,16 @@ INTER_ATTACH_SLEEP_SEC = 3.0
 DEFAULT_LOCK_TTL_SEC = 60
 
 #: NVMe-oF ctrlr timeout params handed to ``bdev_nvme_attach_controller``
-#: for hublvol controllers. The SPDK defaults (``ctrlr_loss_timeout`` ≈ 1s)
-#: turn short peer blips into a destroy→reattach, which is exactly the
-#: condition under which two callers can race on the same subnqn. Giving
-#: the controller reset window enough room to absorb a short blip keeps
-#: the controller alive and removes the opportunity for a race.
-HUBLVOL_CTRLR_LOSS_TIMEOUT_SEC = 10
+#: for hublvol controllers. Tightened so a dead primary surfaces to the
+#: lvstore in seconds (so failover can proceed) instead of waiting 15 s+
+#: on the bdev_nvme retry chain. The trade-off against the original
+#: race-avoidance rationale (longer windows absorb short peer blips that
+#: would otherwise drive a destroy→reattach race on the same subnqn) is
+#: now carried by the coordinator's lock + cooldown rather than by
+#: stretching the SPDK timers themselves.
+HUBLVOL_CTRLR_LOSS_TIMEOUT_SEC = 3
 HUBLVOL_RECONNECT_DELAY_SEC = 2
-HUBLVOL_FAST_IO_FAIL_TIMEOUT_SEC = 5
+HUBLVOL_FAST_IO_FAIL_TIMEOUT_SEC = 1
 
 
 class HublvolReconnectError(Exception):
