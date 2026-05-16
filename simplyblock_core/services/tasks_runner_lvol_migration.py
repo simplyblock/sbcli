@@ -223,7 +223,7 @@ def _get_target_secondary_node(tgt_node):
 
 
 def _expose_lvol_on_secondary(lvol, tgt_node, tgt_sec, sec_rpc, tgt_blobid, tgt_lvol_uuid,
-                              already_registered=False):
+                              already_registered=False, tgt_bdev_name=None):
     """
     Expose the migrated lvol on the target secondary via NVMe-oF.
 
@@ -231,14 +231,19 @@ def _expose_lvol_on_secondary(lvol, tgt_node, tgt_sec, sec_rpc, tgt_blobid, tgt_
     (the lvol was registered in the setup section before final migration started,
     so it is already known to SPDK on the secondary).
 
+    ``tgt_bdev_name`` is the actual SPDK bdev short name on the target (may carry
+    the migration suffix, e.g. ``LVOL_2882m``).  When omitted, ``lvol.lvol_bdev``
+    is used (i.e. the post-DB-update canonical name).
+
     This mirrors what add_lvol_on_node() does for is_primary=False.
     """
+    bdev_name = tgt_bdev_name or lvol.lvol_bdev
     if not already_registered:
         # The lvol blob lives in the target primary's lvstore; the secondary mirrors
         # that same lvstore, so bdev_lvol_register must reference tgt_node.lvstore,
         # not the secondary's own lvstore name (which is a different string).
         ret = sec_rpc.bdev_lvol_register(
-            lvol.lvol_bdev, tgt_node.lvstore, tgt_lvol_uuid, tgt_blobid,
+            bdev_name, tgt_node.lvstore, tgt_lvol_uuid, tgt_blobid,
             lvol.lvol_priority_class)
         if not ret:
             return False, f"bdev_lvol_register failed on secondary {tgt_sec.get_id()}"
@@ -253,7 +258,7 @@ def _expose_lvol_on_secondary(lvol, tgt_node, tgt_sec, sec_rpc, tgt_blobid, tgt_
             lvol.nqn, lvol.ha_type, lvol.uuid, min_cntlid=1000,
             max_namespaces=constants.LVO_MAX_NAMESPACES_PER_SUBSYS)
         if not ret:
-            sec_rpc.delete_lvol(lvol.lvol_bdev, del_async=True)
+            sec_rpc.delete_lvol(bdev_name, del_async=True)
             return False, f"subsystem_create on secondary failed: {lvol.nqn}"
         subsystem_created_on_sec = True
 
@@ -272,7 +277,7 @@ def _expose_lvol_on_secondary(lvol, tgt_node, tgt_sec, sec_rpc, tgt_blobid, tgt_
                         logger.warning("Listener already exists on secondary")
                     else:
                         sec_rpc.subsystem_delete(lvol.nqn)
-                        sec_rpc.delete_lvol(lvol.lvol_bdev, del_async=True)
+                        sec_rpc.delete_lvol(bdev_name, del_async=True)
                         return False, (
                             f"Failed to add listener on secondary {tgt_sec.get_id()}: {err}")
     else:
@@ -286,10 +291,10 @@ def _expose_lvol_on_secondary(lvol, tgt_node, tgt_sec, sec_rpc, tgt_blobid, tgt_
             sub_list = sec_rpc.subsystem_list(lvol.nqn)
             if sub_list:
                 sub = sub_list[0] if isinstance(sub_list, list) else sub_list
-                top_bdev_new = f"{tgt_node.lvstore}/{lvol.lvol_bdev}"
+                top_bdev_new = f"{tgt_node.lvstore}/{bdev_name}"
                 for ns in sub.get('namespaces', []):
                     ns_bdev = ns.get('bdev_name') or ns.get('name', '')
-                    if (ns_bdev.endswith(f"/{lvol.lvol_bdev}")
+                    if (ns_bdev.endswith(f"/{bdev_name}")
                             and ns_bdev != top_bdev_new):
                         old_nsid = ns.get('nsid')
                         sec_rpc.nvmf_subsystem_remove_ns(lvol.nqn, old_nsid)
@@ -303,12 +308,12 @@ def _expose_lvol_on_secondary(lvol, tgt_node, tgt_sec, sec_rpc, tgt_blobid, tgt_
                 f"{tgt_sec.get_id()}: {e}")
 
     # Add namespace using the target primary's lvstore for the composite bdev name
-    top_bdev = f"{tgt_node.lvstore}/{lvol.lvol_bdev}"
+    top_bdev = f"{tgt_node.lvstore}/{bdev_name}"
     ret = sec_rpc.nvmf_subsystem_add_ns(lvol.nqn, top_bdev, lvol.uuid, lvol.guid, nsid=lvol.ns_id)
     if not ret:
         if subsystem_created_on_sec:
             sec_rpc.subsystem_delete(lvol.nqn)
-        sec_rpc.delete_lvol(lvol.lvol_bdev, del_async=True)
+        sec_rpc.delete_lvol(bdev_name, del_async=True)
         return False, f"nvmf_subsystem_add_ns failed on secondary {tgt_sec.get_id()}"
 
     return True, None
@@ -824,9 +829,10 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             if tgt_sec:
                 sec_rpc = _make_rpc(tgt_sec)
 
-        snap_short = _snap_short_name(snap)
-        src_composite = _snap_composite(src_node.lvstore, snap)
-        tgt_composite = f"{tgt_node.lvstore}/{snap_short}"
+        snap_short_src = _snap_short_name(snap)
+        snap_short_tgt = snap_short_src + _MIGRATION_BDEV_SUFFIX
+        src_composite  = _snap_composite(src_node.lvstore, snap)
+        tgt_composite  = f"{tgt_node.lvstore}/{snap_short_tgt}"
 
         # Pre-cleanup: only delete if the bdev actually exists on the target
         # (stale from a previous crashed run). Deleting blindly masks real errors.
@@ -846,7 +852,7 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
 
         logger.info(
             f"Started intermediate snap transfer: {snap_uuid} "
-            f"({src_composite} → {tgt_composite})")
+            f"({src_composite} -> {tgt_composite})")
 
         # Busy-poll: spin at _INTERMEDIATE_POLL_INTERVAL_S until done or timeout
         for _ in range(_INTERMEDIATE_POLL_MAX):
@@ -932,12 +938,10 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         return False, True, str(e)
 
     trtype, target_ip = _get_migration_nic(tgt_node)
-    ctx = migration.transfer_context or {}
     src_lvol_composite = f"{src_node.lvstore}/{lvol.lvol_bdev}"
-    # Restore target bdev name from context on retry (it carries the 'm' suffix);
-    # compute fresh on first entry.
-    tgt_bdev_name = ctx.get('tgt_lvol_bdev') or (lvol.lvol_bdev + _MIGRATION_BDEV_SUFFIX)
-    tgt_lvol_composite = f"{tgt_node.lvstore}/{tgt_bdev_name}"
+    tgt_lvol_bdev = lvol.lvol_bdev + _MIGRATION_BDEV_SUFFIX
+    tgt_lvol_composite = f"{tgt_node.lvstore}/{tgt_lvol_bdev}"
+    ctx = migration.transfer_context or {}
 
     # --- Retry secondary registration after a completed transfer ---
     # Transfer already finished on a previous run; only secondary registration
@@ -968,11 +972,14 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
 
             ok, err = _expose_lvol_on_secondary(
                 lvol, tgt_node, tgt_sec, sec_rpc, None, None,
-                already_registered=True)
+                already_registered=True, tgt_bdev_name=tgt_lvol_bdev)
             if not ok:
                 migration.write_to_db(db.kv_store)
                 return False, True, err
-        migration.transfer_context = {'tgt_lvol_uuid': ctx.get('tgt_lvol_uuid'), 'tgt_lvol_bdev': tgt_bdev_name}
+        migration.transfer_context = {
+            'tgt_lvol_uuid': ctx.get('tgt_lvol_uuid'),
+            'tgt_lvol_bdev': tgt_lvol_bdev,
+        }
         _update_ana_states(migration, src_node, tgt_node, src_rpc, tgt_rpc)
         return True, False, None
 
@@ -1012,7 +1019,10 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         # Carry it forward through every transfer_context write below so it
         # survives the phase boundary even when retries via 'secondary_register'
         # are needed.
-        tgt_uuid_carry = {'tgt_lvol_uuid': ctx.get('tgt_lvol_uuid'), 'tgt_lvol_bdev': tgt_bdev_name}
+        tgt_uuid_carry = {
+            'tgt_lvol_uuid': ctx.get('tgt_lvol_uuid'),
+            'tgt_lvol_bdev': tgt_lvol_bdev,
+        }
 
         if lvol.ha_type == "ha":
             tgt_sec, sec_err = _get_target_secondary_node(tgt_node)
@@ -1046,7 +1056,7 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
 
                 ok, err = _expose_lvol_on_secondary(
                     lvol, tgt_node, tgt_sec, sec_rpc, None, None,
-                    already_registered=True)
+                    already_registered=True, tgt_bdev_name=tgt_lvol_bdev)
                 if not ok:
                     # Keep the primary lvol intact — transfer already completed.
                     # Mark stage so retry skips re-creating and goes straight to
@@ -1077,10 +1087,10 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
     # Step 1: create writable target lvol (size in MiB)
     # Note: SPDK's bdev_lvol_create 'uuid' param is for the lvol *store*, not
     # the new lvol.  Do not pass the lvol UUID here.
-    ret = tgt_rpc.create_lvol(tgt_bdev_name, _bytes_to_mib(lvol.size), tgt_node.lvstore)
+    ret = tgt_rpc.create_lvol(tgt_lvol_bdev, _bytes_to_mib(lvol.size), tgt_node.lvstore)
     if not ret:
         return False, True, f"Failed to create target lvol {tgt_lvol_composite}"
-    logger.info(f"[MIGRATION SIZE CHECK] lvol={tgt_bdev_name} source_size_bytes={lvol.size} target_size_mib={_bytes_to_mib(lvol.size)}")
+    logger.info(f"[MIGRATION SIZE CHECK] lvol={lvol.lvol_bdev} source_size_bytes={lvol.size} target_size_mib={_bytes_to_mib(lvol.size)}")
 
     ret = tgt_rpc.bdev_lvol_set_migration_flag(tgt_lvol_composite)
     if not ret:
@@ -1100,7 +1110,7 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
     tgt_uuid = None
     for entry in lvols_list:
         entry_name = entry.get('name', '') or entry.get('lvol_name', '')
-        if entry_name in (tgt_bdev_name, tgt_lvol_composite):
+        if entry_name in (tgt_lvol_bdev, tgt_lvol_composite):
             tgt_map_id = entry.get('map_id')
             tgt_blobid = entry.get('blobid')
             tgt_uuid = entry.get('uuid')
@@ -1124,7 +1134,7 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         if tgt_sec_setup is not None:
             sec_setup_rpc = _make_rpc(tgt_sec_setup)
             ret = sec_setup_rpc.bdev_lvol_register(
-                tgt_bdev_name, tgt_node.lvstore, tgt_uuid, tgt_blobid,
+                tgt_lvol_bdev, tgt_node.lvstore, tgt_uuid, tgt_blobid,
                 lvol.lvol_priority_class)
             if not ret:
                 _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc)
@@ -1132,7 +1142,7 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                     f"bdev_lvol_register on secondary failed for {tgt_lvol_composite}")
             ret = sec_setup_rpc.bdev_lvol_set_migration_flag(tgt_lvol_composite)
             if not ret:
-                sec_setup_rpc.delete_lvol(tgt_bdev_name, del_async=True)
+                sec_setup_rpc.delete_lvol(tgt_lvol_bdev, del_async=True)
                 _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc)
                 return False, True, (
                     f"bdev_lvol_set_migration_flag on secondary failed for {tgt_lvol_composite}")
@@ -1254,7 +1264,7 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         'tgt_ns_id': tgt_ns_id,
         'subsystem_created_on_target': subsystem_created_on_target,
         'tgt_lvol_uuid': tgt_uuid,
-        'tgt_lvol_bdev': tgt_bdev_name,
+        'tgt_lvol_bdev': tgt_lvol_bdev,
     }
     migration.write_to_db(db.kv_store)
     logger.info(f"Started final migration: lvol={lvol.uuid} map_id={tgt_map_id}")
@@ -1371,10 +1381,9 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
 
     # --- First entry: initialize cleanup state ---
     if ctx.get('stage') != 'cleanup_src':
-        # Preserve the target lvol UUID and bdev name written by PHASE_LVOL_MIGRATE
-        # so we can update lvol.lvol_uuid / lvol.lvol_bdev in the DB after cleanup.
+        # Preserve the target lvol UUID written by PHASE_LVOL_MIGRATE so we can
+        # update lvol.lvol_uuid in the DB after cleanup completes.
         tgt_lvol_uuid = ctx.get('tgt_lvol_uuid')
-        tgt_lvol_bdev = ctx.get('tgt_lvol_bdev')
 
         to_delete = migration_controller.get_snaps_safe_to_delete_on_source(migration)
 
@@ -1400,7 +1409,6 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
             'pending': list(to_delete),
             'current_bdev': None,
             'tgt_lvol_uuid': tgt_lvol_uuid,
-            'tgt_lvol_bdev': tgt_lvol_bdev,
         }
         migration.transfer_context = ctx
         migration.write_to_db(db.kv_store)
