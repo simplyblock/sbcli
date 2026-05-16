@@ -1424,9 +1424,10 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
 
     # --- First entry: initialize cleanup state ---
     if ctx.get('stage') != 'cleanup_src':
-        # Preserve the target lvol UUID written by PHASE_LVOL_MIGRATE so we can
-        # update lvol.lvol_uuid in the DB after cleanup completes.
+        # Preserve the target lvol UUID and bdev name written by PHASE_LVOL_MIGRATE
+        # so we can update lvol.lvol_uuid / lvol.lvol_bdev in the DB after cleanup.
         tgt_lvol_uuid = ctx.get('tgt_lvol_uuid')
+        tgt_lvol_bdev = ctx.get('tgt_lvol_bdev')
 
         to_delete = migration_controller.get_snaps_safe_to_delete_on_source(migration)
 
@@ -1452,6 +1453,7 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
             'pending': list(to_delete),
             'current_bdev': None,
             'tgt_lvol_uuid': tgt_lvol_uuid,
+            'tgt_lvol_bdev': tgt_lvol_bdev,
         }
         migration.transfer_context = ctx
         migration.write_to_db(db.kv_store)
