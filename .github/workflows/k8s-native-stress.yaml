@@ -114,6 +114,11 @@ on:
         options:
           - 'false'
           - 'true'
+      tls_enabled:
+        description: 'Enable TLS (installs cert-manager, sets tls.enabled + tls.mutual_enabled)'
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   stress-test:
@@ -543,10 +548,28 @@ jobs:
 
       # ── Deploy CSI stack ────────────────────────────────────────────────────
 
+      - name: Install cert-manager (TLS prerequisite)
+        if: ${{ github.event.inputs.use_existing_cluster != 'true' && github.event.inputs.tls_enabled == 'true' }}
+        run: |
+          helm repo add jetstack https://charts.jetstack.io
+          helm repo update
+          helm install cert-manager jetstack/cert-manager \
+            --namespace cert-manager --create-namespace \
+            --version v1.13.0 --set installCRDs=true
+
+          echo "Waiting for cert-manager pods to be ready..."
+          kubectl wait --for=condition=Ready pods --all -n cert-manager --timeout=120s
+          echo "cert-manager is ready."
+
       - name: Install Helm Chart for simplyblock-operator
         if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
         run: |
           cd $GITHUB_WORKSPACE/helm-charts/charts/simplyblock-operator/
+
+          TLS_FLAGS=""
+          if [ "${{ github.event.inputs.tls_enabled }}" = "true" ]; then
+            TLS_FLAGS="--set tls.enabled=true --set tls.mutual_enabled=true"
+          fi
 
           helm upgrade --install spdk-csi ./ \
             --namespace simplyblock \
@@ -564,7 +587,8 @@ jobs:
             --set csiConfig.simplybk.ip="http://simplyblock-webappapi.simplyblock:5000" \
             --set prometheus.server.persistentVolume.storageClass=local-hostpath \
             --set controlplane.observability.enabled=true \
-            --set opensearch.persistence.storageClass=local-hostpath
+            --set opensearch.persistence.storageClass=local-hostpath \
+            $TLS_FLAGS
 
       - name: Grant OpenShift SCC to all service accounts (post-helm)
         if: ${{ github.event.inputs.use_existing_cluster != 'true' && (github.event.inputs.cluster_environment == 'aws-openshift' || github.event.inputs.cluster_environment == 'openshift-local') }}
@@ -860,7 +884,7 @@ jobs:
           for i in $(seq 1 60); do
             if kubectl get daemonset simplyblock-storage-node-ds-simplyblock-cluster -n $NAMESPACE &>/dev/null; then
               echo "Daemonset found, waiting for rollout to complete..."
-              kubectl rollout status daemonset simplyblock-storage-node-ds-simplyblock-cluster -n $NAMESPACE --timeout=300s || true
+              kubectl rollout status daemonset simplyblock-storage-node-ds-simplyblock-cluster -n $NAMESPACE --timeout=100s || true
               kubectl get pods -n $NAMESPACE
               echo "Restarting daemonset..."
               kubectl rollout restart -n $NAMESPACE ds simplyblock-storage-node-ds-simplyblock-cluster
