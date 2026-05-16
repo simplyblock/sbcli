@@ -1324,6 +1324,46 @@ def _cleanup_subsystem_or_ns(nqn, ns_id, subsystem_was_created_by_migration, rpc
         rpc.subsystem_delete(nqn)
 
 
+def _delete_intermediate_snaps_on_target(migration, tgt_rpc, tgt_sec_rpc=None):
+    """
+    Delete migration-created intermediate ('shrink') snapshots from the target
+    after a successful migration.
+
+    Must be called AFTER apply_migration_to_db() — at that point snap.snap_bdev
+    already holds the target composite path (e.g. LVS_TGT/SNAP_xxxm).
+
+    No migration flag is set before deletion so SPDK actually coalesces the
+    clusters into the child bdev and frees them.  Deletion proceeds oldest-first
+    so each snapshot has at most one child when it is removed, satisfying SPDK's
+    snapshot-deletion constraint.
+    """
+    for snap_uuid in migration.intermediate_snaps:
+        try:
+            snap = db.get_snapshot_by_id(snap_uuid)
+        except KeyError:
+            logger.info(f"Intermediate snap {snap_uuid} already removed from DB; skipping")
+            continue
+
+        tgt_composite = snap.snap_bdev  # updated to target path by apply_migration_to_db
+
+        if tgt_rpc.get_bdevs(tgt_composite):
+            try:
+                _delete_bdev_blocking(tgt_composite, tgt_rpc, secondary_rpc=tgt_sec_rpc)
+                logger.info(f"Deleted intermediate snap bdev {tgt_composite} from target")
+            except Exception as e:
+                logger.warning(
+                    f"Could not delete intermediate snap {tgt_composite} from target: {e}")
+        else:
+            logger.info(
+                f"Intermediate snap bdev {tgt_composite} absent from target; skipping SPDK delete")
+
+        try:
+            snap.remove(db.kv_store)
+            logger.info(f"Removed intermediate snap {snap_uuid} from DB")
+        except Exception as e:
+            logger.warning(f"Could not remove intermediate snap {snap_uuid} from DB: {e}")
+
+
 def _get_secondary_rpc(node):
     """Return RPC clients for node's online secondaries."""
     if not node.secondary_node_id:
@@ -1375,6 +1415,9 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
             migration,
             tgt_lvol_uuid=_ctx.get('tgt_lvol_uuid'),
             tgt_lvol_bdev=_ctx.get('tgt_lvol_bdev'))
+        if migration.intermediate_snaps:
+            tgt_sec_rpc = _get_secondary_rpc(tgt_node)
+            _delete_intermediate_snaps_on_target(migration, tgt_rpc, tgt_sec_rpc)
         return True, False, None
 
     ctx = migration.transfer_context or {}
@@ -1470,6 +1513,13 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
     if not migration_controller.apply_migration_to_db(
             migration, tgt_lvol_uuid=tgt_lvol_uuid, tgt_lvol_bdev=tgt_lvol_bdev):
         return False, False, "Failed to update DB records after source cleanup"
+
+    # Delete intermediate (shrink) snapshots from the target — they are migration
+    # artifacts and do not need to be preserved. No migration flag so SPDK
+    # coalesces and frees their clusters into the child bdev.
+    if migration.intermediate_snaps:
+        tgt_sec_rpc = _get_secondary_rpc(tgt_node)
+        _delete_intermediate_snaps_on_target(migration, tgt_rpc, tgt_sec_rpc)
 
     return True, False, None
 
