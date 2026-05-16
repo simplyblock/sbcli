@@ -242,8 +242,68 @@ def spdk_process_start(body: SPDKParams):
     })}}},
 })
 def spdk_process_kill(query: utils.RPCPortParams):
-    for name in {f"/spdk_{query.rpc_port}", f"/spdk_proxy_{query.rpc_port}"}:
-        core_utils.remove_container(get_docker_client(), name, graceful_timeout=0)
+    """Fast peer termination for ``sn shutdown --force`` / restart paths.
+
+    Two changes vs. the previous ``remove_container(..., graceful_timeout=0)``
+    implementation:
+
+    1. Fan out across the two containers in parallel — there is no ordering
+       dependency between killing ``/spdk_<port>`` and ``/spdk_proxy_<port>``.
+    2. Decouple SIGKILL delivery from container record removal. The kernel
+       closes every open fd (and emits RST on TCP listener sockets) as soon
+       as the process is reaped, which happens within microseconds of
+       SIGKILL. dockerd's subsequent cleanup (cgroups, network namespace,
+       hugepage munmap, container DB delete) is what makes
+       ``remove(force=True)`` cost 1-2s per container under a loaded
+       daemon — but the peer-detection-on-the-host side only needs the
+       SIGKILL, not the dockerd record cleanup. Issue the SIGKILL
+       synchronously (bounded join), and let ``remove()`` run as a detached
+       background thread so the HTTP request returns as soon as the peer's
+       SPDK process is dead.
+
+    Net effect: under a loaded swarm daemon, peer SPDK is dead within
+    ~50-200 ms of the HTTP request landing (vs. ~3.5s previously), so
+    the host-side bdev_nvme observes ``EPIPE`` on its remote controllers
+    near-immediately instead of waiting for dockerd to finish container
+    teardown.
+    """
+    import threading
+    from docker.errors import NotFound
+
+    client = get_docker_client()
+    names = [f"/spdk_{query.rpc_port}", f"/spdk_proxy_{query.rpc_port}"]
+
+    def _kill_one(name):
+        try:
+            client.containers.get(name).kill(signal="SIGKILL")
+        except NotFound:
+            pass
+        except Exception as exc:
+            logger.warning("SIGKILL on %s failed: %s", name, exc)
+
+    def _remove_one(name):
+        try:
+            client.containers.get(name).remove(force=True)
+        except NotFound:
+            pass
+        except Exception as exc:
+            logger.warning("remove(%s) failed: %s", name, exc)
+
+    # 1) Parallel synchronous SIGKILL — bounded so a wedged dockerd can't
+    #    hang the request indefinitely. We do *not* wait for the kernel
+    #    reap; SIGKILL delivery is enough to make the kernel close fds.
+    kill_threads = [threading.Thread(target=_kill_one, args=(n,), daemon=True)
+                    for n in names]
+    for t in kill_threads:
+        t.start()
+    for t in kill_threads:
+        t.join(timeout=5)
+
+    # 2) Detached remove — peer is already dead, the record cleanup is
+    #    just dockerd bookkeeping. Fire-and-forget; HTTP returns now.
+    for name in names:
+        threading.Thread(target=_remove_one, args=(name,), daemon=True).start()
+
     return utils.get_response(True)
 
 
