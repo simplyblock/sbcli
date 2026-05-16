@@ -128,6 +128,13 @@ def _get_migration_nic(node):
     return trtype, node.mgmt_ip
 
 
+# Suffix appended to every bdev created on the target node during migration so
+# that we never accidentally operate on a real pre-existing target bdev during
+# retry or initial attempts.  Must match _MIGRATION_BDEV_SUFFIX in
+# migration_controller.py.
+_MIGRATION_BDEV_SUFFIX = 'm'
+
+
 def _snap_short_name(snap):
     """Return the bare bdev name for a snapshot, stripping any lvstore prefix."""
     path = snap.snap_bdev
@@ -390,7 +397,7 @@ def _setup_snap_transfer(snap, snap_index, migration, src_node, tgt_node,
     Callers are responsible for rolling back any previously launched transfers.
     """
     snap_uuid = snap.uuid
-    snap_short = _snap_short_name(snap)
+    snap_short = _snap_short_name(snap) + _MIGRATION_BDEV_SUFFIX
     src_composite = _snap_composite(src_node.lvstore, snap)
     tgt_composite = f"{tgt_node.lvstore}/{snap_short}"
     temp_nqn = f"nqn.2023-02.io.simplyblock:mig:{migration.uuid[:8]}:{snap_index}"
@@ -500,7 +507,10 @@ def _post_process_snap(snap, tgt_node, tgt_rpc, src_rpc, migration, t,
         pred_uuid = migration.snaps_migrated[-1]
         try:
             pred_snap = db.get_snapshot_by_id(pred_uuid)
-            pred_composite = _snap_composite(tgt_node.lvstore, pred_snap)
+            # Predecessor was created on target with the migration suffix — build
+            # composite from the source short name + suffix, not from snap_bdev
+            # (which still holds the source path until apply_migration_to_db runs).
+            pred_composite = f"{tgt_node.lvstore}/{_snap_short_name(pred_snap) + _MIGRATION_BDEV_SUFFIX}"
             ret = tgt_rpc.bdev_lvol_add_clone(tgt_composite, pred_composite)
             if not ret:
                 return False, f"bdev_lvol_add_clone failed for {snap_uuid}"
@@ -523,15 +533,14 @@ def _post_process_snap(snap, tgt_node, tgt_rpc, src_rpc, migration, t,
         if not ret_sec:
             return False, f"bdev_lvol_convert on secondary failed for {snap_uuid}"
 
-    # Update DB so the snapshot shows on the target node immediately after
-    # convert — before apply_migration_to_db() runs at end of cleanup.
+    # Early partial DB update: route health-check and delete to the target node
+    # immediately after convert.  snap_bdev keeps its source path here; the full
+    # update (with migration suffix and all other fields) happens in
+    # apply_migration_to_db() at the end of CLEANUP_SOURCE.
     try:
         snap_rec = db.get_snapshot_by_id(snap_uuid)
         if snap_rec.lvol.uuid == migration.lvol_id:
             snap_rec.lvol.node_id = tgt_node.get_id()
-            if snap_rec.snap_bdev and '/' in snap_rec.snap_bdev:
-                short_name = snap_rec.snap_bdev.split('/', 1)[1]
-                snap_rec.snap_bdev = f"{tgt_node.lvstore}/{short_name}"
             snap_rec.write_to_db(db.kv_store)
     except KeyError:
         logger.warning(f"Snapshot {snap_uuid} not found in DB for early node update")
@@ -622,9 +631,10 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                     _rollback_parallel_transfers(src_rpc, tgt_rpc, transfers)
                     return False, True, f"Snapshot {snap_uuid} not found in DB"
 
-                snap_short = _snap_short_name(snap)
+                snap_short_src = _snap_short_name(snap)
+                snap_short_tgt = snap_short_src + _MIGRATION_BDEV_SUFFIX
                 src_composite = _snap_composite(src_node.lvstore, snap)
-                tgt_composite = f"{tgt_node.lvstore}/{snap_short}"
+                tgt_composite = f"{tgt_node.lvstore}/{snap_short_tgt}"
                 temp_nqn = (f"nqn.2023-02.io.simplyblock:mig:"
                             f"{migration.uuid[:8]}:{snap_index}")
                 ctrl_name = f"mig_{migration.uuid[:8]}_{snap_index}"
@@ -637,7 +647,7 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                         f"Resuming in-progress transfer for snap {snap_uuid}")
                     transfers.append({
                         'snap_uuid': snap_uuid,
-                        'snap_short': snap_short,
+                        'snap_short': snap_short_tgt,
                         'snap_index': snap_index,
                         'temp_nqn': temp_nqn,
                         'ctrl_name': ctrl_name,
@@ -922,9 +932,12 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         return False, True, str(e)
 
     trtype, target_ip = _get_migration_nic(tgt_node)
-    src_lvol_composite = f"{src_node.lvstore}/{lvol.lvol_bdev}"
-    tgt_lvol_composite = f"{tgt_node.lvstore}/{lvol.lvol_bdev}"
     ctx = migration.transfer_context or {}
+    src_lvol_composite = f"{src_node.lvstore}/{lvol.lvol_bdev}"
+    # Restore target bdev name from context on retry (it carries the 'm' suffix);
+    # compute fresh on first entry.
+    tgt_bdev_name = ctx.get('tgt_lvol_bdev') or (lvol.lvol_bdev + _MIGRATION_BDEV_SUFFIX)
+    tgt_lvol_composite = f"{tgt_node.lvstore}/{tgt_bdev_name}"
 
     # --- Retry secondary registration after a completed transfer ---
     # Transfer already finished on a previous run; only secondary registration
@@ -943,7 +956,7 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             if migration.snaps_migrated:
                 try:
                     last_snap = db.get_snapshot_by_id(migration.snaps_migrated[-1])
-                    tgt_snap_composite = _snap_composite(tgt_node.lvstore, last_snap)
+                    tgt_snap_composite = f"{tgt_node.lvstore}/{_snap_short_name(last_snap) + _MIGRATION_BDEV_SUFFIX}"
                     ret = sec_rpc.bdev_lvol_add_clone(tgt_lvol_composite, tgt_snap_composite)
                     if not ret:
                         migration.write_to_db(db.kv_store)
@@ -959,7 +972,7 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             if not ok:
                 migration.write_to_db(db.kv_store)
                 return False, True, err
-        migration.transfer_context = {'tgt_lvol_uuid': ctx.get('tgt_lvol_uuid')}
+        migration.transfer_context = {'tgt_lvol_uuid': ctx.get('tgt_lvol_uuid'), 'tgt_lvol_bdev': tgt_bdev_name}
         _update_ana_states(migration, src_node, tgt_node, src_rpc, tgt_rpc)
         return True, False, None
 
@@ -999,7 +1012,7 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         # Carry it forward through every transfer_context write below so it
         # survives the phase boundary even when retries via 'secondary_register'
         # are needed.
-        tgt_uuid_carry = {'tgt_lvol_uuid': ctx.get('tgt_lvol_uuid')}
+        tgt_uuid_carry = {'tgt_lvol_uuid': ctx.get('tgt_lvol_uuid'), 'tgt_lvol_bdev': tgt_bdev_name}
 
         if lvol.ha_type == "ha":
             tgt_sec, sec_err = _get_target_secondary_node(tgt_node)
@@ -1015,7 +1028,7 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                 if migration.snaps_migrated:
                     try:
                         last_snap = db.get_snapshot_by_id(migration.snaps_migrated[-1])
-                        tgt_snap_composite = _snap_composite(tgt_node.lvstore, last_snap)
+                        tgt_snap_composite = f"{tgt_node.lvstore}/{_snap_short_name(last_snap) + _MIGRATION_BDEV_SUFFIX}"
                         ret = sec_rpc.bdev_lvol_add_clone(tgt_lvol_composite, tgt_snap_composite)
                         if not ret:
                             logger.error(
@@ -1064,10 +1077,10 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
     # Step 1: create writable target lvol (size in MiB)
     # Note: SPDK's bdev_lvol_create 'uuid' param is for the lvol *store*, not
     # the new lvol.  Do not pass the lvol UUID here.
-    ret = tgt_rpc.create_lvol(lvol.lvol_bdev, _bytes_to_mib(lvol.size), tgt_node.lvstore)
+    ret = tgt_rpc.create_lvol(tgt_bdev_name, _bytes_to_mib(lvol.size), tgt_node.lvstore)
     if not ret:
         return False, True, f"Failed to create target lvol {tgt_lvol_composite}"
-    logger.info(f"[MIGRATION SIZE CHECK] lvol={lvol.lvol_bdev} source_size_bytes={lvol.size} target_size_mib={_bytes_to_mib(lvol.size)}")
+    logger.info(f"[MIGRATION SIZE CHECK] lvol={tgt_bdev_name} source_size_bytes={lvol.size} target_size_mib={_bytes_to_mib(lvol.size)}")
 
     ret = tgt_rpc.bdev_lvol_set_migration_flag(tgt_lvol_composite)
     if not ret:
@@ -1087,7 +1100,7 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
     tgt_uuid = None
     for entry in lvols_list:
         entry_name = entry.get('name', '') or entry.get('lvol_name', '')
-        if entry_name in (lvol.lvol_bdev, tgt_lvol_composite):
+        if entry_name in (tgt_bdev_name, tgt_lvol_composite):
             tgt_map_id = entry.get('map_id')
             tgt_blobid = entry.get('blobid')
             tgt_uuid = entry.get('uuid')
@@ -1111,7 +1124,7 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         if tgt_sec_setup is not None:
             sec_setup_rpc = _make_rpc(tgt_sec_setup)
             ret = sec_setup_rpc.bdev_lvol_register(
-                lvol.lvol_bdev, tgt_node.lvstore, tgt_uuid, tgt_blobid,
+                tgt_bdev_name, tgt_node.lvstore, tgt_uuid, tgt_blobid,
                 lvol.lvol_priority_class)
             if not ret:
                 _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc)
@@ -1119,7 +1132,7 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                     f"bdev_lvol_register on secondary failed for {tgt_lvol_composite}")
             ret = sec_setup_rpc.bdev_lvol_set_migration_flag(tgt_lvol_composite)
             if not ret:
-                sec_setup_rpc.delete_lvol(lvol.lvol_bdev, del_async=True)
+                sec_setup_rpc.delete_lvol(tgt_bdev_name, del_async=True)
                 _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc)
                 return False, True, (
                     f"bdev_lvol_set_migration_flag on secondary failed for {tgt_lvol_composite}")
@@ -1222,7 +1235,7 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc, secondary_rpc=sec_setup_rpc)
         return False, True, f"Last snapshot {last_snap_uuid} not found"
 
-    tgt_snap_composite = _snap_composite(tgt_node.lvstore, last_snap)
+    tgt_snap_composite = f"{tgt_node.lvstore}/{_snap_short_name(last_snap) + _MIGRATION_BDEV_SUFFIX}"
 
     # Step 5: start final migration (async) – I/O is frozen for the small delta
     ret = src_rpc.bdev_lvol_final_migration(
@@ -1241,6 +1254,7 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         'tgt_ns_id': tgt_ns_id,
         'subsystem_created_on_target': subsystem_created_on_target,
         'tgt_lvol_uuid': tgt_uuid,
+        'tgt_lvol_bdev': tgt_bdev_name,
     }
     migration.write_to_db(db.kv_store)
     logger.info(f"Started final migration: lvol={lvol.uuid} map_id={tgt_map_id}")
@@ -1346,30 +1360,36 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
     """
     if _SKIP_CLEANUP_SOURCE:
         logger.info("SKIP_CLEANUP_SOURCE flag is set — skipping source cleanup, applying DB only")
-        migration_controller.apply_migration_to_db(migration)
+        _ctx = migration.transfer_context or {}
+        migration_controller.apply_migration_to_db(
+            migration,
+            tgt_lvol_uuid=_ctx.get('tgt_lvol_uuid'),
+            tgt_lvol_bdev=_ctx.get('tgt_lvol_bdev'))
         return True, False, None
 
     ctx = migration.transfer_context or {}
 
     # --- First entry: initialize cleanup state ---
     if ctx.get('stage') != 'cleanup_src':
-        # Preserve the target lvol UUID written by PHASE_LVOL_MIGRATE so we can
-        # update lvol.lvol_uuid in the DB after cleanup completes.
+        # Preserve the target lvol UUID and bdev name written by PHASE_LVOL_MIGRATE
+        # so we can update lvol.lvol_uuid / lvol.lvol_bdev in the DB after cleanup.
         tgt_lvol_uuid = ctx.get('tgt_lvol_uuid')
+        tgt_lvol_bdev = ctx.get('tgt_lvol_bdev')
 
         to_delete = migration_controller.get_snaps_safe_to_delete_on_source(migration)
 
         # Verify each snapshot to be deleted physically exists on the target
-        # before we remove anything from the source.
+        # before we remove anything from the source.  Target bdevs carry the
+        # migration suffix (e.g. SNAP_xxxm) — derive from source short name.
         tgt_lvols = tgt_rpc.bdev_lvol_get_lvols(tgt_node.lvstore) or []
         tgt_names = {e.get('name', '').split('/')[-1] for e in tgt_lvols}
         for snap_uuid in to_delete:
             try:
                 snap = db.get_snapshot_by_id(snap_uuid)
-                snap_short = _snap_short_name(snap)
-                if snap_short not in tgt_names:
+                snap_short_tgt = _snap_short_name(snap) + _MIGRATION_BDEV_SUFFIX
+                if snap_short_tgt not in tgt_names:
                     return False, False, (
-                        f"Target missing snapshot {snap_short} ({snap_uuid}) "
+                        f"Target missing snapshot {snap_short_tgt} ({snap_uuid}) "
                         "— aborting source cleanup to prevent data loss"
                     )
             except KeyError:
@@ -1380,6 +1400,7 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
             'pending': list(to_delete),
             'current_bdev': None,
             'tgt_lvol_uuid': tgt_lvol_uuid,
+            'tgt_lvol_bdev': tgt_lvol_bdev,
         }
         migration.transfer_context = ctx
         migration.write_to_db(db.kv_store)
@@ -1436,8 +1457,10 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
         logger.warning(f"Source subsystem cleanup failed (non-fatal): {e}")
 
     tgt_lvol_uuid = ctx.get('tgt_lvol_uuid')
+    tgt_lvol_bdev = ctx.get('tgt_lvol_bdev')
     migration.transfer_context = {}
-    if not migration_controller.apply_migration_to_db(migration, tgt_lvol_uuid=tgt_lvol_uuid):
+    if not migration_controller.apply_migration_to_db(
+            migration, tgt_lvol_uuid=tgt_lvol_uuid, tgt_lvol_bdev=tgt_lvol_bdev):
         return False, False, "Failed to update DB records after source cleanup"
 
     return True, False, None
@@ -1541,7 +1564,7 @@ def _handle_cleanup_target(migration, tgt_node, tgt_rpc):
         snap_uuid = ctx['pending'].pop(0)
         try:
             snap = db.get_snapshot_by_id(snap_uuid)
-            snap_short = _snap_short_name(snap)
+            snap_short = _snap_short_name(snap) + _MIGRATION_BDEV_SUFFIX
             bdev_name = f"{tgt_node.lvstore}/{snap_short}"
             ret, _ = tgt_rpc.delete_lvol(bdev_name)
             if not ret:
