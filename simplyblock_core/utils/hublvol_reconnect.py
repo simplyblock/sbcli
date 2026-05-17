@@ -104,7 +104,7 @@ DEFAULT_LOCK_TTL_SEC = 60
 #: now carried by the coordinator's lock + cooldown rather than by
 #: stretching the SPDK timers themselves.
 HUBLVOL_CTRLR_LOSS_TIMEOUT_SEC = 3
-HUBLVOL_RECONNECT_DELAY_SEC = 2
+HUBLVOL_RECONNECT_DELAY_SEC = 1
 HUBLVOL_FAST_IO_FAIL_TIMEOUT_SEC = 1
 
 
