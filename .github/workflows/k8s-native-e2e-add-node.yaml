@@ -448,6 +448,17 @@ jobs:
 
           echo "=== Cleanup complete ==="
 
+      - name: Cleanup old cert-manager deployment
+        if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
+        run: |
+          set +e
+          echo "=== Uninstalling cert-manager ==="
+          helm uninstall cert-manager -n cert-manager 2>/dev/null || true
+          kubectl delete namespace cert-manager --wait=false 2>/dev/null || true
+          echo "Waiting for cert-manager namespace to be deleted..."
+          kubectl wait --for=delete namespace/cert-manager --timeout=120s 2>/dev/null || true
+          echo "=== cert-manager cleanup complete ==="
+
       # ── Label nodes ─────────────────────────────────────────────────────────
 
       - name: Label initial worker nodes
