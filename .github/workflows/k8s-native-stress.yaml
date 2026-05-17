@@ -288,6 +288,20 @@ jobs:
       - name: Verify kubectl connectivity
         run: kubectl get nodes
 
+      - name: Ensure OVN-Kubernetes routingViaHost is enabled
+        run: |
+          CURRENT=$(oc get network.operator.openshift.io cluster \
+            -o jsonpath='{.spec.defaultNetwork.ovnKubernetesConfig.gatewayConfig.routingViaHost}' 2>/dev/null || echo "")
+          if [ "$CURRENT" = "true" ]; then
+            echo "routingViaHost is already enabled, skipping patch"
+          else
+            echo "routingViaHost is not enabled (current: '$CURRENT'), applying patch..."
+            oc patch network.operator.openshift.io cluster --type=merge \
+              -p '{"spec":{"defaultNetwork":{"ovnKubernetesConfig":{"gatewayConfig":{"routingViaHost":true}}}}}'
+            echo "Waiting 30s for OVN-Kubernetes to reconcile..."
+            sleep 30
+          fi
+
       # ── Cleanup old deployment ──────────────────────────────────────────────
 
       - name: Cleanup old CSI deployment

@@ -3658,6 +3658,12 @@ class K8sNativeResilientFailoverTest(K8sNativeFailoverTest):
             f"[permanent] {len(self.permanent_pvcs)} permanent "
             f"PVCs: {sorted(self.permanent_pvcs)}"
         )
+        if not self.permanent_pvcs:
+            raise RuntimeError(
+                "[permanent] FATAL: No permanent PVCs were created — "
+                "PVC provisioning is completely broken. "
+                "Check CSI controller logs for connectivity errors."
+            )
         sleep_n_sec(30)
         self._ensure_per_node_coverage()
 
