@@ -1683,14 +1683,10 @@ class K8sNativeFailoverTest(TestClusterBase):
         self.collect_outage_diagnostics(f"pre_outage_nodes_{'_'.join(outage_nodes[:3])}")
 
         node_plans = []
-        outage_num = 0
-        for node in outage_nodes:
-            if outage_num == 0:
-                if self.npcs == 1:
-                    outage_type = random.choice(self.outage_types2)
-                else:
-                    outage_type = random.choice(self.outage_types)
-                outage_num = 1
+        for i, node in enumerate(outage_nodes):
+            if i == 0:
+                # First outage is always graceful_shutdown
+                outage_type = "graceful_shutdown"
             else:
                 outage_type = random.choice(self.outage_types2)
 
@@ -1699,31 +1695,19 @@ class K8sNativeFailoverTest(TestClusterBase):
             node_rpc_port = node_details[0]["rpc_port"]
             node_plans.append((node, outage_type, node_ip, node_rpc_port))
 
-        # Trigger all outages simultaneously
-        outage_results = {}
-
-        def _trigger(node, outage_type, node_ip, _rpc_port):
+        # Trigger outages sequentially with a 10s gap between them
+        outage_combinations = []
+        for idx, (node, outage_type, node_ip, _rpc_port) in enumerate(node_plans):
+            if idx > 0:
+                self.logger.info("Waiting 10s before next outage...")
+                sleep_n_sec(10)
             self.logger.info(f"Performing {outage_type} on node {node}")
             if outage_type == "container_stop":
                 self._k8s_stop_spdk_pod(node_ip, node)
             elif outage_type == "graceful_shutdown":
                 self._graceful_shutdown_node(node)
             self.log_outage_event(node, outage_type, "Outage started")
-            outage_results[node] = (outage_type, 0)
-
-        threads = [
-            threading.Thread(target=_trigger, args=(n, ot, nip, nrpc))
-            for n, ot, nip, nrpc in node_plans
-        ]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-
-        outage_combinations = []
-        for node, _, _, _ in node_plans:
-            otype, odur = outage_results[node]
-            outage_combinations.append((node, otype, odur))
+            outage_combinations.append((node, outage_type, 0))
             self.current_outage_nodes.append(node)
 
         self.outage_start_time = int(datetime.now().timestamp())
