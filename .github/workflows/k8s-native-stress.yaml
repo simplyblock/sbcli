@@ -24,6 +24,12 @@ on:
         description: 'Operator image tag'
         required: false
         default: 'main'
+      csi_repository:
+        description: 'CSI driver image repository (leave empty for chart default)'
+        required: false
+      csi_tag:
+        description: 'CSI driver image tag (leave empty for chart default)'
+        required: false
       spdk_image:
         description: 'SPDK container image'
         required: true
@@ -595,6 +601,14 @@ jobs:
             TLS_FLAGS="--set tls.enabled=true --set tls.mutual_enabled=true"
           fi
 
+          CSI_FLAGS=""
+          if [ -n "${{ github.event.inputs.csi_repository }}" ]; then
+            CSI_FLAGS="$CSI_FLAGS --set image.csi.repository=${{ github.event.inputs.csi_repository }}"
+          fi
+          if [ -n "${{ github.event.inputs.csi_tag }}" ]; then
+            CSI_FLAGS="$CSI_FLAGS --set image.csi.tag=${{ github.event.inputs.csi_tag }}"
+          fi
+
           helm upgrade --install spdk-csi ./ \
             --namespace simplyblock \
             --create-namespace \
@@ -612,7 +626,7 @@ jobs:
             --set prometheus.server.persistentVolume.storageClass=local-hostpath \
             --set controlplane.observability.enabled=true \
             --set opensearch.persistence.storageClass=local-hostpath \
-            $TLS_FLAGS
+            $TLS_FLAGS $CSI_FLAGS
 
       - name: Grant OpenShift SCC to all service accounts (post-helm)
         if: ${{ github.event.inputs.use_existing_cluster != 'true' && (github.event.inputs.cluster_environment == 'aws-openshift' || github.event.inputs.cluster_environment == 'openshift-local') }}
