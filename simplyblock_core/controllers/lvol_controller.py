@@ -658,6 +658,12 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
                     kms.create_data_encryption_keys(pool.get_id(), lvol.crypto_bdev)
                 else:
                     kms.import_data_encryption_keys(pool.get_id(), lvol.crypto_bdev, crypto_key)
+                # For LocalKMS, sync keys to the in-memory lvol so subsequent
+                # write_to_db calls do not overwrite them with empty strings.
+                if not cl.hashicorp_vault_settings:
+                    lvol.crypto_key1, lvol.crypto_key2 = kms.get_data_encryption_keys(
+                        pool.get_id(), lvol.crypto_bdev
+                    )
                 logger.info("Created lvol keys")
             except KMSException:
                 msg = "Failed to create lvol keys"
