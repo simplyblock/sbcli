@@ -339,7 +339,7 @@ def ping_host(ip):
     logger.debug(f"Pinging ip ... {ip}")
     try:
         result = subprocess.run(
-            ["ping", "-c", "2", "-W", "2", ip],
+            ["sudo", "ping", "-c", "2", "-W", "2", ip],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         up = result.returncode == 0
     except Exception as e:
