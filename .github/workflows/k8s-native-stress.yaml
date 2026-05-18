@@ -1,5 +1,5 @@
 name: K8s Native Stress Tests
-run-name: "K8s Native Stress Tests | ${{ inputs.testname || 'K8sNativeFailoverTest' }} | ${{ inputs.cluster_environment || 'local' }} | NDCS:${{ inputs.ndcs || '1' }} NPCS:${{ inputs.npcs || '1' }}"
+run-name: "K8s Native Stress Tests | ${{ inputs.testname || 'K8sNativeFailoverTest' }} | ${{ inputs.cluster_environment || 'local' }} | ${{ inputs.cluster_params || 'ndcs=2,npcs=1,bs=4096,chunk_bs=4096,partitions=0,jm_count=3' }}"
 
 on:
   workflow_dispatch:
@@ -70,30 +70,10 @@ on:
         required: false
         default: true
         type: boolean
-      ndcs:
-        description: 'Number of data chunks'
+      cluster_params:
+        description: 'Cluster config: ndcs=2,npcs=1,bs=4096,chunk_bs=4096,partitions=0,jm_count=3'
         required: false
-        default: 1
-      npcs:
-        description: 'Number of parity chunks'
-        required: false
-        default: 1
-      bs:
-        description: 'Block size'
-        required: false
-        default: 4096
-      chunk_bs:
-        description: 'Chunk block size'
-        required: false
-        default: 4096
-      partitions:
-        description: 'Number of partitions per storage node'
-        required: false
-        default: 0
-      journal_manager_count:
-        description: 'Number of journal managers per device'
-        required: false
-        default: 3
+        default: 'ndcs=2,npcs=1,bs=4096,chunk_bs=4096,partitions=0,jm_count=3'
       cluster_environment:
         description: 'Target cluster environment'
         required: true
@@ -286,10 +266,20 @@ jobs:
 
       - name: Set parameters
         run: |
-          echo "NDCS=${{ github.event.inputs.ndcs || 2 }}" >> $GITHUB_ENV
-          echo "NPCS=${{ github.event.inputs.npcs || 1 }}" >> $GITHUB_ENV
-          echo "BS=${{ github.event.inputs.bs || 4096 }}" >> $GITHUB_ENV
-          echo "CHUNK_BS=${{ github.event.inputs.chunk_bs || 4096 }}" >> $GITHUB_ENV
+          PARAMS="${{ github.event.inputs.cluster_params || 'ndcs=2,npcs=1,bs=4096,chunk_bs=4096,partitions=0,jm_count=3' }}"
+          # Parse key=value pairs from cluster_params
+          for pair in $(echo "$PARAMS" | tr ',' ' '); do
+            key=$(echo "$pair" | cut -d= -f1)
+            val=$(echo "$pair" | cut -d= -f2)
+            case "$key" in
+              ndcs)       echo "NDCS=$val" >> $GITHUB_ENV ;;
+              npcs)       echo "NPCS=$val" >> $GITHUB_ENV ;;
+              bs)         echo "BS=$val" >> $GITHUB_ENV ;;
+              chunk_bs)   echo "CHUNK_BS=$val" >> $GITHUB_ENV ;;
+              partitions) echo "PARTITIONS=$val" >> $GITHUB_ENV ;;
+              jm_count)   echo "JM_COUNT=$val" >> $GITHUB_ENV ;;
+            esac
+          done
 
       - name: Verify kubectl connectivity
         run: kubectl get nodes
@@ -722,8 +712,8 @@ jobs:
           SB_TAG="${{ github.event.inputs.simplyblock_image }}"
           SPDK_IMAGE="${{ github.event.inputs.spdk_image }}"
           DATA_NICS="${{ github.event.inputs.data_nics || 'enp1s0' }}"
-          PARTITIONS="${{ github.event.inputs.partitions || '0' }}"
-          JM_COUNT="${{ github.event.inputs.journal_manager_count || '3' }}"
+          PARTITIONS="${PARTITIONS:-0}"
+          JM_COUNT="${JM_COUNT:-3}"
           OPENSHIFT_CLUSTER="${{ (github.event.inputs.cluster_environment == 'aws-openshift' || github.event.inputs.cluster_environment == 'openshift-local') && 'true' || 'false' }}"
           CORE_PERCENTAGE="${{ github.event.inputs.cluster_environment == 'aws-openshift' && '50' || github.event.inputs.cluster_environment == 'openshift-local' && '50' || github.event.inputs.cluster_environment == 'local' && '35' || '65' }}"
           SKIP_KUBELET_CONFIG="${{ (github.event.inputs.cluster_environment == 'aws-openshift' || github.event.inputs.cluster_environment == 'openshift-local') && 'false' || 'true' }}"
