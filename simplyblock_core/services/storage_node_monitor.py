@@ -427,12 +427,7 @@ def set_node_schedulable(node):
 
 
 def set_node_down(node):
-    # DOWN is reserved for "ONLINE node, client-facing port failed". Any
-    # other current state means another actor (shutdown, restart, monitor)
-    # owns the transition — flipping to DOWN from there clobbers the real
-    # in-flight state (e.g. IN_SHUTDOWN → DOWN was observed during
-    # graceful sbctl shutdown when port 4426 momentarily failed mid-tear-down).
-    if node.status == StorageNode.STATUS_ONLINE:
+    if node.status not in [StorageNode.STATUS_DOWN, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_IN_SHUTDOWN]:
         storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_DOWN)
         update_cluster_status(cluster_id)
 
