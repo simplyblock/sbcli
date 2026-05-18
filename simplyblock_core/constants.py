@@ -181,7 +181,7 @@ KATO=5000
 # budget. Long-term, the freeze itself is being shortened (single-path
 # hublvol attach + deferred failover); this stays as belt-and-braces so
 # a stragglier rejoin doesn't immediately re-trip the bug.
-ACK_TO=12
+ACK_TO=11
 # bdev_retry_count must be non-zero for SPDK bdev_nvme to retry an aborted
 # IO on the alternate path of an NVMe-oF multipath bdev (per the SPDK
 # multipath docs). Multipath is in play whenever a node consumes a hublvol
