@@ -11,6 +11,8 @@ from ._exceptions import KMSException
 
 logger = logging.getLogger(__name__)
 
+_CERT_ROLE_NAME = "webappapi"
+
 
 class HCPClient(KMS):
     def __init__(
@@ -31,7 +33,7 @@ class HCPClient(KMS):
             timeout=timeout,
         )
         try:
-            self.client.auth.cert.login()
+            self.client.auth.cert.login(name=_CERT_ROLE_NAME)
         except hvac.exceptions.VaultError as e:
             raise KMSException("Authentication failed") from e
 
