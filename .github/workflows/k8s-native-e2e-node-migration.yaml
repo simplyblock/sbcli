@@ -166,8 +166,10 @@ jobs:
       - name: Setup kubeconfig
         run: |
           mkdir -p $HOME/.kube
-          echo "${KUBECONFIG_DATA}" > $HOME/.kube/config
-          chmod 600 $HOME/.kube/config
+          KUBECONFIG_FILE="$HOME/.kube/config-${{ github.run_id }}"
+          echo "${KUBECONFIG_DATA}" > "$KUBECONFIG_FILE"
+          chmod 600 "$KUBECONFIG_FILE"
+          echo "KUBECONFIG=$KUBECONFIG_FILE" >> $GITHUB_ENV
         env:
           KUBECONFIG_DATA: ${{
             github.event.inputs.cluster_environment == 'aws-openshift' && secrets.KUBECONFIG_AWS_OPENSHIFT ||
@@ -1416,4 +1418,4 @@ jobs:
         run: |
           rm -rf ./* || true
           rm -rf ./.??* || true
-          rm -rf $HOME/.kube
+          rm -f "$HOME/.kube/config-${{ github.run_id }}"
