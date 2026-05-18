@@ -36,6 +36,7 @@ class LocalKMS(KMS):
     def import_data_encryption_keys(self, kek_name: str, name: str, keys: tuple[str, str]) -> None:
         lvol = self._lvol_by_data_encryption_key_name(name)
         lvol.crypto_key1, lvol.crypto_key2 = keys
+        lvol.write_to_db(self._db_controller.kv_store)
 
     def get_data_encryption_keys(self, kek_name: str, name: str) -> tuple[str, str]:
         lvol = self._lvol_by_data_encryption_key_name(name)

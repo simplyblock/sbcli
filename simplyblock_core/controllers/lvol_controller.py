@@ -627,18 +627,6 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
         lvol.lvol_type += ',crypto'
         lvol.top_bdev = lvol.crypto_bdev
 
-        with create_kms_connection(cl) as kms:
-            try:
-                if crypto_key is None:
-                    kms.create_data_encryption_keys(pool.get_id(), lvol.crypto_bdev)
-                else:
-                    kms.import_data_encryption_keys(pool.get_id(), lvol.crypto_bdev, crypto_key)
-                logger.info("Created lvol keys")
-            except KMSException:
-                msg = "Failed to create lvol keys"
-                logger.exception(msg)
-                return False, msg
-
     # Process allowed hosts (for host restriction and/or DH-HMAC-CHAP authentication)
     if not namespace:
         if pool.dhchap:
@@ -662,6 +650,20 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
                 bool(pool.dhchap_key) if pool.dhchap else "N/A")
 
     lvol.write_to_db(db_controller.kv_store)
+
+    if use_crypto:
+        with create_kms_connection(cl) as kms:
+            try:
+                if crypto_key is None:
+                    kms.create_data_encryption_keys(pool.get_id(), lvol.crypto_bdev)
+                else:
+                    kms.import_data_encryption_keys(pool.get_id(), lvol.crypto_bdev, crypto_key)
+                logger.info("Created lvol keys")
+            except KMSException:
+                msg = "Failed to create lvol keys"
+                logger.exception(msg)
+                lvol.remove(db_controller.kv_store)
+                return False, msg
 
     if ha_type == "single":
         if host_node.status == StorageNode.STATUS_ONLINE:
