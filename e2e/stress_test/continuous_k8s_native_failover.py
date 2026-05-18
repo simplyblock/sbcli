@@ -1695,20 +1695,39 @@ class K8sNativeFailoverTest(TestClusterBase):
             node_rpc_port = node_details[0]["rpc_port"]
             node_plans.append((node, outage_type, node_ip, node_rpc_port))
 
-        # Trigger outages sequentially with a 10s gap between them
+        # Trigger outages in parallel threads with a 10s delay between launches
         outage_combinations = []
+        outage_errors = {}
+
+        def _run_outage(node, outage_type, node_ip):
+            try:
+                self.logger.info(f"Performing {outage_type} on node {node}")
+                if outage_type == "container_stop":
+                    self._k8s_stop_spdk_pod(node_ip, node)
+                elif outage_type == "graceful_shutdown":
+                    self._graceful_shutdown_node(node)
+                self.log_outage_event(node, outage_type, "Outage started")
+            except Exception as e:
+                self.logger.error(f"Outage {outage_type} on node {node} failed: {e}")
+                outage_errors[node] = e
+
+        threads = []
         for idx, (node, outage_type, node_ip, _rpc_port) in enumerate(node_plans):
             if idx > 0:
-                self.logger.info("Waiting 10s before next outage...")
+                self.logger.info("Waiting 10s before launching next outage thread...")
                 sleep_n_sec(10)
-            self.logger.info(f"Performing {outage_type} on node {node}")
-            if outage_type == "container_stop":
-                self._k8s_stop_spdk_pod(node_ip, node)
-            elif outage_type == "graceful_shutdown":
-                self._graceful_shutdown_node(node)
-            self.log_outage_event(node, outage_type, "Outage started")
+            t = threading.Thread(target=_run_outage, args=(node, outage_type, node_ip))
+            t.start()
+            threads.append(t)
             outage_combinations.append((node, outage_type, 0))
             self.current_outage_nodes.append(node)
+
+        for t in threads:
+            t.join(timeout=600)
+
+        if outage_errors:
+            failed = ", ".join(f"{n}: {e}" for n, e in outage_errors.items())
+            raise RuntimeError(f"Outage(s) failed: {failed}")
 
         self.outage_start_time = int(datetime.now().timestamp())
         return outage_combinations
