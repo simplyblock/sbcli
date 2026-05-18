@@ -215,6 +215,7 @@ jobs:
         run: kubectl get nodes
 
       - name: Ensure OVN-Kubernetes routingViaHost is enabled
+        if: ${{ github.event.inputs.cluster_environment == 'aws-openshift' || github.event.inputs.cluster_environment == 'openshift-local' }}
         run: |
           CURRENT=$(oc get network.operator.openshift.io cluster \
             -o jsonpath='{.spec.defaultNetwork.ovnKubernetesConfig.gatewayConfig.routingViaHost}' 2>/dev/null || echo "")
