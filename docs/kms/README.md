@@ -63,6 +63,10 @@ path "transit/datakey/wrapped/*" {
   capabilities = ["create", "update"]
 }
 
+path "transit/encrypt/*" {
+  capabilities = ["create", "update"]
+}
+
 path "transit/decrypt/*" {
   capabilities = ["create", "update"]
 }
