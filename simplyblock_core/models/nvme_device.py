@@ -66,6 +66,11 @@ class NVMeDevice(BaseModel):
     last_flap_tsc: float = 0.0
     serial_number: str = ""
     size: int = -1
+    # NVMe per-block metadata size in bytes, as reported by the bound SPDK bdev.
+    # >=8 means alceml can run in cv_md_method (no read/write amplification).
+    # 0 means alceml must use cv_fallback_method (extra md page per 2 MiB extent).
+    md_size: int = 0
+    md_supported: bool = False
     testing_bdev: str = ""
     connecting_from_node: str = ""
     previous_status: str = ""

@@ -1,0 +1,1892 @@
+#!/usr/bin/env python3
+"""Lab variant of aws_dual_node_outage_soak_mixed_churn.py.
+
+Designed to run from the simplyblock jump host against the bare-metal lab
+cluster (mgmt 192.168.10.210, storage .201-.204) deployed by
+setup_lab_perf_test1.py.
+
+Iteration pattern (load during outage, unload during settle):
+  1. start fio on every volume
+  2. apply the dual-node outage pair (fio takes the hit)
+  3. wait for both nodes back online + post-outage check_fio (fault gate)
+  4. stop fio
+  5. optionally rebuild one randomly-selected volume
+     (every --churn-every-n-iters iterations)
+  6. wait_for_cluster_stable + wait_for_data_migration_complete -- now
+     UNLOADED, so migration drains fast
+  7. next iteration
+
+This trades the AWS-variant's "fio runs continuously across outages plus
+a 3-20 minute background churn timer" for a deterministic per-iteration
+pattern: settling never happens under fio load, so iteration time drops
+to whatever rebalance takes on a quiet cluster. There is no inter-
+iteration NIC chaos.
+
+Differences vs. the AWS variant beyond the iteration pattern:
+  - SSH uses a single shared root password (CLI flag, env var, or prompt),
+    not an EC2 keypair. Install paramiko if you can ("pip3 install --user
+    paramiko" on the jump host); otherwise the script falls back to
+    `sshpass + ssh`, which is slower because every command opens a fresh
+    connection.
+  - Defaults match the lab topology: --expected-node-count 4, metadata
+    file cluster_metadata_base.json (the file setup_lab_perf_test1.py
+    writes), mount root /root/lab_outage_soak_*.
+
+Typical invocation (from the jump host, after setup_lab_perf_test1.py has
+created the cluster and written cluster_metadata_base.json next to this
+script):
+
+    python3 ~/lab_dual_node_outage_soak_mixed_churn.py             # prompts for password
+    SBCLI_ROOT_PASSWORD='...' python3 ~/lab_dual_node_outage_soak_mixed_churn.py
+    python3 ~/lab_dual_node_outage_soak_mixed_churn.py --password '...'
+"""
+import argparse
+import getpass
+import itertools
+import json
+import logging
+import os
+import posixpath
+import random
+import re
+import shlex
+import subprocess
+import sys
+import threading
+import time
+from dataclasses import dataclass
+from pathlib import Path
+
+try:
+    import paramiko
+except ImportError:
+    paramiko = None
+
+# Silence paramiko's Transport-thread "Socket exception: Connection
+# reset by peer (104)" prints. They fire whenever an open SSH
+# connection to a storage node gets RST'd by a planned event —
+# host_reboot outage tearing down sshd, NIC down/up flapping, etc.
+# The retry/reconnect logic handles it cleanly; the stack-trace-less
+# stderr lines just clutter the soak output.
+logging.getLogger("paramiko").setLevel(logging.CRITICAL)
+logging.getLogger("paramiko.transport").setLevel(logging.CRITICAL)
+
+
+UUID_RE = re.compile(r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}")
+# `sbctl lvol connect` emits `sudo nvme connect ... --nqn=<NQN> ...`
+# (long form with `=`, see lvol_controller.py:1737). Tolerate the legacy
+# short form `-n <NQN>` as well so older sbctl deployments still parse.
+NQN_RE = re.compile(r"(?:--nqn[=\s]+|-n\s+)(\S+)")
+
+
+OUTAGE_METHODS = (
+    "graceful", "forced", "container_kill", "host_reboot",
+    "network_outage_20", "network_outage_50",
+)
+# Methods that leave the node in a state where it recovers on its own
+# (no sbctl restart required from the soak driver).
+AUTO_RECOVER_METHODS = (
+    "container_kill", "host_reboot",
+    "network_outage_20", "network_outage_50",
+)
+
+# Scenario enumeration:
+#   3 role categories × P(M,2) ordered distinct-method pairs
+#   = 3 × M·(M-1) scenarios per cycle.
+# Examples:
+#   M=5 → 3 × 20 = 60
+#   M=6 → 3 × 30 = 90
+# Role categories (relative ring-distance preserved; the actual node pair
+# is re-rolled randomly per scenario at execution time so the soak hits
+# many different concrete pairs while keeping the topological distance
+# fixed for each category).
+# Order matters: the soak walks the full method permutation for one
+# category before moving on. "unrelated" runs first so the outage with
+# the widest blast-radius coverage (two nodes from different LVS rings)
+# exercises the cluster before the within-ring categories.
+#   - unrelated         : pair sharing no LVS in any role — ring-distance
+#                         ≥ 3 (≥ 2 nodes between).
+#   - primary_tertiary  : primary + tertiary of same LVS — ring-distance
+#                         2 (exactly one node between); no replication
+#                         edge connects them (jumps over the secondary).
+#   - primary_secondary : primary + secondary of same LVS — ring-distance
+#                         1 (direct successor). Represents both (P,S) and
+#                         (S,T): two adjacent replicas of the same LVS
+#                         going down is structurally symmetric regardless
+#                         of which end.
+# Same-method pairs (graceful,graceful etc.) are not enumerated — the
+# user-agreed count 30 for 6 methods equals 6·5, not 6².
+ROLE_CATEGORIES = ("unrelated", "primary_tertiary", "primary_secondary")
+
+
+def parse_args():
+    default_metadata = Path(__file__).with_name("cluster_metadata_base.json")
+    default_log_dir = Path(__file__).parent
+
+    parser = argparse.ArgumentParser(
+        description=(
+            "Run a long fio soak against the lab cluster while cycling random "
+            "two-node outages with mixed outage methods. Each iteration: start "
+            "fio on every volume, apply the outage pair, fault-check fio, "
+            "stop fio, optionally rebuild one volume, then wait for the cluster "
+            "to settle UNLOADED (no IO pressure on rebalance/data-migration). "
+            "Trades 'fio always running' for fast iteration time."
+        )
+    )
+    parser.add_argument("--metadata", default=str(default_metadata), help="Path to cluster metadata JSON.")
+    parser.add_argument("--pool", default="pool01", help="Pool name for volume creation.")
+    parser.add_argument("--expected-node-count", type=int, default=4, help="Required storage node count.")
+    parser.add_argument("--volume-size", default="25G", help="Volume size to create per storage node.")
+    parser.add_argument("--runtime", type=int, default=72000, help="fio runtime in seconds.")
+    parser.add_argument("--restart-timeout", type=int, default=900, help="Seconds to wait for restarted nodes.")
+    parser.add_argument("--rebalance-timeout", type=int, default=7200, help="Seconds to wait for rebalancing.")
+    parser.add_argument("--poll-interval", type=int, default=10, help="Poll interval for health checks.")
+    parser.add_argument(
+        "--shutdown-gap",
+        type=int,
+        default=0,
+        help="Optional delay between shutting down the two selected nodes.",
+    )
+    parser.add_argument(
+        "--log-file",
+        default=str(default_log_dir / f"aws_dual_node_outage_soak_{time.strftime('%Y%m%d_%H%M%S')}.log"),
+        help="Single log file for script and CLI output.",
+    )
+    parser.add_argument(
+        "--run-on-mgmt",
+        action="store_true",
+        help="Run management-node commands locally instead of over SSH.",
+    )
+    parser.add_argument(
+        "--password",
+        default=None,
+        help=(
+            "Root password shared by mgmt+storage nodes. If omitted, falls "
+            "back to the SBCLI_ROOT_PASSWORD env var, then to an interactive "
+            "prompt. Avoid the flag form on shared hosts (visible in `ps`)."
+        ),
+    )
+    parser.add_argument(
+        "--methods",
+        default=",".join(OUTAGE_METHODS),
+        help=(
+            "Comma-separated subset of outage methods to pick from per iteration. "
+            f"Choices: {','.join(OUTAGE_METHODS)}. "
+            "Each iteration picks 2 distinct methods at random."
+        ),
+    )
+    parser.add_argument(
+        "--auto-recover-wait",
+        type=int,
+        default=900,
+        help=(
+            "Seconds to wait for a node to return online after a container_kill "
+            "or host_reboot outage (no sbctl restart is issued)."
+        ),
+    )
+    parser.add_argument(
+        "--cycles",
+        type=int,
+        default=1,
+        help=(
+            "Number of passes through the full deterministic scenario list. "
+            "Each pass covers C(N,2)*M² scenarios (250 for 5 nodes × 5 methods; "
+            "540 for 6 × 6). 0 means loop forever."
+        ),
+    )
+    parser.add_argument(
+        "--shuffle-scenarios",
+        action="store_true",
+        help=(
+            "Shuffle scenario order per cycle (seeded deterministically off "
+            "the cycle index). Useful when a full cycle is too long to finish "
+            "and you want even coverage across early/mid/late pairs."
+        ),
+    )
+    parser.add_argument(
+        "--start-at",
+        type=int,
+        default=1,
+        help=(
+            "Start the first cycle at scenario N (1-indexed). Scenarios "
+            "1..N-1 are skipped in the first cycle only; subsequent cycles "
+            "run from scenario 1 as normal. Use to resume after a failure — "
+            "e.g. --start-at 60 if scenario 60 is the one that failed."
+        ),
+    )
+    parser.add_argument(
+        "--churn-every-n-iters",
+        type=int,
+        default=3,
+        help=(
+            "Rebuild one randomly-chosen volume every N outage iterations, "
+            "in the unloaded window between fio-stop and rebalance-wait. "
+            "Default 3. Set to 0 to disable; --no-churn is an explicit alias."
+        ),
+    )
+    parser.add_argument(
+        "--no-churn",
+        action="store_true",
+        help="Disable per-iteration volume churn entirely.",
+    )
+    args = parser.parse_args()
+    methods = [m.strip() for m in args.methods.split(",") if m.strip()]
+    bad = [m for m in methods if m not in OUTAGE_METHODS]
+    if bad:
+        parser.error(f"Unknown outage method(s): {bad}. Choices: {list(OUTAGE_METHODS)}")
+    if not methods:
+        parser.error("At least one outage method must be enabled")
+    args.methods = methods
+    if args.churn_every_n_iters < 0:
+        parser.error("--churn-every-n-iters must be >= 0")
+    args.password = resolve_password(args.password)
+    if not args.password:
+        parser.error("Empty root password; supply --password, SBCLI_ROOT_PASSWORD, or answer the prompt.")
+    if subprocess.run(["which", "sshpass"], capture_output=True).returncode != 0 and paramiko is None:
+        parser.error(
+            "Neither paramiko nor sshpass is available on this host. "
+            "Install one ('pip3 install --user paramiko' or 'sudo dnf install sshpass') "
+            "before running."
+        )
+    return args
+
+
+def resolve_password(cli_value):
+    if cli_value:
+        return cli_value
+    env_value = os.environ.get("SBCLI_ROOT_PASSWORD")
+    if env_value:
+        return env_value
+    return getpass.getpass("Root password for lab nodes (.210, .201-.204): ")
+
+
+def load_metadata(path):
+    with open(path, "r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+class Logger:
+    def __init__(self, path):
+        self.path = path
+        self.lock = threading.Lock()
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+
+    def log(self, message):
+        line = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {message}"
+        with self.lock:
+            print(line, flush=True)
+            with open(self.path, "a", encoding="utf-8") as handle:
+                handle.write(line + "\n")
+
+    def block(self, header, content):
+        if content is None:
+            return
+        text = content.rstrip()
+        if not text:
+            return
+        with self.lock:
+            with open(self.path, "a", encoding="utf-8") as handle:
+                handle.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {header}\n")
+                handle.write(text + "\n")
+
+
+class RemoteCommandError(RuntimeError):
+    pass
+
+
+class RemoteHost:
+    def __init__(self, hostname, user, password, logger, name):
+        self.hostname = hostname
+        self.user = user
+        self.password = password
+        self.logger = logger
+        self.name = name
+        self.client = None
+        self.connect()
+
+    def connect(self):
+        if paramiko is None:
+            return
+        self.close()
+        last_error = None
+        for attempt in range(1, 16):
+            try:
+                client = paramiko.SSHClient()
+                client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                client.connect(
+                    hostname=self.hostname,
+                    username=self.user,
+                    password=self.password,
+                    timeout=15,
+                    banner_timeout=15,
+                    auth_timeout=15,
+                    allow_agent=False,
+                    look_for_keys=False,
+                )
+                transport = client.get_transport()
+                if transport is not None:
+                    transport.set_keepalive(30)
+                self.client = client
+                return
+            except Exception as exc:
+                last_error = exc
+                self.logger.log(
+                    f"{self.name}: SSH attempt {attempt}/15 failed to {self.hostname}: {exc}"
+                )
+                time.sleep(5)
+        raise RemoteCommandError(f"{self.name}: failed to connect to {self.hostname}: {last_error}")
+
+    def run(self, command, timeout=600, check=True, label=None):
+        if paramiko is None:
+            return self._run_via_ssh_cli(command, timeout=timeout, check=check, label=label)
+        if self.client is None:
+            self.connect()
+        label = label or command
+        self.logger.log(f"{self.name}: RUN {label}")
+        try:
+            stdin, stdout, stderr = self.client.exec_command(command, timeout=timeout)
+            stdout_text = stdout.read().decode("utf-8", errors="replace")
+            stderr_text = stderr.read().decode("utf-8", errors="replace")
+            rc = stdout.channel.recv_exit_status()
+        except Exception as exc:
+            self.logger.log(f"{self.name}: command transport failure for {label}: {exc}; reconnecting once")
+            self.connect()
+            stdin, stdout, stderr = self.client.exec_command(command, timeout=timeout)
+            stdout_text = stdout.read().decode("utf-8", errors="replace")
+            stderr_text = stderr.read().decode("utf-8", errors="replace")
+            rc = stdout.channel.recv_exit_status()
+        self.logger.block(f"{self.name}: STDOUT for {label}", stdout_text)
+        self.logger.block(f"{self.name}: STDERR for {label}", stderr_text)
+        if check and rc != 0:
+            raise RemoteCommandError(
+                f"{self.name}: command failed with rc={rc}: {label}"
+            )
+        return rc, stdout_text, stderr_text
+
+    def _run_via_ssh_cli(self, command, timeout=600, check=True, label=None):
+        label = label or command
+        self.logger.log(f"{self.name}: RUN {label}")
+        ssh_cmd = [
+            "sshpass", "-e",
+            "ssh",
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "UserKnownHostsFile=/dev/null",
+            "-o", "LogLevel=ERROR",
+            "-o", "ConnectTimeout=15",
+            "-o", "ServerAliveInterval=30",
+            f"{self.user}@{self.hostname}",
+            command,
+        ]
+        env = os.environ.copy()
+        env["SSHPASS"] = self.password
+        try:
+            completed = subprocess.run(
+                ssh_cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+                env=env,
+            )
+        except subprocess.TimeoutExpired as exc:
+            stdout_text = exc.stdout or ""
+            stderr_text = exc.stderr or ""
+            self.logger.block(f"{self.name}: STDOUT for {label}", stdout_text)
+            self.logger.block(f"{self.name}: STDERR for {label}", stderr_text)
+            raise RemoteCommandError(f"{self.name}: command timed out: {label}") from exc
+        stdout_text = completed.stdout or ""
+        stderr_text = completed.stderr or ""
+        rc = completed.returncode
+        self.logger.block(f"{self.name}: STDOUT for {label}", stdout_text)
+        self.logger.block(f"{self.name}: STDERR for {label}", stderr_text)
+        if check and rc != 0:
+            raise RemoteCommandError(f"{self.name}: command failed with rc={rc}: {label}")
+        return rc, stdout_text, stderr_text
+
+    def close(self):
+        if self.client is not None:
+            self.client.close()
+            self.client = None
+
+
+class LocalHost:
+    def __init__(self, logger, name):
+        self.logger = logger
+        self.name = name
+
+    def run(self, command, timeout=600, check=True, label=None):
+        label = label or command
+        self.logger.log(f"{self.name}: RUN {label}")
+        try:
+            completed = subprocess.run(
+                ["/bin/bash", "-lc", command],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            stdout_text = exc.stdout or ""
+            stderr_text = exc.stderr or ""
+            self.logger.block(f"{self.name}: STDOUT for {label}", stdout_text)
+            self.logger.block(f"{self.name}: STDERR for {label}", stderr_text)
+            raise RemoteCommandError(f"{self.name}: command timed out: {label}") from exc
+        stdout_text = completed.stdout or ""
+        stderr_text = completed.stderr or ""
+        rc = completed.returncode
+        self.logger.block(f"{self.name}: STDOUT for {label}", stdout_text)
+        self.logger.block(f"{self.name}: STDERR for {label}", stderr_text)
+        if check and rc != 0:
+            raise RemoteCommandError(f"{self.name}: command failed with rc={rc}: {label}")
+        return rc, stdout_text, stderr_text
+
+    def close(self):
+        return
+
+
+# Number of fio worker processes per --name. Must match --numjobs in
+# start_fio(). --group_reporting aggregates all workers into one report,
+# so a single fio summary + per-run stderr stream is sufficient to
+# diagnose any fio fault.
+FIO_NUMJOBS = 4
+
+
+@dataclass
+class FioJob:
+    volume_id: str
+    volume_name: str
+    mount_point: str
+    fio_log: str       # fio's --output summary file (written on exit)
+    fio_stderr: str    # captured stdout+stderr during the run (progress,
+                       # errors, "max_latency exceeded" messages). This is
+                       # the primary source of ground truth for fio faults.
+    rc_file: str
+    pid: int
+    fio_name: str      # matches --name=<fio_name> in the fio command line
+
+
+class TestRunError(RuntimeError):
+    pass
+
+
+class SoakRunner:
+    def __init__(self, args, metadata, logger):
+        self.args = args
+        self.metadata = metadata
+        self.logger = logger
+        self.user = metadata["user"]
+        self.password = args.password
+        self.run_id = time.strftime("%Y%m%d_%H%M%S")
+        if args.run_on_mgmt:
+            self.mgmt = LocalHost(logger, "mgmt")
+        else:
+            self.mgmt = RemoteHost(metadata["mgmt"]["public_ip"], self.user, self.password, logger, "mgmt")
+        client_entry = metadata["clients"][0]
+        if args.run_on_mgmt:
+            client_addr = client_entry.get("private_ip") or client_entry["public_ip"]
+        else:
+            client_addr = client_entry["public_ip"]
+        self.client = RemoteHost(client_addr, self.user, self.password, logger, "client")
+        self.cluster_id = metadata.get("cluster_uuid") or ""
+        self.fio_jobs = []
+        # Stored so the churn cycle can pick a random volume to rebuild.
+        self.volumes = []
+        self.created_volume_ids = []
+        # Mixed-outage state
+        self.methods = list(args.methods)
+        # On multipath clusters, network-layer coverage is provided by the
+        # inter-iteration single-NIC chaos. Dropping all data NICs on a node
+        # (network_outage_*) is a simple-cluster-only scenario.
+        if self._is_multipath():
+            filtered = [m for m in self.methods if not m.startswith("network_outage_")]
+            dropped = [m for m in self.methods if m not in filtered]
+            if dropped:
+                self.logger.log(
+                    f"multipath cluster detected: excluding {dropped} from outage methods"
+                )
+            if not filtered:
+                raise TestRunError(
+                    "No outage methods remain after excluding network_outage_* "
+                    "on multipath cluster; pass --methods with at least one "
+                    "non-network_outage method"
+                )
+            self.methods = filtered
+        self.node_hosts = {}  # uuid -> RemoteHost (private_ip of storage node)
+        self.node_ip_map = self._build_node_ip_map()
+        # Counter incremented by every churn cycle; embedded in fio --name and
+        # the rebuilt volume name so logs/pkill targets remain unique across
+        # iterations even when the same volume index is rebuilt repeatedly.
+        self.churn_counter = 0
+        self.mount_root = None
+
+    def close(self):
+        self.client.close()
+        self.mgmt.close()
+        for host in self.node_hosts.values():
+            try:
+                host.close()
+            except Exception:
+                pass
+
+    def _build_node_ip_map(self):
+        """Return {uuid: private_ip} for every storage node we know about."""
+        ip_map = {}
+        topology = self.metadata.get("topology") or {}
+        for node in topology.get("nodes", []):
+            uuid = node.get("uuid")
+            ip = node.get("management_ip") or node.get("private_ip")
+            if uuid and ip:
+                ip_map[uuid] = ip
+        # Fallback: pair storage_nodes list with sbctl-returned UUIDs by mgmt IP,
+        # which is done lazily in _resolve_node_ip below.
+        return ip_map
+
+    def _resolve_node_ip(self, uuid):
+        """Return the private/mgmt IP for a storage node UUID, refreshing via
+        sbctl if we haven't seen it in metadata."""
+        ip = self.node_ip_map.get(uuid)
+        if ip:
+            return ip
+        # Try fetching via sbctl sn list JSON.
+        nodes = self.sbctl("sn list --json", json_output=True)
+        for node in nodes:
+            candidate_ip = (
+                node.get("Management IP")
+                or node.get("Mgmt IP")
+                or node.get("mgmt_ip")
+                or node.get("management_ip")
+            )
+            if node.get("UUID") == uuid and candidate_ip:
+                self.node_ip_map[uuid] = candidate_ip
+                return candidate_ip
+        raise TestRunError(f"Cannot resolve storage-node IP for UUID {uuid}")
+
+    def _node_host(self, uuid):
+        """Lazily create a RemoteHost for a storage node identified by UUID."""
+        if uuid in self.node_hosts:
+            return self.node_hosts[uuid]
+        ip = self._resolve_node_ip(uuid)
+        host = RemoteHost(ip, self.user, self.password, self.logger, f"sn[{ip}]")
+        self.node_hosts[uuid] = host
+        return host
+
+    def sbctl(self, args, timeout=600, json_output=False):
+        command = "sudo /usr/local/bin/sbctl -d " + args
+        _, stdout_text, stderr_text = self.mgmt.run(
+            command,
+            timeout=timeout,
+            check=True,
+            label=f"sbctl {args}",
+        )
+        if not json_output:
+            return stdout_text
+        for candidate in (stdout_text, stderr_text, stdout_text + "\n" + stderr_text):
+            candidate = candidate.strip()
+            if not candidate:
+                continue
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError:
+                pass
+            decoder = json.JSONDecoder()
+            final_payloads = []
+            list_payloads = []
+            dict_payloads = []
+            for start, char in enumerate(candidate):
+                if char not in "[{":
+                    continue
+                try:
+                    obj, end = decoder.raw_decode(candidate[start:])
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(obj, (dict, list)):
+                    continue
+                if not candidate[start + end:].strip():
+                    final_payloads.append(obj)
+                elif isinstance(obj, list):
+                    list_payloads.append(obj)
+                else:
+                    dict_payloads.append(obj)
+            if final_payloads:
+                return final_payloads[-1]
+            if list_payloads:
+                return list_payloads[-1]
+            if dict_payloads:
+                return dict_payloads[-1]
+        raise TestRunError(f"Failed to parse JSON from sbctl {args}")
+
+    def ensure_prerequisites(self):
+        self.logger.log(f"Using password auth as {self.user}; paramiko={'yes' if paramiko else 'no (sshpass fallback)'}")
+        self.client.run(
+            "if command -v dnf >/dev/null 2>&1; then "
+            "sudo dnf install -y nvme-cli fio xfsprogs; "
+            "else sudo apt-get update && sudo apt-get install -y nvme-cli fio xfsprogs; fi",
+            timeout=1800,
+            label="install client packages",
+        )
+        self.client.run("sudo modprobe nvme_tcp", timeout=60, label="load nvme_tcp")
+
+    def get_cluster_id(self):
+        if self.cluster_id:
+            return self.cluster_id
+        clusters = self.sbctl("cluster list --json", json_output=True)
+        if not clusters:
+            raise TestRunError("No clusters returned by sbctl cluster list")
+        self.cluster_id = clusters[0]["UUID"]
+        return self.cluster_id
+
+    def get_nodes(self):
+        nodes = self.sbctl("sn list --json", json_output=True)
+        parsed = []
+        for node in nodes:
+            parsed.append(
+                {
+                    "uuid": node["UUID"],
+                    "status": str(node.get("Status", "")).lower(),
+                    "mgmt_ip": node.get("Mgmt IP") or node.get("mgmt_ip") or "",
+                    "hostname": node.get("Hostname") or "",
+                }
+            )
+        return parsed
+
+    def ensure_expected_nodes(self):
+        nodes = self.get_nodes()
+        if len(nodes) != self.args.expected_node_count:
+            raise TestRunError(
+                f"Expected {self.args.expected_node_count} storage nodes, found {len(nodes)}. "
+                f"Update metadata or pass --expected-node-count."
+            )
+        return nodes
+
+    def assert_cluster_not_suspended(self):
+        clusters = self.sbctl("cluster list --json", json_output=True)
+        if not clusters:
+            raise TestRunError("Cluster list returned no rows")
+        status = str(clusters[0].get("Status", "")).lower()
+        if status == "suspended":
+            raise TestRunError("Cluster is suspended")
+        return status
+
+    def wait_for_all_online(self, target_nodes=None, timeout=None):
+        timeout = timeout or self.args.restart_timeout
+        expected = self.args.expected_node_count
+        target_nodes = set(target_nodes or [])
+        started = time.time()
+        while time.time() - started < timeout:
+            self.assert_cluster_not_suspended()
+            nodes = self.ensure_expected_nodes()
+            statuses = {node["uuid"]: node["status"] for node in nodes}
+            offline = [uuid for uuid, status in statuses.items() if status != "online"]
+            unaffected_bad = [
+                uuid for uuid, status in statuses.items()
+                if uuid not in target_nodes and status != "online"
+            ]
+            if unaffected_bad:
+                raise TestRunError(
+                    "Unaffected nodes are not online: "
+                    + ", ".join(f"{uuid}:{statuses[uuid]}" for uuid in unaffected_bad)
+                )
+            if not offline and len(statuses) == expected:
+                return nodes
+            self.logger.log(
+                "Waiting for all nodes online: "
+                + ", ".join(f"{uuid}:{status}" for uuid, status in statuses.items())
+            )
+            time.sleep(self.args.poll_interval)
+        raise TestRunError("Timed out waiting for nodes to return online")
+
+    def wait_for_cluster_stable(self):
+        cluster_id = self.get_cluster_id()
+        started = time.time()
+        while time.time() - started < self.args.rebalance_timeout:
+            cluster_list = self.sbctl("cluster list --json", json_output=True)
+            status = str(cluster_list[0].get("Status", "")).lower()
+            if status == "suspended":
+                raise TestRunError("Cluster entered suspended state")
+            cluster_info = self.sbctl(f"cluster get {cluster_id}", json_output=True)
+            rebalancing = bool(cluster_info.get("is_re_balancing", False))
+            nodes = self.ensure_expected_nodes()
+            node_statuses = {node["uuid"]: node["status"] for node in nodes}
+            if status == "active" and not rebalancing and all(
+                state == "online" for state in node_statuses.values()
+            ):
+                self.logger.log("Cluster stable: ACTIVE, online, not rebalancing")
+                return
+            self.logger.log(
+                "Waiting for cluster stability: "
+                f"status={status}, rebalancing={rebalancing}, "
+                + ", ".join(f"{uuid}:{state}" for uuid, state in node_statuses.items())
+            )
+            time.sleep(self.args.poll_interval)
+        raise TestRunError("Timed out waiting for cluster rebalancing to finish")
+
+    def get_active_tasks(self):
+        cluster_id = self.get_cluster_id()
+        script = (
+            "import json; "
+            "from simplyblock_core import db_controller; "
+            "from simplyblock_core.models.job_schedule import JobSchedule; "
+            "db = db_controller.DBController(); "
+            f"tasks = db.get_job_tasks({cluster_id!r}, reverse=False); "
+            "out = [t.get_clean_dict() for t in tasks "
+            "if t.status != JobSchedule.STATUS_DONE and not getattr(t, 'canceled', False)]; "
+            "print(json.dumps(out))"
+        )
+        out = self.mgmt.run(
+            f"sudo python3 -c {shlex.quote(script)}",
+            timeout=60,
+            label="list active tasks",
+        )[1].strip()
+        return json.loads(out or "[]")
+
+    def wait_for_no_active_tasks(self, reason):
+        started = time.time()
+        while time.time() - started < self.args.rebalance_timeout:
+            self.assert_cluster_not_suspended()
+            active_tasks = self.get_active_tasks()
+            if not active_tasks:
+                return
+            details = ", ".join(
+                f"{task.get('function_name')}:{task.get('status')}:{task.get('node_id') or task.get('device_id')}"
+                for task in active_tasks
+            )
+            self.logger.log(f"Waiting before {reason}; active tasks: {details}")
+            time.sleep(self.args.poll_interval)
+        raise TestRunError(f"Timed out waiting for active tasks to finish before {reason}")
+
+    @staticmethod
+    def _is_data_migration_task(task):
+        function_name = str(task.get("function_name", "")).lower()
+        task_name = str(task.get("task_name", "")).lower()
+        task_type = str(task.get("task_type", "")).lower()
+        haystack = " ".join([function_name, task_name, task_type])
+        markers = (
+            "migration",
+            "rebalanc",
+            "sync",
+        )
+        return any(marker in haystack for marker in markers)
+
+    def wait_for_data_migration_complete(self, reason):
+        started = time.time()
+        while time.time() - started < self.args.rebalance_timeout:
+            self.assert_cluster_not_suspended()
+            active_tasks = self.get_active_tasks()
+            migration_tasks = [task for task in active_tasks if self._is_data_migration_task(task)]
+            if not migration_tasks:
+                return
+            details = ", ".join(
+                f"{task.get('function_name')}:{task.get('status')}:{task.get('node_id') or task.get('device_id')}"
+                for task in migration_tasks
+            )
+            self.logger.log(f"Waiting before {reason}; data migration tasks: {details}")
+            time.sleep(self.args.poll_interval)
+        raise TestRunError(
+            f"Timed out waiting for data migration tasks to finish before {reason}"
+        )
+
+    def sbctl_allow_failure(self, args, timeout=600):
+        command = "sudo /usr/local/bin/sbctl -d " + args
+        rc, stdout_text, stderr_text = self.mgmt.run(
+            command,
+            timeout=timeout,
+            check=False,
+            label=f"sbctl {args}",
+        )
+        return rc, stdout_text, stderr_text
+
+    def shutdown_with_migration_retry(self, node_id):
+        while True:
+            rc, stdout_text, stderr_text = self.sbctl_allow_failure(
+                f"sn shutdown {node_id}",
+                timeout=300,
+            )
+            if rc == 0:
+                return
+            output = f"{stdout_text}\n{stderr_text}".lower()
+            retry_markers = (
+                "migration",
+                "migrat",
+                "rebalanc",
+                "active task",
+                "running task",
+                "in_progress",
+                "in progress",
+            )
+            if any(marker in output for marker in retry_markers):
+                self.logger.log(
+                    f"Shutdown of {node_id} blocked by migration/rebalance/task; retrying in 15s"
+                )
+                time.sleep(15)
+                continue
+            raise RemoteCommandError(
+                f"mgmt: command failed with rc={rc}: sbctl sn shutdown {node_id}"
+            )
+
+    def prepare_client(self):
+        home = "/root" if self.user == "root" else posixpath.join("/home", self.user)
+        mount_root = posixpath.join(home, f"lab_outage_soak_{self.run_id}")
+        command = (
+            "sudo pkill -f '[f]io --name=aws_dual_soak_' || true\n"
+            f"sudo mkdir -p {shlex.quote(mount_root)}\n"
+            f"sudo chown {shlex.quote(self.user)}:{shlex.quote(self.user)} {shlex.quote(mount_root)}\n"
+        )
+        self.client.run(f"bash -lc {shlex.quote(command)}", timeout=120, label="prepare client workspace")
+        return mount_root
+
+    def extract_uuid(self, text):
+        for line in reversed(text.splitlines()):
+            stripped = line.strip()
+            if UUID_RE.fullmatch(stripped):
+                return stripped
+        raise TestRunError(f"Failed to extract standalone UUID from output: {text}")
+
+    def _create_one_volume(self, volume_name, node_uuid, index):
+        """Create one lvol bound to ``node_uuid`` and return its volume dict.
+
+        Retries inside the rebalance window if the LVStore is being recreated
+        or while a rebalance / data migration is in flight, matching the
+        behaviour of the bulk ``create_volumes`` path.
+        """
+        volume_id = None
+        started = time.time()
+        while time.time() - started < self.args.rebalance_timeout:
+            self.wait_for_all_online(timeout=self.args.restart_timeout)
+            self.wait_for_cluster_stable()
+            output = self.sbctl(
+                f"lvol add {volume_name} {self.args.volume_size} {self.args.pool} --host-id {node_uuid}"
+            )
+            if "ERROR:" in output or "LVStore is being recreated" in output:
+                self.logger.log(f"Volume create for {volume_name} deferred: {output.strip()}")
+                time.sleep(self.args.poll_interval)
+                continue
+            volume_id = self.extract_uuid(output)
+            break
+        if volume_id is None:
+            raise TestRunError(f"Timed out creating volume {volume_name} on node {node_uuid}")
+        self.created_volume_ids.append(volume_id)
+        self.logger.log(f"Created volume {volume_name} ({volume_id}) on node {node_uuid}")
+        return {
+            "index": index,
+            "volume_name": volume_name,
+            "volume_id": volume_id,
+            "node_uuid": node_uuid,
+        }
+
+    def create_volumes(self, nodes):
+        self.logger.log(
+            f"Creating {len(nodes)} volumes of size {self.args.volume_size}, one per storage node"
+        )
+        volumes = []
+        for index, node in enumerate(nodes, start=1):
+            volume_name = f"aws_dual_soak_{self.run_id}_v{index}"
+            volumes.append(self._create_one_volume(volume_name, node["uuid"], index))
+        return volumes
+
+    def connect_and_mount_volumes(self, volumes, mount_root):
+        self.logger.log("Connecting volumes to client and preparing filesystems")
+        for volume in volumes:
+            self._connect_and_mount_one(volume, mount_root)
+
+    def _connect_and_mount_one(self, volume, mount_root):
+        """Connect, mkfs, mount a single volume. Mutates ``volume`` to add
+        mount_point / fio_log / fio_stderr / rc_file / nqn keys.
+
+        Saving ``nqn`` lets the churn cycle disconnect via ``nvme disconnect
+        -n <nqn>`` without having to re-derive it from the device path.
+        """
+        connect_output = self.sbctl(f"lvol connect {volume['volume_id']}")
+        connect_commands = []
+        for line in connect_output.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("sudo nvme connect"):
+                connect_commands.append(stripped)
+        if not connect_commands:
+            raise TestRunError(f"No nvme connect command returned for {volume['volume_id']}")
+        nqn = None
+        for cmd in connect_commands:
+            m = NQN_RE.search(cmd)
+            if m:
+                nqn = m.group(1)
+                break
+        if nqn is None:
+            raise TestRunError(
+                f"Failed to parse NQN from lvol connect output for {volume['volume_id']}"
+            )
+        volume["nqn"] = nqn
+        successful_connects = 0
+        failed_connects = []
+        for connect_cmd in connect_commands:
+            try:
+                self.client.run(connect_cmd, timeout=120, label=f"connect {volume['volume_id']}")
+                successful_connects += 1
+            except TestRunError as exc:
+                failed_connects.append(str(exc))
+                self.logger.log(f"Path connect failed for {volume['volume_id']}: {exc}")
+        if successful_connects == 0:
+            raise TestRunError(
+                f"No nvme paths connected for {volume['volume_id']}: {'; '.join(failed_connects)}"
+            )
+        if failed_connects:
+            self.logger.log(
+                f"Continuing with {successful_connects}/{len(connect_commands)} connected paths "
+                f"for {volume['volume_id']}"
+            )
+        volume["mount_point"] = posixpath.join(mount_root, f"vol{volume['index']}")
+        volume["fio_log"] = posixpath.join(mount_root, f"fio_vol{volume['index']}.log")
+        volume["fio_stderr"] = posixpath.join(mount_root, f"fio_vol{volume['index']}.stderr")
+        volume["rc_file"] = posixpath.join(mount_root, f"fio_vol{volume['index']}.rc")
+        find_and_mount = (
+            "set -euo pipefail\n"
+            f"dev=$(readlink -f /dev/disk/by-id/*{volume['volume_id']}* | head -n 1)\n"
+            "if [ -z \"$dev\" ]; then\n"
+            f"  echo 'Failed to locate NVMe device for {volume['volume_id']}' >&2\n"
+            "  exit 1\n"
+            "fi\n"
+            f"sudo mkfs.xfs -f \"$dev\"\n"
+            f"sudo mkdir -p {shlex.quote(volume['mount_point'])}\n"
+            f"sudo mount \"$dev\" {shlex.quote(volume['mount_point'])}\n"
+            f"sudo chown {shlex.quote(self.user)}:{shlex.quote(self.user)} {shlex.quote(volume['mount_point'])}\n"
+        )
+        self.client.run(
+            f"bash -lc {shlex.quote(find_and_mount)}",
+            timeout=600,
+            label=f"format and mount {volume['volume_id']}",
+        )
+
+    def _build_fio_name(self, index, churn_id):
+        # Names embed both the volume index and the churn counter so the name
+        # is unique even after a churn replaces a volume — avoids prefix
+        # collisions when pkill -f matches by --name=<name>.
+        return f"aws_dual_soak_v{index}_c{churn_id}"
+
+    def _start_fio_for_volume(self, volume, fio_name):
+        # Capture fio's stdout+stderr to a dedicated file. --output only
+        # writes the aggregate summary on exit; progress lines and error
+        # messages ("fio: max_latency exceeded", IO error details, etc.)
+        # go to stderr during the run. That stream is the authoritative
+        # source for "what went wrong" — surface it on every fault.
+        start_script = (
+            "set -euo pipefail\n"
+            f"rm -f {shlex.quote(volume['rc_file'])} {shlex.quote(volume['fio_stderr'])}\n"
+            "nohup bash -lc "
+            + shlex.quote(
+                f"cd {shlex.quote(volume['mount_point'])} && "
+                f"fio --name={fio_name} --directory={shlex.quote(volume['mount_point'])} "
+                "--direct=1 --rw=randrw --bs=4K --group_reporting --time_based "
+                f"--numjobs={FIO_NUMJOBS} --iodepth=4 --size=4G --runtime={self.args.runtime} "
+                "--ioengine=aiolib --max_latency=20s --exitall_on_error=1 "
+                f"--output={shlex.quote(volume['fio_log'])}; "
+                "rc=$?; "
+                f"echo $rc > {shlex.quote(volume['rc_file'])}"
+            )
+            + f" > {shlex.quote(volume['fio_stderr'])} 2>&1 & echo $!"
+        )
+        _, stdout_text, _ = self.client.run(
+            f"bash -lc {shlex.quote(start_script)}",
+            timeout=60,
+            label=f"start fio {volume['volume_id']}",
+        )
+        pid_text = stdout_text.strip().splitlines()[-1]
+        pid = int(pid_text)
+        job = FioJob(
+            volume_id=volume["volume_id"],
+            volume_name=volume["volume_name"],
+            mount_point=volume["mount_point"],
+            fio_log=volume["fio_log"],
+            fio_stderr=volume["fio_stderr"],
+            rc_file=volume["rc_file"],
+            pid=pid,
+            fio_name=fio_name,
+        )
+        self.logger.log(f"Started fio for {volume['volume_name']} with pid {pid} (name={fio_name})")
+        return job
+
+    def start_fio(self, volumes):
+        self.logger.log("Starting fio on all mounted volumes in parallel")
+        fio_jobs = []
+        for volume in volumes:
+            fio_name = self._build_fio_name(volume["index"], 0)
+            fio_jobs.append(self._start_fio_for_volume(volume, fio_name))
+        self.fio_jobs = fio_jobs
+        # Give fio a few seconds to begin; don't block on worker fork — the
+        # authoritative "fio is in trouble" signal is rc_file / stderr, not
+        # process counts. If fio never issues IO the pre-stop check and
+        # outage cluster-health checks will surface that.
+        time.sleep(5)
+
+    def read_remote_file(self, path):
+        rc, stdout_text, _ = self.client.run(
+            f"bash -lc {shlex.quote(f'cat {shlex.quote(path)}')}",
+            timeout=30,
+            check=False,
+            label=f"read {path}",
+        )
+        if rc != 0:
+            return ""
+        return stdout_text
+
+    # ----- fio fault detection --------------------------------------------
+
+    # Any line in fio_stderr matching one of these (case-sensitive, fixed
+    # string) is treated as a fio fault — even if fio is still running.
+    # ``--max_latency`` violations in particular log "fio: latency of …
+    # exceeds specified max" and do NOT always terminate fio when run
+    # with --group_reporting + --numjobs>1, so a process-still-alive
+    # check alone misses them.
+    FIO_STDERR_ERROR_MARKERS = (
+        "fio: latency of",     # --max_latency violation
+        "fio: io_u error",     # io_u submission/completion error
+        "fio: pid=",           # generic fio per-job error dump
+        "io_u error on file",  # alternate io_u error format
+        "verify failed",       # data verification fault
+        "fio: verify",         # alternate verify error
+        "fio: error",          # generic fio error
+        "Killed",              # bash reports fio got SIGKILL
+        "Terminated",          # bash reports fio got SIGTERM (no churn here)
+    )
+
+    def _read_rc_file(self, job):
+        """Return the rc string if fio's wrapping bash wrote rc_file, else None.
+
+        ``rc_file`` is one of three independent fault signals; see
+        ``_check_fio_fault``.
+        """
+        probe = (
+            f"if [ -f {shlex.quote(job.rc_file)} ]; then "
+            f"cat {shlex.quote(job.rc_file)}; fi"
+        )
+        _, stdout_text, _ = self.client.run(
+            f"bash -lc {shlex.quote(probe)}",
+            timeout=15,
+            check=False,
+            label=f"check rc_file {job.volume_name}",
+        )
+        rc = (stdout_text or "").strip()
+        return rc or None
+
+    def _wrapper_alive(self, job):
+        """Return True iff the wrapping bash that runs fio is still alive.
+
+        ``job.pid`` is the pid printed by ``echo $!`` at start_fio time
+        (the nohup'd bash, parent of fio). If that pid is gone AND no
+        rc_file was written, fio was signalled away and bash never got
+        to record an exit code — that case is a fault, not "still running".
+        """
+        probe = (
+            f"if kill -0 {int(job.pid)} 2>/dev/null; then echo alive; fi"
+        )
+        _, stdout_text, _ = self.client.run(
+            f"bash -lc {shlex.quote(probe)}",
+            timeout=15,
+            check=False,
+            label=f"check wrapper pid {job.volume_name}",
+        )
+        return stdout_text.strip() == "alive"
+
+    def _scan_fio_stderr_for_errors(self, job):
+        """Return matching error lines from fio_stderr (up to 20), or "".
+
+        See FIO_STDERR_ERROR_MARKERS for the list. ``--max_latency``
+        violations in particular are reported here even while fio
+        continues running, so this catches faults the rc_file / pid
+        checks would miss.
+        """
+        if not self.FIO_STDERR_ERROR_MARKERS:
+            return ""
+        grep_args = " ".join(
+            f"-e {shlex.quote(p)}" for p in self.FIO_STDERR_ERROR_MARKERS
+        )
+        grep_cmd = (
+            f"grep -F -m 20 {grep_args} "
+            f"{shlex.quote(job.fio_stderr)} 2>/dev/null || true"
+        )
+        _, stdout_text, _ = self.client.run(
+            f"bash -lc {shlex.quote(grep_cmd)}",
+            timeout=15,
+            check=False,
+            label=f"scan stderr {job.volume_name}",
+        )
+        return stdout_text.strip()
+
+    def _check_fio_fault(self, job):
+        """Detect any fio fault for ``job``. Returns ``(kind, detail)`` or None.
+
+        Three independent signals — ANY one is a fault:
+          * ``exited``: fio's wrapping bash wrote rc_file (any rc, including 0,
+            is a fault mid-run because fio's --runtime is orders of magnitude
+            longer than an outage iteration).
+          * ``missing``: the wrapping bash pid is gone and no rc_file was
+            written — fio was signalled away (or its wrapper died) without
+            recording an exit code.
+          * ``stderr_error``: fio_stderr contains a known fio error marker
+            (max_latency violation, io_u error, verify failure, etc.) — fio
+            may still be running but is degraded; treat it as a fault.
+
+        ``detail`` is a human-readable one-liner. The full stderr/output
+        is dumped via ``_dump_fio_streams`` by the callers.
+        """
+        rc = self._read_rc_file(job)
+        if rc is not None:
+            return ("exited", f"fio exited rc={rc}")
+
+        if not self._wrapper_alive(job):
+            return (
+                "missing",
+                f"fio wrapper pid {job.pid} is gone and no rc_file was written",
+            )
+
+        err = self._scan_fio_stderr_for_errors(job)
+        if err:
+            first_line = err.splitlines()[0][:240]
+            return ("stderr_error", f"stderr error marker: {first_line}")
+
+        return None
+
+    def _dump_fio_streams(self, job, context):
+        """Write fio's captured stderr and --output summary into the soak
+        log so the actual fio error text (max_latency violations, IO
+        errors, "fio: pid=…, err=…, func=…" lines) is visible next to
+        the outage scenario that triggered it."""
+        for label, path, lines in [
+            ("fio stderr",  job.fio_stderr, 200),
+            ("fio summary", job.fio_log,     60),
+        ]:
+            _, body, _ = self.client.run(
+                f"bash -lc {shlex.quote(f'tail -{lines} {shlex.quote(path)} 2>/dev/null || true')}",
+                timeout=30,
+                check=False,
+                label=f"dump {label} {job.volume_name}",
+            )
+            if body.strip():
+                self.logger.block(
+                    f"[{context}] {job.volume_name} {label} ({path}):",
+                    body,
+                )
+            else:
+                self.logger.log(
+                    f"[{context}] {job.volume_name} {label} ({path}): (empty)"
+                )
+
+    def check_fio(self):
+        """Raise if any tracked fio shows a fault.
+
+        Three independent signals are evaluated per ``_check_fio_fault``:
+        rc_file written (fio exited), wrapper pid gone with no rc_file
+        (signalled away), or a fio error marker in stderr (max_latency
+        violation, io_u/verify error, etc.). ANY of these is a fault —
+        fio's ``--runtime`` is orders of magnitude longer than a single
+        outage iteration, and a degraded-but-running fio is just as
+        invalid a result as a dead one.
+
+        On fault, every faulting job's captured stderr and --output
+        summary are dumped into the soak log so the exact fio error
+        lines are visible next to the iteration that triggered them.
+        """
+        faulted = []
+        for job in self.fio_jobs:
+            fault = self._check_fio_fault(job)
+            if fault is not None:
+                faulted.append((job, fault))
+        if not faulted:
+            return
+        for job, (kind, detail) in faulted:
+            self._dump_fio_streams(job, context=f"fio fault [{kind}] {detail}")
+        details = ", ".join(
+            f"{j.volume_name}={kind}:{detail}" for j, (kind, detail) in faulted
+        )
+        raise TestRunError(f"fio fault detected: {details}")
+
+    def ensure_fio_running(self):
+        self.check_fio()
+
+    def stop_fio(self):
+        """Stop every fio process launched by this soak on the client host.
+
+        Called between outage iterations so rebalancing runs unloaded.
+        Before killing, calls ``check_fio`` — any fio that wrote its
+        rc_file is a mid-run exit, which is a fault. Dumps the captured
+        fio stderr/summary into the soak log so the actual fio error
+        text is side-by-side with the outage scenario that triggered it.
+        After the check passes we SIGTERM (short grace window) then
+        SIGKILL; matching by ``fio --name=aws_dual_soak_*`` catches both
+        the bash wrapper and any fio workers.
+        """
+        if not self.fio_jobs:
+            return
+
+        # Pre-kill verification: any fio having exited is a fault.
+        self.check_fio()
+
+        self.logger.log("All fio still running; stopping them between iterations")
+        kill_script = (
+            "set +e\n"
+            "sudo pkill -TERM -f 'fio --name=aws_dual_soak_' 2>/dev/null || true\n"
+            "for i in $(seq 1 15); do\n"
+            "  if ! pgrep -f 'fio --name=aws_dual_soak_' >/dev/null; then\n"
+            "    exit 0\n"
+            "  fi\n"
+            "  sleep 2\n"
+            "done\n"
+            "sudo pkill -KILL -f 'fio --name=aws_dual_soak_' 2>/dev/null || true\n"
+        )
+        self.client.run(
+            f"bash -lc {shlex.quote(kill_script)}",
+            timeout=90,
+            check=False,
+            label="stop fio",
+        )
+        # Drop the job list; start_fio will rebuild it from self.volumes.
+        self.fio_jobs = []
+
+    # ----- single-volume fio + churn ---------------------------------------
+
+    def _disconnect_one_volume(self, volume):
+        nqn = volume.get("nqn")
+        if not nqn:
+            self.logger.log(
+                f"WARNING: no NQN saved for {volume['volume_name']}; skipping nvme disconnect"
+            )
+            return
+        # ``nvme disconnect -n <nqn>`` tears down every controller (path) for
+        # that subsystem in one call, so multipath connections are handled
+        # without a per-path teardown loop.
+        self.client.run(
+            f"sudo nvme disconnect -n {shlex.quote(nqn)}",
+            timeout=60,
+            check=False,
+            label=f"nvme disconnect {volume['volume_name']}",
+        )
+
+    def _unmount_one_volume(self, volume):
+        mount_point = volume.get("mount_point")
+        if not mount_point:
+            return
+        # Try plain unmount first, then -f, then lazy as last resort. We've
+        # already SIGKILLed the fio holding the mount, so plain umount
+        # should succeed on the happy path; the fallbacks only matter if
+        # buffered IO is still draining.
+        umount_script = (
+            f"sudo umount {shlex.quote(mount_point)} 2>/dev/null || "
+            f"sudo umount -f {shlex.quote(mount_point)} 2>/dev/null || "
+            f"sudo umount -l {shlex.quote(mount_point)} 2>/dev/null || true"
+        )
+        self.client.run(
+            f"bash -lc {shlex.quote(umount_script)}",
+            timeout=60,
+            check=False,
+            label=f"umount {volume['volume_name']}",
+        )
+
+    def _delete_one_lvol(self, volume):
+        rc, stdout_text, stderr_text = self.sbctl_allow_failure(
+            f"lvol delete {volume['volume_id']} --force",
+            timeout=600,
+        )
+        if rc != 0:
+            raise TestRunError(
+                f"lvol delete failed for {volume['volume_name']} ({volume['volume_id']}): "
+                f"{stdout_text.strip()} | {stderr_text.strip()}"
+            )
+        if volume["volume_id"] in self.created_volume_ids:
+            self.created_volume_ids.remove(volume["volume_id"])
+
+    def _churn_one_volume(self):
+        """Rebuild one randomly-selected volume.
+
+        Called between iterations, AFTER stop_fio. fio is not running, so
+        no per-job teardown is needed — we just delete + recreate +
+        remount the volume. The next iteration's start_fio() will pick up
+        the fresh volume and start a new fio job for it.
+        """
+        if not self.volumes:
+            return
+        idx = random.randrange(len(self.volumes))
+        old_volume = self.volumes[idx]
+
+        self.churn_counter += 1
+        churn_id = self.churn_counter
+        new_name = f"aws_dual_soak_{self.run_id}_v{old_volume['index']}_c{churn_id}"
+        self.logger.log(
+            f"churn {churn_id}: rebuilding {old_volume['volume_name']} "
+            f"({old_volume['volume_id']}) on node {old_volume['node_uuid']} "
+            f"-> {new_name}"
+        )
+
+        self._unmount_one_volume(old_volume)
+        self._disconnect_one_volume(old_volume)
+        self._delete_one_lvol(old_volume)
+
+        # Recreate on the SAME storage node so the topology used by the
+        # outage scenario list (pinned at startup off role-representative
+        # pairs) doesn't drift.
+        new_volume = self._create_one_volume(
+            new_name,
+            old_volume["node_uuid"],
+            old_volume["index"],
+        )
+        self._connect_and_mount_one(new_volume, self.mount_root)
+
+        self.volumes[idx] = new_volume
+        self.logger.log(
+            f"churn {churn_id}: complete; {new_name} ({new_volume['volume_id']}) "
+            f"will be picked up by next start_fio"
+        )
+
+    # ----- outage methods ---------------------------------------------------
+
+    def _forced_shutdown(self, node_id):
+        """Shutdown with --force; still retry if blocked by migration."""
+        while True:
+            rc, stdout_text, stderr_text = self.sbctl_allow_failure(
+                f"sn shutdown {node_id} --force",
+                timeout=300,
+            )
+            if rc == 0:
+                return
+            output = f"{stdout_text}\n{stderr_text}".lower()
+            retry_markers = (
+                "migration", "migrat", "rebalanc",
+                "active task", "running task",
+                "in_progress", "in progress",
+            )
+            if any(m in output for m in retry_markers):
+                self.logger.log(
+                    f"Forced shutdown of {node_id} blocked by migration/task; retrying in 15s"
+                )
+                time.sleep(15)
+                continue
+            raise RemoteCommandError(
+                f"mgmt: command failed with rc={rc}: sbctl sn shutdown {node_id} --force"
+            )
+
+    def _container_kill(self, node_id):
+        """Kill the SPDK container on the storage node's host. Node is expected
+        to auto-recover; no sbctl restart is issued."""
+        host = self._node_host(node_id)
+        cmd = (
+            "set -euo pipefail; "
+            "cns=$(sudo docker ps --format '{{.Names}}' | grep -E '^spdk_[0-9]+$' || true); "
+            "if [ -z \"$cns\" ]; then echo 'no spdk_* container found' >&2; exit 0; fi; "
+            "for cn in $cns; do echo \"killing $cn\"; sudo docker kill \"$cn\" || true; done"
+        )
+        host.run(
+            f"bash -lc {shlex.quote(cmd)}",
+            timeout=120,
+            check=False,
+            label=f"container_kill {node_id}",
+        )
+
+    def _host_reboot(self, node_id):
+        """Reboot the storage node's host. Node is expected to auto-recover;
+        no sbctl restart is issued."""
+        host = self._node_host(node_id)
+        # nohup + background + sleep so the shell exit beats reboot cleanly
+        cmd = "sudo nohup bash -c 'sleep 2; reboot -f' >/dev/null 2>&1 &"
+        try:
+            host.run(
+                f"bash -lc {shlex.quote(cmd)}",
+                timeout=30,
+                check=False,
+                label=f"host_reboot {node_id}",
+            )
+        except RemoteCommandError as exc:
+            # SSH may drop as the host goes down — not fatal.
+            self.logger.log(f"host_reboot {node_id}: ssh terminated as expected: {exc}")
+        # Drop the cached SSH client; it's going to die anyway.
+        cached = self.node_hosts.pop(node_id, None)
+        if cached is not None:
+            try:
+                cached.close()
+            except Exception:
+                pass
+
+    # --- Multipath NIC chaos ---
+
+    def _is_multipath(self):
+        return bool(self.metadata.get("multipath"))
+
+    def _get_data_nics(self):
+        """Return the list of data NIC names (e.g. ['eth1', 'eth2'])."""
+        nics = self.metadata.get("data_nics")
+        if nics:
+            return nics
+        iface = self.metadata.get("data_iface")
+        if iface:
+            return [iface]
+        return []
+
+    def _network_outage(self, node_id, duration):
+        """Take all data NICs down on one storage node for *duration* seconds,
+        then bring them back up. Simulates a transient network partition of
+        a single node. Node is expected to auto-recover once the NICs return
+        — no sbctl restart is issued."""
+        host = self._node_host(node_id)
+        nics = self._get_data_nics() or ["eth1"]
+        self.logger.log(
+            f"network_outage on {node_id}: dropping {nics} for {duration}s"
+        )
+        for nic in nics:
+            try:
+                host.run(f"sudo ip link set {nic} down", timeout=10, check=False,
+                         label=f"netout down {nic} on {node_id}")
+            except Exception as e:
+                self.logger.log(f"WARNING: failed to down {nic} on {node_id}: {e}")
+        try:
+            time.sleep(duration)
+        finally:
+            for nic in nics:
+                try:
+                    host.run(f"sudo ip link set {nic} up", timeout=10, check=False,
+                             label=f"netout up {nic} on {node_id}")
+                except Exception as e:
+                    self.logger.log(f"WARNING: failed to up {nic} on {node_id}: {e}")
+
+    def _apply_outage(self, node_id, method):
+        self.logger.log(f"Applying outage '{method}' on {node_id}")
+        if method == "graceful":
+            self.shutdown_with_migration_retry(node_id)
+        elif method == "forced":
+            self._forced_shutdown(node_id)
+        elif method == "container_kill":
+            self._container_kill(node_id)
+        elif method == "host_reboot":
+            self._host_reboot(node_id)
+        elif method.startswith("network_outage_"):
+            try:
+                duration = int(method.rsplit("_", 1)[-1])
+            except ValueError:
+                raise TestRunError(f"Unknown outage method: {method}")
+            self._network_outage(node_id, duration)
+        else:
+            raise TestRunError(f"Unknown outage method: {method}")
+
+    def _needs_manual_restart(self, method):
+        return method not in AUTO_RECOVER_METHODS
+
+    def wait_node_leaves_online(self, node_id, timeout=90, poll=2):
+        """Poll sbctl until the control plane observes node_id leaving 'online'.
+        Returns True once any non-online status is seen, False on timeout.
+
+        Why this exists: the CP's health-check loop updates status on its own
+        cadence. If the soak polls wait_for_all_online *before* the CP has
+        noticed the outage, the first poll reports all-online and we return
+        while the target is actually still down. The next iteration then
+        stacks extra outages on a silently-offline node and breaks the FTT
+        budget (see incident: 2026-04-20 iter 17 container_kill on 2870dfa5,
+        CP status transition lagged the soak's first sn-list by ~1 s).
+        """
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                nodes = self.get_nodes()
+            except Exception as exc:
+                self.logger.log(f"wait_node_leaves_online: sn list failed ({exc})")
+                time.sleep(poll)
+                continue
+            status = next(
+                (n["status"] for n in nodes if n["uuid"] == node_id),
+                "unknown",
+            )
+            if status != "online":
+                self.logger.log(
+                    f"CP observed {node_id[:8]} leaving online (now {status})"
+                )
+                return True
+            time.sleep(poll)
+        return False
+
+    def run_outage_pair(self, node1, node2, method1, method2):
+        self.logger.log(
+            f"Outage pair: {node1}={method1} and {node2}={method2}"
+        )
+        # Apply first outage, then optional gap, then second outage.
+        self._apply_outage(node1, method1)
+        if self.args.shutdown_gap:
+            time.sleep(self.args.shutdown_gap)
+        self._apply_outage(node2, method2)
+
+        # Issue sbctl restart only for methods that leave the node in a
+        # "shutdown" state that the CP won't recover on its own.
+        # Retry with backoff: when the other node in the pair used an
+        # auto-recover method (container_kill / host_reboot), it may
+        # still be in_shutdown or in_restart when we try to restart the
+        # manually-recovered peer — the per-cluster guard rejects
+        # concurrent restarts. Retrying gives the auto-recovering node
+        # time to come back.
+        for node_id, method in [(node1, method1), (node2, method2)]:
+            if not self._needs_manual_restart(method):
+                continue
+            deadline = time.time() + self.args.restart_timeout
+            while True:
+                try:
+                    # Emit a RESTART header with the wall-clock timestamp,
+                    # then dump the raw sbctl -d restart stdout below it
+                    # (without per-line timestamp prefix) so the CP trace
+                    # produced by -d lines up with a single moment in time.
+                    self.logger.log(
+                        f"RESTART: {time.strftime('%Y-%m-%d %H:%M:%S')} {node_id}"
+                    )
+                    stdout_text = self.sbctl(f"sn restart {node_id}", timeout=300)
+                    with self.logger.lock:
+                        print(stdout_text, flush=True, end=""
+                              if stdout_text.endswith("\n") else "\n")
+                        with open(self.logger.path, "a", encoding="utf-8") as handle:
+                            handle.write(stdout_text)
+                            if not stdout_text.endswith("\n"):
+                                handle.write("\n")
+                    break
+                except Exception as e:
+                    if time.time() >= deadline:
+                        raise
+                    self.logger.log(
+                        f"Restart of {node_id} failed ({e}), "
+                        f"retrying in 15s (peer may still be recovering)")
+                    time.sleep(15)
+
+        # Before we call wait_for_all_online, make sure the control plane has
+        # actually observed each auto-recover target leaving 'online' state.
+        # Otherwise wait_for_all_online can race the CP: the first sn-list
+        # poll may still report the just-killed node as 'online' (stale),
+        # all statuses look good, and we return immediately — the node is
+        # then in a silent offline state when the next iteration stacks
+        # more outages on top, crossing the FTT budget.
+        # network_outage_* methods can finish before the CP notices; that's
+        # fine (short outages often recover from HA multipath without CP
+        # involvement), so we don't fail if the observation window expires.
+        for node_id, method in [(node1, method1), (node2, method2)]:
+            if method not in AUTO_RECOVER_METHODS:
+                continue
+            if method.startswith("network_outage_"):
+                observed = self.wait_node_leaves_online(node_id, timeout=30)
+                if not observed:
+                    self.logger.log(
+                        f"CP did not observe {node_id[:8]} offline for "
+                        f"{method} within 30s (expected for short NIC drops)"
+                    )
+            else:
+                # container_kill, host_reboot: the node IS down; we must see it.
+                observed = self.wait_node_leaves_online(node_id, timeout=90)
+                if not observed:
+                    self.logger.log(
+                        f"WARN: CP never observed {node_id[:8]} offline after "
+                        f"{method} within 90s; sn-list may be stale"
+                    )
+
+        # For auto-recovery methods, allow a longer wait window since the host
+        # has to reboot / the container has to come back under its supervisor.
+        wait_timeout = self.args.restart_timeout
+        if any(
+            m in AUTO_RECOVER_METHODS for m in (method1, method2)
+        ):
+            wait_timeout = max(wait_timeout, self.args.auto_recover_wait)
+
+        self.wait_for_all_online(
+            target_nodes={node1, node2}, timeout=wait_timeout
+        )
+        # Intentionally no check_fio / wait_for_cluster_stable here: the
+        # outer loop calls check_fio right after this returns, then
+        # stop_fio, then waits for cluster stability unloaded.
+
+    # ----- topology & scenario enumeration ---------------------------------
+
+    def discover_topology(self):
+        """Return {lvs_name: {'primary': uuid, 'secondary': uuid, 'tertiary': uuid}}.
+
+        Queried once at soak startup to identify the 4 role-representative
+        node pairs. Leader takeover mid-soak may shift role assignments;
+        the scenario list is pinned at startup so the 4 chosen pairs stay
+        fixed across retries even if the CP has re-promoted since.
+        """
+        script = (
+            "import json; "
+            "from simplyblock_core import db_controller; "
+            "db = db_controller.DBController(); "
+            "nodes = db.get_storage_nodes(); "
+            "out = {n.lvstore: {"
+            "'primary': n.get_id(), "
+            "'secondary': getattr(n, 'secondary_node_id', '') or '', "
+            "'tertiary': getattr(n, 'tertiary_node_id', '') or ''"
+            "} for n in nodes "
+            "if getattr(n, 'lvstore', '') "
+            "and not getattr(n, 'is_secondary_node', False)}; "
+            "print(json.dumps(out))"
+        )
+        _, stdout_text, _ = self.mgmt.run(
+            f"sudo python3 -c {shlex.quote(script)}",
+            timeout=60,
+            label="discover topology",
+        )
+        for line in reversed((stdout_text or "").strip().splitlines()):
+            line = line.strip()
+            if line.startswith("{"):
+                try:
+                    return json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+        raise TestRunError(
+            f"Failed to parse topology JSON from mgmt; stdout was:\n{stdout_text}"
+        )
+
+    def _validate_topology_for_categories(self):
+        """Verify the pinned topology can supply at least one pair per category.
+
+        Raises TestRunError if:
+          * the pinned topology has no LVS (empty cluster)
+          * no LVS has both primary and secondary (primary_secondary unservable)
+          * no LVS has both primary and tertiary (primary_tertiary unservable)
+          * no unrelated pair exists — in a dense FT=2 ring with N ≤ 4 this
+            is possible; raise so the coverage gap is explicit.
+        """
+        if not self.topology:
+            raise TestRunError("Empty topology; cannot pick representative pairs")
+
+        if not self._candidate_pairs_for_role("secondary"):
+            raise TestRunError(
+                "No LVS in topology has both primary and secondary; "
+                "primary_secondary category is unservable"
+            )
+        if not self._candidate_pairs_for_role("tertiary"):
+            raise TestRunError(
+                "No LVS in topology has both primary and tertiary; "
+                "primary_tertiary category is unservable"
+            )
+
+        all_nodes, lvs_members = self._lvs_membership()
+        if not self._unrelated_pairs(all_nodes, lvs_members):
+            raise TestRunError(
+                "No unrelated node pair found in topology "
+                f"({len(all_nodes)} nodes across {len(lvs_members)} LVSs)"
+            )
+
+    def _candidate_pairs_for_role(self, role_b):
+        """All (primary, role_b) pairs across the pinned topology."""
+        pairs = []
+        for roles in self.topology.values():
+            a = roles.get("primary")
+            b = roles.get(role_b)
+            if a and b:
+                pairs.append((a, b))
+        return pairs
+
+    def _lvs_membership(self):
+        """Return (all_nodes, lvs_members) derived from the pinned topology."""
+        all_nodes = set()
+        lvs_members = []
+        for r in self.topology.values():
+            members = {v for v in r.values() if v}
+            lvs_members.append(members)
+            all_nodes.update(members)
+        return all_nodes, lvs_members
+
+    def _unrelated_pairs(self, all_nodes, lvs_members):
+        """All node pairs that share no LVS in any role."""
+        pairs = []
+        for a, b in itertools.combinations(sorted(all_nodes), 2):
+            if not any(a in m and b in m for m in lvs_members):
+                pairs.append((a, b))
+        return pairs
+
+    def pick_pair_for_category(self, category):
+        """Randomly pick a (node_a, node_b) pair for the given role category.
+
+        Distance preserved per category (so each scenario in a "group" hits
+        the same topological relationship, just on different concrete nodes):
+          - primary_secondary: ring-distance 1 (direct successor)
+          - primary_tertiary:  ring-distance 2 (exactly one node between)
+          - unrelated:         ring-distance ≥ 3 (≥ 2 nodes between)
+        """
+        if category == "unrelated":
+            all_nodes, lvs_members = self._lvs_membership()
+            candidates = self._unrelated_pairs(all_nodes, lvs_members)
+        elif category == "primary_secondary":
+            candidates = self._candidate_pairs_for_role("secondary")
+        elif category == "primary_tertiary":
+            candidates = self._candidate_pairs_for_role("tertiary")
+        else:
+            raise TestRunError(f"Unknown role category: {category}")
+
+        if not candidates:
+            raise TestRunError(
+                f"No candidate pairs available for category {category}"
+            )
+        return random.choice(candidates)
+
+    def build_scenarios(self, nodes):
+        """Enumerate role categories × P(M,2) ordered method pairs.
+
+        Returns a list of dicts with keys: method_a, method_b, category.
+        The actual (a, b) node pair is rolled at iteration time via
+        ``pick_pair_for_category`` so the soak hits many concrete pairs per
+        group while keeping the relative ring-distance fixed per category.
+        Same-method method pairs are NOT included — ordered distinct pairs
+        only, per itertools.permutations(methods, 2).
+        """
+        _ = nodes  # unused: pair picking happens at iteration time
+        scenarios = []
+        for category in ROLE_CATEGORIES:
+            for m_a, m_b in itertools.permutations(self.methods, 2):
+                scenarios.append({
+                    "method_a": m_a,
+                    "method_b": m_b,
+                    "category": category,
+                })
+        method_pair_count = len(self.methods) * (len(self.methods) - 1)
+        self.logger.log(
+            f"Built {len(scenarios)} scenarios: "
+            f"{len(ROLE_CATEGORIES)} role categories × "
+            f"P({len(self.methods)},2)={method_pair_count} ordered method pairs "
+            f"(node pair rolled randomly per scenario)"
+        )
+        return scenarios
+
+    def run(self):
+        self.ensure_prerequisites()
+        nodes = self.ensure_expected_nodes()
+        self.wait_for_all_online(timeout=self.args.restart_timeout)
+        # Wait for the cluster to be fully stable (no in-flight rebalance
+        # or data migration) before starting iterations.
+        self.wait_for_cluster_stable()
+        self.wait_for_data_migration_complete("test start")
+        mount_root = self.prepare_client()
+        # Saved so the churn cycle can mount its newly-created volume back
+        # into the same workspace tree.
+        self.mount_root = mount_root
+        volumes = self.create_volumes(nodes)
+        # Stored so the churn cycle can drive per-volume teardown/rebuild
+        # without re-creating / re-mounting the underlying soak workspace.
+        self.volumes = volumes
+        self.connect_and_mount_volumes(volumes, mount_root)
+
+        # Pin the topology once, before any outages. Leader takeover during
+        # the soak can permanently shift role assignments, but the
+        # representative pairs are fixed at startup so each cycle targets
+        # the same pairs for the same role categories.
+        self.topology = self.discover_topology()
+        self.logger.log(f"Pinned topology: {json.dumps(self.topology, sort_keys=True)}")
+        self._validate_topology_for_categories()
+        self.scenarios = self.build_scenarios(nodes)
+        if not self.scenarios:
+            raise TestRunError("No outage scenarios built; method/node list empty")
+
+        start_at = max(1, self.args.start_at)
+        if start_at > len(self.scenarios):
+            raise TestRunError(
+                f"--start-at {start_at} exceeds scenario count "
+                f"{len(self.scenarios)}; nothing to run"
+            )
+
+        churn_every = 0 if self.args.no_churn else self.args.churn_every_n_iters
+        if churn_every > 0:
+            self.logger.log(
+                f"Volume churn enabled: rebuild one random volume every "
+                f"{churn_every} iteration(s) in the unloaded settle window"
+            )
+        else:
+            self.logger.log("Volume churn disabled")
+
+        # iteration counter is aligned to scenario_idx: when --start-at N is
+        # used, the first executed scenario logs as iteration=N so post-hoc
+        # grep for "iteration 60" finds the resumed scenario and its prior
+        # failure side by side.
+        iteration = start_at - 1
+        cycle = 0
+        while True:
+            cycle += 1
+            if self.args.cycles and cycle > self.args.cycles:
+                self.logger.log(
+                    f"Completed {cycle - 1} full cycle(s) of {len(self.scenarios)} "
+                    f"scenarios; exiting"
+                )
+                return
+
+            cycle_scenarios = list(self.scenarios)
+            if self.args.shuffle_scenarios:
+                # Seed off cycle number so two soaks with the same --cycles
+                # walk identical sequences, but successive cycles rotate
+                # through different orderings.
+                random.Random(cycle).shuffle(cycle_scenarios)
+
+            cycle_start_at = start_at if cycle == 1 else 1
+            self.logger.log(
+                f"Starting cycle {cycle} ({len(cycle_scenarios)} scenarios"
+                f"{', shuffled' if self.args.shuffle_scenarios else ''}"
+                f"{f', starting at scenario {cycle_start_at}' if cycle_start_at > 1 else ''})"
+            )
+
+            for scenario_idx, scenario in enumerate(cycle_scenarios, 1):
+                if scenario_idx < cycle_start_at:
+                    continue
+                iteration += 1
+
+                node1, node2 = self.pick_pair_for_category(scenario["category"])
+                method1 = scenario["method_a"]
+                method2 = scenario["method_b"]
+
+                self.logger.log(
+                    f"Starting outage iteration {iteration} "
+                    f"(cycle {cycle} scenario {scenario_idx}/{len(cycle_scenarios)}): "
+                    f"category={scenario['category']} "
+                    f"pair=({node1[:8]},{node2[:8]}) "
+                    f"methods=({method1},{method2})"
+                )
+
+                # Skip scenarios whose nodes are not currently in the
+                # expected-node set (e.g. one has been removed from the
+                # cluster mid-soak). Better to log-and-skip than to try to
+                # restart a ghost.
+                current_uuids = {n["uuid"] for n in self.ensure_expected_nodes()}
+                missing = [uid for uid in (node1, node2) if uid not in current_uuids]
+                if missing:
+                    self.logger.log(
+                        f"Scenario {iteration} skipped: nodes {missing} not in "
+                        f"current cluster set {sorted(current_uuids)}"
+                    )
+                    continue
+
+                # Load during outage: start fresh fio so the outage hits
+                # live IO. This is the only window where fio runs.
+                self.start_fio(self.volumes)
+
+                self.run_outage_pair(node1, node2, method1, method2)
+
+                # Fault gate: any fio that exited / faulted during the
+                # outage is a real failure. check_fio raises on faults.
+                self.check_fio()
+
+                # Unload before settle: stop fio so the rebalance / data-
+                # migration drain runs without IO pressure. This is what
+                # makes the iteration cycle short.
+                self.stop_fio()
+
+                # Optional volume rebuild. fio is already stopped, so we
+                # don't need any per-job teardown — just delete + recreate
+                # + remount; the next iteration's start_fio picks it up.
+                if churn_every > 0 and iteration % churn_every == 0:
+                    self._churn_one_volume()
+
+                self.wait_for_all_online(timeout=self.args.restart_timeout)
+                self.wait_for_cluster_stable()
+                self.wait_for_data_migration_complete("next iteration")
+
+
+def main():
+    args = parse_args()
+    logger = Logger(args.log_file)
+    logger.log(f"Logging to {args.log_file}")
+    metadata = load_metadata(args.metadata)
+    if not metadata.get("clients"):
+        raise SystemExit("Metadata file does not contain a client host")
+
+    runner = SoakRunner(args, metadata, logger)
+    try:
+        runner.run()
+    except (RemoteCommandError, TestRunError, ValueError) as exc:
+        logger.log(f"ERROR: {exc}")
+        sys.exit(1)
+    finally:
+        runner.close()
+
+
+if __name__ == "__main__":
+    main()

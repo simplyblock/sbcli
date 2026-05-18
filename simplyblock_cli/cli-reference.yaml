@@ -111,6 +111,14 @@ commands:
             dest: force
             type: bool
             action: store_true
+          - name: "--enable-inline-checksum"
+            help: >
+              When formatting (with --force), prefer an LBAF that supports >=8 bytes of NVMe metadata per block,
+              so alceml can run inline checksum validation in md-on-device mode. Drives with no md-capable LBAF
+              still format to plain 4K and will use the fallback layout.
+            dest: inline_checksum
+            type: bool
+            action: store_true
           - name: "--calculate-hp-only"
             help: "Calculate the minimum required huge pages, it depends on the following params: --cores-percentage, --sockets-to-use, --max-lvol, --nodes-per-socket, --number-of-devices."
             dest: calculate_hp_only
@@ -976,6 +984,14 @@ commands:
             dest: strict_node_anti_affinity
             type: bool
             action: store_true
+          - name: "--enable-inline-checksum"
+            help: >
+              Enable inline CRC checksum validation on every IO for silent-data-error protection. Cannot be enabled or
+              disabled after cluster creation. Per-device alceml mode (md-on-device vs fallback) is auto-detected at
+              add-node.
+            dest: inline_checksum
+            type: bool
+            action: store_true
           - name: "--name"
             help: >
               Assigns a name to the newly created cluster.
@@ -1147,6 +1163,13 @@ commands:
               Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node.
               This requires a minimum of _data-chunks-in-stripe + parity-chunks-in-stripe + 1_ nodes in the cluster."
             dest: strict_node_anti_affinity
+            type: bool
+            action: store_true
+          - name: "--enable-inline-checksum"
+            help: >
+              Enable inline CRC checksum validation on every IO for silent-data-error protection. Cannot be enabled or
+              disabled after cluster creation.
+            dest: inline_checksum
             type: bool
             action: store_true
           - name: "--name"
