@@ -3419,12 +3419,9 @@ def shutdown_storage_node(node_id, force=False):
             )
         elif force:
             logger.warning(
-                "Migration task found: %s, proceeding with forced shutdown and canceling tasks",
+                "Migration task found: %s, proceeding with forced shutdown",
                 len(tasks),
             )
-            for task in tasks:
-                if task.function_name != JobSchedule.FN_NODE_RESTART:
-                    tasks_controller.cancel_task(task.uuid)
         else:
             logger.error(f"Migration task found: {len(tasks)}, can not shutdown storage node or use --force")
             return False
@@ -3537,11 +3534,9 @@ def suspend_storage_node(node_id, force=False, change_node_status=True):
             )
         elif force:
             logger.warning(
-                "Migration task found: %s, proceeding with forced suspend and canceling tasks",
+                "Migration task found: %s, proceeding with forced suspend",
                 len(tasks),
             )
-            for task in tasks:
-                tasks_controller.cancel_task(task.uuid)
         else:
             logger.error(f"Migration task found: {len(tasks)}, can not suspend storage node, use --force")
             return False
