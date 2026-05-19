@@ -103,7 +103,7 @@ on:
       tls_enabled:
         description: 'Enable TLS (installs cert-manager, sets tls.enabled + tls.mutual_enabled)'
         required: false
-        default: false
+        default: true
         type: boolean
 
 jobs:
@@ -706,6 +706,23 @@ jobs:
             sleep 10
           done
 
+      - name: Setup KMS (vault) for encryption
+        if: ${{ github.event.inputs.use_existing_cluster != 'true' && github.event.inputs.tls_enabled == 'true' }}
+        run: |
+          # Auto-detect default StorageClass for vault PVCs
+          STORAGE_CLASS=$(kubectl get sc -o jsonpath='{.items[?(@.metadata.annotations.storageclass\.kubernetes\.io/is-default-class=="true")].metadata.name}' | awk '{print $1}')
+          if [ -z "$STORAGE_CLASS" ]; then
+            STORAGE_CLASS=$(kubectl get sc -o jsonpath='{.items[0].metadata.name}')
+          fi
+          echo "Using StorageClass for KMS: $STORAGE_CLASS"
+
+          export STORAGE_CLASS
+          UNSEAL_KEYS_FILE=./openbao-init.txt bash $GITHUB_WORKSPACE/helm-charts/scripts/setup-kms.sh
+
+          echo "Waiting for vault pods to be ready..."
+          kubectl wait --for=condition=Ready pods -l app.kubernetes.io/name=openbao -n vault --timeout=300s || true
+          echo "KMS setup complete."
+
       - name: Apply operator custom resources
         if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
         run: |
@@ -729,6 +746,24 @@ jobs:
             WORKER_YAML="${WORKER_YAML}    - ${NODE}"$'\n'
           done
 
+          # Build vault settings and encryption pool blocks (conditional on TLS)
+          VAULT_SETTINGS=""
+          ENCRYPTION_POOL_YAML=""
+          if [ "${{ github.event.inputs.tls_enabled }}" = "true" ]; then
+            VAULT_SETTINGS="  hashicorpVaultSettings:
+              baseURL: \"https://openbao.vault:8200\""
+            ENCRYPTION_POOL_YAML="---
+          apiVersion: storage.simplyblock.io/v1alpha1
+          kind: Pool
+          metadata:
+            name: encryption-pool
+            namespace: ${NAMESPACE}
+          spec:
+            clusterName: simplyblock-cluster
+            storageClassParameters:
+              encryption: \"true\""
+          fi
+
           echo "=== Custom resource YAML to apply ==="
           cat <<EOF
           apiVersion: storage.simplyblock.io/v1alpha1
@@ -750,6 +785,7 @@ jobs:
             criticalThreshold:
               capacity: 96
               provisionedCapacity: 98
+          ${VAULT_SETTINGS}
           ---
           apiVersion: storage.simplyblock.io/v1alpha1
           kind: Pool
@@ -758,6 +794,7 @@ jobs:
             namespace: ${NAMESPACE}
           spec:
             clusterName: simplyblock-cluster
+          ${ENCRYPTION_POOL_YAML}
           ---
           apiVersion: storage.simplyblock.io/v1alpha1
           kind: StorageNode
@@ -810,6 +847,7 @@ jobs:
             criticalThreshold:
               capacity: 96
               provisionedCapacity: 98
+          ${VAULT_SETTINGS}
           ---
           apiVersion: storage.simplyblock.io/v1alpha1
           kind: Pool
@@ -818,6 +856,7 @@ jobs:
             namespace: ${NAMESPACE}
           spec:
             clusterName: simplyblock-cluster
+          ${ENCRYPTION_POOL_YAML}
           ---
           apiVersion: storage.simplyblock.io/v1alpha1
           kind: StorageNode
@@ -1059,10 +1098,9 @@ jobs:
             sleep 10
           done
 
-          echo "ERROR: Cluster did not become active within timeout"
+          echo "WARNING: Cluster did not become active within timeout — will attempt force-activate"
           kubectl -n $NAMESPACE get pods
           kubectl -n $NAMESPACE exec "$ADMIN_POD" -- sbctl cluster list 2>&1 || true
-          exit 1
 
       - name: Verify and force-activate cluster if needed
         if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
@@ -1077,22 +1115,53 @@ jobs:
             exit 1
           fi
 
+          # Helper: extract cluster ID and secret from sbctl output and export to GITHUB_ENV
+          extract_cluster_info() {
+            local output="$1"
+            local cid csecret
+            cid=$(echo "$output" | awk 'NR==4{print $2}')
+            csecret=$(echo "$output" | awk 'NR==4{print $NF}')
+            if [ -z "$cid" ] || [ "$cid" = "+" ]; then
+              echo "Table parsing failed, trying JSON..."
+              local json_out
+              json_out=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
+                sbctl cluster list --json 2>&1) || true
+              cid=$(echo "$json_out" | jq -r '.[0].id // .[0].uuid // empty')
+              csecret=$(echo "$json_out" | jq -r '.[0].secret // empty')
+            fi
+            if [ -n "$cid" ] && [ "$cid" != "+" ]; then
+              echo "CLUSTER_ID=${cid}" >> $GITHUB_ENV
+              echo "CLUSTER_SECRET=${csecret}" >> $GITHUB_ENV
+              echo "Extracted CLUSTER_ID=${cid}"
+            fi
+            echo "$cid"
+          }
+
           echo "=== Verifying cluster activation ==="
           OUTPUT=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
             sbctl cluster list 2>&1) || true
           echo "$OUTPUT"
 
           if echo "$OUTPUT" | grep -qi "active"; then
-            echo "Cluster is active, no action needed"
+            echo "Cluster is active, ensuring env vars are set"
+            extract_cluster_info "$OUTPUT"
             exit 0
           fi
 
           echo "Cluster is NOT active, attempting forced activation..."
-          kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
-            sbctl -d cluster activate "${CLUSTER_ID}" 2>&1 || true
+          # Extract cluster ID for the activate command
+          CID=$(extract_cluster_info "$OUTPUT")
+          if [ -n "$CID" ] && [ "$CID" != "+" ]; then
+            kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
+              sbctl -d cluster activate "${CID}" 2>&1 || true
+          else
+            echo "WARNING: Could not extract cluster ID, trying activate without ID..."
+            kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
+              sbctl -d cluster activate 2>&1 || true
+          fi
 
-          echo "Waiting 30s for activation to take effect..."
-          sleep 30
+          echo "Waiting 60s for activation to take effect..."
+          sleep 60
 
           OUTPUT=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
             sbctl cluster list 2>&1) || true
@@ -1100,13 +1169,12 @@ jobs:
 
           if echo "$OUTPUT" | grep -qi "active"; then
             echo "Cluster is now active after forced activation"
+            extract_cluster_info "$OUTPUT"
             exit 0
           fi
 
           echo "ERROR: Cluster is still not active after forced activation"
           exit 1
-        env:
-          CLUSTER_ID: ${{ env.CLUSTER_ID }}
 
       - name: Patch fluent-bit daemonset (post-cluster-active)
         if: ${{ env.FLUENTBIT_PATCHED != 'true' }}
@@ -1159,7 +1227,7 @@ jobs:
 
           python3 -u stress.py $TESTNAME \
             --ndcs $NDCS --npcs $NPCS --bs $BS --chunk_bs $CHUNK_BS \
-            --run_k8s True 2>&1 | tee output.log
+            --run_k8s True --tls_enabled ${{ github.event.inputs.tls_enabled }} 2>&1 | tee output.log
         env:
           NDCS: ${{ env.NDCS }}
           NPCS: ${{ env.NPCS }}

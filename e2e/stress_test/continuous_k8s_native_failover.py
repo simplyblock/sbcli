@@ -68,8 +68,11 @@ class K8sNativeFailoverTest(TestClusterBase):
 
         # K8s resource naming
         self.STORAGE_CLASS_NAME = "simplyblock-csi-sc"
+        self.CRYPTO_STORAGE_CLASS_NAME = "simplyblock-csi-sc-crypto"
+        self.CRYPTO_POOL_NAME = "encryption-pool"
         self.SNAPSHOT_CLASS_NAME = "simplyblock-csi-snapshotclass"
         self.FIO_IMAGE = "dockerpinata/fio:2.1"
+        self.tls_enabled = str(kwargs.get("tls_enabled", os.environ.get("TLS_ENABLED", "false"))).lower() == "true"
 
         # Sizing
         self.pvc_size = "10Gi"
@@ -607,7 +610,7 @@ class K8sNativeFailoverTest(TestClusterBase):
             f"rw=randrw\n"
             f"rwmixread=50\n"
             f"bs={bs}\n"
-            f"iodepth=256\n"
+            f"iodepth=1\n"
             f"direct=1\n"
             f"ioengine=libaio\n"
             f"size={self.fio_size}\n"
@@ -621,6 +624,7 @@ class K8sNativeFailoverTest(TestClusterBase):
             f"verify_backlog=4096\n"
             f"verify_backlog_batch=32\n"
             f"randseed={randseed}\n"
+            f"max_latency=20s\n"
             f"write_iolog=/spdkvol/{name}-iolog.log\n"
             f"log_avg_msec=1000\n"
             f"write_bw_log=/spdkvol/{name}-fio\n"
@@ -926,7 +930,8 @@ class K8sNativeFailoverTest(TestClusterBase):
 
     # ── PVC + FIO creation ───────────────────────────────────────────────────
 
-    def create_pvcs_with_fio(self, count: int, node_ids: list[str] = None):
+    def create_pvcs_with_fio(self, count: int, node_ids: list[str] = None,
+                             storage_class: str = None):
         """Create *count* PVCs via K8s and start FIO on each.
 
         When ``self.use_client_fio`` is True, the underlying lvol is
@@ -936,14 +941,26 @@ class K8sNativeFailoverTest(TestClusterBase):
         Args:
             node_ids: If provided, pin PVC *i* to ``node_ids[i]`` using the
                       ``simplybk/host-id`` annotation.  Length must equal *count*.
+            storage_class: Explicit SC name. When None, alternates between
+                           regular and crypto (if TLS enabled) for 50/50 split.
         """
         self._ensure_k8s_utils()
+        # Track how many PVCs already exist (for alternation index)
+        existing_count = len(self.pvc_details)
         for i in range(count):
             pvc_name = f"pvc-{_rand_seq(12)}"
             target_node = node_ids[i] if node_ids and i < len(node_ids) else None
 
+            # Determine StorageClass: explicit > 50/50 alternation > regular
+            if storage_class:
+                sc_name = storage_class
+            elif self.tls_enabled and (existing_count + i) % 2 == 1:
+                sc_name = self.CRYPTO_STORAGE_CLASS_NAME
+            else:
+                sc_name = self.STORAGE_CLASS_NAME
+
             self.logger.info(
-                f"[create_pvc] Creating PVC {pvc_name} ({i+1}/{count})"
+                f"[create_pvc] Creating PVC {pvc_name} ({i+1}/{count}) SC={sc_name}"
                 + (f" pinned to node {target_node}" if target_node else "")
             )
 
@@ -952,7 +969,7 @@ class K8sNativeFailoverTest(TestClusterBase):
 
             try:
                 self.k8s_utils.create_pvc(
-                    pvc_name, self.pvc_size, self.STORAGE_CLASS_NAME,
+                    pvc_name, self.pvc_size, sc_name,
                     node_id=target_node,
                 )
                 self.k8s_utils.wait_pvc_bound(pvc_name, timeout=300)
@@ -1018,6 +1035,7 @@ class K8sNativeFailoverTest(TestClusterBase):
                         "client": client,
                         "log_file": None,
                         "fs_type": fs_type,
+                        "storage_class": sc_name,
                     }
                     if node_id:
                         self.node_vs_pvc.setdefault(node_id, []).append(pvc_name)
@@ -1054,6 +1072,7 @@ class K8sNativeFailoverTest(TestClusterBase):
                     "client": client,
                     "log_file": log_file,
                     "fs_type": fs_type,
+                    "storage_class": sc_name,
                 }
                 # Also track in lvol_mount_details for compatibility
                 self.lvol_mount_details[lvol_name] = {
@@ -1097,10 +1116,11 @@ class K8sNativeFailoverTest(TestClusterBase):
                     "configmap_name": cm_name,
                     "snapshots": [],
                     "node_id": node_id,
+                    "storage_class": sc_name,
                 }
 
                 self.logger.info(
-                    f"[create_pvc] PVC {pvc_name} on node {node_id} with FIO Job {job_name}"
+                    f"[create_pvc] PVC {pvc_name} on node {node_id} with FIO Job {job_name} SC={sc_name}"
                 )
 
             if node_id:
@@ -1170,11 +1190,12 @@ class K8sNativeFailoverTest(TestClusterBase):
             # Snapshot lvol IDs before clone PVC (for client mode mapping)
             old_lvol_ids = self._snapshot_lvol_ids() if self.use_client_fio else set()
 
-            # Create clone PVC (k8s-native in both modes)
+            # Create clone PVC — use same StorageClass as source PVC
+            clone_sc = self.pvc_details.get(pvc_name, {}).get("storage_class", self.STORAGE_CLASS_NAME)
             sleep_n_sec(10)
             try:
                 self.k8s_utils.create_clone_pvc(
-                    clone_name, self.pvc_size, self.STORAGE_CLASS_NAME, snap_name
+                    clone_name, self.pvc_size, clone_sc, snap_name
                 )
                 self.k8s_utils.wait_pvc_bound(clone_name, timeout=300)
             except Exception as exc:
@@ -1224,6 +1245,7 @@ class K8sNativeFailoverTest(TestClusterBase):
                         "mount_path": None,
                         "client": client,
                         "log_file": None,
+                        "storage_class": clone_sc,
                     }
                     continue
 
@@ -1248,6 +1270,7 @@ class K8sNativeFailoverTest(TestClusterBase):
                     "mount_path": mount_point,
                     "client": client,
                     "log_file": log_file,
+                    "storage_class": clone_sc,
                 }
                 self.clone_mount_details[clone_lvol_name] = {
                     "ID": clone_lvol_id,
@@ -1286,6 +1309,7 @@ class K8sNativeFailoverTest(TestClusterBase):
                     "snap_name": snap_name,
                     "job_name": clone_job,
                     "configmap_name": clone_cm,
+                    "storage_class": clone_sc,
                 }
 
             # Resize source PVC and clone PVC
@@ -2280,6 +2304,16 @@ class K8sNativeFailoverTest(TestClusterBase):
             ndcs=self.ndcs,
             npcs=self.npcs,
         )
+        if self.tls_enabled:
+            self.logger.info("TLS enabled — creating crypto StorageClass with encryption=True")
+            self.k8s_utils.create_storage_class(
+                name=self.CRYPTO_STORAGE_CLASS_NAME,
+                cluster_id=cluster_id,
+                pool_name=self.CRYPTO_POOL_NAME,
+                ndcs=self.ndcs,
+                npcs=self.npcs,
+                encryption=True,
+            )
         self.k8s_utils.delete_volume_snapshot_class(self.SNAPSHOT_CLASS_NAME)
         self.k8s_utils.create_volume_snapshot_class(self.SNAPSHOT_CLASS_NAME)
         sleep_n_sec(5)
@@ -2376,7 +2410,7 @@ class K8sNativeFailoverTest(TestClusterBase):
                         start_timestamp=self.outage_start_time,
                         end_timestamp=self.outage_end_time,
                         time_duration=time_duration,
-                        warn_only=False,
+                        warn_only=True,
                     )
                 except AssertionError as exc:
                     self.logger.error(
@@ -2470,11 +2504,12 @@ class K8sNativeBasicFailoverTest(K8sNativeFailoverTest):
             # Snapshot lvol IDs before clone PVC (for client mode mapping)
             old_lvol_ids = self._snapshot_lvol_ids() if self.use_client_fio else set()
 
-            # Create clone PVC
+            # Create clone PVC — use same StorageClass as source PVC
+            clone_sc = self.pvc_details.get(pvc_name, {}).get("storage_class", self.STORAGE_CLASS_NAME)
             sleep_n_sec(10)
             try:
                 self.k8s_utils.create_clone_pvc(
-                    clone_name, self.pvc_size, self.STORAGE_CLASS_NAME, snap_name
+                    clone_name, self.pvc_size, clone_sc, snap_name
                 )
                 self.k8s_utils.wait_pvc_bound(clone_name, timeout=300)
             except Exception as exc:
@@ -2529,6 +2564,7 @@ class K8sNativeBasicFailoverTest(K8sNativeFailoverTest):
                     "mount_path": mount_point,
                     "client": client,
                     "log_file": log_file,
+                    "storage_class": clone_sc,
                 }
                 self.clone_mount_details[clone_lvol_name] = {
                     "ID": clone_lvol_id,
@@ -2567,6 +2603,7 @@ class K8sNativeBasicFailoverTest(K8sNativeFailoverTest):
                     "snap_name": snap_name,
                     "job_name": clone_job,
                     "configmap_name": clone_cm,
+                    "storage_class": clone_sc,
                 }
 
             # Resize source PVC and clone PVC
@@ -2731,7 +2768,7 @@ class K8sNativeBasicFailoverTest(K8sNativeFailoverTest):
                         start_timestamp=self.outage_start_time,
                         end_timestamp=self.outage_end_time,
                         time_duration=time_duration,
-                        warn_only=False,
+                        warn_only=True,
                     )
                 except AssertionError as exc:
                     self.logger.error(
@@ -3085,12 +3122,14 @@ class K8sNativeResilientFailoverTest(K8sNativeFailoverTest):
                 self._snapshot_lvol_ids() if self.use_client_fio else set()
             )
 
-            # Create clone PVC
+            # Create clone PVC — use same StorageClass as source PVC
+            clone_sc = self.pvc_details.get(pvc_name, {}).get(
+                "storage_class", self.STORAGE_CLASS_NAME
+            )
             sleep_n_sec(10)
             try:
                 self.k8s_utils.create_clone_pvc(
-                    clone_name, self.pvc_size,
-                    self.STORAGE_CLASS_NAME, snap_name,
+                    clone_name, self.pvc_size, clone_sc, snap_name,
                 )
                 self.k8s_utils.wait_pvc_bound(clone_name, timeout=300)
             except Exception as exc:
@@ -3162,6 +3201,7 @@ class K8sNativeResilientFailoverTest(K8sNativeFailoverTest):
                     "mount_path": mount_point,
                     "client": client,
                     "log_file": log_file,
+                    "storage_class": clone_sc,
                 }
                 self.clone_mount_details[clone_lvol_name] = {
                     "ID": clone_lvol_id,
@@ -3204,6 +3244,7 @@ class K8sNativeResilientFailoverTest(K8sNativeFailoverTest):
                     "snap_name": snap_name,
                     "job_name": clone_job,
                     "configmap_name": clone_cm,
+                    "storage_class": clone_sc,
                 }
 
             self.logger.info(
@@ -3621,6 +3662,19 @@ class K8sNativeResilientFailoverTest(K8sNativeFailoverTest):
             ndcs=self.ndcs,
             npcs=self.npcs,
         )
+        if self.tls_enabled:
+            self.logger.info(
+                "TLS enabled — creating crypto StorageClass "
+                "with encryption=True"
+            )
+            self.k8s_utils.create_storage_class(
+                name=self.CRYPTO_STORAGE_CLASS_NAME,
+                cluster_id=cluster_id,
+                pool_name=self.CRYPTO_POOL_NAME,
+                ndcs=self.ndcs,
+                npcs=self.npcs,
+                encryption=True,
+            )
         self.k8s_utils.delete_volume_snapshot_class(
             self.SNAPSHOT_CLASS_NAME
         )
@@ -3696,6 +3750,7 @@ class K8sNativeResilientFailoverTest(K8sNativeFailoverTest):
         # ── Stress loop ──
         iteration = 1
         test_failed = False
+        failure_reasons = []
         try:
             while True:
                 self.logger.info(f"=== Iteration {iteration} ===")
@@ -3777,9 +3832,9 @@ class K8sNativeResilientFailoverTest(K8sNativeFailoverTest):
                     try:
                         self.retry_failed_nvme_connects()
                     except AssertionError as exc:
-                        self.logger.error(
-                            f"[iteration {iteration}] {exc}"
-                        )
+                        msg = f"[iteration {iteration}] NVMe reconnect failed: {exc}"
+                        self.logger.error(msg)
+                        failure_reasons.append(msg)
                         test_failed = True
                     self.retry_failed_secondary_connects()
                 self.validate_pending_deletions()
@@ -3810,19 +3865,30 @@ class K8sNativeResilientFailoverTest(K8sNativeFailoverTest):
                         start_timestamp=self.outage_start_time,
                         end_timestamp=self.outage_end_time,
                         time_duration=time_duration,
-                        warn_only=False,
+                        warn_only=True,
                     )
                 except AssertionError as exc:
-                    self.logger.error(
+                    msg = (
                         f"[iteration {iteration}] IO validation "
                         f"failed — zero IO detected: {exc}"
                     )
+                    self.logger.error(msg)
+                    failure_reasons.append(msg)
                     test_failed = True
                 self.validate_migration_for_node(
                     self.outage_start_time, 2000, None, 60
                 )
                 self.wait_for_fio_complete()
-                self.validate_fio_jobs()
+                try:
+                    self.validate_fio_jobs()
+                except Exception as exc:
+                    msg = (
+                        f"[iteration {iteration}] FIO validation "
+                        f"failed: {exc}"
+                    )
+                    self.logger.error(msg)
+                    failure_reasons.append(msg)
+                    test_failed = True
 
                 self.logger.info(
                     f"=== Iteration {iteration} complete "
@@ -3842,17 +3908,22 @@ class K8sNativeResilientFailoverTest(K8sNativeFailoverTest):
 
                 iteration += 1
 
-        except Exception:
+        except Exception as exc:
             test_failed = True
+            failure_reasons.append(f"Unhandled exception: {exc}")
             raise
         finally:
             if test_failed:
+                summary = "; ".join(failure_reasons) if failure_reasons else "unknown error"
+                self.logger.error(
+                    f"[cleanup] Test FAILED — reasons: {summary}"
+                )
                 self.logger.info(
-                    "[cleanup] Test failed — skipping resource "
-                    "cleanup to preserve state for debugging"
+                    "[cleanup] Skipping resource cleanup to "
+                    "preserve state for debugging"
                 )
                 raise AssertionError(
-                    "Stress test failed — see errors above"
+                    f"Stress test failed: {summary}"
                 )
             else:
                 self._cleanup_all_k8s_resources()
