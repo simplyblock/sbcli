@@ -669,6 +669,22 @@ jobs:
       - name: Setup KMS (vault) for encryption
         if: ${{ github.event.inputs.use_existing_cluster != 'true' && github.event.inputs.tls_enabled == 'true' }}
         run: |
+          # Check if OpenBao vault is already initialized and unsealed
+          if kubectl get pods openbao-0 -n vault &>/dev/null; then
+            VAULT_STATUS=$(kubectl exec openbao-0 -n vault -- env BAO_ADDR=https://openbao.vault:8200 bao status -format=json 2>/dev/null || true)
+            VAULT_INITIALIZED=$(echo "$VAULT_STATUS" | jq -r '.initialized' 2>/dev/null || echo "false")
+            VAULT_SEALED=$(echo "$VAULT_STATUS" | jq -r '.sealed' 2>/dev/null || echo "true")
+            if [ "$VAULT_INITIALIZED" = "true" ] && [ "$VAULT_SEALED" = "false" ]; then
+              echo "OpenBao vault is already initialized and unsealed. Skipping KMS setup."
+              exit 0
+            fi
+            echo "OpenBao exists but not ready (initialized=$VAULT_INITIALIZED, sealed=$VAULT_SEALED). Cleaning up for fresh install..."
+            helm uninstall openbao -n vault --wait || true
+            kubectl delete pvc -n vault --all --wait=false || true
+            kubectl delete namespace vault --wait=false || true
+            sleep 10
+          fi
+
           # Auto-detect default StorageClass for vault PVCs
           STORAGE_CLASS=$(kubectl get sc -o jsonpath='{.items[?(@.metadata.annotations.storageclass\.kubernetes\.io/is-default-class=="true")].metadata.name}' | awk '{print $1}')
           if [ -z "$STORAGE_CLASS" ]; then
