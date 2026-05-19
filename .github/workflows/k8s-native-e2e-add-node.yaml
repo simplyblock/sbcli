@@ -579,6 +579,7 @@ jobs:
             --set prometheus.server.persistentVolume.storageClass=local-hostpath \
             --set controlplane.observability.enabled=true \
             --set opensearch.persistence.storageClass=local-hostpath \
+            --set controlplane.observability.minio.storageClass=local-hostpath \
             --set image.simplyblock.pullPolicy=IfNotPresent \
             --set image.operator.pullPolicy=IfNotPresent \
             $TLS_FLAGS $CSI_FLAGS
