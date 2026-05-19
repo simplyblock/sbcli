@@ -323,86 +323,42 @@ class TestActivatePortBlockWrapper(unittest.TestCase):
 # ===========================================================================
 
 
-class TestSuspendNoLeadershipDropAfterBlock(unittest.TestCase):
-    """suspend_storage_node must block lvs+hublvol ports but NOT issue
-    bdev_lvol_set_leader(leader=False) or bdev_distrib_force_to_non_leader
-    afterwards — the surviving peer auto-promotes on the closed redirect
-    and an explicit demote races pre-block in-flight IO."""
+class TestSuspendIsDeprecatedNoop(unittest.TestCase):
+    """The suspension phase (port-block on sec/tert + own-primary LVS
+    ports) was removed entirely after the 2026-05-19 jm_vuid=4818
+    incident: an iptables-only fence cannot stop SPDK's lvol layer
+    from resubmitting failed-redirect IO as if it were new host IO,
+    which races the surviving peer's auto-promotion. See the new
+    `shutdown_storage_node` docstring for the replacement flow
+    (Loop 1 device-unavailable + Loop 2 detach-remote-controllers).
 
-    def _run(self, snode, secondary_owners=None):
+    Here we just verify that `suspend_storage_node` is a noop
+    (returns True without invoking FirewallClient). The detailed
+    coverage for the new shutdown flow lives in
+    tests/test_shutdown_no_suspension.py.
+    """
+
+    def test_suspend_is_noop_and_does_not_touch_firewall(self):
         from simplyblock_core import storage_node_ops
 
-        db = MagicMock()
-        db.get_storage_node_by_id.return_value = snode
-        db.get_primary_storage_nodes_by_secondary_node_id.return_value = \
-            secondary_owners or []
-
-        rpc_client = MagicMock()
-        snode.rpc_client = MagicMock(return_value=rpc_client)
-        snode.write_to_db = MagicMock(return_value=True)
-
-        fw_calls = []
-
-        class FakeFW:
-            def __init__(self, node, timeout=20, retry=1):
-                self._node = node
-
-            def firewall_set_port(self, port, ptype, action, rpc_port, **kw):
-                fw_calls.append((port, action))
-
-        patches = [
-            patch.object(storage_node_ops, "DBController", return_value=db),
-            patch.object(storage_node_ops, "FirewallClient", FakeFW),
-            patch.object(storage_node_ops, "set_node_status",
-                         lambda *a, **kw: None),
-            patch.object(storage_node_ops, "time", MagicMock()),
-            patch.object(storage_node_ops.tasks_controller,
-                         "get_active_node_restart_task",
-                         lambda *a, **kw: None),
-            patch.object(storage_node_ops.tasks_controller,
-                         "get_active_node_tasks", lambda *a, **kw: []),
-            patch.object(storage_node_ops, "_check_ftt_allows_node_removal",
-                         lambda *a, **kw: (True, "")),
-        ]
-        for p in patches:
-            p.start()
-        self.addCleanup(lambda: [p.stop() for p in patches])
-
-        ret = storage_node_ops.suspend_storage_node(snode.get_id())
-        return ret, rpc_client, fw_calls
-
-    def test_own_primary_lvs_blocks_ports_without_demote(self):
         snode = _node("node-A", lvstore="LVS_A")
-        ret, rpc, fw_calls = self._run(snode)
-        self.assertTrue(ret)
-        # Both ports were blocked.
-        self.assertIn((4420, "block"), fw_calls)
-        self.assertIn((4427, "block"), fw_calls)
-        # And critically: no leadership drop after the block.
-        rpc.bdev_lvol_set_leader.assert_not_called()
-        rpc.bdev_distrib_force_to_non_leader.assert_not_called()
 
-    def test_secondary_tertiary_lvs_blocks_ports_without_demote(self):
-        # snode also hosts secondary copy for primary "node-B"
+        with patch.object(storage_node_ops, "FirewallClient") as fw_cls, \
+                patch.object(storage_node_ops, "DBController") as _db:
+            self.assertTrue(
+                storage_node_ops.suspend_storage_node(snode.get_id()))
+            fw_cls.assert_not_called()
+
+    def test_resume_is_noop_and_does_not_touch_firewall(self):
+        from simplyblock_core import storage_node_ops
+
         snode = _node("node-A", lvstore="LVS_A")
-        snode.lvstore_stack_secondary = "node-B"
 
-        primary_b = _node("node-B", lvstore="LVS_B",
-                          mgmt_ip="10.0.0.99", rpc_port=8082)
-        primary_b.lvstore_ports = {
-            "LVS_B": {"lvol_subsys_port": 4430, "hublvol_port": 4431}}
-
-        ret, rpc, fw_calls = self._run(snode, secondary_owners=[primary_b])
-        self.assertTrue(ret)
-        # Sec lvs+hub ports blocked AND own primary lvs+hub ports blocked.
-        ports_blocked = {p for p, action in fw_calls if action == "block"}
-        self.assertIn(4430, ports_blocked)   # sec lvs port (primary_b's lvs port)
-        self.assertIn(4431, ports_blocked)   # sec hub port (primary_b's hub port)
-        self.assertIn(4420, ports_blocked)   # own lvs port
-        self.assertIn(4427, ports_blocked)   # own hub port
-        # No explicit demote on any LVS.
-        rpc.bdev_lvol_set_leader.assert_not_called()
-        rpc.bdev_distrib_force_to_non_leader.assert_not_called()
+        with patch.object(storage_node_ops, "FirewallClient") as fw_cls, \
+                patch.object(storage_node_ops, "DBController") as _db:
+            self.assertTrue(
+                storage_node_ops.resume_storage_node(snode.get_id()))
+            fw_cls.assert_not_called()
 
 
 if __name__ == "__main__":

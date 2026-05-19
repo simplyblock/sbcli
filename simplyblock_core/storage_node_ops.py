@@ -3372,7 +3372,147 @@ def _allow_shutdown_with_migration_tasks(snode, db_controller):
     )
 
 
+# Peer statuses we still try to talk to during a graceful shutdown's
+# Loop 1 (device-unavailable broadcast) and Loop 2 (detach remote ctrlrs).
+# A peer in any other status is either gone (offline/removed) or in a
+# state where the RPC would be meaningless (the peer's own shutdown).
+_PEER_RECONNECT_ELIGIBLE_STATUSES = (
+    StorageNode.STATUS_ONLINE,
+    StorageNode.STATUS_DOWN,
+    StorageNode.STATUS_RESTARTING,
+)
+
+
+def _target_is_reconnect_eligible(target_node):
+    """True iff a remote ctrlr attach toward ``target_node`` should proceed.
+
+    Any service that calls bdev_nvme_attach_controller toward a peer must
+    consult this gate first. A target in in_shutdown / offline / unreachable
+    is either dying or already dead; a fresh attach would either fail or
+    silently make the local node a competing writer for an LVS the target
+    is no longer serving.
+    """
+    if target_node is None:
+        return False
+    return target_node.status in _PEER_RECONNECT_ELIGIBLE_STATUSES
+
+
+def _detach_remote_controllers_from_peers(snode, db_controller):
+    """Loop 2 of graceful shutdown.
+
+    For every peer in {online, down, in_restart}, detach the remote
+    controllers on that peer that reference ``snode`` — i.e. its
+    remote_alceml_<dev-uuid> and remote_jm_<node-uuid> controllers.
+    bdev_nvme_detach_controller cancels the SPDK auto-reconnect poller
+    on the peer in one shot, so the peer's SPDK can never reattach to
+    the dying node behind our back.
+
+    Per-peer work is sequential (avoid issuing concurrent detach RPCs to
+    one SPDK); fan-out across peers is parallel. Every RPC is wrapped in
+    try/except — silent on failure including: controller already absent
+    (peer detached on its own), peer in_restart hasn't created the
+    controller yet, peer unreachable / timeout. None of these can block
+    the kill in step 4.
+    """
+    shutting_down_id = snode.get_id()
+    all_peers = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
+    peers = [
+        p for p in all_peers
+        if p.get_id() != shutting_down_id
+        and p.status in _PEER_RECONNECT_ELIGIBLE_STATUSES
+    ]
+
+    if not peers:
+        return 0
+
+    detached = [0]
+    detached_lock = threading.Lock()
+
+    def _detach_one_peer(peer):
+        try:
+            rpc_client = peer.rpc_client(timeout=5, retry=1)
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning(
+                "detach: could not build rpc_client for peer %s: %s",
+                peer.get_id(), e)
+            return
+
+        ctrl_names = []
+        for rem_dev in (peer.remote_devices or []):
+            if rem_dev.node_id != shutting_down_id:
+                continue
+            bdev_name = rem_dev.remote_bdev or ""
+            if bdev_name.endswith("n1"):
+                ctrl_names.append(bdev_name[:-2])
+
+        for rem_jm in (peer.remote_jm_devices or []):
+            if rem_jm.node_id != shutting_down_id:
+                continue
+            bdev_name = rem_jm.remote_bdev or ""
+            if bdev_name.endswith("n1"):
+                ctrl_names.append(bdev_name[:-2])
+
+        if not ctrl_names:
+            return
+
+        local_count = 0
+        for ctrl_name in ctrl_names:
+            try:
+                rpc_client.bdev_nvme_detach_controller(ctrl_name)
+                local_count += 1
+            except Exception as e:
+                logger.info(
+                    "detach: peer %s ctrlr %s detach failed (best-effort, "
+                    "shutdown continues): %s",
+                    peer.get_id(), ctrl_name, e)
+        if local_count:
+            with detached_lock:
+                detached[0] += local_count
+
+    threads = []
+    for peer in peers:
+        t = threading.Thread(target=_detach_one_peer, args=(peer,))
+        threads.append(t)
+        t.start()
+    for t in threads:
+        t.join(timeout=15)
+    return detached[0]
+
+
 def shutdown_storage_node(node_id, force=False):
+    """Gracefully terminate a storage node.
+
+    Flow (graceful, force=False):
+      1. FTT / concurrency guards, set node status to in_shutdown.
+      2. Cancel in-flight migration tasks for this node.
+      3. Loop 1: broadcast device-unavailable events to peers in
+         {online, down, in_restart} via device_set_unavailable() /
+         set_jm_device_state() — these already fan out
+         distr_controller.send_dev_status_event(...) under the hood,
+         so peers update their cluster maps and DISTRIB stops routing
+         IO toward this node's devices.
+      4. Loop 2: on the same peers, detach the remote_alceml /
+         remote_jm controllers that point at this node. Detach
+         cancels SPDK's auto-reconnect poller in one shot, so peers
+         cannot reattach after we kill our SPDK.
+      5. spdk_process_kill — hard SIGKILL of the SPDK container.
+      6. Set status to offline + trigger_ana_failover_for_node.
+
+    No suspension phase. Earlier revisions blocked sec/tert lvstore
+    ports on the dying node first ("suspend") to drain host IO before
+    kill. That fence is iptables-only and cannot stop SPDK's lvol
+    layer from resubmitting failed-redirect IO as if it were new host
+    IO — which races with the surviving sec/tert peer's auto-promotion
+    and produces a writer conflict. Removing the suspension step
+    removes the surface where that race lives; the only benefit
+    suspension provided over a hard kill — letting peers cleanly tear
+    down their remote_alceml / remote_jm controllers — is now provided
+    by Loop 2.
+
+    Forced (force=True) still skips Loops 1+2 and goes straight to
+    kill (matches the existing --force semantics: terminate immediately
+    and accept that peers discover the loss through TCP errors).
+    """
     db_controller = DBController()
     try:
         snode = db_controller.get_storage_node_by_id(node_id)
@@ -3382,7 +3522,6 @@ def shutdown_storage_node(node_id, force=False):
 
     logger.info("Node found: %s in state: %s", snode.hostname, snode.status)
 
-    # FTT check (suspend already checked this, but verify again for direct shutdown calls)
     if not force:
         allowed, reason = _check_ftt_allows_node_removal(node_id, db_controller)
         if not allowed:
@@ -3429,47 +3568,93 @@ def shutdown_storage_node(node_id, force=False):
             logger.error(f"Migration task found: {len(tasks)}, can not shutdown storage node or use --force")
             return False
 
-    # If node is not yet suspended and force is not used, run suspend first
-    if snode.status != StorageNode.STATUS_SUSPENDED:
+    if snode.status not in (
+            StorageNode.STATUS_ONLINE,
+            StorageNode.STATUS_SUSPENDED,
+            StorageNode.STATUS_DOWN,
+    ):
         if force:
-            logger.warning("Node is not in suspended state, proceeding with force")
-        elif snode.status == StorageNode.STATUS_ONLINE:
-            logger.info("Node is online, suspending before shutdown")
-            ret = suspend_storage_node(node_id, force=False, change_node_status=False)
-            if not ret:
-                logger.error("Failed to suspend node, cannot proceed with shutdown")
-                return False
-            snode = db_controller.get_storage_node_by_id(node_id)
+            logger.warning(
+                "Node status is %s, proceeding with force", snode.status)
         else:
-            logger.error("Node is not in suspended or online state, use --force")
+            logger.error(
+                "Node is in %s state; only online/suspended/down can be "
+                "gracefully shut down. Use --force.", snode.status)
             return False
 
+    # Step 1: mark the node in_shutdown. set_node_status fans out a
+    # node_status event to peers so their cluster maps see "this node
+    # is going away" before we touch any device state.
     logger.info("Shutting down node")
     set_node_status(node_id, StorageNode.STATUS_IN_SHUTDOWN)
-    # Non-force path keeps the original 3s+1s+1s settle window so the
-    # storage-node monitor can react to FDB status flips before SPDK is
-    # killed. --force is meant to terminate the peer immediately so the
-    # host side observes EPIPE within ~1s instead of waiting ~9s; the
-    # mgmt-side sleeps add ~5s of latency to peer detection with no IO
-    # safety benefit (the kill is SIGKILL via docker rm -f anyway).
-    if not force:
-        time.sleep(3)
+    snode = db_controller.get_storage_node_by_id(node_id)
 
-    if snode.jm_device and snode.jm_device.status != JMDevice.STATUS_REMOVED:
-        logger.info("Setting JM unavailable")
-        device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
-
-    if not force:
-        time.sleep(1)
-    for dev in snode.nvme_devices:
-        if dev.status in [NVMeDevice.STATUS_UNAVAILABLE, NVMeDevice.STATUS_ONLINE,
-                          NVMeDevice.STATUS_CANNOT_ALLOCATE, NVMeDevice.STATUS_READONLY]:
-            # Default cause (CAUSE_OTHER) is correct here: a node-driven
-            # shutdown must not count against the per-device flap budget.
-            device_controller.device_set_unavailable(dev.get_id())
+    # Step 2: cancel migration tasks while controllers are still up.
+    pending_tasks = db_controller.get_job_tasks(snode.cluster_id)
+    for task in pending_tasks:
+        if task.node_id != node_id or task.status == JobSchedule.STATUS_DONE:
+            continue
+        if task.function_name in [
+            JobSchedule.FN_DEV_MIG,
+            JobSchedule.FN_FAILED_DEV_MIG,
+            JobSchedule.FN_NEW_DEV_MIG,
+        ]:
+            task.canceled = True
+            task.write_to_db(db_controller.kv_store)
 
     if not force:
-        time.sleep(1)
+        # Step 3 (Loop 1): broadcast device-unavailable events. The
+        # underlying device_set_unavailable() / set_jm_device_state()
+        # helpers call distr_controller.send_dev_status_event() which
+        # already fans out to all peers and skips offline/removed.
+        if snode.jm_device and snode.jm_device.status != JMDevice.STATUS_REMOVED:
+            logger.info("Loop 1: setting JM unavailable on peers")
+            try:
+                device_controller.set_jm_device_state(
+                    snode.jm_device.get_id(), JMDevice.STATUS_UNAVAILABLE)
+            except Exception as e:
+                logger.warning(
+                    "Loop 1: set_jm_device_state failed (continuing): %s", e)
+
+        logger.info(
+            "Loop 1: marking %d nvme device(s) unavailable on peers",
+            len(snode.nvme_devices))
+        for dev in snode.nvme_devices:
+            if dev.status not in [
+                NVMeDevice.STATUS_UNAVAILABLE,
+                NVMeDevice.STATUS_ONLINE,
+                NVMeDevice.STATUS_CANNOT_ALLOCATE,
+                NVMeDevice.STATUS_READONLY,
+            ]:
+                continue
+            try:
+                # Default cause (CAUSE_OTHER): a node-driven shutdown
+                # must not count against the per-device flap budget.
+                device_controller.device_set_unavailable(dev.get_id())
+            except Exception as e:
+                logger.warning(
+                    "Loop 1: device_set_unavailable(%s) failed (continuing): %s",
+                    dev.get_id(), e)
+
+        # Step 4 (Loop 2): detach remote_alceml / remote_jm controllers
+        # on every peer still capable of receiving an RPC. Detach (vs.
+        # disconnect) removes the per-ctrlr reconnect poller so the
+        # peer's SPDK cannot reattach after we kill our SPDK below.
+        snode = db_controller.get_storage_node_by_id(node_id)
+        logger.info("Loop 2: detaching remote controllers on peers")
+        try:
+            count = _detach_remote_controllers_from_peers(snode, db_controller)
+            logger.info("Loop 2: detached %d controller(s) total", count)
+        except Exception as e:
+            logger.warning(
+                "Loop 2: peer-side detach pass raised %s (continuing to kill)",
+                e)
+
+    # Step 5: hard-kill SPDK. Same code path as the existing --force
+    # shutdown — peers see the TCP drop and host multipath retries on
+    # surviving paths. Any IO inside SPDK at this instant is lost;
+    # that's also true for --force today and is the design contract for
+    # kill.
     logger.info("Stopping SPDK")
     try:
         snode.client(timeout=10, retry=10).spdk_process_kill(snode.rpc_port, snode.cluster_id)
@@ -3486,230 +3671,58 @@ def shutdown_storage_node(node_id, force=False):
             except Exception as e:
                 logger.debug(e)
 
+    # Step 6: status → offline + ANA failover bookkeeping.
     logger.info("Setting node status to offline")
     set_node_status(node_id, StorageNode.STATUS_OFFLINE)
 
-    # ANA failover: update subsystem states on surviving nodes
     snode = db_controller.get_storage_node_by_id(node_id)
     try:
         trigger_ana_failover_for_node(snode)
     except Exception as ana_e:
         logger.error("ANA failover during shutdown of %s failed: %s", node_id, ana_e)
 
-    tasks = db_controller.get_job_tasks(snode.cluster_id)
-    for task in tasks:
-        if task.node_id == node_id and task.status != JobSchedule.STATUS_DONE:
-            if task.function_name in [JobSchedule.FN_DEV_MIG, JobSchedule.FN_FAILED_DEV_MIG,
-                                      JobSchedule.FN_NEW_DEV_MIG]:
-                task.canceled = True
-                task.write_to_db(db_controller.kv_store)
-
     logger.info("Done")
     return True
 
 
 def suspend_storage_node(node_id, force=False, change_node_status=True):
-    db_controller = DBController()
-    try:
-        snode = db_controller.get_storage_node_by_id(node_id)
-    except KeyError:
-        logger.exception("This storage node is not part of the cluster")
-        return False
+    """Deprecated: the suspension phase is no longer a precursor to
+    graceful shutdown. Kept as a noop-stub so any external automation
+    still calling `sbctl sn suspend` doesn't hard-fail.
 
-    logger.info("Node found: %s in state: %s", snode.hostname, snode.status)
-    if snode.status != StorageNode.STATUS_ONLINE and change_node_status:
-        logger.error("Node is not in online state")
-        if force is False:
-            return False
-
-    task_id = tasks_controller.get_active_node_restart_task(snode.cluster_id, snode.get_id())
-    if task_id:
-        logger.error(f"Restart task found: {task_id}, can not suspend storage node")
-        if force is False:
-            return False
-
-    tasks = tasks_controller.get_active_node_tasks(snode.cluster_id, snode.get_id())
-    if tasks:
-        if not force and _allow_shutdown_with_migration_tasks(snode, db_controller):
-            logger.warning(
-                "Migration task found: %s, proceeding with suspend because FTT=2 allows node outage",
-                len(tasks),
-            )
-        elif force:
-            logger.warning(
-                "Migration task found: %s, proceeding with forced suspend and canceling tasks",
-                len(tasks),
-            )
-            for task in tasks:
-                tasks_controller.cancel_task(task.uuid)
-        else:
-            logger.error(f"Migration task found: {len(tasks)}, can not suspend storage node, use --force")
-            return False
-
-    if not force:
-        allowed, reason = _check_ftt_allows_node_removal(node_id, db_controller)
-        if not allowed:
-            logger.error(f"Cannot suspend node: {reason}")
-            return False, reason
-
-    logger.info("Suspending node")
-
-    fw_api = FirewallClient(snode, timeout=20, retry=1)
-    port_type = "tcp"
-    if snode.active_rdma:
-        port_type = "udp"
-
-    # Track all blocked ports so we can revert on failure
-    blocked_ports = []  # list of (port, port_type, rpc_port) tuples
-
-    def _block_port(port):
-        fw_api.firewall_set_port(port, port_type, "block", snode.rpc_port, is_reject=True)
-        blocked_ports.append(port)
-
-    def _revert_blocked_ports():
-        for port in blocked_ports:
-            try:
-                fw_api.firewall_set_port(port, port_type, "unblock", snode.rpc_port)
-            except Exception as revert_e:
-                logger.error(f"Failed to revert port block for port {port}: {revert_e}")
-
-    try:
-        # Block per-lvstore ports for secondary lvstores hosted on this node.
-        # Per-LVS order:
-        #   1. block client (lvs) port — multipath clients fail over to peers
-        #   2. sleep so any pre-block in-flight IO already on our distrib
-        #      pipeline can complete locally before we close the hublvol
-        #   3. block the hublvol port — surviving peer detects "no redirect
-        #      target", JC consensus + auto-promotion on the peer elects the
-        #      new leader cleanly (the in-flight IO that triggered earlier
-        #      revisions of this code is already drained by step 2).
-        # We deliberately do NOT issue an explicit
-        # bdev_lvol_set_leader(leader=False) / bdev_distrib_force_to_non_leader
-        # at any point inside this loop. Prior incidents:
-        #   2026-05-06 iter 2, jm_vuid=4450 — hub closed before client; fixed
-        #     by client-first ordering.
-        #   2026-05-10 iter 3, jm_vuid=4245 — multipath refilled the
-        #     secondary's pipeline during the drain; tried "demote between
-        #     the two blocks" (3ae2a9b0). Still produced a writer conflict
-        #     because the explicit demote races pre-block IO still being
-        #     processed on the local distrib (port block does not halt
-        #     internal distrib processing of already-queued requests); the
-        #     IO completes as non-leader → conflict. Dropped the demote
-        #     entirely and rely on the peer's auto-promotion path.
-        if snode.lvstore_stack_secondary or snode.lvstore_stack_tertiary:
-            nodes = db_controller.get_primary_storage_nodes_by_secondary_node_id(node_id)
-            if nodes:
-                for node in nodes:
-                    sec_lvs_port = node.get_lvol_subsys_port(node.lvstore)
-                    sec_hub_port = node.get_hublvol_port(node.lvstore)
-                    _block_port(sec_lvs_port)
-                    time.sleep(1)
-                    if sec_hub_port:
-                        _block_port(sec_hub_port)
-                    time.sleep(0.5)
-
-        # Block per-lvstore ports for this node's own primary lvstore
-        # (same per-LVS ordering — see comment above).
-        own_lvs_port = snode.get_lvol_subsys_port(snode.lvstore)
-        own_hub_port = snode.get_hublvol_port(snode.lvstore)
-        _block_port(own_lvs_port)
-        time.sleep(1)
-        if own_hub_port:
-            _block_port(own_hub_port)
-        time.sleep(0.5)
-        time.sleep(1)
-    except Exception as e:
-        logger.error(f"Failed during suspend port blocking/leadership transfer: {e}")
-        logger.info("Reverting blocked ports")
-        _revert_blocked_ports()
-        return False
-
-    if change_node_status:
-        logger.info("Setting node status to suspended")
-        set_node_status(snode.get_id(), StorageNode.STATUS_SUSPENDED)
-
-    logger.info("Done")
+    Earlier revisions blocked sec/tert + own-primary lvstore ports via
+    iptables-`REJECT --reject-with tcp-reset` here, then transitioned
+    the node to STATUS_SUSPENDED. That fence cannot stop SPDK's lvol
+    layer from resubmitting failed-redirect IO inside the dying node
+    as if it were new host IO, which races the surviving sec/tert
+    peer's auto-promotion and produces a writer conflict (incident
+    2026-05-19, jm_vuid=4818). The new shutdown_storage_node() drops
+    the entire suspension phase and instead relies on:
+      (a) device-unavailable events to peers (already part of the
+          old flow, retained in shutdown_storage_node),
+      (b) bdev_nvme_detach_controller on every peer's remote_alceml
+          / remote_jm controller pointing at the dying node (new
+          Loop 2 in shutdown_storage_node), and
+      (c) a hard SPDK kill — every condition we used to "drain" is
+          now resolved post-kill by the peers' normal recovery path.
+    """
+    logger.warning(
+        "sn suspend is deprecated: the suspension phase has been removed "
+        "from graceful shutdown (see shutdown_storage_node docstring). "
+        "Treating call as no-op for node %s.",
+        node_id,
+    )
     return True
 
 
 def resume_storage_node(node_id):
-    db_controller = DBController()
-    try:
-        snode = db_controller.get_storage_node_by_id(node_id)
-    except KeyError:
-        logger.error("This storage node is not part of the cluster")
-        return False
-
-    logger.info("Node found: %s in state: %s", snode.hostname, snode.status)
-    if snode.status != StorageNode.STATUS_SUSPENDED:
-        logger.error("Node is not in suspended state")
-        return False
-
-    sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-    if sec_node and sec_node.status == StorageNode.STATUS_UNREACHABLE:
-        logger.error("Secondary node is unreachable, cannot resume primary node")
-        return False
-
-    logger.info("Resuming node")
-    for dev in snode.nvme_devices:
-        if dev.status == NVMeDevice.STATUS_UNAVAILABLE:
-            device_controller.device_set_online(dev.get_id())
-
-    for db_dev in snode.nvme_devices:
-        distr_controller.send_dev_status_event(db_dev, db_dev.status)
-
-    logger.info("Set JM Online")
-    if snode.jm_device and snode.jm_device.get_id():
-        device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
-
-    logger.info("Connecting to remote devices")
-    snode = db_controller.get_storage_node_by_id(node_id)
-    try:
-        snode.remote_devices = _connect_to_remote_devs(snode)
-    except RuntimeError:
-        logger.error('Failed to connect to remote devices')
-        return False
-    if snode.enable_ha_jm:
-        snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
-    snode.write_to_db()
-    _refresh_cluster_maps_after_node_recovery(snode)
-
-    fw_api = FirewallClient(snode, timeout=20, retry=1)
-    port_type = "tcp"
-    if snode.active_rdma:
-        port_type = "udp"
-    nodes = db_controller.get_primary_storage_nodes_by_secondary_node_id(node_id)
-    if nodes:
-        for node in nodes:
-            try:
-                # Allow per-lvstore ports for secondary lvstores on this node
-                sec_lvs_port = node.get_lvol_subsys_port(node.lvstore)
-                sec_hub_port = node.get_hublvol_port(node.lvstore)
-                fw_api.firewall_set_port(
-                    sec_lvs_port, port_type, "allow", snode.rpc_port)
-                if sec_hub_port:
-                    fw_api.firewall_set_port(
-                        sec_hub_port, port_type, "allow", snode.rpc_port)
-            except Exception as e:
-                logger.error(e)
-                return False
-
-    try:
-        # Allow per-lvstore ports for this node's own primary lvstore
-        own_lvs_port = snode.get_lvol_subsys_port(snode.lvstore)
-        own_hub_port = snode.get_hublvol_port(snode.lvstore)
-        fw_api.firewall_set_port(
-            own_lvs_port, port_type, "allow", snode.rpc_port)
-        if own_hub_port:
-            fw_api.firewall_set_port(
-                own_hub_port, port_type, "allow", snode.rpc_port)
-    except Exception as e:
-        logger.error(e)
-        return False
-
-    logger.info("Setting node status to online")
-    set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE, caused_by="resume")
-    logger.info("Done")
+    """Deprecated: counterpart to suspend_storage_node, which is now a
+    noop. There is nothing to resume."""
+    logger.warning(
+        "sn resume is deprecated: the suspension phase has been removed "
+        "from graceful shutdown. Treating call as no-op for node %s.",
+        node_id,
+    )
     return True
 
 
