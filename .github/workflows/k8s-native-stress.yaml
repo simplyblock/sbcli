@@ -761,7 +761,7 @@ jobs:
           spec:
             clusterName: simplyblock-cluster
             storageClassParameters:
-              encryption: \"true\""
+              encryption: true"
           fi
 
           echo "=== Custom resource YAML to apply ==="

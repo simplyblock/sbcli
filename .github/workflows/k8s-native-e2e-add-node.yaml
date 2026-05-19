@@ -723,7 +723,7 @@ jobs:
           spec:
             clusterName: simplyblock-cluster
             storageClassParameters:
-              encryption: \"true\""
+              encryption: true"
           fi
 
           echo "=== Applying custom resources (initial ${#NODES[@]} workers) ==="
