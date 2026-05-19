@@ -4,7 +4,7 @@ import pprint
 import json
 from inspect import ismethod
 import sys
-from typing import Mapping, Type
+from typing import Mapping, Type, Union
 from collections import ChainMap
 
 
@@ -86,6 +86,16 @@ class BaseModel(object):
                             value = {item: dtype.__args__[1]().from_dict(data[attr][item]) for item in data[attr]}
                         else:
                             value = value_dict['type'](data[attr])
+                    elif dtype.__origin__ is Union:
+                        if data[attr] is None:
+                            value = None
+                        else:
+                            inner_types = [t for t in dtype.__args__ if t is not type(None)]
+                            inner = inner_types[0] if inner_types else None
+                            if inner is not None and hasattr(inner, "from_dict"):
+                                value = inner().from_dict(data[attr])
+                            elif inner is not None:
+                                value = inner(data[attr])
                 else:
                     value = value_dict['type'](data[attr])
             setattr(self, attr, value)

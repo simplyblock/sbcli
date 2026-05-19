@@ -6,7 +6,6 @@ import socket
 import subprocess
 import time
 import uuid
-import textwrap
 import typing as t
 
 import docker
@@ -18,7 +17,7 @@ from simplyblock_core import utils, scripts, constants, mgmt_node_ops, storage_n
 from simplyblock_core.controllers import backup_controller, cluster_events, device_controller, qos_controller, tasks_controller, tcp_ports_events
 from simplyblock_core.fw_api_client import FirewallClient
 from simplyblock_core.db_controller import DBController
-from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.models.cluster import Cluster, HashicorpVaultSettings
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.mgmt_node import MgmtNode
@@ -226,7 +225,9 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    enable_node_affinity, qpair_count, client_qpair_count, max_queue_size, inflight_io_threshold, disable_monitoring, strict_node_anti_affinity, name,
                    tls_secret, ingress_host_source, dns_name, fabric, is_single_node, client_data_nic,
                    nvmeof_tls_config=None, max_fault_tolerance=1, backup_config=None,
-                   nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001, container_image_prefix=None) -> str:
+                   nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001, container_image_prefix=None,
+                   hashicorp_vault_settings : t.Optional[HashicorpVaultSettings] = None,
+) -> str:
 
     if distr_ndcs == 0 and distr_npcs == 0:
         raise ValueError("both distr_ndcs and distr_npcs cannot be 0")
@@ -253,6 +254,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     scripts.install_deps(mode)
     logger.info("Installing dependencies > Done")
 
+    db_connection = None
     if mode == "docker":
         if not ifname:
             ifname = "eth0"
@@ -355,6 +357,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.rpc_base_port = rpc_base_port
     cluster.snode_api_port = snode_api_port
     cluster.container_image_prefix = container_image_prefix or ""
+    cluster.hashicorp_vault_settings = hashicorp_vault_settings
 
     if nvmeof_tls_config:
         cluster.tls = True
@@ -382,11 +385,10 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         logger.info("Retrieving foundationdb connection string...")
         fdb_cluster_string = utils.get_fdb_cluster_string(constants.FDB_CONFIG_NAME, constants.K8S_NAMESPACE)
         db_connection = fdb_cluster_string
-        
+
         logger.info("Patching prometheus configmap...")
         utils.patch_prometheus_configmap(cluster.uuid, cluster.secret)
 
-    if not disable_monitoring:
         if ingress_host_source == "hostip":
             dns_name = dev_ip
 
@@ -395,8 +397,10 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         _add_graylog_input(graylog_endpoint, monitoring_secret)
 
         _create_update_user(cluster.uuid, cluster.grafana_endpoint, monitoring_secret, cluster.secret)
+    else:
+        assert False, "Unreachable"
 
-    cluster.db_connection = db_connection
+    cluster.db_connection = db_connection  # type: ignore[assignment]
     cluster.status = Cluster.STATUS_UNREADY
     cluster.create_dt = str(datetime.datetime.now())
 
@@ -435,41 +439,14 @@ def _cleanup_nvme(mount_point, nqn_value) -> None:
     logger.info(f"Removed mount point: {mount_point}")
 
 
-def _run_fio(mount_point) -> None:
-    if not os.path.exists(mount_point):
-        os.makedirs(mount_point, exist_ok=True)
-
-    try:
-        fio_config = textwrap.dedent(f"""
-            [test]
-            ioengine=aiolib
-            direct=1
-            iodepth=4
-            readwrite=randrw
-            bs=4K
-            nrfiles=4
-            size=1G
-            verify=md5
-            numjobs=3
-            directory={mount_point}
-        """).strip()
-        config_file = "fio.cfg"
-        with open(config_file, "w") as f:
-            f.write(fio_config)
-
-        logger.info(subprocess.check_output(["sudo", "fio", config_file], text=True))
-    finally:
-        if os.path.exists(config_file):
-            os.remove(config_file)
-            logger.info("fio configuration file removed.")
-
-
 def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
                 distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity, qpair_count,
                 max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name, cr_name=None,
                 cr_namespace=None, cr_plural=None, fabric="tcp", cluster_ip=None, grafana_secret=None,
                 client_data_nic="", max_fault_tolerance=1, backup_config=None,
-                nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001) -> str:
+                nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001,
+                hashicorp_vault_settings : t.Optional[HashicorpVaultSettings] = None,
+) -> str:
 
 
     default_cluster = None
@@ -496,7 +473,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
             raise ValueError("max_fault_tolerance > 1 requires distr_npcs >= 2")
 
     monitoring_secret = os.environ.get("MONITORING_SECRET", "")
-    
+
     logger.info("Adding new cluster")
     cluster = Cluster()
     cluster.uuid = str(uuid.uuid4())
@@ -571,6 +548,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     cluster.nvmf_base_port = nvmf_base_port
     cluster.rpc_base_port = rpc_base_port
     cluster.snode_api_port = snode_api_port
+    cluster.hashicorp_vault_settings = hashicorp_vault_settings
     if backup_config:
         cluster.backup_config = backup_config
 

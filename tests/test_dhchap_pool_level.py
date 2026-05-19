@@ -20,6 +20,8 @@ import inspect
 import unittest
 from unittest.mock import MagicMock, patch
 
+from tests._mocks import make_mock_cluster
+
 
 # ---------------------------------------------------------------------------
 # Pool model
@@ -94,8 +96,7 @@ class TestAddPoolDhchap(unittest.TestCase):
         """Call add_pool with a fully-mocked DB and return the pool written to DB."""
         from simplyblock_core.controllers import pool_controller
 
-        cluster = MagicMock()
-        cluster.get_id.return_value = "cluster-1"
+        cluster = make_mock_cluster()
 
         written_pool = {}
 
@@ -273,8 +274,7 @@ class TestAddPoolKeyGeneration(unittest.TestCase):
 
     def _run_add(self, dhchap):
         from simplyblock_core.controllers import pool_controller
-        cluster = MagicMock()
-        cluster.get_id.return_value = "cluster-1"
+        cluster = make_mock_cluster()
 
         with patch("simplyblock_core.controllers.pool_controller.DBController") as MockDB, \
              patch("simplyblock_core.controllers.pool_controller.Pool") as MockPool, \

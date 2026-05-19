@@ -10,6 +10,8 @@ from simplyblock_core.controllers import lvol_controller, snapshot_events, pool_
     migration_controller
 
 from simplyblock_core import utils, constants
+from simplyblock_core.kms import create_kms_connection
+from simplyblock_core.kms._exceptions import KMSException
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.pool import Pool
@@ -763,6 +765,20 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
             return False, msg
 
     lvol.write_to_db(db_controller.kv_store)
+
+    if snap.lvol.crypto_bdev:
+        with create_kms_connection(cluster) as kms:
+            try:
+                key1, key2 = kms.get_data_encryption_keys(snap.lvol.pool_uuid, snap.lvol.crypto_bdev)
+                kms.import_data_encryption_keys(lvol.pool_uuid, lvol.crypto_bdev, (key1, key2))
+                if not cluster.hashicorp_vault_settings:
+                    lvol.crypto_key1, lvol.crypto_key2 = key1, key2
+                    lvol.write_to_db(db_controller.kv_store)
+            except KMSException:
+                msg = f"Failed to copy encryption keys for clone {lvol.crypto_bdev}"
+                logger.exception(msg)
+                lvol.remove(db_controller.kv_store)
+                return False, msg
 
     if lvol.ha_type == "single":
         lvol_bdev, error = lvol_controller.add_lvol_on_node(lvol, snode)

@@ -13,6 +13,7 @@ from simplyblock_core import utils, constants
 from simplyblock_core.controllers import snapshot_controller, pool_controller, lvol_events, tasks_controller, \
     snapshot_events
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.kms import KMSException, create_kms_connection
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.pool import Pool
@@ -120,8 +121,9 @@ def _register_dhchap_keys_on_node(snode, host_nqn, host_entry, rpc_client):
     return key_names
 
 
-
-def _create_crypto_lvol(rpc_client, name, base_name, key1, key2):
+def _create_crypto_lvol(rpc_client, lvol, cluster):
+    name = lvol.crypto_bdev
+    base_name = f"{lvol.lvs_name}/{lvol.lvol_bdev}"
     ret = rpc_client.get_bdevs(base_name)
     if not ret:
         logger.error(f"Failed to find LVol bdev {base_name}")
@@ -135,8 +137,15 @@ def _create_crypto_lvol(rpc_client, name, base_name, key1, key2):
         logger.info("crypto LVol %s already exists, skipping create", name)
         return True
 
+    with create_kms_connection(cluster) as kms:
+        try:
+            original_key1, original_key2 = kms.get_data_encryption_keys(lvol.pool_uuid, name)
+        except KMSException:
+            logger.exception(f"Failed to get keys for lvol: {name} from KMS")
+            return False
+
     key_name = f'key_{name}'
-    ret = rpc_client.lvol_crypto_key_create(key_name, key1, key2)
+    ret = rpc_client.lvol_crypto_key_create(key_name, original_key1, original_key2)
     if not ret:
         # SPDK returns failure when the key name already exists. On
         # re-activation that's the same node re-issuing the same key —
@@ -362,10 +371,9 @@ def validate_aes_xts_keys(key1: str, key2: str) -> Tuple[bool, str]:
 
 def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=False, use_crypto=False,
                 distr_vuid=0, max_rw_iops=0, max_rw_mbytes=0, max_r_mbytes=0, max_w_mbytes=0,
-                with_snapshot=False, max_size=0, crypto_key1=None, crypto_key2=None, lvol_priority_class=0,
+                with_snapshot=False, max_size=0, lvol_priority_class=0,
                 uid=None, pvc_name=None, namespaced=None, max_namespace_per_subsys=1, fabric="tcp", ndcs=0, npcs=0,
-                allowed_hosts=None,
-                do_replicate=False, replication_cluster_id=None):
+                allowed_hosts=None, do_replicate=False, replication_cluster_id=None, crypto_key=None):
     db_controller = DBController()
     logger.info(f"Adding LVol: {name}")
     host_node = None
@@ -517,7 +525,8 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     lvol.guid = utils.generate_hex_string(16)
     lvol.vuid = vuid
     lvol.lvol_bdev = f"LVOL_{vuid}"
-
+    lvol.pool_uuid = pool.get_id()
+    lvol.pool_name = pool.pool_name
     lvol.crypto_bdev = ''
     lvol.comp_bdev = ''
 
@@ -606,28 +615,17 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     lvol.bdev_stack = [lvol_dict]
 
     if use_crypto:
-        if crypto_key1 is None or crypto_key2 is None:
-            return False, "encryption keys for lvol not provided"
-        else:
-            success, err = validate_aes_xts_keys(crypto_key1, crypto_key2)
-            if not success:
-                return False, err
-
         lvol.crypto_bdev = f"crypto_{lvol.lvol_bdev}"
         lvol.bdev_stack.append({
             "type": "crypto",
             "name": lvol.crypto_bdev,
             "params": {
                 "name": lvol.crypto_bdev,
-                "base_name": lvol.top_bdev,
-                "key1": crypto_key1,
-                "key2": crypto_key2,
+                "base_name": lvol.top_bdev
             }
         })
         lvol.lvol_type += ',crypto'
         lvol.top_bdev = lvol.crypto_bdev
-        lvol.crypto_key1 = crypto_key1
-        lvol.crypto_key2 = crypto_key2
 
     # Process allowed hosts (for host restriction and/or DH-HMAC-CHAP authentication)
     if not namespace:
@@ -652,6 +650,26 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
                 bool(pool.dhchap_key) if pool.dhchap else "N/A")
 
     lvol.write_to_db(db_controller.kv_store)
+
+    if use_crypto:
+        with create_kms_connection(cl) as kms:
+            try:
+                if crypto_key is None:
+                    kms.create_data_encryption_keys(pool.get_id(), lvol.crypto_bdev)
+                else:
+                    kms.import_data_encryption_keys(pool.get_id(), lvol.crypto_bdev, crypto_key)
+                # For LocalKMS, sync keys to the in-memory lvol so subsequent
+                # write_to_db calls do not overwrite them with empty strings.
+                if not cl.hashicorp_vault_settings:
+                    lvol.crypto_key1, lvol.crypto_key2 = kms.get_data_encryption_keys(
+                        pool.get_id(), lvol.crypto_bdev
+                    )
+                logger.info("Created lvol keys")
+            except KMSException:
+                msg = "Failed to create lvol keys"
+                logger.exception(msg)
+                lvol.remove(db_controller.kv_store)
+                return False, msg
 
     if ha_type == "single":
         if host_node.status == StorageNode.STATUS_ONLINE:
@@ -797,7 +815,9 @@ def _create_bdev_stack(lvol, snode, is_primary=True):
             ret = rpc_client.ultra21_lvol_mount_lvol(**params)
 
         elif type == "crypto":
-            ret = _create_crypto_lvol(rpc_client, **params)
+            db_controller = DBController()
+            cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+            ret = _create_crypto_lvol(rpc_client, lvol, cluster)
 
         elif type == "bdev_lvstore":
             ret = rpc_client.create_lvstore(**params)
@@ -963,13 +983,12 @@ def is_node_leader(snode, lvs_name):
     return False
 
 def recreate_lvol_on_node(lvol, snode, ha_inode_self=0, ana_state=None):
+    db_controller = DBController()
     rpc_client = snode.rpc_client()
 
-    base=f"{lvol.lvs_name}/{lvol.lvol_bdev}"
-
     if "crypto" in lvol.lvol_type:
-        ret = _create_crypto_lvol(
-            rpc_client, lvol.crypto_bdev, base, lvol.crypto_key1, lvol.crypto_key2)
+        cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+        ret = _create_crypto_lvol(rpc_client, lvol, cluster)
         if not ret:
             msg=f"Failed to create crypto lvol on node {snode.get_id()}"
             logger.error(msg)
@@ -1343,6 +1362,15 @@ def delete_lvol(id_or_name, force_delete=False):
                 snapshot_controller.delete(snap.get_id())
         except KeyError:
             pass # already deleted
+
+    cl = db_controller.get_cluster_by_id(snode.cluster_id)
+
+    with create_kms_connection(cl) as kms:
+        try:
+            kms.delete_data_encryption_keys(lvol.crypto_bdev)
+            logger.info("Deleted lvol key")
+        except KMSException:
+            logger.exception("Failed to delete lvol key")
 
     logger.info("Done")
     return True
