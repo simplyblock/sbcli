@@ -45,38 +45,41 @@ class HashicorpVaultSettings(BaseModel):
     base_url: Optional[Annotated[AnyUrl, UrlConstraints(allowed_schemes=["https"])]] = None
 
 
+_immutable = {"x-immutable": True}
+
+
 class ClusterParams(BaseModel):
     name: str = ""
-    blk_size: Literal[512, 4096] = 512
-    page_size_in_blocks: int = Field(2097152, gt=0)
+    blk_size: Literal[512, 4096] = Field(default=512, json_schema_extra=_immutable)
+    page_size_in_blocks: int = Field(2097152, gt=0, json_schema_extra=_immutable)
     cap_warn: util.Percent = 0
     cap_crit: util.Percent = 0
     prov_cap_warn: util.Percent = 0
     prov_cap_crit: util.Percent = 0
-    distr_ndcs: int = 1
-    distr_npcs: int = 1
-    distr_bs: int = 4096
-    distr_chunk_bs: int = 4096
-    ha_type: Literal['single', 'ha'] = 'ha'
-    qpair_count: int = 256
-    max_queue_size: int = 128
-    inflight_io_threshold: int = 4
-    enable_node_affinity: bool = False
-    strict_node_anti_affinity: bool = False
-    is_single_node: bool = False
-    fabric: str = "tcp"
+    distr_ndcs: int = Field(default=1, json_schema_extra=_immutable)
+    distr_npcs: int = Field(default=1, json_schema_extra=_immutable)
+    distr_bs: int = Field(default=4096, json_schema_extra=_immutable)
+    distr_chunk_bs: int = Field(default=4096, json_schema_extra=_immutable)
+    ha_type: Literal['single', 'ha'] = Field(default='ha', json_schema_extra=_immutable)
+    qpair_count: int = Field(default=256, json_schema_extra=_immutable)
+    max_queue_size: int = Field(default=128, json_schema_extra=_immutable)
+    inflight_io_threshold: int = Field(default=4, json_schema_extra=_immutable)
+    enable_node_affinity: bool = Field(default=False, json_schema_extra=_immutable)
+    strict_node_anti_affinity: bool = Field(default=False, json_schema_extra=_immutable)
+    is_single_node: bool = Field(default=False, json_schema_extra=_immutable)
+    fabric: str = Field(default="tcp", json_schema_extra=_immutable)
     cr_name: str = ""
     cr_namespace: str = ""
     cr_plural: str = ""
     cluster_ip: str = ""
     grafana_secret: str = ""
-    client_data_nic: str = ""
-    max_fault_tolerance: int = 1
-    nvmf_base_port: int = 4420
-    rpc_base_port: int = 8080
-    snode_api_port: int = 50001
+    client_data_nic: str = Field(default="", json_schema_extra=_immutable)
+    max_fault_tolerance: int = Field(default=1, json_schema_extra=_immutable)
+    nvmf_base_port: int = Field(default=4420, json_schema_extra=_immutable)
+    rpc_base_port: int = Field(default=8080, json_schema_extra=_immutable)
+    snode_api_port: int = Field(default=50001, json_schema_extra=_immutable)
     backup_config: Optional[BackupConfigParams] = None
-    hashicorp_vault_settings: Optional[HashicorpVaultSettings] = None
+    hashicorp_vault_settings: Optional[HashicorpVaultSettings] = Field(default=None, json_schema_extra=_immutable)
 
 
 @api.get('/', name='clusters:list')

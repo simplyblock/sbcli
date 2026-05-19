@@ -6048,13 +6048,15 @@
               4096
             ],
             "title": "Blk Size",
-            "default": 512
+            "default": 512,
+            "x-immutable": true
           },
           "page_size_in_blocks": {
             "type": "integer",
             "exclusiveMinimum": 0.0,
             "title": "Page Size In Blocks",
-            "default": 2097152
+            "default": 2097152,
+            "x-immutable": true
           },
           "cap_warn": {
             "type": "integer",
@@ -6087,22 +6089,26 @@
           "distr_ndcs": {
             "type": "integer",
             "title": "Distr Ndcs",
-            "default": 1
+            "default": 1,
+            "x-immutable": true
           },
           "distr_npcs": {
             "type": "integer",
             "title": "Distr Npcs",
-            "default": 1
+            "default": 1,
+            "x-immutable": true
           },
           "distr_bs": {
             "type": "integer",
             "title": "Distr Bs",
-            "default": 4096
+            "default": 4096,
+            "x-immutable": true
           },
           "distr_chunk_bs": {
             "type": "integer",
             "title": "Distr Chunk Bs",
-            "default": 4096
+            "default": 4096,
+            "x-immutable": true
           },
           "ha_type": {
             "type": "string",
@@ -6111,42 +6117,50 @@
               "ha"
             ],
             "title": "Ha Type",
-            "default": "ha"
+            "default": "ha",
+            "x-immutable": true
           },
           "qpair_count": {
             "type": "integer",
             "title": "Qpair Count",
-            "default": 256
+            "default": 256,
+            "x-immutable": true
           },
           "max_queue_size": {
             "type": "integer",
             "title": "Max Queue Size",
-            "default": 128
+            "default": 128,
+            "x-immutable": true
           },
           "inflight_io_threshold": {
             "type": "integer",
             "title": "Inflight Io Threshold",
-            "default": 4
+            "default": 4,
+            "x-immutable": true
           },
           "enable_node_affinity": {
             "type": "boolean",
             "title": "Enable Node Affinity",
-            "default": false
+            "default": false,
+            "x-immutable": true
           },
           "strict_node_anti_affinity": {
             "type": "boolean",
             "title": "Strict Node Anti Affinity",
-            "default": false
+            "default": false,
+            "x-immutable": true
           },
           "is_single_node": {
             "type": "boolean",
             "title": "Is Single Node",
-            "default": false
+            "default": false,
+            "x-immutable": true
           },
           "fabric": {
             "type": "string",
             "title": "Fabric",
-            "default": "tcp"
+            "default": "tcp",
+            "x-immutable": true
           },
           "cr_name": {
             "type": "string",
@@ -6176,27 +6190,32 @@
           "client_data_nic": {
             "type": "string",
             "title": "Client Data Nic",
-            "default": ""
+            "default": "",
+            "x-immutable": true
           },
           "max_fault_tolerance": {
             "type": "integer",
             "title": "Max Fault Tolerance",
-            "default": 1
+            "default": 1,
+            "x-immutable": true
           },
           "nvmf_base_port": {
             "type": "integer",
             "title": "Nvmf Base Port",
-            "default": 4420
+            "default": 4420,
+            "x-immutable": true
           },
           "rpc_base_port": {
             "type": "integer",
             "title": "Rpc Base Port",
-            "default": 8080
+            "default": 8080,
+            "x-immutable": true
           },
           "snode_api_port": {
             "type": "integer",
             "title": "Snode Api Port",
-            "default": 50001
+            "default": 50001,
+            "x-immutable": true
           },
           "backup_config": {
             "anyOf": [
