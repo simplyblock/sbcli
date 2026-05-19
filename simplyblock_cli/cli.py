@@ -202,12 +202,18 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--force', help='Force node shutdown.', dest='force', action='store_true')
 
     def init_storage_node__suspend(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'suspend', 'Suspends a storage node.')
+        subcommand = self.add_sub_command(
+            subparser, 'suspend',
+            'DEPRECATED: the suspension phase was removed from graceful '
+            'shutdown (it caused writer conflicts on sec/tert lvstores). '
+            'This command is now a no-op returning success. Use `sn shutdown`.')
         subcommand.add_argument('node_id', help='Storage node id', type=str).completer = self._completer_get_sn_list
-        argument = subcommand.add_argument('--force', help='Force node suspend.', dest='force', action='store_true')
+        argument = subcommand.add_argument('--force', help='Ignored (kept for backwards compatibility).', dest='force', action='store_true')
 
     def init_storage_node__resume(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'resume', 'Resumes a storage node.')
+        subcommand = self.add_sub_command(
+            subparser, 'resume',
+            'DEPRECATED: counterpart to `sn suspend`, also a no-op.')
         subcommand.add_argument('node_id', help='Storage node id', type=str).completer = self._completer_get_sn_list
 
     def init_storage_node__get_io_stats(self, subparser):
