@@ -2305,6 +2305,12 @@ class K8sNativeFailoverTest(TestClusterBase):
             npcs=self.npcs,
         )
         if self.tls_enabled:
+            self.logger.info("TLS enabled — ensuring encryption pool exists")
+            self.sbcli_utils.ensure_pool_exists(
+                self.CRYPTO_POOL_NAME,
+                cluster_id=self.cluster_id,
+                encryption=True,
+            )
             self.logger.info("TLS enabled — creating crypto StorageClass with encryption=True")
             self.k8s_utils.create_storage_class(
                 name=self.CRYPTO_STORAGE_CLASS_NAME,
@@ -3663,6 +3669,12 @@ class K8sNativeResilientFailoverTest(K8sNativeFailoverTest):
             npcs=self.npcs,
         )
         if self.tls_enabled:
+            self.logger.info("TLS enabled — ensuring encryption pool exists")
+            self.sbcli_utils.ensure_pool_exists(
+                self.CRYPTO_POOL_NAME,
+                cluster_id=self.cluster_id,
+                encryption=True,
+            )
             self.logger.info(
                 "TLS enabled — creating crypto StorageClass "
                 "with encryption=True"

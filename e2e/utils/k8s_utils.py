@@ -1920,13 +1920,12 @@ class K8sSbcliUtils:
         ns = self.k8s.namespace
 
         yaml_content = (
-            f"apiVersion: simplyblock.simplyblock.io/v1alpha1\n"
-            f"kind: SimplyBlockPool\n"
+            f"apiVersion: storage.simplyblock.io/v1alpha1\n"
+            f"kind: Pool\n"
             f"metadata:\n"
             f"  name: {k8s_resource_name}\n"
             f"  namespace: {ns}\n"
             f"spec:\n"
-            f"  capacityLimit: 100Gi\n"
             f"  clusterName: {cluster_name}\n"
         )
 
@@ -1945,6 +1944,61 @@ class K8sSbcliUtils:
                 return actual
             sleep_n_sec(5)
         self.logger.warning("[pool] Pool not confirmed after kubectl apply")
+        return pool_name
+
+    def ensure_pool_exists(self, pool_name, cluster_id=None, encryption=False):
+        """Verify a specific pool exists; create it via kubectl if missing.
+
+        Unlike ``add_storage_pool`` (which reuses *any* existing pool), this
+        method checks for a pool with exactly *pool_name* and only creates
+        it when that specific pool is absent.
+
+        Returns the pool name.
+        """
+        existing = self.list_storage_pools()
+        if pool_name in existing:
+            self.logger.info(f"[pool] Pool '{pool_name}' already exists")
+            return pool_name
+
+        # Pool does not exist — create it
+        cid = cluster_id or self.cluster_id
+        cluster_details = self.get_cluster_details(cluster_id=cid)
+        cluster_name = cluster_details.get("name") or cluster_details.get("Name", cid)
+
+        ns = self.k8s.namespace
+        sc_params = ""
+        if encryption:
+            sc_params = (
+                f"    storageClassParameters:\n"
+                f"      encryption: true\n"
+            )
+
+        yaml_content = (
+            f"apiVersion: storage.simplyblock.io/v1alpha1\n"
+            f"kind: Pool\n"
+            f"metadata:\n"
+            f"  name: {pool_name}\n"
+            f"  namespace: {ns}\n"
+            f"spec:\n"
+            f"  clusterName: {cluster_name}\n"
+            f"{sc_params}"
+        )
+
+        self.logger.info(
+            f"[pool] Pool '{pool_name}' not found — creating "
+            f"(cluster={cluster_name}, encryption={encryption}) via kubectl apply"
+        )
+        yaml_escaped = yaml_content.replace("'", "'\\''")
+        self.k8s._exec_kubectl(f"echo '{yaml_escaped}' | kubectl apply -f -")
+
+        # Wait up to 90s for the pool to become visible in sbcli
+        for _ in range(18):
+            pools = self.list_storage_pools()
+            if pool_name in pools:
+                self.logger.info(f"[pool] Pool '{pool_name}' is ready")
+                return pool_name
+            sleep_n_sec(5)
+        self.logger.warning(f"[pool] Pool '{pool_name}' not confirmed after kubectl apply")
         return pool_name
 
     def add_host_to_pool(self, pool_id, host_nqn):
@@ -1966,8 +2020,9 @@ class K8sSbcliUtils:
     def delete_storage_pool(self, pool_name):
         """Delete a storage pool by removing its K8s CRD resource."""
         self.logger.info(f"[pool] Deleting pool CRD '{pool_name}'")
+        ns = self.k8s.namespace
         self.k8s._exec_kubectl(
-            f"kubectl delete pools {pool_name} -n default "
+            f"kubectl delete pools {pool_name} -n {ns} "
             f"--timeout=60s 2>/dev/null || true"
         )
         # Wait for pool to disappear from sbcli
@@ -1980,15 +2035,16 @@ class K8sSbcliUtils:
 
     def delete_all_storage_pools(self):
         """Delete all storage pool CRD resources."""
+        ns = self.k8s.namespace
         out, _ = self.k8s._exec_kubectl(
-            "kubectl get pools -n default --no-headers "
-            "-o custom-columns=NAME:.metadata.name 2>/dev/null || true"
+            f"kubectl get pools -n {ns} --no-headers "
+            f"-o custom-columns=NAME:.metadata.name 2>/dev/null || true"
         )
         resources = [r.strip() for r in out.strip().splitlines() if r.strip()]
         for res in resources:
             self.logger.info(f"[pool] Deleting pool CRD '{res}'")
             self.k8s._exec_kubectl(
-                f"kubectl delete pools {res} -n default "
+                f"kubectl delete pools {res} -n {ns} "
                 f"--timeout=60s 2>/dev/null || true"
             )
 

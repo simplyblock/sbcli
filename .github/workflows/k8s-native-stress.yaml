@@ -363,6 +363,32 @@ jobs:
           }
           patch_and_delete_crs
 
+          # Dynamic catch-all: patch finalizers and delete ALL CRs of each type
+          # (handles resources not in the hardcoded list, e.g. encryption-pool)
+          echo "Cleaning up any remaining CRs..."
+          for CR_TYPE in \
+            "simplyblockpool.storage.simplyblock.io" \
+            "simplyblocklvol.storage.simplyblock.io" \
+            "simplyblocktask.storage.simplyblock.io" \
+            "simplyblockdevices.storage.simplyblock.io" \
+            "simplyblockstoragenodes.storage.simplyblock.io" \
+            "simplyblockstorageclusters.storage.simplyblock.io" \
+            "simplyblocksnapshotreplications.storage.simplyblock.io" \
+            "pool.storage.simplyblock.io" \
+            "lvol.storage.simplyblock.io" \
+            "task.storage.simplyblock.io" \
+            "devices.storage.simplyblock.io" \
+            "storagenodes.storage.simplyblock.io" \
+            "storageclusters.storage.simplyblock.io" \
+            "snapshotreplications.storage.simplyblock.io"; do
+            for CR_NAME in $(kubectl -n $NAMESPACE get "$CR_TYPE" --no-headers -o custom-columns=:metadata.name 2>/dev/null); do
+              kubectl -n $NAMESPACE patch "$CR_TYPE" "$CR_NAME" \
+                --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
+              kubectl -n $NAMESPACE delete "$CR_TYPE" "$CR_NAME" \
+                --ignore-not-found --wait=false 2>/dev/null || true
+            done
+          done
+
           echo "=== Phase 3a: Delete VolumeSnapshots & VolumeSnapshotContents ==="
           # Delete snapshots first (they block PVC deletion)
           for VS in $(kubectl get volumesnapshot -n $NAMESPACE --no-headers -o custom-columns=:metadata.name 2>/dev/null); do
