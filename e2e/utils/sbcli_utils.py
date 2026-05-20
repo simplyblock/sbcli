@@ -533,6 +533,24 @@ class SbcliUtils:
             sleep_n_sec(5)
             lvols = self.list_lvols()
 
+    def delete_all_clones(self):
+        """Delete all clone lvols (lvols with cloned_from_snap set).
+
+        Must be called BEFORE delete_all_snapshots, because SPDK refuses
+        to delete a snapshot that still has clones.
+        """
+        data = self.get_request(api_url="/lvol")
+        for lvol_info in data.get("results", []):
+            if lvol_info.get("cloned_from_snap"):
+                name = lvol_info.get("lvol_name")
+                self.logger.info(f"Deleting clone lvol: {name}")
+                try:
+                    self.delete_lvol(lvol_name=name, skip_error=True)
+                except Exception as e:
+                    self.logger.warning(
+                        f"Clone delete failed (continuing): {name}, err={e}"
+                    )
+
     def delete_all_lvols(self):
         """Deletes all lvols
         """

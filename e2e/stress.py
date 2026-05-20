@@ -44,7 +44,7 @@ def main():
     parser.add_argument('--run_ha', type=bool, help="Run HA tests", default=False)
     parser.add_argument('--send_debug_notification', type=bool, help="Send notification for debug", default=False)
     parser.add_argument('--upload_logs', type=bool, help="Upload Logs", default=False)
-    
+    parser.add_argument('--tls_enabled', type=str, help="TLS enabled", default="false")
 
     args = parser.parse_args()
     
@@ -110,7 +110,8 @@ def main():
                         npcs=args.npcs,
                         bs=args.bs,
                         chunk_bs=args.chunk_bs,
-                        k8s_run=args.run_k8s)
+                        k8s_run=args.run_k8s,
+                        tls_enabled=args.tls_enabled)
         try:
             test_obj.setup()
             if i == 0:
