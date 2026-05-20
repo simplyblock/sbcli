@@ -2126,19 +2126,62 @@ class K8sNativeFailoverTest(TestClusterBase):
     # ── FIO Validation ───────────────────────────────────────────────────────
 
     def _save_fio_pod_logs(self, job_name: str, resource_name: str):
-        """Save FIO pod logs to local log directory for debugging."""
+        """Save FIO pod logs and performance data to local log directory."""
         try:
             pod_name = self.k8s_utils.get_job_pod_name(job_name)
             if not pod_name:
                 return
+            # Save kubectl logs (stdout/stderr)
             logs = self.k8s_utils.get_pod_logs(pod_name, tail=2000)
             if logs:
                 log_file = os.path.join(self.log_path, f"{resource_name}_fio.log")
                 with open(log_file, "w") as f:
                     f.write(logs)
                 self.logger.info(f"Saved FIO logs for {resource_name} to {log_file}")
+
+            # Copy FIO performance logs from /spdkvol/ inside the pod
+            self._copy_fio_perf_logs(pod_name, resource_name)
         except Exception as exc:
             self.logger.warning(f"Could not save FIO logs for {resource_name}: {exc}")
+
+    def _copy_fio_perf_logs(self, pod_name: str, resource_name: str):
+        """Copy FIO perf log files (lat, bw, iops, iolog) from /spdkvol/ in
+        the pod to the local ClientLogs directory.
+
+        FIO writes files like ``{name}-fio_bw.1.log``, ``{name}-iolog.log``
+        inside the PVC mount.  This method lists matching files and copies
+        them out via ``kubectl cp``.
+        """
+        ns = self.k8s_utils.namespace
+        perf_dir = os.path.join(self.log_path, f"{resource_name}_perf")
+        try:
+            # List FIO-generated log files inside /spdkvol/
+            file_list, _ = self.k8s_utils._exec_kubectl(
+                f"kubectl exec {pod_name} -n {ns} -- "
+                f"find /spdkvol/ -maxdepth 1 -name '*-fio_*.log' -o -name '*-iolog.log' "
+                f"2>/dev/null || true",
+                supress_logs=True,
+            )
+            files = [f.strip() for f in file_list.strip().splitlines() if f.strip()]
+            if not files:
+                self.logger.info(f"No FIO perf logs found in pod {pod_name}")
+                return
+
+            os.makedirs(perf_dir, exist_ok=True)
+            for src_path in files:
+                fname = os.path.basename(src_path)
+                dest = os.path.join(perf_dir, fname)
+                self.k8s_utils._exec_kubectl(
+                    f"kubectl cp {ns}/{pod_name}:{src_path} {dest} 2>/dev/null || true",
+                    supress_logs=True,
+                )
+            self.logger.info(
+                f"Copied {len(files)} FIO perf log(s) for {resource_name} to {perf_dir}"
+            )
+        except Exception as exc:
+            self.logger.warning(
+                f"Could not copy FIO perf logs for {resource_name} from pod {pod_name}: {exc}"
+            )
 
     def validate_fio_jobs(self):
         """Validate all active FIO workloads.
