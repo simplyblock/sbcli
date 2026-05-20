@@ -78,9 +78,10 @@ class CLIWrapper(CLIWrapperBase):
 , '{{ alias }}'
 {%- endfor -%}
 {%- endif -%}
-, help='{{ parameter.help | escape_strings | escape_python_string }}'
+, help='{{ parameter | apply_deprecated_warning | escape_strings | escape_python_string }}{{ parameter.help | escape_strings | escape_python_string }}'
 {%- if parameter.type is defined and parameter.action is undefined %}, type={{ parameter.type | argument_type }}{% endif %}
-{%- if parameter.default is defined %}, default={{ parameter | default_value }}{% endif %}
+{%- if parameter.deprecated is defined and parameter.deprecated and parameter.action is defined and parameter.action in ('store_true', 'store_false') %}, default=None
+{%- elif parameter.default is defined %}, default={{ parameter | default_value }}{% endif %}
 {%- if parameter.dest is defined %}, dest='{{ parameter.dest }}'{% endif %}
 {%- if parameter.required is defined %}, required={{ parameter.required }}{% endif %}
 {%- if parameter.nargs is defined %}, nargs={{ parameter | nargs }}{% endif %}
@@ -137,6 +138,12 @@ class CLIWrapper(CLIWrapperBase):
                         args.{{ parameter.dest }} = {{ parameter | default_value }}
 {%- endif -%}
 {%- endfor -%}
+{%- for parameter in subcommand.parameters -%}
+{%- if parameter.deprecated is defined and parameter.deprecated.migration is defined %}
+                    if hasattr(args, '{{ parameter.dest if parameter.dest is defined else parameter.name }}') and getattr(args, '{{ parameter.dest if parameter.dest is defined else parameter.name }}', None) is not None:
+                        args = self.{{ parameter.deprecated.migration }}(args)
+{%- endif %}
+{%- endfor -%}
 {%- if subcommand.private %}
                     if not self.developer_mode:
                         print("This command is private.")
@@ -169,4 +176,3 @@ def main():
     utils.init_sentry_sdk()
     cli = CLIWrapper()
     cli.run()
-
