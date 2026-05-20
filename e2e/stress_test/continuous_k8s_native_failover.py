@@ -26,6 +26,7 @@ Loop structure mirrors RandomMultiClientMultiFailoverTest.run():
 
 from __future__ import annotations
 
+import json
 import os
 import random
 import shutil
@@ -1127,7 +1128,7 @@ class K8sNativeFailoverTest(TestClusterBase):
                 self.node_vs_pvc.setdefault(node_id, []).append(pvc_name)
             sleep_n_sec(5)
 
-        self.k8s_utils.log_fio_pvc_mapping(self.pvc_details, self.clone_details)
+        self.k8s_utils.log_fio_pvc_mapping(self.pvc_details, self.clone_details, snapshot_details=self.snapshot_details)
 
     def _ensure_per_node_coverage(self):
         """Verify every storage node has at least 1 PVC.  Create extras if needed."""
@@ -1149,7 +1150,7 @@ class K8sNativeFailoverTest(TestClusterBase):
         else:
             self.logger.info("[coverage] All storage nodes have at least 1 PVC.")
 
-        self.k8s_utils.log_fio_pvc_mapping(self.pvc_details, self.clone_details)
+        self.k8s_utils.log_fio_pvc_mapping(self.pvc_details, self.clone_details, snapshot_details=self.snapshot_details)
 
     # ── Snapshot & Clone creation ────────────────────────────────────────────
 
@@ -1326,7 +1327,7 @@ class K8sNativeFailoverTest(TestClusterBase):
             )
             sleep_n_sec(10)
 
-        self.k8s_utils.log_fio_pvc_mapping(self.pvc_details, self.clone_details)
+        self.k8s_utils.log_fio_pvc_mapping(self.pvc_details, self.clone_details, snapshot_details=self.snapshot_details)
 
     # ── Delete PVCs ──────────────────────────────────────────────────────────
 
@@ -2155,10 +2156,14 @@ class K8sNativeFailoverTest(TestClusterBase):
         ns = self.k8s_utils.namespace
         perf_dir = os.path.join(self.log_path, f"{resource_name}_perf")
         try:
-            # List FIO-generated log files inside /spdkvol/
+            # List ALL FIO-generated files inside /spdkvol/ (log, iolog,
+            # lat, bw, iops, etc.) — capture everything for post-mortem.
             file_list, _ = self.k8s_utils._exec_kubectl(
                 f"kubectl exec {pod_name} -n {ns} -- "
-                f"find /spdkvol/ -maxdepth 1 -name '*-fio_*.log' -o -name '*-iolog.log' "
+                f"find /spdkvol/ -maxdepth 1 "
+                f"\\( -name '*fio*.log' -o -name '*-iolog.log' -o -name '*_lat.*' "
+                f"-o -name '*_bw.*' -o -name '*_iops.*' -o -name '*_clat.*' "
+                f"-o -name '*_slat.*' \\) "
                 f"2>/dev/null || true",
                 supress_logs=True,
             )
@@ -2183,13 +2188,59 @@ class K8sNativeFailoverTest(TestClusterBase):
                 f"Could not copy FIO perf logs for {resource_name} from pod {pod_name}: {exc}"
             )
 
+    def _save_all_fio_logs(self):
+        """Save FIO pod logs and perf files for ALL PVCs and clones,
+        regardless of success or failure."""
+        self._ensure_k8s_utils()
+        if self.use_client_fio:
+            return
+        for pvc_name, pvc_info in self.pvc_details.items():
+            job_name = pvc_info.get("job_name")
+            if job_name:
+                self._save_fio_pod_logs(job_name, pvc_name)
+        for clone_name, clone_info in self.clone_details.items():
+            job_name = clone_info.get("job_name")
+            if job_name:
+                self._save_fio_pod_logs(job_name, clone_name)
+        self.logger.info(
+            f"[save_fio] Saved FIO logs for {len(self.pvc_details)} PVCs "
+            f"and {len(self.clone_details)} clones"
+        )
+
+    def _save_fio_mapping_summary(self):
+        """Save a JSON summary file mapping every PVC/clone to its lvol,
+        storage worker, FIO job, FIO K8s node, snapshot lineage, etc."""
+        self._ensure_k8s_utils()
+
+        entries = self.k8s_utils.log_fio_pvc_mapping(
+            self.pvc_details, self.clone_details,
+            snapshot_details=self.snapshot_details,
+        )
+        if not entries:
+            return
+
+        summary_path = os.path.join(self.docker_logs_path, "fio_mapping_summary.json")
+        try:
+            with open(summary_path, "w") as f:
+                json.dump(entries, f, indent=2, default=str)
+            self.logger.info(f"[save_fio] Wrote FIO mapping summary to {summary_path}")
+        except Exception as exc:
+            self.logger.warning(f"[save_fio] Could not write mapping summary: {exc}")
+
     def validate_fio_jobs(self):
         """Validate all active FIO workloads.
 
         Client mode: validate fio logs on clients via SSH.
         K8s mode: validate K8s Job status + pod logs.
+
+        Always saves ALL FIO logs (pod stdout, perf files) for every
+        PVC/clone first, then validates.
         """
         self._ensure_k8s_utils()
+
+        # Save all FIO logs and mapping summary before validation
+        self._save_all_fio_logs()
+        self._save_fio_mapping_summary()
 
         if self.use_client_fio:
             for pvc_name, pvc_info in self.pvc_details.items():
@@ -2203,11 +2254,9 @@ class K8sNativeFailoverTest(TestClusterBase):
         else:
             fio_timeout = self.FIO_RUNTIME + 300  # extra buffer over FIO runtime
             for pvc_name, pvc_info in self.pvc_details.items():
-                self._save_fio_pod_logs(pvc_info["job_name"], pvc_name)
                 self.k8s_utils.validate_fio_job(pvc_info["job_name"], timeout=fio_timeout)
 
             for clone_name, clone_info in self.clone_details.items():
-                self._save_fio_pod_logs(clone_info["job_name"], clone_name)
                 self.k8s_utils.validate_fio_job(clone_info["job_name"], timeout=fio_timeout)
 
     # ── Cleanup ──────────────────────────────────────────────────────────────
@@ -2669,7 +2718,7 @@ class K8sNativeBasicFailoverTest(K8sNativeFailoverTest):
             )
             sleep_n_sec(10)
 
-        self.k8s_utils.log_fio_pvc_mapping(self.pvc_details, self.clone_details)
+        self.k8s_utils.log_fio_pvc_mapping(self.pvc_details, self.clone_details, snapshot_details=self.snapshot_details)
 
     def run(self):
         """Simplified run loop: create once, then loop outages only."""
@@ -3116,7 +3165,8 @@ class K8sNativeResilientFailoverTest(K8sNativeFailoverTest):
             sleep_n_sec(5)
 
         self.k8s_utils.log_fio_pvc_mapping(
-            self.pvc_details, self.clone_details
+            self.pvc_details, self.clone_details,
+            snapshot_details=self.snapshot_details,
         )
 
     def _create_permanent_snapshots_and_clones(self):
@@ -3303,7 +3353,8 @@ class K8sNativeResilientFailoverTest(K8sNativeFailoverTest):
             sleep_n_sec(10)
 
         self.k8s_utils.log_fio_pvc_mapping(
-            self.pvc_details, self.clone_details
+            self.pvc_details, self.clone_details,
+            snapshot_details=self.snapshot_details,
         )
 
     def _delete_dynamic_pvcs(self, count: int):
