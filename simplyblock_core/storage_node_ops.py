@@ -2898,7 +2898,18 @@ def _restart_storage_node_impl(
 
         logger.info("Cluster is not ready yet")
         logger.info("Setting node status to Online")
-        set_node_status(node_id, StorageNode.STATUS_ONLINE, caused_by="restart")
+        if not set_node_status(node_id, StorageNode.STATUS_ONLINE, caused_by="restart"):
+            # FSM rejected the final flip — typically because a racing
+            # monitor/healthcheck/task already clobbered the RESTARTING
+            # lock with OFFLINE. The wrapper's finally block will pick
+            # up the False return and run its cleanup; without this
+            # propagation the impl would silently return True with the
+            # node stranded (incident 2026-05-20).
+            logger.error(
+                f"Restart impl: final ONLINE write rejected for {node_id}; "
+                f"treating restart as failed"
+            )
+            return False
         _refresh_cluster_maps_after_node_recovery(snode)
 
         online_devices_list = []
@@ -2953,7 +2964,8 @@ def _restart_storage_node_impl(
             logger.error(f"Restart abort: {reason}")
             storage_events.snode_restart_failed(snode)
             _kill_spdk_until_dead(snode)
-            set_node_status(snode.get_id(), StorageNode.STATUS_OFFLINE)
+            set_node_status(snode.get_id(), StorageNode.STATUS_OFFLINE,
+                            caused_by="restart_cleanup")
 
         try:
             ret = recreate_all_lvstores(snode, force=force_lvol_recreate)
@@ -3010,7 +3022,16 @@ def _restart_storage_node_impl(
             logger.error("ANA failback during restart of %s failed: %s", snode.get_id(), ana_e)
 
         logger.info("Setting node status to Online")
-        set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE, caused_by="restart")
+        if not set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE, caused_by="restart"):
+            # See twin call site above (single-leader restart path) for
+            # the full rationale — final ONLINE rejection must propagate
+            # so the wrapper's finally cleanup runs and the CLI reports
+            # a real failure instead of silently lying.
+            logger.error(
+                f"Restart impl (non-leader): final ONLINE write rejected for "
+                f"{snode.get_id()}; treating restart as failed"
+            )
+            return False
 
         logger.info("Sending device status event")
         snode = db_controller.get_storage_node_by_id(snode.get_id())
@@ -4236,6 +4257,17 @@ _ALLOWED_PRE_STATUSES_FOR_ONLINE = (
     StorageNode.STATUS_DOWN,
 )
 
+# Callers permitted to flip a node out of STATUS_RESTARTING to STATUS_OFFLINE.
+# The only legitimate cleanup path is the restart wrapper's finally block —
+# everything else (monitors, health service, task runners) must respect the
+# in-progress restart and leave the lock alone. The wrapper itself uses a
+# direct DB write (storage_node_ops.py:2373) and bypasses this helper, so
+# this whitelist is for callers that still route through set_node_status
+# (e.g. tasks_runner_restart._reset_if_transient which tags itself).
+_ALLOWED_CAUSED_BY_RESTARTING_TO_OFFLINE = (
+    "restart_cleanup",
+)
+
 
 def set_node_status(node_id, status, caused_by="monitor"):
     """Write a status transition for the node. Pure bookkeeping: emits
@@ -4258,6 +4290,26 @@ def set_node_status(node_id, status, caused_by="monitor"):
         logger.error(
             f"Refusing illegal status transition for {node_id}: "
             f"{snode.status} -> ONLINE. Only {_ALLOWED_PRE_STATUSES_FOR_ONLINE} -> ONLINE is allowed."
+        )
+        return False
+
+    if (status == StorageNode.STATUS_OFFLINE
+            and snode.status == StorageNode.STATUS_RESTARTING
+            and caused_by not in _ALLOWED_CAUSED_BY_RESTARTING_TO_OFFLINE):
+        # Symmetric to the ONLINE guard above: RESTARTING is the restart
+        # impl's exclusive lock. Anything else clobbering it to OFFLINE
+        # mid-flight (HealthCheck, StorageNodeMonitor, MainDistrEventCollector,
+        # auto-restart task races) strands the node — the impl's later
+        # set_node_status(ONLINE, caused_by="restart") then hits the
+        # OFFLINE → ONLINE rejection above, returns False, and the CLI
+        # exits silently with the node parked in OFFLINE forever.
+        # Observed: incident 2026-05-20 iter 57 (forced restart of
+        # 5110e910 stuck offline for 16 min until soak gave up).
+        logger.error(
+            f"Refusing illegal status transition for {node_id}: "
+            f"{snode.status} -> OFFLINE from caused_by={caused_by!r}. "
+            f"Only {_ALLOWED_CAUSED_BY_RESTARTING_TO_OFFLINE} may flip "
+            f"a RESTARTING node to OFFLINE."
         )
         return False
 
@@ -4950,7 +5002,8 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
             snode_api.spdk_process_kill(snode.rpc_port, snode.cluster_id)
         except Exception as ke:
             logger.error("Failed to kill SPDK during abort: %s", ke)
-        set_node_status(snode.get_id(), StorageNode.STATUS_OFFLINE)
+        set_node_status(snode.get_id(), StorageNode.STATUS_OFFLINE,
+                        caused_by="restart_cleanup")
         if leader_port_blocked:
             try:
                 fw_api = FirewallClient(leader_node, timeout=5, retry=2)
@@ -5642,7 +5695,8 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
         """
         storage_events.snode_restart_failed(snode)
         _kill_spdk_until_dead(snode)
-        set_node_status(snode.get_id(), StorageNode.STATUS_OFFLINE)
+        set_node_status(snode.get_id(), StorageNode.STATUS_OFFLINE,
+                        caused_by="restart_cleanup")
 
     def _abort_restart_and_unblock(reason):
         """Abort: kill SPDK, set offline, unblock every blocked peer, raise."""
