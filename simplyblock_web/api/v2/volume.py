@@ -224,32 +224,29 @@ def inflate(cluster: Cluster, pool: StoragePool, volume: Volume) -> Response:
 
     return Response(status_code=204)
 
-@instance_api.post('/replication_trigger', name='clusters:storage-pools:volumes:replication_start', status_code=204, responses={204: {"content": None}})
+@instance_api.post('/replication_trigger', name='clusters:storage-pools:volumes:replication_trigger', status_code=204, responses={204: {"content": None}})
 def replication_trigger(cluster: Cluster, pool: StoragePool, volume: Volume) -> Response:
     if not lvol_controller.replication_trigger(volume.get_id()):
-        raise ValueError('Failed to start volume snapshot replication')
-
+        raise HTTPException(400, 'Failed to trigger volume snapshot replication')
     return Response(status_code=204)
 
 @instance_api.post('/replication_start', name='clusters:storage-pools:volumes:replication_start', status_code=204, responses={204: {"content": None}})
 def replication_start(cluster: Cluster, pool: StoragePool, volume: Volume) -> Response:
     if not lvol_controller.replication_start(volume.get_id(), cluster.get_id()):
-        raise ValueError('Failed to start volume snapshot replication')
-
+        raise HTTPException(400, 'Failed to start volume snapshot replication')
     return Response(status_code=204)
 
 @instance_api.post('/replication_stop', name='clusters:storage-pools:volumes:replication_stop', status_code=204, responses={204: {"content": None}})
 def replication_stop(cluster: Cluster, pool: StoragePool, volume: Volume) -> Response:
     if not lvol_controller.replication_stop(volume.get_id()):
-        raise ValueError('Failed to stop volume snapshot replication')
-
+        raise HTTPException(400, 'Failed to stop volume snapshot replication')
     return Response(status_code=204)
 
 @instance_api.get('/connect', name='clusters:storage-pools:volumes:connect')
 def connect(cluster: Cluster, pool: StoragePool, volume: Volume, host_nqn: Optional[str] = None):
     details, err = lvol_controller.connect_lvol(volume.get_id(), host_nqn=host_nqn)
     if err:
-        raise ValueError(err)
+        raise HTTPException(400, err)
     return details
 
 
@@ -310,7 +307,10 @@ def create_snapshot(
 
 @instance_api.post('/replicate_lvol', name='clusters:storage-pools:volumes:replicate_lvol')
 def replicate_lvol_on_target_cluster(cluster: Cluster, pool: StoragePool, volume: Volume):
-    return lvol_controller.replicate_lvol_on_target_cluster(volume.get_id())
+    result = lvol_controller.replicate_lvol_on_target_cluster(volume.get_id())
+    if not result:
+        raise HTTPException(400, 'Failed to replicate lvol on target cluster — no replicated snapshot found')
+    return result
 
 
 class ReplicateLVolParams(BaseModel):
@@ -319,7 +319,10 @@ class ReplicateLVolParams(BaseModel):
 
 @api.post('/replicate_lvol_on_source_cluster', name='clusters:storage-pools:replicate_lvol_on_source_cluster')
 def replicate_lvol_on_source_cluster(cluster: Cluster, pool: StoragePool, body: ReplicateLVolParams):
-    return lvol_controller.replicate_lvol_on_source_cluster(body.lvol_id, cluster.get_id(), pool.get_id())
+    result = lvol_controller.replicate_lvol_on_source_cluster(body.lvol_id, cluster.get_id(), pool.get_id())
+    if not result:
+        raise HTTPException(400, 'Failed to replicate lvol on source cluster')
+    return result
 
 
 @instance_api.get('/list_replication_tasks', name='clusters:storage-pools:volumes:list_replication_tasks')

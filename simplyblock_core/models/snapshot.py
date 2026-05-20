@@ -35,3 +35,4 @@ class SnapShot(BaseModel):
     next_snap_uuid: str = ""
     prev_snap_uuid: str = ""
     instances: list = []
+    source_lvol_id: str = ""

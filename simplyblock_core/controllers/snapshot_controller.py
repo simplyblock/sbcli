@@ -274,6 +274,7 @@ def add(lvol_id, snapshot_name, backup=False, lock=True):
     snap.snap_bdev = f"{lvol.lvs_name}/{snap_bdev_name}"
     snap.created_at = int(time.time())
     snap.lvol = lvol
+    snap.source_lvol_id = lvol.get_id()
     snap.fabric = lvol.fabric
     snap.vuid = snap_vuid
     snap.status = SnapShot.STATUS_ONLINE
