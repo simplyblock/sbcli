@@ -29,10 +29,14 @@ def create_kms_connection(cluster: Cluster) -> KMS:
         if not path.is_file()
     }):
         raise KMSException("Missing certificates: " + ", ".join(map(str, missing)))
+    vault = cluster.hashicorp_vault_settings
     return HCPClient(
-        cluster.hashicorp_vault_settings.base_url,
+        vault.base_url,
         settings.tls_certificate_authority,
         settings.tls_certificate,
         settings.tls_key,
         cluster.get_id(),
+        transit_mount=vault.transit_mount,
+        kv_mount=vault.kv_mount,
+        cert_role=vault.cert_role,
     )

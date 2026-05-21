@@ -43,6 +43,9 @@ class BackupConfigParams(BaseModel):
 
 class HashicorpVaultSettings(BaseModel):
     base_url: Optional[Annotated[AnyUrl, UrlConstraints(allowed_schemes=["https"])]] = None
+    transit_mount: str = "simplyblock/transit"
+    kv_mount: str = "simplyblock/kv"
+    cert_role: str = "simplyblock-webappapi"
 
 
 class ClusterParams(BaseModel):
