@@ -123,18 +123,19 @@ class BaseModel(object):
 
     def read_from_db(self, kv_store, id="", limit=0, reverse=False):
         if not kv_store:
-            return []
+            from simplyblock_core.db_controller import DBController
+            kv_store = DBController().kv_store
         try:
             objects = []
             prefix = self.get_db_id(id)
             for k, v in kv_store.get_range_startswith(prefix.strip().encode('utf-8'),  limit=limit, reverse=reverse):
                 objects.append(self.__class__().from_dict(json.loads(v)))
             return objects
-        except Exception:
+        except Exception as e:
             from simplyblock_core import utils
             logger = utils.get_logger(__name__)
             logger.exception('Error reading from FDB')
-            return []
+            raise e
 
     def get_last(self, kv_store):
         id = self.get_db_id(" ")
