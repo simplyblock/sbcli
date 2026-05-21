@@ -984,6 +984,18 @@ class SoakRunner:
                 "--direct=1 --rw=randrw --bs=4K --group_reporting --time_based "
                 f"--numjobs={FIO_NUMJOBS} --iodepth=4 --size=4G --runtime={self.args.runtime} "
                 "--ioengine=aiolib --max_latency=20s --exitall_on_error=1 "
+                # md5 data integrity check on every read. verify_backlog
+                # makes randrw reads target recently-written blocks so we
+                # don't fail on unwritten regions. verify_fatal=1 makes
+                # fio exit non-zero on the first mismatch -> rc_file
+                # picks up a non-zero code -> the soak's fio-fault
+                # detector surfaces the corruption immediately.
+                # verify_dump preserves the mismatched buffer for
+                # postmortem; verify_state_save=0 avoids the .fio-verify
+                # -state files (they would survive the umount/mount
+                # churn cycle and confuse the next run).
+                "--verify=md5 --verify_backlog=1024 --verify_fatal=1 "
+                "--verify_dump=1 --verify_state_save=0 "
                 f"--output={shlex.quote(volume['fio_log'])}; "
                 "rc=$?; "
                 f"echo $rc > {shlex.quote(volume['rc_file'])}"
