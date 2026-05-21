@@ -1754,6 +1754,8 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
     db_controller = DBController()
     try:
         lvol = db_controller.get_lvol_by_id(uuid)
+        if lvol.status == LVol.STATUS_DELETED:
+            raise KeyError(f"LVol {uuid} is deleted")
     except KeyError:
         logger.exception("Failed to get lvol by id: %s", uuid)
         return False, "Failed to find volume"
