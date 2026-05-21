@@ -85,7 +85,13 @@ happen immediately via a tail-recursive call to ``task_runner``, eliminating
 the 3-second service-loop gap between phases.
 """
 
+import datetime
 import time
+
+
+def _now_ms():
+    """Return current wall-clock time as an ISO-8601 string with milliseconds."""
+    return datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3]
 
 from simplyblock_core import db_controller as db_mod, utils, constants
 from simplyblock_core.controllers import (
@@ -340,13 +346,17 @@ def _cleanup_snap_transfer(src_rpc, tgt_rpc, ctx):
 
 
 def _cleanup_final_migration(src_rpc, ctx, tgt_rpc=None, rollback_target=False):
-    """Detach the hub controller attached for the final lvol migration.
+    """Clean up after a final lvol migration attempt.
 
-    When *rollback_target* is True the target lvol and its subsystem/namespace
-    are also torn down so that a retry can re-create them from scratch.
+    On the success path (rollback_target=False) the hub controller is kept
+    attached on source — detaching it would drop the migration path before
+    clients have switched to the new target path.
+
+    On the rollback path (rollback_target=True) the hub controller IS detached
+    and the target lvol/subsystem are torn down so a retry starts clean.
     """
     ctrl_name = ctx.get('ctrl_name')
-    if ctrl_name:
+    if ctrl_name and rollback_target:
         try:
             src_rpc.bdev_nvme_detach_controller(ctrl_name)
         except Exception as e:
@@ -901,6 +911,9 @@ def _take_intermediate_snapshot(migration):
     to reduce the delta that must be frozen during PHASE_LVOL_MIGRATE.
     """
     snap_name = f"_mig_{migration.uuid[:8]}_r{migration.intermediate_snap_rounds}"
+    logger.info(
+        f"[IO-FREEZE] {_now_ms()} intermediate snapshot starting: "
+        f"lvol={migration.lvol_id} round={migration.intermediate_snap_rounds} name={snap_name}")
     snap_uuid, err = snapshot_controller.add(migration.lvol_id, snap_name)
     if err:
         logger.warning(f"Intermediate snapshot failed (proceeding without): {err}")
@@ -908,6 +921,9 @@ def _take_intermediate_snapshot(migration):
         migration.write_to_db(db.kv_store)
         return
 
+    logger.info(
+        f"[IO-RESUME] {_now_ms()} intermediate snapshot done: "
+        f"lvol={migration.lvol_id} snap={snap_uuid}")
     migration.intermediate_snaps.append(snap_uuid)
     migration.snap_migration_plan.append(snap_uuid)
     migration.intermediate_snap_rounds += 1
@@ -1004,6 +1020,9 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             return False, True, f"Final migration {state}"
 
         # state == 'Done' ─ register on secondary and update ANA states
+        logger.info(
+            f"[IO-RESUME] {_now_ms()} final migration Done: "
+            f"lvol={migration.lvol_id} io now live on target")
         _cleanup_final_migration(src_rpc, ctx)
         migration.current_job_id = ""
         migration.write_to_db(db.kv_store)
@@ -1182,22 +1201,35 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                 f"pre-existing subsystem {nqn} — may already exist")
 
         # Remove old secondary-mirror namespace(s) for this lvol before we add
-        # the new primary namespace.  The secondary mirror used a bdev on the
-        # secondary's own lvstore (e.g. LVS_8171/LVOL_268); after migration the
-        # bdev lives on tgt_node.lvstore (e.g. LVS_8222/LVOL_268).  Leaving the
-        # old namespace in place means the subsystem has two namespaces for the
-        # same logical volume — clients that had connected to nsid 1 (the old
-        # mirror bdev with 0 allocated clusters) would continue reading zeros.
+        # the new primary namespace.
+        #
+        # Two sub-cases:
+        #   a) Normal: TGT is a different node — secondary mirror bdev was on a
+        #      different lvstore (e.g. LVS_8171/LVOL_268 on the old secondary).
+        #      Remove any namespace whose bdev ends with /LVOL_xxx but lives on a
+        #      different lvstore than tgt_node.
+        #   b) TGT is SRC's secondary node — the secondary mirror bdev IS on
+        #      tgt_node.lvstore (e.g. LVS_TGT/LVOL_xxx).  The condition
+        #      "different lvstore" would miss it.  Explicitly remove the
+        #      unsuffixed bdev from the same lvstore.
+        tgt_is_src_secondary = (src_node.secondary_node_id == tgt_node.get_id())
         try:
             sub_list = tgt_rpc.subsystem_list(nqn)
             if sub_list:
                 sub = sub_list[0] if isinstance(sub_list, list) else sub_list
                 for ns in sub.get('namespaces', []):
                     ns_bdev = ns.get('bdev_name') or ns.get('name', '')
-                    # Remove if it's this lvol's bdev on a different lvstore
+                    old_nsid = ns.get('nsid')
+                    stale = False
+                    # Case (a): bdev is this lvol on a foreign lvstore
                     if (ns_bdev.endswith(f"/{lvol.lvol_bdev}")
                             and not ns_bdev.startswith(f"{tgt_node.lvstore}/")):
-                        old_nsid = ns.get('nsid')
+                        stale = True
+                    # Case (b): TGT was SRC's secondary — same lvstore, unsuffixed
+                    elif (tgt_is_src_secondary
+                          and ns_bdev == f"{tgt_node.lvstore}/{lvol.lvol_bdev}"):
+                        stale = True
+                    if stale:
                         tgt_rpc.nvmf_subsystem_remove_ns(nqn, old_nsid)
                         logger.info(
                             f"Removed stale secondary namespace nsid={old_nsid} "
@@ -1248,6 +1280,9 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
     tgt_snap_composite = f"{tgt_node.lvstore}/{_snap_short_name(last_snap) + _MIGRATION_BDEV_SUFFIX}"
 
     # Step 5: start final migration (async) – I/O is frozen for the small delta
+    logger.info(
+        f"[IO-FREEZE] {_now_ms()} bdev_lvol_final_migration starting: "
+        f"lvol={lvol.uuid} src={src_lvol_composite} tgt_snap={tgt_snap_composite}")
     ret = src_rpc.bdev_lvol_final_migration(
         src_lvol_composite, tgt_map_id, tgt_snap_composite, 2, hub_bdev)
     if ret is None:
