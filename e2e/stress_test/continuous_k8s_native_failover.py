@@ -2126,7 +2126,8 @@ class K8sNativeFailoverTest(TestClusterBase):
 
     # ── FIO Validation ───────────────────────────────────────────────────────
 
-    def _save_fio_pod_logs(self, job_name: str, resource_name: str):
+    def _save_fio_pod_logs(self, job_name: str, resource_name: str,
+                           pvc_name: str = None):
         """Save FIO pod logs and performance data to local log directory."""
         try:
             pod_name = self.k8s_utils.get_job_pod_name(job_name)
@@ -2141,25 +2142,23 @@ class K8sNativeFailoverTest(TestClusterBase):
                 self.logger.info(f"Saved FIO logs for {resource_name} to {log_file}")
 
             # Copy FIO performance logs from /spdkvol/ inside the pod
-            self._copy_fio_perf_logs(pod_name, resource_name)
+            self._copy_fio_perf_logs(pod_name, resource_name, pvc_name=pvc_name)
         except Exception as exc:
             self.logger.warning(f"Could not save FIO logs for {resource_name}: {exc}")
 
-    def _copy_fio_perf_logs(self, pod_name: str, resource_name: str):
-        """Copy FIO perf log files (lat, bw, iops, iolog) from /spdkvol/ in
-        the pod to the local ClientLogs directory.
+    # ── FIO perf-log helpers ──────────────────────────────────────────────
 
-        FIO writes files like ``{name}-fio_bw.1.log``, ``{name}-iolog.log``
-        inside the PVC mount.  This method lists matching files and copies
-        them out via ``kubectl cp``.
+    def _list_fio_perf_files(self, pod_name: str, ns: str,
+                              container: str = None) -> list[str]:
+        """List FIO-generated perf files in /spdkvol/ of a *running* pod.
+
+        Returns a list of absolute paths inside the container, or ``[]`` if
+        the pod is not running or the command fails.
         """
-        ns = self.k8s_utils.namespace
-        perf_dir = os.path.join(self.log_path, f"{resource_name}_perf")
+        container_flag = f"-c {container} " if container else ""
         try:
-            # List ALL FIO-generated files inside /spdkvol/ (log, iolog,
-            # lat, bw, iops, etc.) — capture everything for post-mortem.
             file_list, _ = self.k8s_utils._exec_kubectl(
-                f"kubectl exec {pod_name} -n {ns} -- "
+                f"kubectl exec {container_flag}{pod_name} -n {ns} -- "
                 f"find /spdkvol/ -maxdepth 1 "
                 f"\\( -name '*fio*.log' -o -name '*-iolog.log' -o -name '*_lat.*' "
                 f"-o -name '*_bw.*' -o -name '*_iops.*' -o -name '*_clat.*' "
@@ -2167,26 +2166,134 @@ class K8sNativeFailoverTest(TestClusterBase):
                 f"2>/dev/null || true",
                 supress_logs=True,
             )
-            files = [f.strip() for f in file_list.strip().splitlines() if f.strip()]
+            return [f.strip() for f in file_list.strip().splitlines() if f.strip()]
+        except Exception:
+            return []
+
+    def _create_copier_pod(self, copier_name: str, pvc_name: str,
+                            node_name: str, ns: str):
+        """Create a lightweight busybox pod on *node_name* mounting *pvc_name*.
+
+        Used as a fallback to copy FIO perf files from the PVC volume after
+        the original FIO pod has completed (``kubectl exec`` no longer works).
+        """
+        yaml_spec = (
+            f"apiVersion: v1\n"
+            f"kind: Pod\n"
+            f"metadata:\n"
+            f"  name: {copier_name}\n"
+            f"  namespace: {ns}\n"
+            f"  labels:\n"
+            f"    app: fio-copier\n"
+            f"spec:\n"
+            f"  nodeName: {node_name}\n"
+            f"  tolerations:\n"
+            f"  - operator: Exists\n"
+            f"  containers:\n"
+            f"  - name: copier\n"
+            f"    image: busybox\n"
+            f"    command: ['sleep', '300']\n"
+            f"    volumeMounts:\n"
+            f"    - mountPath: /spdkvol\n"
+            f"      name: vol\n"
+            f"  volumes:\n"
+            f"  - name: vol\n"
+            f"    persistentVolumeClaim:\n"
+            f"      claimName: {pvc_name}\n"
+            f"  restartPolicy: Never\n"
+        )
+        self.k8s_utils._exec_kubectl(
+            f"cat <<'COPIER_EOF' | kubectl apply -f -\n{yaml_spec}COPIER_EOF",
+        )
+        self.k8s_utils._exec_kubectl(
+            f"kubectl wait pod/{copier_name} -n {ns} "
+            f"--for=condition=Ready --timeout=120s",
+        )
+
+    def _copy_fio_perf_logs(self, pod_name: str, resource_name: str,
+                             pvc_name: str = None):
+        """Copy FIO perf log files (lat, bw, iops, iolog) from /spdkvol/ in
+        the pod to the local ClientLogs directory.
+
+        FIO writes files like ``{name}-fio_bw.1.log``, ``{name}-iolog.log``
+        inside the PVC mount.  This method first tries ``kubectl exec`` on the
+        original FIO pod.  If that fails (pod Completed), it creates a
+        temporary copier pod that mounts the same PVC and copies from there.
+        """
+        ns = self.k8s_utils.namespace
+        perf_dir = os.path.join(self.log_path, f"{resource_name}_perf")
+        copier_name = None
+        copy_from_pod = pod_name
+        container = None
+
+        try:
+            # 1. Try direct exec on the FIO pod (works if still running)
+            files = self._list_fio_perf_files(pod_name, ns)
+
+            # 2. Fallback: create a copier pod mounting the same PVC
+            if not files and pvc_name:
+                node_name = self.k8s_utils.get_pod_node_name(pod_name)
+                if node_name:
+                    copier_name = f"fio-cp-{_rand_seq(8)}"
+                    self.logger.info(
+                        f"[perf_copy] FIO pod {pod_name} not running; "
+                        f"creating copier pod {copier_name} on {node_name} "
+                        f"for PVC {pvc_name}"
+                    )
+                    try:
+                        self._create_copier_pod(copier_name, pvc_name,
+                                                node_name, ns)
+                        files = self._list_fio_perf_files(
+                            copier_name, ns, container="copier"
+                        )
+                        copy_from_pod = copier_name
+                        container = "copier"
+                    except Exception as exc:
+                        self.logger.warning(
+                            f"[perf_copy] Copier pod failed for "
+                            f"{resource_name}: {exc}"
+                        )
+                        files = []
+
             if not files:
-                self.logger.info(f"No FIO perf logs found in pod {pod_name}")
+                self.logger.info(
+                    f"No FIO perf logs found for {resource_name} "
+                    f"(pod={pod_name})"
+                )
                 return
 
             os.makedirs(perf_dir, exist_ok=True)
+            container_flag = f" -c {container}" if container else ""
             for src_path in files:
                 fname = os.path.basename(src_path)
                 dest = os.path.join(perf_dir, fname)
                 self.k8s_utils._exec_kubectl(
-                    f"kubectl cp {ns}/{pod_name}:{src_path} {dest} 2>/dev/null || true",
+                    f"kubectl cp "
+                    f"{ns}/{copy_from_pod}:{src_path} {dest}"
+                    f"{container_flag} "
+                    f"2>/dev/null || true",
                     supress_logs=True,
                 )
             self.logger.info(
-                f"Copied {len(files)} FIO perf log(s) for {resource_name} to {perf_dir}"
+                f"Copied {len(files)} FIO perf log(s) for {resource_name} "
+                f"to {perf_dir}"
             )
         except Exception as exc:
             self.logger.warning(
-                f"Could not copy FIO perf logs for {resource_name} from pod {pod_name}: {exc}"
+                f"Could not copy FIO perf logs for {resource_name} "
+                f"from pod {pod_name}: {exc}"
             )
+        finally:
+            # Clean up copier pod if we created one
+            if copier_name:
+                try:
+                    self.k8s_utils._exec_kubectl(
+                        f"kubectl delete pod {copier_name} -n {ns} "
+                        f"--force --grace-period=0 2>/dev/null || true",
+                        supress_logs=True,
+                    )
+                except Exception:
+                    pass
 
     def _save_all_fio_logs(self):
         """Save FIO pod logs and perf files for ALL PVCs and clones,
@@ -2197,15 +2304,26 @@ class K8sNativeFailoverTest(TestClusterBase):
         for pvc_name, pvc_info in self.pvc_details.items():
             job_name = pvc_info.get("job_name")
             if job_name:
-                self._save_fio_pod_logs(job_name, pvc_name)
+                self._save_fio_pod_logs(job_name, pvc_name, pvc_name=pvc_name)
         for clone_name, clone_info in self.clone_details.items():
             job_name = clone_info.get("job_name")
             if job_name:
-                self._save_fio_pod_logs(job_name, clone_name)
+                # Clones are PVCs themselves — pass clone_name as pvc_name
+                self._save_fio_pod_logs(job_name, clone_name, pvc_name=clone_name)
         self.logger.info(
             f"[save_fio] Saved FIO logs for {len(self.pvc_details)} PVCs "
             f"and {len(self.clone_details)} clones"
         )
+        # Bulk cleanup any leftover copier pods (belt-and-suspenders)
+        try:
+            self.k8s_utils._exec_kubectl(
+                f"kubectl delete pods -l app=fio-copier "
+                f"-n {self.k8s_utils.namespace} "
+                f"--force --grace-period=0 2>/dev/null || true",
+                supress_logs=True,
+            )
+        except Exception:
+            pass
 
     def _save_fio_mapping_summary(self):
         """Save a JSON summary file mapping every PVC/clone to its lvol,
