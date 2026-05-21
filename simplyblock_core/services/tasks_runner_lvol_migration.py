@@ -1040,8 +1040,8 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         # are needed.
         # When tgt is NOT src's secondary the hub controller must stay attached
         # until clients have taken the new path — defer detach to CLEANUP_SOURCE.
-        # When tgt IS src's secondary the namespace swap already happened and the
-        # hub is detached immediately after ANA is updated (see below).
+        # When tgt IS src's secondary the namespace swap happens just below
+        # (before _update_ana_states) and the hub is detached immediately after.
         tgt_is_src_secondary = (src_node.secondary_node_id == tgt_node.get_id())
         tgt_uuid_carry = {
             'tgt_lvol_uuid': ctx.get('tgt_lvol_uuid'),
@@ -1092,14 +1092,44 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                 logger.info(
                     f"Lvol {lvol.uuid} registered and exposed on secondary {tgt_sec.get_id()}")
 
+        # For tgt_is_src_secondary: the namespace swap was deferred until now.
+        # The secondary mirror bdev (LVS_TGT/LVOL_xxx) is removed and replaced
+        # by the migrated bdev (LVS_TGT/LVOL_xxxm) with the same UUID so the
+        # NVMe multipath driver recognises it as the same volume.  This happens
+        # immediately before the ANA update so the new path is ready the moment
+        # SRC becomes inaccessible.
+        if tgt_is_src_secondary:
+            try:
+                mirror_bdev = f"{tgt_node.lvstore}/{lvol.lvol_bdev}"
+                sub_list = tgt_rpc.subsystem_list(lvol.nqn)
+                if sub_list:
+                    sub = sub_list[0] if isinstance(sub_list, list) else sub_list
+                    for ns in sub.get('namespaces', []):
+                        if (ns.get('bdev_name') or ns.get('name', '')) == mirror_bdev:
+                            tgt_rpc.nvmf_subsystem_remove_ns(lvol.nqn, ns.get('nsid'))
+                            logger.info(f"Removed secondary mirror namespace {mirror_bdev}")
+                            break
+                ns_ret = tgt_rpc.nvmf_subsystem_add_ns(
+                    lvol.nqn, tgt_lvol_composite, uuid=lvol.uuid)
+                if ns_ret:
+                    tgt_uuid_carry['tgt_ns_id'] = int(ns_ret)
+                    logger.info(
+                        f"Added migrated namespace {tgt_lvol_composite} "
+                        f"nsid={ns_ret} to {lvol.nqn}")
+                else:
+                    logger.warning(
+                        f"nvmf_subsystem_add_ns {tgt_lvol_composite} failed "
+                        f"— client may not find the new path")
+            except Exception as e:
+                logger.warning(f"Deferred namespace swap failed: {e}")
+
         migration.transfer_context = tgt_uuid_carry
 
         _update_ana_states(migration, src_node, tgt_node, src_rpc, tgt_rpc)
 
-        # When tgt was src's secondary the namespace swap already replaced the
-        # secondary mirror route with the new primary namespace before the ANA
-        # switch.  Clients that were on the secondary path now land on the new
-        # primary namespace on the same node — no path flap.  Detach hub now.
+        # Hub detach for tgt_is_src_secondary: clients that were on the
+        # secondary mirror path now land on the new primary namespace on the
+        # same node.  Detach hub now that ANA is updated.
         if tgt_is_src_secondary:
             ctrl_name = ctx.get('ctrl_name')
             if ctrl_name:
@@ -1192,6 +1222,7 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
     nqn = lvol.nqn
     existing_sub = tgt_rpc.subsystem_list(nqn)
     subsystem_created_on_target = False
+    tgt_is_src_secondary = (src_node.secondary_node_id == tgt_node.get_id())
 
     if not existing_sub:
         # First volume from this namespace group to arrive on target
@@ -1222,51 +1253,48 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         # Remove old secondary-mirror namespace(s) for this lvol before we add
         # the new primary namespace.
         #
-        # Two sub-cases:
-        #   a) Normal: TGT is a different node — secondary mirror bdev was on a
-        #      different lvstore (e.g. LVS_8171/LVOL_268 on the old secondary).
-        #      Remove any namespace whose bdev ends with /LVOL_xxx but lives on a
-        #      different lvstore than tgt_node.
-        #   b) TGT is SRC's secondary node — the secondary mirror bdev IS on
-        #      tgt_node.lvstore (e.g. LVS_TGT/LVOL_xxx).  The condition
-        #      "different lvstore" would miss it.  Explicitly remove the
-        #      unsuffixed bdev from the same lvstore.
-        tgt_is_src_secondary = (src_node.secondary_node_id == tgt_node.get_id())
-        try:
-            sub_list = tgt_rpc.subsystem_list(nqn)
-            if sub_list:
-                sub = sub_list[0] if isinstance(sub_list, list) else sub_list
-                for ns in sub.get('namespaces', []):
-                    ns_bdev = ns.get('bdev_name') or ns.get('name', '')
-                    old_nsid = ns.get('nsid')
-                    stale = False
-                    # Case (a): bdev is this lvol on a foreign lvstore
-                    if (ns_bdev.endswith(f"/{lvol.lvol_bdev}")
-                            and not ns_bdev.startswith(f"{tgt_node.lvstore}/")):
-                        stale = True
-                    # Case (b): TGT was SRC's secondary — same lvstore, unsuffixed
-                    elif (tgt_is_src_secondary
-                          and ns_bdev == f"{tgt_node.lvstore}/{lvol.lvol_bdev}"):
-                        stale = True
-                    if stale:
-                        tgt_rpc.nvmf_subsystem_remove_ns(nqn, old_nsid)
-                        logger.info(
-                            f"Removed stale secondary namespace nsid={old_nsid} "
-                            f"bdev={ns_bdev} from subsystem {nqn}")
-        except Exception as e:
-            logger.warning(f"Could not clean up stale secondary namespace in {nqn}: {e}")
+        # Case (a) only: TGT is a different node — secondary mirror bdev was on a
+        # different lvstore (e.g. LVS_8171/LVOL_268 on the old secondary).
+        # Remove any namespace whose bdev ends with /LVOL_xxx but lives on a
+        # different lvstore than tgt_node.
+        #
+        # Case (b) — TGT is SRC's secondary (same lvstore, unsuffixed bdev):
+        # Deferring this removal to after bdev_lvol_final_migration completes so
+        # that the client retains its secondary path throughout the migration.
+        # Swapping too early causes the client to lose all paths and time out.
+        if not tgt_is_src_secondary:
+            try:
+                sub_list = tgt_rpc.subsystem_list(nqn)
+                if sub_list:
+                    sub = sub_list[0] if isinstance(sub_list, list) else sub_list
+                    for ns in sub.get('namespaces', []):
+                        ns_bdev = ns.get('bdev_name') or ns.get('name', '')
+                        old_nsid = ns.get('nsid')
+                        if (ns_bdev.endswith(f"/{lvol.lvol_bdev}")
+                                and not ns_bdev.startswith(f"{tgt_node.lvstore}/")):
+                            tgt_rpc.nvmf_subsystem_remove_ns(nqn, old_nsid)
+                            logger.info(
+                                f"Removed stale secondary namespace nsid={old_nsid} "
+                                f"bdev={ns_bdev} from subsystem {nqn}")
+            except Exception as e:
+                logger.warning(f"Could not clean up stale secondary namespace in {nqn}: {e}")
 
         logger.info(
             f"Subsystem {nqn} already exists on target; added listener on "
             f"{target_ip}:{tgt_primary_port} and attaching namespace")
 
-    ns_ret = tgt_rpc.nvmf_subsystem_add_ns(nqn, tgt_lvol_composite, uuid=lvol.uuid)
-    if not ns_ret:
-        if subsystem_created_on_target:
-            tgt_rpc.subsystem_delete(nqn)
-        _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc, secondary_rpc=sec_setup_rpc)
-        return False, True, "Failed to add namespace to target subsystem"
-    tgt_ns_id = int(ns_ret) if ns_ret else lvol.ns_id
+    # For tgt_is_src_secondary: defer the namespace swap (remove mirror + add new)
+    # until after bdev_lvol_final_migration completes.  Adding the intermediate
+    # bdev to the NQN now would drop the client's secondary path prematurely.
+    tgt_ns_id = None
+    if not tgt_is_src_secondary:
+        ns_ret = tgt_rpc.nvmf_subsystem_add_ns(nqn, tgt_lvol_composite, uuid=lvol.uuid)
+        if not ns_ret:
+            if subsystem_created_on_target:
+                tgt_rpc.subsystem_delete(nqn)
+            _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc, secondary_rpc=sec_setup_rpc)
+            return False, True, "Failed to add namespace to target subsystem"
+        tgt_ns_id = int(ns_ret) if ns_ret else lvol.ns_id
 
     # Step 3: connect source to target hub lvol
     ctrl_name = f"mighub_{migration.uuid[:8]}"
@@ -1274,7 +1302,8 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
     hub_port = tgt_node.hublvol.nvmf_port
     ret = src_rpc.bdev_nvme_attach_controller(ctrl_name, hub_nqn, target_ip, hub_port, trtype)
     if not ret:
-        tgt_rpc.subsystem_delete(nqn)
+        if subsystem_created_on_target:
+            tgt_rpc.subsystem_delete(nqn)
         _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc, secondary_rpc=sec_setup_rpc)
         return False, True, "Failed to connect source to target hub"
 
@@ -1283,7 +1312,8 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
     # Step 4: locate the last migrated snapshot's composite name on the target
     if not migration.snaps_migrated:
         src_rpc.bdev_nvme_detach_controller(ctrl_name)
-        tgt_rpc.subsystem_delete(nqn)
+        if subsystem_created_on_target:
+            tgt_rpc.subsystem_delete(nqn)
         _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc, secondary_rpc=sec_setup_rpc)
         return False, True, "No snapshots migrated; cannot perform final migration"
 
@@ -1292,7 +1322,8 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         last_snap = db.get_snapshot_by_id(last_snap_uuid)
     except KeyError:
         src_rpc.bdev_nvme_detach_controller(ctrl_name)
-        tgt_rpc.subsystem_delete(nqn)
+        if subsystem_created_on_target:
+            tgt_rpc.subsystem_delete(nqn)
         _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc, secondary_rpc=sec_setup_rpc)
         return False, True, f"Last snapshot {last_snap_uuid} not found"
 
@@ -1306,7 +1337,8 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         src_lvol_composite, tgt_map_id, tgt_snap_composite, 2, hub_bdev)
     if ret is None:
         src_rpc.bdev_nvme_detach_controller(ctrl_name)
-        tgt_rpc.subsystem_delete(nqn)
+        if subsystem_created_on_target:
+            tgt_rpc.subsystem_delete(nqn)
         _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc, secondary_rpc=sec_setup_rpc)
         return False, True, "bdev_lvol_final_migration failed to start"
 
@@ -1319,6 +1351,7 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         'subsystem_created_on_target': subsystem_created_on_target,
         'tgt_lvol_uuid': tgt_uuid,
         'tgt_lvol_bdev': tgt_lvol_bdev,
+        'tgt_is_src_secondary': tgt_is_src_secondary,
     }
     migration.write_to_db(db.kv_store)
     logger.info(f"Started final migration: lvol={lvol.uuid} map_id={tgt_map_id}")
