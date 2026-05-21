@@ -1139,26 +1139,32 @@ def set_shared_placement(cl_id, enable=True, force=False) -> bool:
     # Step 3: persist the flag in every stored distrib stack entry on
     # every node, so restarts re-create with the new mode without needing
     # to consult the cluster row.
+    #
+    # NB: only `lvstore_stack` is a List[dict] of bdev stack entries.
+    # Despite the model's type annotation, `lvstore_stack_secondary` and
+    # `_tertiary` hold a single UUID string — the id of the upstream
+    # primary whose LVS this node serves as a peer for. The peer's bdev
+    # params come from that primary's lvstore_stack at recreate time
+    # (see storage_node_ops._create_bdev_stack callers in step-2 /
+    # step-3 of full_node_recreate_lvstore), so updating the primary's
+    # stack here covers the peers automatically.
     for node in nodes:
         changed = False
-        for stack_attr in ("lvstore_stack",
-                            "lvstore_stack_secondary",
-                            "lvstore_stack_tertiary"):
-            stack = getattr(node, stack_attr, None) or []
-            for entry in stack:
-                if entry.get("type") != "bdev_distr":
-                    continue
-                params = entry.setdefault("params", {})
-                current = params.get("shared_placement", False)
-                if enable and not current:
-                    params["shared_placement"] = True
-                    changed = True
-                elif not enable and current:
-                    # remove rather than set False, so the param dict
-                    # stays minimal and matches the default-construct
-                    # case below.
-                    params.pop("shared_placement", None)
-                    changed = True
+        for entry in (node.lvstore_stack or []):
+            if not isinstance(entry, dict) or entry.get("type") != "bdev_distr":
+                continue
+            params = entry.setdefault("params", {})
+            if not isinstance(params, dict):
+                continue
+            current = params.get("shared_placement", False)
+            if enable and not current:
+                params["shared_placement"] = True
+                changed = True
+            elif not enable and current:
+                # remove rather than set False, so the param dict stays
+                # minimal and matches the default-construct case.
+                params.pop("shared_placement", None)
+                changed = True
         if changed:
             node.write_to_db(db_controller.kv_store)
 
