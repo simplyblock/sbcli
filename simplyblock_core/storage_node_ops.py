@@ -5229,6 +5229,7 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
         # attached path must target a known-alive peer. If the original
         # leader is offline (no quorum) we attach directly to the secondary
         # — the dead leader's IP is not even tried.
+        attach_target = None
         try:
             if is_tertiary:
                 secondary_alive = (secondary_node and not _check_peer_disconnected(
@@ -5259,36 +5260,99 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
                         "(leader=%s alive=%s, secondary alive=%s)",
                         snode.get_id(), primary_node.lvstore,
                         leader_node.get_id(), leader_has_quorum, secondary_alive)
-
-                if sync_target is not None:
-                    # Pass lvs_node=primary_node so LVS metadata (lvstore
-                    # name, jm_vuid, port, hublvol NQN/bdev) comes from
-                    # the configured primary of the LVS being recreated,
-                    # *not* from sync_target — when the configured
-                    # primary is offline and sync_target is a peer that
-                    # took over leadership, sync_target.hublvol points at
-                    # sync_target's OWN primary-LVS, which is the wrong
-                    # LVS for our connection. (incident 2026-05-02
-                    # 15:53:42: tertiary worker1 connecting through
-                    # acting-leader worker5 for LVS_6207 set
-                    # groupid=4729 — worker5's own primary — instead
-                    # of 6207.)
-                    snode.connect_to_hublvol(sync_target, failover_node=None,
-                                             role=sec_role, rpc_timeout=0.2,
-                                             lvs_node=primary_node)
+                attach_target = sync_target  # may be None
             else:
                 # Secondary: connect to leader (primary) hublvol — single path,
-                # short timeout, no deferred failover (secondaries don't carry one).
-                # Same lvs_node=primary_node rationale as the tertiary
-                # branch above: when ``leader_node`` is a peer that took
-                # over leadership of ``primary_node.lvstore``, its OWN
-                # hublvol metadata would label the connection with the
-                # wrong LVS.
-                snode.connect_to_hublvol(leader_node, failover_node=None,
-                                         role=sec_role, rpc_timeout=0.2,
-                                         lvs_node=primary_node)
+                # no deferred failover (secondaries don't carry one).
+                attach_target = leader_node
         except Exception as e:
-            logger.error("Error connecting to hublvol: %s", e)
+            logger.error("Error determining hublvol attach target: %s", e)
+            attach_target = None
+
+        # Attach with retries. Each call is bounded by ``rpc_timeout=1.0``
+        # so the port-block window cannot be held open indefinitely. If
+        # the proxy is still busy when the RPC times out the controller
+        # may be partially attached in SPDK — but the CP has no proof,
+        # and unblocking the leader on that ambiguous state has been
+        # observed to produce writer-conflicts seconds later (incident
+        # 2026-05-21 18:04:01: tertiary e16a rejoining LVS_9651 with
+        # leader=00e7, 200 ms RPC timeout exhausted while SPDK was past
+        # ``set_num_queues_done`` but pre-namespace; no path attached;
+        # restart unblocked the leader anyway → writer_conflict on
+        # ``jm_vuid=9651`` at 18:04:03.520, 00e7 marked ``down``).
+        # Between attempts the leader port is unblocked for 5 s so the
+        # client side has time to reconnect its NVMe controller (which
+        # may have been disconnected during the prior block) and push
+        # IO again, then we re-block for the next attempt. The gap is
+        # not held under port-block. On exhaustion, ``_abort_and_unblock``
+        # kills snode's SPDK, marks it offline, and restores the leader
+        # port — the task runner will retry.
+        # ``lvs_node=primary_node`` is preserved so LVS metadata
+        # (lvstore name, jm_vuid, port, hublvol NQN/bdev) comes from
+        # the configured primary of the LVS being recreated, not from
+        # ``attach_target``; when the configured primary is offline
+        # and ``attach_target`` is a peer that took over leadership,
+        # that peer's own hublvol points at its OWN primary-LVS, which
+        # is the wrong LVS for our connection (incident 2026-05-02
+        # 15:53:42: tertiary worker1 via acting-leader worker5 for
+        # LVS_6207 set groupid=4729 — worker5's own primary).
+        if attach_target is not None:
+            ATTACH_MAX_ATTEMPTS = 3
+            ATTACH_RETRY_GAP_SEC = 5
+            ok = False
+            last_err = None
+            for attempt in range(1, ATTACH_MAX_ATTEMPTS + 1):
+                try:
+                    ok = snode.connect_to_hublvol(
+                        attach_target, failover_node=None,
+                        role=sec_role, rpc_timeout=1.0,
+                        lvs_node=primary_node)
+                    last_err = None
+                except Exception as e:
+                    ok = False
+                    last_err = e
+                    logger.error(
+                        "connect_to_hublvol attempt %d/%d on %s for %s raised: %s",
+                        attempt, ATTACH_MAX_ATTEMPTS,
+                        snode.get_id(), primary_node.lvstore, e)
+                if ok or attempt >= ATTACH_MAX_ATTEMPTS:
+                    break
+                logger.warning(
+                    "connect_to_hublvol attempt %d/%d on %s for %s failed; "
+                    "unblock leader, wait %ds, re-block and retry",
+                    attempt, ATTACH_MAX_ATTEMPTS, snode.get_id(),
+                    primary_node.lvstore, ATTACH_RETRY_GAP_SEC)
+                if leader_port_blocked:
+                    try:
+                        fw_api = FirewallClient(leader_node, timeout=3, retry=1)
+                        fw_api.firewall_set_port(
+                            leader_lvs_port, port_type, "allow",
+                            leader_node.rpc_port)
+                        tcp_ports_events.port_allowed(
+                            leader_node, leader_lvs_port)
+                        leader_port_blocked = False
+                    except Exception as ue:
+                        logger.warning(
+                            "Unblock leader %s during attach-retry gap "
+                            "failed: %s", leader_node.get_id(), ue)
+                time.sleep(ATTACH_RETRY_GAP_SEC)
+                try:
+                    fw_api = FirewallClient(leader_node, timeout=3, retry=1)
+                    fw_api.firewall_set_port(
+                        leader_lvs_port, port_type, "block",
+                        leader_node.rpc_port)
+                    tcp_ports_events.port_deny(leader_node, leader_lvs_port)
+                    leader_port_blocked = True
+                except Exception as be:
+                    _abort_and_unblock(
+                        f"Re-block leader {leader_node.get_id()} port "
+                        f"{leader_lvs_port} after retry gap failed for "
+                        f"{primary_node.lvstore}: {be}")
+            if not ok:
+                _abort_and_unblock(
+                    f"connect_to_hublvol failed for {primary_node.lvstore} "
+                    f"after {ATTACH_MAX_ATTEMPTS} attempts"
+                    + (f": {last_err}" if last_err else ""))
 
         ### 8- unblock leader port
         # If we blocked it, we MUST unblock — a stuck-blocked leader can't
