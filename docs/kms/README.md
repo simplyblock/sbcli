@@ -50,40 +50,40 @@ kubectl -n vault exec -it vault-0 -- env VAULT_ADDR=https://vault.vault:8200/ VA
 Using this shell, configure the vault. Note that the certificate path needs to be adapted depending on Openbao/HCP-vault:
 ```
 # Configure auth
-$CLI policy write webappapi-policy - <<EOF
-path "transit/keys/*" {
+$CLI policy write simplyblock-webappapi-policy - <<EOF
+path "simplyblock/transit/keys/*" {
   capabilities = ["create", "update", "read", "delete"]
 }
 
-path "transit/datakey/plaintext/*" {
+path "simplyblock/transit/datakey/plaintext/*" {
   capabilities = ["create", "update"]
 }
 
-path "transit/datakey/wrapped/*" {
+path "simplyblock/transit/datakey/wrapped/*" {
   capabilities = ["create", "update"]
 }
 
-path "transit/encrypt/*" {
+path "simplyblock/transit/encrypt/*" {
   capabilities = ["create", "update"]
 }
 
-path "transit/decrypt/*" {
+path "simplyblock/transit/decrypt/*" {
   capabilities = ["create", "update"]
 }
 
-path "kv/*" {
+path "simplyblock/kv/*" {
   capabilities = ["create", "read", "update", "delete"]
 }
 EOF
 $CLI auth enable cert
-$CLI write auth/cert/certs/webappapi \
+$CLI write auth/cert/certs/simplyblock-webappapi \
     certificate=@/{openbao,vault}/tls/ca.crt \
     allowed_dns_sans="simplyblock-webappapi" \
-    token_policies=webappapi-policy \
+    token_policies=simplyblock-webappapi-policy \
     token_ttl=10m \
     token_max_ttl=30m
 
 # Enable components
-$CLI secrets enable transit
-$CLI secrets enable -version=1 kv
+$CLI secrets enable -path=simplyblock/transit transit
+$CLI secrets enable -path=simplyblock/kv kv
 ```

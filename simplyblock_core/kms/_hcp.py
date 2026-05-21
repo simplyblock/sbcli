@@ -11,9 +11,6 @@ from ._exceptions import KMSException
 
 logger = logging.getLogger(__name__)
 
-_CERT_ROLE_NAME = "webappapi"
-
-
 class HCPClient(KMS):
     def __init__(
         self,
@@ -22,10 +19,15 @@ class HCPClient(KMS):
         tls_certificate: Path,
         tls_key: Path,
         cluster_id: UUID,
+        transit_mount: str,
+        kv_mount: str,
+        cert_role: str,
         timeout: int = 300,
         retry: int = 5,
     ):
         self.cluster_id = cluster_id
+        self.transit_mount = transit_mount
+        self.kv_mount = kv_mount
         self.client = hvac.Client(
             url=base_url,
             cert=(str(tls_certificate), str(tls_key)),
@@ -33,7 +35,7 @@ class HCPClient(KMS):
             timeout=timeout,
         )
         try:
-            self.client.auth.cert.login(name=_CERT_ROLE_NAME)
+            self.client.auth.cert.login(name=cert_role)
         except hvac.exceptions.VaultError as e:
             raise KMSException("Authentication failed") from e
 
@@ -46,7 +48,7 @@ class HCPClient(KMS):
     def _create_data_encryption_key(self, kek_name: str) -> str:
         try:
             return self.client.secrets.transit.generate_data_key(
-                name=kek_name, key_type='wrapped'
+                name=kek_name, key_type='wrapped', mount_point=self.transit_mount,
             )['data']['ciphertext']
         except hvac.exceptions.VaultError as e:
             raise KMSException("Request failed") from e
@@ -55,7 +57,7 @@ class HCPClient(KMS):
         plaintext_b64 = base64.b64encode(bytes.fromhex(plaintext_hex)).decode()
         try:
             return self.client.secrets.transit.encrypt_data(
-                name=kek_name, plaintext=plaintext_b64
+                name=kek_name, plaintext=plaintext_b64, mount_point=self.transit_mount,
             )['data']['ciphertext']
         except hvac.exceptions.VaultError as e:
             raise KMSException("Request failed") from e
@@ -63,7 +65,7 @@ class HCPClient(KMS):
     def _decrypt(self, kek_name: str, ciphertext: str) -> str:
         try:
             plaintext_b64 = self.client.secrets.transit.decrypt_data(
-                name=kek_name, ciphertext=ciphertext
+                name=kek_name, ciphertext=ciphertext, mount_point=self.transit_mount,
             )['data']['plaintext']
         except hvac.exceptions.VaultError as e:
             raise KMSException("Request failed") from e
@@ -71,36 +73,36 @@ class HCPClient(KMS):
 
     def create_data_encryption_keys(self, kek_name: str, name: str) -> None:
         try:
-            self.client.secrets.kv.v1.create_or_update_secret(
+            self.client.secrets.kv.v2.create_or_update_secret(
                 path=f"{self.cluster_id}/{name}",
                 secret={"keys": [
                     self._create_data_encryption_key(kek_name),
                     self._create_data_encryption_key(kek_name),
                 ]},
-                mount_point="kv",
+                mount_point=self.kv_mount,
             )
         except hvac.exceptions.VaultError as e:
             raise KMSException("Request failed") from e
 
     def import_data_encryption_keys(self, kek_name: str, name: str, keys: tuple[str, str]) -> None:
         try:
-            self.client.secrets.kv.v1.create_or_update_secret(
+            self.client.secrets.kv.v2.create_or_update_secret(
                 path=f"{self.cluster_id}/{name}",
                 secret={"keys": [
                     self._encrypt(kek_name, keys[0]),
                     self._encrypt(kek_name, keys[1]),
                 ]},
-                mount_point="kv",
+                mount_point=self.kv_mount,
             )
         except hvac.exceptions.VaultError as e:
             raise KMSException("Request failed") from e
 
     def get_data_encryption_keys(self, kek_name: str, name: str) -> tuple[str, str]:
         try:
-            encrypted_key1, encrypted_key2 = self.client.secrets.kv.v1.read_secret(
+            encrypted_key1, encrypted_key2 = self.client.secrets.kv.v2.read_secret_version(
                 path=f"{self.cluster_id}/{name}",
-                mount_point="kv",
-            )['data']['keys']
+                mount_point=self.kv_mount,
+            )['data']['data']['keys']
             return (
                 self._decrypt(kek_name, encrypted_key1),
                 self._decrypt(kek_name, encrypted_key2),
@@ -110,9 +112,9 @@ class HCPClient(KMS):
 
     def delete_data_encryption_keys(self, name: str) -> None:
         try:
-            self.client.secrets.kv.v1.delete_secret(
+            self.client.secrets.kv.v2.delete_metadata_and_all_versions(
                 path=f"{self.cluster_id}/{name}",
-                mount_point="kv",
+                mount_point=self.kv_mount,
             )
         except hvac.exceptions.VaultError as e:
             raise KMSException("Request failed") from e
@@ -120,16 +122,17 @@ class HCPClient(KMS):
     def create_key_encryption_key(self, name: str) -> None:
         try:
             self.client.secrets.transit.create_key(
-                name=name, key_type='aes256-gcm96', exportable=False
+                name=name, key_type='aes256-gcm96', exportable=False,
+                mount_point=self.transit_mount,
             )
             self.client.secrets.transit.update_key_configuration(
-                name=name, deletion_allowed=True
+                name=name, deletion_allowed=True, mount_point=self.transit_mount,
             )
         except hvac.exceptions.VaultError as e:
             raise KMSException("Request failed") from e
 
     def delete_key_encryption_key(self, name: str) -> None:
         try:
-            self.client.secrets.transit.delete_key(name=name)
+            self.client.secrets.transit.delete_key(name=name, mount_point=self.transit_mount)
         except hvac.exceptions.VaultError as e:
             raise KMSException("Request failed") from e
