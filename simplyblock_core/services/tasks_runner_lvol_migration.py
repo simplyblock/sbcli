@@ -1094,28 +1094,35 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
 
         # For tgt_is_src_secondary: the namespace swap was deferred until now.
         # The secondary mirror bdev (LVS_TGT/LVOL_xxx) is removed and replaced
-        # by the migrated bdev (LVS_TGT/LVOL_xxxm) with the same UUID so the
-        # NVMe multipath driver recognises it as the same volume.  This happens
-        # immediately before the ANA update so the new path is ready the moment
-        # SRC becomes inaccessible.
+        # by the migrated bdev (LVS_TGT/LVOL_xxxm) with the same nsid and UUID
+        # so the NVMe multipath driver does not need to rediscover the namespace
+        # — it just sees the same nsid become optimised on the target port.
+        # Reusing the nsid is critical: if a new nsid were assigned, the kernel
+        # driver would need AER-driven namespace re-scan (~2-4 s of EIO).
         if tgt_is_src_secondary:
             try:
                 mirror_bdev = f"{tgt_node.lvstore}/{lvol.lvol_bdev}"
+                mirror_nsid = None
                 sub_list = tgt_rpc.subsystem_list(lvol.nqn)
                 if sub_list:
                     sub = sub_list[0] if isinstance(sub_list, list) else sub_list
                     for ns in sub.get('namespaces', []):
                         if (ns.get('bdev_name') or ns.get('name', '')) == mirror_bdev:
-                            tgt_rpc.nvmf_subsystem_remove_ns(lvol.nqn, ns.get('nsid'))
-                            logger.info(f"Removed secondary mirror namespace {mirror_bdev}")
+                            mirror_nsid = ns.get('nsid')
+                            tgt_rpc.nvmf_subsystem_remove_ns(lvol.nqn, mirror_nsid)
+                            logger.info(
+                                f"Removed secondary mirror namespace {mirror_bdev} "
+                                f"nsid={mirror_nsid}")
                             break
                 ns_ret = tgt_rpc.nvmf_subsystem_add_ns(
-                    lvol.nqn, tgt_lvol_composite, uuid=lvol.uuid)
+                    lvol.nqn, tgt_lvol_composite, uuid=lvol.uuid,
+                    nsid=mirror_nsid)
                 if ns_ret:
                     tgt_uuid_carry['tgt_ns_id'] = int(ns_ret)
                     logger.info(
                         f"Added migrated namespace {tgt_lvol_composite} "
-                        f"nsid={ns_ret} to {lvol.nqn}")
+                        f"nsid={ns_ret} (reused mirror nsid={mirror_nsid}) "
+                        f"to {lvol.nqn}")
                 else:
                     logger.warning(
                         f"nvmf_subsystem_add_ns {tgt_lvol_composite} failed "
