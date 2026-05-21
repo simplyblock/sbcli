@@ -83,7 +83,7 @@ spec:
         - -c
         - |
           if [ ! -e /dev/fd ]; then
-            ln -s /proc/self/fd /dev/fd
+            sudo ln -s /proc/self/fd /dev/fd
           fi
           sudo -E /root/scripts/run_distr_with_ssd.sh "{{ L_CORES }}" "{{ SPDK_MEM }}"
       env:

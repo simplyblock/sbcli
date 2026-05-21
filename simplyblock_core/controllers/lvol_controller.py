@@ -1163,14 +1163,8 @@ def delete_lvol_from_node(lvol_id, node_id, clear_data=True, del_async=False, fo
         if not ret:
             logger.error("RPC failed bdev_lvol_remove_from_group")
 
-    subsystem = rpc_client.subsystem_list(lvol.nqn)
-    # 1- remove subsystem
-    if subsystem:
-        if len(subsystem[0]["namespaces"]) > 1:
-            rpc_client.nvmf_subsystem_remove_ns(lvol.nqn, lvol.ns_id)
-        else:
-            logger.info("Removing subsystem")
-            rpc_client.subsystem_delete(lvol.nqn)
+    # 1- remove subsystem (no-op if the pre-leader phase already removed it)
+    _remove_lvol_subsys_from_node(lvol, rpc_client)
 
     # 2- remove bdevs
     logger.info("Removing bdev stack")
@@ -1181,6 +1175,26 @@ def delete_lvol_from_node(lvol_id, node_id, clear_data=True, del_async=False, fo
     lvol.deletion_status = node_id
     lvol.write_to_db(db_controller.kv_store)
     return True
+
+
+def _remove_lvol_subsys_from_node(lvol, rpc_client):
+    """Remove the lvol's NVMf subsystem from one node.
+
+    Drops just the namespace if other namespaces still live on the
+    subsystem; otherwise deletes the whole subsystem. Idempotent: if the
+    subsystem is already gone, this is a no-op.
+
+    Returns True on success or when there was nothing to do. Returns
+    False if an RPC returned a non-success result. Exceptions are NOT
+    caught here — the caller decides whether a slow/hung node is fatal.
+    """
+    subsystem = rpc_client.subsystem_list(lvol.nqn)
+    if not subsystem:
+        return True
+    if len(subsystem[0]["namespaces"]) > 1:
+        return bool(rpc_client.nvmf_subsystem_remove_ns(lvol.nqn, lvol.ns_id))
+    logger.info(f"Removing subsystem {lvol.nqn}")
+    return bool(rpc_client.subsystem_delete(lvol.nqn))
 
 
 def delete_lvol(id_or_name, force_delete=False):
@@ -1280,10 +1294,58 @@ def delete_lvol(id_or_name, force_delete=False):
     elif lvol.ha_type == "ha":
         from simplyblock_core.storage_node_ops import (
             check_non_leader_for_operation,
-            queue_for_restart_drain, execute_on_leader_with_failover,
+            execute_on_leader_with_failover,
+            queue_for_restart_drain,
         )
 
         host_node = db_controller.get_storage_node_by_id(snode.get_id())
+
+        # Pre-leader subsystem teardown in fixed role order:
+        # tertiary -> secondary -> primary. Skip any role whose node is
+        # not ONLINE (down / in_restart / unreachable / etc). A single
+        # 2-second wait lands after the primary's subsystem delete so
+        # multipath clients fail the path away before the leader's bdev
+        # stack disappears (the leader's bdev stack is removed by the
+        # async delete below, which may target a different node than
+        # the primary if the LVS has failed over).
+        primary_subsys_deleted = False
+        for role_label, role_id in (
+            ("tertiary",  snode.tertiary_node_id),
+            ("secondary", snode.secondary_node_id),
+            ("primary",   host_node.get_id()),
+        ):
+            if not role_id:
+                continue
+            try:
+                peer = db_controller.get_storage_node_by_id(role_id)
+            except KeyError:
+                continue
+            if peer.status != StorageNode.STATUS_ONLINE:
+                logger.info(
+                    f"Skipping subsystem delete for {lvol.uuid} on "
+                    f"{role_id[:8]} ({role_label}): status={peer.status}")
+                continue
+            try:
+                peer_rpc = peer.rpc_client(timeout=5, retry=2)
+                ok = _remove_lvol_subsys_from_node(lvol, peer_rpc)
+                if ok:
+                    logger.info(
+                        f"Removed subsystem/ns for {lvol.uuid} on "
+                        f"{role_id[:8]} ({role_label})")
+                    if role_label == "primary":
+                        primary_subsys_deleted = True
+                else:
+                    logger.warning(
+                        f"Subsystem delete RPC returned non-success on "
+                        f"{role_id[:8]} ({role_label}); continuing")
+            except Exception:
+                logger.exception(
+                    f"Exception during subsystem delete on "
+                    f"{role_id[:8]} ({role_label})")
+
+        if primary_subsys_deleted:
+            time.sleep(2)
+
         all_sec_nodes = []
         for sec_id in lvol.nodes[1:]:
             try:
@@ -1692,6 +1754,8 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
     db_controller = DBController()
     try:
         lvol = db_controller.get_lvol_by_id(uuid)
+        if lvol.status == LVol.STATUS_DELETED:
+            raise KeyError(f"LVol {uuid} is deleted")
     except KeyError:
         logger.exception("Failed to get lvol by id: %s", uuid)
         return False, "Failed to find volume"
