@@ -301,7 +301,7 @@ def _collect_attached_ips(ctrlr_list):
     for each enabled one merge ``trid.traddr`` plus any ``alternate_trids``.
     Disabled / resetting paths are not counted as attached.
     """
-    attached = set()
+    attached: set[str] = set()
     if not ctrlr_list:
         return attached
     for entry in ctrlr_list:
