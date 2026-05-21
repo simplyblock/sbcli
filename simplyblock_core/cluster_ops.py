@@ -1038,6 +1038,137 @@ def cluster_set_active(cl_id) -> None:
                     device_controller.device_set_online(dev.get_id())
 
 
+def set_shared_placement(cl_id, enable=True, force=False) -> bool:
+    """Flip the cluster-wide shared_placement flag for distrib bdevs.
+
+    Sequence (per upgrade procedure):
+      1. Preflight: every storage node must be ONLINE; cluster status must
+         be ACTIVE and not rebalancing. With force=True the rebalancing
+         and node-status gates are bypassed (only valid for the off->on
+         transition; off->on is always safe per the data-plane spec).
+      2. For every online storage node, submit the runtime RPC
+         ``distr_shared_placement`` with ``enable`` and no ``name`` so it
+         applies to all distrib bdevs on that node.
+      3. Persist the flag on the lvstore_stack[/_secondary/_tertiary]
+         distrib entries of every node so that restarts re-create with
+         the new mode.
+      4. Persist cluster.shared_placement so future bdev_distrib_create
+         calls (new nodes, new distribs) get the flag automatically.
+
+    The off->on direction is always safe. The on->off direction is left
+    for debug only and requires force=True; the spec calls out that a
+    bdev created with shared_placement=True may host two layers sharing
+    a storage_ID across columns on a page, so disabling it on such a
+    bdev causes undefined behavior. Callers are expected to ensure the
+    bdev is balanced or empty before flipping back.
+    """
+    cluster = db_controller.get_cluster_by_id(cl_id)
+    enable = bool(enable)
+
+    if cluster.shared_placement == enable:
+        logger.info(
+            "Cluster %s shared_placement already %s; nothing to do",
+            cl_id, enable)
+        return True
+
+    # Direction-specific guards.
+    if not enable and not force:
+        logger.error(
+            "Disabling shared_placement is a debug-only operation; pass "
+            "force=True after verifying every distrib bdev is balanced or "
+            "empty")
+        return False
+
+    # Preflight (skippable only via force; cluster-status gate is hard).
+    if cluster.status != Cluster.STATUS_ACTIVE:
+        logger.error(
+            "Cluster %s is %s; shared_placement can only be toggled while "
+            "the cluster is %s",
+            cl_id, cluster.status, Cluster.STATUS_ACTIVE)
+        return False
+    if cluster.is_re_balancing and not force:
+        logger.error(
+            "Cluster %s is rebalancing; wait for rebalance to finish "
+            "(or pass force=True for the off->on direction)", cl_id)
+        return False
+
+    nodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
+    if not force:
+        non_online = [
+            n for n in nodes if n.status != StorageNode.STATUS_ONLINE
+        ]
+        if non_online:
+            ids = ", ".join(f"{n.get_id()[:8]}={n.status}" for n in non_online)
+            logger.error(
+                "Cluster %s has non-online storage nodes; refusing to toggle "
+                "shared_placement: %s", cl_id, ids)
+            return False
+
+    # Step 2: dispatch the runtime RPC to every online node. We do this
+    # before persisting so that if SPDK rejects the flip we don't end up
+    # with a divergent DB state. Failures on individual nodes are logged
+    # but do not abort the operation — the per-node lvstore_stack update
+    # below also gates the restart-time behavior.
+    failures = []
+    for node in nodes:
+        if node.status != StorageNode.STATUS_ONLINE:
+            logger.info(
+                "Skipping runtime shared_placement RPC on %s (status=%s)",
+                node.get_id()[:8], node.status)
+            continue
+        try:
+            rpc = node.rpc_client(timeout=10, retry=2)
+            ok = rpc.distr_shared_placement(enable=enable)
+            if not ok:
+                failures.append(node.get_id())
+                logger.warning(
+                    "Node %s rejected distr_shared_placement(enable=%s)",
+                    node.get_id()[:8], enable)
+        except Exception:
+            failures.append(node.get_id())
+            logger.exception(
+                "Node %s raised on distr_shared_placement(enable=%s)",
+                node.get_id()[:8], enable)
+
+    if failures and not force:
+        logger.error(
+            "Aborting shared_placement toggle: %d node(s) rejected the "
+            "runtime RPC: %s", len(failures), failures)
+        return False
+
+    # Step 3: persist the flag in every stored distrib stack entry on
+    # every node, so restarts re-create with the new mode without needing
+    # to consult the cluster row.
+    for node in nodes:
+        changed = False
+        for stack_attr in ("lvstore_stack",
+                            "lvstore_stack_secondary",
+                            "lvstore_stack_tertiary"):
+            stack = getattr(node, stack_attr, None) or []
+            for entry in stack:
+                if entry.get("type") != "bdev_distr":
+                    continue
+                params = entry.setdefault("params", {})
+                current = params.get("shared_placement", False)
+                if enable and not current:
+                    params["shared_placement"] = True
+                    changed = True
+                elif not enable and current:
+                    # remove rather than set False, so the param dict
+                    # stays minimal and matches the default-construct
+                    # case below.
+                    params.pop("shared_placement", None)
+                    changed = True
+        if changed:
+            node.write_to_db(db_controller.kv_store)
+
+    # Step 4: persist on the cluster row.
+    cluster.shared_placement = enable
+    cluster.write_to_db(db_controller.kv_store)
+    logger.info("Cluster %s shared_placement set to %s", cl_id, enable)
+    return True
+
+
 def list() -> t.List[dict]:
     cls = db_controller.get_clusters()
     mt = db_controller.get_mgmt_nodes()

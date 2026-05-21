@@ -643,7 +643,7 @@ class RPCClient:
     def bdev_distrib_create(self, name, vuid, ndcs, npcs, num_blocks, block_size, jm_names,
                             chunk_size, ha_comm_addrs=None, ha_inode_self=None, pba_page_size=2097152,
                             distrib_cpu_mask="", ha_is_non_leader=True, jm_vuid=0, write_protection=False,
-                            full_page_unmap=True):
+                            full_page_unmap=True, shared_placement=False):
         """"
             // Optional (not specified = no HA)
             // Comma-separated communication addresses, for each node, e.g. "192.168.10.1:45001,192.168.10.1:32768".
@@ -685,7 +685,34 @@ class RPCClient:
             params["write_protection"] = True
         if full_page_unmap:
             params["use_map_whole_page_on_1st_write"] = True
+        if shared_placement:
+            params["shared_placement"] = True
         return self._request("bdev_distrib_create", params)
+
+    def distr_shared_placement(self, name=None, enable=True):
+        """Flip the shared_placement (data placement-binding mode) of distrib
+        bdevs at runtime.
+
+        Args:
+            name: target a single distrib bdev. If None / empty, the flag is
+                applied to every distrib bdev on this node.
+            enable: True flips per-page -> per-chunk (always safe).
+                False is reserved for debug only: it is only safe on a
+                balanced or empty bdev. A bdev created with shared_placement
+                = True may host two layers that share a storage_ID across
+                different columns on a page; disabling on such a bdev causes
+                undefined behavior.
+
+        Response shape (per spec):
+            - normal success on success
+            - ENODEV if name is given but no such bdev exists
+            - normal success if name is omitted / empty and no distrib bdevs
+              exist (nothing to do)
+        """
+        params: dict = {"enable": bool(enable)}
+        if name:
+            params["name"] = name
+        return self._request("distr_shared_placement", params)
 
     def bdev_lvol_delete_lvstore(self, name):
         params = {"lvs_name": name}
