@@ -6352,6 +6352,7 @@ def get_secondary_nodes_2(current_node, exclude_ids=None, exclude_mgmt_ips=None)
 
 def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blocks, max_size):
     db_controller = DBController()
+    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     lvstore_stack: List[dict] = []
     distrib_list = []
     distrib_vuids = []
@@ -6383,23 +6384,29 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
             distrib_vuid = utils.get_random_vuid()
 
         distrib_name = f"distrib_{distrib_vuid}"
+        distrib_params = {
+            "name": distrib_name,
+            "jm_vuid": jm_vuid,
+            "vuid": distrib_vuid,
+            "ndcs": ndcs,
+            "npcs": npcs,
+            "num_blocks": size // distr_bs,
+            "block_size": distr_bs,
+            "chunk_size": distr_chunk_bs,
+            "pba_page_size": distr_page_size,
+            "write_protection": write_protection,
+        }
+        # Per-chunk placement is a cluster-wide opt-in. Persist it on each
+        # stack entry so subsequent restarts re-create the bdev with the
+        # same flag without having to re-fetch the cluster setting.
+        if cluster.shared_placement:
+            distrib_params["shared_placement"] = True
         lvstore_stack.extend(
             [
                 {
                     "type": "bdev_distr",
                     "name": distrib_name,
-                    "params": {
-                        "name": distrib_name,
-                        "jm_vuid": jm_vuid,
-                        "vuid": distrib_vuid,
-                        "ndcs": ndcs,
-                        "npcs": npcs,
-                        "num_blocks": size // distr_bs,
-                        "block_size": distr_bs,
-                        "chunk_size": distr_chunk_bs,
-                        "pba_page_size": distr_page_size,
-                        "write_protection": write_protection,
-                    }
+                    "params": distrib_params,
                 }
             ]
         )

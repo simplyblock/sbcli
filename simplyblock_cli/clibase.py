@@ -521,6 +521,14 @@ class CLIWrapperBase:
         cluster_ops.set(args.cluster_id, args.attr_name, args.attr_value)
         return True
 
+    def cluster__set_shared_placement(self, sub_command, args):
+        # Default action is enable (False -> True). --disable runs the
+        # debug-only reverse transition and requires --force.
+        enable = not getattr(args, "disable", False)
+        force = bool(getattr(args, "force", False))
+        return cluster_ops.set_shared_placement(
+            args.cluster_id, enable=enable, force=force)
+
     def cluster__change_name(self, sub_command, args):
         cluster_id = args.cluster_id
         cluster_name = args.name

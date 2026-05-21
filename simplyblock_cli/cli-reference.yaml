@@ -1452,6 +1452,25 @@ commands:
             help: "The new attribute value."
             dest: attr_value
             type: str
+      - name: set-shared-placement
+        help: "Enable cluster-wide per-chunk data placement-binding for distrib bdevs (forward-only upgrade; --disable is reserved for debug)."
+        usage: "Preflight: every storage node must be ONLINE; the cluster must be ACTIVE and not rebalancing. The runtime distr_shared_placement RPC is dispatched to every online node, then the flag is persisted on the cluster row and on every node's lvstore_stack distrib entries so subsequent restarts re-create with the new mode."
+        arguments:
+          - name: "cluster_id"
+            help: "The cluster id."
+            dest: cluster_id
+            type: str
+            completer: _completer_get_cluster_list
+          - name: "--disable"
+            help: "Reverse transition (per-chunk -> per-page). Debug only; only safe on a balanced or empty bdev. Requires --force."
+            dest: disable
+            type: bool
+            action: store_true
+          - name: "--force"
+            help: "Bypass the rebalancing / non-online-node guards. Required when --disable is passed."
+            dest: force
+            type: bool
+            action: store_true
       - name: change-name
         help: Assigns or changes a name to a cluster
         arguments:

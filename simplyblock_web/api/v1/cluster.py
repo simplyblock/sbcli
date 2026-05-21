@@ -298,6 +298,36 @@ def cluster_activate(uuid):
     # FIXME: Any failure within the thread are not handled
     return utils.get_response(True), 202
 
+@bp.route('/cluster/shared-placement/<string:uuid>', methods=['PUT'])
+def cluster_set_shared_placement(uuid):
+    """Flip cluster.shared_placement at runtime + persist for restarts.
+
+    Request body (all optional):
+        enable: bool, default True. Pass False to run the debug-only
+                reverse transition (then force is required).
+        force:  bool, default False. Bypasses the rebalancing / not-all-
+                nodes-online preflight; required for enable=False.
+
+    Returns 404 if the cluster does not exist, 400 if the controller
+    refuses the request, 200 with True on success.
+    """
+    try:
+        db.get_cluster_by_id(uuid)
+    except KeyError:
+        return utils.get_response_error(f"Cluster not found: {uuid}", 404)
+
+    req = request.get_json(silent=True) or {}
+    enable = bool(req.get("enable", True))
+    force = bool(req.get("force", False))
+
+    ok = cluster_ops.set_shared_placement(uuid, enable=enable, force=force)
+    if not ok:
+        return utils.get_response_error(
+            "Refused to toggle shared_placement; see management logs for "
+            "the failing precondition", 400)
+    return utils.get_response(True)
+
+
 @bp.route('/cluster/addreplication/<string:uuid>', methods=['PUT'])
 def cluster_add_replication(uuid):
     req_data = request.get_json()
