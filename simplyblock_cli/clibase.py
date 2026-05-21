@@ -15,7 +15,7 @@ from simplyblock_core.controllers import pool_controller, lvol_controller, snaps
     tasks_controller, qos_controller, migration_controller, backup_controller
 from simplyblock_core.controllers import health_controller
 from simplyblock_core.models.pool import Pool
-from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.models.cluster import Cluster, HashicorpVaultSettings
 
 
 def range_type(min, max):
@@ -576,8 +576,6 @@ class CLIWrapperBase:
             args.max_w_mbytes,
             with_snapshot=with_snapshot,
             max_size=max_size,
-            crypto_key1=args.crypto_key1,
-            crypto_key2=args.crypto_key2,
             lvol_priority_class=lvol_priority_class,
             uid=args.uid, pvc_name=args.pvc_name, namespaced=args.namespaced,
             max_namespace_per_subsys=args.max_namespace_per_subsys, ndcs=ndcs, npcs=npcs, fabric=args.fabric,
@@ -1014,7 +1012,9 @@ class CLIWrapperBase:
             distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity,
             qpair_count, max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name, fabric,
             client_data_nic, max_fault_tolerance=max_fault_tolerance, backup_config=backup_config,
-            nvmf_base_port=args.nvmf_base_port, rpc_base_port=args.rpc_base_port, snode_api_port=args.snode_api_port)
+            nvmf_base_port=args.nvmf_base_port, rpc_base_port=args.rpc_base_port, snode_api_port=args.snode_api_port,
+            hashicorp_vault_settings=HashicorpVaultSettings({"base_url": args.hashicorp_vault_url}) if args.hashicorp_vault_url else None,
+        )
 
     def cluster_create(self, args):
         import json as _json
@@ -1068,7 +1068,9 @@ class CLIWrapperBase:
             strict_node_anti_affinity, name, tls_secret, ingress_host_source, dns_name, fabric, is_single_node, client_data_nic,
             max_fault_tolerance=max_fault_tolerance,
             backup_config=backup_config,
-            nvmf_base_port=args.nvmf_base_port, rpc_base_port=args.rpc_base_port, snode_api_port=args.snode_api_port)
+            nvmf_base_port=args.nvmf_base_port, rpc_base_port=args.rpc_base_port, snode_api_port=args.snode_api_port,
+            hashicorp_vault_settings=HashicorpVaultSettings({"base_url": args.hashicorp_vault_url}) if args.hashicorp_vault_url else None,
+        )
 
     def query_yes_no(self, question, default="yes"):
         """Ask a yes/no question via raw_input() and return their answer.

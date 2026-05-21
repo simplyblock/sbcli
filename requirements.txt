@@ -1,4 +1,5 @@
 foundationdb==7.3.63
+hvac
 requests
 prettytable>=3.10.0
 docker

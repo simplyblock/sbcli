@@ -427,6 +427,7 @@ def set_node_schedulable(node):
 
 
 def set_node_down(node):
+    node = db.get_storage_node_by_id(node.get_id())
     if node.status not in [StorageNode.STATUS_DOWN, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_IN_SHUTDOWN]:
         storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_DOWN)
         update_cluster_status(cluster_id)

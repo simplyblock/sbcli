@@ -1,8 +1,12 @@
 # coding=utf-8
 
-from typing import List
+from typing import List, Optional
 
 from simplyblock_core.models.base_model import BaseModel
+
+
+class HashicorpVaultSettings(BaseModel):
+    base_url: str = ""
 
 
 class Cluster(BaseModel):
@@ -94,6 +98,7 @@ class Cluster(BaseModel):
     rpc_base_port: int = 8080
     snode_api_port: int = 50001
     container_image_prefix: str = ""
+    hashicorp_vault_settings: Optional[HashicorpVaultSettings] = None
 
     def get_status_code(self):
         if self.status in self.STATUS_CODE_MAP:

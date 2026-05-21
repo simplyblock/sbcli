@@ -241,6 +241,253 @@ class TestSourceCallSites(unittest.TestCase):
             "(leader_node may be a peer)",
         )
 
+    def test_recreate_lvstore_takeover_passes_lvs_node(self):
+        # The takeover branch of recreate_lvstore (snode is taking over
+        # leadership for an LVS whose configured primary, lvs_primary, is
+        # offline) must pass lvs_node=lvs_node so the peer iteration's
+        # connect_to_hublvol routes LVS metadata from the configured
+        # primary, not from snode's OWN primary-LVS. Without this, the
+        # peer is reconfigured for snode's own LVS (the wrong one) and
+        # the LVS being taken over never gets its hublvol wired up on
+        # the peer — but the peer-port unblock fires anyway, and the
+        # peer's existing tertiary path then re-promotes on the next
+        # client write, producing a dual-leader writer conflict.
+        # (incident 2026-05-21 05:38:14 k8s_native_resilient_failover-
+        # 20260520-231822, LVS_270 takeover by worker-4.)
+        start = self.src.index("def recreate_lvstore(")
+        end = self.src.index("\ndef ", start + 1)
+        body = self.src[start:end]
+        # The peer-loop connect call uses sec_node.connect_to_hublvol(snode, ...)
+        idx = body.index("sec_node.connect_to_hublvol(snode")
+        window = body[idx:idx + 800]
+        self.assertIn(
+            "lvs_node=lvs_node",
+            window,
+            "recreate_lvstore takeover peer-loop must pass "
+            "lvs_node=lvs_node so connect_to_hublvol uses the metadata "
+            "of the LVS being taken over, not snode's own primary LVS",
+        )
+
+    def test_no_naked_connect_to_hublvol_in_takeover_path(self):
+        """Stricter pin: every connect_to_hublvol call inside
+        recreate_lvstore must pass lvs_node= explicitly. Guards against
+        a regression that adds a new call site in the takeover path
+        without re-applying the metadata-routing arg."""
+        start = self.src.index("def recreate_lvstore(")
+        end = self.src.index("\ndef ", start + 1)
+        body = self.src[start:end]
+        cursor = 0
+        call_token = "connect_to_hublvol("
+        offenders = []
+        while True:
+            i = body.find(call_token, cursor)
+            if i < 0:
+                break
+            depth = 1
+            j = i + len(call_token)
+            while j < len(body) and depth:
+                ch = body[j]
+                if ch == "(":
+                    depth += 1
+                elif ch == ")":
+                    depth -= 1
+                j += 1
+            arglist = body[i + len(call_token):j - 1]
+            if "lvs_node=" not in arglist:
+                offenders.append(body[i:i + 120].replace("\n", " "))
+            cursor = j
+        self.assertEqual(
+            offenders, [],
+            "Every connect_to_hublvol call inside recreate_lvstore must "
+            "pass lvs_node= explicitly (takeover paths break otherwise). "
+            f"Offenders: {offenders}",
+        )
+
+
+# --------------------------------------------------------------------------
+# Behavioral test: drive recreate_lvstore in takeover mode and assert that
+# connect_to_hublvol on the surviving peer receives lvs_node=lvs_primary,
+# not snode. Reproduces the LVS_270 incident topology:
+#   worker-3 = primary (offline)
+#   worker-4 = secondary, snode (restarting, taking leadership)
+#   worker-1 = tertiary (was acting leader, now non-leader)
+# --------------------------------------------------------------------------
+
+class TestRecreateLvstoreTakeoverBehavioral(unittest.TestCase):
+
+    def _node(self, uuid, lvstore, jm_vuid, secondary_node_id="",
+              tertiary_node_id="", status="online", lvstore_ports=None):
+        from simplyblock_core.models.iface import IFace
+        from simplyblock_core.models.hublvol import HubLVol
+        n = StorageNode()
+        n.uuid = uuid
+        n.status = status
+        n.cluster_id = "c1"
+        n.hostname = f"host-{uuid[:8]}"
+        n.lvstore = lvstore
+        n.jm_vuid = jm_vuid
+        n.secondary_node_id = secondary_node_id
+        n.tertiary_node_id = tertiary_node_id
+        n.mgmt_ip = "10.0.0.1"
+        n.rpc_port = 8080
+        n.rpc_username = "u"
+        n.rpc_password = "p"
+        n.lvol_subsys_port = 4434
+        n.lvstore_ports = dict(lvstore_ports) if lvstore_ports else {}
+        n.active_tcp = True
+        n.active_rdma = False
+        n.lvstore_stack_secondary = ""
+        n.lvstore_stack_tertiary = ""
+        n.lvstore_status = "ready"
+        n.enable_ha_jm = False
+        n.lvstore_stack = []
+        n.raid = "raid0"
+        n.hublvol = HubLVol({"nvmf_port": 4433, "uuid": f"hub-{uuid}",
+                              "nqn": f"nqn.hub.{uuid}",
+                              "bdev_name": f"{lvstore}/hublvol",
+                              "model_number": "m", "nguid": "0" * 32})
+        n.remote_devices = []
+        n.remote_jm_devices = []
+        n.nvme_devices = []
+        n.health_check = True
+        nic = IFace()
+        nic.ip4_address = n.mgmt_ip
+        nic.trtype = "TCP"
+        n.data_nics = [nic]
+        return n
+
+    def test_takeover_passes_lvs_primary_as_lvs_node(self):
+        """Reproduce the LVS_270 incident topology: worker-3 (primary)
+        offline, worker-4 (secondary, snode) restarting, worker-1
+        (tertiary) online. connect_to_hublvol on worker-1 must receive
+        lvs_node=worker-3, not lvs_node=worker-4 (the default that
+        triggered the 2026-05-21 incident)."""
+        from simplyblock_core import storage_node_ops
+        from simplyblock_core.models.cluster import Cluster
+
+        snode = self._node(
+            "worker-4", lvstore="LVS_9915", jm_vuid=9915,
+            lvstore_ports={"LVS_270": {"lvol_subsys_port": 4432,
+                                        "hublvol_port": 4433}},
+        )
+        lvs_owner = self._node(
+            "worker-3", lvstore="LVS_270", jm_vuid=270,
+            secondary_node_id="worker-4",
+            tertiary_node_id="worker-1",
+            status="offline",
+            lvstore_ports={"LVS_270": {"lvol_subsys_port": 4432,
+                                        "hublvol_port": 4433}},
+        )
+        tertiary = self._node(
+            "worker-1", lvstore="LVS_TERT_OWN", jm_vuid=1111,
+            lvstore_ports={"LVS_270": {"lvol_subsys_port": 4432,
+                                        "hublvol_port": 4433}},
+        )
+        nodes = {n.get_id(): n for n in (snode, lvs_owner, tertiary)}
+
+        captured = []
+
+        def make_capture(self_node):
+            def fake(primary_node, failover_node=None, role=None,
+                     timeout=None, rpc_timeout=None, lvs_node=None):
+                captured.append({
+                    "self_id": self_node.get_id(),
+                    "primary_id": primary_node.get_id(),
+                    "lvs_node_id": lvs_node.get_id() if lvs_node else None,
+                    "role": role,
+                })
+                return True
+            return fake
+
+        cluster = Cluster()
+        cluster.uuid = "c1"
+        cluster.ha_type = "ha"
+        cluster.distr_ndcs = 2
+        cluster.distr_npcs = 2
+        cluster.max_fault_tolerance = 2
+        cluster.client_qpair_count = 3
+        cluster.client_data_nic = ""
+        cluster.status = Cluster.STATUS_ACTIVE
+        cluster.nqn = "nqn.cluster.c1"
+
+        rpc = MagicMock()
+        rpc.bdev_lvol_get_lvstores.return_value = [
+            {"lvs leadership": True, "uuid": "u", "lvs_primary": False}
+        ]
+        rpc.get_bdevs.return_value = []
+        rpc.bdev_lvol_set_lvs_opts.return_value = True
+        rpc.bdev_lvol_set_leader.return_value = True
+        rpc.bdev_wait_for_examine.return_value = True
+        rpc.bdev_examine.return_value = True
+        rpc.bdev_distrib_force_to_non_leader.return_value = True
+        rpc.jc_compression_get_status.return_value = False
+        rpc.jc_explicit_synchronization.return_value = True
+        rpc.bdev_distrib_check_inflight_io.return_value = False
+
+        for n in nodes.values():
+            n.write_to_db = MagicMock()
+            n.rpc_client = MagicMock(return_value=rpc)
+            n.wait_for_jm_rep_tasks_to_finish = MagicMock(return_value=True)
+            n.recreate_hublvol = MagicMock(return_value=True)
+            n.adopt_hublvol = MagicMock()
+            n.create_secondary_hublvol = MagicMock(return_value="nqn-sec")
+            n.connect_to_hublvol = make_capture(n)
+            n.client = MagicMock(return_value=MagicMock())
+
+        def disc(node, lvs_peer_ids=None):
+            return node.get_id() == "worker-3"
+
+        with patch("simplyblock_core.storage_node_ops._check_peer_disconnected",
+                   side_effect=disc), \
+             patch("simplyblock_core.storage_node_ops._set_restart_phase"), \
+             patch("simplyblock_core.storage_node_ops._failback_primary_ana"), \
+             patch("simplyblock_core.storage_node_ops.health_controller"), \
+             patch("simplyblock_core.storage_node_ops.tcp_ports_events"), \
+             patch("simplyblock_core.storage_node_ops.storage_events"), \
+             patch("simplyblock_core.storage_node_ops.FirewallClient",
+                   return_value=MagicMock()), \
+             patch("simplyblock_core.rpc_client.RPCClient", return_value=rpc), \
+             patch("simplyblock_core.storage_node_ops._connect_to_remote_jm_devs",
+                   return_value=[]), \
+             patch("simplyblock_core.storage_node_ops._connect_to_remote_devs",
+                   return_value=[]), \
+             patch("simplyblock_core.storage_node_ops._create_bdev_stack",
+                   return_value=(True, None)), \
+             patch("simplyblock_core.storage_node_ops.DBController") as mdb:
+
+            db = mdb.return_value
+            db.get_storage_node_by_id.side_effect = lambda nid: nodes.get(
+                nid.split("/")[-1] if "/" in nid else nid, snode)
+            db.get_lvols_by_node_id.return_value = []
+            db.get_snapshots_by_node_id.return_value = []
+            db.get_cluster_by_id.return_value = cluster
+
+            ok = storage_node_ops.recreate_lvstore(snode, lvs_primary=lvs_owner)
+            self.assertTrue(ok)
+
+        # Exactly one connect_to_hublvol on the tertiary peer.
+        self.assertEqual(
+            len(captured), 1,
+            f"Expected one connect_to_hublvol call on tertiary, got {captured}")
+        c = captured[0]
+        self.assertEqual(c["self_id"], "worker-1",
+                         "connect_to_hublvol should run on the tertiary peer")
+        self.assertEqual(c["primary_id"], "worker-4",
+                         "primary_node arg must be snode (the new acting "
+                         "leader / hublvol attach target)")
+        # THE assertion that pins the bug fix:
+        self.assertEqual(
+            c["lvs_node_id"], "worker-3",
+            "lvs_node MUST be the configured primary (worker-3), not snode "
+            "(worker-4). With lvs_node defaulting to primary_node=snode, "
+            "the peer is reconfigured for snode's own LVS_9915 instead of "
+            "LVS_270, the LVS_270 hublvol on the peer never gets wired up, "
+            "and the peer-port unblock exposes LVS_270 in a pre-takeover "
+            "state — producing the dual-leader writer conflict observed "
+            "in the 2026-05-21 incident.")
+        self.assertEqual(c["role"], "tertiary",
+                         "worker-1 is the topological tertiary of LVS_270")
+
 
 if __name__ == "__main__":
     unittest.main()

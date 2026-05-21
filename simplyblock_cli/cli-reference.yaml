@@ -284,7 +284,7 @@ commands:
           The storage node cannot be used or added any more. Any data residing on this storage node will be migrated to
           the remaining storage nodes. The user must ensure that there is sufficient free space in remaining cluster to
           allow for successful node removal.
-          
+
           !!! danger
               If there isn't enough storage available, the cluster may run full and switch to read-only mode.
         arguments:
@@ -1029,6 +1029,10 @@ commands:
             dest: snode_api_port
             type: int
             default: 50001
+          - name: "--hashicorp-vault-url"
+            help: "Hashicorp vault URL for storing encryption keys for this cluster"
+            dest: hashicorp_vault_url
+            type: str
       - name: add
         help: "Adds a new cluster."
         arguments:
@@ -1180,6 +1184,10 @@ commands:
             dest: snode_api_port
             type: int
             default: 50001
+          - name: "--hashicorp-vault-url"
+            help: "Hashicorp vault URL for storing encryption keys for this cluster"
+            dest: hashicorp_vault_url
+            type: str
       - name: activate
         help: >
           Activates a cluster.
@@ -1548,14 +1556,6 @@ commands:
             dest: encrypt
             type: bool
             action: store_true
-          - name: "--crypto-key1"
-            help: "The hex value of key1 to be used for logical volume encryption."
-            dest: crypto_key1
-            type: str
-          - name: "--crypto-key2"
-            help: "The hex value of key2 to be used for logical volume encryption."
-            dest: crypto_key2
-            type: str
           - name: "--max-rw-iops"
             help: "Maximum Read Write IO Per Second."
             dest: max_rw_iops
