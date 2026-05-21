@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from abc import abstractmethod
 from contextlib import AbstractContextManager
 from types import TracebackType
