@@ -1183,6 +1183,17 @@ def delete_lvol_from_node(lvol_id, node_id, clear_data=True, del_async=False, fo
     return True
 
 
+def _remove_lvol_subsys_from_node(lvol, node):
+    node_rpc = node.rpc_client()
+    subsystem = node_rpc.subsystem_list(lvol.nqn)
+    if subsystem:
+        if len(subsystem[0]["namespaces"]) > 1:
+            node_rpc.nvmf_subsystem_remove_ns(lvol.nqn, lvol.ns_id)
+        else:
+            node_rpc.subsystem_delete(lvol.nqn)
+    return True
+
+
 def delete_lvol(id_or_name, force_delete=False):
     db_controller = DBController()
     try:
@@ -1279,9 +1290,24 @@ def delete_lvol(id_or_name, force_delete=False):
 
     elif lvol.ha_type == "ha":
         from simplyblock_core.storage_node_ops import (
-            check_non_leader_for_operation,
-            queue_for_restart_drain, execute_on_leader_with_failover,
-        )
+            check_non_leader_for_operation, _is_node_rpc_responsive,
+            queue_for_restart_drain, execute_on_leader_with_failover )
+
+        if snode.tertiary_node_id:
+            tertiary_node = db_controller.get_storage_node_by_id(snode.tertiary_node_id)
+            if _is_node_rpc_responsive(tertiary_node, snode.lvstore):
+                logger.info(
+                    f"Deleting subsystem/namespace for {lvol.uuid} on {tertiary_node.get_id()}: node is tertiary")
+                _remove_lvol_subsys_from_node(lvol, tertiary_node)
+                time.sleep(2)
+
+        if snode.secondary_node_id:
+            secondary_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+            if _is_node_rpc_responsive(secondary_node, snode.lvstore):
+                logger.info(
+                    f"Deleting subsystem/namespace for {lvol.uuid} on {secondary_node.get_id()}: node is secondary")
+                _remove_lvol_subsys_from_node(lvol, secondary_node)
+                time.sleep(2)
 
         host_node = db_controller.get_storage_node_by_id(snode.get_id())
         all_sec_nodes = []
