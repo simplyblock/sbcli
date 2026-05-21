@@ -30,16 +30,20 @@ class LocalKMS(KMS):
         except StopIteration:
             raise KMSException(f"No LVol found for key {name}")
 
-    def create_data_encryption_keys(self, kek_name: str, name: str) -> None:
-        self.import_data_encryption_keys(kek_name, name, (generate_hex_string(32), generate_hex_string(32)))
+    def create_data_encryption_keys(self, kek_name: str, name: str, lvol: LVol | None = None) -> None:
+        self.import_data_encryption_keys(kek_name, name, (generate_hex_string(32), generate_hex_string(32)), lvol=lvol)
 
-    def import_data_encryption_keys(self, kek_name: str, name: str, keys: tuple[str, str]) -> None:
-        lvol = self._lvol_by_data_encryption_key_name(name)
-        lvol.crypto_key1, lvol.crypto_key2 = keys
-        lvol.write_to_db(self._db_controller.kv_store)
+    def import_data_encryption_keys(self, kek_name: str, name: str, keys: tuple[str, str], lvol: LVol | None = None) -> None:
+        if lvol is None:
+            lvol = self._lvol_by_data_encryption_key_name(name)
+            lvol.crypto_key1, lvol.crypto_key2 = keys
+            lvol.write_to_db(self._db_controller.kv_store)
+        else:
+            lvol.crypto_key1, lvol.crypto_key2 = keys
 
-    def get_data_encryption_keys(self, kek_name: str, name: str) -> tuple[str, str]:
-        lvol = self._lvol_by_data_encryption_key_name(name)
+    def get_data_encryption_keys(self, kek_name: str, name: str, lvol: LVol | None = None) -> tuple[str, str]:
+        if lvol is None:
+            lvol = self._lvol_by_data_encryption_key_name(name)
         return lvol.crypto_key1, lvol.crypto_key2
 
     def delete_data_encryption_keys(self, name: str) -> None:

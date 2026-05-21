@@ -139,7 +139,7 @@ def _create_crypto_lvol(rpc_client, lvol, cluster):
 
     with create_kms_connection(cluster) as kms:
         try:
-            original_key1, original_key2 = kms.get_data_encryption_keys(lvol.pool_uuid, name)
+            original_key1, original_key2 = kms.get_data_encryption_keys(lvol.pool_uuid, name, lvol=lvol)
         except KMSException:
             logger.exception(f"Failed to get keys for lvol: {name} from KMS")
             return False
@@ -649,27 +649,20 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
                 lvol.allowed_hosts,
                 bool(pool.dhchap_key) if pool.dhchap else "N/A")
 
-    lvol.write_to_db(db_controller.kv_store)
-
     if use_crypto:
         with create_kms_connection(cl) as kms:
             try:
                 if crypto_key is None:
-                    kms.create_data_encryption_keys(pool.get_id(), lvol.crypto_bdev)
+                    kms.create_data_encryption_keys(pool.get_id(), lvol.crypto_bdev, lvol=lvol)
                 else:
-                    kms.import_data_encryption_keys(pool.get_id(), lvol.crypto_bdev, crypto_key)
-                # For LocalKMS, sync keys to the in-memory lvol so subsequent
-                # write_to_db calls do not overwrite them with empty strings.
-                if not cl.hashicorp_vault_settings:
-                    lvol.crypto_key1, lvol.crypto_key2 = kms.get_data_encryption_keys(
-                        pool.get_id(), lvol.crypto_bdev
-                    )
+                    kms.import_data_encryption_keys(pool.get_id(), lvol.crypto_bdev, crypto_key, lvol=lvol)
                 logger.info("Created lvol keys")
             except KMSException:
                 msg = "Failed to create lvol keys"
                 logger.exception(msg)
-                lvol.remove(db_controller.kv_store)
                 return False, msg
+
+    lvol.write_to_db(db_controller.kv_store)
 
     if ha_type == "single":
         if host_node.status == StorageNode.STATUS_ONLINE:
