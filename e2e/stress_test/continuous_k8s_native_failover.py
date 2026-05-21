@@ -284,6 +284,14 @@ class K8sNativeFailoverTest(TestClusterBase):
                     self.logger.warning(f"[setup] NVMe disconnect on {client}: {exc}")
                 sleep_n_sec(2)
 
+        # Start dmesg/journalctl collectors on all K8s nodes.
+        # These privileged pods stream host dmesg via nsenter, so we get
+        # full kernel-level NVMe path events throughout the test.
+        try:
+            self._start_dmesg_collectors()
+        except Exception as exc:
+            self.logger.warning(f"[setup] dmesg collectors failed to start: {exc}")
+
         self.logger.info(
             f"K8sNativeFailoverTest.setup() complete "
             f"(client_fio={'enabled' if self.use_client_fio else 'disabled'})"
@@ -404,6 +412,12 @@ class K8sNativeFailoverTest(TestClusterBase):
         self.logger.info("Inside K8sNativeFailoverTest.teardown()")
         self.stop_root_monitor()
 
+        # Collect final dmesg/journalctl and clean up collector pods
+        try:
+            self._stop_dmesg_collectors()
+        except Exception as exc:
+            self.logger.warning(f"[teardown] dmesg collector cleanup: {exc}")
+
         # Kill fio on client hosts BEFORE deleting PVCs to avoid IO errors
         # from volumes being deleted while fio is still running
         if self.use_client_fio and self.ssh_obj:
@@ -449,9 +463,234 @@ class K8sNativeFailoverTest(TestClusterBase):
                 self.logger.info(f"Teardown cleanup error: {e}")
                 self.logger.info(traceback.format_exc())
 
+    def collect_outage_diagnostics(self, label):
+        """Override base to also collect dmesg/journalctl snapshots."""
+        super().collect_outage_diagnostics(label)
+        try:
+            self._collect_dmesg_snapshots(label)
+        except Exception as exc:
+            self.logger.warning(f"[diagnostics] dmesg snapshot failed: {exc}")
+
     def cleanup_logs(self):
         """No-op: K8s-native test has no SSH-based logs to clean."""
         self.logger.info("cleanup_logs: skipped (K8s-native, no SSH)")
+
+    # ── Node-level dmesg / journalctl collection ────────────────────────
+    #
+    # Primary : Privileged pods with ``nsenter`` streaming ``dmesg -Tw``
+    #           on every node.  Works on Talos, vanilla K8s, and OpenShift.
+    # Fallback: ``oc debug node/<n> -- chroot /host dmesg -T`` when on
+    #           OpenShift and the collector pod is unreachable (e.g. the
+    #           node was under outage and the pod hasn't restarted yet).
+    #
+    # Collection points (same as other metrics):
+    #   - pre_outage   : before any node is taken down
+    #   - post_recovery: after all nodes are back online
+    #   - end_iteration: after FIO validation completes
+    #   - final        : at teardown
+
+    def _get_all_k8s_node_names(self) -> list[str]:
+        """Return a list of ALL K8s node hostnames."""
+        out, _ = self.k8s_utils._exec_kubectl(
+            "kubectl get nodes --no-headers -o custom-columns=':metadata.name'",
+            supress_logs=True,
+        )
+        return [n.strip() for n in out.strip().splitlines() if n.strip()]
+
+    def _detect_openshift(self) -> bool:
+        """Return True if the cluster is OpenShift (``oc`` available)."""
+        if hasattr(self, '_is_openshift'):
+            return self._is_openshift
+        try:
+            out, _ = self.k8s_utils._exec_kubectl(
+                "oc version --client 2>/dev/null && echo OC_OK || echo OC_NO",
+                supress_logs=True,
+            )
+            self._is_openshift = "OC_OK" in out
+        except Exception:
+            self._is_openshift = False
+        self.logger.info(f"[dmesg] Platform detection: openshift={self._is_openshift}")
+        return self._is_openshift
+
+    def _start_dmesg_collectors(self):
+        """Deploy a privileged pod on each K8s node that streams host dmesg.
+
+        Each pod runs ``nsenter`` into the host PID namespace and executes
+        ``dmesg -Tw`` (follow mode with human-readable timestamps).  The
+        output is captured on pod stdout, retrievable via ``kubectl logs``
+        at any time.
+
+        Also starts a ``journalctl -kf`` stream in a second container for
+        kernel journal messages.
+
+        Deployed on ALL platforms (Talos, K8s, OpenShift).  On OpenShift
+        ``oc debug node/`` is available as a fallback if the pod is down.
+        """
+        self._ensure_k8s_utils()
+        self._detect_openshift()
+
+        ns = self.k8s_utils.namespace
+        nodes = self._get_all_k8s_node_names()
+        if not nodes:
+            self.logger.warning("[dmesg] No K8s nodes found — skipping collectors")
+            return
+
+        self._dmesg_collector_nodes = nodes
+        self.logger.info(f"[dmesg] Starting dmesg/journalctl collectors on {len(nodes)} nodes")
+
+        for node in nodes:
+            pod_name = f"dmesg-collector-{node}"
+            yaml_spec = (
+                f"apiVersion: v1\n"
+                f"kind: Pod\n"
+                f"metadata:\n"
+                f"  name: {pod_name}\n"
+                f"  namespace: {ns}\n"
+                f"  labels:\n"
+                f"    app: dmesg-collector\n"
+                f"spec:\n"
+                f"  nodeName: {node}\n"
+                f"  hostPID: true\n"
+                f"  tolerations:\n"
+                f"  - operator: Exists\n"
+                f"  containers:\n"
+                f"  - name: dmesg\n"
+                f"    image: busybox\n"
+                f"    command: ['nsenter', '-t', '1', '-m', '-u', '-i', '-n', '--',\n"
+                f"              'sh', '-c', 'dmesg -Tw 2>/dev/null || dmesg -T']\n"
+                f"    securityContext:\n"
+                f"      privileged: true\n"
+                f"  - name: journalctl\n"
+                f"    image: busybox\n"
+                f"    command: ['nsenter', '-t', '1', '-m', '-u', '-i', '-n', '--',\n"
+                f"              'sh', '-c',\n"
+                f"              'journalctl -kf --no-pager 2>/dev/null || dmesg -Tw 2>/dev/null || sleep infinity']\n"
+                f"    securityContext:\n"
+                f"      privileged: true\n"
+                f"  restartPolicy: Always\n"
+            )
+            try:
+                # Delete any leftover from previous run
+                self.k8s_utils._exec_kubectl(
+                    f"kubectl delete pod {pod_name} -n {ns} "
+                    f"--force --grace-period=0 2>/dev/null || true",
+                    supress_logs=True,
+                )
+                self.k8s_utils._exec_kubectl(
+                    f"cat <<'DMESG_EOF' | kubectl apply -f -\n{yaml_spec}DMESG_EOF",
+                )
+                self.logger.info(f"[dmesg] Started collector pod {pod_name} on {node}")
+            except Exception as exc:
+                self.logger.warning(f"[dmesg] Failed to start collector on {node}: {exc}")
+
+        # Wait for all collector pods to be running
+        try:
+            self.k8s_utils._exec_kubectl(
+                f"kubectl wait pods -l app=dmesg-collector -n {ns} "
+                f"--for=condition=Ready --timeout=120s 2>/dev/null || true",
+            )
+        except Exception:
+            pass
+
+    def _collect_dmesg_from_pod(self, node: str, snap_dir: str,
+                                 label: str) -> bool:
+        """Try to collect dmesg/journalctl from the collector pod on *node*.
+
+        Returns True if at least one log was saved, False otherwise.
+        """
+        ns = self.k8s_utils.namespace
+        pod_name = f"dmesg-collector-{node}"
+        saved = False
+        for container, prefix in [("dmesg", "dmesg"), ("journalctl", "journalctl")]:
+            try:
+                out, _ = self.k8s_utils._exec_kubectl(
+                    f"kubectl logs {pod_name} -c {container} -n {ns} "
+                    f"2>/dev/null || true",
+                    supress_logs=True,
+                )
+                if out and out.strip():
+                    fname = f"{prefix}_{node}_{label}.log"
+                    fpath = os.path.join(snap_dir, fname)
+                    with open(fpath, "w") as f:
+                        f.write(out)
+                    self.logger.info(
+                        f"[dmesg] Saved {prefix} for {node} "
+                        f"({len(out)} bytes) → {fname}"
+                    )
+                    saved = True
+            except Exception:
+                pass
+        return saved
+
+    def _collect_dmesg_via_oc_debug(self, node: str, snap_dir: str,
+                                     label: str):
+        """Fallback: collect dmesg/journalctl via ``oc debug node/``."""
+        for cmd_name, host_cmd in [
+            ("dmesg", "dmesg -T"),
+            ("journalctl", "journalctl -b --no-pager"),
+        ]:
+            fname = f"{cmd_name}_{node}_{label}.log"
+            fpath = os.path.join(snap_dir, fname)
+            # Skip if already collected from the pod
+            if os.path.exists(fpath):
+                continue
+            try:
+                out, _ = self.k8s_utils._exec_kubectl(
+                    f"oc debug node/{node} "
+                    f"-- chroot /host {host_cmd} 2>/dev/null || true",
+                    supress_logs=True,
+                )
+                if out and out.strip():
+                    with open(fpath, "w") as f:
+                        f.write(out)
+                    self.logger.info(
+                        f"[dmesg] oc debug fallback: saved {cmd_name} for "
+                        f"{node} ({len(out)} bytes) → {fname}"
+                    )
+            except Exception as exc:
+                self.logger.warning(
+                    f"[dmesg] oc debug {cmd_name} on {node} failed: {exc}"
+                )
+
+    def _collect_dmesg_snapshots(self, label: str):
+        """Save a dmesg + journalctl snapshot from each node.
+
+        Primary: reads from the persistent collector pods via kubectl logs.
+        Fallback (OpenShift): if the pod is unreachable (node under outage),
+        tries ``oc debug node/`` to get a host-level snapshot.
+        """
+        if not hasattr(self, '_dmesg_collector_nodes') or not self._dmesg_collector_nodes:
+            return
+
+        snap_dir = os.path.join(self.docker_logs_path, "node_kernel_logs")
+        os.makedirs(snap_dir, exist_ok=True)
+
+        for node in self._dmesg_collector_nodes:
+            # Primary: collector pod
+            got_logs = self._collect_dmesg_from_pod(node, snap_dir, label)
+
+            # Fallback: oc debug (OpenShift only, when pod didn't yield logs)
+            if not got_logs and getattr(self, '_is_openshift', False):
+                self._collect_dmesg_via_oc_debug(node, snap_dir, label)
+
+    def _stop_dmesg_collectors(self):
+        """Collect final snapshots and delete all dmesg collector pods."""
+        if not hasattr(self, '_dmesg_collector_nodes') or not self._dmesg_collector_nodes:
+            return
+
+        self.logger.info("[dmesg] Collecting final dmesg/journalctl snapshots")
+        self._collect_dmesg_snapshots("final")
+
+        ns = self.k8s_utils.namespace
+        try:
+            self.k8s_utils._exec_kubectl(
+                f"kubectl delete pods -l app=dmesg-collector -n {ns} "
+                f"--force --grace-period=0 2>/dev/null || true",
+                supress_logs=True,
+            )
+            self.logger.info("[dmesg] Cleaned up all dmesg collector pods")
+        except Exception as exc:
+            self.logger.warning(f"[dmesg] Cleanup failed: {exc}")
 
     def configure_sysctl_settings(self):
         """No-op: K8s-native test has no SSH access for sysctl."""
