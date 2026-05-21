@@ -1427,12 +1427,13 @@ def delete_lvol(id_or_name, force_delete=False):
 
     cl = db_controller.get_cluster_by_id(snode.cluster_id)
 
-    with create_kms_connection(cl) as kms:
-        try:
-            kms.delete_data_encryption_keys(lvol.crypto_bdev)
-            logger.info("Deleted lvol key")
-        except KMSException:
-            logger.exception("Failed to delete lvol key")
+    if lvol.crypto_bdev:
+        with create_kms_connection(cl) as kms:
+            try:
+                kms.delete_data_encryption_keys(lvol.crypto_bdev)
+                logger.info("Deleted lvol key")
+            except KMSException:
+                logger.exception("Failed to delete lvol key")
 
     logger.info("Done")
     return True
