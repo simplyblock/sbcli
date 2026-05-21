@@ -12,7 +12,7 @@ duplicate JSON-RPC that SPDK would reject with -EEXIST.
 """
 
 import unittest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 from simplyblock_core.rpc_client import RPCClient
 

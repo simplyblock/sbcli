@@ -431,7 +431,7 @@ commands:
             type: bool
             action: store_true
       - name: suspend
-        help: "Suspends a storage node."
+        help: "DEPRECATED: the suspension phase was removed from graceful shutdown (it caused writer conflicts on sec/tert lvstores). This command is now a no-op returning success. Use `sn shutdown`."
         usage: The node will stop accepting new IO, but will finish processing any IO, which has been received already.
         arguments:
           - name: node_id
@@ -440,12 +440,12 @@ commands:
             completer: _completer_get_sn_list
             type: str
           - name: "--force"
-            help: "Force node suspend."
+            help: "Ignored (kept for backwards compatibility)."
             dest: force
             type: bool
             action: store_true
       - name: resume
-        help: "Resumes a storage node."
+        help: "DEPRECATED: counterpart to `sn suspend`, also a no-op."
         arguments:
           - name: node_id
             help: Storage node id
