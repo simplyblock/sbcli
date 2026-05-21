@@ -133,7 +133,11 @@ def _reset_if_transient(node_id):
         )
         return
     try:
-        storage_node_ops.set_node_status(node_id, StorageNode.STATUS_OFFLINE)
+        # Tag as restart_cleanup so the RESTARTING-lock guard in
+        # set_node_status admits this transition (we've just verified
+        # SPDK is dead, so the lock is no longer protecting anything).
+        storage_node_ops.set_node_status(
+            node_id, StorageNode.STATUS_OFFLINE, caused_by="restart_cleanup")
         logger.info(f"Node {node_id} reset to OFFLINE (SPDK confirmed down)")
     except Exception as exc:
         logger.error(f"Failed to reset node {node_id} to OFFLINE: {exc}")
@@ -237,7 +241,11 @@ def task_runner_node(task):
         task.function_result = "max retry reached"
         task.status = JobSchedule.STATUS_DONE
         task.write_to_db(db.kv_store)
-        storage_node_ops.set_node_status(task.node_id, StorageNode.STATUS_OFFLINE)
+        # restart_cleanup: this task ran try_set_node_restarting earlier
+        # and is the lock owner; tagging unblocks the RESTARTING-lock
+        # guard so the giving-up flip lands.
+        storage_node_ops.set_node_status(
+            task.node_id, StorageNode.STATUS_OFFLINE, caused_by="restart_cleanup")
         # Re-queue a fresh auto-restart task so the node does not get
         # stranded in OFFLINE forever. Without this, the legitimate
         # auto-restart trigger (set_node_offline) won't fire either —

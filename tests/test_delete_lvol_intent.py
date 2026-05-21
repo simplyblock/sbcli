@@ -38,6 +38,8 @@ from unittest.mock import MagicMock, patch
 
 from simplyblock_core.models.lvol_model import LVol
 
+from tests._mocks import make_mock_cluster
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -112,6 +114,7 @@ class TestDeleteLvolIntentPersisted(unittest.TestCase):
         db_mock.get_lvol_by_name.return_value = lvol
         db_mock.get_storage_node_by_id.return_value = _make_node()
         db_mock.get_pool_by_id.return_value = _make_pool()
+        db_mock.get_cluster_by_id.return_value = make_mock_cluster()
         db_mock.kv_store = MagicMock()
 
         # execute_on_leader_with_failover mock. Return shape mirrors prod:
