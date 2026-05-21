@@ -6068,8 +6068,28 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
                 # Single-path attach against ``snode`` (the leader). The
                 # secondary failover for tertiary is appended in a
                 # post-unblock pass via ``add_hublvol_failover_path``.
+                #
+                # Pass lvs_node=lvs_node so LVS metadata (lvstore name,
+                # jm_vuid, port, hublvol NQN/bdev) comes from the
+                # configured primary of the LVS being taken over, *not*
+                # from snode — when this is a takeover (lvs_primary set,
+                # configured primary offline), snode.hublvol points at
+                # snode's OWN primary-LVS, which is the wrong LVS for
+                # this connection. Without it, the call sets up the
+                # wrong LVS on the peer, the LVS being taken over is
+                # never wired up, and the subsequent peer-port unblock
+                # opens the tertiary path to a still-unconfigured LVS —
+                # any client IO arriving on the still-open existing
+                # connection triggers spdk_lvs_trigger_leadership_switch
+                # on the peer and produces a dual-leader writer
+                # conflict. (incident 2026-05-21 05:38:14 k8s_native_
+                # resilient_failover-20260520-231822, LVS_270 takeover
+                # by worker-4: tertiary worker-1 was wired up as
+                # tertiary of LVS_9915 instead of LVS_270, port 4432
+                # was unblocked, worker-1 re-promoted on next client
+                # write, writer conflict on worker-4.)
                 ok = sec_node.connect_to_hublvol(snode, failover_node=None, role=sec_role,
-                                                 rpc_timeout=0.2)
+                                                 rpc_timeout=0.2, lvs_node=lvs_node)
             except Exception as e:
                 logger.error("Error establishing hublvol on %s: %s", sec_node.get_id(), e)
                 _abort_restart_and_unblock(
