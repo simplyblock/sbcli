@@ -1038,9 +1038,15 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         # Carry it forward through every transfer_context write below so it
         # survives the phase boundary even when retries via 'secondary_register'
         # are needed.
+        # When tgt is NOT src's secondary the hub controller must stay attached
+        # until clients have taken the new path — defer detach to CLEANUP_SOURCE.
+        # When tgt IS src's secondary the namespace swap already happened and the
+        # hub is detached immediately after ANA is updated (see below).
+        tgt_is_src_secondary = (src_node.secondary_node_id == tgt_node.get_id())
         tgt_uuid_carry = {
             'tgt_lvol_uuid': ctx.get('tgt_lvol_uuid'),
             'tgt_lvol_bdev': tgt_lvol_bdev,
+            'hub_ctrl_name': ctx.get('ctrl_name') if not tgt_is_src_secondary else None,
         }
 
         if lvol.ha_type == "ha":
@@ -1089,6 +1095,19 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         migration.transfer_context = tgt_uuid_carry
 
         _update_ana_states(migration, src_node, tgt_node, src_rpc, tgt_rpc)
+
+        # When tgt was src's secondary the namespace swap already replaced the
+        # secondary mirror route with the new primary namespace before the ANA
+        # switch.  Clients that were on the secondary path now land on the new
+        # primary namespace on the same node — no path flap.  Detach hub now.
+        if tgt_is_src_secondary:
+            ctrl_name = ctx.get('ctrl_name')
+            if ctrl_name:
+                try:
+                    src_rpc.bdev_nvme_detach_controller(ctrl_name)
+                    logger.info(f"Hub controller {ctrl_name} detached (tgt was src secondary)")
+                except Exception as e:
+                    logger.warning(f"Hub detach {ctrl_name}: {e}")
 
         # apply_migration_to_db is intentionally deferred to CLEANUP_SOURCE
         return True, False, None
@@ -1544,6 +1563,17 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
     except Exception as e:
         logger.warning(f"Source subsystem cleanup failed (non-fatal): {e}")
 
+    # Deferred hub detach: for the non-secondary case the hub controller was
+    # kept alive so clients could follow the ANA-optimized path on target
+    # uninterrupted.  Now that the source NQN is gone, detach the hub.
+    hub_ctrl_name = ctx.get('hub_ctrl_name')
+    if hub_ctrl_name:
+        try:
+            src_rpc.bdev_nvme_detach_controller(hub_ctrl_name)
+            logger.info(f"Deferred hub controller detach: {hub_ctrl_name}")
+        except Exception as e:
+            logger.warning(f"Deferred hub detach {hub_ctrl_name}: {e}")
+
     tgt_lvol_uuid = ctx.get('tgt_lvol_uuid')
     tgt_lvol_bdev = ctx.get('tgt_lvol_bdev')
     migration.transfer_context = {}
@@ -1613,8 +1643,9 @@ def _handle_cleanup_target(migration, tgt_node, tgt_rpc):
             return False, False, None  # poll on next call
         else:
             # No dangling lvol; go straight to snapshot cleanup
-            to_delete = migration_controller.get_snaps_to_delete_on_target(migration)
-            ctx = {'stage': 'cleanup_tgt', 'pending': list(to_delete), 'current_bdev': None}
+            # Only delete intermediates we created — pre-existing sibling snaps must not be touched
+            to_delete = list(migration.intermediate_snaps)
+            ctx = {'stage': 'cleanup_tgt', 'pending': to_delete, 'current_bdev': None}
             migration.transfer_context = ctx
             migration.write_to_db(db.kv_store)
 
@@ -1631,9 +1662,9 @@ def _handle_cleanup_target(migration, tgt_node, tgt_rpc):
             logger.info(f"Deleted target lvol {bdev_name}")
         else:
             logger.warning(f"delete_status {status} for {bdev_name}; proceeding anyway")
-        # Transition to snapshot cleanup
-        to_delete = migration_controller.get_snaps_to_delete_on_target(migration)
-        ctx = {'stage': 'cleanup_tgt', 'pending': list(to_delete), 'current_bdev': None}
+        # Transition to snapshot cleanup — only delete intermediates we created
+        to_delete = list(migration.intermediate_snaps)
+        ctx = {'stage': 'cleanup_tgt', 'pending': to_delete, 'current_bdev': None}
         migration.transfer_context = ctx
         migration.write_to_db(db.kv_store)
 
