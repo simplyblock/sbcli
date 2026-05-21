@@ -133,7 +133,10 @@ class BaseModel(object):
 
     def read_from_db(self, kv_store, id="", limit=0, reverse=False):
         if not kv_store:
-            return []
+            from simplyblock_core import utils
+            logger = utils.get_logger(__name__)
+            logger.exception('Error reading from FDB')
+            raise Exception("kv_store is required for reading from DB")
         try:
             objects = []
             prefix = self.get_db_id(id)
