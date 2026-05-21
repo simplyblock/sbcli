@@ -1005,7 +1005,12 @@ class CLIWrapperBase:
             qpair_count, max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name, fabric,
             client_data_nic, max_fault_tolerance=max_fault_tolerance, backup_config=backup_config,
             nvmf_base_port=args.nvmf_base_port, rpc_base_port=args.rpc_base_port, snode_api_port=args.snode_api_port,
-            hashicorp_vault_settings=HashicorpVaultSettings({"base_url": args.hashicorp_vault_url}) if args.hashicorp_vault_url else None,
+            hashicorp_vault_settings=HashicorpVaultSettings({
+                "base_url": args.hashicorp_vault_url,
+                "transit_mount": args.hashicorp_vault_transit_mount,
+                "kv_mount": args.hashicorp_vault_kv_mount,
+                "cert_role": args.hashicorp_vault_cert_role,
+            }) if args.hashicorp_vault_url else None,
         )
 
     def cluster_create(self, args):
@@ -1061,7 +1066,12 @@ class CLIWrapperBase:
             max_fault_tolerance=max_fault_tolerance,
             backup_config=backup_config,
             nvmf_base_port=args.nvmf_base_port, rpc_base_port=args.rpc_base_port, snode_api_port=args.snode_api_port,
-            hashicorp_vault_settings=HashicorpVaultSettings({"base_url": args.hashicorp_vault_url}) if args.hashicorp_vault_url else None,
+            hashicorp_vault_settings=HashicorpVaultSettings({
+                "base_url": args.hashicorp_vault_url,
+                "transit_mount": args.hashicorp_vault_transit_mount,
+                "kv_mount": args.hashicorp_vault_kv_mount,
+                "cert_role": args.hashicorp_vault_cert_role,
+            }) if args.hashicorp_vault_url else None,
         )
 
     def query_yes_no(self, question, default="yes"):

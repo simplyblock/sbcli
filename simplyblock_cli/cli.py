@@ -428,6 +428,9 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--rpc-base-port', help='The base port for SPDK JSON-RPC. Default: `8080`.', type=int, default=8080, dest='rpc_base_port')
         argument = subcommand.add_argument('--snode-api-port', help='The SNodeAPI/firewall port (one per host IP). Default: `50001`.', type=int, default=50001, dest='snode_api_port')
         argument = subcommand.add_argument('--hashicorp-vault-url', help='Hashicorp vault URL for storing encryption keys for this cluster', type=str, dest='hashicorp_vault_url')
+        argument = subcommand.add_argument('--hashicorp-vault-transit-mount', help='Vault transit secrets engine mount path. Default: `simplyblock/transit`.', type=str, default='simplyblock/transit', dest='hashicorp_vault_transit_mount')
+        argument = subcommand.add_argument('--hashicorp-vault-kv-mount', help='Vault KV secrets engine mount path. Default: `simplyblock/kv`.', type=str, default='simplyblock/kv', dest='hashicorp_vault_kv_mount')
+        argument = subcommand.add_argument('--hashicorp-vault-cert-role', help='Vault certificate auth role name. Default: `simplyblock-webappapi`.', type=str, default='simplyblock-webappapi', dest='hashicorp_vault_cert_role')
 
     def init_cluster__add(self, subparser):
         subcommand = self.add_sub_command(subparser, 'add', 'Adds a new cluster.')
@@ -461,6 +464,9 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--rpc-base-port', help='The base port for SPDK JSON-RPC. Default: `8080`.', type=int, default=8080, dest='rpc_base_port')
         argument = subcommand.add_argument('--snode-api-port', help='The SNodeAPI/firewall port (one per host IP). Default: `50001`.', type=int, default=50001, dest='snode_api_port')
         argument = subcommand.add_argument('--hashicorp-vault-url', help='Hashicorp vault URL for storing encryption keys for this cluster', type=str, dest='hashicorp_vault_url')
+        argument = subcommand.add_argument('--hashicorp-vault-transit-mount', help='Vault transit secrets engine mount path. Default: `simplyblock/transit`.', type=str, default='simplyblock/transit', dest='hashicorp_vault_transit_mount')
+        argument = subcommand.add_argument('--hashicorp-vault-kv-mount', help='Vault KV secrets engine mount path. Default: `simplyblock/kv`.', type=str, default='simplyblock/kv', dest='hashicorp_vault_kv_mount')
+        argument = subcommand.add_argument('--hashicorp-vault-cert-role', help='Vault certificate auth role name. Default: `simplyblock-webappapi`.', type=str, default='simplyblock-webappapi', dest='hashicorp_vault_cert_role')
 
     def init_cluster__activate(self, subparser):
         subcommand = self.add_sub_command(subparser, 'activate', 'Activates a cluster.')

@@ -47,43 +47,58 @@ kubectl -n vault exec -it openbao-0 -- env BAO_ADDR=https://openbao.vault:8200/ 
 kubectl -n vault exec -it vault-0 -- env VAULT_ADDR=https://vault.vault:8200/ VAULT_TOKEN=$token CLI=vault sh
 ```
 
-Using this shell, configure the vault. Note that the certificate path needs to be adapted depending on Openbao/HCP-vault:
+Using this shell, configure the vault.
+
+The defaults below (`webappapi`, `transit`, `kv`) match SimplyBlock's defaults. If you use
+different values, pass them to `cluster create` via `--hashicorp-vault-cert-role`,
+`--hashicorp-vault-transit-mount`, and `--hashicorp-vault-kv-mount`.
+
+The CA cert (`$SB_CA_CERT`) must be the SimplyBlock CA — extract it from the
+`simplyblock-ca-bundle-tls` secret in the SimplyBlock namespace:
 ```
+kubectl -n <simplyblock-namespace> get secret simplyblock-ca-bundle-tls \
+    -o jsonpath='{.data.ca\.crt}' | base64 -d > /tmp/sb-ca.crt
+SB_CA_CERT=/tmp/sb-ca.crt
+```
+
+```
+CERT_ROLE=simplyblock-webappapi
+TRANSIT_MOUNT=simplyblock/transit
+KV_MOUNT=simplyblock/kv
+
 # Configure auth
-$CLI policy write webappapi-policy - <<EOF
-path "transit/keys/*" {
+$CLI policy write "${CERT_ROLE}-policy" - <<EOF
+path "${TRANSIT_MOUNT}/keys/*" {
   capabilities = ["create", "update", "read", "delete"]
 }
-
-path "transit/datakey/plaintext/*" {
+path "${TRANSIT_MOUNT}/datakey/plaintext/*" {
   capabilities = ["create", "update"]
 }
-
-path "transit/datakey/wrapped/*" {
+path "${TRANSIT_MOUNT}/datakey/wrapped/*" {
   capabilities = ["create", "update"]
 }
-
-path "transit/encrypt/*" {
+path "${TRANSIT_MOUNT}/encrypt/*" {
   capabilities = ["create", "update"]
 }
-
-path "transit/decrypt/*" {
+path "${TRANSIT_MOUNT}/decrypt/*" {
   capabilities = ["create", "update"]
 }
-
-path "kv/*" {
+path "${KV_MOUNT}/*" {
   capabilities = ["create", "read", "update", "delete"]
+}
+path "${KV_MOUNT}/metadata/*" {
+  capabilities = ["create", "read", "update", "delete", "list"]
 }
 EOF
 $CLI auth enable cert
-$CLI write auth/cert/certs/webappapi \
-    certificate=@/{openbao,vault}/tls/ca.crt \
+$CLI write "auth/cert/certs/${CERT_ROLE}" \
+    certificate=@"$SB_CA_CERT" \
     allowed_dns_sans="simplyblock-webappapi" \
-    token_policies=webappapi-policy \
+    token_policies="${CERT_ROLE}-policy" \
     token_ttl=10m \
     token_max_ttl=30m
 
 # Enable components
-$CLI secrets enable transit
-$CLI secrets enable -version=1 kv
+$CLI secrets enable -path="$TRANSIT_MOUNT" transit
+$CLI secrets enable -path="$KV_MOUNT" kv
 ```
