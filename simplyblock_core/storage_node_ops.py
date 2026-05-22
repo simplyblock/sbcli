@@ -2499,6 +2499,43 @@ def _restart_storage_node_impl(
     node_info, _ = snode_api.info()
     logger.debug(f"Node info: {node_info}")
 
+    if recalculate_cores:
+
+        if node_info.get("nodes_config") and node_info["nodes_config"].get("nodes"):
+            nodes = node_info["nodes_config"]["nodes"]
+        else:
+            logger.error("Please run sbcli sn configure before adding the storage node, "
+                         "If you run it and the config has been manually changed please "
+                         "run 'sbcli sn configure-upgrade'")
+            return False
+
+        found_nodes = []
+        for node_config in nodes:
+            if node_config.get("socket") == snode.socket:
+                found_nodes.append(node_config)
+
+        if len(found_nodes) != 1:
+            logger.error("can not recalculate cpus for more than one node")
+            return False
+
+        node_config = found_nodes[0]
+
+        jc_singleton_core = node_config.get("distribution").get("jc_singleton_core")
+        if jc_singleton_core:
+            snode.jc_singleton_mask = utils.decimal_to_hex_power_of_2(jc_singleton_core[0])
+
+        snode.app_thread_mask = utils.generate_mask(node_config.get("distribution").get("app_thread_core"))
+        snode.jm_cpu_mask = utils.generate_mask(node_config.get("distribution").get("jm_cpu_core"))
+        snode.poller_cpu_cores = node_config.get("distribution").get("poller_cpu_cores")
+        snode.pollers_mask = utils.generate_mask(snode.poller_cpu_cores)
+        snode.lvol_poller_mask = utils.generate_mask(node_config.get("distribution").get("lvol_poller_core"))
+        snode.alceml_cpu_cores = node_config.get("distribution").get("alceml_cpu_cores")
+        snode.alceml_worker_cpu_cores = node_config.get("distribution").get("alceml_worker_cpu_cores")
+        snode.distrib_cpu_cores = node_config.get("distribution").get("distrib_cpu_cores")
+        snode.iobuf_small_pool_count = node_config.get("small_pool_count")
+        snode.iobuf_large_pool_count = node_config.get("large_pool_count")
+
+
     logger.info("Restarting SPDK")
 
     if max_lvol:
@@ -2615,7 +2652,7 @@ def _restart_storage_node_impl(
     cores, _ = snode_api.read_allowed_list()
     logger.info(f"read_allowed list is {cores}")
 
-    if len(cores) == req_cpu_count or recalculate_cores:
+    if len(cores) == req_cpu_count:
         new_distribution, _ = snode_api.recalculate_cores_distribution(cores, snode.number_of_alceml_devices)
         poller_cpu_cores = new_distribution.get("poller_cpu_cores")
         snode.alceml_cpu_cores = new_distribution.get("alceml_cpu_cores")
