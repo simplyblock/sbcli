@@ -20,7 +20,7 @@ def list(request: Request, cluster: Cluster, pool: StoragePool) -> List[Snapshot
     return [
         SnapshotDTO.from_model(snapshot, request, cluster_id=cluster.get_id(), pool_id=pool.get_id())
         for snapshot
-        in db.get_snapshots()
+        in db.get_snapshots(cluster_id=cluster.get_id())
         if snapshot.pool_uuid == pool.get_id()
     ]
 
@@ -28,11 +28,14 @@ def list(request: Request, cluster: Cluster, pool: StoragePool) -> List[Snapshot
 instance_api = APIRouter(prefix='/{snapshot_id}')
 
 
-def _lookup_snapshot(snapshot_id: UUID) -> SnapshotModel:
+def _lookup_snapshot(snapshot_id: UUID, pool: StoragePool) -> SnapshotModel:
     try:
-        return db.get_snapshot_by_id(str(snapshot_id))
+        snapshot = db.get_snapshot_by_id(str(snapshot_id))
     except KeyError as e:
         raise HTTPException(404, str(e))
+    if snapshot.pool_uuid != pool.get_id():
+        raise HTTPException(404, f'Snapshot {snapshot_id} not found in pool {pool.get_id()}')
+    return snapshot
 
 
 Snapshot = Annotated[SnapshotModel, Depends(_lookup_snapshot)]
@@ -44,7 +47,7 @@ def get(request: Request, cluster: Cluster, pool: StoragePool, snapshot: Snapsho
 
 
 @instance_api.delete('/', name='clusters:storage-pools:snapshots:delete', status_code=204, responses={204: {"content": None}})
-def delete(cluster: Cluster, pool: StoragePool, snapshot: Snapshot) -> Response:
+def delete(snapshot: Snapshot) -> Response:
     if not snapshot_controller.delete(snapshot.get_id()):
         raise ValueError('Failed to delete snapshot')
 

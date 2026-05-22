@@ -70,9 +70,11 @@ def export_backups(
     if backup_id and not lvol_name_filter:
         try:
             backup = db.get_backup_by_id(backup_id)
-            lvol_name_filter = backup.lvol_name
         except KeyError:
             raise HTTPException(404, f"Backup {backup_id} not found")
+        if backup.cluster_id != cluster.get_id():
+            raise HTTPException(404, f"Backup {backup_id} not found")
+        lvol_name_filter = backup.lvol_name
     data = backup_controller.export_backups(
         cluster_id=cluster.get_id(), lvol_name=lvol_name_filter)
     return data
