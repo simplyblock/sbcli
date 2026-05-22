@@ -242,7 +242,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         if not dns_name:
             raise ValueError("--dns-name is required when --ingress-host-source is dns or loadbalancer")
 
-    if name:
+    if name and db_controller.kv_store is not None:
         existing_clusters = db_controller.get_clusters()
         for existing in existing_clusters:
             if existing.cluster_name and existing.cluster_name == name:
