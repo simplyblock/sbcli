@@ -299,6 +299,14 @@ class DBController(metaclass=Singleton):
                 ret.append(snap)
         return sorted(ret, key=lambda x: x.create_dt)
 
+    def get_snapshots_by_pool_id(self, pool_id) -> List[SnapShot]:
+        ret = []
+        snaps = SnapShot().read_from_db(self.kv_store)
+        for snap in snaps:
+            if snap.pool_uuid == pool_id:
+                ret.append(snap)
+        return sorted(ret, key=lambda x: x.create_dt)
+
     def get_snapshots_by_lvol_id(self, lvol_id) -> List[SnapShot]:
         return [s for s in self.get_snapshots() if s.lvol and s.lvol.get_id() == lvol_id]
 

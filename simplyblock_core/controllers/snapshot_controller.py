@@ -329,8 +329,21 @@ def add(lvol_id, snapshot_name, backup=False, lock=True):
     return snap.uuid, False
 
 
-def list(all=False, cluster_id=None, with_details=False):
-    snaps = db_controller.get_snapshots(cluster_id)
+def list(all=False, cluster_id=None, with_details=False, pool_id_or_name=None):
+    if pool_id_or_name:
+        try:
+            pool = (
+                    db_controller.get_pool_by_id(pool_id_or_name)
+                    if utils.UUID_PATTERN.match(pool_id_or_name) is not None
+                    else db_controller.get_pool_by_name(pool_id_or_name)
+            )
+            snaps = db_controller.get_snapshots_by_pool_id(pool.get_id())
+        except KeyError:
+            logger.error("Can not find pool with provided pool_id_or_name: %s", pool_id_or_name)
+            return False
+    else:
+        snaps = db_controller.get_snapshots(cluster_id)
+
     snaps = sorted(snaps, key=lambda snap: snap.created_at)
 
     # Build set of lvol UUIDs with active migrations (single DB scan)
