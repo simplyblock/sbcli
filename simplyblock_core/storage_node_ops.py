@@ -2518,6 +2518,7 @@ def _restart_storage_node_impl(
             logger.error("can not recalculate cpus for more than one node")
             return False
 
+        logger.info("Recalculating cores and masks according to the node config")
         node_config = found_nodes[0]
 
         jc_singleton_core = node_config.get("distribution").get("jc_singleton_core")
@@ -2534,7 +2535,8 @@ def _restart_storage_node_impl(
         snode.distrib_cpu_cores = node_config.get("distribution").get("distrib_cpu_cores")
         snode.iobuf_small_pool_count = node_config.get("small_pool_count")
         snode.iobuf_large_pool_count = node_config.get("large_pool_count")
-
+        snode.l_cores = node_config.get("l-cores")
+        snode.spdk_cpu_mask = node_config.get("cpu_mask")
 
     logger.info("Restarting SPDK")
 
