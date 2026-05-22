@@ -3,6 +3,7 @@ import time
 
 
 from simplyblock_core import db_controller, storage_node_ops, utils, constants
+from simplyblock_core.controllers import lvol_controller
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.cluster import Cluster
 
@@ -36,21 +37,32 @@ def process_task(task):
         task.status = JobSchedule.STATUS_RUNNING
         task.write_to_db(db.kv_store)
 
-    try:
-        res = storage_node_ops.add_node(**task.function_params)
-        msg = f"Node add result: {res}"
-        logger.info(msg)
-        task.function_result = msg
-        if res:
-            task.status = JobSchedule.STATUS_DONE
-        else:
-            task.retry += 1
-            task.status = JobSchedule.STATUS_SUSPENDED
-        task.write_to_db(db.kv_store)
-        return True
-    except Exception as e:
-        logger.error(e)
-        return False
+        try:
+            if task.function_name == JobSchedule.FN_NODE_ADD:
+                res = storage_node_ops.add_node(**task.function_params)
+            elif task.function_name == JobSchedule.FN_LVOL_ADD:
+                pass
+            elif task.function_name == JobSchedule.FN_LVOL_CLONE:
+                clone_id, error = lvol_controller.clone_lvol(**task.function_params)
+                res = clone_id or error
+            elif task.function_name == JobSchedule.FN_LVOL_DELETE:
+                res = lvol_controller.delete_lvol(**task.function_params)
+            else:
+                raise ValueError(f"Unknown function name: {task.function_name}")
+            msg = f"Result: {res}"
+            logger.info(msg)
+            task.function_result = res
+            if res:
+                task.status = JobSchedule.STATUS_DONE
+            else:
+                task.retry += 1
+                task.status = JobSchedule.STATUS_SUSPENDED
+            task.write_to_db(db.kv_store)
+            return True
+        except Exception as e:
+            logger.error(e)
+            return False
+
 
 
 logger.info("Starting Tasks runner node add...")
@@ -64,7 +76,7 @@ while True:
             tasks = db.get_job_tasks(cl.get_id(), reverse=False)
             for task in tasks:
                 delay_seconds = constants.TASK_EXEC_INTERVAL_SEC
-                if task.function_name == JobSchedule.FN_NODE_ADD:
+                if task.function_name in [JobSchedule.FN_NODE_ADD, JobSchedule.FN_LVOL_ADD, JobSchedule.FN_LVOL_CLONE, JobSchedule.FN_LVOL_DELETE]:
                     while task.status != JobSchedule.STATUS_DONE:
                         # get new task object because it could be changed from cancel task
                         task = db.get_task_by_id(task.uuid)
@@ -74,6 +86,6 @@ while True:
                                 break
                         else:
                             delay_seconds *= 2
-                        time.sleep(delay_seconds)
+                        time.sleep(1)
 
-    time.sleep(constants.TASK_EXEC_INTERVAL_SEC)
+    time.sleep(3)

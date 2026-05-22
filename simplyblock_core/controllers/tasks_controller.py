@@ -608,3 +608,14 @@ def add_snapshot_replication_task(cluster_id, node_id, snapshot_id, replicate_to
     return _add_task(JobSchedule.FN_SNAPSHOT_REPLICATION, cluster_id, node_id, "",
                      function_params={"snapshot_id": snapshot_id, "replicate_to_source": replicate_to_source},
                      send_to_cluster_log=False)
+
+def add_lvol_add_task(cluster_id, function_params):
+    return _add_task(JobSchedule.FN_LVOL_ADD, cluster_id, "", "", function_params=function_params, max_retry=3)
+
+def add_lvol_delete_task(cluster_id, function_params):
+    return _add_task(JobSchedule.FN_LVOL_DELETE, cluster_id, "", "", function_params=function_params, max_retry=3)
+
+def add_lvol_clone_task(cluster_id, function_params):
+    return _add_task(JobSchedule.FN_LVOL_CLONE, cluster_id, "", "", function_params=function_params, max_retry=3)
+
+
