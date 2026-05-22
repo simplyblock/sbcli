@@ -52,12 +52,22 @@ def get_migration(cluster: Cluster, migration_id: str) -> MigrationDTO:
         migration = db.get_migration_by_id(migration_id)
     except KeyError as e:
         raise HTTPException(404, str(e))
+    if migration.cluster_id != cluster.get_id():
+        raise HTTPException(404, f'Migration {migration_id} not found in cluster {cluster.get_id()}')
     return MigrationDTO.from_model(migration)
 
 
 @instance_api.post('/cancel', name='clusters:migrations:cancel', status_code=200)
 def cancel_migration(cluster: Cluster, migration_id: str):
+    from simplyblock_core.db_controller import DBController
     from simplyblock_core.controllers import migration_controller
+    db = DBController()
+    try:
+        migration = db.get_migration_by_id(migration_id)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    if migration.cluster_id != cluster.get_id():
+        raise HTTPException(404, f'Migration {migration_id} not found in cluster {cluster.get_id()}')
     ok, error = migration_controller.cancel_migration(migration_id)
     if not ok:
         raise HTTPException(400, error)

@@ -127,11 +127,14 @@ def add(
 instance_api = APIRouter(prefix='/{volume_id}')
 
 
-def _lookup_volume(volume_id: UUID) -> LVol:
+def _lookup_volume(volume_id: UUID, pool: StoragePool) -> LVol:
     try:
-        return db.get_lvol_by_id(str(volume_id))
+        volume = db.get_lvol_by_id(str(volume_id))
     except KeyError as e:
         raise HTTPException(404, str(e))
+    if volume.pool_uuid != pool.get_id():
+        raise HTTPException(404, f'Volume {volume_id} not found in pool {pool.get_id()}')
+    return volume
 
 
 Volume = Annotated[LVol, Depends(_lookup_volume)]
@@ -279,7 +282,7 @@ def snapshot(request: Request, cluster: Cluster, pool: StoragePool, volume: Volu
     return [
         SnapshotDTO.from_model(snapshot, request, cluster_id=cluster.get_id(), pool_id=pool.get_id(), volume_id=volume.get_id())
         for snapshot
-        in db.get_snapshots()
+        in db.get_snapshots(cluster_id=cluster.get_id())
         if snapshot.lvol is not None and snapshot.lvol.get_id() == volume.get_id()
     ]
 

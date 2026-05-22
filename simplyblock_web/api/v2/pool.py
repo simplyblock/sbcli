@@ -21,13 +21,12 @@ db = DBController()
 @api.get('/', name='clusters:storage-pools:list')
 def list(cluster: Cluster) -> List[StoragePoolDTO]:
     data = []
-    for pool in db.get_pools():
-        if pool.cluster_id == cluster.get_id():
-            stat_obj = None
-            ret = db.get_pool_stats(pool, 1)
-            if ret:
-                stat_obj = ret[0]
-            data.append(StoragePoolDTO.from_model(pool, stat_obj))
+    for pool in db.get_pools(cluster.get_id()):
+        stat_obj = None
+        ret = db.get_pool_stats(pool, 1)
+        if ret:
+            stat_obj = ret[0]
+        data.append(StoragePoolDTO.from_model(pool, stat_obj))
     return data
 
 
@@ -68,11 +67,14 @@ def add(request: Request, cluster: Cluster, parameters: StoragePoolParams) -> Re
 instance_api = APIRouter(prefix='/{pool_id}')
 
 
-def _lookup_storage_pool(pool_id: UUID) -> PoolModel:
+def _lookup_storage_pool(pool_id: UUID, cluster: Cluster) -> PoolModel:
     try:
-        return db.get_pool_by_id(str(pool_id))
+        pool = db.get_pool_by_id(str(pool_id))
     except KeyError as e:
         raise HTTPException(404, str(e))
+    if pool.cluster_id != cluster.get_id():
+        raise HTTPException(404, f'Storage pool {pool_id} not found in cluster {cluster.get_id()}')
+    return pool
 
 
 StoragePool = Annotated[PoolModel, Depends(_lookup_storage_pool)]
