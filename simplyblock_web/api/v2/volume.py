@@ -183,14 +183,8 @@ def delete(cluster: Cluster, pool: StoragePool, volume: Volume) -> Response:
     if volume.status == LVol.STATUS_DELETED:
         return Response(status_code=404)
 
-    task_id_or_false = tasks_controller.add_lvol_delete_task(
-        cluster.get_id(),
-        {
-            'id_or_name': volume.get_id()
-        }
-    )
-    if not task_id_or_false:
-        return Response(status_code=500, content="Failed to add delete volume task'")
+    if not lvol_controller.delete_lvol(volume.get_id()):
+        raise ValueError('Failed to delete volume')
 
     return Response(status_code=204)
 
@@ -356,30 +350,9 @@ def clone(
             size = core_utils.parse_size(new_size)
         except Exception:
             raise HTTPException(400, f'Invalid new_size value: {new_size!r}')
-    task_id_or_false = tasks_controller.add_lvol_clone_task(
-        cluster.get_id(),
-        { # , , =None, =None
-            'lvol_id': volume.get_id(),
-            'clone_name': clone_name,
-            'new_size': size,
-            'pvc_name': pvc_name
-        }
-    )
-    if not task_id_or_false:
-        raise ValueError('Failed to add clone volume task')
-
-    clone_id = None
-    for i in range(50):
-        task = db.get_task_by_id(task_id_or_false)
-        if task.status != JobSchedule.STATUS_DONE:
-            time.sleep(1)
-            continue
-        clone_id = task.function_result
-        break
-
+    clone_id, error = lvol_controller.clone_lvol(volume.get_id(), clone_name, size, pvc_name)
     if not clone_id:
-        return Response(status_code=500, content='Failed to clone volume')
-
+        raise ValueError(error or 'Failed to clone volume')
     entity_url = request.app.url_path_for(
         'clusters:storage-pools:volumes:detail',
         cluster_id=cluster.get_id(),
