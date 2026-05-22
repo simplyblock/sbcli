@@ -624,6 +624,8 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--max-size', help='The logical volume max size. Default: `1000T`.', type=size_type(), default='1000T', dest='max_size')
         argument = subcommand.add_argument('--host-id', help='The primary storage node id or hostname.', type=str, dest='host_id')
         argument = subcommand.add_argument('--encrypt', help='Use inline data encryption and decryption on the logical volume.', dest='encrypt', action='store_true')
+        argument = subcommand.add_argument('--crypto-key1', help='**Deprecated since: 26.2** Do not use this parameter: This has been replaced by internal or external KMS support. See https://docs.simplyblock.io/latest/usage/baremetal/encrypting/\n\nThe hex value of key1 to be used for logical volume encryption.', type=str, dest='crypto_key1')
+        argument = subcommand.add_argument('--crypto-key2', help='**Deprecated since: 26.2** Do not use this parameter: This has been replaced by internal or external KMS support. See https://docs.simplyblock.io/latest/usage/baremetal/encrypting/\n\nThe hex value of key2 to be used for logical volume encryption.', type=str, dest='crypto_key2')
         argument = subcommand.add_argument('--max-rw-iops', help='Maximum Read Write IO Per Second.', type=int, dest='max_rw_iops')
         argument = subcommand.add_argument('--max-rw-mbytes', help='Maximum Read Write Megabytes Per Second.', type=int, dest='max_rw_mbytes')
         argument = subcommand.add_argument('--max-r-mbytes', help='Maximum Read Megabytes Per Second.', type=int, dest='max_r_mbytes')
@@ -1306,6 +1308,10 @@ class CLIWrapper(CLIWrapperBase):
                     if not self.developer_mode:
                         args.distr_vuid = None
                         args.uid = None
+                    if getattr(args, 'crypto_key1', None) is not None:
+                        raise ValueError("Deprecated parameter '--crypto-key1' cannot be used: This has been replaced by internal or external KMS support. See https://docs.simplyblock.io/latest/usage/baremetal/encrypting/")
+                    if getattr(args, 'crypto_key2', None) is not None:
+                        raise ValueError("Deprecated parameter '--crypto-key2' cannot be used: This has been replaced by internal or external KMS support. See https://docs.simplyblock.io/latest/usage/baremetal/encrypting/")
                     ret = self.volume__add(sub_command, args)
                 elif sub_command in ['qos-set']:
                     ret = self.volume__qos_set(sub_command, args)

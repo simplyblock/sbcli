@@ -309,6 +309,11 @@ properties:
                       required:
                         - since
                       properties:
+                        reason:
+                          type: string
+                          minLength: 1
+                          description: If set, usage of the deprecated parameter is rejected with this reason message.
+                          x-intellij-html-description: If set, usage of the deprecated parameter is rejected with this reason message.
                         replaced-by:
                           type: string
                           description: The replacement of the parameter.

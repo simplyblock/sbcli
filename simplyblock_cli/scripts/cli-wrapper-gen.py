@@ -75,11 +75,15 @@ def apply_deprecated_warning(item):
 
     since = deprecated.get("since")
     replaced_by = deprecated.get("replaced-by")
+    reason = deprecated.get("reason")
 
     if not since:
         raise ValueError("deprecated item must have a since")
 
-    return f"**Deprecated since: {since}**{ '' if not replaced_by else f' Replaced by: {replaced_by}'}" + "\\n\\n"
+    warning = f"**Deprecated since: {since}**{ '' if not replaced_by else f' Replaced by: {replaced_by}'}"
+    if reason:
+        warning += f" Do not use this parameter: {reason}"
+    return warning + "\\n\\n"
 
 
 def make_identifier(name):
@@ -146,6 +150,10 @@ def validate_deprecated_parameters(items):
             if not since:
                 raise ValueError("deprecated parameter must have a since")
 
+            reason = item["deprecated"].get("reason")
+            if reason is not None and (not isinstance(reason, str) or not reason.strip()):
+                raise ValueError("deprecated.reason must be a non-empty string when provided")
+
             if "replaced-by" in item["deprecated"]:
                 found = False
                 replaced_by = item["deprecated"]["replaced-by"]
@@ -157,6 +165,8 @@ def validate_deprecated_parameters(items):
 
                 if "migration" in item["deprecated"]:
                     item.pop("default", None)
+            if "reason" in item["deprecated"]:
+                item.pop("default", None)
 
 
 base_path = sys.argv[1]
