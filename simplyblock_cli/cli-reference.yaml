@@ -172,6 +172,7 @@ commands:
               1: Auto-create small partitions for journal on nvme devices. 0: use a separate (the smallest) nvme device of the node for journal. The journal needs a maximum of 3 percent of total available raw disk space. Default: `1`.
             dest: partitions
             type: int
+            default: 1
             choices:
               - 0
               - 1

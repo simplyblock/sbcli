@@ -299,8 +299,8 @@ properties:
                       type: array
                       description: The valid choices of the positional argument or parameter.
                       x-intellij-html-description: The valid choices of the positional argument or parameter.
+                      minItems: 2
                       items:
-                        minItems: 2
                         oneOf:
                           - type: string
                           - type: integer
