@@ -416,6 +416,12 @@ commands:
             dest: spdk_proxy_image
             type: str
             private: true
+          - name: "--recalculate-cores"
+            help: "Recalculate CPU cores and distribution."
+            dest: recalculate_cores
+            type: bool
+            default: false
+            private: true
       - name: shutdown
         help: "Initiates a storage node shutdown."
         usage: Once the command is issued, the node will stop accepting IO,but IO, which was previously received, will still be processed. In a high-availability setup, this will not impact operations.

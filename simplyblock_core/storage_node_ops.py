@@ -2267,7 +2267,7 @@ def restart_storage_node(
         spdk_image=None, set_spdk_debug=None,
         small_bufsize=0, large_bufsize=0,
         force=False, node_address=None, reattach_volume=False, clear_data=False, new_ssd_pcie=[],
-        force_lvol_recreate=False, spdk_proxy_image=None):
+        force_lvol_recreate=False, spdk_proxy_image=None, recalculate_cores=False):
     """Wrapper that guarantees the node is reset to OFFLINE if the restart
     fails after THIS call set the RESTARTING status. Without this, any
     ``return False`` inside the inner logic leaves the node pinned in
@@ -2305,7 +2305,8 @@ def restart_storage_node(
             small_bufsize=small_bufsize, large_bufsize=large_bufsize,
             force=force, node_address=node_address, reattach_volume=reattach_volume,
             clear_data=clear_data, new_ssd_pcie=new_ssd_pcie,
-            force_lvol_recreate=force_lvol_recreate, spdk_proxy_image=spdk_proxy_image)
+            force_lvol_recreate=force_lvol_recreate, spdk_proxy_image=spdk_proxy_image,
+            recalculate_cores=recalculate_cores)
     except Exception:
         logger.exception("restart_storage_node raised unexpectedly")
     finally:
@@ -2388,7 +2389,7 @@ def _restart_storage_node_impl(
         spdk_image=None, set_spdk_debug=None,
         small_bufsize=0, large_bufsize=0,
         force=False, node_address=None, reattach_volume=False, clear_data=False, new_ssd_pcie=[],
-        force_lvol_recreate=False, spdk_proxy_image=None):
+        force_lvol_recreate=False, spdk_proxy_image=None, recalculate_cores=False):
     db_controller = DBController()
     logger.info("Restarting storage node")
     try:
@@ -2614,7 +2615,7 @@ def _restart_storage_node_impl(
     cores, _ = snode_api.read_allowed_list()
     logger.info(f"read_allowed list is {cores}")
 
-    if len(cores) == req_cpu_count:
+    if len(cores) == req_cpu_count or recalculate_cores:
         new_distribution, _ = snode_api.recalculate_cores_distribution(cores, snode.number_of_alceml_devices)
         poller_cpu_cores = new_distribution.get("poller_cpu_cores")
         snode.alceml_cpu_cores = new_distribution.get("alceml_cpu_cores")
