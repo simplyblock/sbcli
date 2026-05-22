@@ -1001,17 +1001,31 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
 
     # --- Poll in-progress final migration ---
     if ctx.get('stage') == 'transfer':
-        result = src_rpc.bdev_lvol_transfer_stat(src_lvol_composite)
-        if result is None:
-            _cleanup_final_migration(src_rpc, ctx, tgt_rpc, rollback_target=True)
-            migration.transfer_context = {}
-            migration.write_to_db(db.kv_store)
-            return False, True, "bdev_lvol_transfer_stat returned None for final migration"
-
-        state = result.get('transfer_state', 'No process')
-
-        if state == 'In progress':
-            return False, False, None
+        # Tight-poll bdev_lvol_transfer_stat so the Done handler fires within
+        # milliseconds of SPDK completing the migration — not within the outer
+        # 3-second service-loop sleep.  This eliminates the "ANA gap": the window
+        # where SRC bdev returns EIO but the ANA state still says "optimized",
+        # causing the multipath driver to keep hammering SRC and accumulating IO
+        # errors while we wait for the next scheduler tick.
+        _FINAL_MIG_POLL_S   = 0.1   # 100 ms between stat checks
+        _FINAL_MIG_TIMEOUT  = 300   # give up after 5 min
+        _t_start = time.monotonic()
+        state = 'In progress'
+        while state == 'In progress':
+            if time.monotonic() - _t_start > _FINAL_MIG_TIMEOUT:
+                _cleanup_final_migration(src_rpc, ctx, tgt_rpc, rollback_target=True)
+                migration.transfer_context = {}
+                migration.write_to_db(db.kv_store)
+                return False, True, "bdev_lvol_final_migration timed out"
+            result = src_rpc.bdev_lvol_transfer_stat(src_lvol_composite)
+            if result is None:
+                _cleanup_final_migration(src_rpc, ctx, tgt_rpc, rollback_target=True)
+                migration.transfer_context = {}
+                migration.write_to_db(db.kv_store)
+                return False, True, "bdev_lvol_transfer_stat returned None for final migration"
+            state = result.get('transfer_state', 'No process')
+            if state == 'In progress':
+                time.sleep(_FINAL_MIG_POLL_S)
 
         if state in ('Failed', 'No process'):
             _cleanup_final_migration(src_rpc, ctx, tgt_rpc, rollback_target=True)
@@ -1093,12 +1107,15 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                     f"Lvol {lvol.uuid} registered and exposed on secondary {tgt_sec.get_id()}")
 
         # For tgt_is_src_secondary: the namespace swap was deferred until now.
-        # The secondary mirror bdev (LVS_TGT/LVOL_xxx) is removed and replaced
-        # by the migrated bdev (LVS_TGT/LVOL_xxxm) with the same nsid and UUID
-        # so the NVMe multipath driver does not need to rediscover the namespace
-        # — it just sees the same nsid become optimised on the target port.
-        # Reusing the nsid is critical: if a new nsid were assigned, the kernel
-        # driver would need AER-driven namespace re-scan (~2-4 s of EIO).
+        # Strategy:
+        #   1. Try nvmf_subsystem_ns_update (SPDK ≥ 24.01) — atomically swaps
+        #      the backing bdev while keeping the same nsid/UUID/anagrp.  The
+        #      client never sees the namespace disappear, so no AER rediscovery
+        #      delay and no IO blackout beyond the migration freeze itself.
+        #   2. If ns_update is unavailable, fall back to remove + add_ns (accepts
+        #      ~2-4 s AER rediscovery gap but is still far better than 8+ s).
+        #      The add uses no explicit nsid to avoid SPDK rejecting a recycled
+        #      nsid that hasn't fully cleared yet.
         if tgt_is_src_secondary:
             try:
                 mirror_bdev = f"{tgt_node.lvstore}/{lvol.lvol_bdev}"
@@ -1109,24 +1126,44 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                     for ns in sub.get('namespaces', []):
                         if (ns.get('bdev_name') or ns.get('name', '')) == mirror_bdev:
                             mirror_nsid = ns.get('nsid')
-                            tgt_rpc.nvmf_subsystem_remove_ns(lvol.nqn, mirror_nsid)
-                            logger.info(
-                                f"Removed secondary mirror namespace {mirror_bdev} "
-                                f"nsid={mirror_nsid}")
                             break
-                ns_ret = tgt_rpc.nvmf_subsystem_add_ns(
-                    lvol.nqn, tgt_lvol_composite, uuid=lvol.uuid,
-                    nsid=mirror_nsid)
-                if ns_ret:
-                    tgt_uuid_carry['tgt_ns_id'] = int(ns_ret)
-                    logger.info(
-                        f"Added migrated namespace {tgt_lvol_composite} "
-                        f"nsid={ns_ret} (reused mirror nsid={mirror_nsid}) "
-                        f"to {lvol.nqn}")
-                else:
-                    logger.warning(
-                        f"nvmf_subsystem_add_ns {tgt_lvol_composite} failed "
-                        f"— client may not find the new path")
+
+                swapped = False
+                if mirror_nsid is not None:
+                    # Preferred path: atomic in-place bdev swap (SPDK ≥ 24.01)
+                    ret = tgt_rpc.nvmf_subsystem_ns_update(
+                        lvol.nqn, mirror_nsid, tgt_lvol_composite)
+                    if ret is not None:
+                        tgt_uuid_carry['tgt_ns_id'] = mirror_nsid
+                        swapped = True
+                        logger.info(
+                            f"nvmf_subsystem_ns_update: replaced mirror bdev "
+                            f"{mirror_bdev} with {tgt_lvol_composite} "
+                            f"nsid={mirror_nsid} (atomic, no AER gap)")
+
+                if not swapped:
+                    # Fallback: remove mirror, add new namespace (different nsid)
+                    if mirror_nsid is not None:
+                        tgt_rpc.nvmf_subsystem_remove_ns(lvol.nqn, mirror_nsid)
+                        logger.info(
+                            f"Removed secondary mirror namespace {mirror_bdev} "
+                            f"nsid={mirror_nsid} (fallback remove+add path)")
+                    ns_ret = tgt_rpc.nvmf_subsystem_add_ns(
+                        lvol.nqn, tgt_lvol_composite, uuid=lvol.uuid)
+                    if ns_ret:
+                        tgt_uuid_carry['tgt_ns_id'] = int(ns_ret)
+                        logger.info(
+                            f"Added migrated namespace {tgt_lvol_composite} "
+                            f"nsid={ns_ret} to {lvol.nqn} "
+                            f"(mirror was nsid={mirror_nsid})")
+                    else:
+                        logger.error(
+                            f"nvmf_subsystem_add_ns {tgt_lvol_composite} failed "
+                            f"and ns_update also failed — skipping ANA update "
+                            f"to avoid stranding client with no TGT namespace")
+                        # Do NOT call _update_ana_states: keep SRC accessible
+                        # until operator can investigate.
+                        return True, False, None
             except Exception as e:
                 logger.warning(f"Deferred namespace swap failed: {e}")
 
