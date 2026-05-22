@@ -24,9 +24,9 @@ def list(request: Request, cluster: Cluster, pool: StoragePool) -> List[VolumeDT
     data = []
     for lvol in db.get_lvols_by_pool_id(pool.get_id()):
         stat_obj = None
-        ret = db.get_lvol_stats(lvol, 1)
-        if ret:
-            stat_obj = ret[0]
+        # ret = db.get_lvol_stats(lvol, 1)
+        # if ret:
+        #     stat_obj = ret[0]
         data.append(VolumeDTO.from_model(lvol, request, cluster.get_id(), stat_obj))
     return data
 
