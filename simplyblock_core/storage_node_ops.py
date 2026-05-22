@@ -2537,6 +2537,9 @@ def _restart_storage_node_impl(
         snode.iobuf_large_pool_count = node_config.get("large_pool_count")
         snode.l_cores = node_config.get("l-cores")
         snode.spdk_cpu_mask = node_config.get("cpu_mask")
+        snode.alceml_cpu_index = 0
+        snode.alceml_worker_cpu_index = 0
+        snode.distrib_cpu_index = 0
 
     logger.info("Restarting SPDK")
 
