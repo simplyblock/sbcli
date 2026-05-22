@@ -1191,10 +1191,21 @@ def _remove_lvol_subsys_from_node(lvol, rpc_client):
     subsystem = rpc_client.subsystem_list(lvol.nqn)
     if not subsystem:
         return True
-    if len(subsystem[0]["namespaces"]) > 1:
-        return bool(rpc_client.nvmf_subsystem_remove_ns(lvol.nqn, lvol.ns_id))
-    logger.info(f"Removing subsystem {lvol.nqn}")
-    return bool(rpc_client.subsystem_delete(lvol.nqn))
+
+    for ns in subsystem[0]["namespaces"]:
+        if ns["uuid"] == lvol.uuid:
+            logger.info("Removing namespace %s from subsystem %s", ns["uuid"], lvol.nqn)
+            ret = bool(rpc_client.nvmf_subsystem_remove_ns(lvol.nqn, lvol.ns_id))
+            if not ret:
+                logger.error(f"Failed to remove namespace {lvol.ns_id} from subsystem {lvol.nqn}")
+            subsystem = rpc_client.subsystem_list(lvol.nqn)
+            break
+
+    if len(subsystem[0]["namespaces"]) == 0:
+        logger.info(f"Removing subsystem {lvol.nqn}")
+        return bool(rpc_client.subsystem_delete(lvol.nqn))
+
+    return True
 
 
 def delete_lvol(id_or_name, force_delete=False):
@@ -1381,13 +1392,7 @@ def delete_lvol(id_or_name, force_delete=False):
                     f"sync delete lvol {lvol.get_id()} on {nl.get_id()[:8]}")
             elif action == "proceed":
                 try:
-                    sec_rpc = nl.rpc_client()
-                    subsystem = sec_rpc.subsystem_list(lvol.nqn)
-                    if subsystem:
-                        if len(subsystem[0]["namespaces"]) > 1:
-                            sec_rpc.nvmf_subsystem_remove_ns(lvol.nqn, lvol.ns_id)
-                        else:
-                            sec_rpc.subsystem_delete(lvol.nqn)
+                    _remove_lvol_subsys_from_node(lvol, nl.rpc_client())
                 except Exception as e:
                     logger.warning(f"Failed sync delete on {nl.get_id()}: {e}")
                     # Post-leader-op: check if we should kill or queue
