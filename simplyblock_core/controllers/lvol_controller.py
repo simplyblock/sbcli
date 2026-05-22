@@ -2433,6 +2433,9 @@ def clone_lvol(lvol_id, clone_name, new_size=None, pvc_name=None):
     except KeyError:
         logger.exception("Volume lookup failed for clone request: %s", lvol_id)
         return False, "Volume not found"
+    if lvol.status != LVol.STATUS_ONLINE:
+        logger.error(f"LVol: {lvol_id} is not online")
+        return False, "LVol is not online"
 
     host_node = db_controller.get_storage_node_by_id(lvol.node_id)
     subsys_count = len(set(lv.nqn for lv in db_controller.get_lvols_by_node_id(lvol.node_id)))

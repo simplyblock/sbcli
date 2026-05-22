@@ -190,19 +190,7 @@ def delete(cluster: Cluster, pool: StoragePool, volume: Volume) -> Response:
         }
     )
     if not task_id_or_false:
-        raise ValueError('Failed to add delete volume task')
-
-    deleted = False
-    for i in range(30):
-        task = db.get_task_by_id(task_id_or_false)
-        if task.status != JobSchedule.STATUS_DONE:
-            time.sleep(1)
-            continue
-        deleted = task.function_result
-        break
-
-    if not deleted:
-        raise ValueError('Failed to delete volume')
+        return Response(status_code=500, content="Failed to add delete volume task'")
 
     return Response(status_code=204)
 
@@ -269,7 +257,7 @@ def replication_stop(cluster: Cluster, pool: StoragePool, volume: Volume) -> Res
 def connect(cluster: Cluster, pool: StoragePool, volume: Volume, host_nqn: Optional[str] = None):
     details, err = lvol_controller.connect_lvol(volume.get_id(), host_nqn=host_nqn)
     if err:
-        raise ValueError(err)
+        return Response(status_code=404, content=err)
     return details
 
 
@@ -390,7 +378,7 @@ def clone(
         break
 
     if not clone_id:
-        raise ValueError('Failed to clone volume')
+        return Response(status_code=500, content='Failed to clone volume')
 
     entity_url = request.app.url_path_for(
         'clusters:storage-pools:volumes:detail',
