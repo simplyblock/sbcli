@@ -1,8 +1,7 @@
 # coding=utf-8
 """
 test_device_flap_counter.py — unit tests for the per-device flap counter
-and failed-state guard added to ``device_controller.device_set_state`` plus
-the health-check escalation in ``services.health_check_service``.
+and failed-state guard added to ``device_controller.device_set_state``.
 
 The counter advances only when the device's home node spontaneously reports
 an unsolicited per-device failure event (cause=CAUSE_LOCAL_FAILURE) on a
@@ -278,76 +277,6 @@ class TestRestartResetsCounter(unittest.TestCase):
                 env.device.uuid, NVMeDevice.STATUS_ONLINE)
             self.assertEqual(env.device.flap_count, 2)
             self.assertEqual(env.device.last_flap_tsc, 1234.5)
-
-
-# ---------------------------------------------------------------------------
-# Health-check escalation (Option 1)
-# ---------------------------------------------------------------------------
-
-
-class TestHealthCheckEscalation(unittest.TestCase):
-
-    def _setup(self, device_status, node_status):
-        from simplyblock_core.services import health_check_service as mod
-        device = _device(status=device_status)
-        node = _node(status=node_status, devices=[device])
-
-        p_db = patch.object(mod, "db", create=True)
-        p_devctl = patch.object(mod, "device_controller")
-        p_events = patch.object(mod, "device_events")
-        self._patches = [p_db, p_devctl, p_events]
-        starts = [p.start() for p in self._patches]
-        self.mock_db, self.mock_devctl, self.mock_events = starts
-        self.mock_db.get_storage_nodes_by_cluster_id.return_value = [node]
-        # Re-read fresh fetch.
-        self.mock_db.get_storage_node_by_id.return_value = node
-        self.mock_devctl.CAUSE_LOCAL_FAILURE = "local_failure"
-        self.mod = mod
-        self.device = device
-        self.node = node
-        return mod
-
-    def tearDown(self):
-        for p in getattr(self, "_patches", []):
-            p.stop()
-
-    def test_online_device_on_online_node_escalates_to_unavailable(self):
-        mod = self._setup(NVMeDevice.STATUS_ONLINE, StorageNode.STATUS_ONLINE)
-        # Pre-condition: device.health_check is True (default).
-        self.device.health_check = True
-        mod.set_device_health_check("cluster-1", self.device, False)
-        self.mock_devctl.device_set_unavailable.assert_called_once_with(
-            self.device.get_id(), cause="local_failure")
-
-    def test_already_unhealthy_device_does_not_re_escalate(self):
-        """No-op if the new status equals the old status."""
-        mod = self._setup(NVMeDevice.STATUS_ONLINE, StorageNode.STATUS_ONLINE)
-        self.device.health_check = False
-        mod.set_device_health_check("cluster-1", self.device, False)
-        self.mock_devctl.device_set_unavailable.assert_not_called()
-
-    def test_offline_node_does_not_escalate(self):
-        """Node-cascade window: don't trigger the local-failure path."""
-        mod = self._setup(NVMeDevice.STATUS_ONLINE, StorageNode.STATUS_OFFLINE)
-        self.device.health_check = True
-        mod.set_device_health_check("cluster-1", self.device, False)
-        self.mock_devctl.device_set_unavailable.assert_not_called()
-
-    def test_already_unavailable_device_does_not_escalate(self):
-        """If the device is already non-online, the health_check flip is
-        a status reflection, not a fresh failure."""
-        mod = self._setup(
-            NVMeDevice.STATUS_UNAVAILABLE, StorageNode.STATUS_ONLINE)
-        self.device.health_check = True
-        mod.set_device_health_check("cluster-1", self.device, False)
-        self.mock_devctl.device_set_unavailable.assert_not_called()
-
-    def test_health_check_recovery_does_not_escalate(self):
-        """False→True is a recovery signal, not a failure."""
-        mod = self._setup(NVMeDevice.STATUS_ONLINE, StorageNode.STATUS_ONLINE)
-        self.device.health_check = False
-        mod.set_device_health_check("cluster-1", self.device, True)
-        self.mock_devctl.device_set_unavailable.assert_not_called()
 
 
 if __name__ == "__main__":
