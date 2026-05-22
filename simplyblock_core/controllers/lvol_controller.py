@@ -1792,7 +1792,7 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
     if cluster.status == Cluster.STATUS_SUSPENDED and cluster.snapshot_replication_target_cluster:
         logger.error("Cluster is suspended, looking for replicated lvol")
         for lv in db_controller.get_lvols(cluster.snapshot_replication_target_cluster):
-            if lv.nqn == lvol.nqn:
+            if lv.nqn.split(":lvol:")[-1] == lvol.nqn.split(":lvol:")[-1]:
                 logger.info(f"LVol with same nqn already exists on target cluster: {lv.get_id()}")
                 lvol = lv
                 break
@@ -1854,6 +1854,7 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
 
             entry = {
                 "ns_id": lvol.ns_id,
+                "model": lvol.uuid,
                 "transport": transport,
                 "ip": ip,
                 "port": port,
@@ -2521,19 +2522,17 @@ def replicate_lvol_on_target_cluster(lvol_id):
         if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION:
             logger.debug(task)
             try:
-                snap = db_controller.get_snapshot_by_id(task.function_params["snapshot_id"])
+                snap = db_controller.get_snapshot_by_id(task.function_result)
             except KeyError:
                 continue
 
-            if snap.lvol.get_id() != lvol_id:
+            if snap.source_lvol_id != lvol_id:
                 continue
             snaps.append(snap)
 
     if snaps:
         snaps = sorted(snaps, key=lambda x: x.created_at)
-        last_snapshot = snaps[-1]
-        rep_snap = db_controller.get_snapshot_by_id(last_snapshot.target_replicated_snap_uuid)
-        snapshot = rep_snap
+        snapshot = snaps[-1]
 
     if not snapshot:
         logger.error(f"Snapshot for replication not found for lvol: {lvol_id}")
@@ -2606,6 +2605,7 @@ def replicate_lvol_on_target_cluster(lvol_id):
     lvol = db_controller.get_lvol_by_id(lvol_id)
     lvol.from_source = False
     lvol.write_to_db()
+    replication_stop(lvol_id)
     lvol_events.lvol_replicated(lvol, new_lvol)
 
     return new_lvol.lvol_uuid
@@ -2615,17 +2615,25 @@ def list_replication_tasks(lvol_id):
     db_controller = DBController()
     lvol = db_controller.get_lvol_by_id(lvol_id)
     node = db_controller.get_storage_node_by_id(lvol.node_id)
+    logger.info("list_replication_tasks: lvol=%s node=%s cluster=%s do_replicate=%s",
+                lvol_id, node.get_id(), node.cluster_id, lvol.do_replicate)
     tasks = []
-    for task in db_controller.get_job_tasks(node.cluster_id):
+    all_tasks = db_controller.get_job_tasks(node.cluster_id)
+    logger.info("list_replication_tasks: total cluster tasks=%d", len(all_tasks))
+    for task in all_tasks:
         if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION:
             try:
                 snap = db_controller.get_snapshot_by_id(task.function_params["snapshot_id"])
             except KeyError:
+                logger.warning("list_replication_tasks: snapshot not found for task=%s", task.uuid)
                 continue
-            if snap.lvol.get_id() != lvol_id:
+            if snap.source_lvol_id != lvol_id:
                 continue
+            logger.info("list_replication_tasks: matched task=%s snap=%s status=%s",
+                        task.uuid, snap.get_id(), task.status)
             tasks.append(task)
 
+    logger.info("list_replication_tasks: returning %d tasks for lvol=%s", len(tasks), lvol_id)
     return tasks
 
 
@@ -2730,17 +2738,46 @@ def replicate_lvol_on_source_cluster(lvol_id, cluster_id=None, pool_uuid=None):
         return False
 
 
+    target_cluster_id = None
+    if lvol.replication_node_id:
+        try:
+            target_node = db_controller.get_storage_node_by_id(lvol.replication_node_id)
+            target_cluster_id = target_node.cluster_id
+        except KeyError:
+            pass
+    if not target_cluster_id:
+        _src_cl = db_controller.get_cluster_by_id(source_node.cluster_id)
+        target_cluster_id = _src_cl.snapshot_replication_target_cluster
+
+    if not target_cluster_id:
+        logger.error(f"Target cluster not found for lvol: {lvol_id}")
+        return False
+
+    target_lvol_id = None
+    lvol_id_in_nqn = lvol.nqn.split(":")[-1]
+    for lv in db_controller.get_lvols(target_cluster_id):
+        if lv.nqn.split(":")[-1] == lvol_id_in_nqn:
+            logger.info(f"LVol with same lvol nqn already exists on target cluster: {lv.get_id()}")
+            target_lvol_id = lv.get_id()
+            break
+
+    if not target_lvol_id:
+        logger.error(f"LVol with same nqn does not exist on target cluster: {target_cluster_id}")
+        return False
+
     snaps = []
     snapshot = None
-    for task in db_controller.get_job_tasks(source_node.cluster_id):
+    for task in db_controller.get_job_tasks(target_cluster_id):
         if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION:
             logger.debug(task)
+            if task.status != JobSchedule.STATUS_DONE:
+                continue
             try:
-                snap = db_controller.get_snapshot_by_id(task.function_params["snapshot_id"])
+                snap = db_controller.get_snapshot_by_id(task.function_result)
             except KeyError:
                 continue
 
-            if snap.lvol.get_id() != lvol_id:
+            if snap.source_lvol_id != target_lvol_id:
                 continue
             snaps.append(snap)
 
@@ -2749,39 +2786,19 @@ def replicate_lvol_on_source_cluster(lvol_id, cluster_id=None, pool_uuid=None):
         snapshot = snaps[-1]
 
     if not snapshot:
-        target_node = db_controller.get_storage_node_by_id(lvol.replication_node_id)
-        logger.info(f"Looking for snapshot in target cluster: {target_node.cluster_id}")
-        target_lvol_id = None
-        lvol_id_in_nqn = lvol.nqn.split(":")[-1]
-        for lv in db_controller.get_lvols(target_node.cluster_id):
-            if lv.nqn.split(":")[-1] == lvol_id_in_nqn:
-                logger.info(f"LVol with same lvol nqn already exists on target cluster: {lv.get_id()}")
-                target_lvol_id = lv.get_id()
-
-        if not target_lvol_id:
-            logger.error(f"LVol with same nqn does not exist on target cluster: {target_node.cluster_id}")
-            return False
-
-        for task in db_controller.get_job_tasks(target_node.cluster_id):
-            if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION:
-                logger.debug(task)
-                try:
-                    snap = db_controller.get_snapshot_by_id(task.function_params["snapshot_id"])
-                except KeyError:
-                    continue
-
-                if snap.lvol.get_id() != target_lvol_id:
-                    continue
-                snaps.append(snap)
-
-        if snaps:
-            snaps = sorted(snaps, key=lambda x: x.created_at)
-            snapshot = snaps[-1]
-            snapshot = db_controller.get_snapshot_by_id(snapshot.target_replicated_snap_uuid)
-
-    if not snapshot:
         logger.error(f"Snapshot for replication not found for lvol: {lvol_id}")
         return False
+
+    # bdev_lvol_clone must run on the same SPDK that owns the snapshot's LVS
+    try:
+        snap_node = db_controller.get_storage_node_by_id(snapshot.lvol.node_id)
+        if snap_node.status == StorageNode.STATUS_ONLINE:
+            source_node = snap_node
+        else:
+            logger.error(f"Snapshot node {snapshot.lvol.node_id} is not online")
+            return False
+    except KeyError:
+        logger.warning(f"Could not find snapshot node {snapshot.lvol.node_id}, using current source_node")
 
     # create lvol on target node
     new_lvol = copy.deepcopy(lvol)
@@ -2828,6 +2845,9 @@ def replicate_lvol_on_source_cluster(lvol_id, cluster_id=None, pool_uuid=None):
 
     logger.debug(f"new lvol from_source: {new_lvol.from_source}")
 
+    logger.debug(f"new_lvol: {new_lvol}")
+    logger.debug(f"source_node: {source_node}")
+
     lvol_bdev, error = add_lvol_on_node(new_lvol, source_node)
     if error:
         logger.error(error)
@@ -2851,8 +2871,9 @@ def replicate_lvol_on_source_cluster(lvol_id, cluster_id=None, pool_uuid=None):
 
     new_lvol.status = LVol.STATUS_ONLINE
     new_lvol.from_source = True
+    new_lvol.do_replicate = True
     new_lvol.write_to_db(db_controller.kv_store)
-    lvol_events.lvol_replicated(lvol, new_lvol)
+    lvol_events.lvol_replicated(new_lvol, new_lvol)
     logger.debug(f"new lvol from_source: {new_lvol.from_source}")
 
     return new_lvol.lvol_uuid

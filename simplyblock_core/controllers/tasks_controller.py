@@ -594,7 +594,7 @@ def _check_snap_instance_on_node(snapshot_id: str , node_id: str):
 
     _add_task(JobSchedule.FN_SNAPSHOT_REPLICATION, snapshot.cluster_id, node_id, "",
               function_params={"snapshot_id": snapshot.get_id(), "replicate_to_source": False,
-                               "replicate_as_snap_instance": True},
+                               "replicate_as_snap_instance": False},
               send_to_cluster_log=False)
 
 

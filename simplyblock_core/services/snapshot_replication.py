@@ -80,12 +80,20 @@ def process_snap_replicate_start(task, snapshot):
             if not ret:
                 msg = "controller attach failed"
                 logger.error(msg)
-                raise RuntimeError(msg)
+                task.function_result = msg
+                task.status = JobSchedule.STATUS_SUSPENDED
+                task.retry += 1
+                task.write_to_db()
+                return
             bdev_name = ret[0]
             if not bdev_name:
                 msg = "Bdev name not returned from controller attach"
                 logger.error(msg)
-                raise RuntimeError(msg)
+                task.function_result = msg
+                task.status = JobSchedule.STATUS_SUSPENDED
+                task.retry += 1
+                task.write_to_db()
+                return
             bdev_found = False
             for i in range(5):
                 ret = snode.rpc_client().get_bdevs(bdev_name)
@@ -96,8 +104,13 @@ def process_snap_replicate_start(task, snapshot):
                     time.sleep(1)
 
             if not bdev_found:
+                msg = f"Failed to connect to lvol: {remote_lv.get_id()}"
                 logger.error("lvol Bdev not found after 5 attempts")
-                raise RuntimeError(f"Failed to connect to lvol: {remote_lv.get_id()}")
+                task.function_result = msg
+                task.status = JobSchedule.STATUS_SUSPENDED
+                task.retry += 1
+                task.write_to_db()
+                return
 
     offset = 0
     if "offset" in task.function_params and task.function_params["offset"]:
@@ -125,6 +138,8 @@ def delete_last_snapshot_if_needed(this_task, lvol):
         if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION:
             if task.get_id() == this_task.get_id():
                 continue
+            if task.status != JobSchedule.STATUS_DONE:
+                continue
             logger.debug(task)
             try:
                 snap = db.get_snapshot_by_id(task.function_params["snapshot_id"])
@@ -138,7 +153,7 @@ def delete_last_snapshot_if_needed(this_task, lvol):
         snaps = sorted(snaps, key=lambda x: x.created_at)
         snapshot = snaps[-1]
         logger.info("Deleting snapshot: %s", snapshot.get_id())
-        ret = snapshot_controller.delete(snapshot)
+        ret = snapshot_controller.delete(snapshot.get_id())
         logger.debug(ret)
 
 
@@ -234,6 +249,7 @@ def process_snap_replicate_finish(task, snapshot):
         except Exception as e:
             logger.error(e)
 
+    new_snapshot.source_lvol_id = snapshot.source_lvol_id or snapshot.lvol.get_id()
     new_snapshot.write_to_db()
 
     if snapshot.status == SnapShot.STATUS_IN_REPLICATION:
@@ -252,7 +268,13 @@ def process_snap_replicate_finish(task, snapshot):
 
 
 def task_runner(task: JobSchedule):
-    snapshot = db.get_snapshot_by_id(task.function_params["snapshot_id"])
+    try:
+        snapshot = db.get_snapshot_by_id(task.function_params["snapshot_id"])
+    except KeyError:
+        task.function_result = "snapshot not found"
+        task.status = JobSchedule.STATUS_DONE
+        task.write_to_db(db.kv_store)
+        return True
     if not snapshot:
         task.function_result = "snapshot not found"
         task.status = JobSchedule.STATUS_DONE
@@ -360,7 +382,15 @@ while True:
                     if task.status != JobSchedule.STATUS_DONE:
                         # get new task object because it could be changed from cancel task
                         task = db.get_task_by_id(task.uuid)
-                        res = task_runner(task)
+                        try:
+                            res = task_runner(task)
+                        except Exception as e:
+                            logger.exception("task_runner raised for task %s: %s", task.uuid, e)
+                            task.function_result = str(e)
+                            task.status = JobSchedule.STATUS_SUSPENDED
+                            task.retry += 1
+                            task.write_to_db(db.kv_store)
+                            res = False
                         if not res:
                             time.sleep(3)
 
