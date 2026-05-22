@@ -369,7 +369,7 @@ def clone(
         raise ValueError('Failed to add clone volume task')
 
     clone_id = None
-    for i in range(30):
+    for i in range(50):
         task = db.get_task_by_id(task_id_or_false)
         if task.status != JobSchedule.STATUS_DONE:
             time.sleep(1)
