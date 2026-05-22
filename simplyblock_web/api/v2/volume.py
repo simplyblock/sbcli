@@ -380,6 +380,7 @@ def clone(
     if not task_id_or_false:
         raise ValueError('Failed to add clone volume task')
 
+    clone_id = None
     for i in range(30):
         task = db.get_task_by_id(task_id_or_false)
         if task.status != JobSchedule.STATUS_DONE:
@@ -387,6 +388,9 @@ def clone(
             continue
         clone_id = task.function_result
         break
+
+    if not clone_id:
+        raise ValueError('Failed to clone volume')
 
     entity_url = request.app.url_path_for(
         'clusters:storage-pools:volumes:detail',
