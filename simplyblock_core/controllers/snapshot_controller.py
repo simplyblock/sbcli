@@ -339,10 +339,11 @@ def list(all=False, cluster_id=None, with_details=False):
         if m.is_active():
             migrating_lvols.append(m.lvol_id)
     data = []
+    all_lvols = db_controller.get_lvols()
     for snap in snaps:
         logger.debug(snap)
         clones = []
-        for lvol in db_controller.get_lvols():
+        for lvol in all_lvols:
             if lvol.cloned_from_snap and lvol.cloned_from_snap == snap.get_id():
                 clones.append(lvol.get_id())
         d = {
