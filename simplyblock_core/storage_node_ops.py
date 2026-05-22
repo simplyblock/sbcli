@@ -18,12 +18,11 @@ import docker
 from docker.types import LogConfig
 
 from simplyblock_core import constants, scripts, distr_controller, cluster_ops
-from simplyblock_core import utils
+from simplyblock_core import port_block, utils
 from simplyblock_core.constants import LINUX_DRV_MASS_STORAGE_NVME_TYPE_ID, LINUX_DRV_MASS_STORAGE_ID
 from simplyblock_core.controllers import lvol_controller, storage_events, snapshot_controller, device_events, \
     device_controller, tasks_controller, health_controller, tcp_ports_events, qos_controller
 from simplyblock_core.db_controller import DBController
-from simplyblock_core.fw_api_client import FirewallClient
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
@@ -1704,7 +1703,6 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             return False
 
         mgmt_ip, mgmt_iface = mgmt_info
-        firewall_port = utils.get_next_fw_port(cluster_id, mgmt_ip=mgmt_ip)
         rpc_port = utils.get_next_nvmf_port(cluster_id)
         logger.info(f"mgmt interface is {mgmt_iface}")
 
@@ -1742,7 +1740,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 multi_threading_enabled=constants.SPDK_PROXY_MULTI_THREADING_ENABLED,
                 timeout=constants.SPDK_PROXY_TIMEOUT,
                 ssd_pcie=ssd_pcie, total_mem=total_mem, system_mem=minimum_sys_memory, cluster_mode=cluster.mode,
-                socket=node_socket, firewall_port=firewall_port, cluster_id=cluster_id, spdk_proxy_image=spdk_proxy_image)
+                socket=node_socket, cluster_id=cluster_id, spdk_proxy_image=spdk_proxy_image)
             time.sleep(5)
 
         except Exception as e:
@@ -1907,7 +1905,6 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         snode.iobuf_small_bufsize = small_bufsize or 0
         snode.iobuf_large_bufsize = large_bufsize or 0
         snode.enable_test_device = enable_test_device
-        snode.firewall_port = firewall_port
 
         if cluster.is_single_node:
             snode.physical_label = 0
@@ -2652,7 +2649,7 @@ def _restart_storage_node_impl(
             snode.namespace, snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password,
             multi_threading_enabled=constants.SPDK_PROXY_MULTI_THREADING_ENABLED, timeout=constants.SPDK_PROXY_TIMEOUT,
             ssd_pcie=snode.ssd_pcie, total_mem=total_mem, system_mem=minimum_sys_memory, cluster_mode=cluster.mode,
-            socket=snode.socket, firewall_port=snode.firewall_port, cluster_id=snode.cluster_id,
+            socket=snode.socket, cluster_id=snode.cluster_id,
             spdk_proxy_image=snode.spdk_proxy_image)
 
     except Exception as e:
@@ -5063,9 +5060,6 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
         if lvol.allowed_hosts:
             _reapply_allowed_hosts(lvol, snode, snode_rpc_client)
 
-    port_type = "tcp"
-    if leader_node.active_rdma:
-        port_type = "udp"
     leader_lvs_port = primary_node.get_lvol_subsys_port(primary_node.lvstore)
 
     logger.info(f"[RESTART] Non-leader for {primary_node.lvstore} on {snode.get_id()[:8]}, "
@@ -5095,8 +5089,7 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
                         caused_by="restart_cleanup")
         if leader_port_blocked:
             try:
-                fw_api = FirewallClient(leader_node, timeout=5, retry=2)
-                fw_api.firewall_set_port(leader_lvs_port, port_type, "allow", leader_node.rpc_port)
+                port_block.set_port(leader_node, leader_lvs_port, block=False, timeout=5, retry=2)
                 tcp_ports_events.port_allowed(leader_node, leader_lvs_port)
             except Exception as ue:
                 logger.error("Failed to unblock leader port during abort: %s", ue)
@@ -5120,7 +5113,7 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
         # CRC mismatches and lvol drops on the restarting peer. So retry,
         # and if it still can't land, abort the restart unless force=True.
         #
-        # Budget: 3 attempts × FirewallClient(timeout=3, retry=1) × 1s sleep
+        # Budget: 3 attempts × rpc_client(timeout=3, retry=1) × 1s sleep
         # between attempts → worst-case ~15s abort. Previously 5× ×
         # (timeout=5, retry=5) × 2s = ~140s, which made every iteration
         # against a dead-mgmt leader stall the restart task for minutes.
@@ -5131,8 +5124,7 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
         attempts = 3
         for attempt in range(1, attempts + 1):
             try:
-                fw_api = FirewallClient(leader_node, timeout=3, retry=1)
-                fw_api.firewall_set_port(leader_lvs_port, port_type, "block", leader_node.rpc_port)
+                port_block.set_port(leader_node, leader_lvs_port, block=True, timeout=3, retry=1)
                 tcp_ports_events.port_deny(leader_node, leader_lvs_port)
                 leader_port_blocked = True
                 last_err = None
@@ -5416,10 +5408,7 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
                     primary_node.lvstore, ATTACH_RETRY_GAP_SEC)
                 if leader_port_blocked:
                     try:
-                        fw_api = FirewallClient(leader_node, timeout=3, retry=1)
-                        fw_api.firewall_set_port(
-                            leader_lvs_port, port_type, "allow",
-                            leader_node.rpc_port)
+                        port_block.set_port(leader_node, leader_lvs_port, block=False, timeout=3, retry=1)
                         tcp_ports_events.port_allowed(
                             leader_node, leader_lvs_port)
                         leader_port_blocked = False
@@ -5429,10 +5418,7 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
                             "failed: %s", leader_node.get_id(), ue)
                 time.sleep(ATTACH_RETRY_GAP_SEC)
                 try:
-                    fw_api = FirewallClient(leader_node, timeout=3, retry=1)
-                    fw_api.firewall_set_port(
-                        leader_lvs_port, port_type, "block",
-                        leader_node.rpc_port)
+                    port_block.set_port(leader_node, leader_lvs_port, block=True, timeout=3, retry=1)
                     tcp_ports_events.port_deny(leader_node, leader_lvs_port)
                     leader_port_blocked = True
                 except Exception as be:
@@ -5456,8 +5442,7 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
             attempts = 3
             for attempt in range(1, attempts + 1):
                 try:
-                    fw_api = FirewallClient(leader_node, timeout=3, retry=1)
-                    fw_api.firewall_set_port(leader_lvs_port, port_type, "allow", leader_node.rpc_port)
+                    port_block.set_port(leader_node, leader_lvs_port, block=False, timeout=3, retry=1)
                     tcp_ports_events.port_allowed(leader_node, leader_lvs_port)
                     unblocked = True
                     break
@@ -5871,14 +5856,12 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
     blocked_peers: list = []
 
     def _unblock_peer_port(peer):
-        """Remove the firewall block for snode_lvs_port on peer and drop
+        """Remove the port block for snode_lvs_port on peer and drop
         the peer from blocked_peers. Safe to call if peer is not currently
         blocked (no-op). Tolerates RPC failure — logs and continues so
         other peers can still be unblocked."""
         try:
-            _pt = "udp" if peer.active_rdma else "tcp"
-            _fw = FirewallClient(peer, timeout=5, retry=2)
-            _fw.firewall_set_port(snode_lvs_port, _pt, "allow", peer.rpc_port)
+            port_block.set_port(peer, snode_lvs_port, block=False, timeout=5, retry=2)
             tcp_ports_events.port_allowed(peer, snode_lvs_port)
         except Exception as ue:
             logger.error("Failed to unblock port %s on %s: %s",
@@ -5942,11 +5925,7 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
                 current_leader.write_to_db()
                 time.sleep(3)
 
-                port_type = "tcp"
-                if current_leader.active_rdma:
-                    port_type = "udp"
-                fw_api = FirewallClient(current_leader, timeout=5, retry=2)
-                fw_api.firewall_set_port(snode_lvs_port, port_type, "block", current_leader.rpc_port)
+                port_block.set_port(current_leader, snode_lvs_port, block=True, timeout=5, retry=2)
                 tcp_ports_events.port_deny(current_leader, snode_lvs_port)
                 blocked_peers.append(current_leader)
             except Exception as e:
@@ -5972,9 +5951,7 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
             if sec_node in blocked_peers:
                 continue
             try:
-                port_type = "udp" if sec_node.active_rdma else "tcp"
-                fw_api = FirewallClient(sec_node, timeout=5, retry=2)
-                fw_api.firewall_set_port(snode_lvs_port, port_type, "block", sec_node.rpc_port)
+                port_block.set_port(sec_node, snode_lvs_port, block=True, timeout=5, retry=2)
                 tcp_ports_events.port_deny(sec_node, snode_lvs_port)
                 blocked_peers.append(sec_node)
             except Exception as e:

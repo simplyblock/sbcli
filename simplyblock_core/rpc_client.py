@@ -1479,19 +1479,20 @@ class RPCClient:
         }
         return self._request2("jc_compression", params)
 
-    def nvmf_port_block_rdma(self, port):
+    def nvmf_port_block(self, port, is_reject=False):
         params = {
             "port": port,
+            "is_reject": bool(is_reject),
         }
         return self._request("nvmf_port_block", params)
 
-    def nvmf_port_unblock_rdma(self, port):
+    def nvmf_port_unblock(self, port):
         params = {
             "port": port,
         }
         return self._request("nvmf_port_unblock", params)
 
-    def nvmf_get_blocked_ports_rdma(self):
+    def nvmf_get_blocked_ports(self):
         return self._request("nvmf_get_blocked_ports")
 
     def bdev_raid_get_bdevs(self):

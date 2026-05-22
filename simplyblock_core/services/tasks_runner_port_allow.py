@@ -6,7 +6,6 @@ from simplyblock_core import db_controller, utils, storage_node_ops, distr_contr
 from simplyblock_core.controllers import (
     tcp_ports_events, health_controller, tasks_controller, storage_events,
 )
-from simplyblock_core.fw_api_client import FirewallClient
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.storage_node import StorageNode
@@ -512,11 +511,8 @@ def exec_port_allow_task(task):
         return
 
     logger.info(f"Allow port {port_number} on node {node.get_id()}")
-    fw_api = FirewallClient(snode, timeout=5, retry=2)
-    port_type = "tcp"
-    if node.active_rdma:
-        port_type = "udp"
-    fw_api.firewall_set_port(port_number, port_type, "allow", node.rpc_port)
+    from simplyblock_core import port_block
+    port_block.set_port(node, port_number, block=False, timeout=5, retry=2)
     tcp_ports_events.port_allowed(node, port_number)
 
     task.function_result = f"Port {port_number} allowed on node"

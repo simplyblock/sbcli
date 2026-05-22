@@ -3,11 +3,9 @@
 from typing import Any
 from logging import DEBUG, ERROR, INFO
 
-import jc
 
 from simplyblock_core import utils, distr_controller, storage_node_ops
 from simplyblock_core.db_controller import DBController
-from simplyblock_core.fw_api_client import FirewallClient
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice, RemoteDevice
 from simplyblock_core.models.storage_node import StorageNode
@@ -165,9 +163,9 @@ def _check_node_api(node):
 
 
 def _log_port_check_failure(db_controller, snode, port, exc):
-    # ECONNREFUSED from the node-agent's /firewall endpoint is routine during
-    # activation and restart windows. Downgrade to WARNING so a transient miss
-    # doesn't look like a real outage in logs.
+    # ECONNREFUSED / RPC errors are routine during activation and restart
+    # windows. Downgrade to WARNING so a transient miss doesn't look like
+    # a real outage in logs.
     try:
         cluster = db_controller.get_cluster_by_id(snode.cluster_id)
         cluster_status = cluster.status if cluster else None
@@ -180,27 +178,8 @@ def _log_port_check_failure(db_controller, snode, port, exc):
 
 
 def check_port_on_node(snode, port_id):
-    fw_api = FirewallClient(snode, timeout=5, retry=5)
-    iptables_command_output, _ = fw_api.get_firewall(snode.rpc_port)
-    if type(iptables_command_output) is str:
-        iptables_command_output = [iptables_command_output]
-    for rules in iptables_command_output:
-        result = jc.parse('iptables', rules)
-        for chain in result:
-            if chain['chain'] in ["INPUT", "OUTPUT"]:  # type: ignore
-                for rule in chain['rules']:  # type: ignore
-                    if str(port_id) in rule['options']:  # type: ignore
-                        action = rule['target']  # type: ignore
-                        if action in ["DROP"]:
-                            return False
-
-    # check RDMA port block
-    if snode.active_rdma:
-        rdma_fw_port_list = snode.rpc_client().nvmf_get_blocked_ports_rdma()
-        if port_id in rdma_fw_port_list:
-            return False
-
-    return True
+    from simplyblock_core import port_block
+    return not port_block.is_port_blocked(snode, port_id)
 
 
 def _check_node_ping(ip):
