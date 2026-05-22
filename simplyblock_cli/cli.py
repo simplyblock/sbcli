@@ -195,6 +195,8 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--force-lvol-recreate', help='Force logical volume recreation on node restart even if the logical volume bdev was not recovered. Default: `False`.', default=False, dest='force_lvol_recreate', action='store_true')
         if self.developer_mode:
             argument = subcommand.add_argument('--spdk-proxy-image', help='The SPDK proxy image URI.', type=str, dest='spdk_proxy_image')
+        if self.developer_mode:
+            argument = subcommand.add_argument('--recalculate-cores', help='Recalculate CPU cores and distribution.', type=bool, default=False, dest='recalculate_cores')
 
     def init_storage_node__shutdown(self, subparser):
         subcommand = self.add_sub_command(subparser, 'shutdown', 'Initiates a storage node shutdown.')
@@ -1111,6 +1113,7 @@ class CLIWrapper(CLIWrapperBase):
                         args.small_bufsize = 0
                         args.large_bufsize = 0
                         args.spdk_proxy_image = None
+                        args.recalculate_cores = False
                     ret = self.storage_node__restart(sub_command, args)
                 elif sub_command in ['shutdown']:
                     ret = self.storage_node__shutdown(sub_command, args)
