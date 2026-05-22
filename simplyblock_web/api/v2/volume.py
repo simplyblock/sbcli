@@ -1,4 +1,3 @@
-import time
 from typing import Annotated, List, Literal, Optional, Union
 from uuid import UUID
 
@@ -7,8 +6,7 @@ from pydantic import BaseModel, Field, RootModel
 
 from simplyblock_core.db_controller import DBController
 from simplyblock_core import utils as core_utils
-from simplyblock_core.controllers import lvol_controller, snapshot_controller, tasks_controller
-from simplyblock_core.models.job_schedule import JobSchedule
+from simplyblock_core.controllers import lvol_controller, snapshot_controller
 from simplyblock_core.models.lvol_model import LVol
 
 from .cluster import Cluster
@@ -26,9 +24,6 @@ def list(request: Request, cluster: Cluster, pool: StoragePool) -> List[VolumeDT
     data = []
     for lvol in db.get_lvols_by_pool_id(pool.get_id()):
         stat_obj = None
-        # ret = db.get_lvol_stats(lvol, 1)
-        # if ret:
-        #     stat_obj = ret[0]
         data.append(VolumeDTO.from_model(lvol, request, cluster.get_id(), stat_obj))
     return data
 
@@ -142,9 +137,6 @@ Volume = Annotated[LVol, Depends(_lookup_volume)]
 @instance_api.get('/', name='clusters:storage-pools:volumes:detail')
 def get(request: Request, cluster: Cluster, pool: StoragePool, volume: Volume) -> VolumeDTO:
     stat_obj = None
-    # ret = db.get_lvol_stats(volume, 1)
-    # if ret:
-    #     stat_obj = ret[0]
     rep_info = lvol_controller.get_replication_info(volume.get_id())
     return VolumeDTO.from_model(volume, request, cluster.get_id(), stat_obj, rep_info)
 

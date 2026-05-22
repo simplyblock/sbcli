@@ -28,9 +28,6 @@ class JobSchedule(BaseModel):
     FN_BACKUP = "s3_backup"
     FN_BACKUP_RESTORE = "s3_backup_restore"
     FN_BACKUP_MERGE = "s3_backup_merge"
-    FN_LVOL_CLONE = "lvol_clone"
-    FN_LVOL_ADD = "lvol_add"
-    FN_LVOL_DELETE = "lvol_delete"
 
     canceled: bool = False
     cluster_id: str = ""
