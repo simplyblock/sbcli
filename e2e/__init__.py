@@ -70,6 +70,10 @@ from stress_test.continuous_parallel_lvol_snapshot_clone import TestParallelLvol
 from stress_test.continuous_lvol_dirfill_stress import TestLvolDirFillStress
 from stress_test.continuous_failover_ha_namespace import RandomMultiClientFailoverNamespaceTest
 from stress_test.continuous_single_node_outage import RandomMultiClientSingleNodeTest
+from stress_test.continuous_parallel_namespace_lvol import (
+    TestParallelNamespaceLvolDocker,
+    TestParallelNamespaceLvolK8s,
+)
 from stress_test.continuous_failover_ha_security import (
     RandomSecurityFailoverTest,
     RandomAllSecurityFailoverTest,
@@ -248,6 +252,8 @@ ALL_TESTS = [
     K8sNativeFailoverTest,
     K8sNativeBasicFailoverTest,
     K8sNativeResilientFailoverTest,
+    TestParallelNamespaceLvolDocker,
+    TestParallelNamespaceLvolK8s,
 ]
 
 def get_all_tests(custom=True, ha_test=False):
@@ -356,6 +362,8 @@ def get_stress_tests():
         K8sNativeFailoverTest,
         K8sNativeBasicFailoverTest,
         K8sNativeResilientFailoverTest,
+        TestParallelNamespaceLvolDocker,
+        TestParallelNamespaceLvolK8s,
     ]
     return tests
 

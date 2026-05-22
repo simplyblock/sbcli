@@ -540,7 +540,8 @@ class K8sUtils:
     def create_storage_class(self, name: str, cluster_id: str, pool_name: str,
                              ndcs: int = 1, npcs: int = 1, fs_type: str = "ext4",
                              compression: bool = False, encryption: bool = False,
-                             fabric: str = "tcp"):
+                             fabric: str = "tcp",
+                             max_namespace_per_subsys: int = 1):
         """Create a simplyblock CSI StorageClass."""
         yaml_content = (
             f"allowVolumeExpansion: true\n"
@@ -557,7 +558,7 @@ class K8sUtils:
             f"  encryption: \"{str(encryption)}\"\n"
             f"  fabric: {fabric}\n"
             f"  lvol_priority_class: \"0\"\n"
-            f"  max_namespace_per_subsys: \"1\"\n"
+            f"  max_namespace_per_subsys: \"{max_namespace_per_subsys}\"\n"
             f"  pool_name: {pool_name}\n"
             f"  qos_r_mbytes: \"0\"\n"
             f"  qos_rw_iops: \"0\"\n"
