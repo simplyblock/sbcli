@@ -3,7 +3,9 @@ import time
 
 
 from simplyblock_core import db_controller, utils, storage_node_ops, distr_controller
-from simplyblock_core.controllers import tcp_ports_events, health_controller, tasks_controller
+from simplyblock_core.controllers import (
+    tcp_ports_events, health_controller, tasks_controller, storage_events,
+)
 from simplyblock_core.fw_api_client import FirewallClient
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.cluster import Cluster
@@ -13,6 +15,206 @@ logger = utils.get_logger(__name__)
 
 # get DB controller
 db = db_controller.DBController()
+
+
+# -- Hublvol gate retry policy -----------------------------------------------
+#
+# Per port-allow design: before unblocking the recovering primary's listener
+# port, every online peer (secondary, tertiary) must have a *verified-open*
+# hublvol to the primary. "Verified-open" means:
+#   1) bdev_nvme_controller_list returns the controller AND
+#      at least one path is in state == "enabled", AND
+#   2) the namespace bdev <primary.hublvol.bdev_name>n1 is registered on
+#      the peer (i.e., spdk_lvs_open_hub_bdev would not return ENODEV).
+#
+# A non-empty controller list alone is insufficient — during a destruct-in-
+# flight window the list returns a controller object that does not have any
+# usable path and the namespace bdev is gone (incident 2026-05-21 18:52:56:
+# gate said True for 6be10996 / LVS_753; lvolstore open returned ENODEV 6 s
+# later; primary unblocked too early and the split-brain abort followed).
+#
+# If verification fails we re-issue connect_to_hublvol (which drives a fresh
+# bdev_nvme_attach_controller as step 1) and re-verify. Five attempts with
+# exponential backoff covers a typical SPDK reconnect window without parking
+# the cluster IO indefinitely:
+_HUBLVOL_RETRY_DELAYS_SEC = (1, 2, 4, 8, 16)  # delays *between* attempts -> 5 attempts, ~31s ceiling
+_HUBLVOL_MAX_ATTEMPTS = len(_HUBLVOL_RETRY_DELAYS_SEC)
+
+
+def _hublvol_verified_open(peer_node, primary_node):
+    """Strict check of the peer's hublvol to ``primary_node``.
+
+    Returns True only if both:
+      - bdev_nvme_controller_list(<hublvol_bdev_name>) returns a controller
+        with at least one path whose ``state == "enabled"``;
+      - get_bdevs(<hublvol_bdev_name>n1) returns the namespace bdev (the
+        bdev the lvolstore will spdk_bdev_open_ext on at takeover time).
+
+    On any RPC error the function returns False — we conservatively treat
+    "couldn't verify" as "not open" so the port-allow gate keeps the port
+    blocked instead of letting a transient management-side failure leak a
+    half-open hublvol into a split-brain.
+    """
+    try:
+        rpc = peer_node.rpc_client(timeout=5, retry=1)
+        ctrlrs_resp = rpc.bdev_nvme_controller_list(primary_node.hublvol.bdev_name)
+        if not ctrlrs_resp:
+            return False
+        ctrlrs = ctrlrs_resp[0].get("ctrlrs", []) if isinstance(ctrlrs_resp, list) else []
+        if not any(ct.get("state") == "enabled" for ct in ctrlrs):
+            return False
+        ns_name = primary_node.hublvol.bdev_name + "n1"
+        bdev_resp = rpc.get_bdevs(ns_name)
+        return bool(bdev_resp)
+    except Exception as e:
+        logger.warning(
+            "Hublvol verify on %s for %s raised: %s",
+            peer_node.get_id()[:8], primary_node.hublvol.bdev_name, e)
+        return False
+
+
+def _reconnect_peer_hublvol_once(peer_node, primary_node):
+    """Drive a single ``connect_to_hublvol`` from peer to primary, with
+    the correct ``role`` / ``failover_node`` for tertiary-vs-secondary.
+
+    Returns the bool that ``connect_to_hublvol`` returned (True iff all
+    three internal steps -- attach + set_lvs_opts + connect_hublvol --
+    succeeded).
+    """
+    # Determine role: peer is tertiary of primary if its tertiary back-ref
+    # points at primary (the same condition health_controller._check_sec_
+    # node_hublvol uses to compute is_sec2).
+    is_tertiary = (peer_node.lvstore_stack_tertiary == primary_node.get_id())
+    sec_role = "tertiary" if is_tertiary else "secondary"
+    failover_node = None
+    if is_tertiary and primary_node.secondary_node_id:
+        try:
+            sec1 = db.get_storage_node_by_id(primary_node.secondary_node_id)
+            if sec1.status in (StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN):
+                failover_node = sec1
+        except KeyError:
+            pass
+    try:
+        return bool(peer_node.connect_to_hublvol(
+            primary_node, failover_node=failover_node, role=sec_role))
+    except Exception as e:
+        logger.warning(
+            "connect_to_hublvol(%s -> %s, role=%s) raised: %s",
+            peer_node.get_id()[:8], primary_node.get_id()[:8], sec_role, e)
+        return False
+
+
+def _verify_or_reconnect_peer_hublvol(peer_node, primary_node):
+    """Up to _HUBLVOL_MAX_ATTEMPTS verify+reconnect attempts, with
+    exponential backoff (1, 2, 4, 8, 16 s) between them. Returns True iff
+    any attempt yields a verified-open hublvol from ``peer_node`` to
+    ``primary_node``; False on exhaustion.
+
+    Each attempt runs in three steps:
+
+      1. existing ``health_controller._check_sec_node_hublvol`` with
+         ``auto_fix=True``. This is the project's pre-existing check;
+         keeping it in the loop means we benefit from any new heuristics
+         that land there in the future.
+
+      2. STRICT verify: ``_hublvol_verified_open`` confirms the bdev_nvme
+         controller has at least one enabled path AND the namespace bdev
+         ``<hublvol.bdev_name>n1`` is registered (so a subsequent
+         ``spdk_bdev_open_ext`` would not return -ENODEV the way it did
+         in the 2026-05-21 LVS_753 incident). This step is only meaningful
+         when ``primary_node.hublvol`` carries the metadata; without it
+         we trust step 1.
+
+      3. on failure of either, force-drive a fresh ``connect_to_hublvol``
+         (which re-runs ``bdev_nvme_attach_controller`` as step 1 of its
+         own contract) and immediately re-verify strictly.
+
+    On exhaustion the caller's port-allow path aborts the recovering
+    node rather than risk unblocking with a half-open peer hublvol.
+    """
+    label = f"{peer_node.get_id()[:8]} <- {primary_node.get_id()[:8]}"
+    have_metadata = bool(primary_node.hublvol)
+
+    for attempt in range(1, _HUBLVOL_MAX_ATTEMPTS + 1):
+        # Step 1: existing check (with its embedded auto_fix heuristic).
+        existing_ok = False
+        try:
+            existing_ok = bool(health_controller._check_sec_node_hublvol(
+                peer_node, auto_fix=True, primary_node_id=primary_node.get_id()))
+        except Exception as e:
+            logger.warning(
+                "_check_sec_node_hublvol raised on attempt %d for %s: %s",
+                attempt, label, e)
+
+        # Step 2: strict verify when metadata is available.
+        if existing_ok:
+            if not have_metadata or _hublvol_verified_open(peer_node, primary_node):
+                logger.info(
+                    "Hublvol verified on attempt %d for %s", attempt, label)
+                return True
+            logger.info(
+                "Existing check passed but strict verify failed on "
+                "attempt %d for %s; driving forced reconnect",
+                attempt, label)
+
+        # Step 3: force a reconnect (only meaningful with metadata) and
+        # re-verify strictly. This bypasses the ``not passed`` gate in
+        # _check_sec_node_hublvol's auto_fix branch that lets a stale
+        # bdev_nvme_controller_list entry suppress the actual reconnect.
+        if have_metadata:
+            _reconnect_peer_hublvol_once(peer_node, primary_node)
+            if _hublvol_verified_open(peer_node, primary_node):
+                logger.info(
+                    "Hublvol verified after forced reconnect on attempt %d for %s",
+                    attempt, label)
+                return True
+
+        if attempt < _HUBLVOL_MAX_ATTEMPTS:
+            delay = _HUBLVOL_RETRY_DELAYS_SEC[attempt - 1]
+            logger.info(
+                "Hublvol verify+reconnect attempt %d/%d failed for %s; "
+                "sleeping %ds before retry",
+                attempt, _HUBLVOL_MAX_ATTEMPTS, label, delay)
+            time.sleep(delay)
+
+    logger.error(
+        "Hublvol verify+reconnect exhausted %d attempts for %s",
+        _HUBLVOL_MAX_ATTEMPTS, label)
+    return False
+
+
+def _abort_recovering_node(node, reason):
+    """Abort port-allow: kill SPDK on the recovering node, mark OFFLINE,
+    do NOT issue port_allowed. Used when one or more online peers cannot
+    establish a verified-open hublvol within the retry budget.
+
+    The rationale matches storage_node_ops._abort_and_unblock (used in
+    the non-leader-restart abort path): if we cannot prove every online
+    peer has a usable hublvol, letting the primary's port re-open
+    creates the split-brain window we just spent retries trying to
+    avoid. Killing the primary's SPDK lets the secondary (whose own
+    failover path is independent of this task) take over cleanly.
+    """
+    logger.error(
+        "Aborting recovering node %s: %s",
+        node.get_id(), reason)
+    try:
+        storage_events.snode_restart_failed(node)
+    except Exception:
+        # Event emission must never block the abort itself.
+        logger.exception("Failed to emit snode_restart_failed event for %s", node.get_id())
+    try:
+        snode_api = node.client(timeout=5, retry=5)
+        snode_api.spdk_process_kill(node.rpc_port, node.cluster_id)
+    except Exception:
+        logger.exception("Failed to kill SPDK on %s during port-allow abort", node.get_id())
+    try:
+        storage_node_ops.set_node_status(
+            node.get_id(), StorageNode.STATUS_OFFLINE,
+            caused_by="restart_cleanup")
+    except Exception:
+        logger.exception(
+            "Failed to mark %s OFFLINE during port-allow abort", node.get_id())
 
 
 def exec_port_allow_task(task):
@@ -174,6 +376,11 @@ def exec_port_allow_task(task):
         if node.tertiary_node_id:
             sec_ids.append(node.tertiary_node_id)
         if sec_ids:
+            # Primary-side hublvol exposure is the precondition; if the
+            # primary hasn't (re)registered its hublvol subsystem yet there's
+            # nothing useful the port_allow runner can drive from the peer
+            # side. Stay with suspend-and-retry for this gate -- this is a
+            # primary-local recovery step, not a peer reconnect.
             primary_hublvol_check = health_controller._check_node_hublvol(node)
             if not primary_hublvol_check:
                 msg = "Node hublvol check fail, retry later"
@@ -183,17 +390,41 @@ def exec_port_allow_task(task):
                 task.write_to_db(db.kv_store)
                 return
 
+            # Peer hublvol gate: for each ONLINE secondary/tertiary, drive
+            # ``connect_to_hublvol`` (which re-attaches the bdev_nvme
+            # controller as step 1) and verify the result with the strict
+            # _hublvol_verified_open check. Up to _HUBLVOL_MAX_ATTEMPTS
+            # attempts with exponential backoff per peer. On exhaustion
+            # the recovering node is aborted -- we will NOT issue
+            # port_allowed with a half-open peer hublvol (that's exactly
+            # how the 2026-05-21 18:52:56 split-brain happened).
+            failing_peers = []
             for sec_id in sec_ids:
-                sec_node = db.get_storage_node_by_id(sec_id)
-                if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
-                    secondary_hublvol_check = health_controller._check_sec_node_hublvol(sec_node, auto_fix=True, primary_node_id=node.get_id())
-                    if not secondary_hublvol_check:
-                        msg = f"Secondary node {sec_id} hublvol check fail, retry later"
-                        logger.warning(msg)
-                        task.function_result = msg
-                        task.status = JobSchedule.STATUS_SUSPENDED
-                        task.write_to_db(db.kv_store)
-                        return
+                try:
+                    sec_node = db.get_storage_node_by_id(sec_id)
+                except KeyError:
+                    continue
+                if not sec_node or sec_node.status != StorageNode.STATUS_ONLINE:
+                    # Skip peers that aren't currently online -- the spec's
+                    # explicit exception "secondary is not online at that
+                    # time": we cannot gate on a peer that has nothing to
+                    # connect with. The peer will (re)establish its
+                    # hublvol via its own restart path when it comes back.
+                    continue
+                if not _verify_or_reconnect_peer_hublvol(sec_node, node):
+                    failing_peers.append(sec_id)
+
+            if failing_peers:
+                reason = (
+                    f"hublvol not verified-open on {len(failing_peers)} peer(s) "
+                    f"after {_HUBLVOL_MAX_ATTEMPTS} attempts: " +
+                    ", ".join(p[:8] for p in failing_peers))
+                _abort_recovering_node(node, reason)
+                task.function_result = (
+                    f"Aborted recovering node {node.get_id()[:8]}: {reason}")
+                task.status = JobSchedule.STATUS_DONE
+                task.write_to_db(db.kv_store)
+                return
 
     if task.status != JobSchedule.STATUS_RUNNING:
         task.status = JobSchedule.STATUS_RUNNING
