@@ -52,11 +52,11 @@ def process_task(task):
             msg = f"Result: {res}"
             logger.info(msg)
             task.function_result = res
-            if res:
-                task.status = JobSchedule.STATUS_DONE
-            else:
-                task.retry += 1
-                task.status = JobSchedule.STATUS_SUSPENDED
+            # if res:
+            task.status = JobSchedule.STATUS_DONE
+            # else:
+            #     task.retry += 1
+            #     task.status = JobSchedule.STATUS_SUSPENDED
             task.write_to_db(db.kv_store)
             return True
         except Exception as e:
