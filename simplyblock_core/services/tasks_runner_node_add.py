@@ -73,7 +73,7 @@ while True:
         logger.error("No clusters found!")
     else:
         for cl in clusters:
-            tasks = db.get_job_tasks(cl.get_id(), reverse=False)
+            tasks = db.get_job_tasks(cl.get_id(), reverse=True)
             for task in tasks:
                 delay_seconds = constants.TASK_EXEC_INTERVAL_SEC
                 if task.function_name in [JobSchedule.FN_NODE_ADD, JobSchedule.FN_LVOL_ADD, JobSchedule.FN_LVOL_CLONE, JobSchedule.FN_LVOL_DELETE]:
