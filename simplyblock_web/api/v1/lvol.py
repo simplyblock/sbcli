@@ -12,6 +12,7 @@ from simplyblock_core.controllers import lvol_controller, snapshot_controller
 from simplyblock_web import utils
 
 from simplyblock_core import db_controller, utils as core_utils
+from simplyblock_core.models.lvol_model import LVolInDeletionError
 
 logger = logging.getLogger(__name__)
 
@@ -128,10 +129,13 @@ def add_lvol():
     if not pool:
         return utils.get_response(None, f"Pool not found: {pool_id_or_name}", 400)
 
-    for lvol in db.get_lvols():  # pass
-        if lvol.pool_uuid == pool.get_id():
-            if lvol.lvol_name == name:
-                return utils.get_response(lvol.get_id())
+    try:
+        existing = db.get_lvol_by_pool_and_name(pool.get_id(), name)
+        return utils.get_response(existing.get_id())
+    except LVolInDeletionError:
+        return utils.get_response(None, f"Volume {name} is being deleted, retry later", 409)
+    except KeyError:
+        pass
 
     rw_iops = utils.get_int_value_or_default(cl_data, "max_rw_iops", 0)
     rw_mbytes = utils.get_int_value_or_default(cl_data, "max_rw_mbytes", 0)

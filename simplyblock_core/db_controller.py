@@ -10,7 +10,7 @@ from simplyblock_core import constants
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.job_schedule import JobSchedule
-from simplyblock_core.models.lvol_model import LVol
+from simplyblock_core.models.lvol_model import LVol, LVolInDeletionError
 from simplyblock_core.models.mgmt_node import MgmtNode
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
 from simplyblock_core.models.pool import Pool
@@ -195,6 +195,16 @@ class DBController(metaclass=Singleton):
             if lvol.lvol_name == lvol_name:
                 return lvol
         raise KeyError(f'LVol {lvol_name} not found')
+
+    def get_lvol_by_pool_and_name(self, pool_uuid: str, lvol_name: str) -> LVol:
+        for lvol in self.get_all_lvols():
+            if lvol.pool_uuid == pool_uuid and lvol.lvol_name == lvol_name:
+                if lvol.status == LVol.STATUS_DELETED:
+                    continue
+                if lvol.status == LVol.STATUS_IN_DELETION:
+                    raise LVolInDeletionError(f"LVol {lvol_name} is being deleted")
+                return lvol
+        raise KeyError(f"LVol {lvol_name} not found in pool {pool_uuid}")
 
     def get_mgmt_node_by_id(self, id) -> MgmtNode:
         ret = MgmtNode().read_from_db(self.kv_store, id)

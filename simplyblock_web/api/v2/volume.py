@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field, RootModel
 from simplyblock_core.db_controller import DBController
 from simplyblock_core import utils as core_utils
 from simplyblock_core.controllers import lvol_controller, snapshot_controller
-from simplyblock_core.models.lvol_model import LVol
+from simplyblock_core.models.lvol_model import LVol, LVolInDeletionError
 
 from .cluster import Cluster
 from .pool import StoragePool
@@ -66,8 +66,10 @@ def add(
 ) -> Response:
     data = parameters.root
     try:
-        db.get_lvol_by_name(data.name)
+        db.get_lvol_by_pool_and_name(pool.get_id(), data.name)
         raise HTTPException(409, f'Volume {data.name} exists')
+    except LVolInDeletionError:
+        raise HTTPException(409, f'Volume {data.name} is being deleted, retry later')
     except KeyError:
         pass
 

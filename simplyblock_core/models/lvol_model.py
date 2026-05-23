@@ -6,6 +6,10 @@ from simplyblock_core.models.base_model import BaseModel
 from simplyblock_core.models.nvme_device import NVMeDevice
 
 
+class LVolInDeletionError(Exception):
+    pass
+
+
 class LVol(BaseModel):
 
     STATUS_IN_CREATION = 'in_creation'
