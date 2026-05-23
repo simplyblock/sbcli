@@ -785,8 +785,8 @@ class BulkLvolDeleteK8s(_BulkDeleteMixin, K8sNativeFailoverTest):
                             pass
                         try:
                             self.k8s_utils.delete_pvc(pvc_name)
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            self.logger.warning(f"[cleanup] Failed to delete PVC {pvc_name}: {exc}")
         except Exception as exc:
             self.logger.warning(f"[cleanup] K8s cleanup failed: {exc}")
 
