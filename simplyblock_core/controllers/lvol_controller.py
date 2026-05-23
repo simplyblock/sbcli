@@ -139,7 +139,7 @@ def _create_crypto_lvol(rpc_client, lvol, cluster):
 
     with create_kms_connection(cluster) as kms:
         try:
-            original_key1, original_key2 = kms.get_data_encryption_keys(lvol.pool_uuid, name)
+            original_key1, original_key2 = kms.get_data_encryption_keys(lvol)
         except KMSException:
             logger.exception(f"Failed to get keys for lvol: {name} from KMS")
             return False
@@ -649,27 +649,20 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
                 lvol.allowed_hosts,
                 bool(pool.dhchap_key) if pool.dhchap else "N/A")
 
-    lvol.write_to_db(db_controller.kv_store)
-
     if use_crypto:
         with create_kms_connection(cl) as kms:
             try:
                 if crypto_key is None:
-                    kms.create_data_encryption_keys(pool.get_id(), lvol.crypto_bdev)
+                    kms.create_data_encryption_keys(lvol)
                 else:
-                    kms.import_data_encryption_keys(pool.get_id(), lvol.crypto_bdev, crypto_key)
-                # For LocalKMS, sync keys to the in-memory lvol so subsequent
-                # write_to_db calls do not overwrite them with empty strings.
-                if not cl.hashicorp_vault_settings:
-                    lvol.crypto_key1, lvol.crypto_key2 = kms.get_data_encryption_keys(
-                        pool.get_id(), lvol.crypto_bdev
-                    )
+                    kms.import_data_encryption_keys(lvol, crypto_key)
                 logger.info("Created lvol keys")
             except KMSException:
                 msg = "Failed to create lvol keys"
                 logger.exception(msg)
-                lvol.remove(db_controller.kv_store)
                 return False, msg
+
+    lvol.write_to_db(db_controller.kv_store)
 
     if ha_type == "single":
         if host_node.status == StorageNode.STATUS_ONLINE:
@@ -1191,10 +1184,21 @@ def _remove_lvol_subsys_from_node(lvol, rpc_client):
     subsystem = rpc_client.subsystem_list(lvol.nqn)
     if not subsystem:
         return True
-    if len(subsystem[0]["namespaces"]) > 1:
-        return bool(rpc_client.nvmf_subsystem_remove_ns(lvol.nqn, lvol.ns_id))
-    logger.info(f"Removing subsystem {lvol.nqn}")
-    return bool(rpc_client.subsystem_delete(lvol.nqn))
+
+    for ns in subsystem[0]["namespaces"]:
+        if ns["uuid"] == lvol.uuid:
+            logger.info("Removing namespace %s from subsystem %s", ns["uuid"], lvol.nqn)
+            ret = bool(rpc_client.nvmf_subsystem_remove_ns(lvol.nqn, lvol.ns_id))
+            if not ret:
+                logger.error(f"Failed to remove namespace {lvol.ns_id} from subsystem {lvol.nqn}")
+            subsystem = rpc_client.subsystem_list(lvol.nqn)
+            break
+
+    if len(subsystem[0]["namespaces"]) == 0:
+        logger.info(f"Removing subsystem {lvol.nqn}")
+        return bool(rpc_client.subsystem_delete(lvol.nqn))
+
+    return True
 
 
 def delete_lvol(id_or_name, force_delete=False):
@@ -1381,13 +1385,7 @@ def delete_lvol(id_or_name, force_delete=False):
                     f"sync delete lvol {lvol.get_id()} on {nl.get_id()[:8]}")
             elif action == "proceed":
                 try:
-                    sec_rpc = nl.rpc_client()
-                    subsystem = sec_rpc.subsystem_list(lvol.nqn)
-                    if subsystem:
-                        if len(subsystem[0]["namespaces"]) > 1:
-                            sec_rpc.nvmf_subsystem_remove_ns(lvol.nqn, lvol.ns_id)
-                        else:
-                            sec_rpc.subsystem_delete(lvol.nqn)
+                    _remove_lvol_subsys_from_node(lvol, nl.rpc_client())
                 except Exception as e:
                     logger.warning(f"Failed sync delete on {nl.get_id()}: {e}")
                     # Post-leader-op: check if we should kill or queue
@@ -2428,6 +2426,9 @@ def clone_lvol(lvol_id, clone_name, new_size=None, pvc_name=None):
     except KeyError:
         logger.exception("Volume lookup failed for clone request: %s", lvol_id)
         return False, "Volume not found"
+    if lvol.status != LVol.STATUS_ONLINE:
+        logger.error(f"LVol: {lvol_id} is not online")
+        return False, "LVol is not online"
 
     host_node = db_controller.get_storage_node_by_id(lvol.node_id)
     subsys_count = len(set(lv.nqn for lv in db_controller.get_lvols_by_node_id(lvol.node_id)))
