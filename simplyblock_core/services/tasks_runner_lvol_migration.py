@@ -1414,9 +1414,41 @@ def _update_ana_states(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         tgt_trtype, tgt_ip = _get_migration_nic(tgt_node)
         src_trtype, src_ip = _get_migration_nic(src_node)
 
-        tgt_rpc.nvmf_subsystem_listener_set_ana_state(
-            nqn, tgt_ip, tgt_node.get_lvol_subsys_port(tgt_node.lvstore), trtype=tgt_trtype, ana="optimized")
-        logger.info(f"ANA: {nqn} on target {tgt_ip} → optimized")
+        # Set ALL TGT listeners to optimized.
+        # When tgt_is_src_secondary, TGT has two listeners for this NQN:
+        #   (1) TGT primary port (e.g. 4432) — the new home of the lvol
+        #   (2) Mirror port (e.g. 4430, same number as SRC primary) — the port
+        #       the client originally connected to TGT through, because TGT was
+        #       SRC's HA secondary.
+        # Setting only the primary port to optimized leaves the mirror port
+        # non-optimized → client sees "no available path".
+        # Fix: enumerate all listeners in the subsystem on TGT and set each to
+        # optimized.
+        tgt_sub_list = tgt_rpc.subsystem_list(nqn)
+        if tgt_sub_list:
+            tgt_sub = tgt_sub_list[0] if isinstance(tgt_sub_list, list) else tgt_sub_list
+            listeners_set = 0
+            for listener in tgt_sub.get('listen_addresses', []):
+                trtype = listener.get('trtype', 'TCP')
+                traddr = listener.get('traddr', '')
+                port   = listener.get('trsvcid', '')
+                if traddr and port:
+                    tgt_rpc.nvmf_subsystem_listener_set_ana_state(
+                        nqn, traddr, port, trtype=trtype, ana="optimized")
+                    logger.info(f"ANA: {nqn} listener {traddr}:{port} → optimized")
+                    listeners_set += 1
+            if listeners_set == 0:
+                # Subsystem had no listeners — fall back to known primary port
+                tgt_rpc.nvmf_subsystem_listener_set_ana_state(
+                    nqn, tgt_ip, tgt_node.get_lvol_subsys_port(tgt_node.lvstore),
+                    trtype=tgt_trtype, ana="optimized")
+                logger.info(f"ANA: {nqn} on target {tgt_ip} → optimized (fallback, no listeners found)")
+        else:
+            # subsystem_list failed — fall back to known primary port
+            tgt_rpc.nvmf_subsystem_listener_set_ana_state(
+                nqn, tgt_ip, tgt_node.get_lvol_subsys_port(tgt_node.lvstore),
+                trtype=tgt_trtype, ana="optimized")
+            logger.info(f"ANA: {nqn} on target {tgt_ip} → optimized (fallback, subsystem_list failed)")
 
         src_rpc.nvmf_subsystem_listener_set_ana_state(
             nqn, src_ip, src_node.get_lvol_subsys_port(src_node.lvstore), trtype=src_trtype, ana="inaccessible")
