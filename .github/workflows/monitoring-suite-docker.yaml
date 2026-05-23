@@ -371,60 +371,76 @@ jobs:
               for d in \$dirs; do rm -rf \"\$d\" || true; done" || true
           done
 
-      - name: Reboot storage nodes + wait + disk reset
+      - name: Reboot storage nodes, wait online, disk reset + PCI rebind + mklabel
         shell: bash
         run: |
           set -euxo pipefail
+
           run_remote() {
+            local ip="$1"
+            local script="$2"
             sshpass -p "${SSH_PASSWORD}" ssh \
-              -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-              "${SSH_USER}@$1" "bash -s" <<< "$2"
+              -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              "${SSH_USER}@${ip}" "bash -s" <<< "$script"
           }
+
+          # reboot storage nodes
           for ip in $STORAGE_PRIVATE_IPS; do
-            sshpass -p "${SSH_PASSWORD}" ssh -o StrictHostKeyChecking=no \
-              -o UserKnownHostsFile=/dev/null "${SSH_USER}@${ip}" \
+            echo "---- reboot storage: $ip ----"
+            sshpass -p "${SSH_PASSWORD}" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${SSH_USER}@${ip}" \
               "nohup reboot >/dev/null 2>&1 &" || true
           done
+
+          # wait storage online
           for ip in $STORAGE_PRIVATE_IPS; do
             echo "Waiting for $ip..."
             for i in {1..60}; do
-              if sshpass -p "${SSH_PASSWORD}" ssh -o StrictHostKeyChecking=no \
-                -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 \
-                "${SSH_USER}@${ip}" "echo online" >/dev/null 2>&1; then
-                echo "$ip online"; break
+              if sshpass -p "${SSH_PASSWORD}" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 "${SSH_USER}@${ip}" \
+                "echo online" >/dev/null 2>&1; then
+                echo "$ip online"
+                break
               fi
               sleep 10
               [[ "$i" -lt 60 ]] || (echo "ERROR: $ip did not come online" && exit 1)
             done
           done
+
+          # disk reset / PCI rebind / mklabel on storage nodes
           for ip in $STORAGE_PRIVATE_IPS; do
             echo "---- disk reset on $ip ----"
-            run_remote "$ip" "set -euxo pipefail
+            run_remote "$ip" "set -euxo pipefail;
               for dev in /dev/nvme0n1 /dev/nvme1n1 /dev/nvme2n1 /dev/nvme3n1; do
                 if [[ -b \$dev ]]; then
-                  parted \$dev --script rm 1 || true
-                  parted \$dev --script rm 2 || true
-                  parted \$dev --script rm 3 || true
+                  parted \$dev --script rm 1 || true;
+                  parted \$dev --script rm 2 || true;
+                  parted \$dev --script rm 3 || true;
                 fi
-              done
+              done;
+
               for pci in \$(lspci -D | grep 'QEMU NVM Express' | awk '{print \$1}' || true); do
-                echo \$pci > /sys/bus/pci/drivers/nvme/unbind || true
-              done
+                echo \$pci > /sys/bus/pci/drivers/nvme/unbind || true;
+              done;
+
               for i in 2 3 4 5; do
-                echo 0000:00:0\${i}.0 > /sys/bus/pci/drivers/uio_pci_generic/unbind || true
-              done
+                echo 0000:00:0\${i}.0 > /sys/bus/pci/drivers/uio_pci_generic/unbind || true;
+              done;
               for i in 2 3 4 5; do
-                echo 0000:00:0\${i}.0 > /sys/bus/pci/drivers/vfio-pci/unbind || true
-              done
+                echo 0000:00:0\${i}.0 > /sys/bus/pci/drivers/vfio-pci/unbind || true;
+              done;
+
               for i in 2 3 4 5; do
-                echo nvme > /sys/bus/pci/devices/0000:00:0\${i}.0/driver_override || true
-              done
+                echo nvme > /sys/bus/pci/devices/0000:00:0\${i}.0/driver_override || true;
+              done;
               for i in 2 3 4 5; do
-                echo 0000:00:0\${i}.0 > /sys/bus/pci/drivers/nvme/bind || true
-              done
+                echo 0000:00:0\${i}.0 > /sys/bus/pci/drivers/nvme/bind || true;
+              done;
+
               for i in 0 1 2 3; do
-                dev=/dev/nvme\${i}n1
-                if [[ -b \$dev ]]; then parted -fs \$dev mklabel gpt || true; fi
+                dev=/dev/nvme\${i}n1;
+                if [[ -b \$dev ]]; then
+                  parted -fs \$dev mklabel gpt || true;
+                fi
               done"
           done
 
