@@ -167,6 +167,7 @@ class K8sNativeNodeMigrationTest(TestClusterBase):
             f"verify=md5\n"
             f"verify_dump=1\n"
             f"verify_fatal=1\n"
+            f"verify_backlog=128\n"
             f"\n"
             f"[job1]\n"
         )
