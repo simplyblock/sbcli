@@ -2017,8 +2017,8 @@ class K8sSbcliUtils:
         sc_params = ""
         if encryption:
             sc_params = (
-                f"    storageClassParameters:\n"
-                f"      encryption: true\n"
+                "    storageClassParameters:\n"
+                "      encryption: true\n"
             )
 
         yaml_content = (

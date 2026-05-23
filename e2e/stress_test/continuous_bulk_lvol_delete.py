@@ -130,7 +130,6 @@ class _BulkDeleteMixin:
                 },
             })
 
-        total_deleted = sum(r["deleted"] for r in results)
         total_duration = sum(r.get("delete_duration", 0) for r in results)
 
         report = {
@@ -165,7 +164,7 @@ class _BulkDeleteMixin:
 # Docker variant
 # ─────────────────────────────────────────────────────────────────────────────
 
-from stress_test.lvol_ha_stress_fio import TestLvolHACluster
+from stress_test.lvol_ha_stress_fio import TestLvolHACluster  # noqa: E402
 
 
 class BulkLvolDeleteDocker(_BulkDeleteMixin, TestLvolHACluster):
@@ -455,7 +454,7 @@ class BulkLvolDeleteDocker(_BulkDeleteMixin, TestLvolHACluster):
 # K8s variant
 # ─────────────────────────────────────────────────────────────────────────────
 
-from stress_test.continuous_k8s_native_failover import K8sNativeFailoverTest
+from stress_test.continuous_k8s_native_failover import K8sNativeFailoverTest  # noqa: E402
 
 
 class BulkLvolDeleteK8s(_BulkDeleteMixin, K8sNativeFailoverTest):

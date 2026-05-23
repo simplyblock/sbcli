@@ -21,10 +21,9 @@ import random
 import string
 import threading
 import time
-from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from e2e_tests.cluster_test_base import TestClusterBase, generate_random_sequence
+from e2e_tests.cluster_test_base import TestClusterBase
 from utils.common_utils import sleep_n_sec
 
 try:

@@ -228,8 +228,8 @@ class _LargeScaleMixin:
 #  Docker variant — sbcli API + NVMe connect + SSH FIO
 # ─────────────────────────────────────────────────────────────────────────────
 
-from stress_test.lvol_ha_stress_fio import TestLvolHACluster
-from utils.ssh_utils import get_parent_device
+from stress_test.lvol_ha_stress_fio import TestLvolHACluster  # noqa: E402
+from utils.ssh_utils import get_parent_device  # noqa: E402
 
 
 class LargeScaleLvolDocker(_LargeScaleMixin, TestLvolHACluster):
@@ -711,7 +711,7 @@ class LargeScaleLvolDocker(_LargeScaleMixin, TestLvolHACluster):
 #  K8s variant — PVC + FIO K8s Jobs or Client SSH FIO
 # ─────────────────────────────────────────────────────────────────────────────
 
-from stress_test.continuous_k8s_native_failover import K8sNativeFailoverTest
+from stress_test.continuous_k8s_native_failover import K8sNativeFailoverTest  # noqa: E402
 
 
 class LargeScaleLvolK8s(_LargeScaleMixin, K8sNativeFailoverTest):

@@ -17,11 +17,8 @@ cluster geometry (ndcs/npcs) and require at least one client node
 
 import json
 import math
-import os
-import random
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
