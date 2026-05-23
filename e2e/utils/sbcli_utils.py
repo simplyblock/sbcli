@@ -625,6 +625,19 @@ class SbcliUtils:
         self.logger.info(f"Device Details: {device_details}")
         return device_details["results"]
 
+    def remove_device(self, device_id):
+        """Remove a storage device (transitions ONLINE → REMOVED).
+
+        Args:
+            device_id (str): The storage device UUID.
+
+        Returns:
+            dict: API response results.
+        """
+        data = self.get_request(api_url=f"/device/remove/{device_id}")
+        self.logger.info(f"Remove device response: {data}")
+        return data
+
     def get_lvol_details(self, lvol_id):
         """Get lvol details for given lvol id
         """
@@ -770,7 +783,47 @@ class SbcliUtils:
     def list_migration_tasks(self, cluster_id):
         """List all migration tasks for a given cluster."""
         return self.get_request(f"/cluster/list-tasks/{cluster_id}?limit=0")
-    
+
+    def wait_migration_tasks_complete(self, timeout=3600):
+        """Wait until all FN_FAILED_DEV_MIG tasks finish.
+
+        Polls ``list_migration_tasks`` every 10 seconds until no active
+        failure-migration tasks remain or *timeout* seconds elapse.
+
+        Args:
+            timeout (int): Maximum seconds to wait (default 3600).
+
+        Returns:
+            float: Elapsed seconds until migration completed.
+
+        Raises:
+            TimeoutError: If active tasks remain after *timeout*.
+        """
+        import time as _time
+        start = _time.time()
+        active = []
+        while _time.time() - start < timeout:
+            tasks = self.list_migration_tasks(self.cluster_id)
+            active = [
+                t for t in tasks.get("results", [])
+                if t.get("function_name") == "FN_FAILED_DEV_MIG"
+                and t.get("status") not in ("done", "cancelled", "error")
+            ]
+            if not active:
+                elapsed = _time.time() - start
+                self.logger.info(
+                    f"All failure-migration tasks complete in {elapsed:.1f}s"
+                )
+                return elapsed
+            self.logger.info(
+                f"Waiting for {len(active)} migration task(s) to finish …"
+            )
+            sleep_n_sec(10)
+        raise TimeoutError(
+            f"Migration not complete after {timeout}s, "
+            f"{len(active)} task(s) remain"
+        )
+
     def get_io_stats(self, cluster_id, time_duration=None):
         """
         Fetch I/O statistics for the given cluster at the specified time duration.
@@ -868,7 +921,25 @@ class SbcliUtils:
         """
         data = self.get_request(api_url=f"/cluster/capacity/{self.cluster_id}")
         return data["results"]
-    
+
+    def get_node_capacity(self, node_id, history=None):
+        """Get per-node capacity statistics.
+
+        Args:
+            node_id (str): Storage node UUID.
+            history (str, optional): History window, e.g. ``"1d12h"``.
+
+        Returns:
+            dict: Capacity record(s) with keys like *size_total*,
+            *size_used*, *size_util*, etc.
+        """
+        url = f"/storagenode/capacity/{node_id}"
+        if history:
+            url += f"/history/{history}"
+        data = self.get_request(api_url=url)
+        self.logger.info(f"Node capacity for {node_id}: {data}")
+        return data["results"]
+
     def activate_cluster(self, cluster_id):
         """Activate the given cluster
 

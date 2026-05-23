@@ -49,7 +49,7 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
 
         # ── Scale ──────────────────────────────────────────────────────────
         self.NUM_PARENTS = 300
-        self.NAMESPACES_PER_PARENT = 6       # max_namespace_per_subsys
+        self.NAMESPACES_PER_PARENT = 100     # max_namespace_per_subsys
         self.CHILDREN_PER_PARENT = 5         # 300 × 5 = 1500 children
         self.SNAPSHOTS_PER_LVOL = 2          # per parent + 1 random child
         self.NUM_CLONES = 1500               # from 1 picked snapshot

@@ -74,6 +74,18 @@ from stress_test.continuous_parallel_namespace_lvol import (
     TestParallelNamespaceLvolDocker,
     TestParallelNamespaceLvolK8s,
 )
+from stress_test.continuous_bulk_lvol_delete import (
+    BulkLvolDeleteDocker,
+    BulkLvolDeleteK8s,
+)
+from stress_test.large_scale_lvol_stress import (
+    LargeScaleLvolDocker,
+    LargeScaleLvolK8s,
+)
+from stress_test.device_failure_migration import (
+    DeviceFailureMigrationNoLoad,
+    DeviceFailureMigrationUnderLoad,
+)
 from stress_test.continuous_failover_ha_security import (
     RandomSecurityFailoverTest,
     RandomAllSecurityFailoverTest,
@@ -254,6 +266,12 @@ ALL_TESTS = [
     K8sNativeResilientFailoverTest,
     TestParallelNamespaceLvolDocker,
     TestParallelNamespaceLvolK8s,
+    BulkLvolDeleteDocker,
+    BulkLvolDeleteK8s,
+    LargeScaleLvolDocker,
+    LargeScaleLvolK8s,
+    DeviceFailureMigrationNoLoad,
+    DeviceFailureMigrationUnderLoad,
 ]
 
 def get_all_tests(custom=True, ha_test=False):
@@ -364,8 +382,29 @@ def get_stress_tests():
         K8sNativeResilientFailoverTest,
         TestParallelNamespaceLvolDocker,
         TestParallelNamespaceLvolK8s,
+        BulkLvolDeleteDocker,
+        BulkLvolDeleteK8s,
+        LargeScaleLvolDocker,
+        LargeScaleLvolK8s,
+        DeviceFailureMigrationNoLoad,
+        DeviceFailureMigrationUnderLoad,
     ]
     return tests
+
+
+def get_monitoring_tests():
+    """Tests that produce timing/performance data for the monitoring suite."""
+    return [
+        TestParallelNamespaceLvolDocker,
+        TestParallelNamespaceLvolK8s,
+        BulkLvolDeleteDocker,
+        BulkLvolDeleteK8s,
+        LargeScaleLvolDocker,
+        LargeScaleLvolK8s,
+        DeviceFailureMigrationNoLoad,
+        DeviceFailureMigrationUnderLoad,
+        TestLvolOutageLoadTest,
+    ]
 
 def get_backup_tests():
     return [

@@ -1,5 +1,5 @@
 name: K8s Native E2E - Add Node
-run-name: "K8s Native E2E - Add Node | ${{ inputs.cluster_environment || 'local' }} | ${{ inputs.cluster_params || 'ndcs=1,npcs=1,bs=4096,chunk_bs=4096,partitions=0,jm_count=3' }}"
+run-name: "K8s Native E2E - Add Node | ${{ inputs.cluster_environment || 'local' }} | ${{ inputs.cluster_params || 'ndcs=2,npcs=2,bs=4096,chunk_bs=4096,partitions=1,jm_count=4' }}"
 
 on:
   workflow_dispatch:
@@ -40,14 +40,14 @@ on:
       new_worker_nodes:
         description: 'Comma-separated new K8s worker node names to add during test (at least 2, multiples of 2)'
         required: true
-      mgmt_ifc:
-        description: 'Management network interface'
+      ifc_names:
+        description: 'Network interfaces (mgmt_ifc:data_nics)'
         required: false
-        default: 'ens18'
-      data_nics:
-        description: 'Data network interface'
+        default: 'ens18:enp1s0'
+      max_lvol:
+        description: 'Max logical volume count per storage node'
         required: false
-        default: 'enp1s0'
+        default: '30'
       ssh_user:
         description: 'SSH user for client nodes'
         required: false
@@ -62,9 +62,9 @@ on:
         default: true
         type: boolean
       cluster_params:
-        description: 'Cluster config: ndcs=1,npcs=1,bs=4096,chunk_bs=4096,partitions=0,jm_count=3'
+        description: 'Cluster config: ndcs=2,npcs=2,bs=4096,chunk_bs=4096,partitions=1,jm_count=4'
         required: false
-        default: 'ndcs=1,npcs=1,bs=4096,chunk_bs=4096,partitions=0,jm_count=3'
+        default: 'ndcs=2,npcs=2,bs=4096,chunk_bs=4096,partitions=1,jm_count=4'
       cluster_environment:
         description: 'Target cluster environment'
         required: true
@@ -199,7 +199,7 @@ jobs:
 
       - name: Set parameters
         run: |
-          PARAMS="${{ github.event.inputs.cluster_params || 'ndcs=1,npcs=1,bs=4096,chunk_bs=4096,partitions=0,jm_count=3' }}"
+          PARAMS="${{ github.event.inputs.cluster_params || 'ndcs=2,npcs=2,bs=4096,chunk_bs=4096,partitions=1,jm_count=4' }}"
           for pair in $(echo "$PARAMS" | tr ',' ' '); do
             key=$(echo "$pair" | cut -d= -f1)
             val=$(echo "$pair" | cut -d= -f2)
@@ -727,11 +727,13 @@ jobs:
         if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
         run: |
           NAMESPACE=simplyblock
-          MGMT_IFC="${{ github.event.inputs.mgmt_ifc || 'ens18' }}"
+          IFC_NAMES="${{ github.event.inputs.ifc_names || 'ens18:enp1s0' }}"
+          MGMT_IFC="${IFC_NAMES%%:*}"
+          DATA_NICS="${IFC_NAMES#*:}"
+          MAX_LVOL="${{ github.event.inputs.max_lvol || '30' }}"
           SB_REPO="${{ github.event.inputs.simplyblock_repository || 'public.ecr.aws/simply-block/simplyblock' }}"
           SB_TAG="${{ github.event.inputs.simplyblock_image }}"
           SPDK_IMAGE="${{ github.event.inputs.spdk_image }}"
-          DATA_NICS="${{ github.event.inputs.data_nics || 'enp1s0' }}"
           PARTITIONS="${PARTITIONS:-0}"
           JM_COUNT="${JM_COUNT:-3}"
           OPENSHIFT_CLUSTER="${{ (github.event.inputs.cluster_environment == 'aws-openshift' || github.event.inputs.cluster_environment == 'openshift-local') && 'true' || 'false' }}"
@@ -811,7 +813,7 @@ jobs:
             mgmtIfname: ${MGMT_IFC}
             dataIfname:
               - ${DATA_NICS}
-            maxLogicalVolumeCount: 30
+            maxLogicalVolumeCount: ${MAX_LVOL}
             partitions: ${PARTITIONS}
             corePercentage: ${CORE_PERCENTAGE}
             journalManager:
