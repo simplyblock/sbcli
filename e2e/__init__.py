@@ -77,6 +77,8 @@ from stress_test.continuous_parallel_namespace_lvol import (
 from stress_test.continuous_bulk_lvol_delete import (
     BulkLvolDeleteDocker,
     BulkLvolDeleteK8s,
+    BulkLvolHotDeleteDocker,
+    BulkLvolHotDeleteK8s,
 )
 from stress_test.large_scale_lvol_stress import (
     LargeScaleLvolDocker,
@@ -268,6 +270,8 @@ ALL_TESTS = [
     TestParallelNamespaceLvolK8s,
     BulkLvolDeleteDocker,
     BulkLvolDeleteK8s,
+    BulkLvolHotDeleteDocker,
+    BulkLvolHotDeleteK8s,
     LargeScaleLvolDocker,
     LargeScaleLvolK8s,
     DeviceFailureMigrationNoLoad,
@@ -384,6 +388,8 @@ def get_stress_tests():
         TestParallelNamespaceLvolK8s,
         BulkLvolDeleteDocker,
         BulkLvolDeleteK8s,
+        BulkLvolHotDeleteDocker,
+        BulkLvolHotDeleteK8s,
         LargeScaleLvolDocker,
         LargeScaleLvolK8s,
         DeviceFailureMigrationNoLoad,
@@ -399,6 +405,8 @@ def get_monitoring_tests():
         TestParallelNamespaceLvolK8s,
         BulkLvolDeleteDocker,
         BulkLvolDeleteK8s,
+        BulkLvolHotDeleteDocker,
+        BulkLvolHotDeleteK8s,
         LargeScaleLvolDocker,
         LargeScaleLvolK8s,
         DeviceFailureMigrationNoLoad,

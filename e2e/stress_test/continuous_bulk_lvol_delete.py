@@ -54,6 +54,113 @@ class _BulkDeleteMixin:
     DELETE_INTERVAL = 5          # seconds between sequential deletes
     FIO_RUNTIME = 2000           # seconds per FIO job
 
+    CORE_DUMP_DIR = "/etc/simplyblock"
+    CORE_DUMP_PATTERN = "core*.zst"
+
+    # ── Core dump helpers (used by graceful and hot-delete) ───────────
+
+    def _get_storage_node_ips(self):
+        """Get management IPs of all storage nodes."""
+        nodes = self.sbcli_utils.get_storage_nodes()
+        ips = []
+        for n in nodes.get("results", []):
+            ip = n.get("mgmt_ip") or n.get("ip")
+            if ip:
+                ips.append(ip)
+        return ips
+
+    def _snapshot_core_dumps(self, node_ips):
+        """Return {ip: set(core_dump_paths)} for all storage nodes."""
+        snapshots = {}
+        for ip in node_ips:
+            try:
+                cmd = (
+                    f"find {self.CORE_DUMP_DIR} -maxdepth 1 "
+                    f"-name '{self.CORE_DUMP_PATTERN}' "
+                    f"-type f 2>/dev/null || true"
+                )
+                output, _ = self.ssh_obj.exec_command(ip, cmd)
+                files = set()
+                if output and output.strip():
+                    files = {
+                        f.strip() for f in output.strip().split("\n")
+                        if f.strip()
+                    }
+                snapshots[ip] = files
+            except Exception as exc:
+                self.logger.warning(
+                    f"Could not snapshot core dumps on {ip}: {exc}"
+                )
+                snapshots[ip] = set()
+        return snapshots
+
+    def _check_new_core_dumps(self, node_ips, before_snapshots,
+                              iteration, resource_name):
+        """Check for new core dumps after a deletion.
+
+        Returns True if new core dumps were found.
+        Updates *before_snapshots* in-place so dumps are not re-reported.
+        """
+        found_new = False
+        for ip in node_ips:
+            try:
+                cmd = (
+                    f"find {self.CORE_DUMP_DIR} -maxdepth 1 "
+                    f"-name '{self.CORE_DUMP_PATTERN}' "
+                    f"-type f 2>/dev/null || true"
+                )
+                output, _ = self.ssh_obj.exec_command(ip, cmd)
+                current = set()
+                if output and output.strip():
+                    current = {
+                        f.strip() for f in output.strip().split("\n")
+                        if f.strip()
+                    }
+                new_dumps = current - before_snapshots.get(ip, set())
+                if new_dumps:
+                    found_new = True
+                    self.logger.error(
+                        f"[coredump {iteration}] NEW CORE DUMPS on {ip} "
+                        f"after deleting {resource_name}: {new_dumps}"
+                    )
+                    # Also grab dmesg tail for context
+                    try:
+                        dmesg_out, _ = self.ssh_obj.exec_command(
+                            ip,
+                            "dmesg | grep -i 'segfault\\|core dump\\|panic' "
+                            "| tail -20 || true",
+                        )
+                        if dmesg_out and dmesg_out.strip():
+                            self.logger.error(
+                                f"[coredump {iteration}] dmesg on {ip}: "
+                                f"{dmesg_out.strip()}"
+                            )
+                    except Exception:
+                        pass
+                    before_snapshots[ip] = current
+            except Exception as exc:
+                self.logger.warning(
+                    f"Could not check core dumps on {ip}: {exc}"
+                )
+        if not found_new:
+            self.logger.info(
+                f"[coredump {iteration}] No new core dumps after "
+                f"deleting {resource_name}"
+            )
+        return found_new
+
+    def _wait_lvol_deleted(self, lvol_name, timeout=300):
+        """Poll until lvol is no longer listed. Returns True if deleted."""
+        for _ in range(timeout // 5):
+            remaining = self.sbcli_utils.list_lvols()
+            if lvol_name not in remaining:
+                return True
+            sleep_n_sec(5)
+        self.logger.warning(
+            f"Lvol {lvol_name} still present after {timeout}s"
+        )
+        return False
+
     def _run_bulk_iterations(self):
         results = []
         for iteration in range(1, self.NUM_ITERATIONS + 1):
@@ -84,6 +191,16 @@ class _BulkDeleteMixin:
         self._write_monitoring_json(results)
 
         total_failed = sum(r["failed"] + r["stale"] for r in results)
+        total_core_dumps = sum(
+            r.get("core_dumps_detected", 0) for r in results
+        )
+
+        if total_core_dumps > 0:
+            raise RuntimeError(
+                f"Bulk delete test detected {total_core_dumps} core dumps "
+                f"on storage nodes across {self.NUM_ITERATIONS} iterations"
+            )
+
         if total_failed > 0:
             raise RuntimeError(
                 f"Bulk delete test had {total_failed} total failures across "
@@ -117,7 +234,10 @@ class _BulkDeleteMixin:
         from pathlib import Path
 
         phases = []
+        total_core_dumps = 0
         for r in results:
+            cd = r.get("core_dumps_detected", 0)
+            total_core_dumps += cd
             phases.append({
                 "name": f"iteration_{r['iteration']}",
                 "duration_sec": round(r.get("delete_duration", 0), 2),
@@ -127,6 +247,7 @@ class _BulkDeleteMixin:
                     "deleted": r["deleted"],
                     "failed": r["failed"],
                     "stale": r["stale"],
+                    "core_dumps_detected": cd,
                 },
             })
 
@@ -137,10 +258,10 @@ class _BulkDeleteMixin:
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "status": "passed" if all(
                 r["failed"] + r["stale"] == 0 for r in results
-            ) else "failed",
+            ) and total_core_dumps == 0 else "failed",
             "geometry": {"ndcs": self.ndcs, "npcs": self.npcs},
             "config": {
-                "batch_size": self.BATCH_SIZE,
+                "batch_size": self.NUM_LVOLS,
                 "num_iterations": self.NUM_ITERATIONS,
                 "lvol_size": self.LVOL_SIZE,
             },
@@ -149,6 +270,7 @@ class _BulkDeleteMixin:
                 "total_duration_sec": round(total_duration, 2),
                 "key_metric": round(total_duration, 2),
                 "key_metric_label": "total_delete_duration_sec",
+                "total_core_dumps": total_core_dumps,
             },
         }
 
@@ -342,6 +464,11 @@ class BulkLvolDeleteDocker(_BulkDeleteMixin, TestLvolHACluster):
     def _bulk_delete_sequential(self, iteration, names):
         deleted = 0
         failed = 0
+        core_dump_count = 0
+
+        # Snapshot existing core dumps before starting deletions
+        storage_ips = self._get_storage_node_ips()
+        core_snapshots = self._snapshot_core_dumps(storage_ips)
 
         for idx, lvol_name in enumerate(names):
             self.logger.info(
@@ -393,13 +520,22 @@ class BulkLvolDeleteDocker(_BulkDeleteMixin, TestLvolHACluster):
                 self.logger.info(
                     f"[delete {iteration}] {lvol_name} deleted successfully"
                 )
+                # Wait for lvol to be actually deleted
+                self._wait_lvol_deleted(lvol_name, timeout=300)
             else:
                 failed += 1
                 self.logger.error(
                     f"[delete {iteration}] {lvol_name} FAILED to delete"
                 )
 
-            # 4. Clean up tracking
+            # 4. Check core dumps 20s after delete
+            sleep_n_sec(20)
+            if self._check_new_core_dumps(
+                storage_ips, core_snapshots, iteration, lvol_name
+            ):
+                core_dump_count += 1
+
+            # 5. Clean up tracking
             self.lvol_mount_details.pop(lvol_name, None)
             for _, lvols in self.node_vs_lvol.items():
                 if lvol_name in lvols:
@@ -432,6 +568,7 @@ class BulkLvolDeleteDocker(_BulkDeleteMixin, TestLvolHACluster):
             "deleted": deleted,
             "failed": failed,
             "stale": len(stale),
+            "core_dumps_detected": core_dump_count,
         }
 
     # ── Cleanup ──────────────────────────────────────────────────────────
@@ -664,6 +801,11 @@ class BulkLvolDeleteK8s(_BulkDeleteMixin, K8sNativeFailoverTest):
     def _bulk_delete_sequential(self, iteration, names):
         deleted = 0
         failed = 0
+        core_dump_count = 0
+
+        # Snapshot existing core dumps before starting deletions
+        storage_ips = self._get_storage_node_ips()
+        core_snapshots = self._snapshot_core_dumps(storage_ips)
 
         for idx, pvc_name in enumerate(names):
             self.logger.info(
@@ -722,13 +864,28 @@ class BulkLvolDeleteK8s(_BulkDeleteMixin, K8sNativeFailoverTest):
                 self.logger.info(
                     f"[delete {iteration}] {pvc_name} deleted successfully"
                 )
+                # Wait for PVC to be actually gone
+                for _ in range(60):
+                    out, _ = self.k8s_utils._exec_kubectl(
+                        f"get pvc {pvc_name} -o name 2>/dev/null || true"
+                    )
+                    if not out or not out.strip() or "NotFound" in out:
+                        break
+                    sleep_n_sec(5)
             except Exception as exc:
                 failed += 1
                 self.logger.error(
                     f"[delete {iteration}] {pvc_name} FAILED to delete: {exc}"
                 )
 
-            # 3. Clean tracking
+            # 3. Check core dumps 20s after delete
+            sleep_n_sec(20)
+            if self._check_new_core_dumps(
+                storage_ips, core_snapshots, iteration, pvc_name
+            ):
+                core_dump_count += 1
+
+            # 4. Clean tracking
             node_id = pvc_info.get("node_id")
             if node_id and node_id in self.node_vs_pvc:
                 if pvc_name in self.node_vs_pvc[node_id]:
@@ -741,7 +898,7 @@ class BulkLvolDeleteK8s(_BulkDeleteMixin, K8sNativeFailoverTest):
         prefix = f"bulk-{self._run_id}-i{iteration}-"
         stale_count = 0
         try:
-            output = self.k8s_utils._exec_kubectl("get pvc -o name")
+            output, _ = self.k8s_utils._exec_kubectl("get pvc -o name")
             if output:
                 all_pvcs = output.strip().split("\n")
                 stale = [p for p in all_pvcs if prefix in p]
@@ -762,6 +919,7 @@ class BulkLvolDeleteK8s(_BulkDeleteMixin, K8sNativeFailoverTest):
             "deleted": deleted,
             "failed": failed,
             "stale": stale_count,
+            "core_dumps_detected": core_dump_count,
         }
 
     # ── Cleanup ──────────────────────────────────────────────────────────
@@ -800,3 +958,383 @@ class BulkLvolDeleteK8s(_BulkDeleteMixin, K8sNativeFailoverTest):
             self.sbcli_utils.delete_all_storage_pools()
         except Exception as exc:
             self.logger.warning(f"[cleanup] sbcli cleanup failed: {exc}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Hot-delete variants: delete lvol WHILE FIO is running, then cleanup
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _BulkHotDeleteMixin:
+    """Hot-delete variant: delete lvol/PVC → disconnect NVMe → stop FIO → unmount.
+
+    Core dump methods and _write_monitoring_json are inherited from _BulkDeleteMixin.
+    This mixin only adds NQN extraction (needed to disconnect after lvol is gone).
+    """
+
+    @staticmethod
+    def _extract_nqn_from_connect_str(connect_str):
+        """Extract NQN from an nvme connect command string."""
+        for part in connect_str.split():
+            if part.startswith("--nqn="):
+                return part.split("=", 1)[1]
+        # Handle "-n <nqn>" or "--nqn <nqn>" form
+        parts = connect_str.split()
+        for i, part in enumerate(parts):
+            if part in ("-n", "--nqn") and i + 1 < len(parts):
+                return parts[i + 1]
+        return None
+
+
+class BulkLvolHotDeleteDocker(_BulkHotDeleteMixin, BulkLvolDeleteDocker):
+    """
+    Hot-delete Docker: delete lvol WHILE FIO is running.
+
+    Order per lvol: delete → disconnect NVMe → stop FIO → unmount.
+    Checks for core dumps on all storage nodes after each deletion.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.test_name = "bulk_lvol_hot_delete_docker"
+
+    def _bulk_delete_sequential(self, iteration, names):
+        deleted = 0
+        failed = 0
+        core_dump_count = 0
+
+        # Snapshot existing core dumps before starting deletions
+        storage_ips = self._get_storage_node_ips()
+        core_snapshots = self._snapshot_core_dumps(storage_ips)
+
+        for idx, lvol_name in enumerate(names):
+            self.logger.info(
+                f"[hot-delete {iteration}] Deleting {lvol_name} "
+                f"({idx+1}/{len(names)}) — FIO still running"
+            )
+            details = self.lvol_mount_details.get(lvol_name, {})
+            client = details.get(
+                "Client",
+                self.fio_node[0] if self.fio_node else None,
+            )
+
+            # 1. DELETE LVOL (while FIO is still running!)
+            result = self.sbcli_utils.delete_lvol(
+                lvol_name, max_attempt=120, skip_error=True
+            )
+            if result:
+                deleted += 1
+                self.logger.info(
+                    f"[hot-delete {iteration}] {lvol_name} deleted"
+                )
+                # Wait for lvol to be actually deleted
+                self._wait_lvol_deleted(lvol_name, timeout=300)
+            else:
+                failed += 1
+                self.logger.error(
+                    f"[hot-delete {iteration}] {lvol_name} FAILED to delete"
+                )
+
+            # 2. DISCONNECT NVMe (using NQN cached from connect strings)
+            if client and details.get("Command"):
+                nqns_disconnected = set()
+                for connect_str in details["Command"]:
+                    nqn = self._extract_nqn_from_connect_str(connect_str)
+                    if nqn and nqn not in nqns_disconnected:
+                        try:
+                            self.ssh_obj.disconnect_nvme(
+                                node=client, nqn_grep=nqn
+                            )
+                            nqns_disconnected.add(nqn)
+                        except Exception as exc:
+                            self.logger.warning(
+                                f"[hot-delete {iteration}] NVMe disconnect "
+                                f"failed for {lvol_name}: {exc}"
+                            )
+
+            sleep_n_sec(3)
+
+            # 3. STOP FIO
+            if client:
+                fio_pids = self.ssh_obj.find_process_name(
+                    client, f"{lvol_name}_fio", return_pid=True
+                )
+                for pid in fio_pids:
+                    self.ssh_obj.kill_processes(client, pid=pid)
+                for attempt in range(30):
+                    fio_pids = self.ssh_obj.find_process_name(
+                        client, f"{lvol_name}_fio", return_pid=True
+                    )
+                    if len(fio_pids) <= 2:
+                        break
+                    for pid in fio_pids:
+                        self.ssh_obj.kill_processes(client, pid=pid)
+                    sleep_n_sec(10)
+
+            # 4. UNMOUNT
+            if client and details.get("Mount"):
+                try:
+                    self.ssh_obj.unmount_path(client, details["Mount"])
+                    self.ssh_obj.remove_dir(
+                        client, dir_path=details["Mount"]
+                    )
+                except Exception as exc:
+                    self.logger.warning(
+                        f"[hot-delete {iteration}] Unmount failed for "
+                        f"{lvol_name}: {exc}"
+                    )
+
+            # 5. CHECK CORE DUMPS on storage nodes (after unmount)
+            if self._check_new_core_dumps(
+                storage_ips, core_snapshots, iteration, lvol_name
+            ):
+                core_dump_count += 1
+
+            # Clean up tracking
+            self.lvol_mount_details.pop(lvol_name, None)
+            for _, lvols in self.node_vs_lvol.items():
+                if lvol_name in lvols:
+                    lvols.remove(lvol_name)
+                    break
+
+            if client:
+                self.ssh_obj.delete_files(
+                    client, [f"{self.log_path}/local-{lvol_name}_fio*"]
+                )
+                self.ssh_obj.delete_files(
+                    client, [f"{self.log_path}/{lvol_name}_fio_iolog*"]
+                )
+
+            sleep_n_sec(self.DELETE_INTERVAL)
+
+        # Verify no stale lvols remain
+        remaining = self.sbcli_utils.list_lvols()
+        prefix = f"bulk-{self._run_id}-i{iteration}-"
+        stale = [n for n in remaining if n.startswith(prefix)]
+        if stale:
+            self.logger.error(
+                f"[verify {iteration}] {len(stale)} lvols still present: "
+                f"{stale}"
+            )
+
+        return {
+            "iteration": iteration,
+            "created": len(names),
+            "deleted": deleted,
+            "failed": failed,
+            "stale": len(stale),
+            "core_dumps_detected": core_dump_count,
+        }
+
+
+class BulkLvolHotDeleteK8s(_BulkHotDeleteMixin, BulkLvolDeleteK8s):
+    """
+    Hot-delete K8s: delete lvol WHILE FIO is running.
+
+    For client-SSH FIO: delete lvol via sbcli → disconnect NVMe → stop FIO → unmount → delete PVC.
+    For K8s-Job FIO: delete lvol via sbcli → delete FIO Job → delete PVC.
+    Checks for core dumps on all storage nodes after each deletion.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.test_name = "bulk_lvol_hot_delete_k8s"
+
+    def _bulk_create(self, iteration):
+        """Override to cache NQN and lvol_id for all modes (needed for hot-delete)."""
+        names = super()._bulk_create(iteration)
+
+        # For K8s Job mode, resolve and cache lvol_id + NQN per PVC
+        if not self.use_client_fio:
+            for pvc_name in names:
+                pvc_info = self.pvc_details.get(pvc_name, {})
+                if pvc_info.get("lvol_id"):
+                    continue  # already set (client mode)
+                try:
+                    lvol_id = self.k8s_utils.get_pvc_volume_handle(pvc_name)
+                    if lvol_id:
+                        pvc_info["lvol_id"] = lvol_id
+                        details = self.sbcli_utils.get_lvol_details(lvol_id)
+                        if details:
+                            pvc_info["nqn"] = details[0].get("nqn", "")
+                            if not pvc_info.get("lvol_name"):
+                                pvc_info["lvol_name"] = details[0].get(
+                                    "lvol_name", ""
+                                )
+                except Exception as exc:
+                    self.logger.warning(
+                        f"[create {iteration}] Could not cache lvol info "
+                        f"for PVC {pvc_name}: {exc}"
+                    )
+        else:
+            # Client mode: cache NQN from lvol details
+            for pvc_name in names:
+                pvc_info = self.pvc_details.get(pvc_name, {})
+                lvol_id = pvc_info.get("lvol_id")
+                if lvol_id and not pvc_info.get("nqn"):
+                    try:
+                        details = self.sbcli_utils.get_lvol_details(lvol_id)
+                        if details:
+                            pvc_info["nqn"] = details[0].get("nqn", "")
+                    except Exception:
+                        pass
+
+        return names
+
+    def _bulk_delete_sequential(self, iteration, names):
+        deleted = 0
+        failed = 0
+        core_dump_count = 0
+
+        # Snapshot existing core dumps before starting deletions
+        storage_ips = self._get_storage_node_ips()
+        core_snapshots = self._snapshot_core_dumps(storage_ips)
+
+        for idx, pvc_name in enumerate(names):
+            self.logger.info(
+                f"[hot-delete {iteration}] Deleting PVC {pvc_name} "
+                f"({idx+1}/{len(names)}) — FIO still running"
+            )
+            pvc_info = self.pvc_details.get(pvc_name, {})
+            lvol_id = pvc_info.get("lvol_id", "")
+            lvol_name = pvc_info.get("lvol_name", "")
+            cached_nqn = pvc_info.get("nqn", "")
+
+            # 1. DELETE LVOL via sbcli (bypasses K8s PV protection,
+            #    causes NVMe device to disappear while FIO is running)
+            delete_ok = False
+            if lvol_id:
+                try:
+                    self.sbcli_utils.delete_lvol(
+                        lvol_name or lvol_id,
+                        max_attempt=120,
+                        skip_error=True,
+                    )
+                    delete_ok = True
+                    self.logger.info(
+                        f"[hot-delete {iteration}] Lvol {lvol_id} deleted "
+                        f"(PVC {pvc_name})"
+                    )
+                    # Wait for lvol to be actually deleted
+                    if lvol_name:
+                        self._wait_lvol_deleted(lvol_name, timeout=300)
+                except Exception as exc:
+                    self.logger.error(
+                        f"[hot-delete {iteration}] Lvol delete failed for "
+                        f"{pvc_name}: {exc}"
+                    )
+
+            # 2. DISCONNECT NVMe + STOP FIO
+            if self.use_client_fio:
+                client = pvc_info.get("client")
+                if client:
+                    # 2a. DISCONNECT NVMe first (using cached NQN)
+                    if cached_nqn:
+                        try:
+                            self.ssh_obj.disconnect_nvme(
+                                node=client, nqn_grep=cached_nqn
+                            )
+                        except Exception as exc:
+                            self.logger.warning(
+                                f"[hot-delete {iteration}] NVMe disconnect "
+                                f"failed for {pvc_name}: {exc}"
+                            )
+
+                    sleep_n_sec(3)
+
+                    # 2b. STOP FIO
+                    self._kill_fio_on_client(pvc_name, client)
+                    sleep_n_sec(5)
+
+                    # 3. UNMOUNT
+                    if pvc_info.get("mount_path"):
+                        try:
+                            self.ssh_obj.unmount_path(
+                                client, pvc_info["mount_path"]
+                            )
+                            self.ssh_obj.remove_dir(
+                                client, dir_path=pvc_info["mount_path"]
+                            )
+                        except Exception as exc:
+                            self.logger.warning(
+                                f"[hot-delete {iteration}] Unmount failed "
+                                f"for {pvc_name}: {exc}"
+                            )
+
+                self.lvol_mount_details.pop(lvol_name, None)
+            else:
+                # K8s Job mode: delete the FIO Job + ConfigMap
+                try:
+                    if pvc_info.get("job_name"):
+                        self.k8s_utils.delete_job(pvc_info["job_name"])
+                    if pvc_info.get("configmap_name"):
+                        self.k8s_utils.delete_configmap(
+                            pvc_info["configmap_name"]
+                        )
+                except Exception as exc:
+                    self.logger.warning(
+                        f"[hot-delete {iteration}] Job cleanup failed for "
+                        f"{pvc_name}: {exc}"
+                    )
+
+            # 5. DELETE PVC (orphaned — lvol already gone)
+            try:
+                self.k8s_utils.delete_pvc(pvc_name)
+                deleted += 1
+                self.logger.info(
+                    f"[hot-delete {iteration}] PVC {pvc_name} deleted"
+                )
+            except Exception as exc:
+                if delete_ok:
+                    deleted += 1
+                    self.logger.warning(
+                        f"[hot-delete {iteration}] PVC {pvc_name} delete "
+                        f"failed (lvol already removed): {exc}"
+                    )
+                else:
+                    failed += 1
+                    self.logger.error(
+                        f"[hot-delete {iteration}] {pvc_name} FAILED: {exc}"
+                    )
+
+            # 6. CHECK CORE DUMPS on storage nodes (after all cleanup)
+            if self._check_new_core_dumps(
+                storage_ips, core_snapshots, iteration, pvc_name
+            ):
+                core_dump_count += 1
+
+            # Clean tracking
+            node_id = pvc_info.get("node_id")
+            if node_id and node_id in self.node_vs_pvc:
+                if pvc_name in self.node_vs_pvc[node_id]:
+                    self.node_vs_pvc[node_id].remove(pvc_name)
+            self.pvc_details.pop(pvc_name, None)
+
+            sleep_n_sec(self.DELETE_INTERVAL)
+
+        # Verify no stale PVCs remain
+        prefix = f"bulk-{self._run_id}-i{iteration}-"
+        stale_count = 0
+        try:
+            output, _ = self.k8s_utils._exec_kubectl("get pvc -o name")
+            if output:
+                all_pvcs = output.strip().split("\n")
+                stale = [p for p in all_pvcs if prefix in p]
+                stale_count = len(stale)
+                if stale:
+                    self.logger.error(
+                        f"[verify {iteration}] {stale_count} PVCs still "
+                        f"present: {stale}"
+                    )
+        except Exception as exc:
+            self.logger.warning(
+                f"[verify {iteration}] Could not verify stale PVCs: {exc}"
+            )
+
+        return {
+            "iteration": iteration,
+            "created": len(names),
+            "deleted": deleted,
+            "failed": failed,
+            "stale": stale_count,
+            "core_dumps_detected": core_dump_count,
+        }
