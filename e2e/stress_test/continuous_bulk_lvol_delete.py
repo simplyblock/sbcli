@@ -48,7 +48,8 @@ class _BulkDeleteMixin:
     NUM_LVOLS = 50
     LVOL_SIZE = "100G"
     PVC_SIZE = "100Gi"
-    FIO_SIZE = "1G"
+    FIO_SIZE = "14G"             # per job; 5 jobs × 14G = 70G ≈ 70% of 100G lvol
+    FIO_NUMJOBS = 5
     WAIT_AFTER_CREATE = 600      # 10 minutes
     NUM_ITERATIONS = 5
     DELETE_INTERVAL = 5          # seconds between sequential deletes
@@ -264,6 +265,8 @@ class _BulkDeleteMixin:
                 "batch_size": self.NUM_LVOLS,
                 "num_iterations": self.NUM_ITERATIONS,
                 "lvol_size": self.LVOL_SIZE,
+                "fio_size": self.FIO_SIZE,
+                "fio_numjobs": self.FIO_NUMJOBS,
             },
             "phases": phases,
             "summary": {
@@ -417,7 +420,7 @@ class BulkLvolDeleteDocker(_BulkDeleteMixin, TestLvolHACluster):
                     "bs": f"{2 ** random.randint(2, 7)}K",
                     "nrfiles": 16,
                     "iodepth": 1,
-                    "numjobs": 5,
+                    "numjobs": self.FIO_NUMJOBS,
                     "time_based": True,
                     "runtime": self.FIO_RUNTIME,
                     "log_avg_msec": 1000,
@@ -611,6 +614,7 @@ class BulkLvolDeleteK8s(_BulkDeleteMixin, K8sNativeFailoverTest):
         self.test_name = "bulk_lvol_delete_k8s"
         self.pvc_size = self.PVC_SIZE
         self.fio_size = self.FIO_SIZE
+        self.fio_num_jobs = self.FIO_NUMJOBS
         self.FIO_RUNTIME = _BulkDeleteMixin.FIO_RUNTIME
         self._run_id = _rand_seq(8)
 

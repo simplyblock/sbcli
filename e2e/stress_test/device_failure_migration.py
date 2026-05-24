@@ -38,6 +38,7 @@ class _DeviceFailureMigrationBase:
     # ── Configuration ────────────────────────────────────────────────────────
     FILL_PERCENT = 65          # target device utilisation before failure
     LVOL_SIZE = "50G"          # per-lvol size (large enough to fill device)
+    FIO_FILL_SIZE = "45G"      # < LVOL_SIZE to fit within filesystem overhead
     FIO_FILL_BS = "512K"       # sequential write block size for fill
     FIO_LOAD_BS = "4K"         # random IO block size for load
     FIO_LOAD_IODEPTH = 4
@@ -214,7 +215,7 @@ class _DeviceFailureMigrationBase:
                     "name": f"fill_{name}",
                     "rw": "write",
                     "bs": self.FIO_FILL_BS,
-                    "size": self.LVOL_SIZE,
+                    "size": self.FIO_FILL_SIZE,
                     "runtime": 0,
                     "time_based": False,
                     "iodepth": 1,

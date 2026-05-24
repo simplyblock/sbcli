@@ -54,7 +54,7 @@ class _LargeScaleMixin:
     NAMESPACES_PER_SUBSYSTEM = 32       # 100 × 32 = 3200 total lvols
     LVOL_SIZE = "1G"                    # Docker API
     PVC_SIZE = "1Gi"                    # K8s PVC
-    FIO_SIZE = "1G"
+    FIO_SIZE = "800M"                   # < 1G to fit within filesystem overhead
 
     # ── FIO — intentionally lightweight to avoid overload ────────────────────
     FIO_IODEPTH = 1
