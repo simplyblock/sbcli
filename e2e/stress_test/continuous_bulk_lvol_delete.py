@@ -190,6 +190,7 @@ class _BulkDeleteMixin:
         self._bulk_cleanup()
         self._print_bulk_summary(results)
         self._write_monitoring_json(results)
+        self._generate_bulk_charts(results)
 
         total_failed = sum(r["failed"] + r["stale"] for r in results)
         total_core_dumps = sum(
@@ -239,6 +240,12 @@ class _BulkDeleteMixin:
         for r in results:
             cd = r.get("core_dumps_detected", 0)
             total_core_dumps += cd
+            per_lvol = r.get("per_lvol_times", [])
+            avg_delete = 0
+            if per_lvol:
+                avg_delete = round(
+                    sum(t["delete_sec"] for t in per_lvol) / len(per_lvol), 3
+                )
             phases.append({
                 "name": f"iteration_{r['iteration']}",
                 "duration_sec": round(r.get("delete_duration", 0), 2),
@@ -249,6 +256,8 @@ class _BulkDeleteMixin:
                     "failed": r["failed"],
                     "stale": r["stale"],
                     "core_dumps_detected": cd,
+                    "avg_delete_sec": avg_delete,
+                    "per_lvol_times": per_lvol,
                 },
             })
 
@@ -283,6 +292,137 @@ class _BulkDeleteMixin:
         with open(out_path, "w") as f:
             _json.dump(report, f, indent=2)
         self.logger.info(f"Monitoring JSON written to {out_path}")
+
+    def _generate_bulk_charts(self, results):
+        """Generate per-lvol and per-iteration timing charts."""
+        from pathlib import Path
+
+        out_dir = Path("logs")
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+        except ImportError:
+            self.logger.warning("matplotlib not available — skipping charts")
+            return
+
+        class_name = self.__class__.__name__
+
+        # ── Chart 1: Per-lvol delete time (line chart, one line per iteration) ──
+        try:
+            fig, ax = plt.subplots(figsize=(14, 6))
+            has_data = False
+            for r in results:
+                per_lvol = r.get("per_lvol_times", [])
+                if not per_lvol:
+                    continue
+                has_data = True
+                xs = [t["index"] for t in per_lvol]
+                ys = [t["delete_sec"] for t in per_lvol]
+                ax.plot(xs, ys, marker=".", markersize=3, linewidth=1,
+                        label=f"Iter {r['iteration']}", alpha=0.8)
+
+            if has_data:
+                ax.set_xlabel("Lvol Index (within batch)")
+                ax.set_ylabel("Delete Time (seconds)")
+                ax.set_title(f"{class_name} — Per-Lvol Delete Time")
+                ax.legend(fontsize=8)
+                ax.grid(True, alpha=0.3)
+                plt.tight_layout()
+                path = out_dir / "per_lvol_delete_time.png"
+                fig.savefig(str(path), dpi=150)
+                self.logger.info(f"Chart saved: {path}")
+            plt.close(fig)
+        except Exception as exc:
+            self.logger.warning(f"Per-lvol chart failed: {exc}")
+
+        # ── Chart 2: Per-iteration summary (bar chart) ──
+        try:
+            iters = [r["iteration"] for r in results]
+            avgs = []
+            maxs = []
+            mins = []
+            totals = []
+            for r in results:
+                per_lvol = r.get("per_lvol_times", [])
+                times = [t["delete_sec"] for t in per_lvol] if per_lvol else [0]
+                avgs.append(sum(times) / len(times) if times else 0)
+                maxs.append(max(times) if times else 0)
+                mins.append(min(times) if times else 0)
+                totals.append(r.get("delete_duration", 0))
+
+            fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+            # Left: avg/min/max per iteration
+            x = range(len(iters))
+            width = 0.25
+            axes[0].bar([i - width for i in x], mins, width,
+                        label="Min", color="#2ecc71", alpha=0.8)
+            axes[0].bar(list(x), avgs, width,
+                        label="Avg", color="#3498db", alpha=0.8)
+            axes[0].bar([i + width for i in x], maxs, width,
+                        label="Max", color="#e74c3c", alpha=0.8)
+            for i, v in enumerate(avgs):
+                axes[0].text(i, v + max(maxs) * 0.02, f"{v:.1f}s",
+                             ha="center", fontsize=7)
+            axes[0].set_xticks(list(x))
+            axes[0].set_xticklabels([f"Iter {i}" for i in iters])
+            axes[0].set_ylabel("Delete Time per Lvol (seconds)")
+            axes[0].set_title("Per-Iteration: Min / Avg / Max Delete Time")
+            axes[0].legend(fontsize=8)
+            axes[0].grid(True, axis="y", alpha=0.3)
+
+            # Right: total batch delete duration
+            bars = axes[1].bar(list(x), totals, color="#9b59b6", alpha=0.8)
+            for i, v in enumerate(totals):
+                axes[1].text(i, v + max(totals) * 0.02, f"{v:.0f}s",
+                             ha="center", fontsize=8)
+            axes[1].set_xticks(list(x))
+            axes[1].set_xticklabels([f"Iter {i}" for i in iters])
+            axes[1].set_ylabel("Total Batch Delete Duration (seconds)")
+            axes[1].set_title("Per-Iteration: Total Delete Duration")
+            axes[1].grid(True, axis="y", alpha=0.3)
+
+            plt.suptitle(f"{class_name} — Iteration Summary", fontsize=12)
+            plt.tight_layout()
+            path = out_dir / "iteration_summary.png"
+            fig.savefig(str(path), dpi=150)
+            self.logger.info(f"Chart saved: {path}")
+            plt.close(fig)
+        except Exception as exc:
+            self.logger.warning(f"Iteration summary chart failed: {exc}")
+
+        # ── Chart 3: Delete time distribution (histogram) ──
+        try:
+            all_times = []
+            for r in results:
+                per_lvol = r.get("per_lvol_times", [])
+                all_times.extend(t["delete_sec"] for t in per_lvol)
+
+            if all_times:
+                fig, ax = plt.subplots(figsize=(10, 5))
+                ax.hist(all_times, bins=min(50, max(10, len(all_times) // 5)),
+                        color="#3498db", edgecolor="white", alpha=0.8)
+                ax.axvline(sum(all_times) / len(all_times), color="#e74c3c",
+                           linestyle="--", linewidth=1.5,
+                           label=f"Mean: {sum(all_times)/len(all_times):.1f}s")
+                ax.set_xlabel("Delete Time (seconds)")
+                ax.set_ylabel("Count")
+                ax.set_title(
+                    f"{class_name} — Delete Time Distribution "
+                    f"(n={len(all_times)})"
+                )
+                ax.legend()
+                ax.grid(True, axis="y", alpha=0.3)
+                plt.tight_layout()
+                path = out_dir / "delete_time_distribution.png"
+                fig.savefig(str(path), dpi=150)
+                self.logger.info(f"Chart saved: {path}")
+                plt.close(fig)
+        except Exception as exc:
+            self.logger.warning(f"Distribution chart failed: {exc}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -468,6 +608,7 @@ class BulkLvolDeleteDocker(_BulkDeleteMixin, TestLvolHACluster):
         deleted = 0
         failed = 0
         core_dump_count = 0
+        per_lvol_times = []
 
         # Snapshot existing core dumps before starting deletions
         storage_ips = self._get_storage_node_ips()
@@ -515,6 +656,7 @@ class BulkLvolDeleteDocker(_BulkDeleteMixin, TestLvolHACluster):
                     )
 
             # 3. Delete lvol
+            t_del_start = time.time()
             result = self.sbcli_utils.delete_lvol(
                 lvol_name, max_attempt=120, skip_error=True
             )
@@ -530,6 +672,16 @@ class BulkLvolDeleteDocker(_BulkDeleteMixin, TestLvolHACluster):
                 self.logger.error(
                     f"[delete {iteration}] {lvol_name} FAILED to delete"
                 )
+            delete_sec = round(time.time() - t_del_start, 3)
+            per_lvol_times.append({
+                "index": idx,
+                "name": lvol_name,
+                "delete_sec": delete_sec,
+                "ok": bool(result),
+            })
+            self.logger.info(
+                f"[delete {iteration}] {lvol_name} delete took {delete_sec:.1f}s"
+            )
 
             # 4. Check core dumps 20s after delete
             sleep_n_sec(20)
@@ -572,6 +724,7 @@ class BulkLvolDeleteDocker(_BulkDeleteMixin, TestLvolHACluster):
             "failed": failed,
             "stale": len(stale),
             "core_dumps_detected": core_dump_count,
+            "per_lvol_times": per_lvol_times,
         }
 
     # ── Cleanup ──────────────────────────────────────────────────────────
@@ -806,6 +959,7 @@ class BulkLvolDeleteK8s(_BulkDeleteMixin, K8sNativeFailoverTest):
         deleted = 0
         failed = 0
         core_dump_count = 0
+        per_lvol_times = []
 
         # Snapshot existing core dumps before starting deletions
         storage_ips = self._get_storage_node_ips()
@@ -862,8 +1016,11 @@ class BulkLvolDeleteK8s(_BulkDeleteMixin, K8sNativeFailoverTest):
                     )
 
             # 2. Delete PVC
+            t_del_start = time.time()
+            del_ok = False
             try:
                 self.k8s_utils.delete_pvc(pvc_name)
+                del_ok = True
                 deleted += 1
                 self.logger.info(
                     f"[delete {iteration}] {pvc_name} deleted successfully"
@@ -881,6 +1038,16 @@ class BulkLvolDeleteK8s(_BulkDeleteMixin, K8sNativeFailoverTest):
                 self.logger.error(
                     f"[delete {iteration}] {pvc_name} FAILED to delete: {exc}"
                 )
+            delete_sec = round(time.time() - t_del_start, 3)
+            per_lvol_times.append({
+                "index": idx,
+                "name": pvc_name,
+                "delete_sec": delete_sec,
+                "ok": del_ok,
+            })
+            self.logger.info(
+                f"[delete {iteration}] {pvc_name} delete took {delete_sec:.1f}s"
+            )
 
             # 3. Check core dumps 20s after delete
             sleep_n_sec(20)
@@ -924,6 +1091,7 @@ class BulkLvolDeleteK8s(_BulkDeleteMixin, K8sNativeFailoverTest):
             "failed": failed,
             "stale": stale_count,
             "core_dumps_detected": core_dump_count,
+            "per_lvol_times": per_lvol_times,
         }
 
     # ── Cleanup ──────────────────────────────────────────────────────────
@@ -1005,6 +1173,7 @@ class BulkLvolHotDeleteDocker(_BulkHotDeleteMixin, BulkLvolDeleteDocker):
         deleted = 0
         failed = 0
         core_dump_count = 0
+        per_lvol_times = []
 
         # Snapshot existing core dumps before starting deletions
         storage_ips = self._get_storage_node_ips()
@@ -1022,6 +1191,7 @@ class BulkLvolHotDeleteDocker(_BulkHotDeleteMixin, BulkLvolDeleteDocker):
             )
 
             # 1. DELETE LVOL (while FIO is still running!)
+            t_del_start = time.time()
             result = self.sbcli_utils.delete_lvol(
                 lvol_name, max_attempt=120, skip_error=True
             )
@@ -1037,6 +1207,17 @@ class BulkLvolHotDeleteDocker(_BulkHotDeleteMixin, BulkLvolDeleteDocker):
                 self.logger.error(
                     f"[hot-delete {iteration}] {lvol_name} FAILED to delete"
                 )
+            delete_sec = round(time.time() - t_del_start, 3)
+            per_lvol_times.append({
+                "index": idx,
+                "name": lvol_name,
+                "delete_sec": delete_sec,
+                "ok": bool(result),
+            })
+            self.logger.info(
+                f"[hot-delete {iteration}] {lvol_name} delete took "
+                f"{delete_sec:.1f}s"
+            )
 
             # 2. DISCONNECT NVMe (using NQN cached from connect strings)
             if client and details.get("Command"):
@@ -1127,6 +1308,7 @@ class BulkLvolHotDeleteDocker(_BulkHotDeleteMixin, BulkLvolDeleteDocker):
             "failed": failed,
             "stale": len(stale),
             "core_dumps_detected": core_dump_count,
+            "per_lvol_times": per_lvol_times,
         }
 
 
@@ -1188,6 +1370,7 @@ class BulkLvolHotDeleteK8s(_BulkHotDeleteMixin, BulkLvolDeleteK8s):
         deleted = 0
         failed = 0
         core_dump_count = 0
+        per_lvol_times = []
 
         # Snapshot existing core dumps before starting deletions
         storage_ips = self._get_storage_node_ips()
@@ -1205,6 +1388,7 @@ class BulkLvolHotDeleteK8s(_BulkHotDeleteMixin, BulkLvolDeleteK8s):
 
             # 1. DELETE LVOL via sbcli (bypasses K8s PV protection,
             #    causes NVMe device to disappear while FIO is running)
+            t_del_start = time.time()
             delete_ok = False
             if lvol_id:
                 try:
@@ -1226,6 +1410,17 @@ class BulkLvolHotDeleteK8s(_BulkHotDeleteMixin, BulkLvolDeleteK8s):
                         f"[hot-delete {iteration}] Lvol delete failed for "
                         f"{pvc_name}: {exc}"
                     )
+            delete_sec = round(time.time() - t_del_start, 3)
+            per_lvol_times.append({
+                "index": idx,
+                "name": pvc_name,
+                "delete_sec": delete_sec,
+                "ok": delete_ok,
+            })
+            self.logger.info(
+                f"[hot-delete {iteration}] {pvc_name} delete took "
+                f"{delete_sec:.1f}s"
+            )
 
             # 2. DISCONNECT NVMe + STOP FIO
             if self.use_client_fio:
@@ -1341,4 +1536,5 @@ class BulkLvolHotDeleteK8s(_BulkHotDeleteMixin, BulkLvolDeleteK8s):
             "failed": failed,
             "stale": stale_count,
             "core_dumps_detected": core_dump_count,
+            "per_lvol_times": per_lvol_times,
         }

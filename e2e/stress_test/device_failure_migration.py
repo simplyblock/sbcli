@@ -79,6 +79,7 @@ class _DeviceFailureMigrationBase:
             self._timing["total_duration"] = time.time() - t0
             self._print_migration_summary()
             self._write_timing_json()
+            self._generate_charts()
 
     # ── Phase 1: create pool, lvols, connect, format, mount ──────────────────
 
@@ -437,6 +438,98 @@ class _DeviceFailureMigrationBase:
         with open(out_path, "w") as f:
             json.dump(report, f, indent=2)
         self.logger.info(f"Timing JSON written to {out_path}")
+
+    def _generate_charts(self):
+        """Generate timing charts for device failure migration test."""
+        out_dir = Path("logs")
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+        except ImportError:
+            self.logger.warning("matplotlib not available — skipping charts")
+            return
+
+        class_name = self.__class__.__name__
+
+        # Chart 1: Phase duration waterfall
+        try:
+            phase_names = []
+            phase_durations = []
+            for name in ("setup_duration", "fill_duration", "remove_duration",
+                          "migration_duration"):
+                if name in self._timing:
+                    phase_names.append(name.replace("_duration", ""))
+                    phase_durations.append(self._timing[name])
+
+            if phase_durations:
+                colors = ["#3498db", "#f39c12", "#e74c3c", "#9b59b6"]
+                colors = colors[:len(phase_names)]
+
+                fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+                # Left: bar chart
+                bars = axes[0].bar(range(len(phase_names)), phase_durations,
+                                   color=colors, alpha=0.8)
+                axes[0].set_xticks(range(len(phase_names)))
+                axes[0].set_xticklabels(phase_names, fontsize=10)
+                axes[0].set_ylabel("Duration (seconds)")
+                axes[0].set_title(f"{class_name} — Phase Durations")
+                for b, v in zip(bars, phase_durations):
+                    axes[0].text(b.get_x() + b.get_width() / 2,
+                                 b.get_height() + max(phase_durations) * 0.02,
+                                 f"{v:.0f}s", ha="center", va="bottom", fontsize=9)
+                axes[0].grid(True, axis="y", alpha=0.3)
+
+                # Right: pie chart of time distribution
+                axes[1].pie(phase_durations, labels=phase_names, colors=colors,
+                            autopct="%1.0f%%", startangle=90)
+                axes[1].set_title("Time Distribution")
+
+                plt.suptitle(
+                    f"{class_name}\n"
+                    f"IO load: {'YES' if self._with_io_load else 'NO'}  |  "
+                    f"Fill: {self.FILL_PERCENT}%  |  "
+                    f"Lvols: {len(self._lvols_on_target)} target + "
+                    f"{len(self._lvols_on_others)} other",
+                    fontsize=10,
+                )
+                plt.tight_layout()
+                path = out_dir / "migration_phase_durations.png"
+                fig.savefig(str(path), dpi=150)
+                plt.close(fig)
+                self.logger.info(f"Chart saved: {path}")
+        except Exception as exc:
+            self.logger.warning(f"Phase duration chart failed: {exc}")
+
+        # Chart 2: Migration vs fill comparison
+        try:
+            fill = self._timing.get("fill_duration", 0)
+            migrate = self._timing.get("migration_duration", 0)
+            if fill > 0 or migrate > 0:
+                fig, ax = plt.subplots(figsize=(8, 4))
+                bars = ax.barh(["Fill to 65%", "Migration"],
+                               [fill, migrate],
+                               color=["#f39c12", "#9b59b6"], alpha=0.8,
+                               height=0.5)
+                for b, v in zip(bars, [fill, migrate]):
+                    ax.text(b.get_width() + max(fill, migrate) * 0.02,
+                            b.get_y() + b.get_height() / 2,
+                            f"{v:.0f}s ({v/60:.1f}m)", va="center", fontsize=10)
+                ax.set_xlabel("Duration (seconds)")
+                ax.set_title(
+                    f"{class_name} — Fill vs Migration Time"
+                )
+                ax.grid(True, axis="x", alpha=0.3)
+                plt.tight_layout()
+                path = out_dir / "fill_vs_migration.png"
+                fig.savefig(str(path), dpi=150)
+                plt.close(fig)
+                self.logger.info(f"Chart saved: {path}")
+        except Exception as exc:
+            self.logger.warning(f"Fill vs migration chart failed: {exc}")
 
     # ── Helpers ──────────────────────────────────────────────────────────────
 

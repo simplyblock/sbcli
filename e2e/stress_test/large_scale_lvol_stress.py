@@ -112,6 +112,7 @@ class _LargeScaleMixin:
             self._phase_durations["cleanup"] = round(time.time() - t0, 1)
             self._print_large_scale_summary()
             self._write_monitoring_json()
+            self._generate_charts()
 
         if self._fio_failures > 0:
             raise RuntimeError(
@@ -211,6 +212,91 @@ class _LargeScaleMixin:
         with open(out_path, "w") as f:
             _json.dump(report, f, indent=2)
         self.logger.info(f"Monitoring JSON written to {out_path}")
+
+    def _generate_charts(self):
+        """Generate phase duration and scale charts."""
+        from pathlib import Path
+
+        out_dir = Path("logs")
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+        except ImportError:
+            self.logger.warning("matplotlib not available — skipping charts")
+            return
+
+        class_name = self.__class__.__name__
+        total = self.NUM_SUBSYSTEMS * self.NAMESPACES_PER_SUBSYSTEM
+
+        # Chart 1: Phase duration bar chart
+        try:
+            phases = list(self._phase_durations.keys())
+            durations = list(self._phase_durations.values())
+            colors = ["#3498db", "#2ecc71", "#f39c12", "#9b59b6", "#e74c3c"]
+            colors = colors[:len(phases)] + ["#95a5a6"] * max(0, len(phases) - len(colors))
+
+            fig, ax = plt.subplots(figsize=(10, 5))
+            bars = ax.bar(range(len(phases)), durations, color=colors, alpha=0.8)
+            ax.set_xticks(range(len(phases)))
+            ax.set_xticklabels(phases, rotation=30, ha="right", fontsize=9)
+            ax.set_ylabel("Duration (seconds)")
+            ax.set_title(f"{class_name} — Phase Durations ({total} lvols)")
+            for b, v in zip(bars, durations):
+                ax.text(b.get_x() + b.get_width() / 2, b.get_height() + max(durations) * 0.02,
+                        f"{v:.0f}s", ha="center", va="bottom", fontsize=9)
+            ax.grid(True, axis="y", alpha=0.3)
+            plt.tight_layout()
+            path = out_dir / "phase_durations.png"
+            fig.savefig(str(path), dpi=150)
+            plt.close(fig)
+            self.logger.info(f"Chart saved: {path}")
+        except Exception as exc:
+            self.logger.warning(f"Phase duration chart failed: {exc}")
+
+        # Chart 2: Creation rate (lvols/sec)
+        try:
+            create_dur = self._phase_durations.get("create", 0)
+            if create_dur > 0:
+                fig, ax = plt.subplots(figsize=(8, 4))
+                rate = self._total_created / create_dur
+                ax.barh(["Created lvols", "Create rate"],
+                        [self._total_created, rate],
+                        color=["#3498db", "#2ecc71"], alpha=0.8)
+                ax.set_xlabel("Count / Rate")
+                ax.set_title(f"{class_name} — Creation Summary")
+                ax.text(self._total_created, 0,
+                        f"  {self._total_created}/{total}", va="center", fontsize=9)
+                ax.text(rate, 1,
+                        f"  {rate:.1f} lvols/sec", va="center", fontsize=9)
+                plt.tight_layout()
+                path = out_dir / "creation_rate.png"
+                fig.savefig(str(path), dpi=150)
+                plt.close(fig)
+                self.logger.info(f"Chart saved: {path}")
+        except Exception as exc:
+            self.logger.warning(f"Creation rate chart failed: {exc}")
+
+        # Chart 3: FIO summary pie
+        try:
+            if self._fio_started > 0:
+                fig, ax = plt.subplots(figsize=(6, 5))
+                success = self._fio_started - self._fio_failures
+                values = [success, self._fio_failures]
+                labels = [f"OK ({success})", f"Failed ({self._fio_failures})"]
+                colors = ["#2ecc71", "#e74c3c"] if self._fio_failures > 0 else ["#2ecc71", "#ecf0f1"]
+                ax.pie(values, labels=labels, colors=colors, autopct="%1.0f%%",
+                       startangle=90)
+                ax.set_title(f"{class_name} — FIO Status ({self._fio_started} total)")
+                plt.tight_layout()
+                path = out_dir / "fio_summary.png"
+                fig.savefig(str(path), dpi=150)
+                plt.close(fig)
+                self.logger.info(f"Chart saved: {path}")
+        except Exception as exc:
+            self.logger.warning(f"FIO summary chart failed: {exc}")
 
     # ── Abstract methods (subclasses implement) ──────────────────────────────
 
