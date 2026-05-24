@@ -150,6 +150,19 @@ class _BulkDeleteMixin:
             )
         return found_new
 
+    @staticmethod
+    def _extract_nqn_from_connect_str(connect_str):
+        """Extract NQN from an nvme connect command string."""
+        for part in connect_str.split():
+            if part.startswith("--nqn="):
+                return part.split("=", 1)[1]
+        # Handle "-n <nqn>" or "--nqn <nqn>" form
+        parts = connect_str.split()
+        for i, part in enumerate(parts):
+            if part in ("-n", "--nqn") and i + 1 < len(parts):
+                return parts[i + 1]
+        return None
+
     def _wait_lvol_deleted(self, lvol_name, timeout=300):
         """Poll until lvol is no longer listed. Returns True if deleted."""
         for _ in range(timeout // 5):
@@ -375,7 +388,7 @@ class _BulkDeleteMixin:
             axes[0].grid(True, axis="y", alpha=0.3)
 
             # Right: total batch delete duration
-            bars = axes[1].bar(list(x), totals, color="#9b59b6", alpha=0.8)
+            axes[1].bar(list(x), totals, color="#9b59b6", alpha=0.8)
             for i, v in enumerate(totals):
                 axes[1].text(i, v + max(totals) * 0.02, f"{v:.0f}s",
                              ha="center", fontsize=8)
@@ -655,7 +668,24 @@ class BulkLvolDeleteDocker(_BulkDeleteMixin, TestLvolHACluster):
                         f"[delete {iteration}] Unmount failed for {lvol_name}: {exc}"
                     )
 
-            # 3. Delete lvol
+            # 3. Disconnect NVMe
+            if client and details.get("Command"):
+                nqns_disconnected = set()
+                for connect_str in details["Command"]:
+                    nqn = self._extract_nqn_from_connect_str(connect_str)
+                    if nqn and nqn not in nqns_disconnected:
+                        try:
+                            self.ssh_obj.disconnect_nvme(
+                                node=client, nqn_grep=nqn
+                            )
+                            nqns_disconnected.add(nqn)
+                        except Exception as exc:
+                            self.logger.warning(
+                                f"[delete {iteration}] NVMe disconnect "
+                                f"failed for {lvol_name}: {exc}"
+                            )
+
+            # 4. Delete lvol
             t_del_start = time.time()
             result = self.sbcli_utils.delete_lvol(
                 lvol_name, max_attempt=120, skip_error=True
@@ -683,14 +713,14 @@ class BulkLvolDeleteDocker(_BulkDeleteMixin, TestLvolHACluster):
                 f"[delete {iteration}] {lvol_name} delete took {delete_sec:.1f}s"
             )
 
-            # 4. Check core dumps 20s after delete
+            # 5. Check core dumps 20s after delete
             sleep_n_sec(20)
             if self._check_new_core_dumps(
                 storage_ips, core_snapshots, iteration, lvol_name
             ):
                 core_dump_count += 1
 
-            # 5. Clean up tracking
+            # 6. Clean up tracking
             self.lvol_mount_details.pop(lvol_name, None)
             for _, lvols in self.node_vs_lvol.items():
                 if lvol_name in lvols:
@@ -1139,22 +1169,9 @@ class BulkLvolDeleteK8s(_BulkDeleteMixin, K8sNativeFailoverTest):
 class _BulkHotDeleteMixin:
     """Hot-delete variant: delete lvol/PVC → disconnect NVMe → stop FIO → unmount.
 
-    Core dump methods and _write_monitoring_json are inherited from _BulkDeleteMixin.
-    This mixin only adds NQN extraction (needed to disconnect after lvol is gone).
+    Core dump methods, _write_monitoring_json, and _extract_nqn_from_connect_str
+    are inherited from _BulkDeleteMixin.
     """
-
-    @staticmethod
-    def _extract_nqn_from_connect_str(connect_str):
-        """Extract NQN from an nvme connect command string."""
-        for part in connect_str.split():
-            if part.startswith("--nqn="):
-                return part.split("=", 1)[1]
-        # Handle "-n <nqn>" or "--nqn <nqn>" form
-        parts = connect_str.split()
-        for i, part in enumerate(parts):
-            if part in ("-n", "--nqn") and i + 1 < len(parts):
-                return parts[i + 1]
-        return None
 
 
 class BulkLvolHotDeleteDocker(_BulkHotDeleteMixin, BulkLvolDeleteDocker):

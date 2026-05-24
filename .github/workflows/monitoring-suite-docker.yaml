@@ -756,6 +756,10 @@ jobs:
 
       - name: Generate comparison summary
         shell: bash
+        env:
+          NFS_BASE: ${{ inputs.NFS_MOUNTPOINT || '/mnt/nfs_share' }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           python3 - <<'PYEOF'
           import json, os, glob, base64, io
@@ -928,6 +932,19 @@ jobs:
               lines.append("```")
               lines.append("\n*Full comparison chart PNG available in the "
                            "artifacts and NFS.*\n")
+
+          # Add log paths section
+          nfs_base = os.environ.get("NFS_BASE", "/mnt/nfs_share").rstrip("/")
+          run_id = os.environ.get("RUN_ID", "")
+          run_url = os.environ.get("RUN_URL", "")
+          lines.append("\n---\n### Logs & Artifacts\n")
+          lines.append(f"| Location | Path |")
+          lines.append(f"|----------|------|")
+          if nfs_base:
+              lines.append(f"| NFS | `{nfs_base}/monitoring-suite-docker/run-{run_id}-*` |")
+          if run_url:
+              lines.append(f"| GitHub | [Actions Run]({run_url}) |")
+          lines.append(f"| Artifacts | Download `monitoring-*-{run_id}` from the Actions run |")
 
           # Save summary as markdown file for NFS archival
           summary_md_path = results_dir / "summary.md"
