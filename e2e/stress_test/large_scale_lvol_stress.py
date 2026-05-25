@@ -397,178 +397,166 @@ class LargeScaleLvolDocker(_LargeScaleMixin, TestLvolHACluster):
 
     def _phase_create_subsystems(self):
         self.logger.info("=== Phase: Create Subsystems (Docker) ===")
-
-        # Sub-phase 1: Create 100 parent lvols in parallel
+        total_expected = self.NUM_SUBSYSTEMS * self.NAMESPACES_PER_SUBSYSTEM
         self.logger.info(
-            f"[create] Sub-phase 1: Creating {self.NUM_SUBSYSTEMS} parents"
+            f"[create] Sequential: {self.NUM_SUBSYSTEMS} parents × "
+            f"{self.NAMESPACES_PER_SUBSYSTEM} ns = {total_expected} lvols"
         )
-        parent_items = []
+
         for i in range(self.NUM_SUBSYSTEMS):
-            name = f"lss-par-{_rand_seq(6)}-{i:03d}"
-            parent_items.append({"name": name, "idx": i})
+            parent_name = f"lss-par-{_rand_seq(6)}-{i:03d}"
+            self.logger.info(
+                f"[create] === Parent {i+1}/{self.NUM_SUBSYSTEMS}: "
+                f"{parent_name} ==="
+            )
 
-        self._batch_exec(parent_items, self._create_parent, "create_parents")
+            # 1. Create parent lvol
+            self._create_parent({"name": parent_name})
+            if parent_name not in self._parent_registry:
+                raise RuntimeError(
+                    f"Parent {parent_name} creation failed"
+                )
 
-        parent_count = len(self._parent_registry)
-        self.logger.info(f"[create] {parent_count} parents created")
-        if parent_count == 0:
-            raise RuntimeError("No parents created — cannot continue")
+            # 2. NVMe-connect parent + format/mount nsid=1
+            self._connect_parent(parent_name)
+            pinfo = self._parent_registry[parent_name]
+            if not pinfo.get("ctrl_dev"):
+                raise RuntimeError(
+                    f"Parent {parent_name} NVMe connect failed"
+                )
 
-        # Sub-phase 2: NVMe connect all parents + format/mount parent device
-        self.logger.info(
-            f"[create] Sub-phase 2: NVMe connecting {parent_count} parents"
-        )
-        parent_names = list(self._parent_registry.keys())
-        self._batch_exec(
-            parent_names, self._connect_parent, "connect_parents"
-        )
+            # 3. Create all namespace children + format/mount each
+            self._create_children_for_parent(parent_name)
 
-        connected = sum(
-            1 for p in self._parent_registry.values() if p.get("ctrl_dev")
-        )
-        self.logger.info(f"[create] {connected} parents connected")
+            children_done = sum(
+                1 for c in self._child_registry.values()
+                if c["parent_name"] == parent_name
+            )
+            expected = self.NAMESPACES_PER_SUBSYSTEM - 1
+            self.logger.info(
+                f"[create] Parent {parent_name}: "
+                f"{children_done}/{expected} children created"
+            )
+            if children_done < expected:
+                raise RuntimeError(
+                    f"Parent {parent_name}: only {children_done}/{expected} "
+                    f"children created — aborting"
+                )
 
-        # Sub-phase 3: Create namespace children per parent
-        # (sequential within a parent, parallel across parents)
-        total_children = (self.NAMESPACES_PER_SUBSYSTEM - 1) * connected
-        self.logger.info(
-            f"[create] Sub-phase 3: Creating {total_children} namespace "
-            f"children ({self.NAMESPACES_PER_SUBSYSTEM - 1} per parent)"
-        )
-        connected_parents = [
-            pname for pname, pinfo in self._parent_registry.items()
-            if pinfo.get("ctrl_dev")
-        ]
-        # Each parent creates 31 children sequentially (~130s each worst case)
-        self._batch_exec(
-            connected_parents,
-            self._create_children_for_parent,
-            "create_children",
-            per_item_timeout=5400,  # 90 min per parent
-        )
-
-        child_count = len(self._child_registry)
         self._total_created = len(self._device_registry)
         self.logger.info(
-            f"[create] {child_count} children created, "
-            f"{self._total_created} total devices formatted + mounted"
+            f"[create] All done: {len(self._parent_registry)} parents, "
+            f"{len(self._child_registry)} children, "
+            f"{self._total_created} total devices mounted"
         )
 
     def _create_parent(self, params: dict):
         name = params["name"]
+        self.sbcli_utils.add_lvol(
+            lvol_name=name,
+            pool_name=self.pool_name,
+            size=self.LVOL_SIZE,
+            distr_ndcs=self.ndcs,
+            distr_npcs=self.npcs,
+            distr_bs=self.bs,
+            distr_chunk_bs=self.chunk_bs,
+            max_namespace_per_subsys=self.NAMESPACES_PER_SUBSYSTEM,
+            retry=3,
+        )
+        sleep_n_sec(2)
+        lvol_id = self.sbcli_utils.get_lvol_id(lvol_name=name)
+        if not lvol_id:
+            raise RuntimeError(f"[create_parent] {name}: ID not found")
+        # Get the node_id so children can target the same node via host_id
+        node_id = None
         try:
-            self.sbcli_utils.add_lvol(
-                lvol_name=name,
-                pool_name=self.pool_name,
-                size=self.LVOL_SIZE,
-                distr_ndcs=self.ndcs,
-                distr_npcs=self.npcs,
-                distr_bs=self.bs,
-                distr_chunk_bs=self.chunk_bs,
-                max_namespace_per_subsys=self.NAMESPACES_PER_SUBSYSTEM,
-                retry=3,
-            )
-            sleep_n_sec(2)
-            lvol_id = self.sbcli_utils.get_lvol_id(lvol_name=name)
-            if not lvol_id:
-                self.logger.error(f"[create_parent] {name}: ID not found")
-                return
-            # Get the node_id so children can target the same node via host_id
-            node_id = None
-            try:
-                details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
-                if details:
-                    node_id = details[0].get("node_id")
-            except Exception as ex:
-                self.logger.warning(f"[create_parent] {name}: could not get node_id: {ex}")
-            self._parent_registry[name] = {
-                "id": lvol_id,
-                "node_id": node_id,
-                "client": None,
-                "ctrl_dev": None,
-                "nqn": None,
-                "devices": [],
-            }
-            self.logger.info(f"[create_parent] {name} -> {lvol_id} (node={node_id})")
-        except Exception as e:
-            self.logger.error(f"[create_parent] {name} failed: {e}")
+            details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
+            if details:
+                node_id = details[0].get("node_id")
+        except Exception as ex:
+            self.logger.warning(f"[create_parent] {name}: could not get node_id: {ex}")
+        self._parent_registry[name] = {
+            "id": lvol_id,
+            "node_id": node_id,
+            "client": None,
+            "ctrl_dev": None,
+            "nqn": None,
+            "devices": [],
+        }
+        self.logger.info(f"[create_parent] {name} -> {lvol_id} (node={node_id})")
 
     def _connect_parent(self, parent_name: str):
         """NVMe-connect parent, detect device, format + mount the parent
-        namespace (nsid=1)."""
+        namespace (nsid=1).  Raises on any failure."""
         pinfo = self._parent_registry.get(parent_name)
         if not pinfo:
-            return
-        try:
-            connect_ls = self.sbcli_utils.get_lvol_connect_str(
-                lvol_name=parent_name
+            raise RuntimeError(f"{parent_name}: not in registry")
+
+        connect_ls = self.sbcli_utils.get_lvol_connect_str(
+            lvol_name=parent_name
+        )
+        if not connect_ls:
+            raise RuntimeError(
+                f"[connect] {parent_name}: no connect strings"
             )
-            if not connect_ls:
-                self.logger.error(
-                    f"[connect] {parent_name}: no connect strings"
-                )
-                return
 
-            # Round-robin across client nodes
-            client = self.fio_node[
-                list(self._parent_registry.keys()).index(parent_name)
-                % len(self.fio_node)
-            ]
-            pinfo["client"] = client
+        # Round-robin across client nodes
+        client = self.fio_node[
+            list(self._parent_registry.keys()).index(parent_name)
+            % len(self.fio_node)
+        ]
+        pinfo["client"] = client
 
-            initial_devices = self.ssh_obj.get_devices(node=client)
+        initial_devices = self.ssh_obj.get_devices(node=client)
 
-            for cmd in connect_ls:
-                self.ssh_obj.exec_command(node=client, command=cmd)
-                # Extract NQN for later disconnect
-                nqn_match = re.search(r"-n\s+(nqn\S+)", cmd)
-                if nqn_match:
-                    pinfo["nqn"] = nqn_match.group(1)
+        for cmd in connect_ls:
+            self.ssh_obj.exec_command(node=client, command=cmd)
+            # Extract NQN for later disconnect
+            nqn_match = re.search(r"-n\s+(nqn\S+)", cmd)
+            if nqn_match:
+                pinfo["nqn"] = nqn_match.group(1)
 
-            sleep_n_sec(3)
-            final_devices = self.ssh_obj.get_devices(node=client)
+        sleep_n_sec(3)
+        final_devices = self.ssh_obj.get_devices(node=client)
 
-            parent_dev = None
-            for dev in final_devices:
-                if dev not in initial_devices:
-                    parent_dev = f"/dev/{dev.strip()}"
-                    break
+        parent_dev = None
+        for dev in final_devices:
+            if dev not in initial_devices:
+                parent_dev = f"/dev/{dev.strip()}"
+                break
 
-            if not parent_dev:
-                self.logger.error(
-                    f"[connect] {parent_name}: no new device after connect"
-                )
-                return
-
-            ctrl_dev = get_parent_device(parent_dev)
-            pinfo["ctrl_dev"] = ctrl_dev
-            pinfo["devices"] = [parent_dev]
-
-            # Format + mount the parent device (nsid=1)
-            mount_name = f"lss-{parent_name[-3:]}-ns01"
-            mount_point = f"{self.mount_path}/{mount_name}"
-            log_file = f"{self.log_path}/{mount_name}.log"
-            self.ssh_obj.format_disk(
-                node=client, device=parent_dev, fs_type="ext4"
+        if not parent_dev:
+            raise RuntimeError(
+                f"[connect] {parent_name}: no new device after connect"
             )
-            self.ssh_obj.mount_path(
-                node=client, device=parent_dev, mount_path=mount_point
-            )
-            self._device_registry[parent_dev] = {
-                "name": mount_name,
-                "client": client,
-                "mount": mount_point,
-                "log": log_file,
-                "parent_name": parent_name,
-                "ctrl_dev": ctrl_dev,
-                "ns_idx": 1,
-            }
-            self.logger.info(
-                f"[connect] {parent_name}: {parent_dev} ns01 "
-                f"(ctrl={ctrl_dev}) on {client} -> {mount_point}"
-            )
-        except Exception as e:
-            self.logger.error(f"[connect] {parent_name} failed: {e}")
+
+        ctrl_dev = get_parent_device(parent_dev)
+        pinfo["ctrl_dev"] = ctrl_dev
+        pinfo["devices"] = [parent_dev]
+
+        # Format + mount the parent device (nsid=1)
+        mount_name = f"lss-{parent_name[-3:]}-ns01"
+        mount_point = f"{self.mount_path}/{mount_name}"
+        log_file = f"{self.log_path}/{mount_name}.log"
+        self.ssh_obj.format_disk(
+            node=client, device=parent_dev, fs_type="ext4"
+        )
+        self.ssh_obj.mount_path(
+            node=client, device=parent_dev, mount_path=mount_point
+        )
+        self._device_registry[parent_dev] = {
+            "name": mount_name,
+            "client": client,
+            "mount": mount_point,
+            "log": log_file,
+            "parent_name": parent_name,
+            "ctrl_dev": ctrl_dev,
+            "ns_idx": 1,
+        }
+        self.logger.info(
+            f"[connect] {parent_name}: {parent_dev} ns01 "
+            f"(ctrl={ctrl_dev}) on {client} -> {mount_point}"
+        )
 
     def _create_children_for_parent(self, parent_name: str):
         """Create all namespace children for one parent sequentially.
@@ -576,103 +564,89 @@ class LargeScaleLvolDocker(_LargeScaleMixin, TestLvolHACluster):
         For each child:
           1. add_lvol(namespace=parent_id)
           2. Verify the new namespace device appears on the client
-             (rescan if it doesn't show up automatically)
           3. Format + mount the new device
+
+        Raises on any failure so the caller can abort immediately.
         """
         pinfo = self._parent_registry.get(parent_name)
         if not pinfo or not pinfo.get("ctrl_dev"):
-            return
+            raise RuntimeError(f"{parent_name}: not connected")
         parent_id = pinfo["id"]
         client = pinfo["client"]
         ctrl_dev = pinfo["ctrl_dev"]
 
         # Snapshot of current namespace devices before creating children
         before_set = set(self._list_nvme_ns_devices(client, ctrl_dev))
-        created = 0
 
         for ns_idx in range(2, self.NAMESPACES_PER_SUBSYSTEM + 1):
             cname = (
                 f"lss-ch-{parent_name[-3:]}-ns{ns_idx:02d}-{_rand_seq(4)}"
             )
-            try:
-                self.sbcli_utils.add_lvol(
-                    lvol_name=cname,
-                    pool_name=self.pool_name,
-                    size=self.LVOL_SIZE,
-                    distr_ndcs=self.ndcs,
-                    distr_npcs=self.npcs,
-                    distr_bs=self.bs,
-                    distr_chunk_bs=self.chunk_bs,
-                    host_id=pinfo.get("node_id"),
-                    namespace=parent_id,
-                    retry=3,
-                )
-                sleep_n_sec(2)
-                child_id = self.sbcli_utils.get_lvol_id(lvol_name=cname)
-                if not child_id:
-                    self.logger.error(
-                        f"[create_child] {cname}: ID not found"
-                    )
-                    continue
 
-                # Wait for the new namespace device to appear on client
-                new_dev, new_set = self._wait_for_new_namespace_device(
-                    node=client,
-                    ctrl_dev=ctrl_dev,
-                    before_set=before_set,
-                    timeout=120,
-                    interval=3,
-                )
-                if not new_dev:
-                    self.logger.error(
-                        f"[create_child] {cname}: namespace device did not "
-                        f"appear on {client} (ctrl={ctrl_dev})"
-                    )
-                    continue
-                before_set = new_set
-
-                # Format + mount the new namespace device
-                mount_name = (
-                    f"lss-{parent_name[-3:]}-ns{ns_idx:02d}"
-                )
-                mount_point = f"{self.mount_path}/{mount_name}"
-                log_file = f"{self.log_path}/{mount_name}.log"
-                self.ssh_obj.format_disk(
-                    node=client, device=new_dev, fs_type="ext4"
-                )
-                self.ssh_obj.mount_path(
-                    node=client, device=new_dev, mount_path=mount_point
+            self.sbcli_utils.add_lvol(
+                lvol_name=cname,
+                pool_name=self.pool_name,
+                size=self.LVOL_SIZE,
+                distr_ndcs=self.ndcs,
+                distr_npcs=self.npcs,
+                distr_bs=self.bs,
+                distr_chunk_bs=self.chunk_bs,
+                host_id=pinfo.get("node_id"),
+                namespace=parent_id,
+                retry=3,
+            )
+            sleep_n_sec(2)
+            child_id = self.sbcli_utils.get_lvol_id(lvol_name=cname)
+            if not child_id:
+                raise RuntimeError(
+                    f"[create_child] {cname}: lvol ID not found after create"
                 )
 
-                self._child_registry[cname] = {
-                    "id": child_id,
-                    "parent_name": parent_name,
-                    "device": new_dev,
-                    "ns_idx": ns_idx,
-                }
-                self._device_registry[new_dev] = {
-                    "name": mount_name,
-                    "client": client,
-                    "mount": mount_point,
-                    "log": log_file,
-                    "parent_name": parent_name,
-                    "ctrl_dev": ctrl_dev,
-                    "ns_idx": ns_idx,
-                }
-                created += 1
-                self.logger.info(
-                    f"[create_child] {cname} -> {child_id} "
-                    f"ns{ns_idx:02d} device={new_dev} on {client}"
+            # Wait for the new namespace device to appear on client
+            new_dev, new_set = self._wait_for_new_namespace_device(
+                node=client,
+                ctrl_dev=ctrl_dev,
+                before_set=before_set,
+                timeout=120,
+                interval=3,
+            )
+            if not new_dev:
+                raise RuntimeError(
+                    f"[create_child] {cname}: namespace device did not "
+                    f"appear on {client} (ctrl={ctrl_dev})"
                 )
-            except Exception as e:
-                self.logger.error(
-                    f"[create_child] {cname} failed: {e}"
-                )
+            before_set = new_set
 
-        self.logger.info(
-            f"[create_children] {parent_name}: "
-            f"{created}/{self.NAMESPACES_PER_SUBSYSTEM - 1} children created"
-        )
+            # Format + mount the new namespace device
+            mount_name = f"lss-{parent_name[-3:]}-ns{ns_idx:02d}"
+            mount_point = f"{self.mount_path}/{mount_name}"
+            log_file = f"{self.log_path}/{mount_name}.log"
+            self.ssh_obj.format_disk(
+                node=client, device=new_dev, fs_type="ext4"
+            )
+            self.ssh_obj.mount_path(
+                node=client, device=new_dev, mount_path=mount_point
+            )
+
+            self._child_registry[cname] = {
+                "id": child_id,
+                "parent_name": parent_name,
+                "device": new_dev,
+                "ns_idx": ns_idx,
+            }
+            self._device_registry[new_dev] = {
+                "name": mount_name,
+                "client": client,
+                "mount": mount_point,
+                "log": log_file,
+                "parent_name": parent_name,
+                "ctrl_dev": ctrl_dev,
+                "ns_idx": ns_idx,
+            }
+            self.logger.info(
+                f"[create_child] {cname} -> {child_id} "
+                f"ns{ns_idx:02d} device={new_dev} on {client}"
+            )
 
     # ── Phase 2: Start FIO ──────────────────────────────────────────────────
 
