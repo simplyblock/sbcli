@@ -101,10 +101,6 @@ def add(lvol_id, snapshot_name, backup=False, lock=True):
                 ref_snap = db_controller.get_snapshot_by_id(snap.snap_ref_id)
                 ref_count = ref_snap.ref_count
 
-            if ref_count >= constants.MAX_SNAP_COUNT:
-                msg = f"Can not create more than {constants.MAX_SNAP_COUNT} snaps from this clone"
-                logger.error(msg)
-                return False, msg
         except KeyError:
             pass
 
@@ -636,10 +632,6 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
         ref_snap = db_controller.get_snapshot_by_id(snap.snap_ref_id)
         ref_count = ref_snap.ref_count
 
-    if ref_count >= constants.MAX_SNAP_COUNT:
-        msg = f"Can not create more than {constants.MAX_SNAP_COUNT} clones from this snapshot"
-        logger.error(msg)
-        return False, msg
 
     for lvol in db_controller.get_lvols():
         if lvol.pool_uuid != pool.get_id() or lvol.lvol_name != clone_name:
