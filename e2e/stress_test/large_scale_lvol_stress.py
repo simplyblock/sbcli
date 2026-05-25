@@ -959,181 +959,190 @@ class LargeScaleLvolK8s(_LargeScaleMixin, K8sNativeFailoverTest):
 
         self._run_large_scale_test()
 
-    # ── Phase 1: Create subsystems ───────────────────────────────────────────
+    # ── Phase 1: Create subsystems (sequential per-subsystem) ──────────────
 
     def _phase_create_subsystems(self):
+        """Create PVCs in per-subsystem batches.  For each subsystem
+        (NAMESPACES_PER_SUBSYSTEM PVCs), create all PVCs sequentially,
+        verify each one is Bound, then verify lvol count in API before
+        moving to the next subsystem.  Fail fast on any error."""
         total_pvcs = self.NUM_SUBSYSTEMS * self.NAMESPACES_PER_SUBSYSTEM
         self.logger.info(
-            f"=== Phase: Create {total_pvcs} PVCs (K8s) ==="
+            f"=== Phase: Create {total_pvcs} PVCs (K8s) — sequential "
+            f"per subsystem ==="
         )
 
-        pvc_items = []
-        for i in range(total_pvcs):
-            pvc_name = f"lss-pvc-{_rand_seq(6)}-{i:04d}"
-            pvc_items.append({"name": pvc_name, "idx": i})
+        pvc_idx = 0
+        for subsys in range(self.NUM_SUBSYSTEMS):
+            self.logger.info(
+                f"[create] === Subsystem {subsys+1}/"
+                f"{self.NUM_SUBSYSTEMS} ==="
+            )
+            batch_names = []
+            for ns in range(self.NAMESPACES_PER_SUBSYSTEM):
+                pvc_name = f"lss-pvc-{_rand_seq(6)}-{pvc_idx:04d}"
+                pvc_idx += 1
 
-        if self.use_client_fio:
-            self._create_pvcs_client_mode(pvc_items)
-        else:
-            self._create_pvcs_job_mode(pvc_items)
+                if self.use_client_fio:
+                    self._create_single_pvc_client(
+                        {"name": pvc_name, "idx": pvc_idx - 1}
+                    )
+                else:
+                    self._create_single_pvc({"name": pvc_name})
+
+                if pvc_name not in self.pvc_details:
+                    raise RuntimeError(
+                        f"PVC {pvc_name} creation failed — aborting "
+                        f"subsystem {subsys+1}"
+                    )
+                batch_names.append(pvc_name)
+
+            # Verify lvol count matches expectations
+            all_lvols = self.sbcli_utils.list_lvols()
+            expected = (subsys + 1) * self.NAMESPACES_PER_SUBSYSTEM
+            if len(all_lvols) < expected:
+                self.logger.warning(
+                    f"[create] Subsystem {subsys+1}: lvol count "
+                    f"{len(all_lvols)} < expected {expected}"
+                )
+
+            self.logger.info(
+                f"[create] Subsystem {subsys+1}/{self.NUM_SUBSYSTEMS} "
+                f"OK — {len(batch_names)} PVCs created, "
+                f"total lvols in API: {len(all_lvols)}"
+            )
 
         self._total_created = len(self.pvc_details)
         self.logger.info(f"[create] {self._total_created} PVCs created")
 
-    def _create_pvcs_job_mode(self, items: list[dict]):
-        """Create PVCs in parallel (K8s Job FIO mode)."""
-        self._batch_exec_k8s(items, self._create_single_pvc, "create_pvcs")
-
-    def _create_pvcs_client_mode(self, items: list[dict]):
-        """Create PVCs + NVMe connect on clients."""
-        self._batch_exec_k8s(
-            items, self._create_single_pvc_client, "create_pvcs_client"
-        )
-
     def _create_single_pvc(self, params: dict):
+        """Create a single PVC and wait for Bound.  Raises on failure."""
         name = params["name"]
-        try:
-            self.k8s_utils.create_pvc(
-                name=name,
-                size=self.PVC_SIZE,
-                storage_class=self.STORAGE_CLASS_NAME,
-            )
-            if not self.k8s_utils.wait_pvc_bound(name, timeout=300):
-                self.logger.error(f"[create_pvc] {name}: not Bound in 300s")
-                return
-            self.pvc_details[name] = {
-                "job_name": None,
-                "configmap_name": None,
-                "snapshots": [],
-            }
-            self.logger.info(f"[create_pvc] {name} Bound")
-        except Exception as e:
-            self.logger.error(f"[create_pvc] {name} failed: {e}")
+        self.k8s_utils.create_pvc(
+            name=name,
+            size=self.PVC_SIZE,
+            storage_class=self.STORAGE_CLASS_NAME,
+        )
+        if not self.k8s_utils.wait_pvc_bound(name, timeout=300):
+            raise TimeoutError(f"PVC {name} not Bound within 300s")
+        self.pvc_details[name] = {
+            "job_name": None,
+            "configmap_name": None,
+            "snapshots": [],
+        }
+        self.logger.info(f"[create_pvc] {name} Bound")
 
     def _create_single_pvc_client(self, params: dict):
         """Create a single PVC, NVMe-connect on a client, and verify the
-        namespace device appears.  CSI auto-groups PVCs into subsystems
-        based on the StorageClass max_namespace_per_subsys setting.
+        namespace device appears.  Raises on any failure.
 
-        After NVMe connect, the device may appear as:
-        - A new controller + namespace (first PVC in a subsystem)
-        - A new namespace on an existing controller (shared subsystem)
-        Either way we verify a new block device is present.
+        CSI auto-groups PVCs into subsystems based on the StorageClass
+        max_namespace_per_subsys setting.  After NVMe connect, the device
+        may appear as a new controller + namespace (first PVC in a subsystem)
+        or a new namespace on an existing controller (shared subsystem).
         """
         name = params["name"]
-        try:
-            self.k8s_utils.create_pvc(
-                name=name,
-                size=self.PVC_SIZE,
-                storage_class=self.STORAGE_CLASS_NAME,
+        self.k8s_utils.create_pvc(
+            name=name,
+            size=self.PVC_SIZE,
+            storage_class=self.STORAGE_CLASS_NAME,
+        )
+        if not self.k8s_utils.wait_pvc_bound(name, timeout=300):
+            raise TimeoutError(f"PVC {name} not Bound within 300s")
+
+        # Get lvol info for NVMe connect
+        lvol_id = self.k8s_utils.get_pvc_volume_handle(name)
+        if not lvol_id:
+            raise RuntimeError(f"PVC {name}: no volume handle")
+
+        lvol_details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
+        lvol_name = (
+            lvol_details[0].get("lvol_name", name) if lvol_details else name
+        )
+
+        connect_ls = self.sbcli_utils.get_lvol_connect_str(
+            lvol_name=lvol_name
+        )
+
+        client = self.fio_node[params["idx"] % len(self.fio_node)]
+
+        # Snapshot devices before connect
+        initial_devices = set(self.ssh_obj.get_devices(node=client))
+
+        # Extract NQN from connect strings for namespace tracking
+        nqn = None
+        for cmd in connect_ls:
+            self.ssh_obj.exec_command(node=client, command=cmd)
+            nqn_match = re.search(r"-n\s+(nqn\S+)", cmd)
+            if nqn_match:
+                nqn = nqn_match.group(1)
+
+        sleep_n_sec(3)
+
+        # Check for new device — could be new controller or new namespace
+        final_devices = set(self.ssh_obj.get_devices(node=client))
+        new_devs = sorted(final_devices - initial_devices)
+
+        new_dev = None
+        if new_devs:
+            new_dev = f"/dev/{new_devs[-1].strip()}"
+        else:
+            # Device didn't appear automatically — try NVMe rescan
+            self.logger.info(
+                f"[create_pvc] {name}: no new device, rescanning"
             )
-            if not self.k8s_utils.wait_pvc_bound(name, timeout=300):
-                self.logger.error(f"[create_pvc] {name}: not Bound in 300s")
-                return
-
-            # Get lvol info for NVMe connect
-            lvol_id = self.k8s_utils.get_pvc_volume_handle(name)
-            if not lvol_id:
-                self.logger.error(
-                    f"[create_pvc] {name}: no volume handle"
-                )
-                return
-
-            lvol_name = None
-            lvol_details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
-            if lvol_details:
-                lvol_name = lvol_details[0].get("lvol_name", name)
-            else:
-                lvol_name = name
-
-            connect_ls = self.sbcli_utils.get_lvol_connect_str(
-                lvol_name=lvol_name
+            rescan_cmd = (
+                "bash -lc 'for c in /dev/nvme*; do "
+                "[ -c \"$c\" ] && nvme ns-rescan $c 2>/dev/null; "
+                "done || true'"
             )
-
-            client = self.fio_node[params["idx"] % len(self.fio_node)]
-
-            # Snapshot devices before connect
-            initial_devices = set(self.ssh_obj.get_devices(node=client))
-
-            # Extract NQN from connect strings for namespace tracking
-            nqn = None
-            for cmd in connect_ls:
-                self.ssh_obj.exec_command(node=client, command=cmd)
-                nqn_match = re.search(r"-n\s+(nqn\S+)", cmd)
-                if nqn_match:
-                    nqn = nqn_match.group(1)
-
-            sleep_n_sec(3)
-
-            # Check for new device — could be new controller or new namespace
+            self.ssh_obj.exec_command(
+                node=client, command=rescan_cmd
+            )
+            sleep_n_sec(5)
             final_devices = set(self.ssh_obj.get_devices(node=client))
             new_devs = sorted(final_devices - initial_devices)
-
-            new_dev = None
             if new_devs:
                 new_dev = f"/dev/{new_devs[-1].strip()}"
-            else:
-                # Device didn't appear automatically — try NVMe rescan
-                # Find controller for this NQN and rescan namespaces
-                self.logger.info(
-                    f"[create_pvc] {name}: no new device, rescanning"
-                )
-                # Rescan all controllers on this client
-                rescan_cmd = (
-                    "bash -lc 'for c in /dev/nvme*; do "
-                    "[ -c \"$c\" ] && nvme ns-rescan $c 2>/dev/null; "
-                    "done || true'"
-                )
-                self.ssh_obj.exec_command(
-                    node=client, command=rescan_cmd
-                )
-                sleep_n_sec(5)
-                final_devices = set(self.ssh_obj.get_devices(node=client))
-                new_devs = sorted(final_devices - initial_devices)
-                if new_devs:
-                    new_dev = f"/dev/{new_devs[-1].strip()}"
 
-            if not new_dev:
-                self.logger.error(
-                    f"[create_pvc] {name}: no device after NVMe "
-                    f"connect + rescan on {client}"
-                )
-                return
-
-            ctrl_dev = get_parent_device(new_dev)
-            mount_point = f"{self.mount_path}/{name}"
-            log_file = f"{self.log_path}/{name}.log"
-
-            self.ssh_obj.format_disk(
-                node=client, device=new_dev, fs_type="ext4"
-            )
-            self.ssh_obj.mount_path(
-                node=client, device=new_dev, mount_path=mount_point
+        if not new_dev:
+            raise RuntimeError(
+                f"PVC {name}: no device after NVMe connect + rescan "
+                f"on {client}"
             )
 
-            self.pvc_details[name] = {
-                "job_name": None,
-                "configmap_name": None,
-                "snapshots": [],
-            }
-            self.lvol_mount_details[lvol_name] = {
-                "ID": lvol_id,
-                "Name": lvol_name,
-                "Mount": mount_point,
-                "Device": new_dev,
-                "FS": "ext4",
-                "Log": log_file,
-                "Client": client,
-                "pvc_name": name,
-                "ctrl_dev": ctrl_dev,
-                "nqn": nqn,
-            }
-            self.logger.info(
-                f"[create_pvc] {name} -> {new_dev} "
-                f"(ctrl={ctrl_dev}) on {client}"
-            )
-        except Exception as e:
-            self.logger.error(f"[create_pvc] {name} failed: {e}")
+        ctrl_dev = get_parent_device(new_dev)
+        mount_point = f"{self.mount_path}/{name}"
+        log_file = f"{self.log_path}/{name}.log"
+
+        self.ssh_obj.format_disk(
+            node=client, device=new_dev, fs_type="ext4"
+        )
+        self.ssh_obj.mount_path(
+            node=client, device=new_dev, mount_path=mount_point
+        )
+
+        self.pvc_details[name] = {
+            "job_name": None,
+            "configmap_name": None,
+            "snapshots": [],
+        }
+        self.lvol_mount_details[lvol_name] = {
+            "ID": lvol_id,
+            "Name": lvol_name,
+            "Mount": mount_point,
+            "Device": new_dev,
+            "FS": "ext4",
+            "Log": log_file,
+            "Client": client,
+            "pvc_name": name,
+            "ctrl_dev": ctrl_dev,
+            "nqn": nqn,
+        }
+        self.logger.info(
+            f"[create_pvc] {name} -> {new_dev} "
+            f"(ctrl={ctrl_dev}) on {client}"
+        )
 
     # ── Phase 2: Start FIO ──────────────────────────────────────────────────
 

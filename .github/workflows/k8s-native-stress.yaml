@@ -1162,7 +1162,7 @@ jobs:
             cid=$(echo "$output" | awk 'NR==4{print $2}')
             csecret=$(echo "$output" | awk 'NR==4{print $NF}')
             if [ -z "$cid" ] || [ "$cid" = "+" ]; then
-              echo "Table parsing failed, trying JSON..."
+              echo "Table parsing failed, trying JSON..." >&2
               local json_out
               json_out=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
                 sbctl cluster list --json 2>&1) || true
@@ -1172,7 +1172,7 @@ jobs:
             if [ -n "$cid" ] && [ "$cid" != "+" ]; then
               echo "CLUSTER_ID=${cid}" >> $GITHUB_ENV
               echo "CLUSTER_SECRET=${csecret}" >> $GITHUB_ENV
-              echo "Extracted CLUSTER_ID=${cid}"
+              echo "Extracted CLUSTER_ID=${cid}" >&2
             fi
             echo "$cid"
           }
