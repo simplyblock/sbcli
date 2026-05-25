@@ -16,7 +16,7 @@ from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot
-from simplyblock_core.models.lvol_model import LVol
+from simplyblock_core.models.lvol_model import LVol, LVolInDeletionError
 from simplyblock_core.models.storage_node import StorageNode
 
 
@@ -613,15 +613,20 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
         logger.error(msg)
         return False, msg
 
-    for lvol in db_controller.get_lvols():
-        if lvol.pool_uuid != pool.get_id() or lvol.lvol_name != clone_name:
-            continue
-        if lvol.cloned_from_snap == snapshot_id and lvol.status != LVol.STATUS_IN_DELETION:
-            logger.info(f"Clone already exists, reusing lvol: {lvol.get_id()}")
-            return lvol.get_id(), False
-        msg=f"LVol name must be unique: {clone_name}"
+    try:
+        existing = db_controller.get_lvol_by_pool_and_name(pool.get_id(), clone_name)
+        if existing.cloned_from_snap == snapshot_id:
+            logger.info(f"Clone already exists, reusing lvol: {existing.get_id()}")
+            return existing.get_id(), False
+        msg = f"LVol name must be unique: {clone_name}"
         logger.error(msg)
         return False, msg
+    except LVolInDeletionError:
+        msg = f"Clone {clone_name} is being deleted, retry later"
+        logger.error(msg)
+        return False, msg
+    except KeyError:
+        pass
 
     size = snap.size
     if 0 < pool.lvol_max_size < size:
