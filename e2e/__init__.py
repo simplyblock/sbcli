@@ -412,6 +412,7 @@ def get_monitoring_tests():
         DeviceFailureMigrationNoLoad,
         DeviceFailureMigrationUnderLoad,
         TestLvolOutageLoadTest,
+        TestParallelLvolSnapshotCloneAPI,
     ]
 
 def get_backup_tests():
