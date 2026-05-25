@@ -1124,7 +1124,11 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                 if sub_list:
                     sub = sub_list[0] if isinstance(sub_list, list) else sub_list
                     for ns in sub.get('namespaces', []):
-                        if (ns.get('bdev_name') or ns.get('name', '')) == mirror_bdev:
+                        ns_uuid = ns.get('uuid', '')
+                        ns_bdev = ns.get('bdev_name') or ns.get('name', '')
+                        # SPDK may report bdev_name as UUID string rather than
+                        # the composite "LVS/LVOL" form — match by either.
+                        if ns_uuid == lvol.uuid or ns_bdev == mirror_bdev:
                             mirror_nsid = ns.get('nsid')
                             break
 
@@ -1667,7 +1671,12 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
     try:
         lvol = db.get_lvol_by_id(migration.lvol_id)
         _cleanup_subsystem_or_ns(lvol.nqn, lvol.ns_id, True, src_rpc)
-        if src_sec_rpc:
+        tgt_is_src_secondary = (src_node.secondary_node_id == tgt_node.get_id())
+        if src_sec_rpc and not tgt_is_src_secondary:
+            # When tgt_is_src_secondary, src_sec_rpc IS the TGT node's RPC.
+            # Its namespace was already swapped to the migrated bdev by the
+            # deferred swap block above — do NOT remove it here or clients
+            # will lose their active path and suffer a ~70s AER rediscovery.
             _cleanup_subsystem_or_ns(lvol.nqn, lvol.ns_id, True, src_sec_rpc)
     except Exception as e:
         logger.warning(f"Source subsystem cleanup failed (non-fatal): {e}")
