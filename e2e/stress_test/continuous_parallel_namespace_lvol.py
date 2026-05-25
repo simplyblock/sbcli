@@ -1391,10 +1391,8 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
             f"× {pvcs_per_subsys} PVCs = {total} total"
         )
 
-        ns = self.k8s_utils.namespace
         pvc_idx = 0
         for i in range(self.NUM_PARENTS):
-            subsys_label = f"subsys-{i:04d}"
             self.logger.info(
                 f"[create_subsystems] === Subsystem {i+1}/"
                 f"{self.NUM_PARENTS} ==="
