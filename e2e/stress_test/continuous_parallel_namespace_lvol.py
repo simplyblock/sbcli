@@ -904,7 +904,12 @@ class TestParallelNamespaceLvolDocker(_ParallelNamespaceLvolBase):
     # ── Setup / Cleanup ───────────────────────────────────────────────────
 
     def _phase_setup(self):
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        actual_pool = self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        if actual_pool and actual_pool != self.pool_name:
+            self.logger.info(
+                f"[setup] Pool name changed: {self.pool_name} -> {actual_pool}"
+            )
+            self.pool_name = actual_pool
         sleep_n_sec(2)
 
     def _phase_cleanup(self):
@@ -1314,7 +1319,12 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
     def _phase_setup(self):
         self._init_k8s_utils()
         # Create pool via sbcli
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        actual_pool = self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        if actual_pool and actual_pool != self.pool_name:
+            self.logger.info(
+                f"[setup] Pool name changed: {self.pool_name} -> {actual_pool}"
+            )
+            self.pool_name = actual_pool
         sleep_n_sec(2)
 
         # Create StorageClass with namespace support

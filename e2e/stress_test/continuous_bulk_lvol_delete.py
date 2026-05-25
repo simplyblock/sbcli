@@ -466,7 +466,12 @@ class BulkLvolDeleteDocker(_BulkDeleteMixin, TestLvolHACluster):
         self._run_id = _rand_seq(8)
 
     def run(self):
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        actual_pool = self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        if actual_pool and actual_pool != self.pool_name:
+            self.logger.info(
+                f"[run] Pool name changed: {self.pool_name} -> {actual_pool}"
+            )
+            self.pool_name = actual_pool
 
         storage_nodes = self.sbcli_utils.get_storage_nodes()
         for result in storage_nodes["results"]:
