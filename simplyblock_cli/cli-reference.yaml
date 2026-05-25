@@ -164,11 +164,15 @@ commands:
             dest: ifname
             type: str
           - name: "--journal-partition"
-            help: >-
-              **Deprecated:** use `--enable-journal-device` instead.<br><br>
+            deprecated:
+              since: "26.1"
+              replaced-by: "--enable-journal-device"
+              migration: "migrate_journal_partition"
+            help: |
               1: Auto-create small partitions for journal on nvme devices. 0: use a separate (the smallest) nvme device of the node for journal. The journal needs a maximum of 3 percent of total available raw disk space. Default: `1`.
             dest: partitions
             type: int
+            default: 1
             choices:
               - 0
               - 1
@@ -1383,7 +1387,6 @@ commands:
             type: str
       - name: graceful-shutdown
         help: "Initiates a graceful shutdown of a cluster's storage nodes."
-        private: true
         arguments:
           - name: "cluster_id"
             help: "The cluster id."
@@ -1392,7 +1395,6 @@ commands:
             completer: _completer_get_cluster_list
       - name: graceful-startup
         help: "Initiates a graceful startup of a cluster's storage nodes."
-        private: true
         arguments:
           - name: "cluster_id"
             help: "The cluster id."
@@ -1556,6 +1558,20 @@ commands:
             dest: encrypt
             type: bool
             action: store_true
+          - name: "--crypto-key1"
+            help: "The hex value of key1 to be used for logical volume encryption."
+            dest: crypto_key1
+            type: str
+            deprecated:
+              since: "26.2"
+              reason: "This has been replaced by internal or external KMS support. See https://docs.simplyblock.io/latest/usage/baremetal/encrypting/"
+          - name: "--crypto-key2"
+            help: "The hex value of key2 to be used for logical volume encryption."
+            dest: crypto_key2
+            type: str
+            deprecated:
+              since: "26.2"
+              reason: "This has been replaced by internal or external KMS support. See https://docs.simplyblock.io/latest/usage/baremetal/encrypting/"
           - name: "--max-rw-iops"
             help: "Maximum Read Write IO Per Second."
             dest: max_rw_iops

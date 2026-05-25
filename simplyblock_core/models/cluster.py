@@ -7,6 +7,9 @@ from simplyblock_core.models.base_model import BaseModel
 
 class HashicorpVaultSettings(BaseModel):
     base_url: str = ""
+    transit_mount: str = "simplyblock/transit"
+    kv_mount: str = "simplyblock/kv"
+    cert_role: str = "simplyblock-webappapi"
 
 
 class Cluster(BaseModel):

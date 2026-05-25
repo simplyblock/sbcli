@@ -540,7 +540,8 @@ class K8sUtils:
     def create_storage_class(self, name: str, cluster_id: str, pool_name: str,
                              ndcs: int = 1, npcs: int = 1, fs_type: str = "ext4",
                              compression: bool = False, encryption: bool = False,
-                             fabric: str = "tcp"):
+                             fabric: str = "tcp",
+                             max_namespace_per_subsys: int = 1):
         """Create a simplyblock CSI StorageClass."""
         yaml_content = (
             f"allowVolumeExpansion: true\n"
@@ -557,7 +558,7 @@ class K8sUtils:
             f"  encryption: \"{str(encryption)}\"\n"
             f"  fabric: {fabric}\n"
             f"  lvol_priority_class: \"0\"\n"
-            f"  max_namespace_per_subsys: \"1\"\n"
+            f"  max_namespace_per_subsys: \"{max_namespace_per_subsys}\"\n"
             f"  pool_name: {pool_name}\n"
             f"  qos_r_mbytes: \"0\"\n"
             f"  qos_rw_iops: \"0\"\n"
@@ -768,17 +769,20 @@ class K8sUtils:
             return None
 
     def log_fio_pvc_mapping(self, pvc_details: dict, clone_details: dict = None,
-                            extra_details: dict = None):
+                            extra_details: dict = None,
+                            snapshot_details: dict = None):
         """Log a table mapping FIO Job → PVC → lvol ID for debugging.
 
         Parameters
         ----------
         pvc_details : dict
-            ``{pvc_name: {"job_name": ..., ...}}``
+            ``{pvc_name: {"job_name": ..., "node_id": ..., "storage_class": ..., ...}}``
         clone_details : dict | None
-            Same structure for clone PVCs.
+            Same structure for clone PVCs, with optional ``snap_name`` key.
         extra_details : dict | None
             Any additional PVC sets (e.g. new-node PVCs).
+        snapshot_details : dict | None
+            ``{snap_name: {"pvc_name": parent_pvc}}`` for parent PVC lookup.
         """
         all_entries = []
         for label, details in [("pvc", pvc_details),
@@ -789,21 +793,55 @@ class K8sUtils:
             for name, info in details.items():
                 job = info.get("job_name") or "N/A"
                 vol_handle = self.get_pvc_volume_handle(name)
-                all_entries.append((job, name or "N/A", vol_handle or "N/A", label))
+                storage_node = info.get("node_id", "N/A") or "N/A"
+                sc = info.get("storage_class", "N/A") or "N/A"
+                snap = info.get("snap_name", "") or ""
+                parent_pvc = ""
+                if snap and snapshot_details:
+                    parent_pvc = snapshot_details.get(snap, {}).get("pvc_name", "")
+
+                # Resolve FIO pod's K8s node
+                fio_node = "N/A"
+                if job and job != "N/A":
+                    try:
+                        pod = self.get_job_pod_name(job)
+                        if pod:
+                            fio_node = self.get_pod_node_name(pod) or "N/A"
+                    except Exception:
+                        pass
+
+                all_entries.append({
+                    "type": label,
+                    "name": name or "N/A",
+                    "job": job,
+                    "lvol_id": vol_handle or "N/A",
+                    "storage_node": storage_node,
+                    "storage_class": sc,
+                    "snap_name": snap,
+                    "parent_pvc": parent_pvc,
+                    "fio_k8s_node": fio_node,
+                })
 
         if not all_entries:
             return
 
-        self.logger.info("=" * 120)
-        self.logger.info("FIO Job → PVC → Lvol Mapping")
-        self.logger.info("-" * 120)
+        self.logger.info("=" * 180)
+        self.logger.info("FIO Job → PVC/Clone → Lvol → Worker Mapping")
+        self.logger.info("-" * 180)
         self.logger.info(
-            f"{'FIO Job':<40} {'PVC':<40} {'Lvol ID (volumeHandle)':<42} {'Type':<8}"
+            f"{'FIO Job':<30} {'PVC/Clone':<25} {'Lvol ID':<40} "
+            f"{'Storage Node':<40} {'FIO K8s Node':<20} {'SC':<28} "
+            f"{'Snapshot':<20} {'Parent PVC':<25} {'Type':<6}"
         )
-        self.logger.info("-" * 120)
-        for job, pvc, handle, typ in all_entries:
-            self.logger.info(f"{job:<40} {pvc:<40} {handle:<42} {typ:<8}")
-        self.logger.info("=" * 120)
+        self.logger.info("-" * 180)
+        for e in all_entries:
+            self.logger.info(
+                f"{e['job']:<30} {e['name']:<25} {e['lvol_id']:<40} "
+                f"{e['storage_node']:<40} {e['fio_k8s_node']:<20} {e['storage_class']:<28} "
+                f"{e['snap_name']:<20} {e['parent_pvc']:<25} {e['type']:<6}"
+            )
+        self.logger.info("=" * 180)
+        return all_entries
 
     # ── VolumeSnapshot operations ────────────────────────────────────────────
 
@@ -1066,6 +1104,16 @@ class K8sUtils:
         out, _ = self._exec_kubectl(
             f"kubectl get pods -n {ns} --selector=job-name={job_name} "
             f"--no-headers -o custom-columns=:metadata.name | head -1",
+            supress_logs=True,
+        )
+        return out.strip()
+
+    def get_pod_node_name(self, pod_name: str, namespace: str = None) -> str:
+        """Return the K8s node hostname where a pod is/was scheduled."""
+        ns = namespace or self.namespace
+        out, _ = self._exec_kubectl(
+            f"kubectl get pod {pod_name} -n {ns} "
+            f"-o jsonpath='{{.spec.nodeName}}' 2>/dev/null || true",
             supress_logs=True,
         )
         return out.strip()
@@ -1920,20 +1968,17 @@ class K8sSbcliUtils:
         ns = self.k8s.namespace
 
         yaml_content = (
-            f"apiVersion: simplyblock.simplyblock.io/v1alpha1\n"
-            f"kind: SimplyBlockPool\n"
+            f"apiVersion: storage.simplyblock.io/v1alpha1\n"
+            f"kind: Pool\n"
             f"metadata:\n"
             f"  name: {k8s_resource_name}\n"
             f"  namespace: {ns}\n"
             f"spec:\n"
-            f"  capacityLimit: 100Gi\n"
             f"  clusterName: {cluster_name}\n"
-            f"  name: {pool_name}\n"
         )
 
         self.logger.info(
-            f"[pool] No pools found — creating '{pool_name}' via kubectl apply "
-            f"(cluster={cluster_name}, resource={k8s_resource_name})"
+            f"[pool] No pools found — creating '{pool_name}' (cluster={cluster_name}) via kubectl apply"
         )
         yaml_escaped = yaml_content.replace("'", "'\\''")
         self.k8s._exec_kubectl(f"echo '{yaml_escaped}' | kubectl apply -f -")
@@ -1947,6 +1992,61 @@ class K8sSbcliUtils:
                 return actual
             sleep_n_sec(5)
         self.logger.warning("[pool] Pool not confirmed after kubectl apply")
+        return pool_name
+
+    def ensure_pool_exists(self, pool_name, cluster_id=None, encryption=False):
+        """Verify a specific pool exists; create it via kubectl if missing.
+
+        Unlike ``add_storage_pool`` (which reuses *any* existing pool), this
+        method checks for a pool with exactly *pool_name* and only creates
+        it when that specific pool is absent.
+
+        Returns the pool name.
+        """
+        existing = self.list_storage_pools()
+        if pool_name in existing:
+            self.logger.info(f"[pool] Pool '{pool_name}' already exists")
+            return pool_name
+
+        # Pool does not exist — create it
+        cid = cluster_id or self.cluster_id
+        cluster_details = self.get_cluster_details(cluster_id=cid)
+        cluster_name = cluster_details.get("name") or cluster_details.get("Name", cid)
+
+        ns = self.k8s.namespace
+        sc_params = ""
+        if encryption:
+            sc_params = (
+                "    storageClassParameters:\n"
+                "      encryption: true\n"
+            )
+
+        yaml_content = (
+            f"apiVersion: storage.simplyblock.io/v1alpha1\n"
+            f"kind: Pool\n"
+            f"metadata:\n"
+            f"  name: {pool_name}\n"
+            f"  namespace: {ns}\n"
+            f"spec:\n"
+            f"  clusterName: {cluster_name}\n"
+            f"{sc_params}"
+        )
+
+        self.logger.info(
+            f"[pool] Pool '{pool_name}' not found — creating "
+            f"(cluster={cluster_name}, encryption={encryption}) via kubectl apply"
+        )
+        yaml_escaped = yaml_content.replace("'", "'\\''")
+        self.k8s._exec_kubectl(f"echo '{yaml_escaped}' | kubectl apply -f -")
+
+        # Wait up to 90s for the pool to become visible in sbcli
+        for _ in range(18):
+            pools = self.list_storage_pools()
+            if pool_name in pools:
+                self.logger.info(f"[pool] Pool '{pool_name}' is ready")
+                return pool_name
+            sleep_n_sec(5)
+        self.logger.warning(f"[pool] Pool '{pool_name}' not confirmed after kubectl apply")
         return pool_name
 
     def add_host_to_pool(self, pool_id, host_nqn):
@@ -1966,10 +2066,35 @@ class K8sSbcliUtils:
         return out
 
     def delete_storage_pool(self, pool_name):
-        self.logger.info(f"[pool] K8s mode: skipping delete of pool '{pool_name}'")
+        """Delete a storage pool by removing its K8s CRD resource."""
+        self.logger.info(f"[pool] Deleting pool CRD '{pool_name}'")
+        ns = self.k8s.namespace
+        self.k8s._exec_kubectl(
+            f"kubectl delete pools {pool_name} -n {ns} "
+            f"--timeout=60s 2>/dev/null || true"
+        )
+        # Wait for pool to disappear from sbcli
+        for _ in range(12):
+            if not self.list_storage_pools():
+                self.logger.info(f"[pool] Pool '{pool_name}' deleted")
+                return
+            sleep_n_sec(5)
+        self.logger.warning(f"[pool] Pool '{pool_name}' may not be fully removed")
 
     def delete_all_storage_pools(self):
-        self.logger.info("[pool] K8s mode: skipping delete_all_storage_pools")
+        """Delete all storage pool CRD resources."""
+        ns = self.k8s.namespace
+        out, _ = self.k8s._exec_kubectl(
+            f"kubectl get pools -n {ns} --no-headers "
+            f"-o custom-columns=NAME:.metadata.name 2>/dev/null || true"
+        )
+        resources = [r.strip() for r in out.strip().splitlines() if r.strip()]
+        for res in resources:
+            self.logger.info(f"[pool] Deleting pool CRD '{res}'")
+            self.k8s._exec_kubectl(
+                f"kubectl delete pools {res} -n {ns} "
+                f"--timeout=60s 2>/dev/null || true"
+            )
 
     # ── cluster methods ──────────────────────────────────────────────────────
 

@@ -14,20 +14,20 @@ helm uninstall spdk-csi -n $NAMESPACE 2>/dev/null || true
 
 echo "=== Phase 2: Patch finalizers and delete CRs ==="
 RESOURCES=(
-  "simplyblockpool.simplyblock.simplyblock.io simplyblock-pool"
-  "simplyblockpool.simplyblock.simplyblock.io simplyblock-pool2"
-  "simplyblocklvol.simplyblock.simplyblock.io simplyblock-lvol"
-  "simplyblocktask.simplyblock.simplyblock.io simplyblock-task"
-  "simplyblockdevices.simplyblock.simplyblock.io simplyblock-devices"
-  "simplyblockdevices.simplyblock.simplyblock.io simplyblock-device-action"
-  "simplyblockstoragenodes.simplyblock.simplyblock.io simplyblock-node"
-  "simplyblockstoragenodes.simplyblock.simplyblock.io simplyblock-node2"
-  "simplyblockstoragenodes.simplyblock.simplyblock.io simplyblock-node-action"
-  "simplyblockstorageclusters.simplyblock.simplyblock.io simplyblock-cluster"
-  "simplyblockstorageclusters.simplyblock.simplyblock.io simplyblock-cluster2"
-  "simplyblockstorageclusters.simplyblock.simplyblock.io simplyblock-cluster-activate"
-  "simplyblocksnapshotreplications.simplyblock.simplyblock.io simplyblock-snap-replication"
-  "simplyblocksnapshotreplications.simplyblock.simplyblock.io simplyblock-snap-replication-failback"
+  "simplyblockpool.storage.simplyblock.io simplyblock-pool"
+  "simplyblockpool.storage.simplyblock.io simplyblock-pool2"
+  "simplyblocklvol.storage.simplyblock.io simplyblock-lvol"
+  "simplyblocktask.storage.simplyblock.io simplyblock-task"
+  "simplyblockdevices.storage.simplyblock.io simplyblock-devices"
+  "simplyblockdevices.storage.simplyblock.io simplyblock-device-action"
+  "simplyblockstoragenodes.storage.simplyblock.io simplyblock-node"
+  "simplyblockstoragenodes.storage.simplyblock.io simplyblock-node2"
+  "simplyblockstoragenodes.storage.simplyblock.io simplyblock-node-action"
+  "simplyblockstorageclusters.storage.simplyblock.io simplyblock-cluster"
+  "simplyblockstorageclusters.storage.simplyblock.io simplyblock-cluster2"
+  "simplyblockstorageclusters.storage.simplyblock.io simplyblock-cluster-activate"
+  "simplyblocksnapshotreplications.storage.simplyblock.io simplyblock-snap-replication"
+  "simplyblocksnapshotreplications.storage.simplyblock.io simplyblock-snap-replication-failback"
   "pool.storage.simplyblock.io simplyblock-pool"
   "pool.storage.simplyblock.io simplyblock-pool2"
   "lvol.storage.simplyblock.io simplyblock-lvol"
@@ -62,6 +62,32 @@ patch_and_delete_crs() {
   done
 }
 patch_and_delete_crs
+
+# Dynamic catch-all: patch finalizers and delete ALL CRs of each type
+# (handles resources not in the hardcoded list, e.g. encryption-pool)
+echo "Cleaning up any remaining CRs..."
+for CR_TYPE in \
+  "simplyblockpool.storage.simplyblock.io" \
+  "simplyblocklvol.storage.simplyblock.io" \
+  "simplyblocktask.storage.simplyblock.io" \
+  "simplyblockdevices.storage.simplyblock.io" \
+  "simplyblockstoragenodes.storage.simplyblock.io" \
+  "simplyblockstorageclusters.storage.simplyblock.io" \
+  "simplyblocksnapshotreplications.storage.simplyblock.io" \
+  "pool.storage.simplyblock.io" \
+  "lvol.storage.simplyblock.io" \
+  "task.storage.simplyblock.io" \
+  "devices.storage.simplyblock.io" \
+  "storagenodes.storage.simplyblock.io" \
+  "storageclusters.storage.simplyblock.io" \
+  "snapshotreplications.storage.simplyblock.io"; do
+  for CR_NAME in $(kubectl -n $NAMESPACE get "$CR_TYPE" --no-headers -o custom-columns=:metadata.name 2>/dev/null); do
+    kubectl -n $NAMESPACE patch "$CR_TYPE" "$CR_NAME" \
+      --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
+    kubectl -n $NAMESPACE delete "$CR_TYPE" "$CR_NAME" \
+      --ignore-not-found --wait=false 2>/dev/null || true
+  done
+done
 
 echo "=== Phase 3a: Delete VolumeSnapshots & VolumeSnapshotContents ==="
 # Delete snapshots first (they block PVC deletion)
@@ -157,10 +183,10 @@ kubectl -n $NAMESPACE get all 2>/dev/null || echo "No resources found"
 echo ""
 echo "CRDs:"
 for CR_TYPE in \
-  "simplyblockpool.simplyblock.simplyblock.io" \
-  "simplyblocklvol.simplyblock.simplyblock.io" \
-  "simplyblockstoragenodes.simplyblock.simplyblock.io" \
-  "simplyblockstorageclusters.simplyblock.simplyblock.io" \
+  "simplyblockpool.storage.simplyblock.io" \
+  "simplyblocklvol.storage.simplyblock.io" \
+  "simplyblockstoragenodes.storage.simplyblock.io" \
+  "simplyblockstorageclusters.storage.simplyblock.io" \
   "pool.storage.simplyblock.io" \
   "lvol.storage.simplyblock.io" \
   "storagenodes.storage.simplyblock.io" \

@@ -339,10 +339,11 @@ def list(all=False, cluster_id=None, with_details=False):
         if m.is_active():
             migrating_lvols.append(m.lvol_id)
     data = []
+    all_lvols = db_controller.get_lvols()
     for snap in snaps:
         logger.debug(snap)
         clones = []
-        for lvol in db_controller.get_lvols():
+        for lvol in all_lvols:
             if lvol.cloned_from_snap and lvol.cloned_from_snap == snap.get_id():
                 clones.append(lvol.get_id())
         d = {
@@ -736,21 +737,17 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
             logger.error(msg)
             return False, msg
 
-    lvol.write_to_db(db_controller.kv_store)
-
     if snap.lvol.crypto_bdev:
         with create_kms_connection(cluster) as kms:
             try:
-                key1, key2 = kms.get_data_encryption_keys(snap.lvol.pool_uuid, snap.lvol.crypto_bdev)
-                kms.import_data_encryption_keys(lvol.pool_uuid, lvol.crypto_bdev, (key1, key2))
-                if not cluster.hashicorp_vault_settings:
-                    lvol.crypto_key1, lvol.crypto_key2 = key1, key2
-                    lvol.write_to_db(db_controller.kv_store)
+                key1, key2 = kms.get_data_encryption_keys(snap.lvol)
+                kms.import_data_encryption_keys(lvol, (key1, key2))
             except KMSException:
                 msg = f"Failed to copy encryption keys for clone {lvol.crypto_bdev}"
                 logger.exception(msg)
-                lvol.remove(db_controller.kv_store)
                 return False, msg
+
+    lvol.write_to_db(db_controller.kv_store)
 
     if lvol.ha_type == "single":
         lvol_bdev, error = lvol_controller.add_lvol_on_node(lvol, snode)

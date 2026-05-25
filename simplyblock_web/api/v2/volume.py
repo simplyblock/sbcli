@@ -24,9 +24,6 @@ def list(request: Request, cluster: Cluster, pool: StoragePool) -> List[VolumeDT
     data = []
     for lvol in db.get_lvols_by_pool_id(pool.get_id()):
         stat_obj = None
-        ret = db.get_lvol_stats(lvol, 1)
-        if ret:
-            stat_obj = ret[0]
         data.append(VolumeDTO.from_model(lvol, request, cluster.get_id(), stat_obj))
     return data
 
@@ -140,9 +137,6 @@ Volume = Annotated[LVol, Depends(_lookup_volume)]
 @instance_api.get('/', name='clusters:storage-pools:volumes:detail')
 def get(request: Request, cluster: Cluster, pool: StoragePool, volume: Volume) -> VolumeDTO:
     stat_obj = None
-    ret = db.get_lvol_stats(volume, 1)
-    if ret:
-        stat_obj = ret[0]
     rep_info = lvol_controller.get_replication_info(volume.get_id())
     return VolumeDTO.from_model(volume, request, cluster.get_id(), stat_obj, rep_info)
 
@@ -249,7 +243,7 @@ def replication_stop(cluster: Cluster, pool: StoragePool, volume: Volume) -> Res
 def connect(cluster: Cluster, pool: StoragePool, volume: Volume, host_nqn: Optional[str] = None):
     details, err = lvol_controller.connect_lvol(volume.get_id(), host_nqn=host_nqn)
     if err:
-        raise ValueError(err)
+        return Response(status_code=404, content=err)
     return details
 
 

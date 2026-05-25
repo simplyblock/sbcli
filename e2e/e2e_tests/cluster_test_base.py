@@ -66,7 +66,7 @@ class TestClusterBase:
         self.npcs = kwargs.get("npcs", 1)
         self.bs = kwargs.get("bs", 4096)
         self.chunk_bs = kwargs.get("chunk_bs", 4096)
-        self.pool_name = "test_pool"
+        self.pool_name = "testpool"
         self.lvol_name = f"test_lvl_{generate_random_sequence(4)}"
         self.mount_path = "/mnt/test_location"
         _skip_nfs = os.environ.get("SKIP_NFS", "").strip() in ("1", "true")
