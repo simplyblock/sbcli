@@ -686,6 +686,73 @@ jobs:
             done <<< "${CONTAINERS}"
           done
 
+      - name: Collect Graylog/OpenSearch logs
+        if: always()
+        timeout-minutes: 240
+        shell: bash
+        run: |
+          set +e
+          [ -z "${TEST_START_EPOCH:-}" ] || [ -z "${TEST_END_EPOCH:-}" ] && exit 0
+          ELAPSED=$((TEST_END_EPOCH - TEST_START_EPOCH))
+          [ "${ELAPSED}" -le 0 ] && exit 0
+
+          WINDOW_START=$((TEST_START_EPOCH - 3600))
+          WINDOW_END=$((TEST_END_EPOCH + 3600))
+
+          MGMT_IP="$(echo "${MNODES}" | awk '{print $1}')"
+          SSH_OPTS=(-i "${KEY_PATH}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10)
+
+          OUTPUT_DIR=""
+          if [ -n "${RUN_BASE_DIR:-}" ] && [ -d "${RUN_BASE_DIR}" ]; then
+            OUTPUT_DIR="${RUN_BASE_DIR}/graylog_collected"
+          else
+            OUTPUT_DIR="${NFS_MOUNTPOINT:-/mnt/nfs_share}/graylog_collected-$(date -u '+%Y%m%d-%H%M%S')"
+          fi
+          mkdir -p "${OUTPUT_DIR}" 2>/dev/null || true
+
+          epoch_to_iso() {
+            python3 -c "from datetime import datetime,timezone; print(datetime.fromtimestamp($1,tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%S'))"
+          }
+
+          CHUNK=0; CURRENT=${WINDOW_START}
+          while [ ${CURRENT} -lt ${WINDOW_END} ]; do
+            CHUNK=$((CHUNK + 1))
+            CHUNK_END=$((CURRENT + 3600))
+            [ ${CHUNK_END} -gt ${WINDOW_END} ] && CHUNK_END=${WINDOW_END}
+            CHUNK_MINUTES=$(( ((CHUNK_END - CURRENT) + 59) / 60 ))
+            CHUNK_ISO=$(epoch_to_iso ${CURRENT})
+            REMOTE_OUTPUT_DIR="/tmp/graylog_collect_chunk${CHUNK}"
+            ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" "mkdir -p '${REMOTE_OUTPUT_DIR}'" 2>/dev/null || true
+            ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" \
+              "python3 -m simplyblock_core.scripts.collect_logs \
+                '${CHUNK_ISO}' '${CHUNK_MINUTES}' \
+                --mode docker \
+                --output-dir '${REMOTE_OUTPUT_DIR}' \
+                ${CLUSTER_ID:+--cluster-id '${CLUSTER_ID}'}" \
+            2>&1 || {
+              ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" \
+                "python3 -m simplyblock_core.scripts.collect_logs \
+                  '${CHUNK_ISO}' '${CHUNK_MINUTES}' \
+                  --mode docker --use-opensearch \
+                  --output-dir '${REMOTE_OUTPUT_DIR}' \
+                  ${CLUSTER_ID:+--cluster-id '${CLUSTER_ID}'}" \
+              2>&1 || true
+            }
+            TARBALLS=$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" \
+              "find '${REMOTE_OUTPUT_DIR}' -name '*.tar.gz' -type f 2>/dev/null") || true
+            if [ -n "${TARBALLS}" ]; then
+              for TB in ${TARBALLS}; do
+                scp "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}:${TB}" "${OUTPUT_DIR}/$(basename ${TB})" 2>&1 || true
+              done
+              for TB_FILE in "${OUTPUT_DIR}"/*.tar.gz; do
+                [ -f "${TB_FILE}" ] && tar -xzf "${TB_FILE}" -C "${OUTPUT_DIR}/" 2>/dev/null || true
+              done
+            fi
+            ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" "rm -rf '${REMOTE_OUTPUT_DIR}'" 2>/dev/null || true
+            CURRENT=${CHUNK_END}
+          done
+          echo "=== Graylog collection complete (${CHUNK} chunks): ${OUTPUT_DIR} ==="
+
       # ============================================================
       # COLLECT TIMING ARTIFACTS
       # ============================================================
@@ -694,6 +761,8 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
+          # Clean any stale artifacts from previous runs on this self-hosted runner
+          rm -rf monitoring_results/
           artifact_dir="monitoring_results/${TEST_CLASS}"
           mkdir -p "${artifact_dir}"
           find sbcli/e2e/logs -name '*timing*.json' -exec cp {} "${artifact_dir}/" \; 2>/dev/null || true
@@ -743,6 +812,10 @@ jobs:
     runs-on: [self-hosted]
 
     steps:
+      - name: Clean stale results from previous runs
+        shell: bash
+        run: rm -rf all_results/ monitoring_results/
+
       - name: Download all test artifacts
         uses: actions/download-artifact@v4
         with:
@@ -826,68 +899,72 @@ jobs:
                   for p in t["phases"]:
                       lines.append(f"| {t['name']} | {p.get('name','?')} | {p.get('duration_sec',0):.1f} | {p.get('status','?')} |")
 
-          if len(tests) == 1:
-              # Single test: show detailed per-iteration and per-lvol timing
-              test_dir = None
-              for d in sorted(results_dir.iterdir()):
-                  if d.is_dir() and (d / "meta.json").exists():
-                      test_dir = d
-                      break
-              if test_dir:
-                  pngs = sorted(test_dir.glob("*.png"))
-                  if pngs:
-                      lines.append(f"\n### Test Graphs ({tests[0]['name']})\n")
-                      lines.append(f"*{len(pngs)} graph(s) saved — download the "
-                                   f"artifacts to view.*\n")
+          # Per-test detail: show graphs, per-iteration timing, per-lvol timing
+          # for every test that has phase data (not just single-test runs)
+          test_dirs = {}
+          for d in sorted(results_dir.iterdir()):
+              if d.is_dir() and (d / "meta.json").exists():
+                  meta = json.loads((d / "meta.json").read_text())
+                  test_dirs[meta.get("test_class", d.name)] = d
 
-                  # Render per-iteration detail from timing JSON
-                  t = tests[0]
-                  if t["phases"]:
-                      lines.append("\n### Per-Iteration Timing\n")
+          for t in tests:
+              if not t["phases"] and t["status"] != "success":
+                  continue  # skip failed tests with no data
+              td = test_dirs.get(t["name"])
+              if not td:
+                  continue
+
+              pngs = sorted(td.glob("*.png"))
+              if pngs:
+                  lines.append(f"\n### Test Graphs: {t['name']}\n")
+                  lines.append(f"*{len(pngs)} graph(s) saved — download the "
+                               f"artifacts to view.*\n")
+
+              if t["phases"]:
+                  lines.append(f"\n### Per-Phase Timing: {t['name']}\n")
+                  lines.append("```")
+                  max_dur = max((p.get("duration_sec", 0) for p in t["phases"]), default=1) or 1
+                  bar_w = 35
+                  for p in t["phases"]:
+                      dur = p.get("duration_sec", 0)
+                      det = p.get("details", {})
+                      avg = det.get("avg_delete_sec", 0)
+                      bar_len = int(dur / max_dur * bar_w)
+                      bar = "#" * bar_len + "." * (bar_w - bar_len)
+                      label = p.get("name", "?")[:18].ljust(18)
+                      extra = f"  avg={avg:.1f}s/lvol" if avg else ""
+                      lines.append(f"  {label} |{bar}| {dur:.0f}s{extra}")
+                  lines.append("```")
+
+                  # Per-lvol timing text chart (first iteration with per-lvol data)
+                  first_with_lvol = None
+                  for p in t["phases"]:
+                      det = p.get("details", {})
+                      if det.get("per_lvol_times"):
+                          first_with_lvol = p
+                          break
+                  if first_with_lvol:
+                      per_lvol = first_with_lvol["details"]["per_lvol_times"]
+                      lines.append(f"\n### Per-Lvol Delete Time: {t['name']} ({first_with_lvol['name']})\n")
                       lines.append("```")
-                      max_dur = max((p.get("duration_sec", 0) for p in t["phases"]), default=1) or 1
-                      bar_w = 35
-                      for p in t["phases"]:
-                          dur = p.get("duration_sec", 0)
-                          det = p.get("details", {})
-                          avg = det.get("avg_delete_sec", 0)
-                          bar_len = int(dur / max_dur * bar_w)
-                          bar = "█" * bar_len + "░" * (bar_w - bar_len)
-                          label = p.get("name", "?")[:18].ljust(18)
-                          extra = f"  avg={avg:.1f}s/lvol" if avg else ""
-                          lines.append(f"  {label} |{bar}| {dur:.0f}s{extra}")
+                      max_t = max((lv["delete_sec"] for lv in per_lvol), default=1) or 1
+                      step = max(1, len(per_lvol) // 25)
+                      for i, lv in enumerate(per_lvol):
+                          if i % step == 0 or i == len(per_lvol) - 1:
+                              bar_len = int(lv["delete_sec"] / max_t * 30)
+                              bar = "#" * bar_len + "." * (30 - bar_len)
+                              lines.append(f"  lvol {lv['index']:>3} |{bar}| {lv['delete_sec']:.1f}s")
                       lines.append("```")
+                      times = [lv["delete_sec"] for lv in per_lvol]
+                      lines.append(
+                          f"\n**Stats:** min={min(times):.1f}s  "
+                          f"avg={sum(times)/len(times):.1f}s  "
+                          f"max={max(times):.1f}s  "
+                          f"count={len(times)}\n"
+                      )
 
-                      # Per-lvol timing text chart (first iteration sample)
-                      first_with_lvol = None
-                      for p in t["phases"]:
-                          det = p.get("details", {})
-                          if det.get("per_lvol_times"):
-                              first_with_lvol = p
-                              break
-                      if first_with_lvol:
-                          per_lvol = first_with_lvol["details"]["per_lvol_times"]
-                          lines.append(f"\n### Per-Lvol Delete Time ({first_with_lvol['name']})\n")
-                          lines.append("```")
-                          max_t = max((t["delete_sec"] for t in per_lvol), default=1) or 1
-                          # Show every Nth lvol to fit summary
-                          step = max(1, len(per_lvol) // 25)
-                          for i, lv in enumerate(per_lvol):
-                              if i % step == 0 or i == len(per_lvol) - 1:
-                                  bar_len = int(lv["delete_sec"] / max_t * 30)
-                                  bar = "█" * bar_len + "░" * (30 - bar_len)
-                                  lines.append(f"  lvol {lv['index']:>3} |{bar}| {lv['delete_sec']:.1f}s")
-                          lines.append("```")
-                          times = [t["delete_sec"] for t in per_lvol]
-                          lines.append(
-                              f"\n**Stats:** min={min(times):.1f}s  "
-                              f"avg={sum(times)/len(times):.1f}s  "
-                              f"max={max(times):.1f}s  "
-                              f"count={len(times)}\n"
-                          )
-
-                  if not pngs and not t.get("phases"):
-                      lines.append("\n*No graphs or detailed timing data generated.*\n")
+              if not pngs and not t.get("phases"):
+                  lines.append(f"\n*No graphs or detailed timing data for {t['name']}.*\n")
 
           # Generate comparison bar chart (saved to file in artifacts + NFS)
           if len(tests) > 1:
@@ -941,7 +1018,8 @@ jobs:
           lines.append(f"| Location | Path |")
           lines.append(f"|----------|------|")
           if nfs_base:
-              lines.append(f"| NFS | `{nfs_base}/monitoring-suite-docker/run-{run_id}-*` |")
+              lines.append(f"| NFS results | `{nfs_base}/monitoring-suite-docker/run-{run_id}-*` |")
+              lines.append(f"| Graylog logs | `<run_dir>/graylog_collected/` (on NFS) |")
           if run_url:
               lines.append(f"| GitHub | [Actions Run]({run_url}) |")
           lines.append(f"| Artifacts | Download `monitoring-*-{run_id}` from the Actions run |")
