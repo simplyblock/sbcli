@@ -480,8 +480,8 @@ class SbcliUtils:
             body["max_namespace_per_subsys"] = int(max_namespace_per_subsys)
 
         if namespace:
-            # parent lvol id
-            body["namespace"] = namespace
+            # flag for auto-grouping into existing parent subsystem
+            body["namespaced"] = True
         
         self.post_request(api_url="/lvol", body=body, retry=retry)
 

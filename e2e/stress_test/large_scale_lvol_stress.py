@@ -473,14 +473,23 @@ class LargeScaleLvolDocker(_LargeScaleMixin, TestLvolHACluster):
             if not lvol_id:
                 self.logger.error(f"[create_parent] {name}: ID not found")
                 return
+            # Get the node_id so children can target the same node via host_id
+            node_id = None
+            try:
+                details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
+                if details:
+                    node_id = details[0].get("node_id")
+            except Exception as ex:
+                self.logger.warning(f"[create_parent] {name}: could not get node_id: {ex}")
             self._parent_registry[name] = {
                 "id": lvol_id,
+                "node_id": node_id,
                 "client": None,
                 "ctrl_dev": None,
                 "nqn": None,
                 "devices": [],
             }
-            self.logger.info(f"[create_parent] {name} -> {lvol_id}")
+            self.logger.info(f"[create_parent] {name} -> {lvol_id} (node={node_id})")
         except Exception as e:
             self.logger.error(f"[create_parent] {name} failed: {e}")
 
@@ -594,6 +603,7 @@ class LargeScaleLvolDocker(_LargeScaleMixin, TestLvolHACluster):
                     distr_npcs=self.npcs,
                     distr_bs=self.bs,
                     distr_chunk_bs=self.chunk_bs,
+                    host_id=pinfo.get("node_id"),
                     namespace=parent_id,
                     retry=3,
                 )

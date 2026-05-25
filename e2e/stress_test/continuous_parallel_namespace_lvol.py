@@ -881,18 +881,33 @@ class TestParallelNamespaceLvolDocker(_ParallelNamespaceLvolBase):
             retry=1,
         ), ctx={"name": name})
         lvol_id = self._wait_lvol_id(name)
+        # Get the node_id so children can target the same node via host_id
+        node_id = None
+        try:
+            details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
+            if details:
+                node_id = details[0].get("node_id")
+        except Exception as ex:
+            self.logger.warning(f"[create_parent] {name}: could not get node_id: {ex}")
         with self._lock:
             self._parent_registry[name] = {
-                "id": lvol_id, "children": [], "snapshots": [],
+                "id": lvol_id, "node_id": node_id,
+                "children": [], "snapshots": [],
             }
             self._metrics["counts"]["parents_created"] += 1
         self._inc("attempts", "create_parent", 0)  # already counted
-        self.logger.info(f"[create_parent] {name} -> {lvol_id}")
+        self.logger.info(f"[create_parent] {name} -> {lvol_id} (node={node_id})")
 
     def _create_child_impl(self, params: dict):
         name = params["name"]
         parent_name = params["parent_name"]
         parent_id = params["parent_id"]
+        # Get host_id from parent registry so auto-grouping targets the right node
+        parent_node_id = None
+        with self._lock:
+            pinfo = self._parent_registry.get(parent_name)
+            if pinfo:
+                parent_node_id = pinfo.get("node_id")
         self._inc("attempts", "create_child")
         self._api_retry("create_child", lambda: self.sbcli_utils.add_lvol(
             lvol_name=name,
@@ -902,6 +917,7 @@ class TestParallelNamespaceLvolDocker(_ParallelNamespaceLvolBase):
             distr_npcs=self.npcs,
             distr_bs=self.bs,
             distr_chunk_bs=self.chunk_bs,
+            host_id=parent_node_id,
             namespace=parent_id,
             retry=1,
         ), ctx={"name": name, "parent": parent_name})
