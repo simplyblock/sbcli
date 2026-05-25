@@ -901,6 +901,14 @@ jobs:
           echo "TEST_END_HUMAN=$(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> "$GITHUB_ENV"
           echo "TEST_END_TIME=$(date +%s)" >> $GITHUB_ENV
 
+          # Log collection timeout: half the test runtime, minimum 30 minutes
+          if [ -n "${TEST_START_TIME:-}" ]; then
+            _elapsed=$(( $(date +%s) - TEST_START_TIME ))
+            LOG_COLLECT_TIMEOUT_MINS=$(( (_elapsed + 119) / 120 ))
+            [ "$LOG_COLLECT_TIMEOUT_MINS" -lt 30 ] && LOG_COLLECT_TIMEOUT_MINS=30
+            echo "LOG_COLLECT_TIMEOUT_MINS=$LOG_COLLECT_TIMEOUT_MINS" >> "$GITHUB_ENV"
+          fi
+
       # ============================================================
       # POST-TEST: LOG COLLECTION
       # ============================================================
@@ -913,7 +921,7 @@ jobs:
 
       - name: Collect Graylog/OpenSearch logs
         if: always()
-        timeout-minutes: 240
+        timeout-minutes: ${{ env.LOG_COLLECT_TIMEOUT_MINS || 240 }}
         run: |
           set +e
           NAMESPACE=simplyblock

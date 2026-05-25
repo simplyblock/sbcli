@@ -1350,9 +1350,14 @@ jobs:
           echo "TEST_TIME_MINS=$TEST_TIME_MINS" >> $GITHUB_ENV
           echo "TEST_TIME_SECS=$TEST_TIME_SECS" >> $GITHUB_ENV
 
+          # Log collection timeout: half the test runtime, minimum 30 minutes
+          LOG_COLLECT_TIMEOUT_MINS=$(( (TEST_TIME + 119) / 120 ))
+          [ "$LOG_COLLECT_TIMEOUT_MINS" -lt 30 ] && LOG_COLLECT_TIMEOUT_MINS=30
+          echo "LOG_COLLECT_TIMEOUT_MINS=$LOG_COLLECT_TIMEOUT_MINS" >> $GITHUB_ENV
+
       - name: Collect Graylog/OpenSearch logs
         if: always()
-        timeout-minutes: 240
+        timeout-minutes: ${{ env.LOG_COLLECT_TIMEOUT_MINS || 240 }}
         run: |
           set +e
           echo "=== Collecting Graylog/OpenSearch logs (per-hour chunks) ==="

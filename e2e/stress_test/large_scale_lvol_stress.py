@@ -326,6 +326,7 @@ class LargeScaleLvolDocker(_LargeScaleMixin, TestLvolHACluster):
         super().__init__(**kwargs)
         self.test_name = "large_scale_lvol_docker"
         self.fio_threads: list[threading.Thread] = []
+        self.sn_nodes: list[str] = []
 
         # parent_name → {id, client, ctrl_dev, nqn, devices: [dev_path]}
         self._parent_registry: dict[str, dict] = {}
