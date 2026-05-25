@@ -391,14 +391,23 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
 
         if ingress_host_source == "hostip":
             dns_name = dev_ip
-
-        _set_max_result_window(os_endpoint)
-
-        _add_graylog_input(graylog_endpoint, monitoring_secret)
-
-        _create_update_user(cluster.uuid, cluster.grafana_endpoint, monitoring_secret, cluster.secret)
     else:
         assert False, "Unreachable"
+
+    # Monitoring stack configuration (OpenSearch max_result_window, Graylog
+    # GELF input + JSON extractor, Grafana admin user). Must run after the
+    # mode-specific deploy block has produced a reachable graylog endpoint.
+    # Pre-KMS (commit 7700b866) this lived in a single shared block after
+    # the if/elif; the KMS refactor accidentally moved it into the
+    # kubernetes branch only, which silently left every docker-swarm
+    # deployment without a Graylog input — services were emitting GELF on
+    # port 12201 but graylog was dropping them on the floor because no
+    # input was configured. Restore the shared placement so both modes
+    # provision monitoring.
+    if not disable_monitoring:
+        _set_max_result_window(os_endpoint)
+        _add_graylog_input(graylog_endpoint, monitoring_secret)
+        _create_update_user(cluster.uuid, cluster.grafana_endpoint, monitoring_secret, cluster.secret)
 
     cluster.db_connection = db_connection  # type: ignore[assignment]
     cluster.status = Cluster.STATUS_UNREADY

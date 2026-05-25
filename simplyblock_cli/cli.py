@@ -123,7 +123,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('cluster_id', help='The cluster id.', type=str)
         subcommand.add_argument('node_addr', help='Address of storage node api to add, like <node-ip>:5000.', type=str)
         subcommand.add_argument('ifname', help='The management interface name.', type=str)
-        argument = subcommand.add_argument('--journal-partition', help='**Deprecated:** use `--enable-journal-device` instead.<br><br> 1: Auto-create small partitions for journal on nvme devices. 0: use a separate (the smallest) nvme device of the node for journal. The journal needs a maximum of 3 percent of total available raw disk space. Default: `1`.', type=int, dest='partitions', choices=[0,1,])
+        argument = subcommand.add_argument('--journal-partition', help='**Deprecated since: 26.1** Replaced by: --enable-journal-device\n\n1: Auto-create small partitions for journal on nvme devices. 0: use a separate (the smallest) nvme device of the node for journal. The journal needs a maximum of 3 percent of total available raw disk space. Default: `1`.', type=int, dest='partitions', choices=[0,1,])
         argument = subcommand.add_argument('--enable-journal-device', help='Enables the use of a separate (the smallest) NVMe device of the node for the journal. Otherwise, the journal uses a maximum of 3%% of total available raw disk space across all NVMe devices.', default=False, dest='enable_journal_device', action='store_true')
         argument = subcommand.add_argument('--format-4k', help='Force format nvme devices with 4K.', dest='format_4k', action='store_true')
         if self.developer_mode:
@@ -368,10 +368,8 @@ class CLIWrapper(CLIWrapperBase):
         self.init_cluster__update_fabric(subparser)
         self.init_cluster__check(subparser)
         self.init_cluster__update(subparser)
-        if self.developer_mode:
-            self.init_cluster__graceful_shutdown(subparser)
-        if self.developer_mode:
-            self.init_cluster__graceful_startup(subparser)
+        self.init_cluster__graceful_shutdown(subparser)
+        self.init_cluster__graceful_startup(subparser)
         self.init_cluster__list_tasks(subparser)
         self.init_cluster__cancel_task(subparser)
         self.init_cluster__get_subtasks(subparser)
@@ -624,6 +622,8 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--max-size', help='The logical volume max size. Default: `1000T`.', type=size_type(), default='1000T', dest='max_size')
         argument = subcommand.add_argument('--host-id', help='The primary storage node id or hostname.', type=str, dest='host_id')
         argument = subcommand.add_argument('--encrypt', help='Use inline data encryption and decryption on the logical volume.', dest='encrypt', action='store_true')
+        argument = subcommand.add_argument('--crypto-key1', help='**Deprecated since: 26.2** Do not use this parameter: This has been replaced by internal or external KMS support. See https://docs.simplyblock.io/latest/usage/baremetal/encrypting/\n\nThe hex value of key1 to be used for logical volume encryption.', type=str, dest='crypto_key1')
+        argument = subcommand.add_argument('--crypto-key2', help='**Deprecated since: 26.2** Do not use this parameter: This has been replaced by internal or external KMS support. See https://docs.simplyblock.io/latest/usage/baremetal/encrypting/\n\nThe hex value of key2 to be used for logical volume encryption.', type=str, dest='crypto_key2')
         argument = subcommand.add_argument('--max-rw-iops', help='Maximum Read Write IO Per Second.', type=int, dest='max_rw_iops')
         argument = subcommand.add_argument('--max-rw-mbytes', help='Maximum Read Write Megabytes Per Second.', type=int, dest='max_rw_mbytes')
         argument = subcommand.add_argument('--max-r-mbytes', help='Maximum Read Megabytes Per Second.', type=int, dest='max_r_mbytes')
@@ -1092,6 +1092,8 @@ class CLIWrapper(CLIWrapperBase):
                         args.id_device_by_nqn = False
                         args.max_snap = 5000
                         args.spdk_proxy_image = None
+                    if getattr(args, 'partitions', None) is not None:
+                        args = self.migrate_journal_partition(args)
                     ret = self.storage_node__add_node(sub_command, args)
                 elif sub_command in ['delete']:
                     ret = self.storage_node__delete(sub_command, args)
@@ -1266,17 +1268,9 @@ class CLIWrapper(CLIWrapperBase):
                 elif sub_command in ['update']:
                     ret = self.cluster__update(sub_command, args)
                 elif sub_command in ['graceful-shutdown']:
-                    if not self.developer_mode:
-                        print("This command is private.")
-                        ret = False
-                    else:
-                        ret = self.cluster__graceful_shutdown(sub_command, args)
+                    ret = self.cluster__graceful_shutdown(sub_command, args)
                 elif sub_command in ['graceful-startup']:
-                    if not self.developer_mode:
-                        print("This command is private.")
-                        ret = False
-                    else:
-                        ret = self.cluster__graceful_startup(sub_command, args)
+                    ret = self.cluster__graceful_startup(sub_command, args)
                 elif sub_command in ['list-tasks']:
                     ret = self.cluster__list_tasks(sub_command, args)
                 elif sub_command in ['cancel-task']:
@@ -1304,6 +1298,10 @@ class CLIWrapper(CLIWrapperBase):
                     if not self.developer_mode:
                         args.distr_vuid = None
                         args.uid = None
+                    if getattr(args, 'crypto_key1', None) is not None:
+                        raise ValueError("Deprecated parameter '--crypto-key1' cannot be used: This has been replaced by internal or external KMS support. See https://docs.simplyblock.io/latest/usage/baremetal/encrypting/")
+                    if getattr(args, 'crypto_key2', None) is not None:
+                        raise ValueError("Deprecated parameter '--crypto-key2' cannot be used: This has been replaced by internal or external KMS support. See https://docs.simplyblock.io/latest/usage/baremetal/encrypting/")
                     ret = self.volume__add(sub_command, args)
                 elif sub_command in ['qos-set']:
                     ret = self.volume__qos_set(sub_command, args)

@@ -44,13 +44,30 @@ _HUBLVOL_MAX_ATTEMPTS = len(_HUBLVOL_RETRY_DELAYS_SEC)
 def _hublvol_verified_open(peer_node, primary_node):
     """Strict check of the peer's hublvol to ``primary_node``.
 
-    Returns True only if both:
+    Returns True only if all three hold:
       - bdev_nvme_controller_list(<hublvol_bdev_name>) returns a controller
         with at least one path whose ``state == "enabled"``;
+      - that enabled path is attached to one of ``primary_node``'s data-NIC
+        IPs (i.e. it actually points to the primary, not to a peer);
       - get_bdevs(<hublvol_bdev_name>n1) returns the namespace bdev (the
         bdev the lvolstore will spdk_bdev_open_ext on at takeover time).
 
-    On any RPC error the function returns False — we conservatively treat
+    The primary-IP requirement matters for the tertiary case: a tertiary's
+    hublvol bdev_nvme is a single multipath group containing paths to BOTH
+    the primary (ANA-optimized) and the secondary (ANA-non-optimized). When
+    the primary's data NICs go dark in a network_outage, the primary-pointing
+    controllers get destroyed by ``ctrlr_loss_timeout`` but the
+    secondary-pointing controllers stay ``enabled``. The earlier
+    ``any(state == "enabled")`` check would PASS spuriously, the port-allow
+    gate would unblock the primary's LVS port with the tert->pri leg still
+    down, and the next JC heartbeat would surface the cross-JM sync_id
+    divergence built up during the outage as a writer_conflict (incident
+    2026-05-22 19:31-19:32 LVS_7578: tertiary 5156755c had cntlid 1000+1001
+    enabled to secondary 2333e02a but no enabled path to primary 93abb06b
+    when port_allow fired ``Port allowed: 4442`` at 19:32:30.114; 2333e02a
+    went online->down at 19:32:36.400).
+
+    On any RPC error the function returns False -- we conservatively treat
     "couldn't verify" as "not open" so the port-allow gate keeps the port
     blocked instead of letting a transient management-side failure leak a
     half-open hublvol into a split-brain.
@@ -61,8 +78,24 @@ def _hublvol_verified_open(peer_node, primary_node):
         if not ctrlrs_resp:
             return False
         ctrlrs = ctrlrs_resp[0].get("ctrlrs", []) if isinstance(ctrlrs_resp, list) else []
-        if not any(ct.get("state") == "enabled" for ct in ctrlrs):
+
+        primary_ips = {
+            iface.ip4_address for iface in (primary_node.data_nics or [])
+            if iface.ip4_address
+        }
+        has_enabled_primary_path = False
+        for ct in ctrlrs:
+            if ct.get("state") != "enabled":
+                continue
+            attached = {ct.get("trid", {}).get("traddr")}
+            for alt in (ct.get("alternate_trids") or []):
+                attached.add(alt.get("traddr"))
+            if attached & primary_ips:
+                has_enabled_primary_path = True
+                break
+        if not has_enabled_primary_path:
             return False
+
         ns_name = primary_node.hublvol.bdev_name + "n1"
         bdev_resp = rpc.get_bdevs(ns_name)
         return bool(bdev_resp)

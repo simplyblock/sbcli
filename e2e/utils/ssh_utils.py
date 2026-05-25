@@ -1026,9 +1026,15 @@ class SshUtils:
         output_fmt  = f' --output-format={kwargs["output_format"]} ' if kwargs.get("output_format") else ''
         output_file = f" --output={kwargs['output_file']} " if kwargs.get("output_file") else ''
         iolog_base  = kwargs.get("iolog_file")
+        fio_log_base = kwargs.get("fio_log_file")
 
         iolog_opt   = f"--write_iolog={iolog_base}" if iolog_base else ""
         log_opt     = f"--log_avg_msec={log_avg_ms}" if log_avg_ms else ""
+        fio_log_opt = (
+            f"--write_bw_log={fio_log_base} "
+            f"--write_lat_log={fio_log_base} "
+            f"--write_iops_log={fio_log_base}"
+        ) if fio_log_base else ""
         latency = f" --max_latency={max_latency}" if use_latency else ""
 
         # Unique seed per FIO process to prevent identical IO patterns
@@ -1036,13 +1042,29 @@ class SshUtils:
         # which collides when multiple processes start simultaneously).
         randseed = kwargs.get("randseed", random.randint(1, 2**63))
 
+        # verify_backlog: required for rw/randrw + verify=md5 to avoid false
+        # err=84.  FIO's rand_seed PRNG is shared between writes and verify-
+        # reads; in rw modes the interleaving makes seeds unpredictable.
+        # Setting verify_backlog enables TD_F_VER_BACKLOG which bypasses the
+        # rand_seed check while still verifying data via MD5.  Auto-enable
+        # for mixed read-write workloads unless the caller explicitly opts out.
+        verify_backlog = kwargs.get("verify_backlog")
+        if verify_backlog is None and rw in ("rw", "randrw", "readwrite"):
+            verify_backlog = 4096
+        vbacklog_opt = f" --verify_backlog={verify_backlog}" if verify_backlog else ""
+
+        verify_backlog_batch = kwargs.get("verify_backlog_batch")
+        if verify_backlog_batch is None and verify_backlog:
+            verify_backlog_batch = 32
+        vbatch_opt = f" --verify_backlog_batch={verify_backlog_batch}" if verify_backlog_batch else ""
+
         # raw fio command
         fio_cmd = (
             f"fio --name={name} {location} --ioengine={ioengine} --direct=1 --iodepth={iodepth} "
             f"{time_based} --runtime={runtime} --rw={rw} {latency} --bs={bs} --size={size} --rwmixread={rwmixread} "
-            f"--verify=md5 --verify_dump=1 --verify_fatal=1 --randseed={randseed} "
+            f"--verify=md5 --verify_dump=1 --verify_fatal=1 --randseed={randseed}{vbacklog_opt}{vbatch_opt} "
             f"--numjobs={numjobs} --nrfiles={nrfiles} "
-            f"{log_opt} {iolog_opt} {output_fmt}{output_file}"
+            f"{log_opt} {iolog_opt} {fio_log_opt} {output_fmt}{output_file}"
         ).strip()
 
         if kwargs.get("debug"):

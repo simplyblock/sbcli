@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-FROM redhat/ubi10:10.1
+FROM registry.access.redhat.com/ubi10/ubi:10.2
 
 LABEL name="simplyblock"
 LABEL vendor="Simplyblock"
@@ -38,6 +38,8 @@ COPY requirements.txt requirements.txt
 RUN pip3 install --upgrade pip setuptools
 RUN yum remove python-urllib3 -y
 RUN pip3 install -r requirements.txt
+
+RUN dnf upgrade -y
 
 RUN dnf clean all
 

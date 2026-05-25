@@ -60,7 +60,7 @@ from stress_test.continuous_failover_ha_2node import RandomMultiClient2NodeFailo
 from stress_test.continuous_failover_ha_rdma import RandomRDMAFailoverTest
 from stress_test.continuous_failover_ha_rdma_multi_outage import RandomRDMAMultiFailoverTest
 from stress_test.continuous_failover_ha_k8s import RandomK8sMultiOutageFailoverTest
-from stress_test.continuous_k8s_native_failover import K8sNativeFailoverTest, K8sNativeBasicFailoverTest
+from stress_test.continuous_k8s_native_failover import K8sNativeFailoverTest, K8sNativeBasicFailoverTest, K8sNativeResilientFailoverTest
 from stress_test.continuous_failover_ha_multi_client_quick_outage import (
     RandomRapidFailoverNoGap,
     RandomRapidFailoverNoGapV2WithMigration,
@@ -70,6 +70,24 @@ from stress_test.continuous_parallel_lvol_snapshot_clone import TestParallelLvol
 from stress_test.continuous_lvol_dirfill_stress import TestLvolDirFillStress
 from stress_test.continuous_failover_ha_namespace import RandomMultiClientFailoverNamespaceTest
 from stress_test.continuous_single_node_outage import RandomMultiClientSingleNodeTest
+from stress_test.continuous_parallel_namespace_lvol import (
+    TestParallelNamespaceLvolDocker,
+    TestParallelNamespaceLvolK8s,
+)
+from stress_test.continuous_bulk_lvol_delete import (
+    BulkLvolDeleteDocker,
+    BulkLvolDeleteK8s,
+    BulkLvolHotDeleteDocker,
+    BulkLvolHotDeleteK8s,
+)
+from stress_test.large_scale_lvol_stress import (
+    LargeScaleLvolDocker,
+    LargeScaleLvolK8s,
+)
+from stress_test.device_failure_migration import (
+    DeviceFailureMigrationNoLoad,
+    DeviceFailureMigrationUnderLoad,
+)
 from stress_test.continuous_failover_ha_security import (
     RandomSecurityFailoverTest,
     RandomAllSecurityFailoverTest,
@@ -247,6 +265,17 @@ ALL_TESTS = [
     # K8s-native failover stress test
     K8sNativeFailoverTest,
     K8sNativeBasicFailoverTest,
+    K8sNativeResilientFailoverTest,
+    TestParallelNamespaceLvolDocker,
+    TestParallelNamespaceLvolK8s,
+    BulkLvolDeleteDocker,
+    BulkLvolDeleteK8s,
+    BulkLvolHotDeleteDocker,
+    BulkLvolHotDeleteK8s,
+    LargeScaleLvolDocker,
+    LargeScaleLvolK8s,
+    DeviceFailureMigrationNoLoad,
+    DeviceFailureMigrationUnderLoad,
 ]
 
 def get_all_tests(custom=True, ha_test=False):
@@ -354,8 +383,36 @@ def get_stress_tests():
         RandomMultiClientSingleNodeTest,
         K8sNativeFailoverTest,
         K8sNativeBasicFailoverTest,
+        K8sNativeResilientFailoverTest,
+        TestParallelNamespaceLvolDocker,
+        TestParallelNamespaceLvolK8s,
+        BulkLvolDeleteDocker,
+        BulkLvolDeleteK8s,
+        BulkLvolHotDeleteDocker,
+        BulkLvolHotDeleteK8s,
+        LargeScaleLvolDocker,
+        LargeScaleLvolK8s,
+        DeviceFailureMigrationNoLoad,
+        DeviceFailureMigrationUnderLoad,
     ]
     return tests
+
+
+def get_monitoring_tests():
+    """Tests that produce timing/performance data for the monitoring suite."""
+    return [
+        TestParallelNamespaceLvolDocker,
+        TestParallelNamespaceLvolK8s,
+        BulkLvolDeleteDocker,
+        BulkLvolDeleteK8s,
+        BulkLvolHotDeleteDocker,
+        BulkLvolHotDeleteK8s,
+        LargeScaleLvolDocker,
+        LargeScaleLvolK8s,
+        DeviceFailureMigrationNoLoad,
+        DeviceFailureMigrationUnderLoad,
+        TestLvolOutageLoadTest,
+    ]
 
 def get_backup_tests():
     return [
