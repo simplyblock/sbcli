@@ -1720,7 +1720,8 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
                 )
                 if output and output.strip():
                     lines = [
-                        l for l in output.strip().split("\n") if l.strip()
+                        ln for ln in output.strip().split("\n")
+                        if ln.strip()
                     ]
                     self.logger.warning(
                         f"[verify_cleanup] {len(lines)} test PVCs still "
