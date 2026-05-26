@@ -490,8 +490,11 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
                 pass
             try:
                 self.sbcli_utils.delete_all_snapshots()
-            except Exception:
-                pass
+            except Exception as e:
+                self.logger.warning(
+                    "[verify_cleanup] delete_all_snapshots failed during retry: %s",
+                    e,
+                )
             try:
                 self.sbcli_utils.delete_all_lvols()
             except Exception:
