@@ -1106,16 +1106,8 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                 logger.info(
                     f"Lvol {lvol.uuid} registered and exposed on secondary {tgt_sec.get_id()}")
 
-        # For tgt_is_src_secondary: the namespace swap was deferred until now.
-        # Strategy:
-        #   1. Try nvmf_subsystem_ns_update (SPDK ≥ 24.01) — atomically swaps
-        #      the backing bdev while keeping the same nsid/UUID/anagrp.  The
-        #      client never sees the namespace disappear, so no AER rediscovery
-        #      delay and no IO blackout beyond the migration freeze itself.
-        #   2. If ns_update is unavailable, fall back to remove + add_ns (accepts
-        #      ~2-4 s AER rediscovery gap but is still far better than 8+ s).
-        #      The add uses no explicit nsid to avoid SPDK rejecting a recycled
-        #      nsid that hasn't fully cleared yet.
+        # For tgt_is_src_secondary: swap the namespace on TGT from the mirror
+        # bdev to the migrated bdev now that the transfer is complete.
         if tgt_is_src_secondary:
             try:
                 mirror_bdev = f"{tgt_node.lvstore}/{lvol.lvol_bdev}"
@@ -1146,28 +1138,16 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                             f"nsid={mirror_nsid} (atomic, no AER gap)")
 
                 if not swapped:
-                    # Fallback: remove mirror, add new namespace (different nsid)
+                    # Fallback: remove the mirror namespace then add the migrated bdev.
                     if mirror_nsid is not None:
                         tgt_rpc.nvmf_subsystem_remove_ns(lvol.nqn, mirror_nsid)
                         logger.info(
                             f"Removed secondary mirror namespace {mirror_bdev} "
                             f"nsid={mirror_nsid} (fallback remove+add path)")
-                    ns_ret = tgt_rpc.nvmf_subsystem_add_ns(
-                        lvol.nqn, tgt_lvol_composite, uuid=lvol.uuid)
-                    if ns_ret:
-                        tgt_uuid_carry['tgt_ns_id'] = int(ns_ret)
-                        logger.info(
-                            f"Added migrated namespace {tgt_lvol_composite} "
-                            f"nsid={ns_ret} to {lvol.nqn} "
-                            f"(mirror was nsid={mirror_nsid})")
-                    else:
-                        logger.error(
-                            f"nvmf_subsystem_add_ns {tgt_lvol_composite} failed "
-                            f"and ns_update also failed — skipping ANA update "
-                            f"to avoid stranding client with no TGT namespace")
-                        # Do NOT call _update_ana_states: keep SRC accessible
-                        # until operator can investigate.
-                        return True, False, None
+                    tgt_rpc.nvmf_subsystem_add_ns(lvol.nqn, tgt_lvol_composite)
+                    logger.info(
+                        f"Added migrated bdev {tgt_lvol_composite} to subsystem "
+                        f"{lvol.nqn} (fallback remove+add path)")
             except Exception as e:
                 logger.warning(f"Deferred namespace swap failed: {e}")
 
