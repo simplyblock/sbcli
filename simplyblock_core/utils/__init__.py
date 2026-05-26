@@ -1,4 +1,5 @@
 # coding=utf-8
+import contextvars
 import glob
 import json
 import logging
@@ -12,6 +13,14 @@ import subprocess
 import sys
 import uuid
 import time
+
+request_id_var: contextvars.ContextVar[str] = contextvars.ContextVar('request_id', default='-')
+
+
+class RequestIdFilter(logging.Filter):
+    def filter(self, record):
+        record.request_id = request_id_var.get()
+        return True
 from datetime import datetime, timezone
 from typing import Union, Any, Optional, Tuple, List, Dict, Iterable
 from docker import DockerClient
@@ -646,7 +655,8 @@ def get_logger(name=""):
 
     if not logg.hasHandlers():
         logger_handler = logging.StreamHandler(stream=sys.stdout)
-        logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(thread)d: %(levelname)s: %(message)s'))
+        logger_handler.addFilter(RequestIdFilter())
+        logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(thread)d: [%(request_id)s] %(levelname)s: %(message)s'))
         logg.addHandler(logger_handler)
         # gelf_handler = GELFTCPHandler('0.0.0.0', constants.GELF_PORT)
         # logg.addHandler(gelf_handler)
