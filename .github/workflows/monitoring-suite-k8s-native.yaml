@@ -1020,7 +1020,7 @@ jobs:
 
       - name: Collect Graylog/OpenSearch logs
         if: always()
-        timeout-minutes: ${{ env.LOG_COLLECT_TIMEOUT_MINS || 240 }}
+        timeout-minutes: ${{ fromJSON(env.LOG_COLLECT_TIMEOUT_MINS || '240') }}
         run: |
           set +e
           NAMESPACE=simplyblock
