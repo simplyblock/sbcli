@@ -740,8 +740,12 @@ class BulkLvolDeleteDocker(_BulkDeleteMixin, TestLvolHACluster):
                             if data:
                                 with open(dest, "w") as f:
                                     f.write(data)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            self.logger.warning(
+                                f"[validate {iteration}] Failed to collect "
+                                f"perf file for {lvol_name} on {client}: "
+                                f"{src} -> {dest}: {e}"
+                            )
             except Exception:
                 pass
 
