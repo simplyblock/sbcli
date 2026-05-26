@@ -338,14 +338,17 @@ def list(all=False, cluster_id=None, with_details=False):
     for m in db_controller.get_migrations():
         if m.is_active():
             migrating_lvols.append(m.lvol_id)
+    # Build snap_id → clone list in one pass instead of rescanning all lvols
+    # for every snapshot (was O(M×N) in-memory).
+    clones_by_snap = {}
+    for lv in db_controller.get_lvols():
+        if lv.cloned_from_snap:
+            clones_by_snap.setdefault(lv.cloned_from_snap, []).append(lv.get_id())
+
     data = []
-    all_lvols = db_controller.get_lvols()
     for snap in snaps:
         logger.debug(snap)
-        clones = []
-        for lvol in all_lvols:
-            if lvol.cloned_from_snap and lvol.cloned_from_snap == snap.get_id():
-                clones.append(lvol.get_id())
+        clones = clones_by_snap.get(snap.get_id(), [])
         d = {
             "UUID": snap.uuid,
             "BDdev UUID": snap.snap_uuid,
@@ -636,11 +639,20 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
             logger.error(msg)
             return False, msg
 
-    subsys_count = len(set(lv.nqn for lv in db_controller.get_lvols_by_node_id(snode.get_id())))
-    if subsys_count >= snode.max_lvol:
-        error = f"Too many subsystems on node: {snode.get_id()}, max subsystems reached: {subsys_count}"
-        logger.error(error)
-        return False, error
+    # Resolve the namespace slot early so we can (a) skip the subsystem limit
+    # check when the clone fits into an existing subsystem, and (b) reuse the
+    # result below instead of calling get_next_available_subsystem_on_node twice.
+    _available_subsys = lvol_controller.get_next_available_subsystem_on_node(snode.get_id()) if namespaced else None
+
+    if not _available_subsys:
+        subsys_count = len(set(
+            lv.nqn for lv in db_controller.get_lvols_by_node_id(snode.get_id())
+            if lv.status not in [LVol.STATUS_IN_DELETION, LVol.STATUS_DELETED]
+        ))
+        if subsys_count >= snode.max_lvol:
+            error = f"Too many subsystems on node: {snode.get_id()}, max subsystems reached: {snode.max_lvol}"
+            logger.error(error)
+            return False, error
 
     if pool.pool_max_size > 0:
         total = pool_controller.get_pool_total_capacity(pool.get_id())
@@ -683,10 +695,9 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     lvol.max_namespace_per_subsys = snap.lvol.max_namespace_per_subsys
 
     if namespaced:
-        # search for an existing subsystem with a free namespace slot on the same node
-        result = lvol_controller.get_next_available_subsystem_on_node(lvol.node_id)
-        if result:
-            namespace, free_nqn = result
+        # reuse the slot resolved above — avoids a second DB read
+        if _available_subsys:
+            namespace, free_nqn = _available_subsys
             lvol.nqn = free_nqn
             lvol.namespace = namespace
 
@@ -944,16 +955,21 @@ def set_value(snapshot_uuid, attr, value) -> bool:
 def list_by_node(node_id=None, is_json=False):
     snaps = db_controller.get_snapshots()
     snaps = sorted(snaps, key=lambda snap: snap.created_at)
+
+    # Build snap_id → clone list once instead of a full DB read per snapshot
+    # (was O(M×N) DB reads).
+    clones_by_snap = {}
+    for lv in db_controller.get_lvols():
+        if lv.cloned_from_snap:
+            clones_by_snap.setdefault(lv.cloned_from_snap, []).append(lv.get_id())
+
     data = []
     for snap in snaps:
         if node_id:
             if snap.lvol.node_id != node_id:
                 continue
         logger.debug(snap)
-        clones = []
-        for lvol in db_controller.get_lvols():
-            if lvol.cloned_from_snap and lvol.cloned_from_snap == snap.get_id():
-                clones.append(lvol.get_id())
+        clones = clones_by_snap.get(snap.get_id(), [])
         data.append({
             "UUID": snap.uuid,
             "BDdev UUID": snap.snap_uuid,

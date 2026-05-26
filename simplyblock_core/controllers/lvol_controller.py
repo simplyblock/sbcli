@@ -260,13 +260,21 @@ def validate_add_lvol_func(name, size, host_id_or_name, pool_id_or_name,
 def _get_next_3_nodes(cluster_id, lvol_size=0):
     db_controller = DBController()
     snodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
+
+    # Build node→subsystem-count map with a single cluster-wide DB read instead
+    # of one read per node (was O(K×N) where K = number of nodes).
+    node_nqns = {}
+    for lv in db_controller.get_lvols(cluster_id):
+        if lv.status not in [LVol.STATUS_IN_DELETION, LVol.STATUS_DELETED]:
+            node_nqns.setdefault(lv.node_id, set()).add(lv.nqn)
+
     online_nodes = []
     node_stats = {}
     for node in snodes:
         if node.is_secondary_node:  # pass
             continue
         if node.status == node.STATUS_ONLINE:
-            subsys_count = len(set(lv.nqn for lv in db_controller.get_lvols_by_node_id(node.get_id())))
+            subsys_count = len(node_nqns.get(node.get_id(), set()))
             if subsys_count >= node.max_lvol:
                 continue
             if node.lvol_sync_del():
@@ -588,11 +596,18 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
         random_nodes = _get_next_3_nodes(replication_cluster_id, lvol.size)
         lvol.replication_node_id = random_nodes[0].get_id()
 
-    subsys_count = len(set(lv.nqn for lv in db_controller.get_lvols_by_node_id(host_node.get_id())))
-    if subsys_count > host_node.max_lvol:
-        error = f"Too many subsystems on node: {host_node.get_id()}, max subsystems reached: {subsys_count}"
-        logger.error(error)
-        return False, error
+    # Only enforce the subsystem limit when a new subsystem would actually be
+    # created. Namespaced lvols that found a free slot (namespace is set) share
+    # an existing NQN and do not increase the subsystem count.
+    if namespace is None:
+        subsys_count = len(set(
+            lv.nqn for lv in db_controller.get_lvols_by_node_id(host_node.get_id())
+            if lv.status not in [LVol.STATUS_IN_DELETION, LVol.STATUS_DELETED]
+        ))
+        if subsys_count >= host_node.max_lvol:
+            error = f"Too many subsystems on node: {host_node.get_id()}, max subsystems reached: {host_node.max_lvol}"
+            logger.error(error)
+            return False, error
 
     lvol_dict: dict = {
         "type": "bdev_lvol",
@@ -2488,11 +2503,17 @@ def clone_lvol(lvol_id, clone_name, new_size=None, pvc_name=None):
         return False, "LVol is not online"
 
     host_node = db_controller.get_storage_node_by_id(lvol.node_id)
-    subsys_count = len(set(lv.nqn for lv in db_controller.get_lvols_by_node_id(lvol.node_id)))
-    if subsys_count >= host_node.max_lvol:
-        error = f"Too many subsystems on node: {host_node.get_id()}, max subsystems reached: {subsys_count}"
-        logger.error(error)
-        return False, error
+    # clone_lvol always uses namespaced=True. Only enforce the subsystem limit
+    # if there is no existing subsystem with a free namespace slot.
+    if not get_next_available_subsystem_on_node(lvol.node_id):
+        subsys_count = len(set(
+            lv.nqn for lv in db_controller.get_lvols_by_node_id(lvol.node_id)
+            if lv.status not in [LVol.STATUS_IN_DELETION, LVol.STATUS_DELETED]
+        ))
+        if subsys_count >= host_node.max_lvol:
+            error = f"Too many subsystems on node: {host_node.get_id()}, max subsystems reached: {host_node.max_lvol}"
+            logger.error(error)
+            return False, error
 
     snapshot_uuid = None
     for snap in db_controller.get_snapshots_by_node_id(lvol.node_id):
@@ -3151,9 +3172,17 @@ def get_namespaces_per_lvol(lvol):
 
 def get_next_available_subsystem_on_node(node_id):
     db_controller = DBController()
-    for lvol in db_controller.get_lvols_by_node_id(node_id):
+    lvols = db_controller.get_lvols_by_node_id(node_id)
+
+    # Count active namespaces per NQN in a single pass instead of issuing a
+    # separate DB read for every subsystem root (was O(N²)).
+    ns_counts = {}
+    for lv in lvols:
+        if lv.status not in [LVol.STATUS_IN_DELETION, LVol.STATUS_DELETED]:
+            ns_counts[lv.nqn] = ns_counts.get(lv.nqn, 0) + 1
+
+    for lvol in lvols:
         if not lvol.namespace:
-            ns_count = get_namespaces_per_lvol(lvol)
-            if ns_count < lvol.max_namespace_per_subsys:
+            if ns_counts.get(lvol.nqn, 0) < lvol.max_namespace_per_subsys:
                 return lvol.get_id(), lvol.nqn
     return None
