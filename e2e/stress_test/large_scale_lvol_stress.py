@@ -22,6 +22,7 @@ Invocation:
 
 from __future__ import annotations
 
+import json as _json
 import os
 import random
 import re
@@ -69,6 +70,7 @@ class _LargeScaleMixin:
     # ── Parallelism ──────────────────────────────────────────────────────────
     MAX_WORKERS = 20
     BATCH_SIZE = 50
+    PARALLEL_PARENTS = 5             # concurrent parents/subsystems during creation
 
     # ── Internal state ───────────────────────────────────────────────────────
     _phase_durations: dict
@@ -146,6 +148,164 @@ class _LargeScaleMixin:
     def _phase_validate(self):
         """Override in subclass for mode-specific validation."""
         self.logger.info("=== Validation phase ===")
+
+    # ── FIO log collection helpers (shared) ──────────────────────────────────
+
+    def _save_fio_pod_logs(self, job_name: str, resource_name: str,
+                           pvc_name: str = None):
+        """Save FIO pod logs and performance data to local log directory."""
+        try:
+            pod_name = self.k8s_utils.get_job_pod_name(job_name)
+            if not pod_name:
+                return
+            logs = self.k8s_utils.get_pod_logs(pod_name, tail=2000)
+            if logs:
+                log_file = os.path.join(
+                    self.log_path, f"{resource_name}_fio.log"
+                )
+                with open(log_file, "w") as f:
+                    f.write(logs)
+                self.logger.info(
+                    f"[save_fio] Saved logs for {resource_name}"
+                )
+            self._copy_fio_perf_logs(
+                pod_name, resource_name, pvc_name=pvc_name
+            )
+        except Exception as exc:
+            self.logger.warning(
+                f"[save_fio] Could not save logs for {resource_name}: {exc}"
+            )
+
+    def _list_fio_perf_files(self, pod_name: str, ns: str,
+                              container: str = None) -> list:
+        """List FIO-generated perf files in /spdkvol/ of a running pod."""
+        container_flag = f"-c {container} " if container else ""
+        try:
+            file_list, _ = self.k8s_utils._exec_kubectl(
+                f"kubectl exec {container_flag}{pod_name} -n {ns} -- "
+                f"find /spdkvol/ -maxdepth 1 "
+                f"\\( -name '*fio*.log' -o -name '*-iolog.log' "
+                f"-o -name '*_lat.*' "
+                f"-o -name '*_bw.*' -o -name '*_iops.*' "
+                f"-o -name '*_clat.*' "
+                f"-o -name '*_slat.*' \\) "
+                f"2>/dev/null || true",
+                supress_logs=True,
+            )
+            return [
+                f.strip() for f in file_list.strip().splitlines()
+                if f.strip()
+            ]
+        except Exception:
+            return []
+
+    def _create_copier_pod(self, copier_name: str, pvc_name: str,
+                            node_name: str, ns: str):
+        """Create a lightweight busybox pod mounting a PVC for log copy."""
+        yaml_spec = (
+            f"apiVersion: v1\n"
+            f"kind: Pod\n"
+            f"metadata:\n"
+            f"  name: {copier_name}\n"
+            f"  namespace: {ns}\n"
+            f"  labels:\n"
+            f"    app: fio-copier\n"
+            f"spec:\n"
+            f"  nodeName: {node_name}\n"
+            f"  tolerations:\n"
+            f"  - operator: Exists\n"
+            f"  containers:\n"
+            f"  - name: copier\n"
+            f"    image: busybox\n"
+            f"    command: ['sleep', '300']\n"
+            f"    volumeMounts:\n"
+            f"    - mountPath: /spdkvol\n"
+            f"      name: vol\n"
+            f"  volumes:\n"
+            f"  - name: vol\n"
+            f"    persistentVolumeClaim:\n"
+            f"      claimName: {pvc_name}\n"
+            f"  restartPolicy: Never\n"
+        )
+        self.k8s_utils._exec_kubectl(
+            f"cat <<'COPIER_EOF' | kubectl apply -f -\n"
+            f"{yaml_spec}COPIER_EOF",
+        )
+        self.k8s_utils._exec_kubectl(
+            f"kubectl wait pod/{copier_name} -n {ns} "
+            f"--for=condition=Ready --timeout=120s",
+        )
+
+    def _copy_fio_perf_logs(self, pod_name: str, resource_name: str,
+                             pvc_name: str = None):
+        """Copy FIO perf log files from /spdkvol/ in the pod to local dir."""
+        ns = self.k8s_utils.namespace
+        perf_dir = os.path.join(self.log_path, f"{resource_name}_perf")
+        copier_name = None
+        copy_from_pod = pod_name
+        container = None
+
+        try:
+            files = self._list_fio_perf_files(pod_name, ns)
+
+            if not files and pvc_name:
+                node_name = self.k8s_utils.get_pod_node_name(pod_name)
+                if node_name:
+                    copier_name = f"fio-cp-{_rand_seq(8)}"
+                    self.logger.info(
+                        f"[perf_copy] Creating copier pod {copier_name} "
+                        f"on {node_name} for PVC {pvc_name}"
+                    )
+                    try:
+                        self._create_copier_pod(
+                            copier_name, pvc_name, node_name, ns
+                        )
+                        files = self._list_fio_perf_files(
+                            copier_name, ns, container="copier"
+                        )
+                        copy_from_pod = copier_name
+                        container = "copier"
+                    except Exception as exc:
+                        self.logger.warning(
+                            f"[perf_copy] Copier pod failed for "
+                            f"{resource_name}: {exc}"
+                        )
+                        files = []
+
+            if not files:
+                return
+
+            os.makedirs(perf_dir, exist_ok=True)
+            container_flag = f" -c {container}" if container else ""
+            for src_path in files:
+                fname = os.path.basename(src_path)
+                dest = os.path.join(perf_dir, fname)
+                self.k8s_utils._exec_kubectl(
+                    f"kubectl cp "
+                    f"{ns}/{copy_from_pod}:{src_path} {dest}"
+                    f"{container_flag} "
+                    f"2>/dev/null || true",
+                    supress_logs=True,
+                )
+            self.logger.info(
+                f"[perf_copy] Copied {len(files)} perf log(s) "
+                f"for {resource_name}"
+            )
+        except Exception as exc:
+            self.logger.warning(
+                f"[perf_copy] Could not copy perf logs for "
+                f"{resource_name}: {exc}"
+            )
+        finally:
+            if copier_name:
+                try:
+                    self.k8s_utils._exec_kubectl(
+                        f"kubectl delete pod {copier_name} -n {ns} "
+                        f"--force --grace-period=0 2>/dev/null || true",
+                        supress_logs=True,
+                    )
+                except Exception:
+                    pass
 
     # ── Summary (shared) ─────────────────────────────────────────────────────
 
@@ -404,47 +564,93 @@ class LargeScaleLvolDocker(_LargeScaleMixin, TestLvolHACluster):
         self.logger.info("=== Phase: Create Subsystems (Docker) ===")
         total_expected = self.NUM_SUBSYSTEMS * self.NAMESPACES_PER_SUBSYSTEM
         self.logger.info(
-            f"[create] Sequential: {self.NUM_SUBSYSTEMS} parents × "
-            f"{self.NAMESPACES_PER_SUBSYSTEM} ns = {total_expected} lvols"
+            f"[create] {self.NUM_SUBSYSTEMS} parents × "
+            f"{self.NAMESPACES_PER_SUBSYSTEM} ns = {total_expected} lvols "
+            f"(parallel={self.PARALLEL_PARENTS})"
         )
 
-        for i in range(self.NUM_SUBSYSTEMS):
-            parent_name = f"lss-par-{_rand_seq(6)}-{i:03d}"
-            self.logger.info(
-                f"[create] === Parent {i+1}/{self.NUM_SUBSYSTEMS}: "
-                f"{parent_name} ==="
+        # ── Sub-phase 1: Create all parent lvols in parallel ────────────
+        parent_names = [
+            f"lss-par-{_rand_seq(6)}-{i:03d}"
+            for i in range(self.NUM_SUBSYSTEMS)
+        ]
+        self.logger.info(
+            f"[create][sub1] Creating {len(parent_names)} parent lvols "
+            f"(parallel, workers={self.MAX_WORKERS})"
+        )
+        ok, fail = self._batch_exec(
+            [{"name": n} for n in parent_names],
+            self._create_parent,
+            "create_parents",
+        )
+        if fail > 0:
+            raise RuntimeError(
+                f"[create][sub1] {fail} parent creations failed"
             )
-
-            # 1. Create parent lvol
-            self._create_parent({"name": parent_name})
-            if parent_name not in self._parent_registry:
+        # Verify all parents are registered
+        for pn in parent_names:
+            if pn not in self._parent_registry:
                 raise RuntimeError(
-                    f"Parent {parent_name} creation failed"
+                    f"[create][sub1] Parent {pn} not in registry after create"
                 )
+        self.logger.info(
+            f"[create][sub1] All {ok} parents created successfully"
+        )
 
-            # 2. NVMe-connect parent + format/mount nsid=1
-            self._connect_parent(parent_name)
-            pinfo = self._parent_registry[parent_name]
+        # ── Sub-phase 2: NVMe-connect all parents (sequential) ─────────
+        # Sequential to avoid device-detection races on same client.
+        self.logger.info(
+            f"[create][sub2] Connecting {len(parent_names)} parents "
+            f"(sequential)"
+        )
+        for idx, pn in enumerate(parent_names):
+            # Pre-assign client round-robin
+            self._parent_registry[pn]["client"] = (
+                self.fio_node[idx % len(self.fio_node)]
+            )
+            self._connect_parent(pn)
+            pinfo = self._parent_registry[pn]
             if not pinfo.get("ctrl_dev"):
                 raise RuntimeError(
-                    f"Parent {parent_name} NVMe connect failed"
+                    f"[create][sub2] Parent {pn} NVMe connect failed"
                 )
+            if (idx + 1) % 10 == 0 or idx == len(parent_names) - 1:
+                self.logger.info(
+                    f"[create][sub2] Connected {idx+1}/"
+                    f"{len(parent_names)}"
+                )
+        self.logger.info(
+            f"[create][sub2] All {len(parent_names)} parents connected"
+        )
 
-            # 3. Create all namespace children + format/mount each
-            self._create_children_for_parent(parent_name)
+        # ── Sub-phase 3: Create children (PARALLEL_PARENTS concurrent) ──
+        self.logger.info(
+            f"[create][sub3] Creating children for {len(parent_names)} "
+            f"parents (parallel, workers={self.PARALLEL_PARENTS})"
+        )
+        child_timeout = self.NAMESPACES_PER_SUBSYSTEM * 180
+        ok, fail = self._batch_exec(
+            parent_names,
+            self._create_children_for_parent,
+            "create_children",
+            per_item_timeout=child_timeout,
+            max_workers=self.PARALLEL_PARENTS,
+        )
+        if fail > 0:
+            raise RuntimeError(
+                f"[create][sub3] {fail} parent child-creation batches failed"
+            )
 
+        # Verify child counts
+        for pn in parent_names:
             children_done = sum(
                 1 for c in self._child_registry.values()
-                if c["parent_name"] == parent_name
+                if c["parent_name"] == pn
             )
             expected = self.NAMESPACES_PER_SUBSYSTEM - 1
-            self.logger.info(
-                f"[create] Parent {parent_name}: "
-                f"{children_done}/{expected} children created"
-            )
             if children_done < expected:
                 raise RuntimeError(
-                    f"Parent {parent_name}: only {children_done}/{expected} "
+                    f"Parent {pn}: only {children_done}/{expected} "
                     f"children created — aborting"
                 )
 
@@ -505,12 +711,11 @@ class LargeScaleLvolDocker(_LargeScaleMixin, TestLvolHACluster):
                 f"[connect] {parent_name}: no connect strings"
             )
 
-        # Round-robin across client nodes
-        client = self.fio_node[
-            list(self._parent_registry.keys()).index(parent_name)
-            % len(self.fio_node)
-        ]
-        pinfo["client"] = client
+        # Use pre-assigned client if set (sub-phase 2), otherwise fall back
+        if not pinfo.get("client"):
+            idx = list(self._parent_registry.keys()).index(parent_name)
+            pinfo["client"] = self.fio_node[idx % len(self.fio_node)]
+        client = pinfo["client"]
 
         initial_devices = self.ssh_obj.get_devices(node=client)
 
@@ -717,6 +922,11 @@ class LargeScaleLvolDocker(_LargeScaleMixin, TestLvolHACluster):
 
     def _phase_validate(self):
         self.logger.info("=== Phase: Validate FIO (Docker) ===")
+
+        # 1. Collect FIO logs from all clients
+        self._save_all_fio_logs_docker()
+
+        # 2. Check thread liveness
         alive = sum(1 for t in self.fio_threads if t.is_alive())
         dead = len(self.fio_threads) - alive
         self.logger.info(
@@ -727,6 +937,82 @@ class LargeScaleLvolDocker(_LargeScaleMixin, TestLvolHACluster):
             self.logger.error(
                 f"[validate] {dead} FIO threads died during test"
             )
+
+        # 3. Validate FIO log contents for errors
+        validated = 0
+        failed = 0
+        for device, dinfo in self._device_registry.items():
+            log_file = dinfo.get("log")
+            client = dinfo.get("client")
+            name = dinfo.get("name")
+            if not log_file or not client:
+                continue
+            try:
+                self.common_utils.validate_fio_test(client, log_file)
+                validated += 1
+            except RuntimeError as e:
+                failed += 1
+                self.logger.error(
+                    f"[validate] FIO error in {name} on {client}: {e}"
+                )
+        self.logger.info(
+            f"[validate] Log validation: {validated} passed, "
+            f"{failed} failed"
+        )
+        self._fio_failures = max(self._fio_failures, failed)
+
+    def _save_all_fio_logs_docker(self):
+        """Collect FIO log files from all clients to the local log dir."""
+        saved = 0
+        for device, dinfo in self._device_registry.items():
+            log_file = dinfo.get("log")
+            client = dinfo.get("client")
+            name = dinfo.get("name")
+            if not log_file or not client:
+                continue
+            try:
+                file_data = self.ssh_obj.read_file(client, log_file)
+                if file_data:
+                    local_path = os.path.join(
+                        self.log_path, f"{name}_fio.log"
+                    )
+                    with open(local_path, "w") as f:
+                        f.write(file_data)
+                    saved += 1
+            except Exception:
+                pass
+            # Also collect perf logs (_bw, _lat, _iops, _iolog)
+            fio_log_base = log_file.replace(".log", "_fio")
+            perf_dir = os.path.join(self.log_path, f"{name}_perf")
+            try:
+                out, _ = self.ssh_obj.exec_command(
+                    node=client,
+                    command=f"bash -lc 'ls {fio_log_base}* "
+                            f"{log_file.replace('.log', '_iolog.log')} "
+                            f"2>/dev/null || true'",
+                    supress_logs=True,
+                )
+                perf_files = [
+                    f.strip() for f in (out or "").splitlines()
+                    if f.strip()
+                ]
+                if perf_files:
+                    os.makedirs(perf_dir, exist_ok=True)
+                    for src in perf_files:
+                        fname = os.path.basename(src)
+                        dest = os.path.join(perf_dir, fname)
+                        try:
+                            data = self.ssh_obj.read_file(client, src)
+                            if data:
+                                with open(dest, "w") as f:
+                                    f.write(data)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+        self.logger.info(
+            f"[save_fio] Collected {saved} FIO logs from clients"
+        )
 
     # ── Cleanup ──────────────────────────────────────────────────────────────
 
@@ -892,13 +1178,15 @@ class LargeScaleLvolDocker(_LargeScaleMixin, TestLvolHACluster):
     # ── Batch parallel helper ────────────────────────────────────────────────
 
     def _batch_exec(self, items, task_fn, op_name: str,
-                    per_item_timeout: int = 600):
+                    per_item_timeout: int = 600,
+                    max_workers: int = None):
         """Execute task_fn(item) for each item using ThreadPoolExecutor."""
         total = len(items)
         success = 0
         failures = 0
+        workers = max_workers or self.MAX_WORKERS
 
-        with ThreadPoolExecutor(max_workers=self.MAX_WORKERS) as executor:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
             for batch_start in range(0, total, self.BATCH_SIZE):
                 batch = items[batch_start:batch_start + self.BATCH_SIZE]
                 futures = {}
@@ -938,9 +1226,8 @@ class LargeScaleLvolK8s(_LargeScaleMixin, K8sNativeFailoverTest):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.test_name = "large_scale_lvol_k8s"
-        # Override base class FIO config for lightweight load
+        # Match Docker: lightweight FIO load
         self.fio_num_jobs = self.FIO_NUMJOBS
-        self.FIO_RUNTIME = 7200
 
     # ── run() ────────────────────────────────────────────────────────────────
 
@@ -969,61 +1256,91 @@ class LargeScaleLvolK8s(_LargeScaleMixin, K8sNativeFailoverTest):
 
         self._run_large_scale_test()
 
-    # ── Phase 1: Create subsystems (sequential per-subsystem) ──────────────
+    # ── Phase 1: Create subsystems (parallel across subsystems) ─────────
 
     def _phase_create_subsystems(self):
-        """Create PVCs in per-subsystem batches.  For each subsystem
-        (NAMESPACES_PER_SUBSYSTEM PVCs), create all PVCs sequentially,
-        verify each one is Bound, then verify lvol count in API before
-        moving to the next subsystem.  Fail fast on any error."""
+        """Create PVCs with PARALLEL_PARENTS subsystems processed concurrently.
+
+        Each subsystem creates NAMESPACES_PER_SUBSYSTEM PVCs sequentially
+        (to preserve device detection order within a subsystem), but multiple
+        subsystems run in parallel to reduce total wall-clock time."""
         total_pvcs = self.NUM_SUBSYSTEMS * self.NAMESPACES_PER_SUBSYSTEM
         self.logger.info(
-            f"=== Phase: Create {total_pvcs} PVCs (K8s) — sequential "
-            f"per subsystem ==="
+            f"=== Phase: Create {total_pvcs} PVCs (K8s) — "
+            f"{self.NUM_SUBSYSTEMS} subsystems × "
+            f"{self.NAMESPACES_PER_SUBSYSTEM} PVCs "
+            f"(parallel={self.PARALLEL_PARENTS}) ==="
         )
 
-        pvc_idx = 0
-        for subsys in range(self.NUM_SUBSYSTEMS):
-            self.logger.info(
-                f"[create] === Subsystem {subsys+1}/"
-                f"{self.NUM_SUBSYSTEMS} ==="
+        # Build work items: one per subsystem
+        work_items = [
+            {
+                "subsys_idx": s,
+                "start_pvc_idx": s * self.NAMESPACES_PER_SUBSYSTEM,
+            }
+            for s in range(self.NUM_SUBSYSTEMS)
+        ]
+
+        subsys_timeout = self.NAMESPACES_PER_SUBSYSTEM * 60
+        ok, fail = self._batch_exec_k8s(
+            work_items,
+            self._create_subsystem_pvcs,
+            "create_subsystems",
+            per_item_timeout=subsys_timeout,
+            max_workers=self.PARALLEL_PARENTS,
+        )
+        if fail > 0:
+            raise RuntimeError(
+                f"[create] {fail}/{self.NUM_SUBSYSTEMS} subsystems failed"
             )
-            batch_names = []
-            for ns in range(self.NAMESPACES_PER_SUBSYSTEM):
-                pvc_name = f"lss-pvc-{_rand_seq(6)}-{pvc_idx:04d}"
-                pvc_idx += 1
 
-                if self.use_client_fio:
-                    self._create_single_pvc_client(
-                        {"name": pvc_name, "idx": pvc_idx - 1}
-                    )
-                else:
-                    self._create_single_pvc({"name": pvc_name})
-
-                if pvc_name not in self.pvc_details:
-                    raise RuntimeError(
-                        f"PVC {pvc_name} creation failed — aborting "
-                        f"subsystem {subsys+1}"
-                    )
-                batch_names.append(pvc_name)
-
-            # Verify lvol count matches expectations
-            all_lvols = self.sbcli_utils.list_lvols()
-            expected = (subsys + 1) * self.NAMESPACES_PER_SUBSYSTEM
-            if len(all_lvols) < expected:
-                self.logger.warning(
-                    f"[create] Subsystem {subsys+1}: lvol count "
-                    f"{len(all_lvols)} < expected {expected}"
-                )
-
-            self.logger.info(
-                f"[create] Subsystem {subsys+1}/{self.NUM_SUBSYSTEMS} "
-                f"OK — {len(batch_names)} PVCs created, "
-                f"total lvols in API: {len(all_lvols)}"
+        # Bulk verification at the end
+        all_lvols = self.sbcli_utils.list_lvols()
+        if len(all_lvols) < total_pvcs:
+            self.logger.warning(
+                f"[create] lvol count {len(all_lvols)} < "
+                f"expected {total_pvcs}"
             )
 
         self._total_created = len(self.pvc_details)
-        self.logger.info(f"[create] {self._total_created} PVCs created")
+        self.logger.info(
+            f"[create] {self._total_created} PVCs created, "
+            f"lvols in API: {len(all_lvols)}"
+        )
+
+    def _create_subsystem_pvcs(self, params: dict):
+        """Create all PVCs for one subsystem sequentially.
+
+        Called from _batch_exec_k8s with PARALLEL_PARENTS concurrency.
+        PVCs within a subsystem must be sequential for device detection."""
+        subsys_idx = params["subsys_idx"]
+        start_idx = params["start_pvc_idx"]
+
+        self.logger.info(
+            f"[create] === Subsystem {subsys_idx+1}/"
+            f"{self.NUM_SUBSYSTEMS} ==="
+        )
+        for ns in range(self.NAMESPACES_PER_SUBSYSTEM):
+            pvc_idx = start_idx + ns
+            pvc_name = f"lss-pvc-{_rand_seq(6)}-{pvc_idx:04d}"
+
+            if self.use_client_fio:
+                self._create_single_pvc_client(
+                    {"name": pvc_name, "idx": pvc_idx}
+                )
+            else:
+                self._create_single_pvc({"name": pvc_name})
+
+            if pvc_name not in self.pvc_details:
+                raise RuntimeError(
+                    f"PVC {pvc_name} creation failed — aborting "
+                    f"subsystem {subsys_idx+1}"
+                )
+
+        self.logger.info(
+            f"[create] Subsystem {subsys_idx+1}/{self.NUM_SUBSYSTEMS} "
+            f"OK — {self.NAMESPACES_PER_SUBSYSTEM} PVCs created"
+        )
 
     def _create_single_pvc(self, params: dict):
         """Create a single PVC and wait for Bound.  Raises on failure."""
@@ -1308,7 +1625,13 @@ class LargeScaleLvolK8s(_LargeScaleMixin, K8sNativeFailoverTest):
 
     def _phase_validate(self):
         self.logger.info("=== Phase: Validate FIO (K8s) ===")
+
+        # 1. Save all FIO logs first (regardless of pass/fail)
+        self._save_all_fio_logs_k8s()
+        self._save_fio_mapping_summary_k8s()
+
         if self.use_client_fio:
+            # 2a. Check thread liveness
             alive = sum(1 for t in self.fio_threads if t.is_alive())
             dead = len(self.fio_threads) - alive
             self.logger.info(
@@ -1319,27 +1642,123 @@ class LargeScaleLvolK8s(_LargeScaleMixin, K8sNativeFailoverTest):
                 self.logger.error(
                     f"[validate] {dead} FIO threads died during test"
                 )
+
+            # 2b. Validate client FIO log contents
+            validated = 0
+            failed = 0
+            for lvol_name, details in self.lvol_mount_details.items():
+                log_file = details.get("Log")
+                client = details.get("Client")
+                if not log_file or not client:
+                    continue
+                try:
+                    self.common_utils.validate_fio_test(client, log_file)
+                    validated += 1
+                except RuntimeError as e:
+                    failed += 1
+                    self.logger.error(
+                        f"[validate] FIO error in {lvol_name}: {e}"
+                    )
+            self.logger.info(
+                f"[validate] Log validation: {validated} passed, "
+                f"{failed} failed"
+            )
+            self._fio_failures = max(self._fio_failures, failed)
         else:
-            # Check K8s Job statuses
-            try:
-                ns = self.k8s_utils.namespace
-                out, _ = self.k8s_utils._exec_kubectl(
-                    f"kubectl get jobs -n {ns} "
-                    f"-l app=fio "
-                    f"-o jsonpath='{{.items[*].status.failed}}' "
-                    f"2>/dev/null || true",
-                    supress_logs=True,
+            # 2c. Validate K8s Job statuses + pod logs
+            fio_timeout = self.FIO_RUNTIME + 300
+            validated = 0
+            failed = 0
+            for pvc_name, pvc_info in self.pvc_details.items():
+                job_name = pvc_info.get("job_name")
+                if not job_name:
+                    continue
+                try:
+                    self.k8s_utils.validate_fio_job(
+                        job_name, timeout=fio_timeout
+                    )
+                    validated += 1
+                except RuntimeError as e:
+                    failed += 1
+                    self.logger.error(
+                        f"[validate] FIO job {job_name} failed: {e}"
+                    )
+            self.logger.info(
+                f"[validate] Job validation: {validated} passed, "
+                f"{failed} failed"
+            )
+            self._fio_failures = failed
+
+    def _save_all_fio_logs_k8s(self):
+        """Save FIO pod logs and perf files for all PVCs."""
+        if self.use_client_fio:
+            # Client mode: collect logs via SSH
+            saved = 0
+            for lvol_name, details in self.lvol_mount_details.items():
+                log_file = details.get("Log")
+                client = details.get("Client")
+                if not log_file or not client:
+                    continue
+                try:
+                    file_data = self.ssh_obj.read_file(client, log_file)
+                    if file_data:
+                        local_path = os.path.join(
+                            self.log_path, f"{lvol_name}_fio.log"
+                        )
+                        with open(local_path, "w") as f:
+                            f.write(file_data)
+                        saved += 1
+                except Exception:
+                    pass
+            self.logger.info(
+                f"[save_fio] Collected {saved} FIO logs from clients"
+            )
+            return
+
+        # K8s Job mode: collect pod logs + perf files
+        saved = 0
+        for pvc_name, pvc_info in self.pvc_details.items():
+            job_name = pvc_info.get("job_name")
+            if job_name:
+                self._save_fio_pod_logs(
+                    job_name, pvc_name, pvc_name=pvc_name
                 )
-                failed_counts = [
-                    int(x) for x in (out or "").split() if x.strip()
-                ]
-                total_failed = sum(failed_counts)
-                self.logger.info(
-                    f"[validate] {total_failed} jobs have failures"
-                )
-                self._fio_failures = total_failed
-            except Exception as e:
-                self.logger.warning(f"[validate] Job check failed: {e}")
+                saved += 1
+        self.logger.info(f"[save_fio] Saved FIO logs for {saved} PVCs")
+
+        # Bulk cleanup leftover copier pods
+        try:
+            self.k8s_utils._exec_kubectl(
+                f"kubectl delete pods -l app=fio-copier "
+                f"-n {self.k8s_utils.namespace} "
+                f"--force --grace-period=0 2>/dev/null || true",
+                supress_logs=True,
+            )
+        except Exception:
+            pass
+
+    def _save_fio_mapping_summary_k8s(self):
+        """Save a JSON summary mapping PVCs to lvols, workers, FIO jobs."""
+        if self.use_client_fio:
+            return
+        try:
+            entries = self.k8s_utils.log_fio_pvc_mapping(
+                self.pvc_details
+            )
+            if not entries:
+                return
+            summary_path = os.path.join(
+                self.docker_logs_path, "fio_mapping_summary.json"
+            )
+            with open(summary_path, "w") as f:
+                _json.dump(entries, f, indent=2, default=str)
+            self.logger.info(
+                f"[save_fio] Wrote FIO mapping summary to {summary_path}"
+            )
+        except Exception as exc:
+            self.logger.warning(
+                f"[save_fio] Could not write mapping summary: {exc}"
+            )
 
     # ── Cleanup ──────────────────────────────────────────────────────────────
 
@@ -1510,13 +1929,16 @@ class LargeScaleLvolK8s(_LargeScaleMixin, K8sNativeFailoverTest):
 
     # ── Batch parallel helper ────────────────────────────────────────────────
 
-    def _batch_exec_k8s(self, items, task_fn, op_name: str):
+    def _batch_exec_k8s(self, items, task_fn, op_name: str,
+                        per_item_timeout: int = 600,
+                        max_workers: int = None):
         """Execute task_fn(item) for each item using ThreadPoolExecutor."""
         total = len(items)
         success = 0
         failures = 0
+        workers = max_workers or self.MAX_WORKERS
 
-        with ThreadPoolExecutor(max_workers=self.MAX_WORKERS) as executor:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
             for batch_start in range(0, total, self.BATCH_SIZE):
                 batch = items[batch_start:batch_start + self.BATCH_SIZE]
                 futures = {}
@@ -1526,7 +1948,7 @@ class LargeScaleLvolK8s(_LargeScaleMixin, K8sNativeFailoverTest):
 
                 for f in as_completed(futures):
                     try:
-                        f.result(timeout=600)
+                        f.result(timeout=per_item_timeout)
                         success += 1
                     except Exception as exc:
                         failures += 1
