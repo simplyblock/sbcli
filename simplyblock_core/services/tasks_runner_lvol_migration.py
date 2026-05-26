@@ -1515,7 +1515,7 @@ def _get_secondary_rpc(node):
 
 
 
-_SKIP_CLEANUP_SOURCE = True  # DEBUG: set True to skip source cleanup
+_SKIP_CLEANUP_SOURCE = False  # DEBUG: set True to skip source cleanup
 
 
 def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
