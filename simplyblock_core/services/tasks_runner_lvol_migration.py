@@ -1108,46 +1108,57 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
 
         migration.transfer_context = tgt_uuid_carry
 
-        _update_ana_states(migration, src_node, tgt_node, src_rpc, tgt_rpc)
+        # For the non-adjacent path: flip ANA states so the client (which is
+        # already connected to both SRC and TGT) routes IO to TGT.
+        # For tgt_is_src_secondary: skip — TGT already has non-optimized ANA
+        # as the secondary mirror, and we are about to delete+recreate the
+        # subsystem anyway.  The new subsystem defaults to optimized (correct,
+        # since TGT is now primary), and the client reconnects fresh via new
+        # connection strings — no ANA flip needed.
+        if not tgt_is_src_secondary:
+            _update_ana_states(migration, src_node, tgt_node, src_rpc, tgt_rpc)
 
-        # For tgt_is_src_secondary: now that the migrated bdev is live and ANA
-        # states are flipped, clean up TGT's old secondary-mirror role:
-        #   1. Remove the mirror namespace (old unsuffixed bdev the client was
-        #      using as its secondary path).
-        #   2. Remove the mirror listener (the port TGT was serving as a mirror,
-        #      equal to SRC's primary port).
-        # This tells the client that the old secondary path is gone so it will
-        # drop that controller.  The client must then connect fresh to TGT's
-        # primary port (and TGT's own secondary port) to resume I/O.
+        # For tgt_is_src_secondary: transfer is complete; now expose the
+        # migrated lvol via NVMe-oF for the first time.
+        #   1. Delete the old secondary-mirror subsystem entirely — this
+        #      removes all mirror namespaces and listeners in one shot and
+        #      makes the client's existing secondary path go away cleanly.
+        #   2. Create a fresh subsystem with the same NQN on TGT's primary
+        #      port and attach the migrated bdev as its sole namespace.
+        # The client must then disconnect stale controllers and reconnect
+        # using the new connection strings (primary + secondary ports).
         if tgt_is_src_secondary:
-            mirror_bdev = f"{tgt_node.lvstore}/{lvol.lvol_bdev}"
-            src_mirror_port = str(src_node.get_lvol_subsys_port(src_node.lvstore))
+            tgt_primary_port = tgt_node.get_lvol_subsys_port(tgt_node.lvstore)
+            tgt_trtype_local, tgt_ip_local = _get_migration_nic(tgt_node)
             try:
-                sub_list = tgt_rpc.subsystem_list(lvol.nqn)
-                sub = (sub_list[0] if isinstance(sub_list, list) else sub_list) if sub_list else {}
-                # Remove mirror namespace
-                for ns in sub.get('namespaces', []):
-                    ns_bdev  = ns.get('bdev_name') or ns.get('name', '')
-                    ns_uuid  = ns.get('uuid', '')
-                    if ns_bdev == mirror_bdev or ns_uuid == lvol.uuid:
-                        mirror_nsid = ns.get('nsid')
-                        tgt_rpc.nvmf_subsystem_remove_ns(lvol.nqn, mirror_nsid)
-                        logger.info(
-                            f"tgt_is_src_secondary: removed mirror namespace "
-                            f"{mirror_bdev} nsid={mirror_nsid} from {lvol.nqn}")
-                        break
-                # Remove mirror listener (the port matching SRC's primary port)
-                for listener in sub.get('listen_addresses', []):
-                    if str(listener.get('trsvcid', '')) == src_mirror_port:
-                        trtype = listener.get('trtype', 'TCP')
-                        traddr = listener.get('traddr', '')
-                        tgt_rpc.listeners_del(lvol.nqn, trtype, traddr, src_mirror_port)
-                        logger.info(
-                            f"tgt_is_src_secondary: removed mirror listener "
-                            f"{traddr}:{src_mirror_port} from {lvol.nqn}")
-                        break
+                # Step 1: delete the old mirror subsystem
+                tgt_rpc.subsystem_delete(lvol.nqn)
+                logger.info(
+                    f"tgt_is_src_secondary: deleted old mirror subsystem {lvol.nqn}")
             except Exception as e:
-                logger.warning(f"tgt_is_src_secondary mirror cleanup failed (non-fatal): {e}")
+                logger.warning(
+                    f"tgt_is_src_secondary: subsystem_delete {lvol.nqn} failed "
+                    f"(may not exist): {e}")
+            try:
+                # Step 2: create new subsystem with same NQN
+                serial = lvol.uuid[:20].upper().replace('-', '')
+                if not tgt_rpc.subsystem_create(lvol.nqn, serial, "SimplyBlock"):
+                    logger.error(
+                        f"tgt_is_src_secondary: subsystem_create {lvol.nqn} failed")
+                else:
+                    # Step 3: add primary-port listener
+                    tgt_rpc.listeners_create(
+                        lvol.nqn, tgt_trtype_local, tgt_ip_local, tgt_primary_port)
+                    # Step 4: add migrated bdev as namespace
+                    tgt_rpc.nvmf_subsystem_add_ns(
+                        lvol.nqn, tgt_lvol_composite, uuid=lvol.uuid)
+                    logger.info(
+                        f"tgt_is_src_secondary: created subsystem {lvol.nqn} "
+                        f"listener={tgt_ip_local}:{tgt_primary_port} "
+                        f"ns={tgt_lvol_composite}")
+            except Exception as e:
+                logger.error(
+                    f"tgt_is_src_secondary: subsystem re-creation failed: {e}")
 
         # apply_migration_to_db is intentionally deferred to CLEANUP_SOURCE
         return True, False, None
@@ -1252,45 +1263,55 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         # Subsystem pre-exists because this node was already the secondary mirror
         # for this lvol (at the source's port, e.g. 4420).  After migration the
         # lvol must be reachable at the target's primary port (e.g. 4427).  Add
-        # that listener now if it isn't already present.
-        tgt_primary_port = tgt_node.get_lvol_subsys_port(tgt_node.lvstore)
-        ret = tgt_rpc.listeners_create(nqn, trtype, target_ip, tgt_primary_port)
-        if not ret:
-            logger.warning(
-                f"Could not add primary-port listener {tgt_primary_port} to "
-                f"pre-existing subsystem {nqn} — may already exist")
+        if tgt_is_src_secondary:
+            # For the adjacent path (TGT was SRC's secondary mirror): do NOT
+            # touch the existing mirror subsystem during setup.  The mirror
+            # subsystem will be deleted and re-created cleanly after the
+            # transfer completes, so the client can disconnect the stale path
+            # and reconnect with correct connection strings.
+            logger.info(
+                f"tgt_is_src_secondary: deferring subsystem setup for {nqn} "
+                f"until after transfer completes")
+        else:
+            # TGT pre-existing subsystem from a non-secondary scenario:
+            # add the primary-port listener if missing, remove any stale
+            # secondary-mirror namespace, then attach our new namespace.
+            tgt_primary_port = tgt_node.get_lvol_subsys_port(tgt_node.lvstore)
+            ret = tgt_rpc.listeners_create(nqn, trtype, target_ip, tgt_primary_port)
+            if not ret:
+                logger.warning(
+                    f"Could not add primary-port listener {tgt_primary_port} to "
+                    f"pre-existing subsystem {nqn} — may already exist")
 
-        # Remove old secondary-mirror namespace(s) for this lvol before we add
-        # the new primary namespace.  Remove any namespace whose bdev ends with
-        # /LVOL_xxx but lives on a different lvstore than tgt_node.
-        try:
-            sub_list = tgt_rpc.subsystem_list(nqn)
-            if sub_list:
-                sub = sub_list[0] if isinstance(sub_list, list) else sub_list
-                for ns in sub.get('namespaces', []):
-                    ns_bdev = ns.get('bdev_name') or ns.get('name', '')
-                    old_nsid = ns.get('nsid')
-                    if (ns_bdev.endswith(f"/{lvol.lvol_bdev}")
-                            and not ns_bdev.startswith(f"{tgt_node.lvstore}/")):
-                        tgt_rpc.nvmf_subsystem_remove_ns(nqn, old_nsid)
-                        logger.info(
-                            f"Removed stale secondary namespace nsid={old_nsid} "
-                            f"bdev={ns_bdev} from subsystem {nqn}")
-        except Exception as e:
-            logger.warning(f"Could not clean up stale secondary namespace in {nqn}: {e}")
+            try:
+                sub_list = tgt_rpc.subsystem_list(nqn)
+                if sub_list:
+                    sub = sub_list[0] if isinstance(sub_list, list) else sub_list
+                    for ns in sub.get('namespaces', []):
+                        ns_bdev = ns.get('bdev_name') or ns.get('name', '')
+                        old_nsid = ns.get('nsid')
+                        if (ns_bdev.endswith(f"/{lvol.lvol_bdev}")
+                                and not ns_bdev.startswith(f"{tgt_node.lvstore}/")):
+                            tgt_rpc.nvmf_subsystem_remove_ns(nqn, old_nsid)
+                            logger.info(
+                                f"Removed stale secondary namespace nsid={old_nsid} "
+                                f"bdev={ns_bdev} from subsystem {nqn}")
+            except Exception as e:
+                logger.warning(f"Could not clean up stale secondary namespace in {nqn}: {e}")
 
-        logger.info(
-            f"Subsystem {nqn} already exists on target; added listener on "
-            f"{target_ip}:{tgt_primary_port} and attaching namespace")
+            logger.info(
+                f"Subsystem {nqn} already exists on target; added listener on "
+                f"{target_ip}:{tgt_primary_port} and attaching namespace")
 
     tgt_ns_id = None
-    ns_ret = tgt_rpc.nvmf_subsystem_add_ns(nqn, tgt_lvol_composite, uuid=lvol.uuid)
-    if not ns_ret:
-        if subsystem_created_on_target:
-            tgt_rpc.subsystem_delete(nqn)
-        _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc, secondary_rpc=sec_setup_rpc)
-        return False, True, "Failed to add namespace to target subsystem"
-    tgt_ns_id = int(ns_ret) if ns_ret else lvol.ns_id
+    if not tgt_is_src_secondary:
+        ns_ret = tgt_rpc.nvmf_subsystem_add_ns(nqn, tgt_lvol_composite, uuid=lvol.uuid)
+        if not ns_ret:
+            if subsystem_created_on_target:
+                tgt_rpc.subsystem_delete(nqn)
+            _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc, secondary_rpc=sec_setup_rpc)
+            return False, True, "Failed to add namespace to target subsystem"
+        tgt_ns_id = int(ns_ret) if ns_ret else lvol.ns_id
 
     # Step 3: connect source to target hub lvol
     ctrl_name = f"mighub_{migration.uuid[:8]}"
@@ -1622,9 +1643,8 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
         tgt_is_src_secondary = (src_node.secondary_node_id == tgt_node.get_id())
         if src_sec_rpc and not tgt_is_src_secondary:
             # When tgt_is_src_secondary, src_sec_rpc IS the TGT node's RPC.
-            # Its namespace was already swapped to the migrated bdev by the
-            # deferred swap block above — do NOT remove it here or clients
-            # will lose their active path and suffer a ~70s AER rediscovery.
+            # The old mirror subsystem was already deleted and a new one created
+            # in the transfer-complete handler — do not touch it here.
             _cleanup_subsystem_or_ns(lvol.nqn, lvol.ns_id, True, src_sec_rpc)
     except Exception as e:
         logger.warning(f"Source subsystem cleanup failed (non-fatal): {e}")
