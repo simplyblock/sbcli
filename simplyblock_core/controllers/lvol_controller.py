@@ -2525,20 +2525,22 @@ def clone_lvol(lvol_id, clone_name, new_size=None, pvc_name=None):
     #         logger.error(error)
     #         return False, error
 
+    all_lvols = db_controller.get_lvols()
+    all_snaps = db_controller.get_snapshots()
     snapshot_uuid = None
-    for snap in db_controller.get_snapshots_by_node_id(lvol.node_id):
-        if snap.snap_name == clone_name:
+    for snap in all_snaps:
+        if snap.snap_name == clone_name and snap.lvol.node_id == lvol.node_id:
             logger.info(f"Snapshot with name {clone_name} already exists for this LVol: {snap.uuid}, using it for cloning")
             snapshot_uuid = snap.uuid
             break
 
     if not snapshot_uuid:
-        snapshot_uuid, err = snapshot_controller.add(lvol_id, clone_name, lock=False)
+        snapshot_uuid, err = snapshot_controller.add(lvol_id, clone_name, lock=False, all_snaps=all_snaps, all_lvols=all_lvols)
         if err:
             logger.error(err)
             return False, str(err)
     new_lvol_uuid, err = snapshot_controller.clone(
-        snapshot_uuid, clone_name, new_size, pvc_name, delete_snap_on_lvol_delete=True, lock=False, namespaced=True)
+        snapshot_uuid, clone_name, new_size, pvc_name, delete_snap_on_lvol_delete=True, lock=False, namespaced=True, all_snaps=all_snaps, all_lvols=all_lvols)
     if err:
         logger.error(err)
         if snapshot_uuid:

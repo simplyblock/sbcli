@@ -1316,7 +1316,7 @@ def get_random_snapshot_vuid(all_lvols=None, all_snapshots=None):
     # exists". That rejection in the clone path is what triggered the
     # mgmt-side async snapshot delete + reuse-during-deletion sequence
     # producing stuck snapshots (incident: aws_dual_soak 2026-04-30).
-    used = used_vuids | _used_bdev_name_numbers(db_controller, all_lvols=None, all_snapshots=None)
+    used = used_vuids | _used_bdev_name_numbers(db_controller, all_lvols, all_snapshots)
 
     r = 1 + int(random.random() * 1000000)
     while r in used:

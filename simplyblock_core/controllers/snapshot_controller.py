@@ -46,7 +46,7 @@ def _rollback_lvol_creation(lvol, node_ids):
             logger.error(f"Failed to rollback lvol {lvol.get_id()} from node {node_id}: {e}")
 
 
-def add(lvol_id, snapshot_name, backup=False, lock=True):
+def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvols=None):
     try:
         lvol = db_controller.get_lvol_by_id(lvol_id)
     except KeyError:
@@ -81,7 +81,8 @@ def add(lvol_id, snapshot_name, backup=False, lock=True):
         logger.error(msg)
         return False, msg
 
-    all_snaps = db_controller.get_snapshots(pool.cluster_id)
+    if not all_snaps:
+        all_snaps = db_controller.get_snapshots(pool.cluster_id)
     for sn in all_snaps:
         if sn.snap_name == snapshot_name:
             return False, f"Snapshot name must be unique: {snapshot_name}"
@@ -105,7 +106,8 @@ def add(lvol_id, snapshot_name, backup=False, lock=True):
         logger.error(msg)
         return False, msg
 
-    all_lvols = db_controller.get_lvols()
+    if not all_lvols:
+        all_lvols = db_controller.get_lvols()
     if pool.pool_max_size > 0:
         total = pool_controller.get_pool_total_capacity(pool.get_id(), all_lvols, all_snaps)
         if total + size > pool.pool_max_size:
@@ -121,7 +123,7 @@ def add(lvol_id, snapshot_name, backup=False, lock=True):
     if cluster.status not in [cluster.STATUS_ACTIVE, cluster.STATUS_DEGRADED]:
         return False, f"Cluster is not active, status: {cluster.status}"
 
-    snap_vuid = utils.get_random_snapshot_vuid()
+    snap_vuid = utils.get_random_snapshot_vuid(all_lvols, all_snaps)
     snap_bdev_name = f"SNAP_{snap_vuid}"
     size = lvol.size
     blobid = 0
@@ -550,7 +552,7 @@ def delete(snapshot_uuid, force_delete=False):
 
 
 def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None, delete_snap_on_lvol_delete=False,
-          lock=True, namespaced=True):
+          lock=True, namespaced=True, all_snaps=None, all_lvols=None):
     try:
         snap = db_controller.get_snapshot_by_id(snapshot_id)
     except KeyError:
@@ -605,7 +607,9 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     cluster = db_controller.get_cluster_by_id(pool.cluster_id)
     if cluster.status not in [cluster.STATUS_ACTIVE, cluster.STATUS_DEGRADED]:
         return False, f"Cluster is not active, status: {cluster.status}"
-    all_lvols = db_controller.get_lvols()
+
+    if not all_lvols:
+        all_lvols = db_controller.get_lvols()
     for lvol in all_lvols:
         if lvol.pool_uuid != pool.get_id() or lvol.lvol_name != clone_name:
             continue
@@ -616,7 +620,8 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
         logger.error(msg)
         return False, msg
 
-    all_snaps = db_controller.get_snapshots()
+    if not all_snaps:
+        all_snaps = db_controller.get_snapshots()
     size = snap.size
     if 0 < pool.lvol_max_size < size:
         msg = f"Pool Max LVol size is: {utils.humanbytes(pool.lvol_max_size)}, LVol size: {utils.humanbytes(size)} must be below this limit"
@@ -629,13 +634,6 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
             msg = f"Invalid LVol size: {utils.humanbytes(size)}. Pool max size has reached {utils.humanbytes(total+size)} of {utils.humanbytes(pool.pool_max_size)}"
             logger.error(msg)
             return False, msg
-
-    subsys_count = len(set(lv.nqn for lv in all_lvols if lv.node_id == snode.get_id()))
-    if subsys_count >= snode.max_lvol:
-        error = f"Too many subsystems on node: {snode.get_id()}, max subsystems reached: {subsys_count}"
-        logger.error(error)
-        return False, error
-
 
     # Resolve the namespace slot early so we can (a) skip the subsystem limit
     # check when the clone fits into an existing subsystem, and (b) reuse the
