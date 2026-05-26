@@ -81,22 +81,8 @@ def add(lvol_id, snapshot_name, backup=False, lock=True):
         logger.error(msg)
         return False, msg
 
-    if lvol.cloned_from_snap:
-        try:
-            snap = db_controller.get_snapshot_by_id(lvol.cloned_from_snap)
-            ref_count = snap.ref_count
-            if snap.snap_ref_id:
-                ref_snap = db_controller.get_snapshot_by_id(snap.snap_ref_id)
-                ref_count = ref_snap.ref_count
-
-            if ref_count >= constants.MAX_SNAP_COUNT:
-                msg = f"Can not create more than {constants.MAX_SNAP_COUNT} snaps from this clone"
-                logger.error(msg)
-                return False, msg
-        except KeyError:
-            pass
-
-    for sn in db_controller.get_snapshots(pool.cluster_id):
+    all_snaps = db_controller.get_snapshots(pool.cluster_id)
+    for sn in all_snaps:
         if sn.snap_name == snapshot_name:
             return False, f"Snapshot name must be unique: {snapshot_name}"
 
@@ -119,8 +105,9 @@ def add(lvol_id, snapshot_name, backup=False, lock=True):
         logger.error(msg)
         return False, msg
 
+    all_lvols = db_controller.get_lvols()
     if pool.pool_max_size > 0:
-        total = pool_controller.get_pool_total_capacity(pool.get_id())
+        total = pool_controller.get_pool_total_capacity(pool.get_id(), all_lvols, all_snaps)
         if total + size > pool.pool_max_size:
             msg = f"Invalid LVol size: {utils.humanbytes(size)}. pool max size has reached {utils.humanbytes(total+size)} of {utils.humanbytes(pool.pool_max_size)}"
             logger.error(msg)
@@ -289,7 +276,7 @@ def add(lvol_id, snapshot_name, backup=False, lock=True):
             snap.snap_ref_id = original_snap.get_id()
             snap.write_to_db(db_controller.kv_store)
 
-    for sn in db_controller.get_snapshots(cluster.get_id()):
+    for sn in all_snaps:
         if sn.get_id() == snap.get_id():
             continue
         if sn.lvol.get_id() == lvol_id:
@@ -605,19 +592,9 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     cluster = db_controller.get_cluster_by_id(pool.cluster_id)
     if cluster.status not in [cluster.STATUS_ACTIVE, cluster.STATUS_DEGRADED]:
         return False, f"Cluster is not active, status: {cluster.status}"
-
-    ref_count = snap.ref_count
-    if snap.snap_ref_id:
-        ref_snap = db_controller.get_snapshot_by_id(snap.snap_ref_id)
-        ref_count = ref_snap.ref_count
-
-    if ref_count >= constants.MAX_SNAP_COUNT:
-        msg = f"Can not create more than {constants.MAX_SNAP_COUNT} clones from this snapshot"
-        logger.error(msg)
-        return False, msg
-
-    for lvol in db_controller.get_lvols_by_pool_id(pool.get_id()):
-        if lvol.lvol_name != clone_name:
+    all_lvols = db_controller.get_lvols()
+    for lvol in all_lvols:
+        if lvol.pool_uuid != pool.get_id() or lvol.lvol_name != clone_name:
             continue
         if lvol.cloned_from_snap == snapshot_id and lvol.status != LVol.STATUS_IN_DELETION:
             logger.info(f"Clone already exists, reusing lvol: {lvol.get_id()}")
@@ -626,6 +603,7 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
         logger.error(msg)
         return False, msg
 
+    all_snaps = db_controller.get_snapshots()
     size = snap.size
     if 0 < pool.lvol_max_size < size:
         msg = f"Pool Max LVol size is: {utils.humanbytes(pool.lvol_max_size)}, LVol size: {utils.humanbytes(size)} must be below this limit"
@@ -633,25 +611,28 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
         return False, msg
 
     if pool.pool_max_size > 0:
-        total = pool_controller.get_pool_total_capacity(pool.get_id())
+        total = pool_controller.get_pool_total_capacity(pool.get_id(), all_lvols=all_lvols, all_snaps=all_snaps)
         if total + size > pool.pool_max_size:
             msg = f"Invalid LVol size: {utils.humanbytes(size)}. Pool max size has reached {utils.humanbytes(total+size)} of {utils.humanbytes(pool.pool_max_size)}"
             logger.error(msg)
             return False, msg
-        if total + snap.lvol.size > pool.pool_max_size:
-            msg = f"Pool max size has reached {utils.humanbytes(total)} of {utils.humanbytes(pool.pool_max_size)}"
-            logger.error(msg)
-            return False, msg
+
+    subsys_count = len(set(lv.nqn for lv in all_lvols if lv.node_id == snode.get_id()))
+    if subsys_count >= snode.max_lvol:
+        error = f"Too many subsystems on node: {snode.get_id()}, max subsystems reached: {subsys_count}"
+        logger.error(error)
+        return False, error
+
 
     # Resolve the namespace slot early so we can (a) skip the subsystem limit
     # check when the clone fits into an existing subsystem, and (b) reuse the
     # result below instead of calling get_next_available_subsystem_on_node twice.
-    _available_subsys = lvol_controller.get_next_available_subsystem_on_node(snode.get_id()) if namespaced else None
+    _available_subsys = lvol_controller.get_next_available_subsystem_on_node(snode.get_id(), all_lvols=all_lvols) if namespaced else None
 
     if not _available_subsys:
         subsys_count = len(set(
-            lv.nqn for lv in db_controller.get_lvols_by_node_id(snode.get_id())
-            if lv.status not in [LVol.STATUS_IN_DELETION, LVol.STATUS_DELETED]
+            lv.nqn for lv in all_lvols if lv.node_id == snode.get_id() and
+            lv.status not in [LVol.STATUS_IN_DELETION, LVol.STATUS_DELETED]
         ))
         if subsys_count >= snode.max_lvol:
             error = f"Too many subsystems on node: {snode.get_id()}, max subsystems reached: {snode.max_lvol}"
