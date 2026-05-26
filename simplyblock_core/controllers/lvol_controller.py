@@ -18,6 +18,7 @@ from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.lvol_model import LVol
+from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.prom_client import PromClient
 
@@ -2527,7 +2528,7 @@ def clone_lvol(lvol_id, clone_name, new_size=None, pvc_name=None):
 
     snapshot_uuid = None
     for snap in db_controller.get_snapshots_by_node_id(lvol.node_id):
-        if snap.snap_name == clone_name:
+        if snap.snap_name == clone_name and snap.status == SnapShot.STATUS_ONLINE:
             logger.info(f"Snapshot with name {clone_name} already exists for this LVol: {snap.uuid}, using it for cloning")
             snapshot_uuid = snap.uuid
             break
