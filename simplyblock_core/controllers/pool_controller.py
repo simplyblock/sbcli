@@ -489,7 +489,7 @@ def get_io_stats(pool_id, history, records_count=20):
     ])
 
 
-def get_pool_total_capacity(pool_id):
+def get_pool_total_capacity(pool_id, all_lvols=None, all_snaps=None):
     db_controller = DBController()
     try:
         db_controller.get_pool_by_id(pool_id)
@@ -497,11 +497,14 @@ def get_pool_total_capacity(pool_id):
         logger.error(f"Pool not found {pool_id}")
         return False
     total = 0
-    for lvol in db_controller.get_lvols_by_pool_id(pool_id):
+    if not all_lvols:
+        all_lvols = db_controller.get_lvols_by_pool_id(pool_id)
+    for lvol in all_lvols:
         total += lvol.size
 
-    snaps = db_controller.get_snapshots()
-    for snap in snaps:
+    if not all_snaps:
+        all_snaps = db_controller.get_snapshots()
+    for snap in all_snaps:
         if snap.lvol.pool_uuid == pool_id:
             total += snap.used_size
     return total

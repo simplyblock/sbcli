@@ -785,7 +785,7 @@ class CLIWrapperBase:
         return True
 
     def snapshot__list(self, sub_command, args):
-        return snapshot_controller.list(args.all, args.cluster_id, args.with_details)
+        return snapshot_controller.list(args.all, args.cluster_id, args.with_details, args.pool)
 
     def snapshot__delete(self, sub_command, args):
         return snapshot_controller.delete(args.snapshot_id, args.force)
