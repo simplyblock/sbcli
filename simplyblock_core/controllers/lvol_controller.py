@@ -1037,7 +1037,7 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
             subsys_ns = subsys[0]["namespaces"]
             if subsys_max_ns == len(subsys_ns):
                 logger.info("Subsys is full, looking for another one")
-                result = get_next_available_subsystem_on_node(lvol.host_id)
+                result = get_next_available_subsystem_on_node(lvol.node_id)
                 if result:
                     namespace, free_nqn = result
                     lvol.nqn = free_nqn
