@@ -915,6 +915,8 @@ def _fail_after_bdev(lvol, rpc_client, msg):
     rollback failure so the caller still sees the original error."""
     try:
         _remove_bdev_stack(lvol.bdev_stack[::-1], rpc_client)
+        lvol.status = LVol.STATUS_IN_DELETION
+        lvol.write_to_db(DBController().kv_store)
     except Exception:
         logger.exception("rollback of bdev stack failed for %s", lvol.get_id())
     return False, msg
@@ -1040,6 +1042,9 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
                     namespace, free_nqn = result
                     lvol.nqn = free_nqn
                     lvol.namespace = namespace
+                else:
+                    lvol.nqn = snode.cluster_id + ":lvol:" + lvol.uuid
+                    lvol.namespace = ""
             return False
 
     logger.info("Add BDev to subsystem")

@@ -815,7 +815,8 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
                 lvol_bdev, error = lvol_controller.add_lvol_on_node(lvol, primary_node)
                 if error:
                     logger.error(error)
-                    lvol.remove(db_controller.kv_store)
+                    if lvol.status != LVol.STATUS_IN_DELETION:
+                        lvol.remove(db_controller.kv_store)
                     return False, error
                 lvol.lvol_uuid = lvol_bdev['uuid']
                 lvol.blobid = lvol_bdev['driver_specific']['lvol']['blobid']
@@ -824,7 +825,8 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
                 lvol_bdev, error = lvol_controller.add_lvol_on_node(lvol, sec, is_primary=False)
                 if error:
                     logger.error(error)
-                    lvol.remove(db_controller.kv_store)
+                    if lvol.status != LVol.STATUS_IN_DELETION:
+                        lvol.remove(db_controller.kv_store)
                     return False, error
         finally:
             if lock:
