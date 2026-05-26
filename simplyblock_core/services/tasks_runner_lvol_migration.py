@@ -1146,9 +1146,10 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                     logger.error(
                         f"tgt_is_src_secondary: subsystem_create {lvol.nqn} failed")
                 else:
-                    # Step 3: add primary-port listener
+                    # Step 3: add primary-port listener, explicitly optimized
                     tgt_rpc.listeners_create(
-                        lvol.nqn, tgt_trtype_local, tgt_ip_local, tgt_primary_port)
+                        lvol.nqn, tgt_trtype_local, tgt_ip_local, tgt_primary_port,
+                        ana_state="optimized")
                     # Step 4: add migrated bdev as namespace
                     tgt_rpc.nvmf_subsystem_add_ns(
                         lvol.nqn, tgt_lvol_composite, uuid=lvol.uuid)
@@ -1637,10 +1638,11 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
             logger.warning(f"Source snapshot {snap_uuid} not found in DB; skipping")
 
     # --- All deletes finished: cleanup source NVMe-oF exposure ---
+    lvol = None
+    tgt_is_src_secondary = (src_node.secondary_node_id == tgt_node.get_id())
     try:
         lvol = db.get_lvol_by_id(migration.lvol_id)
         _cleanup_subsystem_or_ns(lvol.nqn, lvol.ns_id, True, src_rpc)
-        tgt_is_src_secondary = (src_node.secondary_node_id == tgt_node.get_id())
         if src_sec_rpc and not tgt_is_src_secondary:
             # When tgt_is_src_secondary, src_sec_rpc IS the TGT node's RPC.
             # The old mirror subsystem was already deleted and a new one created
@@ -1648,6 +1650,24 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
             _cleanup_subsystem_or_ns(lvol.nqn, lvol.ns_id, True, src_sec_rpc)
     except Exception as e:
         logger.warning(f"Source subsystem cleanup failed (non-fatal): {e}")
+
+    # Explicitly delete the source lvol bdev.  bdev_lvol_final_migration may
+    # have already freed it internally on the SPDK side — if so the call
+    # returns not-found which we silently ignore.
+    if lvol is not None:
+        try:
+            src_lvol_composite = f"{src_node.lvstore}/{lvol.lvol_bdev}"
+            ret, _ = src_rpc.delete_lvol(src_lvol_composite)
+            if ret:
+                logger.info(f"Deleted source lvol bdev {src_lvol_composite}")
+            else:
+                logger.info(
+                    f"Source lvol bdev {src_lvol_composite} already gone "
+                    f"(freed by bdev_lvol_final_migration)")
+            if src_sec_rpc and not tgt_is_src_secondary:
+                src_sec_rpc.delete_lvol(src_lvol_composite, del_async=True)
+        except Exception as e:
+            logger.warning(f"Source lvol delete failed (non-fatal): {e}")
 
     # Deferred hub detach: for the non-secondary case the hub controller was
     # kept alive so clients could follow the ANA-optimized path on target
