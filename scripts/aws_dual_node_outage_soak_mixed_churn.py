@@ -100,6 +100,25 @@ def parse_args():
     parser.add_argument("--rebalance-timeout", type=int, default=7200, help="Seconds to wait for rebalancing.")
     parser.add_argument("--poll-interval", type=int, default=10, help="Poll interval for health checks.")
     parser.add_argument(
+        "--wait-for-rebalance",
+        action="store_true",
+        help=(
+            "Between iterations, poll until cluster rebalancing / data migration "
+            "fully drains (bounded by --rebalance-timeout). Default: sleep a fixed "
+            "--inter-iteration-window instead (rebalance wait disabled)."
+        ),
+    )
+    parser.add_argument(
+        "--inter-iteration-window",
+        type=int,
+        default=60,
+        help=(
+            "Seconds to settle between iterations when --wait-for-rebalance is NOT "
+            "set (default: 60). Nodes are still brought back online first; only the "
+            "rebalance / data-migration completion wait is replaced by this fixed sleep."
+        ),
+    )
+    parser.add_argument(
         "--shutdown-gap",
         type=int,
         default=0,
@@ -784,6 +803,30 @@ class SoakRunner:
         raise TestRunError(
             f"Timed out waiting for data migration tasks to finish before {reason}"
         )
+
+    def settle_between_iterations(self, reason):
+        """Inter-iteration settle gate.
+
+        With --wait-for-rebalance, poll until the cluster is stable and all
+        rebalance / data-migration tasks have drained (bounded by
+        --rebalance-timeout). Without it (the default), bring the nodes back
+        online and then sleep a fixed --inter-iteration-window instead of
+        waiting for rebalancing to finish — appropriate when device-migration
+        runners are disabled or rebalancing is not the thing under test.
+        """
+        if self.args.wait_for_rebalance:
+            self.wait_for_cluster_stable()
+            self.wait_for_data_migration_complete(reason)
+            return
+        # Default: nodes must be back online, then a fixed settle window.
+        self.wait_for_all_online(timeout=self.args.restart_timeout)
+        self.logger.log(
+            f"Fixed inter-iteration window before {reason}: "
+            f"{self.args.inter_iteration_window}s "
+            "(rebalance / data-migration wait disabled; pass "
+            "--wait-for-rebalance to gate on completion instead)"
+        )
+        time.sleep(self.args.inter_iteration_window)
 
     def sbctl_allow_failure(self, args, timeout=600):
         command = "sudo /usr/local/bin/sbctl -d " + args
@@ -2085,22 +2128,20 @@ class SoakRunner:
                     # SIGTERM/SIGKILL — fio keeps running into the next
                     # iteration and across the upcoming churn cycles.
                     self.check_fio()
-                    # Wait for the cluster to settle: all nodes online AND
-                    # rebalance / data-migration drained before the next
-                    # outage pair fires.
+                    # Bring nodes back online, then settle before the next
+                    # outage pair: either wait for rebalance / data-migration
+                    # to drain (--wait-for-rebalance) or a fixed window.
                     self.wait_for_all_online(timeout=self.args.restart_timeout)
-                    self.wait_for_cluster_stable()
-                    self.wait_for_data_migration_complete("next outage pair")
+                    self.settle_between_iterations("next outage pair")
                     self._inter_iteration_nic_chaos()
 
                 # Re-check for any churn fault that may have fired
                 # before we acquired the lock; exit at the next sync point.
                 self.reraise_churn_error()
-                # Wait for rebalance / data-migration to complete before
-                # starting the next iteration (main branch: device-migration
-                # runners are active and we gate on `is_re_balancing`).
-                self.wait_for_cluster_stable()
-                self.wait_for_data_migration_complete("next iteration")
+                # Settle before the next iteration: with --wait-for-rebalance,
+                # gate on rebalance / data-migration completion (device-migration
+                # runners active, `is_re_balancing`); otherwise a fixed window.
+                self.settle_between_iterations("next iteration")
 
 
 def main():
