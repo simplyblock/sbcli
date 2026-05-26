@@ -1028,6 +1028,19 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
                         return _fail_after_bdev(
                             lvol, rpc_client,
                             f"Failed to create listener for {lvol.get_id()}")
+    else:
+        subsys = rpc_client.subsystem_list(lvol.nqn)
+        if subsys and is_primary:
+            subsys_max_ns = subsys[0]["max_namespaces"]
+            subsys_ns = subsys[0]["namespaces"]
+            if subsys_max_ns == len(subsys_ns):
+                logger.info("Subsys is full, looking for another one")
+                result = get_next_available_subsystem_on_node(lvol.host_id)
+                if result:
+                    namespace, free_nqn = result
+                    lvol.nqn = free_nqn
+                    lvol.namespace = namespace
+            return False
 
     logger.info("Add BDev to subsystem")
     ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid)
