@@ -2226,6 +2226,10 @@ commands:
             dest: with_details
             type: bool
             action: store_true
+          - name: "--pool"
+            help: "List snapshots in particular pool id or name."
+            dest: pool
+            type: str
       - name: delete
         help: "Deletes a snapshot."
         arguments:
