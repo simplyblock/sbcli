@@ -6,6 +6,7 @@ import os
 import ssl
 import sys
 import time
+import uuid
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.wsgi import WSGIMiddleware
@@ -34,8 +35,9 @@ for _ext_logger_name in (
 
 access_logger = logging.getLogger('simplyblock_web.access')
 _access_handler = logging.StreamHandler(stream=sys.stdout)
+_access_handler.addFilter(core_utils.RequestIdFilter())
 _access_handler.setFormatter(logging.Formatter(
-    '%(asctime)s %(levelname)s %(client_ip)s'
+    '%(asctime)s %(levelname)s [%(request_id)s] %(client_ip)s'
     ' "%(message)s" %(status_code)s %(request_size)s %(response_size)s %(duration_ms).2fms'
 ))
 access_logger.addHandler(_access_handler)
@@ -49,13 +51,21 @@ class AccessLogMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         client_ip = request.client.host if request.client else '-'
         request_size = request.headers.get('content-length', '-')
+        request_id = request.headers.get('x-request-id') or uuid.uuid4().hex[:8]
+        token = core_utils.request_id_var.set(request_id)
 
         # Query strings can carry credentials (?secret=…, ?token=…) and have
         # no type info to mask by, so log the path only.
         path = request.url.path
 
         start = time.monotonic()
-        response = await call_next(request)
+        try:
+            response = await call_next(request)
+        except Exception:
+            logger.exception('Unhandled exception during %s %s (%.1fms)',
+                             request.method, path, (time.monotonic() - start) * 1000)
+            core_utils.request_id_var.reset(token)
+            raise
         duration_ms = (time.monotonic() - start) * 1000
 
         response_size = response.headers.get('content-length', '-')
@@ -72,6 +82,7 @@ class AccessLogMiddleware(BaseHTTPMiddleware):
                 'duration_ms': duration_ms,
             },
         )
+        core_utils.request_id_var.reset(token)
         return response
 
 
