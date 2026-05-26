@@ -96,10 +96,9 @@ def add(lvol_id, snapshot_name, backup=False, lock=True):
         except KeyError:
             pass
 
-    for sn in db_controller.get_snapshots():
-        if sn.cluster_id == pool.cluster_id:
-            if sn.snap_name == snapshot_name:
-                return False, f"Snapshot name must be unique: {snapshot_name}"
+    for sn in db_controller.get_snapshots(pool.cluster_id):
+        if sn.snap_name == snapshot_name:
+            return False, f"Snapshot name must be unique: {snapshot_name}"
 
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
 
@@ -123,12 +122,9 @@ def add(lvol_id, snapshot_name, backup=False, lock=True):
     if pool.pool_max_size > 0:
         total = pool_controller.get_pool_total_capacity(pool.get_id())
         if total + size > pool.pool_max_size:
-            msg =  f"Invalid LVol size: {utils.humanbytes(size)}. pool max size has reached {utils.humanbytes(total+size)} of {utils.humanbytes(pool.pool_max_size)}"
+            msg = f"Invalid LVol size: {utils.humanbytes(size)}. pool max size has reached {utils.humanbytes(total+size)} of {utils.humanbytes(pool.pool_max_size)}"
             logger.error(msg)
             return False, msg
-
-    if pool.pool_max_size > 0:
-        total = pool_controller.get_pool_total_capacity(pool.get_id())
         if total + lvol.size > pool.pool_max_size:
             msg = f"Pool max size has reached {utils.humanbytes(total)} of {utils.humanbytes(pool.pool_max_size)}"
             logger.error(msg)
@@ -280,8 +276,10 @@ def add(lvol_id, snapshot_name, backup=False, lock=True):
 
     snap.write_to_db(db_controller.kv_store)
 
+    _parent_snap = None
     if lvol.cloned_from_snap:
-        original_snap = db_controller.get_snapshot_by_id(lvol.cloned_from_snap)
+        _parent_snap = db_controller.get_snapshot_by_id(lvol.cloned_from_snap)
+        original_snap = _parent_snap
         if original_snap:
             if original_snap.snap_ref_id:
                 original_snap = db_controller.get_snapshot_by_id(original_snap.snap_ref_id)
@@ -308,7 +306,7 @@ def add(lvol_id, snapshot_name, backup=False, lock=True):
         if task:
             snapshot_events.replication_task_created(snap)
     if lvol.cloned_from_snap:
-        lvol_snap = db_controller.get_snapshot_by_id(lvol.cloned_from_snap)
+        lvol_snap = _parent_snap  # reuse fetch from above — same ID, no second DB read
         if lvol_snap.source_replicated_snap_uuid:
             try:
                 org_snap = db_controller.get_snapshot_by_id(lvol_snap.source_replicated_snap_uuid)
@@ -386,6 +384,7 @@ def delete(snapshot_uuid, force_delete=False):
             return True
 
     # Block during restart Phase 5
+    snode = None
     try:
         snode = db_controller.get_storage_node_by_id(snap.lvol.node_id)
         if snode.lvstore_status == "in_creation" and not force_delete:
@@ -420,7 +419,8 @@ def delete(snapshot_uuid, force_delete=False):
         return False
 
     try:
-        snode = db_controller.get_storage_node_by_id(snap.lvol.node_id)
+        if snode is None:
+            snode = db_controller.get_storage_node_by_id(snap.lvol.node_id)
     except KeyError:
         logger.exception(f"Storage node not found {snap.lvol.node_id}")
         if force_delete:
@@ -616,13 +616,13 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
         logger.error(msg)
         return False, msg
 
-    for lvol in db_controller.get_lvols():
-        if lvol.pool_uuid != pool.get_id() or lvol.lvol_name != clone_name:
+    for lvol in db_controller.get_lvols_by_pool_id(pool.get_id()):
+        if lvol.lvol_name != clone_name:
             continue
         if lvol.cloned_from_snap == snapshot_id and lvol.status != LVol.STATUS_IN_DELETION:
             logger.info(f"Clone already exists, reusing lvol: {lvol.get_id()}")
             return lvol.get_id(), False
-        msg=f"LVol name must be unique: {clone_name}"
+        msg = f"LVol name must be unique: {clone_name}"
         logger.error(msg)
         return False, msg
 
@@ -635,7 +635,11 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     if pool.pool_max_size > 0:
         total = pool_controller.get_pool_total_capacity(pool.get_id())
         if total + size > pool.pool_max_size:
-            msg =  f"Invalid LVol size: {utils.humanbytes(size)}. Pool max size has reached {utils.humanbytes(total+size)} of {utils.humanbytes(pool.pool_max_size)}"
+            msg = f"Invalid LVol size: {utils.humanbytes(size)}. Pool max size has reached {utils.humanbytes(total+size)} of {utils.humanbytes(pool.pool_max_size)}"
+            logger.error(msg)
+            return False, msg
+        if total + snap.lvol.size > pool.pool_max_size:
+            msg = f"Pool max size has reached {utils.humanbytes(total)} of {utils.humanbytes(pool.pool_max_size)}"
             logger.error(msg)
             return False, msg
 
@@ -653,13 +657,6 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
             error = f"Too many subsystems on node: {snode.get_id()}, max subsystems reached: {snode.max_lvol}"
             logger.error(error)
             return False, error
-
-    if pool.pool_max_size > 0:
-        total = pool_controller.get_pool_total_capacity(pool.get_id())
-        if total + snap.lvol.size > pool.pool_max_size:
-            msg = f"Pool max size has reached {utils.humanbytes(total)} of {utils.humanbytes(pool.pool_max_size)}"
-            logger.error(msg)
-            return False, msg
 
     clone_vuid = utils.get_random_vuid()
     lvol = LVol()

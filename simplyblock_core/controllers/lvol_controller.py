@@ -422,14 +422,16 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
             return False, f"QOS class not found: {lvol_priority_class}"
 
     if uid:
-        for lvol in db_controller.get_lvols():
-            if lvol.get_id() == uid:
-                if pvc_name:
-                    lvol.pvc_name = pvc_name
-                if name:
-                    lvol.lvol_name = name
-                lvol.write_to_db()
-                return uid, None
+        try:
+            lvol = db_controller.get_lvol_by_id(uid)
+            if pvc_name:
+                lvol.pvc_name = pvc_name
+            if name:
+                lvol.lvol_name = name
+            lvol.write_to_db()
+            return uid, None
+        except KeyError:
+            pass
 
     if ha_type == "default":
         ha_type = cl.ha_type
@@ -1327,10 +1329,10 @@ def delete_lvol(id_or_name, force_delete=False):
             try:
                 snap = db_controller.get_snapshot_by_id(lvol.cloned_from_snap)
                 if snap.deleted is True:
-                    lvols_count = 0
-                    for lvol in db_controller.get_lvols():  # pass
-                        if lvol.cloned_from_snap == snap.get_id():
-                            lvols_count += 1
+                    lvols_count = sum(
+                        1 for lv in db_controller.get_lvols()
+                        if lv.cloned_from_snap == snap.get_id()
+                    )
                     if lvols_count == 0:
                         snapshot_controller.delete(snap.get_id())
             except KeyError:
@@ -1793,11 +1795,13 @@ def get_replication_info(lvol_id_or_name):
 
 def get_lvol(lvol_id_or_name, is_json):
     db_controller = DBController()
-    lvol = db_controller.get_lvol_by_id(lvol_id_or_name)
-    for lv in db_controller.get_lvols():  # pass
-        if lv.get_id() == lvol_id_or_name or lv.lvol_name == lvol_id_or_name:
-            lvol = lv
-            break
+    try:
+        lvol = db_controller.get_lvol_by_id(lvol_id_or_name)
+    except KeyError:
+        try:
+            lvol = db_controller.get_lvol_by_name(lvol_id_or_name)
+        except KeyError:
+            lvol = None
 
     if not lvol:
         logger.error(f"LVol id or name not found: {lvol_id_or_name}")
@@ -3136,6 +3140,13 @@ def get_master_lvols_by_pool_uuid(pool_id, is_json=False):
     db_controller = DBController()
     lvols = db_controller.get_lvols_by_pool_id(pool_id)
 
+    # Count namespaced children per subsystem root in one pass instead of
+    # issuing a separate DB scan for each root (was O(M×N)).
+    ns_counts = {}
+    for lv in lvols:
+        if lv.namespace:
+            ns_counts[lv.namespace] = ns_counts.get(lv.namespace, 0) + 1
+
     data = []
 
     for lvol in lvols:
@@ -3150,7 +3161,7 @@ def get_master_lvols_by_pool_uuid(pool_id, is_json=False):
             "Size": utils.humanbytes(lvol.size),
             "Hostname": lvol.hostname,
             "Status": lvol.status,
-            "Namespaces": len(db_controller.get_lvols_by_namespace(lvol.uuid)),
+            "Namespaces": ns_counts.get(lvol.uuid, 0),
             "MaxNamespaces": lvol.max_namespace_per_subsys,
         }
         data.append(lvol_data)
