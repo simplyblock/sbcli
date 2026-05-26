@@ -1045,7 +1045,6 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
                 else:
                     lvol.nqn = snode.cluster_id + ":lvol:" + lvol.uuid
                     lvol.namespace = ""
-            return False
 
     logger.info("Add BDev to subsystem")
     ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid)
