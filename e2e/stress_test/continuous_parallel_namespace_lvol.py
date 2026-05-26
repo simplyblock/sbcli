@@ -1583,6 +1583,31 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
         self.SNAPSHOT_CLASS_NAME = "simplyblock-csi-snapshotclass"
         self.k8s_utils = None
 
+    def setup(self):
+        """K8s-native setup: no SSH client machines needed — FIO runs as K8s Jobs."""
+        self.logger.info("Inside TestParallelNamespaceLvolK8s.setup()")
+
+        retry = 30
+        while retry > 0:
+            try:
+                self.logger.info("Getting all storage nodes")
+                self.mgmt_nodes, self.storage_nodes = self.sbcli_utils.get_all_nodes_ip()
+                self.sbcli_utils.list_lvols()
+                self.sbcli_utils.list_storage_pools()
+                break
+            except Exception as e:
+                self.logger.debug(f"API call failed with error: {e}")
+                retry -= 1
+                if retry == 0:
+                    self.logger.info(f"Retry attempt exhausted. API failed with: {e}. Exiting")
+                    raise e
+                self.logger.info(f"Retrying Base APIs before starting tests. Attempt: {30 - retry + 1}")
+                sleep_n_sec(10)
+
+        # No client machines needed — FIO runs as K8s Jobs
+        self.client_machines = []
+        self.fio_node = []
+
     # ── K8s helpers ───────────────────────────────────────────────────────
 
     def _init_k8s_utils(self):
