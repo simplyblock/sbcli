@@ -693,8 +693,11 @@ class BulkLvolDeleteDocker(_BulkDeleteMixin, TestLvolHACluster):
                     with open(local_path, "w") as f:
                         f.write(file_data)
                     saved += 1
-            except Exception:
-                pass
+            except Exception as e:
+                self.logger.warning(
+                    f"[collect {iteration}] Failed to save FIO log for "
+                    f"{lvol_name} on {client} (remote: {log_file}): {e}"
+                )
             # Validate log contents for error keywords
             try:
                 self.common_utils.validate_fio_test(client, log_file)
