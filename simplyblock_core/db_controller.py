@@ -427,6 +427,41 @@ class DBController(metaclass=Singleton):
         transactional = fdb.transactional(DBController._release_backup_chain_locks_tx)
         transactional(self, self.kv_store, ordered_snapshot_ids)
 
+    # ---- Subsystem Namespace Slot Guard (Single FDB Transaction) ----
+
+    def _write_lvol_with_ns_check_tx(self, tr, node_id, nqn, max_ns, lvol_key, lvol_data):
+        """Count active namespaces for *nqn* on *node_id* inside a single FDB
+        transaction and write the new lvol record only if the subsystem still
+        has room.  Because the range-read and the write share one transaction,
+        FDB's OCC serialises concurrent writers to the same subsystem
+        automatically — no explicit lock needed.
+        Returns False (without writing) when the subsystem is already full.
+        """
+        live = 0
+        for _, v in tr.get_range_startswith(b"object/LVol/"):
+            d = json.loads(v)
+            if (d.get("node_id") == node_id
+                    and d.get("nqn") == nqn
+                    and d.get("status") not in (LVol.STATUS_IN_DELETION, LVol.STATUS_DELETED)):
+                live += 1
+        if live >= max_ns:
+            return False
+        tr[lvol_key] = lvol_data
+        return True
+
+    def write_lvol_with_ns_check(self, lvol):
+        """Write a namespaced lvol to FDB while atomically verifying the
+        per-subsystem namespace limit is not exceeded.  Use in place of
+        lvol.write_to_db() when lvol.namespace is set (namespaced placement).
+        """
+        fn = fdb.transactional(DBController._write_lvol_with_ns_check_tx)
+        return fn(
+            self, self.kv_store,
+            lvol.node_id, lvol.nqn, lvol.max_namespace_per_subsys,
+            lvol.get_db_id().encode(),
+            json.dumps(lvol.to_dict()).encode(),
+        )
+
     # ---- Pre-Restart Guard (Single FDB Transaction) ----
 
     def _try_set_node_restarting_tx(self, tr, cluster_id, node_id):

@@ -685,7 +685,16 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
                 logger.exception(msg)
                 return False, msg
 
-    lvol.write_to_db(db_controller.kv_store)
+    if lvol.namespace:
+        # Namespaced lvol: verify the subsystem slot count atomically before
+        # writing.  FDB's OCC retries the losing transaction when two parallel
+        # creates race for the last free slot, so max_namespace_per_subsys is
+        # never exceeded.
+        if not db_controller.write_lvol_with_ns_check(lvol):
+            logger.error("Subsystem %s reached capacity during concurrent create", lvol.nqn)
+            return False, "Subsystem namespace limit reached concurrently; retry"
+    else:
+        lvol.write_to_db(db_controller.kv_store)
 
     if ha_type == "single":
         if host_node.status == StorageNode.STATUS_ONLINE:
