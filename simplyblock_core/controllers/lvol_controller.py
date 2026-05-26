@@ -845,6 +845,58 @@ def _create_bdev_stack(lvol, snode, is_primary=True):
     return True, None
 
 
+def _resolve_namespaced_subsystem(lvol, rpc_client, snode):
+    """Return True if ``lvol`` should follow the standalone subsystem-create
+    path (i.e. ``lvol.namespace`` ends up empty), False if it should attach to
+    the pre-existing subsystem named by ``lvol.nqn``.
+
+    Closes the race between ``snapshot_controller.clone()`` picking a free
+    namespaced subsystem via ``get_next_available_subsystem_on_node`` and a
+    concurrent lvol-delete tearing that subsystem down before
+    ``nvmf_subsystem_add_ns`` runs. If the target subsystem is gone, we
+    downgrade this lvol to its own subsystem rather than failing the add_ns
+    RPC with "Unable to find subsystem with NQN ..." and leaving an orphan
+    bdev_lvol_clone blob behind.
+    """
+    if not lvol.namespace:
+        return True
+    subsys = rpc_client.subsystem_list(lvol.nqn)
+    if subsys:
+        return False
+    db_ctrl = DBController()
+    try:
+        cluster = db_ctrl.get_cluster_by_id(snode.cluster_id)
+    except KeyError:
+        logger.error(
+            "namespace auto-grouping race: target subsystem %s missing on node "
+            "%s and cluster %s not found in DB; cannot downgrade lvol %s",
+            lvol.nqn, snode.get_id(), snode.cluster_id, lvol.get_id())
+        return False
+    logger.warning(
+        "namespace auto-grouping race: target subsystem %s missing on node "
+        "%s; downgrading lvol %s to its own subsystem",
+        lvol.nqn, snode.get_id(), lvol.get_id())
+    lvol.nqn = cluster.nqn + ":lvol:" + lvol.uuid
+    lvol.namespace = ""
+    lvol.ns_id = 0
+    lvol.write_to_db(db_ctrl.kv_store)
+    return True
+
+
+def _fail_after_bdev(lvol, rpc_client, msg):
+    """Rollback an in-progress add_lvol_on_node after _create_bdev_stack has
+    already produced a bdev/blob. Without this, a post-bdev-stack failure (a
+    missing namespaced subsystem, a listener add error, an add_ns error) leaves
+    the SPDK clone-blob in place, which then blocks the parent snapshot delete
+    with "vbdev_lvol_destroy: ... has N clones". Logs but does not raise on
+    rollback failure so the caller still sees the original error."""
+    try:
+        _remove_bdev_stack(lvol.bdev_stack[::-1], rpc_client)
+    except Exception:
+        logger.exception("rollback of bdev stack failed for %s", lvol.get_id())
+    return False, msg
+
+
 def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
     rpc_client = snode.rpc_client()
 
@@ -852,7 +904,7 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
     if not ret:
         return False, msg
 
-    if not lvol.namespace:
+    if _resolve_namespaced_subsystem(lvol, rpc_client, snode):
         if is_primary:
             min_cntlid = 1
         else:
@@ -939,7 +991,9 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
                     if err and "code" in err and err["code"] == -32602:
                         logger.warning("listener already exists")
                     else:
-                        return False, f"Failed to create listener for {lvol.get_id()}"
+                        return _fail_after_bdev(
+                            lvol, rpc_client,
+                            f"Failed to create listener for {lvol.get_id()}")
             elif iface.ip4_address and lvol.fabric == "tcp" and snode.active_tcp:
                 logger.info("adding listener for %s on IP %s, fabric TCP port %s" % (lvol.nqn, iface.ip4_address, listener_port))
                 ret, err = rpc_client.nvmf_subsystem_add_listener(
@@ -948,12 +1002,15 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
                     if err and "code" in err and err["code"] == -32602:
                         logger.warning("listener already exists")
                     else:
-                        return False, f"Failed to create listener for {lvol.get_id()}"
+                        return _fail_after_bdev(
+                            lvol, rpc_client,
+                            f"Failed to create listener for {lvol.get_id()}")
 
     logger.info("Add BDev to subsystem")
     ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid)
     if not ret:
-        return False, "Failed to add bdev to subsystem"
+        return _fail_after_bdev(
+            lvol, rpc_client, "Failed to add bdev to subsystem")
     lvol.ns_id = int(ret)
 
     spdk_mem_info_after = rpc_client.ultra21_util_get_malloc_stats()
