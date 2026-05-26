@@ -1154,8 +1154,11 @@ class BulkLvolDeleteK8s(_BulkDeleteMixin, K8sNativeFailoverTest):
                         with open(local_path, "w") as f:
                             f.write(file_data)
                         saved += 1
-                except Exception:
-                    pass
+                except Exception as e:
+                    self.logger.warning(
+                        f"[validate {iteration}] Unable to save FIO log for "
+                        f"{pvc_name} on {client} ({log_file}): {e}"
+                    )
                 # Validate log contents
                 try:
                     self.common_utils.validate_fio_test(client, log_file)
