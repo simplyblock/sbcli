@@ -430,25 +430,6 @@ def get_cluster_id():
     return out
 
 
-class FilePath(BaseModel):
-    file_name: str
-
-
-@api.get('/get_file_content/<string:file_name>', responses={
-    200: {'content': {'application/json': {'schema': utils.response_schema({
-        'type': 'boolean'
-    })}}},
-})
-def get_file_content(path: FilePath):
-    out, err, _ = shell_utils.run_command(f"cat /etc/simplyblock/{path.file_name}")
-    if out:
-        return utils.get_response(out)
-    elif err:
-        err = err.decode("utf-8")
-        logger.debug(err)
-        return utils.get_response(None, err)
-
-
 DHCHAP_KEY_DIR = os.environ.get("DHCHAP_KEY_DIR", "/etc/simplyblock/dhchap_keys")
 
 
