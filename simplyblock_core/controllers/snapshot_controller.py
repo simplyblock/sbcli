@@ -652,7 +652,7 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
             logger.error(error)
             return False, error
 
-    clone_vuid = utils.get_random_vuid()
+    clone_vuid = utils.get_random_vuid(all_lvols, all_snaps)
     lvol = LVol()
     lvol.uuid = str(uuid.uuid4())
     lvol.create_dt = str(datetime.now())

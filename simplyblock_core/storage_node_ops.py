@@ -3093,7 +3093,7 @@ def list_storage_nodes(is_json, cluster_id=None):
         nodes = db_controller.get_storage_nodes()
     data = []
     output = ""
-
+    all_lvols = db_controller.get_lvols()
     for node in nodes:
         logger.debug(node)
         logger.debug("*" * 20)
@@ -3103,7 +3103,7 @@ def list_storage_nodes(is_json, cluster_id=None):
         for dev in node.nvme_devices:
             if dev.status == NVMeDevice.STATUS_ONLINE:
                 online_devices += 1
-        lvs = db_controller.get_lvols_by_node_id(node.get_id()) or []
+        lvs = [lv for lv in all_lvols if lv.node_id == node.get_id()]
         data.append({
             "UUID": node.uuid,
             "Hostname": node.hostname,
