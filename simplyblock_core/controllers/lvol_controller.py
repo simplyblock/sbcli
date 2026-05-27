@@ -1,6 +1,5 @@
 # coding=utf-8
 import copy
-import logging as lg
 import json
 import random
 import sys
@@ -21,7 +20,7 @@ from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.prom_client import PromClient
 
-logger = lg.getLogger()
+logger = utils.get_logger(__name__)
 
 
 def _get_dhchap_group(cluster, pool=None):
@@ -881,29 +880,44 @@ def _resolve_namespaced_subsystem(lvol, rpc_client, snode):
     RPC with "Unable to find subsystem with NQN ..." and leaving an orphan
     bdev_lvol_clone blob behind.
     """
+    db_ctrl = DBController()
+
     if not lvol.namespace:
         return True
+
     subsys = rpc_client.subsystem_list(lvol.nqn)
-    if subsys:
-        return False
-    db_ctrl = DBController()
-    try:
-        cluster = db_ctrl.get_cluster_by_id(snode.cluster_id)
-    except KeyError:
-        logger.error(
-            "namespace auto-grouping race: target subsystem %s missing on node "
-            "%s and cluster %s not found in DB; cannot downgrade lvol %s",
-            lvol.nqn, snode.get_id(), snode.cluster_id, lvol.get_id())
-        return False
-    logger.warning(
-        "namespace auto-grouping race: target subsystem %s missing on node "
-        "%s; downgrading lvol %s to its own subsystem",
-        lvol.nqn, snode.get_id(), lvol.get_id())
-    lvol.nqn = cluster.nqn + ":lvol:" + lvol.uuid
-    lvol.namespace = ""
-    lvol.ns_id = 0
-    lvol.write_to_db(db_ctrl.kv_store)
-    return True
+    if not subsys:
+        return True
+
+    if lvol.node_id == snode.get_id():
+        subsys_max_ns = subsys[0]["max_namespaces"]
+        subsys_ns = subsys[0]["namespaces"]
+        if subsys_max_ns == len(subsys_ns):
+            logger.info("Subsys is full, looking for another one")
+            result = get_next_available_subsystem_on_node(lvol.node_id)
+            if result:
+                namespace, free_nqn = result
+                lvol.nqn = free_nqn
+                lvol.namespace = namespace
+                return False
+            else:
+                all_lvols = db_ctrl.get_lvols(snode.cluster_id)
+                subsys_count = len(set(
+                    lv.nqn for lv in all_lvols if lv.node_id == snode.get_id() and
+                    lv.status not in [LVol.STATUS_IN_DELETION, LVol.STATUS_DELETED]
+                ))
+                if subsys_count >= snode.max_lvol:
+                    error = f"Too many subsystems on node: {snode.get_id()}, max subsystems reached: {snode.max_lvol}"
+                    logger.error(error)
+                    raise Exception(error)
+
+                lvol.nqn = snode.cluster_id + ":lvol:" + lvol.uuid
+                lvol.namespace = ""
+                return True
+        else:
+            return False
+
+    return False
 
 
 def _fail_after_bdev(lvol, rpc_client, msg):
@@ -1030,21 +1044,6 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
                         return _fail_after_bdev(
                             lvol, rpc_client,
                             f"Failed to create listener for {lvol.get_id()}")
-    else:
-        subsys = rpc_client.subsystem_list(lvol.nqn)
-        if subsys and is_primary:
-            subsys_max_ns = subsys[0]["max_namespaces"]
-            subsys_ns = subsys[0]["namespaces"]
-            if subsys_max_ns == len(subsys_ns):
-                logger.info("Subsys is full, looking for another one")
-                result = get_next_available_subsystem_on_node(lvol.node_id)
-                if result:
-                    namespace, free_nqn = result
-                    lvol.nqn = free_nqn
-                    lvol.namespace = namespace
-                else:
-                    lvol.nqn = snode.cluster_id + ":lvol:" + lvol.uuid
-                    lvol.namespace = ""
 
     logger.info("Add BDev to subsystem")
     ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid)
