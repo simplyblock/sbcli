@@ -17,6 +17,12 @@ db = db_controller.DBController()
 
 logger.info("Starting Device monitor...")
 while True:
+    try:
+        db.get_clusters()
+    except Exception as e:
+        logger.error(f"Failed to get clusters: {e}")
+        time.sleep(3)
+        continue
     for cluster in db.get_clusters():
         for node in db.get_storage_nodes_by_cluster_id(cluster.get_id()):
             auto_restart_devices = []
