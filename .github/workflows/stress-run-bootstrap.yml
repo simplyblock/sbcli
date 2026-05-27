@@ -736,6 +736,15 @@ jobs:
           echo "TEST_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           echo "TEST_START_HUMAN=$(date -u +'%Y-%m-%d %H:%M:%S UTC')" >> "$GITHUB_ENV"
 
+      - name: Enable shared placement
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ssh_opts="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ${KEY_PATH}"
+          mgmt_ip="$(echo "${MNODES}" | awk '{print $1}')"
+          ssh ${ssh_opts} "${SSH_USER}@${mgmt_ip}" \
+            "${SBCLI_CMD} cluster set-shared-placement ${CLUSTER_ID} --force" || true
+
       - name: Run stress (foreground; runs until failure)
         shell: bash
         working-directory: sbcli/e2e

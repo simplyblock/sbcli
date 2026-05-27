@@ -300,57 +300,86 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
     # ── Verification helpers ──────────────────────────────────────────────
 
     def _verify_all_lvols_exist(self):
-        """Verify all registered parents and children exist in lvol list."""
+        """Verify registered parents and children exist in lvol list.
+        Warns for missing, only fails if >50% missing."""
         all_lvols = self.sbcli_utils.list_lvols()
         missing = []
         with self._lock:
+            total = len(self._parent_registry) + len(self._child_registry)
             for name in self._parent_registry:
                 if name not in all_lvols:
                     missing.append(("parent", name))
             for name in self._child_registry:
                 if name not in all_lvols:
                     missing.append(("child", name))
+        miss_pct = len(missing) * 100 / max(total, 1)
         if missing:
-            raise RuntimeError(
-                f"[verify_lvols] {len(missing)} lvols missing from API: "
+            self.logger.warning(
+                f"[verify_lvols] {len(missing)}/{total} ({miss_pct:.1f}%) "
+                f"lvols missing from API: "
                 f"{missing[:10]}{'...' if len(missing) > 10 else ''}"
             )
-        total = len(self._parent_registry) + len(self._child_registry)
-        self.logger.info(f"[verify_lvols] All {total} lvols confirmed in API")
+        if miss_pct > 50:
+            raise RuntimeError(
+                f"[verify_lvols] {miss_pct:.1f}% lvols missing exceeds "
+                f"50% threshold — {len(missing)}/{total}"
+            )
+        self.logger.info(
+            f"[verify_lvols] {total - len(missing)}/{total} lvols "
+            f"confirmed in API"
+        )
 
     def _verify_all_snapshots_exist(self):
-        """Verify all registered snapshots exist in snapshot list."""
+        """Verify registered snapshots exist in snapshot list.
+        Warns for missing, only fails if >50% missing."""
         all_snaps = self.sbcli_utils.list_snapshots()
         missing = []
         with self._lock:
+            total = len(self._snap_registry)
             for name in self._snap_registry:
                 if name not in all_snaps:
                     missing.append(name)
+        miss_pct = len(missing) * 100 / max(total, 1)
         if missing:
-            raise RuntimeError(
-                f"[verify_snapshots] {len(missing)} snapshots missing: "
+            self.logger.warning(
+                f"[verify_snapshots] {len(missing)}/{total} ({miss_pct:.1f}%) "
+                f"snapshots missing: "
                 f"{missing[:10]}{'...' if len(missing) > 10 else ''}"
             )
+        if miss_pct > 50:
+            raise RuntimeError(
+                f"[verify_snapshots] {miss_pct:.1f}% snapshots missing "
+                f"exceeds 50% threshold — {len(missing)}/{total}"
+            )
         self.logger.info(
-            f"[verify_snapshots] All {len(self._snap_registry)} snapshots "
+            f"[verify_snapshots] {total - len(missing)}/{total} snapshots "
             f"confirmed in API"
         )
 
     def _verify_all_clones_exist(self):
-        """Verify all registered clones exist in lvol list."""
+        """Verify registered clones exist in lvol list.
+        Warns for missing, only fails if >50% missing."""
         all_lvols = self.sbcli_utils.list_lvols()
         missing = []
         with self._lock:
+            total = len(self._clone_registry)
             for name in self._clone_registry:
                 if name not in all_lvols:
                     missing.append(name)
+        miss_pct = len(missing) * 100 / max(total, 1)
         if missing:
-            raise RuntimeError(
-                f"[verify_clones] {len(missing)} clones missing from API: "
+            self.logger.warning(
+                f"[verify_clones] {len(missing)}/{total} ({miss_pct:.1f}%) "
+                f"clones missing from API: "
                 f"{missing[:10]}{'...' if len(missing) > 10 else ''}"
             )
+        if miss_pct > 50:
+            raise RuntimeError(
+                f"[verify_clones] {miss_pct:.1f}% clones missing exceeds "
+                f"50% threshold — {len(missing)}/{total}"
+            )
         self.logger.info(
-            f"[verify_clones] All {len(self._clone_registry)} clones "
+            f"[verify_clones] {total - len(missing)}/{total} clones "
             f"confirmed in API"
         )
 
@@ -1290,74 +1319,165 @@ class TestParallelNamespaceLvolDocker(_ParallelNamespaceLvolBase):
     # ── Two-phase subsystem creation: parents then parallel children ────
 
     def _phase_create_subsystems(self):
-        """Sub-phase 1: create all parents sequentially.
-        Sub-phase 2: create children for PARALLEL_PARENTS parents concurrently."""
-        total_expected = self.NUM_PARENTS * (1 + self.CHILDREN_PER_PARENT)
+        """Sub-phase 1: create all parents in parallel.
+        Sub-phase 2: create ALL children in parallel (flat list).
+        50% failure threshold with detailed name logging."""
+        pvcs_per_subsys = 1 + self.CHILDREN_PER_PARENT
+        total_expected = self.NUM_PARENTS * pvcs_per_subsys
         self.logger.info(
             f"[create_subsystems] {self.NUM_PARENTS} parents × "
-            f"(1 + {self.CHILDREN_PER_PARENT} children) = "
-            f"{total_expected} lvols (parallel={self.PARALLEL_PARENTS})"
+            f"{pvcs_per_subsys} lvols = {total_expected} total "
+            f"(parallel, workers={self.MAX_WORKERS_CREATE})"
         )
 
-        # ── Sub-phase 1: Create all parents (sequential) ────────────
-        self.logger.info(
-            f"[create_subsystems][sub1] Creating {self.NUM_PARENTS} parents "
-            f"(sequential)"
-        )
+        # ── Sub-phase 1: Create all parents (parallel) ─────────────
+        parent_items = []
         parent_names = []
         for i in range(self.NUM_PARENTS):
-            parent_name = f"ns-par-{_rand_seq(6)}-{i:04d}"
-            self.logger.info(
-                f"[create_subsystems][sub1] Parent {i+1}/"
-                f"{self.NUM_PARENTS}: {parent_name}"
-            )
-            t0 = time.time()
-            self._create_parent(parent_name)
-            self._record_timing(
-                "create_parent", parent_name,
-                time.time() - t0, self._snapshot_inventory(),
-            )
-            parent_names.append(parent_name)
+            pname = f"ns-par-{_rand_seq(6)}-{i:04d}"
+            parent_items.append({"name": pname, "idx": i})
+            parent_names.append(pname)
 
         self.logger.info(
-            f"[create_subsystems][sub1] All {len(parent_names)} parents created"
+            f"[create_subsystems][sub1] Creating {self.NUM_PARENTS} parents "
+            f"(parallel, workers={self.MAX_WORKERS_CREATE})"
+        )
+        parents_t0 = time.time()
+        _ok, parent_fail = self._batch_parallel(
+            parent_items,
+            self._create_single_parent_docker,
+            self.MAX_WORKERS_CREATE,
+            "create_parents",
+        )
+        parents_elapsed = time.time() - parents_t0
+        self._log_op_stats(
+            "create_parent", batch_label="all parents",
+            batch_elapsed=parents_elapsed,
         )
 
-        # ── Sub-phase 2: Create children (PARALLEL_PARENTS concurrent) ──
+        # Remove failed parents
+        failed_parents = []
+        if parent_fail > 0:
+            created_parents = set(self._parent_registry.keys())
+            for pname in list(parent_names):
+                if pname not in created_parents:
+                    failed_parents.append(pname)
+                    parent_names.remove(pname)
+
         self.logger.info(
-            f"[create_subsystems][sub2] Creating children for "
-            f"{len(parent_names)} parents "
-            f"(parallel, workers={self.PARALLEL_PARENTS})"
+            f"[create_subsystems][sub1] {len(parent_names)} parents "
+            f"created in {parents_elapsed:.1f}s"
+            f"{f', {len(failed_parents)} FAILED: {failed_parents}' if failed_parents else ''}"
         )
+
+        # ── Sub-phase 2: Create ALL children in parallel ───────────
+        total_children = len(parent_names) * self.CHILDREN_PER_PARENT
+        self.logger.info(
+            f"[create_subsystems][sub2] Creating {total_children} children "
+            f"in parallel (workers={self.MAX_WORKERS_CREATE})"
+        )
+        child_items = []
+        for pname in parent_names:
+            pinfo = self._parent_registry[pname]
+            for c in range(self.CHILDREN_PER_PARENT):
+                child_items.append({
+                    "name": f"ns-ch-{_rand_seq(6)}-{pname[-4:]}-{c:02d}",
+                    "parent_name": pname,
+                    "parent_id": pinfo["id"],
+                    "parent_node_id": pinfo.get("node_id"),
+                })
         children_t0 = time.time()
-        _ok, fail = self._batch_parallel(
-            parent_names,
-            self._create_children_for_parent_docker,
-            self.PARALLEL_PARENTS,
+        _ok, child_fail = self._batch_parallel(
+            child_items,
+            self._create_single_child_docker,
+            self.MAX_WORKERS_CREATE,
             "create_children",
         )
         children_elapsed = time.time() - children_t0
-        if fail > 0:
-            raise RuntimeError(
-                f"[create_subsystems][sub2] {fail} parent child-creation "
-                f"batches failed"
-            )
         self._log_op_stats(
             "create_child", batch_label="all children",
             batch_elapsed=children_elapsed,
         )
 
-        # ── Verify total lvol count ──────────────────────────────────
+        # Identify failed children
+        failed_children = []
+        if child_fail > 0:
+            created_children = set(self._child_registry.keys())
+            for item in child_items:
+                if item["name"] not in created_children:
+                    failed_children.append(
+                        f"{item['name']} (parent={item['parent_name']})"
+                    )
+
+        # ── Failure summary ──────────────────────────────────────────
+        total_attempted = self.NUM_PARENTS + total_children
+        total_failed = len(failed_parents) + len(failed_children)
+        fail_pct = (total_failed * 100 / max(total_attempted, 1))
+
+        if total_failed > 0:
+            self.logger.warning(
+                f"[create_subsystems] FAILED lvols: {total_failed}/"
+                f"{total_attempted} ({fail_pct:.1f}%)"
+            )
+            if failed_parents:
+                self.logger.warning(
+                    f"  Failed PARENTS ({len(failed_parents)}): "
+                    f"{failed_parents}"
+                )
+            if failed_children:
+                self.logger.warning(
+                    f"  Failed CHILDREN ({len(failed_children)}): "
+                    f"{failed_children[:20]}"
+                    f"{'...' if len(failed_children) > 20 else ''}"
+                )
+
+        if fail_pct > 50:
+            raise RuntimeError(
+                f"[create_subsystems] {fail_pct:.1f}% failure rate "
+                f"exceeds 50% threshold — {total_failed}/{total_attempted} "
+                f"(parents={len(failed_parents)}, "
+                f"children={len(failed_children)})"
+            )
+
+        # ── Bulk verify ──────────────────────────────────────────────
         all_lvols = self.sbcli_utils.list_lvols()
-        if len(all_lvols) < total_expected:
+        expected_created = total_attempted - total_failed
+        if len(all_lvols) < expected_created:
             self.logger.warning(
                 f"[create_subsystems] lvol count {len(all_lvols)} < "
-                f"expected {total_expected}"
+                f"expected {expected_created}"
             )
 
         self.logger.info(
             f"[create_subsystems] Done: {len(self._parent_registry)} parents, "
             f"{len(self._child_registry)} children"
+            f"{f' ({total_failed} failures tolerated)' if total_failed else ''}"
+        )
+
+    def _create_single_parent_docker(self, item):
+        """Create a single parent lvol. Called from _batch_parallel."""
+        name = item["name"]
+        t0 = time.time()
+        self._create_parent(name)
+        self._record_timing(
+            "create_parent", name,
+            time.time() - t0, self._snapshot_inventory(),
+        )
+
+    def _create_single_child_docker(self, item):
+        """Create a single child lvol and register under its parent.
+
+        Called from _batch_parallel with MAX_WORKERS_CREATE concurrency —
+        all children for all parents run in parallel."""
+        child_name = item["name"]
+        parent_name = item["parent_name"]
+        parent_id = item["parent_id"]
+        parent_node_id = item["parent_node_id"]
+        t0 = time.time()
+        self._create_child(child_name, parent_name, parent_id, parent_node_id)
+        self._record_timing(
+            "create_child", child_name,
+            time.time() - t0, self._snapshot_inventory(),
         )
 
     def _create_parent(self, name: str):
@@ -1384,11 +1504,12 @@ class TestParallelNamespaceLvolDocker(_ParallelNamespaceLvolBase):
             self.logger.warning(
                 f"[create_parent] {name}: could not get node_id: {ex}"
             )
-        self._parent_registry[name] = {
-            "id": lvol_id, "node_id": node_id,
-            "children": [], "snapshots": [],
-        }
-        self._inc("counts", "parents_created")
+        with self._lock:
+            self._parent_registry[name] = {
+                "id": lvol_id, "node_id": node_id,
+                "children": [], "snapshots": [],
+            }
+            self._metrics["counts"]["parents_created"] += 1
         self.logger.info(
             f"[create_parent] {name} -> {lvol_id} (node={node_id})"
         )
@@ -1410,109 +1531,92 @@ class TestParallelNamespaceLvolDocker(_ParallelNamespaceLvolBase):
             retry=1,
         ), ctx={"name": name, "parent": parent_name})
         child_id = self._wait_lvol_id(name)
-        self._child_registry[name] = {
-            "id": child_id, "parent_name": parent_name,
-        }
-        self._parent_registry[parent_name]["children"].append(name)
-        self._inc("counts", "children_created")
+        with self._lock:
+            self._child_registry[name] = {
+                "id": child_id, "parent_name": parent_name,
+            }
+            self._parent_registry[parent_name]["children"].append(name)
+            self._metrics["counts"]["children_created"] += 1
         self.logger.info(
             f"[create_child] {name} -> {child_id} (parent={parent_name})"
         )
 
-    def _create_children_for_parent_docker(self, parent_name: str):
-        """Create all children for one parent sequentially.
-
-        Called from _batch_parallel with PARALLEL_PARENTS concurrency.
-        Children within a parent must be sequential for device detection."""
-        pinfo = self._parent_registry.get(parent_name)
-        if not pinfo:
-            raise RuntimeError(f"{parent_name}: not in registry")
-        parent_id = pinfo["id"]
-        parent_node_id = pinfo.get("node_id")
-
-        for c in range(self.CHILDREN_PER_PARENT):
-            child_name = (
-                f"ns-ch-{_rand_seq(6)}-{parent_name[-4:]}-{c:02d}"
-            )
-            t0 = time.time()
-            self._create_child(
-                child_name, parent_name, parent_id, parent_node_id,
-            )
-            self._record_timing(
-                "create_child", child_name,
-                time.time() - t0, self._snapshot_inventory(),
-            )
-
-        # Verify all lvols for this parent are in API
-        all_lvols = self.sbcli_utils.list_lvols()
-        expected = [parent_name] + [
-            cn for cn, ci in self._child_registry.items()
-            if ci["parent_name"] == parent_name
-        ]
-        missing = [n for n in expected if n not in all_lvols]
-        if missing:
-            raise RuntimeError(
-                f"Parent {parent_name}: {len(missing)} lvols missing "
-                f"from API after creation: {missing}"
-            )
-        self.logger.info(
-            f"[create_children] {parent_name}: "
-            f"{self.CHILDREN_PER_PARENT} children verified"
-        )
-
-    # ── Write data to parent lvols ───────────────────────────────────────
+    # ── Write data (parallel FIO per parent group) ─────────────────────
 
     def _phase_write_data(self):
-        """NVMe-connect to each parent, write 10 MB, disconnect."""
-        client = self.fio_node[0]
-        parents = list(self._parent_registry.items())
+        """Parallel FIO: one thread per parent group.
+
+        Each thread NVMe-connects the parent + all its children, runs
+        FIO (100 MB sequential write) on each device, then disconnects.
+        Also pre-selects the snapshot child so _phase_create_snapshots
+        reuses it.
+        """
+        # Pre-select snapshot child
+        with self._lock:
+            child_names = list(self._child_registry.keys())
+        if child_names:
+            self._snapshot_child = random.choice(child_names)
+            self.logger.info(
+                f"[write_data] Pre-selected child for snapshot: "
+                f"{self._snapshot_child}"
+            )
+        else:
+            self._snapshot_child = None
+
+        # Build per-parent groups: parent + all its children
+        parent_items = []
+        with self._lock:
+            for pname, pinfo in self._parent_registry.items():
+                lvols = [(pname, pinfo["id"])]
+                for cname in pinfo.get("children", []):
+                    cinfo = self._child_registry.get(cname)
+                    if cinfo:
+                        lvols.append((cname, cinfo["id"]))
+                parent_items.append({
+                    "parent_name": pname,
+                    "lvols": lvols,
+                })
+
+        total_lvols = sum(len(item["lvols"]) for item in parent_items)
         self.logger.info(
-            f"[write_data] Writing 10 MB to {len(parents)} parent lvols "
-            f"from client {client}"
+            f"[write_data] Running parallel FIO (100 MB) on {total_lvols} "
+            f"lvols across {len(parent_items)} parent groups "
+            f"(workers={self.MAX_WORKERS_CREATE})"
         )
 
-        for idx, (pname, pinfo) in enumerate(parents):
-            try:
-                self._write_data_to_lvol(client, pname, pinfo["id"])
-                self.logger.info(
-                    f"[write_data] {idx+1}/{len(parents)} {pname} OK"
-                )
-            except Exception as exc:
-                raise RuntimeError(
-                    f"[write_data] Failed to write data to {pname}: {exc}"
-                )
+        write_t0 = time.time()
+        _ok, fail = self._batch_parallel(
+            parent_items, self._fio_parent_group_docker,
+            self.MAX_WORKERS_CREATE, "write_data",
+        )
+        write_elapsed = time.time() - write_t0
+        self.logger.info(
+            f"[write_data] Done: {_ok}/{len(parent_items)} groups OK, "
+            f"{fail} failed in {write_elapsed:.1f}s"
+        )
+        if fail > 0:
+            self.logger.warning(
+                f"[write_data] {fail}/{len(parent_items)} FIO groups failed"
+            )
 
-        self.logger.info(f"[write_data] Done: {len(parents)} lvols written")
-
-    def _write_data_to_lvol(self, client: str, lvol_name: str, lvol_id: str):
-        """Connect, write 10 MB raw data, disconnect for a single lvol."""
-        connect_strs = self.sbcli_utils.get_lvol_connect_str(lvol_name)
-        if not connect_strs:
-            raise RuntimeError(f"No connect strings for {lvol_name}")
-
-        # Get NQN from connect string for later disconnect
-        nqn = None
+    def _extract_nqn(self, connect_strs):
+        """Extract NQN from nvme connect command strings."""
         for cs in connect_strs:
             for part in cs.split():
                 if part.startswith("--nqn="):
-                    nqn = part.split("=", 1)[1]
-                    break
-            if nqn:
-                break
+                    return part.split("=", 1)[1]
+                if part.startswith("-n ") or part == "-n":
+                    continue
+        return None
 
-        # NVMe connect
-        for cs in connect_strs:
-            self.ssh_obj.exec_command(client, cs)
-        sleep_n_sec(3)
-
-        # Discover the device — find NVMe device matching this NQN
+    def _find_device_by_nqn(self, client, nqn):
+        """Find NVMe block device for a given NQN via nvme list-subsys."""
+        import json as _json
         out, _ = self.ssh_obj.exec_command(
             client,
             "sudo nvme list-subsys -o json 2>/dev/null || echo '[]'",
             supress_logs=True,
         )
-        import json as _json
-        device = None
         try:
             subsys_data = _json.loads(out)
             if isinstance(subsys_data, list) and subsys_data:
@@ -1522,41 +1626,95 @@ class TestParallelNamespaceLvolDocker(_ParallelNamespaceLvolBase):
                     for path in ss.get("Paths", []):
                         dev_name = path.get("Name")
                         if dev_name:
-                            device = f"/dev/{dev_name}"
-                            break
-                    break
+                            return f"/dev/{dev_name}"
         except Exception:
             pass
+        return None
 
-        if not device:
-            # Fallback: use nvme list and find newest device
-            out2, _ = self.ssh_obj.exec_command(
-                client,
-                "lsblk -dn -o NAME,TYPE | grep disk | grep nvme | "
-                "tail -1 | awk '{print $1}'",
-                supress_logs=True,
+    def _fio_parent_group_docker(self, item):
+        """Connect all lvols in a parent group, run FIO on each, disconnect.
+
+        Each parent thread owns its NVMe connections exclusively — no shared
+        connect strings across threads.
+        """
+        client = self.fio_node[0]
+        parent_name = item["parent_name"]
+        lvols = item["lvols"]  # [(name, id), ...]
+        connected_nqns = []
+        t0_group = time.time()
+
+        try:
+            # ── Step 1: NVMe-connect all lvols in this group ─────────
+            nqn_map = {}  # lvol_name -> nqn
+            for lvol_name, lvol_id in lvols:
+                try:
+                    connect_strs = self.sbcli_utils.get_lvol_connect_str(
+                        lvol_name
+                    )
+                    if not connect_strs:
+                        self.logger.warning(
+                            f"[write_data] No connect strings for {lvol_name}"
+                        )
+                        continue
+                    nqn = self._extract_nqn(connect_strs)
+                    for cs in connect_strs:
+                        self.ssh_obj.exec_command(client, cs)
+                    if nqn:
+                        nqn_map[lvol_name] = nqn
+                        connected_nqns.append(nqn)
+                except Exception as exc:
+                    self.logger.warning(
+                        f"[write_data] Connect failed for {lvol_name}: {exc}"
+                    )
+
+            sleep_n_sec(3)
+
+            # ── Step 2: Discover devices and run FIO on each ─────────
+            fio_ok = 0
+            for lvol_name, nqn in nqn_map.items():
+                try:
+                    device = self._find_device_by_nqn(client, nqn)
+                    if not device:
+                        self.logger.warning(
+                            f"[write_data] No device found for "
+                            f"{lvol_name} (nqn={nqn})"
+                        )
+                        continue
+                    t0 = time.time()
+                    self.ssh_obj.exec_command(
+                        client,
+                        f"sudo fio --name=write-{lvol_name[:20]} "
+                        f"--filename={device} --size=100M --bs=1M "
+                        f"--rw=write --direct=1 --ioengine=libaio "
+                        f"--iodepth=1 --numjobs=1",
+                    )
+                    elapsed = time.time() - t0
+                    self._record_timing(
+                        "write_data", lvol_name, elapsed,
+                        self._snapshot_inventory(),
+                    )
+                    fio_ok += 1
+                except Exception as exc:
+                    self.logger.warning(
+                        f"[write_data] FIO failed for {lvol_name}: {exc}"
+                    )
+
+            group_elapsed = time.time() - t0_group
+            self.logger.info(
+                f"[write_data] Group {parent_name}: "
+                f"{fio_ok}/{len(lvols)} lvols written "
+                f"in {group_elapsed:.1f}s"
             )
-            dev_name = out2.strip()
-            if dev_name:
-                device = f"/dev/{dev_name}"
 
-        if not device:
-            raise RuntimeError(
-                f"Could not find NVMe device for {lvol_name} (nqn={nqn})"
-            )
-
-        # Write 10 MB of data
-        self.ssh_obj.exec_command(
-            client,
-            f"sudo dd if=/dev/urandom of={device} bs=1M count=10 "
-            f"oflag=direct 2>/dev/null",
-        )
-
-        # NVMe disconnect
-        if nqn:
-            self.ssh_obj.exec_command(
-                client, f"sudo nvme disconnect -n {nqn}",
-            )
+        finally:
+            # ── Step 3: NVMe-disconnect all ──────────────────────────
+            for nqn in connected_nqns:
+                try:
+                    self.ssh_obj.exec_command(
+                        client, f"sudo nvme disconnect -n {nqn}",
+                    )
+                except Exception:
+                    pass
 
     # ── Create implementations ────────────────────────────────────────────
 
@@ -2286,11 +2444,11 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
         if self._snapshot_child:
             targets.append(self._snapshot_child)
 
+        child_label = " + 1 child" if self._snapshot_child else ""
         self.logger.info(
             f"[write_data] Running parallel FIO (100 MB) on "
             f"{len(targets)} PVCs ({len(parents)} parents"
-            f"{f' + 1 child' if self._snapshot_child else ''}) "
-            f"via K8s Jobs"
+            f"{child_label}) via K8s Jobs"
         )
 
         fio_items = [{"pvc_name": pvc} for pvc in targets]

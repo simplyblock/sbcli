@@ -714,6 +714,15 @@ jobs:
           echo "TEST_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           echo "TEST_START_HUMAN=$(date -u +'%Y-%m-%d %H:%M:%S UTC')" >> "$GITHUB_ENV"
 
+      - name: Enable shared placement
+        shell: bash
+        run: |
+          set -euxo pipefail
+          admin_pod="$(kubectl get pods -n "${K8S_NAMESPACE}" --no-headers \
+            -o custom-columns=:metadata.name | grep simplyblock-admin-control | head -1)"
+          kubectl exec -n "${K8S_NAMESPACE}" "${admin_pod}" -- \
+            bash -c "${SBCLI_CMD} cluster set-shared-placement ${CLUSTER_ID} --force" || true
+
       - name: Run stress (foreground; runs until failure)
         shell: bash
         working-directory: sbcli/e2e
