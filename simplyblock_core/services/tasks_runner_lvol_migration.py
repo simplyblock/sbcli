@@ -147,6 +147,21 @@ def _snap_short_name(snap):
     return path.split('/', 1)[1] if '/' in path else path
 
 
+def _snap_tgt_short_name(snap):
+    """Return the migration-target bdev short name for a snapshot.
+
+    Normally the target bdev is named <src_short> + _MIGRATION_BDEV_SUFFIX.
+    However, when apply_migration_to_db() is called early (adjacent / tgt_is_src_secondary
+    path), snap.snap_bdev is already updated to the target name which already carries the
+    suffix.  In that case return it as-is to avoid producing a double suffix (e.g.
+    'SNAP_16745mm' instead of 'SNAP_16745m').
+    """
+    short = _snap_short_name(snap)
+    if short.endswith(_MIGRATION_BDEV_SUFFIX):
+        return short   # apply_migration_to_db already updated this snap
+    return short + _MIGRATION_BDEV_SUFFIX
+
+
 def _snap_composite(lvstore, snap):
     """SPDK composite bdev name for a snapshot on a given node: ``<lvstore>/<bdev>``."""
     return f"{lvstore}/{_snap_short_name(snap)}"
@@ -1708,7 +1723,7 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
         for snap_uuid in to_delete:
             try:
                 snap = db.get_snapshot_by_id(snap_uuid)
-                snap_short_tgt = _snap_short_name(snap) + _MIGRATION_BDEV_SUFFIX
+                snap_short_tgt = _snap_tgt_short_name(snap)
                 if snap_short_tgt not in tgt_names:
                     return False, False, (
                         f"Target missing snapshot {snap_short_tgt} ({snap_uuid}) "
@@ -1949,7 +1964,7 @@ def _handle_cleanup_target(migration, tgt_node, tgt_rpc):
         snap_uuid = ctx['pending'].pop(0)
         try:
             snap = db.get_snapshot_by_id(snap_uuid)
-            snap_short = _snap_short_name(snap) + _MIGRATION_BDEV_SUFFIX
+            snap_short = _snap_tgt_short_name(snap)
             bdev_name = f"{tgt_node.lvstore}/{snap_short}"
             ret, _ = tgt_rpc.delete_lvol(bdev_name)
             if not ret:
