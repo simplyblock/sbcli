@@ -748,7 +748,16 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
                 logger.exception(msg)
                 return False, msg
 
-    lvol.write_to_db(db_controller.kv_store)
+    if lvol.namespace:
+        # Namespaced clone: verify the subsystem slot count atomically before
+        # writing.  FDB's OCC retries the losing transaction when two parallel
+        # clones race for the last free slot, so max_namespace_per_subsys is
+        # never exceeded.
+        if not db_controller.write_lvol_with_ns_check(lvol):
+            logger.error("Subsystem %s reached capacity during concurrent clone", lvol.nqn)
+            return False, "Subsystem namespace limit reached concurrently; retry the clone"
+    else:
+        lvol.write_to_db(db_controller.kv_store)
 
     if lvol.ha_type == "single":
         lvol_bdev, error = lvol_controller.add_lvol_on_node(lvol, snode)
