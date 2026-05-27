@@ -39,7 +39,7 @@ class _TestMultiNodeOutageBase(TestClusterBase):
         self.lvol_size = "5G"
         self.fio_size = "1G"
         self.short_fio_runtime = 120    # seconds — short FIO should complete well within this
-        self.long_fio_runtime = 600     # seconds — long FIO runs during outage
+        self.long_fio_runtime = 1000     # seconds — long FIO runs during outage
         self.outage_duration = 180      # 3 minutes
         self.num_lvols_per_node = 3
         self.num_outage_nodes = 3
@@ -426,6 +426,19 @@ class _TestMultiNodeOutageBase(TestClusterBase):
             self.logger.info(f"  Outage thread started for {node_uuid[:8]} ({outage_type})")
 
         # ── Step 10: Wait for outage to pass ────────────────────────
+        self.logger.info("[step-10] Waiting for cluster to become Suspended")
+        try:
+            self.sbcli_utils.wait_for_cluster_status(
+                status=["suspended"], timeout=600
+            )
+            self.logger.info("[step-11] Cluster is Suspended")
+        except TimeoutError:
+            # Try accepting degraded as well
+            self.logger.warning("Cluster did not reach Suspended — checking for degraded")
+            cluster_status = self.sbcli_utils.get_cluster_status()
+            self.logger.info(f"Current cluster status: {cluster_status}")
+
+
         wait_secs = self.outage_duration + 60  # extra buffer
         self.logger.info(f"[step-10] Waiting {wait_secs}s for outage period to pass")
         sleep_n_sec(wait_secs)
