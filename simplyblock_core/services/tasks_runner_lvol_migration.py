@@ -437,7 +437,21 @@ def _setup_snap_transfer(snap, snap_index, migration, src_node, tgt_node,
     # Step 1: create target lvol on primary
     # Note: SPDK's bdev_lvol_create 'uuid' param is for the lvol *store*, not
     # the new lvol.  Do not pass the snapshot UUID here.
-    size_in_mib = _bytes_to_mib(snap.size)
+    #
+    # Use the actual SPDK size of the source snapshot (num_blocks × block_size)
+    # rather than snap.size from the DB.  snap.size stores the user-requested
+    # byte count which may be up to 1 MiB larger than the MiB-rounded value
+    # SPDK used.  A mismatch propagates through the snapshot chain and causes
+    # bdev_lvol_final_migration to produce a target lvol that is 1 MiB larger
+    # than the source, triggering a spurious NVMe capacity-change event on the
+    # client (dmesg: "detected capacity change").
+    size_in_mib = _bytes_to_mib(snap.size)   # safe fallback
+    src_bdev_list = src_rpc.get_bdevs(src_composite)
+    if src_bdev_list:
+        b = src_bdev_list[0] if isinstance(src_bdev_list, list) else src_bdev_list
+        actual_bytes = b.get('num_blocks', 0) * b.get('block_size', 512)
+        if actual_bytes > 0:
+            size_in_mib = utils.convert_size(actual_bytes, 'MiB', round_up=True)
     ret = tgt_rpc.create_lvol(snap_short, size_in_mib, tgt_node.lvstore)
     if not ret:
         return None, f"Failed to create target lvol for snap {snap_uuid}"
