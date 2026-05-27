@@ -74,7 +74,7 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
 
         # ── Retry ─────────────────────────────────────────────────────────
         self.RETRY_MAX = 10
-        self.RETRY_INTERVAL = 5
+        self.RETRY_INTERVAL = 30
 
         # ── Thread-safe state ─────────────────────────────────────────────
         self._lock = threading.Lock()
@@ -230,6 +230,14 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
         msg = (api_err.get("msg") or "").lower()
         return "lvol sync deletion found" in text or "lvol sync deletion found" in msg
 
+    def _is_already_exists_error(self, api_err: dict) -> bool:
+        """Detect 'LVol name must be unique' — resource was created by a
+        prior attempt that appeared to fail but actually succeeded."""
+        text = (api_err.get("text") or "").lower()
+        msg = (api_err.get("msg") or "").lower()
+        return ("must be unique" in text or "must be unique" in msg
+                or "already exists" in text or "already exists" in msg)
+
     def _api_retry(self, op: str, fn, ctx: dict = None):
         """Call fn() with retry.  Returns fn() result on success."""
         ctx = ctx or {}
@@ -242,6 +250,14 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
                     self._inc("failures", op)
                     self.logger.warning(f"[max_lvols] op={op} ctx={ctx}")
                     raise
+                # "Name must be unique" means a prior attempt actually
+                # succeeded — treat as success, not failure
+                if self._is_already_exists_error(api_err):
+                    self.logger.info(
+                        f"[retry] op={op} resource already exists "
+                        f"(prior attempt succeeded): ctx={ctx}"
+                    )
+                    return None  # treat as success
                 if attempt < self.RETRY_MAX:
                     self.logger.warning(
                         f"[retry] op={op} attempt {attempt}/{self.RETRY_MAX} "
