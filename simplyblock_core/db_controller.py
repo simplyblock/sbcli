@@ -140,11 +140,8 @@ class DBController(metaclass=Singleton):
         return cluster_lvols
 
     def get_all_lvols(self) -> List[LVol]:
-        logger.info("Reading all LVols from DB")
         lvols = LVol().read_from_db(self.kv_store)
-        ret = sorted(lvols, key=lambda x: x.create_dt)
-        logger.info("returning all LVols from DB")
-        return ret
+        return sorted(lvols, key=lambda x: x.create_dt)
 
     def get_lvols_by_node_id(self, node_id) -> List[LVol]:
         lvols = []
@@ -176,11 +173,9 @@ class DBController(metaclass=Singleton):
         return hostnames
 
     def get_snapshots(self, cluster_id=None) -> List[SnapShot]:
-        logger.info("Reading all snapshots from DB")
         snaps = SnapShot().read_from_db(self.kv_store)
         if cluster_id:
             snaps = [n for n in snaps if n.cluster_id == cluster_id]
-        logger.info("returning all snapshots from DB")
         return sorted(snaps, key=lambda x: x.created_at)
 
     def get_snapshot_by_id(self, id) -> SnapShot:
