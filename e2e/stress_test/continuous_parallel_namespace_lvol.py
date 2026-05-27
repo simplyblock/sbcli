@@ -543,7 +543,64 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
         finally:
             dur = time.time() - start
             self.logger.info(f"=== Phase {name} done in {dur:.1f}s ===")
+            # Flush timing data after every phase so data survives cancellation
+            try:
+                self._flush_timing_data()
+            except Exception:
+                pass
             return dur  # used for iteration timing
+
+    def _flush_timing_data(self):
+        """Write intermediate timing JSON to disk (fast, no graphs).
+
+        Called after every phase so data survives if the test is killed.
+        """
+        try:
+            out_dir = self._get_log_dir()
+        except Exception:
+            return
+        report = {
+            "config": {
+                "NUM_PARENTS": self.NUM_PARENTS,
+                "NAMESPACES_PER_PARENT": self.NAMESPACES_PER_PARENT,
+                "CHILDREN_PER_PARENT": self.CHILDREN_PER_PARENT,
+                "SNAPSHOTS_PER_LVOL": self.SNAPSHOTS_PER_LVOL,
+                "NUM_CLONES": self.NUM_CLONES,
+                "NUM_ITERATIONS": self.NUM_ITERATIONS,
+                "BATCH_SIZE": self.BATCH_SIZE,
+                "MAX_WORKERS_CREATE": self.MAX_WORKERS_CREATE,
+                "CLONE_BATCH_SIZE": self.CLONE_BATCH_SIZE,
+            },
+            "iterations": self._iteration_timings,
+            "samples": self._timing_samples,
+            "batch_timings": self._batch_timings,
+            "metrics": self._metrics,
+            "mappings": self._get_registry_mappings(),
+        }
+        path = os.path.join(out_dir, "namespace_stress_timings.json")
+        try:
+            with open(path, "w") as f:
+                json.dump(report, f, indent=2, default=str)
+        except Exception:
+            pass
+
+    def _get_registry_mappings(self) -> dict:
+        """Snapshot current registry relationships for graph generation."""
+        with self._lock:
+            child_to_parent = {
+                cn: ci.get("parent_name", "unknown")
+                for cn, ci in self._child_registry.items()
+            }
+            clone_to_snap = {
+                cn: ci.get("snap_name", "unknown")
+                for cn, ci in self._clone_registry.items()
+            }
+            parent_list = list(self._parent_registry.keys())
+        return {
+            "child_to_parent": child_to_parent,
+            "clone_to_snap": clone_to_snap,
+            "parent_list": parent_list,
+        }
 
     def _clear_registries(self):
         with self._lock:
@@ -949,11 +1006,15 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
                 "SNAPSHOTS_PER_LVOL": self.SNAPSHOTS_PER_LVOL,
                 "NUM_CLONES": self.NUM_CLONES,
                 "NUM_ITERATIONS": self.NUM_ITERATIONS,
+                "BATCH_SIZE": self.BATCH_SIZE,
+                "MAX_WORKERS_CREATE": self.MAX_WORKERS_CREATE,
+                "CLONE_BATCH_SIZE": self.CLONE_BATCH_SIZE,
             },
             "iterations": self._iteration_timings,
             "samples": self._timing_samples,
             "batch_timings": self._batch_timings,
             "metrics": self._metrics,
+            "mappings": self._get_registry_mappings(),
         }
         path = os.path.join(out_dir, "namespace_stress_timings.json")
         try:
@@ -1003,19 +1064,22 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
         except Exception as exc:
             self.logger.warning(f"Graph 1 failed: {exc}")
 
-        # ── 2. Latency per iteration (box plot) ──────────────────────────
+        # ── 2. Latency per iteration (box plot with legend) ──────────────
         try:
+            from matplotlib.patches import Patch
             create_ops = [
                 "create_parent", "create_child",
                 "create_snapshot", "create_clone",
             ]
+            op_labels = ["parent", "child", "snapshot", "clone"]
             iterations = sorted(set(s["iteration"] for s in samples))
             fig, ax = plt.subplots(figsize=(14, 8))
             positions = []
             labels = []
             data_groups = []
+            op_indices = []  # track which op each box belongs to
             for it in iterations:
-                for op in create_ops:
+                for oi, op in enumerate(create_ops):
                     vals = [
                         s["elapsed_sec"] for s in samples
                         if s["iteration"] == it and s["op"] == op
@@ -1027,11 +1091,12 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
                             + create_ops.index(op)
                         )
                         labels.append(f"i{it}_{op.split('_')[-1]}")
+                        op_indices.append(oi)
             if data_groups:
                 bp = ax.boxplot(data_groups, positions=positions, widths=0.6,
                                 patch_artist=True, showfliers=False)
                 for j, patch in enumerate(bp["boxes"]):
-                    c_idx = j % len(create_ops)
+                    c_idx = op_indices[j] if j < len(op_indices) else j
                     patch.set_facecolor(colors[c_idx % len(colors)])
                 ax.set_xlabel("Iteration / Operation")
                 ax.set_ylabel("Latency (sec)")
@@ -1041,6 +1106,12 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
                     [f"iter {it}" for it in iterations],
                     rotation=45, fontsize=7,
                 )
+                # Add explicit legend mapping colors to operations
+                legend_patches = [
+                    Patch(facecolor=colors[i % len(colors)], label=op_labels[i])
+                    for i in range(len(create_ops))
+                ]
+                ax.legend(handles=legend_patches, fontsize=8, loc="upper left")
             fig.tight_layout()
             fig.savefig(os.path.join(out_dir, "latency_per_iteration.png"),
                         dpi=150)
@@ -1083,7 +1154,7 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
         except Exception as exc:
             self.logger.warning(f"Graph 3 failed: {exc}")
 
-        # ── 4. Clone latency vs clone index (per iteration) ──────────────
+        # ── 4. Clone latency vs clone index with batch boundaries ────────
         try:
             fig, ax = plt.subplots(figsize=(14, 8))
             for it in iterations:
@@ -1098,9 +1169,27 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
                         [s["elapsed_sec"] for s in clone_samples],
                         label=f"iter {it}", alpha=0.7, linewidth=0.8,
                     )
+                    # Mark batch boundaries (CLONE_BATCH_SIZE)
+                    cbs = self.CLONE_BATCH_SIZE
+                    for bi in range(cbs, len(clone_samples), cbs):
+                        ax.axvline(
+                            x=bi, color="gray", linestyle="--",
+                            alpha=0.4, linewidth=0.6,
+                        )
+                    # Mark _batch_parallel BATCH_SIZE boundaries too
+                    bs = self.BATCH_SIZE
+                    for bi in range(bs, len(clone_samples), bs):
+                        ax.axvline(
+                            x=bi, color="red", linestyle=":",
+                            alpha=0.3, linewidth=0.5,
+                        )
             ax.set_xlabel("Clone index (creation order)")
             ax.set_ylabel("Latency (sec)")
-            ax.set_title("Clone Creation Latency vs Clone Count")
+            ax.set_title(
+                f"Clone Creation Latency vs Clone Count "
+                f"(gray=clone batch/{self.CLONE_BATCH_SIZE}, "
+                f"red=submit batch/{self.BATCH_SIZE})"
+            )
             ax.legend(fontsize=7)
             fig.tight_layout()
             fig.savefig(
@@ -1224,13 +1313,27 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
                 s for s in samples if s["op"] == "create_child"
             ]
             if child_samples:
-                # Group by parent (via child_registry mapping)
-                parent_durations = {}
+                # Build child→parent mapping from registry or saved JSON
                 with self._lock:
                     child_to_parent = {
-                        cn: ci["parent_name"]
+                        cn: ci.get("parent_name", "unknown")
                         for cn, ci in self._child_registry.items()
                     }
+                # Fall back to saved mappings if registry was cleared
+                if not child_to_parent:
+                    try:
+                        rpath = os.path.join(
+                            out_dir, "namespace_stress_timings.json"
+                        )
+                        with open(rpath) as rf:
+                            saved = json.load(rf)
+                        child_to_parent = saved.get(
+                            "mappings", {}
+                        ).get("child_to_parent", {})
+                    except Exception:
+                        pass
+
+                parent_durations = {}
                 for s in child_samples:
                     pname = child_to_parent.get(s["name"], "unknown")
                     parent_durations.setdefault(pname, []).append(
@@ -1246,6 +1349,9 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
                     sum(parent_durations[p]) / len(parent_durations[p])
                     for p in parents_sorted
                 ]
+                counts = [
+                    len(parent_durations[p]) for p in parents_sorted
+                ]
                 ax.bar(x, totals, color=colors[0], alpha=0.7,
                        label="total (sec)")
                 ax2 = ax.twinx()
@@ -1254,10 +1360,14 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
                 ax.set_xlabel("Parent subsystem")
                 ax.set_ylabel("Total creation time (sec)")
                 ax2.set_ylabel("Avg per child (sec)")
-                ax.set_title("Child Creation Duration per Parent")
+                ax.set_title(
+                    f"Child Creation Duration per Parent "
+                    f"({len(parents_sorted)} parents, "
+                    f"{len(child_samples)} children)"
+                )
                 ax.set_xticks(list(x))
                 ax.set_xticklabels(
-                    [p[-8:] for p in parents_sorted],
+                    [f"{p[-8:]}({counts[i]})" for i, p in enumerate(parents_sorted)],
                     rotation=45, fontsize=7,
                 )
                 ax.legend(loc="upper left", fontsize=7)
@@ -1275,6 +1385,65 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
                 )
         except Exception as exc:
             self.logger.warning(f"Graph 8 failed: {exc}")
+
+        # ── 9-12. Individual per-op latency over time (one graph each) ──
+        individual_ops = [
+            ("create_parent", "Parent LVol Creation Latency Over Time"),
+            ("create_child", "Child LVol Creation Latency Over Time"),
+            ("create_snapshot", "Snapshot Creation Latency Over Time"),
+            ("create_clone", "Clone Creation Latency Over Time"),
+        ]
+        for op_name, title in individual_ops:
+            try:
+                op_samples = sorted(
+                    [s for s in samples if s["op"] == op_name],
+                    key=lambda s: s["timestamp"],
+                )
+                if not op_samples:
+                    continue
+                fig, ax = plt.subplots(figsize=(14, 8))
+                t0_global = min(s["timestamp"] for s in samples)
+                x = [(s["timestamp"] - t0_global) / 60.0
+                     for s in op_samples]
+                y = [s["elapsed_sec"] for s in op_samples]
+
+                ax.scatter(x, y, alpha=0.5, s=12,
+                           color=colors[0], label="latency")
+                # Rolling average (window=20)
+                if len(y) >= 20:
+                    window = 20
+                    rolling = [
+                        sum(y[max(0, i - window):i]) / min(i, window)
+                        for i in range(1, len(y) + 1)
+                    ]
+                    ax.plot(x, rolling, color="red", linewidth=1.5,
+                            alpha=0.8, label=f"rolling avg (w={window})")
+
+                # Mark batch boundaries
+                bs = self.BATCH_SIZE
+                for bi in range(bs, len(op_samples), bs):
+                    ax.axvline(
+                        x=x[bi] if bi < len(x) else x[-1],
+                        color="gray", linestyle="--",
+                        alpha=0.3, linewidth=0.5,
+                    )
+
+                ax.set_xlabel("Time since test start (minutes)")
+                ax.set_ylabel("Latency (sec)")
+                ax.set_title(
+                    f"{title} ({len(op_samples)} ops, "
+                    f"batch_size={bs}, workers={self.MAX_WORKERS_CREATE})"
+                )
+                ax.legend(fontsize=8)
+                fig.tight_layout()
+                fname = f"{op_name}_latency_over_time.png"
+                fig.savefig(os.path.join(out_dir, fname), dpi=150)
+                plt.close(fig)
+                self.logger.info(f"Generated {fname}")
+            except Exception as exc:
+                self.logger.warning(
+                    f"Graph {op_name}_latency_over_time failed: {exc}"
+                )
 
     def _print_summary(self):
         self.logger.info("=" * 60)
@@ -1341,7 +1510,10 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
                     "iteration": iteration,
                     "phase_durations_sec": phase_durations,
                 })
-                self._clear_registries()
+                # Only clear registries if iteration succeeded — graphs
+                # need the mappings and they run in the finally block
+                if not self._stop_event.is_set():
+                    self._clear_registries()
 
         finally:
             self._metrics["end_ts"] = time.time()
@@ -2194,29 +2366,31 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
             pv_names = []
             found_pvcs = set()
 
-            # Bulk fetch all test PVCs in one kubectl call
+            # Bulk fetch all test PVCs via -o json (avoids jsonpath quoting issues)
             out, _ = self.k8s_utils._exec_kubectl(
                 f"kubectl get pvc -l test=ns-stress -n {ns} "
-                f"-o jsonpath='{{range .items}}{{.metadata.name}}|"
-                f"{{.status.phase}}|{{.spec.volumeName}}{{\"\\n\"}}{{end}}'",
+                f"-o json 2>/dev/null || echo '{{\"items\":[]}}'",
                 supress_logs=True,
             )
 
-            for line in (out or "").strip().split("\n"):
-                line = line.strip()
-                if not line:
-                    continue
-                parts = line.split("|")
-                if len(parts) < 3:
-                    continue
-                pvc_name, phase, pv_name = parts[0], parts[1], parts[2]
-                if pvc_name not in all_pvc_names:
-                    continue
-                found_pvcs.add(pvc_name)
-                if phase != "Bound":
-                    not_bound.append((pvc_name, phase))
-                elif pv_name:
-                    pv_names.append((pvc_name, pv_name))
+            try:
+                data = json.loads(out or '{"items":[]}')
+                for item in data.get("items", []):
+                    pvc_name = item.get("metadata", {}).get("name", "")
+                    phase = item.get("status", {}).get("phase", "")
+                    pv_name = item.get("spec", {}).get("volumeName", "")
+                    if pvc_name not in all_pvc_names:
+                        continue
+                    found_pvcs.add(pvc_name)
+                    if phase != "Bound":
+                        not_bound.append((pvc_name, phase))
+                    elif pv_name:
+                        pv_names.append((pvc_name, pv_name))
+            except (json.JSONDecodeError, TypeError):
+                self.logger.warning(
+                    f"[verify_lvols] Failed to parse kubectl JSON output "
+                    f"(len={len(out or '')})"
+                )
 
             # Check for PVCs not found in K8s at all
             missing_pvcs = all_pvc_names - found_pvcs
@@ -2280,6 +2454,9 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
     def _verify_all_snapshots_exist(self):
         """K8s override: verify VolumeSnapshots are readyToUse.
 
+        Uses ``-o json`` instead of jsonpath to avoid shell-quoting issues
+        when _exec_kubectl runs through bash -c or SSH layers.
+
         Retries up to 30 minutes to allow snapshots to become ready.
         Warns for not-ready, only fails if >50% not ready.
         """
@@ -2298,22 +2475,24 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
 
         while waited <= max_wait:
             not_ready = []
-            # Bulk query all snapshots with our label
+            # Use -o json for reliable parsing (jsonpath has shell-quoting issues)
             out, _ = self.k8s_utils._exec_kubectl(
                 f"kubectl get volumesnapshot -l test=ns-stress -n {ns} "
-                f"-o jsonpath='{{range .items}}{{.metadata.name}}|"
-                f"{{.status.readyToUse}}{{\"\\n\"}}{{end}}' "
-                f"2>/dev/null || true",
+                f"-o json 2>/dev/null || echo '{{\"items\":[]}}'",
                 supress_logs=True,
             )
             found_snaps = {}
-            for line in (out or "").strip().split("\n"):
-                line = line.strip()
-                if not line:
-                    continue
-                parts = line.split("|")
-                if len(parts) >= 2:
-                    found_snaps[parts[0]] = parts[1]
+            try:
+                data = json.loads(out or '{"items":[]}')
+                for item in data.get("items", []):
+                    name = item.get("metadata", {}).get("name", "")
+                    ready = item.get("status", {}).get("readyToUse", False)
+                    found_snaps[name] = str(ready).lower()
+            except (json.JSONDecodeError, TypeError):
+                self.logger.warning(
+                    f"[verify_snapshots] Failed to parse kubectl JSON output "
+                    f"(len={len(out or '')})"
+                )
 
             for snap_name in snap_names:
                 ready = found_snaps.get(snap_name, "not-found")
@@ -2358,6 +2537,8 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
     def _verify_all_clones_exist(self):
         """K8s override: verify clone PVCs are Bound.
 
+        Uses ``-o json`` instead of jsonpath to avoid shell-quoting issues.
+
         Retries up to 30 minutes to allow clone PVCs to bind.
         Warns for not-bound, only fails if >50% not bound.
         """
@@ -2376,22 +2557,24 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
 
         while waited <= max_wait:
             not_bound = []
-            # Bulk query all test PVCs (clones have same label)
+            # Use -o json for reliable parsing
             out, _ = self.k8s_utils._exec_kubectl(
                 f"kubectl get pvc -l test=ns-stress -n {ns} "
-                f"-o jsonpath='{{range .items}}{{.metadata.name}}|"
-                f"{{.status.phase}}{{\"\\n\"}}{{end}}' "
-                f"2>/dev/null || true",
+                f"-o json 2>/dev/null || echo '{{\"items\":[]}}'",
                 supress_logs=True,
             )
             found_pvcs = {}
-            for line in (out or "").strip().split("\n"):
-                line = line.strip()
-                if not line:
-                    continue
-                parts = line.split("|")
-                if len(parts) >= 2:
-                    found_pvcs[parts[0]] = parts[1]
+            try:
+                data = json.loads(out or '{"items":[]}')
+                for item in data.get("items", []):
+                    name = item.get("metadata", {}).get("name", "")
+                    phase = item.get("status", {}).get("phase", "")
+                    found_pvcs[name] = phase
+            except (json.JSONDecodeError, TypeError):
+                self.logger.warning(
+                    f"[verify_clones] Failed to parse kubectl JSON output "
+                    f"(len={len(out or '')})"
+                )
 
             for clone_name in clone_names:
                 phase = found_pvcs.get(clone_name, "not-found")
