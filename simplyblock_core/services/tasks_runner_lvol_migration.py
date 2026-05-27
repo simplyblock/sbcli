@@ -1128,20 +1128,6 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         # The client must then disconnect stale controllers and reconnect
         # using the new connection strings (primary + secondary ports).
         if tgt_is_src_secondary:
-            # Step 0: detach the hub controller from SRC — it was used to push
-            # migration data and is no longer needed.  Must happen here because
-            # hub_ctrl_name is nulled out in tgt_uuid_carry for this path
-            # (hub stays connected until now so SPDK can complete the transfer).
-            # Failing to detach leaves mighub_<uuid> as a zombie on SRC and
-            # causes EEXIST on the very next migration attempt.
-            hub_ctrl = ctx.get('ctrl_name')
-            if hub_ctrl:
-                try:
-                    src_rpc.bdev_nvme_detach_controller(hub_ctrl)
-                    logger.info(f"tgt_is_src_secondary: detached hub controller {hub_ctrl}")
-                except Exception as e:
-                    logger.warning(f"tgt_is_src_secondary: hub detach {hub_ctrl} failed (non-fatal): {e}")
-
             tgt_primary_port = tgt_node.get_lvol_subsys_port(tgt_node.lvstore)
             tgt_trtype_local, tgt_ip_local = _get_migration_nic(tgt_node)
             try:
@@ -1154,9 +1140,12 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                     f"tgt_is_src_secondary: subsystem_delete {lvol.nqn} failed "
                     f"(may not exist): {e}")
             try:
-                # Step 2: create new subsystem with same NQN
-                serial = lvol.uuid[:20].upper().replace('-', '')
-                if not tgt_rpc.subsystem_create(lvol.nqn, serial, "SimplyBlock"):
+                # Step 2: create new subsystem with same NQN.
+                # Use lvol.ha_type / lvol.uuid to match the normal lvol-creation
+                # convention (serial='ha', model=uuid) — the previous code used a
+                # truncated-uuid serial and 'SimplyBlock' model which caused the
+                # NVMe subsystem identity to differ from what the client expected.
+                if not tgt_rpc.subsystem_create(lvol.nqn, lvol.ha_type, lvol.uuid):
                     logger.error(
                         f"tgt_is_src_secondary: subsystem_create {lvol.nqn} failed")
                 else:
@@ -1164,9 +1153,13 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                     tgt_rpc.listeners_create(
                         lvol.nqn, tgt_trtype_local, tgt_ip_local, tgt_primary_port,
                         ana_state="optimized")
-                    # Step 4: add migrated bdev as namespace
+                    # Step 4: add migrated bdev as namespace.
+                    # Pass lvol.guid (nguid) and lvol.ns_id to match the original
+                    # namespace identity — previously these were omitted, which caused
+                    # the namespace to appear without nguid/nsid to the client.
                     tgt_rpc.nvmf_subsystem_add_ns(
-                        lvol.nqn, tgt_lvol_composite, uuid=lvol.uuid)
+                        lvol.nqn, tgt_lvol_composite, lvol.uuid, lvol.guid,
+                        nsid=lvol.ns_id)
                     logger.info(
                         f"tgt_is_src_secondary: created subsystem {lvol.nqn} "
                         f"listener={tgt_ip_local}:{tgt_primary_port} "
@@ -1174,6 +1167,19 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             except Exception as e:
                 logger.error(
                     f"tgt_is_src_secondary: subsystem re-creation failed: {e}")
+
+            # Step 5: detach the hub controller from SRC — done AFTER the migrated
+            # lvol is already connected to the client's subsystem so there is no
+            # window where neither path serves the client.  Hub is no longer needed
+            # once the subsystem is live; failing to detach leaves mighub_<uuid> as
+            # a zombie on SRC and causes EEXIST on the next migration attempt.
+            hub_ctrl = ctx.get('ctrl_name')
+            if hub_ctrl:
+                try:
+                    src_rpc.bdev_nvme_detach_controller(hub_ctrl)
+                    logger.info(f"tgt_is_src_secondary: detached hub controller {hub_ctrl}")
+                except Exception as e:
+                    logger.warning(f"tgt_is_src_secondary: hub detach {hub_ctrl} failed (non-fatal): {e}")
 
         # apply_migration_to_db is intentionally deferred to CLEANUP_SOURCE
         return True, False, None
