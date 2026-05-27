@@ -2939,6 +2939,43 @@ echo "$WORKDIR_HOST/{os.path.basename(remote_tar)}"
         self.exec_command(node_ip, stop_command)
         self.logger.info(f"Stopped all tshark processes on {node_ip}")
 
+    def start_full_pcap_capture(self, node_ip, log_dir, interface="any",
+                                max_size_mb=500, max_files=3):
+        """Start full packet capture in pcap format with file rotation.
+
+        Captures all packets on the given interface.  Files rotate at
+        *max_size_mb* MB, keeping at most *max_files* rotated files
+        (total max disk = max_size_mb * max_files per node).
+
+        Args:
+            node_ip: Target node IP.
+            log_dir: Directory to write pcap files into.
+            interface: Network interface (default ``any``).
+            max_size_mb: Rotate file after this many MB.
+            max_files: Maximum number of rotated files to keep.
+        """
+        self.check_and_install_tcpdump(node_ip)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        pcap_file = f"{log_dir}/full_capture_{node_ip}_{timestamp}.pcap"
+        cmd = (
+            f"sudo tmux new-session -d -s full_pcap_session "
+            f"\"tcpdump -i {interface} -w {pcap_file} "
+            f"-C {max_size_mb} -W {max_files} 2>&1\""
+        )
+        self.exec_command(node_ip, cmd)
+        self.logger.info(
+            f"Started full pcap capture on {node_ip} -> {pcap_file} "
+            f"(rotate={max_size_mb}MB x{max_files})"
+        )
+
+    def stop_full_pcap_capture(self, node_ip):
+        """Stop the full pcap capture tmux session on a node."""
+        self.exec_command(
+            node_ip,
+            "sudo tmux kill-session -t full_pcap_session 2>/dev/null || true",
+        )
+        self.logger.info(f"Stopped full pcap capture on {node_ip}")
+
     def get_dmesg_logs_within_iso_window(self, node_ip, start_iso, end_iso):
         """
         Fetch dmesg logs with ISO timestamps on a remote node within a time window.

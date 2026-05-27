@@ -1,3 +1,4 @@
+import os
 import random
 import threading
 import time
@@ -147,6 +148,39 @@ class RandomMultiClientMultiFailoverAllNodesTest(RandomMultiClientMultiFailoverT
             )
 
         self.logger.info(
-            f"max_fault_tolerance={max_fault_tolerance} — proceeding with all-nodes outage test."
+            f"max_fault_tolerance={max_fault_tolerance} — proceeding "
+            f"with all-nodes outage test."
         )
-        super().run()
+
+        # Start full pcap capture on all nodes for network diagnostics
+        all_node_ips = set(
+            self.storage_nodes + self.mgmt_nodes + self.fio_node
+        )
+        self.logger.info(
+            f"Starting full pcap capture on {len(all_node_ips)} nodes"
+        )
+        for node_ip in all_node_ips:
+            try:
+                node_log_dir = os.path.join(
+                    self.docker_logs_path, node_ip,
+                )
+                self.ssh_obj.make_directory(
+                    node=node_ip, dir_name=node_log_dir,
+                )
+                self.ssh_obj.start_full_pcap_capture(
+                    node_ip, node_log_dir,
+                )
+            except Exception as exc:
+                self.logger.warning(
+                    f"Failed to start pcap on {node_ip}: {exc}"
+                )
+
+        try:
+            super().run()
+        finally:
+            # Stop pcap capture on all nodes
+            for node_ip in all_node_ips:
+                try:
+                    self.ssh_obj.stop_full_pcap_capture(node_ip)
+                except Exception:
+                    pass

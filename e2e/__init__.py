@@ -27,6 +27,10 @@ from e2e_tests.cloning_and_snapshot.multi_lvol_snapshot_fio import TestMultiLvol
 from e2e_tests.ha_journal.lvol_journal_device_node_restart import TestDeviceNodeRestart
 from e2e_tests.data_migration.data_migration_ha_fio import FioWorkloadTest
 from e2e_tests.multi_node_crash_fio_clone import TestMultiFioSnapshotDowntime
+from e2e_tests.test_multi_node_outage import (
+    TestMultiNodeOutageDocker,
+    TestMultiNodeOutageK8s,
+)
 
 
 from e2e_tests.add_node_fio_run import (
@@ -276,6 +280,8 @@ ALL_TESTS = [
     LargeScaleLvolK8s,
     DeviceFailureMigrationNoLoad,
     DeviceFailureMigrationUnderLoad,
+    TestMultiNodeOutageDocker,
+    TestMultiNodeOutageK8s,
 ]
 
 def get_all_tests(custom=True, ha_test=False):

@@ -143,16 +143,20 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
                 "clones": clones, "total": lvols + snaps + clones,
             }
 
-    def _record_timing(self, op: str, name: str, elapsed: float, inventory: dict):
+    def _record_timing(self, op: str, name: str, elapsed: float,
+                       inventory: dict, api_elapsed: float = None):
         with self._lock:
-            self._timing_samples.append({
+            sample = {
                 "iteration": self._current_iteration,
                 "op": op,
                 "name": name,
                 "elapsed_sec": round(elapsed, 4),
                 "inventory": inventory,
                 "timestamp": time.time(),
-            })
+            }
+            if api_elapsed is not None:
+                sample["api_elapsed_sec"] = round(api_elapsed, 4)
+            self._timing_samples.append(sample)
 
     def _log_op_stats(self, op: str, batch_label: str = "",
                       batch_elapsed: float = 0, count: int = 0):
@@ -477,6 +481,43 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
             f"confirmed in API"
         )
 
+    def _phase_mount_verify_clones(self):
+        """Mount 20 random clones and run short FIO read to verify accessibility.
+
+        Picks up to 20 random clones from the registry, connects/mounts each,
+        runs a 4 MB FIO read, checks for errors, and disconnects.  Fails the
+        phase if any clone verification fails.
+        """
+        with self._lock:
+            clone_names = list(self._clone_registry.keys())
+        sample_size = min(20, len(clone_names))
+        if sample_size == 0:
+            self.logger.info("[mount_verify] No clones to verify, skipping")
+            return
+        selected = random.sample(clone_names, sample_size)
+        self.logger.info(
+            f"[mount_verify] Verifying {sample_size} clones with FIO read"
+        )
+        ok, fail = self._batch_parallel(
+            [{"clone_name": c} for c in selected],
+            self._mount_verify_single_clone,
+            min(sample_size, self.MAX_WORKERS_CREATE),
+            "mount_verify",
+        )
+        self.logger.info(
+            f"[mount_verify] {ok}/{sample_size} OK, {fail} failed"
+        )
+        if fail > 0:
+            raise RuntimeError(
+                f"[mount_verify] {fail}/{sample_size} clone mount+FIO "
+                f"verifications failed. Check logs for FIO err= or "
+                f"connect failures."
+            )
+
+    def _mount_verify_single_clone(self, item):
+        """Subclass must implement: connect/mount clone, FIO read, verify."""
+        raise NotImplementedError
+
     def _verify_nodes_healthy(self):
         """Verify all storage nodes are online and healthy."""
         nodes_data = self.sbcli_utils.get_storage_nodes()
@@ -718,9 +759,12 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
     def _timed_create_clone(self, params: dict):
         inv = self._snapshot_inventory()
         t0 = time.time()
-        self._create_clone_impl(params)
+        api_elapsed = self._create_clone_impl(params)
         elapsed = time.time() - t0
-        self._record_timing("create_clone", params["name"], elapsed, inv)
+        self._record_timing(
+            "create_clone", params["name"], elapsed, inv,
+            api_elapsed=api_elapsed,
+        )
 
     def _timed_delete_clone(self, clone_name: str):
         inv = self._snapshot_inventory()
@@ -1004,6 +1048,49 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
 
     # ── Reporting ─────────────────────────────────────────────────────────
 
+    def _compute_per_iteration_summary(self):
+        """Compute per-iteration avg/min/max/p50/p95 for create operations.
+
+        Uses api_elapsed_sec when available (Docker — API-only time),
+        otherwise falls back to elapsed_sec (K8s — time to PVC Bound).
+        """
+        summary = {}
+        with self._lock:
+            all_samples = list(self._timing_samples)
+        if not all_samples:
+            return summary
+        iterations = sorted(set(s["iteration"] for s in all_samples))
+        create_ops = [
+            "create_parent", "create_child", "create_clone",
+        ]
+        for it in iterations:
+            it_key = str(it)
+            summary[it_key] = {}
+            for op in create_ops:
+                samples = [
+                    s for s in all_samples
+                    if s["iteration"] == it and s["op"] == op
+                ]
+                if not samples:
+                    continue
+                times = [
+                    s.get("api_elapsed_sec", s["elapsed_sec"])
+                    for s in samples
+                ]
+                times_sorted = sorted(times)
+                n = len(times_sorted)
+                summary[it_key][op] = {
+                    "count": n,
+                    "avg": round(sum(times_sorted) / n, 4),
+                    "min": round(times_sorted[0], 4),
+                    "max": round(times_sorted[-1], 4),
+                    "p50": round(times_sorted[n // 2], 4),
+                    "p95": round(
+                        times_sorted[min(int(n * 0.95), n - 1)], 4
+                    ),
+                }
+        return summary
+
     def _get_log_dir(self) -> str:
         """Return the directory for timing/graph output."""
         d = getattr(self, "docker_logs_path", None)
@@ -1027,6 +1114,7 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
                 "CLONE_BATCH_SIZE": self.CLONE_BATCH_SIZE,
             },
             "iterations": self._iteration_timings,
+            "per_iteration_summary": self._compute_per_iteration_summary(),
             "samples": self._timing_samples,
             "batch_timings": self._batch_timings,
             "metrics": self._metrics,
@@ -1461,6 +1549,87 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
                     f"Graph {op_name}_latency_over_time failed: {exc}"
                 )
 
+        # ── 13. Per-iteration average create time (grouped bar) ────────
+        try:
+            per_it = self._compute_per_iteration_summary()
+            if per_it:
+                create_ops_bar = [
+                    "create_parent", "create_child", "create_clone",
+                ]
+                op_labels_bar = ["parent", "child", "clone"]
+                it_keys = sorted(per_it.keys(), key=int)
+                fig, ax = plt.subplots(figsize=(14, 8))
+                n_its = len(it_keys)
+                n_ops = len(create_ops_bar)
+                width = 0.8 / max(n_ops, 1)
+                has_data = False
+
+                for oi, (op, label) in enumerate(
+                    zip(create_ops_bar, op_labels_bar)
+                ):
+                    avgs = []
+                    mins = []
+                    maxs = []
+                    x_pos = []
+                    for xi, it_key in enumerate(it_keys):
+                        stats = per_it[it_key].get(op)
+                        if stats:
+                            avgs.append(stats["avg"])
+                            mins.append(stats["min"])
+                            maxs.append(stats["max"])
+                            x_pos.append(xi)
+                    if avgs:
+                        has_data = True
+                        offsets = [
+                            x + (oi - n_ops / 2 + 0.5) * width
+                            for x in x_pos
+                        ]
+                        err_lo = [a - m for a, m in zip(avgs, mins)]
+                        err_hi = [m - a for a, m in zip(avgs, maxs)]
+                        ax.bar(
+                            offsets, avgs, width,
+                            label=f"{label} (avg)",
+                            color=colors[oi % len(colors)],
+                            alpha=0.8,
+                            yerr=[err_lo, err_hi],
+                            capsize=3,
+                            error_kw={"linewidth": 0.8},
+                        )
+                        # Annotate counts
+                        for j, xi in enumerate(x_pos):
+                            cnt = per_it[it_keys[xi]][op]["count"]
+                            ax.text(
+                                offsets[j], avgs[j] + err_hi[j] + 0.3,
+                                f"n={cnt}", ha="center", fontsize=6,
+                            )
+
+                if has_data:
+                    ax.set_xlabel("Iteration")
+                    ax.set_ylabel("Create time (sec)")
+                    ax.set_title(
+                        "Per-Iteration Average Create Time "
+                        "(API time for Docker, PVC Bound for K8s)"
+                    )
+                    ax.set_xticks(range(n_its))
+                    ax.set_xticklabels(
+                        [f"iter {k}" for k in it_keys], fontsize=8,
+                    )
+                    ax.legend(fontsize=8)
+                    fig.tight_layout()
+                    fig.savefig(
+                        os.path.join(
+                            out_dir,
+                            "per_iteration_avg_create_time.png",
+                        ),
+                        dpi=150,
+                    )
+                    self.logger.info(
+                        "Generated per_iteration_avg_create_time.png"
+                    )
+                plt.close(fig)
+        except Exception as exc:
+            self.logger.warning(f"Graph 13 failed: {exc}")
+
     def _print_summary(self):
         self.logger.info("=" * 60)
         self.logger.info("  PARALLEL NAMESPACE LVOL STRESS — SUMMARY")
@@ -1515,6 +1684,7 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
                     ("verify_snapshots", self._verify_all_snapshots_exist),
                     ("create_clones", self._phase_create_clones),
                     ("verify_clones", self._verify_all_clones_exist),
+                    ("mount_verify_clones", self._phase_mount_verify_clones),
                     ("verify_nodes_final", self._verify_nodes_healthy),
                     ("delete_all", self._phase_delete_all),
                     ("verify_cleanup", self._phase_verify_cleanup),
@@ -1747,10 +1917,11 @@ class TestParallelNamespaceLvolDocker(_ParallelNamespaceLvolBase):
         """Create a single parent lvol. Called from _batch_parallel."""
         name = item["name"]
         t0 = time.time()
-        self._create_parent(name)
+        api_elapsed = self._create_parent(name)
         self._record_timing(
             "create_parent", name,
             time.time() - t0, self._snapshot_inventory(),
+            api_elapsed=api_elapsed,
         )
 
     def _create_single_child_docker(self, item):
@@ -1763,15 +1934,22 @@ class TestParallelNamespaceLvolDocker(_ParallelNamespaceLvolBase):
         parent_id = item["parent_id"]
         parent_node_id = item["parent_node_id"]
         t0 = time.time()
-        self._create_child(child_name, parent_name, parent_id, parent_node_id)
+        api_elapsed = self._create_child(
+            child_name, parent_name, parent_id, parent_node_id,
+        )
         self._record_timing(
             "create_child", child_name,
             time.time() - t0, self._snapshot_inventory(),
+            api_elapsed=api_elapsed,
         )
 
     def _create_parent(self, name: str):
-        """Create a single parent lvol + register. Raises on failure."""
+        """Create a single parent lvol + register. Raises on failure.
+
+        Returns the API-only elapsed time (seconds) for timing reports.
+        """
         self._inc("attempts", "create_parent")
+        api_t0 = time.time()
         self._api_retry("create_parent", lambda: self.sbcli_utils.add_lvol(
             lvol_name=name,
             pool_name=self.pool_name,
@@ -1783,6 +1961,7 @@ class TestParallelNamespaceLvolDocker(_ParallelNamespaceLvolBase):
             max_namespace_per_subsys=self.NAMESPACES_PER_PARENT,
             retry=1,
         ), ctx={"name": name})
+        api_elapsed = time.time() - api_t0
         lvol_id = self._wait_lvol_id(name)
         node_id = None
         try:
@@ -1802,11 +1981,16 @@ class TestParallelNamespaceLvolDocker(_ParallelNamespaceLvolBase):
         self.logger.info(
             f"[create_parent] {name} -> {lvol_id} (node={node_id})"
         )
+        return api_elapsed
 
     def _create_child(self, name: str, parent_name: str,
                       parent_id: str, parent_node_id: str):
-        """Create a single child namespace lvol. Raises on failure."""
+        """Create a single child namespace lvol. Raises on failure.
+
+        Returns the API-only elapsed time (seconds) for timing reports.
+        """
         self._inc("attempts", "create_child")
+        api_t0 = time.time()
         self._api_retry("create_child", lambda: self.sbcli_utils.add_lvol(
             lvol_name=name,
             pool_name=self.pool_name,
@@ -1819,6 +2003,7 @@ class TestParallelNamespaceLvolDocker(_ParallelNamespaceLvolBase):
             namespace=parent_id,
             retry=1,
         ), ctx={"name": name, "parent": parent_name})
+        api_elapsed = time.time() - api_t0
         child_id = self._wait_lvol_id(name)
         with self._lock:
             self._child_registry[name] = {
@@ -1829,6 +2014,7 @@ class TestParallelNamespaceLvolDocker(_ParallelNamespaceLvolBase):
         self.logger.info(
             f"[create_child] {name} -> {child_id} (parent={parent_name})"
         )
+        return api_elapsed
 
     # ── Write data (parallel FIO per parent group) ─────────────────────
 
@@ -2035,11 +2221,13 @@ class TestParallelNamespaceLvolDocker(_ParallelNamespaceLvolBase):
         snap_name = params["snap_name"]
         snap_id = params["snap_id"]
         self._inc("attempts", "create_clone")
+        api_t0 = time.time()
         self._api_retry("create_clone", lambda: self.sbcli_utils.add_clone(
             snapshot_id=snap_id,
             clone_name=clone_name,
             retry=1,
         ), ctx={"clone": clone_name, "snap": snap_name})
+        api_elapsed = time.time() - api_t0
         clone_id = self._wait_lvol_id(clone_name)
         with self._lock:
             self._clone_registry[clone_name] = {
@@ -2049,6 +2237,134 @@ class TestParallelNamespaceLvolDocker(_ParallelNamespaceLvolBase):
                 self._snap_registry[snap_name]["clones"].append(clone_name)
             self._metrics["counts"]["clones_created"] += 1
         self.logger.info(f"[create_clone] {clone_name} -> {clone_id}")
+        return api_elapsed
+
+    # ── Clone mount verification ─────────────────────────────────────────
+
+    def _mount_verify_single_clone(self, item):
+        """Connect a clone via NVMe, run short FIO read, check for errors."""
+        clone_name = item["clone_name"]
+        client = self.fio_node[0]
+        nqn = None
+        t0 = time.time()
+
+        try:
+            # 1. Get connect strings (works for clones — they are lvols)
+            connect_strs = self.sbcli_utils.get_lvol_connect_str(clone_name)
+            if not connect_strs:
+                raise RuntimeError(
+                    f"No connect strings returned for clone {clone_name}"
+                )
+            nqn = self._extract_nqn(connect_strs)
+
+            # 2. Record devices before connect
+            initial_devices = set(self.ssh_obj.get_devices(node=client))
+
+            # 3. NVMe connect
+            for cs in connect_strs:
+                self.ssh_obj.exec_command(client, cs)
+            sleep_n_sec(3)
+
+            # 4. Detect new device (namespace lvols may add namespace to
+            #    existing controller rather than creating a new one)
+            final_devices = set(self.ssh_obj.get_devices(node=client))
+            new_devices = list(final_devices - initial_devices)
+
+            device = None
+            if new_devices:
+                device = f"/dev/{new_devices[0]}"
+            else:
+                # Namespace lvol: try ns-rescan on existing controllers
+                out, _ = self.ssh_obj.exec_command(
+                    client,
+                    "ls /dev/nvme[0-9]* 2>/dev/null | grep -oP 'nvme\\d+$' "
+                    "| sort -u",
+                    supress_logs=True,
+                )
+                for ctrl in (out or "").strip().splitlines():
+                    ctrl = ctrl.strip()
+                    if ctrl:
+                        self.ssh_obj.exec_command(
+                            client,
+                            f"sudo nvme ns-rescan /dev/{ctrl}",
+                            supress_logs=True,
+                        )
+                sleep_n_sec(2)
+                rescan_devices = set(self.ssh_obj.get_devices(node=client))
+                new_after_rescan = list(rescan_devices - initial_devices)
+                if new_after_rescan:
+                    device = f"/dev/{new_after_rescan[0]}"
+
+            if not device:
+                # Fall back: find any device for this NQN
+                device = self._find_device_by_nqn(client, nqn)
+
+            if not device:
+                raise RuntimeError(
+                    f"Could not find block device for clone {clone_name} "
+                    f"after NVMe connect (NQN={nqn})"
+                )
+
+            self.logger.info(
+                f"[mount_verify] Clone {clone_name} -> device {device}"
+            )
+
+            # 5. Run short FIO read with output capture
+            fio_log = f"/tmp/fio_verify_{clone_name}.log"
+            fio_cmd = (
+                f"sudo fio --name=verify-{clone_name[:20]} "
+                f"--filename={device} --size=4M --bs=4K "
+                f"--rw=read --direct=1 --ioengine=libaio "
+                f"--iodepth=1 --numjobs=1 "
+                f"--output={fio_log}"
+            )
+            self.ssh_obj.exec_command(client, fio_cmd)
+
+            # 6. Check FIO log for errors
+            fio_output, _ = self.ssh_obj.exec_command(
+                client, f"cat {fio_log}", supress_logs=True,
+            )
+            fio_output = fio_output or ""
+
+            # Parse err= from FIO output
+            err_found = False
+            for line in fio_output.splitlines():
+                if "err=" in line:
+                    # Extract err value: "err= 5" or "err=5"
+                    import re
+                    m = re.search(r"err=\s*(\d+)", line)
+                    if m and int(m.group(1)) != 0:
+                        err_found = True
+                        break
+
+            if err_found:
+                self.logger.error(
+                    f"[mount_verify] FIO reported error on clone "
+                    f"{clone_name}:\n{fio_output}"
+                )
+                raise RuntimeError(
+                    f"FIO read error on clone {clone_name}: {fio_output[:200]}"
+                )
+
+            elapsed = time.time() - t0
+            self.logger.info(
+                f"[mount_verify] Clone {clone_name} verified OK "
+                f"({elapsed:.1f}s)"
+            )
+            self._record_timing(
+                "mount_verify", clone_name, elapsed,
+                self._snapshot_inventory(),
+            )
+
+        finally:
+            # Always disconnect
+            if nqn:
+                try:
+                    self.ssh_obj.exec_command(
+                        client, f"sudo nvme disconnect -n {nqn}",
+                    )
+                except Exception:
+                    pass
 
     # ── Delete implementations (with verification) ────────────────────────
 
@@ -3025,6 +3341,124 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
                 self._snap_registry[snap_name]["clones"].append(clone_name)
             self._metrics["counts"]["clones_created"] += 1
         self.logger.info(f"[create_clone] {clone_name} Bound (snap={snap_name})")
+
+    # ── Clone mount verification ─────────────────────────────────────────
+
+    def _mount_verify_single_clone(self, item):
+        """Create a K8s FIO Job mounting the clone PVC, run read, check errors."""
+        clone_name = item["clone_name"]
+        ns = self.k8s_utils.namespace
+        job_name = f"verify-{clone_name[:40]}-{_rand_seq(4)}"
+        t0 = time.time()
+
+        try:
+            # 1. Create FIO Job that mounts the clone PVC and reads 4 MB
+            yaml_content = (
+                f"apiVersion: batch/v1\n"
+                f"kind: Job\n"
+                f"metadata:\n"
+                f"  name: {job_name}\n"
+                f"  namespace: {ns}\n"
+                f"  labels:\n"
+                f"    test: ns-stress\n"
+                f"    purpose: mount-verify\n"
+                f"spec:\n"
+                f"  backoffLimit: 0\n"
+                f"  template:\n"
+                f"    spec:\n"
+                f"      restartPolicy: Never\n"
+                f"      containers:\n"
+                f"      - name: fio\n"
+                f"        image: dockerpinata/fio:2.1\n"
+                f"        command:\n"
+                f"        - fio\n"
+                f"        args:\n"
+                f"        - --name=verify-{clone_name[:20]}\n"
+                f"        - --filename=/data/testfile\n"
+                f"        - --size=4M\n"
+                f"        - --bs=4K\n"
+                f"        - --rw=read\n"
+                f"        - --direct=1\n"
+                f"        - --ioengine=libaio\n"
+                f"        - --iodepth=1\n"
+                f"        - --numjobs=1\n"
+                f"        volumeMounts:\n"
+                f"        - name: vol\n"
+                f"          mountPath: /data\n"
+                f"      volumes:\n"
+                f"      - name: vol\n"
+                f"        persistentVolumeClaim:\n"
+                f"          claimName: {clone_name}\n"
+            )
+            self.k8s_utils.apply_yaml(yaml_content, namespace=ns)
+
+            # 2. Wait for job completion
+            result = self.k8s_utils.wait_job_complete(
+                job_name, timeout=300, namespace=ns,
+            )
+            elapsed = time.time() - t0
+
+            # 3. Fetch pod logs for FIO output
+            fio_output = ""
+            try:
+                # Find the pod created by this job
+                pod_out, _ = self.k8s_utils._exec_kubectl(
+                    f"kubectl get pods -n {ns} -l job-name={job_name} "
+                    f"-o jsonpath='{{.items[0].metadata.name}}' 2>/dev/null",
+                    supress_logs=True,
+                )
+                pod_name = (pod_out or "").strip()
+                if pod_name:
+                    fio_output = self.k8s_utils.get_pod_logs(
+                        pod_name, namespace=ns, tail=100,
+                    )
+            except Exception:
+                pass
+
+            # 4. Check for errors
+            if result != "succeeded":
+                self.logger.error(
+                    f"[mount_verify] FIO job {job_name} for clone "
+                    f"{clone_name} ended with: {result} ({elapsed:.1f}s)"
+                    f"\nFIO output:\n{fio_output}"
+                )
+                raise RuntimeError(
+                    f"FIO verify job for clone {clone_name} failed: "
+                    f"{result}"
+                )
+
+            # 5. Parse FIO output for err=
+            import re
+            for line in (fio_output or "").splitlines():
+                if "err=" in line:
+                    m = re.search(r"err=\s*(\d+)", line)
+                    if m and int(m.group(1)) != 0:
+                        self.logger.error(
+                            f"[mount_verify] FIO reported error on clone "
+                            f"{clone_name}:\n{fio_output}"
+                        )
+                        raise RuntimeError(
+                            f"FIO read error on clone {clone_name}: "
+                            f"{line.strip()}"
+                        )
+
+            self.logger.info(
+                f"[mount_verify] Clone {clone_name} verified OK "
+                f"({elapsed:.1f}s)"
+            )
+            self._record_timing(
+                "mount_verify", clone_name, elapsed,
+                self._snapshot_inventory(),
+            )
+
+        finally:
+            # Always clean up the job
+            try:
+                self.k8s_utils.delete_resource(
+                    "job", job_name, namespace=ns,
+                )
+            except Exception:
+                pass
 
     # ── Delete implementations (with verification) ────────────────────────
 
