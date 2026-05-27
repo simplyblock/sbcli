@@ -1067,7 +1067,14 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             'hub_ctrl_name': ctx.get('ctrl_name'),
         }
 
-        if lvol.ha_type == "ha":
+        # For the non-adjacent path the secondary must be registered *before*
+        # the ANA-state flip below so the client already has a non-optimised
+        # path to TGT's secondary when IO is redirected.
+        # For tgt_is_src_secondary this registration is deferred until AFTER
+        # the old mirror subsystem is deleted and the new primary subsystem is
+        # created — so all three NVMe-oF operations land in the right order:
+        #   (a) delete old mirror  (b) create primary  (c) create secondary.
+        if lvol.ha_type == "ha" and not tgt_is_src_secondary:
             tgt_sec, sec_err = _get_target_secondary_node(tgt_node)
             if sec_err:
                 migration.error_message = sec_err
@@ -1170,10 +1177,68 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                 logger.error(
                     f"tgt_is_src_secondary: subsystem re-creation failed: {e}")
 
+            # Step 3b: expose on TGT's secondary node so the client gets both
+            # a primary path (TGT:primary_port) and a secondary/non-optimised
+            # path (TGT_SEC:secondary_port) after reconnect.
+            # This runs AFTER the old mirror deletion and new primary creation
+            # so the NVMe-oF topology lands in the correct order:
+            #   (a) delete old mirror  (b) create new primary  (c) create new secondary.
+            if lvol.ha_type == "ha":
+                tgt_sec, sec_err = _get_target_secondary_node(tgt_node)
+                if sec_err:
+                    logger.warning(
+                        f"tgt_is_src_secondary: cannot find TGT secondary for "
+                        f"secondary NVMe-oF setup ({sec_err}); continuing without it")
+                elif tgt_sec is not None:
+                    sec_rpc = _make_rpc(tgt_sec)
+                    if migration.snaps_migrated:
+                        try:
+                            last_snap = db.get_snapshot_by_id(migration.snaps_migrated[-1])
+                            tgt_snap_composite = (
+                                f"{tgt_node.lvstore}/"
+                                f"{_snap_short_name(last_snap) + _MIGRATION_BDEV_SUFFIX}")
+                            ret = sec_rpc.bdev_lvol_add_clone(
+                                tgt_lvol_composite, tgt_snap_composite)
+                            if not ret:
+                                logger.warning(
+                                    f"tgt_is_src_secondary: bdev_lvol_add_clone on "
+                                    f"secondary failed for "
+                                    f"{tgt_lvol_composite} → {tgt_snap_composite}; "
+                                    f"skipping secondary NVMe-oF setup")
+                                tgt_sec = None
+                        except KeyError as e:
+                            logger.warning(
+                                f"tgt_is_src_secondary: last snapshot not found "
+                                f"for secondary chaining: {e}; skipping secondary setup")
+                            tgt_sec = None
+                    if tgt_sec is not None:
+                        ok, err = _expose_lvol_on_secondary(
+                            lvol, tgt_node, tgt_sec, sec_rpc, None, None,
+                            already_registered=True, tgt_bdev_name=tgt_lvol_bdev)
+                        if ok:
+                            logger.info(
+                                f"tgt_is_src_secondary: lvol exposed on secondary "
+                                f"{tgt_sec.get_id()}")
+                        else:
+                            logger.warning(
+                                f"tgt_is_src_secondary: secondary NVMe-oF setup "
+                                f"failed (non-fatal): {err}")
+
             # Hub controller detach is deferred to PHASE_CLEANUP_SOURCE (via
             # hub_ctrl_name in tgt_uuid_carry) so it happens after the source
             # NQN is removed and the client has reconnected — same as the
             # non-adjacent path.
+
+            # Signal cutover: the TGT subsystem is now live.  Record the
+            # timestamp so PHASE_CLEANUP_SOURCE can enforce a grace period
+            # that gives the client time to reconnect before the source NQN
+            # is torn down.  The status is visible to the test script via
+            # sbctl migrate-list so it knows to reconnect immediately.
+            tgt_uuid_carry['cutover_notified_at'] = time.time()
+            migration.status = LVolMigration.STATUS_CUTOVER
+            logger.info(
+                f"Migration {migration.uuid}: STATUS_CUTOVER set — "
+                f"grace period starts, client should reconnect now")
 
         # apply_migration_to_db is intentionally deferred to CLEANUP_SOURCE
         return True, False, None
@@ -1573,6 +1638,25 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
 
     ctx = migration.transfer_context or {}
 
+    # --- Cutover grace period (tgt_is_src_secondary only) ---
+    # Wait here until the client has had time to reconnect to the new TGT
+    # subsystem before we tear down the source subsystem.  The grace period
+    # begins when PHASE_LVOL_MIGRATE sets cutover_notified_at and changes
+    # migration.status to STATUS_CUTOVER — the test script polls for that
+    # status and triggers client reconnect immediately upon seeing it.
+    cutover_notified_at = ctx.get('cutover_notified_at', 0)
+    if cutover_notified_at and ctx.get('stage') != 'cleanup_src':
+        elapsed = time.time() - cutover_notified_at
+        grace = 30.0
+        if elapsed < grace:
+            logger.info(
+                f"PHASE_CLEANUP_SOURCE: cutover grace — "
+                f"{grace - elapsed:.1f}s remaining for client reconnect")
+            return False, False, None
+        logger.info(
+            f"PHASE_CLEANUP_SOURCE: cutover grace elapsed "
+            f"({elapsed:.1f}s >= {grace}s), proceeding with source cleanup")
+
     # --- First entry: initialize cleanup state ---
     if ctx.get('stage') != 'cleanup_src':
         # Preserve the target lvol UUID and bdev name written by PHASE_LVOL_MIGRATE
@@ -1605,6 +1689,9 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
             'current_bdev': None,
             'tgt_lvol_uuid': tgt_lvol_uuid,
             'tgt_lvol_bdev': tgt_lvol_bdev,
+            # Carry hub_ctrl_name through the ctx rebuild so the deferred
+            # hub detach at the end of cleanup can still find it.
+            'hub_ctrl_name': (migration.transfer_context or {}).get('hub_ctrl_name'),
         }
         migration.transfer_context = ctx
         migration.write_to_db(db.kv_store)
@@ -1651,11 +1738,28 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
         except KeyError:
             logger.warning(f"Source snapshot {snap_uuid} not found in DB; skipping")
 
-    # --- All deletes finished: cleanup source NVMe-oF exposure ---
-    lvol = None
+    # --- All deletes finished: hub detach then NVMe-oF teardown ---
+    #
+    # Order matters for the adjacent path (tgt_is_src_secondary):
+    #   Step 7: detach hub controller on SRC — severs the SRC→TGT mirror link.
+    #           Must happen BEFORE deleting the source subsystem so that
+    #           bdev_nvme_detach_controller can still reach the hub bdev.
+    #   Step 8: delete source primary NVMe-oF subsystem.
+    #   Then:   delete source lvol bdev.
     tgt_is_src_secondary = (src_node.secondary_node_id == tgt_node.get_id())
+
+    hub_ctrl_name = ctx.get('hub_ctrl_name')
+    if hub_ctrl_name:
+        try:
+            src_rpc.bdev_nvme_detach_controller(hub_ctrl_name)
+            logger.info(f"Step 7: deferred hub controller detach: {hub_ctrl_name}")
+        except Exception as e:
+            logger.warning(f"Deferred hub detach {hub_ctrl_name} (non-fatal): {e}")
+
+    lvol = None
     try:
         lvol = db.get_lvol_by_id(migration.lvol_id)
+        logger.info(f"Step 8: removing source NVMe-oF subsystem {lvol.nqn}")
         _cleanup_subsystem_or_ns(lvol.nqn, lvol.ns_id, True, src_rpc)
         if src_sec_rpc and not tgt_is_src_secondary:
             # When tgt_is_src_secondary, src_sec_rpc IS the TGT node's RPC.
@@ -1694,17 +1798,6 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
                 src_sec_rpc.delete_lvol(src_lvol_composite, del_async=True)
         except Exception as e:
             logger.warning(f"Source lvol delete failed (non-fatal): {e}")
-
-    # Deferred hub detach: for the non-secondary case the hub controller was
-    # kept alive so clients could follow the ANA-optimized path on target
-    # uninterrupted.  Now that the source NQN is gone, detach the hub.
-    hub_ctrl_name = ctx.get('hub_ctrl_name')
-    if hub_ctrl_name:
-        try:
-            src_rpc.bdev_nvme_detach_controller(hub_ctrl_name)
-            logger.info(f"Deferred hub controller detach: {hub_ctrl_name}")
-        except Exception as e:
-            logger.warning(f"Deferred hub detach {hub_ctrl_name}: {e}")
 
     tgt_lvol_uuid = ctx.get('tgt_lvol_uuid')
     tgt_lvol_bdev = ctx.get('tgt_lvol_bdev')
