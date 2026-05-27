@@ -30,6 +30,7 @@ from e2e_tests.multi_node_crash_fio_clone import TestMultiFioSnapshotDowntime
 from e2e_tests.test_multi_node_outage import (
     TestMultiNodeOutageDocker,
     TestMultiNodeOutageK8s,
+    TestMultiNodeVMRebootDocker
 )
 
 
@@ -282,6 +283,7 @@ ALL_TESTS = [
     DeviceFailureMigrationUnderLoad,
     TestMultiNodeOutageDocker,
     TestMultiNodeOutageK8s,
+    TestMultiNodeVMRebootDocker,
 ]
 
 def get_all_tests(custom=True, ha_test=False):

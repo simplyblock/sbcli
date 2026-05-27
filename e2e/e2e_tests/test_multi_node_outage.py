@@ -179,6 +179,122 @@ class _TestMultiNodeOutageBase(TestClusterBase):
             max_retries=1,
         )
 
+    # ── Outage + recovery (overridable by subclasses) ──────────────
+
+    def _execute_outage_and_recovery(self, node_uuids, client):
+        """Steps 9-11: plan outage, execute, wait for recovery.
+
+        Subclasses can override this to change the outage mechanism
+        (e.g. VM reboot instead of SPDK crash / network disconnect).
+        """
+        # ── Step 9: Plan and execute multi-node outage ──────────────
+        self.logger.info("[step-9] Planning multi-node outage")
+        outage_nodes = random.sample(node_uuids, self.num_outage_nodes)
+        for node_uuid in outage_nodes:
+            outage_type = random.choice(["spdk_crash", "network_outage"])
+            self._outage_plan[node_uuid] = outage_type
+
+        self.logger.info("[step-9] Outage plan:")
+        for node_uuid, otype in self._outage_plan.items():
+            ip = self._node_info[node_uuid]["ip"]
+            self.logger.info(f"  Node {node_uuid[:8]} ({ip}): {otype}")
+
+        # Collect pre-outage diagnostics
+        self.logger.info("[step-9] Collecting pre-outage diagnostics")
+        try:
+            self.collect_management_details(suffix="_pre_outage")
+        except Exception as e:
+            self.logger.warning(f"Pre-outage diagnostics failed: {e}")
+
+        # Execute outages simultaneously
+        self.logger.info("[step-9] TRIGGERING OUTAGES ON 3 NODES")
+        self._outage_threads = []
+        for node_uuid, outage_type in self._outage_plan.items():
+            ninfo = self._node_info[node_uuid]
+            node_ip = ninfo["ip"]
+
+            if outage_type == "spdk_crash":
+                t = threading.Thread(
+                    target=self._trigger_spdk_crash,
+                    args=(node_uuid, node_ip, ninfo["rpc_port"]),
+                    daemon=True,
+                )
+            else:  # network_outage
+                if_names = ninfo["if_names"]
+                if not if_names:
+                    self.logger.warning(
+                        f"No interface names for {node_uuid} — "
+                        f"falling back to get_active_interfaces"
+                    )
+                    if_names = self.ssh_obj.get_active_interfaces(node_ip)
+                t = threading.Thread(
+                    target=self.ssh_obj.disconnect_all_active_interfaces,
+                    args=(node_ip, if_names, self.outage_duration),
+                    daemon=True,
+                )
+
+            self._outage_threads.append(t)
+            t.start()
+            self.logger.info(
+                f"  Outage thread started for {node_uuid[:8]} ({outage_type})"
+            )
+
+        # ── Step 10: Wait for outage to pass ────────────────────────
+        self.logger.info("[step-10] Waiting for cluster to become Suspended or Degraded")
+        try:
+            self.sbcli_utils.wait_for_cluster_status(
+                status=["suspended", "degraded"], timeout=600
+            )
+            self.logger.info("[step-10] Cluster is Suspended/Degraded (outage confirmed)")
+        except TimeoutError:
+            cluster_status = self.sbcli_utils.get_cluster_status()
+            self.logger.warning(
+                f"Cluster did not reach Suspended/Degraded — "
+                f"current status: {cluster_status}"
+            )
+
+        wait_secs = self.outage_duration + 60  # extra buffer
+        self.logger.info(f"[step-10] Waiting {wait_secs}s for outage period to pass")
+        sleep_n_sec(wait_secs)
+
+        # Join outage threads (network disconnect threads block for duration)
+        for t in self._outage_threads:
+            t.join(timeout=120)
+
+        # ── Step 11: Wait for recovery ──────────────────────────────
+        self.logger.info("[step-11] Waiting for all nodes to come back online")
+        for node_uuid in outage_nodes:
+            try:
+                self.sbcli_utils.wait_for_storage_node_status(
+                    node_uuid, status=["online"], timeout=600
+                )
+                self.logger.info(f"  Node {node_uuid[:8]} is online")
+            except TimeoutError:
+                self.logger.error(
+                    f"  Node {node_uuid[:8]} did NOT come back online within 600s"
+                )
+                raise
+
+        self.logger.info("[step-11] Waiting for cluster to become Active")
+        try:
+            self.sbcli_utils.wait_for_cluster_status(
+                status=["active"], timeout=600
+            )
+            self.logger.info("[step-11] Cluster is Active")
+        except TimeoutError:
+            self.logger.warning("Cluster did not reach Active")
+            cluster_status = self.sbcli_utils.get_cluster_status()
+            self.logger.info(f"Current cluster status: {cluster_status}")
+            raise
+
+        # Collect post-recovery diagnostics
+        try:
+            self.collect_management_details(suffix="_post_recovery")
+        except Exception as e:
+            self.logger.warning(f"Post-recovery diagnostics failed: {e}")
+
+        sleep_n_sec(30)  # settle time after recovery
+
     # ── Main test flow ──────────────────────────────────────────────
 
     def run(self):
@@ -376,109 +492,8 @@ class _TestMultiNodeOutageBase(TestClusterBase):
         self.logger.info(f"[step-8] {len(self._running_lvols)} long FIOs started")
         sleep_n_sec(30)  # let FIOs establish
 
-        # ── Step 9: Plan and execute multi-node outage ──────────────
-        self.logger.info("[step-9] Planning multi-node outage")
-        outage_nodes = random.sample(node_uuids, self.num_outage_nodes)
-        for node_uuid in outage_nodes:
-            outage_type = random.choice(["spdk_crash", "network_outage"])
-            self._outage_plan[node_uuid] = outage_type
-
-        self.logger.info("[step-9] Outage plan:")
-        for node_uuid, otype in self._outage_plan.items():
-            ip = self._node_info[node_uuid]["ip"]
-            self.logger.info(f"  Node {node_uuid[:8]} ({ip}): {otype}")
-
-        # Collect pre-outage diagnostics
-        self.logger.info("[step-9] Collecting pre-outage diagnostics")
-        try:
-            self.collect_management_details(suffix="_pre_outage")
-        except Exception as e:
-            self.logger.warning(f"Pre-outage diagnostics failed: {e}")
-
-        # Execute outages simultaneously
-        self.logger.info("[step-9] TRIGGERING OUTAGES ON 3 NODES")
-        self._outage_threads = []
-        for node_uuid, outage_type in self._outage_plan.items():
-            ninfo = self._node_info[node_uuid]
-            node_ip = ninfo["ip"]
-
-            if outage_type == "spdk_crash":
-                t = threading.Thread(
-                    target=self._trigger_spdk_crash,
-                    args=(node_uuid, node_ip, ninfo["rpc_port"]),
-                    daemon=True,
-                )
-            else:  # network_outage
-                if_names = ninfo["if_names"]
-                if not if_names:
-                    self.logger.warning(
-                        f"No interface names for {node_uuid} — falling back to get_active_interfaces"
-                    )
-                    if_names = self.ssh_obj.get_active_interfaces(node_ip)
-                t = threading.Thread(
-                    target=self.ssh_obj.disconnect_all_active_interfaces,
-                    args=(node_ip, if_names, self.outage_duration),
-                    daemon=True,
-                )
-
-            self._outage_threads.append(t)
-            t.start()
-            self.logger.info(f"  Outage thread started for {node_uuid[:8]} ({outage_type})")
-
-        # ── Step 10: Wait for outage to pass ────────────────────────
-        self.logger.info("[step-10] Waiting for cluster to become Suspended")
-        try:
-            self.sbcli_utils.wait_for_cluster_status(
-                status=["suspended"], timeout=600
-            )
-            self.logger.info("[step-11] Cluster is Suspended")
-        except TimeoutError:
-            # Try accepting degraded as well
-            self.logger.warning("Cluster did not reach Suspended — checking for degraded")
-            cluster_status = self.sbcli_utils.get_cluster_status()
-            self.logger.info(f"Current cluster status: {cluster_status}")
-
-
-        wait_secs = self.outage_duration + 60  # extra buffer
-        self.logger.info(f"[step-10] Waiting {wait_secs}s for outage period to pass")
-        sleep_n_sec(wait_secs)
-
-        # Join outage threads (network disconnect threads block for duration)
-        for t in self._outage_threads:
-            t.join(timeout=120)
-
-        # ── Step 11: Wait for recovery ──────────────────────────────
-        self.logger.info("[step-11] Waiting for all nodes to come back online")
-        for node_uuid in outage_nodes:
-            try:
-                self.sbcli_utils.wait_for_storage_node_status(
-                    node_uuid, status=["online"], timeout=600
-                )
-                self.logger.info(f"  Node {node_uuid[:8]} is online")
-            except TimeoutError:
-                self.logger.error(f"  Node {node_uuid[:8]} did NOT come back online within 600s")
-                raise
-
-        self.logger.info("[step-11] Waiting for cluster to become Active")
-        try:
-            self.sbcli_utils.wait_for_cluster_status(
-                status=["active"], timeout=600
-            )
-            self.logger.info("[step-11] Cluster is Active")
-        except TimeoutError:
-            # Try accepting degraded as well
-            self.logger.warning("Cluster did not reach Active — checking for degraded")
-            cluster_status = self.sbcli_utils.get_cluster_status()
-            self.logger.info(f"Current cluster status: {cluster_status}")
-            raise
-
-        # Collect post-recovery diagnostics
-        try:
-            self.collect_management_details(suffix="_post_recovery")
-        except Exception as e:
-            self.logger.warning(f"Post-recovery diagnostics failed: {e}")
-
-        sleep_n_sec(30)  # settle time after recovery
+        # ── Steps 9-11: Outage + recovery (overridable) ──────────
+        self._execute_outage_and_recovery(node_uuids, client)
 
         # ── Step 12: Kill remaining long FIOs (they may have errored) ─
         self.logger.info("[step-12] Killing remaining long FIO sessions")
@@ -624,6 +639,162 @@ class _TestMultiNodeOutageBase(TestClusterBase):
         self.logger.info("=" * 70)
         self.logger.info("Multi-Node Outage E2E Test PASSED")
         self.logger.info("=" * 70)
+
+
+class _TestMultiNodeVMRebootBase(_TestMultiNodeOutageBase):
+    """VM reboot variant — reboots 3 nodes instead of SPDK crash / network outage."""
+
+    def _execute_outage_and_recovery(self, node_uuids, client):
+        """Override: reboot VMs, verify offline + degraded/suspended, wait for recovery."""
+        # ── Step 9: Select and reboot nodes ───────────────────────────
+        self.logger.info("[step-9] Planning VM reboot outage")
+        outage_nodes = random.sample(node_uuids, self.num_outage_nodes)
+        for node_uuid in outage_nodes:
+            self._outage_plan[node_uuid] = "vm_reboot"
+            ip = self._node_info[node_uuid]["ip"]
+            self.logger.info(f"  Node {node_uuid[:8]} ({ip}): vm_reboot")
+
+        # Collect pre-outage diagnostics
+        self.logger.info("[step-9] Collecting pre-outage diagnostics")
+        try:
+            self.collect_management_details(suffix="_pre_outage")
+        except Exception as e:
+            self.logger.warning(f"Pre-outage diagnostics failed: {e}")
+
+        # Trigger reboots — just send `sudo reboot` and close SSH,
+        # do NOT wait for reconnect yet (we need to verify offline first).
+        self.logger.info("[step-9] TRIGGERING VM REBOOTS ON 3 NODES")
+        for node_uuid in outage_nodes:
+            node_ip = self._node_info[node_uuid]["ip"]
+            try:
+                self.ssh_obj.exec_command(
+                    node=node_ip, command="sudo reboot", max_retries=1
+                )
+            except Exception:
+                pass  # Expected — connection drops during reboot
+            # Close SSH connection so subsequent checks don't reuse stale socket
+            if node_ip in self.ssh_obj.ssh_connections:
+                try:
+                    self.ssh_obj.ssh_connections[node_ip].close()
+                except Exception:
+                    pass
+                del self.ssh_obj.ssh_connections[node_ip]
+            self.logger.info(f"  Reboot triggered for {node_uuid[:8]} ({node_ip})")
+
+        sleep_n_sec(15)  # Give nodes time to go down
+
+        # ── Step 10a: Verify nodes are NOT online ─────────────────────
+        self.logger.info("[step-10] Verifying nodes are offline/unreachable")
+        for node_uuid in outage_nodes:
+            try:
+                self.sbcli_utils.wait_for_storage_node_status(
+                    node_uuid,
+                    status=["offline", "unreachable"],
+                    timeout=120,
+                )
+                self.logger.info(f"  Node {node_uuid[:8]} is offline/unreachable (good)")
+            except TimeoutError:
+                try:
+                    details = self.sbcli_utils.get_storage_node_details(
+                        storage_node_id=node_uuid
+                    )
+                    node_status = details[0]["status"] if details else "unknown"
+                except Exception:
+                    node_status = "unknown"
+                self.logger.warning(
+                    f"  Node {node_uuid[:8]} did not go offline within 120s "
+                    f"(current: {node_status})"
+                )
+
+        # ── Step 10b: Verify cluster is degraded or suspended ─────────
+        self.logger.info("[step-10] Waiting for cluster to become Suspended or Degraded")
+        try:
+            self.sbcli_utils.wait_for_cluster_status(
+                status=["suspended", "degraded"], timeout=600
+            )
+            self.logger.info("[step-10] Cluster is Suspended/Degraded (outage confirmed)")
+        except TimeoutError:
+            cluster_status = self.sbcli_utils.get_cluster_status()
+            self.logger.warning(
+                f"Cluster did not reach Suspended/Degraded — "
+                f"current status: {cluster_status}"
+            )
+
+        # ── Step 11: Wait for nodes to come back online ───────────────
+        self.logger.info("[step-11] Waiting for all nodes to come back online after reboot")
+        for node_uuid in outage_nodes:
+            node_ip = self._node_info[node_uuid]["ip"]
+            # Poll SSH until the node is reachable again
+            self.logger.info(f"  Waiting for SSH on {node_uuid[:8]} ({node_ip})")
+            start_time = time.time()
+            ssh_ok = False
+            while time.time() - start_time < 600:
+                try:
+                    self.ssh_obj.connect(
+                        address=node_ip,
+                        bastion_server_address=getattr(self, "bastion_server", None),
+                    )
+                    self.logger.info(f"  SSH reconnected to {node_uuid[:8]} ({node_ip})")
+                    ssh_ok = True
+                    break
+                except Exception:
+                    sleep_n_sec(10)
+            if not ssh_ok:
+                self.logger.error(
+                    f"  SSH reconnect failed for {node_uuid[:8]} ({node_ip}) "
+                    f"after 600s"
+                )
+
+        # Wait for storage node status to become online
+        for node_uuid in outage_nodes:
+            try:
+                self.sbcli_utils.wait_for_storage_node_status(
+                    node_uuid, status=["online"], timeout=600
+                )
+                self.logger.info(f"  Node {node_uuid[:8]} is online")
+            except TimeoutError:
+                self.logger.error(
+                    f"  Node {node_uuid[:8]} did NOT come back online within 600s"
+                )
+                raise
+
+        self.logger.info("[step-11] Waiting for cluster to become Active")
+        try:
+            self.sbcli_utils.wait_for_cluster_status(
+                status=["active"], timeout=600
+            )
+            self.logger.info("[step-11] Cluster is Active")
+        except TimeoutError:
+            self.logger.warning("Cluster did not reach Active")
+            cluster_status = self.sbcli_utils.get_cluster_status()
+            self.logger.info(f"Current cluster status: {cluster_status}")
+            raise
+
+        # Collect post-recovery diagnostics
+        try:
+            self.collect_management_details(suffix="_post_recovery")
+        except Exception as e:
+            self.logger.warning(f"Post-recovery diagnostics failed: {e}")
+
+        sleep_n_sec(30)  # settle time after recovery
+
+
+class TestMultiNodeVMRebootDocker(_TestMultiNodeVMRebootBase):
+    """Docker SSH-based multi-node VM reboot test."""
+
+    def __init__(self, **kwargs):
+        kwargs.pop("k8s_run", None)
+        super().__init__(k8s_run=False, **kwargs)
+        self.test_name = "multi_node_vm_reboot_docker"
+
+
+class TestMultiNodeVMRebootK8s(_TestMultiNodeVMRebootBase):
+    """K8s-based multi-node VM reboot test."""
+
+    def __init__(self, **kwargs):
+        kwargs.pop("k8s_run", None)
+        super().__init__(k8s_run=True, **kwargs)
+        self.test_name = "multi_node_vm_reboot_k8s"
 
 
 class TestMultiNodeOutageDocker(_TestMultiNodeOutageBase):
