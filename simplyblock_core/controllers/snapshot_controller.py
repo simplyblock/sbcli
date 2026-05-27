@@ -642,7 +642,11 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     for lvol in all_lvols:
         if lvol.pool_uuid != pool.get_id() or lvol.lvol_name != clone_name:
             continue
-        if lvol.cloned_from_snap == snapshot_id and lvol.status != LVol.STATUS_IN_DELETION:
+        if lvol.cloned_from_snap == snapshot_id:
+            if lvol.status in [LVol.STATUS_IN_DELETION, lvol.STATUS_IN_CREATION]:
+                msg = f"Clone status {lvol.status} can not proceed"
+                logger.error(msg)
+                return False, msg
             logger.info(f"Clone already exists, reusing lvol: {lvol.get_id()}")
             return lvol.get_id(), False
         msg = f"LVol name must be unique: {clone_name}"
