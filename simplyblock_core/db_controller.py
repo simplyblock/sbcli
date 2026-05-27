@@ -140,7 +140,9 @@ class DBController(metaclass=Singleton):
         return cluster_lvols
 
     def get_all_lvols(self) -> List[LVol]:
+        logger.debug("Fetching all LVols from DB")
         lvols = LVol().read_from_db(self.kv_store)
+        logger.debug("Done fetching all LVols from DB")
         return sorted(lvols, key=lambda x: x.create_dt)
 
     def get_lvols_by_node_id(self, node_id) -> List[LVol]:
@@ -173,9 +175,11 @@ class DBController(metaclass=Singleton):
         return hostnames
 
     def get_snapshots(self, cluster_id=None) -> List[SnapShot]:
+        logger.debug("Fetching all snapshots from DB")
         snaps = SnapShot().read_from_db(self.kv_store)
         if cluster_id:
             snaps = [n for n in snaps if n.cluster_id == cluster_id]
+        logger.debug("Done fetching all snapshots from DB")
         return sorted(snaps, key=lambda x: x.created_at)
 
     def get_snapshot_by_id(self, id) -> SnapShot:
@@ -293,7 +297,7 @@ class DBController(metaclass=Singleton):
 
     def get_snapshots_by_node_id(self, node_id) -> List[SnapShot]:
         ret = []
-        snaps = SnapShot().read_from_db(self.kv_store)
+        snaps = self.get_snapshots()
         for snap in snaps:
             if snap.lvol.node_id == node_id:
                 ret.append(snap)
@@ -301,7 +305,7 @@ class DBController(metaclass=Singleton):
 
     def get_snapshots_by_pool_id(self, pool_id) -> List[SnapShot]:
         ret = []
-        snaps = SnapShot().read_from_db(self.kv_store)
+        snaps = self.get_snapshots()
         for snap in snaps:
             if snap.pool_uuid == pool_id:
                 ret.append(snap)
