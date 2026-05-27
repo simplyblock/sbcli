@@ -315,7 +315,7 @@ def _expose_lvol_on_secondary(lvol, tgt_node, tgt_sec, sec_rpc, tgt_blobid, tgt_
 
     # Add namespace using the target primary's lvstore for the composite bdev name
     top_bdev = f"{tgt_node.lvstore}/{bdev_name}"
-    ret = sec_rpc.nvmf_subsystem_add_ns(lvol.nqn, top_bdev, lvol.uuid, lvol.guid, nsid=lvol.ns_id)
+    ret = sec_rpc.nvmf_subsystem_add_ns(lvol.nqn, top_bdev, lvol.uuid, lvol.guid)
     if not ret:
         if subsystem_created_on_sec:
             sec_rpc.subsystem_delete(lvol.nqn)
@@ -1060,7 +1060,11 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         tgt_uuid_carry = {
             'tgt_lvol_uuid': ctx.get('tgt_lvol_uuid'),
             'tgt_lvol_bdev': tgt_lvol_bdev,
-            'hub_ctrl_name': ctx.get('ctrl_name') if not tgt_is_src_secondary else None,
+            # Carry hub_ctrl_name for BOTH paths so PHASE_CLEANUP_SOURCE always
+            # handles the detach — after the source NQN is gone and the client
+            # has had time to reconnect.  Previously tgt_is_src_secondary nulled
+            # this out and detached early (before client reconnect).
+            'hub_ctrl_name': ctx.get('ctrl_name'),
         }
 
         if lvol.ha_type == "ha":
@@ -1154,12 +1158,10 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                         lvol.nqn, tgt_trtype_local, tgt_ip_local, tgt_primary_port,
                         ana_state="optimized")
                     # Step 4: add migrated bdev as namespace.
-                    # Pass lvol.guid (nguid) and lvol.ns_id to match the original
-                    # namespace identity — previously these were omitted, which caused
-                    # the namespace to appear without nguid/nsid to the client.
+                    # Pass lvol.guid (nguid) to match the original namespace identity.
+                    # nsid is intentionally omitted — let SPDK assign it.
                     tgt_rpc.nvmf_subsystem_add_ns(
-                        lvol.nqn, tgt_lvol_composite, lvol.uuid, lvol.guid,
-                        nsid=lvol.ns_id)
+                        lvol.nqn, tgt_lvol_composite, lvol.uuid, lvol.guid)
                     logger.info(
                         f"tgt_is_src_secondary: created subsystem {lvol.nqn} "
                         f"listener={tgt_ip_local}:{tgt_primary_port} "
@@ -1168,18 +1170,10 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                 logger.error(
                     f"tgt_is_src_secondary: subsystem re-creation failed: {e}")
 
-            # Step 5: detach the hub controller from SRC — done AFTER the migrated
-            # lvol is already connected to the client's subsystem so there is no
-            # window where neither path serves the client.  Hub is no longer needed
-            # once the subsystem is live; failing to detach leaves mighub_<uuid> as
-            # a zombie on SRC and causes EEXIST on the next migration attempt.
-            hub_ctrl = ctx.get('ctrl_name')
-            if hub_ctrl:
-                try:
-                    src_rpc.bdev_nvme_detach_controller(hub_ctrl)
-                    logger.info(f"tgt_is_src_secondary: detached hub controller {hub_ctrl}")
-                except Exception as e:
-                    logger.warning(f"tgt_is_src_secondary: hub detach {hub_ctrl} failed (non-fatal): {e}")
+            # Hub controller detach is deferred to PHASE_CLEANUP_SOURCE (via
+            # hub_ctrl_name in tgt_uuid_carry) so it happens after the source
+            # NQN is removed and the client has reconnected — same as the
+            # non-adjacent path.
 
         # apply_migration_to_db is intentionally deferred to CLEANUP_SOURCE
         return True, False, None
@@ -1677,6 +1671,18 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
     if lvol is not None:
         try:
             src_lvol_composite = f"{src_node.lvstore}/{lvol.lvol_bdev}"
+            # Set migration flag before deletion so SPDK drops only the blob
+            # reference without freeing the physical clusters — the data now
+            # lives on the target and must not be reclaimed from the source.
+            # Snapshots get the same treatment at lines above; the main lvol
+            # bdev was previously deleted without this flag (causing the SPDK
+            # log entry "bdev_lvol_delete without migration flag").
+            try:
+                src_rpc.bdev_lvol_set_migration_flag(src_lvol_composite)
+            except Exception as _mf_err:
+                logger.warning(
+                    f"bdev_lvol_set_migration_flag for source lvol failed "
+                    f"(non-fatal): {_mf_err}")
             ret, _ = src_rpc.delete_lvol(src_lvol_composite)
             if ret:
                 logger.info(f"Deleted source lvol bdev {src_lvol_composite}")
