@@ -2069,6 +2069,8 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
         PVC names (ns-pvc-xxx) don't match API lvol names.  The PV name
         (VOLUME column in ``kubectl get pvc``) matches the lvol name in the
         API (``sbctl lvol list``).  We verify both: PVC Bound + PV in API.
+
+        Retries up to 120s to allow stragglers to settle after creation.
         """
         ns = self.k8s_utils.namespace
         with self._lock:
@@ -2078,46 +2080,67 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
             )
         expected = len(all_pvc_names)
 
-        # Bulk fetch all test PVCs in one kubectl call
-        out, _ = self.k8s_utils._exec_kubectl(
-            f"kubectl get pvc -l test=ns-stress -n {ns} "
-            f"-o jsonpath='{{range .items}}{{.metadata.name}}|"
-            f"{{.status.phase}}|{{.spec.volumeName}}{{\"\\n\"}}{{end}}'",
-            supress_logs=True,
-        )
-
+        # Retry loop: wait for PVCs to settle (some may still be binding)
+        max_wait = 120
+        poll_interval = 10
+        waited = 0
         not_bound = []
-        pv_names = []  # PV names to cross-check against API
+        pv_names = []
         found_pvcs = set()
-        for line in (out or "").strip().split("\n"):
-            line = line.strip()
-            if not line:
-                continue
-            parts = line.split("|")
-            if len(parts) < 3:
-                continue
-            pvc_name, phase, pv_name = parts[0], parts[1], parts[2]
-            if pvc_name not in all_pvc_names:
-                continue
-            found_pvcs.add(pvc_name)
-            if phase != "Bound":
-                not_bound.append((pvc_name, phase))
-            elif pv_name:
-                pv_names.append((pvc_name, pv_name))
 
-        # Check for PVCs not found in K8s at all
-        missing_pvcs = all_pvc_names - found_pvcs
-        if missing_pvcs:
-            not_bound.extend(
-                (name, "not-found") for name in list(missing_pvcs)[:20]
+        while waited <= max_wait:
+            not_bound = []
+            pv_names = []
+            found_pvcs = set()
+
+            # Bulk fetch all test PVCs in one kubectl call
+            out, _ = self.k8s_utils._exec_kubectl(
+                f"kubectl get pvc -l test=ns-stress -n {ns} "
+                f"-o jsonpath='{{range .items}}{{.metadata.name}}|"
+                f"{{.status.phase}}|{{.spec.volumeName}}{{\"\\n\"}}{{end}}'",
+                supress_logs=True,
             )
 
-        # Tolerate up to 50% not-bound/missing — warn but continue
+            for line in (out or "").strip().split("\n"):
+                line = line.strip()
+                if not line:
+                    continue
+                parts = line.split("|")
+                if len(parts) < 3:
+                    continue
+                pvc_name, phase, pv_name = parts[0], parts[1], parts[2]
+                if pvc_name not in all_pvc_names:
+                    continue
+                found_pvcs.add(pvc_name)
+                if phase != "Bound":
+                    not_bound.append((pvc_name, phase))
+                elif pv_name:
+                    pv_names.append((pvc_name, pv_name))
+
+            # Check for PVCs not found in K8s at all
+            missing_pvcs = all_pvc_names - found_pvcs
+            if missing_pvcs:
+                not_bound.extend(
+                    (name, "not-found") for name in list(missing_pvcs)[:50]
+                )
+
+            if not not_bound:
+                break  # All PVCs are Bound
+
+            self.logger.info(
+                f"[verify_lvols] {len(not_bound)}/{expected} PVCs not yet "
+                f"Bound, waiting {poll_interval}s... (waited {waited}s)"
+            )
+            sleep_n_sec(poll_interval)
+            waited += poll_interval
+
+        # Final assessment after wait
         not_bound_pct = len(not_bound) * 100 / max(expected, 1)
         if not_bound:
             self.logger.warning(
                 f"[verify_lvols] {len(not_bound)}/{expected} PVCs "
-                f"({not_bound_pct:.1f}%) not Bound/found: "
+                f"({not_bound_pct:.1f}%) not Bound/found after "
+                f"{waited}s wait: "
                 f"{not_bound[:10]}{'...' if len(not_bound) > 10 else ''}"
             )
         if not_bound_pct > 50:
