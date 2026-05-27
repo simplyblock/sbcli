@@ -1901,6 +1901,156 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
         # Delegate to base for sbcli-level verification
         super()._phase_verify_cleanup()
 
+    # ── K8s verification overrides ────────────────────────────────────────
+    # PVC names != API lvol names (CSI driver uses its own naming), so
+    # verify via K8s PVC status + API lvol count instead of name matching.
+
+    def _verify_all_lvols_exist(self):
+        """K8s override: verify PVCs are Bound and PV names exist in API.
+
+        PVC names (ns-pvc-xxx) don't match API lvol names.  The PV name
+        (VOLUME column in ``kubectl get pvc``) matches the lvol name in the
+        API (``sbctl lvol list``).  We verify both: PVC Bound + PV in API.
+        """
+        ns = self.k8s_utils.namespace
+        with self._lock:
+            all_pvc_names = set(
+                list(self._parent_registry.keys())
+                + list(self._child_registry.keys())
+            )
+        expected = len(all_pvc_names)
+
+        # Bulk fetch all test PVCs in one kubectl call
+        out, _ = self.k8s_utils._exec_kubectl(
+            f"kubectl get pvc -l test=ns-stress -n {ns} "
+            f"-o jsonpath='{{range .items}}{{.metadata.name}}|"
+            f"{{.status.phase}}|{{.spec.volumeName}}{{\"\\n\"}}{{end}}'",
+            supress_logs=True,
+        )
+
+        not_bound = []
+        pv_names = []  # PV names to cross-check against API
+        found_pvcs = set()
+        for line in (out or "").strip().split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split("|")
+            if len(parts) < 3:
+                continue
+            pvc_name, phase, pv_name = parts[0], parts[1], parts[2]
+            if pvc_name not in all_pvc_names:
+                continue
+            found_pvcs.add(pvc_name)
+            if phase != "Bound":
+                not_bound.append((pvc_name, phase))
+            elif pv_name:
+                pv_names.append((pvc_name, pv_name))
+
+        # Check for PVCs not found in K8s at all
+        missing_pvcs = all_pvc_names - found_pvcs
+        if missing_pvcs:
+            not_bound.extend(
+                (name, "not-found") for name in list(missing_pvcs)[:20]
+            )
+
+        if not_bound:
+            raise RuntimeError(
+                f"[verify_lvols] {len(not_bound)}/{expected} PVCs not Bound: "
+                f"{not_bound[:10]}{'...' if len(not_bound) > 10 else ''}"
+            )
+
+        # Cross-check: PV names (VOLUME column) should exist in API lvol list
+        all_lvols = self.sbcli_utils.list_lvols()
+        lvol_names = set(all_lvols.keys()) if isinstance(all_lvols, dict) else set(all_lvols)
+        missing_in_api = []
+        for pvc_name, pv_name in pv_names:
+            if pv_name not in lvol_names:
+                missing_in_api.append((pvc_name, pv_name))
+
+        if missing_in_api:
+            self.logger.warning(
+                f"[verify_lvols] {len(missing_in_api)}/{expected} PVCs Bound "
+                f"but PV not in API: "
+                f"{missing_in_api[:10]}{'...' if len(missing_in_api) > 10 else ''}"
+            )
+
+        self.logger.info(
+            f"[verify_lvols] All {expected} PVCs confirmed Bound, "
+            f"{len(pv_names)} PVs matched in API "
+            f"({len(missing_in_api)} missing)" if missing_in_api else
+            f"[verify_lvols] All {expected} PVCs confirmed Bound, "
+            f"all {len(pv_names)} PVs found in API"
+        )
+
+    def _verify_all_snapshots_exist(self):
+        """K8s override: verify VolumeSnapshots are readyToUse."""
+        ns = self.k8s_utils.namespace
+        with self._lock:
+            snap_names = list(self._snap_registry.keys())
+        if not snap_names:
+            self.logger.info("[verify_snapshots] No snapshots to verify")
+            return
+
+        not_ready = []
+        for snap_name in snap_names:
+            try:
+                out, _ = self.k8s_utils._exec_kubectl(
+                    f"kubectl get volumesnapshot {snap_name} -n {ns} "
+                    f"-o jsonpath='{{.status.readyToUse}}' 2>/dev/null || true",
+                    supress_logs=True,
+                )
+                ready = (out or "").strip().strip("'")
+                if ready != "true":
+                    not_ready.append((snap_name, ready))
+            except Exception as exc:
+                not_ready.append((snap_name, f"error: {exc}"))
+
+        if not_ready:
+            raise RuntimeError(
+                f"[verify_snapshots] {len(not_ready)}/{len(snap_names)} "
+                f"snapshots not ready: "
+                f"{not_ready[:10]}{'...' if len(not_ready) > 10 else ''}"
+            )
+        self.logger.info(
+            f"[verify_snapshots] All {len(snap_names)} snapshots "
+            f"confirmed readyToUse"
+        )
+
+    def _verify_all_clones_exist(self):
+        """K8s override: verify clone PVCs are Bound."""
+        ns = self.k8s_utils.namespace
+        with self._lock:
+            clone_names = list(self._clone_registry.keys())
+        if not clone_names:
+            self.logger.info("[verify_clones] No clones to verify")
+            return
+
+        not_bound = []
+        for clone_name in clone_names:
+            try:
+                out, _ = self.k8s_utils._exec_kubectl(
+                    f"kubectl get pvc {clone_name} -n {ns} "
+                    f"-o jsonpath='{{.status.phase}}' 2>/dev/null || true",
+                    supress_logs=True,
+                )
+                phase = (out or "").strip().strip("'")
+                if phase != "Bound":
+                    not_bound.append((clone_name, phase))
+            except Exception as exc:
+                not_bound.append((clone_name, f"error: {exc}"))
+
+        if not_bound:
+            raise RuntimeError(
+                f"[verify_clones] {len(not_bound)}/{len(clone_names)} "
+                f"clone PVCs not Bound: "
+                f"{not_bound[:10]}{'...' if len(not_bound) > 10 else ''}"
+            )
+        self.logger.info(
+            f"[verify_clones] All {len(clone_names)} clone PVCs "
+            f"confirmed Bound"
+        )
+
     # ── Two-phase subsystem creation: parents then parallel children ────
 
     def _phase_create_subsystems(self):
@@ -2322,8 +2472,17 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
             self._metrics["counts"]["snapshots_deleted"] += 1
 
     def _delete_child_impl(self, child_name: str):
-        """No-op in K8s — no separate children."""
-        pass
+        """Delete child PVC in K8s."""
+        self._inc("attempts", "delete_child")
+        ns = self.k8s_utils.namespace
+        self.k8s_utils._exec_kubectl(
+            f"kubectl delete pvc {child_name} -n {ns} "
+            f"--ignore-not-found --wait=false 2>/dev/null || true"
+        )
+        self._wait_pvc_gone(child_name)
+        with self._lock:
+            self._child_registry.pop(child_name, None)
+            self._metrics["counts"]["children_deleted"] += 1
 
     def _delete_parent_impl(self, parent_name: str):
         self._inc("attempts", "delete_parent")
