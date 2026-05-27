@@ -86,7 +86,6 @@ the 3-second service-loop gap between phases.
 """
 
 import datetime
-import math
 import time
 
 
@@ -177,37 +176,16 @@ def _bytes_to_mib(nbytes):
     the cluster count on the target ends up one higher than the source, causing
     a 2 MiB capacity change on the client after migration.
     """
-    _MIB = 1048576  # 2**20 bytes — the divisor convert_size uses for 'MiB' (binary)
     if nbytes <= 0:
-        logger.info(
-            f"[BYTES_TO_MIB] nbytes={nbytes} ≤ 0 → forced minimum result=1 MiB")
         return 1
-    raw_float = nbytes / _MIB
-    floored   = int(raw_float)          # convert_size with round_up=False returns int(raw)
-    result    = max(1, floored)
-    # SPDK cluster math: bdev_lvol_create rounds UP to next cluster boundary.
-    # With a 2-MiB cluster: num_clusters = ceil(result / 2).
-    # allocated_mib = num_clusters * 2 = result if result is even, result+1 if odd.
-    num_clusters_spdk = math.ceil(result / 2)
-    allocated_mib_spdk = num_clusters_spdk * 2
-    logger.info(
-        f"[BYTES_TO_MIB] nbytes={nbytes} / {_MIB} = {raw_float:.6f} "
-        f"→ floor={floored} result={result} MiB "
-        f"| SPDK will allocate ceil({result}/2)={num_clusters_spdk} clusters "
-        f"= {allocated_mib_spdk} MiB ({num_clusters_spdk * _MIB * 2} bytes)"
-    )
-    return result
+    return max(1, utils.convert_size(nbytes, 'MiB', round_up=False))
 
 
 def _log_spdk_bdev_size(rpc, composite_name, label):
-    """Query SPDK for *composite_name* and emit a structured [BDEV SIZE] log line.
+    """Query SPDK for *composite_name* and emit a [BDEV SIZE] log line.
 
-    Reports num_blocks, block_size, derived actual_bytes/actual_mib, num_clusters,
-    blobid, uuid, and thin-provision flag so the full SPDK allocation picture is
-    visible in a single grep.
-
-    Returns actual_bytes (int) on success, or None if the bdev is absent /
-    the RPC fails.  Never raises — logging failures must not abort the migration.
+    Reports num_blocks × block_size → actual_mib and sectors@512 (the sector
+    count the client sees via the NVMe namespace).  Never raises.
     """
     _MIB = 1048576
     try:
@@ -221,22 +199,12 @@ def _log_spdk_bdev_size(rpc, composite_name, label):
         block_size   = b.get('block_size', 512)
         actual_bytes = num_blocks * block_size
         actual_mib   = actual_bytes // _MIB
-        actual_mib_r = actual_bytes / _MIB          # fractional for exactness check
-        bdev_uuid    = b.get('uuid', '?')
-        lvol_info    = b.get('driver_specific', {}).get('lvol', {})
-        num_clusters = lvol_info.get('num_clusters', '?')
-        blobid       = lvol_info.get('blobid', '?')
-        thin_prov    = lvol_info.get('thin_provision', '?')
-        base_snap    = lvol_info.get('base_snapshot', '?')
-        # Derive expected sector count at 512-byte LBA (what client sees via NVMe namespace)
-        sectors_512 = num_blocks if block_size == 512 else actual_bytes // 512
+        sectors_512  = num_blocks if block_size == 512 else actual_bytes // 512
+        blobid       = b.get('driver_specific', {}).get('lvol', {}).get('blobid', '?')
         logger.info(
-            f"[BDEV SIZE] {label}: {composite_name} | "
-            f"num_blocks={num_blocks} block_size={block_size} | "
-            f"actual_bytes={actual_bytes} actual_mib={actual_mib} ({actual_mib_r:.4f}) | "
-            f"sectors@512={sectors_512} | "
-            f"num_clusters={num_clusters} blobid={blobid} uuid={bdev_uuid} | "
-            f"thin={thin_prov} base_snap={base_snap}"
+            f"[BDEV SIZE] {label}: {composite_name} "
+            f"num_blocks={num_blocks} block_size={block_size} "
+            f"actual_mib={actual_mib} sectors@512={sectors_512} blobid={blobid}"
         )
         return actual_bytes
     except Exception as exc:
@@ -505,43 +473,17 @@ def _setup_snap_transfer(snap, snap_index, migration, src_node, tgt_node,
     temp_nqn = f"nqn.2023-02.io.simplyblock:mig:{migration.uuid[:8]}:{snap_index}"
     ctrl_name = f"mig_{migration.uuid[:8]}_{snap_index}"
 
-    # ── Comprehensive size-chain log (grep: [SNAP SETUP]) ────────────────────
-    # Shows every DB field and derived value before anything is sent to SPDK,
-    # so a log file alone is sufficient to diagnose any sizing mismatch.
-    _snap_lvol_size = getattr(getattr(snap, 'lvol', None), 'size', 'N/A')
-    _snap_lvol_uuid = getattr(getattr(snap, 'lvol', None), 'uuid', 'N/A')
-    _snap_lvol_bdev = getattr(getattr(snap, 'lvol', None), 'lvol_bdev', 'N/A')
-    logger.info(
-        f"[SNAP SETUP] snap={snap_uuid[:8]} index={snap_index} "
-        f"snap.size(db)={snap.size} snap.blobid={getattr(snap, 'blobid', 'N/A')} | "
-        f"snap.lvol.uuid={str(_snap_lvol_uuid)[:8]} snap.lvol.size(db)={_snap_lvol_size} "
-        f"snap.lvol.lvol_bdev={_snap_lvol_bdev} | "
-        f"src_node={src_node.get_id()} src_lvstore={src_node.lvstore} | "
-        f"tgt_node={tgt_node.get_id()} tgt_lvstore={tgt_node.lvstore} | "
-        f"src_composite={src_composite} tgt_composite={tgt_composite}"
-    )
-
     # Step 1: create target lvol on primary
     # Note: SPDK's bdev_lvol_create 'uuid' param is for the lvol *store*, not
     # the new lvol.  Do not pass the snapshot UUID here.
-    # _bytes_to_mib logs its own [BYTES_TO_MIB] line with the full arithmetic.
     size_in_mib = _bytes_to_mib(snap.size)
     logger.info(
-        f"[SNAP SIZE] snap={snap_uuid[:8]} "
-        f"db snap.size={snap.size} → size_in_mib={size_in_mib} "
-        f"(create_lvol will be called with name={snap_short!r} "
-        f"size_in_mib={size_in_mib} lvstore={tgt_node.lvstore!r})"
+        f"[SNAP SIZE] snap={snap_uuid[:8]} db snap.size={snap.size} size_in_mib={size_in_mib}"
     )
-    # Query source SPDK state *before* creating the target bdev.
-    # Any difference between src actual_mib and size_in_mib is the root cause of
-    # the capacity-change symptom (cluster count mismatch across nodes).
     _log_spdk_bdev_size(src_rpc, src_composite, f"SRC snap[{snap_uuid[:8]}] pre-create")
     ret = tgt_rpc.create_lvol(snap_short, size_in_mib, tgt_node.lvstore)
     if not ret:
         return None, f"Failed to create target lvol for snap {snap_uuid}"
-    # Query target SPDK state immediately after creation.
-    # If SPDK rounded the cluster count up the sectors@512 here will exceed the
-    # source bdev's sectors@512 above and explain the client capacity-change error.
     _log_spdk_bdev_size(tgt_rpc, tgt_composite, f"TGT snap[{snap_uuid[:8]}] post-create")
 
     # Step 2: register on secondary immediately so secondary stays consistent.
@@ -1042,19 +984,6 @@ def _take_intermediate_snapshot(migration):
     logger.info(
         f"[IO-RESUME] {_now_ms()} intermediate snapshot done: "
         f"lvol={migration.lvol_id} snap={snap_uuid}")
-    # Log DB fields for the freshly created intermediate snapshot so we know
-    # exactly what size will be passed to _bytes_to_mib when it is transferred.
-    try:
-        _int_snap = db.get_snapshot_by_id(snap_uuid)
-        _int_snap_lvol_size = getattr(getattr(_int_snap, 'lvol', None), 'size', 'N/A')
-        logger.info(
-            f"[INTERM SNAP DB] snap={snap_uuid[:8]} name={snap_name} | "
-            f"snap.size(db)={_int_snap.size} snap.blobid={getattr(_int_snap, 'blobid', 'N/A')} | "
-            f"snap.snap_bdev={getattr(_int_snap, 'snap_bdev', 'N/A')} | "
-            f"snap.lvol.size(db)={_int_snap_lvol_size}"
-        )
-    except Exception as _e:
-        logger.warning(f"[INTERM SNAP DB] could not read snap {snap_uuid} from DB: {_e}")
     migration.intermediate_snaps.append(snap_uuid)
     migration.snap_migration_plan.append(snap_uuid)
     migration.intermediate_snap_rounds += 1
@@ -1370,41 +1299,22 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             # NQN is removed and the client has reconnected — same as the
             # non-adjacent path.
 
-            # Update the DB *now* — before advertising cutover — so that
-            # `sbctl volume connect` returns TGT endpoints when the client
-            # polls immediately after seeing STATUS_CUTOVER.  Without this
-            # the DB still points at SRC and the client reconnects to SRC;
-            # PHASE_CLEANUP_SOURCE then deletes SRC causing a multi-second
-            # blackout.  apply_migration_to_db is idempotent so the later
-            # call inside PHASE_CLEANUP_SOURCE is harmless.
-            try:
-                migration_controller.apply_migration_to_db(
-                    migration,
-                    tgt_lvol_uuid=ctx.get('tgt_lvol_uuid'),
-                    tgt_lvol_bdev=tgt_lvol_bdev)
-                logger.info(
-                    f"tgt_is_src_secondary: DB updated to TGT "
-                    f"(apply_migration_to_db called early for cutover)")
-            except Exception as _db_err:
-                logger.warning(
-                    f"tgt_is_src_secondary: early apply_migration_to_db "
-                    f"failed (non-fatal, will retry in CLEANUP_SOURCE): "
-                    f"{_db_err}")
-
-            # Signal cutover: the TGT subsystem is now live and the DB
-            # reflects the new location.  Record the timestamp so
-            # PHASE_CLEANUP_SOURCE can enforce a grace period that gives
-            # the client time to reconnect before the source NQN is torn
-            # down.  The status is visible to the test script via
-            # sbctl migrate-list so it knows to reconnect immediately.
+            # Signal cutover: the TGT subsystem is now live.  Record the
+            # timestamp so PHASE_CLEANUP_SOURCE can enforce a grace period
+            # that gives the client time to reconnect before the source NQN
+            # is torn down.  DB update (apply_migration_to_db) is deferred
+            # to PHASE_CLEANUP_SOURCE so that snap.snap_bdev still holds
+            # the source path when cleanup runs — cleanup uses it to derive
+            # the correct source bdev name to delete.
             tgt_uuid_carry['cutover_notified_at'] = time.time()
             migration.status = LVolMigration.STATUS_CUTOVER
             logger.info(
                 f"Migration {migration.uuid}: STATUS_CUTOVER set — "
-                f"DB updated to TGT, grace period starts, "
+                f"TGT subsystem live, grace period starts, "
                 f"client should reconnect now")
 
-        # apply_migration_to_db is called again in CLEANUP_SOURCE (idempotent)
+        # apply_migration_to_db is called in CLEANUP_SOURCE after source bdevs
+        # are removed, so snap.snap_bdev still holds the source path here.
         return True, False, None
 
     # --- Gate: check target secondary state before creating on target primary ---
@@ -1417,36 +1327,18 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
 
     # --- Start the final migration ---
 
-    # ── Comprehensive size-chain log (grep: [LVOL SETUP]) ────────────────────
-    logger.info(
-        f"[LVOL SETUP] lvol={lvol.uuid[:8]} lvol_bdev={lvol.lvol_bdev} | "
-        f"lvol.size(db)={lvol.size} lvol.max_size(db)={getattr(lvol, 'max_size', 'N/A')} | "
-        f"lvol.ha_type={lvol.ha_type} lvol.lvol_priority_class={getattr(lvol, 'lvol_priority_class', 'N/A')} | "
-        f"src_node={src_node.get_id()} src_lvstore={src_node.lvstore} | "
-        f"tgt_node={tgt_node.get_id()} tgt_lvstore={tgt_node.lvstore} | "
-        f"src_composite={src_lvol_composite} tgt_composite={tgt_lvol_composite}"
-    )
-
     # Step 1: create writable target lvol (size in MiB)
     # Note: SPDK's bdev_lvol_create 'uuid' param is for the lvol *store*, not
     # the new lvol.  Do not pass the lvol UUID here.
-    # _bytes_to_mib logs its own [BYTES_TO_MIB] line with the full arithmetic.
     lvol_size_in_mib = _bytes_to_mib(lvol.size)
     logger.info(
         f"[MIGRATION SIZE CHECK] lvol={lvol.lvol_bdev} "
-        f"source_size_bytes={lvol.size} → target_size_mib={lvol_size_in_mib} "
-        f"(create_lvol will be called with name={tgt_lvol_bdev!r} "
-        f"size_in_mib={lvol_size_in_mib} lvstore={tgt_node.lvstore!r})"
+        f"source_size_bytes={lvol.size} target_size_mib={lvol_size_in_mib}"
     )
-    # Query source SPDK state *before* creating the target bdev so we can verify
-    # the source cluster count matches what _bytes_to_mib produced.
     _log_spdk_bdev_size(src_rpc, src_lvol_composite, f"SRC lvol[{lvol.lvol_bdev}] pre-create")
     ret = tgt_rpc.create_lvol(tgt_lvol_bdev, lvol_size_in_mib, tgt_node.lvstore)
     if not ret:
         return False, True, f"Failed to create target lvol {tgt_lvol_composite}"
-    # Query target SPDK state immediately after creation.
-    # actual_mib here must match the source bdev's actual_mib above; any difference
-    # means the client will see a capacity change.
     _log_spdk_bdev_size(tgt_rpc, tgt_lvol_composite, f"TGT lvol[{lvol.lvol_bdev}] post-create")
 
     ret = tgt_rpc.bdev_lvol_set_migration_flag(tgt_lvol_composite)
@@ -1471,18 +1363,6 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             tgt_map_id = entry.get('map_id')
             tgt_blobid = entry.get('blobid')
             tgt_uuid = entry.get('uuid')
-            # Log the full raw entry from bdev_lvol_get_lvols so we can verify
-            # every field that SPDK reports about the newly created target bdev.
-            _tgt_num_clusters = entry.get('num_clusters', '?')
-            _tgt_num_blocks    = entry.get('num_blocks', '?')
-            _tgt_block_size    = entry.get('block_size', '?')
-            _tgt_thin          = entry.get('thin_provision', '?')
-            logger.info(
-                f"[LVOL GET_LVOLS] tgt bdev found: name={entry_name!r} "
-                f"map_id={tgt_map_id} blobid={tgt_blobid} uuid={tgt_uuid} | "
-                f"num_clusters={_tgt_num_clusters} num_blocks={_tgt_num_blocks} "
-                f"block_size={_tgt_block_size} thin={_tgt_thin}"
-            )
             break
 
     if tgt_map_id is None:
