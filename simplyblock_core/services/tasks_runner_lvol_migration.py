@@ -1128,6 +1128,20 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         # The client must then disconnect stale controllers and reconnect
         # using the new connection strings (primary + secondary ports).
         if tgt_is_src_secondary:
+            # Step 0: detach the hub controller from SRC — it was used to push
+            # migration data and is no longer needed.  Must happen here because
+            # hub_ctrl_name is nulled out in tgt_uuid_carry for this path
+            # (hub stays connected until now so SPDK can complete the transfer).
+            # Failing to detach leaves mighub_<uuid> as a zombie on SRC and
+            # causes EEXIST on the very next migration attempt.
+            hub_ctrl = ctx.get('ctrl_name')
+            if hub_ctrl:
+                try:
+                    src_rpc.bdev_nvme_detach_controller(hub_ctrl)
+                    logger.info(f"tgt_is_src_secondary: detached hub controller {hub_ctrl}")
+                except Exception as e:
+                    logger.warning(f"tgt_is_src_secondary: hub detach {hub_ctrl} failed (non-fatal): {e}")
+
             tgt_primary_port = tgt_node.get_lvol_subsys_port(tgt_node.lvstore)
             tgt_trtype_local, tgt_ip_local = _get_migration_nic(tgt_node)
             try:
