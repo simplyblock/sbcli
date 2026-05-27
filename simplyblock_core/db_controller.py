@@ -39,7 +39,7 @@ class Singleton(type):
 
 
 
-class DBController(metaclass=Singleton):
+class DBController():
 
     kv_store=None
 
