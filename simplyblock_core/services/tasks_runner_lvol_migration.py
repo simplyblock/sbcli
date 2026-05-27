@@ -444,7 +444,29 @@ def _setup_snap_transfer(snap, snap_index, migration, src_node, tgt_node,
     # Step 1: create target lvol on primary
     # Note: SPDK's bdev_lvol_create 'uuid' param is for the lvol *store*, not
     # the new lvol.  Do not pass the snapshot UUID here.
-    size_in_mib = _bytes_to_mib(snap.size)
+    #
+    # Size: query the source SPDK bdev directly so we use the actual
+    # cluster-aligned byte count rather than the DB field (snap.size can differ
+    # from the SPDK-actual size when the volume was previously migrated with
+    # a different rounding convention, causing a permanent 2 MiB capacity drift).
+    # Fall back to snap.size if the query fails.
+    src_bdev_info = src_rpc.get_bdevs(src_composite)
+    if src_bdev_info:
+        actual_bytes = src_bdev_info[0]['num_blocks'] * src_bdev_info[0]['block_size']
+        size_in_mib = _bytes_to_mib(actual_bytes)
+        logger.info(
+            f"[SNAP SIZE] snap={snap_uuid[:8]} src_bdev={src_composite} "
+            f"num_blocks={src_bdev_info[0]['num_blocks']} "
+            f"block_size={src_bdev_info[0]['block_size']} "
+            f"actual_bytes={actual_bytes} size_in_mib={size_in_mib} "
+            f"(db snap.size={snap.size})"
+        )
+    else:
+        size_in_mib = _bytes_to_mib(snap.size)
+        logger.warning(
+            f"[SNAP SIZE] snap={snap_uuid[:8]} src_bdev={src_composite} not found on source; "
+            f"falling back to db snap.size={snap.size} → size_in_mib={size_in_mib}"
+        )
     ret = tgt_rpc.create_lvol(snap_short, size_in_mib, tgt_node.lvstore)
     if not ret:
         return None, f"Failed to create target lvol for snap {snap_uuid}"
@@ -1312,10 +1334,27 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
     # Step 1: create writable target lvol (size in MiB)
     # Note: SPDK's bdev_lvol_create 'uuid' param is for the lvol *store*, not
     # the new lvol.  Do not pass the lvol UUID here.
-    ret = tgt_rpc.create_lvol(tgt_lvol_bdev, _bytes_to_mib(lvol.size), tgt_node.lvstore)
+    #
+    # Query the source SPDK bdev for its actual cluster-aligned size so that the
+    # target gets exactly the same cluster count as the source.  Using lvol.size
+    # (DB bytes) risks a 1-cluster mismatch when the source was previously
+    # migrated or created with a different rounding convention.  Fall back to
+    # lvol.size only if the SPDK query fails.
+    src_bdev_info_lvol = src_rpc.get_bdevs(src_lvol_composite)
+    if src_bdev_info_lvol:
+        lvol_actual_bytes = src_bdev_info_lvol[0]['num_blocks'] * src_bdev_info_lvol[0]['block_size']
+        lvol_size_in_mib = _bytes_to_mib(lvol_actual_bytes)
+    else:
+        lvol_actual_bytes = lvol.size
+        lvol_size_in_mib = _bytes_to_mib(lvol.size)
+    logger.info(
+        f"[MIGRATION SIZE CHECK] lvol={lvol.lvol_bdev} "
+        f"source_size_bytes={lvol.size} spdk_actual_bytes={lvol_actual_bytes} "
+        f"target_size_mib={lvol_size_in_mib}"
+    )
+    ret = tgt_rpc.create_lvol(tgt_lvol_bdev, lvol_size_in_mib, tgt_node.lvstore)
     if not ret:
         return False, True, f"Failed to create target lvol {tgt_lvol_composite}"
-    logger.info(f"[MIGRATION SIZE CHECK] lvol={lvol.lvol_bdev} source_size_bytes={lvol.size} target_size_mib={_bytes_to_mib(lvol.size)}")
 
     ret = tgt_rpc.bdev_lvol_set_migration_flag(tgt_lvol_composite)
     if not ret:
