@@ -229,7 +229,7 @@ def _get_target_secondary_node(tgt_node):
 
 
 def _expose_lvol_on_secondary(lvol, tgt_node, tgt_sec, sec_rpc, tgt_blobid, tgt_lvol_uuid,
-                              already_registered=False, tgt_bdev_name=None):
+                              already_registered=False, tgt_bdev_name=None, min_cntlid=None):
     """
     Expose the migrated lvol on the target secondary via NVMe-oF.
 
@@ -260,8 +260,9 @@ def _expose_lvol_on_secondary(lvol, tgt_node, tgt_sec, sec_rpc, tgt_blobid, tgt_
     existing_sec_sub = sec_rpc.subsystem_list(lvol.nqn)
     subsystem_created_on_sec = False
     if not existing_sec_sub:
+        _sec_min_cntlid = min_cntlid if min_cntlid is not None else 1000
         ret = sec_rpc.subsystem_create(
-            lvol.nqn, lvol.ha_type, lvol.uuid, min_cntlid=1000,
+            lvol.nqn, lvol.ha_type, lvol.uuid, min_cntlid=_sec_min_cntlid,
             max_namespaces=constants.LVO_MAX_NAMESPACES_PER_SUBSYS)
         if not ret:
             sec_rpc.delete_lvol(bdev_name, del_async=True)
@@ -1156,7 +1157,14 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                 # convention (serial='ha', model=uuid) — the previous code used a
                 # truncated-uuid serial and 'SimplyBlock' model which caused the
                 # NVMe subsystem identity to differ from what the client expected.
-                if not tgt_rpc.subsystem_create(lvol.nqn, lvol.ha_type, lvol.uuid):
+                # Use min_cntlid=2000 so the new TGT primary's controller IDs do
+                # not collide with cntlid=1 (SRC primary, still live) or
+                # cntlid=1000 (the old TGT mirror, being torn down).  The kernel
+                # rejects new connections whose cntlid duplicates an existing
+                # controller for the same NQN, so each subsystem must use a
+                # distinct cntlid range.
+                if not tgt_rpc.subsystem_create(lvol.nqn, lvol.ha_type, lvol.uuid,
+                                                min_cntlid=2000):
                     logger.error(
                         f"tgt_is_src_secondary: subsystem_create {lvol.nqn} failed")
                 else:
@@ -1212,9 +1220,12 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                                 f"for secondary chaining: {e}; skipping secondary setup")
                             tgt_sec = None
                     if tgt_sec is not None:
+                        # min_cntlid=3000: avoids conflict with cntlid=1 (SRC),
+                        # cntlid=1000 (old mirror) and cntlid=2000 (new TGT primary).
                         ok, err = _expose_lvol_on_secondary(
                             lvol, tgt_node, tgt_sec, sec_rpc, None, None,
-                            already_registered=True, tgt_bdev_name=tgt_lvol_bdev)
+                            already_registered=True, tgt_bdev_name=tgt_lvol_bdev,
+                            min_cntlid=3000)
                         if ok:
                             logger.info(
                                 f"tgt_is_src_secondary: lvol exposed on secondary "
