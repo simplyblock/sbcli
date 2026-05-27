@@ -156,6 +156,43 @@ def update_cluster_status(cluster_id):
 
     current_cluster_status = cluster.status
     logger.info("cluster_status: %s", current_cluster_status)
+
+    # One-shot auto-migration to shared (per-chunk) data placement.
+    # Armed (shared_placement_migration_pending) by exactly two events:
+    #   * cluster creation — for brand-new clusters
+    #   * cluster_ops.update_cluster, only AFTER every node's upgrade restart
+    #     has completed — never mid rolling-restart
+    # We require that explicit flag rather than firing on a bare
+    # shared_placement==False, because during a rolling upgrade the cluster
+    # passes through transient ACTIVE / not-rebalancing / all-online windows
+    # between node restarts; switching then would race the still-restarting
+    # nodes. With the flag set only at upgrade completion, switching here is
+    # safe once the cluster has settled.
+    if (cluster.shared_placement_migration_pending
+            and not cluster.shared_placement
+            and current_cluster_status == Cluster.STATUS_ACTIVE
+            and not cluster.is_re_balancing):
+        sp_nodes = db.get_storage_nodes_by_cluster_id(cluster_id)
+        if sp_nodes and all(n.status == StorageNode.STATUS_ONLINE for n in sp_nodes):
+            logger.info(
+                "Auto-enabling shared (per-chunk) placement on cluster %s: "
+                "armed, ACTIVE, all nodes online, not rebalancing", cluster_id)
+            try:
+                if cluster_ops.set_shared_placement(cluster_id, enable=True):
+                    # set_shared_placement persisted shared_placement=True;
+                    # disarm the request so it runs exactly once.
+                    done = db.get_cluster_by_id(cluster_id)
+                    done.shared_placement_migration_pending = False
+                    done.write_to_db()
+                    logger.info("shared_placement enabled on cluster %s", cluster_id)
+                else:
+                    logger.warning(
+                        "set_shared_placement returned False for cluster %s; "
+                        "will retry next monitor cycle", cluster_id)
+            except Exception:
+                logger.exception(
+                    "Auto shared_placement enable raised for cluster %s", cluster_id)
+
     if current_cluster_status in [Cluster.STATUS_UNREADY, Cluster.STATUS_IN_ACTIVATION, Cluster.STATUS_IN_EXPANSION]:
         return
 

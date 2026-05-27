@@ -307,6 +307,9 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster = Cluster()
     cluster.uuid = str(uuid.uuid4())
     cluster.cluster_name = name
+    # New clusters auto-switch to per-chunk placement after their first
+    # activation + rebalance (consumed by storage_node_monitor).
+    cluster.shared_placement_migration_pending = True
     cluster.blk_size = blk_size
     cluster.page_size_in_blocks = page_size_in_blocks
     cluster.nqn = f"{constants.CLUSTER_NQN}:{cluster.uuid}"
@@ -487,6 +490,9 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     cluster = Cluster()
     cluster.uuid = str(uuid.uuid4())
     cluster.cluster_name = name
+    # New clusters auto-switch to per-chunk placement after their first
+    # activation + rebalance (consumed by storage_node_monitor).
+    cluster.shared_placement_migration_pending = True
     cluster.blk_size = blk_size
     cluster.page_size_in_blocks = page_size_in_blocks
     cluster.nqn = f"{constants.CLUSTER_NQN}:{cluster.uuid}"
@@ -1703,6 +1709,18 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                 logger.debug(e)
                 logger.error(f"Failed to restart node: {node.get_id()}")
                 return
+
+    # All storage nodes have been restarted onto the upgraded SPDK image.
+    # Arm the one-shot per-chunk placement migration now — and only now,
+    # after the full rolling restart — so storage_node_monitor switches the
+    # cluster once it settles (ACTIVE, not rebalancing, all nodes online).
+    # Skipped on the early-return failure path above, so a partial/failed
+    # upgrade never arms it. No-op if the cluster is already on per-chunk.
+    upgraded = db_controller.get_cluster_by_id(cluster_id)
+    if not upgraded.shared_placement and not upgraded.shared_placement_migration_pending:
+        upgraded.shared_placement_migration_pending = True
+        upgraded.write_to_db(db_controller.kv_store)
+        logger.info("Armed shared_placement migration for cluster %s post-upgrade", cluster_id)
 
     logger.info("Done")
 
