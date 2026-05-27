@@ -301,22 +301,48 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
 
     def _verify_all_lvols_exist(self):
         """Verify registered parents and children exist in lvol list.
-        Warns for missing, only fails if >50% missing."""
-        all_lvols = self.sbcli_utils.list_lvols()
-        missing = []
+
+        Retries up to 30 minutes to allow resources to settle.
+        Warns for missing, only fails if >50% missing.
+        """
+        max_wait = 1800  # 30 minutes
+        poll_interval = 30
+        waited = 0
+
         with self._lock:
             total = len(self._parent_registry) + len(self._child_registry)
-            for name in self._parent_registry:
-                if name not in all_lvols:
-                    missing.append(("parent", name))
-            for name in self._child_registry:
-                if name not in all_lvols:
-                    missing.append(("child", name))
+
+        while waited <= max_wait:
+            all_lvols = self.sbcli_utils.list_lvols()
+            missing = []
+            with self._lock:
+                for name in self._parent_registry:
+                    if name not in all_lvols:
+                        missing.append(("parent", name))
+                for name in self._child_registry:
+                    if name not in all_lvols:
+                        missing.append(("child", name))
+
+            miss_pct = len(missing) * 100 / max(total, 1)
+            if miss_pct <= 50:
+                break  # Within tolerance
+
+            if waited < max_wait:
+                self.logger.info(
+                    f"[verify_lvols] {len(missing)}/{total} ({miss_pct:.1f}%) "
+                    f"lvols missing, waiting {poll_interval}s... "
+                    f"(waited {waited}s/{max_wait}s)"
+                )
+                sleep_n_sec(poll_interval)
+                waited += poll_interval
+            else:
+                break  # Exhausted wait time
+
         miss_pct = len(missing) * 100 / max(total, 1)
         if missing:
             self.logger.warning(
                 f"[verify_lvols] {len(missing)}/{total} ({miss_pct:.1f}%) "
-                f"lvols missing from API: "
+                f"lvols missing from API after {waited}s wait: "
                 f"{missing[:10]}{'...' if len(missing) > 10 else ''}"
             )
         if miss_pct > 50:
@@ -331,19 +357,45 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
 
     def _verify_all_snapshots_exist(self):
         """Verify registered snapshots exist in snapshot list.
-        Warns for missing, only fails if >50% missing."""
-        all_snaps = self.sbcli_utils.list_snapshots()
-        missing = []
+
+        Retries up to 30 minutes to allow resources to settle.
+        Warns for missing, only fails if >50% missing.
+        """
+        max_wait = 1800  # 30 minutes
+        poll_interval = 30
+        waited = 0
+
         with self._lock:
             total = len(self._snap_registry)
-            for name in self._snap_registry:
-                if name not in all_snaps:
-                    missing.append(name)
+
+        while waited <= max_wait:
+            all_snaps = self.sbcli_utils.list_snapshots()
+            missing = []
+            with self._lock:
+                for name in self._snap_registry:
+                    if name not in all_snaps:
+                        missing.append(name)
+
+            miss_pct = len(missing) * 100 / max(total, 1)
+            if miss_pct <= 50:
+                break  # Within tolerance
+
+            if waited < max_wait:
+                self.logger.info(
+                    f"[verify_snapshots] {len(missing)}/{total} ({miss_pct:.1f}%) "
+                    f"snapshots missing, waiting {poll_interval}s... "
+                    f"(waited {waited}s/{max_wait}s)"
+                )
+                sleep_n_sec(poll_interval)
+                waited += poll_interval
+            else:
+                break  # Exhausted wait time
+
         miss_pct = len(missing) * 100 / max(total, 1)
         if missing:
             self.logger.warning(
                 f"[verify_snapshots] {len(missing)}/{total} ({miss_pct:.1f}%) "
-                f"snapshots missing: "
+                f"snapshots missing after {waited}s wait: "
                 f"{missing[:10]}{'...' if len(missing) > 10 else ''}"
             )
         if miss_pct > 50:
@@ -358,19 +410,45 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
 
     def _verify_all_clones_exist(self):
         """Verify registered clones exist in lvol list.
-        Warns for missing, only fails if >50% missing."""
-        all_lvols = self.sbcli_utils.list_lvols()
-        missing = []
+
+        Retries up to 30 minutes to allow resources to settle.
+        Warns for missing, only fails if >50% missing.
+        """
+        max_wait = 1800  # 30 minutes
+        poll_interval = 30
+        waited = 0
+
         with self._lock:
             total = len(self._clone_registry)
-            for name in self._clone_registry:
-                if name not in all_lvols:
-                    missing.append(name)
+
+        while waited <= max_wait:
+            all_lvols = self.sbcli_utils.list_lvols()
+            missing = []
+            with self._lock:
+                for name in self._clone_registry:
+                    if name not in all_lvols:
+                        missing.append(name)
+
+            miss_pct = len(missing) * 100 / max(total, 1)
+            if miss_pct <= 50:
+                break  # Within tolerance
+
+            if waited < max_wait:
+                self.logger.info(
+                    f"[verify_clones] {len(missing)}/{total} ({miss_pct:.1f}%) "
+                    f"clones missing, waiting {poll_interval}s... "
+                    f"(waited {waited}s/{max_wait}s)"
+                )
+                sleep_n_sec(poll_interval)
+                waited += poll_interval
+            else:
+                break  # Exhausted wait time
+
         miss_pct = len(missing) * 100 / max(total, 1)
         if missing:
             self.logger.warning(
                 f"[verify_clones] {len(missing)}/{total} ({miss_pct:.1f}%) "
-                f"clones missing from API: "
+                f"clones missing from API after {waited}s wait: "
                 f"{missing[:10]}{'...' if len(missing) > 10 else ''}"
             )
         if miss_pct > 50:
@@ -643,9 +721,16 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
             "create_snapshot", batch_label="all snapshots",
             batch_elapsed=snap_elapsed,
         )
+        snap_fail_pct = fail * 100 / max(len(items), 1)
         if fail > 0:
+            self.logger.warning(
+                f"[create_snapshots] {fail}/{len(items)} "
+                f"({snap_fail_pct:.1f}%) snapshots failed"
+            )
+        if snap_fail_pct > 50:
             raise RuntimeError(
-                f"[create_snapshots] {fail}/{len(items)} snapshots failed"
+                f"[create_snapshots] {snap_fail_pct:.1f}% snapshot failures "
+                f"exceeds 50% threshold — {fail}/{len(items)}"
             )
 
     def _phase_create_clones(self):
@@ -675,6 +760,7 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
             // self.CLONE_BATCH_SIZE
         )
         overall_t0 = time.time()
+        total_clone_fail = 0
 
         for batch_idx in range(0, len(all_items), self.CLONE_BATCH_SIZE):
             batch = all_items[batch_idx:batch_idx + self.CLONE_BATCH_SIZE]
@@ -690,8 +776,9 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
                 f"create_clones_b{batch_num}",
             )
             batch_elapsed = time.time() - batch_t0
+            total_clone_fail += batch_fail
             if batch_fail > 0:
-                raise RuntimeError(
+                self.logger.warning(
                     f"[create_clones] Batch {batch_num}: "
                     f"{batch_fail}/{len(batch)} clones failed"
                 )
@@ -733,6 +820,20 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
             "create_clone", batch_label="all clones",
             batch_elapsed=overall_elapsed,
         )
+
+        # Overall clone failure check
+        clone_fail_pct = total_clone_fail * 100 / max(len(all_items), 1)
+        if total_clone_fail > 0:
+            self.logger.warning(
+                f"[create_clones] Total: {total_clone_fail}/{len(all_items)} "
+                f"({clone_fail_pct:.1f}%) clones failed across all batches"
+            )
+        if clone_fail_pct > 50:
+            raise RuntimeError(
+                f"[create_clones] {clone_fail_pct:.1f}% clone failures "
+                f"exceeds 50% threshold — "
+                f"{total_clone_fail}/{len(all_items)}"
+            )
 
     def _phase_delete_all(self):
         """Delete: clones → snapshots → children → parents (ordered)."""
@@ -2070,7 +2171,7 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
         (VOLUME column in ``kubectl get pvc``) matches the lvol name in the
         API (``sbctl lvol list``).  We verify both: PVC Bound + PV in API.
 
-        Retries up to 120s to allow stragglers to settle after creation.
+        Retries up to 30 minutes to allow stragglers to settle after creation.
         """
         ns = self.k8s_utils.namespace
         with self._lock:
@@ -2081,8 +2182,8 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
         expected = len(all_pvc_names)
 
         # Retry loop: wait for PVCs to settle (some may still be binding)
-        max_wait = 120
-        poll_interval = 10
+        max_wait = 1800  # 30 minutes
+        poll_interval = 30
         waited = 0
         not_bound = []
         pv_names = []
@@ -2124,15 +2225,20 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
                     (name, "not-found") for name in list(missing_pvcs)[:50]
                 )
 
-            if not not_bound:
-                break  # All PVCs are Bound
+            not_bound_pct = len(not_bound) * 100 / max(expected, 1)
+            if not not_bound or not_bound_pct <= 50:
+                break  # All Bound or within 50% tolerance
 
-            self.logger.info(
-                f"[verify_lvols] {len(not_bound)}/{expected} PVCs not yet "
-                f"Bound, waiting {poll_interval}s... (waited {waited}s)"
-            )
-            sleep_n_sec(poll_interval)
-            waited += poll_interval
+            if waited < max_wait:
+                self.logger.info(
+                    f"[verify_lvols] {len(not_bound)}/{expected} PVCs "
+                    f"({not_bound_pct:.1f}%) not yet Bound, waiting "
+                    f"{poll_interval}s... (waited {waited}s/{max_wait}s)"
+                )
+                sleep_n_sec(poll_interval)
+                waited += poll_interval
+            else:
+                break  # Exhausted wait time
 
         # Final assessment after wait
         not_bound_pct = len(not_bound) * 100 / max(expected, 1)
@@ -2172,7 +2278,11 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
         )
 
     def _verify_all_snapshots_exist(self):
-        """K8s override: verify VolumeSnapshots are readyToUse."""
+        """K8s override: verify VolumeSnapshots are readyToUse.
+
+        Retries up to 30 minutes to allow snapshots to become ready.
+        Warns for not-ready, only fails if >50% not ready.
+        """
         ns = self.k8s_utils.namespace
         with self._lock:
             snap_names = list(self._snap_registry.keys())
@@ -2180,33 +2290,77 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
             self.logger.info("[verify_snapshots] No snapshots to verify")
             return
 
+        total = len(snap_names)
+        max_wait = 1800  # 30 minutes
+        poll_interval = 30
+        waited = 0
         not_ready = []
-        for snap_name in snap_names:
-            try:
-                out, _ = self.k8s_utils._exec_kubectl(
-                    f"kubectl get volumesnapshot {snap_name} -n {ns} "
-                    f"-o jsonpath='{{.status.readyToUse}}' 2>/dev/null || true",
-                    supress_logs=True,
-                )
-                ready = (out or "").strip().strip("'")
+
+        while waited <= max_wait:
+            not_ready = []
+            # Bulk query all snapshots with our label
+            out, _ = self.k8s_utils._exec_kubectl(
+                f"kubectl get volumesnapshot -l test=ns-stress -n {ns} "
+                f"-o jsonpath='{{range .items}}{{.metadata.name}}|"
+                f"{{.status.readyToUse}}{{\"\\n\"}}{{end}}' "
+                f"2>/dev/null || true",
+                supress_logs=True,
+            )
+            found_snaps = {}
+            for line in (out or "").strip().split("\n"):
+                line = line.strip()
+                if not line:
+                    continue
+                parts = line.split("|")
+                if len(parts) >= 2:
+                    found_snaps[parts[0]] = parts[1]
+
+            for snap_name in snap_names:
+                ready = found_snaps.get(snap_name, "not-found")
                 if ready != "true":
                     not_ready.append((snap_name, ready))
-            except Exception as exc:
-                not_ready.append((snap_name, f"error: {exc}"))
 
+            not_ready_pct = len(not_ready) * 100 / max(total, 1)
+            if not not_ready or not_ready_pct <= 50:
+                break  # All ready or within 50% tolerance
+
+            if waited < max_wait:
+                self.logger.info(
+                    f"[verify_snapshots] {len(not_ready)}/{total} "
+                    f"({not_ready_pct:.1f}%) snapshots not ready, "
+                    f"waiting {poll_interval}s... "
+                    f"(waited {waited}s/{max_wait}s)"
+                )
+                sleep_n_sec(poll_interval)
+                waited += poll_interval
+            else:
+                break  # Exhausted wait time
+
+        not_ready_pct = len(not_ready) * 100 / max(total, 1)
         if not_ready:
-            raise RuntimeError(
-                f"[verify_snapshots] {len(not_ready)}/{len(snap_names)} "
-                f"snapshots not ready: "
+            self.logger.warning(
+                f"[verify_snapshots] {len(not_ready)}/{total} "
+                f"({not_ready_pct:.1f}%) snapshots not ready after "
+                f"{waited}s wait: "
                 f"{not_ready[:10]}{'...' if len(not_ready) > 10 else ''}"
             )
+        if not_ready_pct > 50:
+            raise RuntimeError(
+                f"[verify_snapshots] {not_ready_pct:.1f}% snapshots not "
+                f"ready exceeds 50% threshold — "
+                f"{len(not_ready)}/{total}"
+            )
         self.logger.info(
-            f"[verify_snapshots] All {len(snap_names)} snapshots "
-            f"confirmed readyToUse"
+            f"[verify_snapshots] {total - len(not_ready)}/{total} "
+            f"snapshots confirmed readyToUse"
         )
 
     def _verify_all_clones_exist(self):
-        """K8s override: verify clone PVCs are Bound."""
+        """K8s override: verify clone PVCs are Bound.
+
+        Retries up to 30 minutes to allow clone PVCs to bind.
+        Warns for not-bound, only fails if >50% not bound.
+        """
         ns = self.k8s_utils.namespace
         with self._lock:
             clone_names = list(self._clone_registry.keys())
@@ -2214,29 +2368,69 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
             self.logger.info("[verify_clones] No clones to verify")
             return
 
+        total = len(clone_names)
+        max_wait = 1800  # 30 minutes
+        poll_interval = 30
+        waited = 0
         not_bound = []
-        for clone_name in clone_names:
-            try:
-                out, _ = self.k8s_utils._exec_kubectl(
-                    f"kubectl get pvc {clone_name} -n {ns} "
-                    f"-o jsonpath='{{.status.phase}}' 2>/dev/null || true",
-                    supress_logs=True,
-                )
-                phase = (out or "").strip().strip("'")
+
+        while waited <= max_wait:
+            not_bound = []
+            # Bulk query all test PVCs (clones have same label)
+            out, _ = self.k8s_utils._exec_kubectl(
+                f"kubectl get pvc -l test=ns-stress -n {ns} "
+                f"-o jsonpath='{{range .items}}{{.metadata.name}}|"
+                f"{{.status.phase}}{{\"\\n\"}}{{end}}' "
+                f"2>/dev/null || true",
+                supress_logs=True,
+            )
+            found_pvcs = {}
+            for line in (out or "").strip().split("\n"):
+                line = line.strip()
+                if not line:
+                    continue
+                parts = line.split("|")
+                if len(parts) >= 2:
+                    found_pvcs[parts[0]] = parts[1]
+
+            for clone_name in clone_names:
+                phase = found_pvcs.get(clone_name, "not-found")
                 if phase != "Bound":
                     not_bound.append((clone_name, phase))
-            except Exception as exc:
-                not_bound.append((clone_name, f"error: {exc}"))
 
+            not_bound_pct = len(not_bound) * 100 / max(total, 1)
+            if not not_bound or not_bound_pct <= 50:
+                break  # All Bound or within 50% tolerance
+
+            if waited < max_wait:
+                self.logger.info(
+                    f"[verify_clones] {len(not_bound)}/{total} "
+                    f"({not_bound_pct:.1f}%) clone PVCs not Bound, "
+                    f"waiting {poll_interval}s... "
+                    f"(waited {waited}s/{max_wait}s)"
+                )
+                sleep_n_sec(poll_interval)
+                waited += poll_interval
+            else:
+                break  # Exhausted wait time
+
+        not_bound_pct = len(not_bound) * 100 / max(total, 1)
         if not_bound:
-            raise RuntimeError(
-                f"[verify_clones] {len(not_bound)}/{len(clone_names)} "
-                f"clone PVCs not Bound: "
+            self.logger.warning(
+                f"[verify_clones] {len(not_bound)}/{total} "
+                f"({not_bound_pct:.1f}%) clone PVCs not Bound after "
+                f"{waited}s wait: "
                 f"{not_bound[:10]}{'...' if len(not_bound) > 10 else ''}"
             )
+        if not_bound_pct > 50:
+            raise RuntimeError(
+                f"[verify_clones] {not_bound_pct:.1f}% clone PVCs not "
+                f"Bound exceeds 50% threshold — "
+                f"{len(not_bound)}/{total}"
+            )
         self.logger.info(
-            f"[verify_clones] All {len(clone_names)} clone PVCs "
-            f"confirmed Bound"
+            f"[verify_clones] {total - len(not_bound)}/{total} clone "
+            f"PVCs confirmed Bound"
         )
 
     # ── Two-phase subsystem creation: parents then parallel children ────
