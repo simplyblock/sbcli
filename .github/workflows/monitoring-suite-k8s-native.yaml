@@ -1019,7 +1019,7 @@ jobs:
           [[ -n "${RUN_BASE_DIR}" ]] && echo "RUN_BASE_DIR=${RUN_BASE_DIR}" >> "$GITHUB_ENV" || true
 
       - name: Collect Graylog/OpenSearch logs
-        if: always()
+        if: '!cancelled()'
         timeout-minutes: ${{ fromJSON(env.LOG_COLLECT_TIMEOUT_MINS || '240') }}
         run: |
           set +e

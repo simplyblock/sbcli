@@ -1200,7 +1200,7 @@ jobs:
           echo "LOG_COLLECT_TIMEOUT_MINS=$LOG_COLLECT_TIMEOUT_MINS" >> $GITHUB_ENV
 
       - name: Collect Graylog/OpenSearch logs
-        if: always()
+        if: '!cancelled()'
         timeout-minutes: ${{ fromJSON(env.LOG_COLLECT_TIMEOUT_MINS || '240') }}
         run: |
           set +e

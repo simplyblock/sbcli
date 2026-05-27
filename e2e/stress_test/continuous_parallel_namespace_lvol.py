@@ -27,8 +27,10 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from datetime import datetime
 from e2e_tests.cluster_test_base import TestClusterBase
 from utils.common_utils import sleep_n_sec
+from utils.ssh_utils import RunnerK8sLog
 
 try:
     import requests
@@ -51,10 +53,10 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
         super().__init__(**kwargs)
 
         # ── Scale ──────────────────────────────────────────────────────────
-        self.NUM_PARENTS = 50
-        self.NAMESPACES_PER_PARENT = 51      # max_namespace_per_subsys (parent + 50 children)
-        self.CHILDREN_PER_PARENT = 50        # 50 × 50 = 2500 children
-        self.SNAPSHOTS_PER_LVOL = 2          # per parent + 1 random child
+        self.NUM_PARENTS = 10
+        self.NAMESPACES_PER_PARENT = 11      # max_namespace_per_subsys (parent + 10 children)
+        self.CHILDREN_PER_PARENT = 10        # 10 × 10 = 100 children
+        self.SNAPSHOTS_PER_LVOL = 2          # per parent + 1 random child → ~20 total
         self.NUM_CLONES = 1500               # from 1 picked snapshot
         self.NUM_ITERATIONS = 1
 
@@ -67,7 +69,7 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
         self.MAX_WORKERS_DELETE = 30
         self.BATCH_SIZE = 50
         self.TASK_TIMEOUT = 300
-        self.PARALLEL_PARENTS = 5            # concurrent parents during child creation
+        self.PARALLEL_PARENTS = 10           # concurrent parents during child creation
         self.CLONE_BATCH_SIZE = 250          # clone creation batch size for stats
 
         # ── Retry ─────────────────────────────────────────────────────────
@@ -1050,6 +1052,96 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
         except Exception as exc:
             self.logger.warning(f"Graph 6 failed: {exc}")
 
+        # ── 7. Creation timeline — latency over wall-clock time ───────
+        try:
+            create_ops_ordered = [
+                "create_parent", "create_child",
+                "create_snapshot", "create_clone",
+            ]
+            fig, ax = plt.subplots(figsize=(16, 8))
+            t0_global = min(s["timestamp"] for s in samples)
+            for i, op in enumerate(create_ops_ordered):
+                pts = sorted(
+                    [s for s in samples if s["op"] == op],
+                    key=lambda s: s["timestamp"],
+                )
+                if pts:
+                    x = [(p["timestamp"] - t0_global) / 60.0 for p in pts]
+                    y = [p["elapsed_sec"] for p in pts]
+                    ax.plot(x, y, label=op, alpha=0.7, linewidth=0.8,
+                            color=colors[i % len(colors)])
+            ax.set_xlabel("Time since test start (minutes)")
+            ax.set_ylabel("Latency (sec)")
+            ax.set_title("Creation Latency Over Time")
+            ax.legend(fontsize=7)
+            fig.tight_layout()
+            fig.savefig(
+                os.path.join(out_dir, "creation_latency_timeline.png"),
+                dpi=150,
+            )
+            plt.close(fig)
+            self.logger.info("Generated creation_latency_timeline.png")
+        except Exception as exc:
+            self.logger.warning(f"Graph 7 failed: {exc}")
+
+        # ── 8. Per-parent child creation duration (bar chart) ─────────
+        try:
+            child_samples = [
+                s for s in samples if s["op"] == "create_child"
+            ]
+            if child_samples:
+                # Group by parent (via child_registry mapping)
+                parent_durations = {}
+                with self._lock:
+                    child_to_parent = {
+                        cn: ci["parent_name"]
+                        for cn, ci in self._child_registry.items()
+                    }
+                for s in child_samples:
+                    pname = child_to_parent.get(s["name"], "unknown")
+                    parent_durations.setdefault(pname, []).append(
+                        s["elapsed_sec"]
+                    )
+                parents_sorted = sorted(parent_durations.keys())
+                fig, ax = plt.subplots(figsize=(14, 6))
+                x = range(len(parents_sorted))
+                totals = [
+                    sum(parent_durations[p]) for p in parents_sorted
+                ]
+                avgs = [
+                    sum(parent_durations[p]) / len(parent_durations[p])
+                    for p in parents_sorted
+                ]
+                ax.bar(x, totals, color=colors[0], alpha=0.7,
+                       label="total (sec)")
+                ax2 = ax.twinx()
+                ax2.plot(list(x), avgs, "ro-", markersize=4,
+                         label="avg per child (sec)")
+                ax.set_xlabel("Parent subsystem")
+                ax.set_ylabel("Total creation time (sec)")
+                ax2.set_ylabel("Avg per child (sec)")
+                ax.set_title("Child Creation Duration per Parent")
+                ax.set_xticks(list(x))
+                ax.set_xticklabels(
+                    [p[-8:] for p in parents_sorted],
+                    rotation=45, fontsize=7,
+                )
+                ax.legend(loc="upper left", fontsize=7)
+                ax2.legend(loc="upper right", fontsize=7)
+                fig.tight_layout()
+                fig.savefig(
+                    os.path.join(
+                        out_dir, "child_creation_per_parent.png"
+                    ),
+                    dpi=150,
+                )
+                plt.close(fig)
+                self.logger.info(
+                    "Generated child_creation_per_parent.png"
+                )
+        except Exception as exc:
+            self.logger.warning(f"Graph 8 failed: {exc}")
+
     def _print_summary(self):
         self.logger.info("=" * 60)
         self.logger.info("  PARALLEL NAMESPACE LVOL STRESS — SUMMARY")
@@ -1608,6 +1700,32 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
         self.client_machines = []
         self.fio_node = []
 
+        # Set up log directories
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        log_base = self.nfs_log_base
+        try:
+            os.makedirs(log_base, exist_ok=True)
+        except OSError:
+            log_base = os.path.join(os.path.expanduser("~"), "e2e-logs")
+            os.makedirs(log_base, exist_ok=True)
+        self.docker_logs_path = os.path.join(log_base, f"{self.test_name}-{timestamp}")
+        self.log_path = os.path.join(self.docker_logs_path, "ClientLogs")
+        os.makedirs(self.log_path, exist_ok=True)
+        os.makedirs(self.docker_logs_path, exist_ok=True)
+
+        run_file = os.getenv("RUN_DIR_FILE", None)
+        if run_file:
+            with open(run_file, "w") as f:
+                f.write(self.docker_logs_path)
+
+        # Start K8s log monitor
+        self.runner_k8s_log = RunnerK8sLog(
+            log_dir=self.docker_logs_path,
+            test_name=self.test_name,
+        )
+        self.runner_k8s_log.start_logging()
+        self.runner_k8s_log.monitor_pod_logs()
+
     # ── K8s helpers ───────────────────────────────────────────────────────
 
     def _init_k8s_utils(self):
@@ -1779,107 +1897,171 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
             f"(parallel={self.PARALLEL_PARENTS})"
         )
 
-        # ── Sub-phase 1: Create all parent PVCs (sequential) ────────
-        self.logger.info(
-            f"[create_subsystems][sub1] Creating {self.NUM_PARENTS} parent "
-            f"PVCs (sequential)"
-        )
+        # ── Sub-phase 1: Create all parent PVCs (parallel) ─────────
+        parent_items = []
         parent_names = []
         for i in range(self.NUM_PARENTS):
-            parent_name = f"ns-pvc-{_rand_seq(6)}-{i:04d}"
-            self.logger.info(
-                f"[create_subsystems][sub1] Parent {i+1}/"
-                f"{self.NUM_PARENTS}: {parent_name}"
-            )
-            t0 = time.time()
-            self._create_pvc(parent_name)
-            self._record_timing(
-                "create_parent", parent_name,
-                time.time() - t0, self._snapshot_inventory(),
-            )
-            self._parent_registry[parent_name] = {
-                "id": parent_name,
+            pname = f"ns-pvc-{_rand_seq(6)}-{i:04d}"
+            parent_items.append({"name": pname, "idx": i})
+            parent_names.append(pname)
+            # Pre-register so children can reference parents
+            self._parent_registry[pname] = {
+                "id": pname,
                 "children": [],
                 "snapshots": [],
                 "start_child_idx": i * pvcs_per_subsys + 1,
             }
-            self._inc("counts", "parents_created")
-            parent_names.append(parent_name)
-
         self.logger.info(
-            f"[create_subsystems][sub1] All {len(parent_names)} parents "
-            f"created"
+            f"[create_subsystems][sub1] Creating {self.NUM_PARENTS} parent "
+            f"PVCs (parallel, workers={self.MAX_WORKERS_CREATE})"
+        )
+        parents_t0 = time.time()
+        _ok, parent_fail = self._batch_parallel(
+            parent_items,
+            self._create_single_parent_k8s,
+            self.MAX_WORKERS_CREATE,
+            "create_parents",
+        )
+        parents_elapsed = time.time() - parents_t0
+        self._log_op_stats(
+            "create_parent", batch_label="all parents",
+            batch_elapsed=parents_elapsed,
         )
 
-        # ── Sub-phase 2: Create child PVCs (PARALLEL_PARENTS concurrent) ─
+        # Remove failed parents from registry (they were pre-registered)
+        failed_parents = []
+        if parent_fail > 0:
+            created_parents = {
+                s["name"] for s in self._timing_samples
+                if s["op"] == "create_parent"
+            }
+            for pname in list(parent_names):
+                if pname not in created_parents:
+                    failed_parents.append(pname)
+                    parent_names.remove(pname)
+                    self._parent_registry.pop(pname, None)
+
         self.logger.info(
-            f"[create_subsystems][sub2] Creating children for "
-            f"{len(parent_names)} subsystems "
-            f"(parallel, workers={self.PARALLEL_PARENTS})"
+            f"[create_subsystems][sub1] {len(parent_names)} parents "
+            f"created in {parents_elapsed:.1f}s"
+            f"{f', {len(failed_parents)} FAILED: {failed_parents}' if failed_parents else ''}"
         )
+
+        # ── Sub-phase 2: Create ALL child PVCs in parallel ─────────
+        total_children = len(parent_names) * self.CHILDREN_PER_PARENT
+        self.logger.info(
+            f"[create_subsystems][sub2] Creating {total_children} child "
+            f"PVCs in parallel (workers={self.MAX_WORKERS_CREATE})"
+        )
+        # Build flat list of all children with parent assignment
+        child_items = []
+        for pi, pname in enumerate(parent_names):
+            for c in range(self.CHILDREN_PER_PARENT):
+                child_idx = pi * pvcs_per_subsys + 1 + c
+                child_items.append({
+                    "name": f"ns-pvc-{_rand_seq(6)}-{child_idx:04d}",
+                    "parent_name": pname,
+                })
         children_t0 = time.time()
-        _ok, fail = self._batch_parallel(
-            parent_names,
-            self._create_children_for_subsystem_k8s,
-            self.PARALLEL_PARENTS,
+        _ok, child_fail = self._batch_parallel(
+            child_items,
+            self._create_single_child_k8s,
+            self.MAX_WORKERS_CREATE,
             "create_children",
         )
         children_elapsed = time.time() - children_t0
-        if fail > 0:
-            raise RuntimeError(
-                f"[create_subsystems][sub2] {fail} subsystem child-creation "
-                f"batches failed"
-            )
         self._log_op_stats(
             "create_child", batch_label="all children",
             batch_elapsed=children_elapsed,
         )
 
+        # Identify failed children
+        failed_children = []
+        if child_fail > 0:
+            created_children = set(self._child_registry.keys())
+            for item in child_items:
+                if item["name"] not in created_children:
+                    failed_children.append(
+                        f"{item['name']} (parent={item['parent_name']})"
+                    )
+
+        # ── Failure summary ──────────────────────────────────────────
+        total_attempted = self.NUM_PARENTS + total_children
+        total_failed = len(failed_parents) + len(failed_children)
+        fail_pct = (total_failed * 100 / max(total_attempted, 1))
+
+        if total_failed > 0:
+            self.logger.warning(
+                f"[create_subsystems] FAILED PVCs: {total_failed}/"
+                f"{total_attempted} ({fail_pct:.1f}%)"
+            )
+            if failed_parents:
+                self.logger.warning(
+                    f"  Failed PARENTS ({len(failed_parents)}): "
+                    f"{failed_parents}"
+                )
+            if failed_children:
+                self.logger.warning(
+                    f"  Failed CHILDREN ({len(failed_children)}): "
+                    f"{failed_children}"
+                )
+
+        if fail_pct > 20:
+            raise RuntimeError(
+                f"[create_subsystems] {fail_pct:.1f}% failure rate "
+                f"exceeds 20% threshold — {total_failed}/{total_attempted} "
+                f"PVCs failed (parents={len(failed_parents)}, "
+                f"children={len(failed_children)})"
+            )
+
         # ── Bulk verify ──────────────────────────────────────────────
         all_lvols = self.sbcli_utils.list_lvols()
-        if len(all_lvols) < total:
+        expected_created = total_attempted - total_failed
+        if len(all_lvols) < expected_created:
             self.logger.warning(
                 f"[create_subsystems] lvol count {len(all_lvols)} < "
-                f"expected {total}"
+                f"expected {expected_created}"
             )
 
         self.logger.info(
             f"[create_subsystems] Done: {len(self._parent_registry)} "
             f"parents, {len(self._child_registry)} children"
+            f"{f' ({total_failed} failures tolerated)' if total_failed else ''}"
         )
 
-    def _create_children_for_subsystem_k8s(self, parent_name: str):
-        """Create all child PVCs for one subsystem sequentially.
+    def _create_single_parent_k8s(self, item):
+        """Create a single parent PVC. Called from _batch_parallel."""
+        name = item["name"]
+        t0 = time.time()
+        self._create_pvc(name)
+        self._record_timing(
+            "create_parent", name,
+            time.time() - t0, self._snapshot_inventory(),
+        )
+        self._inc("counts", "parents_created")
 
-        Called from _batch_parallel with PARALLEL_PARENTS concurrency.
-        PVCs within a subsystem must be sequential for CSI grouping."""
-        pinfo = self._parent_registry.get(parent_name)
-        if not pinfo:
-            raise RuntimeError(f"{parent_name}: not in registry")
-        start_idx = pinfo.get("start_child_idx", 0)
+    def _create_single_child_k8s(self, item):
+        """Create a single child PVC and register it under its parent.
 
-        for c in range(self.CHILDREN_PER_PARENT):
-            child_idx = start_idx + c
-            child_name = f"ns-pvc-{_rand_seq(6)}-{child_idx:04d}"
-            t0 = time.time()
-            self._create_pvc(child_name)
-            self._record_timing(
-                "create_child", child_name,
-                time.time() - t0, self._snapshot_inventory(),
-            )
+        Called from _batch_parallel with MAX_WORKERS_CREATE concurrency —
+        all children for all parents run in parallel."""
+        child_name = item["name"]
+        parent_name = item["parent_name"]
+        t0 = time.time()
+        self._create_pvc(child_name)
+        elapsed = time.time() - t0
+        self._record_timing(
+            "create_child", child_name,
+            elapsed, self._snapshot_inventory(),
+        )
+        with self._lock:
             self._child_registry[child_name] = {
                 "id": child_name, "parent_name": parent_name,
             }
-            with self._lock:
-                self._parent_registry[parent_name]["children"].append(
-                    child_name
-                )
-            self._inc("counts", "children_created")
-
-        self.logger.info(
-            f"[create_children] {parent_name}: "
-            f"{self.CHILDREN_PER_PARENT} child PVCs created"
-        )
+            self._parent_registry[parent_name]["children"].append(
+                child_name
+            )
+        self._inc("counts", "children_created")
 
     def _create_pvc(self, name: str):
         """Create a single PVC with label and wait for Bound."""

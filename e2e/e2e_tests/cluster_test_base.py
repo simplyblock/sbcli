@@ -319,6 +319,9 @@ class TestClusterBase:
         self.logger.info("All log monitoring threads stopped.")
     
     def stop_k8s_log_collect(self):
+        if not self.runner_k8s_log or isinstance(self.runner_k8s_log, str):
+            self.logger.warning("[stop_k8s_log_collect] runner_k8s_log not initialized — skipping")
+            return
         self.runner_k8s_log.stop_log_monitor()
         self.runner_k8s_log.stop_logging()
 

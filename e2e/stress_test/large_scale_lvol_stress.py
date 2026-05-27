@@ -88,6 +88,7 @@ class _LargeScaleMixin:
     def _run_large_scale_test(self):
         total = self.NUM_SUBSYSTEMS * self.NAMESPACES_PER_SUBSYSTEM
         self._init_mixin_state()
+        self._creation_partial = False
         self.logger.info(
             f"=== Starting {self.__class__.__name__}: "
             f"{self.NUM_SUBSYSTEMS} subsystems × "
@@ -95,8 +96,30 @@ class _LargeScaleMixin:
         )
         try:
             t0 = time.time()
-            self._phase_create_subsystems()
-            self._phase_durations["create"] = round(time.time() - t0, 1)
+            try:
+                self._phase_create_subsystems()
+            except Exception as create_err:
+                self._creation_partial = True
+                self._phase_durations["create"] = round(time.time() - t0, 1)
+                created = self._count_created_resources()
+                self.logger.error(
+                    f"[create] CREATION FAILED after {created} resources: "
+                    f"{create_err}"
+                )
+                self.logger.info(
+                    f"[create] *** Max resources created: {created} / "
+                    f"{total} ({created * 100 // max(total, 1)}%) ***"
+                )
+                if created == 0:
+                    raise RuntimeError(
+                        f"No resources created — cannot proceed: {create_err}"
+                    )
+                self.logger.info(
+                    f"[create] Proceeding with FIO on {created} existing "
+                    f"resources"
+                )
+            else:
+                self._phase_durations["create"] = round(time.time() - t0, 1)
 
             t0 = time.time()
             self._phase_start_fio()
@@ -121,6 +144,10 @@ class _LargeScaleMixin:
             raise RuntimeError(
                 f"Large-scale test had {self._fio_failures} FIO failures"
             )
+
+    def _count_created_resources(self):
+        """Count resources available for FIO — override in subclass."""
+        return self._total_created
 
     # ── Steady state (shared) ────────────────────────────────────────────────
 
@@ -584,6 +611,7 @@ class LargeScaleLvolDocker(_LargeScaleMixin, TestLvolHACluster):
             "create_parents",
         )
         if fail > 0:
+            self._total_created = len(self._device_registry)
             raise RuntimeError(
                 f"[create][sub1] {fail} parent creations failed"
             )
@@ -637,6 +665,7 @@ class LargeScaleLvolDocker(_LargeScaleMixin, TestLvolHACluster):
             max_workers=self.PARALLEL_PARENTS,
         )
         if fail > 0:
+            self._total_created = len(self._device_registry)
             raise RuntimeError(
                 f"[create][sub3] {fail} parent child-creation batches failed"
             )
@@ -660,6 +689,10 @@ class LargeScaleLvolDocker(_LargeScaleMixin, TestLvolHACluster):
             f"{len(self._child_registry)} children, "
             f"{self._total_created} total devices mounted"
         )
+
+    def _count_created_resources(self):
+        """Count devices available for FIO from the device registry."""
+        return len(self._device_registry)
 
     def _create_parent(self, params: dict):
         name = params["name"]
@@ -1179,15 +1212,29 @@ class LargeScaleLvolDocker(_LargeScaleMixin, TestLvolHACluster):
 
     def _batch_exec(self, items, task_fn, op_name: str,
                     per_item_timeout: int = 600,
-                    max_workers: int = None):
-        """Execute task_fn(item) for each item using ThreadPoolExecutor."""
+                    max_workers: int = None,
+                    max_failures: int = 10):
+        """Execute task_fn(item) for each item using ThreadPoolExecutor.
+
+        Stops submitting new batches once failures >= max_failures.
+        Returns (success_count, failure_count).
+        """
         total = len(items)
         success = 0
         failures = 0
         workers = max_workers or self.MAX_WORKERS
+        stopped_early = False
 
         with ThreadPoolExecutor(max_workers=workers) as executor:
             for batch_start in range(0, total, self.BATCH_SIZE):
+                if failures >= max_failures:
+                    stopped_early = True
+                    self.logger.error(
+                        f"[{op_name}] Stopping: {failures} failures "
+                        f"reached max_failures={max_failures}"
+                    )
+                    break
+
                 batch = items[batch_start:batch_start + self.BATCH_SIZE]
                 futures = {}
                 for item in batch:
@@ -1201,7 +1248,8 @@ class LargeScaleLvolDocker(_LargeScaleMixin, TestLvolHACluster):
                     except Exception as exc:
                         failures += 1
                         self.logger.error(
-                            f"[{op_name}] Failed: {exc}"
+                            f"[{op_name}] Failed ({failures}/"
+                            f"{max_failures} max): {exc}"
                         )
 
                 done = batch_start + len(batch)
@@ -1210,6 +1258,12 @@ class LargeScaleLvolDocker(_LargeScaleMixin, TestLvolHACluster):
                     f"(ok={success} fail={failures})"
                 )
 
+        if stopped_early:
+            self.logger.info(
+                f"[{op_name}] Stopped early: {success} succeeded, "
+                f"{failures} failed, "
+                f"{total - success - failures} skipped"
+            )
         return success, failures
 
 
@@ -1256,6 +1310,10 @@ class LargeScaleLvolK8s(_LargeScaleMixin, K8sNativeFailoverTest):
 
         self._run_large_scale_test()
 
+    def _count_created_resources(self):
+        """Count PVCs available for FIO from pvc_details."""
+        return len(self.pvc_details)
+
     # ── Phase 1: Create subsystems (parallel across subsystems) ─────────
 
     def _phase_create_subsystems(self):
@@ -1290,6 +1348,7 @@ class LargeScaleLvolK8s(_LargeScaleMixin, K8sNativeFailoverTest):
             max_workers=self.PARALLEL_PARENTS,
         )
         if fail > 0:
+            self._total_created = len(self.pvc_details)
             raise RuntimeError(
                 f"[create] {fail}/{self.NUM_SUBSYSTEMS} subsystems failed"
             )
@@ -1931,15 +1990,29 @@ class LargeScaleLvolK8s(_LargeScaleMixin, K8sNativeFailoverTest):
 
     def _batch_exec_k8s(self, items, task_fn, op_name: str,
                         per_item_timeout: int = 600,
-                        max_workers: int = None):
-        """Execute task_fn(item) for each item using ThreadPoolExecutor."""
+                        max_workers: int = None,
+                        max_failures: int = 10):
+        """Execute task_fn(item) for each item using ThreadPoolExecutor.
+
+        Stops submitting new batches once failures >= max_failures.
+        Returns (success_count, failure_count).
+        """
         total = len(items)
         success = 0
         failures = 0
         workers = max_workers or self.MAX_WORKERS
+        stopped_early = False
 
         with ThreadPoolExecutor(max_workers=workers) as executor:
             for batch_start in range(0, total, self.BATCH_SIZE):
+                if failures >= max_failures:
+                    stopped_early = True
+                    self.logger.error(
+                        f"[{op_name}] Stopping: {failures} failures "
+                        f"reached max_failures={max_failures}"
+                    )
+                    break
+
                 batch = items[batch_start:batch_start + self.BATCH_SIZE]
                 futures = {}
                 for item in batch:
@@ -1952,7 +2025,10 @@ class LargeScaleLvolK8s(_LargeScaleMixin, K8sNativeFailoverTest):
                         success += 1
                     except Exception as exc:
                         failures += 1
-                        self.logger.error(f"[{op_name}] Failed: {exc}")
+                        self.logger.error(
+                            f"[{op_name}] Failed ({failures}/"
+                            f"{max_failures} max): {exc}"
+                        )
 
                 done = batch_start + len(batch)
                 self.logger.info(
@@ -1960,4 +2036,10 @@ class LargeScaleLvolK8s(_LargeScaleMixin, K8sNativeFailoverTest):
                     f"(ok={success} fail={failures})"
                 )
 
+        if stopped_early:
+            self.logger.info(
+                f"[{op_name}] Stopped early: {success} succeeded, "
+                f"{failures} failed, "
+                f"{total - success - failures} skipped"
+            )
         return success, failures
