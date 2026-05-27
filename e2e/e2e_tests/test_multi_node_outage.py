@@ -630,6 +630,7 @@ class TestMultiNodeOutageDocker(_TestMultiNodeOutageBase):
     """Docker SSH-based multi-node outage test."""
 
     def __init__(self, **kwargs):
+        kwargs.pop("k8s_run", None)
         super().__init__(k8s_run=False, **kwargs)
         self.test_name = "multi_node_outage_docker"
 
@@ -638,5 +639,6 @@ class TestMultiNodeOutageK8s(_TestMultiNodeOutageBase):
     """K8s-based multi-node outage test (sbcli via kubectl exec)."""
 
     def __init__(self, **kwargs):
+        kwargs.pop("k8s_run", None)
         super().__init__(k8s_run=True, **kwargs)
         self.test_name = "multi_node_outage_k8s"
