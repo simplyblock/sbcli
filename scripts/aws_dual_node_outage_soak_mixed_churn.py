@@ -714,7 +714,7 @@ class SoakRunner:
             time.sleep(self.args.poll_interval)
         raise TestRunError("Timed out waiting for nodes to return online")
 
-    def wait_for_cluster_stable(self):
+    def wait_for_cluster_stable(self, require_no_rebalance=True):
         cluster_id = self.get_cluster_id()
         started = time.time()
         while time.time() - started < self.args.rebalance_timeout:
@@ -726,18 +726,24 @@ class SoakRunner:
             rebalancing = bool(cluster_info.get("is_re_balancing", False))
             nodes = self.ensure_expected_nodes()
             node_statuses = {node["uuid"]: node["status"] for node in nodes}
-            if status == "active" and not rebalancing and all(
+            rebalance_ok = (not rebalancing) or (not require_no_rebalance)
+            if status == "active" and rebalance_ok and all(
                 state == "online" for state in node_statuses.values()
             ):
-                self.logger.log("Cluster stable: ACTIVE, online, not rebalancing")
+                self.logger.log(
+                    "Cluster stable: ACTIVE, online"
+                    + ("" if require_no_rebalance else f" (rebalancing={rebalancing}, not gated)")
+                )
                 return
             self.logger.log(
                 "Waiting for cluster stability: "
-                f"status={status}, rebalancing={rebalancing}, "
+                f"status={status}, rebalancing={rebalancing}"
+                + ("" if require_no_rebalance else " (rebalance not gated)")
+                + ", "
                 + ", ".join(f"{uuid}:{state}" for uuid, state in node_statuses.items())
             )
             time.sleep(self.args.poll_interval)
-        raise TestRunError("Timed out waiting for cluster rebalancing to finish")
+        raise TestRunError("Timed out waiting for cluster to become stable")
 
     def get_active_tasks(self):
         cluster_id = self.get_cluster_id()
@@ -894,7 +900,7 @@ class SoakRunner:
         started = time.time()
         while time.time() - started < self.args.rebalance_timeout:
             self.wait_for_all_online(timeout=self.args.restart_timeout)
-            self.wait_for_cluster_stable()
+            self.wait_for_cluster_stable(require_no_rebalance=self.args.wait_for_rebalance)
             output = self.sbctl(
                 f"lvol add {volume_name} {self.args.volume_size} {self.args.pool} --host-id {node_uuid}"
             )
@@ -1663,7 +1669,7 @@ class SoakRunner:
         finally:
             self._enable_nic_on_all_nodes(nic)
         self.wait_for_all_online(timeout=self.args.restart_timeout)
-        self.wait_for_cluster_stable()
+        self.wait_for_cluster_stable(require_no_rebalance=self.args.wait_for_rebalance)
 
     def _network_outage(self, node_id, duration):
         """Take all data NICs down on one storage node for *duration* seconds,
@@ -1995,10 +2001,13 @@ class SoakRunner:
         self.ensure_prerequisites()
         nodes = self.ensure_expected_nodes()
         self.wait_for_all_online(timeout=self.args.restart_timeout)
-        # Wait for the cluster to be fully stable (no in-flight rebalance
-        # or data migration) before starting iterations.
-        self.wait_for_cluster_stable()
-        self.wait_for_data_migration_complete("test start")
+        # Wait for the cluster to be ACTIVE with all nodes online before
+        # starting iterations. The rebalance / data-migration completion
+        # wait is gated on --wait-for-rebalance (default off): when off we
+        # only require ACTIVE+online and do not block on rebalancing.
+        self.wait_for_cluster_stable(require_no_rebalance=self.args.wait_for_rebalance)
+        if self.args.wait_for_rebalance:
+            self.wait_for_data_migration_complete("test start")
         mount_root = self.prepare_client()
         # Saved so the churn cycle can mount its newly-created volume back
         # into the same workspace tree.
