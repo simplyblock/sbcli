@@ -166,7 +166,7 @@ def process_snap_delete(snap, snode):
         snap.deletion_status = leader_node.get_id()
         snap.write_to_db()
 
-        time.sleep(3)
+        time.sleep(1)
 
     try:
         ret = leader_node.rpc_client().bdev_lvol_get_lvol_delete_status(snap.snap_bdev)

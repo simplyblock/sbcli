@@ -267,7 +267,7 @@ def _get_next_3_nodes(cluster_id, lvol_size=0, all_lvols=None):
         all_lvols = db_controller.get_lvols(cluster_id)
     # Build node→subsystem-count map with a single cluster-wide DB read instead
     # of one read per node (was O(K×N) where K = number of nodes).
-    node_nqns = {}
+    node_nqns: dict[str, set] = {}
     for lv in all_lvols:
         if lv.status not in [LVol.STATUS_IN_DELETION, LVol.STATUS_DELETED]:
             node_nqns.setdefault(lv.node_id, set()).add(lv.nqn)
@@ -915,6 +915,8 @@ def _fail_after_bdev(lvol, rpc_client, msg):
     rollback failure so the caller still sees the original error."""
     try:
         _remove_bdev_stack(lvol.bdev_stack[::-1], rpc_client)
+        lvol.status = LVol.STATUS_IN_DELETION
+        lvol.write_to_db(DBController().kv_store)
     except Exception:
         logger.exception("rollback of bdev stack failed for %s", lvol.get_id())
     return False, msg
@@ -1028,6 +1030,21 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
                         return _fail_after_bdev(
                             lvol, rpc_client,
                             f"Failed to create listener for {lvol.get_id()}")
+    else:
+        subsys = rpc_client.subsystem_list(lvol.nqn)
+        if subsys and is_primary:
+            subsys_max_ns = subsys[0]["max_namespaces"]
+            subsys_ns = subsys[0]["namespaces"]
+            if subsys_max_ns == len(subsys_ns):
+                logger.info("Subsys is full, looking for another one")
+                result = get_next_available_subsystem_on_node(lvol.node_id)
+                if result:
+                    namespace, free_nqn = result
+                    lvol.nqn = free_nqn
+                    lvol.namespace = namespace
+                else:
+                    lvol.nqn = snode.cluster_id + ":lvol:" + lvol.uuid
+                    lvol.namespace = ""
 
     logger.info("Add BDev to subsystem")
     ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid)
@@ -2525,20 +2542,22 @@ def clone_lvol(lvol_id, clone_name, new_size=None, pvc_name=None):
     #         logger.error(error)
     #         return False, error
 
+    all_lvols = db_controller.get_lvols()
+    all_snaps = db_controller.get_snapshots()
     snapshot_uuid = None
-    for snap in db_controller.get_snapshots_by_node_id(lvol.node_id):
-        if snap.snap_name == clone_name:
+    for snap in all_snaps:
+        if snap.snap_name == clone_name and snap.lvol.node_id == lvol.node_id:
             logger.info(f"Snapshot with name {clone_name} already exists for this LVol: {snap.uuid}, using it for cloning")
             snapshot_uuid = snap.uuid
             break
 
     if not snapshot_uuid:
-        snapshot_uuid, err = snapshot_controller.add(lvol_id, clone_name, lock=False)
+        snapshot_uuid, err = snapshot_controller.add(lvol_id, clone_name, lock=False, all_snaps=all_snaps, all_lvols=all_lvols)
         if err:
             logger.error(err)
             return False, str(err)
     new_lvol_uuid, err = snapshot_controller.clone(
-        snapshot_uuid, clone_name, new_size, pvc_name, delete_snap_on_lvol_delete=True, lock=False, namespaced=True)
+        snapshot_uuid, clone_name, new_size, pvc_name, delete_snap_on_lvol_delete=True, lock=False, namespaced=True, all_snaps=all_snaps, all_lvols=all_lvols)
     if err:
         logger.error(err)
         if snapshot_uuid:
@@ -3148,7 +3167,8 @@ def get_master_lvols_by_pool_uuid(pool_id, is_json=False):
 
     # Count namespaced children per subsystem root in one pass instead of
     # issuing a separate DB scan for each root (was O(M×N)).
-    ns_counts = {}
+    ns_counts: dict[str, int] = {}
+
     for lv in lvols:
         if lv.namespace:
             ns_counts[lv.namespace] = ns_counts.get(lv.namespace, 0) + 1
@@ -3194,7 +3214,8 @@ def get_next_available_subsystem_on_node(node_id, all_lvols=None):
 
     # Count active namespaces per NQN in a single pass instead of issuing a
     # separate DB read for every subsystem root (was O(N²)).
-    ns_counts = {}
+    ns_counts: dict[str, int] = {}
+
     for lv in all_lvols:
         if lv.node_id != node_id:
             continue

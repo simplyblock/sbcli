@@ -361,19 +361,28 @@ def sum_records(records):
         return total
 
 
-def _used_bdev_name_numbers(db_controller):
+def _used_bdev_name_numbers(db_controller, all_lvols=None, all_snapshots=None):
     used = set()
-    for lvol in db_controller.get_lvols():
+    if not all_lvols:
+        all_lvols = db_controller.get_lvols()
+
+    if not all_snapshots:
+        all_snapshots = db_controller.get_snapshots()
+
+    for lvol in all_lvols:
         used.add(lvol.vuid)
 
-    for snap in db_controller.get_snapshots():
+    for snap in all_snapshots:
         used.add(snap.vuid)
     return used
 
 
-def get_random_vuid():
+def get_random_vuid(all_lvols=None, all_snapshots=None):
     from simplyblock_core.db_controller import DBController
     db_controller = DBController()
+    if not all_lvols:
+        all_lvols = db_controller.get_lvols()
+
     used_vuids = []
     nodes = db_controller.get_storage_nodes()
     for node in nodes:
@@ -387,10 +396,10 @@ def get_random_vuid():
                 continue
             used_vuids.append(vuid)
 
-    for lvol in db_controller.get_lvols():
+    for lvol in all_lvols:
         used_vuids.append(lvol.vuid)
 
-    used = set(used_vuids) | _used_bdev_name_numbers(db_controller)
+    used = set(used_vuids) | _used_bdev_name_numbers(db_controller, all_lvols, all_snapshots)
 
     # 1M range + dedupe against existing bdev-name numeric suffixes
     # (CLN_xxxx / LVOL_xxxx / SNAP_xxxx). With ~10k lvols+snaps the
@@ -1292,11 +1301,13 @@ def addNvmeDevices(rpc_client, snode, devs):
     return devices
 
 
-def get_random_snapshot_vuid():
+def get_random_snapshot_vuid(all_lvols=None, all_snapshots=None):
     from simplyblock_core.db_controller import DBController
     db_controller = DBController()
     used_vuids = set()
-    for snap in db_controller.get_snapshots():
+    if not all_snapshots:
+        all_snapshots = db_controller.get_snapshots()
+    for snap in all_snapshots:
         used_vuids.add(snap.vuid)
 
     # Same dedupe rationale as ``get_random_vuid``: avoid colliding with
@@ -1305,7 +1316,7 @@ def get_random_snapshot_vuid():
     # exists". That rejection in the clone path is what triggered the
     # mgmt-side async snapshot delete + reuse-during-deletion sequence
     # producing stuck snapshots (incident: aws_dual_soak 2026-04-30).
-    used = used_vuids | _used_bdev_name_numbers(db_controller)
+    used = used_vuids | _used_bdev_name_numbers(db_controller, all_lvols, all_snapshots)
 
     r = 1 + int(random.random() * 1000000)
     while r in used:
