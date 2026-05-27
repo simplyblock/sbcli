@@ -1448,10 +1448,21 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
     hub_port = tgt_node.hublvol.nvmf_port
     ret = src_rpc.bdev_nvme_attach_controller(ctrl_name, hub_nqn, target_ip, hub_port, trtype)
     if not ret:
-        if subsystem_created_on_target:
-            tgt_rpc.subsystem_delete(nqn)
-        _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc, secondary_rpc=sec_setup_rpc)
-        return False, True, "Failed to connect source to target hub"
+        # Attachment can fail with EEXIST (-17) if the task runner crashed
+        # after creating the hub controller in a previous attempt but before
+        # persisting transfer_context to the DB.  The zombie controller is
+        # still alive on the source SPDK.  Check whether the controller's
+        # namespace bdev already exists; if so, reuse it (idempotent retry).
+        if src_rpc.get_bdevs(f"{ctrl_name}n1"):
+            logger.info(
+                f"Hub controller {ctrl_name} already exists on source "
+                f"(zombie from previous attempt); reusing"
+            )
+        else:
+            if subsystem_created_on_target:
+                tgt_rpc.subsystem_delete(nqn)
+            _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc, secondary_rpc=sec_setup_rpc)
+            return False, True, "Failed to connect source to target hub"
 
     hub_bdev = f"{ctrl_name}n1"
 
@@ -1916,9 +1927,13 @@ def _handle_cleanup_target(migration, tgt_node, tgt_rpc):
             migration.write_to_db(db.kv_store)
             return False, False, None  # poll on next call
         else:
-            # No dangling lvol; go straight to snapshot cleanup
-            # Only delete intermediates we created — pre-existing sibling snaps must not be touched
-            to_delete = list(migration.intermediate_snaps)
+            # No dangling lvol; go straight to snapshot cleanup.
+            # Delete ALL snapshots that were transferred to the target (snaps_migrated),
+            # in reverse order so that children are deleted before their parents
+            # (SPDK rejects deleting a snapshot that still has open child references).
+            # intermediate_snaps is a suffix of snaps_migrated, so using the full
+            # reversed list covers both.
+            to_delete = list(reversed(migration.snaps_migrated))
             ctx = {'stage': 'cleanup_tgt', 'pending': to_delete, 'current_bdev': None}
             migration.transfer_context = ctx
             migration.write_to_db(db.kv_store)
@@ -1936,8 +1951,9 @@ def _handle_cleanup_target(migration, tgt_node, tgt_rpc):
             logger.info(f"Deleted target lvol {bdev_name}")
         else:
             logger.warning(f"delete_status {status} for {bdev_name}; proceeding anyway")
-        # Transition to snapshot cleanup — only delete intermediates we created
-        to_delete = list(migration.intermediate_snaps)
+        # Transition to snapshot cleanup — delete ALL transferred snapshots in reverse
+        # order (children/leaves before parents/roots) to satisfy SPDK open-ref rules.
+        to_delete = list(reversed(migration.snaps_migrated))
         ctx = {'stage': 'cleanup_tgt', 'pending': to_delete, 'current_bdev': None}
         migration.transfer_context = ctx
         migration.write_to_db(db.kv_store)
@@ -1966,9 +1982,15 @@ def _handle_cleanup_target(migration, tgt_node, tgt_rpc):
             snap = db.get_snapshot_by_id(snap_uuid)
             snap_short = _snap_tgt_short_name(snap)
             bdev_name = f"{tgt_node.lvstore}/{snap_short}"
+            if not tgt_rpc.get_bdevs(bdev_name):
+                # Bdev may not exist if this snap was never fully transferred or was
+                # already cleaned up by a previous cleanup_target run — skip silently.
+                logger.info(f"Target bdev {bdev_name} not found; skipping (already cleaned up)")
+                continue
             ret, _ = tgt_rpc.delete_lvol(bdev_name)
             if not ret:
-                return False, False, f"delete_lvol async start failed for {bdev_name}"
+                logger.warning(f"delete_lvol async start failed for {bdev_name}; skipping")
+                continue
             ctx['current_bdev'] = bdev_name
             migration.transfer_context = ctx
             migration.write_to_db(db.kv_store)
