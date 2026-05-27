@@ -171,7 +171,7 @@ def _bytes_to_mib(nbytes):
     """Convert bytes to MiB, rounding up.  Returns at least 1."""
     if nbytes <= 0:
         return 1
-    return max(1, (int(nbytes) + 1024 * 1024 - 1) // (1024 * 1024))
+    return max(1, utils.convert_size(nbytes, 'MiB', round_up=True))
 
 
 def _delete_bdev_blocking(bdev_name, primary_rpc, secondary_rpc=None, max_polls=120):
