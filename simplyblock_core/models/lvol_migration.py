@@ -30,6 +30,10 @@ class LVolMigration(BaseModel):
     STATUS_NEW = 'new'
     STATUS_RUNNING = 'running'
     STATUS_SUSPENDED = 'suspended'
+    # CUTOVER: the target subsystem is live and the client must reconnect before
+    # the source subsystem is removed.  Set by PHASE_LVOL_MIGRATE (tgt_is_src_secondary
+    # path only); cleared to STATUS_DONE once PHASE_CLEANUP_SOURCE completes.
+    STATUS_CUTOVER = 'cutover'
     STATUS_DONE = 'done'
     STATUS_FAILED = 'failed'
     STATUS_CANCELLED = 'cancelled'
@@ -44,6 +48,7 @@ class LVolMigration(BaseModel):
         STATUS_NEW: 0,
         STATUS_RUNNING: 1,
         STATUS_SUSPENDED: 2,
+        STATUS_CUTOVER: 6,
         STATUS_DONE: 3,
         STATUS_FAILED: 4,
         STATUS_CANCELLED: 5,
@@ -116,7 +121,10 @@ class LVolMigration(BaseModel):
         super().write_to_db(kv_store)
 
     def is_active(self):
-        return self.status in (self.STATUS_NEW, self.STATUS_RUNNING, self.STATUS_SUSPENDED)
+        return self.status in (
+            self.STATUS_NEW, self.STATUS_RUNNING,
+            self.STATUS_SUSPENDED, self.STATUS_CUTOVER,
+        )
 
     def has_deadline_passed(self):
         if not self.deadline:
