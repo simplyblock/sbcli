@@ -1,4 +1,5 @@
 # coding=utf-8
+import builtins
 import json
 import logging as lg
 import math
@@ -9,7 +10,7 @@ from datetime import datetime
 from simplyblock_core.controllers import lvol_controller, snapshot_events, pool_controller, tasks_controller, \
     migration_controller
 
-from simplyblock_core import utils, constants
+from simplyblock_core import utils
 from simplyblock_core.kms import create_kms_connection
 from simplyblock_core.kms._exceptions import KMSException
 from simplyblock_core.db_controller import DBController
@@ -296,7 +297,7 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
             snapshot_events.replication_task_created(snap)
     if lvol.cloned_from_snap:
         lvol_snap = _parent_snap  # reuse fetch from above — same ID, no second DB read
-        if lvol_snap.source_replicated_snap_uuid:
+        if lvol_snap and lvol_snap.source_replicated_snap_uuid:
             try:
                 org_snap = db_controller.get_snapshot_by_id(lvol_snap.source_replicated_snap_uuid)
                 if org_snap and org_snap.status == SnapShot.STATUS_ONLINE:
@@ -340,7 +341,7 @@ def list(all=False, cluster_id=None, with_details=False, pool_id_or_name=None):
             migrating_lvols.append(m.lvol_id)
     # Build snap_id → clone list in one pass instead of rescanning all lvols
     # for every snapshot (was O(M×N) in-memory).
-    clones_by_snap = {}
+    clones_by_snap: dict[str, builtins.list[str]] = {}
     for lv in db_controller.get_lvols():
         if lv.cloned_from_snap:
             clones_by_snap.setdefault(lv.cloned_from_snap, []).append(lv.get_id())
@@ -949,7 +950,7 @@ def list_by_node(node_id=None, is_json=False):
 
     # Build snap_id → clone list once instead of a full DB read per snapshot
     # (was O(M×N) DB reads).
-    clones_by_snap = {}
+    clones_by_snap: dict[str, builtins.list[str]] = {}
     for lv in db_controller.get_lvols():
         if lv.cloned_from_snap:
             clones_by_snap.setdefault(lv.cloned_from_snap, []).append(lv.get_id())

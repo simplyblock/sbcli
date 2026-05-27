@@ -267,7 +267,7 @@ def _get_next_3_nodes(cluster_id, lvol_size=0, all_lvols=None):
         all_lvols = db_controller.get_lvols(cluster_id)
     # Build node→subsystem-count map with a single cluster-wide DB read instead
     # of one read per node (was O(K×N) where K = number of nodes).
-    node_nqns = {}
+    node_nqns: dict[str, set] = {}
     for lv in all_lvols:
         if lv.status not in [LVol.STATUS_IN_DELETION, LVol.STATUS_DELETED]:
             node_nqns.setdefault(lv.node_id, set()).add(lv.nqn)
@@ -3167,7 +3167,8 @@ def get_master_lvols_by_pool_uuid(pool_id, is_json=False):
 
     # Count namespaced children per subsystem root in one pass instead of
     # issuing a separate DB scan for each root (was O(M×N)).
-    ns_counts = {}
+    ns_counts: dict[str, int] = {}
+
     for lv in lvols:
         if lv.namespace:
             ns_counts[lv.namespace] = ns_counts.get(lv.namespace, 0) + 1
@@ -3213,7 +3214,8 @@ def get_next_available_subsystem_on_node(node_id, all_lvols=None):
 
     # Count active namespaces per NQN in a single pass instead of issuing a
     # separate DB read for every subsystem root (was O(N²)).
-    ns_counts = {}
+    ns_counts: dict[str, int] = {}
+
     for lv in all_lvols:
         if lv.node_id != node_id:
             continue
