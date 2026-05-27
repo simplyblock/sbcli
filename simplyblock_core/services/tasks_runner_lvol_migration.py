@@ -1229,18 +1229,41 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             # NQN is removed and the client has reconnected — same as the
             # non-adjacent path.
 
-            # Signal cutover: the TGT subsystem is now live.  Record the
-            # timestamp so PHASE_CLEANUP_SOURCE can enforce a grace period
-            # that gives the client time to reconnect before the source NQN
-            # is torn down.  The status is visible to the test script via
+            # Update the DB *now* — before advertising cutover — so that
+            # `sbctl volume connect` returns TGT endpoints when the client
+            # polls immediately after seeing STATUS_CUTOVER.  Without this
+            # the DB still points at SRC and the client reconnects to SRC;
+            # PHASE_CLEANUP_SOURCE then deletes SRC causing a multi-second
+            # blackout.  apply_migration_to_db is idempotent so the later
+            # call inside PHASE_CLEANUP_SOURCE is harmless.
+            try:
+                migration_controller.apply_migration_to_db(
+                    migration,
+                    tgt_lvol_uuid=ctx.get('tgt_lvol_uuid'),
+                    tgt_lvol_bdev=tgt_lvol_bdev)
+                logger.info(
+                    f"tgt_is_src_secondary: DB updated to TGT "
+                    f"(apply_migration_to_db called early for cutover)")
+            except Exception as _db_err:
+                logger.warning(
+                    f"tgt_is_src_secondary: early apply_migration_to_db "
+                    f"failed (non-fatal, will retry in CLEANUP_SOURCE): "
+                    f"{_db_err}")
+
+            # Signal cutover: the TGT subsystem is now live and the DB
+            # reflects the new location.  Record the timestamp so
+            # PHASE_CLEANUP_SOURCE can enforce a grace period that gives
+            # the client time to reconnect before the source NQN is torn
+            # down.  The status is visible to the test script via
             # sbctl migrate-list so it knows to reconnect immediately.
             tgt_uuid_carry['cutover_notified_at'] = time.time()
             migration.status = LVolMigration.STATUS_CUTOVER
             logger.info(
                 f"Migration {migration.uuid}: STATUS_CUTOVER set — "
-                f"grace period starts, client should reconnect now")
+                f"DB updated to TGT, grace period starts, "
+                f"client should reconnect now")
 
-        # apply_migration_to_db is intentionally deferred to CLEANUP_SOURCE
+        # apply_migration_to_db is called again in CLEANUP_SOURCE (idempotent)
         return True, False, None
 
     # --- Gate: check target secondary state before creating on target primary ---
