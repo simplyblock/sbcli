@@ -27,7 +27,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from datetime import datetime
+from datetime import datetime, timezone
 from e2e_tests.cluster_test_base import TestClusterBase
 from utils.common_utils import sleep_n_sec
 from utils.ssh_utils import RunnerK8sLog
@@ -53,10 +53,10 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
         super().__init__(**kwargs)
 
         # ── Scale ──────────────────────────────────────────────────────────
-        self.NUM_PARENTS = 10
-        self.NAMESPACES_PER_PARENT = 11      # max_namespace_per_subsys (parent + 10 children)
-        self.CHILDREN_PER_PARENT = 10        # 10 × 10 = 100 children
-        self.SNAPSHOTS_PER_LVOL = 2          # per parent + 1 random child → ~20 total
+        self.NUM_PARENTS = 20
+        self.NAMESPACES_PER_PARENT = 26      # max_namespace_per_subsys (parent + 25 children)
+        self.CHILDREN_PER_PARENT = 25        # 20 × 25 = 500 children
+        self.SNAPSHOTS_PER_LVOL = 2          # per parent + 1 random child → ~42 total
         self.NUM_CLONES = 1500               # from 1 picked snapshot
         self.NUM_ITERATIONS = 1
 
@@ -94,6 +94,7 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
         self._batch_timings = []    # batch-level summaries for graphs
         self._iteration_timings = []  # per-iteration phase durations
         self._current_iteration = 0
+        self._snapshot_child = None  # pre-selected child for snapshot (set in write_data)
 
         # ── Metrics ───────────────────────────────────────────────────────
         self._metrics = {
@@ -443,6 +444,7 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
             self._child_registry.clear()
             self._snap_registry.clear()
             self._clone_registry.clear()
+            self._snapshot_child = None
 
     # ── Abstract-like methods (subclasses override) ───────────────────────
 
@@ -578,10 +580,12 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
             snap_lvols = []
             for pname, pinfo in self._parent_registry.items():
                 snap_lvols.append((pname, pinfo["id"]))
-            # Pick 1 random child (if any)
+            # Use pre-selected child (from write_data) or pick a random one
+            chosen_child = getattr(self, "_snapshot_child", None)
             child_names = list(self._child_registry.keys())
-            if child_names:
+            if not chosen_child and child_names:
                 chosen_child = random.choice(child_names)
+            if chosen_child and chosen_child in self._child_registry:
                 cinfo = self._child_registry[chosen_child]
                 snap_lvols.append((chosen_child, cinfo["id"]))
                 self.logger.info(
@@ -1700,6 +1704,12 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
         self.client_machines = []
         self.fio_node = []
 
+        # Record UTC start time for Graylog log export at teardown
+        self.test_start_time_utc = datetime.now(timezone.utc)
+
+        # Initialize k8s_utils early so it's available even if _phase_setup fails
+        self._init_k8s_utils()
+
         # Set up log directories
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         log_base = self.nfs_log_base
@@ -1796,6 +1806,14 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
         self.logger.info("[cleanup] K8s bulk cleanup")
         ns = self.k8s_utils.namespace if self.k8s_utils else "default"
         if self.k8s_utils:
+            # Delete FIO/write-data jobs with our label
+            try:
+                self.k8s_utils._exec_kubectl(
+                    f"kubectl delete job -l test=ns-stress -n {ns} "
+                    f"--wait=false --ignore-not-found 2>/dev/null || true"
+                )
+            except Exception:
+                pass
             # Delete all PVCs with our label
             try:
                 self.k8s_utils._exec_kubectl(
@@ -2085,64 +2103,124 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
         if not self.k8s_utils.wait_pvc_bound(name, timeout=300, namespace=ns):
             raise TimeoutError(f"PVC {name} not Bound within 300s")
 
-    # ── Write data to parent PVCs ────────────────────────────────────────
+    # ── Write data (parallel FIO) to snapshot-target PVCs ──────────────
 
     def _phase_write_data(self):
-        """Create one-shot Jobs that write 10 MB to each parent PVC."""
+        """Run parallel FIO (100 MB write) on all PVCs that will be snapshotted.
+
+        Snapshot targets = all parents + 1 random child.  The chosen child is
+        stored in self._snapshot_child so _phase_create_snapshots reuses it.
+        """
         parents = list(self._parent_registry.keys())
+
+        # Pick the random child now so we FIO it and snapshot it later
+        with self._lock:
+            child_names = list(self._child_registry.keys())
+        if child_names:
+            self._snapshot_child = random.choice(child_names)
+            self.logger.info(
+                f"[write_data] Pre-selected child for snapshot: "
+                f"{self._snapshot_child}"
+            )
+        else:
+            self._snapshot_child = None
+
+        targets = list(parents)
+        if self._snapshot_child:
+            targets.append(self._snapshot_child)
+
         self.logger.info(
-            f"[write_data] Writing 10 MB to {len(parents)} parent PVCs "
+            f"[write_data] Running parallel FIO (100 MB) on "
+            f"{len(targets)} PVCs ({len(parents)} parents"
+            f"{f' + 1 child' if self._snapshot_child else ''}) "
             f"via K8s Jobs"
         )
+
+        fio_items = [{"pvc_name": pvc} for pvc in targets]
+        write_t0 = time.time()
+        _ok, fail = self._batch_parallel(
+            fio_items, self._run_fio_job_k8s,
+            self.MAX_WORKERS_CREATE, "write_data",
+        )
+        write_elapsed = time.time() - write_t0
+        self.logger.info(
+            f"[write_data] Done: {_ok}/{len(targets)} OK, "
+            f"{fail} failed in {write_elapsed:.1f}s"
+        )
+        if fail > 0:
+            self.logger.warning(
+                f"[write_data] {fail}/{len(targets)} FIO jobs failed"
+            )
+
+    def _run_fio_job_k8s(self, item):
+        """Create a K8s Job running FIO 100 MB sequential write on a PVC."""
+        pvc_name = item["pvc_name"]
         ns = self.k8s_utils.namespace
+        job_name = f"fio-{pvc_name[:40]}-{_rand_seq(4)}"
+        t0 = time.time()
 
-        for idx, pvc_name in enumerate(parents):
-            job_name = f"write-{pvc_name[:40]}-{_rand_seq(4)}"
-            yaml_content = (
-                f"apiVersion: batch/v1\n"
-                f"kind: Job\n"
-                f"metadata:\n"
-                f"  name: {job_name}\n"
-                f"  labels:\n"
-                f"    test: ns-stress\n"
-                f"    purpose: write-data\n"
-                f"spec:\n"
-                f"  backoffLimit: 0\n"
-                f"  template:\n"
-                f"    spec:\n"
-                f"      restartPolicy: Never\n"
-                f"      containers:\n"
-                f"      - name: writer\n"
-                f"        image: alpine\n"
-                f"        command:\n"
-                f"        - sh\n"
-                f"        - -c\n"
-                f"        - dd if=/dev/urandom of=/data/testfile "
-                f"bs=1M count=10 2>/dev/null\n"
-                f"        volumeMounts:\n"
-                f"        - name: vol\n"
-                f"          mountPath: /data\n"
-                f"      volumes:\n"
-                f"      - name: vol\n"
-                f"        persistentVolumeClaim:\n"
-                f"          claimName: {pvc_name}\n"
+        yaml_content = (
+            f"apiVersion: batch/v1\n"
+            f"kind: Job\n"
+            f"metadata:\n"
+            f"  name: {job_name}\n"
+            f"  labels:\n"
+            f"    test: ns-stress\n"
+            f"    purpose: write-data\n"
+            f"spec:\n"
+            f"  backoffLimit: 0\n"
+            f"  template:\n"
+            f"    spec:\n"
+            f"      restartPolicy: Never\n"
+            f"      containers:\n"
+            f"      - name: fio\n"
+            f"        image: dockerpinata/fio:2.1\n"
+            f"        command:\n"
+            f"        - fio\n"
+            f"        args:\n"
+            f"        - --name=write-{pvc_name[:20]}\n"
+            f"        - --filename=/data/testfile\n"
+            f"        - --size=100M\n"
+            f"        - --bs=1M\n"
+            f"        - --rw=write\n"
+            f"        - --direct=1\n"
+            f"        - --ioengine=libaio\n"
+            f"        - --iodepth=1\n"
+            f"        - --numjobs=1\n"
+            f"        volumeMounts:\n"
+            f"        - name: vol\n"
+            f"          mountPath: /data\n"
+            f"      volumes:\n"
+            f"      - name: vol\n"
+            f"        persistentVolumeClaim:\n"
+            f"          claimName: {pvc_name}\n"
+        )
+        self.k8s_utils.apply_yaml(yaml_content, namespace=ns)
+        result = self.k8s_utils.wait_job_complete(
+            job_name, timeout=300, namespace=ns,
+        )
+        elapsed = time.time() - t0
+        if result != "succeeded":
+            self.logger.error(
+                f"[write_data] FIO job {job_name} for PVC {pvc_name} "
+                f"ended with: {result} ({elapsed:.1f}s)"
             )
-            self.k8s_utils.apply_yaml(yaml_content, namespace=ns)
-            result = self.k8s_utils.wait_job_complete(
-                job_name, timeout=120, namespace=ns,
+            raise RuntimeError(
+                f"FIO job {job_name} for PVC {pvc_name} "
+                f"ended with: {result}"
             )
-            if result != "succeeded":
-                raise RuntimeError(
-                    f"[write_data] Job {job_name} for PVC {pvc_name} "
-                    f"ended with: {result}"
-                )
-            # Clean up the job
+        # Clean up the completed job
+        try:
             self.k8s_utils.delete_resource("job", job_name, namespace=ns)
-            self.logger.info(
-                f"[write_data] {idx+1}/{len(parents)} {pvc_name} OK"
-            )
-
-        self.logger.info(f"[write_data] Done: {len(parents)} PVCs written")
+        except Exception:
+            pass
+        self._record_timing(
+            "write_data", pvc_name, elapsed,
+            self._snapshot_inventory(),
+        )
+        self.logger.info(
+            f"[write_data] {pvc_name} OK ({elapsed:.1f}s)"
+        )
 
     # ── Create implementations ────────────────────────────────────────────
 
