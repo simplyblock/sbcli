@@ -168,10 +168,17 @@ def _snap_composite(lvstore, snap):
 
 
 def _bytes_to_mib(nbytes):
-    """Convert bytes to MiB, rounding up.  Returns at least 1."""
+    """Convert bytes to MiB, rounding down (floor).  Returns at least 1.
+
+    Must use floor to match the lvol creation code which also uses floor when
+    converting user-specified bytes to size_in_mib.  SPDK's bdev_lvol_create
+    then applies its own ceiling at the cluster boundary — if we pass ceil here
+    the cluster count on the target ends up one higher than the source, causing
+    a 2 MiB capacity change on the client after migration.
+    """
     if nbytes <= 0:
         return 1
-    return max(1, utils.convert_size(nbytes, 'MiB', round_up=True))
+    return max(1, utils.convert_size(nbytes, 'MiB', round_up=False))
 
 
 def _delete_bdev_blocking(bdev_name, primary_rpc, secondary_rpc=None, max_polls=120):
@@ -437,21 +444,7 @@ def _setup_snap_transfer(snap, snap_index, migration, src_node, tgt_node,
     # Step 1: create target lvol on primary
     # Note: SPDK's bdev_lvol_create 'uuid' param is for the lvol *store*, not
     # the new lvol.  Do not pass the snapshot UUID here.
-    #
-    # Use the actual SPDK size of the source snapshot (num_blocks × block_size)
-    # rather than snap.size from the DB.  snap.size stores the user-requested
-    # byte count which may be up to 1 MiB larger than the MiB-rounded value
-    # SPDK used.  A mismatch propagates through the snapshot chain and causes
-    # bdev_lvol_final_migration to produce a target lvol that is 1 MiB larger
-    # than the source, triggering a spurious NVMe capacity-change event on the
-    # client (dmesg: "detected capacity change").
-    size_in_mib = _bytes_to_mib(snap.size)   # safe fallback
-    src_bdev_list = src_rpc.get_bdevs(src_composite)
-    if src_bdev_list:
-        b = src_bdev_list[0] if isinstance(src_bdev_list, list) else src_bdev_list
-        actual_bytes = b.get('num_blocks', 0) * b.get('block_size', 512)
-        if actual_bytes > 0:
-            size_in_mib = utils.convert_size(actual_bytes, 'MiB', round_up=True)
+    size_in_mib = _bytes_to_mib(snap.size)
     ret = tgt_rpc.create_lvol(snap_short, size_in_mib, tgt_node.lvstore)
     if not ret:
         return None, f"Failed to create target lvol for snap {snap_uuid}"
@@ -1319,26 +1312,10 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
     # Step 1: create writable target lvol (size in MiB)
     # Note: SPDK's bdev_lvol_create 'uuid' param is for the lvol *store*, not
     # the new lvol.  Do not pass the lvol UUID here.
-    #
-    # Size must come from the live source SPDK bdev (num_blocks × block_size),
-    # NOT from lvol.size in the DB.  lvol.size stores the user-requested value
-    # (e.g. 10 000 000 000 bytes for "10g") which may differ from the MiB-
-    # rounded value SPDK used at creation time (e.g. 9536 MiB).  Using the DB
-    # value produces a target 1 MiB larger → the NVMe client detects a capacity
-    # change mid-migration and may re-read the partition table unnecessarily.
-    size_in_mib = _bytes_to_mib(lvol.size)   # safe fallback if SPDK query fails
-    src_bdev_list = src_rpc.get_bdevs(src_lvol_composite)
-    if src_bdev_list:
-        b = src_bdev_list[0] if isinstance(src_bdev_list, list) else src_bdev_list
-        actual_bytes = b.get('num_blocks', 0) * b.get('block_size', 512)
-        if actual_bytes > 0:
-            size_in_mib = utils.convert_size(actual_bytes, 'MiB', round_up=True)
-    logger.info(
-        f"[MIGRATION SIZE CHECK] lvol={lvol.lvol_bdev} "
-        f"source_size_bytes={lvol.size} target_size_mib={size_in_mib}")
-    ret = tgt_rpc.create_lvol(tgt_lvol_bdev, size_in_mib, tgt_node.lvstore)
+    ret = tgt_rpc.create_lvol(tgt_lvol_bdev, _bytes_to_mib(lvol.size), tgt_node.lvstore)
     if not ret:
         return False, True, f"Failed to create target lvol {tgt_lvol_composite}"
+    logger.info(f"[MIGRATION SIZE CHECK] lvol={lvol.lvol_bdev} source_size_bytes={lvol.size} target_size_mib={_bytes_to_mib(lvol.size)}")
 
     ret = tgt_rpc.bdev_lvol_set_migration_flag(tgt_lvol_composite)
     if not ret:
