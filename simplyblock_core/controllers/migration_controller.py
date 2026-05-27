@@ -538,10 +538,15 @@ def apply_migration_to_db(migration, tgt_lvol_uuid=None, tgt_lvol_bdev=None):
         # snap_bdev: update lvstore prefix and add migration suffix.
         # On the target the bdev was created as <src_short> + _MIGRATION_BDEV_SUFFIX
         # (e.g. SNAP_xxxm) to avoid collisions with real pre-existing target bdevs.
+        # Guard is idempotent: if this function is called twice (e.g. after a crash
+        # and retry), src_short already carries the suffix — do not append it again.
         tgt_short = None
         if snap.snap_bdev and '/' in snap.snap_bdev:
             src_short = snap.snap_bdev.split('/', 1)[1]
-            tgt_short = src_short + _MIGRATION_BDEV_SUFFIX
+            if src_short.endswith(_MIGRATION_BDEV_SUFFIX):
+                tgt_short = src_short          # already updated on a previous call
+            else:
+                tgt_short = src_short + _MIGRATION_BDEV_SUFFIX
             snap.snap_bdev = f"{tgt_node.lvstore}/{tgt_short}"
 
         # SPDK-specific fields: snap_uuid (SPDK bdev UUID) and blobid
