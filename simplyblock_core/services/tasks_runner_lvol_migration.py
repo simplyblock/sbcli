@@ -1692,26 +1692,13 @@ _SKIP_CLEANUP_SOURCE = False  # DEBUG: set True to skip source cleanup
 def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
     """
     Delete snapshots from the source node that are exclusively owned by the
-    migrated volume, using a non-blocking async state machine so the task
-    runner is never blocked.
+    migrated volume, then tear down the source NVMe-oF subsystem, delete the
+    source lvol bdev, and update DB records.
 
-    State machine (tracked in migration.transfer_context):
-
-      stage='cleanup_src'  pending=[...] current_bdev=None
-        → pop first pending bdev, call delete_lvol(sync=False), set current_bdev
-        → return (False, False, None)  ← come back next iteration to poll
-
-      stage='cleanup_src'  current_bdev=<name>
-        → poll bdev_lvol_get_lvol_delete_status
-        → if in-progress: return (False, False, None)
-        → if done/not-found: finalize on primary + secondary, clear current_bdev
-        → continue with next pending item in the same invocation
-
-      When pending is empty and no current_bdev:
-        → cleanup source subsystem/ns, apply_migration_to_db, return (True,…)
-
-    This avoids snapshot_controller.delete() clone-check soft-delete behaviour.
-    apply_migration_to_db() is called AFTER all deletes complete.
+    Each snapshot deletion uses _delete_bdev_blocking (async-start → poll →
+    sync-finalize on primary and secondary) which blocks until the bdev is
+    gone.  This avoids snapshot_controller.delete() clone-check soft-delete
+    behaviour.  apply_migration_to_db() is called AFTER all deletes complete.
 
     Returns (done: bool, suspend: bool, error: str|None).
     """
@@ -1776,8 +1763,6 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
 
         ctx = {
             'stage': 'cleanup_src',
-            'pending': list(to_delete),
-            'current_bdev': None,
             'tgt_lvol_uuid': tgt_lvol_uuid,
             'tgt_lvol_bdev': tgt_lvol_bdev,
             # Carry hub_ctrl_name through the ctx rebuild so the deferred
@@ -1789,43 +1774,23 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
 
     src_sec_rpc = _get_secondary_rpc(src_node)
 
-    # --- Poll a currently running async delete ---
-    if ctx.get('current_bdev'):
-        bdev_name = ctx['current_bdev']
-        status = src_rpc.bdev_lvol_get_lvol_delete_status(bdev_name)
-        if status == 1:
-            return False, False, None  # still in progress
-        if status in (0, 2):
-            # Async delete on source primary already completed — only finalize on secondary.
-            if src_sec_rpc:
-                src_sec_rpc.delete_lvol(bdev_name, del_async=True)
-            logger.info(f"Deleted source bdev {bdev_name}")
-            ctx['current_bdev'] = None
-            migration.transfer_context = ctx
-            migration.write_to_db(db.kv_store)
-        else:
-            return False, False, f"delete_status returned {status} for {bdev_name}"
-
-    # --- Start the next pending delete ---
-    while ctx['pending']:
-        snap_uuid = ctx['pending'].pop(0)
+    # --- Delete source snapshots (blocking, idempotent) ---
+    # Recompute to_delete here so re-entries after crash work without stored pending list.
+    # _delete_bdev_blocking handles "not found" (status 2) gracefully, so double-deletes
+    # from a crash-recovery re-run are safe.
+    to_delete = migration_controller.get_snaps_safe_to_delete_on_source(migration)
+    for snap_uuid in to_delete:
         try:
             snap = db.get_snapshot_by_id(snap_uuid)
             snap_short = _snap_short_name(snap)
             bdev_name = f"{src_node.lvstore}/{snap_short}"
-            # Mark as migration-source before deletion so SPDK only drops the
-            # blob reference without freeing the physical clusters (data lives
-            # on the target now).
+            # Mark as migration-source so SPDK drops only the blob reference
+            # without freeing the physical clusters (data lives on the target now).
             src_rpc.bdev_lvol_set_migration_flag(bdev_name)
             if src_sec_rpc:
                 src_sec_rpc.bdev_lvol_set_migration_flag(bdev_name)
-            ret, _ = src_rpc.delete_lvol(bdev_name)
-            if not ret:
-                return False, False, f"delete_lvol async start failed for {bdev_name}"
-            ctx['current_bdev'] = bdev_name
-            migration.transfer_context = ctx
-            migration.write_to_db(db.kv_store)
-            return False, False, None  # poll on next call
+            _delete_bdev_blocking(bdev_name, src_rpc, secondary_rpc=src_sec_rpc)
+            logger.info(f"Deleted source bdev {bdev_name}")
         except KeyError:
             logger.warning(f"Source snapshot {snap_uuid} not found in DB; skipping")
 
@@ -1861,32 +1826,23 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
         logger.warning(f"Source subsystem cleanup failed (non-fatal): {e}")
 
     # Explicitly delete the source lvol bdev.  bdev_lvol_final_migration may
-    # have already freed it internally on the SPDK side — if so the call
-    # returns not-found which we silently ignore.
+    # have already freed it on the SPDK side — _delete_bdev_blocking handles
+    # that gracefully (status 2 = not-found is treated as complete).
     if lvol is not None:
         try:
             src_lvol_composite = f"{src_node.lvstore}/{lvol.lvol_bdev}"
-            # Set migration flag before deletion so SPDK drops only the blob
-            # reference without freeing the physical clusters — the data now
-            # lives on the target and must not be reclaimed from the source.
-            # Snapshots get the same treatment at lines above; the main lvol
-            # bdev was previously deleted without this flag (causing the SPDK
-            # log entry "bdev_lvol_delete without migration flag").
+            # Set migration flag so SPDK drops only the blob reference without
+            # freeing the physical clusters — data now lives on the target.
             try:
                 src_rpc.bdev_lvol_set_migration_flag(src_lvol_composite)
             except Exception as _mf_err:
                 logger.warning(
                     f"bdev_lvol_set_migration_flag for source lvol failed "
                     f"(non-fatal): {_mf_err}")
-            ret, _ = src_rpc.delete_lvol(src_lvol_composite)
-            if ret:
-                logger.info(f"Deleted source lvol bdev {src_lvol_composite}")
-            else:
-                logger.info(
-                    f"Source lvol bdev {src_lvol_composite} already gone "
-                    f"(freed by bdev_lvol_final_migration)")
-            if src_sec_rpc and not tgt_is_src_secondary:
-                src_sec_rpc.delete_lvol(src_lvol_composite, del_async=True)
+            _delete_bdev_blocking(
+                src_lvol_composite, src_rpc,
+                secondary_rpc=src_sec_rpc if (src_sec_rpc and not tgt_is_src_secondary) else None)
+            logger.info(f"Deleted source lvol bdev {src_lvol_composite}")
         except Exception as e:
             logger.warning(f"Source lvol delete failed (non-fatal): {e}")
 
@@ -1909,32 +1865,25 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
 
 def _handle_cleanup_target(migration, tgt_node, tgt_rpc):
     """
-    Roll back a failed or cancelled migration: remove snapshots copied to the
-    target and any partially-created target lvol/subsystem, using a non-blocking
-    async state machine identical in structure to _handle_cleanup_source.
+    Roll back a failed or cancelled migration: remove any partially-created
+    target lvol/subsystem, then delete all snapshots copied to the target.
 
-    State machine stages in migration.transfer_context:
-
-      stage='cleanup_tgt_lvol'  (optional first step: delete the target lvol
-         created by LVOL_MIGRATE if the failure happened after it was set up)
-
-      stage='cleanup_tgt'  pending=[...] current_bdev=None / <name>
-         (same polling pattern as cleanup_src)
+    Each deletion uses _delete_bdev_blocking (async-start → poll → sync-finalize
+    on primary and secondary).  Idempotent: "not found" (status 2) is treated as
+    already done, so a crash-recovery re-run is safe.
 
     Returns (done: bool, suspend: bool, error: str|None).
     """
     ctx = migration.transfer_context or {}
     tgt_sec_rpc = _get_secondary_rpc(tgt_node)
 
-    # --- Step 0: if LVOL_MIGRATE created the target lvol before failing, delete it first ---
-    if ctx.get('stage') not in ('cleanup_tgt', 'cleanup_tgt_lvol'):
-        # Detect a dangling target lvol from transfer_context written by LVOL_MIGRATE
+    # --- Step 0: delete dangling target lvol from a failed LVOL_MIGRATE ---
+    if ctx.get('stage') != 'cleanup_tgt':
         tgt_lvol_composite = ctx.get('tgt_lvol_composite')
         nqn = ctx.get('nqn')
         tgt_ns_id = ctx.get('tgt_ns_id')
         subsystem_created_on_target = ctx.get('subsystem_created_on_target', True)
         if tgt_lvol_composite:
-            # Clean up subsystem first (sync), then start async lvol delete
             if nqn:
                 try:
                     _cleanup_subsystem_or_ns(nqn, tgt_ns_id, subsystem_created_on_target, tgt_rpc)
@@ -1946,90 +1895,33 @@ def _handle_cleanup_target(migration, tgt_node, tgt_rpc):
                                                  tgt_sec_rpc)
                     except Exception as e:
                         logger.warning(f"cleanup target secondary subsystem {nqn}: {e}")
-            ret, _ = tgt_rpc.delete_lvol(tgt_lvol_composite)
-            if not ret:
-                logger.warning(f"delete_lvol async start failed for {tgt_lvol_composite}")
-            ctx = {
-                'stage': 'cleanup_tgt_lvol',
-                'current_bdev': tgt_lvol_composite,
-                'sec_rpc_needed': tgt_sec_rpc is not None,
-            }
-            migration.transfer_context = ctx
-            migration.write_to_db(db.kv_store)
-            return False, False, None  # poll on next call
-        else:
-            # No dangling lvol; go straight to snapshot cleanup.
-            # Delete ALL snapshots that were transferred to the target (snaps_migrated),
-            # in reverse order so that children are deleted before their parents
-            # (SPDK rejects deleting a snapshot that still has open child references).
-            # intermediate_snaps is a suffix of snaps_migrated, so using the full
-            # reversed list covers both.
-            to_delete = list(reversed(migration.snaps_migrated))
-            ctx = {'stage': 'cleanup_tgt', 'pending': to_delete, 'current_bdev': None}
-            migration.transfer_context = ctx
-            migration.write_to_db(db.kv_store)
+            try:
+                _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc, secondary_rpc=tgt_sec_rpc)
+                logger.info(f"Deleted target lvol {tgt_lvol_composite}")
+            except Exception as e:
+                logger.warning(f"delete target lvol {tgt_lvol_composite} (non-fatal): {e}")
 
-    # --- Poll the target lvol delete (cleanup_tgt_lvol stage) ---
-    if ctx.get('stage') == 'cleanup_tgt_lvol':
-        bdev_name = ctx['current_bdev']
-        status = tgt_rpc.bdev_lvol_get_lvol_delete_status(bdev_name)
-        if status == 1:
-            return False, False, None
-        if status in (0, 2):
-            tgt_rpc.delete_lvol(bdev_name, del_async=True)
-            if tgt_sec_rpc:
-                tgt_sec_rpc.delete_lvol(bdev_name, del_async=True)
-            logger.info(f"Deleted target lvol {bdev_name}")
-        else:
-            logger.warning(f"delete_status {status} for {bdev_name}; proceeding anyway")
-        # Transition to snapshot cleanup — delete ALL transferred snapshots in reverse
-        # order (children/leaves before parents/roots) to satisfy SPDK open-ref rules.
-        to_delete = list(reversed(migration.snaps_migrated))
-        ctx = {'stage': 'cleanup_tgt', 'pending': to_delete, 'current_bdev': None}
+        ctx = {'stage': 'cleanup_tgt'}
         migration.transfer_context = ctx
         migration.write_to_db(db.kv_store)
 
-    # --- Poll a currently running async snapshot delete ---
-    if ctx.get('current_bdev'):
-        bdev_name = ctx['current_bdev']
-        status = tgt_rpc.bdev_lvol_get_lvol_delete_status(bdev_name)
-        if status == 1:
-            return False, False, None
-        if status in (0, 2):
-            tgt_rpc.delete_lvol(bdev_name, del_async=True)
-            if tgt_sec_rpc:
-                tgt_sec_rpc.delete_lvol(bdev_name, del_async=True)
-            logger.info(f"Deleted target snapshot bdev {bdev_name}")
-            ctx['current_bdev'] = None
-            migration.transfer_context = ctx
-            migration.write_to_db(db.kv_store)
-        else:
-            return False, False, f"delete_status returned {status} for {bdev_name}"
-
-    # --- Start the next pending snapshot delete ---
-    while ctx['pending']:
-        snap_uuid = ctx['pending'].pop(0)
+    # --- Delete target snapshots (blocking, idempotent) ---
+    # Reverse order: children/leaves before parents/roots (SPDK open-ref constraint).
+    # _delete_bdev_blocking handles "not found" (status 2) gracefully, so a
+    # crash-recovery re-run that re-deletes already-removed bdevs is safe.
+    for snap_uuid in reversed(migration.snaps_migrated):
         try:
             snap = db.get_snapshot_by_id(snap_uuid)
             snap_short = _snap_tgt_short_name(snap)
             bdev_name = f"{tgt_node.lvstore}/{snap_short}"
             if not tgt_rpc.get_bdevs(bdev_name):
-                # Bdev may not exist if this snap was never fully transferred or was
-                # already cleaned up by a previous cleanup_target run — skip silently.
                 logger.info(f"Target bdev {bdev_name} not found; skipping (already cleaned up)")
                 continue
-            ret, _ = tgt_rpc.delete_lvol(bdev_name)
-            if not ret:
-                logger.warning(f"delete_lvol async start failed for {bdev_name}; skipping")
-                continue
-            ctx['current_bdev'] = bdev_name
-            migration.transfer_context = ctx
-            migration.write_to_db(db.kv_store)
-            return False, False, None
+            _delete_bdev_blocking(bdev_name, tgt_rpc, secondary_rpc=tgt_sec_rpc)
+            logger.info(f"Deleted target snapshot bdev {bdev_name}")
         except KeyError:
             logger.warning(f"Target snapshot {snap_uuid} not found in DB; skipping")
 
-    # --- All done ---
     migration.transfer_context = {}
     migration.write_to_db(db.kv_store)
     return True, False, None
