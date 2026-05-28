@@ -28,11 +28,14 @@ def list(request: Request, cluster: Cluster, pool: StoragePool) -> List[Snapshot
 instance_api = APIRouter(prefix='/{snapshot_id}')
 
 
-def _lookup_snapshot(snapshot_id: UUID) -> SnapshotModel:
+def _lookup_snapshot(snapshot_id: UUID, pool: StoragePool) -> SnapshotModel:
     try:
-        return db.get_snapshot_by_id(str(snapshot_id))
+        snapshot = db.get_snapshot_by_id(str(snapshot_id))
     except KeyError as e:
         raise HTTPException(404, str(e))
+    if snapshot.pool_uuid != pool.get_id():
+        raise HTTPException(404, f'Snapshot {snapshot_id} not found')
+    return snapshot
 
 
 Snapshot = Annotated[SnapshotModel, Depends(_lookup_snapshot)]

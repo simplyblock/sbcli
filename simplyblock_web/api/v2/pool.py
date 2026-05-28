@@ -65,11 +65,14 @@ def add(request: Request, cluster: Cluster, parameters: StoragePoolParams) -> Re
 instance_api = APIRouter(prefix='/{pool_id}')
 
 
-def _lookup_storage_pool(pool_id: UUID) -> PoolModel:
+def _lookup_storage_pool(pool_id: UUID, cluster: Cluster) -> PoolModel:
     try:
-        return db.get_pool_by_id(str(pool_id))
+        pool = db.get_pool_by_id(str(pool_id))
     except KeyError as e:
         raise HTTPException(404, str(e))
+    if pool.cluster_id != cluster.get_id():
+        raise HTTPException(404, f'Pool {pool_id} not found')
+    return pool
 
 
 StoragePool = Annotated[PoolModel, Depends(_lookup_storage_pool)]

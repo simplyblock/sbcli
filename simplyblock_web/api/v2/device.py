@@ -31,10 +31,13 @@ instance_api = APIRouter(prefix='/{device_id}')
 
 
 def _lookup_device(storage_node: StorageNode, device_id: UUID) -> NVMeDevice:
-    try:
-        return db.get_storage_device_by_id(str(device_id))
-    except KeyError as e:
-        raise HTTPException(404, str(e))
+    device = next(
+        (d for d in storage_node.nvme_devices if d.get_id() == str(device_id)),
+        None,
+    )
+    if device is None:
+        raise HTTPException(404, f'Device {device_id} not found')
+    return device
 
 
 Device = Annotated[NVMeDevice, Depends(_lookup_device)]
