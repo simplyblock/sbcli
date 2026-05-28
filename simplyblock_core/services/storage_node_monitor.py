@@ -767,6 +767,12 @@ if __name__ == "__main__":
     threads_maps: dict[str, threading.Thread] = {}
 
     while True:
+        try:
+            db.get_clusters()
+        except Exception as e:
+            logger.error(f"Failed to get clusters: {e}")
+            time.sleep(3)
+            continue
         clusters = db.get_clusters()
         for cluster in clusters:
             cluster_id = cluster.get_id()
