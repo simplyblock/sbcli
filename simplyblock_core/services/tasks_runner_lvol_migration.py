@@ -1299,22 +1299,35 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             # NQN is removed and the client has reconnected — same as the
             # non-adjacent path.
 
-            # Signal cutover: the TGT subsystem is now live.  Record the
-            # timestamp so PHASE_CLEANUP_SOURCE can enforce a grace period
-            # that gives the client time to reconnect before the source NQN
-            # is torn down.  DB update (apply_migration_to_db) is deferred
-            # to PHASE_CLEANUP_SOURCE so that snap.snap_bdev still holds
-            # the source path when cleanup runs — cleanup uses it to derive
-            # the correct source bdev name to delete.
-            tgt_uuid_carry['cutover_notified_at'] = time.time()
-            migration.status = LVolMigration.STATUS_CUTOVER
-            logger.info(
-                f"Migration {migration.uuid}: STATUS_CUTOVER set — "
-                f"TGT subsystem live, grace period starts, "
-                f"client should reconnect now")
+        # Save source snap bdev names before apply_migration_to_db updates
+        # them — PHASE_CLEANUP_SOURCE uses this map to derive the correct
+        # source bdev names regardless of which path ran.
+        source_snap_bdevs = {}
+        for _snap_uuid in migration.snaps_migrated:
+            try:
+                _snap = db.get_snapshot_by_id(_snap_uuid)
+                source_snap_bdevs[_snap_uuid] = _snap.snap_bdev
+            except KeyError:
+                pass
+        tgt_uuid_carry['source_snap_bdevs'] = source_snap_bdevs
+        # Persist source_snap_bdevs BEFORE apply_migration_to_db updates
+        # snap.snap_bdev — so a crash between apply and the runner's write
+        # still has the correct source paths in DB on re-entry.
+        migration.write_to_db(db.kv_store)
 
-        # apply_migration_to_db is called in CLEANUP_SOURCE after source bdevs
-        # are removed, so snap.snap_bdev still holds the source path here.
+        # Apply DB records now so sbctl volume connect returns TGT endpoints
+        # for clients polling migration status at cutover time.
+        migration_controller.apply_migration_to_db(
+            migration,
+            tgt_lvol_uuid=tgt_uuid_carry.get('tgt_lvol_uuid'),
+            tgt_lvol_bdev=tgt_uuid_carry.get('tgt_lvol_bdev'))
+
+        tgt_uuid_carry['cutover_notified_at'] = time.time()
+        migration.status = LVolMigration.STATUS_CUTOVER
+        logger.info(
+            f"Migration {migration.uuid}: STATUS_CUTOVER set — "
+            f"TGT subsystem live, grace period starts, "
+            f"client should reconnect now")
         return True, False, None
 
     # --- Gate: check target secondary state before creating on target primary ---
@@ -1779,11 +1792,14 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
     # _delete_bdev_blocking handles "not found" (status 2) gracefully, so double-deletes
     # from a crash-recovery re-run are safe.
     to_delete = migration_controller.get_snaps_safe_to_delete_on_source(migration)
+    source_snap_bdevs = ctx.get('source_snap_bdevs', {})
     for snap_uuid in to_delete:
         try:
             snap = db.get_snapshot_by_id(snap_uuid)
-            snap_short = _snap_short_name(snap)
-            bdev_name = f"{src_node.lvstore}/{snap_short}"
+            if snap_uuid in source_snap_bdevs:
+                bdev_name = source_snap_bdevs[snap_uuid]
+            else:
+                bdev_name = f"{src_node.lvstore}/{_snap_short_name(snap)}"
             # Mark as migration-source so SPDK drops only the blob reference
             # without freeing the physical clusters (data lives on the target now).
             src_rpc.bdev_lvol_set_migration_flag(bdev_name)
