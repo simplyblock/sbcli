@@ -71,6 +71,7 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
         self.TASK_TIMEOUT = 300
         self.PARALLEL_PARENTS = 10           # concurrent parents during child creation
         self.CLONE_BATCH_SIZE = 250          # clone creation batch size for stats
+        self.CLONE_BIND_TIMEOUT = 3600       # 1 hour — large clone batches queue in CSI
 
         # ── Retry ─────────────────────────────────────────────────────────
         self.RETRY_MAX = 10
@@ -79,6 +80,7 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
         # ── Thread-safe state ─────────────────────────────────────────────
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
+        self._clones_binding = 0             # how many clones waiting for Bound right now
 
         # parent_name -> {id, children: [child_name], snapshots: [snap_name]}
         self._parent_registry = {}
@@ -894,10 +896,13 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
             )
             batch_elapsed = time.time() - batch_t0
             total_clone_fail += batch_fail
+            with self._lock:
+                still_binding = self._clones_binding
             if batch_fail > 0:
                 self.logger.warning(
                     f"[create_clones] Batch {batch_num}: "
-                    f"{batch_fail}/{len(batch)} clones failed"
+                    f"{batch_fail}/{len(batch)} clones failed "
+                    f"(still_binding={still_binding})"
                 )
             # Per-batch stats (only for clones created in this batch)
             with self._lock:
@@ -910,13 +915,17 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
             if batch_samples:
                 bs = sorted(batch_samples)
                 n = len(bs)
+                throughput = n / batch_elapsed if batch_elapsed > 0 else 0
+                effective_per_clone = batch_elapsed / n if n > 0 else 0
                 self.logger.info(
                     f"[create_clones] Batch {batch_num} stats: "
                     f"{n} ops in {batch_elapsed:.1f}s — "
-                    f"avg={sum(bs)/n:.2f}s "
+                    f"avg_wall={sum(bs)/n:.2f}s "
                     f"p50={bs[n//2]:.2f}s "
                     f"p95={bs[min(int(n*0.95), n-1)]:.2f}s "
-                    f"min={bs[0]:.2f}s max={bs[-1]:.2f}s"
+                    f"min={bs[0]:.2f}s max={bs[-1]:.2f}s | "
+                    f"throughput={throughput:.2f} clones/s "
+                    f"effective_per_clone={effective_per_clone:.2f}s"
                 )
                 with self._lock:
                     self._batch_timings.append({
@@ -925,11 +934,13 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
                         "batch_label": f"batch {batch_num}/{total_batches}",
                         "batch_elapsed": round(batch_elapsed, 2),
                         "count": n,
-                        "avg": round(sum(bs) / n, 4),
+                        "avg_wall": round(sum(bs) / n, 4),
                         "p50": round(bs[n // 2], 4),
                         "p95": round(bs[min(int(n * 0.95), n - 1)], 4),
                         "min": round(bs[0], 4),
                         "max": round(bs[-1], 4),
+                        "throughput_per_sec": round(throughput, 4),
+                        "effective_per_clone": round(effective_per_clone, 4),
                     })
 
         overall_elapsed = time.time() - overall_t0
@@ -1079,9 +1090,9 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
                 ]
                 times_sorted = sorted(times)
                 n = len(times_sorted)
-                summary[it_key][op] = {
+                op_summary = {
                     "count": n,
-                    "avg": round(sum(times_sorted) / n, 4),
+                    "avg_wall": round(sum(times_sorted) / n, 4),
                     "min": round(times_sorted[0], 4),
                     "max": round(times_sorted[-1], 4),
                     "p50": round(times_sorted[n // 2], 4),
@@ -1089,6 +1100,28 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
                         times_sorted[min(int(n * 0.95), n - 1)], 4
                     ),
                 }
+                # For clone ops, compute throughput from batch timings
+                if op == "create_clone":
+                    with self._lock:
+                        it_batches = [
+                            b for b in self._batch_timings
+                            if b["iteration"] == it and b["op"] == op
+                        ]
+                    if it_batches:
+                        total_elapsed = sum(
+                            b["batch_elapsed"] for b in it_batches
+                        )
+                        total_count = sum(
+                            b["count"] for b in it_batches
+                        )
+                        if total_elapsed > 0:
+                            op_summary["throughput_per_sec"] = round(
+                                total_count / total_elapsed, 4
+                            )
+                            op_summary["effective_per_clone"] = round(
+                                total_elapsed / total_count, 4
+                            )
+                summary[it_key][op] = op_summary
         return summary
 
     def _get_log_dir(self) -> str:
@@ -1345,23 +1378,46 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
                 if clone_batches:
                     fig, ax = plt.subplots(figsize=(14, 8))
                     labels = [b["batch_label"] for b in clone_batches]
-                    avgs = [b["avg"] for b in clone_batches]
+                    avgs = [b["avg_wall"] for b in clone_batches]
                     p50s = [b["p50"] for b in clone_batches]
                     p95s = [b["p95"] for b in clone_batches]
+                    effs = [
+                        b.get("effective_per_clone", 0)
+                        for b in clone_batches
+                    ]
                     x = range(len(labels))
-                    width = 0.25
+                    width = 0.2
                     ax.bar(
-                        [i - width for i in x], avgs, width,
-                        label="avg", color=colors[0],
+                        [i - 1.5 * width for i in x], avgs, width,
+                        label="avg wall", color=colors[0],
                     )
-                    ax.bar(x, p50s, width, label="p50", color=colors[1])
                     ax.bar(
-                        [i + width for i in x], p95s, width,
+                        [i - 0.5 * width for i in x], p50s, width,
+                        label="p50", color=colors[1],
+                    )
+                    ax.bar(
+                        [i + 0.5 * width for i in x], p95s, width,
                         label="p95", color=colors[2],
                     )
+                    ax.bar(
+                        [i + 1.5 * width for i in x], effs, width,
+                        label="effective/clone", color=colors[3 % len(colors)],
+                    )
+                    # Annotate throughput on each batch
+                    for idx, b in enumerate(clone_batches):
+                        tp = b.get("throughput_per_sec", 0)
+                        if tp > 0:
+                            ax.text(
+                                idx, max(avgs[idx], p95s[idx]) + 0.5,
+                                f"{tp:.2f}/s",
+                                ha="center", fontsize=6, color="black",
+                            )
                     ax.set_xlabel("Clone Batch")
                     ax.set_ylabel("Latency (sec)")
-                    ax.set_title("Clone Creation — Per-Batch Latency Stats")
+                    ax.set_title(
+                        "Clone Creation — Per-Batch Latency "
+                        "(wall vs effective vs throughput)"
+                    )
                     ax.set_xticks(list(x))
                     ax.set_xticklabels(labels, rotation=45, fontsize=7)
                     ax.legend(fontsize=7)
@@ -1571,12 +1627,16 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
                     mins = []
                     maxs = []
                     x_pos = []
+                    eff_times = []  # effective per-clone (throughput-based)
                     for xi, it_key in enumerate(it_keys):
                         stats = per_it[it_key].get(op)
                         if stats:
-                            avgs.append(stats["avg"])
+                            avgs.append(stats["avg_wall"])
                             mins.append(stats["min"])
                             maxs.append(stats["max"])
+                            eff_times.append(
+                                stats.get("effective_per_clone")
+                            )
                             x_pos.append(xi)
                     if avgs:
                         has_data = True
@@ -1588,19 +1648,22 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
                         err_hi = [m - a for a, m in zip(avgs, maxs)]
                         ax.bar(
                             offsets, avgs, width,
-                            label=f"{label} (avg)",
+                            label=f"{label} (avg wall)",
                             color=colors[oi % len(colors)],
                             alpha=0.8,
                             yerr=[err_lo, err_hi],
                             capsize=3,
                             error_kw={"linewidth": 0.8},
                         )
-                        # Annotate counts
+                        # Annotate counts + effective time
                         for j, xi in enumerate(x_pos):
                             cnt = per_it[it_keys[xi]][op]["count"]
+                            ann = f"n={cnt}"
+                            if eff_times[j] is not None:
+                                ann += f"\neff={eff_times[j]:.1f}s"
                             ax.text(
                                 offsets[j], avgs[j] + err_hi[j] + 0.3,
-                                f"n={cnt}", ha="center", fontsize=6,
+                                ann, ha="center", fontsize=6,
                             )
 
                 if has_data:
@@ -3331,8 +3394,26 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
             f"    apiGroup: snapshot.storage.k8s.io\n"
         )
         self.k8s_utils.apply_yaml(yaml_content, namespace=ns)
-        if not self.k8s_utils.wait_pvc_bound(clone_name, timeout=300, namespace=ns):
-            raise TimeoutError(f"Clone PVC {clone_name} not Bound within 300s")
+        with self._lock:
+            self._clones_binding += 1
+            concurrent = self._clones_binding
+        self.logger.info(
+            f"[create_clone] {clone_name} waiting for Bound "
+            f"(concurrent_binding={concurrent})"
+        )
+        bind_t0 = time.time()
+        try:
+            if not self.k8s_utils.wait_pvc_bound(
+                clone_name, timeout=self.CLONE_BIND_TIMEOUT, namespace=ns
+            ):
+                raise TimeoutError(
+                    f"Clone PVC {clone_name} not Bound "
+                    f"within {self.CLONE_BIND_TIMEOUT}s"
+                )
+        finally:
+            with self._lock:
+                self._clones_binding -= 1
+        bind_elapsed = time.time() - bind_t0
         with self._lock:
             self._clone_registry[clone_name] = {
                 "id": clone_name, "snap_name": snap_name,
@@ -3340,7 +3421,10 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
             if snap_name in self._snap_registry:
                 self._snap_registry[snap_name]["clones"].append(clone_name)
             self._metrics["counts"]["clones_created"] += 1
-        self.logger.info(f"[create_clone] {clone_name} Bound (snap={snap_name})")
+        self.logger.info(
+            f"[create_clone] {clone_name} Bound in {bind_elapsed:.1f}s "
+            f"(snap={snap_name})"
+        )
 
     # ── Clone mount verification ─────────────────────────────────────────
 
