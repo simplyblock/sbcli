@@ -78,6 +78,24 @@ class Cluster(BaseModel):
     tls: bool = False
     tls_config: dict = {}
     is_re_balancing: bool = False
+    # Cluster-wide data placement-binding mode for distrib bdevs.
+    #   False = legacy per-page placement binding (default, safe everywhere)
+    #   True  = new per-chunk placement binding (opt-in, propagated to every
+    #           bdev_distrib_create at restart and flipped at runtime via the
+    #           distr_shared_placement RPC)
+    # Set by cluster_ops.set_shared_placement after a preflight check
+    # (status=active, not rebalancing, all nodes online). Persisted here so
+    # subsequent restarts re-create distrib bdevs with the same flag.
+    shared_placement: bool = False
+    # Armed when the cluster should be auto-switched to per-chunk placement
+    # once it is fully settled (ACTIVE, not rebalancing, all nodes online):
+    #   * set at cluster creation (new clusters migrate after first rebalance)
+    #   * set by cluster_ops.update_cluster ONLY after every node restart of an
+    #     upgrade has completed — never mid rolling-restart, so the monitor
+    #     cannot fire on a transiently-quiet cluster
+    # storage_node_monitor consumes this flag, calls set_shared_placement once,
+    # and clears it. shared_placement (above) is the durable "done" marker.
+    shared_placement_migration_pending: bool = False
     full_page_unmap: bool = True
     is_single_node: bool = False
     snapshot_replication_target_cluster: str = ""

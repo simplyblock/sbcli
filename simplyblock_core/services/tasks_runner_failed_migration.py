@@ -129,6 +129,12 @@ logger = utils.get_logger(__name__)
 db = db_controller.DBController()
 logger.info("Starting Tasks runner...")
 while True:
+    try:
+        db.get_clusters()
+    except Exception as e:
+        logger.error(f"Failed to get clusters: {e}")
+        time.sleep(3)
+        continue
     time.sleep(3)
     clusters = db.get_clusters()
     if not clusters:

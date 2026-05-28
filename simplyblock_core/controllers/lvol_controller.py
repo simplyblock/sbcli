@@ -1,6 +1,5 @@
 # coding=utf-8
 import copy
-import logging as lg
 import json
 import random
 import sys
@@ -21,7 +20,7 @@ from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.prom_client import PromClient
 
-logger = lg.getLogger()
+logger = utils.get_logger(__name__)
 
 
 def _get_dhchap_group(cluster, pool=None):
@@ -267,7 +266,7 @@ def _get_next_3_nodes(cluster_id, lvol_size=0, all_lvols=None):
         all_lvols = db_controller.get_lvols(cluster_id)
     # Build node→subsystem-count map with a single cluster-wide DB read instead
     # of one read per node (was O(K×N) where K = number of nodes).
-    node_nqns = {}
+    node_nqns: dict[str, set] = {}
     for lv in all_lvols:
         if lv.status not in [LVol.STATUS_IN_DELETION, LVol.STATUS_DELETED]:
             node_nqns.setdefault(lv.node_id, set()).add(lv.nqn)
@@ -881,29 +880,44 @@ def _resolve_namespaced_subsystem(lvol, rpc_client, snode):
     RPC with "Unable to find subsystem with NQN ..." and leaving an orphan
     bdev_lvol_clone blob behind.
     """
+    db_ctrl = DBController()
+
     if not lvol.namespace:
         return True
+
     subsys = rpc_client.subsystem_list(lvol.nqn)
-    if subsys:
-        return False
-    db_ctrl = DBController()
-    try:
-        cluster = db_ctrl.get_cluster_by_id(snode.cluster_id)
-    except KeyError:
-        logger.error(
-            "namespace auto-grouping race: target subsystem %s missing on node "
-            "%s and cluster %s not found in DB; cannot downgrade lvol %s",
-            lvol.nqn, snode.get_id(), snode.cluster_id, lvol.get_id())
-        return False
-    logger.warning(
-        "namespace auto-grouping race: target subsystem %s missing on node "
-        "%s; downgrading lvol %s to its own subsystem",
-        lvol.nqn, snode.get_id(), lvol.get_id())
-    lvol.nqn = cluster.nqn + ":lvol:" + lvol.uuid
-    lvol.namespace = ""
-    lvol.ns_id = 0
-    lvol.write_to_db(db_ctrl.kv_store)
-    return True
+    if not subsys:
+        return True
+
+    if lvol.node_id == snode.get_id():
+        subsys_max_ns = subsys[0]["max_namespaces"]
+        subsys_ns = subsys[0]["namespaces"]
+        if subsys_max_ns == len(subsys_ns):
+            logger.info("Subsys is full, looking for another one")
+            result = get_next_available_subsystem_on_node(lvol.node_id)
+            if result:
+                namespace, free_nqn = result
+                lvol.nqn = free_nqn
+                lvol.namespace = namespace
+                return False
+            else:
+                all_lvols = db_ctrl.get_lvols(snode.cluster_id)
+                subsys_count = len(set(
+                    lv.nqn for lv in all_lvols if lv.node_id == snode.get_id() and
+                    lv.status not in [LVol.STATUS_IN_DELETION, LVol.STATUS_DELETED]
+                ))
+                if subsys_count >= snode.max_lvol:
+                    error = f"Too many subsystems on node: {snode.get_id()}, max subsystems reached: {snode.max_lvol}"
+                    logger.error(error)
+                    raise Exception(error)
+
+                lvol.nqn = snode.cluster_id + ":lvol:" + lvol.uuid
+                lvol.namespace = ""
+                return True
+        else:
+            return False
+
+    return False
 
 
 def _fail_after_bdev(lvol, rpc_client, msg):
@@ -915,6 +929,8 @@ def _fail_after_bdev(lvol, rpc_client, msg):
     rollback failure so the caller still sees the original error."""
     try:
         _remove_bdev_stack(lvol.bdev_stack[::-1], rpc_client)
+        lvol.status = LVol.STATUS_IN_DELETION
+        lvol.write_to_db(DBController().kv_store)
     except Exception:
         logger.exception("rollback of bdev stack failed for %s", lvol.get_id())
     return False, msg
@@ -2525,20 +2541,22 @@ def clone_lvol(lvol_id, clone_name, new_size=None, pvc_name=None):
     #         logger.error(error)
     #         return False, error
 
+    all_lvols = db_controller.get_lvols()
+    all_snaps = db_controller.get_snapshots()
     snapshot_uuid = None
-    for snap in db_controller.get_snapshots_by_node_id(lvol.node_id):
-        if snap.snap_name == clone_name:
+    for snap in all_snaps:
+        if snap.snap_name == clone_name and snap.lvol.node_id == lvol.node_id:
             logger.info(f"Snapshot with name {clone_name} already exists for this LVol: {snap.uuid}, using it for cloning")
             snapshot_uuid = snap.uuid
             break
 
     if not snapshot_uuid:
-        snapshot_uuid, err = snapshot_controller.add(lvol_id, clone_name, lock=False)
+        snapshot_uuid, err = snapshot_controller.add(lvol_id, clone_name, lock=False, all_snaps=all_snaps, all_lvols=all_lvols)
         if err:
             logger.error(err)
             return False, str(err)
     new_lvol_uuid, err = snapshot_controller.clone(
-        snapshot_uuid, clone_name, new_size, pvc_name, delete_snap_on_lvol_delete=True, lock=False, namespaced=True)
+        snapshot_uuid, clone_name, new_size, pvc_name, delete_snap_on_lvol_delete=True, lock=False, namespaced=True, all_snaps=all_snaps, all_lvols=all_lvols)
     if err:
         logger.error(err)
         if snapshot_uuid:
@@ -3148,7 +3166,8 @@ def get_master_lvols_by_pool_uuid(pool_id, is_json=False):
 
     # Count namespaced children per subsystem root in one pass instead of
     # issuing a separate DB scan for each root (was O(M×N)).
-    ns_counts = {}
+    ns_counts: dict[str, int] = {}
+
     for lv in lvols:
         if lv.namespace:
             ns_counts[lv.namespace] = ns_counts.get(lv.namespace, 0) + 1
@@ -3194,7 +3213,8 @@ def get_next_available_subsystem_on_node(node_id, all_lvols=None):
 
     # Count active namespaces per NQN in a single pass instead of issuing a
     # separate DB read for every subsystem root (was O(N²)).
-    ns_counts = {}
+    ns_counts: dict[str, int] = {}
+
     for lv in all_lvols:
         if lv.node_id != node_id:
             continue

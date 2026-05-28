@@ -469,10 +469,17 @@ class SnapshotCloneScaleRun:
 
     @staticmethod
     def _extract_uuid(text):
-        m = UUID_RE.search(text or "")
-        if not m:
-            raise RemoteCommandError(f"No UUID in sbctl output: {text!r}")
-        return m.group(0)
+        # sbctl `lvol add` / `snapshot add` / `snapshot clone` print the new
+        # object's UUID as a standalone line; other UUIDs (the --host-id node,
+        # log/INFO lines) only ever appear embedded in surrounding text. Scan
+        # from the end for a line that is EXACTLY a UUID so we never capture
+        # one of those (a bare search() grabbed the --host-id node UUID and
+        # then connect_lvol failed with 'LVol <id> not found').
+        for line in reversed((text or "").splitlines()):
+            stripped = line.strip()
+            if UUID_RE.fullmatch(stripped):
+                return stripped
+        raise RemoteCommandError(f"No standalone UUID in sbctl output: {text!r}")
 
     def create_parent(self):
         node_uuid = self.pick_storage_node()
