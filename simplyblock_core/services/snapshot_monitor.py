@@ -247,7 +247,12 @@ db = db_controller.DBController()
 
 logger.info("Starting LVol monitor...")
 while True:
-
+    try:
+        db.get_clusters()
+    except Exception as e:
+        logger.error(f"Failed to get clusters: {e}")
+        time.sleep(3)
+        continue
     for cluster in db.get_clusters():
 
         if cluster.status in [Cluster.STATUS_INACTIVE, Cluster.STATUS_UNREADY, Cluster.STATUS_IN_ACTIVATION]:

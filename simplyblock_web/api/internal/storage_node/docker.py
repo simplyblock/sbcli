@@ -904,7 +904,7 @@ def disconnect_nqn(body: utils.DisconnectParams):
 
 class PingQuery(BaseModel):
     ip: str = Field(pattern=utils.IP_PATTERN)
-    ifname: str
+    ifname: str = Field(pattern=utils.IFNAME_PATTERN)
 
 @api.get('/ping_ip', responses={
     200: {'content': {'application/json': {'schema': utils.response_schema({
