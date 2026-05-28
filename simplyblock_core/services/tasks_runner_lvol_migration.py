@@ -1281,9 +1281,12 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         except KeyError:
             pass
     tgt_uuid_carry['source_snap_bdevs'] = source_snap_bdevs
-    # Persist source_snap_bdevs BEFORE apply_migration_to_db updates
-    # snap.snap_bdev — so a crash between apply and the runner's write
-    # still has the correct source paths in DB on re-entry.
+    # Save original source lvol bdev name before apply_migration_to_db
+    # renames lvol.lvol_bdev to the target 'm'-suffix name.
+    tgt_uuid_carry['source_lvol_bdev'] = lvol.lvol_bdev
+    # Persist before apply_migration_to_db updates snap.snap_bdev / lvol.lvol_bdev
+    # so a crash between apply and the runner's DB write still has correct source
+    # paths on re-entry.
     migration.write_to_db(db.kv_store)
 
     # Apply DB records now so sbctl volume connect returns TGT endpoints
@@ -1443,6 +1446,10 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
         # so we can update lvol.lvol_uuid / lvol.lvol_bdev in the DB after cleanup.
         tgt_lvol_uuid = ctx.get('tgt_lvol_uuid')
         tgt_lvol_bdev = ctx.get('tgt_lvol_bdev')
+        # Carry the pre-apply source bdev names so cleanup deletes hit the correct
+        # bdevs even after apply_migration_to_db renamed them to target names in DB.
+        source_snap_bdevs_saved = ctx.get('source_snap_bdevs', {})
+        source_lvol_bdev_saved  = ctx.get('source_lvol_bdev', '')
 
         to_delete = migration_controller.get_snaps_safe_to_delete_on_source(migration)
 
@@ -1470,6 +1477,8 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
             # Carry hub_ctrl_name through the ctx rebuild so the deferred
             # hub detach at the end of cleanup can still find it.
             'hub_ctrl_name': (migration.transfer_context or {}).get('hub_ctrl_name'),
+            'source_snap_bdevs': source_snap_bdevs_saved,
+            'source_lvol_bdev':  source_lvol_bdev_saved,
         }
         migration.transfer_context = ctx
         migration.write_to_db(db.kv_store)
@@ -1532,7 +1541,10 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
     # that gracefully (status 2 = not-found is treated as complete).
     if lvol is not None:
         try:
-            src_lvol_composite = f"{src_node.lvstore}/{lvol.lvol_bdev}"
+            # Use the saved pre-apply bdev name; apply_migration_to_db already
+            # renamed lvol.lvol_bdev to the target 'm'-suffix name in DB.
+            src_bdev_short = ctx.get('source_lvol_bdev') or lvol.lvol_bdev
+            src_lvol_composite = f"{src_node.lvstore}/{src_bdev_short}"
             # Set migration flag so SPDK drops only the blob reference without
             # freeing the physical clusters — data now lives on the target.
             try:
