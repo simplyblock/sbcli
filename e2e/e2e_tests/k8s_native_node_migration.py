@@ -56,6 +56,7 @@ class K8sNativeNodeMigrationTest(TestClusterBase):
 
         # K8s resource naming
         self.STORAGE_CLASS_NAME = "simplyblock-csi-sc"
+        self.XFS_STORAGE_CLASS_NAME = "simplyblock-csi-sc-xfs"
         self.SNAPSHOT_CLASS_NAME = "simplyblock-csi-snapshotclass"
         self.FIO_IMAGE = "dockerpinata/fio:2.1"
 
@@ -212,6 +213,14 @@ class K8sNativeNodeMigrationTest(TestClusterBase):
             ndcs=self.ndcs,
             npcs=self.npcs,
         )
+        self.k8s_utils.create_storage_class(
+            name=self.XFS_STORAGE_CLASS_NAME,
+            cluster_id=cluster_id,
+            pool_name=pool_name,
+            ndcs=self.ndcs,
+            npcs=self.npcs,
+            fs_type="xfs",
+        )
         self.k8s_utils.create_volume_snapshot_class(name=self.SNAPSHOT_CLASS_NAME)
 
         # Record nodes
@@ -226,11 +235,13 @@ class K8sNativeNodeMigrationTest(TestClusterBase):
             pvc_name = f"mig-pvc-{_rand_seq(4)}-{i}"
             job_name = f"fio-{pvc_name}"
             cm_name = f"fio-cfg-{pvc_name}"
+            sc_name = random.choice([self.STORAGE_CLASS_NAME, self.XFS_STORAGE_CLASS_NAME])
+            fs_type = "xfs" if sc_name == self.XFS_STORAGE_CLASS_NAME else "ext4"
 
             self.k8s_utils.create_pvc(
                 name=pvc_name,
                 size=self.pvc_size,
-                storage_class=self.STORAGE_CLASS_NAME,
+                storage_class=sc_name,
             )
             self.k8s_utils.wait_pvc_bound(pvc_name, timeout=300)
 
@@ -249,6 +260,8 @@ class K8sNativeNodeMigrationTest(TestClusterBase):
                 "job_name": job_name,
                 "configmap_name": cm_name,
                 "snapshots": [],
+                "storage_class": sc_name,
+                "fs_type": fs_type,
             }
             sleep_n_sec(5)
 
@@ -273,10 +286,12 @@ class K8sNativeNodeMigrationTest(TestClusterBase):
             detail["snapshots"].append(snap_name)
             self.snapshot_details[snap_name] = {"pvc_name": pvc_name}
 
+            clone_sc = detail.get("storage_class", self.STORAGE_CLASS_NAME)
+            clone_fs_type = detail.get("fs_type", "ext4")
             self.k8s_utils.create_clone_pvc(
                 name=clone_name,
                 size=self.pvc_size,
-                storage_class=self.STORAGE_CLASS_NAME,
+                storage_class=clone_sc,
                 snapshot_name=snap_name,
             )
             self.k8s_utils.wait_pvc_bound(clone_name, timeout=300)
@@ -296,6 +311,8 @@ class K8sNativeNodeMigrationTest(TestClusterBase):
                 "snap_name": snap_name,
                 "job_name": clone_job,
                 "configmap_name": clone_cm,
+                "storage_class": clone_sc,
+                "fs_type": clone_fs_type,
             }
             sleep_n_sec(5)
 

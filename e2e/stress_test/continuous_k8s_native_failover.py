@@ -69,6 +69,7 @@ class K8sNativeFailoverTest(TestClusterBase):
 
         # K8s resource naming
         self.STORAGE_CLASS_NAME = "simplyblock-csi-sc"
+        self.XFS_STORAGE_CLASS_NAME = "simplyblock-csi-sc-xfs"
         self.CRYPTO_STORAGE_CLASS_NAME = "simplyblock-csi-sc-crypto"
         self.CRYPTO_POOL_NAME = "encryption-pool"
         self.SNAPSHOT_CLASS_NAME = "simplyblock-csi-snapshotclass"
@@ -1192,16 +1193,17 @@ class K8sNativeFailoverTest(TestClusterBase):
             pvc_name = f"pvc-{_rand_seq(12)}"
             target_node = node_ids[i] if node_ids and i < len(node_ids) else None
 
-            # Determine StorageClass: explicit > 50/50 alternation > regular
+            # Determine StorageClass: explicit > TLS alternation > random ext4/xfs
             if storage_class:
                 sc_name = storage_class
             elif self.tls_enabled and (existing_count + i) % 2 == 1:
                 sc_name = self.CRYPTO_STORAGE_CLASS_NAME
             else:
-                sc_name = self.STORAGE_CLASS_NAME
+                sc_name = random.choice([self.STORAGE_CLASS_NAME, self.XFS_STORAGE_CLASS_NAME])
+            fs_type = "xfs" if sc_name == self.XFS_STORAGE_CLASS_NAME else "ext4"
 
             self.logger.info(
-                f"[create_pvc] Creating PVC {pvc_name} ({i+1}/{count}) SC={sc_name}"
+                f"[create_pvc] Creating PVC {pvc_name} ({i+1}/{count}) SC={sc_name} fs={fs_type}"
                 + (f" pinned to node {target_node}" if target_node else "")
             )
 
@@ -1358,10 +1360,11 @@ class K8sNativeFailoverTest(TestClusterBase):
                     "snapshots": [],
                     "node_id": node_id,
                     "storage_class": sc_name,
+                    "fs_type": fs_type,
                 }
 
                 self.logger.info(
-                    f"[create_pvc] PVC {pvc_name} on node {node_id} with FIO Job {job_name} SC={sc_name}"
+                    f"[create_pvc] PVC {pvc_name} on node {node_id} with FIO Job {job_name} SC={sc_name} fs={fs_type}"
                 )
 
             if node_id:
@@ -1431,8 +1434,9 @@ class K8sNativeFailoverTest(TestClusterBase):
             # Snapshot lvol IDs before clone PVC (for client mode mapping)
             old_lvol_ids = self._snapshot_lvol_ids() if self.use_client_fio else set()
 
-            # Create clone PVC — use same StorageClass as source PVC
+            # Create clone PVC — use same StorageClass/fs_type as source PVC
             clone_sc = self.pvc_details.get(pvc_name, {}).get("storage_class", self.STORAGE_CLASS_NAME)
+            clone_fs_type = self.pvc_details.get(pvc_name, {}).get("fs_type", "ext4")
             sleep_n_sec(10)
             try:
                 self.k8s_utils.create_clone_pvc(
@@ -1487,6 +1491,7 @@ class K8sNativeFailoverTest(TestClusterBase):
                         "client": client,
                         "log_file": None,
                         "storage_class": clone_sc,
+                        "fs_type": clone_fs_type,
                     }
                     continue
 
@@ -1512,6 +1517,7 @@ class K8sNativeFailoverTest(TestClusterBase):
                     "client": client,
                     "log_file": log_file,
                     "storage_class": clone_sc,
+                    "fs_type": clone_fs_type,
                 }
                 self.clone_mount_details[clone_lvol_name] = {
                     "ID": clone_lvol_id,
@@ -1551,6 +1557,7 @@ class K8sNativeFailoverTest(TestClusterBase):
                     "job_name": clone_job,
                     "configmap_name": clone_cm,
                     "storage_class": clone_sc,
+                    "fs_type": clone_fs_type,
                 }
 
             # Resize source PVC and clone PVC
@@ -2754,6 +2761,14 @@ class K8sNativeFailoverTest(TestClusterBase):
             ndcs=self.ndcs,
             npcs=self.npcs,
         )
+        self.k8s_utils.create_storage_class(
+            name=self.XFS_STORAGE_CLASS_NAME,
+            cluster_id=cluster_id,
+            pool_name=self.pool_name,
+            ndcs=self.ndcs,
+            npcs=self.npcs,
+            fs_type="xfs",
+        )
         if self.tls_enabled:
             self.logger.info("TLS enabled — ensuring encryption pool exists")
             self.sbcli_utils.ensure_pool_exists(
@@ -2960,8 +2975,9 @@ class K8sNativeBasicFailoverTest(K8sNativeFailoverTest):
             # Snapshot lvol IDs before clone PVC (for client mode mapping)
             old_lvol_ids = self._snapshot_lvol_ids() if self.use_client_fio else set()
 
-            # Create clone PVC — use same StorageClass as source PVC
+            # Create clone PVC — use same StorageClass/fs_type as source PVC
             clone_sc = self.pvc_details.get(pvc_name, {}).get("storage_class", self.STORAGE_CLASS_NAME)
+            clone_fs_type = self.pvc_details.get(pvc_name, {}).get("fs_type", "ext4")
             sleep_n_sec(10)
             try:
                 self.k8s_utils.create_clone_pvc(
@@ -3060,6 +3076,7 @@ class K8sNativeBasicFailoverTest(K8sNativeFailoverTest):
                     "job_name": clone_job,
                     "configmap_name": clone_cm,
                     "storage_class": clone_sc,
+                    "fs_type": clone_fs_type,
                 }
 
             # Resize source PVC and clone PVC
@@ -3133,6 +3150,14 @@ class K8sNativeBasicFailoverTest(K8sNativeFailoverTest):
             pool_name=self.pool_name,
             ndcs=self.ndcs,
             npcs=self.npcs,
+        )
+        self.k8s_utils.create_storage_class(
+            name=self.XFS_STORAGE_CLASS_NAME,
+            cluster_id=cluster_id,
+            pool_name=self.pool_name,
+            ndcs=self.ndcs,
+            npcs=self.npcs,
+            fs_type="xfs",
         )
         self.k8s_utils.delete_volume_snapshot_class(self.SNAPSHOT_CLASS_NAME)
         self.k8s_utils.create_volume_snapshot_class(self.SNAPSHOT_CLASS_NAME)
@@ -3321,13 +3346,14 @@ class K8sNativeResilientFailoverTest(K8sNativeFailoverTest):
         self._ensure_k8s_utils()
         for i in range(count):
             pvc_name = f"pvc-{_rand_seq(12)}"
+            sc_name = random.choice([self.STORAGE_CLASS_NAME, self.XFS_STORAGE_CLASS_NAME])
             self.logger.info(
                 f"[deferred_create] Creating PVC {pvc_name} "
-                f"({i+1}/{count}) — will bind after recovery"
+                f"({i+1}/{count}) SC={sc_name} — will bind after recovery"
             )
             try:
                 self.k8s_utils.create_pvc(
-                    pvc_name, self.pvc_size, self.STORAGE_CLASS_NAME,
+                    pvc_name, self.pvc_size, sc_name,
                 )
             except Exception as exc:
                 self.logger.warning(
@@ -3579,10 +3605,11 @@ class K8sNativeResilientFailoverTest(K8sNativeFailoverTest):
                 self._snapshot_lvol_ids() if self.use_client_fio else set()
             )
 
-            # Create clone PVC — use same StorageClass as source PVC
+            # Create clone PVC — use same StorageClass/fs_type as source PVC
             clone_sc = self.pvc_details.get(pvc_name, {}).get(
                 "storage_class", self.STORAGE_CLASS_NAME
             )
+            clone_fs_type = self.pvc_details.get(pvc_name, {}).get("fs_type", "ext4")
             sleep_n_sec(10)
             try:
                 self.k8s_utils.create_clone_pvc(
@@ -3659,6 +3686,7 @@ class K8sNativeResilientFailoverTest(K8sNativeFailoverTest):
                     "client": client,
                     "log_file": log_file,
                     "storage_class": clone_sc,
+                    "fs_type": clone_fs_type,
                 }
                 self.clone_mount_details[clone_lvol_name] = {
                     "ID": clone_lvol_id,
@@ -3702,6 +3730,7 @@ class K8sNativeResilientFailoverTest(K8sNativeFailoverTest):
                     "job_name": clone_job,
                     "configmap_name": clone_cm,
                     "storage_class": clone_sc,
+                    "fs_type": clone_fs_type,
                 }
 
             self.logger.info(
@@ -4119,6 +4148,14 @@ class K8sNativeResilientFailoverTest(K8sNativeFailoverTest):
             pool_name=self.pool_name,
             ndcs=self.ndcs,
             npcs=self.npcs,
+        )
+        self.k8s_utils.create_storage_class(
+            name=self.XFS_STORAGE_CLASS_NAME,
+            cluster_id=cluster_id,
+            pool_name=self.pool_name,
+            ndcs=self.ndcs,
+            npcs=self.npcs,
+            fs_type="xfs",
         )
         if self.tls_enabled:
             self.logger.info("TLS enabled — ensuring encryption pool exists")

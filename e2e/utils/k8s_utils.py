@@ -810,6 +810,8 @@ class K8sUtils:
                     except Exception:
                         pass
 
+                fs_type = info.get("fs_type", "N/A") or "N/A"
+
                 all_entries.append({
                     "type": label,
                     "name": name or "N/A",
@@ -817,6 +819,7 @@ class K8sUtils:
                     "lvol_id": vol_handle or "N/A",
                     "storage_node": storage_node,
                     "storage_class": sc,
+                    "fs_type": fs_type,
                     "snap_name": snap,
                     "parent_pvc": parent_pvc,
                     "fio_k8s_node": fio_node,
@@ -825,22 +828,22 @@ class K8sUtils:
         if not all_entries:
             return
 
-        self.logger.info("=" * 180)
+        self.logger.info("=" * 190)
         self.logger.info("FIO Job → PVC/Clone → Lvol → Worker Mapping")
-        self.logger.info("-" * 180)
+        self.logger.info("-" * 190)
         self.logger.info(
             f"{'FIO Job':<30} {'PVC/Clone':<25} {'Lvol ID':<40} "
             f"{'Storage Node':<40} {'FIO K8s Node':<20} {'SC':<28} "
-            f"{'Snapshot':<20} {'Parent PVC':<25} {'Type':<6}"
+            f"{'FS':<6} {'Snapshot':<20} {'Parent PVC':<25} {'Type':<6}"
         )
-        self.logger.info("-" * 180)
+        self.logger.info("-" * 190)
         for e in all_entries:
             self.logger.info(
                 f"{e['job']:<30} {e['name']:<25} {e['lvol_id']:<40} "
                 f"{e['storage_node']:<40} {e['fio_k8s_node']:<20} {e['storage_class']:<28} "
-                f"{e['snap_name']:<20} {e['parent_pvc']:<25} {e['type']:<6}"
+                f"{e['fs_type']:<6} {e['snap_name']:<20} {e['parent_pvc']:<25} {e['type']:<6}"
             )
-        self.logger.info("=" * 180)
+        self.logger.info("=" * 190)
         return all_entries
 
     # ── VolumeSnapshot operations ────────────────────────────────────────────

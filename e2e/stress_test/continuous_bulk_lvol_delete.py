@@ -960,6 +960,14 @@ class BulkLvolDeleteK8s(_BulkDeleteMixin, K8sNativeFailoverTest):
             ndcs=self.ndcs,
             npcs=self.npcs,
         )
+        self.k8s_utils.create_storage_class(
+            name=self.XFS_STORAGE_CLASS_NAME,
+            cluster_id=cluster_id,
+            pool_name=self.pool_name,
+            ndcs=self.ndcs,
+            npcs=self.npcs,
+            fs_type="xfs",
+        )
 
         self._run_bulk_iterations()
 
@@ -976,13 +984,16 @@ class BulkLvolDeleteK8s(_BulkDeleteMixin, K8sNativeFailoverTest):
                 f"({i+1}/{self.NUM_LVOLS})"
             )
 
+            sc_name = random.choice([self.STORAGE_CLASS_NAME, self.XFS_STORAGE_CLASS_NAME])
+            pvc_fs_type = "xfs" if sc_name == self.XFS_STORAGE_CLASS_NAME else "ext4"
+
             # Snapshot lvol IDs before PVC creation (for client mode mapping)
             if self.use_client_fio:
                 old_lvol_ids = self._snapshot_lvol_ids()
 
             try:
                 self.k8s_utils.create_pvc(
-                    pvc_name, self.PVC_SIZE, self.STORAGE_CLASS_NAME,
+                    pvc_name, self.PVC_SIZE, sc_name,
                 )
                 self.k8s_utils.wait_pvc_bound(pvc_name, timeout=300)
             except Exception as exc:
@@ -1060,7 +1071,7 @@ class BulkLvolDeleteK8s(_BulkDeleteMixin, K8sNativeFailoverTest):
                     "client": client,
                     "log_file": log_file,
                     "fs_type": fs_type,
-                    "storage_class": self.STORAGE_CLASS_NAME,
+                    "storage_class": sc_name,
                 }
                 self.lvol_mount_details[lvol_name] = {
                     "ID": lvol_id,
@@ -1108,7 +1119,8 @@ class BulkLvolDeleteK8s(_BulkDeleteMixin, K8sNativeFailoverTest):
                     "configmap_name": cm_name,
                     "snapshots": [],
                     "node_id": node_id,
-                    "storage_class": self.STORAGE_CLASS_NAME,
+                    "storage_class": sc_name,
+                    "fs_type": pvc_fs_type,
                 }
 
                 self.logger.info(

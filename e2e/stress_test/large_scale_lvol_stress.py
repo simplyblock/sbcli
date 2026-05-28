@@ -1307,6 +1307,15 @@ class LargeScaleLvolK8s(_LargeScaleMixin, K8sNativeFailoverTest):
             npcs=self.npcs,
             max_namespace_per_subsys=self.NAMESPACES_PER_SUBSYSTEM,
         )
+        self.k8s_utils.create_storage_class(
+            name=self.XFS_STORAGE_CLASS_NAME,
+            cluster_id=cluster_id,
+            pool_name=self.pool_name,
+            ndcs=self.ndcs,
+            npcs=self.npcs,
+            fs_type="xfs",
+            max_namespace_per_subsys=self.NAMESPACES_PER_SUBSYSTEM,
+        )
 
         self._run_large_scale_test()
 
@@ -1404,10 +1413,12 @@ class LargeScaleLvolK8s(_LargeScaleMixin, K8sNativeFailoverTest):
     def _create_single_pvc(self, params: dict):
         """Create a single PVC and wait for Bound.  Raises on failure."""
         name = params["name"]
+        sc_name = random.choice([self.STORAGE_CLASS_NAME, self.XFS_STORAGE_CLASS_NAME])
+        fs_type = "xfs" if sc_name == self.XFS_STORAGE_CLASS_NAME else "ext4"
         self.k8s_utils.create_pvc(
             name=name,
             size=self.PVC_SIZE,
-            storage_class=self.STORAGE_CLASS_NAME,
+            storage_class=sc_name,
         )
         if not self.k8s_utils.wait_pvc_bound(name, timeout=300):
             raise TimeoutError(f"PVC {name} not Bound within 300s")
@@ -1415,8 +1426,10 @@ class LargeScaleLvolK8s(_LargeScaleMixin, K8sNativeFailoverTest):
             "job_name": None,
             "configmap_name": None,
             "snapshots": [],
+            "storage_class": sc_name,
+            "fs_type": fs_type,
         }
-        self.logger.info(f"[create_pvc] {name} Bound")
+        self.logger.info(f"[create_pvc] {name} Bound (fs={fs_type})")
 
     def _create_single_pvc_client(self, params: dict):
         """Create a single PVC, NVMe-connect on a client, and verify the
@@ -1428,10 +1441,12 @@ class LargeScaleLvolK8s(_LargeScaleMixin, K8sNativeFailoverTest):
         or a new namespace on an existing controller (shared subsystem).
         """
         name = params["name"]
+        sc_name = random.choice([self.STORAGE_CLASS_NAME, self.XFS_STORAGE_CLASS_NAME])
+        fs_type = "xfs" if sc_name == self.XFS_STORAGE_CLASS_NAME else "ext4"
         self.k8s_utils.create_pvc(
             name=name,
             size=self.PVC_SIZE,
-            storage_class=self.STORAGE_CLASS_NAME,
+            storage_class=sc_name,
         )
         if not self.k8s_utils.wait_pvc_bound(name, timeout=300):
             raise TimeoutError(f"PVC {name} not Bound within 300s")
@@ -1502,7 +1517,7 @@ class LargeScaleLvolK8s(_LargeScaleMixin, K8sNativeFailoverTest):
         log_file = f"{self.log_path}/{name}.log"
 
         self.ssh_obj.format_disk(
-            node=client, device=new_dev, fs_type="ext4"
+            node=client, device=new_dev, fs_type=fs_type
         )
         self.ssh_obj.mount_path(
             node=client, device=new_dev, mount_path=mount_point
@@ -1512,13 +1527,15 @@ class LargeScaleLvolK8s(_LargeScaleMixin, K8sNativeFailoverTest):
             "job_name": None,
             "configmap_name": None,
             "snapshots": [],
+            "storage_class": sc_name,
+            "fs_type": fs_type,
         }
         self.lvol_mount_details[lvol_name] = {
             "ID": lvol_id,
             "Name": lvol_name,
             "Mount": mount_point,
             "Device": new_dev,
-            "FS": "ext4",
+            "FS": fs_type,
             "Log": log_file,
             "Client": client,
             "pvc_name": name,
