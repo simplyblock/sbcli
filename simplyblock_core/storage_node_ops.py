@@ -3543,11 +3543,17 @@ def shutdown_storage_node(node_id, force=False):
 
     logger.info("Node found: %s in state: %s", snode.hostname, snode.status)
 
-    if not force:
-        allowed, reason = _check_ftt_allows_node_removal(node_id, db_controller)
-        if not allowed:
-            logger.error(f"Cannot shutdown node: {reason}")
-            return False, reason
+    # NOTE: shutdown does not consult _check_ftt_allows_node_removal.
+    # Removal and shutdown are different operations: removing a node
+    # permanently changes the cluster's storage budget, while shutting one
+    # down is a transient state that the cluster is meant to absorb under
+    # its FTT contract. Conflating the two was added in commit fbdffea3
+    # (2026-03-28) and caused soak/operator workflows to wait for
+    # rebalancing to drain — the wrong policy for an operation whose
+    # whole point is to disrupt the cluster on purpose. The web API
+    # layer (simplyblock_web/api/v{1,2}/storage_node.py) still gates on
+    # this for its own non-force shutdown endpoint, where the policy
+    # decision belongs.
 
     # Guard: no concurrent shutdown + restart (design: mutual exclusion)
     for peer in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
