@@ -14,7 +14,7 @@ KEY_NAME = "mtes01"
 KEY_PATH = os.path.expanduser("~/.ssh/mtes01.pem")
 AZ = "us-east-1a"
 SG_NAME = "default"
-BRANCH = "main"
+BRANCH = "inline-checksum-validation"
 MAX_LVOL = "100"
 # --- Manual Network Config ---
 # Replace this with your actual Subnet ID (e.g., "subnet-0593459d6b931ee4c")
@@ -403,7 +403,7 @@ def main():
         "sudo dnf install git python3-pip nvme-cli -y",
         "sudo /usr/bin/python3 -m pip install --upgrade pip setuptools wheel",
         "sudo /usr/bin/python3 -m pip install ruamel.yaml",
-        "sudo pip install git+https://github.com/simplyblock-io/sbcli@main --upgrade --force --ignore-installed requests",
+        "sudo pip install git+https://github.com/simplyblock-io/sbcli@inline-checksum-validation --upgrade --force --ignore-installed requests",
         "echo 'export PATH=/usr/local/bin:$PATH' >> ~/.bashrc"
     ]
 
@@ -417,17 +417,29 @@ def main():
     # --- 5. Cluster Configuration (Phase 2) ---
     # Step 5a: Create cluster on mgmt (sequential, must complete first)
     print("Phase 2a: Creating cluster on management node...")
+    # --enable-inline-checksum is frozen at cluster create time (no
+    # mutator, no upgrade path). Pair with --enable-inline-checksum on
+    # `sn configure` below so the drives format to an LBAF with NVMe
+    # metadata (ms>=8) and alceml can run in md-on-device mode.
     ssh_exec(mgmt_ip, [
-        "sudo /usr/local/bin/sbctl -d cluster create --enable-node-affinity"
+        "sudo /usr/local/bin/sbctl -d cluster create"
         " --data-chunks-per-stripe 2 --parity-chunks-per-stripe 2"
+        " --enable-inline-checksum"
     ], check=True)
     print("Phase 2a: DONE - cluster created.")
 
     # Step 5b: Configure and deploy storage nodes in parallel
     print("Phase 2b: Configuring storage nodes...")
+    # --enable-inline-checksum here drives `sn configure`'s formatter to
+    # pick the smallest LBAF with ds=12, ms>=8 (8B+ NVMe metadata per
+    # 4K block) and force-reformat through the existing 4K-already-set
+    # early-out — required for alceml's md-on-device checksum_method=1.
+    # Devices with no md-capable LBAF format to plain 4K and fall back
+    # to checksum_method=2 (cv_fallback, ~1.17% capacity overhead).
     with ThreadPoolExecutor(max_workers=len(sn_ips)) as executor:
         tasks = [executor.submit(ssh_exec, ip, [
             f"sudo /usr/local/bin/sbctl -d sn configure --max-subsys {MAX_LVOL}"
+            " --enable-inline-checksum"
         ], check=True) for ip in sn_ips]
         for t in tasks:
             t.result()
