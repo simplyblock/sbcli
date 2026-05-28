@@ -34,8 +34,8 @@ Phase state-machine
       2. Create target lvol with the SAME NQN as the source lvol's subsystem
       3. Get target blobid via bdev_lvol_get_lvols
       4. Connect source to target's hub lvol (bdev_nvme_attach_controller)
-      5. bdev_lvol_final_migration on source (async)
-      6. Poll bdev_lvol_transfer_stat on source lvol until Done/Failed
+      5. bdev_lvol_final_migration on source (synchronous — blocks until done)
+      6. Rebuild NVMe-oF subsystem on TGT (delete old → create fresh, min_cntlid=2000)
       7. Register lvol on target secondary (if online)
       8. Create subsystem + listeners + namespace on target secondary (if online)
       → advance to PHASE_CLEANUP_SOURCE
@@ -151,8 +151,8 @@ def _snap_tgt_short_name(snap):
     """Return the migration-target bdev short name for a snapshot.
 
     Normally the target bdev is named <src_short> + _MIGRATION_BDEV_SUFFIX.
-    However, when apply_migration_to_db() is called early (adjacent / tgt_is_src_secondary
-    path), snap.snap_bdev is already updated to the target name which already carries the
+    However, when apply_migration_to_db() is called early (at cutover time),
+    snap.snap_bdev is already updated to the target name which already carries the
     suffix.  In that case return it as-is to avoid producing a double suffix (e.g.
     'SNAP_16745mm' instead of 'SNAP_16745m').
     """
@@ -1000,8 +1000,8 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
 
     Creates the target lvol with the same NQN as the source subsystem, connects
     the source to the target's hub lvol, and issues bdev_lvol_final_migration
-    (async).  Polls until Done, then registers the lvol on the target secondary
-    (if applicable) and updates ANA states.
+    (synchronous — blocks until SPDK completes the delta copy).  On success,
+    immediately rebuilds the TGT NVMe-oF subsystem and sets STATUS_CUTOVER.
 
     Note: apply_migration_to_db() is NOT called here; it is deferred to the end
     of PHASE_CLEANUP_SOURCE after source snap deletion is complete.
@@ -1019,599 +1019,288 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
     tgt_lvol_composite = f"{tgt_node.lvstore}/{tgt_lvol_bdev}"
     ctx = migration.transfer_context or {}
 
-    # --- Retry secondary registration after a completed transfer ---
-    # Transfer already finished on a previous run; only secondary registration
-    # remains.  Re-entering without this guard would re-create the lvol on the
-    # primary (collision), trigger cleanup, and lose the migrated data.
-    if ctx.get('stage') == 'secondary_register':
-        tgt_sec, sec_err = _get_target_secondary_node(tgt_node)
-        if sec_err:
-            migration.error_message = sec_err
-            migration.write_to_db(db.kv_store)
-            return False, True, _WAIT
-
-        if tgt_sec is not None:
-            sec_rpc = _make_rpc(tgt_sec)
-
-            if migration.snaps_migrated:
-                try:
-                    last_snap = db.get_snapshot_by_id(migration.snaps_migrated[-1])
-                    tgt_snap_composite = f"{tgt_node.lvstore}/{_snap_short_name(last_snap) + _MIGRATION_BDEV_SUFFIX}"
-                    ret = sec_rpc.bdev_lvol_add_clone(tgt_lvol_composite, tgt_snap_composite)
-                    if not ret:
-                        migration.write_to_db(db.kv_store)
-                        return False, True, (
-                            f"bdev_lvol_add_clone on secondary failed for {tgt_lvol_composite}")
-                except KeyError as e:
-                    migration.write_to_db(db.kv_store)
-                    return False, True, str(e)
-
-            ok, err = _expose_lvol_on_secondary(
-                lvol, tgt_node, tgt_sec, sec_rpc, None, None,
-                already_registered=True, tgt_bdev_name=tgt_lvol_bdev)
-            if not ok:
-                migration.write_to_db(db.kv_store)
-                return False, True, err
-        migration.transfer_context = {
-            'tgt_lvol_uuid': ctx.get('tgt_lvol_uuid'),
-            'tgt_lvol_bdev': tgt_lvol_bdev,
-        }
-        _update_ana_states(migration, src_node, tgt_node, src_rpc, tgt_rpc)
-        return True, False, None
-
-    # --- Poll in-progress final migration ---
+    # --- Crash recovery: Done handler was interrupted mid-run ---
+    # bdev_lvol_final_migration is synchronous — it blocks until SPDK completes.
+    # If we re-enter with stage='transfer' the migration already finished; check
+    # stat once to detect the rare SPDK-side failure, then re-run Done handler.
     if ctx.get('stage') == 'transfer':
-        # Tight-poll bdev_lvol_transfer_stat so the Done handler fires within
-        # milliseconds of SPDK completing the migration — not within the outer
-        # 3-second service-loop sleep.  This eliminates the "ANA gap": the window
-        # where SRC bdev returns EIO but the ANA state still says "optimized",
-        # causing the multipath driver to keep hammering SRC and accumulating IO
-        # errors while we wait for the next scheduler tick.
-        _FINAL_MIG_POLL_S   = 0.1   # 100 ms between stat checks
-        _FINAL_MIG_TIMEOUT  = 300   # give up after 5 min
-        _t_start = time.monotonic()
-        state = 'In progress'
-        while state == 'In progress':
-            if time.monotonic() - _t_start > _FINAL_MIG_TIMEOUT:
-                _cleanup_final_migration(src_rpc, ctx, tgt_rpc, rollback_target=True)
-                migration.transfer_context = {}
-                migration.write_to_db(db.kv_store)
-                return False, True, "bdev_lvol_final_migration timed out"
-            result = src_rpc.bdev_lvol_transfer_stat(src_lvol_composite)
-            if result is None:
-                _cleanup_final_migration(src_rpc, ctx, tgt_rpc, rollback_target=True)
-                migration.transfer_context = {}
-                migration.write_to_db(db.kv_store)
-                return False, True, "bdev_lvol_transfer_stat returned None for final migration"
-            state = result.get('transfer_state', 'No process')
-            if state == 'In progress':
-                time.sleep(_FINAL_MIG_POLL_S)
-
-        if state in ('Failed', 'No process'):
+        result = src_rpc.bdev_lvol_transfer_stat(src_lvol_composite)
+        if result is None:
             _cleanup_final_migration(src_rpc, ctx, tgt_rpc, rollback_target=True)
             migration.transfer_context = {}
             migration.write_to_db(db.kv_store)
-            return False, True, f"Final migration {state}"
-
-        # state == 'Done' ─ register on secondary and update ANA states
+            return False, True, "bdev_lvol_transfer_stat returned None (crash recovery)"
+        state = result.get('transfer_state', 'No process')
+        if state == 'Failed':
+            _cleanup_final_migration(src_rpc, ctx, tgt_rpc, rollback_target=True)
+            migration.transfer_context = {}
+            migration.write_to_db(db.kv_store)
+            return False, True, "Final migration Failed (crash recovery)"
+        # 'Done' or 'No process': migration completed — SPDK cleans up the
+        # transfer poller after a sync call so 'No process' means finished.
         logger.info(
-            f"[IO-RESUME] {_now_ms()} final migration Done: "
+            f"[IO-RESUME] {_now_ms()} final migration Done (crash recovery, state={state}): "
             f"lvol={migration.lvol_id} io now live on target")
-        _cleanup_final_migration(src_rpc, ctx)
-        migration.current_job_id = ""
-        migration.write_to_db(db.kv_store)
-
-        # Chain lvol → last migrated snapshot on SECONDARY, then expose via NVMe-oF.
-        # On the primary, handle_snapshot_post_migration runs automatically via
-        # hublvol_write() intercepting the completion signal — SPDK sends the signal
-        # BEFORE setting XFER_DONE, so by the time we poll "Done" the primary chain
-        # is already established.  Calling bdev_lvol_add_clone on primary would fail
-        # with -EEXIST.  The secondary never receives the forwarded signal (its
-        # replication path is not up yet), so we must chain it explicitly here.
-        # tgt_uuid is needed by CLEANUP_SOURCE to update lvol.lvol_uuid in the DB.
-        # Carry it forward through every transfer_context write below so it
-        # survives the phase boundary even when retries via 'secondary_register'
-        # are needed.
-        # When tgt is NOT src's secondary the hub controller must stay attached
-        # until clients have taken the new path — defer detach to CLEANUP_SOURCE.
-        # When tgt IS src's secondary the namespace swap happens just below
-        # (before _update_ana_states) and the hub is detached immediately after.
-        tgt_is_src_secondary = (src_node.secondary_node_id == tgt_node.get_id())
         tgt_uuid_carry = {
             'tgt_lvol_uuid': ctx.get('tgt_lvol_uuid'),
             'tgt_lvol_bdev': tgt_lvol_bdev,
-            # Carry hub_ctrl_name for BOTH paths so PHASE_CLEANUP_SOURCE always
-            # handles the detach — after the source NQN is gone and the client
-            # has had time to reconnect.  Previously tgt_is_src_secondary nulled
-            # this out and detached early (before client reconnect).
             'hub_ctrl_name': ctx.get('ctrl_name'),
         }
 
-        # For the non-adjacent path the secondary must be registered *before*
-        # the ANA-state flip below so the client already has a non-optimised
-        # path to TGT's secondary when IO is redirected.
-        # For tgt_is_src_secondary this registration is deferred until AFTER
-        # the old mirror subsystem is deleted and the new primary subsystem is
-        # created — so all three NVMe-oF operations land in the right order:
-        #   (a) delete old mirror  (b) create primary  (c) create secondary.
-        if lvol.ha_type == "ha" and not tgt_is_src_secondary:
-            tgt_sec, sec_err = _get_target_secondary_node(tgt_node)
+    else:
+        # --- Gate: check target secondary state before creating on target primary ---
+        if lvol.ha_type == "ha":
+            _, sec_err = _get_target_secondary_node(tgt_node)
             if sec_err:
                 migration.error_message = sec_err
-                migration.transfer_context = tgt_uuid_carry
                 migration.write_to_db(db.kv_store)
                 return False, True, _WAIT
+
+        # --- Start the final migration ---
+
+        # Step 1: create writable target lvol (size in MiB)
+        # Note: SPDK's bdev_lvol_create 'uuid' param is for the lvol *store*, not
+        # the new lvol.  Do not pass the lvol UUID here.
+        lvol_size_in_mib = _bytes_to_mib(lvol.size)
+        logger.info(
+            f"[MIGRATION SIZE CHECK] lvol={lvol.lvol_bdev} "
+            f"source_size_bytes={lvol.size} target_size_mib={lvol_size_in_mib}"
+        )
+        _log_spdk_bdev_size(src_rpc, src_lvol_composite, f"SRC lvol[{lvol.lvol_bdev}] pre-create")
+        ret = tgt_rpc.create_lvol(tgt_lvol_bdev, lvol_size_in_mib, tgt_node.lvstore)
+        if not ret:
+            return False, True, f"Failed to create target lvol {tgt_lvol_composite}"
+        _log_spdk_bdev_size(tgt_rpc, tgt_lvol_composite, f"TGT lvol[{lvol.lvol_bdev}] post-create")
+
+        ret = tgt_rpc.bdev_lvol_set_migration_flag(tgt_lvol_composite)
+        if not ret:
+            _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc)
+            return False, True, f"bdev_lvol_set_migration_flag failed for target lvol {tgt_lvol_composite}"
+
+        # Step 1b: query map_id / blobid / uuid — needed for secondary registration
+        # and for bdev_lvol_final_migration.  Do this once here rather than again
+        # after NVMe-oF setup to keep secondary state consistent from the start.
+        lvols_list = tgt_rpc.bdev_lvol_get_lvols(tgt_node.lvstore)
+        if not lvols_list:
+            _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc)
+            return False, True, "bdev_lvol_get_lvols returned empty result from target"
+
+        tgt_map_id = None
+        tgt_blobid = None
+        tgt_uuid = None
+        for entry in lvols_list:
+            entry_name = entry.get('name', '') or entry.get('lvol_name', '')
+            if entry_name in (tgt_lvol_bdev, tgt_lvol_composite):
+                tgt_map_id = entry.get('map_id')
+                tgt_blobid = entry.get('blobid')
+                tgt_uuid = entry.get('uuid')
+                break
+
+        if tgt_map_id is None:
+            _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc)
+            return False, True, f"Could not find map_id for {lvol.lvol_bdev} on target"
+
+        # Step 1c: register lvol on secondary and set migration flag there.
+        # The secondary's hublvol_write() checks migration_flag before deciding
+        # whether to treat the completion signal as a chain-parent operation.
+        # If the flag is not set the signal is treated as normal I/O and the
+        # secondary's lvol is never chained to its parent snapshot.
+        sec_setup_rpc = None
+        if lvol.ha_type == "ha":
+            tgt_sec_setup, sec_setup_err = _get_target_secondary_node(tgt_node)
+            if sec_setup_err:
+                _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc)
+                return False, True, sec_setup_err
+            if tgt_sec_setup is not None:
+                sec_setup_rpc = _make_rpc(tgt_sec_setup)
+                ret = sec_setup_rpc.bdev_lvol_register(
+                    tgt_lvol_bdev, tgt_node.lvstore, tgt_uuid, tgt_blobid,
+                    lvol.lvol_priority_class)
+                if not ret:
+                    _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc)
+                    return False, True, (
+                        f"bdev_lvol_register on secondary failed for {tgt_lvol_composite}")
+                ret = sec_setup_rpc.bdev_lvol_set_migration_flag(tgt_lvol_composite)
+                if not ret:
+                    sec_setup_rpc.delete_lvol(tgt_lvol_bdev, del_async=True)
+                    _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc)
+                    return False, True, (
+                        f"bdev_lvol_set_migration_flag on secondary failed for {tgt_lvol_composite}")
+
+        # NVMe-oF subsystem setup is deferred to the Done handler — the subsystem
+        # is deleted and recreated fresh after transfer completes so all paths get
+        # a clean primary-port subsystem (min_cntlid=2000).
+
+        # Step 3: connect source to target hub lvol
+        ctrl_name = f"mighub_{migration.uuid[:8]}"
+        hub_nqn = tgt_node.hublvol.nqn
+        hub_port = tgt_node.hublvol.nvmf_port
+        ret = src_rpc.bdev_nvme_attach_controller(ctrl_name, hub_nqn, target_ip, hub_port, trtype)
+        if not ret:
+            # Attachment can fail with EEXIST (-17) if the task runner crashed
+            # after creating the hub controller in a previous attempt but before
+            # persisting transfer_context to the DB.  The zombie controller is
+            # still alive on the source SPDK.  Check whether the controller's
+            # namespace bdev already exists; if so, reuse it (idempotent retry).
+            if src_rpc.get_bdevs(f"{ctrl_name}n1"):
+                logger.info(
+                    f"Hub controller {ctrl_name} already exists on source "
+                    f"(zombie from previous attempt); reusing"
+                )
+            else:
+                _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc, secondary_rpc=sec_setup_rpc)
+                return False, True, "Failed to connect source to target hub"
+
+        hub_bdev = f"{ctrl_name}n1"
+
+        # Step 4: locate the last migrated snapshot's composite name on the target
+        if not migration.snaps_migrated:
+            src_rpc.bdev_nvme_detach_controller(ctrl_name)
+            _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc, secondary_rpc=sec_setup_rpc)
+            return False, True, "No snapshots migrated; cannot perform final migration"
+
+        last_snap_uuid = migration.snaps_migrated[-1]
+        try:
+            last_snap = db.get_snapshot_by_id(last_snap_uuid)
+        except KeyError:
+            src_rpc.bdev_nvme_detach_controller(ctrl_name)
+            _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc, secondary_rpc=sec_setup_rpc)
+            return False, True, f"Last snapshot {last_snap_uuid} not found"
+
+        tgt_snap_composite = f"{tgt_node.lvstore}/{_snap_short_name(last_snap) + _MIGRATION_BDEV_SUFFIX}"
+
+        # Step 5: start final migration — synchronous: blocks until SPDK completes
+        # the IO drain and delta copy.  Returns success/failure directly; no polling needed.
+        logger.info(
+            f"[IO-FREEZE] {_now_ms()} bdev_lvol_final_migration starting: "
+            f"lvol={lvol.uuid} src={src_lvol_composite} tgt_snap={tgt_snap_composite}")
+        ret = src_rpc.bdev_lvol_final_migration(
+            src_lvol_composite, tgt_map_id, tgt_snap_composite, 2, hub_bdev)
+        if ret is None:
+            src_rpc.bdev_nvme_detach_controller(ctrl_name)
+            _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc, secondary_rpc=sec_setup_rpc)
+            return False, True, "bdev_lvol_final_migration failed"
+
+        logger.info(
+            f"[IO-RESUME] {_now_ms()} final migration Done: "
+            f"lvol={migration.lvol_id} io now live on target")
+        migration.current_job_id = ""
+        # Save crash recovery anchor before Done handler so a mid-handler crash
+        # re-enters here with stage='transfer' and skips re-doing setup.
+        migration.transfer_context = {
+            'stage': 'transfer',
+            'ctrl_name': ctrl_name,
+            'tgt_lvol_composite': tgt_lvol_composite,
+            'tgt_lvol_uuid': tgt_uuid,
+            'tgt_lvol_bdev': tgt_lvol_bdev,
+        }
+        migration.write_to_db(db.kv_store)
+        tgt_uuid_carry = {
+            'tgt_lvol_uuid': tgt_uuid,
+            'tgt_lvol_bdev': tgt_lvol_bdev,
+            'hub_ctrl_name': ctrl_name,
+        }
+
+    # --- Done handler (shared by first-call and crash-recovery paths) ---
+    migration.transfer_context = tgt_uuid_carry
+
+    # Delete the old TGT subsystem (mirror for adjacent, migration subsystem
+    # for non-adjacent) and recreate fresh as the new primary.  All paths use
+    # the same sequence so the client always reconnects with clean connection strings.
+    # min_cntlid=2000: avoids controller ID collision with cntlid=1 (SRC primary)
+    # and cntlid=1000 (old TGT mirror if adjacent).
+    nqn = lvol.nqn
+    tgt_primary_port = tgt_node.get_lvol_subsys_port(tgt_node.lvstore)
+    tgt_trtype_local, tgt_ip_local = _get_migration_nic(tgt_node)
+    try:
+        tgt_rpc.subsystem_delete(nqn)
+        logger.info(f"Deleted old TGT subsystem {nqn}")
+    except Exception as e:
+        logger.warning(f"subsystem_delete {nqn} (may not exist): {e}")
+    try:
+        if not tgt_rpc.subsystem_create(nqn, lvol.ha_type, lvol.uuid,
+                                        min_cntlid=2000):
+            logger.error(f"subsystem_create {nqn} failed")
+        else:
+            tgt_rpc.listeners_create(
+                nqn, tgt_trtype_local, tgt_ip_local, tgt_primary_port,
+                ana_state="optimized")
+            # Pass lvol.guid (nguid) to match the original namespace identity.
+            tgt_rpc.nvmf_subsystem_add_ns(nqn, tgt_lvol_composite, lvol.uuid, lvol.guid)
+            logger.info(
+                f"Created subsystem {nqn} "
+                f"listener={tgt_ip_local}:{tgt_primary_port} ns={tgt_lvol_composite}")
+    except Exception as e:
+        logger.error(f"Subsystem re-creation failed: {e}")
+
+    # Expose on TGT secondary — order: (a) delete old  (b) create primary  (c) secondary.
+    # min_cntlid=3000: avoids conflict with cntlid=1 (SRC), 1000 (old mirror), 2000 (new primary).
+    if lvol.ha_type == "ha":
+        tgt_sec, sec_err = _get_target_secondary_node(tgt_node)
+        if sec_err:
+            logger.warning(
+                f"Cannot find TGT secondary for NVMe-oF setup ({sec_err}); continuing without it")
+        elif tgt_sec is not None:
+            sec_rpc = _make_rpc(tgt_sec)
+            if migration.snaps_migrated:
+                try:
+                    last_snap = db.get_snapshot_by_id(migration.snaps_migrated[-1])
+                    tgt_snap_composite = (
+                        f"{tgt_node.lvstore}/"
+                        f"{_snap_short_name(last_snap) + _MIGRATION_BDEV_SUFFIX}")
+                    ret = sec_rpc.bdev_lvol_add_clone(tgt_lvol_composite, tgt_snap_composite)
+                    if not ret:
+                        logger.warning(
+                            f"bdev_lvol_add_clone on secondary failed for "
+                            f"{tgt_lvol_composite} → {tgt_snap_composite}; "
+                            f"skipping secondary NVMe-oF setup")
+                        tgt_sec = None
+                except KeyError as e:
+                    logger.warning(
+                        f"Last snapshot not found for secondary chaining: {e}; "
+                        f"skipping secondary setup")
+                    tgt_sec = None
             if tgt_sec is not None:
-                sec_rpc = _make_rpc(tgt_sec)
-
-                # Chain lvol → last migrated snapshot on secondary
-                if migration.snaps_migrated:
-                    try:
-                        last_snap = db.get_snapshot_by_id(migration.snaps_migrated[-1])
-                        tgt_snap_composite = f"{tgt_node.lvstore}/{_snap_short_name(last_snap) + _MIGRATION_BDEV_SUFFIX}"
-                        ret = sec_rpc.bdev_lvol_add_clone(tgt_lvol_composite, tgt_snap_composite)
-                        if not ret:
-                            logger.error(
-                                f"bdev_lvol_add_clone on secondary failed for "
-                                f"{tgt_lvol_composite} → {tgt_snap_composite}")
-                            migration.transfer_context = {'stage': 'secondary_register', **tgt_uuid_carry}
-                            migration.write_to_db(db.kv_store)
-                            return False, True, (
-                                f"bdev_lvol_add_clone on secondary failed for {tgt_lvol_composite}")
-                    except KeyError as e:
-                        logger.error(f"Last snapshot not found for secondary chaining: {e}")
-                        migration.transfer_context = {'stage': 'secondary_register', **tgt_uuid_carry}
-                        migration.write_to_db(db.kv_store)
-                        return False, True, str(e)
-
                 ok, err = _expose_lvol_on_secondary(
                     lvol, tgt_node, tgt_sec, sec_rpc, None, None,
-                    already_registered=True, tgt_bdev_name=tgt_lvol_bdev)
-                if not ok:
-                    # Keep the primary lvol intact — transfer already completed.
-                    # Mark stage so retry skips re-creating and goes straight to
-                    # secondary registration.
-                    migration.transfer_context = {'stage': 'secondary_register', **tgt_uuid_carry}
-                    migration.write_to_db(db.kv_store)
-                    return False, True, err
-                logger.info(
-                    f"Lvol {lvol.uuid} registered and exposed on secondary {tgt_sec.get_id()}")
-
-        migration.transfer_context = tgt_uuid_carry
-
-        # For the non-adjacent path: flip ANA states so the client (which is
-        # already connected to both SRC and TGT) routes IO to TGT.
-        # For tgt_is_src_secondary: skip — TGT already has non-optimized ANA
-        # as the secondary mirror, and we are about to delete+recreate the
-        # subsystem anyway.  The new subsystem defaults to optimized (correct,
-        # since TGT is now primary), and the client reconnects fresh via new
-        # connection strings — no ANA flip needed.
-        if not tgt_is_src_secondary:
-            _update_ana_states(migration, src_node, tgt_node, src_rpc, tgt_rpc)
-
-        # For tgt_is_src_secondary: transfer is complete; now expose the
-        # migrated lvol via NVMe-oF for the first time.
-        #   1. Delete the old secondary-mirror subsystem entirely — this
-        #      removes all mirror namespaces and listeners in one shot and
-        #      makes the client's existing secondary path go away cleanly.
-        #   2. Create a fresh subsystem with the same NQN on TGT's primary
-        #      port and attach the migrated bdev as its sole namespace.
-        # The client must then disconnect stale controllers and reconnect
-        # using the new connection strings (primary + secondary ports).
-        if tgt_is_src_secondary:
-            tgt_primary_port = tgt_node.get_lvol_subsys_port(tgt_node.lvstore)
-            tgt_trtype_local, tgt_ip_local = _get_migration_nic(tgt_node)
-            try:
-                # Step 1: delete the old mirror subsystem
-                tgt_rpc.subsystem_delete(lvol.nqn)
-                logger.info(
-                    f"tgt_is_src_secondary: deleted old mirror subsystem {lvol.nqn}")
-            except Exception as e:
-                logger.warning(
-                    f"tgt_is_src_secondary: subsystem_delete {lvol.nqn} failed "
-                    f"(may not exist): {e}")
-            try:
-                # Step 2: create new subsystem with same NQN.
-                # Use lvol.ha_type / lvol.uuid to match the normal lvol-creation
-                # convention (serial='ha', model=uuid) — the previous code used a
-                # truncated-uuid serial and 'SimplyBlock' model which caused the
-                # NVMe subsystem identity to differ from what the client expected.
-                # Use min_cntlid=2000 so the new TGT primary's controller IDs do
-                # not collide with cntlid=1 (SRC primary, still live) or
-                # cntlid=1000 (the old TGT mirror, being torn down).  The kernel
-                # rejects new connections whose cntlid duplicates an existing
-                # controller for the same NQN, so each subsystem must use a
-                # distinct cntlid range.
-                if not tgt_rpc.subsystem_create(lvol.nqn, lvol.ha_type, lvol.uuid,
-                                                min_cntlid=2000):
-                    logger.error(
-                        f"tgt_is_src_secondary: subsystem_create {lvol.nqn} failed")
+                    already_registered=True, tgt_bdev_name=tgt_lvol_bdev,
+                    min_cntlid=3000)
+                if ok:
+                    logger.info(f"Lvol exposed on TGT secondary {tgt_sec.get_id()}")
                 else:
-                    # Step 3: add primary-port listener, explicitly optimized
-                    tgt_rpc.listeners_create(
-                        lvol.nqn, tgt_trtype_local, tgt_ip_local, tgt_primary_port,
-                        ana_state="optimized")
-                    # Step 4: add migrated bdev as namespace.
-                    # Pass lvol.guid (nguid) to match the original namespace identity.
-                    # nsid is intentionally omitted — let SPDK assign it.
-                    tgt_rpc.nvmf_subsystem_add_ns(
-                        lvol.nqn, tgt_lvol_composite, lvol.uuid, lvol.guid)
-                    logger.info(
-                        f"tgt_is_src_secondary: created subsystem {lvol.nqn} "
-                        f"listener={tgt_ip_local}:{tgt_primary_port} "
-                        f"ns={tgt_lvol_composite}")
-            except Exception as e:
-                logger.error(
-                    f"tgt_is_src_secondary: subsystem re-creation failed: {e}")
+                    logger.warning(f"TGT secondary NVMe-oF setup failed (non-fatal): {err}")
 
-            # Step 3b: expose on TGT's secondary node so the client gets both
-            # a primary path (TGT:primary_port) and a secondary/non-optimised
-            # path (TGT_SEC:secondary_port) after reconnect.
-            # This runs AFTER the old mirror deletion and new primary creation
-            # so the NVMe-oF topology lands in the correct order:
-            #   (a) delete old mirror  (b) create new primary  (c) create new secondary.
-            if lvol.ha_type == "ha":
-                tgt_sec, sec_err = _get_target_secondary_node(tgt_node)
-                if sec_err:
-                    logger.warning(
-                        f"tgt_is_src_secondary: cannot find TGT secondary for "
-                        f"secondary NVMe-oF setup ({sec_err}); continuing without it")
-                elif tgt_sec is not None:
-                    sec_rpc = _make_rpc(tgt_sec)
-                    if migration.snaps_migrated:
-                        try:
-                            last_snap = db.get_snapshot_by_id(migration.snaps_migrated[-1])
-                            tgt_snap_composite = (
-                                f"{tgt_node.lvstore}/"
-                                f"{_snap_short_name(last_snap) + _MIGRATION_BDEV_SUFFIX}")
-                            ret = sec_rpc.bdev_lvol_add_clone(
-                                tgt_lvol_composite, tgt_snap_composite)
-                            if not ret:
-                                logger.warning(
-                                    f"tgt_is_src_secondary: bdev_lvol_add_clone on "
-                                    f"secondary failed for "
-                                    f"{tgt_lvol_composite} → {tgt_snap_composite}; "
-                                    f"skipping secondary NVMe-oF setup")
-                                tgt_sec = None
-                        except KeyError as e:
-                            logger.warning(
-                                f"tgt_is_src_secondary: last snapshot not found "
-                                f"for secondary chaining: {e}; skipping secondary setup")
-                            tgt_sec = None
-                    if tgt_sec is not None:
-                        # min_cntlid=3000: avoids conflict with cntlid=1 (SRC),
-                        # cntlid=1000 (old mirror) and cntlid=2000 (new TGT primary).
-                        ok, err = _expose_lvol_on_secondary(
-                            lvol, tgt_node, tgt_sec, sec_rpc, None, None,
-                            already_registered=True, tgt_bdev_name=tgt_lvol_bdev,
-                            min_cntlid=3000)
-                        if ok:
-                            logger.info(
-                                f"tgt_is_src_secondary: lvol exposed on secondary "
-                                f"{tgt_sec.get_id()}")
-                        else:
-                            logger.warning(
-                                f"tgt_is_src_secondary: secondary NVMe-oF setup "
-                                f"failed (non-fatal): {err}")
-
-            # Hub controller detach is deferred to PHASE_CLEANUP_SOURCE (via
-            # hub_ctrl_name in tgt_uuid_carry) so it happens after the source
-            # NQN is removed and the client has reconnected — same as the
-            # non-adjacent path.
-
-        # Save source snap bdev names before apply_migration_to_db updates
-        # them — PHASE_CLEANUP_SOURCE uses this map to derive the correct
-        # source bdev names regardless of which path ran.
-        source_snap_bdevs = {}
-        for _snap_uuid in migration.snaps_migrated:
-            try:
-                _snap = db.get_snapshot_by_id(_snap_uuid)
-                source_snap_bdevs[_snap_uuid] = _snap.snap_bdev
-            except KeyError:
-                pass
-        tgt_uuid_carry['source_snap_bdevs'] = source_snap_bdevs
-        # Persist source_snap_bdevs BEFORE apply_migration_to_db updates
-        # snap.snap_bdev — so a crash between apply and the runner's write
-        # still has the correct source paths in DB on re-entry.
-        migration.write_to_db(db.kv_store)
-
-        # Apply DB records now so sbctl volume connect returns TGT endpoints
-        # for clients polling migration status at cutover time.
-        migration_controller.apply_migration_to_db(
-            migration,
-            tgt_lvol_uuid=tgt_uuid_carry.get('tgt_lvol_uuid'),
-            tgt_lvol_bdev=tgt_uuid_carry.get('tgt_lvol_bdev'))
-
-        tgt_uuid_carry['cutover_notified_at'] = time.time()
-        migration.status = LVolMigration.STATUS_CUTOVER
-        logger.info(
-            f"Migration {migration.uuid}: STATUS_CUTOVER set — "
-            f"TGT subsystem live, grace period starts, "
-            f"client should reconnect now")
-        return True, False, None
-
-    # --- Gate: check target secondary state before creating on target primary ---
-    if lvol.ha_type == "ha":
-        _, sec_err = _get_target_secondary_node(tgt_node)
-        if sec_err:
-            migration.error_message = sec_err
-            migration.write_to_db(db.kv_store)
-            return False, True, _WAIT
-
-    # --- Start the final migration ---
-
-    # Step 1: create writable target lvol (size in MiB)
-    # Note: SPDK's bdev_lvol_create 'uuid' param is for the lvol *store*, not
-    # the new lvol.  Do not pass the lvol UUID here.
-    lvol_size_in_mib = _bytes_to_mib(lvol.size)
-    logger.info(
-        f"[MIGRATION SIZE CHECK] lvol={lvol.lvol_bdev} "
-        f"source_size_bytes={lvol.size} target_size_mib={lvol_size_in_mib}"
-    )
-    _log_spdk_bdev_size(src_rpc, src_lvol_composite, f"SRC lvol[{lvol.lvol_bdev}] pre-create")
-    ret = tgt_rpc.create_lvol(tgt_lvol_bdev, lvol_size_in_mib, tgt_node.lvstore)
-    if not ret:
-        return False, True, f"Failed to create target lvol {tgt_lvol_composite}"
-    _log_spdk_bdev_size(tgt_rpc, tgt_lvol_composite, f"TGT lvol[{lvol.lvol_bdev}] post-create")
-
-    ret = tgt_rpc.bdev_lvol_set_migration_flag(tgt_lvol_composite)
-    if not ret:
-        _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc)
-        return False, True, f"bdev_lvol_set_migration_flag failed for target lvol {tgt_lvol_composite}"
-
-    # Step 1b: query map_id / blobid / uuid — needed for secondary registration
-    # and for bdev_lvol_final_migration.  Do this once here rather than again
-    # after NVMe-oF setup to keep secondary state consistent from the start.
-    lvols_list = tgt_rpc.bdev_lvol_get_lvols(tgt_node.lvstore)
-    if not lvols_list:
-        _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc)
-        return False, True, "bdev_lvol_get_lvols returned empty result from target"
-
-    tgt_map_id = None
-    tgt_blobid = None
-    tgt_uuid = None
-    for entry in lvols_list:
-        entry_name = entry.get('name', '') or entry.get('lvol_name', '')
-        if entry_name in (tgt_lvol_bdev, tgt_lvol_composite):
-            tgt_map_id = entry.get('map_id')
-            tgt_blobid = entry.get('blobid')
-            tgt_uuid = entry.get('uuid')
-            break
-
-    if tgt_map_id is None:
-        _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc)
-        return False, True, f"Could not find map_id for {lvol.lvol_bdev} on target"
-
-    # Step 1c: register lvol on secondary and set migration flag there.
-    # The secondary's hublvol_write() checks migration_flag before deciding
-    # whether to treat the completion signal as a chain-parent operation.
-    # If the flag is not set the signal is treated as normal I/O and the
-    # secondary's lvol is never chained to its parent snapshot.
-    sec_setup_rpc = None
-    if lvol.ha_type == "ha":
-        tgt_sec_setup, sec_setup_err = _get_target_secondary_node(tgt_node)
-        if sec_setup_err:
-            _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc)
-            return False, True, sec_setup_err
-        if tgt_sec_setup is not None:
-            sec_setup_rpc = _make_rpc(tgt_sec_setup)
-            ret = sec_setup_rpc.bdev_lvol_register(
-                tgt_lvol_bdev, tgt_node.lvstore, tgt_uuid, tgt_blobid,
-                lvol.lvol_priority_class)
-            if not ret:
-                _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc)
-                return False, True, (
-                    f"bdev_lvol_register on secondary failed for {tgt_lvol_composite}")
-            ret = sec_setup_rpc.bdev_lvol_set_migration_flag(tgt_lvol_composite)
-            if not ret:
-                sec_setup_rpc.delete_lvol(tgt_lvol_bdev, del_async=True)
-                _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc)
-                return False, True, (
-                    f"bdev_lvol_set_migration_flag on secondary failed for {tgt_lvol_composite}")
-
-    # Step 2: expose via NVMe-oF using the SOURCE's NQN (clients follow same NQN)
-    # Multiple volumes may share the same subsystem (namespace sharing group):
-    # if the subsystem already exists on target (placed there by a prior migration
-    # of a sibling volume), just add a new namespace to it.
-    nqn = lvol.nqn
-    existing_sub = tgt_rpc.subsystem_list(nqn)
-    subsystem_created_on_target = False
-    tgt_is_src_secondary = (src_node.secondary_node_id == tgt_node.get_id())
-
-    if not existing_sub:
-        # First volume from this namespace group to arrive on target
-        serial = lvol.uuid[:20].upper().replace('-', '')
-        ret = tgt_rpc.subsystem_create(nqn, serial, "SimplyBlock")
-        if not ret:
-            _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc, secondary_rpc=sec_setup_rpc)
-            return False, True, f"Failed to create subsystem {nqn} on target"
-        subsystem_created_on_target = True
-
-        ret = tgt_rpc.listeners_create(nqn, trtype, target_ip, tgt_node.get_lvol_subsys_port(tgt_node.lvstore))
-        if not ret:
-            tgt_rpc.subsystem_delete(nqn)
-            _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc, secondary_rpc=sec_setup_rpc)
-            return False, True, "Failed to create listener on target"
-    else:
-        # Subsystem pre-exists because this node was already the secondary mirror
-        # for this lvol (at the source's port, e.g. 4420).  After migration the
-        # lvol must be reachable at the target's primary port (e.g. 4427).  Add
-        if tgt_is_src_secondary:
-            # For the adjacent path (TGT was SRC's secondary mirror): do NOT
-            # touch the existing mirror subsystem during setup.  The mirror
-            # subsystem will be deleted and re-created cleanly after the
-            # transfer completes, so the client can disconnect the stale path
-            # and reconnect with correct connection strings.
-            logger.info(
-                f"tgt_is_src_secondary: deferring subsystem setup for {nqn} "
-                f"until after transfer completes")
-        else:
-            # TGT pre-existing subsystem from a non-secondary scenario:
-            # add the primary-port listener if missing, remove any stale
-            # secondary-mirror namespace, then attach our new namespace.
-            tgt_primary_port = tgt_node.get_lvol_subsys_port(tgt_node.lvstore)
-            ret = tgt_rpc.listeners_create(nqn, trtype, target_ip, tgt_primary_port)
-            if not ret:
-                logger.warning(
-                    f"Could not add primary-port listener {tgt_primary_port} to "
-                    f"pre-existing subsystem {nqn} — may already exist")
-
-            try:
-                sub_list = tgt_rpc.subsystem_list(nqn)
-                if sub_list:
-                    sub = sub_list[0] if isinstance(sub_list, list) else sub_list
-                    for ns in sub.get('namespaces', []):
-                        ns_bdev = ns.get('bdev_name') or ns.get('name', '')
-                        old_nsid = ns.get('nsid')
-                        if (ns_bdev.endswith(f"/{lvol.lvol_bdev}")
-                                and not ns_bdev.startswith(f"{tgt_node.lvstore}/")):
-                            tgt_rpc.nvmf_subsystem_remove_ns(nqn, old_nsid)
-                            logger.info(
-                                f"Removed stale secondary namespace nsid={old_nsid} "
-                                f"bdev={ns_bdev} from subsystem {nqn}")
-            except Exception as e:
-                logger.warning(f"Could not clean up stale secondary namespace in {nqn}: {e}")
-
-            logger.info(
-                f"Subsystem {nqn} already exists on target; added listener on "
-                f"{target_ip}:{tgt_primary_port} and attaching namespace")
-
-    tgt_ns_id = None
-    if not tgt_is_src_secondary:
-        ns_ret = tgt_rpc.nvmf_subsystem_add_ns(nqn, tgt_lvol_composite, uuid=lvol.uuid)
-        if not ns_ret:
-            if subsystem_created_on_target:
-                tgt_rpc.subsystem_delete(nqn)
-            _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc, secondary_rpc=sec_setup_rpc)
-            return False, True, "Failed to add namespace to target subsystem"
-        tgt_ns_id = int(ns_ret) if ns_ret else lvol.ns_id
-
-    # Step 3: connect source to target hub lvol
-    ctrl_name = f"mighub_{migration.uuid[:8]}"
-    hub_nqn = tgt_node.hublvol.nqn
-    hub_port = tgt_node.hublvol.nvmf_port
-    ret = src_rpc.bdev_nvme_attach_controller(ctrl_name, hub_nqn, target_ip, hub_port, trtype)
-    if not ret:
-        # Attachment can fail with EEXIST (-17) if the task runner crashed
-        # after creating the hub controller in a previous attempt but before
-        # persisting transfer_context to the DB.  The zombie controller is
-        # still alive on the source SPDK.  Check whether the controller's
-        # namespace bdev already exists; if so, reuse it (idempotent retry).
-        if src_rpc.get_bdevs(f"{ctrl_name}n1"):
-            logger.info(
-                f"Hub controller {ctrl_name} already exists on source "
-                f"(zombie from previous attempt); reusing"
-            )
-        else:
-            if subsystem_created_on_target:
-                tgt_rpc.subsystem_delete(nqn)
-            _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc, secondary_rpc=sec_setup_rpc)
-            return False, True, "Failed to connect source to target hub"
-
-    hub_bdev = f"{ctrl_name}n1"
-
-    # Step 4: locate the last migrated snapshot's composite name on the target
-    if not migration.snaps_migrated:
-        src_rpc.bdev_nvme_detach_controller(ctrl_name)
-        if subsystem_created_on_target:
-            tgt_rpc.subsystem_delete(nqn)
-        _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc, secondary_rpc=sec_setup_rpc)
-        return False, True, "No snapshots migrated; cannot perform final migration"
-
-    last_snap_uuid = migration.snaps_migrated[-1]
-    try:
-        last_snap = db.get_snapshot_by_id(last_snap_uuid)
-    except KeyError:
-        src_rpc.bdev_nvme_detach_controller(ctrl_name)
-        if subsystem_created_on_target:
-            tgt_rpc.subsystem_delete(nqn)
-        _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc, secondary_rpc=sec_setup_rpc)
-        return False, True, f"Last snapshot {last_snap_uuid} not found"
-
-    tgt_snap_composite = f"{tgt_node.lvstore}/{_snap_short_name(last_snap) + _MIGRATION_BDEV_SUFFIX}"
-
-    # Step 5: start final migration (async) – I/O is frozen for the small delta
-    logger.info(
-        f"[IO-FREEZE] {_now_ms()} bdev_lvol_final_migration starting: "
-        f"lvol={lvol.uuid} src={src_lvol_composite} tgt_snap={tgt_snap_composite}")
-    ret = src_rpc.bdev_lvol_final_migration(
-        src_lvol_composite, tgt_map_id, tgt_snap_composite, 2, hub_bdev)
-    if ret is None:
-        src_rpc.bdev_nvme_detach_controller(ctrl_name)
-        if subsystem_created_on_target:
-            tgt_rpc.subsystem_delete(nqn)
-        _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc, secondary_rpc=sec_setup_rpc)
-        return False, True, "bdev_lvol_final_migration failed to start"
-
-    migration.transfer_context = {
-        'stage': 'transfer',
-        'ctrl_name': ctrl_name,
-        'nqn': nqn,
-        'tgt_lvol_composite': tgt_lvol_composite,
-        'tgt_ns_id': tgt_ns_id,
-        'subsystem_created_on_target': subsystem_created_on_target,
-        'tgt_lvol_uuid': tgt_uuid,
-        'tgt_lvol_bdev': tgt_lvol_bdev,
-        'tgt_is_src_secondary': tgt_is_src_secondary,
-    }
+    # Save source snap bdev names before apply_migration_to_db updates
+    # them — PHASE_CLEANUP_SOURCE uses this map to derive the correct
+    # source bdev names regardless of which path ran.
+    source_snap_bdevs = {}
+    for _snap_uuid in migration.snaps_migrated:
+        try:
+            _snap = db.get_snapshot_by_id(_snap_uuid)
+            source_snap_bdevs[_snap_uuid] = _snap.snap_bdev
+        except KeyError:
+            pass
+    tgt_uuid_carry['source_snap_bdevs'] = source_snap_bdevs
+    # Persist source_snap_bdevs BEFORE apply_migration_to_db updates
+    # snap.snap_bdev — so a crash between apply and the runner's write
+    # still has the correct source paths in DB on re-entry.
     migration.write_to_db(db.kv_store)
-    logger.info(f"Started final migration: lvol={lvol.uuid} map_id={tgt_map_id}")
-    return False, False, None
 
+    # Apply DB records now so sbctl volume connect returns TGT endpoints
+    # for clients polling migration status at cutover time.
+    migration_controller.apply_migration_to_db(
+        migration,
+        tgt_lvol_uuid=tgt_uuid_carry.get('tgt_lvol_uuid'),
+        tgt_lvol_bdev=tgt_uuid_carry.get('tgt_lvol_bdev'))
 
-def _update_ana_states(migration, src_node, tgt_node, src_rpc, tgt_rpc):
-    """
-    After a successful migration set ANA states so clients follow the volume:
-      target listener → optimized   (new primary)
-      source listener → inaccessible (stale; will be cleaned up)
-    """
-    try:
-        lvol = db.get_lvol_by_id(migration.lvol_id)
-        nqn = lvol.nqn
-        tgt_trtype, tgt_ip = _get_migration_nic(tgt_node)
-        src_trtype, src_ip = _get_migration_nic(src_node)
+    tgt_uuid_carry['cutover_notified_at'] = time.time()
+    migration.status = LVolMigration.STATUS_CUTOVER
+    logger.info(
+        f"Migration {migration.uuid}: STATUS_CUTOVER set — "
+        f"TGT subsystem live, grace period starts, "
+        f"client should reconnect now")
+    return True, False, None
 
-        # Set ALL TGT listeners to optimized.
-        # When tgt_is_src_secondary, TGT has two listeners for this NQN:
-        #   (1) TGT primary port (e.g. 4432) — the new home of the lvol
-        #   (2) Mirror port (e.g. 4430, same number as SRC primary) — the port
-        #       the client originally connected to TGT through, because TGT was
-        #       SRC's HA secondary.
-        # Setting only the primary port to optimized leaves the mirror port
-        # non-optimized → client sees "no available path".
-        # Fix: enumerate all listeners in the subsystem on TGT and set each to
-        # optimized.
-        tgt_sub_list = tgt_rpc.subsystem_list(nqn)
-        if tgt_sub_list:
-            tgt_sub = tgt_sub_list[0] if isinstance(tgt_sub_list, list) else tgt_sub_list
-            listeners_set = 0
-            for listener in tgt_sub.get('listen_addresses', []):
-                trtype = listener.get('trtype', 'TCP')
-                traddr = listener.get('traddr', '')
-                port   = listener.get('trsvcid', '')
-                if traddr and port:
-                    tgt_rpc.nvmf_subsystem_listener_set_ana_state(
-                        nqn, traddr, port, trtype=trtype, ana="optimized")
-                    logger.info(f"ANA: {nqn} listener {traddr}:{port} → optimized")
-                    listeners_set += 1
-            if listeners_set == 0:
-                # Subsystem had no listeners — fall back to known primary port
-                tgt_rpc.nvmf_subsystem_listener_set_ana_state(
-                    nqn, tgt_ip, tgt_node.get_lvol_subsys_port(tgt_node.lvstore),
-                    trtype=tgt_trtype, ana="optimized")
-                logger.info(f"ANA: {nqn} on target {tgt_ip} → optimized (fallback, no listeners found)")
-        else:
-            # subsystem_list failed — fall back to known primary port
-            tgt_rpc.nvmf_subsystem_listener_set_ana_state(
-                nqn, tgt_ip, tgt_node.get_lvol_subsys_port(tgt_node.lvstore),
-                trtype=tgt_trtype, ana="optimized")
-            logger.info(f"ANA: {nqn} on target {tgt_ip} → optimized (fallback, subsystem_list failed)")
-
-        src_rpc.nvmf_subsystem_listener_set_ana_state(
-            nqn, src_ip, src_node.get_lvol_subsys_port(src_node.lvstore), trtype=src_trtype, ana="inaccessible")
-        logger.info(f"ANA: {nqn} on source {src_ip} → inaccessible")
-    except Exception as e:
-        logger.error(f"ANA state update error (non-fatal): {e}")
 
 
 def _cleanup_subsystem_or_ns(nqn, ns_id, subsystem_was_created_by_migration, rpc):
@@ -1729,7 +1418,7 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
 
     ctx = migration.transfer_context or {}
 
-    # --- Cutover grace period (tgt_is_src_secondary only) ---
+    # --- Cutover grace period ---
     # Wait here until the client has had time to reconnect to the new TGT
     # subsystem before we tear down the source subsystem.  The grace period
     # begins when PHASE_LVOL_MIGRATE sets cutover_notified_at and changes
@@ -1812,14 +1501,12 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
 
     # --- All deletes finished: hub detach then NVMe-oF teardown ---
     #
-    # Order matters for the adjacent path (tgt_is_src_secondary):
+    # Teardown order:
     #   Step 7: detach hub controller on SRC — severs the SRC→TGT mirror link.
     #           Must happen BEFORE deleting the source subsystem so that
     #           bdev_nvme_detach_controller can still reach the hub bdev.
     #   Step 8: delete source primary NVMe-oF subsystem.
     #   Then:   delete source lvol bdev.
-    tgt_is_src_secondary = (src_node.secondary_node_id == tgt_node.get_id())
-
     hub_ctrl_name = ctx.get('hub_ctrl_name')
     if hub_ctrl_name:
         try:
@@ -1833,10 +1520,9 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
         lvol = db.get_lvol_by_id(migration.lvol_id)
         logger.info(f"Step 8: removing source NVMe-oF subsystem {lvol.nqn}")
         _cleanup_subsystem_or_ns(lvol.nqn, lvol.ns_id, True, src_rpc)
-        if src_sec_rpc and not tgt_is_src_secondary:
-            # When tgt_is_src_secondary, src_sec_rpc IS the TGT node's RPC.
-            # The old mirror subsystem was already deleted and a new one created
-            # in the transfer-complete handler — do not touch it here.
+        if src_sec_rpc and src_node.secondary_node_id != tgt_node.get_id():
+            # When TGT is SRC's secondary, src_sec_rpc points to TGT whose
+            # subsystem was rebuilt as the new primary — do not touch it here.
             _cleanup_subsystem_or_ns(lvol.nqn, lvol.ns_id, True, src_sec_rpc)
     except Exception as e:
         logger.warning(f"Source subsystem cleanup failed (non-fatal): {e}")
@@ -1857,7 +1543,7 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
                     f"(non-fatal): {_mf_err}")
             _delete_bdev_blocking(
                 src_lvol_composite, src_rpc,
-                secondary_rpc=src_sec_rpc if (src_sec_rpc and not tgt_is_src_secondary) else None)
+                secondary_rpc=src_sec_rpc)
             logger.info(f"Deleted source lvol bdev {src_lvol_composite}")
         except Exception as e:
             logger.warning(f"Source lvol delete failed (non-fatal): {e}")
