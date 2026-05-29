@@ -152,11 +152,20 @@ class _DeviceFailureMigrationBase:
             raise RuntimeError(
                 f"No devices found on target node {self._target_node_id}"
             )
-        self._target_device_info = devices[0]
-        self._target_device_id = devices[0]["id"]
+        # Filter for online devices only — old failed_and_migrated devices
+        # remain in the list after recovery and must be skipped
+        online_devices = [d for d in devices if d.get("status") == "online"]
+        if not online_devices:
+            raise RuntimeError(
+                f"No online devices found on target node {self._target_node_id}. "
+                f"Device statuses: {[d.get('status') for d in devices]}"
+            )
+        self._target_device_info = online_devices[0]
+        self._target_device_id = online_devices[0]["id"]
         self.logger.info(
             f"Target node: {self._target_node_id}, "
-            f"Target device: {self._target_device_id}"
+            f"Target device: {self._target_device_id} "
+            f"(selected from {len(online_devices)} online / {len(devices)} total devices)"
         )
 
         # Get node capacity to calculate how many lvols to create
@@ -1135,11 +1144,20 @@ class _DeviceFailureMigrationK8s(_DeviceFailureMigrationBase):
             raise RuntimeError(
                 f"No devices found on target node {self._target_node_id}"
             )
-        self._target_device_info = devices[0]
-        self._target_device_id = devices[0]["id"]
+        # Filter for online devices only — old failed_and_migrated devices
+        # remain in the list after recovery and must be skipped
+        online_devices = [d for d in devices if d.get("status") == "online"]
+        if not online_devices:
+            raise RuntimeError(
+                f"No online devices found on target node {self._target_node_id}. "
+                f"Device statuses: {[d.get('status') for d in devices]}"
+            )
+        self._target_device_info = online_devices[0]
+        self._target_device_id = online_devices[0]["id"]
         self.logger.info(
             f"Target node: {self._target_node_id}, "
-            f"Target device: {self._target_device_id}"
+            f"Target device: {self._target_device_id} "
+            f"(selected from {len(online_devices)} online / {len(devices)} total devices)"
         )
 
         # Get node capacity to calculate how many PVCs to create
