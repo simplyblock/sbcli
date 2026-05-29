@@ -545,6 +545,12 @@ class RPCClient:
             "snapshot_name": snapshot_name}
         return self._request("bdev_lvol_snapshot", params)
 
+    def lvol_create_snapshot2(self, lvol_id, snapshot_name):
+        params = {
+            "lvol_name": lvol_id,
+            "snapshot_name": snapshot_name}
+        return self._request2("bdev_lvol_snapshot", params)
+
     def lvol_clone(self, snapshot_name, clone_name):
         params = {
             "snapshot_name": snapshot_name,

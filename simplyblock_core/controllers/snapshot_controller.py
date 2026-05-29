@@ -205,7 +205,13 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
                 rpc_client = primary_node.rpc_client()
 
                 logger.info("Creating Snapshot bdev")
-                ret = rpc_client.lvol_create_snapshot(f"{lvol.lvs_name}/{lvol.lvol_bdev}", snap_bdev_name)
+                ret = False
+                for i in range(5):
+                    ret, err = rpc_client.lvol_create_snapshot2(f"{lvol.lvs_name}/{lvol.lvol_bdev}", snap_bdev_name)
+                    if not ret:
+                        if err and err.get("code") == -32602: # {"code": -32602, "message": "Device or resource busy"}}
+                            logger.error(f"Failed to create snapshot, retrying: {err}")
+                            time.sleep(0.1)
                 if not ret:
                     return False, f"Failed to create snapshot on node: {snode.get_id()}"
 
