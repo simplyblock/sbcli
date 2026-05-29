@@ -2,21 +2,43 @@
 Device Failure Migration Stress Test
 
 Measures the time it takes to complete failure migration on a single device.
-Two variants:
 
-  - DeviceFailureMigrationNoLoad:
-        Fill device to 65 %, fail it, measure migration time (no IO load).
-  - DeviceFailureMigrationUnderLoad:
-        Fill device to 65 %, start IO on every cluster node, fail device,
-        measure migration time while IO is running.
+Variants:
 
-Both tests are Docker-mode only (sbcli + SSH FIO).  They work with any
-cluster geometry (ndcs/npcs) and require at least one client node
-(CLIENT_IP env var or mgmt node fallback).
+  Docker (sbcli + SSH FIO):
+  - DeviceFailureMigrationNoLoad          — API removal, no IO load
+  - DeviceFailureMigrationUnderLoad       — API removal, IO load running
+  - DeviceFailureMigrationPCIeNoLoad      — PCIe sysfs removal, no IO load
+  - DeviceFailureMigrationPCIeUnderLoad   — PCIe sysfs removal, IO load running
+
+  K8s-native (PVC + FIO K8s Jobs):
+  - DeviceFailureMigrationNoLoadK8s       — API removal, no IO load
+  - DeviceFailureMigrationUnderLoadK8s    — API removal, IO load running
+  - DeviceFailureMigrationPCIeNoLoadK8s   — PCIe sysfs removal, no IO load
+  - DeviceFailureMigrationPCIeUnderLoadK8s— PCIe sysfs removal, IO load running
+
+Failure modes:
+  - "api"  : Logical removal via REST API + set-failed-device CLI
+  - "pcie" : Physical removal via /sys/bus/pci/devices/<addr>/remove
+
+All tests work with any cluster geometry (ndcs/npcs) and require at least
+one storage node with a device.
+
+Invocation:
+  # Docker
+  python3 stress.py --testname DeviceFailureMigrationNoLoad --ndcs 2 --npcs 2
+  python3 stress.py --testname DeviceFailureMigrationPCIeNoLoad --ndcs 2 --npcs 2
+
+  # K8s
+  python3 stress.py --testname DeviceFailureMigrationNoLoadK8s --ndcs 2 --npcs 2 --run_k8s True
+  python3 stress.py --testname DeviceFailureMigrationPCIeUnderLoadK8s --ndcs 2 --npcs 2 --run_k8s True
 """
 
 import json
 import math
+import os
+import random
+import string
 import threading
 import time
 from datetime import datetime, timezone
@@ -28,8 +50,14 @@ from stress_test.lvol_ha_stress_fio import TestLvolHACluster
 from utils.common_utils import sleep_n_sec
 
 
+def _rand_seq(length: int = 8) -> str:
+    first = random.choice(string.ascii_lowercase)
+    rest = "".join(random.choices(string.ascii_lowercase + string.digits, k=length - 1))
+    return first + rest
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
-#  Mixin — shared orchestration for both variants
+#  Mixin — shared orchestration for all variants
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class _DeviceFailureMigrationBase:
@@ -59,19 +87,24 @@ class _DeviceFailureMigrationBase:
         self._load_fio_threads = []
         self._sn_nodes = []
         self._with_io_load = False
+        self._failure_mode = "api"
 
     # ── Main flow ────────────────────────────────────────────────────────────
 
-    def _run_migration_test(self, with_io_load=False):
-        """Main flow: setup → fill → [start IO] → fail → migrate → cleanup."""
+    def _run_migration_test(self, with_io_load=False, failure_mode="api"):
+        """Main flow: setup -> fill -> [start IO] -> fail -> migrate -> cleanup."""
         self._with_io_load = with_io_load
+        self._failure_mode = failure_mode
         t0 = time.time()
         try:
             self._phase_setup_pool_and_lvols()
             self._phase_fill_devices()
             if with_io_load:
                 self._phase_start_io_load()
-            self._phase_fail_and_migrate()
+            if failure_mode == "pcie":
+                self._phase_fail_and_migrate_pcie()
+            else:
+                self._phase_fail_and_migrate()
         finally:
             if with_io_load:
                 self._phase_stop_io_load()
@@ -277,19 +310,20 @@ class _DeviceFailureMigrationBase:
             f"IO load started: {len(self._load_fio_threads)} FIO threads"
         )
 
-    # ── Phase 4: remove device → set-failed → wait migration ────────────────
+    # ── Phase 4a: API removal -> set-failed -> wait migration ────────────────
 
     def _phase_fail_and_migrate(self):
         self.logger.info(
-            f"=== Phase: Fail device {self._target_device_id} and migrate ==="
+            f"=== Phase: Fail device {self._target_device_id} via API and migrate ==="
         )
         t0 = time.time()
 
-        # Step 1: remove device (ONLINE → REMOVED)
-        self.logger.info(f"Removing device {self._target_device_id} …")
+        # Step 1: remove device (ONLINE -> REMOVED)
+        self.logger.info(f"Removing device {self._target_device_id} ...")
         self.sbcli_utils.remove_device(self._target_device_id)
         self.sbcli_utils.wait_for_device_status(
-            self._target_node_id, "removed", timeout=120
+            self._target_node_id, "removed", timeout=120,
+            device_id=self._target_device_id,
         )
         self._timing["remove_duration"] = time.time() - t0
         self.logger.info(
@@ -306,14 +340,88 @@ class _DeviceFailureMigrationBase:
         sleep_n_sec(5)
 
         # Step 3: wait for migration to complete
-        self.logger.info("Waiting for failure migration tasks to complete …")
+        self._wait_migration_and_verify(t1)
+
+    # ── Phase 4b: PCIe sysfs removal -> set-failed -> wait migration ─────────
+
+    def _phase_fail_and_migrate_pcie(self):
+        self.logger.info(
+            f"=== Phase: Fail device {self._target_device_id} via PCIe and migrate ==="
+        )
+        t0 = time.time()
+
+        # Step 1: Get node IP and PCIe address
+        node_details = self.sbcli_utils.get_storage_node_details(
+            self._target_node_id
+        )
+        node_ip = node_details[0]["mgmt_ip"]
+        pcie_addr = self._target_device_info.get("pcie_address", "")
+        if not pcie_addr:
+            raise RuntimeError(
+                f"No pcie_address found for device {self._target_device_id}"
+            )
+        self.logger.info(
+            f"PCIe hot-unplug: device {self._target_device_id} "
+            f"at {pcie_addr} on {node_ip}"
+        )
+
+        # Step 2: PCIe hot-unplug via sysfs
+        self.ssh_obj.exec_command(
+            node=node_ip,
+            command=f"echo 1 | sudo tee /sys/bus/pci/devices/{pcie_addr}/remove"
+        )
+        self.logger.info("PCIe device removed via sysfs")
+        sleep_n_sec(10)
+
+        # Step 3: Wait for control plane to detect device loss
+        self.sbcli_utils.wait_for_device_status(
+            self._target_node_id, "unavailable", timeout=120,
+            device_id=self._target_device_id,
+        )
+        self._timing["remove_duration"] = time.time() - t0
+        self.logger.info(
+            f"Device detected as unavailable ({self._timing['remove_duration']:.1f}s)"
+        )
+
+        # Step 4: Logical remove + set-failed to trigger migration
+        t1 = time.time()
+        self.sbcli_utils.remove_device(self._target_device_id)
+        self.sbcli_utils.wait_for_device_status(
+            self._target_node_id, "removed", timeout=120,
+            device_id=self._target_device_id,
+        )
+
+        mgmt_ip = self.mgmt_nodes[0]
+        cmd = f"{self.base_cmd} sn set-failed-device {self._target_device_id}"
+        self.logger.info(f"Setting device failed via CLI: {cmd}")
+        result = self.ssh_obj.exec_command(mgmt_ip, cmd)
+        self.logger.info(f"set-failed-device result: {result}")
+        sleep_n_sec(5)
+
+        # Step 5: wait for migration to complete
+        self._wait_migration_and_verify(t1)
+
+        # Step 6: Rescan PCI bus to bring device back (for future tests)
+        self.logger.info("Rescanning PCI bus to restore device ...")
+        self.ssh_obj.exec_command(
+            node=node_ip,
+            command="echo 1 | sudo tee /sys/bus/pci/rescan"
+        )
+        sleep_n_sec(10)
+        self.logger.info("PCI bus rescan complete")
+
+    # ── Shared migration wait + verify ───────────────────────────────────────
+
+    def _wait_migration_and_verify(self, t_start):
+        """Wait for migration tasks and verify final device status."""
+        self.logger.info("Waiting for failure migration tasks to complete ...")
         migration_elapsed = self.sbcli_utils.wait_migration_tasks_complete(
             timeout=self.MIGRATION_TIMEOUT
         )
-        self._timing["migration_duration"] = time.time() - t1
+        self._timing["migration_duration"] = time.time() - t_start
         self._timing["migration_tasks_elapsed"] = migration_elapsed
 
-        # Step 4: verify device status
+        # Verify device status
         sleep_n_sec(5)
         devices = self.sbcli_utils.get_device_details(self._target_node_id)
         target_dev = None
@@ -380,6 +488,7 @@ class _DeviceFailureMigrationBase:
         self.logger.info("  DEVICE FAILURE MIGRATION SUMMARY")
         self.logger.info("=" * 70)
         self.logger.info(f"  Test class:       {self.__class__.__name__}")
+        self.logger.info(f"  Failure mode:     {self._failure_mode}")
         self.logger.info(f"  IO load:          {'YES' if self._with_io_load else 'NO'}")
         self.logger.info(f"  Target node:      {self._target_node_id}")
         self.logger.info(f"  Target device:    {self._target_device_id}")
@@ -415,6 +524,7 @@ class _DeviceFailureMigrationBase:
                 "fill_percent": self.FILL_PERCENT,
                 "lvol_size": self.LVOL_SIZE,
                 "with_io_load": self._with_io_load,
+                "failure_mode": self._failure_mode,
                 "target_node": self._target_node_id,
                 "target_device": self._target_device_id,
                 "lvols_on_target": len(self._lvols_on_target),
@@ -491,6 +601,7 @@ class _DeviceFailureMigrationBase:
                 plt.suptitle(
                     f"{class_name}\n"
                     f"IO load: {'YES' if self._with_io_load else 'NO'}  |  "
+                    f"Failure: {self._failure_mode}  |  "
                     f"Fill: {self.FILL_PERCENT}%  |  "
                     f"Lvols: {len(self._lvols_on_target)} target + "
                     f"{len(self._lvols_on_others)} other",
@@ -547,11 +658,11 @@ class _DeviceFailureMigrationBase:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  Concrete test classes
+#  Docker concrete test classes (sbcli + SSH FIO)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class DeviceFailureMigrationNoLoad(_DeviceFailureMigrationBase, TestLvolHACluster):
-    """Fill device to 65 %, fail it, run migration WITHOUT IO load.
+    """Fill device to 65 %, fail it via API, run migration WITHOUT IO load.
 
     Measures: setup time, fill time, device remove time, migration time.
     """
@@ -568,7 +679,7 @@ class DeviceFailureMigrationNoLoad(_DeviceFailureMigrationBase, TestLvolHACluste
 
 
 class DeviceFailureMigrationUnderLoad(_DeviceFailureMigrationBase, TestLvolHACluster):
-    """Fill device to 65 %, start IO on all nodes, fail device, migrate UNDER LOAD.
+    """Fill device to 65 %, start IO on all nodes, fail device via API, migrate UNDER LOAD.
 
     Measures: setup time, fill time, device remove time, migration time.
     IO errors during migration are logged but do not fail the test.
@@ -583,3 +694,431 @@ class DeviceFailureMigrationUnderLoad(_DeviceFailureMigrationBase, TestLvolHAClu
     def run(self):
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
         self._run_migration_test(with_io_load=True)
+
+
+class DeviceFailureMigrationPCIeNoLoad(_DeviceFailureMigrationBase, TestLvolHACluster):
+    """Fill device to 65 %, remove via PCIe sysfs, run migration WITHOUT IO load.
+
+    Uses physical PCIe hot-unplug (/sys/bus/pci/devices/<addr>/remove) instead
+    of the control-plane API.  After migration, rescans PCI bus to restore device.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.logger = setup_logger(__name__)
+        self._init_migration_state()
+        self.test_name = "device_failure_migration_pcie_no_load"
+
+    def run(self):
+        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self._run_migration_test(with_io_load=False, failure_mode="pcie")
+
+
+class DeviceFailureMigrationPCIeUnderLoad(_DeviceFailureMigrationBase, TestLvolHACluster):
+    """Fill device to 65 %, start IO, remove via PCIe sysfs, migrate UNDER LOAD.
+
+    Uses physical PCIe hot-unplug (/sys/bus/pci/devices/<addr>/remove) instead
+    of the control-plane API.  After migration, rescans PCI bus to restore device.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.logger = setup_logger(__name__)
+        self._init_migration_state()
+        self.test_name = "device_failure_migration_pcie_under_load"
+
+    def run(self):
+        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self._run_migration_test(with_io_load=True, failure_mode="pcie")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  K8s-native concrete test classes (PVC + FIO K8s Jobs)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+from stress_test.continuous_k8s_native_failover import K8sNativeFailoverTest  # noqa: E402
+
+
+class _DeviceFailureMigrationK8s(_DeviceFailureMigrationBase):
+    """K8s-native overrides for setup, fill, IO load, and cleanup phases.
+
+    Uses PVCs for storage provisioning and K8s FIO Jobs for workload
+    generation instead of sbcli + SSH.
+
+    The device failure and migration phases are identical to Docker
+    (they operate at the control-plane / sysfs level, not the data path).
+    """
+
+    # K8s-specific sizing
+    K8S_PVC_SIZE = "50Gi"
+    K8S_FIO_FILL_SIZE = "45G"
+    K8S_FIO_LOAD_SIZE = "1G"
+
+    def _init_migration_state(self):
+        super()._init_migration_state()
+        self._pvc_details = {}     # pvc_name -> {job_name, configmap_name, node_id}
+        self._fill_jobs = []       # (job_name, configmap_name) for fill FIO jobs
+        self._load_jobs = []       # (job_name, configmap_name) for load FIO jobs
+
+    # ── Phase 1 override: PVC-based setup ────────────────────────────────────
+
+    def _phase_setup_pool_and_lvols(self):
+        self.logger.info("=== Phase: Setup pool and PVCs (K8s) ===")
+        t0 = time.time()
+
+        # Get storage nodes
+        storage_nodes = self.sbcli_utils.get_storage_nodes()
+        for r in storage_nodes["results"]:
+            self._sn_nodes.append(r["uuid"])
+            self.node_vs_pvc[r["uuid"]] = []
+
+        if len(self._sn_nodes) < 1:
+            raise RuntimeError("No storage nodes found")
+
+        # Pick target node and device
+        self._target_node_id = self._sn_nodes[0]
+        devices = self.sbcli_utils.get_device_details(self._target_node_id)
+        if not devices:
+            raise RuntimeError(
+                f"No devices found on target node {self._target_node_id}"
+            )
+        self._target_device_info = devices[0]
+        self._target_device_id = devices[0]["id"]
+        self.logger.info(
+            f"Target node: {self._target_node_id}, "
+            f"Target device: {self._target_device_id}"
+        )
+
+        # Get node capacity to calculate how many PVCs to create
+        capacity = self.sbcli_utils.get_node_capacity(self._target_node_id)
+        if isinstance(capacity, list):
+            capacity = capacity[0] if capacity else {}
+        size_total_bytes = capacity.get("size_total", 0)
+        if isinstance(size_total_bytes, str):
+            size_total_bytes = self._parse_size(size_total_bytes)
+        target_bytes = int(size_total_bytes * self.FILL_PERCENT / 100)
+        lvol_bytes = self._parse_size(self.LVOL_SIZE)
+        num_lvols = max(1, math.ceil(target_bytes / lvol_bytes))
+        self.logger.info(
+            f"Node capacity: {size_total_bytes} bytes, "
+            f"target fill: {target_bytes} bytes, "
+            f"creating {num_lvols} PVCs of {self.K8S_PVC_SIZE}"
+        )
+
+        # Create PVCs pinned to target node
+        for i in range(num_lvols):
+            pvc_name = f"mig-target-{_rand_seq(4)}-{i}"
+            self._create_pvc(pvc_name, self._target_node_id)
+            self._lvols_on_target.append(pvc_name)
+
+        # Create 1 PVC per OTHER node (for IO load variant)
+        other_nodes = [n for n in self._sn_nodes if n != self._target_node_id]
+        for idx, node_id in enumerate(other_nodes):
+            pvc_name = f"mig-other-{_rand_seq(4)}-{idx}"
+            self._create_pvc(pvc_name, node_id)
+            self._lvols_on_others.append(pvc_name)
+
+        self._timing["setup_duration"] = time.time() - t0
+        self.logger.info(
+            f"Setup complete: {len(self._lvols_on_target)} target PVCs, "
+            f"{len(self._lvols_on_others)} other PVCs "
+            f"({self._timing['setup_duration']:.1f}s)"
+        )
+
+    def _create_pvc(self, pvc_name, node_id):
+        """Create a PVC pinned to a specific storage node."""
+        self.k8s_utils.create_pvc(
+            pvc_name, self.K8S_PVC_SIZE, self.STORAGE_CLASS_NAME,
+            node_id=node_id,
+        )
+        self.k8s_utils.wait_pvc_bound(pvc_name, timeout=300)
+        sleep_n_sec(2)
+
+        node_id_actual = self._get_pvc_node_id(pvc_name) or node_id
+        self._pvc_details[pvc_name] = {
+            "job_name": None,
+            "configmap_name": None,
+            "node_id": node_id_actual,
+        }
+        self.node_vs_pvc.setdefault(node_id_actual, []).append(pvc_name)
+        self.logger.info(f"PVC {pvc_name} created and bound (node={node_id_actual})")
+
+    # ── Phase 2 override: fill via K8s FIO Jobs ──────────────────────────────
+
+    def _phase_fill_devices(self):
+        self.logger.info(
+            f"=== Phase: Fill target device to {self.FILL_PERCENT}% (K8s FIO Jobs) ==="
+        )
+        t0 = time.time()
+
+        # Create fill FIO jobs for target PVCs
+        for pvc_name in self._lvols_on_target:
+            job_name = f"fio-fill-{pvc_name}"
+            cm_name = f"fiocfg-fill-{pvc_name}"
+            run_id = _rand_seq(6)
+
+            fio_config = (
+                f"[global]\n"
+                f"name=fill-{pvc_name}\n"
+                f"filename_format=/spdkvol/fio-fill-{run_id}.$jobnum\n"
+                f"rw=write\n"
+                f"bs={self.FIO_FILL_BS}\n"
+                f"iodepth=1\n"
+                f"direct=1\n"
+                f"ioengine=libaio\n"
+                f"size={self.K8S_FIO_FILL_SIZE}\n"
+                f"numjobs=1\n"
+                f"group_reporting\n"
+                f"\n"
+                f"[job1]\n"
+            )
+
+            try:
+                self.k8s_utils.create_fio_job(
+                    job_name, pvc_name, cm_name, fio_config,
+                    image=self.FIO_IMAGE,
+                )
+                self._fill_jobs.append((job_name, cm_name))
+                self.logger.info(f"Fill FIO job {job_name} created for {pvc_name}")
+            except Exception as exc:
+                self.logger.error(f"Fill FIO job failed for {pvc_name}: {exc}")
+
+        # Wait for fill jobs to complete
+        self.logger.info(f"Waiting for {len(self._fill_jobs)} fill jobs to complete ...")
+        for job_name, _ in self._fill_jobs:
+            try:
+                self.k8s_utils.wait_fio_job_complete(job_name, timeout=3600)
+                self.logger.info(f"Fill job {job_name} completed")
+            except Exception as exc:
+                self.logger.warning(f"Fill job {job_name} did not complete: {exc}")
+
+        # Verify fill level
+        sleep_n_sec(5)
+        capacity = self.sbcli_utils.get_node_capacity(self._target_node_id)
+        if isinstance(capacity, list):
+            capacity = capacity[0] if capacity else {}
+        util = capacity.get("size_util", 0)
+        self.logger.info(f"Post-fill device utilisation: {util}%")
+
+        # Cleanup fill jobs
+        for job_name, cm_name in self._fill_jobs:
+            try:
+                self.k8s_utils.delete_resource("job", job_name)
+                self.k8s_utils.delete_resource("configmap", cm_name)
+            except Exception:
+                pass
+
+        self._timing["fill_duration"] = time.time() - t0
+        self.logger.info(
+            f"Fill complete ({self._timing['fill_duration']:.1f}s)"
+        )
+
+    # ── Phase 3 override: IO load via K8s FIO Jobs ───────────────────────────
+
+    def _phase_start_io_load(self):
+        self.logger.info("=== Phase: Start IO load on all nodes (K8s FIO Jobs) ===")
+        all_pvc_names = self._lvols_on_target + self._lvols_on_others
+
+        for pvc_name in all_pvc_names:
+            job_name = f"fio-load-{pvc_name}"
+            cm_name = f"fiocfg-load-{pvc_name}"
+            run_id = _rand_seq(6)
+
+            fio_config = (
+                f"[global]\n"
+                f"name=load-{pvc_name}\n"
+                f"filename_format=/spdkvol/fio-load-{run_id}.$jobnum\n"
+                f"rw=randrw\n"
+                f"rwmixread=50\n"
+                f"bs={self.FIO_LOAD_BS}\n"
+                f"iodepth={self.FIO_LOAD_IODEPTH}\n"
+                f"direct=1\n"
+                f"ioengine=libaio\n"
+                f"size={self.K8S_FIO_LOAD_SIZE}\n"
+                f"numjobs={self.FIO_LOAD_NUMJOBS}\n"
+                f"time_based\n"
+                f"runtime={self.FIO_LOAD_RUNTIME}\n"
+                f"group_reporting\n"
+                f"\n"
+                f"[job1]\n"
+            )
+
+            try:
+                node_id = self._pvc_details.get(pvc_name, {}).get("node_id")
+                avoid = (
+                    self._get_k8s_node_for_storage_node(node_id)
+                    if node_id else None
+                )
+                self.k8s_utils.create_fio_job(
+                    job_name, pvc_name, cm_name, fio_config,
+                    image=self.FIO_IMAGE,
+                    avoid_node=avoid,
+                )
+                self._load_jobs.append((job_name, cm_name))
+                self._pvc_details[pvc_name]["job_name"] = job_name
+                self._pvc_details[pvc_name]["configmap_name"] = cm_name
+                self.logger.info(f"Load FIO job {job_name} created for {pvc_name}")
+            except Exception as exc:
+                self.logger.error(f"Load FIO job failed for {pvc_name}: {exc}")
+
+        sleep_n_sec(15)  # let IO ramp up
+        self.logger.info(
+            f"IO load started: {len(self._load_jobs)} FIO jobs"
+        )
+
+    # ── Phase 5 override: stop IO load (K8s) ─────────────────────────────────
+
+    def _phase_stop_io_load(self):
+        self.logger.info("=== Phase: Stop IO load (K8s) ===")
+        for job_name, cm_name in self._load_jobs:
+            try:
+                self.k8s_utils.delete_resource("job", job_name)
+                self.k8s_utils.delete_resource("configmap", cm_name)
+            except Exception:
+                pass
+        self.logger.info("IO load stopped (K8s jobs deleted)")
+
+    # ── Cleanup override (K8s) ───────────────────────────────────────────────
+
+    def _phase_cleanup(self):
+        self.logger.info("=== Phase: Cleanup (K8s) ===")
+        try:
+            # Delete all FIO jobs and configmaps
+            for job_name, cm_name in self._fill_jobs + self._load_jobs:
+                try:
+                    self.k8s_utils.delete_resource("job", job_name)
+                    self.k8s_utils.delete_resource("configmap", cm_name)
+                except Exception:
+                    pass
+
+            # Delete PVCs
+            all_pvcs = self._lvols_on_target + self._lvols_on_others
+            for pvc_name in all_pvcs:
+                try:
+                    self.k8s_utils.delete_pvc(pvc_name)
+                except Exception:
+                    pass
+            sleep_n_sec(10)
+
+            # Delete storage pool
+            self.sbcli_utils.delete_all_storage_pools()
+        except Exception as e:
+            self.logger.error(f"Cleanup error: {e}")
+
+
+# ── K8s concrete classes ─────────────────────────────────────────────────────
+
+class DeviceFailureMigrationNoLoadK8s(_DeviceFailureMigrationK8s, K8sNativeFailoverTest):
+    """K8s-native: fill device to 65 %, fail via API, run migration WITHOUT IO load."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.logger = setup_logger(__name__)
+        self._init_migration_state()
+        self.test_name = "device_failure_migration_no_load_k8s"
+
+    def run(self):
+        storage_nodes = self.sbcli_utils.get_storage_nodes()
+        for result in storage_nodes["results"]:
+            self.sn_nodes.append(result["uuid"])
+            self.node_vs_pvc[result["uuid"]] = []
+
+        pool_test = self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self.pool_name = self.pool_name if pool_test == self.pool_name else pool_test
+
+        cluster_id = self.cluster_id or ""
+        self.k8s_utils.create_storage_class(
+            name=self.STORAGE_CLASS_NAME,
+            cluster_id=cluster_id,
+            pool_name=self.pool_name,
+            ndcs=self.ndcs,
+            npcs=self.npcs,
+        )
+        self._run_migration_test(with_io_load=False, failure_mode="api")
+
+
+class DeviceFailureMigrationUnderLoadK8s(_DeviceFailureMigrationK8s, K8sNativeFailoverTest):
+    """K8s-native: fill device to 65 %, start IO, fail via API, migrate UNDER LOAD."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.logger = setup_logger(__name__)
+        self._init_migration_state()
+        self.test_name = "device_failure_migration_under_load_k8s"
+
+    def run(self):
+        storage_nodes = self.sbcli_utils.get_storage_nodes()
+        for result in storage_nodes["results"]:
+            self.sn_nodes.append(result["uuid"])
+            self.node_vs_pvc[result["uuid"]] = []
+
+        pool_test = self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self.pool_name = self.pool_name if pool_test == self.pool_name else pool_test
+
+        cluster_id = self.cluster_id or ""
+        self.k8s_utils.create_storage_class(
+            name=self.STORAGE_CLASS_NAME,
+            cluster_id=cluster_id,
+            pool_name=self.pool_name,
+            ndcs=self.ndcs,
+            npcs=self.npcs,
+        )
+        self._run_migration_test(with_io_load=True, failure_mode="api")
+
+
+class DeviceFailureMigrationPCIeNoLoadK8s(_DeviceFailureMigrationK8s, K8sNativeFailoverTest):
+    """K8s-native: fill device to 65 %, remove via PCIe sysfs, migrate WITHOUT IO load."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.logger = setup_logger(__name__)
+        self._init_migration_state()
+        self.test_name = "device_failure_migration_pcie_no_load_k8s"
+
+    def run(self):
+        storage_nodes = self.sbcli_utils.get_storage_nodes()
+        for result in storage_nodes["results"]:
+            self.sn_nodes.append(result["uuid"])
+            self.node_vs_pvc[result["uuid"]] = []
+
+        pool_test = self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self.pool_name = self.pool_name if pool_test == self.pool_name else pool_test
+
+        cluster_id = self.cluster_id or ""
+        self.k8s_utils.create_storage_class(
+            name=self.STORAGE_CLASS_NAME,
+            cluster_id=cluster_id,
+            pool_name=self.pool_name,
+            ndcs=self.ndcs,
+            npcs=self.npcs,
+        )
+        self._run_migration_test(with_io_load=False, failure_mode="pcie")
+
+
+class DeviceFailureMigrationPCIeUnderLoadK8s(_DeviceFailureMigrationK8s, K8sNativeFailoverTest):
+    """K8s-native: fill device to 65 %, start IO, remove via PCIe sysfs, migrate UNDER LOAD."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.logger = setup_logger(__name__)
+        self._init_migration_state()
+        self.test_name = "device_failure_migration_pcie_under_load_k8s"
+
+    def run(self):
+        storage_nodes = self.sbcli_utils.get_storage_nodes()
+        for result in storage_nodes["results"]:
+            self.sn_nodes.append(result["uuid"])
+            self.node_vs_pvc[result["uuid"]] = []
+
+        pool_test = self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self.pool_name = self.pool_name if pool_test == self.pool_name else pool_test
+
+        cluster_id = self.cluster_id or ""
+        self.k8s_utils.create_storage_class(
+            name=self.STORAGE_CLASS_NAME,
+            cluster_id=cluster_id,
+            pool_name=self.pool_name,
+            ndcs=self.ndcs,
+            npcs=self.npcs,
+        )
+        self._run_migration_test(with_io_load=True, failure_mode="pcie")

@@ -722,25 +722,50 @@ class SbcliUtils:
         self.logger.info(f"Value: {value_match}")
         return all(value_match)
     
-    def wait_for_device_status(self, node_id, status, timeout=60):
+    def wait_for_device_status(self, node_id, status, timeout=60, device_id=None):
+        """Wait for device(s) to reach the expected status.
+
+        Args:
+            node_id: Storage node UUID.
+            status: Expected status string or list of status strings.
+            timeout: Max seconds to wait.
+            device_id: If provided, only check this specific device.
+                       If None, check ALL devices on the node (legacy behaviour).
+        """
+        status = status if isinstance(status, list) else [status]
         device_ids = {}
         device_details = self.get_device_details(storage_node_id=node_id)
         total_devices = len(device_details)
         while timeout > 0:
             self.logger.info("Retrying Device Status check")
             device_details = self.get_device_details(storage_node_id=node_id)
-            for device in device_details:
-                device_ids[device['id']] = device['status']
-                status = status if isinstance(status, list) else [status]
+
+            if device_id:
+                # Single-device mode: only check the specified device
+                for device in device_details:
+                    if device['id'] == device_id:
+                        actual = device['status']
+                        self.logger.info(f"Device ID: {device_id} Expected Status: {status} / Actual Status: {actual}")
+                        if actual in status:
+                            return device_details
+                        break
+                else:
+                    self.logger.warning(f"Device {device_id} not found on node {node_id}")
+            else:
+                # All-devices mode (legacy): require every device to match
+                device_ids = {}
+                for device in device_details:
+                    device_ids[device['id']] = device['status']
                 self.logger.info(f"Device statuses: {device_ids}")
-                if device['status'] in status:
-                    if len(device_ids) == total_devices and self.all_expected_status(device_ids, status):
-                        return device_details
-                self.logger.info(f"Device ID: {device['id']} Expected Status: {status} / Actual Status: {device['status']}")
+                if len(device_ids) == total_devices and self.all_expected_status(device_ids, status):
+                    return device_details
+                for did, dstatus in device_ids.items():
+                    self.logger.info(f"Device ID: {did} Expected Status: {status} / Actual Status: {dstatus}")
+
             sleep_n_sec(1)
             timeout -= 1
-        raise TimeoutError(f"Timed out waiting for device status, Node id: {node_id}, Device id: {list(device_ids.keys())}"
-                            f"Expected status: {status}, Actual status: {list(device_ids.values())}")
+        raise TimeoutError(f"Timed out waiting for device status, Node id: {node_id}, Device id: {device_id or list(device_ids.keys())}, "
+                            f"Expected status: {status}, Actual status: {list(device_ids.values()) if not device_id else 'see above'}")
     
     def wait_for_health_status(self, node_id, status, timeout=60, device_id=None):
         actual_status = None

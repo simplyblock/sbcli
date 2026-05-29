@@ -862,6 +862,10 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
         chosen_snap = random.choice(snap_names)
         with self._lock:
             snap_id = self._snap_registry[chosen_snap]["snap_id"]
+            snap_parent = self._snap_registry[chosen_snap].get("lvol_name", "")
+            clone_sc = self._parent_registry.get(snap_parent, {}).get(
+                "storage_class", self.STORAGE_CLASS_NAME
+            )
         self.logger.info(
             f"[create_clones] Chosen snapshot: {chosen_snap} (id={snap_id})"
         )
@@ -872,6 +876,7 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
                 "name": clone_name,
                 "snap_name": chosen_snap,
                 "snap_id": snap_id,
+                "sc_name": clone_sc,
             })
 
         total_batches = (
@@ -2502,6 +2507,7 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
         super().__init__(**kwargs)
         self.test_name = "parallel_namespace_lvol_k8s"
         self.STORAGE_CLASS_NAME = "simplyblock-ns-stress-sc"
+        self.XFS_STORAGE_CLASS_NAME = "simplyblock-ns-stress-sc-xfs"
         self.SNAPSHOT_CLASS_NAME = "simplyblock-csi-snapshotclass"
         self.k8s_utils = None
 
@@ -2614,7 +2620,7 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
             self.pool_name = actual_pool
         sleep_n_sec(2)
 
-        # Create StorageClass with namespace support
+        # Create StorageClasses with namespace support (ext4 + xfs)
         cluster_id = self.cluster_id or os.environ.get("CLUSTER_ID", "")
         self.k8s_utils.create_storage_class(
             name=self.STORAGE_CLASS_NAME,
@@ -2622,6 +2628,15 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
             pool_name=self.pool_name,
             ndcs=self.ndcs,
             npcs=self.npcs,
+            max_namespace_per_subsys=self.NAMESPACES_PER_PARENT,
+        )
+        self.k8s_utils.create_storage_class(
+            name=self.XFS_STORAGE_CLASS_NAME,
+            cluster_id=cluster_id,
+            pool_name=self.pool_name,
+            ndcs=self.ndcs,
+            npcs=self.npcs,
+            fs_type="xfs",
             max_namespace_per_subsys=self.NAMESPACES_PER_PARENT,
         )
         self.k8s_utils.create_volume_snapshot_class(
@@ -2656,14 +2671,15 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
                 )
             except Exception:
                 pass
-            # Delete StorageClass
-            try:
-                self.k8s_utils._exec_kubectl(
-                    f"kubectl delete storageclass {self.STORAGE_CLASS_NAME} "
-                    f"--ignore-not-found 2>/dev/null || true"
-                )
-            except Exception:
-                pass
+            # Delete StorageClasses
+            for sc in [self.STORAGE_CLASS_NAME, self.XFS_STORAGE_CLASS_NAME]:
+                try:
+                    self.k8s_utils._exec_kubectl(
+                        f"kubectl delete storageclass {sc} "
+                        f"--ignore-not-found 2>/dev/null || true"
+                    )
+                except Exception:
+                    pass
         # Targeted sbcli cleanup — only test resources
         try:
             self.sbcli_utils.delete_all_clones()
@@ -3030,7 +3046,9 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
         parent_names = []
         for i in range(self.NUM_PARENTS):
             pname = f"ns-pvc-{_rand_seq(6)}-{i:04d}"
-            parent_items.append({"name": pname, "idx": i})
+            sc_name = random.choice([self.STORAGE_CLASS_NAME, self.XFS_STORAGE_CLASS_NAME])
+            fs_type = "xfs" if sc_name == self.XFS_STORAGE_CLASS_NAME else "ext4"
+            parent_items.append({"name": pname, "idx": i, "sc_name": sc_name})
             parent_names.append(pname)
             # Pre-register so children can reference parents
             self._parent_registry[pname] = {
@@ -3038,6 +3056,8 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
                 "children": [],
                 "snapshots": [],
                 "start_child_idx": i * pvcs_per_subsys + 1,
+                "storage_class": sc_name,
+                "fs_type": fs_type,
             }
         self.logger.info(
             f"[create_subsystems][sub1] Creating {self.NUM_PARENTS} parent "
@@ -3160,8 +3180,9 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
     def _create_single_parent_k8s(self, item):
         """Create a single parent PVC. Called from _batch_parallel."""
         name = item["name"]
+        sc_name = item.get("sc_name", self.STORAGE_CLASS_NAME)
         t0 = time.time()
-        self._create_pvc(name)
+        self._create_pvc(name, sc_name=sc_name)
         self._record_timing(
             "create_parent", name,
             time.time() - t0, self._snapshot_inventory(),
@@ -3175,8 +3196,12 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
         all children for all parents run in parallel."""
         child_name = item["name"]
         parent_name = item["parent_name"]
+        # Children inherit StorageClass (and thus fs_type) from parent
+        sc_name = self._parent_registry.get(parent_name, {}).get(
+            "storage_class", self.STORAGE_CLASS_NAME
+        )
         t0 = time.time()
-        self._create_pvc(child_name)
+        self._create_pvc(child_name, sc_name=sc_name)
         elapsed = time.time() - t0
         self._record_timing(
             "create_child", child_name,
@@ -3191,8 +3216,9 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
             )
         self._inc("counts", "children_created")
 
-    def _create_pvc(self, name: str):
+    def _create_pvc(self, name: str, sc_name: str = None):
         """Create a single PVC with label and wait for Bound."""
+        sc = sc_name or self.STORAGE_CLASS_NAME
         ns = self.k8s_utils.namespace
         yaml_content = (
             f"apiVersion: v1\n"
@@ -3204,7 +3230,7 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
             f"spec:\n"
             f"  accessModes:\n"
             f"    - ReadWriteOnce\n"
-            f"  storageClassName: {self.STORAGE_CLASS_NAME}\n"
+            f"  storageClassName: {sc}\n"
             f"  resources:\n"
             f"    requests:\n"
             f"      storage: {self.PVC_SIZE}\n"
@@ -3371,6 +3397,7 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
     def _create_clone_impl(self, params: dict):
         clone_name = params["name"]
         snap_name = params["snap_name"]
+        sc_name = params.get("sc_name", self.STORAGE_CLASS_NAME)
         self._inc("attempts", "create_clone")
         ns = self.k8s_utils.namespace
         # Clone PVC from VolumeSnapshot with label
@@ -3384,7 +3411,7 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
             f"spec:\n"
             f"  accessModes:\n"
             f"    - ReadWriteOnce\n"
-            f"  storageClassName: {self.STORAGE_CLASS_NAME}\n"
+            f"  storageClassName: {sc_name}\n"
             f"  resources:\n"
             f"    requests:\n"
             f"      storage: {self.PVC_SIZE}\n"

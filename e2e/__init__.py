@@ -92,6 +92,12 @@ from stress_test.large_scale_lvol_stress import (
 from stress_test.device_failure_migration import (
     DeviceFailureMigrationNoLoad,
     DeviceFailureMigrationUnderLoad,
+    DeviceFailureMigrationPCIeNoLoad,
+    DeviceFailureMigrationPCIeUnderLoad,
+    DeviceFailureMigrationNoLoadK8s,
+    DeviceFailureMigrationUnderLoadK8s,
+    DeviceFailureMigrationPCIeNoLoadK8s,
+    DeviceFailureMigrationPCIeUnderLoadK8s,
 )
 from stress_test.continuous_failover_ha_security import (
     RandomSecurityFailoverTest,
@@ -281,6 +287,12 @@ ALL_TESTS = [
     LargeScaleLvolK8s,
     DeviceFailureMigrationNoLoad,
     DeviceFailureMigrationUnderLoad,
+    DeviceFailureMigrationPCIeNoLoad,
+    DeviceFailureMigrationPCIeUnderLoad,
+    DeviceFailureMigrationNoLoadK8s,
+    DeviceFailureMigrationUnderLoadK8s,
+    DeviceFailureMigrationPCIeNoLoadK8s,
+    DeviceFailureMigrationPCIeUnderLoadK8s,
     TestMultiNodeOutageDocker,
     TestMultiNodeOutageK8s,
     TestMultiNodeVMRebootDocker,
@@ -402,6 +414,12 @@ def get_stress_tests():
         LargeScaleLvolK8s,
         DeviceFailureMigrationNoLoad,
         DeviceFailureMigrationUnderLoad,
+        DeviceFailureMigrationPCIeNoLoad,
+        DeviceFailureMigrationPCIeUnderLoad,
+        DeviceFailureMigrationNoLoadK8s,
+        DeviceFailureMigrationUnderLoadK8s,
+        DeviceFailureMigrationPCIeNoLoadK8s,
+        DeviceFailureMigrationPCIeUnderLoadK8s,
     ]
     return tests
 
@@ -419,6 +437,12 @@ def get_monitoring_tests():
         LargeScaleLvolK8s,
         DeviceFailureMigrationNoLoad,
         DeviceFailureMigrationUnderLoad,
+        DeviceFailureMigrationPCIeNoLoad,
+        DeviceFailureMigrationPCIeUnderLoad,
+        DeviceFailureMigrationNoLoadK8s,
+        DeviceFailureMigrationUnderLoadK8s,
+        DeviceFailureMigrationPCIeNoLoadK8s,
+        DeviceFailureMigrationPCIeUnderLoadK8s,
         TestLvolOutageLoadTest,
         TestParallelLvolSnapshotCloneAPI,
     ]
