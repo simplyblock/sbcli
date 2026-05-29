@@ -1,8 +1,4 @@
-import hmac
-from typing import Annotated, Optional
-
-from fastapi import APIRouter, Depends, HTTPException
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi import APIRouter, Depends
 
 from . import cluster
 from . import backup
@@ -14,25 +10,7 @@ from . import snapshot
 from . import storage_node
 from . import task
 from . import migration
-
-from simplyblock_core.db_controller import DBController
-
-_db = DBController()
-security = HTTPBearer()
-
-
-def _verify_api_token(
-        credentials: Annotated[HTTPAuthorizationCredentials, Depends(security)],
-        cluster_id: Optional[str] = None,
-):
-    authorized_cluster_id = next((
-        cluster.id
-        for cluster
-        in _db.get_clusters()
-        if hmac.compare_digest(cluster.secret, credentials.credentials)
-    ), None)
-    if (authorized_cluster_id is None) or (cluster_id is not None and cluster_id != authorized_cluster_id):
-        raise HTTPException(401, 'Invalid token')
+from ._auth import verify_api_token
 
 # Assemble routes here to avoid circular imports
 device.api.include_router(device.instance_api)
@@ -67,7 +45,7 @@ cluster.api.include_router(cluster.instance_api)
 management_node.api.include_router(management_node.instance_api)
 
 api = APIRouter(
-    dependencies=[Depends(_verify_api_token)],
+    dependencies=[Depends(verify_api_token)],
 )
 api.include_router(cluster.api)
 api.include_router(management_node.api)
