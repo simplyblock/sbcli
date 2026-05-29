@@ -114,6 +114,7 @@ class _DeviceFailureMigrationBase:
         finally:
             if with_io_load:
                 self._phase_stop_io_load()
+            self._phase_restart_device()
             self._phase_cleanup()
             self._timing["total_duration"] = time.time() - t0
             self._print_migration_summary()
@@ -637,6 +638,42 @@ class _DeviceFailureMigrationBase:
         for t in self._load_fio_threads:
             t.join(timeout=30)
         self.logger.info("IO load stopped")
+
+    # ── Phase: restart failed device ─────────────────────────────────────────
+
+    def _phase_restart_device(self):
+        """Restart the failed device so the cluster is left in a clean state.
+
+        Runs in the finally block so it executes even if the test fails.
+        For PCIe variants the PCI bus was already rescanned in the fail phase;
+        this issues the control-plane restart-device to bring it back online.
+        """
+        if not self._target_device_id:
+            return
+        self.logger.info(
+            f"=== Phase: Restart device {self._target_device_id} ==="
+        )
+        try:
+            mgmt_ip = self.mgmt_nodes[0]
+            self.ssh_obj.restart_device(mgmt_ip, self._target_device_id)
+            self.logger.info(
+                f"restart-device issued for {self._target_device_id}"
+            )
+            # Wait for device to come back online
+            try:
+                self.sbcli_utils.wait_for_device_status(
+                    self._target_node_id, "online", timeout=120,
+                    device_id=self._target_device_id,
+                )
+                self.logger.info(
+                    f"Device {self._target_device_id} is back online"
+                )
+            except Exception as exc:
+                self.logger.warning(
+                    f"Device did not come back online within timeout: {exc}"
+                )
+        except Exception as exc:
+            self.logger.error(f"Failed to restart device: {exc}")
 
     # ── Cleanup ──────────────────────────────────────────────────────────────
 
