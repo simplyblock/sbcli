@@ -911,7 +911,8 @@ def _resolve_namespaced_subsystem(lvol, rpc_client, snode):
                     logger.error(error)
                     raise Exception(error)
 
-                lvol.nqn = snode.cluster_id + ":lvol:" + lvol.uuid
+                cluster = db_ctrl.get_cluster_by_id(snode.cluster_id)
+                lvol.nqn = cluster.nqn + ":lvol:" + lvol.uuid
                 lvol.namespace = ""
                 return True
         else:
