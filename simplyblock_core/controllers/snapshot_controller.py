@@ -212,6 +212,8 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
                         if err and err.get("code") == -32602: # {"code": -32602, "message": "Device or resource busy"}}
                             logger.error(f"Failed to create snapshot, retrying: {err}")
                             time.sleep(0.1)
+                        else:
+                            break
                     else:
                         break
                 if not ret:
