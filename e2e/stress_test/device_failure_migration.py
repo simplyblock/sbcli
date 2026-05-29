@@ -413,11 +413,25 @@ class _DeviceFailureMigrationBase:
     # ── Shared migration wait + verify ───────────────────────────────────────
 
     def _wait_migration_and_verify(self, t_start):
-        """Wait for migration tasks and verify final device status."""
+        """Wait for migration tasks and verify final device status.
+
+        Tries the REST-based ``wait_migration_tasks_complete`` first.
+        If the API is unavailable (404 etc.), falls back to polling
+        ``sbctl cluster list-tasks`` via CLI.
+        """
         self.logger.info("Waiting for failure migration tasks to complete ...")
-        migration_elapsed = self.sbcli_utils.wait_migration_tasks_complete(
-            timeout=self.MIGRATION_TIMEOUT
-        )
+        try:
+            migration_elapsed = self.sbcli_utils.wait_migration_tasks_complete(
+                timeout=self.MIGRATION_TIMEOUT
+            )
+        except TimeoutError:
+            raise
+        except Exception as exc:
+            self.logger.warning(
+                f"REST migration wait failed ({exc}), falling back to CLI"
+            )
+            migration_elapsed = self._wait_migration_cli_fallback()
+
         self._timing["migration_duration"] = time.time() - t_start
         self._timing["migration_tasks_elapsed"] = migration_elapsed
 
@@ -435,6 +449,48 @@ class _DeviceFailureMigrationBase:
             f"(migration took {self._timing['migration_duration']:.1f}s)"
         )
         self._timing["device_final_status"] = final_status
+
+    def _wait_migration_cli_fallback(self):
+        """Poll ``sbctl cluster list-tasks`` via CLI until all
+        failed_device_migration tasks are done."""
+        import time as _time
+        mgmt_ip = self.mgmt_nodes[0]
+        cluster_id = self.sbcli_utils.cluster_id
+        start = _time.time()
+        while _time.time() - start < self.MIGRATION_TIMEOUT:
+            cmd = f"{self.base_cmd} cluster list-tasks {cluster_id} --limit 0"
+            output, _ = self.ssh_obj.exec_command(mgmt_ip, cmd)
+            active = self._parse_active_migration_tasks(output or "")
+            if active == 0:
+                elapsed = _time.time() - start
+                self.logger.info(
+                    f"All failure-migration tasks complete (CLI) in {elapsed:.1f}s"
+                )
+                return elapsed
+            self.logger.info(
+                f"Waiting for {active} migration task(s) to finish (CLI) ..."
+            )
+            sleep_n_sec(10)
+        raise TimeoutError(
+            f"Migration not complete after {self.MIGRATION_TIMEOUT}s (CLI)"
+        )
+
+    @staticmethod
+    def _parse_active_migration_tasks(output):
+        """Count active failed_device_migration tasks from CLI table output."""
+        active = 0
+        for line in output.splitlines():
+            if not line.startswith("|"):
+                continue
+            cols = [c.strip() for c in line.split("|")]
+            cols = [c for c in cols if c]
+            if len(cols) < 6 or cols[0] == "Task ID":
+                continue
+            func_name = cols[2] if len(cols) > 2 else ""
+            status = cols[4].lower() if len(cols) > 4 else ""
+            if func_name == "failed_device_migration" and status not in ("done", "cancelled", "error"):
+                active += 1
+        return active
 
     # ── Phase 5: stop IO load ────────────────────────────────────────────────
 

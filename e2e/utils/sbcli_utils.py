@@ -807,10 +807,10 @@ class SbcliUtils:
 
     def list_migration_tasks(self, cluster_id):
         """List all migration tasks for a given cluster."""
-        return self.get_request(f"/cluster/list-tasks/{cluster_id}?limit=0")
+        return self.get_request(f"/cluster/get-tasks/{cluster_id}?limit=0")
 
     def wait_migration_tasks_complete(self, timeout=3600):
-        """Wait until all FN_FAILED_DEV_MIG tasks finish.
+        """Wait until all failed_device_migration tasks finish.
 
         Polls ``list_migration_tasks`` every 10 seconds until no active
         failure-migration tasks remain or *timeout* seconds elapse.
@@ -828,10 +828,15 @@ class SbcliUtils:
         start = _time.time()
         active = []
         while _time.time() - start < timeout:
-            tasks = self.list_migration_tasks(self.cluster_id)
+            try:
+                tasks = self.list_migration_tasks(self.cluster_id)
+            except Exception as exc:
+                self.logger.warning(f"list_migration_tasks API failed: {exc}")
+                sleep_n_sec(10)
+                continue
             active = [
                 t for t in tasks.get("results", [])
-                if t.get("function_name") == "FN_FAILED_DEV_MIG"
+                if t.get("function_name") == "failed_device_migration"
                 and t.get("status") not in ("done", "cancelled", "error")
             ]
             if not active:
