@@ -6,10 +6,10 @@ Measures the time it takes to complete failure migration on a single device.
 Variants:
 
   Docker (sbcli + SSH FIO):
-  - DeviceFailureMigrationNoLoad          — API removal, no IO load
-  - DeviceFailureMigrationUnderLoad       — API removal, IO load running
-  - DeviceFailureMigrationPCIeNoLoad      — PCIe sysfs removal, no IO load
-  - DeviceFailureMigrationPCIeUnderLoad   — PCIe sysfs removal, IO load running
+  - DeviceFailureMigrationNoLoadDocker          — API removal, no IO load
+  - DeviceFailureMigrationUnderLoadDocker       — API removal, IO load running
+  - DeviceFailureMigrationPCIeNoLoadDocker      — PCIe sysfs removal, no IO load
+  - DeviceFailureMigrationPCIeUnderLoadDocker   — PCIe sysfs removal, IO load running
 
   K8s-native (PVC + FIO K8s Jobs):
   - DeviceFailureMigrationNoLoadK8s       — API removal, no IO load
@@ -26,7 +26,7 @@ one storage node with a device.
 
 Invocation:
   # Docker
-  python3 stress.py --testname DeviceFailureMigrationNoLoad --ndcs 2 --npcs 2
+  python3 stress.py --testname DeviceFailureMigrationNoLoadDocker --ndcs 2 --npcs 2
   python3 stress.py --testname DeviceFailureMigrationPCIeNoLoad --ndcs 2 --npcs 2
 
   # K8s
@@ -450,48 +450,6 @@ class _DeviceFailureMigrationBase:
         )
         self._timing["device_final_status"] = final_status
 
-    def _wait_migration_cli_fallback(self):
-        """Poll ``sbctl cluster list-tasks`` via CLI until all
-        failed_device_migration tasks are done."""
-        import time as _time
-        mgmt_ip = self.mgmt_nodes[0]
-        cluster_id = self.sbcli_utils.cluster_id
-        start = _time.time()
-        while _time.time() - start < self.MIGRATION_TIMEOUT:
-            cmd = f"{self.base_cmd} cluster list-tasks {cluster_id} --limit 0"
-            output, _ = self.ssh_obj.exec_command(mgmt_ip, cmd)
-            active = self._parse_active_migration_tasks(output or "")
-            if active == 0:
-                elapsed = _time.time() - start
-                self.logger.info(
-                    f"All failure-migration tasks complete (CLI) in {elapsed:.1f}s"
-                )
-                return elapsed
-            self.logger.info(
-                f"Waiting for {active} migration task(s) to finish (CLI) ..."
-            )
-            sleep_n_sec(10)
-        raise TimeoutError(
-            f"Migration not complete after {self.MIGRATION_TIMEOUT}s (CLI)"
-        )
-
-    @staticmethod
-    def _parse_active_migration_tasks(output):
-        """Count active failed_device_migration tasks from CLI table output."""
-        active = 0
-        for line in output.splitlines():
-            if not line.startswith("|"):
-                continue
-            cols = [c.strip() for c in line.split("|")]
-            cols = [c for c in cols if c]
-            if len(cols) < 6 or cols[0] == "Task ID":
-                continue
-            func_name = cols[2] if len(cols) > 2 else ""
-            status = cols[4].lower() if len(cols) > 4 else ""
-            if func_name == "failed_device_migration" and status not in ("done", "cancelled", "error"):
-                active += 1
-        return active
-
     # ── Phase 5: stop IO load ────────────────────────────────────────────────
 
     def _phase_stop_io_load(self):
@@ -717,7 +675,7 @@ class _DeviceFailureMigrationBase:
 #  Docker concrete test classes (sbcli + SSH FIO)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-class DeviceFailureMigrationNoLoad(_DeviceFailureMigrationBase, TestLvolHACluster):
+class DeviceFailureMigrationNoLoadDocker(_DeviceFailureMigrationBase, TestLvolHACluster):
     """Fill device to 65 %, fail it via API, run migration WITHOUT IO load.
 
     Measures: setup time, fill time, device remove time, migration time.
@@ -734,7 +692,7 @@ class DeviceFailureMigrationNoLoad(_DeviceFailureMigrationBase, TestLvolHACluste
         self._run_migration_test(with_io_load=False)
 
 
-class DeviceFailureMigrationUnderLoad(_DeviceFailureMigrationBase, TestLvolHACluster):
+class DeviceFailureMigrationUnderLoadDocker(_DeviceFailureMigrationBase, TestLvolHACluster):
     """Fill device to 65 %, start IO on all nodes, fail device via API, migrate UNDER LOAD.
 
     Measures: setup time, fill time, device remove time, migration time.
@@ -752,7 +710,7 @@ class DeviceFailureMigrationUnderLoad(_DeviceFailureMigrationBase, TestLvolHAClu
         self._run_migration_test(with_io_load=True)
 
 
-class DeviceFailureMigrationPCIeNoLoad(_DeviceFailureMigrationBase, TestLvolHACluster):
+class DeviceFailureMigrationPCIeNoLoadDocker(_DeviceFailureMigrationBase, TestLvolHACluster):
     """Fill device to 65 %, remove via PCIe sysfs, run migration WITHOUT IO load.
 
     Uses physical PCIe hot-unplug (/sys/bus/pci/devices/<addr>/remove) instead
@@ -770,7 +728,7 @@ class DeviceFailureMigrationPCIeNoLoad(_DeviceFailureMigrationBase, TestLvolHACl
         self._run_migration_test(with_io_load=False, failure_mode="pcie")
 
 
-class DeviceFailureMigrationPCIeUnderLoad(_DeviceFailureMigrationBase, TestLvolHACluster):
+class DeviceFailureMigrationPCIeUnderLoadDocker(_DeviceFailureMigrationBase, TestLvolHACluster):
     """Fill device to 65 %, start IO, remove via PCIe sysfs, migrate UNDER LOAD.
 
     Uses physical PCIe hot-unplug (/sys/bus/pci/devices/<addr>/remove) instead
