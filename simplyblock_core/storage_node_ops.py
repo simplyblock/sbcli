@@ -3093,7 +3093,7 @@ def list_storage_nodes(is_json, cluster_id=None):
         nodes = db_controller.get_storage_nodes()
     data = []
     output = ""
-
+    all_lvols = db_controller.get_lvols()
     for node in nodes:
         logger.debug(node)
         logger.debug("*" * 20)
@@ -3103,7 +3103,7 @@ def list_storage_nodes(is_json, cluster_id=None):
         for dev in node.nvme_devices:
             if dev.status == NVMeDevice.STATUS_ONLINE:
                 online_devices += 1
-        lvs = db_controller.get_lvols_by_node_id(node.get_id()) or []
+        lvs = [lv for lv in all_lvols if lv.node_id == node.get_id()]
         data.append({
             "UUID": node.uuid,
             "Hostname": node.hostname,
@@ -3543,11 +3543,17 @@ def shutdown_storage_node(node_id, force=False):
 
     logger.info("Node found: %s in state: %s", snode.hostname, snode.status)
 
-    if not force:
-        allowed, reason = _check_ftt_allows_node_removal(node_id, db_controller)
-        if not allowed:
-            logger.error(f"Cannot shutdown node: {reason}")
-            return False, reason
+    # NOTE: shutdown does not consult _check_ftt_allows_node_removal.
+    # Removal and shutdown are different operations: removing a node
+    # permanently changes the cluster's storage budget, while shutting one
+    # down is a transient state that the cluster is meant to absorb under
+    # its FTT contract. Conflating the two was added in commit fbdffea3
+    # (2026-03-28) and caused soak/operator workflows to wait for
+    # rebalancing to drain — the wrong policy for an operation whose
+    # whole point is to disrupt the cluster on purpose. The web API
+    # layer (simplyblock_web/api/v{1,2}/storage_node.py) still gates on
+    # this for its own non-force shutdown endpoint, where the policy
+    # decision belongs.
 
     # Guard: no concurrent shutdown + restart (design: mutual exclusion)
     for peer in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
@@ -6431,6 +6437,7 @@ def get_secondary_nodes_2(current_node, exclude_ids=None, exclude_mgmt_ips=None)
 
 def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blocks, max_size):
     db_controller = DBController()
+    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     lvstore_stack: List[dict] = []
     distrib_list = []
     distrib_vuids = []
@@ -6462,23 +6469,29 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
             distrib_vuid = utils.get_random_vuid()
 
         distrib_name = f"distrib_{distrib_vuid}"
+        distrib_params = {
+            "name": distrib_name,
+            "jm_vuid": jm_vuid,
+            "vuid": distrib_vuid,
+            "ndcs": ndcs,
+            "npcs": npcs,
+            "num_blocks": size // distr_bs,
+            "block_size": distr_bs,
+            "chunk_size": distr_chunk_bs,
+            "pba_page_size": distr_page_size,
+            "write_protection": write_protection,
+        }
+        # Per-chunk placement is a cluster-wide opt-in. Persist it on each
+        # stack entry so subsequent restarts re-create the bdev with the
+        # same flag without having to re-fetch the cluster setting.
+        if cluster.shared_placement:
+            distrib_params["shared_placement"] = True
         lvstore_stack.extend(
             [
                 {
                     "type": "bdev_distr",
                     "name": distrib_name,
-                    "params": {
-                        "name": distrib_name,
-                        "jm_vuid": jm_vuid,
-                        "vuid": distrib_vuid,
-                        "ndcs": ndcs,
-                        "npcs": npcs,
-                        "num_blocks": size // distr_bs,
-                        "block_size": distr_bs,
-                        "chunk_size": distr_chunk_bs,
-                        "pba_page_size": distr_page_size,
-                        "write_protection": write_protection,
-                    }
+                    "params": distrib_params,
                 }
             ]
         )

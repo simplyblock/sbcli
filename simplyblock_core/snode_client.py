@@ -191,9 +191,6 @@ class SNodeClient:
         params = {"rpc_port": rpc_port, "cluster_id": cluster_id}
         return self._request("GET", "spdk_process_is_up", params)
 
-    def get_file_content(self, file_name):
-        return self._request("GET", f"get_file_content/{file_name}")
-
     def spdk_proxy_restart(self,rpc_port=None):
         params = {"rpc_port": rpc_port}
         return self._request("GET", "spdk_proxy_restart", params)

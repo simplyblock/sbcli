@@ -376,6 +376,7 @@ class CLIWrapper(CLIWrapperBase):
         self.init_cluster__delete(subparser)
         if self.developer_mode:
             self.init_cluster__set(subparser)
+        self.init_cluster__set_shared_placement(subparser)
         self.init_cluster__change_name(subparser)
         self.init_cluster__add_replication(subparser)
 
@@ -565,6 +566,12 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('cluster_id', help='The cluster id.', type=str)
         subcommand.add_argument('attr_name', help='The new or existing attribute name.', type=str)
         subcommand.add_argument('attr_value', help='The new attribute value.', type=str)
+
+    def init_cluster__set_shared_placement(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'set-shared-placement', 'Enable cluster-wide per-chunk data placement-binding for distrib bdevs (forward-only upgrade; --disable is reserved for debug).')
+        subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
+        argument = subcommand.add_argument('--disable', help='Reverse transition (per-chunk -> per-page). Debug only; only safe on a balanced or empty bdev. Requires --force.', dest='disable', action='store_true')
+        argument = subcommand.add_argument('--force', help='Bypass the rebalancing / non-online-node guards. Required when --disable is passed.', dest='force', action='store_true')
 
     def init_cluster__change_name(self, subparser):
         subcommand = self.add_sub_command(subparser, 'change-name', 'Assigns or changes a name to a cluster')
@@ -905,6 +912,7 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--all', help='List soft deleted snapshots.', dest='all', action='store_true')
         argument = subcommand.add_argument('--cluster-id', help='Filter snapshots by cluster UUID', type=str, dest='cluster_id', required=False)
         argument = subcommand.add_argument('--with-details', help='List snapshots with replicate and chaining details', dest='with_details', action='store_true')
+        argument = subcommand.add_argument('--pool', help='List snapshots in particular pool id or name.', type=str, dest='pool')
 
     def init_snapshot__delete(self, subparser):
         subcommand = self.add_sub_command(subparser, 'delete', 'Deletes a snapshot.')
@@ -1285,6 +1293,8 @@ class CLIWrapper(CLIWrapperBase):
                         ret = False
                     else:
                         ret = self.cluster__set(sub_command, args)
+                elif sub_command in ['set-shared-placement']:
+                    ret = self.cluster__set_shared_placement(sub_command, args)
                 elif sub_command in ['change-name']:
                     ret = self.cluster__change_name(sub_command, args)
                 elif sub_command in ['add-replication']:
