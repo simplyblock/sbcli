@@ -286,9 +286,16 @@ class _DeviceFailureMigrationBase:
             t.start()
             threads.append(t)
 
-        # Wait for all fills to complete
+        # Wait for FIO launch threads to return (they return after verifying
+        # FIO is running in tmux, but FIO itself is still writing)
         for t in threads:
-            t.join(timeout=3600)
+            t.join(timeout=60)
+
+        # Wait for actual FIO processes to finish on the remote node
+        self.logger.info("Waiting for FIO fill processes to complete on remote node ...")
+        self.common_utils.manage_fio_threads(
+            node=client, threads=[], timeout=3600
+        )
 
         # Verify fill level
         sleep_n_sec(5)
@@ -432,45 +439,23 @@ class _DeviceFailureMigrationBase:
     def _phase_wait_fio_completion(self):
         """Wait for FIO processes to finish naturally (do NOT kill them).
 
-        Polls ``pgrep -f fio`` on the client node until no FIO processes
-        remain or the timeout expires.
+        Uses ``common_utils.manage_fio_threads`` to poll for active FIO
+        processes on the client node until none remain.
         """
         self.logger.info("=== Phase: Waiting for FIO to complete naturally ===")
         client = self.fio_node[0]
         t0 = time.time()
         timeout = self.FIO_LOAD_RUNTIME + 300  # runtime + buffer
-        poll_interval = 30
 
-        while time.time() - t0 < timeout:
-            out = self.ssh_obj.exec_command(
-                client, "pgrep -c -f 'fio --name=' || echo 0"
-            )
-            count_str = out.strip() if isinstance(out, str) else str(out).strip()
-            # exec_command may return tuple
-            if isinstance(out, tuple):
-                count_str = out[0].strip()
-            try:
-                count = int(count_str)
-            except (ValueError, TypeError):
-                count = 0
-            if count == 0:
-                elapsed = time.time() - t0
-                self.logger.info(
-                    f"All FIO processes completed naturally ({elapsed:.1f}s)"
-                )
-                self._timing["fio_completion_duration"] = elapsed
-                return
-            self.logger.info(
-                f"FIO still running: {count} process(es), "
-                f"waiting ... ({time.time() - t0:.0f}s elapsed)"
-            )
-            sleep_n_sec(poll_interval)
-
-        self.logger.warning(
-            f"FIO did not complete within {timeout}s — "
-            f"proceeding with validation anyway"
+        self.common_utils.manage_fio_threads(
+            node=client, threads=[], timeout=timeout
         )
+
         self._timing["fio_completion_duration"] = time.time() - t0
+        self.logger.info(
+            f"All FIO processes completed "
+            f"({self._timing['fio_completion_duration']:.1f}s)"
+        )
 
     # ── Phase 3: start random IO on all nodes (under-load variant) ───────────
 
@@ -734,11 +719,33 @@ class _DeviceFailureMigrationBase:
             result_str = result_str.strip()
             self.logger.info(f"new-device-from-failed result: {result_str}")
 
-            # The command returns the new device ID as the last line
-            new_device_id = result_str.strip().split("\n")[-1].strip()
-            if not new_device_id or len(new_device_id) < 10:
+            # Check for "already added back" — device was recovered previously
+            if "already added back from failed" in result_str.lower():
+                self.logger.info(
+                    "Device was already recovered from a previous run, "
+                    "skipping add-device step"
+                )
+                return
+
+            # Check for other errors in output
+            if "error" in result_str.lower() and "new device id:" not in result_str.lower():
                 self.logger.error(
-                    f"Could not parse new device ID from output: {result_str}"
+                    f"new-device-from-failed returned error: {result_str}"
+                )
+                return
+
+            # The last line of successful output is the bare UUID
+            # e.g. "5ab70b74-c8c5-4e24-b76e-dd64bdcfa39d"
+            new_device_id = result_str.strip().split("\n")[-1].strip()
+            # Validate it looks like a UUID (8-4-4-4-12 hex)
+            import re
+            if not re.match(
+                r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
+                new_device_id
+            ):
+                self.logger.error(
+                    f"Could not parse valid device UUID from output. "
+                    f"Got: '{new_device_id}', full output: {result_str}"
                 )
                 return
             self.logger.info(f"New device ID: {new_device_id}")
@@ -1258,7 +1265,7 @@ class _DeviceFailureMigrationK8s(_DeviceFailureMigrationBase):
         self.logger.info(f"Waiting for {len(self._fill_jobs)} fill jobs to complete ...")
         for job_name, _ in self._fill_jobs:
             try:
-                self.k8s_utils.wait_fio_job_complete(job_name, timeout=3600)
+                self.k8s_utils.wait_job_complete(job_name, timeout=3600)
                 self.logger.info(f"Fill job {job_name} completed")
             except Exception as exc:
                 self.logger.warning(f"Fill job {job_name} did not complete: {exc}")
