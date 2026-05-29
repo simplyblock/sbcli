@@ -93,7 +93,11 @@ class _DeviceFailureMigrationBase:
     # ── Main flow ────────────────────────────────────────────────────────────
 
     def _run_migration_test(self, with_io_load=False, failure_mode="api"):
-        """Main flow: setup -> fill -> [start IO] -> fail -> migrate -> validate -> cleanup."""
+        """Main flow: setup -> fill -> [checksum] -> [start IO] -> fail -> migrate -> validate -> recover -> cleanup.
+
+        NoLoad:  fill → md5sum → fail device → migrate → verify md5 + FIO fill logs → recover device → cleanup
+        UnderLoad: fill → start FIO (verify=md5) → fail device → migrate → check FIO OK → wait FIO complete → recover → cleanup
+        """
         self._with_io_load = with_io_load
         self._failure_mode = failure_mode
         self._test_passed = False
@@ -110,11 +114,15 @@ class _DeviceFailureMigrationBase:
             else:
                 self._phase_fail_and_migrate()
             self._phase_validate()
+            if with_io_load:
+                # Wait for FIO to finish naturally — do NOT kill it
+                self._phase_wait_fio_completion()
+                self._phase_validate_fio()
             self._test_passed = True
         finally:
             if with_io_load:
-                self._phase_stop_io_load()
-            self._phase_restart_device()
+                self._phase_stop_io_load()  # kill FIO only if still running (failure path)
+            self._phase_recover_device()
             self._phase_cleanup()
             self._timing["total_duration"] = time.time() - t0
             self._print_migration_summary()
@@ -410,6 +418,51 @@ class _DeviceFailureMigrationBase:
                 f"{other_errors}"
             )
 
+    # ── Phase: wait for FIO to complete naturally ──────────────────────────
+
+    def _phase_wait_fio_completion(self):
+        """Wait for FIO processes to finish naturally (do NOT kill them).
+
+        Polls ``pgrep -f fio`` on the client node until no FIO processes
+        remain or the timeout expires.
+        """
+        self.logger.info("=== Phase: Waiting for FIO to complete naturally ===")
+        client = self.fio_node[0]
+        t0 = time.time()
+        timeout = self.FIO_LOAD_RUNTIME + 300  # runtime + buffer
+        poll_interval = 30
+
+        while time.time() - t0 < timeout:
+            out = self.ssh_obj.exec_command(
+                client, "pgrep -c -f 'fio --name=' || echo 0"
+            )
+            count_str = out.strip() if isinstance(out, str) else str(out).strip()
+            # exec_command may return tuple
+            if isinstance(out, tuple):
+                count_str = out[0].strip()
+            try:
+                count = int(count_str)
+            except (ValueError, TypeError):
+                count = 0
+            if count == 0:
+                elapsed = time.time() - t0
+                self.logger.info(
+                    f"All FIO processes completed naturally ({elapsed:.1f}s)"
+                )
+                self._timing["fio_completion_duration"] = elapsed
+                return
+            self.logger.info(
+                f"FIO still running: {count} process(es), "
+                f"waiting ... ({time.time() - t0:.0f}s elapsed)"
+            )
+            sleep_n_sec(poll_interval)
+
+        self.logger.warning(
+            f"FIO did not complete within {timeout}s — "
+            f"proceeding with validation anyway"
+        )
+        self._timing["fio_completion_duration"] = time.time() - t0
+
     # ── Phase 3: start random IO on all nodes (under-load variant) ───────────
 
     def _phase_start_io_load(self):
@@ -623,57 +676,127 @@ class _DeviceFailureMigrationBase:
             )
         self.logger.info("All non-target devices remain online")
 
-        # 4. Data integrity / FIO checks
+        # 4. Data integrity checks (NoLoad only — UnderLoad is checked after FIO completes)
         if not self._with_io_load:
-            # NoLoad: verify md5 checksums match pre-migration values
             self._phase_verify_checksums()
-        else:
-            # UnderLoad: check FIO logs for errors
-            self._phase_validate_fio()
 
     def _phase_stop_io_load(self):
-        self.logger.info("=== Phase: Stop IO load ===")
+        """Kill remaining FIO processes (failure path only).
+
+        On the success path, FIO completes naturally via
+        ``_phase_wait_fio_completion``.  This method runs in the
+        ``finally`` block to ensure cleanup if the test failed early.
+        """
+        self.logger.info("=== Phase: Stop IO load (cleanup) ===")
         client = self.fio_node[0]
         self.ssh_obj.exec_command(client, "pkill -f fio || true")
         for t in self._load_fio_threads:
             t.join(timeout=30)
         self.logger.info("IO load stopped")
 
-    # ── Phase: restart failed device ─────────────────────────────────────────
+    # ── Phase: recover failed device ─────────────────────────────────────────
 
-    def _phase_restart_device(self):
-        """Restart the failed device so the cluster is left in a clean state.
+    def _phase_recover_device(self):
+        """Create a new device from the failed one and add it back.
 
         Runs in the finally block so it executes even if the test fails.
-        For PCIe variants the PCI bus was already rescanned in the fail phase;
-        this issues the control-plane restart-device to bring it back online.
+
+        Steps:
+          1. ``sbctl sn new-device-from-failed <failed_device_id>`` → new device ID
+          2. ``sbctl sn add-device <new_device_id>``
+          3. Wait for ``new_device_migration`` tasks to complete
         """
         if not self._target_device_id:
             return
         self.logger.info(
-            f"=== Phase: Restart device {self._target_device_id} ==="
+            f"=== Phase: Recover device {self._target_device_id} ==="
         )
+        mgmt_ip = self.mgmt_nodes[0]
+
+        # Step 1: create new device from failed device
         try:
-            mgmt_ip = self.mgmt_nodes[0]
-            self.ssh_obj.restart_device(mgmt_ip, self._target_device_id)
-            self.logger.info(
-                f"restart-device issued for {self._target_device_id}"
+            cmd = (
+                f"{self.base_cmd} sn new-device-from-failed "
+                f"{self._target_device_id}"
             )
-            # Wait for device to come back online
-            try:
-                self.sbcli_utils.wait_for_device_status(
-                    self._target_node_id, "online", timeout=120,
-                    device_id=self._target_device_id,
+            self.logger.info(f"Creating new device from failed: {cmd}")
+            result = self.ssh_obj.exec_command(mgmt_ip, cmd)
+            result_str = result[0] if isinstance(result, tuple) else str(result)
+            result_str = result_str.strip()
+            self.logger.info(f"new-device-from-failed result: {result_str}")
+
+            # The command returns the new device ID as the last line
+            new_device_id = result_str.strip().split("\n")[-1].strip()
+            if not new_device_id or len(new_device_id) < 10:
+                self.logger.error(
+                    f"Could not parse new device ID from output: {result_str}"
                 )
+                return
+            self.logger.info(f"New device ID: {new_device_id}")
+        except Exception as exc:
+            self.logger.error(f"new-device-from-failed failed: {exc}")
+            return
+
+        # Step 2: add the new device
+        try:
+            cmd = f"{self.base_cmd} -d sn add-device {new_device_id}"
+            self.logger.info(f"Adding new device: {cmd}")
+            result = self.ssh_obj.exec_command(mgmt_ip, cmd)
+            self.logger.info(f"add-device result: {result}")
+            sleep_n_sec(5)
+        except Exception as exc:
+            self.logger.error(f"add-device failed: {exc}")
+            return
+
+        # Step 3: wait for new_device_migration tasks to complete
+        try:
+            self._wait_new_device_migration(
+                new_device_id, timeout=self.MIGRATION_TIMEOUT
+            )
+            self.logger.info(
+                f"Device recovery complete — new device {new_device_id} online"
+            )
+        except Exception as exc:
+            self.logger.warning(
+                f"new_device_migration did not complete: {exc}"
+            )
+
+    def _wait_new_device_migration(self, new_device_id, timeout=3600):
+        """Wait for all new_device_migration tasks for *new_device_id* to finish."""
+        self.logger.info(
+            f"Waiting for new_device_migration tasks for {new_device_id} ..."
+        )
+        start = time.time()
+        while time.time() - start < timeout:
+            try:
+                tasks = self.sbcli_utils.list_migration_tasks(
+                    self.sbcli_utils.cluster_id
+                )
+                active = [
+                    t for t in tasks.get("results", [])
+                    if t.get("function_name") == "new_device_migration"
+                    and new_device_id in str(t.get("target_id", ""))
+                    and t.get("status") not in ("done", "cancelled", "error")
+                ]
+                if not active:
+                    elapsed = time.time() - start
+                    self.logger.info(
+                        f"All new_device_migration tasks complete "
+                        f"in {elapsed:.1f}s"
+                    )
+                    return elapsed
                 self.logger.info(
-                    f"Device {self._target_device_id} is back online"
+                    f"Waiting for {len(active)} new_device_migration "
+                    f"task(s) ..."
                 )
             except Exception as exc:
                 self.logger.warning(
-                    f"Device did not come back online within timeout: {exc}"
+                    f"Error checking migration tasks: {exc}"
                 )
-        except Exception as exc:
-            self.logger.error(f"Failed to restart device: {exc}")
+            sleep_n_sec(10)
+        self.logger.warning(
+            f"new_device_migration not complete after {timeout}s"
+        )
 
     # ── Cleanup ──────────────────────────────────────────────────────────────
 
@@ -1168,6 +1291,10 @@ class _DeviceFailureMigrationK8s(_DeviceFailureMigrationBase):
                 f"numjobs={self.FIO_LOAD_NUMJOBS}\n"
                 f"time_based\n"
                 f"runtime={self.FIO_LOAD_RUNTIME}\n"
+                f"verify=md5\n"
+                f"verify_dump=1\n"
+                f"verify_fatal=1\n"
+                f"verify_backlog=4096\n"
                 f"group_reporting\n"
                 f"\n"
                 f"[job1]\n"
@@ -1344,10 +1471,40 @@ class _DeviceFailureMigrationK8s(_DeviceFailureMigrationBase):
                 f"{other_errors}"
             )
 
+    # ── Phase: wait for FIO to complete naturally (K8s) ─────────────────────
+
+    def _phase_wait_fio_completion(self):
+        """Wait for FIO K8s Jobs to complete naturally."""
+        self.logger.info(
+            "=== Phase: Waiting for FIO K8s Jobs to complete naturally ==="
+        )
+        t0 = time.time()
+        fio_timeout = self.FIO_LOAD_RUNTIME + 300
+
+        for job_name, _ in self._load_jobs:
+            try:
+                status = self.k8s_utils.wait_job_complete(
+                    job_name, timeout=fio_timeout
+                )
+                self.logger.info(
+                    f"FIO job {job_name} completed: {status}"
+                )
+            except Exception as exc:
+                self.logger.warning(
+                    f"FIO job {job_name} did not complete: {exc}"
+                )
+
+        elapsed = time.time() - t0
+        self._timing["fio_completion_duration"] = elapsed
+        self.logger.info(
+            f"All FIO jobs finished ({elapsed:.1f}s)"
+        )
+
     # ── Phase 5 override: stop IO load (K8s) ─────────────────────────────────
 
     def _phase_stop_io_load(self):
-        self.logger.info("=== Phase: Stop IO load (K8s) ===")
+        """Delete remaining FIO jobs (failure path only)."""
+        self.logger.info("=== Phase: Stop IO load (K8s cleanup) ===")
         for job_name, cm_name in self._load_jobs:
             try:
                 self.k8s_utils.delete_resource("job", job_name)
