@@ -88,23 +88,29 @@ class _DeviceFailureMigrationBase:
         self._sn_nodes = []
         self._with_io_load = False
         self._failure_mode = "api"
+        self._pre_migration_checksums = {}  # {lvol_name: {filepath: md5}}
 
     # ── Main flow ────────────────────────────────────────────────────────────
 
     def _run_migration_test(self, with_io_load=False, failure_mode="api"):
-        """Main flow: setup -> fill -> [start IO] -> fail -> migrate -> cleanup."""
+        """Main flow: setup -> fill -> [start IO] -> fail -> migrate -> validate -> cleanup."""
         self._with_io_load = with_io_load
         self._failure_mode = failure_mode
+        self._test_passed = False
         t0 = time.time()
         try:
             self._phase_setup_pool_and_lvols()
             self._phase_fill_devices()
+            if not with_io_load:
+                self._phase_compute_checksums()
             if with_io_load:
                 self._phase_start_io_load()
             if failure_mode == "pcie":
                 self._phase_fail_and_migrate_pcie()
             else:
                 self._phase_fail_and_migrate()
+            self._phase_validate()
+            self._test_passed = True
         finally:
             if with_io_load:
                 self._phase_stop_io_load()
@@ -113,6 +119,8 @@ class _DeviceFailureMigrationBase:
             self._print_migration_summary()
             self._write_timing_json()
             self._generate_charts()
+
+        self.logger.info("TEST CASE PASSED !!!")
 
     # ── Phase 1: create pool, lvols, connect, format, mount ──────────────────
 
@@ -276,6 +284,130 @@ class _DeviceFailureMigrationBase:
         self.logger.info(
             f"Fill complete ({self._timing['fill_duration']:.1f}s)"
         )
+
+    # ── Phase 2b: compute pre-migration checksums (no-load variant) ─────────
+
+    def _phase_compute_checksums(self):
+        """Compute MD5 checksums of all files on target lvols before migration."""
+        self.logger.info("=== Phase: Compute pre-migration checksums ===")
+        client = self.fio_node[0]
+        self._pre_migration_checksums = {}
+
+        for name in self._lvols_on_target:
+            info = self.lvol_mount_details.get(name)
+            if not info:
+                continue
+            mount = info["Mount"]
+            try:
+                files = self.ssh_obj.find_files(client, mount)
+                if files:
+                    checksums = self.ssh_obj.generate_checksums(client, files)
+                    self._pre_migration_checksums[name] = checksums
+                    self.logger.info(
+                        f"Captured {len(checksums)} file checksums for {name}"
+                    )
+                else:
+                    self.logger.warning(f"No files found on {mount} for checksum")
+            except Exception as exc:
+                self.logger.warning(f"Checksum capture failed for {name}: {exc}")
+
+        self.logger.info(
+            f"Pre-migration checksums captured for "
+            f"{len(self._pre_migration_checksums)} lvols"
+        )
+
+    def _phase_verify_checksums(self):
+        """Verify MD5 checksums of target lvols match pre-migration values."""
+        self.logger.info("=== Verifying post-migration data integrity ===")
+        client = self.fio_node[0]
+        mismatches = 0
+
+        for name, expected_checksums in self._pre_migration_checksums.items():
+            info = self.lvol_mount_details.get(name)
+            if not info:
+                continue
+            mount = info["Mount"]
+            try:
+                files = self.ssh_obj.find_files(client, mount)
+                self.ssh_obj.verify_checksums(
+                    client, files, expected_checksums,
+                    message=(
+                        f"Data integrity check failed for lvol {name} "
+                        f"after device migration"
+                    ),
+                )
+                self.logger.info(f"Checksums verified for {name}: OK")
+            except ValueError as exc:
+                self.logger.error(f"Checksum MISMATCH for {name}: {exc}")
+                mismatches += 1
+            except Exception as exc:
+                self.logger.error(
+                    f"Checksum verification error for {name}: {exc}"
+                )
+                mismatches += 1
+
+        assert mismatches == 0, (
+            f"Data integrity check failed: {mismatches} lvol(s) had "
+            f"checksum mismatches after migration"
+        )
+        self.logger.info(
+            "All post-migration checksums verified — data integrity OK"
+        )
+
+    def _phase_validate_fio(self):
+        """Check FIO logs for errors after migration (under-load variant).
+
+        IO errors on lvols hosted on the failed device are expected and
+        logged as warnings.  IO errors on lvols hosted on OTHER devices
+        are logged as errors.
+        """
+        self.logger.info("=== Verifying FIO logs for errors ===")
+        client = self.fio_node[0]
+        fail_words = ["error", "fail", "interrupt", "terminate"]
+        target_errors = []
+        other_errors = []
+
+        all_names = self._lvols_on_target + self._lvols_on_others
+        for name in all_names:
+            info = self.lvol_mount_details.get(name)
+            if not info or not info.get("Log"):
+                continue
+            try:
+                log_data = self.ssh_obj.exec_command(
+                    client, f"cat {info['Log']} 2>/dev/null || true"
+                )
+                if not log_data:
+                    self.logger.warning(f"Empty or missing FIO log for {name}")
+                    continue
+                log_lower = log_data.lower() if isinstance(log_data, str) else str(log_data).lower()
+                found = [w for w in fail_words if w in log_lower]
+                if found:
+                    msg = f"{name}: FIO log contains {found}"
+                    if name in self._lvols_on_target:
+                        target_errors.append(msg)
+                        self.logger.warning(
+                            f"[expected] FIO error on failed-device lvol {name}: {found}"
+                        )
+                    else:
+                        other_errors.append(msg)
+                        self.logger.error(
+                            f"FIO error on non-target lvol {name}: {found}"
+                        )
+                else:
+                    self.logger.info(f"FIO log for {name}: no errors")
+            except Exception as exc:
+                self.logger.warning(f"Could not read FIO log for {name}: {exc}")
+
+        if target_errors:
+            self.logger.warning(
+                f"{len(target_errors)} FIO error(s) on target-device lvols "
+                f"(expected during device migration)"
+            )
+        if other_errors:
+            self.logger.error(
+                f"{len(other_errors)} FIO error(s) on non-target lvols: "
+                f"{other_errors}"
+            )
 
     # ── Phase 3: start random IO on all nodes (under-load variant) ───────────
 
@@ -452,6 +584,52 @@ class _DeviceFailureMigrationBase:
 
     # ── Phase 5: stop IO load ────────────────────────────────────────────────
 
+    def _phase_validate(self):
+        """Validate migration results: device migrated, nodes healthy, data intact."""
+        self.logger.info("=== Phase: Validate migration results ===")
+
+        # 1. Device should be in a migrated/failed state
+        final_status = self._timing.get("device_final_status", "unknown")
+        assert final_status in ("failed_and_migrated", "failed"), (
+            f"Device {self._target_device_id} has unexpected final status: "
+            f"{final_status} (expected failed_and_migrated or failed)"
+        )
+        self.logger.info(
+            f"Device {self._target_device_id} status: {final_status}"
+        )
+
+        # 2. All storage nodes should still be online and healthy
+        storage_nodes = self.sbcli_utils.get_storage_nodes()
+        for node in storage_nodes["results"]:
+            assert node["status"] == "online", (
+                f"Node {node['id']} is not online (status={node['status']})"
+            )
+            assert node["health_check"], (
+                f"Node {node['id']} health check failed"
+            )
+        self.logger.info(
+            f"All {len(storage_nodes['results'])} storage nodes online and healthy"
+        )
+
+        # 3. Other devices on target node should still be online
+        devices = self.sbcli_utils.get_device_details(self._target_node_id)
+        for d in devices:
+            if d["id"] == self._target_device_id:
+                continue
+            assert d["status"] == "online", (
+                f"Non-target device {d['id']} on target node has "
+                f"unexpected status: {d['status']}"
+            )
+        self.logger.info("All non-target devices remain online")
+
+        # 4. Data integrity / FIO checks
+        if not self._with_io_load:
+            # NoLoad: verify md5 checksums match pre-migration values
+            self._phase_verify_checksums()
+        else:
+            # UnderLoad: check FIO logs for errors
+            self._phase_validate_fio()
+
     def _phase_stop_io_load(self):
         self.logger.info("=== Phase: Stop IO load ===")
         client = self.fio_node[0]
@@ -509,6 +687,7 @@ class _DeviceFailureMigrationBase:
         self.logger.info(f"  Fill target:      {self.FILL_PERCENT}%")
         self.logger.info(f"  Lvols on target:  {len(self._lvols_on_target)}")
         self.logger.info(f"  Lvols on others:  {len(self._lvols_on_others)}")
+        self.logger.info(f"  Result:           {'PASSED' if self._test_passed else 'FAILED'}")
         self.logger.info("-" * 70)
         for key, val in self._timing.items():
             if isinstance(val, float):
@@ -532,7 +711,7 @@ class _DeviceFailureMigrationBase:
         report = {
             "test_class": self.__class__.__name__,
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "status": "passed",
+            "status": "passed" if self._test_passed else "failed",
             "geometry": {"ndcs": self.ndcs, "npcs": self.npcs},
             "config": {
                 "fill_percent": self.FILL_PERCENT,
@@ -979,6 +1158,154 @@ class _DeviceFailureMigrationK8s(_DeviceFailureMigrationBase):
         self.logger.info(
             f"IO load started: {len(self._load_jobs)} FIO jobs"
         )
+
+    # ── Phase 2b override: checksums via K8s utility pods ───────────────────
+
+    def _phase_compute_checksums(self):
+        """Compute MD5 checksums via utility pods on target PVCs."""
+        self.logger.info("=== Phase: Compute pre-migration checksums (K8s) ===")
+        self._pre_migration_checksums = {}
+        self._checksum_utility_pods = []
+
+        for pvc_name in self._lvols_on_target:
+            pod_name = f"cksum-pre-{pvc_name}"
+            try:
+                self.k8s_utils.create_utility_pod(pod_name, pvc_name)
+                self._checksum_utility_pods.append(pod_name)
+                self.k8s_utils.wait_pod_running(pod_name)
+                files = self.k8s_utils.find_files_in_pvc(pod_name)
+                if files:
+                    checksums = self.k8s_utils.generate_checksums_in_pvc(
+                        pod_name, files
+                    )
+                    self._pre_migration_checksums[pvc_name] = checksums
+                    self.logger.info(
+                        f"Captured {len(checksums)} file checksums for {pvc_name}"
+                    )
+                else:
+                    self.logger.warning(
+                        f"No files found in PVC {pvc_name} for checksum"
+                    )
+            except Exception as exc:
+                self.logger.warning(
+                    f"Checksum capture failed for {pvc_name}: {exc}"
+                )
+            finally:
+                try:
+                    self.k8s_utils.delete_pod(pod_name)
+                except Exception:
+                    pass
+
+        self.logger.info(
+            f"Pre-migration checksums captured for "
+            f"{len(self._pre_migration_checksums)} PVCs"
+        )
+
+    def _phase_verify_checksums(self):
+        """Verify MD5 checksums via utility pods on target PVCs."""
+        self.logger.info("=== Verifying post-migration data integrity (K8s) ===")
+        mismatches = 0
+
+        for pvc_name, expected in self._pre_migration_checksums.items():
+            pod_name = f"cksum-post-{pvc_name}"
+            try:
+                self.k8s_utils.create_utility_pod(pod_name, pvc_name)
+                self.k8s_utils.wait_pod_running(pod_name)
+                actual = self.k8s_utils.generate_checksums_in_pvc(
+                    pod_name,
+                    self.k8s_utils.find_files_in_pvc(pod_name),
+                )
+                # Compare by filename (basename)
+                expected_by_name = {
+                    os.path.basename(k): v for k, v in expected.items()
+                }
+                actual_by_name = {
+                    os.path.basename(k): v for k, v in actual.items()
+                }
+                for fname, cksum in expected_by_name.items():
+                    if fname not in actual_by_name:
+                        self.logger.error(
+                            f"File {fname} missing in PVC {pvc_name} after migration"
+                        )
+                        mismatches += 1
+                    elif actual_by_name[fname] != cksum:
+                        self.logger.error(
+                            f"Checksum MISMATCH for {fname} in {pvc_name}: "
+                            f"expected {cksum}, got {actual_by_name[fname]}"
+                        )
+                        mismatches += 1
+                    else:
+                        self.logger.info(f"Checksum OK: {fname} in {pvc_name}")
+            except Exception as exc:
+                self.logger.error(
+                    f"Checksum verification error for {pvc_name}: {exc}"
+                )
+                mismatches += 1
+            finally:
+                try:
+                    self.k8s_utils.delete_pod(pod_name)
+                except Exception:
+                    pass
+
+        assert mismatches == 0, (
+            f"Data integrity check failed: {mismatches} file(s) had "
+            f"checksum mismatches after migration"
+        )
+        self.logger.info(
+            "All post-migration checksums verified — data integrity OK"
+        )
+
+    def _phase_validate_fio(self):
+        """Check FIO K8s Job status and pod logs for errors."""
+        self.logger.info("=== Verifying FIO jobs for errors (K8s) ===")
+        target_errors = []
+        other_errors = []
+
+        for job_name, _ in self._load_jobs:
+            # Determine if this job is on a target or other PVC
+            pvc_name = job_name.replace("fio-load-", "", 1)
+            is_target = pvc_name in self._lvols_on_target
+            try:
+                pod_name = self.k8s_utils.get_job_pod_name(job_name)
+                if not pod_name:
+                    self.logger.warning(
+                        f"Could not find pod for FIO job {job_name}"
+                    )
+                    continue
+                logs = self.k8s_utils.get_pod_logs(pod_name, tail=500)
+                fail_words = ["error", "fail", "interrupt", "terminate"]
+                logs_lower = logs.lower() if logs else ""
+                found = [w for w in fail_words if w in logs_lower]
+                if found:
+                    msg = f"{job_name} ({pvc_name}): pod logs contain {found}"
+                    if is_target:
+                        target_errors.append(msg)
+                        self.logger.warning(
+                            f"[expected] FIO error on failed-device PVC "
+                            f"{pvc_name}: {found}"
+                        )
+                    else:
+                        other_errors.append(msg)
+                        self.logger.error(
+                            f"FIO error on non-target PVC {pvc_name}: {found}"
+                        )
+                else:
+                    self.logger.info(f"FIO job {job_name}: no errors")
+            except Exception as exc:
+                self.logger.warning(
+                    f"Could not check FIO job {job_name}: {exc}"
+                )
+
+        if target_errors:
+            self.logger.warning(
+                f"{len(target_errors)} FIO error(s) on target-device PVCs "
+                f"(expected during device migration)"
+            )
+        if other_errors:
+            self.logger.error(
+                f"{len(other_errors)} FIO error(s) on non-target PVCs: "
+                f"{other_errors}"
+            )
 
     # ── Phase 5 override: stop IO load (K8s) ─────────────────────────────────
 
