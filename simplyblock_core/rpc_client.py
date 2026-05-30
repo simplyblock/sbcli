@@ -159,7 +159,7 @@ class RPCClient:
         if ret_code == 200:
             try:
                 data = response.json()
-                if method != "bdev_get_bdevs":
+                if method not in ["bdev_get_bdevs", "nvmf_get_subsystems"]:
                     logger.debug("Response json: %s", json.dumps(data))
             except Exception:
                 logger.debug("Response ret_content: %s", ret_content)
