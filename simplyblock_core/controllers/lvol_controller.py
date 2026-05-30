@@ -545,7 +545,6 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     lvol.crypto_bdev = ''
     lvol.comp_bdev = ''
 
-    lvol.mode = 'read-write'
     lvol.lvol_type = 'lvol'
     if lvol_priority_class:
         lvol.lvol_priority_class = lvol_priority_class
@@ -1733,31 +1732,6 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
         return utils.print_table(data)
 
 
-def list_lvols_mem(is_json, is_csv):
-    db_controller = DBController()
-    lvols = db_controller.get_lvols()
-    data = []
-    for lvol in lvols:
-        if lvol.deleted is True:
-            continue
-        logger.debug(lvol)
-        data.append({
-            "id": lvol.uuid,
-            "size": utils.humanbytes(lvol.size),
-            "max_size": utils.humanbytes(lvol.max_size),
-            **lvol.mem_diff
-        })
-
-    if is_json:
-        return json.dumps(data, indent=2)
-    elif is_csv:
-        print(";".join(data[0].keys()))
-        for d in data:
-            print(";".join([str(v) for v in d.values()]))
-    else:
-        return utils.print_table(data)
-
-
 def get_replication_info(lvol_id_or_name):
     db_controller = DBController()
     lvol = None
@@ -2118,39 +2092,6 @@ def resize_lvol(id, new_size):
     logger.info("Done")
 
     return True, None
-
-
-
-def set_read_only(id):
-    db_controller = DBController()
-    try:
-        lvol = db_controller.get_lvol_by_id(id)
-    except KeyError as e:
-        logger.error(e)
-        return False
-
-    pool = db_controller.get_pool_by_id(lvol.pool_uuid)
-    if pool.status == Pool.STATUS_INACTIVE:
-        logger.error("Pool is disabled")
-        return False
-
-    logger.info(f"Setting LVol: {lvol.get_id()} read only")
-
-    snode = db_controller.get_storage_node_by_id(lvol.node_id)
-
-    rpc_client = snode.rpc_client()
-
-    ret = rpc_client.lvol_read_only(lvol.lvol_bdev)
-    if not ret:
-        return "Error"
-
-    old_status = lvol.mode
-    lvol.mode = 'read-only'
-    lvol.write_to_db(db_controller.kv_store)
-    logger.info("Done")
-    lvol_events.lvol_status_change(lvol, lvol.mode, old_status)
-
-    return True
 
 
 def create_snapshot(lvol_id, snapshot_name, backup=False):

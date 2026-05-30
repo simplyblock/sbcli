@@ -3,7 +3,6 @@
 from typing import List
 
 from simplyblock_core.models.base_model import BaseModel
-from simplyblock_core.models.nvme_device import NVMeDevice
 
 
 class LVol(BaseModel):
@@ -48,8 +47,6 @@ class LVol(BaseModel):
     lvol_uuid: str = ""
     lvs_name: str = ""
     max_size: int = 0
-    mem_diff: dict = {}
-    mode: str = "read-write"
     namespace: str = ""
     node_id: str = ""
     nodes: List[str] = []
@@ -57,7 +54,6 @@ class LVol(BaseModel):
     ns_id: int = 1
     max_namespace_per_subsys: int = 1
     subsys_port: int = 9090
-    nvme_dev: NVMeDevice = None  # type: ignore[assignment]
     pool_uuid: str = ""
     pool_name: str = ""
     pvc_name: str = ""

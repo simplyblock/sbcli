@@ -1700,20 +1700,6 @@ commands:
             dest: all
             type: bool
             action: store_true
-      - name: list-mem
-        help: "Gets the size and max_size of a logical volume."
-        private: true
-        arguments:
-          - name: "--json"
-            help: "Print outputs in json format."
-            dest: json
-            type: bool
-            action: store_true
-          - name: "--csv"
-            help: "Print outputs in csv format."
-            dest: csv
-            type: bool
-            action: store_true
       - name: get
         help: "Gets the logical volume details."
         arguments:

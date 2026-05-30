@@ -591,8 +591,6 @@ class CLIWrapper(CLIWrapperBase):
         self.init_volume__add(subparser)
         self.init_volume__qos_set(subparser)
         self.init_volume__list(subparser)
-        if self.developer_mode:
-            self.init_volume__list_mem(subparser)
         self.init_volume__get(subparser)
         self.init_volume__delete(subparser)
         self.init_volume__connect(subparser)
@@ -663,11 +661,6 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--pool', help='List logical volumes in particular pool id or name.', type=str, dest='pool')
         argument = subcommand.add_argument('--json', help='Print outputs in json format.', dest='json', action='store_true')
         argument = subcommand.add_argument('--all', help='List soft deleted logical volumes.', dest='all', action='store_true')
-
-    def init_volume__list_mem(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'list-mem', 'Gets the size and max_size of a logical volume.')
-        argument = subcommand.add_argument('--json', help='Print outputs in json format.', dest='json', action='store_true')
-        argument = subcommand.add_argument('--csv', help='Print outputs in csv format.', dest='csv', action='store_true')
 
     def init_volume__get(self, subparser):
         subcommand = self.add_sub_command(subparser, 'get', 'Gets the logical volume details.')
@@ -1317,12 +1310,6 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.volume__qos_set(sub_command, args)
                 elif sub_command in ['list']:
                     ret = self.volume__list(sub_command, args)
-                elif sub_command in ['list-mem']:
-                    if not self.developer_mode:
-                        print("This command is private.")
-                        ret = False
-                    else:
-                        ret = self.volume__list_mem(sub_command, args)
                 elif sub_command in ['get']:
                     ret = self.volume__get(sub_command, args)
                 elif sub_command in ['delete']:

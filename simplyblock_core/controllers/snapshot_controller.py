@@ -679,7 +679,6 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     lvol.hostname = snode.hostname
     lvol.node_id = snode.get_id()
     lvol.nodes = snap.lvol.nodes
-    lvol.mode = 'read-write'
     lvol.cloned_from_snap = snapshot_id
     lvol.pool_uuid = pool.get_id()
     lvol.ha_type = snap.lvol.ha_type
