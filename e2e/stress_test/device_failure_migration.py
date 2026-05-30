@@ -89,6 +89,7 @@ class _DeviceFailureMigrationBase:
         self._with_io_load = False
         self._failure_mode = "api"
         self._pre_migration_checksums = {}  # {lvol_name: {filepath: md5}}
+        self._pre_existing_failed_devices = set()  # device IDs already failed before test
 
     # ── Main flow ────────────────────────────────────────────────────────────
 
@@ -152,8 +153,18 @@ class _DeviceFailureMigrationBase:
             raise RuntimeError(
                 f"No devices found on target node {self._target_node_id}"
             )
-        # Filter for online devices only — old failed_and_migrated devices
-        # remain in the list after recovery and must be skipped
+        # Record devices already in a non-online state from previous runs —
+        # these will be ignored throughout the test (validation, recovery, etc.)
+        for d in devices:
+            if d.get("status") != "online":
+                self._pre_existing_failed_devices.add(d["id"])
+        if self._pre_existing_failed_devices:
+            self.logger.info(
+                f"Pre-existing non-online devices (will be ignored): "
+                f"{self._pre_existing_failed_devices}"
+            )
+
+        # Filter for online devices only
         online_devices = [d for d in devices if d.get("status") == "online"]
         if not online_devices:
             raise RuntimeError(
@@ -660,9 +671,16 @@ class _DeviceFailureMigrationBase:
         )
 
         # 3. Other devices on target node should still be online
+        #    (skip the target device and any pre-existing failed devices)
         devices = self.sbcli_utils.get_device_details(self._target_node_id)
         for d in devices:
             if d["id"] == self._target_device_id:
+                continue
+            if d["id"] in self._pre_existing_failed_devices:
+                self.logger.info(
+                    f"Skipping pre-existing failed device {d['id']} "
+                    f"(status={d['status']})"
+                )
                 continue
             assert d["status"] == "online", (
                 f"Non-target device {d['id']} on target node has "
@@ -1151,8 +1169,18 @@ class _DeviceFailureMigrationK8s(_DeviceFailureMigrationBase):
             raise RuntimeError(
                 f"No devices found on target node {self._target_node_id}"
             )
-        # Filter for online devices only — old failed_and_migrated devices
-        # remain in the list after recovery and must be skipped
+        # Record devices already in a non-online state from previous runs —
+        # these will be ignored throughout the test (validation, recovery, etc.)
+        for d in devices:
+            if d.get("status") != "online":
+                self._pre_existing_failed_devices.add(d["id"])
+        if self._pre_existing_failed_devices:
+            self.logger.info(
+                f"Pre-existing non-online devices (will be ignored): "
+                f"{self._pre_existing_failed_devices}"
+            )
+
+        # Filter for online devices only
         online_devices = [d for d in devices if d.get("status") == "online"]
         if not online_devices:
             raise RuntimeError(
