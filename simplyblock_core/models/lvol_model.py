@@ -99,6 +99,7 @@ class LVolMini(BaseModel):
     hostname: str = ""
     blobid: int = 0
     ns_id: int = 0
+    max_namespace_per_subsys: int = 0
 
     def from_lvol(self, lvol: LVol):
         self.uuid = lvol.uuid
@@ -117,4 +118,5 @@ class LVolMini(BaseModel):
         self.hostname = lvol.hostname
         self.blobid = lvol.blobid
         self.ns_id = lvol.ns_id
+        self.max_namespace_per_subsys = lvol.max_namespace_per_subsys
         return self
