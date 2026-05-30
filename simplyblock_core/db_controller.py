@@ -2,6 +2,7 @@
 import json
 import logging
 import os.path
+import time
 
 import fdb
 from typing import List, Optional
@@ -140,8 +141,12 @@ class DBController(metaclass=Singleton):
         return cluster_lvols
 
     def get_all_lvols(self) -> List[LVol]:
+        start_time = time.time()
         lvols = LVol().read_from_db(self.kv_store)
-        return sorted(lvols, key=lambda x: x.create_dt)
+        ret = sorted(lvols, key=lambda x: x.create_dt)
+        end_time = time.time()
+        logger.debug(f"time taken to read all LVols: {round(end_time - start_time, 2)}s")
+        return ret
 
     def get_lvols_by_node_id(self, node_id) -> List[LVol]:
         lvols = []
@@ -173,10 +178,14 @@ class DBController(metaclass=Singleton):
         return hostnames
 
     def get_snapshots(self, cluster_id=None) -> List[SnapShot]:
+        start_time = time.time()
         snaps = SnapShot().read_from_db(self.kv_store)
         if cluster_id:
             snaps = [n for n in snaps if n.cluster_id == cluster_id]
-        return sorted(snaps, key=lambda x: x.created_at)
+        ret = sorted(snaps, key=lambda x: x.created_at)
+        end_time = time.time()
+        logger.debug(f"time taken to read all SnapShots: {round(end_time - start_time, 2)}s")
+        return ret
 
     def get_snapshot_by_id(self, id) -> SnapShot:
         ret = SnapShot().read_from_db(self.kv_store, id)
@@ -297,7 +306,7 @@ class DBController(metaclass=Singleton):
 
     def get_snapshots_by_node_id(self, node_id) -> List[SnapShot]:
         ret = []
-        snaps = SnapShot().read_from_db(self.kv_store)
+        snaps = self.get_snapshots()
         for snap in snaps:
             if snap.lvol.node_id == node_id:
                 ret.append(snap)
@@ -305,7 +314,7 @@ class DBController(metaclass=Singleton):
 
     def get_snapshots_by_pool_id(self, pool_id) -> List[SnapShot]:
         ret = []
-        snaps = SnapShot().read_from_db(self.kv_store)
+        snaps = self.get_snapshots()
         for snap in snaps:
             if snap.pool_uuid == pool_id:
                 ret.append(snap)
