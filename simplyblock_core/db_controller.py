@@ -10,7 +10,7 @@ from simplyblock_core import constants
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.job_schedule import JobSchedule
-from simplyblock_core.models.lvol_model import LVol
+from simplyblock_core.models.lvol_model import LVol, LVolReplication
 from simplyblock_core.models.mgmt_node import MgmtNode
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
 from simplyblock_core.models.pool import Pool
@@ -189,6 +189,10 @@ class DBController(metaclass=Singleton):
         if not lvols:
             raise KeyError(f'LVol {id} not found')
         return lvols[0]
+
+    def get_lvol_replication_objects(self) -> List[LVolReplication]:
+        ret = LVolReplication().read_from_db(self.kv_store)
+        return sorted(ret, key=lambda x: x.create_dt)
 
     def get_lvol_by_name(self, lvol_name) -> LVol:
         for lvol in self.get_lvols():

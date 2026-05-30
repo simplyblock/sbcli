@@ -76,3 +76,11 @@ class LVol(BaseModel):
 
     def has_qos(self):
         return (self.rw_ios_per_sec > 0 or self.rw_mbytes_per_sec > 0 or self.r_mbytes_per_sec > 0 or self.w_mbytes_per_sec > 0)
+
+
+class LVolReplication(BaseModel):
+    source_lvol: LVol = None
+    target_lvol: LVol = None
+    source_cluster_id: str = ""
+    target_cluster_id: str = ""
+

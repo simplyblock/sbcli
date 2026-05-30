@@ -159,9 +159,8 @@ def process_lvol_delete_finish(lvol):
             tasks_controller.add_lvol_sync_del_task(sec_node.cluster_id, sec_node.get_id(), lvol_bdev_name, primary_node.get_id())
 
     lvol_events.lvol_delete(lvol)
-    lvol = db.get_lvol_by_id(lvol.get_id())
-    lvol.status = LVol.STATUS_DELETED
-    lvol.write_to_db()
+    lvol.remove(db.kv_store)
+
     # check for full devices
     full_devs_ids = []
     all_devs_ids = []

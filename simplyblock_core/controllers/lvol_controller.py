@@ -16,7 +16,7 @@ from simplyblock_core.kms import KMSException, create_kms_connection
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.pool import Pool
-from simplyblock_core.models.lvol_model import LVol
+from simplyblock_core.models.lvol_model import LVol, LVolReplication
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.prom_client import PromClient
 
@@ -2655,6 +2655,16 @@ def replicate_lvol_on_target_cluster(lvol_id):
     lvol = db_controller.get_lvol_by_id(lvol_id)
     lvol.from_source = False
     lvol.write_to_db()
+
+    lvol_replication = LVolReplication()
+    lvol_replication.uuid = str(uuid.uuid4())
+    lvol_replication.create_dt = str(datetime.now())
+    lvol_replication.source_lvol=lvol
+    lvol_replication.target_lvol=new_lvol
+    lvol_replication.source_cluster_id=source_cluster.get_id()
+    lvol_replication.target_cluster_id=target_cluster.get_id()
+    lvol_replication.write_to_db(db_controller.kv_store)
+
     lvol_events.lvol_replicated(lvol, new_lvol)
 
     return new_lvol.lvol_uuid
@@ -2747,11 +2757,21 @@ def resume_lvol(lvol_id):
 
 def replicate_lvol_on_source_cluster(lvol_id, cluster_id=None, pool_uuid=None):
     db_controller = DBController()
+    lvol = None
     try:
         lvol = db_controller.get_lvol_by_id(lvol_id)
-    except KeyError as e:
-        logger.error(e)
-        return False
+    except KeyError:
+        logger.warning(f"LVol not found: {lvol_id}, looking in lvol replications")
+        # look for it in lvol replication
+        lvol_replications = db_controller.get_lvol_replication_objects()
+        lvol_replications.reverse()
+        for lvol_replication in lvol_replications:
+            if lvol_replication.source_lvol.get_id() == lvol_id:
+                lvol = lvol_replication.source_lvol
+                break
+        if not lvol:
+            logger.error(f"LVol not found: {lvol_id}")
+            return False
 
     source_node = None
     new_source_cluster = None
