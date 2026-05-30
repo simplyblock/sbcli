@@ -5,7 +5,7 @@ from datetime import datetime
 
 from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.models.cluster import Cluster
-from simplyblock_core.models.lvol_model import LVol
+from simplyblock_core.models.lvol_model import LVol, LVolMini
 from simplyblock_core.controllers import health_controller, lvol_events, tasks_controller, lvol_controller
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
@@ -160,6 +160,8 @@ def process_lvol_delete_finish(lvol):
 
     lvol_events.lvol_delete(lvol)
     lvol.remove(db.kv_store)
+    lvol_mini = LVolMini().read_from_db(lvol.uuid)
+    lvol_mini.remove(db.kv_store)
 
     # check for full devices
     full_devs_ids = []

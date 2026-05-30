@@ -84,3 +84,37 @@ class LVolReplication(BaseModel):
     source_cluster_id: str = ""
     target_cluster_id: str = ""
 
+class LVolMini(BaseModel):
+    lvol_uuid: str = ""
+    lvol_name: str = ""
+    pool_uuid: str = ""
+    pool_name: str = ""
+    size: int = 0
+    vuid: int = 0
+    status: str = ""
+    cloned_from_snap: str = ""
+    nqn: str = ""
+    node_id: str = ""
+    namespace: str = ""
+    hostname: str = ""
+    blobid: int = 0
+    ns_id: int = 0
+
+    def from_lvol(self, lvol: LVol):
+        self.uuid = lvol.uuid
+        self.create_dt = lvol.create_dt
+        self.lvol_uuid = lvol.lvol_uuid
+        self.lvol_name = lvol.lvol_name
+        self.pool_uuid = lvol.pool_uuid
+        self.pool_name = lvol.pool_name
+        self.size = lvol.size
+        self.vuid = lvol.vuid
+        self.status = lvol.status
+        self.cloned_from_snap = lvol.cloned_from_snap
+        self.nqn = lvol.nqn
+        self.node_id = lvol.node_id
+        self.namespace = lvol.namespace
+        self.hostname = lvol.hostname
+        self.blobid = lvol.blobid
+        self.ns_id = lvol.ns_id
+        return self

@@ -6,7 +6,7 @@ from datetime import datetime
 from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.controllers import health_controller, snapshot_events, tasks_controller
-from simplyblock_core.models.snapshot import SnapShot
+from simplyblock_core.models.snapshot import SnapShot, SnapShotMini
 from simplyblock_core.models.storage_node import StorageNode
 
 logger = utils.get_logger(__name__)
@@ -111,7 +111,11 @@ def process_snap_delete_finish(snap, leader_node):
             tasks_controller.add_lvol_sync_del_task(non_leader.cluster_id, non_leader.get_id(), lvol_bdev_name, primary_node.get_id())
     snapshot_events.snapshot_delete(snap)
     snap.remove(db.kv_store)
-
+    try:
+        snap_mini = SnapShotMini().read_from_db(snap.uuid)
+        snap_mini.remove(db.kv_store)
+    except Exception as e:
+        logger.error(f"Failed to remove snapshot mini from DB: {e}")
 
 
 def process_snap_delete_try_again(snap):

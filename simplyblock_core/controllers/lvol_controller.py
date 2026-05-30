@@ -16,7 +16,7 @@ from simplyblock_core.kms import KMSException, create_kms_connection
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.pool import Pool
-from simplyblock_core.models.lvol_model import LVol, LVolReplication
+from simplyblock_core.models.lvol_model import LVol, LVolReplication, LVolMini
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.prom_client import PromClient
 
@@ -796,6 +796,8 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     lvol.status = LVol.STATUS_ONLINE
     lvol.write_to_db(db_controller.kv_store)
     lvol_events.lvol_create(lvol)
+    lvol_mini = LVolMini().from_lvol(lvol)
+    lvol_mini.write_to_db(db_controller.kv_store)
 
     if pool.has_qos():
         connect_lvol_to_pool(lvol.uuid)
@@ -1380,6 +1382,9 @@ def delete_lvol(id_or_name, force_delete=False):
         old_status = lvol.status
         lvol.status = LVol.STATUS_IN_DELETION
         lvol.write_to_db(db_controller.kv_store)
+
+        lvol_mini = LVolMini().from_lvol(lvol)
+        lvol_mini.write_to_db(db_controller.kv_store)
         try:
             lvol_events.lvol_status_change(lvol, lvol.status, old_status)
         except KeyError:
@@ -1667,7 +1672,7 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
         except KeyError:
             pass
     else:
-        lvols = db_controller.get_lvols()
+        lvols = db_controller.get_mini_lvols()
 
     data = []
 
@@ -1691,6 +1696,8 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
         elif att.target_type == "pool":
             pool_policy_map[att.target_id] = pol
 
+    # cl = db_controller.get_cluster_by_id(cluster_id)
+
     for lvol in lvols:
         logger.debug(lvol)
         if lvol.deleted is True and all is False:
@@ -1699,11 +1706,8 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
         records = db_controller.get_lvol_stats(lvol, 1)
         if records:
             size_used = records[0].size_used
-        if lvol.ndcs == 0 and lvol.npcs == 0:
-            cl = db_controller.get_cluster_by_id(cluster_id)
-            mode = f"{cl.distr_ndcs}x{cl.distr_npcs}"
-        else:
-            mode = f"{lvol.ndcs}x{lvol.npcs}"
+
+        # mode = f"{cl.distr_ndcs}x{cl.distr_npcs}"
 
         eff_policy = lvol_policy_map.get(lvol.get_id()) or pool_policy_map.get(lvol.pool_uuid)
         lvol_data = {
@@ -1712,17 +1716,17 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
             "Size": utils.humanbytes(lvol.size),
             "Used": f"{utils.humanbytes(size_used)}",
             "Hostname": lvol.hostname,
-            "HA": lvol.ha_type,
+            # "HA": lvol.ha_type,
             "BlobID": lvol.blobid or "",
             "LVolUUID": lvol.lvol_uuid or "",
             "Status": lvol.status,
             "M": "M" if lvol.uuid in migrating_lvols else "",
-            "IO Err": lvol.io_error,
-            "Health": lvol.health_check,
+            # "IO Err": lvol.io_error,
+            # "Health": lvol.health_check,
             "NS ID": lvol.ns_id,
-            "Mode": mode,
+            # "Mode": mode,
             "Policy": eff_policy.policy_name if eff_policy else "",
-            "Replicated On": lvol.replication_node_id,
+            # "Replicated On": lvol.replication_node_id,
         }
         data.append(lvol_data)
 
@@ -2483,8 +2487,8 @@ def clone_lvol(lvol_id, clone_name, new_size=None, pvc_name=None):
     #         logger.error(error)
     #         return False, error
 
-    all_lvols = db_controller.get_lvols()
-    all_snaps = db_controller.get_snapshots()
+    all_lvols = db_controller.get_mini_lvols()
+    all_snaps = db_controller.get_mini_snapshots()
     snapshot_uuid = None
     for snap in all_snaps:
         if snap.snap_name == clone_name and snap.lvol.node_id == lvol.node_id:

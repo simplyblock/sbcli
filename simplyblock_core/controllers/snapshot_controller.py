@@ -16,8 +16,8 @@ from simplyblock_core.kms._exceptions import KMSException
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.pool import Pool
-from simplyblock_core.models.snapshot import SnapShot
-from simplyblock_core.models.lvol_model import LVol
+from simplyblock_core.models.snapshot import SnapShot, SnapShotMini
+from simplyblock_core.models.lvol_model import LVol, LVolMini
 from simplyblock_core.models.storage_node import StorageNode
 
 
@@ -273,8 +273,13 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
     snap.fabric = lvol.fabric
     snap.vuid = snap_vuid
     snap.status = SnapShot.STATUS_ONLINE
+    snap.create_dt = str(datetime.now())
 
     snap.write_to_db(db_controller.kv_store)
+
+    snap_mini = SnapShotMini().from_snapshot(snap)
+    snap_mini.write_to_db(db_controller.kv_store)
+
 
     _parent_snap = None
     if lvol.cloned_from_snap:
@@ -848,6 +853,8 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
 
     lvol.status = LVol.STATUS_ONLINE
     lvol.write_to_db(db_controller.kv_store)
+    lvol_mini = LVolMini().from_lvol(lvol)
+    lvol_mini.write_to_db(db_controller.kv_store)
 
     if snap.snap_ref_id:
         ref_snap = db_controller.get_snapshot_by_id(snap.snap_ref_id)
