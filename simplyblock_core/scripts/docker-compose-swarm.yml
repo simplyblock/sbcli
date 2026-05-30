@@ -32,6 +32,41 @@ services:
         reservations:
           memory: 4g
 
+
+  fdb-server2:
+    <<: *service-base
+    image: foundationdb/foundationdb:7.3.63
+    networks:
+      - hostnet
+    environment:
+      FDB_CLUSTER_FILE_CONTENTS: '$FDB_CLUSTER_FILE_CONTENTS'
+      FDB_NETWORKING_MODE: 'container'
+      FDB_PORT: 4501
+    volumes:
+      - "/etc/foundationdb2/data:/var/fdb/data"
+      - "/etc/foundationdb2/logs:/var/fdb/logs"
+    deploy:
+      mode: global
+      placement:
+        constraints: [ node.role == manager ]
+
+  fdb-server3:
+    <<: *service-base
+    image: foundationdb/foundationdb:7.3.63
+    networks:
+      - hostnet
+    environment:
+      FDB_CLUSTER_FILE_CONTENTS: '$FDB_CLUSTER_FILE_CONTENTS'
+      FDB_NETWORKING_MODE: 'container'
+      FDB_PORT: 4502
+    volumes:
+      - "/etc/foundationdb3/data:/var/fdb/data"
+      - "/etc/foundationdb3/logs:/var/fdb/logs"
+    deploy:
+      mode: global
+      placement:
+        constraints: [ node.role == manager ]
+
   fdb-backup-agent:
     <<: *service-base
     image: foundationdb/foundationdb:7.3.63
@@ -63,6 +98,46 @@ services:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
       FLASK_DEBUG: "False"
       FLASK_ENV: "production"
+      FLASK_PORT: 5000
+
+  WebAppAPI2:
+    <<: *service-base
+    image: $SIMPLYBLOCK_DOCKER_IMAGE
+    command: "python3 simplyblock_web/app.py"
+    networks:
+      - localnet
+    deploy:
+      endpoint_mode: dnsrr
+      mode: global
+      placement:
+        constraints: [node.role == manager]
+    volumes:
+      - "/etc/foundationdb:/etc/foundationdb"
+    environment:
+      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      FLASK_DEBUG: "False"
+      FLASK_ENV: "production"
+      FLASK_PORT: 5001
+
+  WebAppAPI3:
+    <<: *service-base
+    image: $SIMPLYBLOCK_DOCKER_IMAGE
+    command: "python3 simplyblock_web/app.py"
+    networks:
+      - localnet
+    deploy:
+      endpoint_mode: dnsrr
+      mode: global
+      placement:
+        constraints: [node.role == manager]
+    volumes:
+      - "/etc/foundationdb:/etc/foundationdb"
+    environment:
+      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      FLASK_DEBUG: "False"
+      FLASK_ENV: "production"
+      FLASK_PORT: 5002
+
 
   StorageNodeMonitor:
     <<: *service-base

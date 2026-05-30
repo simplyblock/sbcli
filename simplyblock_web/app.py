@@ -2,6 +2,7 @@
 # encoding: utf-8
 
 import logging
+import os
 import ssl
 import sys
 import time
@@ -104,7 +105,7 @@ def main() -> None:
     config: Config = uvicorn.Config(
         app=app,
         host='0.0.0.0',
-        port=5000,
+        port=int(os.environ.get('FLASK_PORT', 5000)),
         log_level='debug',
         access_log=False,
         proxy_headers=True,
