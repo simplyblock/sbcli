@@ -1204,34 +1204,39 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
     # --- Done handler (shared by first-call and crash-recovery paths) ---
     migration.transfer_context = tgt_uuid_carry
 
-    # Delete the old TGT subsystem (mirror for adjacent, migration subsystem
-    # for non-adjacent) and recreate fresh as the new primary.  All paths use
-    # the same sequence so the client always reconnects with clean connection strings.
-    # min_cntlid=2000: avoids controller ID collision with cntlid=1 (SRC primary)
-    # and cntlid=1000 (old TGT mirror if adjacent).
+    # TEST: keep existing TGT subsystem alive, swap namespace, add new listener.
+    # REVERT: git checkout a11a0974 -- simplyblock_core/services/tasks_runner_lvol_migration.py
     nqn = lvol.nqn
     tgt_primary_port = tgt_node.get_lvol_subsys_port(tgt_node.lvstore)
     tgt_trtype_local, tgt_ip_local = _get_migration_nic(tgt_node)
     try:
-        tgt_rpc.subsystem_delete(nqn)
-        logger.info(f"Deleted old TGT subsystem {nqn}")
-    except Exception as e:
-        logger.warning(f"subsystem_delete {nqn} (may not exist): {e}")
-    try:
-        if not tgt_rpc.subsystem_create(nqn, lvol.ha_type, lvol.uuid,
-                                        min_cntlid=2000):
-            logger.error(f"subsystem_create {nqn} failed")
-        else:
+        existing_sub_list = tgt_rpc.subsystem_list(nqn)
+        existing_sub = (existing_sub_list[0] if isinstance(existing_sub_list, list)
+                        else existing_sub_list) if existing_sub_list else None
+
+        if existing_sub:
+            for ns in existing_sub.get('namespaces', []):
+                old_nsid = ns.get('nsid')
+                if old_nsid is not None:
+                    tgt_rpc.nvmf_subsystem_remove_ns(nqn, old_nsid)
+                    logger.info(f"Removed old namespace nsid={old_nsid} from {nqn}")
+            tgt_rpc.nvmf_subsystem_add_ns(nqn, tgt_lvol_composite, lvol.uuid, lvol.guid)
             tgt_rpc.listeners_create(
                 nqn, tgt_trtype_local, tgt_ip_local, tgt_primary_port,
                 ana_state="optimized")
-            # Pass lvol.guid (nguid) to match the original namespace identity.
-            tgt_rpc.nvmf_subsystem_add_ns(nqn, tgt_lvol_composite, lvol.uuid, lvol.guid)
-            logger.info(
-                f"Created subsystem {nqn} "
-                f"listener={tgt_ip_local}:{tgt_primary_port} ns={tgt_lvol_composite}")
+            logger.info(f"Kept existing subsystem {nqn}, swapped ns → {tgt_lvol_composite}, "
+                        f"added listener={tgt_ip_local}:{tgt_primary_port} optimized")
+        else:
+            if not tgt_rpc.subsystem_create(nqn, lvol.ha_type, lvol.uuid, min_cntlid=2000):
+                logger.error(f"subsystem_create {nqn} failed")
+            else:
+                tgt_rpc.listeners_create(nqn, tgt_trtype_local, tgt_ip_local, tgt_primary_port,
+                                         ana_state="optimized")
+                tgt_rpc.nvmf_subsystem_add_ns(nqn, tgt_lvol_composite, lvol.uuid, lvol.guid)
+                logger.info(f"Created subsystem {nqn} listener={tgt_ip_local}:{tgt_primary_port} "
+                            f"ns={tgt_lvol_composite}")
     except Exception as e:
-        logger.error(f"Subsystem re-creation failed: {e}")
+        logger.error(f"Subsystem setup failed: {e}")
 
     # Expose on TGT secondary — order: (a) delete old  (b) create primary  (c) secondary.
     # min_cntlid=3000: avoids conflict with cntlid=1 (SRC), 1000 (old mirror), 2000 (new primary).
