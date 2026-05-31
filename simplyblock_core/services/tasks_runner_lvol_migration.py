@@ -1325,6 +1325,20 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         # makes SRC inaccessible — so the client always has an optimized path.
         tgt_adj_trtype, tgt_adj_ip = _get_migration_nic(tgt_node)
         tgt_adj_port = src_node.get_lvol_subsys_port(src_node.lvstore)
+        tgt_native_port = tgt_node.get_lvol_subsys_port(tgt_node.lvstore)
+        # Add TGT's native port listener (e.g. 4432) so that post-migration
+        # connect-str (which uses tgt_node's port) actually has a listener.
+        if tgt_native_port != tgt_adj_port:
+            try:
+                tgt_rpc.nvmf_subsystem_add_listener(
+                    nqn, tgt_adj_ip, tgt_native_port, trtype=tgt_adj_trtype)
+                logger.info(
+                    f"Added TGT native listener {tgt_adj_ip}:{tgt_native_port} to {nqn}")
+            except Exception as e:
+                logger.warning(f"TGT native listener add (non-fatal): {e}")
+        # Flip the existing SRC-port listener to optimized NOW — before
+        # _update_ana_states makes SRC inaccessible — so the client always
+        # has an optimized path during the transition.
         try:
             tgt_rpc.nvmf_subsystem_listener_set_ana_state(
                 nqn, tgt_adj_ip, tgt_adj_port, trtype=tgt_adj_trtype, ana="optimized")
