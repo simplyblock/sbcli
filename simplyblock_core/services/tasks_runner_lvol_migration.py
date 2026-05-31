@@ -1331,7 +1331,7 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         if tgt_native_port != tgt_adj_port:
             try:
                 tgt_rpc.nvmf_subsystem_add_listener(
-                    nqn, tgt_adj_ip, tgt_native_port, trtype=tgt_adj_trtype)
+                    nqn, tgt_adj_trtype, tgt_adj_ip, tgt_native_port)
                 logger.info(
                     f"Added TGT native listener {tgt_adj_ip}:{tgt_native_port} to {nqn}")
             except Exception as e:
