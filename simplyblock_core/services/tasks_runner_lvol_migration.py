@@ -1283,22 +1283,71 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
     # --- Done handler (shared by first-call and crash-recovery paths) ---
     migration.transfer_context = tgt_uuid_carry
 
-    # Done handler: TGT subsystem was pre-created with an inaccessible listener during
-    # PHASE_SNAP_COPY. Add LVOL_XXXm as namespace now that transfer is complete, then
-    # flip all ANA states so the client follows the volume with no reconnect required.
+    # Done handler: add LVOL_XXXm as namespace and flip ANA states so the client
+    # follows the volume without disconnect/reconnect.
     # REVERT: git checkout a11a0974 -- simplyblock_core/services/tasks_runner_lvol_migration.py
     nqn = lvol.nqn
-    try:
-        ns_ret = tgt_rpc.nvmf_subsystem_add_ns(nqn, tgt_lvol_composite, lvol.uuid, lvol.guid)
-        if ns_ret:
-            logger.info(
-                f"Added namespace {tgt_lvol_composite} nsid={ns_ret} to TGT subsystem {nqn}")
+    # Adjacent migration: TGT is the source's secondary node — its subsystem already
+    # exists with nsid=1 pointing to the old source-secondary bdev.
+    tgt_is_src_secondary = (tgt_node.get_id() == src_node.secondary_node_id)
+
+    if tgt_is_src_secondary:
+        logger.info(
+            f"Adjacent migration: TGT {tgt_node.get_id()} == SRC secondary — "
+            f"swapping existing namespace to {tgt_lvol_composite}")
+        # Try atomic bdev swap first (SPDK ≥ 24.01): no namespace-change AER to client,
+        # nsid/uuid/nguid stay identical.
+        swap_ret = tgt_rpc.nvmf_subsystem_ns_update(nqn, 1, tgt_lvol_composite)
+        if swap_ret is not None:
+            logger.info(f"nvmf_subsystem_ns_update: nsid=1 → {tgt_lvol_composite}")
         else:
-            logger.error(
-                f"nvmf_subsystem_add_ns {tgt_lvol_composite} failed on TGT — "
-                f"ANA flip may leave client with no usable namespace")
-    except Exception as e:
-        logger.error(f"TGT namespace add failed: {e}")
+            # Fallback: remove old nsid=1 (TGT is non-optimized so no active IO through
+            # this path), then re-add — SPDK auto-assigns nsid=1 to the now-empty subsystem.
+            logger.info("nvmf_subsystem_ns_update unavailable — using remove + add_ns")
+            try:
+                tgt_rpc.nvmf_subsystem_remove_ns(nqn, 1)
+                logger.info(f"Removed old nsid=1 from TGT subsystem {nqn}")
+            except Exception as e:
+                logger.warning(f"Could not remove old nsid=1 from TGT (non-fatal): {e}")
+            try:
+                ns_ret = tgt_rpc.nvmf_subsystem_add_ns(
+                    nqn, tgt_lvol_composite, lvol.uuid, lvol.guid)
+                if ns_ret:
+                    logger.info(
+                        f"Added {tgt_lvol_composite} nsid={ns_ret} to TGT subsystem {nqn}")
+                else:
+                    logger.error(
+                        f"nvmf_subsystem_add_ns failed on TGT for adjacent case")
+            except Exception as e:
+                logger.error(f"TGT namespace add failed (adjacent): {e}")
+        # The TGT listener lives at the SOURCE's lvol port (e.g. 4430), not TGT's own
+        # lvstore port (4432).  Flip it to optimized NOW — before _update_ana_states
+        # makes SRC inaccessible — so the client always has an optimized path.
+        tgt_adj_trtype, tgt_adj_ip = _get_migration_nic(tgt_node)
+        tgt_adj_port = src_node.get_lvol_subsys_port(src_node.lvstore)
+        try:
+            tgt_rpc.nvmf_subsystem_listener_set_ana_state(
+                nqn, tgt_adj_ip, tgt_adj_port, trtype=tgt_adj_trtype, ana="optimized")
+            logger.info(
+                f"ANA: {nqn} TGT-adjacent {tgt_adj_ip}:{tgt_adj_port} → optimized")
+        except Exception as e:
+            logger.error(f"ANA update TGT-adjacent failed: {e}")
+    else:
+        # Independent case: TGT subsystem was pre-created empty during PHASE_SNAP_COPY.
+        # Add namespace now — SPDK auto-assigns nsid=1.
+        try:
+            ns_ret = tgt_rpc.nvmf_subsystem_add_ns(
+                nqn, tgt_lvol_composite, lvol.uuid, lvol.guid)
+            if ns_ret:
+                logger.info(
+                    f"Added namespace {tgt_lvol_composite} nsid={ns_ret} "
+                    f"to TGT subsystem {nqn}")
+            else:
+                logger.error(
+                    f"nvmf_subsystem_add_ns {tgt_lvol_composite} failed on TGT — "
+                    f"ANA flip may leave client with no usable namespace")
+        except Exception as e:
+            logger.error(f"TGT namespace add failed: {e}")
 
     # TGT secondary: chain ancestry via add_clone, then attach namespace to
     # pre-created secondary subsystem (reuses inaccessible subsystem from SNAP_COPY).
