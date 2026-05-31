@@ -630,7 +630,7 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
         if lvol.pool_uuid != pool.get_id() or lvol.lvol_name != clone_name:
             continue
         if lvol.cloned_from_snap == snapshot_id:
-            if lvol.status in [LVol.STATUS_IN_DELETION, lvol.STATUS_IN_CREATION]:
+            if lvol.status in [LVol.STATUS_IN_DELETION, LVol.STATUS_IN_CREATION]:
                 msg = f"Clone status {lvol.status} can not proceed"
                 logger.error(msg)
                 return False, msg
