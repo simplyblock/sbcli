@@ -562,6 +562,8 @@ class MigrationDTO(BaseModel):
     status: str
     snaps_total: int
     snaps_migrated: int
+    intermediate_snap_rounds: int
+    max_intermediate_snap_rounds: int
     retry_count: int
     max_retries: int
     error_message: str
@@ -579,6 +581,8 @@ class MigrationDTO(BaseModel):
             status=model.status,
             snaps_total=len(model.snap_migration_plan),
             snaps_migrated=len(model.snaps_migrated),
+            intermediate_snap_rounds=model.intermediate_snap_rounds,
+            max_intermediate_snap_rounds=model.max_intermediate_snap_rounds,
             retry_count=model.retry_count,
             max_retries=model.max_retries,
             error_message=model.error_message or "",

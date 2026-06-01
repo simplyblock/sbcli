@@ -47,6 +47,7 @@ from simplyblock_core.models.lvol_migration import LVolMigration
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.models.cluster import Cluster
 
 # Note: JobSchedule is not imported directly here; task creation is delegated to
 # tasks_controller.add_lvol_mig_task() which handles event logging consistently.
@@ -570,5 +571,193 @@ def apply_migration_to_db(migration, tgt_lvol_uuid=None, tgt_lvol_bdev=None):
         logger.debug(f"apply_migration_to_db: updated snapshot {snap_uuid} snap_bdev={snap.snap_bdev}")
 
     return True
+
+
+def pre_create_on_target(lvol_id, target_node_id,
+                         ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO,
+                         host_nqn=None):
+    """
+    Pre-create the target NVMe-oF infrastructure for a future migration of
+    *lvol_id* to *target_node_id*.
+
+    Steps performed on the target primary (and secondary when HA):
+      1. Create migration bdev  <lvol_bdev>m  in the target lvstore.
+         Idempotent: skipped if the bdev already exists.
+      2. Create NVMe-oF subsystem with the same NQN as the source lvol.
+         Returns False when the subsystem already exists (overlap case).
+      3. Add inaccessible listeners on every data NIC of the target node.
+      4. Add a namespace pointing to the new bdev — ONLY when the subsystem
+         was newly created (i.e. subsystem_create returned True).  When the
+         subsystem already exists (overlap / TGT-sec == SRC) the namespace is
+         left as-is to avoid disrupting live IO.
+
+    Returns:
+      (connect_strings, error_str)
+      connect_strings: list[dict]  — same format as lvol_controller.connect_lvol()
+      On error: (None, error_message)
+    """
+    db = DBController()
+
+    try:
+        lvol = db.get_lvol_by_id(lvol_id)
+    except KeyError:
+        return None, f"LVol {lvol_id} not found"
+
+    try:
+        tgt_node = db.get_storage_node_by_id(target_node_id)
+    except KeyError:
+        return None, f"Target node {target_node_id} not found"
+
+    if not tgt_node.lvstore:
+        return None, f"Target node {target_node_id} has no lvstore"
+
+    cluster = db.get_cluster_by_id(tgt_node.cluster_id)
+    tgt_rpc  = tgt_node.rpc_client()
+    nqn      = lvol.nqn
+    bdev_short  = lvol.lvol_bdev + _MIGRATION_BDEV_SUFFIX
+    composite   = f"{tgt_node.lvstore}/{bdev_short}"
+    size_in_mib = lvol.size // (1024 * 1024)
+    tgt_port    = tgt_node.get_lvol_subsys_port(tgt_node.lvstore)
+
+    # ── 1. Bdev ──────────────────────────────────────────────────────────────
+    if not tgt_rpc.get_bdevs(composite):
+        ret = tgt_rpc.create_lvol(
+            bdev_short, size_in_mib, tgt_node.lvstore,
+            lvol_priority_class=lvol.lvol_priority_class,
+            ndcs=lvol.ndcs, npcs=lvol.npcs)
+        if not ret:
+            return None, f"bdev_lvol_create failed for {composite} on {target_node_id}"
+        logger.info(f"pre_create_on_target: created bdev {composite}")
+    else:
+        logger.info(f"pre_create_on_target: bdev {composite} already exists — skipping create")
+
+    # ── 2. Subsystem + listeners ──────────────────────────────────────────────
+    subsys_created = tgt_rpc.subsystem_create(
+        nqn, lvol.ha_type, lvol.uuid, min_cntlid=2000,
+        max_namespaces=constants.LVO_MAX_NAMESPACES_PER_SUBSYS)
+
+    for nic in tgt_node.data_nics:
+        if not nic.ip4_address:
+            continue
+        trtype = nic.trtype.lower()
+        if trtype != lvol.fabric:
+            continue
+        tgt_rpc.listeners_create(nqn, trtype, nic.ip4_address, tgt_port,
+                                 ana_state="inaccessible")
+
+    # ── 3. Namespace — only when subsystem was freshly created ────────────────
+    if subsys_created:
+        tgt_rpc.nvmf_subsystem_add_ns(nqn, composite, lvol.uuid, lvol.guid)
+        logger.info(
+            f"pre_create_on_target: subsystem {nqn} created with ns={composite}")
+    else:
+        logger.info(
+            f"pre_create_on_target: subsystem {nqn} already existed — namespace left unchanged")
+
+    # ── HA secondary ──────────────────────────────────────────────────────────
+    if lvol.ha_type == "ha":
+        try:
+            sec_node = None
+            if tgt_node.secondary_node_id:
+                sec_node = db.get_storage_node_by_id(tgt_node.secondary_node_id)
+        except KeyError:
+            sec_node = None
+
+        if sec_node is not None:
+            sec_rpc   = sec_node.rpc_client()
+            sec_port  = sec_node.get_lvol_subsys_port(tgt_node.lvstore)
+
+            sec_subsys_created = sec_rpc.subsystem_create(
+                nqn, lvol.ha_type, lvol.uuid, min_cntlid=3000,
+                max_namespaces=constants.LVO_MAX_NAMESPACES_PER_SUBSYS)
+
+            for nic in sec_node.data_nics:
+                if not nic.ip4_address:
+                    continue
+                trtype = nic.trtype.lower()
+                if trtype != lvol.fabric:
+                    continue
+                sec_rpc.listeners_create(nqn, trtype, nic.ip4_address, sec_port,
+                                         ana_state="inaccessible")
+
+            if sec_subsys_created:
+                sec_rpc.nvmf_subsystem_add_ns(nqn, composite, lvol.uuid, lvol.guid)
+                logger.info(
+                    f"pre_create_on_target: TGT-sec subsystem {nqn} created with ns={composite}")
+            else:
+                logger.info(
+                    f"pre_create_on_target: TGT-sec subsystem {nqn} already existed — namespace left unchanged")
+
+    # ── 4. Build connect strings for the target node ──────────────────────────
+    host_entry = None
+    if lvol.allowed_hosts and host_nqn:
+        for h in lvol.allowed_hosts:
+            if h["nqn"] == host_nqn:
+                host_entry = h
+                break
+
+    if lvol.allowed_hosts and not host_nqn:
+        return None, (f"Volume {lvol_id} has allowed hosts configured; "
+                      f"--host-nqn is required")
+
+    out = []
+    for nic in tgt_node.data_nics:
+        ip = nic.ip4_address
+        if not ip:
+            continue
+        trtype = nic.trtype.lower()
+        if trtype != lvol.fabric:
+            continue
+
+        if trtype == "tcp":
+            keep_alive_tmo = constants.LVOL_NVME_KEEP_ALIVE_TO_TCP
+        else:
+            keep_alive_tmo = constants.LVOL_NVME_KEEP_ALIVE_TO
+
+        client_data_nic_str = (f"--host-iface={cluster.client_data_nic}"
+                               if cluster.client_data_nic else "")
+        tls_str = host_auth_str = ""
+        if host_entry:
+            host_auth_str = f" --hostnqn={host_nqn}"
+            if host_entry.get("psk"):
+                tls_str = " --tls"
+            if host_entry.get("dhchap_key"):
+                host_auth_str += f" --dhchap-secret={host_entry['dhchap_key']}"
+            if host_entry.get("dhchap_ctrlr_key"):
+                host_auth_str += f" --dhchap-ctrl-secret={host_entry['dhchap_ctrlr_key']}"
+        elif host_nqn:
+            host_auth_str = f" --hostnqn={host_nqn}"
+
+        connect_cmd = (
+            f"sudo nvme connect"
+            f" --reconnect-delay={constants.LVOL_NVME_CONNECT_RECONNECT_DELAY}"
+            f" --ctrl-loss-tmo={ctrl_loss_tmo}"
+            f" --fast_io_fail_tmo={constants.LVOL_NVME_CONNECT_FAST_IO_FAIL_TO}"
+            f" --nr-io-queues={cluster.client_qpair_count}"
+            f" --keep-alive-tmo={keep_alive_tmo}"
+            f" --transport={trtype} --traddr={ip} --trsvcid={tgt_port} --nqn={nqn}"
+            f" {client_data_nic_str}{tls_str}{host_auth_str}"
+        )
+        entry = {
+            "transport": trtype,
+            "ip": ip,
+            "port": tgt_port,
+            "nqn": nqn,
+            "reconnect-delay": constants.LVOL_NVME_CONNECT_RECONNECT_DELAY,
+            "ctrl-loss-tmo": ctrl_loss_tmo,
+            "fast_io_fail_tmo": constants.LVOL_NVME_CONNECT_FAST_IO_FAIL_TO,
+            "nr-io-queues": cluster.client_qpair_count,
+            "keep-alive-tmo": keep_alive_tmo,
+            "host-iface": cluster.client_data_nic,
+            "connect": connect_cmd,
+        }
+        if host_entry and host_entry.get("psk"):
+            entry["tls"] = True
+        out.append(entry)
+
+    logger.info(
+        f"pre_create_on_target: done for lvol={lvol_id} target={target_node_id} "
+        f"subsys_created={subsys_created} connect_strings={len(out)}")
+    return out, None
 
 

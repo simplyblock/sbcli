@@ -701,6 +701,20 @@ class CLIWrapperBase:
         print(f"Migration {args.migration_id} cancelled")
         return True
 
+    def volume__migrate_pre_create(self, sub_command, args):
+        connect_strings, error = migration_controller.pre_create_on_target(
+            args.volume_id,
+            args.target_node_id,
+            ctrl_loss_tmo=args.ctrl_loss_tmo,
+            host_nqn=getattr(args, 'host_nqn', None),
+        )
+        if error:
+            print(f"Error: {error}")
+            return False
+        if connect_strings:
+            return "\n".join(c['connect'] for c in connect_strings)
+        return True
+
     def control_plane__add(self, sub_command, args):
         cluster_id = args.cluster_id
         cluster_ip = args.cluster_ip
