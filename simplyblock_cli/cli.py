@@ -617,6 +617,8 @@ class CLIWrapper(CLIWrapperBase):
             self.init_volume__migrate_list(subparser)
         if self.developer_mode:
             self.init_volume__migrate_cancel(subparser)
+        if self.developer_mode:
+            self.init_volume__migrate_pre_create(subparser)
 
 
     def init_volume__add(self, subparser):
@@ -767,6 +769,23 @@ class CLIWrapper(CLIWrapperBase):
     def init_volume__migrate_cancel(self, subparser):
         subcommand = self.add_sub_command(subparser, 'migrate-cancel', 'Cancel an active volume migration.')
         subcommand.add_argument('migration_id', help='The migration id.', type=str)
+
+    def init_volume__migrate_pre_create(self, subparser):
+        subcommand = self.add_sub_command(
+            subparser, 'migrate-pre-create',
+            'Pre-create the target NVMe-oF subsystem and bdev for a future migration. '
+            'Returns NVMe connect strings for the target node (inaccessible ANA state).')
+        subcommand.add_argument('volume_id', help='The logical volume id.', type=str)
+        subcommand.add_argument('target_node_id', help='The target storage node id.', type=str)
+        subcommand.add_argument(
+            '--ctrl-loss-tmo',
+            help=f'NVMe ctrl-loss-tmo in seconds. Default: {constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO}.',
+            type=int, default=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO,
+            dest='ctrl_loss_tmo')
+        subcommand.add_argument(
+            '--host-nqn',
+            help='Host NQN for DH-HMAC-CHAP authentication (required when volume has allowed hosts).',
+            type=str, dest='host_nqn')
 
 
     def init_control_plane(self):

@@ -6,6 +6,7 @@ from pydantic import BaseModel
 
 from simplyblock_core.models.lvol_migration import LVolMigration
 
+from simplyblock_core import constants
 from .cluster import Cluster
 from .dtos import MigrationDTO
 
@@ -25,6 +26,32 @@ class _MigrateParams(BaseModel):
     target_node_id: str
     max_retries: int = 10
     deadline_seconds: int = 14400
+
+
+class _PreCreateParams(BaseModel):
+    volume_id: str
+    target_node_id: str
+    ctrl_loss_tmo: int = constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO
+    host_nqn: Optional[str] = None
+
+
+@api.post('/pre-create', name='clusters:migrations:pre-create', status_code=200)
+def pre_create_on_target(cluster: Cluster, parameters: _PreCreateParams):
+    """Pre-create the target NVMe-oF subsystem and bdev for a future migration.
+
+    Returns the list of NVMe connect strings (inaccessible ANA state) for the
+    target node so that the client can pre-connect before migration begins.
+    """
+    from simplyblock_core.controllers import migration_controller
+    connect_strings, error = migration_controller.pre_create_on_target(
+        parameters.volume_id,
+        parameters.target_node_id,
+        ctrl_loss_tmo=parameters.ctrl_loss_tmo,
+        host_nqn=parameters.host_nqn,
+    )
+    if error:
+        raise HTTPException(400, error)
+    return {"connect_strings": connect_strings}
 
 
 @api.post('/', name='clusters:migrations:create', status_code=201)

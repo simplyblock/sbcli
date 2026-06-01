@@ -287,7 +287,8 @@ MIG_JOB_SIZE = 64
 # Live volume migration constants
 LVOL_MIG_MAX_RETRIES = 5          # max retry attempts before aborting
 LVOL_MIG_DEADLINE_SEC = 360  # default 4-hour deadline (0 = no deadline)
-LVOL_MIG_MAX_INTERMEDIATE_SNAPS = 3  # max recursive "shrink" snapshot rounds
+LVOL_MIG_MAX_INTERMEDIATE_SNAPS = 3        # max recursive "shrink" snapshot rounds
+LVOL_MIG_INTERMEDIATE_SNAP_THRESHOLD_BYTES = 500 * 1024 * 1024  # 500 MB — skip if delta is smaller
 
 # NVMe-oF TLS / DH-HMAC-CHAP security
 VALID_DHCHAP_DIGESTS = ["sha256", "sha384", "sha512"]
