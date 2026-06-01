@@ -160,7 +160,7 @@ def process_lvol_delete_finish(lvol):
 
     lvol_events.lvol_delete(lvol)
     lvol.remove(db.kv_store)
-    lvol_mini = LVolMini().read_from_db(lvol.uuid)
+    lvol_mini = LVolMini().read_from_db(db.kv_store, lvol.uuid)
     lvol_mini.remove(db.kv_store)
 
     # check for full devices

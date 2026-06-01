@@ -112,7 +112,7 @@ def process_snap_delete_finish(snap, leader_node):
     snapshot_events.snapshot_delete(snap)
     snap.remove(db.kv_store)
     try:
-        snap_mini = SnapShotMini().read_from_db(snap.uuid)
+        snap_mini = SnapShotMini().read_from_db(db.kv_store, snap.uuid)
         snap_mini.remove(db.kv_store)
     except Exception as e:
         logger.error(f"Failed to remove snapshot mini from DB: {e}")
