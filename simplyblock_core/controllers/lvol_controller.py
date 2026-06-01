@@ -16,7 +16,7 @@ from simplyblock_core.kms import KMSException, create_kms_connection
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.pool import Pool
-from simplyblock_core.models.lvol_model import LVol, LVolReplication, LVolMini
+from simplyblock_core.models.lvol_model import LVol, LVolReplication
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.prom_client import PromClient
 
@@ -796,8 +796,6 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     lvol.status = LVol.STATUS_ONLINE
     lvol.write_to_db(db_controller.kv_store)
     lvol_events.lvol_create(lvol)
-    lvol_mini = LVolMini().from_lvol(lvol)
-    lvol_mini.write_to_db(db_controller.kv_store)
 
     if pool.has_qos():
         connect_lvol_to_pool(lvol.uuid)
@@ -1383,8 +1381,6 @@ def delete_lvol(id_or_name, force_delete=False):
         lvol.status = LVol.STATUS_IN_DELETION
         lvol.write_to_db(db_controller.kv_store)
 
-        lvol_mini = LVolMini().from_lvol(lvol)
-        lvol_mini.write_to_db(db_controller.kv_store)
         try:
             lvol_events.lvol_status_change(lvol, lvol.status, old_status)
         except KeyError:
@@ -1672,7 +1668,7 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
         except KeyError:
             pass
     else:
-        lvols = db_controller.get_mini_lvols()
+        lvols = db_controller.get_all_lvols()
 
     data = []
 
@@ -2487,8 +2483,8 @@ def clone_lvol(lvol_id, clone_name, new_size=None, pvc_name=None):
     #         logger.error(error)
     #         return False, error
 
-    all_lvols = db_controller.get_mini_lvols()
-    all_snaps = db_controller.get_mini_snapshots()
+    all_lvols = db_controller.get_all_lvols()
+    all_snaps = db_controller.get_snapshots()
     snapshot_uuid = None
     for snap in all_snaps:
         if snap.snap_name == clone_name and snap.lvol.node_id == lvol.node_id:
