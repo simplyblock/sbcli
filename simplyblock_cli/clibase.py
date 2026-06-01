@@ -1384,6 +1384,7 @@ class CLIWrapperBase:
             with open(args.use_backup, 'r') as f:
                 backup_config = json.load(f)
 
+        atomic_4k = getattr(args, 'atomic_4k', False)
         return cluster_ops.add_cluster(
             blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
             distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity,
@@ -1394,6 +1395,7 @@ class CLIWrapperBase:
             enable_failure_domain=enable_failure_domain,
             device_mode=device_mode,
             inline_checksum=inline_checksum,
+            atomic_4k=atomic_4k,
         )
 
     def cluster_create(self, args):
@@ -1435,6 +1437,7 @@ class CLIWrapperBase:
         # Private (developer-mode-only) arg: absent unless sbctl was run with --dev.
         enable_hang_device = getattr(args, "enable_hang_device", False)
         inline_checksum = getattr(args, 'inline_checksum', False)
+        atomic_4k = getattr(args, 'atomic_4k', False)
 
         max_fault_tolerance = min(distr_npcs, 2) if distr_npcs >= 1 else 1
 
@@ -1463,6 +1466,7 @@ class CLIWrapperBase:
             alert_config=parse_alerting_config(
                 Path(args.alerting_config_path) if args.alerting_config_path else None),
             inline_checksum=inline_checksum,
+            atomic_4k=atomic_4k,
         )
 
     def query_yes_no(self, question, default="yes"):
