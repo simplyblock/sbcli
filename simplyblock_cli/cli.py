@@ -1383,6 +1383,12 @@ class CLIWrapper(CLIWrapperBase):
                         ret = False
                     else:
                         ret = self.volume__migrate_cancel(sub_command, args)
+                elif sub_command in ['migrate-pre-create']:
+                    if not self.developer_mode:
+                        print("This command is private.")
+                        ret = False
+                    else:
+                        ret = self.volume__migrate_pre_create(sub_command, args)
                 else:
                     self.parser.print_help()
 
