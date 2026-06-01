@@ -633,7 +633,8 @@ class RPCClient:
     def bdev_alceml_create(self, alceml_name, nvme_name, uuid, pba_init_mode=3,
                            alceml_cpu_mask="", alceml_worker_cpu_mask="", pba_page_size=2097152,
                            write_protection=False, full_page_unmap=False,
-                           checksum_method=0, cache_size=0, cache_eviction_threshold=0):
+                           checksum_method=0, cache_size=0, cache_eviction_threshold=0,
+                           force_4k_atomic=False):
         params = {
             "name": alceml_name,
             "cntr_path": nvme_name,
@@ -666,6 +667,10 @@ class RPCClient:
                 params["cache_size"] = int(cache_size)
             if cache_eviction_threshold:
                 params["cache_eviction_threshold"] = int(cache_eviction_threshold)
+            # The device's logical block size is <4K but it guarantees 4K write
+            # atomicity (cluster.atomic_4k). Tell the data plane to skip its >=4K
+            # block-size gate for fallback-mode checksum validation.
+            params["cv_ignore_block_size"] = bool(force_4k_atomic)
         return self._request("bdev_alceml_create", params)
        
     def bdev_distrib_create(self, name, vuid, ndcs, npcs, num_blocks, block_size, jm_names,

@@ -228,7 +228,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    nvmeof_tls_config=None, max_fault_tolerance=1, backup_config=None,
                    nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001, container_image_prefix=None,
                    hashicorp_vault_settings : t.Optional[HashicorpVaultSettings] = None,
-                   inline_checksum=False) -> str:
+                   inline_checksum=False, atomic_4k=False) -> str:
 
     if distr_ndcs == 0 and distr_npcs == 0:
         raise ValueError("both distr_ndcs and distr_npcs cannot be 0")
@@ -364,6 +364,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.mode = mode
     cluster.full_page_unmap = False
     cluster.inline_checksum = bool(inline_checksum)
+    cluster.atomic_4k = bool(atomic_4k)
     cluster.client_data_nic = client_data_nic or ""
     cluster.max_fault_tolerance = max_fault_tolerance
     cluster.nvmf_base_port = nvmf_base_port
@@ -468,7 +469,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
                 client_data_nic="", max_fault_tolerance=1, backup_config=None,
                 nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001,
                 hashicorp_vault_settings : t.Optional[HashicorpVaultSettings] = None,
-                inline_checksum=False) -> str:
+                inline_checksum=False, atomic_4k=False) -> str:
 
 
     default_cluster = None
@@ -577,6 +578,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     cluster.fabric_rdma = protocols["rdma"]
     cluster.full_page_unmap = False
     cluster.inline_checksum = bool(inline_checksum)
+    cluster.atomic_4k = bool(atomic_4k)
     cluster.client_data_nic = client_data_nic or ""
     cluster.max_fault_tolerance = max_fault_tolerance
     cluster.nvmf_base_port = nvmf_base_port

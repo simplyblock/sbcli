@@ -425,6 +425,11 @@ def main():
         "sudo /usr/local/bin/sbctl -d cluster create"
         " --data-chunks-per-stripe 2 --parity-chunks-per-stripe 2"
         " --enable-inline-checksum"
+        # AWS NVMe is 512B logical but atomic at 4K, so it has no md-capable
+        # LBAF and never reformats to 4K. --4k_atomic lets fallback-mode inline
+        # checksum run on these 512B devices: it makes alceml create send
+        # cv_ignore_block_size=True so the data plane skips its >=4K block-size gate.
+        " --4k_atomic"
     ], check=True)
     print("Phase 2a: DONE - cluster created.")
 

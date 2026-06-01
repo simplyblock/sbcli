@@ -1000,6 +1000,15 @@ commands:
             dest: inline_checksum
             type: bool
             action: store_true
+          - name: "--4k_atomic"
+            help: >
+              Declare that devices guarantee 4K write atomicity even with a <4K logical block size (e.g. AWS NVMe is
+              512B but atomic at 4K). Allows fallback-mode inline checksum on such devices by skipping the data-plane
+              4K block-size requirement. Only meaningful with --enable-inline-checksum. Cannot be changed after cluster
+              creation.
+            dest: atomic_4k
+            type: bool
+            action: store_true
           - name: "--name"
             help: >
               Assigns a name to the newly created cluster.
@@ -1182,6 +1191,15 @@ commands:
               Enable inline CRC checksum validation on every IO for silent-data-error protection. Cannot be enabled or
               disabled after cluster creation.
             dest: inline_checksum
+            type: bool
+            action: store_true
+          - name: "--4k_atomic"
+            help: >
+              Declare that devices guarantee 4K write atomicity even with a <4K logical block size (e.g. AWS NVMe is
+              512B but atomic at 4K). Allows fallback-mode inline checksum on such devices by skipping the data-plane
+              4K block-size requirement. Only meaningful with --enable-inline-checksum. Cannot be changed after cluster
+              creation.
+            dest: atomic_4k
             type: bool
             action: store_true
           - name: "--name"

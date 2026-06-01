@@ -998,6 +998,7 @@ class CLIWrapperBase:
                 backup_config = _json.load(f)
 
         inline_checksum = getattr(args, 'inline_checksum', False)
+        atomic_4k = getattr(args, 'atomic_4k', False)
         return cluster_ops.add_cluster(
             blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
             distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity,
@@ -1006,6 +1007,7 @@ class CLIWrapperBase:
             nvmf_base_port=args.nvmf_base_port, rpc_base_port=args.rpc_base_port, snode_api_port=args.snode_api_port,
             hashicorp_vault_settings=HashicorpVaultSettings({"base_url": args.hashicorp_vault_url}) if args.hashicorp_vault_url else None,
             inline_checksum=inline_checksum,
+            atomic_4k=atomic_4k,
         )
 
     def cluster_create(self, args):
@@ -1044,6 +1046,7 @@ class CLIWrapperBase:
         fabric = args.fabric
         client_data_nic = args.client_data_nic
         inline_checksum = getattr(args, 'inline_checksum', False)
+        atomic_4k = getattr(args, 'atomic_4k', False)
 
         max_fault_tolerance = min(distr_npcs, 2) if distr_npcs >= 1 else 1
 
@@ -1064,6 +1067,7 @@ class CLIWrapperBase:
             nvmf_base_port=args.nvmf_base_port, rpc_base_port=args.rpc_base_port, snode_api_port=args.snode_api_port,
             hashicorp_vault_settings=HashicorpVaultSettings({"base_url": args.hashicorp_vault_url}) if args.hashicorp_vault_url else None,
             inline_checksum=inline_checksum,
+            atomic_4k=atomic_4k,
         )
 
     def query_yes_no(self, question, default="yes"):
