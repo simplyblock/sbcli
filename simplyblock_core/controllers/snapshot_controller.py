@@ -791,6 +791,20 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
         if not primary_node:
             primary_node = host_node
 
+        # Assign each non-leader a stable index so its subsystem is created
+        # with a unique cntlid window (sec0 -> min_cntlid 1000, sec1 -> 2000,
+        # ...). CNTLID must be unique per subsystem across all paths on the
+        # host; without distinct windows every secondary defaulted to
+        # secondary_index=0 -> min_cntlid 1000 and the tertiary path collided
+        # with the secondary ("Duplicate cntlid 1000 ... rejecting"). Keyed by
+        # node id so the index is stable whether a node proceeds now or is
+        # queued for deferred registration.
+        secondary_index_map = {}
+        for candidate in all_nodes:
+            if candidate.get_id() == primary_node.get_id():
+                continue
+            secondary_index_map[candidate.get_id()] = len(secondary_index_map)
+
         # Check non-leader nodes (no status checks)
         for candidate in all_nodes:
             if candidate.get_id() == primary_node.get_id():
@@ -807,7 +821,8 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
             elif action == "queue":
                 queue_for_restart_drain(
                     candidate.get_id(), lvol.lvs_name,
-                    lambda c=candidate: lvol_controller.add_lvol_on_node(lvol, c, is_primary=False),
+                    lambda c=candidate, si=secondary_index_map[candidate.get_id()]:
+                        lvol_controller.add_lvol_on_node(lvol, c, is_primary=False, secondary_index=si),
                     f"register clone {lvol.uuid} on {candidate.get_id()[:8]}")
             # "skip" — disconnected or pre_block, skip
 
@@ -827,7 +842,9 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
                 lvol.blobid = lvol_bdev['driver_specific']['lvol']['blobid']
 
             for sec in secondary_nodes:
-                lvol_bdev, error = lvol_controller.add_lvol_on_node(lvol, sec, is_primary=False)
+                lvol_bdev, error = lvol_controller.add_lvol_on_node(
+                    lvol, sec, is_primary=False,
+                    secondary_index=secondary_index_map[sec.get_id()])
                 if error:
                     logger.error(error)
                     if lvol.status != LVol.STATUS_IN_DELETION:
