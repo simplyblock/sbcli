@@ -423,12 +423,12 @@ class VolumeDTO(BaseModel):
         stat_obj: Optional[StatsObject] = None,
         rep_info=None,
     ):
-        from simplyblock_core.controllers import migration_controller
-        from simplyblock_core.db_controller import DBController as _DBC
-
-        active_mig = migration_controller.get_active_migration_for_lvol(model.uuid)
-        _db = _DBC()
-        eff_policy = _db.get_policy_for_lvol(model)
+        # from simplyblock_core.controllers import migration_controller
+        # from simplyblock_core.db_controller import DBController as _DBC
+        #
+        # active_mig = migration_controller.get_active_migration_for_lvol(model.uuid)
+        # _db = _DBC()
+        # eff_policy = _db.get_policy_for_lvol(model)
         return VolumeDTO(
             id=UUID(model.get_id()),
             cluster_id=UUID(cluster_id),
@@ -437,34 +437,16 @@ class VolumeDTO(BaseModel):
             status=model.status,
             health_check=model.health_check,
             io_error=model.io_error,
-            migrating=active_mig is not None,
+            migrating=False,
             nqn=model.nqn,
             hostname=model.hostname,
             priority_class=model.lvol_priority_class,
             namespace=model.namespace,
             fabric=model.fabric,
-            nodes=[
-                str(
-                    request.url_for(
-                        "clusters:storage-nodes:detail",
-                        cluster_id=cluster_id,
-                        storage_node_id=node_id,
-                    )
-                )
-                for node_id in model.nodes
-            ],
+            nodes=[],
             port=model.subsys_port,
             size=model.size,
-            cloned_from=str(
-                request.url_for(
-                    "clusters:storage-pools:snapshots:detail",
-                    cluster_id=cluster_id,
-                    pool_id=model.pool_uuid,
-                    snapshot_id=model.cloned_from_snap,
-                )
-            )
-            if model.cloned_from_snap
-            else None,
+            cloned_from=None,
             crypto_key=(
                 (model.crypto_key1, model.crypto_key2)
                 if model.crypto_key1 and model.crypto_key2
@@ -486,7 +468,7 @@ class VolumeDTO(BaseModel):
             max_r_mbytes=model.r_mbytes_per_sec,
             max_w_mbytes=model.w_mbytes_per_sec,
             allowed_hosts=[h["nqn"] for h in (model.allowed_hosts or [])],
-            policy=eff_policy.policy_name if eff_policy else "",
+            policy="",
             capacity=CapacityStatDTO.from_model(
                 stat_obj if stat_obj else StatsObject()
             ),
