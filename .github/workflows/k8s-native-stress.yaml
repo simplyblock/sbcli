@@ -544,6 +544,8 @@ jobs:
           set +e
           echo "=== Uninstalling KMS (openbao) ==="
           helm uninstall openbao -n vault 2>/dev/null || true
+          # Remove Helm release secrets in case uninstall left a broken/pending state
+          kubectl delete secret -n vault -l name=openbao,owner=helm 2>/dev/null || true
           kubectl delete namespace vault --wait=false 2>/dev/null || true
           echo "Waiting for vault namespace to be deleted..."
           kubectl wait --for=delete namespace/vault --timeout=120s 2>/dev/null || true

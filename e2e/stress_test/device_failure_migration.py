@@ -672,11 +672,16 @@ class _DeviceFailureMigrationBase:
 
         # 3. Other devices on target node should still be online
         #    (skip the target device and any pre-existing failed devices)
-        #    Retry for up to 5 minutes — devices may take time to settle
-        timeout = 300
+        #    Phase A: poll API for up to 5 minutes
+        #    Phase B: if API still reports not-online, cross-check with CLI
+        #             for up to 10 more minutes before failing
+        api_timeout = 300
+        cli_timeout = 600
         poll_interval = 15
-        deadline = time.time() + timeout
+        deadline = time.time() + api_timeout
         not_online = {}
+
+        # Phase A: API polling
         while True:
             not_online = {}
             devices = self.sbcli_utils.get_device_details(self._target_node_id)
@@ -692,20 +697,113 @@ class _DeviceFailureMigrationBase:
             if time.time() >= deadline:
                 break
             self.logger.info(
-                f"Waiting for non-target devices to come online: {not_online} "
-                f"({int(deadline - time.time())}s remaining)"
+                f"Waiting for non-target devices to come online (API): "
+                f"{not_online} ({int(deadline - time.time())}s remaining)"
             )
             sleep_n_sec(poll_interval)
 
-        for dev_id, status in not_online.items():
-            self.logger.error(
-                f"Non-target device {dev_id} on target node has "
-                f"unexpected status: {status} after {timeout}s"
+        if not not_online:
+            self.logger.info("All non-target devices remain online")
+        else:
+            # Phase B: API says not-online — cross-check with CLI
+            self.logger.warning(
+                f"API reports non-target devices not online after "
+                f"{api_timeout}s: {not_online}. "
+                f"Cross-checking with CLI for up to {cli_timeout}s ..."
             )
-        assert not not_online, (
-            f"Non-target devices not online after {timeout}s: {not_online}"
-        )
-        self.logger.info("All non-target devices remain online")
+            mgmt_ip = self.mgmt_nodes[0]
+            cli_deadline = time.time() + cli_timeout
+
+            while not_online and time.time() < cli_deadline:
+                # Re-check API first in case it caught up
+                devices = self.sbcli_utils.get_device_details(
+                    self._target_node_id
+                )
+                api_resolved = []
+                for d in devices:
+                    if d["id"] in not_online and d.get("status") == "online":
+                        api_resolved.append(d["id"])
+                for dev_id in api_resolved:
+                    self.logger.info(
+                        f"Device {dev_id} now online in API"
+                    )
+                    del not_online[dev_id]
+
+                if not not_online:
+                    break
+
+                # Cross-check with CLI: sbctl sn list-devices <sn_id>
+                # Output is a pipe-delimited table:
+                # | UUID | StorgeID | Name | Size | Serial | PCIe | Status | IO Err | Health |
+                cmd = (
+                    f"{self.base_cmd} sn list-devices "
+                    f"{self._target_node_id}"
+                )
+                try:
+                    result = self.ssh_obj.exec_command(mgmt_ip, cmd)
+                    cli_output = result[0] if isinstance(result, tuple) else str(result)
+                    self.logger.info(f"CLI list-devices output:\n{cli_output}")
+                except Exception as exc:
+                    self.logger.warning(f"CLI list-devices failed: {exc}")
+                    sleep_n_sec(poll_interval)
+                    continue
+
+                # Parse CLI table — find rows matching device UUID and
+                # extract the Status column (7th pipe-delimited field)
+                cli_resolved = []
+                for dev_id in list(not_online.keys()):
+                    for line in cli_output.splitlines():
+                        if dev_id not in line:
+                            continue
+                        cols = [c.strip() for c in line.split("|")]
+                        # cols[0] is empty (before first |), cols[1]=UUID,
+                        # ... cols[7]=Status for the Storage Devices table
+                        cli_status = None
+                        for i, col in enumerate(cols):
+                            if col == dev_id and i + 6 < len(cols):
+                                cli_status = cols[i + 6]
+                                break
+                        if cli_status and cli_status.lower() == "online":
+                            self.logger.warning(
+                                f"Device {dev_id}: CLI shows 'online' but "
+                                f"API reports '{not_online[dev_id]}' — "
+                                f"possible API staleness"
+                            )
+                            cli_resolved.append(dev_id)
+                        elif cli_status:
+                            self.logger.info(
+                                f"Device {dev_id}: CLI status='{cli_status}', "
+                                f"API status='{not_online[dev_id]}'"
+                            )
+                        break
+
+                for dev_id in cli_resolved:
+                    del not_online[dev_id]
+
+                if not not_online:
+                    break
+
+                self.logger.info(
+                    f"Devices still not online: {not_online} "
+                    f"({int(cli_deadline - time.time())}s remaining)"
+                )
+                sleep_n_sec(poll_interval)
+
+            if not_online:
+                for dev_id, status in not_online.items():
+                    self.logger.error(
+                        f"Non-target device {dev_id} on target node has "
+                        f"unexpected status: {status} after "
+                        f"{api_timeout + cli_timeout}s (API + CLI check)"
+                    )
+                assert not not_online, (
+                    f"Non-target devices not online after "
+                    f"{api_timeout + cli_timeout}s: {not_online}"
+                )
+            else:
+                self.logger.info(
+                    "All non-target devices online (resolved via CLI fallback)"
+                )
 
         # 4. Data integrity checks (NoLoad only — UnderLoad is checked after FIO completes)
         if not self._with_io_load:

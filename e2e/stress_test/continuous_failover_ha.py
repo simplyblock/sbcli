@@ -408,6 +408,29 @@ class RandomFailoverTest(TestLvolHACluster):
         node_ip = node_details[0]["mgmt_ip"]
         self.logger.info(f"Performing/Waiting for {outage_type} restart on node {self.current_outage_node}.")
         if outage_type == "graceful_shutdown":
+            # Check if node is already online before we restart — if it is,
+            # auto-restart was triggered which is unexpected for graceful_shutdown
+            try:
+                pre_details = self.sbcli_utils.get_storage_node_details(self.current_outage_node)
+                current_status = pre_details[0].get("status") if pre_details else None
+                if current_status == "online":
+                    raise AssertionError(
+                        f"Node {self.current_outage_node} is already online after "
+                        f"graceful_shutdown — auto-restart was triggered, which is "
+                        f"NOT expected behavior. Node should remain offline until "
+                        f"explicitly restarted."
+                    )
+                self.logger.info(
+                    f"Node {self.current_outage_node} status before restart: "
+                    f"{current_status} (expected)"
+                )
+            except AssertionError:
+                raise
+            except Exception as exc:
+                self.logger.warning(
+                    f"Could not check node status before restart: {exc}"
+                )
+
             max_retries = 10
             retry_delay = 10  # seconds
 

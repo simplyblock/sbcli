@@ -2012,6 +2012,27 @@ class K8sNativeFailoverTest(TestClusterBase):
         self.logger.info(f"Waiting for {outage_type} recovery on node {node}")
 
         if outage_type == "graceful_shutdown":
+            # Check if node is already online before we restart — if it is,
+            # auto-restart was triggered which is unexpected for graceful_shutdown
+            try:
+                node_details = self.sbcli_utils.get_storage_node_details(node)
+                current_status = node_details[0].get("status") if node_details else None
+                if current_status == "online":
+                    raise AssertionError(
+                        f"Node {node} is already online after graceful_shutdown — "
+                        f"auto-restart was triggered, which is NOT expected behavior. "
+                        f"Node should remain offline until explicitly restarted."
+                    )
+                self.logger.info(
+                    f"Node {node} status before restart: {current_status} (expected)"
+                )
+            except AssertionError:
+                raise
+            except Exception as exc:
+                self.logger.warning(
+                    f"Could not check node status before restart: {exc}"
+                )
+
             max_retries = 4
             for attempt in range(max_retries):
                 try:
@@ -2343,32 +2364,51 @@ class K8sNativeFailoverTest(TestClusterBase):
             self.logger.info("[wait_fio] All client FIO processes finished.")
         else:
             self._ensure_k8s_utils()
-            self.logger.info(
-                f"[wait_fio] Waiting for FIO K8s Jobs to complete "
-                f"(timeout={timeout}s) ..."
-            )
+            # Collect all job names to wait for
+            all_jobs = []
             for pvc_name, pvc_info in self.pvc_details.items():
                 job_name = pvc_info.get("job_name")
                 if job_name:
-                    try:
-                        self.k8s_utils.wait_job_complete(
-                            job_name, timeout=timeout
-                        )
-                    except Exception as exc:
-                        self.logger.warning(
-                            f"[wait_fio] Job {job_name} did not complete: {exc}"
-                        )
+                    all_jobs.append(job_name)
             for clone_name, clone_info in self.clone_details.items():
                 job_name = clone_info.get("job_name")
                 if job_name:
+                    all_jobs.append(job_name)
+
+            self.logger.info(
+                f"[wait_fio] Waiting for {len(all_jobs)} FIO K8s Jobs to "
+                f"complete (shared deadline={timeout}s) ..."
+            )
+
+            # Use a single shared deadline so stuck jobs don't multiply the wait
+            deadline = time.time() + timeout
+            still_running = set(all_jobs)
+            while still_running and time.time() < deadline:
+                for job_name in list(still_running):
                     try:
-                        self.k8s_utils.wait_job_complete(
-                            job_name, timeout=timeout
+                        status = self.k8s_utils.wait_job_complete(
+                            job_name, timeout=15
                         )
-                    except Exception as exc:
-                        self.logger.warning(
-                            f"[wait_fio] Job {job_name} did not complete: {exc}"
-                        )
+                        if status in ("succeeded", "failed"):
+                            self.logger.info(
+                                f"[wait_fio] Job {job_name}: {status}"
+                            )
+                            still_running.discard(job_name)
+                    except Exception:
+                        pass
+                if still_running:
+                    remaining = int(deadline - time.time())
+                    self.logger.info(
+                        f"[wait_fio] {len(still_running)} jobs still running, "
+                        f"{remaining}s remaining: "
+                        f"{sorted(still_running)}"
+                    )
+
+            if still_running:
+                self.logger.warning(
+                    f"[wait_fio] {len(still_running)} jobs did not complete "
+                    f"within {timeout}s: {sorted(still_running)}"
+                )
             self.logger.info("[wait_fio] All K8s FIO Jobs finished.")
 
     # ── FIO Validation ───────────────────────────────────────────────────────
