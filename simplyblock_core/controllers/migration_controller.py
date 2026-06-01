@@ -655,9 +655,10 @@ def pre_create_on_target(lvol_id, target_node_id,
             f"pre_create_on_target: subsystem {nqn} already existed — namespace left unchanged")
 
     # ── HA secondary ──────────────────────────────────────────────────────────
+    sec_node = None
+    sec_port = None
     if lvol.ha_type == "ha":
         try:
-            sec_node = None
             if tgt_node.secondary_node_id:
                 sec_node = db.get_storage_node_by_id(tgt_node.secondary_node_id)
         except KeyError:
@@ -754,6 +755,61 @@ def pre_create_on_target(lvol_id, target_node_id,
         if host_entry and host_entry.get("psk"):
             entry["tls"] = True
         out.append(entry)
+
+    if sec_node is not None and sec_port is not None:
+        for nic in sec_node.data_nics:
+            ip = nic.ip4_address
+            if not ip:
+                continue
+            trtype = nic.trtype.lower()
+            if trtype != lvol.fabric:
+                continue
+
+            if trtype == "tcp":
+                keep_alive_tmo = constants.LVOL_NVME_KEEP_ALIVE_TO_TCP
+            else:
+                keep_alive_tmo = constants.LVOL_NVME_KEEP_ALIVE_TO
+
+            client_data_nic_str = (f"--host-iface={cluster.client_data_nic}"
+                                   if cluster.client_data_nic else "")
+            tls_str = host_auth_str = ""
+            if host_entry:
+                host_auth_str = f" --hostnqn={host_nqn}"
+                if host_entry.get("psk"):
+                    tls_str = " --tls"
+                if host_entry.get("dhchap_key"):
+                    host_auth_str += f" --dhchap-secret={host_entry['dhchap_key']}"
+                if host_entry.get("dhchap_ctrlr_key"):
+                    host_auth_str += f" --dhchap-ctrl-secret={host_entry['dhchap_ctrlr_key']}"
+            elif host_nqn:
+                host_auth_str = f" --hostnqn={host_nqn}"
+
+            connect_cmd = (
+                f"sudo nvme connect"
+                f" --reconnect-delay={constants.LVOL_NVME_CONNECT_RECONNECT_DELAY}"
+                f" --ctrl-loss-tmo={ctrl_loss_tmo}"
+                f" --fast_io_fail_tmo={constants.LVOL_NVME_CONNECT_FAST_IO_FAIL_TO}"
+                f" --nr-io-queues={cluster.client_qpair_count}"
+                f" --keep-alive-tmo={keep_alive_tmo}"
+                f" --transport={trtype} --traddr={ip} --trsvcid={sec_port} --nqn={nqn}"
+                f" {client_data_nic_str}{tls_str}{host_auth_str}"
+            )
+            entry = {
+                "transport": trtype,
+                "ip": ip,
+                "port": sec_port,
+                "nqn": nqn,
+                "reconnect-delay": constants.LVOL_NVME_CONNECT_RECONNECT_DELAY,
+                "ctrl-loss-tmo": ctrl_loss_tmo,
+                "fast_io_fail_tmo": constants.LVOL_NVME_CONNECT_FAST_IO_FAIL_TO,
+                "nr-io-queues": cluster.client_qpair_count,
+                "keep-alive-tmo": keep_alive_tmo,
+                "host-iface": cluster.client_data_nic,
+                "connect": connect_cmd,
+            }
+            if host_entry and host_entry.get("psk"):
+                entry["tls"] = True
+            out.append(entry)
 
     logger.info(
         f"pre_create_on_target: done for lvol={lvol_id} target={target_node_id} "
