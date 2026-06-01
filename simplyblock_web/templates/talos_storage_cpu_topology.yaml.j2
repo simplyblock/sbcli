@@ -1,0 +1,84 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ CORE_JOBNAME }}
+  namespace: {{ NAMESPACE }}
+spec:
+  template:
+    spec:
+      restartPolicy: OnFailure
+      nodeSelector:
+        kubernetes.io/hostname: {{ HOSTNAME }}
+      hostNetwork: true
+      hostPID: true
+      serviceAccountName: simplyblock-storage-node-sa
+      tolerations:
+        - effect: NoSchedule
+          operator: Exists
+        - effect: NoExecute
+          operator: Exists
+      volumes:
+        - name: var-simplyblock
+          hostPath:
+            path: /var/simplyblock
+        - name: talos-secrets
+          secret:
+            secretName: {{ TALOS_SA_SECRET }}
+      containers:
+        - name: talos-cpu-topology
+          image: alpine/kubectl:1.34.1
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: var-simplyblock
+              mountPath: /var/simplyblock
+            - name: talos-secrets
+              mountPath: /var/run/secrets/talos.dev
+              readOnly: true
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+
+              MARKER="/var/simplyblock/.cpu_topology_applied"
+              if [ -f "$MARKER" ]; then
+                echo "[INFO] Node already configured. Exiting."
+                exit 0
+              fi
+
+              echo "[INFO] Installing talosctl {{ TALOS_VERSION }}..."
+              apk add --no-cache wget
+              ARCH=$(uname -m)
+              case "$ARCH" in
+                x86_64)  TALOS_ARCH=amd64 ;;
+                aarch64) TALOS_ARCH=arm64 ;;
+                *)       echo "[ERROR] Unsupported arch: $ARCH"; exit 1 ;;
+              esac
+              wget -qO /usr/local/bin/talosctl \
+                "https://github.com/siderolabs/talos/releases/download/{{ TALOS_VERSION }}/talosctl-linux-${TALOS_ARCH}"
+              chmod +x /usr/local/bin/talosctl
+
+              NODE_IP=$(kubectl get node "{{ HOSTNAME }}" \
+                -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}')
+              echo "[INFO] Applying CPU topology machine config on $NODE_IP..."
+
+              cat > /tmp/cpu_topology.yaml <<PATCH
+              machine:
+                kubelet:
+                  extraConfig:
+                    cpuManagerPolicy: static
+                    cpuManagerReconcilePeriod: 5s
+                    topologyManagerPolicy: single-numa-node
+                    topologyManagerScope: pod
+                    reservedSystemCPUs: "{{ RESERVED_SYSTEM_CPUS }}"
+              PATCH
+
+              talosctl --talosconfig /var/run/secrets/talos.dev/config \
+                -n "$NODE_IP" \
+                patch mc -p @/tmp/cpu_topology.yaml
+
+              echo "[INFO] Marking node as configured."
+              touch "$MARKER"
+
+              echo "[INFO] Waiting for Talos to reconcile kubelet configuration..."
+              sleep 120

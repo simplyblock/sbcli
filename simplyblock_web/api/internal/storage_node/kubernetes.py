@@ -314,6 +314,10 @@ def spdk_process_start(body: SPDKParams):
     if isinstance(openshift, str):
        openshift = openshift.strip().lower() in ("true")
 
+    talos_cluster = os.environ.get("TALOS_CLUSTER", True)
+    if isinstance(talos_cluster, str):
+        talos_cluster = talos_cluster.strip().lower() in ("true")
+
     # limit the job name length to 63 characters
     k8s_job_name_length = len(node_prepration_job_name+node_name)
     ubuntu_name_length = len(node_prepration_ubuntu_name+node_name)
@@ -439,7 +443,9 @@ def spdk_process_start(body: SPDKParams):
             logger.info(f"Job '{job_resp.metadata.name}' already gone, skipping delete")
         if (cpu_topology_enabled and not skip_kubelet_configuration) or (core_isolate and not cpu_topology_enabled):
             if cpu_topology_enabled and not skip_kubelet_configuration:
-                if not openshift:
+                if talos_cluster:
+                    template_name = 'talos_storage_cpu_topology.yaml.j2'
+                elif not openshift:
                     template_name = 'storage_cpu_topology.yaml.j2'
                 else:
                     template_name = 'oc_storage_cpu_topology.yaml.j2'
