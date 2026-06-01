@@ -432,6 +432,11 @@ def main():
         " --enable-hang-device"
         " --data-chunks-per-stripe 2 --parity-chunks-per-stripe 2"
         " --enable-inline-checksum"
+        # AWS NVMe is 512B logical but atomic at 4K, so it has no md-capable
+        # LBAF and never reformats to 4K. --4k_atomic lets fallback-mode inline
+        # checksum run on these 512B devices: it makes alceml create send
+        # cv_ignore_block_size=True so the data plane skips its >=4K block-size gate.
+        " --4k_atomic"
         # Swarm stack deploy inside cluster create pulls the full CP image set;
         # observed >10 min on cold registry pulls (2026-07-10, two deploys died
         # on the default 600 s channel timeout at "Deploying swarm stack").

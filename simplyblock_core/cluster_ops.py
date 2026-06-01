@@ -280,6 +280,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    enable_hang_device=False,
                    max_subsys=0, hugepages_mem=0, spdk_vcpu_count=0,
                    inline_checksum=False,
+                   atomic_4k=False,
 ) -> str:
     if (distr_ndcs, distr_npcs) not in SUPPORTED_ERASURE_CODING_SCHEMES:
         raise ValueError("Unsupported erasure coding scheme")
@@ -421,6 +422,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.mode = mode
     cluster.full_page_unmap = False
     cluster.inline_checksum = bool(inline_checksum)
+    cluster.atomic_4k = bool(atomic_4k)
     cluster.client_data_nic = client_data_nic or ""
     cluster.max_fault_tolerance = max_fault_tolerance
     cluster.nvmf_base_port = nvmf_base_port
@@ -524,6 +526,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
                 hashicorp_vault_settings : t.Optional[HashicorpVaultSettings] = None,
                 enable_failure_domain=False,
                 inline_checksum=False,
+                atomic_4k=False,
 ) -> str:
     """Thin wrapper around _add_cluster_impl() that serializes create calls
     for the same name behind a ClusterCreateLock.
@@ -551,6 +554,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
         nvmf_base_port=nvmf_base_port, rpc_base_port=rpc_base_port, snode_api_port=snode_api_port,
         hashicorp_vault_settings=hashicorp_vault_settings, enable_failure_domain=enable_failure_domain,
         inline_checksum=inline_checksum,
+        atomic_4k=atomic_4k,
     )
     if not name:
         return _add_cluster_impl(**kwargs)
@@ -576,6 +580,7 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
                 hashicorp_vault_settings : t.Optional[HashicorpVaultSettings] = None,
                 enable_failure_domain=False,
                 inline_checksum=False,
+                atomic_4k=False,
 ) -> str:
 
     clusters = db_controller.get_clusters()
@@ -694,6 +699,7 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
     cluster.fabric_rdma = protocols["rdma"]
     cluster.full_page_unmap = False
     cluster.inline_checksum = bool(inline_checksum)
+    cluster.atomic_4k = bool(atomic_4k)
     cluster.client_data_nic = client_data_nic or ""
     cluster.max_fault_tolerance = max_fault_tolerance
     cluster.nvmf_base_port = nvmf_base_port
