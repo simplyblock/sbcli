@@ -672,20 +672,39 @@ class _DeviceFailureMigrationBase:
 
         # 3. Other devices on target node should still be online
         #    (skip the target device and any pre-existing failed devices)
-        devices = self.sbcli_utils.get_device_details(self._target_node_id)
-        for d in devices:
-            if d["id"] == self._target_device_id:
-                continue
-            if d["id"] in self._pre_existing_failed_devices:
-                self.logger.info(
-                    f"Skipping pre-existing failed device {d['id']} "
-                    f"(status={d['status']})"
-                )
-                continue
-            assert d["status"] == "online", (
-                f"Non-target device {d['id']} on target node has "
-                f"unexpected status: {d['status']}"
+        #    Retry for up to 5 minutes — devices may take time to settle
+        timeout = 300
+        poll_interval = 15
+        deadline = time.time() + timeout
+        not_online = {}
+        while True:
+            not_online = {}
+            devices = self.sbcli_utils.get_device_details(self._target_node_id)
+            for d in devices:
+                if d["id"] == self._target_device_id:
+                    continue
+                if d["id"] in self._pre_existing_failed_devices:
+                    continue
+                if d.get("status") != "online":
+                    not_online[d["id"]] = d.get("status")
+            if not not_online:
+                break
+            if time.time() >= deadline:
+                break
+            self.logger.info(
+                f"Waiting for non-target devices to come online: {not_online} "
+                f"({int(deadline - time.time())}s remaining)"
             )
+            sleep_n_sec(poll_interval)
+
+        for dev_id, status in not_online.items():
+            self.logger.error(
+                f"Non-target device {dev_id} on target node has "
+                f"unexpected status: {status} after {timeout}s"
+            )
+        assert not not_online, (
+            f"Non-target devices not online after {timeout}s: {not_online}"
+        )
         self.logger.info("All non-target devices remain online")
 
         # 4. Data integrity checks (NoLoad only — UnderLoad is checked after FIO completes)

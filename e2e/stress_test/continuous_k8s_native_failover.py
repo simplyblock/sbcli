@@ -3311,6 +3311,9 @@ class K8sNativeResilientFailoverTest(K8sNativeFailoverTest):
         # Cap on total lvols (PVCs + clones) to avoid resource exhaustion
         self.MAX_TOTAL_LVOLS = int(os.environ.get("MAX_TOTAL_LVOLS", "36"))
 
+        # Skip clone creation entirely (set SKIP_CLONES=1 to disable)
+        self.skip_clones = os.environ.get("SKIP_CLONES", "0") == "1"
+
         # Sets tracking permanent resource names (never deleted)
         self.permanent_pvcs: set[str] = set()
         self.permanent_snapshots: set[str] = set()
@@ -3554,10 +3557,11 @@ class K8sNativeResilientFailoverTest(K8sNativeFailoverTest):
         )
 
     def _create_permanent_snapshots_and_clones(self):
-        """Create 1 snapshot + 1 clone per node from permanent PVCs.
+        """Create 1 snapshot per node from permanent PVCs.
 
-        Picks one permanent PVC per node and creates a snapshot + clone
-        pair.  The results are marked as permanent (never deleted).
+        Picks one permanent PVC per node and creates a snapshot.
+        Clone creation is currently disabled.
+        The results are marked as permanent (never deleted).
         """
         self._ensure_k8s_utils()
         # Build per-node PVC map from permanent PVCs
@@ -3568,13 +3572,12 @@ class K8sNativeResilientFailoverTest(K8sNativeFailoverTest):
                 node_pvc_map[nid] = pvc_name
 
         self.logger.info(
-            f"[permanent] Creating snapshots + clones for "
-            f"{len(node_pvc_map)} nodes"
+            f"[permanent] Creating snapshots for "
+            f"{len(node_pvc_map)} nodes (clones skipped)"
         )
 
         for node_id, pvc_name in node_pvc_map.items():
             snap_name = f"snap-{_rand_seq(12)}"
-            clone_name = f"clone-{_rand_seq(12)}"
 
             # Create snapshot
             try:
@@ -3600,142 +3603,118 @@ class K8sNativeResilientFailoverTest(K8sNativeFailoverTest):
             self.pvc_details[pvc_name]["snapshots"].append(snap_name)
             self.permanent_snapshots.add(snap_name)
 
-            # Snapshot lvol IDs before clone PVC (for client mode mapping)
-            old_lvol_ids = (
-                self._snapshot_lvol_ids() if self.use_client_fio else set()
-            )
-
-            # Create clone PVC — use same StorageClass/fs_type as source PVC
-            clone_sc = self.pvc_details.get(pvc_name, {}).get(
-                "storage_class", self.STORAGE_CLASS_NAME
-            )
-            clone_fs_type = self.pvc_details.get(pvc_name, {}).get("fs_type", "ext4")
-            sleep_n_sec(10)
-            try:
-                self.k8s_utils.create_clone_pvc(
-                    clone_name, self.pvc_size, clone_sc, snap_name,
-                )
-                self.k8s_utils.wait_pvc_bound(clone_name, timeout=300)
-            except Exception as exc:
-                self.logger.warning(
-                    f"[permanent] Clone PVC creation failed for "
-                    f"{clone_name}: {exc}"
-                )
-                try:
-                    self.k8s_utils.delete_pvc(clone_name)
-                except Exception:
-                    pass
-                continue
-
-            self.permanent_clones.add(clone_name)
-
-            if self.use_client_fio:
-                # Client FIO path for clone
-                sleep_n_sec(5)
-                lvol_info = self._find_new_lvol(old_lvol_ids)
-                if not lvol_info:
-                    self.logger.warning(
-                        f"[permanent] Could not map clone {clone_name} "
-                        f"to lvol — skipping FIO"
-                    )
-                    continue
-                clone_lvol_name, clone_lvol_id = lvol_info
-                client = self.fio_node[
-                    list(node_pvc_map.keys()).index(node_id)
-                    % len(self.fio_node)
-                ]
-
-                try:
-                    device, failed_cmds = self._connect_lvol_on_client(
-                        clone_lvol_name, client
-                    )
-                    if failed_cmds:
-                        self.record_failed_secondary_connects(
-                            clone_name, client, failed_cmds
-                        )
-                except Exception as exc:
-                    self.logger.warning(
-                        f"[permanent] NVMe connect failed for clone "
-                        f"{clone_name}: {exc}"
-                    )
-                    continue
-
-                self.ssh_obj.clone_mount_gen_uuid(client, device)
-                mount_point = f"{self.mount_path}/{clone_name}"
-                self.ssh_obj.mount_path(
-                    node=client, device=device, mount_path=mount_point
-                )
-                sleep_n_sec(5)
-
-                log_file = f"{self.log_path}/{clone_name}.log"
-                self.ssh_obj.delete_files(
-                    client, [f"{mount_point}/*fio*"]
-                )
-                self._start_client_fio(
-                    clone_name, client, mount_point, log_file
-                )
-
-                self.clone_details[clone_name] = {
-                    "snap_name": snap_name,
-                    "job_name": None,
-                    "configmap_name": None,
-                    "lvol_name": clone_lvol_name,
-                    "lvol_id": clone_lvol_id,
-                    "device": device,
-                    "mount_path": mount_point,
-                    "client": client,
-                    "log_file": log_file,
-                    "storage_class": clone_sc,
-                    "fs_type": clone_fs_type,
-                }
-                self.clone_mount_details[clone_lvol_name] = {
-                    "ID": clone_lvol_id,
-                    "snapshot": snap_name,
-                    "Mount": mount_point,
-                    "Device": device,
-                    "Log": log_file,
-                    "Client": client,
-                    "clone_pvc": clone_name,
-                }
-            else:
-                # K8s Job FIO path with init container cleanup
-                clone_job = f"fio-{clone_name}"
-                clone_cm = f"fiocfg-{clone_name}"
-                clone_node_id = self._get_pvc_node_id(clone_name)
-                avoid = (
-                    self._get_k8s_node_for_storage_node(clone_node_id)
-                    if clone_node_id
-                    else None
-                )
-
-                fio_config, warmup_config = self._build_fio_config(
-                    clone_name
-                )
-                try:
-                    self.k8s_utils.create_fio_job(
-                        clone_job, clone_name, clone_cm, fio_config,
-                        image=self.FIO_IMAGE,
-                        cleanup_before_fio=True,
-                        avoid_node=avoid,
-                        warmup_config=warmup_config,
-                    )
-                except Exception as exc:
-                    self.logger.warning(
-                        f"[permanent] Clone FIO Job failed for "
-                        f"{clone_name}: {exc}"
-                    )
-
-                self.clone_details[clone_name] = {
-                    "snap_name": snap_name,
-                    "job_name": clone_job,
-                    "configmap_name": clone_cm,
-                    "storage_class": clone_sc,
-                    "fs_type": clone_fs_type,
-                }
+            # NOTE: Clone creation disabled — uncomment block below to re-enable
+            # clone_name = f"clone-{_rand_seq(12)}"
+            # old_lvol_ids = (
+            #     self._snapshot_lvol_ids() if self.use_client_fio else set()
+            # )
+            # clone_sc = self.pvc_details.get(pvc_name, {}).get(
+            #     "storage_class", self.STORAGE_CLASS_NAME
+            # )
+            # clone_fs_type = self.pvc_details.get(pvc_name, {}).get("fs_type", "ext4")
+            # sleep_n_sec(10)
+            # try:
+            #     self.k8s_utils.create_clone_pvc(
+            #         clone_name, self.pvc_size, clone_sc, snap_name,
+            #     )
+            #     self.k8s_utils.wait_pvc_bound(clone_name, timeout=300)
+            # except Exception as exc:
+            #     self.logger.warning(
+            #         f"[permanent] Clone PVC creation failed for "
+            #         f"{clone_name}: {exc}"
+            #     )
+            #     try:
+            #         self.k8s_utils.delete_pvc(clone_name)
+            #     except Exception:
+            #         pass
+            #     continue
+            #
+            # self.permanent_clones.add(clone_name)
+            #
+            # if self.use_client_fio:
+            #     sleep_n_sec(5)
+            #     lvol_info = self._find_new_lvol(old_lvol_ids)
+            #     if not lvol_info:
+            #         self.logger.warning(
+            #             f"[permanent] Could not map clone {clone_name} "
+            #             f"to lvol — skipping FIO"
+            #         )
+            #         continue
+            #     clone_lvol_name, clone_lvol_id = lvol_info
+            #     client = self.fio_node[
+            #         list(node_pvc_map.keys()).index(node_id)
+            #         % len(self.fio_node)
+            #     ]
+            #     try:
+            #         device, failed_cmds = self._connect_lvol_on_client(
+            #             clone_lvol_name, client
+            #         )
+            #         if failed_cmds:
+            #             self.record_failed_secondary_connects(
+            #                 clone_name, client, failed_cmds
+            #             )
+            #     except Exception as exc:
+            #         self.logger.warning(
+            #             f"[permanent] NVMe connect failed for clone "
+            #             f"{clone_name}: {exc}"
+            #         )
+            #         continue
+            #     self.ssh_obj.clone_mount_gen_uuid(client, device)
+            #     mount_point = f"{self.mount_path}/{clone_name}"
+            #     self.ssh_obj.mount_path(
+            #         node=client, device=device, mount_path=mount_point
+            #     )
+            #     sleep_n_sec(5)
+            #     log_file = f"{self.log_path}/{clone_name}.log"
+            #     self.ssh_obj.delete_files(
+            #         client, [f"{mount_point}/*fio*"]
+            #     )
+            #     self._start_client_fio(
+            #         clone_name, client, mount_point, log_file
+            #     )
+            #     self.clone_details[clone_name] = {
+            #         "snap_name": snap_name, "job_name": None,
+            #         "configmap_name": None, "lvol_name": clone_lvol_name,
+            #         "lvol_id": clone_lvol_id, "device": device,
+            #         "mount_path": mount_point, "client": client,
+            #         "log_file": log_file, "storage_class": clone_sc,
+            #         "fs_type": clone_fs_type,
+            #     }
+            #     self.clone_mount_details[clone_lvol_name] = {
+            #         "ID": clone_lvol_id, "snapshot": snap_name,
+            #         "Mount": mount_point, "Device": device,
+            #         "Log": log_file, "Client": client,
+            #         "clone_pvc": clone_name,
+            #     }
+            # else:
+            #     clone_job = f"fio-{clone_name}"
+            #     clone_cm = f"fiocfg-{clone_name}"
+            #     clone_node_id = self._get_pvc_node_id(clone_name)
+            #     avoid = (
+            #         self._get_k8s_node_for_storage_node(clone_node_id)
+            #         if clone_node_id else None
+            #     )
+            #     fio_config, warmup_config = self._build_fio_config(clone_name)
+            #     try:
+            #         self.k8s_utils.create_fio_job(
+            #             clone_job, clone_name, clone_cm, fio_config,
+            #             image=self.FIO_IMAGE, cleanup_before_fio=True,
+            #             avoid_node=avoid, warmup_config=warmup_config,
+            #         )
+            #     except Exception as exc:
+            #         self.logger.warning(
+            #             f"[permanent] Clone FIO Job failed for "
+            #             f"{clone_name}: {exc}"
+            #         )
+            #     self.clone_details[clone_name] = {
+            #         "snap_name": snap_name, "job_name": clone_job,
+            #         "configmap_name": clone_cm, "storage_class": clone_sc,
+            #         "fs_type": clone_fs_type,
+            #     }
 
             self.logger.info(
-                f"[permanent] Created snapshot {snap_name}, "
-                f"clone {clone_name} for node {node_id}"
+                f"[permanent] Created snapshot {snap_name} "
+                f"for node {node_id}"
             )
             sleep_n_sec(10)
 
@@ -4225,18 +4204,14 @@ class K8sNativeResilientFailoverTest(K8sNativeFailoverTest):
         sleep_n_sec(30)
         self._ensure_per_node_coverage()
 
-        # ── Phase 2: Create permanent snapshots + clones ──
+        # ── Phase 2: Create permanent snapshots (clones disabled) ──
         self.logger.info(
-            "[permanent] Creating 1 snapshot + 1 clone per node"
+            "[permanent] Creating 1 snapshot per node (clones skipped)"
         )
         self._create_permanent_snapshots_and_clones()
         self.logger.info(
             f"[permanent] Permanent snapshots: "
             f"{sorted(self.permanent_snapshots)}"
-        )
-        self.logger.info(
-            f"[permanent] Permanent clones: "
-            f"{sorted(self.permanent_clones)}"
         )
         sleep_n_sec(30)
 
@@ -4344,8 +4319,9 @@ class K8sNativeResilientFailoverTest(K8sNativeFailoverTest):
                 self._bind_deferred_pvcs_and_start_fio()
 
                 # ── Create snapshots + clones (post-recovery) ──
-                if self._is_cluster_fully_online():
-                    self.create_snapshots_and_clones()
+                # NOTE: Clone creation disabled — uncomment to re-enable
+                # if self._is_cluster_fully_online():
+                #     self.create_snapshots_and_clones()
 
                 # ── Enforce lvol cap ──
                 self._enforce_lvol_cap()
