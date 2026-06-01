@@ -1806,8 +1806,6 @@ def get_lvol(lvol_id_or_name, is_json):
 
     data = lvol.get_clean_dict()
 
-    del data['nvme_dev']
-
     from simplyblock_core.controllers import migration_controller
     active_mig = migration_controller.get_active_migration_for_lvol(lvol.uuid)
     data['migrating'] = active_mig.uuid if active_mig else ""
