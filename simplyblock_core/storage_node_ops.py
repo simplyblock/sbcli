@@ -1180,6 +1180,7 @@ def _create_storage_device_stack(rpc_client, nvme, snode: StorageNode, after_res
         checksum_method=checksum_method,
         cache_size=cache_size,
         cache_eviction_threshold=cache_eviction_threshold,
+        force_4k_atomic=getattr(cluster, 'atomic_4k', False),
     )
 
     if not ret:
