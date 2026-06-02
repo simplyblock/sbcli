@@ -537,7 +537,7 @@ def _rollback_parallel_transfers(src_rpc, tgt_rpc, transfers):
 
 def _setup_snap_transfer(snap, snap_index, migration, src_node, tgt_node,
                          src_rpc, tgt_rpc, trtype, target_ip,
-                         tgt_sec=None, sec_rpc=None):
+                         tgt_sec=None, sec_rpc=None, lvol_size_mib=None):
     """
     Prepare a single snapshot for async transfer:
       1. Create writable lvol on target primary
@@ -558,20 +558,14 @@ def _setup_snap_transfer(snap, snap_index, migration, src_node, tgt_node,
     ctrl_name = f"mig_{migration.uuid[:8]}_{snap_index}"
 
     # Step 1: create target lvol on primary.
-    # The target bdev must cover the FULL addressable range of the source snap
-    # (which equals the parent lvol's total size), not just the snap's allocated
-    # (dirty) byte count stored in snap.size.  Using snap.size causes LBA-out-of-
-    # range errors when the transfer writes to blocks beyond that smaller capacity.
-    src_info = src_rpc.get_bdevs(src_composite)
-    if src_info and isinstance(src_info[0], dict):
-        _nb = src_info[0].get('num_blocks', 0)
-        _bs = src_info[0].get('block_size', 4096)
-        size_in_mib = max(1, (_nb * _bs) // (1024 * 1024))
-    else:
-        size_in_mib = _bytes_to_mib(snap.size)
+    # The target bdev must cover the FULL logical address range of the source snap
+    # (= parent lvol total size).  snap.size is only the blob's own allocated
+    # clusters; using it causes LBA-out-of-range when the transfer reads CoW data
+    # from the parent chain.  Callers pass lvol_size_mib from _bytes_to_mib(lvol.size).
+    size_in_mib = lvol_size_mib if lvol_size_mib else _bytes_to_mib(snap.size)
     logger.info(
-        f"[SNAP SIZE] snap={snap_uuid[:8]} db snap.size={snap.size} "
-        f"spdk_size_mib={size_in_mib}"
+        f"[SNAP SIZE] snap={snap_uuid[:8]} snap.size={snap.size} "
+        f"size_in_mib={size_in_mib} (lvol_size_mib={lvol_size_mib})"
     )
     _log_spdk_bdev_size(src_rpc, src_composite, f"SRC snap[{snap_uuid[:8]}] pre-create")
     ret = tgt_rpc.create_lvol(snap_short, size_in_mib, tgt_node.lvstore)
@@ -763,6 +757,14 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
     trtype, target_ip = _get_migration_nic(tgt_node)
     ctx = migration.transfer_context or {}
 
+    # Snap bdevs on TGT must cover the full logical address range of the lvol,
+    # not just each snap's own allocated clusters.
+    try:
+        _lvol_for_size = db.get_lvol_by_id(migration.lvol_id)
+        _snap_lvol_size_mib = _bytes_to_mib(_lvol_for_size.size)
+    except KeyError:
+        _snap_lvol_size_mib = None
+
     # Ensure TGT subsystems with inaccessible listeners exist on the very first
     # call (before any snapshot is transferred).  When migrate-pre-create was
     # called first the subsystems are already present and this is a no-op.
@@ -901,7 +903,8 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                 t, err = _setup_snap_transfer(
                     snap, snap_index, migration, src_node, tgt_node,
                     src_rpc, tgt_rpc, trtype, target_ip,
-                    tgt_sec=tgt_sec, sec_rpc=sec_rpc)
+                    tgt_sec=tgt_sec, sec_rpc=sec_rpc,
+                    lvol_size_mib=_snap_lvol_size_mib)
                 if t is None:
                     _rollback_parallel_transfers(src_rpc, tgt_rpc, transfers)
                     return False, True, err
@@ -1081,7 +1084,8 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         t, err = _setup_snap_transfer(
             snap, snap_index, migration, src_node, tgt_node,
             src_rpc, tgt_rpc, trtype, target_ip,
-            tgt_sec=tgt_sec, sec_rpc=sec_rpc)
+            tgt_sec=tgt_sec, sec_rpc=sec_rpc,
+            lvol_size_mib=_snap_lvol_size_mib)
         if t is None:
             return False, True, err
 
