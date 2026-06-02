@@ -1052,10 +1052,6 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
             lvol, rpc_client, "Failed to add bdev to subsystem")
     lvol.ns_id = int(ret)
 
-    spdk_mem_info_after = rpc_client.ultra21_util_get_malloc_stats()
-    logger.debug("ultra21_util_get_malloc_stats:")
-    logger.debug(spdk_mem_info_after)
-
     ret = rpc_client.get_bdevs(f"{lvol.lvs_name}/{lvol.lvol_bdev}")
     if ret:
         lvol_bdev = ret[0]
@@ -1087,7 +1083,7 @@ def recreate_lvol_on_node(lvol, snode, ha_inode_self=0, ana_state=None):
     allow_any = not bool(lvol.allowed_hosts)
     logger.info("creating subsystem %s (allow_any_host=%s)", lvol.nqn, allow_any)
     rpc_client.subsystem_create(lvol.nqn, lvol.ha_type, lvol.uuid, min_cntlid,
-                                max_namespaces=constants.LVO_MAX_NAMESPACES_PER_SUBSYS,
+                                max_namespaces=lvol.max_namespace_per_subsys,
                                 allow_any_host=allow_any)
 
     # Re-apply allowed hosts on subsystem recreate
@@ -3173,13 +3169,17 @@ def get_next_available_subsystem_on_node(node_id, all_lvols=None):
     for lv in all_lvols:
         if lv.node_id != node_id:
             continue
-        if lv.status not in [LVol.STATUS_IN_DELETION, LVol.STATUS_DELETED]:
+        if lv.status not in [LVol.STATUS_IN_DELETION, LVol.STATUS_DELETED, LVol.STATUS_IN_CREATION]:
             ns_counts[lv.nqn] = ns_counts.get(lv.nqn, 0) + 1
 
     for lvol in all_lvols:
         if lvol.node_id != node_id:
             continue
+
+        if lvol.status in [LVol.STATUS_IN_DELETION, LVol.STATUS_DELETED, LVol.STATUS_IN_CREATION]:
+            continue
+
         if not lvol.namespace:
-            if ns_counts.get(lvol.nqn, 0) < lvol.max_namespace_per_subsys:
+            if lvol.nqn in ns_counts and ns_counts.get(lvol.nqn, 0) < lvol.max_namespace_per_subsys:
                 return lvol.get_id(), lvol.nqn
     return None
