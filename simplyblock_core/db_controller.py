@@ -11,7 +11,7 @@ from simplyblock_core import constants
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.job_schedule import JobSchedule
-from simplyblock_core.models.lvol_model import LVol, LVolReplication
+from simplyblock_core.models.lvol_model import LVol, LVolReplication, LVolMini
 from simplyblock_core.models.mgmt_node import MgmtNode
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
 from simplyblock_core.models.pool import Pool
@@ -19,7 +19,7 @@ from simplyblock_core.models.port_stat import PortStat
 from simplyblock_core.models.backup import Backup, BackupChainLock, BackupPolicy, BackupPolicyAttachment
 from simplyblock_core.models.lvol_migration import LVolMigration
 from simplyblock_core.models.qos import QOSClass
-from simplyblock_core.models.snapshot import SnapShot
+from simplyblock_core.models.snapshot import SnapShot, SnapShotMini
 from simplyblock_core.models.stats import DeviceStatObject, NodeStatObject, ClusterStatObject, LVolStatObject, \
     PoolStatObject, CachedLVolStatObject
 from simplyblock_core.models.storage_node import StorageNode, NodeLVolDelLock
@@ -185,6 +185,22 @@ class DBController(metaclass=Singleton):
         ret = sorted(snaps, key=lambda x: x.created_at)
         end_time = time.time()
         logger.debug(f"time taken to read all SnapShots: {round(end_time - start_time, 2)}s")
+        return ret
+
+    def get_mini_lvols(self) -> List[LVolMini]:
+        start_time = time.time()
+        lvols = LVolMini().read_from_db(self.kv_store)
+        ret = sorted(lvols, key=lambda x: x.create_dt)
+        end_time = time.time()
+        logger.debug(f"time taken to read all mini lvols: {round(end_time - start_time, 2)}s")
+        return ret
+
+    def get_mini_snapshots(self) -> List[SnapShotMini]:
+        start_time = time.time()
+        snaps = SnapShotMini().read_from_db(self.kv_store)
+        ret = sorted(snaps, key=lambda x: x.created_at)
+        end_time = time.time()
+        logger.debug(f"time taken to read all mini snapshots: {round(end_time - start_time, 2)}s")
         return ret
 
     def get_snapshot_by_id(self, id) -> SnapShot:
