@@ -756,8 +756,8 @@ class CLIWrapper(CLIWrapperBase):
 
     def init_volume__migrate(self, subparser):
         subcommand = self.add_sub_command(subparser, 'migrate', 'Migrate a logical volume to a different storage node.')
-        subcommand.add_argument('volume_id', help='The logical volume id.', type=str)
-        subcommand.add_argument('target_node_id', help='The target storage node id.', type=str)
+        subcommand.add_argument('volume_or_migration_id', help='Migration ID (from migrate-pre-create) or volume ID.', type=str)
+        subcommand.add_argument('target_node_id', help='Target storage node ID. Required when passing a volume ID; omit when passing a migration ID.', type=str, nargs='?', default=None)
         argument = subcommand.add_argument('--max-retries', help='Maximum retry attempts before aborting. Default: `10`.', type=int, default=10, dest='max_retries')
         argument = subcommand.add_argument('--deadline', help='Migration deadline in seconds (0 = no deadline. Default: `14400`.', type=int, default=14400, dest='deadline_seconds')
 

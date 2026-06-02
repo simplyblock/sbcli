@@ -22,8 +22,7 @@ def list_migrations(cluster: Cluster) -> List[MigrationDTO]:
 
 
 class _MigrateParams(BaseModel):
-    volume_id: str
-    target_node_id: str
+    migration_id: str
     max_retries: int = 10
     deadline_seconds: int = 14400
 
@@ -58,8 +57,7 @@ def pre_create_on_target(cluster: Cluster, parameters: _PreCreateParams):
 def start_migration(cluster: Cluster, parameters: _MigrateParams):
     from simplyblock_core.controllers import migration_controller
     migration_id, error = migration_controller.start_migration(
-        parameters.volume_id,
-        parameters.target_node_id,
+        migration_id=parameters.migration_id,
         max_retries=parameters.max_retries,
         deadline_seconds=parameters.deadline_seconds,
     )
