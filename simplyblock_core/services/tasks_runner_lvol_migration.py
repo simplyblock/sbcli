@@ -368,56 +368,100 @@ def _expose_lvol_on_secondary(lvol, tgt_node, tgt_sec, sec_rpc, tgt_blobid, tgt_
                 f"Could not clean up stale namespace in {lvol.nqn} on secondary "
                 f"{tgt_sec.get_id()}: {e}")
 
-    # Add namespace using the target primary's lvstore for the composite bdev name
+    # Add namespace using the target primary's lvstore for the composite bdev name.
+    # Namespace may already exist if pre_create_on_target added it — check first.
     top_bdev = f"{tgt_node.lvstore}/{bdev_name}"
-    ret = sec_rpc.nvmf_subsystem_add_ns(lvol.nqn, top_bdev, lvol.uuid, lvol.guid)
-    if not ret:
-        if subsystem_created_on_sec:
-            sec_rpc.subsystem_delete(lvol.nqn)
-        sec_rpc.delete_lvol(bdev_name, del_async=True)
-        return False, f"nvmf_subsystem_add_ns failed on secondary {tgt_sec.get_id()}"
+    _ns_already = False
+    if existing_sec_sub:
+        _s = existing_sec_sub[0] if isinstance(existing_sec_sub, list) else existing_sec_sub
+        _ns_already = any(
+            ns.get('bdev_name') == top_bdev
+            for ns in (_s.get('namespaces', []) if isinstance(_s, dict) else []))
+    if _ns_already:
+        logger.info(
+            f"Namespace {top_bdev} already present on secondary {tgt_sec.get_id()} "
+            f"(from pre-create)")
+    else:
+        ret = sec_rpc.nvmf_subsystem_add_ns(lvol.nqn, top_bdev, lvol.uuid, lvol.guid)
+        if not ret:
+            if subsystem_created_on_sec:
+                sec_rpc.subsystem_delete(lvol.nqn)
+            sec_rpc.delete_lvol(bdev_name, del_async=True)
+            return False, f"nvmf_subsystem_add_ns failed on secondary {tgt_sec.get_id()}"
 
     return True, None
 
 
 def _update_ana_states(lvol, src_node, tgt_node, src_rpc, tgt_rpc,
-                       tgt_sec=None, sec_rpc=None, tgt_sec_is_src=False):
-    """Flip ANA states at cutover: TGT → optimized/non_optimized, SRC → inaccessible.
+                       tgt_sec=None, sec_rpc=None, tgt_sec_is_src=False,
+                       tgt_is_src_sec=False, src_sec=None, src_sec_rpc=None):
+    """Flip ANA states at cutover.
 
-    tgt_sec_is_src=True means TGT-sec and SRC are the same node (case-2 overlap).
-    In that case the SRC→inaccessible step is skipped — the TGT-sec→non_optimized
-    step transitions that node's listener directly to non_optimized, and the port
-    used is the SRC's native port (where the existing subsystem lives).
+    Sequence:
+      Phase 0 – overlap pre-step (only for overlap cases):
+        Give the client a live path on the non-overlapping target node BEFORE
+        the namespace swap on the overlap node has been resolved:
+          Case A (TGT-prim == SRC-sec): TGT-sec → non_optimized first
+          Case B (TGT-sec == SRC-prim): TGT-prim → optimized first
+
+      Phase 1 – namespace swap for the overlap node:
+        Already done by the caller before this function is invoked.
+
+      Phase 2 – standard 4-step for all nodes:
+        1. TGT-prim → optimized
+        2. TGT-sec  → non_optimized
+        3. SRC-prim → inaccessible  (skip Case B: SRC-prim IS TGT-sec)
+        4. SRC-sec  → inaccessible  (skip Case A: SRC-sec  IS TGT-prim)
     """
     nqn = lvol.nqn
     tgt_trtype, tgt_ip = _get_migration_nic(tgt_node)
     src_trtype, src_ip = _get_migration_nic(src_node)
     tgt_port = tgt_node.get_lvol_subsys_port(tgt_node.lvstore)
     src_port = src_node.get_lvol_subsys_port(src_node.lvstore)
-    try:
-        tgt_rpc.nvmf_subsystem_listener_set_ana_state(
-            nqn, tgt_ip, tgt_port, trtype=tgt_trtype, ana="optimized")
-        logger.info(f"ANA: {nqn} TGT {tgt_ip}:{tgt_port} → optimized")
-    except Exception as e:
-        logger.error(f"ANA update TGT failed (non-fatal): {e}")
-    if not tgt_sec_is_src:
+
+    def _flip(rpc, ip, port, trtype, state, label):
         try:
-            src_rpc.nvmf_subsystem_listener_set_ana_state(
-                nqn, src_ip, src_port, trtype=src_trtype, ana="inaccessible")
-            logger.info(f"ANA: {nqn} SRC {src_ip}:{src_port} → inaccessible")
+            rpc.nvmf_subsystem_listener_set_ana_state(
+                nqn, ip, port, trtype=trtype, ana=state)
+            logger.info(f"ANA: {nqn} {label} {ip}:{port} → {state}")
         except Exception as e:
-            logger.error(f"ANA update SRC failed (non-fatal): {e}")
+            logger.error(f"ANA update {label} failed (non-fatal): {e}")
+
+    # ── Phase 0: give client a live path on the non-overlapping target ────────
+    if tgt_is_src_sec and tgt_sec is not None and sec_rpc is not None:
+        # Case A: TGT-prim has overlap → make TGT-sec available first
+        tgt_sec_trtype, tgt_sec_ip = _get_migration_nic(tgt_sec)
+        tgt_sec_port = tgt_sec.get_lvol_subsys_port(tgt_node.lvstore)
+        _flip(sec_rpc, tgt_sec_ip, tgt_sec_port, tgt_sec_trtype,
+              "non_optimized", "TGT-sec (pre-resolve, Case A)")
+    elif tgt_sec_is_src:
+        # Case B: TGT-sec has overlap → make TGT-prim available first
+        _flip(tgt_rpc, tgt_ip, tgt_port, tgt_trtype,
+              "optimized", "TGT-prim (pre-resolve, Case B)")
+
+    # ── Phase 2: standard 4-step ──────────────────────────────────────────────
+    # 1. TGT-prim → optimized
+    _flip(tgt_rpc, tgt_ip, tgt_port, tgt_trtype, "optimized", "TGT-prim")
+
+    # 2. TGT-sec → non_optimized
     if tgt_sec is not None and sec_rpc is not None:
-        try:
-            tgt_sec_trtype, tgt_sec_ip = _get_migration_nic(tgt_sec)
-            # Case-2 overlap: TGT-sec == SRC — subsystem lives at SRC's port.
-            tgt_sec_port = (src_port if tgt_sec_is_src
-                            else tgt_sec.get_lvol_subsys_port(tgt_node.lvstore))
-            sec_rpc.nvmf_subsystem_listener_set_ana_state(
-                nqn, tgt_sec_ip, tgt_sec_port, trtype=tgt_sec_trtype, ana="non_optimized")
-            logger.info(f"ANA: {nqn} TGT-sec {tgt_sec_ip}:{tgt_sec_port} → non_optimized")
-        except Exception as e:
-            logger.error(f"ANA update TGT-sec failed (non-fatal): {e}")
+        tgt_sec_trtype, tgt_sec_ip = _get_migration_nic(tgt_sec)
+        # Case B: TGT-sec IS SRC-prim — listener lives at SRC's native port
+        tgt_sec_port = (src_port if tgt_sec_is_src
+                        else tgt_sec.get_lvol_subsys_port(tgt_node.lvstore))
+        _flip(sec_rpc, tgt_sec_ip, tgt_sec_port, tgt_sec_trtype,
+              "non_optimized", "TGT-sec")
+
+    # 3. SRC-prim → inaccessible (skip Case B: SRC-prim IS TGT-sec)
+    if not tgt_sec_is_src:
+        _flip(src_rpc, src_ip, src_port, src_trtype, "inaccessible", "SRC-prim")
+
+    # 4. SRC-sec → inaccessible (skip Case A: SRC-sec IS TGT-prim)
+    if not tgt_is_src_sec and src_sec is not None and src_sec_rpc is not None:
+        src_sec_trtype, src_sec_ip = _get_migration_nic(src_sec)
+        src_sec_port = src_sec.get_lvol_subsys_port(src_node.lvstore)
+        _flip(src_sec_rpc, src_sec_ip, src_sec_port, src_sec_trtype,
+              "inaccessible", "SRC-sec")
 
 
 # ---------------------------------------------------------------------------
@@ -1259,19 +1303,30 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                 return False, True, sec_setup_err
             if tgt_sec_setup is not None:
                 sec_setup_rpc = _make_rpc(tgt_sec_setup)
-                ret = sec_setup_rpc.bdev_lvol_register(
-                    tgt_lvol_bdev, tgt_node.lvstore, tgt_uuid, tgt_blobid,
-                    lvol.lvol_priority_class)
-                if not ret:
-                    _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc)
-                    return False, True, (
-                        f"bdev_lvol_register on secondary failed for {tgt_lvol_composite}")
-                ret = sec_setup_rpc.bdev_lvol_set_migration_flag(tgt_lvol_composite)
-                if not ret:
-                    sec_setup_rpc.delete_lvol(tgt_lvol_bdev, del_async=True)
-                    _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc)
-                    return False, True, (
-                        f"bdev_lvol_set_migration_flag on secondary failed for {tgt_lvol_composite}")
+                # Idempotent: bdev may already be registered if pre_create_on_target ran
+                if sec_setup_rpc.get_bdevs(tgt_lvol_composite):
+                    logger.info(
+                        f"Target lvol {tgt_lvol_composite} already registered on secondary "
+                        f"{tgt_sec_setup.get_id()} (from pre-create)")
+                    # Migration flag should already be set; call idempotently
+                    if not sec_setup_rpc.bdev_lvol_set_migration_flag(tgt_lvol_composite):
+                        logger.warning(
+                            f"bdev_lvol_set_migration_flag on secondary (pre-registered) "
+                            f"failed for {tgt_lvol_composite} (may already be set)")
+                else:
+                    ret = sec_setup_rpc.bdev_lvol_register(
+                        tgt_lvol_bdev, tgt_node.lvstore, tgt_uuid, tgt_blobid,
+                        lvol.lvol_priority_class)
+                    if not ret:
+                        _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc)
+                        return False, True, (
+                            f"bdev_lvol_register on secondary failed for {tgt_lvol_composite}")
+                    ret = sec_setup_rpc.bdev_lvol_set_migration_flag(tgt_lvol_composite)
+                    if not ret:
+                        sec_setup_rpc.delete_lvol(tgt_lvol_bdev, del_async=True)
+                        _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc)
+                        return False, True, (
+                            f"bdev_lvol_set_migration_flag on secondary failed for {tgt_lvol_composite}")
 
         # NVMe-oF subsystem setup is deferred to the Done handler — the subsystem
         # is deleted and recreated fresh after transfer completes so all paths get
@@ -1377,14 +1432,10 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                     f"nvmf_subsystem_add_ns failed on TGT for adjacent case")
         except Exception as e:
             logger.error(f"TGT namespace add failed (adjacent): {e}")
-        # The TGT listener lives at the SOURCE's lvol port (e.g. 4430), not TGT's own
-        # lvstore port (4432).  Flip it to optimized NOW — before _update_ana_states
-        # makes SRC inaccessible — so the client always has an optimized path.
+        # Ensure TGT's native port listener exists — ANA flip happens in _update_ana_states.
         tgt_adj_trtype, tgt_adj_ip = _get_migration_nic(tgt_node)
-        tgt_adj_port = src_node.get_lvol_subsys_port(src_node.lvstore)
+        tgt_adj_port   = src_node.get_lvol_subsys_port(src_node.lvstore)
         tgt_native_port = tgt_node.get_lvol_subsys_port(tgt_node.lvstore)
-        # Add TGT's native port listener (e.g. 4432) so that post-migration
-        # connect-str (which uses tgt_node's port) actually has a listener.
         if tgt_native_port != tgt_adj_port:
             try:
                 tgt_rpc.nvmf_subsystem_add_listener(
@@ -1393,22 +1444,22 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                     f"Added TGT native listener {tgt_adj_ip}:{tgt_native_port} to {nqn}")
             except Exception as e:
                 logger.warning(f"TGT native listener add (non-fatal): {e}")
-        # Flip the existing SRC-port listener to optimized NOW — before
-        # _update_ana_states makes SRC inaccessible — so the client always
-        # has an optimized path during the transition.
-        try:
-            tgt_rpc.nvmf_subsystem_listener_set_ana_state(
-                nqn, tgt_adj_ip, tgt_adj_port, trtype=tgt_adj_trtype, ana="optimized")
-            logger.info(
-                f"ANA: {nqn} TGT-adjacent {tgt_adj_ip}:{tgt_adj_port} → optimized")
-        except Exception as e:
-            logger.error(f"ANA update TGT-adjacent failed: {e}")
     else:
-        # Independent case: TGT subsystem was pre-created empty during PHASE_SNAP_COPY.
-        # Add namespace now — SPDK auto-assigns nsid=1.
+        # Independent (non-adjacent) case.
+        # Namespace may already exist if pre_create_on_target added it.
         try:
             ns_ret = tgt_rpc.nvmf_subsystem_add_ns(
                 nqn, tgt_lvol_composite, lvol.uuid, lvol.guid)
+            if not ns_ret:
+                # Check if it was pre-created (pre_create_on_target added it)
+                _sub = tgt_rpc.subsystem_list(nqn)
+                if _sub:
+                    _s = _sub[0] if isinstance(_sub, list) else _sub
+                    ns_ret = next(
+                        (ns['nsid'] for ns in
+                         (_s.get('namespaces', []) if isinstance(_s, dict) else [])
+                         if ns.get('bdev_name') == tgt_lvol_composite),
+                        None)
             if ns_ret:
                 logger.info(
                     f"Added namespace {tgt_lvol_composite} nsid={ns_ret} "
@@ -1488,10 +1539,24 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                         logger.warning(f"TGT secondary namespace setup failed (non-fatal): {err}")
                         tgt_sec = None
 
-    # Flip ANA states atomically: TGT → optimized/non_optimized, SRC → inaccessible.
-    # Client's kernel multipath re-routes IO instantly without disconnect/reconnect.
+    # Look up SRC secondary so _update_ana_states can make it inaccessible.
+    src_sec     = None
+    src_sec_rpc = None
+    if src_node.secondary_node_id:
+        try:
+            _ss = db.get_storage_node_by_id(src_node.secondary_node_id)
+            if _ss.status == StorageNode.STATUS_ONLINE:
+                src_sec     = _ss
+                src_sec_rpc = _make_rpc(_ss)
+        except KeyError:
+            pass
+
+    # Flip ANA states in the correct order so clients always have a live path.
     _update_ana_states(lvol, src_node, tgt_node, src_rpc, tgt_rpc,
-                       tgt_sec=tgt_sec, sec_rpc=sec_rpc, tgt_sec_is_src=tgt_sec_is_src)
+                       tgt_sec=tgt_sec, sec_rpc=sec_rpc,
+                       tgt_sec_is_src=tgt_sec_is_src,
+                       tgt_is_src_sec=tgt_is_src_secondary,
+                       src_sec=src_sec, src_sec_rpc=src_sec_rpc)
 
     # Save source snap bdev names before apply_migration_to_db updates
     # them — PHASE_CLEANUP_SOURCE uses this map to derive the correct

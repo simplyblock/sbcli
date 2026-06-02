@@ -283,8 +283,20 @@ def _cleanup_pre_created(migration):
     bdev_short = lvol.lvol_bdev + _MIGRATION_BDEV_SUFFIX
     composite = f"{tgt_node.lvstore}/{bdev_short}"
 
-    # Secondary first (depends on nothing on primary)
-    if tgt_node.secondary_node_id:
+    # Recompute overlap so we only clean up what pre_create_on_target actually created.
+    try:
+        _src_node = db.get_storage_node_by_id(lvol.node_id)
+    except KeyError:
+        _src_node = None
+    _tgt_is_src_sec = (_src_node is not None and
+                       migration.target_node_id == (_src_node.secondary_node_id or ""))
+    _tgt_sec_is_src = ((tgt_node.secondary_node_id or "") == lvol.node_id)
+
+    tgt_rpc = tgt_node.rpc_client()
+
+    # Secondary first — only if we created the secondary subsystem
+    # (skip Case B: TGT-sec is SRC-prim, subsystem there belongs to SRC)
+    if tgt_node.secondary_node_id and not _tgt_sec_is_src:
         try:
             sec_node = db.get_storage_node_by_id(tgt_node.secondary_node_id)
             sec_rpc = sec_node.rpc_client()
@@ -293,17 +305,17 @@ def _cleanup_pre_created(migration):
         except Exception as e:
             logger.warning(f"_cleanup_pre_created: could not clean TGT-sec subsystem: {e}")
 
-    # Primary subsystem
-    try:
-        tgt_rpc = tgt_node.rpc_client()
-        tgt_rpc.subsystem_delete(nqn)
-        logger.info(f"_cleanup_pre_created: deleted TGT-prim subsystem {nqn} on {tgt_node.get_id()}")
-    except Exception as e:
-        logger.warning(f"_cleanup_pre_created: could not clean TGT-prim subsystem: {e}")
+    # Primary subsystem — only if we created it
+    # (skip Case A: TGT-prim is SRC-sec, subsystem there belongs to SRC)
+    if not _tgt_is_src_sec:
+        try:
+            tgt_rpc.subsystem_delete(nqn)
+            logger.info(f"_cleanup_pre_created: deleted TGT-prim subsystem {nqn} on {tgt_node.get_id()}")
+        except Exception as e:
+            logger.warning(f"_cleanup_pre_created: could not clean TGT-prim subsystem: {e}")
 
-    # Migration bdev (only on primary)
+    # Migration bdev (always delete — we always created it)
     try:
-        tgt_rpc = tgt_node.rpc_client()
         tgt_rpc.delete_lvol(composite)
         logger.info(f"_cleanup_pre_created: deleted migration bdev {composite} on {tgt_node.get_id()}")
     except Exception as e:
@@ -738,6 +750,18 @@ def pre_create_on_target(lvol_id, target_node_id,
     if not tgt_node.lvstore:
         return None, None, f"Target node {target_node_id} has no lvstore"
 
+    # Overlap detection (must happen before any SPDK calls):
+    #   Case A: TGT-prim == SRC-sec  → subsystem already exists on TGT (don't recreate, no ns)
+    #   Case B: TGT-sec  == SRC-prim → TGT-sec is the source (skip TGT-sec subsystem, no ns)
+    src_node_id = lvol.node_id
+    try:
+        src_node = db.get_storage_node_by_id(src_node_id)
+    except KeyError:
+        return None, None, f"Source node {src_node_id} not found"
+    tgt_is_src_sec = (target_node_id == (src_node.secondary_node_id or ""))
+    tgt_sec_is_src = ((tgt_node.secondary_node_id or "") == src_node_id)
+    has_overlap    = tgt_is_src_sec or tgt_sec_is_src
+
     cluster = db.get_cluster_by_id(tgt_node.cluster_id)
     tgt_rpc  = tgt_node.rpc_client()
     nqn      = lvol.nqn
@@ -758,50 +782,141 @@ def pre_create_on_target(lvol_id, target_node_id,
     else:
         logger.info(f"pre_create_on_target: bdev {composite} already exists — skipping create")
 
-    # ── 2. Subsystem + inaccessible listeners (no namespace) ─────────────────
-    tgt_rpc.subsystem_create(
-        nqn, lvol.ha_type, lvol.uuid, min_cntlid=2000,
-        max_namespaces=constants.LVO_MAX_NAMESPACES_PER_SUBSYS)
+    # ── 1b. Get bdev info for secondary registration ──────────────────────────
+    _bdev_info = tgt_rpc.get_bdevs(composite)
+    _tgt_blobid = None
+    _tgt_uuid   = None
+    if _bdev_info and isinstance(_bdev_info[0], dict):
+        _tgt_blobid = (_bdev_info[0].get('driver_specific', {})
+                       .get('lvol', {}).get('blobid'))
+        _tgt_uuid   = _bdev_info[0].get('uuid')
 
-    for nic in tgt_node.data_nics:
-        if not nic.ip4_address:
-            continue
-        trtype = nic.trtype.lower()
-        if trtype != lvol.fabric:
-            continue
-        tgt_rpc.listeners_create(nqn, trtype, nic.ip4_address, tgt_port,
-                                 ana_state="inaccessible")
+    # ── 1c. Set migration flag on TGT-prim ────────────────────────────────────
+    if not tgt_rpc.bdev_lvol_set_migration_flag(composite):
+        logger.warning(f"pre_create_on_target: bdev_lvol_set_migration_flag on primary "
+                       f"failed for {composite} (may already be flagged)")
 
-    logger.info(f"pre_create_on_target: subsystem {nqn} ready on TGT-prim (no namespace)")
+    # ── 1d. Register migration bdev on TGT-sec ────────────────────────────────
+    # Always register if TGT has a secondary (including Case B where TGT-sec IS SRC-prim):
+    # the migration bdev lives on TGT-prim's lvstore and TGT-sec needs bdev_lvol_register
+    # to mirror writes during migration regardless of which node fills the secondary role.
+    _pre_sec_node = None
+    if lvol.ha_type in ("ha", "ha3") and tgt_node.secondary_node_id:
+        try:
+            _pre_sec_node = db.get_storage_node_by_id(tgt_node.secondary_node_id)
+            _sec_rpc_reg  = _pre_sec_node.rpc_client()
+            if _sec_rpc_reg.get_bdevs(composite):
+                logger.info(
+                    f"pre_create_on_target: {composite} already on secondary "
+                    f"{_pre_sec_node.get_id()} — skipping bdev_lvol_register")
+            elif _tgt_blobid is not None and _tgt_uuid is not None:
+                ret_sec = _sec_rpc_reg.bdev_lvol_register(
+                    bdev_short, tgt_node.lvstore, _tgt_uuid, _tgt_blobid,
+                    lvol.lvol_priority_class)
+                if ret_sec:
+                    _sec_rpc_reg.bdev_lvol_set_migration_flag(composite)
+                    logger.info(
+                        f"pre_create_on_target: registered {composite} on "
+                        f"secondary {_pre_sec_node.get_id()}")
+                else:
+                    logger.warning(
+                        f"pre_create_on_target: bdev_lvol_register on secondary "
+                        f"{_pre_sec_node.get_id()} failed (continuing)")
+            else:
+                logger.warning(
+                    f"pre_create_on_target: no bdev info for secondary registration of {composite}")
+        except Exception as _e:
+            logger.warning(
+                f"pre_create_on_target: secondary registration error (continuing): {_e}")
+
+    # ── 2. Subsystem + listeners on TGT-prim ──────────────────────────────────
+    # Case A overlap: TGT-prim IS SRC-sec — its subsystem already exists there.
+    # Skip creation; the task runner handles the namespace swap at cutover.
+    if tgt_is_src_sec:
+        logger.info(
+            f"pre_create_on_target: TGT is SRC-sec (Case A overlap) — "
+            f"skipping subsystem create on TGT-prim (subsystem already exists)")
+    else:
+        if not tgt_rpc.subsystem_list(nqn):
+            tgt_rpc.subsystem_create(
+                nqn, lvol.ha_type, lvol.uuid, min_cntlid=2000,
+                max_namespaces=constants.LVO_MAX_NAMESPACES_PER_SUBSYS)
+        for nic in tgt_node.data_nics:
+            if not nic.ip4_address:
+                continue
+            trtype = nic.trtype.lower()
+            if trtype != lvol.fabric:
+                continue
+            tgt_rpc.listeners_create(nqn, trtype, nic.ip4_address, tgt_port,
+                                     ana_state="inaccessible")
+        # Non-overlap: add namespace so the client can pre-connect and see the device.
+        # Listeners stay inaccessible until migration completes and ANA is flipped.
+        if not has_overlap:
+            _ns_prim = tgt_rpc.nvmf_subsystem_add_ns(
+                nqn, composite, lvol.uuid, lvol.guid)
+            if _ns_prim:
+                logger.info(
+                    f"pre_create_on_target: namespace {composite} "
+                    f"added on TGT-prim nsid={_ns_prim}")
+            else:
+                logger.warning(
+                    f"pre_create_on_target: nvmf_subsystem_add_ns failed on TGT-prim "
+                    f"for {composite}")
+        logger.info(
+            f"pre_create_on_target: subsystem {nqn} ready on TGT-prim "
+            f"(namespace={'added' if not has_overlap else 'deferred to migration'})")
 
     # ── HA secondary ──────────────────────────────────────────────────────────
     sec_node = None
     sec_port = None
     if lvol.ha_type in ("ha", "ha3"):
-        try:
-            if tgt_node.secondary_node_id:
-                sec_node = db.get_storage_node_by_id(tgt_node.secondary_node_id)
-        except KeyError:
-            sec_node = None
+        if tgt_sec_is_src:
+            # Case B overlap: TGT-sec IS SRC-prim — subsystem exists on SRC; skip.
+            logger.info(
+                f"pre_create_on_target: TGT-sec is SRC (Case B overlap) — "
+                f"skipping secondary subsystem create")
+        else:
+            try:
+                if tgt_node.secondary_node_id:
+                    sec_node = (_pre_sec_node
+                                if _pre_sec_node is not None
+                                else db.get_storage_node_by_id(tgt_node.secondary_node_id))
+            except KeyError:
+                sec_node = None
 
-        if sec_node is not None:
-            sec_rpc   = sec_node.rpc_client()
-            sec_port  = sec_node.get_lvol_subsys_port(tgt_node.lvstore)
+            if sec_node is not None:
+                sec_rpc   = sec_node.rpc_client()
+                sec_port  = sec_node.get_lvol_subsys_port(tgt_node.lvstore)
 
-            sec_rpc.subsystem_create(
-                nqn, lvol.ha_type, lvol.uuid, min_cntlid=3000,
-                max_namespaces=constants.LVO_MAX_NAMESPACES_PER_SUBSYS)
+                if not sec_rpc.subsystem_list(nqn):
+                    sec_rpc.subsystem_create(
+                        nqn, lvol.ha_type, lvol.uuid, min_cntlid=3000,
+                        max_namespaces=constants.LVO_MAX_NAMESPACES_PER_SUBSYS)
 
-            for nic in sec_node.data_nics:
-                if not nic.ip4_address:
-                    continue
-                trtype = nic.trtype.lower()
-                if trtype != lvol.fabric:
-                    continue
-                sec_rpc.listeners_create(nqn, trtype, nic.ip4_address, sec_port,
-                                         ana_state="inaccessible")
+                for nic in sec_node.data_nics:
+                    if not nic.ip4_address:
+                        continue
+                    trtype = nic.trtype.lower()
+                    if trtype != lvol.fabric:
+                        continue
+                    sec_rpc.listeners_create(nqn, trtype, nic.ip4_address, sec_port,
+                                             ana_state="inaccessible")
 
-            logger.info(f"pre_create_on_target: subsystem {nqn} ready on TGT-sec (no namespace)")
+                # Non-overlap: add namespace on secondary too
+                if not has_overlap:
+                    _ns_sec = sec_rpc.nvmf_subsystem_add_ns(
+                        nqn, composite, lvol.uuid, lvol.guid)
+                    if _ns_sec:
+                        logger.info(
+                            f"pre_create_on_target: namespace {composite} "
+                            f"added on TGT-sec nsid={_ns_sec}")
+                    else:
+                        logger.warning(
+                            f"pre_create_on_target: nvmf_subsystem_add_ns failed "
+                            f"on TGT-sec for {composite}")
+                logger.info(
+                    f"pre_create_on_target: subsystem {nqn} ready on TGT-sec "
+                    f"(namespace={'added' if not has_overlap else 'deferred to migration'})")
 
     # ── 4. Build connect strings for the target node ──────────────────────────
     host_entry = None
