@@ -60,88 +60,151 @@ db = DBController()
 # Public API
 # ---------------------------------------------------------------------------
 
-def start_migration(lvol_id, target_node_id,
+def start_migration(lvol_id=None, target_node_id=None,
                     max_retries=constants.LVOL_MIG_MAX_RETRIES,
-                    deadline_seconds=constants.LVOL_MIG_DEADLINE_SEC):
+                    deadline_seconds=constants.LVOL_MIG_DEADLINE_SEC,
+                    migration_id=None):
     """
-    Initiate a live migration of *lvol_id* to *target_node_id*.
+    Initiate a live migration.
 
-    Returns (migration_uuid, None) on success or (False, error_message) on
-    failure.
+    Two call modes:
+      1. Pre-create flow: pass only ``migration_id`` (returned by
+         pre_create_on_target).  lvol_id, target_node_id, and the target
+         infrastructure are all derived from the existing PHASE_PRE_CREATED record.
+      2. Direct flow: pass ``lvol_id`` and ``target_node_id``; the migration
+         record is created fresh.
 
-    Preconditions checked:
-    - volume exists and is online
-    - target node exists, is online, and is not the current node
-    - no active migration already running for this volume on its source node
-    - cluster is in an active state
+    Returns (migration_uuid, None) on success or (False, error_message) on failure.
     """
-    # --- Validate volume ---
-    try:
-        lvol = db.get_lvol_by_id(lvol_id)
-    except KeyError as e:
-        return False, str(e)
+    # ── Pre-create flow: derive everything from the existing record ───────────
+    if migration_id:
+        try:
+            migration = db.get_migration_by_id(migration_id)
+        except KeyError:
+            return False, f"Migration {migration_id} not found"
 
-    if lvol.status != LVol.STATUS_ONLINE:
-        return False, f"Volume is not online (status={lvol.status})"
+        if migration.phase != LVolMigration.PHASE_PRE_CREATED:
+            return False, (
+                f"Migration {migration_id} is not in PHASE_PRE_CREATED "
+                f"(phase={migration.phase})"
+            )
 
-    source_node_id = lvol.node_id
+        lvol_id        = migration.lvol_id
+        target_node_id = migration.target_node_id
 
-    # --- Validate nodes ---
-    try:
-        source_node = db.get_storage_node_by_id(source_node_id)
-    except KeyError as e:
-        return False, str(e)
+        try:
+            lvol = db.get_lvol_by_id(lvol_id)
+        except KeyError as e:
+            return False, str(e)
 
-    try:
-        target_node = db.get_storage_node_by_id(target_node_id)
-    except KeyError as e:
-        return False, str(e)
+        if lvol.status != LVol.STATUS_ONLINE:
+            return False, f"Volume is not online (status={lvol.status})"
 
-    if source_node_id == target_node_id:
-        return False, "Source and target nodes must be different"
+        source_node_id = lvol.node_id
 
-    if source_node.status != StorageNode.STATUS_ONLINE:
-        return False, f"Source node is not online (status={source_node.status})"
+        try:
+            source_node = db.get_storage_node_by_id(source_node_id)
+        except KeyError as e:
+            return False, str(e)
 
-    if target_node.status != StorageNode.STATUS_ONLINE:
-        return False, f"Target node is not online (status={target_node.status})"
+        try:
+            target_node = db.get_storage_node_by_id(target_node_id)
+        except KeyError as e:
+            return False, str(e)
 
-    cluster_id = source_node.cluster_id
+        if source_node_id == target_node_id:
+            return False, "Source and target nodes must be different"
 
-    # --- Check for conflicting active migration on the same source node ---
-    existing = get_active_migration_on_node(cluster_id, source_node_id)
-    if existing:
-        return False, (
-            f"Another migration is already active on source node {source_node_id} "
-            f"(migration_id={existing.uuid})"
+        if source_node.status != StorageNode.STATUS_ONLINE:
+            return False, f"Source node is not online (status={source_node.status})"
+
+        if target_node.status != StorageNode.STATUS_ONLINE:
+            return False, f"Target node is not online (status={target_node.status})"
+
+        snap_plan = get_snapshot_chain(lvol_id, source_node_id)
+
+        migration.source_node_id = source_node_id
+        migration.phase = LVolMigration.PHASE_SNAP_COPY
+        migration.snap_migration_plan = snap_plan
+        migration.snaps_migrated = []
+        migration.intermediate_snaps = []
+        migration.next_snap_index = 0
+        migration.intermediate_snap_rounds = 0
+        migration.started_at = int(time.time())
+        migration.deadline = int(time.time()) + deadline_seconds if deadline_seconds else 0
+        migration.max_retries = max_retries
+        migration.status = LVolMigration.STATUS_NEW
+        migration.write_to_db(db.kv_store)
+        logger.info(
+            f"Promoting pre-created migration {migration.uuid} → PHASE_SNAP_COPY "
+            f"lvol={lvol_id} src={source_node_id} dst={target_node_id}"
         )
 
-    # --- Check volume is not already being migrated ---
-    active = get_active_migration_for_lvol(lvol_id, cluster_id)
-    if active:
-        return False, f"Volume already has an active migration (migration_id={active.uuid})"
+    else:
+        # ── Direct flow ───────────────────────────────────────────────────────
+        if not lvol_id or not target_node_id:
+            return False, "Either migration_id or both lvol_id and target_node_id are required"
 
-    # --- Build snapshot migration plan ---
-    snap_plan = get_snapshot_chain(lvol_id, source_node_id)
+        try:
+            lvol = db.get_lvol_by_id(lvol_id)
+        except KeyError as e:
+            return False, str(e)
 
-    # --- Create LVolMigration record ---
-    migration = LVolMigration()
-    migration.uuid = str(uuid.uuid4())
-    migration.cluster_id = cluster_id
-    migration.lvol_id = lvol_id
-    migration.source_node_id = source_node_id
-    migration.target_node_id = target_node_id
-    migration.phase = LVolMigration.PHASE_SNAP_COPY
-    migration.snap_migration_plan = snap_plan
-    migration.snaps_migrated = []
-    migration.intermediate_snaps = []
-    migration.next_snap_index = 0
-    migration.intermediate_snap_rounds = 0
-    migration.started_at = int(time.time())
-    migration.deadline = int(time.time()) + deadline_seconds if deadline_seconds else 0
-    migration.max_retries = max_retries
-    migration.status = LVolMigration.STATUS_NEW
-    migration.write_to_db(db.kv_store)
+        if lvol.status != LVol.STATUS_ONLINE:
+            return False, f"Volume is not online (status={lvol.status})"
+
+        source_node_id = lvol.node_id
+
+        try:
+            source_node = db.get_storage_node_by_id(source_node_id)
+        except KeyError as e:
+            return False, str(e)
+
+        try:
+            target_node = db.get_storage_node_by_id(target_node_id)
+        except KeyError as e:
+            return False, str(e)
+
+        if source_node_id == target_node_id:
+            return False, "Source and target nodes must be different"
+
+        if source_node.status != StorageNode.STATUS_ONLINE:
+            return False, f"Source node is not online (status={source_node.status})"
+
+        if target_node.status != StorageNode.STATUS_ONLINE:
+            return False, f"Target node is not online (status={target_node.status})"
+
+        cluster_id = source_node.cluster_id
+        snap_plan  = get_snapshot_chain(lvol_id, source_node_id)
+        # ── Direct flow: conflict checks + fresh record ───────────────────────
+        existing = get_active_migration_on_node(cluster_id, source_node_id)
+        if existing:
+            return False, (
+                f"Another migration is already active on source node {source_node_id} "
+                f"(migration_id={existing.uuid})"
+            )
+
+        active = get_active_migration_for_lvol(lvol_id, cluster_id)
+        if active:
+            return False, f"Volume already has an active migration (migration_id={active.uuid})"
+
+        migration = LVolMigration()
+        migration.uuid = str(uuid.uuid4())
+        migration.cluster_id = cluster_id
+        migration.lvol_id = lvol_id
+        migration.source_node_id = source_node_id
+        migration.target_node_id = target_node_id
+        migration.phase = LVolMigration.PHASE_SNAP_COPY
+        migration.snap_migration_plan = snap_plan
+        migration.snaps_migrated = []
+        migration.intermediate_snaps = []
+        migration.next_snap_index = 0
+        migration.intermediate_snap_rounds = 0
+        migration.started_at = int(time.time())
+        migration.deadline = int(time.time()) + deadline_seconds if deadline_seconds else 0
+        migration.max_retries = max_retries
+        migration.status = LVolMigration.STATUS_NEW
+        migration.write_to_db(db.kv_store)
 
     # --- Create backing JobSchedule task (reuses _add_task for event logging) ---
     task_uuid = tasks_controller.add_lvol_mig_task(migration)

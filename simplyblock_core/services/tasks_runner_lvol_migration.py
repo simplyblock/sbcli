@@ -710,60 +710,59 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
     trtype, target_ip = _get_migration_nic(tgt_node)
     ctx = migration.transfer_context or {}
 
-    # Pre-create TGT subsystems with inaccessible listeners on the very first call
-    # (before any snapshot is transferred). The client can pre-connect to these
-    # endpoints during the long snapshot-transfer window so no reconnect is needed
-    # at cutover — only ANA state flips are required.
+    # Ensure TGT subsystems with inaccessible listeners exist on the very first
+    # call (before any snapshot is transferred).  When migrate-pre-create was
+    # called first the subsystems are already present and this is a no-op.
+    # For direct migrations (no pre-create) this creates them now so the client
+    # can pre-connect during the snapshot-transfer window.
     if not migration.snaps_migrated and not ctx:
         try:
             lvol_pre = db.get_lvol_by_id(migration.lvol_id)
             nqn_pre = lvol_pre.nqn
             tgt_trtype_pre, tgt_ip_pre = _get_migration_nic(tgt_node)
             tgt_port_pre = tgt_node.get_lvol_subsys_port(tgt_node.lvstore)
-            if tgt_rpc.subsystem_create(
+            if not tgt_rpc.subsystem_list(nqn_pre):
+                tgt_rpc.subsystem_create(
                     nqn_pre, lvol_pre.ha_type, lvol_pre.uuid, min_cntlid=2000,
-                    max_namespaces=constants.LVO_MAX_NAMESPACES_PER_SUBSYS):
+                    max_namespaces=constants.LVO_MAX_NAMESPACES_PER_SUBSYS)
                 tgt_rpc.listeners_create(
                     nqn_pre, tgt_trtype_pre, tgt_ip_pre, tgt_port_pre,
                     ana_state="inaccessible")
                 logger.info(
-                    f"Pre-created TGT subsystem {nqn_pre} "
-                    f"listener={tgt_ip_pre}:{tgt_port_pre} inaccessible "
-                    f"(client may pre-connect now)")
+                    f"Created TGT subsystem {nqn_pre} "
+                    f"listener={tgt_ip_pre}:{tgt_port_pre} inaccessible")
             else:
-                logger.warning(
-                    f"TGT subsystem pre-create returned False for {nqn_pre} "
-                    f"(may already exist — continuing)")
-            if lvol_pre.ha_type == "ha":
+                logger.info(
+                    f"TGT subsystem {nqn_pre} already exists (from pre-create)")
+            if lvol_pre.ha_type in ("ha", "ha3"):
                 tgt_sec_pre, sec_pre_err = _get_target_secondary_node(tgt_node)
                 if sec_pre_err:
                     logger.warning(
-                        f"TGT-sec not available for subsystem pre-create: {sec_pre_err}")
+                        f"TGT-sec not available for subsystem setup: {sec_pre_err}")
                 elif tgt_sec_pre is not None:
                     if tgt_sec_pre.get_id() == src_node.get_id():
-                        # Case 2 overlap: TGT-sec IS SRC primary — subsystem NQN
-                        # already exists there; skip pre-create.
                         logger.info(
                             f"TGT-sec {tgt_sec_pre.get_id()} == SRC — "
-                            f"skipping subsystem pre-create (NQN already exists on SRC)")
+                            f"skipping subsystem create (NQN already exists on SRC)")
                     else:
                         sec_pre_rpc = _make_rpc(tgt_sec_pre)
                         tgt_sec_trtype_pre, tgt_sec_ip_pre = _get_migration_nic(tgt_sec_pre)
                         tgt_sec_port_pre = tgt_sec_pre.get_lvol_subsys_port(tgt_node.lvstore)
-                        if sec_pre_rpc.subsystem_create(
+                        if not sec_pre_rpc.subsystem_list(nqn_pre):
+                            sec_pre_rpc.subsystem_create(
                                 nqn_pre, lvol_pre.ha_type, lvol_pre.uuid, min_cntlid=3000,
-                                max_namespaces=constants.LVO_MAX_NAMESPACES_PER_SUBSYS):
+                                max_namespaces=constants.LVO_MAX_NAMESPACES_PER_SUBSYS)
                             sec_pre_rpc.listeners_create(
                                 nqn_pre, tgt_sec_trtype_pre, tgt_sec_ip_pre,
                                 tgt_sec_port_pre, ana_state="inaccessible")
                             logger.info(
-                                f"Pre-created TGT-sec subsystem {nqn_pre} "
+                                f"Created TGT-sec subsystem {nqn_pre} "
                                 f"listener={tgt_sec_ip_pre}:{tgt_sec_port_pre} inaccessible")
                         else:
-                            logger.warning(
-                                f"TGT-sec subsystem pre-create returned False for {nqn_pre}")
+                            logger.info(
+                                f"TGT-sec subsystem {nqn_pre} already exists (from pre-create)")
         except Exception as e:
-            logger.warning(f"Subsystem pre-create failed (non-fatal, continuing): {e}")
+            logger.warning(f"Subsystem setup failed (non-fatal, continuing): {e}")
 
     # ── A. Launch / resume planned snapshots one at a time ───────────────────
     # SPDK only supports one bdev_lvol_transfer per poller group at a time;
@@ -1200,7 +1199,8 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
 
         # --- Start the final migration ---
 
-        # Step 1: create writable target lvol (size in MiB)
+        # Step 1: create writable target lvol (size in MiB).
+        # Idempotent: pre_create_on_target() may have already created the bdev.
         # Note: SPDK's bdev_lvol_create 'uuid' param is for the lvol *store*, not
         # the new lvol.  Do not pass the lvol UUID here.
         lvol_size_in_mib = _bytes_to_mib(lvol.size)
@@ -1209,9 +1209,13 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             f"source_size_bytes={lvol.size} target_size_mib={lvol_size_in_mib}"
         )
         _log_spdk_bdev_size(src_rpc, src_lvol_composite, f"SRC lvol[{lvol.lvol_bdev}] pre-create")
-        ret = tgt_rpc.create_lvol(tgt_lvol_bdev, lvol_size_in_mib, tgt_node.lvstore)
-        if not ret:
-            return False, True, f"Failed to create target lvol {tgt_lvol_composite}"
+        if tgt_rpc.get_bdevs(tgt_lvol_composite):
+            logger.info(
+                f"Target lvol {tgt_lvol_composite} already exists (from pre-create) — skipping create")
+        else:
+            ret = tgt_rpc.create_lvol(tgt_lvol_bdev, lvol_size_in_mib, tgt_node.lvstore)
+            if not ret:
+                return False, True, f"Failed to create target lvol {tgt_lvol_composite}"
         _log_spdk_bdev_size(tgt_rpc, tgt_lvol_composite, f"TGT lvol[{lvol.lvol_bdev}] post-create")
 
         ret = tgt_rpc.bdev_lvol_set_migration_flag(tgt_lvol_composite)
@@ -1348,7 +1352,6 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
 
     # Done handler: add LVOL_XXXm as namespace and flip ANA states so the client
     # follows the volume without disconnect/reconnect.
-    # REVERT: git checkout a11a0974 -- simplyblock_core/services/tasks_runner_lvol_migration.py
     nqn = lvol.nqn
     # Adjacent migration: TGT is the source's secondary node — its subsystem already
     # exists with nsid=1 pointing to the old source-secondary bdev.
@@ -1811,29 +1814,47 @@ def _handle_cleanup_target(migration, tgt_node, tgt_rpc):
     ctx = migration.transfer_context or {}
     tgt_sec_rpc = _get_secondary_rpc(tgt_node)
 
-    # --- Step 0: delete dangling target lvol from a failed LVOL_MIGRATE ---
+    # --- Step 0: delete dangling target lvol/subsystems from a failed LVOL_MIGRATE ---
+    # Also handles the pre-create case where bdev/subsystems were set up by
+    # pre_create_on_target() but migration was cancelled before LVOL_MIGRATE completed.
     if ctx.get('stage') != 'cleanup_tgt':
         tgt_lvol_composite = ctx.get('tgt_lvol_composite')
         nqn = ctx.get('nqn')
         tgt_ns_id = ctx.get('tgt_ns_id')
         subsystem_created_on_target = ctx.get('subsystem_created_on_target', True)
-        if tgt_lvol_composite:
-            if nqn:
-                try:
-                    _cleanup_subsystem_or_ns(nqn, tgt_ns_id, subsystem_created_on_target, tgt_rpc)
-                except Exception as e:
-                    logger.warning(f"cleanup target subsystem {nqn}: {e}")
-                if tgt_sec_rpc:
-                    try:
-                        _cleanup_subsystem_or_ns(nqn, tgt_ns_id, subsystem_created_on_target,
-                                                 tgt_sec_rpc)
-                    except Exception as e:
-                        logger.warning(f"cleanup target secondary subsystem {nqn}: {e}")
+
+        # Derive the migration bdev name in case it was pre-created but not yet
+        # recorded in transfer_context (i.e. failure before LVOL_MIGRATE saved ctx).
+        try:
+            _lvol = db.get_lvol_by_id(migration.lvol_id)
+            _pre_bdev = f"{tgt_node.lvstore}/{_lvol.lvol_bdev}{_MIGRATION_BDEV_SUFFIX}"
+            _pre_nqn  = _lvol.nqn
+        except Exception:
+            _pre_bdev = None
+            _pre_nqn  = nqn  # fall back to whatever is in ctx
+
+        # Clean up NVMe-oF subsystem — from ctx (LVOL_MIGRATE failure) or from pre-create.
+        _nqn_to_clean = nqn or _pre_nqn
+        if _nqn_to_clean:
             try:
-                _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc, secondary_rpc=tgt_sec_rpc)
-                logger.info(f"Deleted target lvol {tgt_lvol_composite}")
+                _cleanup_subsystem_or_ns(_nqn_to_clean, tgt_ns_id, subsystem_created_on_target, tgt_rpc)
             except Exception as e:
-                logger.warning(f"delete target lvol {tgt_lvol_composite} (non-fatal): {e}")
+                logger.warning(f"cleanup target subsystem {_nqn_to_clean}: {e}")
+            if tgt_sec_rpc:
+                try:
+                    _cleanup_subsystem_or_ns(_nqn_to_clean, tgt_ns_id, subsystem_created_on_target,
+                                             tgt_sec_rpc)
+                except Exception as e:
+                    logger.warning(f"cleanup target secondary subsystem {_nqn_to_clean}: {e}")
+
+        # Delete target migration bdev — prefer ctx composite, fall back to derived name.
+        _bdev_to_delete = tgt_lvol_composite or _pre_bdev
+        if _bdev_to_delete and tgt_rpc.get_bdevs(_bdev_to_delete):
+            try:
+                _delete_bdev_blocking(_bdev_to_delete, tgt_rpc, secondary_rpc=tgt_sec_rpc)
+                logger.info(f"Deleted target lvol {_bdev_to_delete}")
+            except Exception as e:
+                logger.warning(f"delete target lvol {_bdev_to_delete} (non-fatal): {e}")
 
         ctx = {'stage': 'cleanup_tgt'}
         migration.transfer_context = ctx
