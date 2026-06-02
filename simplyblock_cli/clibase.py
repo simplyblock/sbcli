@@ -702,7 +702,7 @@ class CLIWrapperBase:
         return True
 
     def volume__migrate_pre_create(self, sub_command, args):
-        connect_strings, error = migration_controller.pre_create_on_target(
+        migration_id, connect_strings, error = migration_controller.pre_create_on_target(
             args.volume_id,
             args.target_node_id,
             ctrl_loss_tmo=args.ctrl_loss_tmo,
@@ -711,6 +711,7 @@ class CLIWrapperBase:
         if error:
             print(f"Error: {error}")
             return False
+        print(f"Migration ID: {migration_id}")
         if connect_strings:
             return "\n".join(c['connect'] for c in connect_strings)
         return True

@@ -43,7 +43,7 @@ def pre_create_on_target(cluster: Cluster, parameters: _PreCreateParams):
     target node so that the client can pre-connect before migration begins.
     """
     from simplyblock_core.controllers import migration_controller
-    connect_strings, error = migration_controller.pre_create_on_target(
+    migration_id, connect_strings, error = migration_controller.pre_create_on_target(
         parameters.volume_id,
         parameters.target_node_id,
         ctrl_loss_tmo=parameters.ctrl_loss_tmo,
@@ -51,7 +51,7 @@ def pre_create_on_target(cluster: Cluster, parameters: _PreCreateParams):
     )
     if error:
         raise HTTPException(400, error)
-    return {"connect_strings": connect_strings}
+    return {"migration_id": migration_id, "connect_strings": connect_strings}
 
 
 @api.post('/', name='clusters:migrations:create', status_code=201)
