@@ -226,7 +226,7 @@ def check_node(snode, all_lvols):
                     sec_node_lvols_nqns[sub['nqn']] = sub
 
     for lvol in all_lvols:
-        if lvol.node_id == snode.get_id():
+        if lvol.node_id != snode.get_id():
             continue
 
         if lvol.status == LVol.STATUS_IN_CREATION:
@@ -399,7 +399,7 @@ while True:
         if cluster.status in [Cluster.STATUS_INACTIVE, Cluster.STATUS_UNREADY, Cluster.STATUS_IN_ACTIVATION]:
             logger.warning(f"Cluster {cluster.get_id()} is in {cluster.status} state, skipping")
             continue
-        all_lvols = db.get_lvols()
+        all_lvols = db.get_all_lvols()
         for snode in db.get_storage_nodes_by_cluster_id(cluster.get_id()):
             try:
                 check_node(snode, all_lvols)

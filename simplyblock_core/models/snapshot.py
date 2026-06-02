@@ -60,6 +60,7 @@ class SnapShotMini(BaseModel):
     prev_snap_uuid: str = ""
     vuid: int = 0
     created_at: int = 0
+    used_size: int = 0
 
     def from_snapshot(self, snapshot: SnapShot):
         self.uuid = snapshot.uuid
@@ -74,4 +75,5 @@ class SnapShotMini(BaseModel):
         self.prev_snap_uuid = snapshot.prev_snap_uuid
         self.vuid = snapshot.vuid
         self.created_at = snapshot.created_at
+        self.used_size = snapshot.used_size
         return self
