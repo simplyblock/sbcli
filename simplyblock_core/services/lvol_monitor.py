@@ -399,7 +399,7 @@ while True:
         if cluster.status in [Cluster.STATUS_INACTIVE, Cluster.STATUS_UNREADY, Cluster.STATUS_IN_ACTIVATION]:
             logger.warning(f"Cluster {cluster.get_id()} is in {cluster.status} state, skipping")
             continue
-        all_lvols = db.get_mini_lvols()
+        all_lvols = db.get_lvols()
         for snode in db.get_storage_nodes_by_cluster_id(cluster.get_id()):
             try:
                 check_node(snode, all_lvols)
