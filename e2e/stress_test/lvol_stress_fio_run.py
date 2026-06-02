@@ -60,8 +60,6 @@ class TestStressLvolCloneClusterFioRun(TestLvolHACluster):
                 pool_name=self.pool_name,
                 size=self.lvol_size,
                 crypto=is_crypto,
-                key1=self.lvol_crypt_keys[0],
-                key2=self.lvol_crypt_keys[1],
             )
             self.lvol_mount_details[lvol_name] = {
                    "ID": self.sbcli_utils.get_lvol_id(lvol_name),

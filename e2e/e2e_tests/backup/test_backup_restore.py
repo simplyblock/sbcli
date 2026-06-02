@@ -1007,8 +1007,6 @@ class BackupTestBase(TestClusterBase):
             pool_name=self.pool_name,
             size=size,
             crypto=crypto,
-            key1=self.lvol_crypt_keys[0] if crypto else None,
-            key2=self.lvol_crypt_keys[1] if crypto else None,
         )
         if ndcs is not None:
             kwargs["distr_ndcs"] = ndcs

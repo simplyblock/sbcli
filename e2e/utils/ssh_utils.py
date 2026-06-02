@@ -3636,7 +3636,7 @@ echo "$WORKDIR_HOST/{os.path.basename(remote_tar)}"
     #     return out, err
 
     def create_sec_lvol(self, node, lvol_name, size, pool,
-                        encrypt=False, key1=None, key2=None,
+                        encrypt=False,
                         distr_ndcs=0, distr_npcs=0, fabric="tcp",
                         allowed_hosts=None, sec_options=None):
         """
@@ -3650,8 +3650,8 @@ echo "$WORKDIR_HOST/{os.path.basename(remote_tar)}"
         Returns (stdout, stderr).
         """
         cmd = f"{self.base_cmd} -d volume add {lvol_name} {size} {pool}"
-        if encrypt and key1 and key2:
-            cmd += f" --encrypt --crypto-key1 {key1} --crypto-key2 {key2}"
+        if encrypt:
+            cmd += " --encrypt"
         if fabric and fabric != "tcp":
             cmd += f" --fabric {fabric}"
         if distr_ndcs and distr_npcs:

@@ -879,8 +879,6 @@ class RandomSecurityFailoverTest(RandomFailoverTest):
                 _, err = self.ssh_obj.create_sec_lvol(
                     self.mgmt_nodes[0], lvol_name, self.lvol_size, self.pool_name,
                     encrypt=encrypt,
-                    key1=self.lvol_crypt_keys[0] if encrypt else None,
-                    key2=self.lvol_crypt_keys[1] if encrypt else None,
                     distr_ndcs=ndcs, distr_npcs=npcs, fabric=fabric,
                 )
                 if err and "error" in err.lower():
@@ -893,8 +891,6 @@ class RandomSecurityFailoverTest(RandomFailoverTest):
                     pool_name=self.pool_name,
                     size=self.lvol_size,
                     crypto=encrypt,
-                    key1=self.lvol_crypt_keys[0] if encrypt else None,
-                    key2=self.lvol_crypt_keys[1] if encrypt else None,
                     distr_ndcs=ndcs,
                     distr_npcs=npcs,
                     fabric=fabric,
@@ -909,8 +905,6 @@ class RandomSecurityFailoverTest(RandomFailoverTest):
                     self.ssh_obj.create_sec_lvol(
                         self.mgmt_nodes[0], lvol_name, self.lvol_size, self.pool_name,
                         encrypt=encrypt,
-                        key1=self.lvol_crypt_keys[0] if encrypt else None,
-                        key2=self.lvol_crypt_keys[1] if encrypt else None,
                         distr_ndcs=ndcs, distr_npcs=npcs, fabric=fabric,
                     )
                 else:
@@ -919,8 +913,6 @@ class RandomSecurityFailoverTest(RandomFailoverTest):
                         pool_name=self.pool_name,
                         size=self.lvol_size,
                         crypto=encrypt,
-                        key1=self.lvol_crypt_keys[0] if encrypt else None,
-                        key2=self.lvol_crypt_keys[1] if encrypt else None,
                         distr_ndcs=ndcs,
                         distr_npcs=npcs,
                         fabric=fabric,
@@ -1198,8 +1190,6 @@ class RandomAllSecurityMultiFailoverTest(RandomRDMAMultiFailoverTest):
                 _, err = self.ssh_obj.create_sec_lvol(
                     self.mgmt_nodes[0], lvol_name, self.lvol_size, self.pool_name,
                     encrypt=encrypt,
-                    key1=self.lvol_crypt_keys[0] if encrypt else None,
-                    key2=self.lvol_crypt_keys[1] if encrypt else None,
                     distr_ndcs=ndcs, distr_npcs=npcs, fabric=fabric,
                 )
                 if err and "error" in err.lower():
@@ -1209,8 +1199,6 @@ class RandomAllSecurityMultiFailoverTest(RandomRDMAMultiFailoverTest):
                 self.sbcli_utils.add_lvol(
                     lvol_name=lvol_name, pool_name=self.pool_name, size=self.lvol_size,
                     crypto=encrypt,
-                    key1=self.lvol_crypt_keys[0] if encrypt else None,
-                    key2=self.lvol_crypt_keys[1] if encrypt else None,
                     host_id=host_id, distr_ndcs=ndcs, distr_npcs=npcs, fabric=fabric,
                 )
         except Exception as exc:
@@ -1222,16 +1210,12 @@ class RandomAllSecurityMultiFailoverTest(RandomRDMAMultiFailoverTest):
                     self.ssh_obj.create_sec_lvol(
                         self.mgmt_nodes[0], lvol_name, self.lvol_size, self.pool_name,
                         encrypt=encrypt,
-                        key1=self.lvol_crypt_keys[0] if encrypt else None,
-                        key2=self.lvol_crypt_keys[1] if encrypt else None,
                         distr_ndcs=ndcs, distr_npcs=npcs, fabric=fabric,
                     )
                 else:
                     self.sbcli_utils.add_lvol(
                         lvol_name=lvol_name, pool_name=self.pool_name, size=self.lvol_size,
                         crypto=encrypt,
-                        key1=self.lvol_crypt_keys[0] if encrypt else None,
-                        key2=self.lvol_crypt_keys[1] if encrypt else None,
                         host_id=host_id, distr_ndcs=ndcs, distr_npcs=npcs, fabric=fabric,
                     )
             except Exception as exc2:

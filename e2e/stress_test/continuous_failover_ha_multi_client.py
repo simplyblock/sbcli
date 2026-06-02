@@ -314,8 +314,6 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                         pool_name=self.pool_name,
                         size=self.lvol_size,
                         crypto=is_crypto,
-                        key1=self.lvol_crypt_keys[0],
-                        key2=self.lvol_crypt_keys[1],
                         host_id=host_id[0]
                     )
                 elif self.current_outage_node:
@@ -328,8 +326,6 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                         pool_name=self.pool_name,
                         size=self.lvol_size,
                         crypto=is_crypto,
-                        key1=self.lvol_crypt_keys[0],
-                        key2=self.lvol_crypt_keys[1],
                         host_id=host_id[0]
                     )
                 else:
@@ -338,8 +334,6 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                         pool_name=self.pool_name,
                         size=self.lvol_size,
                         crypto=is_crypto,
-                        key1=self.lvol_crypt_keys[0],
-                        key2=self.lvol_crypt_keys[1],
                     )
             except Exception as e:
                 self.logger.warning(f"Lvol creation fails with {str(e)}. Retrying with different name.")
@@ -358,8 +352,6 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                             pool_name=self.pool_name,
                             size=self.lvol_size,
                             crypto=is_crypto,
-                            key1=self.lvol_crypt_keys[0],
-                            key2=self.lvol_crypt_keys[1],
                             host_id=host_id[0]
                         )
                     else:
@@ -368,8 +360,6 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                             pool_name=self.pool_name,
                             size=self.lvol_size,
                             crypto=is_crypto,
-                            key1=self.lvol_crypt_keys[0],
-                            key2=self.lvol_crypt_keys[1],
                         )
                 except Exception as exp:
                     self.logger.warning(f"Retry Lvol creation fails with {str(exp)}.")

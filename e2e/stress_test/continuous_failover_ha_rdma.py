@@ -125,8 +125,6 @@ class RandomRDMAFailoverTest(TestLvolHACluster):
                         pool_name=self.pool_name,
                         size=self.lvol_size,
                         crypto=is_crypto,
-                        key1=self.lvol_crypt_keys[0],
-                        key2=self.lvol_crypt_keys[1],
                         host_id=host_id[0],
                         fabric="rdma"
                     )
@@ -136,8 +134,6 @@ class RandomRDMAFailoverTest(TestLvolHACluster):
                         pool_name=self.pool_name,
                         size=self.lvol_size,
                         crypto=is_crypto,
-                        key1=self.lvol_crypt_keys[0],
-                        key2=self.lvol_crypt_keys[1],
                         fabric="rdma"
                     )
             except Exception as e:
@@ -157,8 +153,6 @@ class RandomRDMAFailoverTest(TestLvolHACluster):
                             pool_name=self.pool_name,
                             size=self.lvol_size,
                             crypto=is_crypto,
-                            key1=self.lvol_crypt_keys[0],
-                            key2=self.lvol_crypt_keys[1],
                             host_id=host_id[0],
                             fabric="rdma"
                         )
@@ -168,8 +162,6 @@ class RandomRDMAFailoverTest(TestLvolHACluster):
                             pool_name=self.pool_name,
                             size=self.lvol_size,
                             crypto=is_crypto,
-                            key1=self.lvol_crypt_keys[0],
-                            key2=self.lvol_crypt_keys[1],
                             fabric="rdma"
                         )
                 except Exception as exp:

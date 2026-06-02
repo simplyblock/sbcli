@@ -300,7 +300,6 @@ class RandomK8sMultiOutageFailoverTest(RandomMultiClientMultiFailoverTest):
                         self.sbcli_utils.add_lvol(
                             lvol_name=lvol_name, pool_name=self.pool_name,
                             size=self.lvol_size, crypto=is_crypto,
-                            key1=self.lvol_crypt_keys[0], key2=self.lvol_crypt_keys[1],
                             host_id=host_id[0], distr_ndcs=ndcs, distr_npcs=npcs,
                         )
                     elif self.current_outage_node:
@@ -315,14 +314,12 @@ class RandomK8sMultiOutageFailoverTest(RandomMultiClientMultiFailoverTest):
                         self.sbcli_utils.add_lvol(
                             lvol_name=lvol_name, pool_name=self.pool_name,
                             size=self.lvol_size, crypto=is_crypto,
-                            key1=self.lvol_crypt_keys[0], key2=self.lvol_crypt_keys[1],
                             host_id=host_id[0], distr_ndcs=ndcs, distr_npcs=npcs,
                         )
                     else:
                         self.sbcli_utils.add_lvol(
                             lvol_name=lvol_name, pool_name=self.pool_name,
                             size=self.lvol_size, crypto=is_crypto,
-                            key1=self.lvol_crypt_keys[0], key2=self.lvol_crypt_keys[1],
                             distr_ndcs=ndcs, distr_npcs=npcs,
                         )
                 except Exception as exc:

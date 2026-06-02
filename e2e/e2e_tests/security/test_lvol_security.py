@@ -2976,7 +2976,7 @@ class TestLvolCryptoWithDhchap(SecurityTestBase):
         lvol_name = f"seccryp{_rand_suffix()}"
         out, err = self.ssh_obj.create_sec_lvol(
             self.mgmt_nodes[0], lvol_name, self.lvol_size, self.pool_name,
-            encrypt=True, key1=self.lvol_crypt_keys[0], key2=self.lvol_crypt_keys[1])
+            encrypt=True)
         assert not err or "error" not in err.lower(), f"crypto lvol creation failed: {err}"
         sleep_n_sec(3)
         lvol_id = self.sbcli_utils.get_lvol_id(lvol_name)
@@ -3541,7 +3541,7 @@ class TestLvolSecurityHAFailover(SecurityTestBase):
         lvol_name = f"secha{_rand_suffix()}"
         out, err = self.ssh_obj.create_sec_lvol(
             self.mgmt_nodes[0], lvol_name, self.lvol_size, self.pool_name,
-            encrypt=True, key1=self.lvol_crypt_keys[0], key2=self.lvol_crypt_keys[1],
+            encrypt=True,
             distr_ndcs=1, distr_npcs=1,
         )
         assert not err or "error" not in err.lower(), f"lvol creation failed: {err}"
@@ -4235,7 +4235,7 @@ class TestLvolSecurityResize(SecurityTestBase):
         self.logger.info("TC-SEC-140: Creating DHCHAP+crypto 5G lvol …")
         out, err = self.ssh_obj.create_sec_lvol(
             self.mgmt_nodes[0], lvol_name, "5G", self.pool_name,
-            encrypt=True, key1=self.lvol_crypt_keys[0], key2=self.lvol_crypt_keys[1])
+            encrypt=True)
         assert not err or "error" not in err.lower(), f"lvol creation failed: {err}"
         sleep_n_sec(3)
         lvol_id = self.sbcli_utils.get_lvol_id(lvol_name)
@@ -4324,7 +4324,7 @@ class TestLvolSecurityWithBackup(SecurityTestBase):
         self.logger.info("TC-SEC-150: Creating DHCHAP+crypto lvol …")
         out, err = self.ssh_obj.create_sec_lvol(
             self.mgmt_nodes[0], lvol_name, self.lvol_size, self.pool_name,
-            encrypt=True, key1=self.lvol_crypt_keys[0], key2=self.lvol_crypt_keys[1])
+            encrypt=True)
         assert not err or "error" not in err.lower(), f"lvol creation failed: {err}"
         sleep_n_sec(3)
         lvol_id = self.sbcli_utils.get_lvol_id(lvol_name)

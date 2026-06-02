@@ -1770,7 +1770,7 @@ class K8sSbcliUtils:
     def add_lvol(self, lvol_name, pool_name, size="256M", distr_ndcs=0, distr_npcs=0,
                  distr_bs=4096, distr_chunk_bs=4096, max_rw_iops=0, max_rw_mbytes=0,
                  max_r_mbytes=0, max_w_mbytes=0, host_id=None, retry=10,
-                 crypto=False, key1=None, key2=None, fabric="tcp", cluster_id=None,
+                 crypto=False, fabric="tcp", cluster_id=None,
                  max_namespace_per_subsys=None, namespace=None):
         """Create an lvol via the CLI."""
         if self.lvol_exists(lvol_name):
@@ -1787,8 +1787,8 @@ class K8sSbcliUtils:
             cmd += f" --data-chunks-per-stripe {distr_ndcs} --parity-chunks-per-stripe {distr_npcs}"
         if fabric:
             cmd += f" --fabric {shlex.quote(fabric)}"
-        if crypto and key1 and key2:
-            cmd += f" --encrypt --crypto-key1 {shlex.quote(key1)} --crypto-key2 {shlex.quote(key2)}"
+        if crypto:
+            cmd += " --encrypt"
 
         self.k8s.exec_sbcli(cmd)
 

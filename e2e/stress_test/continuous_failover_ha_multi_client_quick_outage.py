@@ -175,8 +175,6 @@ class RandomRapidFailoverNoGap(TestLvolHACluster):
                 pool_name=self.pool_name,
                 size=self.lvol_size,
                 crypto=is_crypto,
-                key1=self.lvol_crypt_keys[0],
-                key2=self.lvol_crypt_keys[1],
                 fabric=fabric,
             )
 
@@ -648,8 +646,6 @@ class RandomRapidFailoverNoGapV2WithMigration(RandomRapidFailoverNoGap):
                 pool_name=self.pool_name,
                 size=self.lvol_size,
                 crypto=is_crypto,
-                key1=self.lvol_crypt_keys[0],
-                key2=self.lvol_crypt_keys[1],
                 fabric=fabric,
                 distr_ndcs=ndcs,
                 distr_npcs=npcs_geom,

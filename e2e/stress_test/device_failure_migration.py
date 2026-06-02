@@ -224,8 +224,6 @@ class _DeviceFailureMigrationBase:
             pool_name=self.pool_name,
             size=self.LVOL_SIZE,
             crypto=False,
-            key1=self.lvol_crypt_keys[0],
-            key2=self.lvol_crypt_keys[1],
             host_id=node_id,
         )
         sleep_n_sec(2)

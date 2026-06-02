@@ -53,8 +53,6 @@ class TestLvolOutageLoadTest(TestLvolHACluster):
                 pool_name=self.pool_name,
                 size=self.lvol_size,
                 crypto=False,
-                key1=self.lvol_crypt_keys[0],
-                key2=self.lvol_crypt_keys[1],
                 host_id=self.lvol_node
             )
             sleep_n_sec(2)
@@ -110,8 +108,6 @@ class TestLvolOutageLoadTest(TestLvolHACluster):
                     pool_name=self.pool_name,
                     size=self.lvol_size,
                     crypto=False,
-                    key1=self.lvol_crypt_keys[0],
-                    key2=self.lvol_crypt_keys[1],
                     host_id=self.lvol_node
                 )
             except Exception as e:
