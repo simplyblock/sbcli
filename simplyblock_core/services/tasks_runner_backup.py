@@ -93,6 +93,7 @@ def _run_backup(task):
         backup.write_to_db()
         # Give the data plane time to start the transfer before polling
         task.status = JobSchedule.STATUS_SUSPENDED
+        task.function_result = "Backup in progress"
         task.write_to_db(db.kv_store)
         return
 
@@ -123,11 +124,15 @@ def _run_backup(task):
             # Keep polling — the backup completes on the data plane independently.
             # When max_retry is reached the task runner marks it completed
             # (the data plane returns "Failed" on actual failures).
+            backup.status = Backup.STATUS_PENDING
+            backup.write_to_db()
+            task.function_result = "No process, retrying backup start"
             task.status = JobSchedule.STATUS_SUSPENDED
             task.write_to_db(db.kv_store)
         else:
             # "In progress" — still running, retry later
             task.status = JobSchedule.STATUS_SUSPENDED
+            task.function_result = "Backup in progress"
             task.write_to_db(db.kv_store)
     else:
         # Unexpected response — retry
