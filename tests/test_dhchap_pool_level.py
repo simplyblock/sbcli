@@ -20,6 +20,8 @@ import inspect
 import unittest
 from unittest.mock import MagicMock, patch
 
+from tests._mocks import make_mock_cluster
+
 
 # ---------------------------------------------------------------------------
 # Pool model
@@ -94,8 +96,7 @@ class TestAddPoolDhchap(unittest.TestCase):
         """Call add_pool with a fully-mocked DB and return the pool written to DB."""
         from simplyblock_core.controllers import pool_controller
 
-        cluster = MagicMock()
-        cluster.get_id.return_value = "cluster-1"
+        cluster = make_mock_cluster()
 
         written_pool = {}
 
@@ -273,8 +274,7 @@ class TestAddPoolKeyGeneration(unittest.TestCase):
 
     def _run_add(self, dhchap):
         from simplyblock_core.controllers import pool_controller
-        cluster = MagicMock()
-        cluster.get_id.return_value = "cluster-1"
+        cluster = make_mock_cluster()
 
         with patch("simplyblock_core.controllers.pool_controller.DBController") as MockDB, \
              patch("simplyblock_core.controllers.pool_controller.Pool") as MockPool, \
@@ -542,7 +542,7 @@ class TestLvolInheritsDhchapFromPool(unittest.TestCase):
 class TestAddHostToLvolDhchapPool(unittest.TestCase):
 
     @patch("simplyblock_core.controllers.lvol_controller._register_pool_dhchap_keys_on_node")
-    @patch("simplyblock_core.controllers.lvol_controller.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.controllers.lvol_controller.DBController")
     def test_uses_pool_keys_not_per_host_keys(self, MockDB, MockRPC, mock_pool_reg):
         """add_host_to_lvol on a DHCHAP pool must use pool key names, not generate new ones."""
@@ -580,6 +580,7 @@ class TestAddHostToLvolDhchapPool(unittest.TestCase):
 
         mock_rpc = MockRPC.return_value
         mock_rpc.subsystem_add_host.return_value = True
+        node.rpc_client.return_value = mock_rpc
 
         result, err = add_host_to_lvol("lvol-1", "nqn:new-host")
 
@@ -593,7 +594,7 @@ class TestAddHostToLvolDhchapPool(unittest.TestCase):
         self.assertEqual(call_kwargs["dhchap_group"], "ffdhe2048")
 
     @patch("simplyblock_core.controllers.lvol_controller._register_pool_dhchap_keys_on_node")
-    @patch("simplyblock_core.controllers.lvol_controller.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.controllers.lvol_controller.DBController")
     def test_no_per_host_key_generation_for_dhchap_pool(self, MockDB, MockRPC, mock_pool_reg):
         """For DHCHAP pools, generate_dhchap_key must never be called."""
@@ -699,7 +700,7 @@ class TestConnectLvolDhchap(unittest.TestCase):
         }
         patcher, _ = _make_connect_ctx([host_entry])
         try:
-            result = connect_lvol("lvol-1", host_nqn="nqn:host-a")
+            result, _err = connect_lvol("lvol-1", host_nqn="nqn:host-a")
         finally:
             patcher.stop()
 
@@ -725,7 +726,7 @@ class TestConnectLvolDhchap(unittest.TestCase):
         }
         patcher, _ = _make_connect_ctx([host_entry])
         try:
-            result = connect_lvol("lvol-1", host_nqn="nqn:host-a")
+            result, _err = connect_lvol("lvol-1", host_nqn="nqn:host-a")
         finally:
             patcher.stop()
 
@@ -744,7 +745,7 @@ class TestConnectLvolDhchap(unittest.TestCase):
 
         patcher, _ = _make_connect_ctx([{"nqn": "nqn:host-a"}])
         try:
-            result = connect_lvol("lvol-1", host_nqn=None)
+            result, _err = connect_lvol("lvol-1", host_nqn=None)
         finally:
             patcher.stop()
         self.assertFalse(result)
@@ -755,7 +756,7 @@ class TestConnectLvolDhchap(unittest.TestCase):
 
         patcher, _ = _make_connect_ctx([{"nqn": "nqn:host-a"}])
         try:
-            result = connect_lvol("lvol-1", host_nqn="nqn:intruder")
+            result, _err = connect_lvol("lvol-1", host_nqn="nqn:intruder")
         finally:
             patcher.stop()
         self.assertFalse(result)
@@ -767,7 +768,7 @@ class TestConnectLvolDhchap(unittest.TestCase):
 
         patcher, _ = _make_connect_ctx([])
         try:
-            result = connect_lvol("lvol-1", host_nqn="nqn:whoever")
+            result, _err = connect_lvol("lvol-1", host_nqn="nqn:whoever")
         finally:
             patcher.stop()
 
@@ -790,7 +791,7 @@ class TestConnectLvolDhchap(unittest.TestCase):
         # Pool-level DHCHAP: lvol.allowed_hosts contains only nqn, no keys.
         patcher, _ = _make_connect_ctx([{"nqn": "nqn:host-a"}])
         try:
-            result = connect_lvol("lvol-1", host_nqn="nqn:host-a")
+            result, _err = connect_lvol("lvol-1", host_nqn="nqn:host-a")
         finally:
             patcher.stop()
 

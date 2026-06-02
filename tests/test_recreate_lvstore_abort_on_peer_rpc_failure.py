@@ -30,7 +30,6 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from simplyblock_core.models.cluster import Cluster
-from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.hublvol import HubLVol
@@ -163,7 +162,7 @@ class TestRecreateLvstoreAbortsOnPeerRPCFailure(unittest.TestCase):
             patch("simplyblock_core.storage_node_ops.tcp_ports_events"),
             patch("simplyblock_core.storage_node_ops.storage_events"),
             patch("simplyblock_core.storage_node_ops.FirewallClient"),
-            patch("simplyblock_core.storage_node_ops.RPCClient"),
+            patch("simplyblock_core.models.storage_node.RPCClient"),
             patch("simplyblock_core.storage_node_ops._connect_to_remote_jm_devs"),
             patch("simplyblock_core.storage_node_ops._connect_to_remote_devs"),
             patch("simplyblock_core.storage_node_ops._create_bdev_stack"),
@@ -417,8 +416,14 @@ class TestRecreateLvstoreAbortsOnPeerRPCFailure(unittest.TestCase):
 
         # snode.rpc_client() is reused for both snode and peers in our
         # _attach_node_helpers wiring; route the failure via the leader's
-        # bound rpc_client mock instead.
+        # bound rpc_client mock instead. Mirror the leader-detection
+        # response on leader_rpc so sec is still selected as leader.
         leader_rpc = MagicMock()
+        leader_rpc.bdev_lvol_get_lvstores.return_value = [{
+            "lvs leadership": True,
+            "lvs_primary": False,
+            "uuid": "lvs-uuid",
+        }]
         leader_rpc.jc_compression_get_status.side_effect = Exception(
             "simulated jc_compression timeout")
         nodes["sec"].rpc_client = MagicMock(return_value=leader_rpc)

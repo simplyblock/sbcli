@@ -171,7 +171,7 @@ def spdk_process_start(body: SPDKParams):
 
     container = node_docker.containers.run(
         body.spdk_image,
-        f"/root/scripts/run_distr_with_ssd.sh {body.l_cores} {spdk_mem_mib} {spdk_debug}",
+        f"sudo -E /root/scripts/run_distr_with_ssd.sh {body.l_cores} {spdk_mem_mib} {spdk_debug}",
         name=f"spdk_{body.rpc_port}",
         detach=True,
         privileged=True,
@@ -199,7 +199,7 @@ def spdk_process_start(body: SPDKParams):
     )
     node_docker.containers.run(
         body.spdk_proxy_image,
-        "python simplyblock_core/services/spdk_http_proxy_server.py ",
+        "sudo -E python3 simplyblock_core/services/spdk_http_proxy_server.py ",
         name=f"spdk_proxy_{body.rpc_port}",
         detach=True,
         network_mode="host",
@@ -242,9 +242,117 @@ def spdk_process_start(body: SPDKParams):
     })}}},
 })
 def spdk_process_kill(query: utils.RPCPortParams):
-    for name in {f"/spdk_{query.rpc_port}", f"/spdk_proxy_{query.rpc_port}"}:
-        core_utils.remove_container(get_docker_client(), name, graceful_timeout=0)
+    """Fast peer termination for ``sn shutdown --force`` / restart paths.
+
+    Two changes vs. the previous ``remove_container(..., graceful_timeout=0)``
+    implementation:
+
+    1. Fan out across the two containers in parallel — there is no ordering
+       dependency between killing ``/spdk_<port>`` and ``/spdk_proxy_<port>``.
+    2. Decouple SIGKILL delivery from container record removal. The kernel
+       closes every open fd (and emits RST on TCP listener sockets) as soon
+       as the process is reaped, which happens within microseconds of
+       SIGKILL. dockerd's subsequent cleanup (cgroups, network namespace,
+       hugepage munmap, container DB delete) is what makes
+       ``remove(force=True)`` cost 1-2s per container under a loaded
+       daemon — but the peer-detection-on-the-host side only needs the
+       SIGKILL, not the dockerd record cleanup. Issue the SIGKILL
+       synchronously (bounded join), and let ``remove()`` run as a detached
+       background thread so the HTTP request returns as soon as the peer's
+       SPDK process is dead.
+
+    Net effect: under a loaded swarm daemon, peer SPDK is dead within
+    ~50-200 ms of the HTTP request landing (vs. ~3.5s previously), so
+    the host-side bdev_nvme observes ``EPIPE`` on its remote controllers
+    near-immediately instead of waiting for dockerd to finish container
+    teardown.
+    """
+    import threading
+    from docker.errors import NotFound
+
+    client = get_docker_client()
+    names = [f"/spdk_{query.rpc_port}", f"/spdk_proxy_{query.rpc_port}"]
+
+    def _kill_one(name):
+        try:
+            client.containers.get(name).kill(signal="SIGKILL")
+        except NotFound:
+            pass
+        except Exception as exc:
+            logger.warning("SIGKILL on %s failed: %s", name, exc)
+
+    def _remove_one(name):
+        try:
+            client.containers.get(name).remove(force=True)
+        except NotFound:
+            pass
+        except Exception as exc:
+            logger.warning("remove(%s) failed: %s", name, exc)
+
+    # 1) Parallel synchronous SIGKILL — bounded so a wedged dockerd can't
+    #    hang the request indefinitely. We do *not* wait for the kernel
+    #    reap; SIGKILL delivery is enough to make the kernel close fds.
+    kill_threads = [threading.Thread(target=_kill_one, args=(n,), daemon=True)
+                    for n in names]
+    for t in kill_threads:
+        t.start()
+    for t in kill_threads:
+        t.join(timeout=5)
+
+    # 2) Detached remove — peer is already dead, the record cleanup is
+    #    just dockerd bookkeeping. Fire-and-forget; HTTP returns now.
+    for name in names:
+        threading.Thread(target=_remove_one, args=(name,), daemon=True).start()
+
     return utils.get_response(True)
+
+
+# Tight client timeout for the dockerd fall-through in spdk_process_is_up.
+# The docker-py default is 60s, which under post-outage Swarm reconciliation
+# (incident 2026-04-24, vm205) caused this endpoint to take 76-80s. The
+# fast path now answers most calls from SPDK's own Unix socket; this bound
+# only applies when /mnt/ramdisk is not visible to the SnodeAPI container
+# (old deployments without the ramdisk mount).
+_SPDK_IS_UP_DOCKERD_TIMEOUT = 5
+
+_SPDK_RAMDISK_ROOT = "/mnt/ramdisk"
+
+
+def _spdk_unix_socket_alive(rpc_port, timeout=1.0):
+    """Three-state probe of SPDK's JSON-RPC Unix socket.
+
+    SPDK binds its RPC socket at ``/mnt/ramdisk/spdk_<port>/spdk.sock``
+    (see ``simplyblock_core/services/spdk_http_proxy_server.py``). A
+    successful ``connect()`` proves the SPDK process is alive AND
+    polling its socket — exactly what the auto-restart pre-checks
+    actually want to know.
+
+    Why not the proxy port: the spdk_proxy_<port> container binds the
+    TCP port and stays up serving HTTP errors even when its connection
+    to SPDK's Unix socket is broken. Probing the proxy can return a
+    false positive (proxy alive, SPDK dead).
+
+    Returns:
+      True  — connect() succeeded; SPDK is responsive.
+      False — socket file exists but connect() failed (SPDK crashed
+              and left a stale socket, or the process is wedged hard
+              enough not to accept).
+      None  — ``/mnt/ramdisk`` is not visible from this container
+              (older SnodeAPI deployments lacked the bind-mount). The
+              caller must fall through to dockerd to get an answer.
+    """
+    if not os.path.isdir(_SPDK_RAMDISK_ROOT):
+        return None
+    sock_path = os.path.join(_SPDK_RAMDISK_ROOT, f"spdk_{rpc_port}", "spdk.sock")
+    if not os.path.exists(sock_path):
+        return False
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(timeout)
+            s.connect(sock_path)
+            return True
+    except OSError:
+        return False
 
 
 @api.get('/spdk_process_is_up', responses={
@@ -255,21 +363,44 @@ def spdk_process_kill(query: utils.RPCPortParams):
 def spdk_process_is_up(query: utils.RPCPortParams):
     req_unique_id = time.time_ns()
     logger.debug(f"function:spdk_process_is_up start f{req_unique_id}")
+
+    # Fast path: probe SPDK's Unix domain socket directly. Sub-millisecond
+    # in the common case and bypasses dockerd entirely — a wedged docker
+    # daemon (incident 2026-04-24, vm205) can no longer stall this
+    # endpoint when the SnodeAPI container has /mnt/ramdisk mounted.
+    sock_state = _spdk_unix_socket_alive(query.rpc_port)
+    if sock_state is True:
+        total_time = int((time.time_ns() - req_unique_id) / (1000 * 1000 * 1000))
+        logger.debug(f"function:spdk_process_is_up unix-socket-alive total time {total_time}")
+        return utils.get_response(True)
+    if sock_state is False:
+        total_time = int((time.time_ns() - req_unique_id) / (1000 * 1000 * 1000))
+        logger.debug(f"function:spdk_process_is_up unix-socket-down total time {total_time}")
+        return utils.get_response(False,
+            f"SPDK Unix socket for spdk_{query.rpc_port} not accepting connections")
+
+    # sock_state is None: /mnt/ramdisk is not mounted in this SnodeAPI
+    # container (legacy deployment). Fall through to dockerd. Bounded
+    # client timeout so dockerd cannot hang the caller for the docker-py
+    # default 60s when its API queue is backlogged after a peer outage.
     try:
-        node_docker = get_docker_client()
-        for cont in node_docker.containers.list(all=True):
-            logger.debug(f"Container: {cont.attrs['Name']} status: {cont.attrs['State']}")
-            if cont.attrs['Name'] == f"/spdk_{query.rpc_port}":
-                status = cont.attrs['State']["Status"]
-                is_running = cont.attrs['State']["Running"]
-                logger.debug("function:spdk_process_is_up end")
-                if is_running:
-                    return utils.get_response(True)
-                else:
-                    return utils.get_response(False, f"SPDK container status: {status}, is running: {is_running}")
+        node_docker = get_docker_client(timeout=_SPDK_IS_UP_DOCKERD_TIMEOUT)
+        try:
+            cont = node_docker.containers.get(f"spdk_{query.rpc_port}")
+        except docker.errors.NotFound:
+            cont = None
+        if cont is not None:
+            state = cont.attrs.get("State", {}) or {}
+            is_running = bool(state.get("Running"))
+            status = state.get("Status", "unknown")
+            logger.debug(f"Container: /spdk_{query.rpc_port} status: {state}")
+            if is_running:
+                return utils.get_response(True)
+            return utils.get_response(False,
+                f"SPDK container status: {status}, is running: {is_running}")
     except Exception as e:
-        logger.error(e)
-    logger.debug(f"function:spdk_process_is_up end f{req_unique_id}")
+        logger.error(f"docker probe for spdk_{query.rpc_port} failed: {e}")
+
     total_time = int((time.time_ns() - req_unique_id) / (1000 * 1000 * 1000))
     logger.debug(f"function:spdk_process_is_up total time {total_time}")
     return utils.get_response(False, f"container not found: /spdk_{query.rpc_port}")
@@ -297,25 +428,6 @@ def spdk_proxy_restart(query: utils.RPCPortParams):
 def get_cluster_id():
     out, _, _ = shell_utils.run_command(f"cat {cluster_id_file}")
     return out
-
-
-class FilePath(BaseModel):
-    file_name: str
-
-
-@api.get('/get_file_content/<string:file_name>', responses={
-    200: {'content': {'application/json': {'schema': utils.response_schema({
-        'type': 'boolean'
-    })}}},
-})
-def get_file_content(path: FilePath):
-    out, err, _ = shell_utils.run_command(f"cat /etc/simplyblock/{path.file_name}")
-    if out:
-        return utils.get_response(out)
-    elif err:
-        err = err.decode("utf-8")
-        logger.debug(err)
-        return utils.get_response(None, err)
 
 
 DHCHAP_KEY_DIR = os.environ.get("DHCHAP_KEY_DIR", "/etc/simplyblock/dhchap_keys")
@@ -791,8 +903,8 @@ def disconnect_nqn(body: utils.DisconnectParams):
 
 
 class PingQuery(BaseModel):
-    ip: str
-    ifname: str
+    ip: str = Field(pattern=utils.IP_PATTERN)
+    ifname: str = Field(pattern=utils.IFNAME_PATTERN)
 
 @api.get('/ping_ip', responses={
     200: {'content': {'application/json': {'schema': utils.response_schema({

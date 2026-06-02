@@ -508,20 +508,20 @@ jobs:
 
           # Remove finalizers then delete known CRD instances
           RESOURCES=(
-            "simplyblockpool.simplyblock.simplyblock.io simplyblock-pool"
-            "simplyblockpool.simplyblock.simplyblock.io simplyblock-pool2"
-            "simplyblocklvol.simplyblock.simplyblock.io simplyblock-lvol"
-            "simplyblocktask.simplyblock.simplyblock.io simplyblock-task"
-            "simplyblockdevices.simplyblock.simplyblock.io simplyblock-devices"
-            "simplyblockdevices.simplyblock.simplyblock.io simplyblock-device-action"
-            "simplyblockstoragenodes.simplyblock.simplyblock.io simplyblock-node"
-            "simplyblockstoragenodes.simplyblock.simplyblock.io simplyblock-node2"
-            "simplyblockstoragenodes.simplyblock.simplyblock.io simplyblock-node-action"
-            "simplyblockstorageclusters.simplyblock.simplyblock.io simplyblock-cluster"
-            "simplyblockstorageclusters.simplyblock.simplyblock.io simplyblock-cluster2"
-            "simplyblockstorageclusters.simplyblock.simplyblock.io simplyblock-cluster-activate"
-            "simplyblocksnapshotreplications.simplyblock.simplyblock.io simplyblock-snap-replication"
-            "simplyblocksnapshotreplications.simplyblock.simplyblock.io simplyblock-snap-replication-failback"
+            "simplyblockpool.storage.simplyblock.io simplyblock-pool"
+            "simplyblockpool.storage.simplyblock.io simplyblock-pool2"
+            "simplyblocklvol.storage.simplyblock.io simplyblock-lvol"
+            "simplyblocktask.storage.simplyblock.io simplyblock-task"
+            "simplyblockdevices.storage.simplyblock.io simplyblock-devices"
+            "simplyblockdevices.storage.simplyblock.io simplyblock-device-action"
+            "simplyblockstoragenodes.storage.simplyblock.io simplyblock-node"
+            "simplyblockstoragenodes.storage.simplyblock.io simplyblock-node2"
+            "simplyblockstoragenodes.storage.simplyblock.io simplyblock-node-action"
+            "simplyblockstorageclusters.storage.simplyblock.io simplyblock-cluster"
+            "simplyblockstorageclusters.storage.simplyblock.io simplyblock-cluster2"
+            "simplyblockstorageclusters.storage.simplyblock.io simplyblock-cluster-activate"
+            "simplyblocksnapshotreplications.storage.simplyblock.io simplyblock-snap-replication"
+            "simplyblocksnapshotreplications.storage.simplyblock.io simplyblock-snap-replication-failback"
           )
           for item in "${RESOURCES[@]}"; do
             KIND=$(echo "$item" | awk '{print $1}')
@@ -758,6 +758,86 @@ jobs:
         run: |
           echo "TEST_END_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           echo "TEST_END_HUMAN=$(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> "$GITHUB_ENV"
+
+      - name: Collect Graylog/OpenSearch logs
+        if: always()
+        timeout-minutes: 240
+        shell: bash
+        run: |
+          set +e
+          NAMESPACE="${K8S_NAMESPACE:-simplyblock}"
+          [ -z "${TEST_START_EPOCH:-}" ] || [ -z "${TEST_END_EPOCH:-}" ] && exit 0
+          ELAPSED=$((TEST_END_EPOCH - TEST_START_EPOCH))
+          [ "${ELAPSED}" -le 0 ] && exit 0
+
+          WINDOW_START=$((TEST_START_EPOCH - 3600))
+          WINDOW_END=$((TEST_END_EPOCH + 3600))
+
+          ADMIN_POD=""
+          for i in $(seq 1 12); do
+            ADMIN_POD=$(kubectl -n ${NAMESPACE} get pods -l app=simplyblock-admin-control \
+              -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) || true
+            if [ -n "${ADMIN_POD}" ]; then
+              PHASE=$(kubectl -n ${NAMESPACE} get pod "${ADMIN_POD}" -o jsonpath='{.status.phase}' 2>/dev/null) || true
+              [ "${PHASE}" = "Running" ] && break; ADMIN_POD=""
+            fi
+            sleep 10
+          done
+          [ -z "${ADMIN_POD}" ] && echo "No admin pod found, skipping Graylog collection" && exit 0
+
+          MGMT_IP=$(kubectl get svc -n ${NAMESPACE} | grep graylog | awk '{print $3}')
+          OUTPUT_DIR=""
+          if [ -n "${RUN_BASE_DIR:-}" ] && [ -d "${RUN_BASE_DIR}" ]; then
+            OUTPUT_DIR="${RUN_BASE_DIR}/graylog_collected"
+          else
+            OUTPUT_DIR="${NFS_MOUNTPOINT:-/mnt/nfs_share}/graylog_collected-$(date -u '+%Y%m%d-%H%M%S')"
+          fi
+          mkdir -p "${OUTPUT_DIR}" 2>/dev/null || true
+
+          epoch_to_iso() {
+            python3 -c "from datetime import datetime,timezone; print(datetime.fromtimestamp($1,tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%S'))"
+          }
+
+          CHUNK=0; CURRENT=${WINDOW_START}
+          while [ ${CURRENT} -lt ${WINDOW_END} ]; do
+            CHUNK=$((CHUNK + 1))
+            CHUNK_END=$((CURRENT + 3600))
+            [ ${CHUNK_END} -gt ${WINDOW_END} ] && CHUNK_END=${WINDOW_END}
+            CHUNK_MINUTES=$(( ((CHUNK_END - CURRENT) + 59) / 60 ))
+            CHUNK_ISO=$(epoch_to_iso ${CURRENT})
+            POD_OUTPUT_DIR="/tmp/graylog_collect_chunk${CHUNK}"
+            kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- mkdir -p "${POD_OUTPUT_DIR}" 2>/dev/null || true
+            kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- \
+              python3 /usr/local/lib/python3.12/site-packages/simplyblock_core/scripts/collect_logs.py \
+                "${CHUNK_ISO}" "${CHUNK_MINUTES}" \
+                --mode kubernetes --namespace "${NAMESPACE}" \
+                --output-dir "${POD_OUTPUT_DIR}" \
+                ${MGMT_IP:+--mgmt-ip "${MGMT_IP}"} \
+                ${CLUSTER_ID:+--cluster-id "${CLUSTER_ID}"} \
+            2>&1 || {
+              kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- \
+                python3 /usr/local/lib/python3.12/site-packages/simplyblock_core/scripts/collect_logs.py \
+                  "${CHUNK_ISO}" "${CHUNK_MINUTES}" \
+                  --mode kubernetes --namespace "${NAMESPACE}" \
+                  --output-dir "${POD_OUTPUT_DIR}" --use-opensearch \
+                  ${MGMT_IP:+--mgmt-ip "${MGMT_IP}"} \
+                  ${CLUSTER_ID:+--cluster-id "${CLUSTER_ID}"} \
+              2>&1 || true
+            }
+            TARBALLS=$(kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- \
+              find "${POD_OUTPUT_DIR}" -name "*.tar.gz" -type f 2>/dev/null) || true
+            if [ -n "${TARBALLS}" ]; then
+              for TB in ${TARBALLS}; do
+                kubectl -n ${NAMESPACE} cp "${ADMIN_POD}:${TB}" "${OUTPUT_DIR}/$(basename ${TB})" 2>&1 || true
+              done
+              for TB_FILE in "${OUTPUT_DIR}"/*.tar.gz; do
+                [ -f "${TB_FILE}" ] && tar -xzf "${TB_FILE}" -C "${OUTPUT_DIR}/" 2>/dev/null || true
+              done
+            fi
+            kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- rm -rf "${POD_OUTPUT_DIR}" 2>/dev/null || true
+            CURRENT=${CHUNK_END}
+          done
+          echo "=== Graylog collection complete (${CHUNK} chunks): ${OUTPUT_DIR} ==="
 
       - name: Collect mgmt snapshots (kubectl exec on admin pod)
         if: always()

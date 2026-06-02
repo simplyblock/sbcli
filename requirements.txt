@@ -1,4 +1,5 @@
 foundationdb==7.3.63
+hvac
 requests
 prettytable>=3.10.0
 docker
@@ -7,7 +8,7 @@ py-cpuinfo
 pytest
 mock
 flask
-kubernetes
+kubernetes==35.0.0
 PyYAML
 urllib3
 graypy==2.1.0

@@ -4,7 +4,7 @@ import pprint
 import json
 from inspect import ismethod
 import sys
-from typing import Mapping, Type
+from typing import Mapping, Type, Union
 from collections import ChainMap
 
 
@@ -86,6 +86,16 @@ class BaseModel(object):
                             value = {item: dtype.__args__[1]().from_dict(data[attr][item]) for item in data[attr]}
                         else:
                             value = value_dict['type'](data[attr])
+                    elif dtype.__origin__ is Union:
+                        if data[attr] is None:
+                            value = None
+                        else:
+                            inner_types = [t for t in dtype.__args__ if t is not type(None)]
+                            inner = inner_types[0] if inner_types else None
+                            if inner is not None and hasattr(inner, "from_dict"):
+                                value = inner().from_dict(data[attr])
+                            elif inner is not None:
+                                value = inner(data[attr])
                 else:
                     value = value_dict['type'](data[attr])
             setattr(self, attr, value)
@@ -123,18 +133,19 @@ class BaseModel(object):
 
     def read_from_db(self, kv_store, id="", limit=0, reverse=False):
         if not kv_store:
-            return []
+            from simplyblock_core.db_controller import DBController
+            kv_store = DBController().kv_store
         try:
             objects = []
             prefix = self.get_db_id(id)
             for k, v in kv_store.get_range_startswith(prefix.strip().encode('utf-8'),  limit=limit, reverse=reverse):
                 objects.append(self.__class__().from_dict(json.loads(v)))
             return objects
-        except Exception:
+        except Exception as e:
             from simplyblock_core import utils
             logger = utils.get_logger(__name__)
             logger.exception('Error reading from FDB')
-            return []
+            raise e
 
     def get_last(self, kv_store):
         id = self.get_db_id(" ")

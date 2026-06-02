@@ -164,11 +164,15 @@ commands:
             dest: ifname
             type: str
           - name: "--journal-partition"
-            help: >-
-              **Deprecated:** use `--enable-journal-device` instead.<br><br>
+            deprecated:
+              since: "26.1"
+              replaced-by: "--enable-journal-device"
+              migration: "migrate_journal_partition"
+            help: |
               1: Auto-create small partitions for journal on nvme devices. 0: use a separate (the smallest) nvme device of the node for journal. The journal needs a maximum of 3 percent of total available raw disk space. Default: `1`.
             dest: partitions
             type: int
+            default: 1
             choices:
               - 0
               - 1
@@ -284,7 +288,7 @@ commands:
           The storage node cannot be used or added any more. Any data residing on this storage node will be migrated to
           the remaining storage nodes. The user must ensure that there is sufficient free space in remaining cluster to
           allow for successful node removal.
-          
+
           !!! danger
               If there isn't enough storage available, the cluster may run full and switch to read-only mode.
         arguments:
@@ -431,7 +435,7 @@ commands:
             type: bool
             action: store_true
       - name: suspend
-        help: "Suspends a storage node."
+        help: "DEPRECATED: the suspension phase was removed from graceful shutdown (it caused writer conflicts on sec/tert lvstores). This command is now a no-op returning success. Use `sn shutdown`."
         usage: The node will stop accepting new IO, but will finish processing any IO, which has been received already.
         arguments:
           - name: node_id
@@ -440,12 +444,12 @@ commands:
             completer: _completer_get_sn_list
             type: str
           - name: "--force"
-            help: "Force node suspend."
+            help: "Ignored (kept for backwards compatibility)."
             dest: force
             type: bool
             action: store_true
       - name: resume
-        help: "Resumes a storage node."
+        help: "DEPRECATED: counterpart to `sn suspend`, also a no-op."
         arguments:
           - name: node_id
             help: Storage node id
@@ -1029,6 +1033,10 @@ commands:
             dest: snode_api_port
             type: int
             default: 50001
+          - name: "--hashicorp-vault-url"
+            help: "Hashicorp vault URL for storing encryption keys for this cluster"
+            dest: hashicorp_vault_url
+            type: str
       - name: add
         help: "Adds a new cluster."
         arguments:
@@ -1180,6 +1188,10 @@ commands:
             dest: snode_api_port
             type: int
             default: 50001
+          - name: "--hashicorp-vault-url"
+            help: "Hashicorp vault URL for storing encryption keys for this cluster"
+            dest: hashicorp_vault_url
+            type: str
       - name: activate
         help: >
           Activates a cluster.
@@ -1375,7 +1387,6 @@ commands:
             type: str
       - name: graceful-shutdown
         help: "Initiates a graceful shutdown of a cluster's storage nodes."
-        private: true
         arguments:
           - name: "cluster_id"
             help: "The cluster id."
@@ -1384,7 +1395,6 @@ commands:
             completer: _completer_get_cluster_list
       - name: graceful-startup
         help: "Initiates a graceful startup of a cluster's storage nodes."
-        private: true
         arguments:
           - name: "cluster_id"
             help: "The cluster id."
@@ -1452,6 +1462,25 @@ commands:
             help: "The new attribute value."
             dest: attr_value
             type: str
+      - name: set-shared-placement
+        help: "Enable cluster-wide per-chunk data placement-binding for distrib bdevs (forward-only upgrade; --disable is reserved for debug)."
+        usage: "Preflight: every storage node must be ONLINE; the cluster must be ACTIVE and not rebalancing. The runtime distr_shared_placement RPC is dispatched to every online node, then the flag is persisted on the cluster row and on every node's lvstore_stack distrib entries so subsequent restarts re-create with the new mode."
+        arguments:
+          - name: "cluster_id"
+            help: "The cluster id."
+            dest: cluster_id
+            type: str
+            completer: _completer_get_cluster_list
+          - name: "--disable"
+            help: "Reverse transition (per-chunk -> per-page). Debug only; only safe on a balanced or empty bdev. Requires --force."
+            dest: disable
+            type: bool
+            action: store_true
+          - name: "--force"
+            help: "Bypass the rebalancing / non-online-node guards. Required when --disable is passed."
+            dest: force
+            type: bool
+            action: store_true
       - name: change-name
         help: Assigns or changes a name to a cluster
         arguments:
@@ -1533,10 +1562,16 @@ commands:
             help: "The hex value of key1 to be used for logical volume encryption."
             dest: crypto_key1
             type: str
+            deprecated:
+              since: "26.2"
+              reason: "This has been replaced by internal or external KMS support. See https://docs.simplyblock.io/latest/usage/baremetal/encrypting/"
           - name: "--crypto-key2"
             help: "The hex value of key2 to be used for logical volume encryption."
             dest: crypto_key2
             type: str
+            deprecated:
+              since: "26.2"
+              reason: "This has been replaced by internal or external KMS support. See https://docs.simplyblock.io/latest/usage/baremetal/encrypting/"
           - name: "--max-rw-iops"
             help: "Maximum Read Write IO Per Second."
             dest: max_rw_iops
@@ -1586,10 +1621,11 @@ commands:
             dest: lvol_priority_class
             type: int
             default: 0
-          - name: "--namespace"
-            help: "Sets the NVMe namespace for the logical volume (namespace must already exist)."
-            dest: namespace
-            type: str
+          - name: "--namespaced"
+            help: "Adds this LVol as a namespace on any available subsystem, if not found then create a new subsystem. Default: `false`."
+            dest: namespaced
+            type: bool
+            default: false
           - name: "--uid"
             help: "Set logical volume id."
             dest: uid
@@ -1769,6 +1805,11 @@ commands:
             dest: resize
             type: size
             default: "0"
+          - name: "--namespaced"
+            help: "Adds this LVol as a namespace on any available subsystem, if not found then create a new subsystem. Default: `true`."
+            dest: namespaced
+            type: bool
+            default: true
       - name: move
         help: "Moves a full copy of the logical volume between nodes."
         private: true
@@ -2159,6 +2200,13 @@ commands:
             help: "The host NQN to remove."
             dest: host_nqn
             type: str
+      - name: get-master-lvols
+        help: "Return a list of master lvols (not namespaced lvol) from a storage pool."
+        arguments:
+          - name: "pool_id"
+            help: "The storage pool id."
+            dest: pool_id
+            type: str
   - name: "snapshot"
     help: "Snapshot Commands"
     weight: 600
@@ -2197,6 +2245,10 @@ commands:
             dest: with_details
             type: bool
             action: store_true
+          - name: "--pool"
+            help: "List snapshots in particular pool id or name."
+            dest: pool
+            type: str
       - name: delete
         help: "Deletes a snapshot."
         arguments:
@@ -2232,6 +2284,11 @@ commands:
             dest: resize
             type: size
             default: "0"
+          - name: "--namespaced"
+            help: "Adds this LVol as a namespace on any available subsystem, if not found then create a new subsystem. Default: `false`."
+            dest: namespaced
+            type: bool
+            default: true
       - name: replication-status
         help: "Lists snapshots replication status"
         arguments:

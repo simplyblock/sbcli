@@ -341,19 +341,29 @@ class TestRestartWrapperCleanupSafety(unittest.TestCase):
         self.assertFalse(result)
         mock_set_status.assert_not_called()
 
+    @patch("simplyblock_core.storage_node_ops.distr_controller")
+    @patch("simplyblock_core.storage_node_ops.storage_events")
     @patch("simplyblock_core.storage_node_ops.set_node_status")
     @patch("simplyblock_core.storage_node_ops._restart_storage_node_impl")
     @patch("simplyblock_core.storage_node_ops.DBController")
     def test_cleanup_runs_when_pre_offline_and_post_restarting(
-            self, mock_db_cls, mock_impl, mock_set_status):
-        """Original positive case: WE acquired RESTARTING (pre=OFFLINE) and
-        a later step failed (impl returned False). Cleanup must reset to
-        OFFLINE so future attempts can proceed."""
+            self, mock_db_cls, mock_impl, mock_set_status,
+            mock_events, mock_distr):
+        """WE acquired RESTARTING (pre=OFFLINE) and a later step failed
+        (impl returned False). Cleanup must reset the node to OFFLINE so
+        future attempts can proceed.
+
+        The wrapper does this with a direct DB write rather than
+        ``set_node_status`` (deliberately, to avoid second-order effects
+        from the helper). The contract this test pins is therefore: on
+        the failure path, ``post_node.write_to_db`` is invoked and the
+        post_node's status is set to OFFLINE before the write."""
         from simplyblock_core.storage_node_ops import restart_storage_node
 
         pre_node = self._node(StorageNode.STATUS_OFFLINE)
         post_node = self._node(StorageNode.STATUS_RESTARTING)
-        # First read = pre-call; second read = post-call (in the finally).
+        post_node.write_to_db = MagicMock()
+
         mock_db_cls.return_value.get_storage_node_by_id.side_effect = [
             pre_node, post_node,
         ]
@@ -361,8 +371,12 @@ class TestRestartWrapperCleanupSafety(unittest.TestCase):
 
         result = restart_storage_node("node-1")
         self.assertFalse(result)
-        mock_set_status.assert_called_once_with(
-            "node-1", StorageNode.STATUS_OFFLINE)
+        # The wrapper does not route the cleanup write through
+        # set_node_status.
+        mock_set_status.assert_not_called()
+        # It writes the post_node directly with status flipped to OFFLINE.
+        post_node.write_to_db.assert_called_once()
+        self.assertEqual(post_node.status, StorageNode.STATUS_OFFLINE)
 
     @patch("simplyblock_core.storage_node_ops.set_node_status")
     @patch("simplyblock_core.storage_node_ops._restart_storage_node_impl")
@@ -420,6 +434,134 @@ class TestRestartWrapperCleanupSafety(unittest.TestCase):
         result = restart_storage_node("node-1")
         self.assertFalse(result)
         mock_set_status.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# 4. set_node_status FSM: symmetric guard on RESTARTING → OFFLINE.
+#    Regression for incident 2026-05-20 (forced restart of 5110e910 stuck
+#    OFFLINE for 16 min because something flipped in_restart → offline
+#    mid-restart, after which the CLI's final ONLINE flip was rejected
+#    by the existing ONLINE pre-status guard and the CLI exited silently
+#    with True).
+# ---------------------------------------------------------------------------
+
+class TestRestartingToOfflineGuard(unittest.TestCase):
+    """`set_node_status(OFFLINE)` from a RESTARTING node must be rejected
+    unless the caller identifies as a legitimate restart-cleanup actor."""
+
+    def _node(self, uuid="node-1", status=StorageNode.STATUS_RESTARTING,
+              cluster_id="c1"):
+        n = StorageNode()
+        n.uuid = uuid
+        n.status = status
+        n.cluster_id = cluster_id
+        n.mgmt_ip = "10.0.0.1"
+        n.rpc_port = 8080
+        n.online_since = ""
+        n.updated_at = ""
+        return n
+
+    def _patch_db(self, mock_db_cls, node):
+        db = mock_db_cls.return_value
+        db.get_storage_node_by_id.return_value = node
+        db.kv_store = MagicMock()
+        return db
+
+    @patch("simplyblock_core.storage_node_ops.distr_controller")
+    @patch("simplyblock_core.storage_node_ops.storage_events")
+    @patch("simplyblock_core.storage_node_ops.DBController")
+    def test_rejects_restarting_to_offline_from_monitor(
+            self, mock_db_cls, mock_events, mock_distr):
+        from simplyblock_core.storage_node_ops import set_node_status
+
+        node = self._node(status=StorageNode.STATUS_RESTARTING)
+        self._patch_db(mock_db_cls, node)
+
+        # Default caused_by is "monitor" — must be rejected.
+        result = set_node_status("node-1", StorageNode.STATUS_OFFLINE)
+
+        self.assertFalse(result)
+        # The rejected write must not emit a status-change event or
+        # broadcast to peers — those would mislead the rest of the system
+        # into thinking the transition actually happened.
+        mock_events.snode_status_change.assert_not_called()
+        mock_distr.send_node_status_event.assert_not_called()
+
+    @patch("simplyblock_core.storage_node_ops.distr_controller")
+    @patch("simplyblock_core.storage_node_ops.storage_events")
+    @patch("simplyblock_core.storage_node_ops.DBController")
+    def test_rejects_restarting_to_offline_from_arbitrary_caused_by(
+            self, mock_db_cls, mock_events, mock_distr):
+        from simplyblock_core.storage_node_ops import set_node_status
+
+        node = self._node(status=StorageNode.STATUS_RESTARTING)
+        self._patch_db(mock_db_cls, node)
+
+        for caused_by in ("monitor", "health_check", "cli", ""):
+            with self.subTest(caused_by=caused_by):
+                result = set_node_status(
+                    "node-1", StorageNode.STATUS_OFFLINE, caused_by=caused_by)
+                self.assertFalse(result)
+
+        mock_events.snode_status_change.assert_not_called()
+        mock_distr.send_node_status_event.assert_not_called()
+
+    @patch("simplyblock_core.storage_node_ops.tasks_controller")
+    @patch("simplyblock_core.storage_node_ops.distr_controller")
+    @patch("simplyblock_core.storage_node_ops.storage_events")
+    @patch("simplyblock_core.storage_node_ops.DBController")
+    def test_allows_restarting_to_offline_for_restart_cleanup(
+            self, mock_db_cls, mock_events, mock_distr, mock_tasks):
+        from simplyblock_core.storage_node_ops import set_node_status
+
+        node = self._node(status=StorageNode.STATUS_RESTARTING)
+        self._patch_db(mock_db_cls, node)
+
+        result = set_node_status(
+            "node-1", StorageNode.STATUS_OFFLINE, caused_by="restart_cleanup")
+
+        self.assertTrue(result)
+        mock_events.snode_status_change.assert_called_once()
+        mock_distr.send_node_status_event.assert_called_once()
+
+    @patch("simplyblock_core.storage_node_ops.tasks_controller")
+    @patch("simplyblock_core.storage_node_ops.distr_controller")
+    @patch("simplyblock_core.storage_node_ops.storage_events")
+    @patch("simplyblock_core.storage_node_ops.DBController")
+    def test_restarting_to_online_still_allowed(
+            self, mock_db_cls, mock_events, mock_distr, mock_tasks):
+        """The legitimate happy path: RESTARTING → ONLINE via the restart
+        impl. The new guard must not interfere with this."""
+        from simplyblock_core.storage_node_ops import set_node_status
+
+        node = self._node(status=StorageNode.STATUS_RESTARTING)
+        self._patch_db(mock_db_cls, node)
+        mock_tasks.cancel_pending_node_restart_tasks.return_value = None
+
+        result = set_node_status(
+            "node-1", StorageNode.STATUS_ONLINE, caused_by="restart")
+
+        self.assertTrue(result)
+        mock_events.snode_status_change.assert_called_once()
+
+    @patch("simplyblock_core.storage_node_ops.distr_controller")
+    @patch("simplyblock_core.storage_node_ops.storage_events")
+    @patch("simplyblock_core.storage_node_ops.DBController")
+    def test_offline_to_online_still_rejected(
+            self, mock_db_cls, mock_events, mock_distr):
+        """Regression: pre-existing ONLINE pre-status guard still rejects
+        OFFLINE → ONLINE. This is the rejection that incident 2026-05-20's
+        CLI hit at 00:51:35,338 — keep it working."""
+        from simplyblock_core.storage_node_ops import set_node_status
+
+        node = self._node(status=StorageNode.STATUS_OFFLINE)
+        self._patch_db(mock_db_cls, node)
+
+        result = set_node_status(
+            "node-1", StorageNode.STATUS_ONLINE, caused_by="restart")
+
+        self.assertFalse(result)
+        mock_events.snode_status_change.assert_not_called()
 
 
 if __name__ == "__main__":

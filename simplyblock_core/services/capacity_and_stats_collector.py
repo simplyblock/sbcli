@@ -169,7 +169,12 @@ db = db_controller.DBController()
 
 logger.info("Starting capacity and stats collector...")
 while True:
-
+    try:
+        db.get_clusters()
+    except Exception as e:
+        logger.error(f"Failed to get clusters: {e}")
+        time.sleep(3)
+        continue
     clusters = db.get_clusters()
     for cl in clusters:
         snodes = db.get_storage_nodes_by_cluster_id(cl.get_id())

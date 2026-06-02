@@ -202,7 +202,7 @@ class TestHealthCheckNodeGuard(unittest.TestCase):
         with patch.object(mod, "DBController") as mock_db_cls, \
              patch.object(mod, "_check_node_ping", return_value=True) as mock_ping, \
              patch.object(mod, "_check_node_api", return_value=True) as mock_api, \
-             patch.object(mod, "_check_node_rpc", return_value=(True, True)) as mock_rpc, \
+             patch.object(mod, "check_node_rpc", return_value=(True, True)) as mock_rpc, \
              patch.object(mod, "_check_ping_from_node", return_value=True), \
              patch.object(mod, "check_port_on_node", return_value=True):
             db = mock_db_cls.return_value

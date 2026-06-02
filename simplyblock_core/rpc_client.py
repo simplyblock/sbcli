@@ -10,13 +10,14 @@ import jsonschema
 from jsonschema.exceptions import ValidationError
 
 from simplyblock_core import utils, constants
+from simplyblock_core.settings import Settings
 from requests.adapters import HTTPAdapter
 from urllib3 import Retry
 
 logger = utils.get_logger()
 
 # Shared per-node cache for expensive read-only RPCs (e.g. bdev_get_bdevs, nvmf_get_subsystems).
-# Key: (ip_address, port, method_name), Value: (timestamp, result)
+# Key: (host, port, method_name), Value: (timestamp, result)
 _rpc_cache: dict[tuple, tuple[float, Any]] = {}
 _rpc_cache_lock = threading.Lock()
 RPC_CACHE_TTL_SEC = 15  # cached results are valid for this many seconds
@@ -94,29 +95,35 @@ class RPCClient:
     # ref: https://spdk.io/doc/jsonrpc.html
     DEFAULT_ALLOWED_METHODS = ["HEAD", "GET", "PUT", "DELETE", "OPTIONS", "TRACE", "POST"]
 
-    def __init__(self, ip_address, port, username, password, timeout=180, retry=3):
-        self.ip_address = ip_address
+    def __init__(self, host, port, username, password, timeout=180, retry=3):
+        self.host = host
         self.port = port
-        self.url = 'http://%s:%s/' % (self.ip_address, self.port)
+        settings = Settings()
+        scheme = "https" if settings.tls_connect != "disabled" else "http"
+        self.url = '%s://%s:%s/' % (scheme, self.host, self.port)
         self.username = username
         self.password = password
         self.timeout = timeout
         self.session = requests.session()
+        if settings.tls_connect != "disabled":
+            self.session.verify = str(settings.tls_certificate_authority)
         self.session.auth = (self.username, self.password)
-        self.session.verify = False
         retries = Retry(total=retry, backoff_factor=1, connect=retry, read=retry,
                         allowed_methods=self.DEFAULT_ALLOWED_METHODS)
         self.session.mount("http://", HTTPAdapter(max_retries=retries))
+        self.session.mount("https://", HTTPAdapter(max_retries=retries))
+        if settings.tls_connect == "authenticated":
+            self.session.cert = (str(settings.tls_certificate), str(settings.tls_key))
 
     def _request_cached(self, method, params=None, cache_ttl=RPC_CACHE_TTL_SEC):
         """Like _request but returns a cached result if one exists within cache_ttl seconds."""
-        cache_key = (self.ip_address, self.port, method, json.dumps(params, sort_keys=True) if params else None)
+        cache_key = (self.host, self.port, method, json.dumps(params, sort_keys=True) if params else None)
         now = time.monotonic()
         with _rpc_cache_lock:
             if cache_key in _rpc_cache:
                 ts, cached_result = _rpc_cache[cache_key]
                 if now - ts < cache_ttl:
-                    logger.debug("Cache hit for %s on %s:%s", method, self.ip_address, self.port)
+                    logger.debug("Cache hit for %s on %s:%s", method, self.host, self.port)
                     return cached_result
         result = self._request(method, params)
         if result is not None:
@@ -124,17 +131,22 @@ class RPCClient:
                 _rpc_cache[cache_key] = (now, result)
         return result
 
-    def _request(self, method, params=None):
-        ret, _ = self._request2(method, params)
+    def _request(self, method, params=None, request_timeout=None):
+        ret, _ = self._request2(method, params, request_timeout=request_timeout)
         return ret
 
-    def _request2(self, method, params=None):
+    def _request2(self, method, params=None, request_timeout=None):
         payload = {'id': 1, 'method': method}
         if params:
             payload['params'] = params
+        # Per-call override of the client-level HTTP timeout. Used by callers
+        # that must bound a single SPDK RPC tighter than ``self.timeout``
+        # (e.g. ``bdev_nvme_attach_controller`` inside the LVS rejoin freeze
+        # window, where a single attach has to land within hundreds of ms).
+        effective_timeout = request_timeout if request_timeout is not None else self.timeout
         try:
-            logger.debug("From: %s, Requesting method: %s, params: %s", self.ip_address, method, params)
-            response = self.session.post(self.url, data=json.dumps(payload), timeout=self.timeout)
+            logger.debug("From: %s, Requesting method: %s, params: %s", self.host, method, params)
+            response = self.session.post(self.url, data=json.dumps(payload), timeout=effective_timeout)
         except Exception:
             raise RPCException("connection error")
 
@@ -340,12 +352,13 @@ class RPCClient:
             params = {"name": name}
         return self._request2("bdev_nvme_get_controllers", params)
 
-    def bdev_nvme_controller_attach(self, name, pci_addr):
+    def bdev_nvme_controller_attach(self, name, pci_addr, max_bdevs=1024):
         return self._request3(
-                "bdev_nvme_attach_controller", 
+                "bdev_nvme_attach_controller",
                 name=name,
                 trtype='pcie',
                 traddr=pci_addr,
+                max_bdevs=max_bdevs,
         )
 
     def alloc_bdev_controller_attach(self, name, pci_addr):
@@ -366,7 +379,51 @@ class RPCClient:
         }
         return self._request2("ultra21_alloc_ns_init", params)
 
-    def nvmf_subsystem_add_ns(self, nqn, dev_name, uuid=None, nguid=None, nsid=None, eui64=None):
+    def nvmf_subsystem_add_ns(self, nqn, dev_name, uuid=None, nguid=None, nsid=None, eui64=None,
+                              idempotent=True):
+        """Add a namespace to an NVMe-oF subsystem.
+
+        Idempotency: by default, looks up the subsystem first and if a
+        namespace already exists with a matching ``bdev_name`` (and matching
+        ``nsid`` / ``uuid`` if those were specified), returns the existing
+        nsid instead of issuing the RPC. This is safe for every call site —
+        SPDK would reject the duplicate with -EEXIST anyway, and a single
+        cluster_activate cycle in 2026-05-14 logs (suspend→activate on
+        cluster 3d4914e7-…) emitted ``nvmf_subsystem_add_ns`` twice for the
+        same lvol 12 seconds apart, indicating the activation flow can
+        legitimately re-enter the add path. Callers that need the strict
+        behavior (e.g. tests asserting on RPC traffic) can pass
+        ``idempotent=False``.
+
+        Returns the nsid as the SPDK RPC would, or the existing nsid when
+        the no-op branch fires.
+        """
+        if idempotent:
+            try:
+                subs = self.subsystem_list(nqn_name=nqn) or []
+                if subs:
+                    for ns in subs[0].get("namespaces", []) or []:
+                        if ns.get("bdev_name") != dev_name:
+                            continue
+                        if nsid is not None and ns.get("nsid") != nsid:
+                            continue
+                        if uuid is not None and ns.get("uuid") and ns.get("uuid") != uuid:
+                            # Same bdev at a different nsid is fine to no-op,
+                            # but a mismatched uuid on the same bdev is a real
+                            # conflict — fall through to let SPDK reject.
+                            continue
+                        existing_nsid = ns.get("nsid")
+                        logger.info(
+                            "nvmf_subsystem_add_ns: %s already has %s at nsid=%s, "
+                            "skipping duplicate add",
+                            nqn, dev_name, existing_nsid)
+                        return existing_nsid
+            except Exception as e:
+                # Don't let an idempotency probe block the legitimate add.
+                logger.debug(
+                    "nvmf_subsystem_add_ns idempotency probe failed for %s: %s — "
+                    "proceeding with add", nqn, e)
+
         params = {
             "nqn": nqn,
             "namespace": {
@@ -586,7 +643,7 @@ class RPCClient:
     def bdev_distrib_create(self, name, vuid, ndcs, npcs, num_blocks, block_size, jm_names,
                             chunk_size, ha_comm_addrs=None, ha_inode_self=None, pba_page_size=2097152,
                             distrib_cpu_mask="", ha_is_non_leader=True, jm_vuid=0, write_protection=False,
-                            full_page_unmap=True):
+                            full_page_unmap=True, shared_placement=False):
         """"
             // Optional (not specified = no HA)
             // Comma-separated communication addresses, for each node, e.g. "192.168.10.1:45001,192.168.10.1:32768".
@@ -628,7 +685,34 @@ class RPCClient:
             params["write_protection"] = True
         if full_page_unmap:
             params["use_map_whole_page_on_1st_write"] = True
+        if shared_placement:
+            params["shared_placement"] = True
         return self._request("bdev_distrib_create", params)
+
+    def distr_shared_placement(self, name=None, enable=True):
+        """Flip the shared_placement (data placement-binding mode) of distrib
+        bdevs at runtime.
+
+        Args:
+            name: target a single distrib bdev. If None / empty, the flag is
+                applied to every distrib bdev on this node.
+            enable: True flips per-page -> per-chunk (always safe).
+                False is reserved for debug only: it is only safe on a
+                balanced or empty bdev. A bdev created with shared_placement
+                = True may host two layers that share a storage_ID across
+                different columns on a page; disabling on such a bdev causes
+                undefined behavior.
+
+        Response shape (per spec):
+            - normal success on success
+            - ENODEV if name is given but no such bdev exists
+            - normal success if name is omitted / empty and no distrib bdevs
+              exist (nothing to do)
+        """
+        params: dict = {"enable": bool(enable)}
+        if name:
+            params["name"] = name
+        return self._request("distr_shared_placement", params)
 
     def bdev_lvol_delete_lvstore(self, name):
         params = {"lvs_name": name}
@@ -724,7 +808,8 @@ class RPCClient:
     def bdev_nvme_attach_controller(self, name, nqn, traddr, trsvcid, trtype, multipath=False,
                                     ctrlr_loss_timeout_sec=None,
                                     reconnect_delay_sec=None,
-                                    fast_io_fail_timeout_sec=None):
+                                    fast_io_fail_timeout_sec=None,
+                                    request_timeout=None):
         """Attach an NVMe-oF controller.
 
         multipath: False/"disable", True/"failover", or "multipath" (ANA-based).
@@ -734,6 +819,11 @@ class RPCClient:
         own defaults untouched. For hublvol controllers the coordinator
         passes higher values so a short peer blip becomes a successful
         reset instead of a destroy→reattach cycle.
+
+        request_timeout: per-call HTTP timeout for the underlying SPDK RPC.
+        Used by the LVS rejoin to bound a single attach inside the
+        leader-port-block freeze window — a slow connect against a stale
+        listener must abort fast rather than hold IO frozen.
         """
         params = {
             "name": name,
@@ -755,7 +845,8 @@ class RPCClient:
             params["reconnect_delay_sec"] = int(reconnect_delay_sec)
         if fast_io_fail_timeout_sec is not None:
             params["fast_io_fail_timeout_sec"] = int(fast_io_fail_timeout_sec)
-        return self._request("bdev_nvme_attach_controller", params)
+        return self._request("bdev_nvme_attach_controller", params,
+                             request_timeout=request_timeout)
 
     def bdev_split(self, base_bdev, split_count):
         params = {
@@ -797,28 +888,32 @@ class RPCClient:
         }
         return self._request("bdev_passtest_delete", params)
 
-    def bdev_nvme_set_options(self, multipath=False):
-        # Multipath failover requires a non-zero bdev_retry_count per SPDK docs:
-        # https://spdk.io/doc/nvme_multipath.html
-        # Otherwise aborted IOs (e.g. from a NIC going down) are returned as
-        # errors to the caller instead of being retried on the alternate path.
-        # In multipath mode transport_retry_count is tightened too: the
-        # alternate path already provides redundancy, so failing fast onto
-        # the other path beats burning the per-path retry budget first.
-        bdev_retry = constants.BDEV_RETRY_MULTIPATH if multipath else constants.BDEV_RETRY
-        transport_retry = (
-            constants.TRANSPORT_RETRY_MULTIPATH if multipath else constants.TRANSPORT_RETRY)
+    def bdev_nvme_set_options(self):
+        # bdev_retry_count must be non-zero so SPDK's bdev_nvme retries an
+        # aborted IO on the alternate path of an NVMe-oF multipath bdev,
+        # per https://spdk.io/doc/nvme_multipath.html. Hublvol bdevs are
+        # multipath whenever an FTT≥1 cluster exists, regardless of how
+        # many data NICs the local node has — so the retries are set
+        # unconditionally. See ``constants.BDEV_RETRY`` /
+        # ``constants.TRANSPORT_RETRY`` for the chosen values and the
+        # worst-case retry budget.
         params = {
-            # "action_on_timeout": "abort",
-            "bdev_retry_count": bdev_retry,
-            "transport_retry_count": transport_retry,
+            "bdev_retry_count": constants.BDEV_RETRY,
+            "transport_retry_count": constants.TRANSPORT_RETRY,
             "ctrlr_loss_timeout_sec": constants.CTRL_LOSS_TO,
             "fast_io_fail_timeout_sec" : constants.FAST_FAIL_TO,
             "reconnect_delay_sec": constants.RECONNECT_DELAY_CLUSTER,
             "keep_alive_timeout_ms": constants.KATO,
             "timeout_us": constants.NVME_TIMEOUT_US,
             "transport_ack_timeout": constants.ACK_TO,
-            "action_on_timeout": "abort"
+            # action_on_timeout=abort caused multi-minute IO hangs when a
+            # remote target wedged: the timeout_cb sent an NVMe abort that
+            # itself never completed against the wedged qpair, and the bdev
+            # IO sat pending until something else (keep-alive, reset on
+            # abort_cpl failure) eventually disconnected the qpair. reset
+            # tears down the qpair immediately, which fails the in-flight
+            # IOs back up to the bdev/distrib layer with a clean error.
+            "action_on_timeout": "reset"
         }
         return self._request("bdev_nvme_set_options", params)
 
@@ -1211,17 +1306,20 @@ class RPCClient:
         }
         return self._request("nvmf_set_max_subsystems", params)
 
-    def bdev_lvol_set_lvs_opts(self, lvs, *, groupid, subsystem_port=9090, role="primary"):
+    def bdev_lvol_set_lvs_opts(self, lvs, *, groupid, subsystem_port=9090, hublvol_port=0, role="primary"):
         """Set lvstore options
 
         `lvs` must be either an ID or the lvstore name.
         `role` must be one of: "primary", "secondary", "tertiary".
+        `hublvol_port` is the NVMe-oF port the LVS exposes its hublvol on
+        (per-LVS, distinct from `subsystem_port` which serves lvols).
         """
 
         return self._request('bdev_lvol_set_lvs_opts', {
             "uuid" if utils.UUID_PATTERN.match(lvs) else "lvs_name": lvs,
             "groupid": groupid,
             "subsystem_port": subsystem_port,
+            "hublvol_port": hublvol_port,
             "role": role,
         })
 
@@ -1516,8 +1614,9 @@ class RPCClient:
         Args:
             name: S3 bdev name (e.g. 's3_LVS_1234')
             bucket_name: S3/MinIO bucket name to use for data storage
+        Returns (result, error) tuple.
         """
-        return self._request("bdev_s3_add_bucket_name", {
+        return self._request2("bdev_s3_add_bucket_name", {
             "name": name,
             "bucket_name": bucket_name,
         })

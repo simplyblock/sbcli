@@ -10,8 +10,14 @@ logger = logging.getLogger()
 
 def _lvol_event(lvol, message, caused_by, event):
     db_controller = DBController()
-    snode = db_controller.get_storage_node_by_id(lvol.node_id)
-    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+    try:
+        snode = db_controller.get_storage_node_by_id(lvol.node_id)
+        cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+    except Exception as e:
+        logger.error(e)
+        logger.error(f"Error fetching related objects for lvol event: {message}")
+        return
+
     ec.log_event_cluster(
         cluster_id=snode.cluster_id,
         domain=ec.DOMAIN_CLUSTER,

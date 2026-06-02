@@ -14,6 +14,15 @@ from simplyblock_core.utils.pci import PCIAddress
 
 
 IP_PATTERN = re.compile(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$')
+IFNAME_PATTERN = re.compile(r'^[a-zA-Z0-9_\-\\.]{1,15}$')
+NQN_PATTERN = re.compile(
+    r'nqn\.'
+    r'\d{4}-\d{2}'
+    r'\.'
+    r'(?:[a-zA-Z0-9](?:[a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)*'
+    r'[a-zA-Z]{2,}'
+    r'(?::[a-zA-Z0-9.\-:_]+)?'  # optional unique name
+)
 
 
 def response_schema(result_schema: dict) -> dict:

@@ -6,6 +6,8 @@ import logging
 from requests.adapters import HTTPAdapter
 from urllib3 import Retry
 
+from simplyblock_core.settings import Settings
+
 logger = logging.getLogger()
 
 
@@ -16,15 +18,20 @@ class SNodeClientException(Exception):
 
 class SNodeClient:
 
-    def __init__(self, ip_address, timeout=300, retry=5):
-        self.ip_address = ip_address
-        self.url = 'http://%s/snode/' % self.ip_address
+    def __init__(self, host, timeout=300, retry=5):
+        settings = Settings()
+        scheme = "https" if settings.tls_connect != "disabled" else "http"
+        self.url = f'{scheme}://{host}/snode/'
         self.timeout = timeout
         self.session = requests.session()
-        self.session.verify = False
+        if settings.tls_connect != "disabled":
+            self.session.verify = str(settings.tls_certificate_authority)
         self.session.headers['Content-Type'] = "application/json"
         retries = Retry(total=retry, backoff_factor=1, connect=retry, read=retry)
         self.session.mount("http://", HTTPAdapter(max_retries=retries))
+        self.session.mount("https://", HTTPAdapter(max_retries=retries))
+        if settings.tls_connect == "authenticated":
+            self.session.cert = (str(settings.tls_certificate), str(settings.tls_key))
 
     def _request(self, method, path, payload=None):
         try:
@@ -183,9 +190,6 @@ class SNodeClient:
     def spdk_process_is_up(self, rpc_port, cluster_id):
         params = {"rpc_port": rpc_port, "cluster_id": cluster_id}
         return self._request("GET", "spdk_process_is_up", params)
-
-    def get_file_content(self, file_name):
-        return self._request("GET", f"get_file_content/{file_name}")
 
     def spdk_proxy_restart(self,rpc_port=None):
         params = {"rpc_port": rpc_port}

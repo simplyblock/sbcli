@@ -88,7 +88,15 @@ TASK_EXEC_RETRY_COUNT = 8
 # window.  See incident 2026-04-20: 83 s end-to-end recovery, ~60 s of which
 # was TASK_EXEC_INTERVAL doubling between redundant retries.
 RESTART_TASK_EXEC_INTERVAL_SEC = 3
-RESTART_TASK_EXEC_INTERVAL_MAX_SEC = 15
+# Cap exponential backoff at 1 h. Peer-side recovery (lvstore replay
+# across a slow remote-NVMe link, JC reconnect against a peer coming
+# back from host_reboot, or simply mutual-exclusion contention while a
+# different peer is mid-restart) can legitimately take longer than
+# minutes. With max_retry=11 the doubling sequence (3,6,12,24,48,96,
+# 192,384,768,1536,3072→capped) reaches the cap on the 10th attempt,
+# giving a total budget in the hours range — the right scale for
+# transient peer-recovery waits without giving up prematurely.
+RESTART_TASK_EXEC_INTERVAL_MAX_SEC = 3600
 
 SIMPLY_BLOCK_SPDK_CORE_IMAGE = "simplyblock/spdk-core:v24.05-tag-latest"
 SIMPLY_BLOCK_DOCKER_IMAGE = get_config_var(
@@ -142,27 +150,48 @@ SPDK_PROXY_MULTI_THREADING_ENABLED=True
 SPDK_PROXY_TIMEOUT=60*5
 LVOL_NVME_CONNECT_RECONNECT_DELAY=2
 LVOL_NVME_CONNECT_CTRL_LOSS_TMO=60*60
+LVOL_NVME_CONNECT_FAST_IO_FAIL_TO=1
 LVOL_NVME_CONNECT_NR_IO_QUEUES=3
-LVOL_NVME_KEEP_ALIVE_TO=10
-LVOL_NVME_KEEP_ALIVE_TO_TCP=7
+LVOL_NVME_KEEP_ALIVE_TO=4
+LVOL_NVME_KEEP_ALIVE_TO_TCP=4
 QPAIR_COUNT=32
 CLIENT_QPAIR_COUNT=3
+# 8 s, not 4 s. 4 s false-positives during a peer-reset reactor stall:
+# when a peer dies, bdev_nvme's per-controller reset state machines run on
+# the same SPDK reactor thread that polls JM/heartbeat qpairs to other
+# peers, and the reactor can spend ~4 s in that bookkeeping. With a 4 s
+# timeout, in-flight heartbeats to *healthy* peers age past the threshold
+# during that stall, timeout_cb fires on every controller in lock-step,
+# and the JC marks N JM slots blocked simultaneously — dropping
+# n_safe_jms below the FT threshold and triggering a JCERR / DISTRIBD
+# write fail (observed 2026-04-30 14:14:22 on a dual-outage soak step,
+# stall measured at 4.144 s). 8 s absorbs the worst observed stall and
+# still fast-fails wedged targets ~10× faster than the previous abort-
+# hang path (multi-minute, the 2026-04-27 incident that motivated the
+# action_on_timeout=reset switch — that switch stays; only the threshold
+# reverts).
 NVME_TIMEOUT_US=8000000
 NVMF_MAX_SUBSYSTEMS=50000
-KATO=10000
+KATO=5000
+# transport_ack_timeout exponent: server tears down a client qpair if it
+# stays silent for ~2^ACK_TO ms. ACK_TO=11 (~2 s) is shorter than the LVS
+# tertiary rejoin freeze window (≈ 4 s today) — the server kills healthy
+# qpairs on the alive primary mid-freeze and clients see a multi-second
+# stall on reissue. Bumped to 12 (~4 s) so the freeze fits inside the
+# budget. Long-term, the freeze itself is being shortened (single-path
+# hublvol attach + deferred failover); this stays as belt-and-braces so
+# a stragglier rejoin doesn't immediately re-trip the bug.
 ACK_TO=11
-BDEV_RETRY=0
-# Used when the storage node has >1 data NIC (NVMe multipath active). Per the
-# SPDK NVMe multipath docs, bdev_retry_count must be non-zero so aborted IOs
-# from a failed path are retried on the alternate path instead of returning
-# as errors to the caller. Kept minimal: one fast retry is enough to cover
-# a brief path-switch window without compounding latency on genuine outages.
-BDEV_RETRY_MULTIPATH=2
-TRANSPORT_RETRY=3
-# With NVMe multipath active the alternate path already provides redundancy,
-# so transport_retry_count can be tightened from 3 to 1 to fail an IO faster
-# onto the other path instead of burning the per-path retry budget first.
-TRANSPORT_RETRY_MULTIPATH=1
+# bdev_retry_count must be non-zero for SPDK bdev_nvme to retry an aborted
+# IO on the alternate path of an NVMe-oF multipath bdev (per the SPDK
+# multipath docs). Multipath is in play whenever a node consumes a hublvol
+# bdev that has both a primary-target and a secondary-target listener
+# (i.e. any FTT≥1 cluster), independent of how many local NICs the node has.
+# So we set the retries unconditionally rather than gating on data_nics.
+# Worst-case retry budget: (1+BDEV_RETRY) * (1+TRANSPORT_RETRY) = 3*2 = 6
+# transport submissions per failing IO before EIO bubbles to the caller.
+BDEV_RETRY=2
+TRANSPORT_RETRY=1
 CTRL_LOSS_TO=1
 FAST_FAIL_TO=0
 RECONNECT_DELAY_CLUSTER=1

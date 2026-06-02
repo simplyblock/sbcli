@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
 
 from simplyblock_core.db_controller import DBController
-from simplyblock_core.controllers import pool_controller
+from simplyblock_core.controllers import pool_controller, lvol_controller
 from simplyblock_core import utils as core_utils
 from simplyblock_core.models.pool import Pool as PoolModel
 
@@ -24,9 +24,6 @@ def list(cluster: Cluster) -> List[StoragePoolDTO]:
     for pool in db.get_pools():
         if pool.cluster_id == cluster.get_id():
             stat_obj = None
-            ret = db.get_pool_stats(pool, 1)
-            if ret:
-                stat_obj = ret[0]
             data.append(StoragePoolDTO.from_model(pool, stat_obj))
     return data
 
@@ -47,12 +44,9 @@ class StoragePoolParams(BaseModel):
 
 @api.post('/', name='clusters:storage-pools:create', status_code=201, responses={201: {"content": None}})
 def add(request: Request, cluster: Cluster, parameters: StoragePoolParams) -> Response:
-    try:
-        db.get_pool_by_name(parameters.name)
-        # FIXME: Names are deployment unique, this should be changed
-        raise HTTPException(409, f'Pool {parameters.name} already exists')
-    except KeyError:
-        pass
+    for pool in db.get_pools(cluster.get_id()):
+        if pool.pool_name == parameters.name:
+            raise HTTPException(409, f'Pool {parameters.name} already exists')
 
     id_or_false =  pool_controller.add_pool(
         parameters.name, parameters.pool_max, parameters.volume_max_size, parameters.max_rw_iops, parameters.max_rw_mbytes,
@@ -71,11 +65,14 @@ def add(request: Request, cluster: Cluster, parameters: StoragePoolParams) -> Re
 instance_api = APIRouter(prefix='/{pool_id}')
 
 
-def _lookup_storage_pool(pool_id: UUID) -> PoolModel:
+def _lookup_storage_pool(pool_id: UUID, cluster: Cluster) -> PoolModel:
     try:
-        return db.get_pool_by_id(str(pool_id))
+        pool = db.get_pool_by_id(str(pool_id))
     except KeyError as e:
         raise HTTPException(404, str(e))
+    if pool.cluster_id != cluster.get_id():
+        raise HTTPException(404, f'Pool {pool_id} not found')
+    return pool
 
 
 StoragePool = Annotated[PoolModel, Depends(_lookup_storage_pool)]
@@ -84,9 +81,6 @@ StoragePool = Annotated[PoolModel, Depends(_lookup_storage_pool)]
 @instance_api.get('/', name='clusters:storage-pools:detail')
 def get(cluster: Cluster, pool: StoragePool) -> StoragePoolDTO:
     stat_obj = None
-    ret = db.get_pool_stats(pool, 1)
-    if ret:
-        stat_obj = ret[0]
     return StoragePoolDTO.from_model(pool, stat_obj)
 
 
@@ -162,3 +156,8 @@ def remove_host(cluster: Cluster, pool: StoragePool, parameters: PoolHostParams)
     if not ok:
         raise HTTPException(400, err)
     return Response(status_code=204)
+
+
+@instance_api.get('/master-lvols', name='clusters:storage-pools:master-lvols')
+def master_lvols(cluster: Cluster, pool: StoragePool):
+    return lvol_controller.get_master_lvols_by_pool_uuid(pool.get_id(), is_json=True)

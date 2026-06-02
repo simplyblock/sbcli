@@ -4,9 +4,10 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
+from pydantic.networks import AnyUrl, UrlConstraints
 
 from simplyblock_core.db_controller import DBController
-from simplyblock_core.models.cluster import Cluster as ClusterModel
+from simplyblock_core.models.cluster import Cluster as ClusterModel, HashicorpVaultSettings as ModelVaultSettings
 from simplyblock_core import cluster_ops
 
 from .dtos import ClusterDTO
@@ -40,6 +41,13 @@ class BackupConfigParams(BaseModel):
     s3_thread_pool_size: Optional[int] = Field(default=None, ge=0)
 
 
+class HashicorpVaultSettings(BaseModel):
+    base_url: Optional[Annotated[AnyUrl, UrlConstraints(allowed_schemes=["https"])]] = None
+    transit_mount: str = "simplyblock/transit"
+    kv_mount: str = "simplyblock/kv"
+    cert_role: str = "simplyblock-webappapi"
+
+
 class ClusterParams(BaseModel):
     name: str = ""
     blk_size: Literal[512, 4096] = 512
@@ -71,6 +79,7 @@ class ClusterParams(BaseModel):
     rpc_base_port: int = 8080
     snode_api_port: int = 50001
     backup_config: Optional[BackupConfigParams] = None
+    hashicorp_vault_settings: Optional[HashicorpVaultSettings] = None
 
 
 @api.get('/', name='clusters:list')
@@ -91,6 +100,8 @@ def add(parameters: ClusterParams):
         params = parameters.model_dump(exclude_none=True)
         npcs = params.get('distr_npcs', 1)
         params['max_fault_tolerance'] = min(npcs, 2) if npcs >= 1 else 1
+        if "hashicorp_vault_settings" in params:
+            params["hashicorp_vault_settings"] = ModelVaultSettings(params["hashicorp_vault_settings"])
         cluster_id_or_false = cluster_ops.add_cluster(**params)
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))

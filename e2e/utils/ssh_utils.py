@@ -1026,17 +1026,45 @@ class SshUtils:
         output_fmt  = f' --output-format={kwargs["output_format"]} ' if kwargs.get("output_format") else ''
         output_file = f" --output={kwargs['output_file']} " if kwargs.get("output_file") else ''
         iolog_base  = kwargs.get("iolog_file")
+        fio_log_base = kwargs.get("fio_log_file")
 
         iolog_opt   = f"--write_iolog={iolog_base}" if iolog_base else ""
         log_opt     = f"--log_avg_msec={log_avg_ms}" if log_avg_ms else ""
+        fio_log_opt = (
+            f"--write_bw_log={fio_log_base} "
+            f"--write_lat_log={fio_log_base} "
+            f"--write_iops_log={fio_log_base}"
+        ) if fio_log_base else ""
         latency = f" --max_latency={max_latency}" if use_latency else ""
+
+        # Unique seed per FIO process to prevent identical IO patterns
+        # across concurrent processes (FIO defaults to time-based seeding
+        # which collides when multiple processes start simultaneously).
+        randseed = kwargs.get("randseed", random.randint(1, 2**63))
+
+        # verify_backlog: required for rw/randrw + verify=md5 to avoid false
+        # err=84.  FIO's rand_seed PRNG is shared between writes and verify-
+        # reads; in rw modes the interleaving makes seeds unpredictable.
+        # Setting verify_backlog enables TD_F_VER_BACKLOG which bypasses the
+        # rand_seed check while still verifying data via MD5.  Auto-enable
+        # for mixed read-write workloads unless the caller explicitly opts out.
+        verify_backlog = kwargs.get("verify_backlog")
+        if verify_backlog is None and rw in ("rw", "randrw", "readwrite"):
+            verify_backlog = 4096
+        vbacklog_opt = f" --verify_backlog={verify_backlog}" if verify_backlog else ""
+
+        verify_backlog_batch = kwargs.get("verify_backlog_batch")
+        if verify_backlog_batch is None and verify_backlog:
+            verify_backlog_batch = 32
+        vbatch_opt = f" --verify_backlog_batch={verify_backlog_batch}" if verify_backlog_batch else ""
 
         # raw fio command
         fio_cmd = (
             f"fio --name={name} {location} --ioengine={ioengine} --direct=1 --iodepth={iodepth} "
             f"{time_based} --runtime={runtime} --rw={rw} {latency} --bs={bs} --size={size} --rwmixread={rwmixread} "
-            f"--verify=md5 --verify_dump=1 --verify_fatal=1 --numjobs={numjobs} --nrfiles={nrfiles} "
-            f"{log_opt} {iolog_opt} {output_fmt}{output_file}"
+            f"--verify=md5 --verify_dump=1 --verify_fatal=1 --randseed={randseed}{vbacklog_opt}{vbatch_opt} "
+            f"--numjobs={numjobs} --nrfiles={nrfiles} "
+            f"{log_opt} {iolog_opt} {fio_log_opt} {output_fmt}{output_file}"
         ).strip()
 
         if kwargs.get("debug"):
@@ -1679,6 +1707,8 @@ class SshUtils:
         """
         Get the list of active physical network interfaces on the node.
 
+        Uses 'ip link show' (kernel-level) instead of nmcli for reliability.
+
         Args:
             node_ip (str): IP of the target node.
         Returns:
@@ -1686,13 +1716,13 @@ class SshUtils:
         """
         try:
             cmd = (
-                "sudo nmcli device status | grep 'connected' | awk '{print $1}' | grep -Ev '^(docker|lo)'"
+                "ip -o link show up | awk -F': ' '{print $2}' | grep -Ev '^(docker|lo|veth|br-)'"
             )
             output, error = self.exec_command(node_ip, cmd)
             if error:
                 self.logger.error(f"Error fetching active interfaces on {node_ip}: {error}")
                 return []
-            interfaces = output.strip().split("\n")
+            interfaces = [iface.strip() for iface in output.strip().split("\n") if iface.strip()]
             self.logger.info(f"Filtered active interfaces on {node_ip}: {interfaces}")
             return interfaces
         except Exception as e:
@@ -1770,40 +1800,44 @@ class SshUtils:
         max_tries: int = 3,
     ):
         """
-        Bring all given interfaces DOWN, verify outage by ping, keep for duration, then bring them UP.
-        Fire-and-forget style; robust against brief SSH flaps.
+        Bring all given interfaces DOWN via ‘ip link set’, verify outage by ping,
+        keep for duration, then bring them UP.
+
+        Uses kernel-level ‘ip link set’ instead of nmcli for deterministic
+        behavior — no NetworkManager state machine, no D-Bus timeouts, and
+        ‘ip link set up’ always restores the link without re-negotiation.
         """
         if not interfaces:
             self.logger.info(f"No active interfaces provided for {node_ip}; skipping NIC down.")
             return
 
-        down_cmd = " && ".join([f"nmcli connection down {i}" for i in interfaces])
-        up_cmd   = " && ".join([f"nmcli connection up {i}" for i in interfaces])
+        down_cmd = " && ".join([f"ip link set {i} down" for i in interfaces])
+        up_cmd   = " && ".join([f"ip link set {i} up" for i in interfaces])
         cmd = f'nohup sh -c "{down_cmd} && sleep {duration_secs} && {up_cmd}" &'
 
         try:
-            self.logger.info(f"Executing combined disconnect command on node {node_ip}: {cmd}")
+            self.logger.info(f"Executing ip link disconnect on node {node_ip}: {cmd}")
             out, err = self.exec_command(node=node_ip, command=cmd, max_retries=1, timeout=20)
             if err:
                 raise Exception(err)
         except Exception as e:
             self.logger.info(f"Command: {cmd}, error: {e}! Checking pings!!")
 
-        # Verify outage begins (best-effort). If ping still works, attempt to issue 'down' again.
+        # Verify outage begins (best-effort). If ping still works, attempt to issue ‘down’ again.
         time.sleep(5)
         tries = 0
         if duration_secs < 100:
             attempts = 2
         else:
             attempts = 5
+        down_only_cmd = f'nohup sh -c "{down_cmd}" &'
         while self._ping_once(node_ip) and attempts > 0:
             tries += 1
             if tries >= max_tries:
                 self.logger.warning(f"Ping to {node_ip} still responding after NIC down attempts; continuing anyway.")
                 break
             self.logger.info(f"Ping to {node_ip} still alive; retrying NIC down...")
-            # re-run only the DOWN part (don’t append sleep again to avoid stacking)
-            self.exec_command(node=node_ip, command=cmd, max_retries=2)
+            self.exec_command(node=node_ip, command=down_only_cmd, max_retries=2)
             time.sleep(3)
             attempts -= 1
 
@@ -1944,7 +1978,7 @@ class SshUtils:
             )
 
 
-    def restart_docker_logging(self, node_ip, containers, log_dir, test_name):
+    def restart_docker_logging(self, node_ip, containers, log_dir, test_name, timeout=60, max_retries=2):
         """
         Restart Docker logs collection after an outage.
 
@@ -1953,9 +1987,12 @@ class SshUtils:
             containers (list): List of container names to log.
             log_dir (str): Directory to save log files.
             test_name (str): Name of the test for log identification.
+            timeout (int): SSH command timeout in seconds (default 60).
+            max_retries (int): Max SSH retries per command (default 2).
         """
         try:
-            self.exec_command(node_ip, f"sudo mkdir -p {log_dir} && sudo chmod 777 {log_dir}")
+            self.exec_command(node_ip, f"sudo mkdir -p {log_dir} && sudo chmod 777 {log_dir}",
+                             timeout=timeout, max_retries=max_retries)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             for container in containers:
                 log_file = f"{log_dir}/{container}_{test_name}_{node_ip}_{timestamp}_after_outage.txt"
@@ -1966,16 +2003,8 @@ class SshUtils:
                     f"\"docker logs --follow {container} > {log_file} 2>&1\""
                 )
                 self.logger.info(f"Restarting Docker log collection for container '{container}' on {node_ip}. Command: {command_logs}")
-                self.exec_command(node_ip, command_logs)
-                # # Verify if the process is running (optional but helpful for debugging)
-                # verify_command = f"ps aux | grep 'docker logs --follow {container}'"
-                # output, _ = self.exec_command(node_ip, verify_command)
-                # if output:
-                #     output = output.strip()
+                self.exec_command(node_ip, command_logs, timeout=timeout, max_retries=max_retries)
 
-                # if not output:
-                #     raise RuntimeError("Docker logging process failed to start.")
-                
                 print(f"Docker logging started successfully for container '{container}'.")
         except Exception as e:
             self.logger.error(f"Failed to restart Docker log collection on node {node_ip}: {e}")
@@ -3788,6 +3817,7 @@ class RunnerK8sLog:
             "simplyblock-tasks",
             "simplyblock-webappapi",
             "snode-spdk-pod",
+            "fio-",
         )
         for pod in pods:
             # Filter pods based on prefixes
@@ -3884,6 +3914,7 @@ class RunnerK8sLog:
             "simplyblock-tasks",
             "simplyblock-webappapi",
             "snode-spdk-pod",
+            "fio-",
         )
 
         def _monitor():

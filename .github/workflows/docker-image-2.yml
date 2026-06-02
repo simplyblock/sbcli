@@ -1,0 +1,92 @@
+name: Docker Image Builder (docker.io, ecr.aws, quay.io)
+
+on:
+  workflow_dispatch:
+    inputs:
+      push_to_docker:
+        description: "Push to docker.io"
+        required: false
+        default: true
+        type: boolean
+      push_to_ecr:
+        description: "Push to ecr.aws"
+        required: false
+        default: true
+        type: boolean
+      push_to_quay:
+        description: "Push to quay.io"
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+
+  build:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@master
+
+    - name: Set docker image tag
+      id: get_info
+      run: |
+        if [[ "${{github.ref}}" == refs/pull/* ]]; then
+          tag=${GITHUB_REF/\/merge/}
+          echo "TAG=$(echo pr-${tag:10})" >> $GITHUB_ENV
+        else
+          echo "TAG=$(echo ${GITHUB_REF#refs/*/} | sed 's/\//-/g')" >> $GITHUB_ENV
+        fi
+        echo "BRANCH=$([ -z '${{ github.event.pull_request.head.sha }}' ] && echo ${GITHUB_REF#refs/*/} || echo $GITHUB_HEAD_REF)" >> $GITHUB_ENV
+        echo "SHA=$([ -z '${{ github.event.pull_request.head.sha }}' ] && echo $GITHUB_SHA || echo '${{ github.event.pull_request.head.sha }}')" >> $GITHUB_ENV
+
+    - name: Login to Quay.io
+      uses: docker/login-action@v3
+      if: ${{ inputs.push_to_quay == true }}
+      with:
+        username:  ${{ secrets.QUAY_USERNAME }}
+        password: ${{ secrets.QUAY_PASSWORD }}
+        registry: quay.io
+
+    - name: Login to Docker Hub
+      uses: docker/login-action@v3
+      if: ${{ inputs.push_to_docker == true }}
+      with:
+        username: hamdysimplyblock
+        password: ${{ secrets.DOCKER_PASS }}
+
+    - name: Configure AWS Credentials
+      if: ${{ inputs.push_to_ecr == true }}
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID_HAMDI }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY_HAMDI }}
+        aws-region: us-east-1
+
+    - name: Login to ECR
+      if: ${{ inputs.push_to_ecr == true }}
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
+      with:
+        registry-type: public
+
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@v3
+
+    - name: Build & Push
+      run: |
+        SHORT_SHA=$(echo ${{ env.SHA }} | head -c 8)
+        docker buildx ls
+        docker buildx create --name mybuilder --bootstrap --use
+         if [ "${{ inputs.push_to_docker }}" == "true" ]; then
+          docker buildx build --platform linux/amd64,linux/arm64 -t simplyblock/simplyblock:$TAG -t simplyblock/simplyblock:$TAG-$SHORT_SHA -f docker/Dockerfile . --push
+          echo "::notice title=Docker.com::simplyblock/simplyblock:$TAG"
+        fi
+        if [ "${{ inputs.push_to_ecr }}" == "true" ]; then
+          docker buildx build --platform linux/amd64,linux/arm64 -t public.ecr.aws/simply-block/simplyblock:$TAG -t public.ecr.aws/simply-block/simplyblock:$TAG-$SHORT_SHA -f docker/Dockerfile . --push
+          echo "::notice title=AWS-ECR::public.ecr.aws/simply-block/simplyblock:$TAG"
+        fi
+        if [ "${{ inputs.push_to_quay }}" == "true" ]; then
+          docker buildx build --platform linux/amd64,linux/arm64 -t quay.io/simplyblock-io/simplyblock:$TAG -f docker/Dockerfile . --push
+          echo "::notice title=Quay.io::quay.io/simplyblock-io/simplyblock:$TAG"
+        fi

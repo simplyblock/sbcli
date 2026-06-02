@@ -11,9 +11,9 @@ import uuid
 from simplyblock_core import utils
 from simplyblock_core.controllers import pool_events, lvol_controller
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.kms import KMSException, create_kms_connection
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.prom_client import PromClient
-from simplyblock_core.rpc_client import RPCClient
 
 logger = lg.getLogger()
 
@@ -32,7 +32,7 @@ def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes,
 
     pool_list = db_controller.get_pools()
     for p in pool_list:
-        if p.pool_name == name:
+        if p.pool_name == name and p.cluster_id == cluster_id:
             logger.error(f"Pool found with the same name: {name}")
             return False
 
@@ -98,13 +98,23 @@ def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes,
 
     pool.dhchap = bool(dhchap)
     if pool.dhchap:
-        pool.dhchap_key = utils.generate_dhchap_key(length=36)
-        pool.dhchap_ctrlr_key = utils.generate_dhchap_key(length=36)
+        pool.dhchap_key = utils.generate_dhchap_key(length=32)
+        pool.dhchap_ctrlr_key = utils.generate_dhchap_key(length=32)
+
+
+    with create_kms_connection(cluster) as kms:
+        try:
+            kms.create_key_encryption_key(pool.get_id())
+            logger.info("Created pool key")
+        except KMSException:
+            logger.exception("Failed to create pool key")
+            return False
 
     pool.status = "active"
     pool.write_to_db(db_controller.kv_store)
     pool_events.pool_add(pool)
     logger.info("Done")
+
     return pool.get_id()
 
 
@@ -210,7 +220,7 @@ def set_pool(uuid, pool_max=0, lvol_max=0, max_rw_iops=0,
 
     if name and name != pool.pool_name:
         for p in db_controller.get_pools():
-            if p.pool_name == name:
+            if p.pool_name == name and p.cluster_id == pool.cluster_id:
                 msg = f"Pool found with the same name: {name}"
                 logger.error(msg)
                 return False, msg
@@ -307,7 +317,7 @@ def set_pool(uuid, pool_max=0, lvol_max=0, max_rw_iops=0,
     # Apply QoS settings via RPC
     for hostname in db_controller.get_hostnames_by_pool_id(uuid):
         for sn in db_controller.get_storage_nodes_by_hostname(hostname):
-            client = RPCClient(sn.mgmt_ip, sn.rpc_port, sn.rpc_username, sn.rpc_password)
+            client = sn.rpc_client()
             if not client.bdev_lvol_set_qos_limit(pool.numeric_id, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes):
                 logger.error("RPC failed bdev_lvol_set_qos_limit")
                 return False, "RPC failed"
@@ -342,6 +352,15 @@ def delete_pool(uuid):
     logger.info(f"Deleting pool {pool.get_id()}")
     pool_events.pool_remove(pool)
     pool.remove(db_controller.kv_store)
+    cluster = db_controller.get_cluster_by_id(pool.cluster_id)
+
+    with create_kms_connection(cluster) as kms:
+        try:
+            kms.delete_key_encryption_key(pool.get_id())
+            logger.info("Deleted pool key")
+        except KMSException:
+            logger.exception("Failed to delete pool key")
+
     logger.info("Done")
     return True
 
@@ -470,7 +489,7 @@ def get_io_stats(pool_id, history, records_count=20):
     ])
 
 
-def get_pool_total_capacity(pool_id):
+def get_pool_total_capacity(pool_id, all_lvols=None, all_snaps=None):
     db_controller = DBController()
     try:
         db_controller.get_pool_by_id(pool_id)
@@ -478,11 +497,14 @@ def get_pool_total_capacity(pool_id):
         logger.error(f"Pool not found {pool_id}")
         return False
     total = 0
-    for lvol in db_controller.get_lvols_by_pool_id(pool_id):
+    if not all_lvols:
+        all_lvols = db_controller.get_lvols_by_pool_id(pool_id)
+    for lvol in all_lvols:
         total += lvol.size
 
-    snaps = db_controller.get_snapshots()
-    for snap in snaps:
+    if not all_snaps:
+        all_snaps = db_controller.get_snapshots()
+    for snap in all_snaps:
         if snap.lvol.pool_uuid == pool_id:
             total += snap.used_size
     return total

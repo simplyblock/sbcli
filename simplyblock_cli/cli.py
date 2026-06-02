@@ -123,7 +123,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('cluster_id', help='The cluster id.', type=str)
         subcommand.add_argument('node_addr', help='Address of storage node api to add, like <node-ip>:5000.', type=str)
         subcommand.add_argument('ifname', help='The management interface name.', type=str)
-        argument = subcommand.add_argument('--journal-partition', help='**Deprecated:** use `--enable-journal-device` instead.<br><br> 1: Auto-create small partitions for journal on nvme devices. 0: use a separate (the smallest) nvme device of the node for journal. The journal needs a maximum of 3 percent of total available raw disk space. Default: `1`.', type=int, dest='partitions', choices=[0,1,])
+        argument = subcommand.add_argument('--journal-partition', help='**Deprecated since: 26.1** Replaced by: --enable-journal-device\n\n1: Auto-create small partitions for journal on nvme devices. 0: use a separate (the smallest) nvme device of the node for journal. The journal needs a maximum of 3 percent of total available raw disk space. Default: `1`.', type=int, dest='partitions', choices=[0,1,])
         argument = subcommand.add_argument('--enable-journal-device', help='Enables the use of a separate (the smallest) NVMe device of the node for the journal. Otherwise, the journal uses a maximum of 3%% of total available raw disk space across all NVMe devices.', default=False, dest='enable_journal_device', action='store_true')
         argument = subcommand.add_argument('--format-4k', help='Force format nvme devices with 4K.', dest='format_4k', action='store_true')
         if self.developer_mode:
@@ -202,12 +202,12 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--force', help='Force node shutdown.', dest='force', action='store_true')
 
     def init_storage_node__suspend(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'suspend', 'Suspends a storage node.')
+        subcommand = self.add_sub_command(subparser, 'suspend', 'DEPRECATED: the suspension phase was removed from graceful shutdown (it caused writer conflicts on sec/tert lvstores). This command is now a no-op returning success. Use `sn shutdown`.')
         subcommand.add_argument('node_id', help='Storage node id', type=str).completer = self._completer_get_sn_list
-        argument = subcommand.add_argument('--force', help='Force node suspend.', dest='force', action='store_true')
+        argument = subcommand.add_argument('--force', help='Ignored (kept for backwards compatibility).', dest='force', action='store_true')
 
     def init_storage_node__resume(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'resume', 'Resumes a storage node.')
+        subcommand = self.add_sub_command(subparser, 'resume', 'DEPRECATED: counterpart to `sn suspend`, also a no-op.')
         subcommand.add_argument('node_id', help='Storage node id', type=str).completer = self._completer_get_sn_list
 
     def init_storage_node__get_io_stats(self, subparser):
@@ -368,16 +368,15 @@ class CLIWrapper(CLIWrapperBase):
         self.init_cluster__update_fabric(subparser)
         self.init_cluster__check(subparser)
         self.init_cluster__update(subparser)
-        if self.developer_mode:
-            self.init_cluster__graceful_shutdown(subparser)
-        if self.developer_mode:
-            self.init_cluster__graceful_startup(subparser)
+        self.init_cluster__graceful_shutdown(subparser)
+        self.init_cluster__graceful_startup(subparser)
         self.init_cluster__list_tasks(subparser)
         self.init_cluster__cancel_task(subparser)
         self.init_cluster__get_subtasks(subparser)
         self.init_cluster__delete(subparser)
         if self.developer_mode:
             self.init_cluster__set(subparser)
+        self.init_cluster__set_shared_placement(subparser)
         self.init_cluster__change_name(subparser)
         self.init_cluster__add_replication(subparser)
 
@@ -427,6 +426,7 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--nvmf-base-port', help='Base port for all NVMe-oF listeners (lvol, hublvol, device). Default: `4420`.', type=int, default=4420, dest='nvmf_base_port')
         argument = subcommand.add_argument('--rpc-base-port', help='The base port for SPDK JSON-RPC. Default: `8080`.', type=int, default=8080, dest='rpc_base_port')
         argument = subcommand.add_argument('--snode-api-port', help='The SNodeAPI/firewall port (one per host IP). Default: `50001`.', type=int, default=50001, dest='snode_api_port')
+        argument = subcommand.add_argument('--hashicorp-vault-url', help='Hashicorp vault URL for storing encryption keys for this cluster', type=str, dest='hashicorp_vault_url')
 
     def init_cluster__add(self, subparser):
         subcommand = self.add_sub_command(subparser, 'add', 'Adds a new cluster.')
@@ -459,6 +459,7 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--nvmf-base-port', help='Base port for all NVMe-oF listeners (lvol, hublvol, device). Default: `4420`.', type=int, default=4420, dest='nvmf_base_port')
         argument = subcommand.add_argument('--rpc-base-port', help='The base port for SPDK JSON-RPC. Default: `8080`.', type=int, default=8080, dest='rpc_base_port')
         argument = subcommand.add_argument('--snode-api-port', help='The SNodeAPI/firewall port (one per host IP). Default: `50001`.', type=int, default=50001, dest='snode_api_port')
+        argument = subcommand.add_argument('--hashicorp-vault-url', help='Hashicorp vault URL for storing encryption keys for this cluster', type=str, dest='hashicorp_vault_url')
 
     def init_cluster__activate(self, subparser):
         subcommand = self.add_sub_command(subparser, 'activate', 'Activates a cluster.')
@@ -566,6 +567,12 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('attr_name', help='The new or existing attribute name.', type=str)
         subcommand.add_argument('attr_value', help='The new attribute value.', type=str)
 
+    def init_cluster__set_shared_placement(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'set-shared-placement', 'Enable cluster-wide per-chunk data placement-binding for distrib bdevs (forward-only upgrade; --disable is reserved for debug).')
+        subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
+        argument = subcommand.add_argument('--disable', help='Reverse transition (per-chunk -> per-page). Debug only; only safe on a balanced or empty bdev. Requires --force.', dest='disable', action='store_true')
+        argument = subcommand.add_argument('--force', help='Bypass the rebalancing / non-online-node guards. Required when --disable is passed.', dest='force', action='store_true')
+
     def init_cluster__change_name(self, subparser):
         subcommand = self.add_sub_command(subparser, 'change-name', 'Assigns or changes a name to a cluster')
         subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
@@ -622,8 +629,8 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--max-size', help='The logical volume max size. Default: `1000T`.', type=size_type(), default='1000T', dest='max_size')
         argument = subcommand.add_argument('--host-id', help='The primary storage node id or hostname.', type=str, dest='host_id')
         argument = subcommand.add_argument('--encrypt', help='Use inline data encryption and decryption on the logical volume.', dest='encrypt', action='store_true')
-        argument = subcommand.add_argument('--crypto-key1', help='The hex value of key1 to be used for logical volume encryption.', type=str, dest='crypto_key1')
-        argument = subcommand.add_argument('--crypto-key2', help='The hex value of key2 to be used for logical volume encryption.', type=str, dest='crypto_key2')
+        argument = subcommand.add_argument('--crypto-key1', help='**Deprecated since: 26.2** Do not use this parameter: This has been replaced by internal or external KMS support. See https://docs.simplyblock.io/latest/usage/baremetal/encrypting/\n\nThe hex value of key1 to be used for logical volume encryption.', type=str, dest='crypto_key1')
+        argument = subcommand.add_argument('--crypto-key2', help='**Deprecated since: 26.2** Do not use this parameter: This has been replaced by internal or external KMS support. See https://docs.simplyblock.io/latest/usage/baremetal/encrypting/\n\nThe hex value of key2 to be used for logical volume encryption.', type=str, dest='crypto_key2')
         argument = subcommand.add_argument('--max-rw-iops', help='Maximum Read Write IO Per Second.', type=int, dest='max_rw_iops')
         argument = subcommand.add_argument('--max-rw-mbytes', help='Maximum Read Write Megabytes Per Second.', type=int, dest='max_rw_mbytes')
         argument = subcommand.add_argument('--max-r-mbytes', help='Maximum Read Megabytes Per Second.', type=int, dest='max_r_mbytes')
@@ -634,7 +641,7 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--ha-type', help='Logical volume HA type (single, ha), default is cluster HA type. Default: `default`.', type=str, default='default', dest='ha_type', choices=['single','default','ha',])
         argument = subcommand.add_argument('--fabric', help='The transport fabric type (tcp or rdma). The cluster must support the chosen fabric. Default: `tcp`.', type=str, default='tcp', dest='fabric', choices=['tcp','rdma','tcp,rdma',])
         argument = subcommand.add_argument('--lvol-priority-class', help='The logical volume priority class. Default: `0`.', type=int, default=0, dest='lvol_priority_class')
-        argument = subcommand.add_argument('--namespace', help='Sets the NVMe namespace for the logical volume (namespace must already exist).', type=str, dest='namespace')
+        argument = subcommand.add_argument('--namespaced', help='Adds this LVol as a namespace on any available subsystem, if not found then create a new subsystem. Default: `false`.', type=bool, default=False, dest='namespaced')
         if self.developer_mode:
             argument = subcommand.add_argument('--uid', help='Set logical volume id.', type=str, dest='uid')
         argument = subcommand.add_argument('--pvc-name', '--pvc_name', help='Set logical volume PVC name for k8s clients', type=str, dest='pvc_name')
@@ -694,6 +701,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('snapshot_id', help='The snapshot id.', type=str)
         subcommand.add_argument('clone_name', help='The clone name.', type=str)
         argument = subcommand.add_argument('--resize', help='New logical volume size: 10M, 10G, 10(bytes). Can only increase. Default: `0`.', type=size_type(), default='0', dest='resize')
+        argument = subcommand.add_argument('--namespaced', help='Adds this LVol as a namespace on any available subsystem, if not found then create a new subsystem. Default: `true`.', type=bool, default=True, dest='namespaced')
 
     def init_volume__move(self, subparser):
         subcommand = self.add_sub_command(subparser, 'move', 'Moves a full copy of the logical volume between nodes.')
@@ -805,6 +813,7 @@ class CLIWrapper(CLIWrapperBase):
         self.init_storage_pool__get_io_stats(subparser)
         self.init_storage_pool__add_host(subparser)
         self.init_storage_pool__remove_host(subparser)
+        self.init_storage_pool__get_master_lvols(subparser)
 
 
     def init_storage_pool__add(self, subparser):
@@ -872,6 +881,10 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('pool_id', help='The storage pool id.', type=str)
         subcommand.add_argument('host_nqn', help='The host NQN to remove.', type=str)
 
+    def init_storage_pool__get_master_lvols(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'get-master-lvols', 'Return a list of master lvols (not namespaced lvol) from a storage pool.')
+        subcommand.add_argument('pool_id', help='The storage pool id.', type=str)
+
 
     def init_snapshot(self):
         subparser = self.add_command('snapshot', 'Snapshot Commands')
@@ -899,6 +912,7 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--all', help='List soft deleted snapshots.', dest='all', action='store_true')
         argument = subcommand.add_argument('--cluster-id', help='Filter snapshots by cluster UUID', type=str, dest='cluster_id', required=False)
         argument = subcommand.add_argument('--with-details', help='List snapshots with replicate and chaining details', dest='with_details', action='store_true')
+        argument = subcommand.add_argument('--pool', help='List snapshots in particular pool id or name.', type=str, dest='pool')
 
     def init_snapshot__delete(self, subparser):
         subcommand = self.add_sub_command(subparser, 'delete', 'Deletes a snapshot.')
@@ -914,6 +928,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('snapshot_id', help='The snapshot id.', type=str)
         subcommand.add_argument('lvol_name', help='The logical volume name.', type=str)
         argument = subcommand.add_argument('--resize', help='New logical volume size: 10M, 10G, 10(bytes). Can only increase. Default: `0`.', type=size_type(), default='0', dest='resize')
+        argument = subcommand.add_argument('--namespaced', help='Adds this LVol as a namespace on any available subsystem, if not found then create a new subsystem. Default: `false`.', type=bool, default=True, dest='namespaced')
 
     def init_snapshot__replication_status(self, subparser):
         subcommand = self.add_sub_command(subparser, 'replication-status', 'Lists snapshots replication status')
@@ -1085,6 +1100,8 @@ class CLIWrapper(CLIWrapperBase):
                         args.id_device_by_nqn = False
                         args.max_snap = 5000
                         args.spdk_proxy_image = None
+                    if getattr(args, 'partitions', None) is not None:
+                        args = self.migrate_journal_partition(args)
                     ret = self.storage_node__add_node(sub_command, args)
                 elif sub_command in ['delete']:
                     ret = self.storage_node__delete(sub_command, args)
@@ -1259,17 +1276,9 @@ class CLIWrapper(CLIWrapperBase):
                 elif sub_command in ['update']:
                     ret = self.cluster__update(sub_command, args)
                 elif sub_command in ['graceful-shutdown']:
-                    if not self.developer_mode:
-                        print("This command is private.")
-                        ret = False
-                    else:
-                        ret = self.cluster__graceful_shutdown(sub_command, args)
+                    ret = self.cluster__graceful_shutdown(sub_command, args)
                 elif sub_command in ['graceful-startup']:
-                    if not self.developer_mode:
-                        print("This command is private.")
-                        ret = False
-                    else:
-                        ret = self.cluster__graceful_startup(sub_command, args)
+                    ret = self.cluster__graceful_startup(sub_command, args)
                 elif sub_command in ['list-tasks']:
                     ret = self.cluster__list_tasks(sub_command, args)
                 elif sub_command in ['cancel-task']:
@@ -1284,6 +1293,8 @@ class CLIWrapper(CLIWrapperBase):
                         ret = False
                     else:
                         ret = self.cluster__set(sub_command, args)
+                elif sub_command in ['set-shared-placement']:
+                    ret = self.cluster__set_shared_placement(sub_command, args)
                 elif sub_command in ['change-name']:
                     ret = self.cluster__change_name(sub_command, args)
                 elif sub_command in ['add-replication']:
@@ -1297,6 +1308,10 @@ class CLIWrapper(CLIWrapperBase):
                     if not self.developer_mode:
                         args.distr_vuid = None
                         args.uid = None
+                    if getattr(args, 'crypto_key1', None) is not None:
+                        raise ValueError("Deprecated parameter '--crypto-key1' cannot be used: This has been replaced by internal or external KMS support. See https://docs.simplyblock.io/latest/usage/baremetal/encrypting/")
+                    if getattr(args, 'crypto_key2', None) is not None:
+                        raise ValueError("Deprecated parameter '--crypto-key2' cannot be used: This has been replaced by internal or external KMS support. See https://docs.simplyblock.io/latest/usage/baremetal/encrypting/")
                     ret = self.volume__add(sub_command, args)
                 elif sub_command in ['qos-set']:
                     ret = self.volume__qos_set(sub_command, args)
@@ -1404,6 +1419,8 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.storage_pool__add_host(sub_command, args)
                 elif sub_command in ['remove-host']:
                     ret = self.storage_pool__remove_host(sub_command, args)
+                elif sub_command in ['get-master-lvols']:
+                    ret = self.storage_pool__get_master_lvols(sub_command, args)
                 else:
                     self.parser.print_help()
 

@@ -1,5 +1,4 @@
 from simplyblock_core.db_controller import DBController
-from simplyblock_core.rpc_client import RPCClient
 
 
 CLUSTER_ID = "10293de0-b91c-4618-b17a-5c3e688686f4"
@@ -16,7 +15,7 @@ for target_id, dev_id in MISMATCHES:
     dev = db.get_storage_device_by_id(dev_id)
     expected_prefix = f"remote_{dev.alceml_bdev}"
     in_db = any(rd.get_id() == dev_id for rd in target.remote_devices)
-    rpc = RPCClient(target.mgmt_ip, target.rpc_port, target.rpc_username, target.rpc_password, timeout=5, retry=1)
+    rpc = target.rpc_client(timeout=5, retry=1)
     bdevs = rpc.get_bdevs()
     found = [b["name"] for b in bdevs or [] if b["name"].startswith(expected_prefix)]
     print(

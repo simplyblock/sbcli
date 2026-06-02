@@ -1,24 +1,40 @@
 # coding=utf-8
 """
-test_port_allow_recovery.py — unit tests for network-outage recovery via
+test_port_allow_recovery.py — unit tests for
 ``tasks_runner_port_allow.exec_port_allow_task``.
 
-Two invariants are covered:
+Invariants covered:
 
-  1. Before the recovering node's port is unblocked, the full cluster map
-     must be pushed via ``distr_controller.send_cluster_map_to_node`` so
-     that every distrib on the recovering node has fresh per-device state
-     (not only the node's own devices). Otherwise the first IO through
-     the unblocked port hits ``status_device=48 / is_device_available_read=0``
-     and raises a DISTRIBD "Unable to read stripe" error.
+  1. **Cluster map sent before unblock.** Before the recovering node's
+     port is unblocked, the full cluster map must be pushed via
+     ``distr_controller.send_cluster_map_to_node`` so every distrib on
+     the recovering node has fresh per-device state. Otherwise the
+     first IO through the unblocked port hits
+     ``status_device=48 / is_device_available_read=0`` and raises a
+     DISTRIBD "Unable to read stripe" error.
 
-  2. When the current LVS leader is a *peer* (typical outage-recovery
-     case — a secondary/tertiary took over while this node was out), the
-     peer must be demoted (port blocked, ``bdev_lvol_set_leader(leader=False)``
-     + ``bdev_distrib_force_to_non_leader``, inflight drain) before the
-     recovering node's port is unblocked. Previously the task logged
-     "skipping peer demotion" and unblocked directly, which allowed
-     dual-leader IO and writer conflicts.
+  2. **No leadership manipulation.** The runner must not block any
+     peer's port, must not call ``bdev_lvol_set_leader`` /
+     ``bdev_distrib_force_to_non_leader`` on a peer, and must not call
+     ``bdev_lvol_set_lvs_opts`` to "take leadership locally" on the
+     recovering node. Leadership belongs to the JM heartbeat /
+     writer-conflict resolution; ``port_allow`` only allows the port.
+
+     Background: an earlier implementation did force-failback —
+     when ``_get_lvs_leader`` returned a peer (typical after a
+     failover), the runner would block the peer's port, demote the
+     peer, take leadership locally on the recovering node, and
+     additionally walk every secondary and block + demote them too.
+     That was wrong: a writer conflict only ever blocks the *primary*,
+     and once a failover succeeded the peer is the legitimate new
+     leader — blocking it cuts client IO and opens a fresh writer
+     conflict. See incident 2026-05-02 (k8s_native_failover_ha-
+     20260502-101452): worker5's port_allow at 15:51:44.818 blocked
+     worker1 (the new primary), producing client IO errors.
+
+  3. **Only the recovering node's port is firewall-allowed.** Exactly
+     one ``firewall_set_port(..., "allow", ...)`` call, on the
+     recovering node, on the requested port number.
 """
 
 import unittest
@@ -44,7 +60,6 @@ def _make_node(uuid, mgmt_ip, status=StorageNode.STATUS_ONLINE):
     n.jm_vuid = 1234
     n.lvstore_status = "ready"
     n.api_endpoint = f"{mgmt_ip}:5000"
-    # Stub FDB writes so MagicMock fields never get JSON-serialized.
     n.write_to_db = MagicMock(return_value=True)
     return n
 
@@ -63,90 +78,61 @@ def _make_task(node_id, port_number):
 
 class _BasePortAllowTest(unittest.TestCase):
     """Shared plumbing: patches every boundary so exec_port_allow_task
-    runs start-to-finish against in-memory mocks."""
+    runs start-to-finish against in-memory mocks and records every
+    ordered call into ``self.calls``."""
 
     def setUp(self):
-        # Recovering node (was out, now back)
+        # Recovering node (was DOWN, now coming back)
         self.node = _make_node("node-a", "10.0.0.10")
-        # Its secondary — the one that took leadership during the outage
+        # A peer that took leadership during the outage / conflict.
         self.sec = _make_node("node-b", "10.0.0.11")
         self.node.secondary_node_id = self.sec.uuid
         self.node.tertiary_node_id = None
         self.node.lvstore_ports = {self.node.lvstore: {"lvol_port": 4430}}
-        # Task asks us to unblock the primary LVS port
         self.port = 4430
         self.task = _make_task(self.node.uuid, self.port)
 
-        # One RPC client mock per node — both exposed via node.rpc_client()
-        # and via the explicit RPCClient constructor used for peer demote.
         self.node_rpc = MagicMock(name="node_rpc")
-        self.node_rpc.bdev_lvol_set_lvs_opts.return_value = True
-        self.node_rpc.bdev_lvol_set_leader.return_value = True
         self.sec_rpc = MagicMock(name="sec_rpc")
-        self.sec_rpc.bdev_lvol_set_leader.return_value = True
-        self.sec_rpc.bdev_distrib_force_to_non_leader.return_value = True
-        self.sec_rpc.bdev_distrib_check_inflight_io.return_value = False
-        self.sec_rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": False}]
+        self.sec_rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": True}]
         self.sec_rpc.jc_compression_get_status.return_value = False
 
         self.node.rpc_client = MagicMock(return_value=self.node_rpc)
         self.sec.rpc_client = MagicMock(return_value=self.sec_rpc)
         self.sec.wait_for_jm_rep_tasks_to_finish = MagicMock(return_value=True)
 
-        # get_lvol_subsys_port(lvstore) used for both node and sec
         self.node.get_lvol_subsys_port = MagicMock(return_value=self.port)
         self.sec.get_lvol_subsys_port = MagicMock(return_value=self.port)
 
-        # Call log — anything the task does touches one of these; the test
-        # inspects ordering + presence of specific calls.
         self.calls = []
 
-        # Record call ordering via side_effect on each method we care about,
-        # preserving whatever return_value was configured. Tests that need a
-        # method to raise simply overwrite side_effect on that method to a
-        # function that records the call and then raises.
-        def _record(method_name, owner_label, return_value):
-            def _side(*a, **kw):
-                self.calls.append((method_name, owner_label))
-                return return_value
-            return _side
+        # Record any RPC that would represent leadership manipulation.
+        for rpc in (self.node_rpc, self.sec_rpc):
+            owner = "node" if rpc is self.node_rpc else "sec"
+            for method in ("bdev_lvol_set_leader",
+                           "bdev_distrib_force_to_non_leader",
+                           "bdev_lvol_set_lvs_opts"):
+                def _make_side(name=method, who=owner):
+                    def _side(*a, **kw):
+                        self.calls.append((name, who))
+                        return True
+                    return _side
+                getattr(rpc, method).side_effect = _make_side()
 
-        for m, rv in [("bdev_lvol_set_leader", True),
-                      ("bdev_distrib_force_to_non_leader", True),
-                      ("bdev_distrib_check_inflight_io", False),
-                      ("bdev_lvol_set_lvs_opts", True)]:
-            getattr(self.sec_rpc, m).side_effect = _record(m, "sec", rv)
-            getattr(self.node_rpc, m).side_effect = _record(m, "node", rv)
-        # Expose the recorder helper so individual tests can install raising
-        # side_effects that still log the attempted call.
-        self._record = _record
-
-        # FirewallClient instances we return from the patched factory
+        # FirewallClient factory + spy
         fw_node = MagicMock(name="fw_node")
         fw_sec = MagicMock(name="fw_sec")
-
         def _firewall_side_effect(target, *a, **kw):
             fw = fw_node if target is self.node else fw_sec
             target_uuid = target.uuid
-
             def _spy(port, ptype, action, *a, **kw):
                 self.calls.append(("firewall_set_port", target_uuid, port, action))
                 return True
             fw.firewall_set_port = _spy
             return fw
-
         self.fw_node = fw_node
         self.fw_sec = fw_sec
 
-        # RPCClient(...) constructor is called explicitly for peer demote
-        # — always return self.sec_rpc for the peer's ip, otherwise a fresh
-        # MagicMock.
-        def _rpc_ctor(ip, port, *a, **kw):
-            if ip == self.sec.mgmt_ip:
-                return self.sec_rpc
-            return self.node_rpc
-
-        # Shared patches applied to every test
         self._patches = [
             patch(
                 "simplyblock_core.services.tasks_runner_port_allow.db",
@@ -196,10 +182,6 @@ class _BasePortAllowTest(unittest.TestCase):
                 side_effect=_firewall_side_effect,
             ),
             patch(
-                "simplyblock_core.services.tasks_runner_port_allow.RPCClient",
-                side_effect=_rpc_ctor,
-            ),
-            patch(
                 "simplyblock_core.services.tasks_runner_port_allow.tcp_ports_events.port_deny",
                 side_effect=lambda n, p: self.calls.append(("port_deny", n.uuid, p)),
             ),
@@ -232,18 +214,12 @@ class _BasePortAllowTest(unittest.TestCase):
 
 
 class TestClusterMapBeforeUnblock(_BasePortAllowTest):
-    """Bug #2: full cluster map must be pushed to the recovering node
-    before the firewall allow is issued."""
+    """Cluster map must reach the recovering node before the firewall
+    allow, so distribs see fresh per-device state on the first IO."""
 
     def test_cluster_map_sent_before_port_allow(self):
         from simplyblock_core.services.tasks_runner_port_allow import exec_port_allow_task
-        # No-leader on first look; then the local-restore takes leadership
-        # and _get_lvs_leader returns self.node on the confirmation call.
-        with patch(
-            "simplyblock_core.services.tasks_runner_port_allow._get_lvs_leader",
-            side_effect=[None, self.node],
-        ):
-            exec_port_allow_task(self.task)
+        exec_port_allow_task(self.task)
 
         map_send_idx = next(
             i for i, c in enumerate(self.calls) if c[0] == "send_cluster_map_to_node"
@@ -255,264 +231,389 @@ class TestClusterMapBeforeUnblock(_BasePortAllowTest):
         self.assertLess(
             map_send_idx, node_allow_idx,
             "send_cluster_map_to_node must fire BEFORE the recovering node's "
-            "firewall allow; otherwise the distribs have stale remote-device "
-            "state and DISTRIBD raises 'Unable to read stripe'."
+            "firewall allow; otherwise distribs have stale remote-device state.",
         )
 
     def test_cluster_map_failure_suspends_task(self):
         from simplyblock_core.services.tasks_runner_port_allow import exec_port_allow_task
-        # Make send_cluster_map_to_node fail; task must suspend before any
-        # firewall allow is issued.
+
+        # Stop the side-effect-recording patch and re-patch with a failing
+        # send_cluster_map_to_node.
+        self._patches[4].stop()  # the send_cluster_map patch
         with patch(
             "simplyblock_core.services.tasks_runner_port_allow.distr_controller.send_cluster_map_to_node",
             return_value=False,
         ):
             exec_port_allow_task(self.task)
 
+        # Task suspended, no firewall allow on the node.
+        self.assertEqual(self.task.status, JobSchedule.STATUS_SUSPENDED)
+        node_allow = [
+            c for c in self.calls
+            if c[0] == "firewall_set_port" and c[1] == self.node.uuid and c[3] == "allow"
+        ]
+        self.assertEqual(node_allow, [],
+                         "no firewall allow may fire when cluster map push failed")
+
+
+class TestNoLeadershipManipulation(_BasePortAllowTest):
+    """Regression for incident 2026-05-02: port_allow must not touch
+    leadership at all (no peer demote, no local take-leadership, no
+    secondary block)."""
+
+    def test_no_peer_port_block(self):
+        from simplyblock_core.services.tasks_runner_port_allow import exec_port_allow_task
+        exec_port_allow_task(self.task)
+
+        peer_blocks = [
+            c for c in self.calls
+            if c[0] == "firewall_set_port"
+            and c[1] == self.sec.uuid
+            and c[3] == "block"
+        ]
+        self.assertEqual(
+            peer_blocks, [],
+            "port_allow must not block any peer's port — once a failover "
+            "succeeded the peer is the legitimate new leader and blocking "
+            "it cuts client IO (incident 2026-05-02)",
+        )
+
+    def test_no_peer_demote(self):
+        from simplyblock_core.services.tasks_runner_port_allow import exec_port_allow_task
+        exec_port_allow_task(self.task)
+
+        peer_demote_calls = [
+            c for c in self.calls
+            if c[1] == "sec" and c[0] in (
+                "bdev_lvol_set_leader",
+                "bdev_distrib_force_to_non_leader",
+            )
+        ]
+        self.assertEqual(
+            peer_demote_calls, [],
+            "port_allow must not call bdev_lvol_set_leader or "
+            "bdev_distrib_force_to_non_leader on a peer",
+        )
+
+    def test_no_local_take_leadership(self):
+        from simplyblock_core.services.tasks_runner_port_allow import exec_port_allow_task
+        exec_port_allow_task(self.task)
+
+        local_leader_calls = [
+            c for c in self.calls
+            if c[1] == "node" and c[0] in (
+                "bdev_lvol_set_leader",
+                "bdev_lvol_set_lvs_opts",
+            )
+        ]
+        self.assertEqual(
+            local_leader_calls, [],
+            "port_allow must not 'take leadership locally' on the recovering "
+            "node — leadership belongs to the JM heartbeat, not this task",
+        )
+
+
+class TestOnlyNodePortAllowed(_BasePortAllowTest):
+    """The runner must firewall-allow exactly one port on exactly one node:
+    the requested port on the recovering node."""
+
+    def test_exactly_one_firewall_allow_on_recovering_node(self):
+        from simplyblock_core.services.tasks_runner_port_allow import exec_port_allow_task
+        exec_port_allow_task(self.task)
+
+        allow_calls = [
+            c for c in self.calls
+            if c[0] == "firewall_set_port" and c[3] == "allow"
+        ]
+        self.assertEqual(
+            len(allow_calls), 1,
+            f"expected exactly 1 firewall_set_port allow; got {allow_calls}",
+        )
+        self.assertEqual(allow_calls[0][1], self.node.uuid)
+        self.assertEqual(allow_calls[0][2], self.port)
+
+    def test_no_block_calls_at_all(self):
+        from simplyblock_core.services.tasks_runner_port_allow import exec_port_allow_task
+        exec_port_allow_task(self.task)
+
+        block_calls = [
+            c for c in self.calls
+            if c[0] == "firewall_set_port" and c[3] == "block"
+        ]
+        self.assertEqual(
+            block_calls, [],
+            "port_allow must not block any port — only allow on the "
+            "recovering node",
+        )
+
+
+class TestSourceShape(unittest.TestCase):
+    """Source-level guards that the removed code paths cannot be silently
+    reintroduced."""
+
+    @classmethod
+    def setUpClass(cls):
+        import os
+        path = os.path.join(
+            os.path.dirname(__file__), "..",
+            "simplyblock_core", "services", "tasks_runner_port_allow.py",
+        )
+        with open(path, "r") as f:
+            cls.src = f.read()
+
+    def test_no_get_lvs_leader_helper(self):
+        # The helper that resolved current_leader is no longer needed and
+        # was deleted along with the leadership-manipulation block.
+        self.assertNotIn("def _get_lvs_leader", self.src)
+
+    def test_no_peer_leader_demote_branch(self):
+        self.assertNotIn("Demoting before port_allow", self.src)
+        self.assertNotIn("current_leader.get_id() != node.get_id()", self.src)
+        self.assertNotIn("bdev_distrib_force_to_non_leader", self.src)
+        self.assertNotIn("bs_nonleadership=True", self.src)
+
+    def test_no_unconditional_secondary_loop(self):
+        # The loop iterated `for sid in sec_ids` and called
+        # firewall_set_port(..., "block", ...) on every secondary. That
+        # entire pattern must be gone.
+        # Multiple `for sid in sec_ids` loops still exist for legitimate
+        # purposes (hublvol checks, JC compression), but none of them may
+        # contain a firewall block call.
+        import re
+        for m in re.finditer(r"for sid in [\w_]+", self.src):
+            window = self.src[m.start():m.start() + 1500]
+            self.assertNotIn(
+                'firewall_set_port(port_number, sn_port_type, "block"',
+                window,
+                "no firewall block may appear inside any sec_ids loop",
+            )
+
+    def test_rationale_documented_in_source(self):
+        self.assertIn("incident 2026-05-02", self.src)
+        self.assertIn("port_allow's correct scope", self.src)
+
+
+class _StrictGateBase(_BasePortAllowTest):
+    """Specialised setup for the retry-then-abort strict-gate tests.
+
+    On top of the base test plumbing this attaches a ``hublvol`` object
+    to the recovering primary so the strict ``_hublvol_verified_open``
+    branch becomes active. The base ``primary_node.hublvol`` is None;
+    without metadata our helper falls back to delegating to the existing
+    ``_check_sec_node_hublvol`` (already mocked True in the base) — which
+    is the correct behavior but bypasses the strict-verify code path we
+    want to cover here.
+    """
+
+    def setUp(self):
+        super().setUp()
+        # Synthesize a minimal HubLVol-like object: only ``bdev_name`` is
+        # touched by ``_hublvol_verified_open`` / ``_reconnect_peer_hublvol_once``.
+        hub = MagicMock(name="hublvol")
+        hub.bdev_name = "LVS_TEST/hublvol"
+        self.node.hublvol = hub
+
+
+class TestStrictHublvolGate(_StrictGateBase):
+    """Per port-allow design (2026-05-21 incident): the strict gate must
+    confirm the peer's hublvol is *verified-open* before unblocking, not
+    just that ``bdev_nvme_controller_list`` is non-empty."""
+
+    def test_strict_verify_passes_unblocks(self):
+        """Happy path: ``_check_sec_node_hublvol`` returns True AND the
+        strict ``_hublvol_verified_open`` returns True on the first
+        attempt → port allowed."""
+        from simplyblock_core.services.tasks_runner_port_allow import exec_port_allow_task
+
+        with patch(
+            "simplyblock_core.services.tasks_runner_port_allow._hublvol_verified_open",
+            return_value=True,
+        ) as verify_mock, patch(
+            "simplyblock_core.services.tasks_runner_port_allow._reconnect_peer_hublvol_once",
+        ) as reconnect_mock:
+            exec_port_allow_task(self.task)
+
+        verify_mock.assert_called()  # strict check was applied
+        reconnect_mock.assert_not_called()  # no forced reconnect needed
         allow_calls = [c for c in self.calls
                        if c[0] == "firewall_set_port" and c[3] == "allow"]
-        self.assertEqual(allow_calls, [],
-                         "No firewall allow should be issued if the cluster map send failed.")
-        self.assertEqual(self.task.status, JobSchedule.STATUS_SUSPENDED)
+        self.assertEqual(len(allow_calls), 1)
+        self.assertEqual(allow_calls[0][1], self.node.uuid)
 
-
-class TestPeerLeaderDemoted(_BasePortAllowTest):
-    """Bug #1: if the current leader is a peer (outage-recovery case),
-    demote it (with port block, set_leader=False, drain) before unblocking
-    the recovering node's port. The old code skipped this entirely."""
-
-    def test_peer_leader_is_demoted_before_node_port_unblock(self):
+    def test_strict_verify_failing_then_succeeding_via_reconnect_unblocks(self):
+        """Strict check fails first, forced reconnect runs, second strict
+        check succeeds → port allowed within the retry budget."""
         from simplyblock_core.services.tasks_runner_port_allow import exec_port_allow_task
-        # Peer is the current leader.
+
+        # _hublvol_verified_open is consulted twice per attempt (pre + post-
+        # reconnect); make it False, False, True, True so the first attempt
+        # fails the pre-check, the post-reconnect check succeeds.
+        verify_results = iter([False, True])
         with patch(
-            "simplyblock_core.services.tasks_runner_port_allow._get_lvs_leader",
-            side_effect=[self.sec, self.node],
-        ):
+            "simplyblock_core.services.tasks_runner_port_allow._hublvol_verified_open",
+            side_effect=lambda *a, **kw: next(verify_results),
+        ), patch(
+            "simplyblock_core.services.tasks_runner_port_allow._reconnect_peer_hublvol_once",
+            return_value=True,
+        ) as reconnect_mock:
             exec_port_allow_task(self.task)
 
-        # A) peer port was blocked before any demote RPC to the peer
-        peer_block_idx = next(
-            i for i, c in enumerate(self.calls)
-            if c[0] == "firewall_set_port" and c[1] == self.sec.uuid and c[3] == "block"
-        )
-        sec_demote_idx = next(
-            i for i, c in enumerate(self.calls)
-            if c[0] == "bdev_lvol_set_leader" and c[1] == "sec"
-        )
-        self.assertLess(peer_block_idx, sec_demote_idx,
-                        "peer port must be blocked before demote RPC is issued")
-
-        # B) demote happened on the peer. The previous code also drained via
-        # bdev_distrib_check_inflight_io here; that loop was removed because
-        # distrib-inflight includes migration IO that the port block does not
-        # pause, so the drain could hold clients blocked beyond fio max_latency.
-        # A fixed 0.5s quiesce in storage_node_ops now stands in for the drain.
-        self.assertTrue(
-            any(c[0] == "bdev_distrib_force_to_non_leader" and c[1] == "sec"
-                for c in self.calls),
-            "expected bdev_distrib_force_to_non_leader on the peer leader",
+        reconnect_mock.assert_called_once()
+        allow_calls = [c for c in self.calls
+                       if c[0] == "firewall_set_port" and c[3] == "allow"]
+        self.assertEqual(
+            len(allow_calls), 1,
+            "port must be allowed once the strict gate confirms the peer "
+            "hublvol verified-open via forced reconnect",
         )
 
-        # C) leadership taken locally AFTER the peer was demoted
-        local_take_idx = next(
-            i for i, c in enumerate(self.calls)
-            if c[0] == "bdev_lvol_set_leader" and c[1] == "node"
-        )
-        self.assertLess(sec_demote_idx, local_take_idx,
-                        "local take-leadership must follow the peer demote")
+    def test_strict_verify_exhausts_retries_aborts_recovering_node(self):
+        """Strict check never succeeds → after 5 attempts the recovering
+        node is aborted (SPDK kill + OFFLINE) and the port is NOT allowed."""
+        from simplyblock_core.services.tasks_runner_port_allow import exec_port_allow_task
 
-        # D) node port only unblocked AFTER the peer was demoted
-        node_allow_idx = next(
-            i for i, c in enumerate(self.calls)
-            if c[0] == "firewall_set_port" and c[1] == self.node.uuid and c[3] == "allow"
-        )
-        self.assertLess(sec_demote_idx, node_allow_idx,
-                        "recovering node port must not be unblocked before the "
-                        "peer leader has been demoted")
+        with patch(
+            "simplyblock_core.services.tasks_runner_port_allow._hublvol_verified_open",
+            return_value=False,
+        ), patch(
+            "simplyblock_core.services.tasks_runner_port_allow._reconnect_peer_hublvol_once",
+            return_value=False,
+        ) as reconnect_mock, patch(
+            "simplyblock_core.services.tasks_runner_port_allow._abort_recovering_node",
+            side_effect=lambda n, r: self.calls.append(("abort_recovering_node", n.uuid, r)),
+        ) as abort_mock:
+            exec_port_allow_task(self.task)
 
-        # E) peer port eventually re-allowed at the end
-        peer_allow_calls = [c for c in self.calls
-                            if c[0] == "firewall_set_port"
-                            and c[1] == self.sec.uuid and c[3] == "allow"]
-        self.assertTrue(peer_allow_calls,
-                        "peer port must be re-allowed after its demote")
+        abort_mock.assert_called_once()
+        self.assertEqual(abort_mock.call_args.args[0].uuid, self.node.uuid)
 
+        # No port_allowed event must have been emitted.
+        allow_events = [c for c in self.calls if c[0] == "port_allowed"]
+        self.assertEqual(allow_events, [],
+                         "port_allowed must NOT fire when peers fail the gate")
+
+        # No firewall allow on the recovering node either.
+        allow_calls = [c for c in self.calls
+                       if c[0] == "firewall_set_port" and c[3] == "allow"]
+        self.assertEqual(allow_calls, [])
+
+        # Task ended in DONE (not SUSPENDED — the retries already ran).
         self.assertEqual(self.task.status, JobSchedule.STATUS_DONE)
 
-    def test_peer_demote_failure_unblocks_peer_and_suspends_task(self):
+        # 5 reconnect attempts were issued (one per retry iteration).
+        self.assertEqual(reconnect_mock.call_count, 5)
+
+    def test_no_metadata_falls_back_to_existing_check(self):
+        """If ``primary_node.hublvol`` is None (no metadata to drive a strict
+        verify), the helper must delegate to the existing
+        ``_check_sec_node_hublvol`` (mocked True in the base setup) and not
+        attempt the strict path. This is the safety net for callers that
+        haven't populated hublvol metadata yet."""
         from simplyblock_core.services.tasks_runner_port_allow import exec_port_allow_task
 
-        # Install a raising side_effect that still logs the attempt.
-        def _raise(*a, **kw):
-            self.calls.append(("bdev_lvol_set_leader", "sec"))
-            raise RuntimeError("rpc fail")
-        self.sec_rpc.bdev_lvol_set_leader.side_effect = _raise
+        # Strip the hublvol metadata we added in _StrictGateBase.setUp.
+        self.node.hublvol = None
 
         with patch(
-            "simplyblock_core.services.tasks_runner_port_allow._get_lvs_leader",
-            return_value=self.sec,
-        ):
+            "simplyblock_core.services.tasks_runner_port_allow._hublvol_verified_open",
+        ) as verify_mock, patch(
+            "simplyblock_core.services.tasks_runner_port_allow._reconnect_peer_hublvol_once",
+        ) as reconnect_mock:
             exec_port_allow_task(self.task)
 
-        # Peer port was blocked and then re-allowed (rollback) — not left
-        # blocked.
-        peer_evts = [c for c in self.calls
-                     if c[0] == "firewall_set_port" and c[1] == self.sec.uuid]
-        actions = [c[3] for c in peer_evts]
-        self.assertIn("block", actions)
-        self.assertIn("allow", actions)
-        # Recovering node port was NOT unblocked.
-        self.assertFalse(
-            any(c[0] == "firewall_set_port" and c[1] == self.node.uuid
-                and c[3] == "allow" for c in self.calls),
-            "node port must not be unblocked if peer demote fails",
+        verify_mock.assert_not_called()
+        reconnect_mock.assert_not_called()
+
+        allow_calls = [c for c in self.calls
+                       if c[0] == "firewall_set_port" and c[3] == "allow"]
+        self.assertEqual(len(allow_calls), 1)
+
+
+class TestAbortRecoveringNode(_StrictGateBase):
+    """The abort helper itself must kill SPDK, set OFFLINE, and emit a
+    restart-failed event — same shape as the existing
+    ``storage_node_ops._abort_and_unblock`` non-leader-restart abort."""
+
+    def test_abort_kills_spdk_and_marks_offline(self):
+        from simplyblock_core.services.tasks_runner_port_allow import _abort_recovering_node
+
+        snode_api = MagicMock()
+        self.node.client = MagicMock(return_value=snode_api)
+
+        with patch(
+            "simplyblock_core.services.tasks_runner_port_allow.storage_node_ops.set_node_status",
+        ) as set_status_mock, patch(
+            "simplyblock_core.services.tasks_runner_port_allow.storage_events.snode_restart_failed",
+        ) as event_mock:
+            _abort_recovering_node(self.node, "test reason")
+
+        # SPDK must be killed
+        snode_api.spdk_process_kill.assert_called_once_with(
+            self.node.rpc_port, self.node.cluster_id)
+
+        # Node must be flipped to OFFLINE with the restart-cleanup tag (the
+        # tag that's whitelisted by the RESTARTING→OFFLINE FSM guard in
+        # storage_node_ops.set_node_status).
+        set_status_mock.assert_called_once()
+        args, kwargs = set_status_mock.call_args
+        self.assertEqual(args[0], self.node.get_id())
+        self.assertEqual(args[1], StorageNode.STATUS_OFFLINE)
+        self.assertEqual(kwargs.get("caused_by"), "restart_cleanup")
+
+        # The restart-failed event must fire (best-effort, before the kill,
+        # so monitoring sees the abort decision even if the kill RPC stalls).
+        event_mock.assert_called_once_with(self.node)
+
+
+class TestSourceShapeStrictGate(unittest.TestCase):
+    """Source-level guards for the strict-gate change: the retry+abort
+    rationale must stay in the source so a future refactor doesn't quietly
+    re-introduce the stale-controller-list bug."""
+
+    @classmethod
+    def setUpClass(cls):
+        import os
+        path = os.path.join(
+            os.path.dirname(__file__), "..",
+            "simplyblock_core", "services", "tasks_runner_port_allow.py",
         )
-        self.assertEqual(self.task.status, JobSchedule.STATUS_SUSPENDED)
+        with open(path, "r") as f:
+            cls.src = f.read()
 
+    def test_retry_constants_present(self):
+        self.assertIn("_HUBLVOL_RETRY_DELAYS_SEC", self.src)
+        self.assertIn("_HUBLVOL_MAX_ATTEMPTS", self.src)
+        # 1+2+4+8+16 backoff
+        self.assertIn("(1, 2, 4, 8, 16)", self.src)
 
-class TestGetLvsLeaderLocalNodeExemption(unittest.TestCase):
-    """Unit test for ``_get_lvs_leader``'s ``local_node_id`` kwarg.
+    def test_strict_verify_helper_present(self):
+        self.assertIn("def _hublvol_verified_open", self.src)
+        self.assertIn("bdev_nvme_controller_list", self.src)
+        # Two-condition strict check: enabled path AND namespace bdev.
+        self.assertIn('state") == "enabled"', self.src)
+        self.assertIn('+ "n1"', self.src)
 
-    The recovering node's DB status is ``STATUS_DOWN`` while its own
-    port_allow task runs (``StorageNodeMonitor`` only flips it back to
-    ``STATUS_ONLINE`` after recovery). The post-takeover verify call at
-    line 302 must not treat that DB status as authoritative — SPDK is the
-    ground truth for "did this node just become leader." Without
-    ``local_node_id``, the STATUS_ONLINE filter would skip the recovering
-    node and force the task into the spurious "No leader available, retry
-    task" suspend path that leaks the peer port-block.
-    """
+    def test_abort_helper_present_and_used(self):
+        self.assertIn("def _abort_recovering_node", self.src)
+        # Helper must be invoked from exec_port_allow_task on exhaustion.
+        self.assertIn("_abort_recovering_node(node, reason)", self.src)
 
-    def test_down_node_skipped_when_local_node_id_not_set(self):
-        from simplyblock_core.services.tasks_runner_port_allow import _get_lvs_leader
-        n_down = _make_node("n-down", "10.0.0.10", status=StorageNode.STATUS_DOWN)
-        n_online = _make_node("n-online", "10.0.0.11")
-        with patch(
-            "simplyblock_core.services.tasks_runner_port_allow.lvol_controller.is_node_leader",
-            return_value=True,
-        ) as m:
-            result = _get_lvs_leader("LVS_TEST", [n_down, n_online])
-        self.assertIs(result, n_online,
-                      "DOWN node must be skipped when local_node_id is not set")
-        m.assert_called_once_with(n_online, "LVS_TEST")
-
-    def test_local_node_id_exempts_recovering_node_from_status_filter(self):
-        from simplyblock_core.services.tasks_runner_port_allow import _get_lvs_leader
-        n_down = _make_node("n-down", "10.0.0.10", status=StorageNode.STATUS_DOWN)
-        with patch(
-            "simplyblock_core.services.tasks_runner_port_allow.lvol_controller.is_node_leader",
-            return_value=True,
-        ) as m:
-            result = _get_lvs_leader("LVS_TEST", [n_down], local_node_id="n-down")
-        self.assertIs(result, n_down,
-                      "with local_node_id set, the named DOWN node must be queried")
-        m.assert_called_once_with(n_down, "LVS_TEST")
-
-    def test_local_node_id_only_exempts_the_named_node(self):
-        # Other DOWN peers are still filtered out — only the recovering node
-        # is exempt. This keeps the original safety property: the controller
-        # does not RPC nodes it already knows are unreachable.
-        from simplyblock_core.services.tasks_runner_port_allow import _get_lvs_leader
-        n_local = _make_node("n-local", "10.0.0.10", status=StorageNode.STATUS_DOWN)
-        peer_down = _make_node("peer-down", "10.0.0.11", status=StorageNode.STATUS_DOWN)
-        with patch(
-            "simplyblock_core.services.tasks_runner_port_allow.lvol_controller.is_node_leader",
-            return_value=True,
-        ) as m:
-            result = _get_lvs_leader("LVS_TEST", [peer_down, n_local], local_node_id="n-local")
-        self.assertIs(result, n_local)
-        m.assert_called_once_with(n_local, "LVS_TEST")
-
-
-class TestRecoveringNodeDownDoesNotSpuriouslySuspend(_BasePortAllowTest):
-    """Regression for the network-outage cascade observed in the e2e
-    (``n_plus_k_failover_multi_client_ha_all_nodes-20260424-183535``).
-
-    Sequence the failing run produced:
-      1. ``5475265e`` had a 30s NIC outage; secondary ``7b1d1d08`` took
-         leadership of LVS_3636 in the meantime.
-      2. NIC restored. ``exec_port_allow_task`` ran on ``5475265e``
-         (DB status: STATUS_DOWN — only the monitor flips it later).
-      3. The cluster-wide ``_get_lvs_leader`` correctly returned the peer
-         (``7b1d1d08``); peer was port-blocked + demoted.
-      4. Local ``bdev_lvol_set_leader(True)`` was issued on the recovering
-         node — SPDK accepted it.
-      5. The post-takeover verify ``_get_lvs_leader([node])`` filtered the
-         recovering node out by ``status != STATUS_ONLINE`` and returned
-         ``None``.
-      6. Task suspended with "No leader available, retry task". The peer's
-         firewall block was leaked (no rollback on suspend paths).
-      7. On retry the failover protocol had promoted ``4da9be44`` to leader;
-         that node got the same treatment, leaking its port-block too. Both
-         peers ended up DOWN with port 4432 stuck blocked, and the
-         recovering node never came back.
-
-    With the fix, step (5) trusts ``is_node_leader`` (SPDK) for the
-    recovering node and the verify succeeds. Task reaches STATUS_DONE; the
-    peer's port is unblocked at the end of the happy path.
-    """
-
-    def test_recovering_node_db_down_completes_takeover_and_releases_peer(self):
-        from simplyblock_core.services.tasks_runner_port_allow import exec_port_allow_task
-
-        # Reproduce the actual mid-recovery DB state: the recovering node
-        # is still DOWN while its own port_allow task is executing.
-        self.node.status = StorageNode.STATUS_DOWN
-
-        # SPDK leadership truth:
-        #   - peer is the current leader (failover during outage)
-        #   - after demote+local-takeover, the recovering node reports True
-        # _get_lvs_leader is NOT patched in this test — we want the real
-        # function (with the local_node_id exemption) to run end-to-end.
-        def _is_node_leader(snode, lvs):
-            if snode.uuid == self.sec.uuid:
-                return True   # peer currently leads (pre-demote query)
-            if snode.uuid == self.node.uuid:
-                return True   # recovering node leads after local takeover
-            return False
-
-        with patch(
-            "simplyblock_core.services.tasks_runner_port_allow.lvol_controller.is_node_leader",
-            side_effect=_is_node_leader,
-        ):
-            exec_port_allow_task(self.task)
-
-        # Task must complete — pre-fix this suspended with "No leader
-        # available, retry task" because the post-takeover verify filtered
-        # the DOWN-in-DB recovering node out of its own candidate list.
-        self.assertEqual(
-            self.task.status, JobSchedule.STATUS_DONE,
-            "task must reach STATUS_DONE; pre-fix it suspended at the "
-            "post-takeover verify because the recovering node's DB status "
-            "was STATUS_DOWN, even though SPDK had accepted set_leader(True)",
-        )
-
-        # Recovering node port unblocked once leadership is verified.
-        self.assertTrue(
-            any(c[0] == "firewall_set_port" and c[1] == self.node.uuid and c[3] == "allow"
-                for c in self.calls),
-            "recovering node port must be unblocked after the verify succeeds",
-        )
-
-        # Peer port: blocked during demote, then re-allowed at the end.
-        # The original cascade leaked the block; verify there is no leak by
-        # asserting the peer ends up allowed (the unblock loop reached).
-        peer_evts = [c for c in self.calls
-                     if c[0] == "firewall_set_port" and c[1] == self.sec.uuid]
-        actions = [c[3] for c in peer_evts]
-        self.assertIn("block", actions,
-                      "peer must be port-blocked during demote")
-        self.assertIn("allow", actions,
-                      "peer port must be re-allowed at the end — leaving it "
-                      "blocked is the cascade that took down 7b1d1d08 / 4da9be44")
-        # Block precedes allow.
-        peer_block_idx = next(i for i, c in enumerate(self.calls)
-                              if c[0] == "firewall_set_port" and c[1] == self.sec.uuid
-                              and c[3] == "block")
-        peer_allow_idx = next(i for i, c in enumerate(self.calls)
-                              if c[0] == "firewall_set_port" and c[1] == self.sec.uuid
-                              and c[3] == "allow")
-        self.assertLess(peer_block_idx, peer_allow_idx)
+    def test_no_port_allowed_after_abort(self):
+        # Source-level invariant: when the abort path runs the task returns
+        # without falling through to firewall_set_port/port_allowed.
+        # We assert that abort sets task status DONE and the function
+        # returns before the firewall/port_allowed lines.
+        i_abort = self.src.find("_abort_recovering_node(node, reason)")
+        i_done = self.src.find("STATUS_DONE", i_abort)
+        i_return = self.src.find("return", i_done)
+        i_allow_event = self.src.find("tcp_ports_events.port_allowed")
+        self.assertGreater(i_abort, 0)
+        self.assertGreater(i_done, i_abort)
+        self.assertGreater(i_return, i_done)
+        self.assertGreater(i_allow_event, i_return,
+                           "tcp_ports_events.port_allowed must appear after "
+                           "the abort path's return so it cannot fire on the "
+                           "abort code path")
 
 
 if __name__ == "__main__":

@@ -135,21 +135,21 @@ class TestConnectLvolPort(unittest.TestCase):
                       lvstore_ports={})  # missing LVS_100!
 
         cluster = _cluster()
-        lvol = _lvol("vol-1", "cluster-1/node-1", lvs_name="LVS_100",
-                     nodes=["cluster-1/node-1", "cluster-1/node-2", "cluster-1/node-3"])
+        lvol = _lvol("vol-1", "node-1", lvs_name="LVS_100",
+                     nodes=["node-1", "node-2", "node-3"])
 
         db = mock_db_cls.return_value
 
         def get_node(nid):
-            return {"cluster-1/node-1": primary,
-                    "cluster-1/node-2": sec1,
-                    "cluster-1/node-3": sec2}[nid]
+            return {"node-1": primary,
+                    "node-2": sec1,
+                    "node-3": sec2}[nid]
 
         db.get_lvol_by_id.return_value = lvol
         db.get_storage_node_by_id.side_effect = get_node
         db.get_cluster_by_id.return_value = cluster
 
-        result = connect_lvol("vol-1")
+        result, _err = connect_lvol("vol-1")
         self.assertTrue(result)
         self.assertEqual(len(result), 3)
 
@@ -166,15 +166,15 @@ class TestConnectLvolPort(unittest.TestCase):
         primary = _node("node-1", mgmt_ip="10.10.10.1", lvol_subsys_port=9090,
                          lvstore_ports={"LVS_100": {"lvol_subsys_port": 4420, "hublvol_port": 4425}})
         cluster = _cluster()
-        lvol = _lvol("vol-1", "cluster-1/node-1", lvs_name="LVS_100",
-                     nodes=["cluster-1/node-1"], ha_type="single")
+        lvol = _lvol("vol-1", "node-1", lvs_name="LVS_100",
+                     nodes=["node-1"], ha_type="single")
 
         db = mock_db_cls.return_value
         db.get_lvol_by_id.return_value = lvol
         db.get_storage_node_by_id.return_value = primary
         db.get_cluster_by_id.return_value = cluster
 
-        result = connect_lvol("vol-1")
+        result, _err = connect_lvol("vol-1")
         self.assertTrue(result)
         self.assertEqual(result[0]["port"], 4420)
 
@@ -192,29 +192,29 @@ class TestRecreateLvstoreDualSecondary(unittest.TestCase):
         nodes = {}
         nodes["node-1"] = _node(
             "node-1", lvstore="LVS_100",
-            secondary_node_id="cluster-1/node-2",
-            tertiary_node_id="cluster-1/node-3",
+            secondary_node_id="node-2",
+            tertiary_node_id="node-3",
             lvstore_ports={"LVS_100": {"lvol_subsys_port": 4420, "hublvol_port": 4425}},
             lvstore_stack_secondary="", lvstore_stack_tertiary="",
             mgmt_ip="10.0.0.1")
         nodes["node-2"] = _node(
             "node-2", lvstore="LVS_200",
-            secondary_node_id="cluster-1/node-3",
-            tertiary_node_id="cluster-1/node-4",
+            secondary_node_id="node-3",
+            tertiary_node_id="node-4",
             lvstore_ports={"LVS_200": {"lvol_subsys_port": 4426, "hublvol_port": 4427},
                            "LVS_100": {"lvol_subsys_port": 4420, "hublvol_port": 4425}},
             mgmt_ip="10.0.0.2")
         nodes["node-3"] = _node(
             "node-3", lvstore="LVS_300",
-            secondary_node_id="cluster-1/node-4",
-            tertiary_node_id="cluster-1/node-1",
+            secondary_node_id="node-4",
+            tertiary_node_id="node-1",
             lvstore_ports={"LVS_300": {"lvol_subsys_port": 4428, "hublvol_port": 4429},
                            "LVS_100": {"lvol_subsys_port": 4420, "hublvol_port": 4425}},
             mgmt_ip="10.0.0.3")
         nodes["node-4"] = _node(
             "node-4", lvstore="LVS_400",
-            secondary_node_id="cluster-1/node-1",
-            tertiary_node_id="cluster-1/node-2",
+            secondary_node_id="node-1",
+            tertiary_node_id="node-2",
             status=StorageNode.STATUS_OFFLINE,
             mgmt_ip="10.0.0.4")
         return nodes
@@ -227,7 +227,7 @@ class TestRecreateLvstoreDualSecondary(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
     @patch("simplyblock_core.storage_node_ops.storage_events")
     @patch("simplyblock_core.storage_node_ops.FirewallClient")
-    @patch("simplyblock_core.storage_node_ops.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._connect_to_remote_jm_devs")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
@@ -316,7 +316,7 @@ class TestRecreateLvstoreDualSecondary(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
     @patch("simplyblock_core.storage_node_ops.storage_events")
     @patch("simplyblock_core.storage_node_ops.FirewallClient")
-    @patch("simplyblock_core.storage_node_ops.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._connect_to_remote_jm_devs")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
@@ -359,7 +359,12 @@ class TestRecreateLvstoreDualSecondary(unittest.TestCase):
             n.rpc_client = MagicMock(return_value=rpc)
             n.wait_for_jm_rep_tasks_to_finish = MagicMock(return_value=True)
             n.recreate_hublvol = MagicMock()
-            n.connect_to_hublvol = MagicMock()
+            n.connect_to_hublvol = MagicMock(return_value=True)
+            n.create_secondary_hublvol = MagicMock()
+            # Deferred tertiary→secondary failover-path attach runs after
+            # port_unblock; mock so the test doesn't dive into the real
+            # HublvolReconnectCoordinator.
+            n.add_hublvol_failover_path = MagicMock(return_value=True)
             n.write_to_db = MagicMock()
 
         mock_recreate_on_non_leader.return_value = True
@@ -369,12 +374,16 @@ class TestRecreateLvstoreDualSecondary(unittest.TestCase):
         result = recreate_lvstore(snode)
         self.assertTrue(result)
 
-        # Both sec1 (node-2) and sec2 (node-3) should have connect_to_hublvol called
-        # sec1 gets role="secondary", sec2 gets role="tertiary" with failover to sec1
+        # Both sec1 (node-2) and sec2 (node-3) should have connect_to_hublvol
+        # called with a SINGLE path against snode (the new leader). The
+        # tertiary→secondary failover path is deferred to after port_unblock
+        # via ``add_hublvol_failover_path`` (asserted separately below).
         nodes["node-2"].connect_to_hublvol.assert_called_once_with(
-            snode, failover_node=None, role="secondary", timeout=0.5)
+            snode, failover_node=None, role="secondary", rpc_timeout=0.2)
         nodes["node-3"].connect_to_hublvol.assert_called_once_with(
-            snode, failover_node=nodes["node-2"], role="tertiary", timeout=0.5)
+            snode, failover_node=None, role="tertiary", rpc_timeout=0.2)
+        nodes["node-3"].add_hublvol_failover_path.assert_called_once_with(
+            snode, nodes["node-2"])
 
     @patch("simplyblock_core.storage_node_ops._check_peer_disconnected", return_value=False)
     @patch("simplyblock_core.storage_node_ops._set_restart_phase")
@@ -384,7 +393,7 @@ class TestRecreateLvstoreDualSecondary(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
     @patch("simplyblock_core.storage_node_ops.storage_events")
     @patch("simplyblock_core.storage_node_ops.FirewallClient")
-    @patch("simplyblock_core.storage_node_ops.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._connect_to_remote_jm_devs")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
@@ -459,7 +468,7 @@ class TestRecreateLvstoreDualSecondary(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
     @patch("simplyblock_core.storage_node_ops.storage_events")
     @patch("simplyblock_core.storage_node_ops.FirewallClient")
-    @patch("simplyblock_core.storage_node_ops.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._connect_to_remote_jm_devs")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
@@ -537,7 +546,7 @@ class TestRecreateLvstoreDualSecondary(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
     @patch("simplyblock_core.storage_node_ops.storage_events")
     @patch("simplyblock_core.storage_node_ops.FirewallClient")
-    @patch("simplyblock_core.storage_node_ops.RPCClient")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._connect_to_remote_jm_devs")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
@@ -553,7 +562,7 @@ class TestRecreateLvstoreDualSecondary(unittest.TestCase):
         nodes["node-3"].status = StorageNode.STATUS_UNREACHABLE
 
         db = mock_db_cls.return_value
-        lvol = _lvol("vol-1", "cluster-1/node-1")
+        lvol = _lvol("vol-1", "node-1")
 
         def get_node(nid):
             key = nid.split("/")[-1] if "/" in nid else nid
@@ -608,62 +617,18 @@ class TestRecreateLvstoreDualSecondary(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 3. Race condition: remote_devices loops re-read before write
+# 3. (removed) set_node_status peer remote_devices loop
+#
+# The original test asserted that set_node_status iterated peer nodes,
+# re-read each from DB, and called write_to_db on the fresh copy. That
+# loop was moved out of set_node_status into _connect_to_remote_devs and
+# its callers; set_node_status is now pure bookkeeping (own status write,
+# event emit, distr broadcast, optional auto-restart cancellation). The
+# old test asserted behavior that no longer belongs in this function and
+# has been removed. Coverage for the re-read-before-write contract on
+# peer remote_devices belongs alongside _connect_to_remote_devs callers
+# (e.g. add_node, restart_storage_node) — not here.
 # ---------------------------------------------------------------------------
-
-class TestRemoteDevicesRaceCondition(unittest.TestCase):
-    """Bug 2 fix: when updating remote_devices for other nodes, each node
-    must be re-read from DB immediately before writing to avoid overwriting
-    concurrent lvstore_ports changes."""
-
-    @patch("simplyblock_core.storage_node_ops.distr_controller")
-    @patch("simplyblock_core.storage_node_ops._connect_to_remote_devs")
-    @patch("simplyblock_core.storage_node_ops.DBController")
-    def test_set_node_status_rereads_before_write(
-            self, mock_db_cls, mock_connect_devs, mock_distr):
-        """set_node_status remote_devices loop should call get_storage_node_by_id
-        for each node before modifying and writing."""
-        from simplyblock_core.storage_node_ops import set_node_status
-
-        snode = _node("node-1", mgmt_ip="10.0.0.1")
-        other_node = _node("node-2", mgmt_ip="10.0.0.2",
-                           lvstore_ports={"LVS_100": {"lvol_subsys_port": 4420}})
-
-        cluster = _cluster()
-        db = mock_db_cls.return_value
-        db.get_cluster_by_id.return_value = cluster
-
-        # Track which objects get_storage_node_by_id returns
-        fresh_other = _node("node-2", mgmt_ip="10.0.0.2",
-                            lvstore_ports={"LVS_100": {"lvol_subsys_port": 4420},
-                                           "LVS_200": {"lvol_subsys_port": 4426}})
-        fresh_other.write_to_db = MagicMock()
-        fresh_other.rpc_client = MagicMock()
-
-        call_count = [0]
-        def get_node(nid):
-            call_count[0] += 1
-            if "node-1" in nid:
-                return snode
-            # Return the "fresh" version with updated ports
-            return fresh_other
-
-        db.get_storage_node_by_id.side_effect = get_node
-        db.get_storage_nodes_by_cluster_id.return_value = [snode, other_node]
-        mock_connect_devs.return_value = []
-
-        # Mock to prevent actual status change side effects
-        snode.write_to_db = MagicMock()
-        snode.rpc_client = MagicMock()
-
-        set_node_status("cluster-1/node-1", StorageNode.STATUS_ONLINE)
-
-        # The other node should have been re-read from DB (get_storage_node_by_id)
-        # before write_to_db was called
-        fresh_other.write_to_db.assert_called()
-        # Verify the fresh version (with LVS_200) was written, not the stale one
-        self.assertIn("LVS_200", fresh_other.lvstore_ports)
-
 
 
 # ---------------------------------------------------------------------------

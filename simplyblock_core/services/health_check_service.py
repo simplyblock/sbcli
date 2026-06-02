@@ -8,7 +8,6 @@ from simplyblock_core.controllers import health_controller, storage_events, devi
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.rpc_client import RPCClient
 from simplyblock_core import constants, db_controller, storage_node_ops
 
 
@@ -84,8 +83,7 @@ def check_node(snode):
     logger.info(f"Check: node API {snode.mgmt_ip}:5000 ... {node_api_check}")
 
     # 3- check node RPC
-    node_rpc_check = health_controller._check_node_rpc(
-        snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password)
+    node_rpc_check = health_controller.check_node_rpc(snode)
     logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}")
 
     is_node_online = ping_check and node_api_check and node_rpc_check
@@ -96,10 +94,7 @@ def check_node(snode):
         node_devices_check = True
         node_remote_devices_check = True
 
-        rpc_client = RPCClient(
-            snode.mgmt_ip, snode.rpc_port,
-            snode.rpc_username, snode.rpc_password,
-            timeout=3, retry=2)
+        rpc_client = snode.rpc_client(timeout=3, retry=2)
         connected_devices = []
 
         node_bdevs = rpc_client.get_bdevs()
@@ -205,11 +200,24 @@ def check_node(snode):
                 if remote_device.remote_bdev:
                     check = health_controller.check_bdev(remote_device.remote_bdev, bdev_names=node_bdev_names)
                     if check:
-                        # JM bdev exists but multipath may be degraded — repair missing paths
+                        # JM bdev exists but multipath may be degraded — repair missing paths.
+                        # repair_multipath_controller needs nvmf_ip / nvmf_nqn / nvmf_port
+                        # which RemoteJMDevice strips. Resolve the source JMDevice on the
+                        # owning node before calling — otherwise the repair raises
+                        # AttributeError("'RemoteJMDevice' object has no attribute 'nvmf_ip'")
+                        # every cycle and JM controllers that lose a path during NIC chaos
+                        # are NEVER repaired by the health service.
                         if remote_device.nvmf_multipath:
                             ctrl_name = remote_device.remote_bdev.replace("n1", "")
                             try:
-                                storage_node_ops.repair_multipath_controller(ctrl_name, remote_device, snode)
+                                src_node = db.get_storage_node_by_id(remote_device.node_id)
+                                src_jm = src_node.jm_device if src_node else None
+                                if src_jm and getattr(src_jm, 'nvmf_ip', None):
+                                    storage_node_ops.repair_multipath_controller(ctrl_name, src_jm, snode)
+                                else:
+                                    logger.warning(
+                                        "Multipath repair skipped for JM %s: source JMDevice unavailable",
+                                        ctrl_name)
                             except Exception as e:
                                 logger.warning("Multipath repair failed for JM %s: %s", ctrl_name, e)
                         connected_jms.append(remote_device.get_id())
@@ -326,6 +334,12 @@ threads_maps: dict[str, threading.Thread] = {}
 def _main():
     logger.info("Starting health check service")
     while True:
+        try:
+            db.get_clusters()
+        except Exception as e:
+            logger.error(f"Failed to get clusters: {e}")
+            time.sleep(3)
+            continue
         clusters = db.get_clusters()
         for cluster in clusters:
             for node in db.get_storage_nodes_by_cluster_id(cluster.get_id()):

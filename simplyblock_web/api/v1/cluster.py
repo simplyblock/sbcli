@@ -10,7 +10,7 @@ from simplyblock_core.controllers import tasks_controller, device_controller
 from simplyblock_web import utils
 
 from simplyblock_core import db_controller, cluster_ops, storage_node_ops
-from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.models.cluster import Cluster, HashicorpVaultSettings
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +68,12 @@ def add_cluster():
         qpair_count, max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name,
         cr_name, cr_namespace, cr_plural, fabric, client_data_nic=client_data_nic,
         max_fault_tolerance=max_fault_tolerance, backup_config=backup_config,
-        nvmf_base_port=nvmf_base_port, rpc_base_port=rpc_base_port, snode_api_port=snode_api_port
+        nvmf_base_port=nvmf_base_port, rpc_base_port=rpc_base_port, snode_api_port=snode_api_port,
+        hashicorp_vault_settings=(
+            HashicorpVaultSettings(raw_vault)
+            if (raw_vault := cl_data.get('hashicorp_vault_settings')) is not None
+            else None
+        ),
     ))
 
 
@@ -114,6 +119,8 @@ def create_first_cluster():
     rpc_base_port = cl_data.get('rpc_base_port', 8080)
     snode_api_port = cl_data.get('snode_api_port', 50001)
     backup_config = cl_data.get('backup_config')
+    raw_vault = cl_data.get('hashicorp_vault_settings')
+    hashicorp_vault_settings = HashicorpVaultSettings(raw_vault) if raw_vault else None
 
     try:
         cluster_id = cluster_ops.add_cluster(
@@ -122,7 +129,8 @@ def create_first_cluster():
             qpair_count, max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name,
             cr_name, cr_namespace, cr_plural, fabric, cluster_ip=cluster_ip, grafana_secret=grafana_secret,
             client_data_nic=client_data_nic, max_fault_tolerance=max_fault_tolerance, backup_config=backup_config,
-            nvmf_base_port=nvmf_base_port, rpc_base_port=rpc_base_port, snode_api_port=snode_api_port)
+            nvmf_base_port=nvmf_base_port, rpc_base_port=rpc_base_port, snode_api_port=snode_api_port,
+            hashicorp_vault_settings=hashicorp_vault_settings)
         if cluster_id:
             return utils.get_response(db.get_cluster_by_id(cluster_id).to_dict())
         else:
@@ -297,6 +305,36 @@ def cluster_activate(uuid):
     t.start()
     # FIXME: Any failure within the thread are not handled
     return utils.get_response(True), 202
+
+@bp.route('/cluster/shared-placement/<string:uuid>', methods=['PUT'])
+def cluster_set_shared_placement(uuid):
+    """Flip cluster.shared_placement at runtime + persist for restarts.
+
+    Request body (all optional):
+        enable: bool, default True. Pass False to run the debug-only
+                reverse transition (then force is required).
+        force:  bool, default False. Bypasses the rebalancing / not-all-
+                nodes-online preflight; required for enable=False.
+
+    Returns 404 if the cluster does not exist, 400 if the controller
+    refuses the request, 200 with True on success.
+    """
+    try:
+        db.get_cluster_by_id(uuid)
+    except KeyError:
+        return utils.get_response_error(f"Cluster not found: {uuid}", 404)
+
+    req = request.get_json(silent=True) or {}
+    enable = bool(req.get("enable", True))
+    force = bool(req.get("force", False))
+
+    ok = cluster_ops.set_shared_placement(uuid, enable=enable, force=force)
+    if not ok:
+        return utils.get_response_error(
+            "Refused to toggle shared_placement; see management logs for "
+            "the failing precondition", 400)
+    return utils.get_response(True)
+
 
 @bp.route('/cluster/addreplication/<string:uuid>', methods=['PUT'])
 def cluster_add_replication(uuid):

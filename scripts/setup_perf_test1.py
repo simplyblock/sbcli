@@ -99,10 +99,12 @@ def ssh_exec(ip, cmds, get_output=False, check=False):
         if rc != 0:
             print(f"  [{ip}] FAILED (rc={rc}): {cmd}")
             if out.strip():
-                for line in out.strip().split('\n')[-5:]:
+                print(f"    --- stdout ({len(out.splitlines())} lines) ---")
+                for line in out.rstrip().split('\n'):
                     print(f"    stdout: {line}")
             if err.strip():
-                for line in err.strip().split('\n')[-5:]:
+                print(f"    --- stderr ({len(err.splitlines())} lines) ---")
+                for line in err.rstrip().split('\n'):
                     print(f"    stderr: {line}")
             if check:
                 ssh.close()

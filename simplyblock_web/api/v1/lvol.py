@@ -99,8 +99,6 @@ def add_lvol():
         | max_r_mbytes    | Maximum Read Mega Bytes Per Second
         | max_w_mbytes    | Maximum Write Mega Bytes Per Second
         | ha_type         | LVol HA type, can be (single,ha,default=cluster's ha type), Default=default
-        | crypto_key1     | the hex value of key1 to be used for lvol encryption
-        | crypto_key2     | the hex value of key2 to be used for lvol encryption
         | host_id         | the hostID on which the lvol is created
         | lvol_priority_class | the LVol priority class (0, 1)
         | namespace       | the LVol namespace for k8s
@@ -139,19 +137,12 @@ def add_lvol():
     rw_mbytes = utils.get_int_value_or_default(cl_data, "max_rw_mbytes", 0)
     r_mbytes = utils.get_int_value_or_default(cl_data, "max_r_mbytes", 0)
     w_mbytes = utils.get_int_value_or_default(cl_data, "max_w_mbytes", 0)
-    # max_size = utils.get_int_value_or_default(cl_data, "max_size", 0)
 
     encryption = utils.get_value_or_default(cl_data, "crypto", False)
-
     ha_type = utils.get_value_or_default(cl_data, "ha_type", "default")
-
-    fabric = utils.get_value_or_default(cl_data, "fabric", "TCP")
-
-    crypto_key1 = utils.get_value_or_default(cl_data, "crypto_key1", None)
-    crypto_key2 = utils.get_value_or_default(cl_data, "crypto_key2", None)
     host_id = utils.get_value_or_default(cl_data, "host_id", None)
     lvol_priority_class = utils.get_value_or_default(cl_data, "lvol_priority_class", 0)
-    namespace = utils.get_value_or_default(cl_data, "namespace", None)
+    namespaced = utils.get_value_or_default(cl_data, "namespaced", False)
     uid = utils.get_value_or_default(cl_data, "uid", None)
     pvc_name = utils.get_value_or_default(cl_data, "pvc_name", None)
     max_namespace_per_subsys = utils.get_value_or_default(cl_data, "max_namespace_per_subsys", 1)
@@ -175,13 +166,11 @@ def add_lvol():
 
         host_id_or_name=host_id,
         ha_type=ha_type,
-        crypto_key1=crypto_key1,
-        crypto_key2=crypto_key2,
 
         use_comp=False,
         distr_vuid=0,
         lvol_priority_class=lvol_priority_class,
-        namespace=namespace,
+        namespaced=namespaced,
         uid=uid,
         pvc_name=pvc_name,
         max_namespace_per_subsys=max_namespace_per_subsys,
@@ -278,7 +267,10 @@ def connect_lvol(uuid):
     except KeyError as e:
         return utils.get_response_error(str(e), 404)
 
-    ret = lvol_controller.connect_lvol(uuid)
+    host_nqn = request.args.get('host_nqn')
+    ret, err = lvol_controller.connect_lvol(uuid, host_nqn=host_nqn)
+    if err:
+        return utils.get_response_error(err, 400)
     return utils.get_response(ret)
 
 

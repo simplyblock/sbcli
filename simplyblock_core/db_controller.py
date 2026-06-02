@@ -157,6 +157,13 @@ class DBController(metaclass=Singleton):
                 lvols.append(lvol)
         return sorted(lvols, key=lambda x: x.create_dt)
 
+    def get_lvols_by_namespace(self, namespace) -> List[LVol]:
+        lvols = []
+        for lvol in self.get_lvols():
+            if lvol.namespace and lvol.namespace == namespace:
+                lvols.append(lvol)
+        return sorted(lvols, key=lambda x: x.create_dt)
+
     def get_hostnames_by_pool_id(self, pool_id) -> List[str]:
         lvols = self.get_lvols_by_pool_id(pool_id)
         hostnames = []
@@ -289,6 +296,14 @@ class DBController(metaclass=Singleton):
         snaps = SnapShot().read_from_db(self.kv_store)
         for snap in snaps:
             if snap.lvol.node_id == node_id:
+                ret.append(snap)
+        return sorted(ret, key=lambda x: x.create_dt)
+
+    def get_snapshots_by_pool_id(self, pool_id) -> List[SnapShot]:
+        ret = []
+        snaps = SnapShot().read_from_db(self.kv_store)
+        for snap in snaps:
+            if snap.pool_uuid == pool_id:
                 ret.append(snap)
         return sorted(ret, key=lambda x: x.create_dt)
 

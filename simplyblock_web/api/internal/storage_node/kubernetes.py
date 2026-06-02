@@ -16,6 +16,7 @@ import yaml
 from pydantic import BaseModel, Field
 
 from simplyblock_core import constants, shell_utils, utils as core_utils
+from simplyblock_core.settings import Settings
 from simplyblock_web import utils, node_utils, node_utils_k8s
 from simplyblock_web.node_utils_k8s import namespace_id_file
 
@@ -280,6 +281,7 @@ class SPDKParams(BaseModel):
     })}}},
 })
 def spdk_process_start(body: SPDKParams):
+    settings = Settings()
     ssd_pcie_params = " ".join(" -A " + addr for addr in body.ssd_pcie) if body.ssd_pcie else "none"
     ssd_pcie_list = " ".join(body.ssd_pcie)
 
@@ -371,7 +373,11 @@ def spdk_process_start(body: SPDKParams):
             'NSOCKET': body.socket,
             'FW_PORT': body.firewall_port,
             'CPU_TOPOLOGY_ENABLED': cpu_topology_enabled,
-            'RESERVED_SYSTEM_CPUS': reserved_system_cpus
+            'RESERVED_SYSTEM_CPUS': reserved_system_cpus,
+            'TLS_SERVE': settings.tls_serve,
+            'TLS_CONNECT': settings.tls_connect,
+            'TLS_CLIENT_AUTH': settings.model_dump()["tls_client_auth"],
+            'TLS_PROVIDER': settings.tls_provider,
         }
 
         if ubuntu_host:
@@ -417,15 +423,20 @@ def spdk_process_start(body: SPDKParams):
         node_utils_k8s.wait_for_job_completion(job_resp.metadata.name, namespace)
         logger.info(f"Job '{job_resp.metadata.name}' completed successfully")
 
-        batch_v1.delete_namespaced_job(
-            name=job_resp.metadata.name,
-            namespace=namespace,
-            body=V1DeleteOptions(
-                propagation_policy='Foreground',
-                grace_period_seconds=0
+        try:
+            batch_v1.delete_namespaced_job(
+                name=job_resp.metadata.name,
+                namespace=namespace,
+                body=V1DeleteOptions(
+                    propagation_policy='Foreground',
+                    grace_period_seconds=0
+                )
             )
-        )
-        logger.info(f"Job deleted: '{job_resp.metadata.name}' in namespace '{namespace}")
+            logger.info(f"Job deleted: '{job_resp.metadata.name}' in namespace '{namespace}")
+        except ApiException as e:
+            if e.status != 404:
+                raise
+            logger.info(f"Job '{job_resp.metadata.name}' already gone, skipping delete")
         if (cpu_topology_enabled and not skip_kubelet_configuration) or (core_isolate and not cpu_topology_enabled):
             if cpu_topology_enabled and not skip_kubelet_configuration:
                 if not openshift:
@@ -605,25 +616,6 @@ def spdk_process_is_up(query: utils.RPCPortParams):
         return utils.get_response(True)
     else:
         return utils.get_response(False, "SPDK container is not running")
-
-
-class FilePath(BaseModel):
-    file_name: str
-
-
-@api.get('/get_file_content/<string:file_name>', responses={
-    200: {'content': {'application/json': {'schema': utils.response_schema({
-        'type': 'boolean'
-    })}}},
-})
-def get_file_content(path: FilePath):
-    out, err, _ = shell_utils.run_command(f"cat /etc/simplyblock/{path.file_name}")
-    if out:
-        return utils.get_response(out)
-    elif err:
-        err = err.decode("utf-8")
-        logger.debug(err)
-        return utils.get_response(None, err)
 
 
 DHCHAP_KEY_DIR = "/etc/simplyblock/dhchap_keys"

@@ -6,7 +6,6 @@ import socket
 import subprocess
 import time
 import uuid
-import textwrap
 import typing as t
 
 import docker
@@ -15,9 +14,10 @@ import requests
 
 from docker.errors import DockerException
 from simplyblock_core import utils, scripts, constants, mgmt_node_ops, storage_node_ops
-from simplyblock_core.controllers import backup_controller, cluster_events, device_controller, qos_controller, tasks_controller
+from simplyblock_core.controllers import backup_controller, cluster_events, device_controller, qos_controller, tasks_controller, tcp_ports_events
+from simplyblock_core.fw_api_client import FirewallClient
 from simplyblock_core.db_controller import DBController
-from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.models.cluster import Cluster, HashicorpVaultSettings
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.mgmt_node import MgmtNode
@@ -225,7 +225,9 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    enable_node_affinity, qpair_count, client_qpair_count, max_queue_size, inflight_io_threshold, disable_monitoring, strict_node_anti_affinity, name,
                    tls_secret, ingress_host_source, dns_name, fabric, is_single_node, client_data_nic,
                    nvmeof_tls_config=None, max_fault_tolerance=1, backup_config=None,
-                   nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001, container_image_prefix=None) -> str:
+                   nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001, container_image_prefix=None,
+                   hashicorp_vault_settings : t.Optional[HashicorpVaultSettings] = None,
+) -> str:
 
     if distr_ndcs == 0 and distr_npcs == 0:
         raise ValueError("both distr_ndcs and distr_npcs cannot be 0")
@@ -240,7 +242,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         if not dns_name:
             raise ValueError("--dns-name is required when --ingress-host-source is dns or loadbalancer")
 
-    if name:
+    if name and db_controller.kv_store is not None:
         existing_clusters = db_controller.get_clusters()
         for existing in existing_clusters:
             if existing.cluster_name and existing.cluster_name == name:
@@ -252,6 +254,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     scripts.install_deps(mode)
     logger.info("Installing dependencies > Done")
 
+    db_connection = None
     if mode == "docker":
         if not ifname:
             ifname = "eth0"
@@ -304,6 +307,9 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster = Cluster()
     cluster.uuid = str(uuid.uuid4())
     cluster.cluster_name = name
+    # New clusters auto-switch to per-chunk placement after their first
+    # activation + rebalance (consumed by storage_node_monitor).
+    cluster.shared_placement_migration_pending = True
     cluster.blk_size = blk_size
     cluster.page_size_in_blocks = page_size_in_blocks
     cluster.nqn = f"{constants.CLUSTER_NQN}:{cluster.uuid}"
@@ -354,6 +360,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.rpc_base_port = rpc_base_port
     cluster.snode_api_port = snode_api_port
     cluster.container_image_prefix = container_image_prefix or ""
+    cluster.hashicorp_vault_settings = hashicorp_vault_settings
 
     if nvmeof_tls_config:
         cluster.tls = True
@@ -381,21 +388,31 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         logger.info("Retrieving foundationdb connection string...")
         fdb_cluster_string = utils.get_fdb_cluster_string(constants.FDB_CONFIG_NAME, constants.K8S_NAMESPACE)
         db_connection = fdb_cluster_string
-        
+
         logger.info("Patching prometheus configmap...")
         utils.patch_prometheus_configmap(cluster.uuid, cluster.secret)
 
-    if not disable_monitoring:
         if ingress_host_source == "hostip":
             dns_name = dev_ip
+    else:
+        assert False, "Unreachable"
 
+    # Monitoring stack configuration (OpenSearch max_result_window, Graylog
+    # GELF input + JSON extractor, Grafana admin user). Must run after the
+    # mode-specific deploy block has produced a reachable graylog endpoint.
+    # Pre-KMS (commit 7700b866) this lived in a single shared block after
+    # the if/elif; the KMS refactor accidentally moved it into the
+    # kubernetes branch only, which silently left every docker-swarm
+    # deployment without a Graylog input — services were emitting GELF on
+    # port 12201 but graylog was dropping them on the floor because no
+    # input was configured. Restore the shared placement so both modes
+    # provision monitoring.
+    if not disable_monitoring:
         _set_max_result_window(os_endpoint)
-
         _add_graylog_input(graylog_endpoint, monitoring_secret)
-
         _create_update_user(cluster.uuid, cluster.grafana_endpoint, monitoring_secret, cluster.secret)
 
-    cluster.db_connection = db_connection
+    cluster.db_connection = db_connection  # type: ignore[assignment]
     cluster.status = Cluster.STATUS_UNREADY
     cluster.create_dt = str(datetime.datetime.now())
 
@@ -434,41 +451,14 @@ def _cleanup_nvme(mount_point, nqn_value) -> None:
     logger.info(f"Removed mount point: {mount_point}")
 
 
-def _run_fio(mount_point) -> None:
-    if not os.path.exists(mount_point):
-        os.makedirs(mount_point, exist_ok=True)
-
-    try:
-        fio_config = textwrap.dedent(f"""
-            [test]
-            ioengine=aiolib
-            direct=1
-            iodepth=4
-            readwrite=randrw
-            bs=4K
-            nrfiles=4
-            size=1G
-            verify=md5
-            numjobs=3
-            directory={mount_point}
-        """).strip()
-        config_file = "fio.cfg"
-        with open(config_file, "w") as f:
-            f.write(fio_config)
-
-        logger.info(subprocess.check_output(["sudo", "fio", config_file], text=True))
-    finally:
-        if os.path.exists(config_file):
-            os.remove(config_file)
-            logger.info("fio configuration file removed.")
-
-
 def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
                 distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity, qpair_count,
                 max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name, cr_name=None,
                 cr_namespace=None, cr_plural=None, fabric="tcp", cluster_ip=None, grafana_secret=None,
                 client_data_nic="", max_fault_tolerance=1, backup_config=None,
-                nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001) -> str:
+                nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001,
+                hashicorp_vault_settings : t.Optional[HashicorpVaultSettings] = None,
+) -> str:
 
 
     default_cluster = None
@@ -495,11 +485,14 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
             raise ValueError("max_fault_tolerance > 1 requires distr_npcs >= 2")
 
     monitoring_secret = os.environ.get("MONITORING_SECRET", "")
-    
+
     logger.info("Adding new cluster")
     cluster = Cluster()
     cluster.uuid = str(uuid.uuid4())
     cluster.cluster_name = name
+    # New clusters auto-switch to per-chunk placement after their first
+    # activation + rebalance (consumed by storage_node_monitor).
+    cluster.shared_placement_migration_pending = True
     cluster.blk_size = blk_size
     cluster.page_size_in_blocks = page_size_in_blocks
     cluster.nqn = f"{constants.CLUSTER_NQN}:{cluster.uuid}"
@@ -570,6 +563,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     cluster.nvmf_base_port = nvmf_base_port
     cluster.rpc_base_port = rpc_base_port
     cluster.snode_api_port = snode_api_port
+    cluster.hashicorp_vault_settings = hashicorp_vault_settings
     if backup_config:
         cluster.backup_config = backup_config
 
@@ -607,6 +601,22 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
         ols_status = Cluster.STATUS_UNREADY
     else:
         set_cluster_status(cl_id, Cluster.STATUS_IN_ACTIVATION)
+
+    # First-time activation runs while no primary LVS is serving fabric I/O
+    # yet, so the recreate paths run with activation_mode=True (peer LVS /
+    # leader / hublvol RPCs short-circuited — peer stacks aren't fully built
+    # during this phase, so they would not be safe to call). Re-activation
+    # (e.g. suspended → in_activation after JCERR, or force-reactivating an
+    # active/degraded cluster) is different: every primary's SPDK and lvstore
+    # are still alive and serving I/O — the secondary's examine of its non-
+    # leader raid0 races the live leader's blob-metadata writes and fails
+    # with bs_load_cur_extent_page_valid CRC mismatch on every retry
+    # (observed 2026-05-11, LVS_6769 on node 8084 — 22+ minute examine loop).
+    # We keep activation_mode=True (so peer LVS/hublvol RPCs stay disabled)
+    # and add only a firewall-only port-block on the live leader around the
+    # non-leader recreate in Pass 2. Port-block is benign on peers whose
+    # service isn't listening, so it's safe even against not-fully-built peers.
+    is_fresh_activation = (ols_status == Cluster.STATUS_UNREADY)
     snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     online_nodes = []
     dev_count = 0
@@ -744,16 +754,61 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
         for primary_node in primary_nodes:
             primary_node.lvstore_status = "in_creation"
             primary_node.write_to_db()
+
+            # On re-activation the primary's LVS is still alive and serving
+            # client I/O — snode's examine of its non-leader raid0 will race
+            # the leader's blob-metadata writes unless we quiesce the leader
+            # first. We do this with a firewall-only port-block on the leader:
+            # it has no effect on a peer whose service isn't listening (per
+            # design, safe even when peer stacks aren't fully built yet) but
+            # it stops the live leader from issuing writes that race the
+            # examine. We deliberately do NOT switch the helper out of
+            # activation_mode here: that would enable peer leader/distrib/
+            # lvstore/hublvol RPCs which presume the peer's full stack is up.
+            leader_blocked = False
+            leader_port = None
+            leader_ptype = "tcp"
+            if not is_fresh_activation and primary_node.status == StorageNode.STATUS_ONLINE:
+                try:
+                    leader_port = primary_node.get_lvol_subsys_port(primary_node.lvstore)
+                    leader_ptype = "udp" if primary_node.active_rdma else "tcp"
+                    FirewallClient(primary_node, timeout=3, retry=1).firewall_set_port(
+                        leader_port, leader_ptype, "block", primary_node.rpc_port)
+                    tcp_ports_events.port_deny(primary_node, leader_port)
+                    leader_blocked = True
+                    time.sleep(0.5)
+                except Exception as e:
+                    logger.warning(
+                        "Re-activation: port-block on leader %s for %s failed: %s — "
+                        "proceeding without block (secondary examine may race live leader writes)",
+                        primary_node.get_id(), primary_node.lvstore, e)
+
             try:
-                r = storage_node_ops.recreate_lvstore_on_non_leader(
-                    snode, primary_node, primary_node, activation_mode=True)
-            except storage_node_ops.LVSRestartRequiredError as e:
-                logger.error(e)
-                set_cluster_status(cl_id, ols_status)
-                raise ValueError(
-                    f"Failed to activate cluster: node {e.node_id} holds "
-                    f"partial state for LVS {e.lvs_name} (non-leader). "
-                    f"Restart node {e.node_id} before activating.")
+                try:
+                    r = storage_node_ops.recreate_lvstore_on_non_leader(
+                        snode, primary_node, primary_node, activation_mode=True)
+                except storage_node_ops.LVSRestartRequiredError as e:
+                    logger.error(e)
+                    set_cluster_status(cl_id, ols_status)
+                    raise ValueError(
+                        f"Failed to activate cluster: node {e.node_id} holds "
+                        f"partial state for LVS {e.lvs_name} (non-leader). "
+                        f"Restart node {e.node_id} before activating.")
+            finally:
+                if leader_blocked:
+                    try:
+                        FirewallClient(primary_node, timeout=3, retry=1).firewall_set_port(
+                            leader_port, leader_ptype, "allow", primary_node.rpc_port)
+                        tcp_ports_events.port_allowed(primary_node, leader_port)
+                    except Exception as ue:
+                        logger.error(
+                            "Failed to unblock leader %s:%s after non-leader recreate: %s — scheduling port_allow",
+                            primary_node.get_id(), leader_port, ue)
+                        try:
+                            tasks_controller.add_port_allow_task(
+                                primary_node.cluster_id, primary_node.get_id(), leader_port)
+                        except Exception as se:
+                            logger.error("Failed to schedule port_allow fallback: %s", se)
             if not r:
                 ret = False
 
@@ -987,6 +1042,143 @@ def cluster_set_active(cl_id) -> None:
                 dev_stat = db_controller.get_device_stats(dev, 1)
                 if dev_stat and dev_stat[0].size_util < cluster.cap_crit:
                     device_controller.device_set_online(dev.get_id())
+
+
+def set_shared_placement(cl_id, enable=True, force=False) -> bool:
+    """Flip the cluster-wide shared_placement flag for distrib bdevs.
+
+    Sequence (per upgrade procedure):
+      1. Preflight: every storage node must be ONLINE; cluster status must
+         be ACTIVE and not rebalancing. With force=True the rebalancing
+         and node-status gates are bypassed (only valid for the off->on
+         transition; off->on is always safe per the data-plane spec).
+      2. For every online storage node, submit the runtime RPC
+         ``distr_shared_placement`` with ``enable`` and no ``name`` so it
+         applies to all distrib bdevs on that node.
+      3. Persist the flag on the lvstore_stack[/_secondary/_tertiary]
+         distrib entries of every node so that restarts re-create with
+         the new mode.
+      4. Persist cluster.shared_placement so future bdev_distrib_create
+         calls (new nodes, new distribs) get the flag automatically.
+
+    The off->on direction is always safe. The on->off direction is left
+    for debug only and requires force=True; the spec calls out that a
+    bdev created with shared_placement=True may host two layers sharing
+    a storage_ID across columns on a page, so disabling it on such a
+    bdev causes undefined behavior. Callers are expected to ensure the
+    bdev is balanced or empty before flipping back.
+    """
+    cluster = db_controller.get_cluster_by_id(cl_id)
+    enable = bool(enable)
+
+    if cluster.shared_placement == enable:
+        logger.info(
+            "Cluster %s shared_placement already %s; nothing to do",
+            cl_id, enable)
+        return True
+
+    # Direction-specific guards.
+    if not enable and not force:
+        logger.error(
+            "Disabling shared_placement is a debug-only operation; pass "
+            "force=True after verifying every distrib bdev is balanced or "
+            "empty")
+        return False
+
+    # Preflight (skippable only via force; cluster-status gate is hard).
+    if cluster.status != Cluster.STATUS_ACTIVE:
+        logger.error(
+            "Cluster %s is %s; shared_placement can only be toggled while "
+            "the cluster is %s",
+            cl_id, cluster.status, Cluster.STATUS_ACTIVE)
+        return False
+    if cluster.is_re_balancing and not force:
+        logger.error(
+            "Cluster %s is rebalancing; wait for rebalance to finish "
+            "(or pass force=True for the off->on direction)", cl_id)
+        return False
+
+    nodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
+    if not force:
+        non_online = [
+            n for n in nodes if n.status != StorageNode.STATUS_ONLINE
+        ]
+        if non_online:
+            ids = ", ".join(f"{n.get_id()[:8]}={n.status}" for n in non_online)
+            logger.error(
+                "Cluster %s has non-online storage nodes; refusing to toggle "
+                "shared_placement: %s", cl_id, ids)
+            return False
+
+    # Step 2: dispatch the runtime RPC to every online node. We do this
+    # before persisting so that if SPDK rejects the flip we don't end up
+    # with a divergent DB state. Failures on individual nodes are logged
+    # but do not abort the operation — the per-node lvstore_stack update
+    # below also gates the restart-time behavior.
+    failures = []
+    for node in nodes:
+        if node.status != StorageNode.STATUS_ONLINE:
+            logger.info(
+                "Skipping runtime shared_placement RPC on %s (status=%s)",
+                node.get_id()[:8], node.status)
+            continue
+        try:
+            rpc = node.rpc_client(timeout=10, retry=2)
+            ok = rpc.distr_shared_placement(enable=enable)
+            if not ok:
+                failures.append(node.get_id())
+                logger.warning(
+                    "Node %s rejected distr_shared_placement(enable=%s)",
+                    node.get_id()[:8], enable)
+        except Exception:
+            failures.append(node.get_id())
+            logger.exception(
+                "Node %s raised on distr_shared_placement(enable=%s)",
+                node.get_id()[:8], enable)
+
+    if failures and not force:
+        logger.error(
+            "Aborting shared_placement toggle: %d node(s) rejected the "
+            "runtime RPC: %s", len(failures), failures)
+        return False
+
+    # Step 3: persist the flag in every stored distrib stack entry on
+    # every node, so restarts re-create with the new mode without needing
+    # to consult the cluster row.
+    #
+    # NB: only `lvstore_stack` is a List[dict] of bdev stack entries.
+    # Despite the model's type annotation, `lvstore_stack_secondary` and
+    # `_tertiary` hold a single UUID string — the id of the upstream
+    # primary whose LVS this node serves as a peer for. The peer's bdev
+    # params come from that primary's lvstore_stack at recreate time
+    # (see storage_node_ops._create_bdev_stack callers in step-2 /
+    # step-3 of full_node_recreate_lvstore), so updating the primary's
+    # stack here covers the peers automatically.
+    for node in nodes:
+        changed = False
+        for entry in (node.lvstore_stack or []):
+            if not isinstance(entry, dict) or entry.get("type") != "bdev_distr":
+                continue
+            params = entry.setdefault("params", {})
+            if not isinstance(params, dict):
+                continue
+            current = params.get("shared_placement", False)
+            if enable and not current:
+                params["shared_placement"] = True
+                changed = True
+            elif not enable and current:
+                # remove rather than set False, so the param dict stays
+                # minimal and matches the default-construct case.
+                params.pop("shared_placement", None)
+                changed = True
+        if changed:
+            node.write_to_db(db_controller.kv_store)
+
+    # Step 4: persist on the cluster row.
+    cluster.shared_placement = enable
+    cluster.write_to_db(db_controller.kv_store)
+    logger.info("Cluster %s shared_placement set to %s", cl_id, enable)
+    return True
 
 
 def list() -> t.List[dict]:
@@ -1387,8 +1579,7 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
             service_image = mgmt_image
         service_names = []
         for service in cluster_docker.services.list():
-            if image_parts in service.attrs['Spec']['Labels']['com.docker.stack.image'] or \
-            "simplyblock" in service.attrs['Spec']['Labels']['com.docker.stack.image']:
+            if image_parts in service.attrs['Spec']['Labels']['com.docker.stack.image']:
                 if service.name in ["app_CachingNodeMonitor", "app_CachedLVolStatsCollector"]:
                     logger.info(f"Removing service {service.name}")
                     service.remove()
@@ -1520,6 +1711,18 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                 logger.debug(e)
                 logger.error(f"Failed to restart node: {node.get_id()}")
                 return
+
+    # All storage nodes have been restarted onto the upgraded SPDK image.
+    # Arm the one-shot per-chunk placement migration now — and only now,
+    # after the full rolling restart — so storage_node_monitor switches the
+    # cluster once it settles (ACTIVE, not rebalancing, all nodes online).
+    # Skipped on the early-return failure path above, so a partial/failed
+    # upgrade never arms it. No-op if the cluster is already on per-chunk.
+    upgraded = db_controller.get_cluster_by_id(cluster_id)
+    if not upgraded.shared_placement and not upgraded.shared_placement_migration_pending:
+        upgraded.shared_placement_migration_pending = True
+        upgraded.write_to_db(db_controller.kv_store)
+        logger.info("Armed shared_placement migration for cluster %s post-upgrade", cluster_id)
 
     logger.info("Done")
 

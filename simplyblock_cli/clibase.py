@@ -15,7 +15,7 @@ from simplyblock_core.controllers import pool_controller, lvol_controller, snaps
     tasks_controller, qos_controller, migration_controller, backup_controller
 from simplyblock_core.controllers import health_controller
 from simplyblock_core.models.pool import Pool
-from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.models.cluster import Cluster, HashicorpVaultSettings
 
 
 def range_type(min, max):
@@ -168,18 +168,7 @@ class CLIWrapperBase:
         namespace = args.namespace
         ha_jm_count = args.ha_jm_count
         format_4k = args.format_4k
-
-        if args.enable_journal_device:
-            num_partitions_per_dev = 0
-        else:
-            # Deprecated but still supported for backward compatibility.
-            if args.partitions is None:
-                num_partitions_per_dev = 1
-            elif args.partitions < 0 or args.partitions > 1:
-                self.parser.error("partitions must be either 0 or 1")
-            else:
-                print("WARNING: --journal-partition is deprecated, use --enable-journal-device instead")
-                num_partitions_per_dev = args.partitions
+        num_partitions_per_dev = 0 if args.enable_journal_device else 1
 
         try:
             out = storage_ops.add_node(
@@ -404,7 +393,11 @@ class CLIWrapperBase:
         return self.cluster_add(args)
 
     def cluster__activate(self, sub_command, args):
-        cluster_ops.cluster_activate(args.cluster_id, args.force, args.force_lvstore_create)
+        try:
+            cluster_ops.cluster_activate(args.cluster_id, args.force, args.force_lvstore_create)
+        except Exception as e:
+            print(f"Error activating cluster: {e}")
+            return False
         return True
 
     def cluster__list(self, sub_command, args):
@@ -521,6 +514,14 @@ class CLIWrapperBase:
         cluster_ops.set(args.cluster_id, args.attr_name, args.attr_value)
         return True
 
+    def cluster__set_shared_placement(self, sub_command, args):
+        # Default action is enable (False -> True). --disable runs the
+        # debug-only reverse transition and requires --force.
+        enable = not getattr(args, "disable", False)
+        force = bool(getattr(args, "force", False))
+        return cluster_ops.set_shared_placement(
+            args.cluster_id, enable=enable, force=force)
+
     def cluster__change_name(self, sub_command, args):
         cluster_id = args.cluster_id
         cluster_name = args.name
@@ -568,10 +569,8 @@ class CLIWrapperBase:
             args.max_w_mbytes,
             with_snapshot=with_snapshot,
             max_size=max_size,
-            crypto_key1=args.crypto_key1,
-            crypto_key2=args.crypto_key2,
             lvol_priority_class=lvol_priority_class,
-            uid=args.uid, pvc_name=args.pvc_name, namespace=args.namespace,
+            uid=args.uid, pvc_name=args.pvc_name, namespaced=args.namespaced,
             max_namespace_per_subsys=args.max_namespace_per_subsys, ndcs=ndcs, npcs=npcs, fabric=args.fabric,
             allowed_hosts=allowed_hosts,
             do_replicate=args.replicate)
@@ -606,7 +605,9 @@ class CLIWrapperBase:
         if args.host_nqn:
             kwargs['host_nqn'] = args.host_nqn
 
-        data = lvol_controller.connect_lvol(args.volume_id, **kwargs)
+        data, err = lvol_controller.connect_lvol(args.volume_id, **kwargs)
+        if err:
+            return err
         if data:
             return "\n".join(con['connect'] for con in data)
 
@@ -624,9 +625,7 @@ class CLIWrapperBase:
         return snapshot_id if not error else error
 
     def volume__clone(self, sub_command, args):
-        new_size = args.resize
-
-        clone_id, error = snapshot_controller.clone(args.snapshot_id, args.clone_name, new_size)
+        clone_id, error = snapshot_controller.clone(args.snapshot_id, args.clone_name, args.resize, args.namespaced)
         return clone_id if not error else error
 
     def volume__move(self, sub_command, args):
@@ -781,6 +780,9 @@ class CLIWrapperBase:
             return False
         return True
 
+    def storage_pool__get_master_lvols(self, sub_command, args):
+        return lvol_controller.get_master_lvols_by_pool_uuid(args.pool_id)
+
     def snapshot__add(self, sub_command, args):
         backup = getattr(args, 'backup', False)
         snapshot_id, error = snapshot_controller.add(args.volume_id, args.name, backup=backup)
@@ -795,7 +797,7 @@ class CLIWrapperBase:
         return True
 
     def snapshot__list(self, sub_command, args):
-        return snapshot_controller.list(args.all, args.cluster_id, args.with_details)
+        return snapshot_controller.list(args.all, args.cluster_id, args.with_details, args.pool)
 
     def snapshot__delete(self, sub_command, args):
         return snapshot_controller.delete(args.snapshot_id, args.force)
@@ -804,9 +806,7 @@ class CLIWrapperBase:
         return health_controller.check_snap(args.snapshot_id)
 
     def snapshot__clone(self, sub_command, args):
-        new_size = args.resize
-
-        clone_id, error = snapshot_controller.clone(args.snapshot_id, args.lvol_name, new_size)
+        clone_id, error = snapshot_controller.clone(args.snapshot_id, args.lvol_name, args.resize, args.namespaced)
         return clone_id if not error else error
 
     def snapshot__replication_status(self, sub_command, args):
@@ -1005,7 +1005,9 @@ class CLIWrapperBase:
             distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity,
             qpair_count, max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name, fabric,
             client_data_nic, max_fault_tolerance=max_fault_tolerance, backup_config=backup_config,
-            nvmf_base_port=args.nvmf_base_port, rpc_base_port=args.rpc_base_port, snode_api_port=args.snode_api_port)
+            nvmf_base_port=args.nvmf_base_port, rpc_base_port=args.rpc_base_port, snode_api_port=args.snode_api_port,
+            hashicorp_vault_settings=HashicorpVaultSettings({"base_url": args.hashicorp_vault_url}) if args.hashicorp_vault_url else None,
+        )
 
     def cluster_create(self, args):
         import json as _json
@@ -1059,7 +1061,9 @@ class CLIWrapperBase:
             strict_node_anti_affinity, name, tls_secret, ingress_host_source, dns_name, fabric, is_single_node, client_data_nic,
             max_fault_tolerance=max_fault_tolerance,
             backup_config=backup_config,
-            nvmf_base_port=args.nvmf_base_port, rpc_base_port=args.rpc_base_port, snode_api_port=args.snode_api_port)
+            nvmf_base_port=args.nvmf_base_port, rpc_base_port=args.rpc_base_port, snode_api_port=args.snode_api_port,
+            hashicorp_vault_settings=HashicorpVaultSettings({"base_url": args.hashicorp_vault_url}) if args.hashicorp_vault_url else None,
+        )
 
     def query_yes_no(self, question, default="yes"):
         """Ask a yes/no question via raw_input() and return their answer.
@@ -1098,3 +1102,16 @@ class CLIWrapperBase:
     def _completer_get_sn_list(self, prefix, parsed_args, **kwargs):
         db = db_controller.DBController()
         return (cluster.get_id() for cluster in db.get_storage_nodes() if cluster.get_id().startswith(prefix))
+
+    def migrate_journal_partition(self, args):
+        partitions = getattr(args, 'partitions', None)
+        if partitions is None:
+            return args
+
+        if partitions < 0 or partitions > 1:
+            self.parser.error("partitions must be either 0 or 1")
+        else:
+            if getattr(args, 'enable_journal_device', None) is not True:
+                args.enable_journal_device = args.partitions == 0
+            del args.partitions
+        return args

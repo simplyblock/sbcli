@@ -16,6 +16,12 @@ last_event: dict[str, dict] = {}
 
 logger.info("Starting capacity monitoring service...")
 while True:
+    try:
+        db.get_clusters()
+    except Exception as e:
+        logger.error(f"Failed to get clusters: {e}")
+        time.sleep(3)
+        continue
     clusters = db.get_clusters()
     for cl in clusters:
         logger.info(f"Checking cluster: {cl.get_id()}")

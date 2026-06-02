@@ -8,6 +8,7 @@ on the next upload without needing to be copied anywhere else first.
 Uploads:
   * <this_dir>/stop_cluster_run.py, <this_dir>/extract_spdk_critical.py -> <dest>/scripts/
   * <this_dir>/*soak*.py                                                -> <dest>/perf/
+  * <this_dir>/snapshot_clone_namespace_scale.py                        -> <dest>/perf/
   * <this_dir>/cluster_metadata*.json                                   -> <dest>/perf/
   * The SSH key                                                         -> ~/.ssh/<basename> (chmod 600)
 
@@ -37,6 +38,8 @@ LOCAL_OPS  = [SCRIPT_DIR / "stop_cluster_run.py",
               SCRIPT_DIR / "extract_spdk_critical.py"]
 SOAK_GLOB  = "*soak*.py"
 META_GLOB  = "cluster_metadata*.json"
+# Extra perf/test scripts that don't match SOAK_GLOB but still belong in perf/.
+PERF_EXTRA = [SCRIPT_DIR / "snapshot_clone_namespace_scale.py"]
 
 
 def log(msg: str) -> None:
@@ -148,6 +151,10 @@ def main() -> int:
     if not soaks:
         log(f"WARNING: no files matched {SOAK_GLOB} in {SCRIPT_DIR}")
     for p in soaks:
+        scp_upload(p, user, host, str(key_path), f"{dest}/perf/")
+
+    # 3a) upload extra perf scripts that don't match the soak glob
+    for p in PERF_EXTRA:
         scp_upload(p, user, host, str(key_path), f"{dest}/perf/")
 
     # 3b) upload cluster metadata JSONs (used as stop_cluster_run.py input)

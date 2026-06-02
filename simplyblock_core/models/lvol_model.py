@@ -14,6 +14,7 @@ class LVol(BaseModel):
     STATUS_IN_DELETION = 'in_deletion'
     STATUS_RESTORING = 'restoring'
     STATUS_DELETED = 'deleted'
+    STATUS_RESTORE_FAILED = 'restore_failed'
 
     _STATUS_CODE_MAP = {
         STATUS_ONLINE: 1,
@@ -22,6 +23,7 @@ class LVol(BaseModel):
         STATUS_IN_CREATION: 4,
         STATUS_RESTORING: 5,
         STATUS_DELETED: 6,
+        STATUS_RESTORE_FAILED: 7,
     }
 
     base_bdev: str = ""

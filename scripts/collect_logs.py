@@ -38,6 +38,7 @@ Examples
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 import tarfile
@@ -228,6 +229,79 @@ def _fmt(msg: dict) -> str:
     return f"{ts}  src={src}  ctr={cname}  lvl={lvl}  {text}"
 
 
+# Match the leading timestamp in a line emitted by ``_fmt``.
+# Accepts both ISO-8601 (``2026-04-30T14:14:22.314Z`` / ``+00:00``) and the
+# Graylog-storage form (``2026-04-30 14:14:22.314``). Fractional seconds and
+# trailing zone are optional.  We normalise the captured value to a single
+# canonical key so the sort is monotonic across mixed formats.
+_LEADING_TS_RE = re.compile(
+    r"^(?P<ts>\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?)(?:Z|[+-]\d{2}:?\d{2})?"
+)
+
+
+def _ts_sort_key(line: str) -> str:
+    """Return a canonical ascending-sortable timestamp key for *line*.
+
+    Lines that begin with a recognised timestamp (Graylog/OpenSearch shapes)
+    yield ``YYYY-MM-DDTHH:MM:SS.ffffff`` so that:
+      * ``"2026-04-30 14:14:22.3"`` and ``"2026-04-30T14:14:22.300000Z"``
+        produce the same key (the ' ' vs 'T' separator and the trailing
+        ``Z``/offset don't break ordering),
+      * truncated fractional seconds (``.3`` vs ``.300``) compare correctly
+        because we right-pad to 6 digits.
+    Lines without a parseable timestamp sort *after* every parseable line
+    while keeping their original relative order (handled by the caller's
+    stable sort + the ``"~"`` sentinel which is greater than any digit).
+    """
+    m = _LEADING_TS_RE.match(line)
+    if not m:
+        return "~" + line
+    ts = m.group("ts").replace(" ", "T")
+    if "." in ts:
+        head, frac = ts.split(".", 1)
+        frac = (frac + "000000")[:6]
+        ts = f"{head}.{frac}"
+    else:
+        ts = f"{ts}.000000"
+    return ts
+
+
+def _sort_log_file_inplace(path: Path) -> None:
+    """Re-sort an emitted log file by ascending event timestamp.
+
+    Run after a backend fetch so a single output file is monotonic in time
+    even when records arrived in non-monotonic order — e.g. the Graylog
+    >100 k path that walks adjacent 10-minute sub-windows but cannot promise
+    cross-window ordering when the underlying index reports timestamps with
+    sub-second precision varying across pages, or the OpenSearch scroll
+    path when the resolved index expression covers multiple time-based
+    indices whose shards interleave on continuation batches.
+
+    Uses Python's stable sort, so records with identical timestamps keep
+    the order in which they were originally received from the backend.
+    Lines that don't carry a parseable timestamp prefix (rare; mostly
+    multi-line log entries that survived the ``\\n`` flattening in
+    ``_fmt``) sink to the bottom in arrival order.
+    """
+    if not path.exists():
+        return
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return
+    if size == 0:
+        return
+    with path.open("r", encoding="utf-8", errors="replace") as fh:
+        lines = fh.readlines()
+    if len(lines) < 2:
+        return
+    lines.sort(key=_ts_sort_key)
+    tmp = path.with_suffix(path.suffix + ".sorted")
+    with tmp.open("w", encoding="utf-8", errors="replace") as fh:
+        fh.writelines(lines)
+    tmp.replace(path)
+
+
 # ---------------------------------------------------------------------------
 # Graylog REST API helpers
 # ---------------------------------------------------------------------------
@@ -248,13 +322,26 @@ def _gl_search_page(session, search_url, query, from_iso, to_iso, limit, offset)
         "fields": "timestamp,source,container_name,level,message",
     }
     try:
-        resp = session.get(search_url, params=params, timeout=90)
+        resp = session.get(search_url, params=params, timeout=90,
+                           headers={"Accept": "application/json"})
         resp.raise_for_status()
     except requests.RequestException as exc:
         print(f"    WARN: Graylog page request failed (offset={offset}): {exc}", file=sys.stderr)
         return None, 0
 
-    data = resp.json()
+    # Graylog 5.0.x returns HTTP 200 with an empty body when the request
+    # does not negotiate JSON. The explicit Accept header above is the
+    # primary defence; the empty-body / JSONDecodeError guards below
+    # avoid a fatal crash if a future patch regresses content-negotiation
+    # again or HAProxy strips the header.
+    if not resp.text.strip():
+        print(f"    WARN: Graylog returned empty response (offset={offset}, status={resp.status_code})", file=sys.stderr)
+        return None, 0
+    try:
+        data = resp.json()
+    except requests.exceptions.JSONDecodeError as exc:
+        print(f"    WARN: Graylog response is not valid JSON (offset={offset}): {exc}", file=sys.stderr)
+        return None, 0
     return data.get("messages", []), data.get("total_results", 0)
 
 
@@ -683,18 +770,28 @@ def fetch(
     out_path,
     probe_cache,
 ):
-    """Route to Graylog or OpenSearch depending on *use_opensearch*."""
+    """Route to Graylog or OpenSearch depending on *use_opensearch*.
+
+    Backend writers append records in the order their pages/batches arrive,
+    which for the Graylog 10-minute-sub-window path and the multi-index
+    OpenSearch scroll path is *not* always monotonic in event timestamp.
+    A post-fetch stable sort by leading timestamp restores chronological
+    order without depending on backend-side guarantees.
+    """
     if use_opensearch:
-        return opensearch_fetch_all(
+        n = opensearch_fetch_all(
             os_session, opensearch_base,
             os_container, os_source,
             from_iso, to_iso, str(out_path),
             probe_cache=probe_cache,
         )
-    return graylog_fetch_all(
-        gl_session, graylog_base,
-        gl_query, from_iso, to_iso, str(out_path),
-    )
+    else:
+        n = graylog_fetch_all(
+            gl_session, graylog_base,
+            gl_query, from_iso, to_iso, str(out_path),
+        )
+    _sort_log_file_inplace(Path(out_path))
+    return n
 
 
 # ---------------------------------------------------------------------------

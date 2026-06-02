@@ -94,7 +94,13 @@ logger.info("Starting Mgmt node monitor")
 
 
 while True:
-    # get storage nodes
+    try:
+        db.get_clusters()
+    except Exception as e:
+        logger.error(f"Failed to get clusters: {e}")
+        time.sleep(3)
+        continue
+
     nodes = db.get_mgmt_nodes()
     reachable_ips = set(backend.get_reachable_nodes())
 

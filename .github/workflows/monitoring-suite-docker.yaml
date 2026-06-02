@@ -1,0 +1,1105 @@
+name: Docker Monitoring Suite (Bootstrap + Multi-Test Comparison)
+run-name: "Docker Monitoring | ${{ inputs.SBCLI_BRANCH }} | ${{ inputs.TEST_CLASSES }} | NDCS:${{ inputs.BOOTSTRAP_DATA_CHUNKS }} NPCS:${{ inputs.BOOTSTRAP_PARITY_CHUNKS }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      # =========================
+      # Test selection
+      # =========================
+      TEST_CLASSES:
+        description: "Comma-separated monitoring test class names"
+        required: true
+        default: "TestParallelNamespaceLvolDocker,BulkLvolDeleteDocker,LargeScaleLvolDocker"
+
+      # =========================
+      # Cluster / Lab inputs
+      # =========================
+      STORAGE_PRIVATE_IPS:
+        description: "Space-separated storage node IPs (also used for cleanup)"
+        required: true
+        default: "192.168.10.205 192.168.10.206 192.168.10.207 192.168.10.208"
+      API_INVOKE_URL:
+        description: "API invoke URL"
+        required: true
+        default: "http://192.168.10.211/"
+      BASTION_IP:
+        description: "Bastion IP"
+        required: true
+        default: "192.168.10.211"
+      MNODES:
+        description: "Management node(s) IPs (only remote ops; runner itself is not touched)"
+        required: true
+        default: "192.168.10.211"
+      GRAFANA_ENDPOINT:
+        description: "Grafana endpoint"
+        required: true
+        default: "http://192.168.10.211/grafana"
+      SBCLI_BRANCH:
+        description: "sbcli repo branch to clone for tests"
+        required: true
+        default: "main"
+      CUSTOM_IMAGES:
+        description: "Image overrides: set spdk and/or docker values, leave as \"\" to skip."
+        default: 'spdk="" docker=""'
+        required: false
+
+      # =========================
+      # SSH / client inputs
+      # =========================
+      SSH_USER:
+        description: "SSH user"
+        required: true
+        default: "root"
+      KEY_PATH:
+        description: "SSH private key path on runner"
+        required: true
+        default: "/home/ec2-user/.ssh/simplyblock-us-east-2.pem"
+      CLIENTNODES:
+        description: "Space-separated client node IPs"
+        required: true
+        default: "192.168.10.165 192.168.10.166"
+
+      # =========================
+      # Cleanup inputs
+      # =========================
+      NFS_MOUNTPOINT:
+        description: "NFS mountpoint to unmount everywhere"
+        required: true
+        default: "/mnt/nfs_share"
+
+      # =========================
+      # Bootstrap params
+      # =========================
+      BOOTSTRAP_MAX_LVOL:
+        description: "bootstrap: --max-lvol"
+        required: true
+        default: "300"
+      BOOTSTRAP_DATA_CHUNKS:
+        description: "bootstrap: --data-chunks-per-stripe (also ndcs)"
+        required: true
+        default: "2"
+      BOOTSTRAP_PARITY_CHUNKS:
+        description: "bootstrap: --parity-chunks-per-stripe (also npcs)"
+        required: true
+        default: "2"
+      BOOTSTRAP_JOURNAL_PARTITION:
+        description: "bootstrap: --journal-partition"
+        required: true
+        default: "1"
+      BOOTSTRAP_DATA_NIC:
+        description: "bootstrap: --data-nics (space or comma-separated; default eth1)"
+        required: true
+        default: "eth1"
+      BOOTSTRAP_HA_JM_COUNT:
+        description: "bootstrap: --ha-jm-count"
+        required: true
+        default: "3"
+      BOOTSTRAP_IS_SINGLE_NODE:
+        description: "Bootstrap: deploy as single-node (--is-single-node)"
+        type: boolean
+        required: false
+        default: false
+      BOOTSTRAP_ENABLE_NODE_AFFINITY:
+        description: "Bootstrap: enable node affinity (--enable-node-affinity)"
+        type: boolean
+        required: false
+        default: false
+      EXTRA_CLUSTER_ARGS:
+        description: "Additional arguments for cluster create command"
+        required: false
+        type: string
+      EXTRA_SN_ARGS:
+        description: "Additional arguments for storage-node add-node command"
+        required: false
+        type: string
+
+      # =========================
+      # Security inputs
+      # =========================
+      CLUSTER_SECURITY:
+        description: "Cluster setup mode."
+        required: false
+        type: choice
+        default: "none"
+        options:
+          - none
+          - backup
+
+concurrency:
+  group: simplyblock-monitoring-docker-${{ inputs.MNODES }}
+  cancel-in-progress: false
+
+# ============================================================================
+# JOBS
+# ============================================================================
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────
+  # Job 1: Parse TEST_CLASSES into a JSON matrix
+  # ─────────────────────────────────────────────────────────────────────────
+  setup-matrix:
+    name: Parse test list
+    runs-on: [self-hosted]
+    outputs:
+      test_matrix: ${{ steps.parse.outputs.matrix }}
+      test_count: ${{ steps.parse.outputs.count }}
+    steps:
+      - name: Convert TEST_CLASSES to JSON array
+        id: parse
+        shell: bash
+        run: |
+          set -euo pipefail
+          IFS=',' read -ra tests <<< "${{ inputs.TEST_CLASSES }}"
+          json="["
+          for i in "${!tests[@]}"; do
+            t=$(echo "${tests[$i]}" | xargs)
+            [[ -z "$t" ]] && continue
+            [[ $i -gt 0 ]] && json+=","
+            json+="\"$t\""
+          done
+          json+="]"
+          echo "matrix=${json}" >> "$GITHUB_OUTPUT"
+          echo "count=${#tests[@]}" >> "$GITHUB_OUTPUT"
+          echo "Parsed ${#tests[@]} tests: ${json}"
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Job 2: Sequential test runs — full bare-metal bootstrap + test per entry
+  # ─────────────────────────────────────────────────────────────────────────
+  run-tests:
+    name: "Run: ${{ matrix.test }}"
+    needs: setup-matrix
+    runs-on: [self-hosted]
+    timeout-minutes: 4320
+    strategy:
+      matrix:
+        test: ${{ fromJson(needs.setup-matrix.outputs.test_matrix) }}
+      max-parallel: 1
+      fail-fast: false
+
+    env:
+      STORAGE_PRIVATE_IPS: ${{ inputs.STORAGE_PRIVATE_IPS }}
+      API_INVOKE_URL:      ${{ inputs.API_INVOKE_URL }}
+      API_BASE_URL:        ${{ inputs.API_INVOKE_URL }}
+      BASTION_IP:          ${{ inputs.BASTION_IP }}
+      BASTION_SERVER:      ${{ inputs.BASTION_IP }}
+      MNODES:              ${{ inputs.MNODES }}
+      NR_HUGEPAGES:        '2048'
+      EXTRA_CLUSTER_ARGS:  ${{ inputs.EXTRA_CLUSTER_ARGS || '' }}
+      EXTRA_SN_ARGS:       ${{ inputs.EXTRA_SN_ARGS || '' }}
+      GRAFANA_ENDPOINT:    ${{ inputs.GRAFANA_ENDPOINT }}
+      SBCLI_CMD:           'sbctl'
+      SBCLI_BRANCH:        ${{ inputs.SBCLI_BRANCH }}
+      SSH_USER:            ${{ inputs.SSH_USER }}
+      KEY_PATH:            ${{ inputs.KEY_PATH }}
+      CLIENTNODES:         ${{ inputs.CLIENTNODES }}
+      CLIENT_IP:           ${{ inputs.CLIENTNODES }}
+      NFS_MOUNTPOINT:      ${{ inputs.NFS_MOUNTPOINT }}
+      BOOTSTRAP_MAX_LVOL:          ${{ inputs.BOOTSTRAP_MAX_LVOL }}
+      BOOTSTRAP_DATA_CHUNKS:       ${{ inputs.BOOTSTRAP_DATA_CHUNKS }}
+      BOOTSTRAP_PARITY_CHUNKS:     ${{ inputs.BOOTSTRAP_PARITY_CHUNKS }}
+      BOOTSTRAP_JOURNAL_PARTITION: ${{ inputs.BOOTSTRAP_JOURNAL_PARTITION }}
+      BOOTSTRAP_DATA_NIC:          ${{ inputs.BOOTSTRAP_DATA_NIC }}
+      BOOTSTRAP_HA_JM_COUNT:       ${{ inputs.BOOTSTRAP_HA_JM_COUNT }}
+      NDCS:                ${{ inputs.BOOTSTRAP_DATA_CHUNKS }}
+      NPCS:                ${{ inputs.BOOTSTRAP_PARITY_CHUNKS }}
+      TEST_CLASS:          ${{ matrix.test }}
+      CLUSTER_SECURITY:    ${{ inputs.CLUSTER_SECURITY || 'none' }}
+      CUSTOM_IMAGES:       ${{ inputs.CUSTOM_IMAGES || 'spdk="" docker=""' }}
+      SSH_PASSWORD:        ${{ secrets.SSH_PASSWORD }}
+      SLACK_WEBHOOK_URL:   ${{ secrets.SLACK_WEBHOOK_URL }}
+      MINIO_ACCESS_KEY:    ${{ secrets.MINIO_ACCESS_KEY }}
+      MINIO_SECRET_KEY:    ${{ secrets.MINIO_SECRET_KEY }}
+      SUPABASE_ANON_KEY:   ${{ secrets.SUPABASE_ANON_KEY }}
+      CLUSTER_ID:          ""
+      CLUSTER_SECRET:      ""
+
+    steps:
+      - name: Runner diagnostics
+        shell: bash
+        run: |
+          set -euxo pipefail
+          echo "=== Running monitoring test: ${TEST_CLASS} ==="
+          uname -a; whoami; pwd
+          python3 --version || true
+
+      - name: Clear stale artifacts
+        shell: bash
+        run: rm -f sbcli/e2e/output.log || true
+
+      - name: Install sshpass
+        shell: bash
+        run: |
+          set -euxo pipefail
+          if command -v sshpass >/dev/null 2>&1; then exit 0; fi
+          if command -v apt-get >/dev/null 2>&1; then
+            sudo apt-get update -y && sudo apt-get install -y sshpass
+          elif command -v yum >/dev/null 2>&1; then
+            sudo yum install -y epel-release || true && sudo yum install -y sshpass
+          elif command -v dnf >/dev/null 2>&1; then
+            sudo dnf install -y sshpass
+          else
+            echo "ERROR: Cannot install sshpass" && exit 1
+          fi
+
+      - name: Parse CUSTOM_IMAGES overrides
+        shell: bash
+        run: |
+          set -euxo pipefail
+          custom="${{ inputs.CUSTOM_IMAGES }}"
+          for item in $custom; do
+            key="${item%%=*}"; value="${item#*=}"; value="${value//\"/}"
+            [[ -z "$value" ]] && continue
+            case "$key" in
+              spdk)   echo "SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=$value" >> "$GITHUB_ENV" ;;
+              docker) echo "SIMPLY_BLOCK_DOCKER_IMAGE=$value"     >> "$GITHUB_ENV" ;;
+            esac
+          done
+
+      - name: Resolve SSH KEY_PATH
+        shell: bash
+        run: |
+          set -euxo pipefail
+          kp="${KEY_PATH}"; kp="${kp%\"}"; kp="${kp#\"}"; kp="${kp%\'}"; kp="${kp#\'}"
+          [[ "$kp" == .ssh/* ]]  && kp="${HOME}/${kp}"
+          [[ "$kp" == ~/* ]]     && kp="${HOME}/${kp#~/}"
+          echo "KEY_PATH=$kp" >> "$GITHUB_ENV"
+          test -f "$kp" || (echo "ERROR: SSH key not found at $kp" && exit 1)
+          chmod 600 "$kp" || true
+
+      - name: Export KEY_NAME from KEY_PATH
+        shell: bash
+        run: |
+          set -euxo pipefail
+          key_name="$(basename "${KEY_PATH}")"
+          echo "KEY_NAME=${key_name}" >> "$GITHUB_ENV"
+
+      - name: Validate secrets
+        shell: bash
+        run: |
+          [[ -n "${SSH_PASSWORD}" ]] || (echo "ERROR: secrets.SSH_PASSWORD required" && exit 1)
+
+      # ============================================================
+      # PRE-BOOTSTRAP CLEANUP
+      # ============================================================
+      - name: "Pre-clean: kill fio/tmux + unmount NFS"
+        shell: bash
+        run: |
+          set -euxo pipefail
+          run_remote() {
+            sshpass -p "${SSH_PASSWORD}" ssh \
+              -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+              "${SSH_USER}@$1" "bash -s" <<< "$2"
+          }
+          run_remote_with_retry() {
+            local ip="$1" script="$2" max=5
+            for attempt in $(seq 1 $max); do
+              run_remote "$ip" "$script" && return 0
+              echo "Attempt $attempt/$max failed for $ip, retrying in 5s..."; sleep 5
+            done
+            return 0
+          }
+          targets="$MNODES $STORAGE_PRIVATE_IPS $CLIENTNODES"
+          for ip in $(echo "$targets" | tr ' ' '\n' | sed '/^$/d' | sort -u); do
+            echo "---- $ip: kill fio/tmux + umount NFS ----"
+            run_remote_with_retry "$ip" "set -euxo pipefail
+              pkill -9 fio || true; pkill -9 tmux || true
+              mp='${NFS_MOUNTPOINT}'
+              if mountpoint -q \"\$mp\"; then umount -f \"\$mp\" || umount \"\$mp\"
+              else
+                if mount | grep -q \" \$mp \"; then umount -f \"\$mp\" || umount \"\$mp\" || true; fi
+              fi"
+          done
+
+      - name: "Pre-clean: destroy/clean storage nodes"
+        shell: bash
+        run: |
+          set -euxo pipefail
+          run_remote() {
+            sshpass -p "${SSH_PASSWORD}" ssh \
+              -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+              "${SSH_USER}@$1" "bash -s" <<< "$2"
+          }
+          targets="$MNODES $STORAGE_PRIVATE_IPS"
+          for ip in $(echo "$targets" | tr ' ' '\n' | sed '/^$/d' | sort -u); do
+            echo "---- storage destroy/clean: $ip ----"
+            run_remote "$ip" "set -euxo pipefail
+              systemctl stop firewalld || true; systemctl stop ufw || true
+              sysctl -w net.ipv6.conf.all.disable_ipv6=1 || true
+              '${SBCLI_CMD}' sn deploy-cleaner || echo 'WARN: deploy-cleaner failed'
+              docker stop \$(docker ps -aq) || true
+              docker rm -f \$(docker ps -aq) || true
+              docker builder prune --all -f || true
+              docker system prune -af || true
+              docker volume prune -f || true
+              docker rmi -f \$(docker images -aq) || true
+              pip uninstall -y '${SBCLI_CMD}' || true
+              pip uninstall -y sbctl || true
+              rm -rf /usr/local/bin/sbc* || true
+              k3s-agent-uninstall.sh || true"
+            sleep 10
+          done
+
+      - name: "Pre-clean: client disconnect + unmount"
+        shell: bash
+        run: |
+          set -euxo pipefail
+          run_remote() {
+            sshpass -p "${SSH_PASSWORD}" ssh \
+              -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+              "${SSH_USER}@$1" "bash -s" <<< "$2"
+          }
+          for ip in $CLIENTNODES; do
+            echo "---- client disconnect: $ip ----"
+            run_remote "$ip" "set -euxo pipefail
+              subsystems=\$(nvme list-subsys | grep -i lvol | awk '{print \$3}' | cut -d '=' -f 2 || true)
+              for s in \$subsystems; do nvme disconnect -n \"\$s\" || true; done" || true
+          done
+          # Verify NFS not mounted
+          targets="$MNODES $STORAGE_PRIVATE_IPS $CLIENTNODES"
+          for ip in $(echo "$targets" | tr ' ' '\n' | sed '/^$/d' | sort -u); do
+            if sshpass -p "${SSH_PASSWORD}" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+              "${SSH_USER}@${ip}" "mount | grep -q \" ${NFS_MOUNTPOINT} \"" 2>/dev/null; then
+              echo "WARN: ${NFS_MOUNTPOINT} still mounted on $ip"
+            fi
+          done
+          # Unmount all /mnt on clients
+          for ip in $CLIENTNODES; do
+            run_remote "$ip" "set -euxo pipefail
+              mps=\$(mount | grep ' /mnt' | awk '{print \$3}' || true)
+              for mp in \$mps; do umount -f \"\$mp\" || true; done
+              dirs=\$(find /mnt -mindepth 1 -type d 2>/dev/null || true)
+              for d in \$dirs; do rm -rf \"\$d\" || true; done" || true
+          done
+
+      - name: Reboot storage nodes, wait online, disk reset + PCI rebind + mklabel
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          run_remote() {
+            local ip="$1"
+            local script="$2"
+            sshpass -p "${SSH_PASSWORD}" ssh \
+              -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              "${SSH_USER}@${ip}" "bash -s" <<< "$script"
+          }
+
+          # reboot storage nodes
+          for ip in $STORAGE_PRIVATE_IPS; do
+            echo "---- reboot storage: $ip ----"
+            sshpass -p "${SSH_PASSWORD}" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${SSH_USER}@${ip}" \
+              "nohup reboot >/dev/null 2>&1 &" || true
+          done
+
+          # wait storage online
+          for ip in $STORAGE_PRIVATE_IPS; do
+            echo "Waiting for $ip..."
+            for i in {1..60}; do
+              if sshpass -p "${SSH_PASSWORD}" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 "${SSH_USER}@${ip}" \
+                "echo online" >/dev/null 2>&1; then
+                echo "$ip online"
+                break
+              fi
+              sleep 10
+              [[ "$i" -lt 60 ]] || (echo "ERROR: $ip did not come online" && exit 1)
+            done
+          done
+
+          # disk reset / PCI rebind / mklabel on storage nodes
+          for ip in $STORAGE_PRIVATE_IPS; do
+            echo "---- disk reset on $ip ----"
+            run_remote "$ip" "set -euxo pipefail;
+              for dev in /dev/nvme0n1 /dev/nvme1n1 /dev/nvme2n1 /dev/nvme3n1; do
+                if [[ -b \$dev ]]; then
+                  parted \$dev --script rm 1 || true;
+                  parted \$dev --script rm 2 || true;
+                  parted \$dev --script rm 3 || true;
+                fi
+              done;
+
+              for pci in \$(lspci -D | grep 'QEMU NVM Express' | awk '{print \$1}' || true); do
+                echo \$pci > /sys/bus/pci/drivers/nvme/unbind || true;
+              done;
+
+              for i in 2 3 4 5; do
+                echo 0000:00:0\${i}.0 > /sys/bus/pci/drivers/uio_pci_generic/unbind || true;
+              done;
+              for i in 2 3 4 5; do
+                echo 0000:00:0\${i}.0 > /sys/bus/pci/drivers/vfio-pci/unbind || true;
+              done;
+
+              for i in 2 3 4 5; do
+                echo nvme > /sys/bus/pci/devices/0000:00:0\${i}.0/driver_override || true;
+              done;
+              for i in 2 3 4 5; do
+                echo 0000:00:0\${i}.0 > /sys/bus/pci/drivers/nvme/bind || true;
+              done;
+
+              for i in 0 1 2 3; do
+                dev=/dev/nvme\${i}n1;
+                if [[ -b \$dev ]]; then
+                  parted -fs \$dev mklabel gpt || true;
+                fi
+              done"
+          done
+
+      - name: Write cluster security config
+        shell: bash
+        run: |
+          set -euxo pipefail
+          if [[ "${CLUSTER_SECURITY:-none}" == "none" || -z "${CLUSTER_SECURITY:-}" ]]; then
+            echo "CLUSTER_SECURITY=none; skipping."; exit 0
+          fi
+          mgmt_ip="$(echo "${MNODES}" | awk '{print $1}')"
+          if [[ "${CLUSTER_SECURITY}" == "backup" ]]; then
+            S3_BACKUP_JSON='{"access_key_id":"minioadmin","secret_access_key":"minioadmin","local_endpoint":"http://192.168.10.164:9000","snapshot_backups":true,"with_compression":false,"secondary_target":0,"local_testing":true}'
+            sshpass -p "${SSH_PASSWORD}" ssh \
+              -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+              "${SSH_USER}@${mgmt_ip}" \
+              "echo '${S3_BACKUP_JSON}' > /root/s3-backup.json"
+            echo "EXTRA_CLUSTER_ARGS=${EXTRA_CLUSTER_ARGS} --use-backup /root/s3-backup.json" >> "$GITHUB_ENV"
+          fi
+
+      - name: Remove /etc/simplyblock on all nodes
+        shell: bash
+        run: |
+          set -euxo pipefail
+          run_remote() {
+            sshpass -p "${SSH_PASSWORD}" ssh \
+              -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+              "${SSH_USER}@$1" "bash -s" <<< "$2"
+          }
+          for ip in $(echo "$MNODES $STORAGE_PRIVATE_IPS" | tr ' ' '\n' | sed '/^$/d' | sort -u); do
+            run_remote "$ip" "rm -rf /etc/simplyblock || true"
+          done
+
+      # ============================================================
+      # BARE-METAL BOOTSTRAP
+      # ============================================================
+      - name: Clone simplyBlockDeploy
+        shell: bash
+        run: |
+          set -euxo pipefail
+          rm -rf simplyBlockDeploy
+          git clone https://github.com/simplyblock-io/simplyBlockDeploy.git simplyBlockDeploy
+          test -f simplyBlockDeploy/bare-metal/bootstrap-cluster.sh
+
+      - name: Bootstrap cluster
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd simplyBlockDeploy/bare-metal
+          chmod +x ./bootstrap-cluster.sh
+          extra_args=()
+          if [[ -n "${SIMPLY_BLOCK_SPDK_ULTRA_IMAGE-}" ]]; then
+            extra_args+=( --spdk-image "${SIMPLY_BLOCK_SPDK_ULTRA_IMAGE}" )
+          fi
+          if [[ "${{ inputs.BOOTSTRAP_IS_SINGLE_NODE }}" == "true" ]]; then
+            extra_args+=( --is-single-node true )
+          fi
+          if [[ "${{ inputs.BOOTSTRAP_ENABLE_NODE_AFFINITY }}" == "true" ]]; then
+            extra_args+=( --enable-node-affinity true )
+          fi
+          if [[ -n "${EXTRA_SN_ARGS:-}" ]]; then
+            if nr_val=$(printf '%s' "${EXTRA_SN_ARGS}" | grep -oP '(?<=--nr-hugepages )\S+' | head -1) && [[ -n "${nr_val}" ]]; then
+              echo "NR_HUGEPAGES=${nr_val}" >> "$GITHUB_ENV"
+              NR_HUGEPAGES="${nr_val}"
+            fi
+          fi
+          HA_TYPE="ha"
+          if [[ -n "${EXTRA_CLUSTER_ARGS:-}" ]]; then
+            if ha_val=$(printf '%s' "${EXTRA_CLUSTER_ARGS}" | grep -oP '(?<=--ha-type )\S+' | head -1) && [[ -n "${ha_val}" ]]; then
+              HA_TYPE="${ha_val}"
+            fi
+          fi
+          if [[ -n "${EXTRA_CLUSTER_ARGS:-}" ]]; then
+            extra_args+=( --extra-cluster-args "${EXTRA_CLUSTER_ARGS}" )
+          fi
+          if [[ -n "${EXTRA_SN_ARGS:-}" ]]; then
+            extra_args+=( --extra-sn-args "${EXTRA_SN_ARGS}" )
+          fi
+          set +e
+          ./bootstrap-cluster.sh \
+            --sbcli-cmd "${SBCLI_CMD}" \
+            --max-lvol "${BOOTSTRAP_MAX_LVOL}" \
+            --data-chunks-per-stripe "${BOOTSTRAP_DATA_CHUNKS}" \
+            --parity-chunks-per-stripe "${BOOTSTRAP_PARITY_CHUNKS}" \
+            --journal-partition "${BOOTSTRAP_JOURNAL_PARTITION}" \
+            --ha-jm-count "${BOOTSTRAP_HA_JM_COUNT}" \
+            --ha-type "${HA_TYPE}" \
+            --data-nics "${BOOTSTRAP_DATA_NIC}" \
+            "${extra_args[@]}" | tee bootstrap.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          [[ "$rc" -eq 0 ]] || (echo "ERROR: bootstrap failed (rc=$rc)" && exit "$rc")
+
+      - name: Fetch CLUSTER_ID and CLUSTER_SECRET
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mgmt_ip="$(echo "${MNODES}" | awk '{print $1}')"
+          ssh_common=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i "${KEY_PATH}")
+          cluster_id="$(ssh "${ssh_common[@]}" "${SSH_USER}@${mgmt_ip}" \
+            "${SBCLI_CMD} cluster list" | grep -Eo '[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}' | head -n 1)"
+          [[ -z "${cluster_id}" ]] && echo "ERROR: no cluster_id" && exit 1
+          cluster_secret="$(ssh "${ssh_common[@]}" "${SSH_USER}@${mgmt_ip}" \
+            "${SBCLI_CMD} cluster get-secret ${cluster_id}" | tr -d '\r' | tail -n 1 | xargs)"
+          [[ -z "${cluster_secret}" ]] && echo "ERROR: no cluster_secret" && exit 1
+          echo "CLUSTER_ID=${cluster_id}" >> "$GITHUB_ENV"
+          echo "CLUSTER_SECRET=${cluster_secret}" >> "$GITHUB_ENV"
+
+      # ============================================================
+      # RUN MONITORING TEST
+      # ============================================================
+      - name: Clone sbcli repo
+        shell: bash
+        run: |
+          set -euxo pipefail
+          rm -rf sbcli
+          wf_branch="${{ github.ref_name }}"
+          fallback_branch="${SBCLI_BRANCH}"
+          if git ls-remote --heads https://github.com/simplyblock-io/sbcli.git "$wf_branch" | grep -q "$wf_branch"; then
+            git clone --branch "$wf_branch" --single-branch https://github.com/simplyblock-io/sbcli.git sbcli
+          else
+            git clone --branch "$fallback_branch" --single-branch https://github.com/simplyblock-io/sbcli.git sbcli
+          fi
+
+      - name: Install Python deps
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 -m pip install --upgrade pip
+          [[ -f "sbcli/e2e/requirements.txt" ]] && pip install -r sbcli/e2e/requirements.txt || true
+          pip install matplotlib || true
+
+      - name: Cleanup logs before test
+        shell: bash
+        working-directory: sbcli/e2e
+        run: python3 logs/cleanup.py
+
+      - name: Set RUN_DIR_FILE
+        shell: bash
+        run: echo "RUN_DIR_FILE=/tmp/sb_run_dir_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}.txt" >> "$GITHUB_ENV"
+
+      - name: Record test start time
+        shell: bash
+        run: |
+          echo "TEST_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
+          echo "TEST_START_HUMAN=$(date -u +'%Y-%m-%d %H:%M:%S UTC')" >> "$GITHUB_ENV"
+
+      - name: "Run monitoring test: ${{ matrix.test }}"
+        shell: bash
+        working-directory: sbcli/e2e
+        run: |
+          set -euxo pipefail
+          python3 -u stress.py \
+            --testname "${TEST_CLASS}" \
+            --ndcs "${NDCS}" --npcs "${NPCS}" \
+            2>&1 | tee output.log
+
+      - name: Mark test end time
+        if: always()
+        shell: bash
+        run: |
+          echo "TEST_END_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
+          echo "TEST_END_HUMAN=$(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> "$GITHUB_ENV"
+
+      # ============================================================
+      # POST-TEST CLEANUP + LOG COLLECTION
+      # ============================================================
+      - name: Post-test cleanup (kill fio/tmux)
+        if: always()
+        shell: bash
+        run: |
+          set -euxo pipefail
+          run_remote() {
+            ssh -i "${KEY_PATH}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+              "${SSH_USER}@$1" "bash -s" <<< "$2" || true
+          }
+          for ip in $MNODES $STORAGE_PRIVATE_IPS; do
+            run_remote "$ip" "pkill -9 tmux || true"
+          done
+          for ip in $CLIENTNODES; do
+            run_remote "$ip" "pkill -9 fio || true; pkill -9 tmux || true"
+          done
+
+      - name: Export RUN_BASE_DIR
+        if: always()
+        shell: bash
+        run: |
+          set -euxo pipefail
+          test -f "${RUN_DIR_FILE}" || (echo "RUN_DIR_FILE not found" && exit 0)
+          RUN_BASE_DIR="$(cat "${RUN_DIR_FILE}" | tr -d '\r\n')"
+          [[ -n "${RUN_BASE_DIR}" ]] && echo "RUN_BASE_DIR=${RUN_BASE_DIR}" >> "$GITHUB_ENV" || true
+
+      - name: Collect mgmt snapshots
+        if: always()
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 - <<'PY'
+          import os, subprocess
+          mgmt_ip = os.environ["MNODES"].split()[0]
+          key = os.environ["KEY_PATH"]
+          user = os.environ["SSH_USER"]
+          sbcli = os.environ["SBCLI_CMD"]
+          cluster_id = os.environ.get("CLUSTER_ID", "")
+          run_base = os.environ.get("RUN_BASE_DIR", "").rstrip("/")
+          if not run_base or not cluster_id:
+              print("WARN: RUN_BASE_DIR or CLUSTER_ID not set, skipping"); exit(0)
+          outdir = f"{run_base}/{mgmt_ip}/mgmt_details"
+          os.makedirs(f"{outdir}/mgmt", exist_ok=True)
+          os.makedirs(f"{outdir}/storage_nodes", exist_ok=True)
+          script = f"""set -euo pipefail
+          mkdir -p "{outdir}/mgmt" "{outdir}/storage_nodes"
+          {sbcli} cluster list > "{outdir}/mgmt/cluster_list.txt" 2>&1 || true
+          {sbcli} cluster status {cluster_id} > "{outdir}/mgmt/cluster_status.txt" 2>&1 || true
+          {sbcli} cluster get-logs {cluster_id} --limit 0 > "{outdir}/mgmt/cluster_get_logs.txt" 2>&1 || true
+          {sbcli} lvol list > "{outdir}/mgmt/lvol_list.txt" 2>&1 || true
+          {sbcli} sn list > "{outdir}/mgmt/sn_list.txt" 2>&1 || true
+          {sbcli} sn list --json > "{outdir}/mgmt/sn_list.json" 2>&1 || true
+          """
+          ssh_cmd = ["ssh", "-i", key, "-o", "StrictHostKeyChecking=no",
+                     "-o", "UserKnownHostsFile=/dev/null", "-o", "ConnectTimeout=10",
+                     f"{user}@{mgmt_ip}", "bash", "-s"]
+          subprocess.run(ssh_cmd, input=script.encode(), check=False)
+          PY
+
+      - name: Collect docker logs
+        if: always()
+        shell: bash
+        run: |
+          set -euxo pipefail
+          [[ -n "${RUN_BASE_DIR:-}" ]] || exit 0
+          TAG="containers-final-$(date +%Y%m%d_%H%M%S)"
+          SSH_OPTS=(-i "${KEY_PATH}" -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -C)
+          NODES="$(echo "${MNODES} ${STORAGE_PRIVATE_IPS}" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ')"
+          for NODE in ${NODES}; do
+            REMOTE_DIR="${RUN_BASE_DIR}/${NODE}/${TAG}"
+            ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "sudo mkdir -p '${REMOTE_DIR}' && sudo chmod -R 0777 '${RUN_BASE_DIR}/${NODE}'" || true
+            CONTAINERS="$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "bash -lc \"docker ps -a --format '{{.Names}}' || true\"" || true)"
+            [[ -z "${CONTAINERS}" ]] && continue
+            while IFS= read -r C; do
+              C="${C%%$'\r'}"; [[ -z "${C}" ]] && continue
+              ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "bash -lc \"docker logs --timestamps '${C}' > '${REMOTE_DIR}/${C}.txt' 2>&1 || true\"" || true
+            done <<< "${CONTAINERS}"
+          done
+
+      - name: Collect Graylog/OpenSearch logs
+        if: always()
+        timeout-minutes: 240
+        shell: bash
+        run: |
+          set +e
+          [ -z "${TEST_START_EPOCH:-}" ] || [ -z "${TEST_END_EPOCH:-}" ] && exit 0
+          ELAPSED=$((TEST_END_EPOCH - TEST_START_EPOCH))
+          [ "${ELAPSED}" -le 0 ] && exit 0
+
+          WINDOW_START=$((TEST_START_EPOCH - 3600))
+          WINDOW_END=$((TEST_END_EPOCH + 3600))
+
+          MGMT_IP="$(echo "${MNODES}" | awk '{print $1}')"
+          SSH_OPTS=(-i "${KEY_PATH}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10)
+
+          OUTPUT_DIR=""
+          if [ -n "${RUN_BASE_DIR:-}" ] && [ -d "${RUN_BASE_DIR}" ]; then
+            OUTPUT_DIR="${RUN_BASE_DIR}/graylog_collected"
+          else
+            OUTPUT_DIR="${NFS_MOUNTPOINT:-/mnt/nfs_share}/graylog_collected-$(date -u '+%Y%m%d-%H%M%S')"
+          fi
+          mkdir -p "${OUTPUT_DIR}" 2>/dev/null || true
+
+          epoch_to_iso() {
+            python3 -c "from datetime import datetime,timezone; print(datetime.fromtimestamp($1,tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%S'))"
+          }
+
+          CHUNK=0; CURRENT=${WINDOW_START}
+          while [ ${CURRENT} -lt ${WINDOW_END} ]; do
+            CHUNK=$((CHUNK + 1))
+            CHUNK_END=$((CURRENT + 3600))
+            [ ${CHUNK_END} -gt ${WINDOW_END} ] && CHUNK_END=${WINDOW_END}
+            CHUNK_MINUTES=$(( ((CHUNK_END - CURRENT) + 59) / 60 ))
+            CHUNK_ISO=$(epoch_to_iso ${CURRENT})
+            REMOTE_OUTPUT_DIR="/tmp/graylog_collect_chunk${CHUNK}"
+            ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" "mkdir -p '${REMOTE_OUTPUT_DIR}'" 2>/dev/null || true
+            ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" \
+              "python3 -m simplyblock_core.scripts.collect_logs \
+                '${CHUNK_ISO}' '${CHUNK_MINUTES}' \
+                --mode docker \
+                --output-dir '${REMOTE_OUTPUT_DIR}' \
+                ${CLUSTER_ID:+--cluster-id '${CLUSTER_ID}'}" \
+            2>&1 || {
+              ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" \
+                "python3 -m simplyblock_core.scripts.collect_logs \
+                  '${CHUNK_ISO}' '${CHUNK_MINUTES}' \
+                  --mode docker --use-opensearch \
+                  --output-dir '${REMOTE_OUTPUT_DIR}' \
+                  ${CLUSTER_ID:+--cluster-id '${CLUSTER_ID}'}" \
+              2>&1 || true
+            }
+            TARBALLS=$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" \
+              "find '${REMOTE_OUTPUT_DIR}' -name '*.tar.gz' -type f 2>/dev/null") || true
+            if [ -n "${TARBALLS}" ]; then
+              for TB in ${TARBALLS}; do
+                scp "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}:${TB}" "${OUTPUT_DIR}/$(basename ${TB})" 2>&1 || true
+              done
+              for TB_FILE in "${OUTPUT_DIR}"/*.tar.gz; do
+                [ -f "${TB_FILE}" ] && tar -xzf "${TB_FILE}" -C "${OUTPUT_DIR}/" 2>/dev/null || true
+              done
+            fi
+            ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" "rm -rf '${REMOTE_OUTPUT_DIR}'" 2>/dev/null || true
+            CURRENT=${CHUNK_END}
+          done
+          echo "=== Graylog collection complete (${CHUNK} chunks): ${OUTPUT_DIR} ==="
+
+      # ============================================================
+      # COLLECT TIMING ARTIFACTS
+      # ============================================================
+      - name: Collect timing JSON artifacts
+        if: always()
+        shell: bash
+        run: |
+          set -euxo pipefail
+          # Clean any stale artifacts from previous runs on this self-hosted runner
+          rm -rf monitoring_results/
+          artifact_dir="monitoring_results/${TEST_CLASS}"
+          mkdir -p "${artifact_dir}"
+          find sbcli/e2e/logs -name '*timing*.json' -exec cp {} "${artifact_dir}/" \; 2>/dev/null || true
+          find sbcli/e2e/logs -name '*report*.json' -exec cp {} "${artifact_dir}/" \; 2>/dev/null || true
+          find sbcli/e2e/logs -name '*.png' -exec cp {} "${artifact_dir}/" \; 2>/dev/null || true
+          cp sbcli/e2e/output.log "${artifact_dir}/output.log" 2>/dev/null || true
+          cat > "${artifact_dir}/meta.json" <<METAEOF
+          {
+            "test_class": "${TEST_CLASS}",
+            "start_epoch": ${TEST_START_EPOCH:-0},
+            "end_epoch": ${TEST_END_EPOCH:-0},
+            "start_human": "${TEST_START_HUMAN:-unknown}",
+            "end_human": "${TEST_END_HUMAN:-unknown}",
+            "ndcs": ${NDCS},
+            "npcs": ${NPCS},
+            "job_status": "${{ job.status }}"
+          }
+          METAEOF
+          ls -la "${artifact_dir}/"
+
+      - name: Upload per-test artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: monitoring-${{ matrix.test }}-${{ github.run_id }}
+          path: monitoring_results/${{ matrix.test }}/
+          if-no-files-found: warn
+
+      - name: Upload bootstrap + test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: monitoring-logs-${{ matrix.test }}-${{ github.run_id }}
+          path: |
+            simplyBlockDeploy/bare-metal/bootstrap.log
+            sbcli/e2e/output.log
+            sbcli/e2e/logs/**
+          if-no-files-found: warn
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Job 3: Compare results and generate summary
+  # ─────────────────────────────────────────────────────────────────────────
+  compare-results:
+    name: Compare & Summarize
+    needs: [setup-matrix, run-tests]
+    if: always()
+    runs-on: [self-hosted]
+
+    steps:
+      - name: Clean stale results from previous runs
+        shell: bash
+        run: rm -rf all_results/ monitoring_results/
+
+      - name: Download all test artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: monitoring-*-${{ github.run_id }}
+          path: all_results/
+          merge-multiple: false
+
+      - name: Install matplotlib
+        shell: bash
+        run: pip install matplotlib || true
+
+      - name: Generate comparison summary
+        shell: bash
+        env:
+          NFS_BASE: ${{ inputs.NFS_MOUNTPOINT || '/mnt/nfs_share' }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python3 - <<'PYEOF'
+          import json, os, glob, base64, io
+          from pathlib import Path
+
+          results_dir = Path("all_results")
+          tests = []
+
+          for test_dir in sorted(results_dir.iterdir()):
+              if not test_dir.is_dir():
+                  continue
+              meta_path = test_dir / "meta.json"
+              if not meta_path.exists():
+                  continue
+              meta = json.loads(meta_path.read_text())
+              test_name = meta.get("test_class", test_dir.name)
+              start = meta.get("start_epoch", 0)
+              end = meta.get("end_epoch", 0)
+              duration = max(0, end - start) if end >= start > 0 else 0
+              status = meta.get("job_status", "unknown")
+
+              timing_files = list(test_dir.glob("*timing*.json")) + list(test_dir.glob("*report*.json"))
+              phases = []
+              key_metric = duration
+              key_metric_label = "total_duration_sec"
+
+              for tf in timing_files:
+                  if tf.name == "meta.json":
+                      continue
+                  try:
+                      data = json.loads(tf.read_text())
+                      if "phases" in data:
+                          phases.extend(data["phases"])
+                      if "summary" in data:
+                          km = data["summary"].get("key_metric")
+                          if km is not None:
+                              key_metric = km
+                              key_metric_label = data["summary"].get("key_metric_label", "key_metric")
+                  except Exception:
+                      pass
+
+              tests.append({
+                  "name": test_name, "duration": duration, "status": status,
+                  "phases": phases, "key_metric": key_metric,
+                  "key_metric_label": key_metric_label,
+              })
+
+          lines = ["## Docker Monitoring Suite Results\n",
+                   f"**Tests run:** {len(tests)}\n",
+                   "### Overview\n",
+                   "| Test | Duration | Key Metric | Status |",
+                   "|------|----------|-----------|--------|"]
+          for t in tests:
+              dur = f"{t['duration']//3600}h {(t['duration']%3600)//60}m {t['duration']%60}s"
+              km = f"{t['key_metric']:.1f}s" if isinstance(t['key_metric'], (int, float)) else str(t['key_metric'])
+              icon = ":white_check_mark:" if t["status"] == "success" else ":x:"
+              lines.append(f"| {t['name']} | {dur} | {km} ({t['key_metric_label']}) | {icon} {t['status']} |")
+
+          if any(t["phases"] for t in tests):
+              lines += ["\n### Phase Breakdown\n",
+                        "| Test | Phase | Duration (s) | Status |",
+                        "|------|-------|-------------|--------|"]
+              for t in tests:
+                  for p in t["phases"]:
+                      lines.append(f"| {t['name']} | {p.get('name','?')} | {p.get('duration_sec',0):.1f} | {p.get('status','?')} |")
+
+          # Per-test detail: show graphs, per-iteration timing, per-lvol timing
+          # for every test that has phase data (not just single-test runs)
+          test_dirs = {}
+          for d in sorted(results_dir.iterdir()):
+              if d.is_dir() and (d / "meta.json").exists():
+                  meta = json.loads((d / "meta.json").read_text())
+                  test_dirs[meta.get("test_class", d.name)] = d
+
+          for t in tests:
+              if not t["phases"] and t["status"] != "success":
+                  continue  # skip failed tests with no data
+              td = test_dirs.get(t["name"])
+              if not td:
+                  continue
+
+              pngs = sorted(td.glob("*.png"))
+              if pngs:
+                  lines.append(f"\n### Test Graphs: {t['name']}\n")
+                  lines.append(f"*{len(pngs)} graph(s) saved — download the "
+                               f"artifacts to view.*\n")
+
+              if t["phases"]:
+                  lines.append(f"\n### Per-Phase Timing: {t['name']}\n")
+                  lines.append("```")
+                  max_dur = max((p.get("duration_sec", 0) for p in t["phases"]), default=1) or 1
+                  bar_w = 35
+                  for p in t["phases"]:
+                      dur = p.get("duration_sec", 0)
+                      det = p.get("details", {})
+                      avg = det.get("avg_delete_sec", 0)
+                      bar_len = int(dur / max_dur * bar_w)
+                      bar = "#" * bar_len + "." * (bar_w - bar_len)
+                      label = p.get("name", "?")[:18].ljust(18)
+                      extra = f"  avg={avg:.1f}s/lvol" if avg else ""
+                      lines.append(f"  {label} |{bar}| {dur:.0f}s{extra}")
+                  lines.append("```")
+
+                  # Per-lvol timing text chart (first iteration with per-lvol data)
+                  first_with_lvol = None
+                  for p in t["phases"]:
+                      det = p.get("details", {})
+                      if det.get("per_lvol_times"):
+                          first_with_lvol = p
+                          break
+                  if first_with_lvol:
+                      per_lvol = first_with_lvol["details"]["per_lvol_times"]
+                      lines.append(f"\n### Per-Lvol Delete Time: {t['name']} ({first_with_lvol['name']})\n")
+                      lines.append("```")
+                      max_t = max((lv["delete_sec"] for lv in per_lvol), default=1) or 1
+                      step = max(1, len(per_lvol) // 25)
+                      for i, lv in enumerate(per_lvol):
+                          if i % step == 0 or i == len(per_lvol) - 1:
+                              bar_len = int(lv["delete_sec"] / max_t * 30)
+                              bar = "#" * bar_len + "." * (30 - bar_len)
+                              lines.append(f"  lvol {lv['index']:>3} |{bar}| {lv['delete_sec']:.1f}s")
+                      lines.append("```")
+                      times = [lv["delete_sec"] for lv in per_lvol]
+                      lines.append(
+                          f"\n**Stats:** min={min(times):.1f}s  "
+                          f"avg={sum(times)/len(times):.1f}s  "
+                          f"max={max(times):.1f}s  "
+                          f"count={len(times)}\n"
+                      )
+
+              if not pngs and not t.get("phases"):
+                  lines.append(f"\n*No graphs or detailed timing data for {t['name']}.*\n")
+
+          # Generate comparison bar chart (saved to file in artifacts + NFS)
+          if len(tests) > 1:
+              try:
+                  import matplotlib
+                  matplotlib.use("Agg")
+                  import matplotlib.pyplot as plt
+                  fig, ax = plt.subplots(figsize=(max(8, len(tests)*2), 5))
+                  names = [n[:30]+"..." if len(n)>30 else n for n in [t["name"] for t in tests]]
+                  values = [t["key_metric"] if isinstance(t["key_metric"], (int,float)) else 0 for t in tests]
+                  colors = ["#2ecc71" if t["status"]=="success" else "#e74c3c" for t in tests]
+                  bars = ax.bar(range(len(tests)), values, color=colors, width=0.6)
+                  ax.set_xticks(range(len(tests)))
+                  ax.set_xticklabels(names, rotation=45, ha="right", fontsize=9)
+                  ax.set_ylabel("Key Metric (seconds)")
+                  ax.set_title("Docker Monitoring Suite - Key Metrics")
+                  for b, v in zip(bars, values):
+                      ax.text(b.get_x()+b.get_width()/2, b.get_height()+max(values)*0.01,
+                              f"{v:.0f}s", ha="center", va="bottom", fontsize=8)
+                  plt.tight_layout()
+                  chart_path = results_dir / "comparison_chart.png"
+                  fig.savefig(str(chart_path), format="png", dpi=150)
+                  plt.close(fig)
+                  print(f"Saved comparison chart to {chart_path}")
+              except ImportError:
+                  print("WARN: matplotlib not available -- chart skipped")
+              except Exception as exc:
+                  print(f"WARN: Could not save comparison chart: {exc}")
+
+          # Render text-based comparison chart (only for multi-test runs)
+          if len(tests) > 1:
+              lines.append("\n### Comparison Chart\n")
+              lines.append("```")
+              max_val = max((t["key_metric"] for t in tests if isinstance(t["key_metric"], (int, float))), default=1) or 1
+              bar_width = 40
+              for t in tests:
+                  v = t["key_metric"] if isinstance(t["key_metric"], (int, float)) else 0
+                  bar_len = int(v / max_val * bar_width)
+                  bar = "█" * bar_len + "░" * (bar_width - bar_len)
+                  label = t["name"][:32].ljust(32)
+                  lines.append(f"  {label} |{bar}| {v:.0f}s")
+              lines.append("```")
+              lines.append("\n*Full comparison chart PNG available in the "
+                           "artifacts and NFS.*\n")
+
+          # Add log paths section
+          nfs_base = os.environ.get("NFS_BASE", "/mnt/nfs_share").rstrip("/")
+          run_id = os.environ.get("RUN_ID", "")
+          run_url = os.environ.get("RUN_URL", "")
+          lines.append("\n---\n### Logs & Artifacts\n")
+          lines.append(f"| Location | Path |")
+          lines.append(f"|----------|------|")
+          if nfs_base:
+              lines.append(f"| NFS results | `{nfs_base}/monitoring-suite-docker/run-{run_id}-*` |")
+              lines.append(f"| Graylog logs | `<run_dir>/graylog_collected/` (on NFS) |")
+          if run_url:
+              lines.append(f"| GitHub | [Actions Run]({run_url}) |")
+          lines.append(f"| Artifacts | Download `monitoring-*-{run_id}` from the Actions run |")
+
+          # Save summary as markdown file for NFS archival
+          summary_md_path = results_dir / "summary.md"
+          summary_md_path.write_text("\n".join(lines) + "\n")
+          print(f"Saved summary to {summary_md_path}")
+
+          summary = "\n".join(lines)
+          sf = os.environ.get("GITHUB_STEP_SUMMARY", "")
+          if sf:
+              with open(sf, "a") as f: f.write(summary + "\n")
+          print(summary)
+          PYEOF
+
+      - name: Upload comparison artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: monitoring-comparison-${{ github.run_id }}
+          path: all_results/
+          if-no-files-found: warn
+
+      - name: Copy results to NFS
+        if: always()
+        shell: bash
+        run: |
+          set -euxo pipefail
+          NFS_BASE="${{ inputs.NFS_MOUNTPOINT || '/mnt/nfs_share' }}"
+          NFS_DIR="${NFS_BASE}/monitoring-suite-docker/run-${{ github.run_id }}-$(date -u '+%Y%m%d-%H%M%S')"
+          if [ ! -d "${NFS_BASE}" ]; then
+            echo "WARN: NFS mountpoint ${NFS_BASE} not available, skipping NFS copy"
+            exit 0
+          fi
+          mkdir -p "${NFS_DIR}"
+          if [ -d "all_results" ]; then
+            cp -r all_results/* "${NFS_DIR}/" 2>/dev/null || true
+          fi
+          # Write a run info file
+          cat > "${NFS_DIR}/run_info.json" <<INFOEOF
+          {
+            "workflow": "monitoring-suite-docker",
+            "run_id": "${{ github.run_id }}",
+            "run_attempt": "${{ github.run_attempt }}",
+            "branch": "${{ github.ref_name }}",
+            "test_classes": "${{ inputs.TEST_CLASSES }}",
+            "timestamp": "$(date -u '+%Y-%m-%dT%H:%M:%SZ')",
+            "github_url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          }
+          INFOEOF
+          echo "Copied monitoring results to ${NFS_DIR}"
+          ls -laR "${NFS_DIR}/"
+
+      - name: Send Slack notification
+        if: always()
+        shell: bash
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          JOB_STATUS: ${{ needs.run-tests.result }}
+          SLACK_RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+        run: |
+          python3 - <<'PYEOF'
+          import json, os, sys, urllib.request
+          webhook = os.environ.get("SLACK_WEBHOOK_URL", "")
+          if not webhook: sys.exit(0)
+          ok = os.environ.get("JOB_STATUS", "") == "success"
+          icon = ":white_check_mark:" if ok else ":x:"
+          status = "SUCCESS" if ok else "FAILURE"
+          mention = "" if ok else " <!channel>"
+          lines = [
+              f"{icon} *Docker Monitoring Suite*{mention}",
+              f"*Status:* {status}",
+              f"*Branch:* `{os.environ.get('GITHUB_REF_NAME','?')}`  |  *Tests:* `${{ inputs.TEST_CLASSES }}`",
+              f":link: *Run:* <{os.environ.get('SLACK_RUN_URL','')}|View on GitHub>",
+          ]
+          payload = {"text": "\n".join(lines)}
+          req = urllib.request.Request(webhook, data=json.dumps(payload).encode(),
+                                      headers={"Content-Type": "application/json"})
+          try: urllib.request.urlopen(req, timeout=15)
+          except Exception as exc: print(f"WARN: Slack failed: {exc}", file=sys.stderr)
+          PYEOF

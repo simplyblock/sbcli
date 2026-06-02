@@ -1,3 +1,4 @@
+import hmac
 from typing import Annotated, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -28,7 +29,7 @@ def _verify_api_token(
         cluster.id
         for cluster
         in _db.get_clusters()
-        if cluster.secret == credentials.credentials
+        if hmac.compare_digest(cluster.secret, credentials.credentials)
     ), None)
     if (authorized_cluster_id is None) or (cluster_id is not None and cluster_id != authorized_cluster_id):
         raise HTTPException(401, 'Invalid token')

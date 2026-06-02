@@ -44,7 +44,7 @@ def main():
     parser.add_argument('--run_ha', type=bool, help="Run HA tests", default=False)
     parser.add_argument('--send_debug_notification', type=bool, help="Send notification for debug", default=False)
     parser.add_argument('--upload_logs', type=bool, help="Upload Logs", default=False)
-    
+    parser.add_argument('--tls_enabled', type=str, help="TLS enabled", default="false")
 
     args = parser.parse_args()
     
@@ -110,7 +110,8 @@ def main():
                         npcs=args.npcs,
                         bs=args.bs,
                         chunk_bs=args.chunk_bs,
-                        k8s_run=args.run_k8s)
+                        k8s_run=args.run_k8s,
+                        tls_enabled=args.tls_enabled)
         try:
             test_obj.setup()
             if i == 0:
@@ -132,6 +133,7 @@ def main():
             all_nodes = test_obj._get_all_nodes()
             if not args.run_k8s:
                 test_obj.ssh_obj.collect_final_docker_logs_simple(all_nodes, test_obj.docker_logs_path)
+            test_obj.export_graylog_logs()
             test_obj.teardown(delete_lvols=False, close_ssh=True)
             # pass
         except Exception as _:

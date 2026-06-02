@@ -1,8 +1,7 @@
 FROM alpine/helm:latest
 
 ARG TARGETARCH
-ARG SBCLI_BRANCH=""
-ARG CSI_BRANCH=""
+ARG HELM_CHARTS_TAG=""
 
 RUN apk add --no-cache git curl tar gcompat bash bash-completion
 
@@ -23,14 +22,9 @@ RUN curl -fsSL "https://github.com/siderolabs/talos/releases/latest/download/tal
       -o /usr/local/bin/talosctl && \
     chmod +x /usr/local/bin/talosctl
 
-RUN if [ -n "$SBCLI_BRANCH" ]; then \
-      git clone --branch "$SBCLI_BRANCH" --depth 1 \
-        https://github.com/simplyblock/sbcli /opt/sbcli; \
-    fi
-
-RUN if [ -n "$CSI_BRANCH" ]; then \
-      git clone --branch "$CSI_BRANCH" --depth 1 \
-        https://github.com/simplyblock/simplyblock-csi /opt/simplyblock-csi; \
+RUN if [ -n "$HELM_CHARTS_TAG" ]; then \
+      git clone --branch "$HELM_CHARTS_TAG" --depth 1 \
+        https://github.com/simplyblock/helm-charts /opt/helm-charts; \
     fi
 
 # kubectl and oc autocomplete

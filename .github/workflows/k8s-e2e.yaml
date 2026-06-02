@@ -13,10 +13,10 @@ on:
         description: 'Branch for simplyBlockDeploy'
         required: true
         default: 'main'
-      simplyblock_csi_branch:
-        description: 'Branch for simplyblock-csi'
+      helm_charts_branch:
+        description: 'Branch for helm-charts'
         required: true
-        default: 'master'
+        default: 'main'
       testname:
         description: 'Name of test to run. Empty to run all'
         required: false
@@ -96,11 +96,11 @@ jobs:
           token: ${{ secrets.GH_ACCESS_KEY_ID_RAUNAK }}
 
       - uses: actions/checkout@master
-        name: Checkout code simplyblock_csi_branch
+        name: Checkout helm-charts
         with:
-          repository: simplyblock-io/simplyblock-csi
-          ref: refs/heads/${{ github.event.inputs.simplyblock_csi_branch || 'master'}}
-          path: 'simplyblock-csi'
+          repository: simplyblock/helm-charts
+          ref: refs/heads/${{ github.event.inputs.helm_charts_branch || 'main'}}
+          path: 'helm-charts'
           token: ${{ secrets.GH_ACCESS_KEY_ID_RAUNAK }}
 
       - name: Setup Terraform
@@ -202,12 +202,14 @@ jobs:
       - name: Configure Kubeconfig
         run: |
           mkdir -p $HOME/.kube
-          scp -i "$HOME/.ssh/${{ steps.terraform_outputs.outputs.key_name }}" ec2-user@${{ steps.terraform_outputs.outputs.extra_node_public_ip }}:/etc/rancher/k3s/k3s.yaml $HOME/.kube/config
-          sed -i "s/server: https:\/\/\(localhost\|127.0.0.1\)\(:[0-9]*\)/server: https:\/\/${{ steps.terraform_outputs.outputs.extra_node_public_ip }}\2/" $HOME/.kube/config
+          KUBECONFIG_FILE="$HOME/.kube/config-${{ github.run_id }}"
+          scp -i "$HOME/.ssh/${{ steps.terraform_outputs.outputs.key_name }}" ec2-user@${{ steps.terraform_outputs.outputs.extra_node_public_ip }}:/etc/rancher/k3s/k3s.yaml "$KUBECONFIG_FILE"
+          sed -i "s/server: https:\/\/\(localhost\|127.0.0.1\)\(:[0-9]*\)/server: https:\/\/${{ steps.terraform_outputs.outputs.extra_node_public_ip }}\2/" "$KUBECONFIG_FILE"
+          echo "KUBECONFIG=$KUBECONFIG_FILE" >> $GITHUB_ENV
 
-      - name: Install Helm Chart for simplyblock-csi
+      - name: Install Helm Chart for simplyblock-operator
         run: |
-          cd $GITHUB_WORKSPACE/simplyblock-csi/charts/latest/spdk-csi/
+          cd $GITHUB_WORKSPACE/helm-charts/charts/simplyblock-operator/
           echo "Sleeping for 30 seconds before helm install"
           helm install spdk-csi ./ \
             --namespace spdk-csi \
@@ -222,7 +224,6 @@ jobs:
             --set logicalVolume.distr_ndcs="${NDCS}" \
             --set logicalVolume.distr_npcs="${NPCS}" \
             --set storagenode.create=true \
-            --set cachingnode.create=false \
             --set logicalVolume.encryption=true
         env:
           NDCS: ${{ env.NDCS }}
@@ -234,25 +235,49 @@ jobs:
           CLUSTER_API_GATEWAY_ENDPOINT=${{ steps.bootstrap_cluster.outputs.cluster_api_gateway_endpoint }}
           CLUSTER_UUID=${{ steps.bootstrap_cluster.outputs.cluster_id }}
           CLUSTER_SECRET=${{ steps.bootstrap_cluster.outputs.cluster_secret }}
+          BASTION_IP=${{ steps.terraform_outputs.outputs.bastion_public_ip }}
+          MGMT_IP=${{ steps.terraform_outputs.outputs.mgmt_private_ip }}
+          KEY_NAME=${{ steps.terraform_outputs.outputs.key_name }}
+
           n=0
           until [ "$n" -ge 60 ]
           do
             response=$(curl -s -X GET "$CLUSTER_API_GATEWAY_ENDPOINT/cluster/$CLUSTER_UUID" \
               -H "Content-Type: application/json" \
               -H "Authorization: $CLUSTER_UUID $CLUSTER_SECRET")
-            
+
             status=$(echo $response | jq -r '.results[0].status')
-            
+
             if [ "$status" != "active" ]; then
                 echo "Cluster status is not active, current status: $status, retrying"
-                n=$((n+1)) 
+                n=$((n+1))
                 sleep 10
             else
                 echo "Cluster status is active"
                 exit 0
             fi
           done
-          echo "Cluster status is not active"
+
+          echo "Cluster is not active after polling, attempting forced activation..."
+          ssh -i "$HOME/.ssh/${KEY_NAME}" \
+            -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no \
+            -o ProxyCommand="ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -i \"$HOME/.ssh/${KEY_NAME}\" -W %h:%p ec2-user@${BASTION_IP}" \
+            ec2-user@${MGMT_IP} "sbctl -d cluster activate ${CLUSTER_UUID}" || true
+
+          echo "Waiting 30s for activation to take effect..."
+          sleep 30
+
+          response=$(curl -s -X GET "$CLUSTER_API_GATEWAY_ENDPOINT/cluster/$CLUSTER_UUID" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: $CLUSTER_UUID $CLUSTER_SECRET")
+          status=$(echo $response | jq -r '.results[0].status')
+
+          if [ "$status" = "active" ]; then
+            echo "Cluster is now active after forced activation"
+            exit 0
+          fi
+
+          echo "ERROR: Cluster is still not active after forced activation, status: $status"
           exit 1
 
       - name: Record Test Start Time
@@ -436,4 +461,4 @@ jobs:
           rm -rf ./* || true
           rm -rf ./.??* || true
           ls -la ./
-          rm -rf $HOME/.kube
+          rm -f "$HOME/.kube/config-${{ github.run_id }}"

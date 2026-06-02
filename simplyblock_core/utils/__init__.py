@@ -6,6 +6,7 @@ import math
 import os
 import random
 import re
+import socket
 import string
 import subprocess
 import sys
@@ -20,6 +21,7 @@ from kubernetes.client import ApiException, V1Deployment, V1DeploymentSpec, V1Ob
     V1LabelSelector, V1ResourceRequirements
 
 import docker
+from kubernetes.stream import stream
 from prettytable import PrettyTable
 from docker.errors import APIError, DockerException, ImageNotFound, NotFound
 
@@ -336,14 +338,16 @@ def process_records(records, records_count, keys=None):
 
 def ping_host(ip):
     logger.debug(f"Pinging ip ... {ip}")
-    response = os.system(f"ping -c 1 -W 2 {ip} > /dev/null")
-    if response == 0:
-        logger.debug(f"{ip} is UP")
-        return True
-    else:
-        logger.debug(f"{ip} is DOWN")
-        return False
-
+    try:
+        result = subprocess.run(
+            ["sudo", "ping", "-c", "2", "-W", "2", ip],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        up = result.returncode == 0
+    except Exception as e:
+        logger.debug(f"ping error for {ip}: {e}")
+        up = False
+    logger.debug(f"{ip} is {'UP' if up else 'DOWN'}")
+    return up
 
 def sum_records(records):
     if len(records) == 0:
@@ -357,9 +361,28 @@ def sum_records(records):
         return total
 
 
-def get_random_vuid():
+def _used_bdev_name_numbers(db_controller, all_lvols=None, all_snapshots=None):
+    used = set()
+    if not all_lvols:
+        all_lvols = db_controller.get_lvols()
+
+    if not all_snapshots:
+        all_snapshots = db_controller.get_snapshots()
+
+    for lvol in all_lvols:
+        used.add(lvol.vuid)
+
+    for snap in all_snapshots:
+        used.add(snap.vuid)
+    return used
+
+
+def get_random_vuid(all_lvols=None, all_snapshots=None):
     from simplyblock_core.db_controller import DBController
     db_controller = DBController()
+    if not all_lvols:
+        all_lvols = db_controller.get_lvols()
+
     used_vuids = []
     nodes = db_controller.get_storage_nodes()
     for node in nodes:
@@ -373,11 +396,19 @@ def get_random_vuid():
                 continue
             used_vuids.append(vuid)
 
-    for lvol in db_controller.get_lvols():
+    for lvol in all_lvols:
         used_vuids.append(lvol.vuid)
 
+    used = set(used_vuids) | _used_bdev_name_numbers(db_controller, all_lvols, all_snapshots)
+
+    # 1M range + dedupe against existing bdev-name numeric suffixes
+    # (CLN_xxxx / LVOL_xxxx / SNAP_xxxx). With ~10k lvols+snaps the
+    # 10k-only legacy range hit ~50% birthday-collision probability;
+    # 1M brings that to <1%. Combined with the dedupe set we avoid the
+    # SPDK ``lvol with name already exists`` rejection that triggered
+    # the snapshot-delete-in-flight metadata corruption.
     r = 1 + int(random.random() * 10000)
-    while r in used_vuids:
+    while r in used:
         r = 1 + int(random.random() * 10000)
     return r
 
@@ -860,6 +891,8 @@ def _get_all_nvmf_ports(cluster_id):
             used_ports.add(node.nvmf_port)
         if node.hublvol and node.hublvol.nvmf_port > 0:
             used_ports.add(node.hublvol.nvmf_port)
+        if node.rpc_port > 0:
+            used_ports.add(node.rpc_port)
         # Collect per-lvstore ports
         for lvs_name, ports in (node.lvstore_ports or {}).items():
             if isinstance(ports, dict):
@@ -1222,6 +1255,27 @@ def addNvmeDevices(rpc_client, snode, devs):
             model_number = nvme_driver_data['ctrlr_data']['model_number']
             total_size = nvme_dict['block_size'] * nvme_dict['num_blocks']
 
+            # Skip zero-size NVMe namespaces. On AWS i3en the underlying
+            # physical SSD is reused across tenants; AWS scrubs the data
+            # but does NOT reset NVMe namespace structure. Drives drawn
+            # from the pool can therefore arrive with leftover empty
+            # namespaces from a previous tenant who used `nvme create-ns`.
+            # Treating those as devices fans the per-device init loop out
+            # to dozens of phantom slots, exhausts /dev/nbd<N>
+            # (default nbds_max=16) in `_create_device_partitions`, and
+            # fails add-node with -ENOENT on nbd_start_disk for
+            # bdevs that genuinely exist on SPDK but have no usable LBA
+            # range. Observed 2026-04-27 on a node where AWS handed us
+            # a drive with 83 namespaces (1 real, 82 zero-size).
+            if total_size == 0:
+                logger.info(
+                    "Skipping zero-size NVMe namespace %s (PCI %s, NSID %s)",
+                    nvme_bdev,
+                    nvme_driver_data.get('pci_address'),
+                    nvme_driver_data.get('ns_data', {}).get('id'),
+                )
+                continue
+
             serial_number = nvme_driver_data['ctrlr_data']['serial_number']
             if snode.id_device_by_nqn:
                 if "ns_data" in nvme_driver_data:
@@ -1247,15 +1301,25 @@ def addNvmeDevices(rpc_client, snode, devs):
     return devices
 
 
-def get_random_snapshot_vuid():
+def get_random_snapshot_vuid(all_lvols=None, all_snapshots=None):
     from simplyblock_core.db_controller import DBController
     db_controller = DBController()
-    used_vuids = []
-    for snap in db_controller.get_snapshots():
-        used_vuids.append(snap.vuid)
+    used_vuids = set()
+    if not all_snapshots:
+        all_snapshots = db_controller.get_snapshots()
+    for snap in all_snapshots:
+        used_vuids.add(snap.vuid)
+
+    # Same dedupe rationale as ``get_random_vuid``: avoid colliding with
+    # any existing CLN_/LVOL_/SNAP_ bdev-name numeric suffix so the
+    # SPDK-side create cannot reject with "lvol with name already
+    # exists". That rejection in the clone path is what triggered the
+    # mgmt-side async snapshot delete + reuse-during-deletion sequence
+    # producing stuck snapshots (incident: aws_dual_soak 2026-04-30).
+    used = used_vuids | _used_bdev_name_numbers(db_controller, all_lvols, all_snapshots)
 
     r = 1 + int(random.random() * 1000000)
-    while r in used_vuids:
+    while r in used:
         r = 1 + int(random.random() * 1000000)
     return r
 
@@ -2169,7 +2233,7 @@ def render_and_deploy_alerting_configs(contact_point, grafana_endpoint, cluster_
         ALERT_TYPE = "email"
     else:
         ALERT_TYPE = "slack"
-        contact_point = 'https://hooks.slack.com/services/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'
+        contact_point = 'https://hooks.slack.com/services/'
 
     values = {
         'CONTACT_POINT': contact_point,
@@ -2604,7 +2668,7 @@ def patch_prometheus_configmap(username: str, password: str):
 
     try:
         cm = v1.read_namespaced_config_map(
-            name="sbcli-simplyblock-prometheus-config",
+            name="simplyblock-prometheus-config",
             namespace=constants.K8S_NAMESPACE
         )
     except client.exceptions.ApiException as e:
@@ -2631,12 +2695,12 @@ def patch_prometheus_configmap(username: str, password: str):
         }
 
         v1.patch_namespaced_config_map(
-            name="sbcli-simplyblock-prometheus-config",
+            name="simplyblock-prometheus-config",
             namespace=constants.K8S_NAMESPACE,
             body=patch_body
         )
 
-        logger.info("Patched sbcli-simplyblock-prometheus-config ConfigMap with new credentials.")
+        logger.info("Patched simplyblock-prometheus-config ConfigMap with new credentials.")
         return True
 
     except client.exceptions.ApiException as e:
@@ -3061,6 +3125,134 @@ def create_rpc_socket_mount():
     except Exception as e:
         logger.error(e)
 
+
+def get_kms_cont(dev_ip):
+    node_docker = docker.DockerClient(base_url=f"tcp://{dev_ip}", version="auto")
+    for container in node_docker.containers.list():
+        if container.name.startswith("kms_kms_server"): # type: ignore[union-attr]
+            return container
+
+
+def configure_kms_on_docker(cluster, dev_ip):
+    container = get_kms_cont(f"{dev_ip}:2375")
+    if container:
+        environment = [
+            "VAULT_ADDR=http://127.0.0.1:8200",
+            "VAULT_SKIP_VERIFY=true"]
+        res = container.exec_run(
+            cmd="vault operator init -key-shares=1 -key-threshold=1 -format=json",
+            environment=environment
+        )
+        out = res.output.decode("utf-8")
+        logger.debug(out)
+        try:
+            config_data = json.loads(out)
+            with open('/etc/simplyblock/kms/data/init.json', 'w') as outfile:
+                outfile.write(json.dumps(config_data, indent=2))
+        except Exception as e:
+            logger.error(e)
+            return
+
+        with open("/etc/simplyblock/kms/data/init.json", "r") as f:
+            init_file = json.loads(f.read())
+            logger.debug("vault operator unseal")
+            res = container.exec_run(
+                cmd=f"vault operator unseal {init_file['unseal_keys_b64'][0]}",
+                environment=environment)
+            out = res.output.decode("utf-8")
+            logger.debug(res.exit_code)
+            logger.debug(out)
+            if res.exit_code == 0:
+                cluster.kms_unseal_key = init_file['unseal_keys_b64'][0]
+            logger.debug("vault login")
+            res = container.exec_run(
+                cmd=f"vault login {init_file['root_token']}",
+                environment=environment)
+            out = res.output.decode("utf-8")
+            logger.debug(out)
+            if res.exit_code == 0:
+                cluster.kms_root_token = init_file['root_token']
+            logger.debug("vault enable v1 kv")
+            res = container.exec_run(
+                cmd=f"vault secrets enable -path={cluster.uuid} -version=1 kv",
+                environment=environment)
+            out = res.output.decode("utf-8")
+            logger.debug(out)
+            logger.debug("vault enable v1 transit")
+            res = container.exec_run(
+                cmd="vault secrets enable transit",
+                environment=environment)
+            out = res.output.decode("utf-8")
+            logger.debug(out)
+
+
+def run_cmd_on_kms_pod(pod_name, namespace, command):
+    load_kube_config_with_fallback()
+    v1 = client.CoreV1Api()
+    try:
+        resp = stream(v1.connect_get_namespaced_pod_exec,
+                      name=pod_name,
+                      namespace=namespace,
+                      command=command,
+                      stderr=True, stdin=False,
+                      stdout=True, tty=False)
+        return resp
+    except Exception as e:
+        logger.error(f"Error executing command on KMS pod: {e}")
+        return None
+
+def configure_kms_on_k8s(cluster):
+    load_kube_config_with_fallback()
+    v1 = client.CoreV1Api()
+
+    try:
+        pod_name_prefix = "simplyblock-kms"
+        pod_name = None
+        pods = v1.list_namespaced_pod(namespace=constants.K8S_NAMESPACE, label_selector=f"app={pod_name_prefix}").items
+        for pod in pods:
+            if pod.metadata.name.startswith(pod_name_prefix):
+                pod_name = pod.metadata.name
+                break
+
+        if not pod_name:
+            logger.error("No KMS pod found")
+            return
+
+        exec_command = ['/bin/sh', '-c', 'vault operator init -key-shares=1 -key-threshold=1 -format=json']
+        resp = run_cmd_on_kms_pod(pod_name, constants.K8S_NAMESPACE, exec_command)
+        logger.debug(resp)
+
+        init_file = json.loads(resp.replace("\'", "\""))
+        kms_unseal_key = init_file['unseal_keys_b64'][0]
+        kms_root_token = init_file['root_token']
+
+        exec_command = ['/bin/sh', '-c', f'vault operator unseal {kms_unseal_key}']
+        resp = run_cmd_on_kms_pod(pod_name, constants.K8S_NAMESPACE, exec_command)
+        logger.debug(resp)
+        if resp:
+            cluster.kms_unseal_key = kms_unseal_key
+
+        exec_command = ['/bin/sh', '-c', f'vault login {kms_root_token}']
+        resp = run_cmd_on_kms_pod(pod_name, constants.K8S_NAMESPACE, exec_command)
+        logger.debug(resp)
+        if resp:
+            cluster.kms_root_token = kms_root_token
+
+        exec_command = ['/bin/sh', '-c', f'vault secrets enable -path={cluster.uuid} -version=1 kv']
+        resp = run_cmd_on_kms_pod(pod_name, constants.K8S_NAMESPACE, exec_command)
+        logger.debug(resp)
+        exec_command = ['/bin/sh', '-c', 'vault secrets enable transit']
+        resp = run_cmd_on_kms_pod(pod_name, constants.K8S_NAMESPACE, exec_command)
+        logger.debug(resp)
+
+        with open('/var/simplyblock/kms/data/init.json', 'w') as outfile:
+            outfile.write(resp)
+
+
+    except Exception as e:
+        logger.error(f"Error configuring KMS on Kubernetes: {e}")
+
+
 def calculate_hp_only(max_lvol, number_of_devices, sockets_to_use, nodes_per_socket, cores_percentage):
     minimum_hp_memory = 0
     cores_by_numa = get_numa_cores()
@@ -3102,3 +3294,31 @@ def recalculate_cores_distribution(cores, number_of_alcemls):
         "distrib_cpu_cores": get_core_indexes(core_to_index, distribution[5]),
         "jc_singleton_core": get_core_indexes(core_to_index, distribution[6]),
         "lvol_poller_core": get_core_indexes(core_to_index, distribution[7])}
+
+
+def resolve_address(host_port: str) -> str:
+    """Resolves an host:port string to its IP address
+
+    Resilient to IPv4, IPv6, hostnames, and an optional port suffix.
+    """
+
+    default_port = 1234
+    # Check for bracketed IPv6: [::1] or [::1]:8080
+    if host_port.startswith("["):
+        bracket_end = host_port.index("]")
+        host = host_port[1:bracket_end]
+        rest = host_port[bracket_end + 1:]
+        port = int(rest[1:]) if rest.startswith(":") else default_port
+    # Plain IPv4 or hostname: 1.2.3.4, 1.2.3.4:8080, example.com, example.com:8080
+    elif ":" in host_port:
+        host, port_str = host_port.rsplit(":", 1)
+        port = int(port_str)
+    else:
+        host = host_port
+        port = default_port
+
+    results = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    ip = results[0][4][0]
+    if not isinstance(ip, str):
+        raise ValueError(f"Invalid return value {ip}")
+    return ip

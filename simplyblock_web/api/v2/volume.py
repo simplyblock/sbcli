@@ -1,4 +1,4 @@
-from typing import Annotated, List, Literal, Optional, Tuple, Union
+from typing import Annotated, List, Literal, Optional, Union
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -6,12 +6,12 @@ from pydantic import BaseModel, Field, RootModel
 
 from simplyblock_core.db_controller import DBController
 from simplyblock_core import utils as core_utils
-from simplyblock_core.controllers import lvol_controller, snapshot_controller
+from simplyblock_core.controllers import backup_controller, lvol_controller, snapshot_controller
 from simplyblock_core.models.lvol_model import LVol
 
 from .cluster import Cluster
 from .pool import StoragePool
-from .dtos import VolumeDTO, SnapshotDTO, TaskDTO
+from .dtos import BackupDTO, VolumeDTO, SnapshotDTO, TaskDTO
 from . import util
 
 
@@ -24,9 +24,6 @@ def list(request: Request, cluster: Cluster, pool: StoragePool) -> List[VolumeDT
     data = []
     for lvol in db.get_lvols_by_pool_id(pool.get_id()):
         stat_obj = None
-        ret = db.get_lvol_stats(lvol, 1)
-        if ret:
-            stat_obj = ret[0]
         data.append(VolumeDTO.from_model(lvol, request, cluster.get_id(), stat_obj))
     return data
 
@@ -34,7 +31,6 @@ def list(request: Request, cluster: Cluster, pool: StoragePool) -> List[VolumeDT
 class _CreateParams(BaseModel):
     name: str
     size: util.Size
-    crypto_key: Optional[Tuple[str, str]] = None
     max_rw_iops: util.Unsigned = 0
     max_rw_mbytes: util.Unsigned = 0
     max_r_mbytes: util.Unsigned = 0
@@ -42,7 +38,7 @@ class _CreateParams(BaseModel):
     ha_type: Optional[Literal['single', 'ha']] = None
     host_id: Optional[str] = None
     priority_class: Literal[0, 1] = 0
-    namespace: Optional[str] = None
+    namespaced: Optional[bool] = False
     pvc_name: Optional[str] = None
     ndcs: util.Unsigned = 0
     npcs: util.Unsigned = 0
@@ -51,12 +47,16 @@ class _CreateParams(BaseModel):
     max_namespace_per_subsys: int = 1
     do_replicate: bool = False
     replication_cluster_id: Optional[str] = None
+    encrypt: bool = False
 
 
 class _CloneParams(BaseModel):
     name: str
     snapshot_id: Annotated[Optional[str], Field(pattern=core_utils.UUID_PATTERN)]
     size: util.Size = 0
+    pvc_name: Optional[str] = None
+    pvc_namespace: Optional[str] = None
+    delete_snap_on_lvol_delete: bool = False
 
 
 @api.post('/', name='clusters:storage-pools:volumes:create', status_code=201, responses={201: {"content": None}})
@@ -76,7 +76,7 @@ def add(
             name=data.name,
             size=data.size,
             pool_id_or_name=pool.get_id(),
-            use_crypto=data.crypto_key is not None,
+            use_crypto=data.encrypt,
             max_size=0,
             max_rw_iops=data.max_rw_iops,
             max_rw_mbytes=data.max_rw_mbytes,
@@ -84,12 +84,10 @@ def add(
             max_w_mbytes=data.max_w_mbytes,
             host_id_or_name=data.host_id,
             ha_type=data.ha_type if data.ha_type is not None else 'default',
-            crypto_key1=data.crypto_key[0] if data.crypto_key is not None else None,
-            crypto_key2=data.crypto_key[1] if data.crypto_key is not None else None,
             use_comp=False,
             distr_vuid=0,
             lvol_priority_class=data.priority_class,
-            namespace=data.namespace,
+            namespaced=data.namespaced,
             pvc_name=data.pvc_name,
             ndcs=data.ndcs,
             npcs=data.npcs,
@@ -104,6 +102,9 @@ def add(
             data.snapshot_id,
             data.name,
             data.size if data.size is not None else 0,
+            pvc_name=data.pvc_name,
+            pvc_namespace=data.pvc_namespace,
+            delete_snap_on_lvol_delete=data.delete_snap_on_lvol_delete,
         )
     else:
         raise AssertionError('unreachable')
@@ -123,11 +124,14 @@ def add(
 instance_api = APIRouter(prefix='/{volume_id}')
 
 
-def _lookup_volume(volume_id: UUID) -> LVol:
+def _lookup_volume(volume_id: UUID, pool: StoragePool) -> LVol:
     try:
-        return db.get_lvol_by_id(str(volume_id))
+        volume = db.get_lvol_by_id(str(volume_id))
     except KeyError as e:
         raise HTTPException(404, str(e))
+    if volume.pool_uuid != pool.get_id():
+        raise HTTPException(404, f'LVol {volume_id} not found')
+    return volume
 
 
 Volume = Annotated[LVol, Depends(_lookup_volume)]
@@ -136,9 +140,6 @@ Volume = Annotated[LVol, Depends(_lookup_volume)]
 @instance_api.get('/', name='clusters:storage-pools:volumes:detail')
 def get(request: Request, cluster: Cluster, pool: StoragePool, volume: Volume) -> VolumeDTO:
     stat_obj = None
-    ret = db.get_lvol_stats(volume, 1)
-    if ret:
-        stat_obj = ret[0]
     rep_info = lvol_controller.get_replication_info(volume.get_id())
     return VolumeDTO.from_model(volume, request, cluster.get_id(), stat_obj, rep_info)
 
@@ -242,11 +243,11 @@ def replication_stop(cluster: Cluster, pool: StoragePool, volume: Volume) -> Res
     return Response(status_code=204)
 
 @instance_api.get('/connect', name='clusters:storage-pools:volumes:connect')
-def connect(cluster: Cluster, pool: StoragePool, volume: Volume):
-    details_or_false = lvol_controller.connect_lvol(volume.get_id())
-    if details_or_false == False:  # noqa
-        raise ValueError('Failed to query connection details')
-    return details_or_false
+def connect(cluster: Cluster, pool: StoragePool, volume: Volume, host_nqn: Optional[str] = None):
+    details, err = lvol_controller.connect_lvol(volume.get_id(), host_nqn=host_nqn)
+    if err:
+        return Response(status_code=404, content=err)
+    return details
 
 
 @instance_api.get('/capacity', name='clusters:storage-pools:volumes:capacity')
@@ -331,6 +332,47 @@ def suspend(cluster: Cluster, pool: StoragePool, volume: Volume) -> bool:
 def resume(cluster: Cluster, pool: StoragePool, volume: Volume) -> bool:
     return lvol_controller.resume_lvol(volume.get_id())
 
-@instance_api.get('/clone', name='clusters:storage-pools:volumes:clone')
-def clone(cluster: Cluster, pool: StoragePool, volume: Volume, clone_name: str) -> bool:
-    return lvol_controller.clone_lvol(volume.get_id(), clone_name)
+@instance_api.post('/clone', name='clusters:storage-pools:volumes:clone', status_code=201, responses={201: {"content": None}})
+def clone(
+        request: Request, cluster: Cluster, pool: StoragePool, volume: Volume,
+        clone_name: str,
+        new_size: Optional[str] = None,
+        pvc_name: Optional[str] = None,
+) -> Response:
+    size = None
+    if new_size is not None:
+        try:
+            size = core_utils.parse_size(new_size)
+        except Exception:
+            raise HTTPException(400, f'Invalid new_size value: {new_size!r}')
+    clone_id, error = lvol_controller.clone_lvol(volume.get_id(), clone_name, size, pvc_name)
+    if not clone_id:
+        raise ValueError(error or 'Failed to clone volume')
+    entity_url = request.app.url_path_for(
+        'clusters:storage-pools:volumes:detail',
+        cluster_id=cluster.get_id(),
+        pool_id=pool.get_id(),
+        volume_id=clone_id,
+    )
+    return Response(status_code=201, headers={'Location': str(entity_url)})
+
+
+@instance_api.get('/backups', name='clusters:storage-pools:volumes:backups:list')
+def backups(volume: Volume) -> List[BackupDTO]:
+    rows = db.get_backups_by_lvol_id(volume.get_id())
+    rows = sorted(rows, key=lambda b: (b.created_at, b.uuid), reverse=True)
+    return [BackupDTO.from_model(b) for b in rows]
+
+
+@instance_api.delete(
+    '/backups',
+    name='clusters:storage-pools:volumes:backups:delete',
+    status_code=204,
+    responses={204: {"content": None}},
+)
+def delete_backups(cluster: Cluster, pool: StoragePool, volume: Volume) -> Response:
+    success, error = backup_controller.delete_backups(volume.get_id())
+    if error:
+        raise HTTPException(400, error)
+    return Response(status_code=204)
+

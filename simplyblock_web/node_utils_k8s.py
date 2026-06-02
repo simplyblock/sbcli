@@ -27,7 +27,13 @@ def get_namespace():
 def wait_for_job_completion(job_name, namespace, timeout=480):
     batch_v1 = get_k8s_batch_client()
     for _ in range(timeout):
-        job = batch_v1.read_namespaced_job(job_name, namespace)
+        try:
+            job = batch_v1.read_namespaced_job(job_name, namespace)
+        except ApiException as e:
+            if e.status == 404:
+                # Job completed and was garbage-collected — treat as success.
+                return True
+            raise
         if job.status.succeeded and job.status.succeeded >= 1:
             return True
         elif job.status.failed and job.status.failed > 0:

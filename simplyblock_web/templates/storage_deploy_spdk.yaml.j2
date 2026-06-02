@@ -56,6 +56,23 @@ spec:
     - name: dockercontainerlogdirectory
       hostPath:
         path: /var/log/pods
+    {% if TLS_SERVE or TLS_CONNECT != "disabled" %}
+    - name: tls
+    {% if TLS_PROVIDER == "cert-manager" %}
+      secret:
+        secretName: simplyblock-spdk-proxy-tls
+    {% else %}
+      projected:
+        sources:
+          - secret:
+              name: simplyblock-spdk-proxy-tls
+          - configMap:
+              name: simplyblock-certificate-authority
+              items:
+                - key: service-ca.crt
+                  path: ca.crt
+    {% endif %}
+    {% endif %}
 
   containers:
     - name: spdk-container
@@ -66,9 +83,9 @@ spec:
         - -c
         - |
           if [ ! -e /dev/fd ]; then
-            ln -s /proc/self/fd /dev/fd
+            sudo ln -s /proc/self/fd /dev/fd
           fi
-          /root/scripts/run_distr_with_ssd.sh "{{ L_CORES }}" "{{ SPDK_MEM }}"
+          sudo -E /root/scripts/run_distr_with_ssd.sh "{{ L_CORES }}" "{{ SPDK_MEM }}"
       env:
         - name: SSD_PCIE
           value: "{{ SSD_PCIE }}"
@@ -120,9 +137,16 @@ spec:
       image: {{ SIMPLYBLOCK_DOCKER_IMAGE }}
       imagePullPolicy: "Always"
       command: ["sudo", "-E", "python3", "simplyblock_core/services/spdk_http_proxy_server.py"]
+      securityContext:
+        privileged: true
       volumeMounts:
         - name: socket-dir
           mountPath: /mnt/ramdisk
+        {% if TLS_SERVE or TLS_CONNECT != "disabled" %}
+        - name: tls
+          mountPath: /etc/simplyblock/tls
+          readOnly: true
+        {% endif %}
       env:
         - name: SERVER_IP
           value: "{{ SERVER_IP }}"
@@ -136,6 +160,14 @@ spec:
           value: "True"
         - name: TIMEOUT
           value: "300"
+        - name: SB_TLS_SERVE
+          value: "{{ TLS_SERVE }}"
+        - name: SB_TLS_CONNECT
+          value: "{{ TLS_CONNECT }}"
+        - name: SB_TLS_CLIENT_AUTH
+          value: "{{ TLS_CLIENT_AUTH }}"
+        - name: SB_TLS_PROVIDER
+          value: "{{ TLS_PROVIDER }}"
       {% if CPU_TOPOLOGY_ENABLED %}
       resources:
         limits:
