@@ -2598,6 +2598,7 @@ def _restart_storage_node_impl(
                     snode.ssd_pcie.append(new_ssd)
 
         fdb_connection = cluster.db_connection
+        snode_api.set_hugepages()
         results, err = snode_api.spdk_process_start(
             snode.l_cores, snode.spdk_mem, snode.spdk_image, spdk_debug, cluster_ip, fdb_connection,
             snode.namespace, snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password,
@@ -4071,7 +4072,8 @@ def start_storage_node_api_container(node_ip, cluster_ip=None):
             # /mnt/ramdisk/spdk_<port>/spdk.sock. Without this, the endpoint
             # has to fall through to dockerd, which can stall for 60-80s
             # during post-outage Swarm reconciliation (incident 2026-04-24).
-            '/mnt/ramdisk:/mnt/ramdisk'],
+            '/mnt/ramdisk:/mnt/ramdisk',
+            '/tmp/simplyblock:/tmp/simplyblock'],
         restart_policy={"Name": "always"},
         environment=[
             f"DOCKER_IP={node_ip}",
