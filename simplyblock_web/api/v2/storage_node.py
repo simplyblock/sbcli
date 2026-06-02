@@ -90,11 +90,14 @@ def add(cluster: Cluster, parameters: StorageNodeParams):
 instance_api = APIRouter(prefix='/{storage_node_id}')
 
 
-def _lookup_storage_node(storage_node_id: UUID) -> StorageNodeModel:
+def _lookup_storage_node(storage_node_id: UUID, cluster: Cluster) -> StorageNodeModel:
     try:
-        return db.get_storage_node_by_id(str(storage_node_id))
+        storage_node = db.get_storage_node_by_id(str(storage_node_id))
     except KeyError as e:
         raise HTTPException(404, str(e))
+    if storage_node.cluster_id != cluster.get_id():
+        raise HTTPException(404, f'StorageNode {storage_node_id} not found')
+    return storage_node
 
 
 StorageNode = Annotated[StorageNodeModel, Depends(_lookup_storage_node)]

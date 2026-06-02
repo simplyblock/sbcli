@@ -2307,7 +2307,7 @@ def restart_storage_node(
             clear_data=clear_data, new_ssd_pcie=new_ssd_pcie,
             force_lvol_recreate=force_lvol_recreate, spdk_proxy_image=spdk_proxy_image)
     except Exception:
-        logger.exception("restart_storage_node raised unexpectedly")
+        logger.error("restart_storage_node raised unexpectedly")
     finally:
         # Trust the DB. If the impl raised after the ONLINE write was
         # already committed, the node IS factually online — peers see

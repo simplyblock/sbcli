@@ -6,12 +6,12 @@ from pydantic import BaseModel, Field, RootModel
 
 from simplyblock_core.db_controller import DBController
 from simplyblock_core import utils as core_utils
-from simplyblock_core.controllers import lvol_controller, snapshot_controller
+from simplyblock_core.controllers import backup_controller, lvol_controller, snapshot_controller
 from simplyblock_core.models.lvol_model import LVol
 
 from .cluster import Cluster
 from .pool import StoragePool
-from .dtos import VolumeDTO, SnapshotDTO, TaskDTO
+from .dtos import BackupDTO, VolumeDTO, SnapshotDTO, TaskDTO
 from . import util
 
 
@@ -124,11 +124,14 @@ def add(
 instance_api = APIRouter(prefix='/{volume_id}')
 
 
-def _lookup_volume(volume_id: UUID) -> LVol:
+def _lookup_volume(volume_id: UUID, pool: StoragePool) -> LVol:
     try:
-        return db.get_lvol_by_id(str(volume_id))
+        volume = db.get_lvol_by_id(str(volume_id))
     except KeyError as e:
         raise HTTPException(404, str(e))
+    if volume.pool_uuid != pool.get_id():
+        raise HTTPException(404, f'LVol {volume_id} not found')
+    return volume
 
 
 Volume = Annotated[LVol, Depends(_lookup_volume)]
@@ -352,3 +355,24 @@ def clone(
         volume_id=clone_id,
     )
     return Response(status_code=201, headers={'Location': str(entity_url)})
+
+
+@instance_api.get('/backups', name='clusters:storage-pools:volumes:backups:list')
+def backups(volume: Volume) -> List[BackupDTO]:
+    rows = db.get_backups_by_lvol_id(volume.get_id())
+    rows = sorted(rows, key=lambda b: (b.created_at, b.uuid), reverse=True)
+    return [BackupDTO.from_model(b) for b in rows]
+
+
+@instance_api.delete(
+    '/backups',
+    name='clusters:storage-pools:volumes:backups:delete',
+    status_code=204,
+    responses={204: {"content": None}},
+)
+def delete_backups(cluster: Cluster, pool: StoragePool, volume: Volume) -> Response:
+    success, error = backup_controller.delete_backups(volume.get_id())
+    if error:
+        raise HTTPException(400, error)
+    return Response(status_code=204)
+

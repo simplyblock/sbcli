@@ -393,7 +393,11 @@ class CLIWrapperBase:
         return self.cluster_add(args)
 
     def cluster__activate(self, sub_command, args):
-        cluster_ops.cluster_activate(args.cluster_id, args.force, args.force_lvstore_create)
+        try:
+            cluster_ops.cluster_activate(args.cluster_id, args.force, args.force_lvstore_create)
+        except Exception as e:
+            print(f"Error activating cluster: {e}")
+            return False
         return True
 
     def cluster__list(self, sub_command, args):
