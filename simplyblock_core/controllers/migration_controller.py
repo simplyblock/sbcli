@@ -162,11 +162,16 @@ def start_migration(lvol_id, target_node_id,
 
 def cancel_migration(migration_id):
     """
-    Cancel an active migration.  The task runner will detect the cancellation,
-    stop data-plane operations, and transition to the CLEANUP_TARGET phase to
-    remove any partially-copied snapshots from the target.
+    Cancel an active migration.
 
-    Returns True on success, or (False, error_message) on failure.
+    For PHASE_PRE_CREATED migrations (no task runner involved yet), cleanup is
+    performed inline: subsystems and the migration bdev are deleted on the
+    target primary and secondary before marking the record cancelled.
+
+    For all other active phases, sets migration.canceled = True so the task
+    runner picks it up and transitions to CLEANUP_TARGET.
+
+    Returns (True, None) on success, or (False, error_message) on failure.
     """
     try:
         migration = db.get_migration_by_id(migration_id)
@@ -176,11 +181,70 @@ def cancel_migration(migration_id):
     if not migration.is_active():
         return False, f"Migration is not active (status={migration.status})"
 
+    if migration.phase == LVolMigration.PHASE_PRE_CREATED:
+        _cleanup_pre_created(migration)
+        migration.status = LVolMigration.STATUS_CANCELLED
+        migration.write_to_db(db.kv_store)
+        migration_events.migration_cancelled(migration)
+        logger.info(f"Pre-created migration cleaned up and cancelled: id={migration_id} lvol={migration.lvol_id}")
+        return True, None
+
     migration.canceled = True
     migration.write_to_db(db.kv_store)
     migration_events.migration_cancelled(migration)
     logger.info(f"Migration cancelled: id={migration_id} lvol={migration.lvol_id}")
     return True, None
+
+
+def _cleanup_pre_created(migration):
+    """
+    Delete the subsystem(s) and migration bdev that were created during
+    pre_create_on_target.  Called inline by cancel_migration when
+    phase == PHASE_PRE_CREATED (no task runner is involved yet).
+
+    Best-effort: logs errors but does not raise.
+    """
+    try:
+        lvol = db.get_lvol_by_id(migration.lvol_id)
+    except KeyError:
+        logger.warning(f"_cleanup_pre_created: lvol {migration.lvol_id} not found — skipping cleanup")
+        return
+
+    try:
+        tgt_node = db.get_storage_node_by_id(migration.target_node_id)
+    except KeyError:
+        logger.warning(f"_cleanup_pre_created: target node {migration.target_node_id} not found — skipping cleanup")
+        return
+
+    nqn = lvol.nqn
+    bdev_short = lvol.lvol_bdev + _MIGRATION_BDEV_SUFFIX
+    composite = f"{tgt_node.lvstore}/{bdev_short}"
+
+    # Secondary first (depends on nothing on primary)
+    if tgt_node.secondary_node_id:
+        try:
+            sec_node = db.get_storage_node_by_id(tgt_node.secondary_node_id)
+            sec_rpc = sec_node.rpc_client()
+            sec_rpc.subsystem_delete(nqn)
+            logger.info(f"_cleanup_pre_created: deleted TGT-sec subsystem {nqn} on {sec_node.get_id()}")
+        except Exception as e:
+            logger.warning(f"_cleanup_pre_created: could not clean TGT-sec subsystem: {e}")
+
+    # Primary subsystem
+    try:
+        tgt_rpc = tgt_node.rpc_client()
+        tgt_rpc.subsystem_delete(nqn)
+        logger.info(f"_cleanup_pre_created: deleted TGT-prim subsystem {nqn} on {tgt_node.get_id()}")
+    except Exception as e:
+        logger.warning(f"_cleanup_pre_created: could not clean TGT-prim subsystem: {e}")
+
+    # Migration bdev (only on primary)
+    try:
+        tgt_rpc = tgt_node.rpc_client()
+        tgt_rpc.delete_lvol(composite)
+        logger.info(f"_cleanup_pre_created: deleted migration bdev {composite} on {tgt_node.get_id()}")
+    except Exception as e:
+        logger.warning(f"_cleanup_pre_created: could not clean migration bdev: {e}")
 
 
 def get_active_migration_for_lvol(lvol_id, cluster_id=None):
@@ -584,32 +648,32 @@ def pre_create_on_target(lvol_id, target_node_id,
       1. Create migration bdev  <lvol_bdev>m  in the target lvstore.
          Idempotent: skipped if the bdev already exists.
       2. Create NVMe-oF subsystem with the same NQN as the source lvol.
-         Returns False when the subsystem already exists (overlap case).
-      3. Add inaccessible listeners on every data NIC of the target node.
-      4. Add a namespace pointing to the new bdev — ONLY when the subsystem
-         was newly created (i.e. subsystem_create returned True).  When the
-         subsystem already exists (overlap / TGT-sec == SRC) the namespace is
-         left as-is to avoid disrupting live IO.
+      3. Add inaccessible listeners on every data NIC.
+         No namespace is added — the task runner wires it up when migration
+         actually begins (PHASE_LVOL_MIGRATE).
+      4. Create an LVolMigration record in PHASE_PRE_CREATED so that
+         cancel_migration can tear everything down on request.
 
     Returns:
-      (connect_strings, error_str)
+      (migration_id, connect_strings, error_str)
+      migration_id: str UUID of the newly created migration record
       connect_strings: list[dict]  — same format as lvol_controller.connect_lvol()
-      On error: (None, error_message)
+      On error: (None, None, error_message)
     """
     db = DBController()
 
     try:
         lvol = db.get_lvol_by_id(lvol_id)
     except KeyError:
-        return None, f"LVol {lvol_id} not found"
+        return None, None, f"LVol {lvol_id} not found"
 
     try:
         tgt_node = db.get_storage_node_by_id(target_node_id)
     except KeyError:
-        return None, f"Target node {target_node_id} not found"
+        return None, None, f"Target node {target_node_id} not found"
 
     if not tgt_node.lvstore:
-        return None, f"Target node {target_node_id} has no lvstore"
+        return None, None, f"Target node {target_node_id} has no lvstore"
 
     cluster = db.get_cluster_by_id(tgt_node.cluster_id)
     tgt_rpc  = tgt_node.rpc_client()
@@ -626,13 +690,13 @@ def pre_create_on_target(lvol_id, target_node_id,
             lvol_priority_class=lvol.lvol_priority_class,
             ndcs=lvol.ndcs, npcs=lvol.npcs)
         if not ret:
-            return None, f"bdev_lvol_create failed for {composite} on {target_node_id}"
+            return None, None, f"bdev_lvol_create failed for {composite} on {target_node_id}"
         logger.info(f"pre_create_on_target: created bdev {composite}")
     else:
         logger.info(f"pre_create_on_target: bdev {composite} already exists — skipping create")
 
-    # ── 2. Subsystem + listeners ──────────────────────────────────────────────
-    subsys_created = tgt_rpc.subsystem_create(
+    # ── 2. Subsystem + inaccessible listeners (no namespace) ─────────────────
+    tgt_rpc.subsystem_create(
         nqn, lvol.ha_type, lvol.uuid, min_cntlid=2000,
         max_namespaces=constants.LVO_MAX_NAMESPACES_PER_SUBSYS)
 
@@ -645,19 +709,12 @@ def pre_create_on_target(lvol_id, target_node_id,
         tgt_rpc.listeners_create(nqn, trtype, nic.ip4_address, tgt_port,
                                  ana_state="inaccessible")
 
-    # ── 3. Namespace — only when subsystem was freshly created ────────────────
-    if subsys_created:
-        tgt_rpc.nvmf_subsystem_add_ns(nqn, composite, lvol.uuid, lvol.guid)
-        logger.info(
-            f"pre_create_on_target: subsystem {nqn} created with ns={composite}")
-    else:
-        logger.info(
-            f"pre_create_on_target: subsystem {nqn} already existed — namespace left unchanged")
+    logger.info(f"pre_create_on_target: subsystem {nqn} ready on TGT-prim (no namespace)")
 
     # ── HA secondary ──────────────────────────────────────────────────────────
     sec_node = None
     sec_port = None
-    if lvol.ha_type == "ha":
+    if lvol.ha_type in ("ha", "ha3"):
         try:
             if tgt_node.secondary_node_id:
                 sec_node = db.get_storage_node_by_id(tgt_node.secondary_node_id)
@@ -668,7 +725,7 @@ def pre_create_on_target(lvol_id, target_node_id,
             sec_rpc   = sec_node.rpc_client()
             sec_port  = sec_node.get_lvol_subsys_port(tgt_node.lvstore)
 
-            sec_subsys_created = sec_rpc.subsystem_create(
+            sec_rpc.subsystem_create(
                 nqn, lvol.ha_type, lvol.uuid, min_cntlid=3000,
                 max_namespaces=constants.LVO_MAX_NAMESPACES_PER_SUBSYS)
 
@@ -681,13 +738,7 @@ def pre_create_on_target(lvol_id, target_node_id,
                 sec_rpc.listeners_create(nqn, trtype, nic.ip4_address, sec_port,
                                          ana_state="inaccessible")
 
-            if sec_subsys_created:
-                sec_rpc.nvmf_subsystem_add_ns(nqn, composite, lvol.uuid, lvol.guid)
-                logger.info(
-                    f"pre_create_on_target: TGT-sec subsystem {nqn} created with ns={composite}")
-            else:
-                logger.info(
-                    f"pre_create_on_target: TGT-sec subsystem {nqn} already existed — namespace left unchanged")
+            logger.info(f"pre_create_on_target: subsystem {nqn} ready on TGT-sec (no namespace)")
 
     # ── 4. Build connect strings for the target node ──────────────────────────
     host_entry = None
@@ -698,8 +749,8 @@ def pre_create_on_target(lvol_id, target_node_id,
                 break
 
     if lvol.allowed_hosts and not host_nqn:
-        return None, (f"Volume {lvol_id} has allowed hosts configured; "
-                      f"--host-nqn is required")
+        return None, None, (f"Volume {lvol_id} has allowed hosts configured; "
+                            f"--host-nqn is required")
 
     out = []
     for nic in tgt_node.data_nics:
@@ -811,9 +862,24 @@ def pre_create_on_target(lvol_id, target_node_id,
                 entry["tls"] = True
             out.append(entry)
 
+    # ── 4. Create migration record so cancel can clean up ─────────────────────
+    migration = LVolMigration()
+    migration.uuid = str(uuid.uuid4())
+    migration.cluster_id = tgt_node.cluster_id
+    migration.lvol_id = lvol_id
+    migration.source_node_id = lvol.node_id
+    migration.target_node_id = target_node_id
+    migration.phase = LVolMigration.PHASE_PRE_CREATED
+    migration.status = LVolMigration.STATUS_NEW
+    migration.snap_migration_plan = []
+    migration.snaps_migrated = []
+    migration.intermediate_snaps = []
+    migration.started_at = int(time.time())
+    migration.write_to_db(db.kv_store)
+
     logger.info(
         f"pre_create_on_target: done for lvol={lvol_id} target={target_node_id} "
-        f"subsys_created={subsys_created} connect_strings={len(out)}")
-    return out, None
+        f"migration_id={migration.uuid} connect_strings={len(out)}")
+    return migration.uuid, out, None
 
 

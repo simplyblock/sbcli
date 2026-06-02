@@ -38,6 +38,7 @@ class LVolMigration(BaseModel):
     STATUS_FAILED = 'failed'
     STATUS_CANCELLED = 'cancelled'
 
+    PHASE_PRE_CREATED = 'pre_created'
     PHASE_SNAP_COPY = 'snap_copy'
     PHASE_LVOL_MIGRATE = 'lvol_migrate'
     PHASE_CLEANUP_SOURCE = 'cleanup_source'
