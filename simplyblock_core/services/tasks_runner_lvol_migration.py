@@ -557,12 +557,21 @@ def _setup_snap_transfer(snap, snap_index, migration, src_node, tgt_node,
     temp_nqn = f"nqn.2023-02.io.simplyblock:mig:{migration.uuid[:8]}:{snap_index}"
     ctrl_name = f"mig_{migration.uuid[:8]}_{snap_index}"
 
-    # Step 1: create target lvol on primary
-    # Note: SPDK's bdev_lvol_create 'uuid' param is for the lvol *store*, not
-    # the new lvol.  Do not pass the snapshot UUID here.
-    size_in_mib = _bytes_to_mib(snap.size)
+    # Step 1: create target lvol on primary.
+    # The target bdev must cover the FULL addressable range of the source snap
+    # (which equals the parent lvol's total size), not just the snap's allocated
+    # (dirty) byte count stored in snap.size.  Using snap.size causes LBA-out-of-
+    # range errors when the transfer writes to blocks beyond that smaller capacity.
+    src_info = src_rpc.get_bdevs(src_composite)
+    if src_info and isinstance(src_info[0], dict):
+        _nb = src_info[0].get('num_blocks', 0)
+        _bs = src_info[0].get('block_size', 4096)
+        size_in_mib = max(1, (_nb * _bs) // (1024 * 1024))
+    else:
+        size_in_mib = _bytes_to_mib(snap.size)
     logger.info(
-        f"[SNAP SIZE] snap={snap_uuid[:8]} db snap.size={snap.size} size_in_mib={size_in_mib}"
+        f"[SNAP SIZE] snap={snap_uuid[:8]} db snap.size={snap.size} "
+        f"spdk_size_mib={size_in_mib}"
     )
     _log_spdk_bdev_size(src_rpc, src_composite, f"SRC snap[{snap_uuid[:8]}] pre-create")
     ret = tgt_rpc.create_lvol(snap_short, size_in_mib, tgt_node.lvstore)
