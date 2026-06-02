@@ -1865,16 +1865,9 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
         for h in lvol.allowed_hosts:
             if h["nqn"] == host_nqn:
                 host_entry = h
-                # Do NOT inject pool DHCHAP keys into host_entry here.
-                # Pool-level keys are registered on the target's nvmf
-                # keyring via _register_pool_dhchap_keys_on_node and
-                # used during in-band auth; embedding them in the
-                # connect string overrides explicit host-level keys,
-                # injects keys when the pool has no DHCHAP configured,
-                # and conflicts with hosts using PSK/TLS. Contract is
-                # pinned by tests in tests/test_dhchap_pool_level.py
-                # (test_host_with_psk_sets_tls_flag,
-                # test_pool_level_dhchap_lvol_has_no_secret_in_connect_cmd).
+                pool = db_controller.get_pool_by_id(lvol.pool_uuid)
+                host_entry["dhchap_key"] = pool.dhchap_key
+                host_entry["dhchap_ctrlr_key"] = pool.dhchap_ctrlr_key
                 break
         if not host_entry:
             return False, f"Host NQN {host_nqn} not found in allowed hosts for volume {uuid}"
