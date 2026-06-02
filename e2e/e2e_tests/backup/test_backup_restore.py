@@ -1248,7 +1248,7 @@ class BackupTestBase(TestClusterBase):
 
     # ── teardown ──────────────────────────────────────────────────────────────
 
-    def teardown(self, delete_lvols=True, close_ssh=True):
+    def teardown(self, delete_lvols=True, close_ssh=True, skip_k8s_cleanup=False):
         self.logger.info("BackupTestBase teardown started.")
 
         if delete_lvols:
@@ -1268,7 +1268,7 @@ class BackupTestBase(TestClusterBase):
             except Exception:
                 pass
 
-        super().teardown(delete_lvols=delete_lvols, close_ssh=close_ssh)
+        super().teardown(delete_lvols=delete_lvols, close_ssh=close_ssh, skip_k8s_cleanup=skip_k8s_cleanup)
 
     def _k8s_teardown(self):
         """Delete all K8s resources created during the test."""

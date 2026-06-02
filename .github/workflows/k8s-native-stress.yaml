@@ -105,6 +105,11 @@ on:
         required: false
         default: true
         type: boolean
+      preserve_resources_on_failure:
+        description: 'Preserve PVCs, FIO pods, snapshots on test failure for debugging'
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   stress-test:
@@ -1267,9 +1272,14 @@ jobs:
             TESTNAME="--testname ${{ github.event.inputs.testname }}"
           fi
 
+          PRESERVE_ARG=""
+          if [ "${{ github.event.inputs.preserve_resources_on_failure }}" = "true" ]; then
+            PRESERVE_ARG="--preserve_resources_on_failure True"
+          fi
+
           python3 -u stress.py $TESTNAME \
             --ndcs $NDCS --npcs $NPCS --bs $BS --chunk_bs $CHUNK_BS \
-            --run_k8s True --tls_enabled ${{ github.event.inputs.tls_enabled }} 2>&1 | tee output.log
+            --run_k8s True --tls_enabled ${{ github.event.inputs.tls_enabled }} $PRESERVE_ARG 2>&1 | tee output.log
         env:
           NDCS: ${{ env.NDCS }}
           NPCS: ${{ env.NPCS }}

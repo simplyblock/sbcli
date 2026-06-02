@@ -66,6 +66,7 @@ class TestClusterBase:
         self.npcs = kwargs.get("npcs", 1)
         self.bs = kwargs.get("bs", 4096)
         self.chunk_bs = kwargs.get("chunk_bs", 4096)
+        self.preserve_resources_on_failure = kwargs.get("preserve_resources_on_failure", False)
         self.pool_name = "testpool"
         self.lvol_name = f"test_lvl_{generate_random_sequence(4)}"
         self.mount_path = "/mnt/test_location"
@@ -950,7 +951,7 @@ class TestClusterBase:
         self.logger.info("[SPDK-MEM] SPDK mem stats thread stopped")
 
             
-    def teardown(self, delete_lvols=True, close_ssh=True):
+    def teardown(self, delete_lvols=True, close_ssh=True, skip_k8s_cleanup=False):
         """Contains teradown required post test case execution
         """
         self.logger.info("Inside teardown function")

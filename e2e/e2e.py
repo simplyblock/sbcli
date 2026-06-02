@@ -44,7 +44,9 @@ def main():
     parser.add_argument('--namespace', type=str, help="Kubernetes namespace", default="")
     parser.add_argument('--new_worker_nodes', type=str, help="New K8s worker node names to add (comma-separated)", default="")
     parser.add_argument('--migrate_to_worker', type=str, help="K8s worker node name to migrate a storage node onto", default="")
-    
+    parser.add_argument('--preserve_resources_on_failure', type=bool,
+                        help="Skip K8s resource cleanup when test fails (preserve PVCs/pods for debugging)",
+                        default=False)
 
     args = parser.parse_args()
 
@@ -183,6 +185,7 @@ def main():
                         namespace=args.namespace,
                         new_worker_nodes=new_worker_nodes,
                         migrate_to_worker=args.migrate_to_worker,
+                        preserve_resources_on_failure=args.preserve_resources_on_failure,
                         )
         try:
             test_obj.setup()
@@ -195,16 +198,20 @@ def main():
             tb = traceback.format_exc()
             logger.error(tb)
             errors[f"{test.__name__}"] = [exp, tb]
+        _test_failed = f"{test.__name__}" in errors
+        _skip_k8s = _test_failed and test_obj.preserve_resources_on_failure
+        if _skip_k8s:
+            logger.info(f"[cleanup] Test {test.__name__} failed — preserving K8s resources for debugging (--preserve_resources_on_failure)")
         try:
             test_obj.collect_management_details(post_teardown=False)
-            test_obj.teardown(delete_lvols=False, close_ssh=False)
+            test_obj.teardown(delete_lvols=False, close_ssh=False, skip_k8s_cleanup=_skip_k8s)
             if not args.run_k8s:
                 test_obj.stop_docker_logs_collect()
             else:
                 test_obj.stop_k8s_log_collect()
             test_obj.fetch_all_nodes_distrib_log()
             test_obj.collect_management_details(post_teardown=True)
-            test_obj.teardown(delete_lvols=True, close_ssh=False)
+            test_obj.teardown(delete_lvols=not _skip_k8s, close_ssh=False, skip_k8s_cleanup=_skip_k8s)
             all_nodes = test_obj._get_all_nodes()
             test_obj.ssh_obj.collect_final_docker_logs_simple(all_nodes, test_obj.docker_logs_path)
             test_obj.export_graylog_logs()

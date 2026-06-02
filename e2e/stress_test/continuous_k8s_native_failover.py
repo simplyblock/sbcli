@@ -408,7 +408,7 @@ class K8sNativeFailoverTest(TestClusterBase):
             self.logger.warning(f"[cleanup] Succeeded pod cleanup: {exc}")
         self.logger.info("[cleanup] Orphaned K8s resource cleanup done.")
 
-    def teardown(self, delete_lvols=True, close_ssh=True):
+    def teardown(self, delete_lvols=True, close_ssh=True, skip_k8s_cleanup=False):
         """K8s-native teardown, with optional client cleanup."""
         self.logger.info("Inside K8sNativeFailoverTest.teardown()")
         self.stop_root_monitor()
@@ -437,7 +437,9 @@ class K8sNativeFailoverTest(TestClusterBase):
             sleep_n_sec(5)
 
         # Kill orphaned K8s FIO Jobs so they don't interfere with next run
-        if self.k8s_utils:
+        if skip_k8s_cleanup:
+            self.logger.info("[teardown] Skipping K8s resource cleanup (preserve_resources_on_failure)")
+        elif self.k8s_utils:
             try:
                 self._kill_orphaned_k8s_resources()
             except Exception as exc:
