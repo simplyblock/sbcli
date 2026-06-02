@@ -815,13 +815,21 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
 def _create_bdev_stack(lvol, snode, is_primary=True):
     rpc_client = snode.rpc_client()
 
+    node_bdevs = rpc_client.get_bdevs()
+    if node_bdevs:
+        node_bdev_names = [b['name'] for b in node_bdevs]
+    else:
+        node_bdev_names = []
+
     created_bdevs = []
     for bdev in lvol.bdev_stack:
         type = bdev['type']
         name = bdev['name']
         params = bdev['params']
-        ret = None
+        if name in node_bdev_names:
+            continue
 
+        ret = None
         if type == "bmap_init":
             ret = rpc_client.ultra21_lvol_bmap_init(**params)
 
@@ -1046,10 +1054,35 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
                             f"Failed to create listener for {lvol.get_id()}")
 
     logger.info("Add BDev to subsystem")
-    ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid)
-    if not ret:
-        return _fail_after_bdev(
-            lvol, rpc_client, "Failed to add bdev to subsystem")
+    ret, err = rpc_client.nvmf_subsystem_add_ns2(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid)
+    if  err:
+        if err and err["code"] == -32602 and lvol.namespace and lvol.node_id == snode.get_id():
+            logger.info("Error adding namespace to subsystem, finding new subsystem for namespaced lvol")
+            all_lvols = DBController().get_mini_lvols()
+            result = get_next_available_subsystem_on_node(lvol.node_id, all_lvols)
+            if result:
+                namespace, free_nqn = result
+                lvol.nqn = free_nqn
+                lvol.namespace = namespace
+            else:
+                subsys_count = len(set(
+                    lv.nqn for lv in all_lvols if lv.node_id == snode.get_id() and
+                    lv.status not in [LVol.STATUS_IN_DELETION, LVol.STATUS_DELETED]
+                ))
+                if subsys_count >= snode.max_lvol:
+                    error = f"Too many subsystems on node: {snode.get_id()}, max subsystems reached: {snode.max_lvol}"
+                    logger.error(error)
+                    raise Exception(error)
+
+                cluster = DBController().get_cluster_by_id(snode.cluster_id)
+                lvol.nqn = cluster.nqn + ":lvol:" + lvol.uuid
+                lvol.namespace = ""
+                lvol.max_namespace_per_subsys = constants.LVO_MAX_NAMESPACES_PER_SUBSYS
+            return add_lvol_on_node(lvol, snode, is_primary=is_primary, secondary_index=secondary_index)
+        else:
+            return _fail_after_bdev(
+                lvol, rpc_client, "Failed to add bdev to subsystem")
+
     lvol.ns_id = int(ret)
 
     ret = rpc_client.get_bdevs(f"{lvol.lvs_name}/{lvol.lvol_bdev}")
@@ -3160,7 +3193,7 @@ def get_namespaces_per_lvol(lvol):
 def get_next_available_subsystem_on_node(node_id, all_lvols=None):
     db_controller = DBController()
     if not all_lvols:
-        all_lvols = db_controller.get_lvols_by_node_id(node_id)
+        all_lvols = db_controller.get_mini_lvols()
 
     # Count active namespaces per NQN in a single pass instead of issuing a
     # separate DB read for every subsystem root (was O(N²)).
@@ -3172,6 +3205,7 @@ def get_next_available_subsystem_on_node(node_id, all_lvols=None):
         if lv.status not in [LVol.STATUS_IN_DELETION, LVol.STATUS_DELETED, LVol.STATUS_IN_CREATION]:
             ns_counts[lv.nqn] = ns_counts.get(lv.nqn, 0) + 1
 
+    ret = []
     for lvol in all_lvols:
         if lvol.node_id != node_id:
             continue
@@ -3181,5 +3215,7 @@ def get_next_available_subsystem_on_node(node_id, all_lvols=None):
 
         if not lvol.namespace:
             if lvol.nqn in ns_counts and ns_counts.get(lvol.nqn, 0) < lvol.max_namespace_per_subsys:
-                return lvol.get_id(), lvol.nqn
+                ret.append((lvol.get_id(), lvol.nqn))
+    if ret:
+        return ret[random.randint(0, len(ret) - 1)]
     return None

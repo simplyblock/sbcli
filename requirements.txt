@@ -28,3 +28,5 @@ uvicorn
 prometheus_api_client
 paramiko
 pydantic-settings
+botocore<1.13.0
+boto3<1.10.0

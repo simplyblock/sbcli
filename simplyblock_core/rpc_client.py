@@ -379,7 +379,11 @@ class RPCClient:
         }
         return self._request2("ultra21_alloc_ns_init", params)
 
-    def nvmf_subsystem_add_ns(self, nqn, dev_name, uuid=None, nguid=None, nsid=None, eui64=None,
+    def nvmf_subsystem_add_ns(self, nqn, dev_name, uuid=None, nguid=None, nsid=None, eui64=None, idempotent=True):
+        ret, err = self.nvmf_subsystem_add_ns2(nqn, dev_name, uuid, nguid, nsid, eui64, idempotent)
+        return ret
+
+    def nvmf_subsystem_add_ns2(self, nqn, dev_name, uuid=None, nguid=None, nsid=None, eui64=None,
                               idempotent=True):
         """Add a namespace to an NVMe-oF subsystem.
 
@@ -445,7 +449,7 @@ class RPCClient:
             params['namespace']['ptpl_file'] = "/mnt/ns_resv"+eui64+".json"
 
 
-        return self._request("nvmf_subsystem_add_ns", params)
+        return self._request2("nvmf_subsystem_add_ns", params)
 
     def nvmf_subsystem_remove_ns(self, nqn, nsid):
         params = {
