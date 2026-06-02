@@ -77,6 +77,20 @@ class LVol(BaseModel):
     def has_qos(self):
         return (self.rw_ios_per_sec > 0 or self.rw_mbytes_per_sec > 0 or self.r_mbytes_per_sec > 0 or self.w_mbytes_per_sec > 0)
 
+    def write_to_db(self, kv_store=None):
+        super().write_to_db(kv_store)
+        lvol_mini = LVolMini().from_lvol(self)
+        lvol_mini.write_to_db(kv_store)
+
+    def remove(self, kv_store):
+        super().remove(kv_store)
+        try:
+            lvol_mini = LVolMini().read_from_db(kv_store, self.uuid)[0]
+            lvol_mini.remove(kv_store)
+        except Exception as e:
+            print(f"Failed to remove snapshot mini from DB: {e}")
+
+
 
 class LVolReplication(BaseModel):
     source_lvol: LVol = None

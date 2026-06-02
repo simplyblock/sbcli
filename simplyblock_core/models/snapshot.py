@@ -35,6 +35,19 @@ class SnapShot(BaseModel):
     prev_snap_uuid: str = ""
     instances: list = []
 
+    def write_to_db(self, kv_store=None):
+        super().write_to_db(kv_store)
+        snap_mini = SnapShotMini().from_snapshot(self)
+        snap_mini.write_to_db(kv_store)
+
+    def remove(self, kv_store):
+        super().remove(kv_store)
+        try:
+            snap_mini = SnapShotMini().read_from_db(kv_store, self.uuid)[0]
+            snap_mini.remove(kv_store)
+        except Exception as e:
+            print(f"Failed to remove snapshot mini from DB: {e}")
+
 
 class SnapShotMini(BaseModel):
     snap_uuid: str = ""

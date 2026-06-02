@@ -3093,7 +3093,7 @@ def list_storage_nodes(is_json, cluster_id=None):
         nodes = db_controller.get_storage_nodes()
     data = []
     output = ""
-    all_lvols = db_controller.get_lvols()
+    all_lvols = db_controller.get_mini_lvols()
     for node in nodes:
         logger.debug(node)
         logger.debug("*" * 20)

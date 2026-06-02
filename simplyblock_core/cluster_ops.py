@@ -1381,7 +1381,7 @@ def list_all_info(cluster_id) -> str:
         out += "\n"
 
     lvol_data = []
-    for lvol in db_controller.get_lvols(cluster_id):
+    for lvol in lvols:
         lvolstatsrecs = db_controller.get_lvol_stats(lvol, 1)
         if lvolstatsrecs:
             lvolstatsrec = lvolstatsrecs[0]

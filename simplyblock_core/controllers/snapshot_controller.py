@@ -16,8 +16,8 @@ from simplyblock_core.kms._exceptions import KMSException
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.pool import Pool
-from simplyblock_core.models.snapshot import SnapShot, SnapShotMini
-from simplyblock_core.models.lvol_model import LVol, LVolMini
+from simplyblock_core.models.snapshot import SnapShot
+from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.storage_node import StorageNode
 
 
@@ -108,7 +108,7 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
         return False, msg
 
     if not all_lvols:
-        all_lvols = db_controller.get_lvols()
+        all_lvols = db_controller.get_mini_lvols()
     if pool.pool_max_size > 0:
         total = pool_controller.get_pool_total_capacity(pool.get_id(), all_lvols, all_snaps)
         if total + size > pool.pool_max_size:
@@ -277,10 +277,6 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
 
     snap.write_to_db(db_controller.kv_store)
 
-    snap_mini = SnapShotMini().from_snapshot(snap)
-    snap_mini.write_to_db(db_controller.kv_store)
-
-
     _parent_snap = None
     if lvol.cloned_from_snap:
         _parent_snap = db_controller.get_snapshot_by_id(lvol.cloned_from_snap)
@@ -357,7 +353,7 @@ def list(all=False, cluster_id=None, with_details=False, pool_id_or_name=None):
     # Build snap_id → clone list in one pass instead of rescanning all lvols
     # for every snapshot (was O(M×N) in-memory).
     clones_by_snap: dict[str, builtins.list[str]] = {}
-    for lv in db_controller.get_lvols():
+    for lv in db_controller.get_mini_lvols():
         if lv.cloned_from_snap:
             clones_by_snap.setdefault(lv.cloned_from_snap, []).append(lv.get_id())
 
@@ -459,7 +455,7 @@ def delete(snapshot_uuid, force_delete=False):
     # once SPDK has actually removed the bdev (deletion_status set).
     clones = []
     in_deletion_clones = []
-    for lvol in db_controller.get_lvols(snode.cluster_id):
+    for lvol in db_controller.get_mini_lvols():
         if not lvol.cloned_from_snap or lvol.cloned_from_snap != snapshot_uuid:
             continue
 
@@ -552,11 +548,6 @@ def delete(snapshot_uuid, force_delete=False):
         snap.deletion_status = primary_node.get_id()
         snap.status = SnapShot.STATUS_IN_DELETION
         snap.write_to_db(db_controller.kv_store)
-        try:
-            snap_mini = SnapShotMini().read_from_db(db_controller.kv_store, snap.uuid)[0]
-            snap_mini.remove(db_controller.kv_store)
-        except Exception as e:
-            logger.error(f"Failed to remove snapshot mini from DB: {e}")
 
     try:
         base_lvol = db_controller.get_lvol_by_id(snap.lvol.get_id())
@@ -630,7 +621,7 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
         return False, f"Cluster is not active, status: {cluster.status}"
 
     if not all_lvols:
-        all_lvols = db_controller.get_lvols()
+        all_lvols = db_controller.get_mini_lvols()
     for lvol in all_lvols:
         if lvol.pool_uuid != pool.get_id() or lvol.lvol_name != clone_name:
             continue
@@ -858,8 +849,6 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
 
     lvol.status = LVol.STATUS_ONLINE
     lvol.write_to_db(db_controller.kv_store)
-    lvol_mini = LVolMini().from_lvol(lvol)
-    lvol_mini.write_to_db(db_controller.kv_store)
 
     if snap.snap_ref_id:
         ref_snap = db_controller.get_snapshot_by_id(snap.snap_ref_id)
@@ -976,7 +965,7 @@ def list_by_node(node_id=None, is_json=False):
     # Build snap_id → clone list once instead of a full DB read per snapshot
     # (was O(M×N) DB reads).
     clones_by_snap: dict[str, builtins.list[str]] = {}
-    for lv in db_controller.get_lvols():
+    for lv in db_controller.get_mini_lvols():
         if lv.cloned_from_snap:
             clones_by_snap.setdefault(lv.cloned_from_snap, []).append(lv.get_id())
 

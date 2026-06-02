@@ -203,17 +203,16 @@ while True:
             logger.warning(f"Cluster {cluster.get_id()} is in {cluster.status} state, skipping")
             continue
 
+        lvol_list = db.get_lvols(cluster.get_id())
+
+        if not lvol_list:
+            continue
         all_node_bdev_names: dict[str, dict[str, dict]] = {}
         all_node_lvols_nqns: dict[str, dict[str, str]] = {}
         all_node_lvols_stats: dict[str, dict] = {}
 
         pools_lvols_stats: dict[str, list[LVolStatObject]] = {}
         for snode in db.get_storage_nodes_by_cluster_id(cluster.get_id()):
-
-            lvol_list = db.get_lvols_by_node_id(snode.get_id())
-
-            if not lvol_list:
-                continue
 
             if snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
                 try:
@@ -283,6 +282,8 @@ while True:
 
             for lvol in lvol_list:
                 if lvol.status in [LVol.STATUS_IN_CREATION, LVol.STATUS_IN_DELETION]:
+                    continue
+                if lvol.node_id != snode.get_id():
                     continue
 
                 capacity_dict = {}

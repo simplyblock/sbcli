@@ -5,7 +5,7 @@ from datetime import datetime
 
 from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.models.cluster import Cluster
-from simplyblock_core.models.lvol_model import LVol, LVolMini
+from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.controllers import health_controller, lvol_events, tasks_controller, lvol_controller
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
@@ -160,13 +160,6 @@ def process_lvol_delete_finish(lvol):
 
     lvol_events.lvol_delete(lvol)
     lvol.remove(db.kv_store)
-    lvol_mini = LVolMini().read_from_db(db.kv_store, lvol.uuid)
-    lvol_mini.remove(db.kv_store)
-    try:
-        lvol_mini = LVolMini().read_from_db(db.kv_store, lvol.uuid)[0]
-        lvol_mini.remove(db.kv_store)
-    except Exception as e:
-        logger.error(f"Failed to remove LVolMini: {e}")
 
     # check for full devices
     full_devs_ids = []
@@ -191,7 +184,7 @@ def process_lvol_delete_try_again(lvol):
     lvol.write_to_db()
 
 
-def check_node(snode):
+def check_node(snode, all_lvols):
     node_bdev_names = []
     node_lvols_nqns = {}
     sec_node_bdev_names = {}
@@ -221,7 +214,7 @@ def check_node(snode):
         if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
             if first_sec_node is None:
                 first_sec_node = sec_node
-            sec_rpc_client = sec_node.rpc_client(timeout=3, retry=2)
+            sec_rpc_client = sec_node.rpc_client()
             ret = sec_rpc_client.get_bdevs()
             if ret:
                 for bdev in ret:
@@ -232,7 +225,9 @@ def check_node(snode):
                 for sub in ret:
                     sec_node_lvols_nqns[sub['nqn']] = sub
 
-    for lvol in db.get_lvols_by_node_id(snode.get_id()):
+    for lvol in all_lvols:
+        if lvol.node_id == snode.get_id():
+            continue
 
         if lvol.status == LVol.STATUS_IN_CREATION:
             continue
@@ -386,12 +381,6 @@ def check_node(snode):
             if passed:
                 set_lvol_status(lvol, LVol.STATUS_ONLINE)
 
-    if snode.lvstore_status == "ready":
-
-        for snap in db.get_snapshots_by_node_id(snode.get_id()):
-            present = health_controller.check_bdev(snap.snap_bdev, bdev_names=node_bdev_names)
-            set_snapshot_health_check(snap, present)
-
 
 
 # get DB controller
@@ -410,10 +399,10 @@ while True:
         if cluster.status in [Cluster.STATUS_INACTIVE, Cluster.STATUS_UNREADY, Cluster.STATUS_IN_ACTIVATION]:
             logger.warning(f"Cluster {cluster.get_id()} is in {cluster.status} state, skipping")
             continue
-
+        all_lvols = db.get_mini_lvols()
         for snode in db.get_storage_nodes_by_cluster_id(cluster.get_id()):
             try:
-                check_node(snode)
+                check_node(snode, all_lvols)
             except Exception as e:
                 logger.error(e)
 

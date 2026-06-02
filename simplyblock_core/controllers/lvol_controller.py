@@ -16,7 +16,7 @@ from simplyblock_core.kms import KMSException, create_kms_connection
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.pool import Pool
-from simplyblock_core.models.lvol_model import LVol, LVolReplication, LVolMini
+from simplyblock_core.models.lvol_model import LVol, LVolReplication
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.prom_client import PromClient
 
@@ -245,7 +245,7 @@ def validate_add_lvol_func(name, size, host_id_or_name, pool_id_or_name,
                           f"Pool max size has reached {utils.humanbytes(total+size)} of {utils.humanbytes(pool.pool_max_size)}"
 
     if not all_lvols:
-        all_lvols = db_controller.get_lvols(pool.cluster_id)
+        all_lvols = db_controller.get_mini_lvols()
     for lvol in all_lvols:
         if lvol.pool_uuid == pool.get_id():
             if lvol.lvol_name == name:
@@ -263,7 +263,7 @@ def _get_next_3_nodes(cluster_id, lvol_size=0, all_lvols=None):
     snodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
 
     if not all_lvols:
-        all_lvols = db_controller.get_lvols(cluster_id)
+        all_lvols = db_controller.get_mini_lvols()
     # Build node→subsystem-count map with a single cluster-wide DB read instead
     # of one read per node (was O(K×N) where K = number of nodes).
     node_nqns: dict[str, set] = {}
@@ -444,7 +444,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     max_r_mbytes = max_r_mbytes or 0
     max_w_mbytes = max_w_mbytes or 0
 
-    all_lvols = db_controller.get_lvols(cl.get_id())
+    all_lvols = db_controller.get_mini_lvols()
     all_snaps = db_controller.get_snapshots(cl.get_id())
     result, error = validate_add_lvol_func(name, size, None, pool_id_or_name,
                                            max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, all_lvols, all_snaps)
@@ -796,8 +796,6 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     lvol.status = LVol.STATUS_ONLINE
     lvol.write_to_db(db_controller.kv_store)
     lvol_events.lvol_create(lvol)
-    lvol_mini = LVolMini().from_lvol(lvol)
-    lvol_mini.write_to_db(db_controller.kv_store)
 
     if pool.has_qos():
         connect_lvol_to_pool(lvol.uuid)
@@ -902,7 +900,7 @@ def _resolve_namespaced_subsystem(lvol, rpc_client, snode):
                 lvol.namespace = namespace
                 return False
             else:
-                all_lvols = db_ctrl.get_lvols(snode.cluster_id)
+                all_lvols = db_ctrl.get_mini_lvols()
                 subsys_count = len(set(
                     lv.nqn for lv in all_lvols if lv.node_id == snode.get_id() and
                     lv.status not in [LVol.STATUS_IN_DELETION, LVol.STATUS_DELETED]
@@ -1265,11 +1263,6 @@ def delete_lvol_from_node(lvol_id, node_id, clear_data=True, del_async=False, fo
 
     lvol.deletion_status = node_id
     lvol.write_to_db(db_controller.kv_store)
-    try:
-        lvol_mini = LVolMini().read_from_db(db_controller.kv_store, lvol.uuid)[0]
-        lvol_mini.remove(db_controller.kv_store)
-    except Exception as e:
-        logger.error(f"Failed to remove LVolMini: {e}")
     return True
 
 
@@ -1359,7 +1352,7 @@ def delete_lvol(id_or_name, force_delete=False):
                 snap = db_controller.get_snapshot_by_id(lvol.cloned_from_snap)
                 if snap.deleted is True:
                     lvols_count = sum(
-                        1 for lv in db_controller.get_lvols()
+                        1 for lv in db_controller.get_mini_lvols()
                         if lv.cloned_from_snap == snap.get_id()
                     )
                     if lvols_count == 0:
@@ -1388,8 +1381,6 @@ def delete_lvol(id_or_name, force_delete=False):
         lvol.status = LVol.STATUS_IN_DELETION
         lvol.write_to_db(db_controller.kv_store)
 
-        lvol_mini = LVolMini().from_lvol(lvol)
-        lvol_mini.write_to_db(db_controller.kv_store)
         try:
             lvol_events.lvol_status_change(lvol, lvol.status, old_status)
         except KeyError:
@@ -1677,7 +1668,7 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
         except KeyError:
             pass
     else:
-        lvols = db_controller.get_all_lvols()
+        lvols = db_controller.get_mini_lvols()
 
     data = []
 
@@ -1705,8 +1696,8 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
 
     for lvol in lvols:
         logger.debug(lvol)
-        if lvol.deleted is True and all is False:
-            continue
+        # if lvol.deleted is True and all is False:
+        #     continue
         size_used = 0
         records = db_controller.get_lvol_stats(lvol, 1)
         if records:
@@ -1862,11 +1853,13 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
     cluster = db_controller.get_cluster_by_id(node.cluster_id)
     if cluster.status == Cluster.STATUS_SUSPENDED and cluster.snapshot_replication_target_cluster:
         logger.error("Cluster is suspended, looking for replicated lvol")
-        for lv in db_controller.get_lvols(cluster.snapshot_replication_target_cluster):
+        for lv in db_controller.get_mini_lvols():
             if lv.nqn == lvol.nqn:
-                logger.info(f"LVol with same nqn already exists on target cluster: {lv.get_id()}")
-                lvol = lv
-                break
+                n = db_controller.get_storage_node_by_id(lv.node_id)
+                if n.cluster_id == cluster.snapshot_replication_target_cluster:
+                    logger.info(f"LVol with same nqn already exists on target cluster: {lv.get_id()}")
+                    lvol = lv
+                    break
 
     out = []
     nodes_ids = []
@@ -2429,7 +2422,7 @@ def replication_start(lvol_id, replication_cluster_id=None):
 
 def list_by_node(node_id=None, is_json=False):
     db_controller = DBController()
-    lvols = db_controller.get_lvols()
+    lvols = db_controller.get_mini_lvols()
     lvols = sorted(lvols, key=lambda x: x.create_dt)
     data = []
     for lvol in lvols:
@@ -2447,8 +2440,8 @@ def list_by_node(node_id=None, is_json=False):
             "BlobID": lvol.blobid,
             "Name": lvol.lvol_name,
             "Size": utils.humanbytes(lvol.size),
-            "LVS name": lvol.lvs_name,
-            "BDev": lvol.lvol_bdev,
+            # "LVS name": lvol.lvs_name,
+            # "BDev": lvol.lvol_bdev,
             "Node ID": lvol.node_id,
             "Clone From Snap BDev": cloned_from_snap,
             "Created At": lvol.create_dt,

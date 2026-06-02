@@ -369,7 +369,7 @@ def list_pools(is_json, cluster_id=None):
     db_controller = DBController()
     pools = db_controller.get_pools(cluster_id)
     data = []
-    all_lvols = db_controller.get_lvols() or []
+    all_lvols = db_controller.get_mini_lvols() or []
     for pool in pools:
         lvols_count = 0
         for lvol in all_lvols:
