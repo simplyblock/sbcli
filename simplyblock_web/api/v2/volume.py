@@ -1,9 +1,10 @@
 from typing import Annotated, List, Literal, Optional, Union
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field, RootModel
 
+from simplyblock_core import constants
 from simplyblock_core.db_controller import DBController
 from simplyblock_core import utils as core_utils
 from simplyblock_core.controllers import backup_controller, lvol_controller, snapshot_controller
@@ -243,10 +244,16 @@ def replication_stop(cluster: Cluster, pool: StoragePool, volume: Volume) -> Res
     return Response(status_code=204)
 
 @instance_api.get('/connect', name='clusters:storage-pools:volumes:connect')
-def connect(cluster: Cluster, pool: StoragePool, volume: Volume, host_nqn: Optional[str] = None):
-    details, err = lvol_controller.connect_lvol(volume.get_id(), host_nqn=host_nqn)
+def connect(
+    cluster: Cluster,
+    pool: StoragePool,
+    volume: Volume,
+    host_nqn: Annotated[Optional[str], Query(description='Host NQN for DH-HMAC-CHAP authentication')] = None,
+    ctrl_loss_tmo: Annotated[int, Query(description='Controller loss timeout in seconds (-1 for infinite)')] = constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO,
+):
+    details, err = lvol_controller.connect_lvol(volume.get_id(), host_nqn=host_nqn, ctrl_loss_tmo=ctrl_loss_tmo)
     if err:
-        return Response(status_code=404, content=err)
+        raise HTTPException(404, err)
     return details
 
 
