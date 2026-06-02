@@ -2813,26 +2813,20 @@ class TestLvolSecurityCombinations(SecurityTestBase):
         self.logger.info("TC-NEW-001: Pool created + host registered PASSED")
 
         combos = [
-            ("plain",       False, None, None),
-            ("crypto",      True,  None, None),
-            ("auth",        False, None, None),
-            ("crypto_auth", True,  None, None),
+            ("plain",       False),
+            ("crypto",      True),
+            ("auth",        False),
+            ("crypto_auth", True),
         ]
 
-        for tag, encrypt, key1, key2 in combos:
-            tc = f"TC-NEW-00{combos.index((tag, encrypt, key1, key2)) + 2}"
+        for tag, encrypt in combos:
+            tc = f"TC-NEW-00{combos.index((tag, encrypt)) + 2}"
             lvol_name = f"sec{tag}{_rand_suffix()}"
             self.logger.info(f"{tc}: Creating {tag} lvol …")
 
-            kw = {}
-            if encrypt:
-                kw["encrypt"] = True
-                kw["key1"] = self.lvol_crypt_keys[0]
-                kw["key2"] = self.lvol_crypt_keys[1]
-
             out, err = self.ssh_obj.create_sec_lvol(
                 self.mgmt_nodes[0], lvol_name, self.lvol_size, self.pool_name,
-                **kw,
+                encrypt=encrypt,
             )
             assert not err or "error" not in err.lower(), f"{tag} lvol creation failed: {err}"
             sleep_n_sec(3)
