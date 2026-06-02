@@ -1343,8 +1343,8 @@ def delete_lvol(id_or_name, force_delete=False):
         logger.error(f"lvol node id not found: {lvol.node_id}")
         if not force_delete:
             return False
-        lvol.status = LVol.STATUS_DELETED
-        lvol.write_to_db(db_controller.kv_store)
+
+        lvol.remove(db_controller.kv_store)
 
         # if lvol is clone and snapshot is deleted, then delete snapshot
         if lvol.cloned_from_snap:
@@ -1444,8 +1444,8 @@ def delete_lvol(id_or_name, force_delete=False):
                     f"Exception during subsystem delete on "
                     f"{role_id[:8]} ({role_label})")
 
-        if primary_subsys_deleted:
-            time.sleep(2)
+        # if primary_subsys_deleted:
+        #     time.sleep(2)
 
         all_sec_nodes = []
         for sec_id in lvol.nodes[1:]:
