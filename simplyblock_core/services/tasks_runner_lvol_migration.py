@@ -370,12 +370,14 @@ def _expose_lvol_on_secondary(lvol, tgt_node, tgt_sec, sec_rpc, tgt_blobid, tgt_
 
     # Add namespace using the target primary's lvstore for the composite bdev name.
     # Namespace may already exist if pre_create_on_target added it — check first.
+    # SPDK returns the bdev UUID (not the composite path) as bdev_name in the
+    # namespace listing, so also match by the lvol UUID in the 'uuid' field.
     top_bdev = f"{tgt_node.lvstore}/{bdev_name}"
     _ns_already = False
     if existing_sec_sub:
         _s = existing_sec_sub[0] if isinstance(existing_sec_sub, list) else existing_sec_sub
         _ns_already = any(
-            ns.get('bdev_name') == top_bdev
+            ns.get('bdev_name') == top_bdev or ns.get('uuid') == lvol.uuid
             for ns in (_s.get('namespaces', []) if isinstance(_s, dict) else []))
     if _ns_already:
         logger.info(
@@ -1464,14 +1466,17 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             ns_ret = tgt_rpc.nvmf_subsystem_add_ns(
                 nqn, tgt_lvol_composite, lvol.uuid, lvol.guid)
             if not ns_ret:
-                # Check if it was pre-created (pre_create_on_target added it)
+                # Check if it was pre-created (pre_create_on_target added it).
+                # SPDK returns the bdev UUID (not the composite path) as bdev_name
+                # in the namespace listing, so also match by the lvol UUID.
                 _sub = tgt_rpc.subsystem_list(nqn)
                 if _sub:
                     _s = _sub[0] if isinstance(_sub, list) else _sub
                     ns_ret = next(
                         (ns['nsid'] for ns in
                          (_s.get('namespaces', []) if isinstance(_s, dict) else [])
-                         if ns.get('bdev_name') == tgt_lvol_composite),
+                         if ns.get('bdev_name') == tgt_lvol_composite
+                         or ns.get('uuid') == lvol.uuid),
                         None)
             if ns_ret:
                 logger.info(
@@ -1489,6 +1494,12 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
     tgt_sec = None
     sec_rpc = None
     tgt_sec_is_src = False
+    # tgt_sec_for_ana is captured once when the secondary is resolved and is
+    # never nulled out by namespace-setup failures.  This ensures the ANA flip
+    # (inaccessible → non_optimized) always fires for TGT-sec even when the
+    # clone-chain or namespace operations fail, keeping the secondary path live.
+    tgt_sec_for_ana = None
+    sec_rpc_for_ana = None
     if lvol.ha_type == "ha":
         tgt_sec, sec_err = _get_target_secondary_node(tgt_node)
         if sec_err:
@@ -1496,6 +1507,8 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                 f"Cannot find TGT secondary for namespace setup ({sec_err}); continuing without it")
         elif tgt_sec is not None:
             sec_rpc = _make_rpc(tgt_sec)
+            tgt_sec_for_ana = tgt_sec
+            sec_rpc_for_ana = sec_rpc
             tgt_sec_is_src = (tgt_sec.get_id() == src_node.get_id())
             if migration.snaps_migrated:
                 try:
@@ -1565,8 +1578,10 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             pass
 
     # Flip ANA states in the correct order so clients always have a live path.
+    # Use tgt_sec_for_ana (not tgt_sec) so TGT-sec is always promoted from
+    # inaccessible → non_optimized regardless of namespace-setup outcome above.
     _update_ana_states(lvol, src_node, tgt_node, src_rpc, tgt_rpc,
-                       tgt_sec=tgt_sec, sec_rpc=sec_rpc,
+                       tgt_sec=tgt_sec_for_ana, sec_rpc=sec_rpc_for_ana,
                        tgt_sec_is_src=tgt_sec_is_src,
                        tgt_is_src_sec=tgt_is_src_secondary,
                        src_sec=src_sec, src_sec_rpc=src_sec_rpc)
