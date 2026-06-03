@@ -1887,7 +1887,7 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
                 n = db_controller.get_storage_node_by_id(lv.node_id)
                 if n.cluster_id == cluster.snapshot_replication_target_cluster:
                     logger.info(f"LVol with same nqn already exists on target cluster: {lv.get_id()}")
-                    lvol = lv
+                    lvol = lv # type: ignore[assignment]
                     break
     lvol = db_controller.get_lvol_by_id(lvol.get_id())
     out = []
