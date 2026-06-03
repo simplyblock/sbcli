@@ -102,13 +102,13 @@ def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes,
         pool.dhchap_ctrlr_key = utils.generate_dhchap_key(length=32)
 
 
-    with create_kms_connection(cluster) as kms:
-        try:
+    try:
+        with create_kms_connection(cluster) as kms:
             kms.create_key_encryption_key(pool.get_id())
             logger.info("Created pool key")
-        except KMSException:
-            logger.exception("Failed to create pool key")
-            return False
+    except KMSException:
+        logger.exception("Failed to create pool key")
+        return False
 
     pool.status = "active"
     pool.write_to_db(db_controller.kv_store)
