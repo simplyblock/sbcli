@@ -1462,30 +1462,33 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
     else:
         # Independent (non-adjacent) case.
         # Namespace may already exist if pre_create_on_target added it.
+        # Check first to avoid a redundant RPC that SPDK rejects with -32602.
+        # SPDK returns the bdev UUID (not the composite path) as bdev_name in
+        # the namespace listing, so match by composite path OR lvol UUID.
         try:
-            ns_ret = tgt_rpc.nvmf_subsystem_add_ns(
-                nqn, tgt_lvol_composite, lvol.uuid, lvol.guid)
-            if not ns_ret:
-                # Check if it was pre-created (pre_create_on_target added it).
-                # SPDK returns the bdev UUID (not the composite path) as bdev_name
-                # in the namespace listing, so also match by the lvol UUID.
-                _sub = tgt_rpc.subsystem_list(nqn)
-                if _sub:
-                    _s = _sub[0] if isinstance(_sub, list) else _sub
-                    ns_ret = next(
-                        (ns['nsid'] for ns in
-                         (_s.get('namespaces', []) if isinstance(_s, dict) else [])
-                         if ns.get('bdev_name') == tgt_lvol_composite
-                         or ns.get('uuid') == lvol.uuid),
-                        None)
+            _pre_sub = tgt_rpc.subsystem_list(nqn)
+            _pre_s   = (_pre_sub[0] if isinstance(_pre_sub, list) else _pre_sub) if _pre_sub else None
+            ns_ret   = next(
+                (ns['nsid'] for ns in
+                 (_pre_s.get('namespaces', []) if isinstance(_pre_s, dict) else [])
+                 if ns.get('bdev_name') == tgt_lvol_composite
+                 or ns.get('uuid') == lvol.uuid),
+                None) if _pre_s else None
             if ns_ret:
                 logger.info(
-                    f"Added namespace {tgt_lvol_composite} nsid={ns_ret} "
-                    f"to TGT subsystem {nqn}")
+                    f"Namespace {tgt_lvol_composite} already present on TGT nsid={ns_ret} "
+                    f"(from pre-create)")
             else:
-                logger.error(
-                    f"nvmf_subsystem_add_ns {tgt_lvol_composite} failed on TGT — "
-                    f"ANA flip may leave client with no usable namespace")
+                ns_ret = tgt_rpc.nvmf_subsystem_add_ns(
+                    nqn, tgt_lvol_composite, lvol.uuid, lvol.guid)
+                if ns_ret:
+                    logger.info(
+                        f"Added namespace {tgt_lvol_composite} nsid={ns_ret} "
+                        f"to TGT subsystem {nqn}")
+                else:
+                    logger.error(
+                        f"nvmf_subsystem_add_ns {tgt_lvol_composite} failed on TGT — "
+                        f"ANA flip may leave client with no usable namespace")
         except Exception as e:
             logger.error(f"TGT namespace add failed: {e}")
 
