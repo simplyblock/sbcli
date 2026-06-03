@@ -220,12 +220,13 @@ class SecurityTestBase(TestClusterBase):
     # ── FIO helpers ──────────────────────────────────────────────────────────
 
     def _run_fio_and_validate(self, lvol_name, mount_point, log_file,
-                               rw="randrw", bs="4K", numjobs=2, runtime=120):
+                               rw="randrw", bs="4K", numjobs=2, runtime=120,
+                               fio_size=None):
         """Start FIO in a detached tmux session, wait for it to finish, then validate."""
         job_name = f"{lvol_name}_fio"
         self.ssh_obj.run_fio_test(
             self.fio_node, None, mount_point, log_file,
-            size=self.fio_size,
+            size=fio_size or self.fio_size,
             name=job_name,
             rw=rw, bs=bs, nrfiles=4, iodepth=1,
             numjobs=numjobs, time_based=True, runtime=runtime,
@@ -3912,7 +3913,11 @@ class TestLvolSecurityNegativeConnect(SecurityTestBase):
             tampered = connect_auth[0]
             if "dhchap-secret" in tampered:
                 tampered = re.sub(
-                    r'(--dhchap-secret\s+)\S+',
+                    r'(--dhchap-secret[=\s])\S+',
+                    r'\1DHHC-1:00:DEADBEEFDEADBEEFDEADBEEFDEADBEEF',
+                    tampered)
+                tampered = re.sub(
+                    r'(--dhchap-ctrl-secret[=\s])\S+',
                     r'\1DHHC-1:00:DEADBEEFDEADBEEFDEADBEEFDEADBEEF',
                     tampered)
                 initial_devices = self.ssh_obj.get_devices(node=self.fio_node)
@@ -4188,7 +4193,8 @@ class TestLvolSecurityScaleAndRapidOps(SecurityTestBase):
         self.ssh_obj.mount_path(node=self.fio_node, device=lvol_device, mount_path=mount_point)
         self.lvol_mount_details[first_name]["Mount"] = mount_point
         log_file = f"{self.log_path}/{first_name}_out.log"
-        self._run_fio_and_validate(first_name, mount_point, log_file, rw="randrw", runtime=30)
+        self._run_fio_and_validate(first_name, mount_point, log_file, rw="randrw", runtime=30,
+                                   fio_size="400M")
         self.logger.info("TC-SEC-133: Scale FIO PASSED")
 
         self.logger.info("=== TestLvolSecurityScaleAndRapidOps PASSED ===")
