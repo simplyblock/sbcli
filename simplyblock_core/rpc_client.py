@@ -544,10 +544,8 @@ class RPCClient:
         return self._request("bdev_lvol_set_read_only", params)
 
     def lvol_create_snapshot(self, lvol_id, snapshot_name):
-        params = {
-            "lvol_name": lvol_id,
-            "snapshot_name": snapshot_name}
-        return self._request("bdev_lvol_snapshot", params)
+        ret, _ = self.lvol_create_snapshot2(lvol_id, snapshot_name)
+        return ret
 
     def lvol_create_snapshot2(self, lvol_id, snapshot_name):
         params = {

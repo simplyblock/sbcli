@@ -186,7 +186,7 @@ def update_cluster_status(cluster_id):
     # that may early-return. Otherwise OFFLINE/SCHEDULABLE nodes can stay
     # stranded whenever the cluster takes a recovery path (e.g.
     # DEGRADED -> ACTIVE).
-    # _requeue_stuck_auto_restarts(cluster_id)
+    _requeue_stuck_auto_restarts(cluster_id)
 
     next_current_status = get_next_cluster_status(cluster_id)
     logger.info("cluster_new_status: %s", next_current_status)

@@ -1697,7 +1697,7 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
         except KeyError:
             pass
     else:
-        lvols = db_controller.get_mini_lvols()
+        lvols = db_controller.get_lvols()
 
     data = []
 
@@ -1721,18 +1721,19 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
         elif att.target_type == "pool":
             pool_policy_map[att.target_id] = pol
 
-    # cl = db_controller.get_cluster_by_id(cluster_id)
-
     for lvol in lvols:
         logger.debug(lvol)
-        # if lvol.deleted is True and all is False:
-        #     continue
+        if lvol.deleted is True and all is False:
+            continue
         size_used = 0
         records = db_controller.get_lvol_stats(lvol, 1)
         if records:
             size_used = records[0].size_used
-
-        # mode = f"{cl.distr_ndcs}x{cl.distr_npcs}"
+        if lvol.ndcs == 0 and lvol.npcs == 0:
+            cl = db_controller.get_cluster_by_id(cluster_id)
+            mode = f"{cl.distr_ndcs}x{cl.distr_npcs}"
+        else:
+            mode = f"{lvol.ndcs}x{lvol.npcs}"
 
         eff_policy = lvol_policy_map.get(lvol.get_id()) or pool_policy_map.get(lvol.pool_uuid)
         lvol_data = {
@@ -1741,17 +1742,17 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
             "Size": utils.humanbytes(lvol.size),
             "Used": f"{utils.humanbytes(size_used)}",
             "Hostname": lvol.hostname,
-            # "HA": lvol.ha_type,
+            "HA": lvol.ha_type,
             "BlobID": lvol.blobid or "",
             "LVolUUID": lvol.lvol_uuid or "",
             "Status": lvol.status,
             "M": "M" if lvol.uuid in migrating_lvols else "",
-            # "IO Err": lvol.io_error,
-            # "Health": lvol.health_check,
+            "IO Err": lvol.io_error,
+            "Health": lvol.health_check,
             "NS ID": lvol.ns_id,
-            # "Mode": mode,
+            "Mode": mode,
             "Policy": eff_policy.policy_name if eff_policy else "",
-            # "Replicated On": lvol.replication_node_id,
+            "Replicated On": lvol.replication_node_id,
         }
         data.append(lvol_data)
 
@@ -2451,7 +2452,7 @@ def replication_start(lvol_id, replication_cluster_id=None):
 
 def list_by_node(node_id=None, is_json=False):
     db_controller = DBController()
-    lvols = db_controller.get_mini_lvols()
+    lvols = db_controller.get_lvols()
     lvols = sorted(lvols, key=lambda x: x.create_dt)
     data = []
     for lvol in lvols:
@@ -2469,8 +2470,8 @@ def list_by_node(node_id=None, is_json=False):
             "BlobID": lvol.blobid,
             "Name": lvol.lvol_name,
             "Size": utils.humanbytes(lvol.size),
-            # "LVS name": lvol.lvs_name,
-            # "BDev": lvol.lvol_bdev,
+            "LVS name": lvol.lvs_name,
+            "BDev": lvol.lvol_bdev,
             "Node ID": lvol.node_id,
             "Clone From Snap BDev": cloned_from_snap,
             "Created At": lvol.create_dt,
