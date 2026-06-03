@@ -180,6 +180,21 @@ def add_node_to_auto_restart(node):
         )
         return False
 
+    # A node stopped deliberately via `sn shutdown` (CLI/API, ±--force) must
+    # never be auto-restarted — it stays stopped until an operator brings it
+    # back. This is the single chokepoint for every auto-restart queue path
+    # (set_node_offline, set_node_schedulable, the monitor's re-queue scan,
+    # device_monitor, the restart runner's give-up re-queue), so guarding it
+    # here closes all of them. The flag is cleared in set_node_status() once
+    # the node deliberately returns ONLINE.
+    if node.auto_restart_disabled:
+        logger.info(
+            "Refusing auto-restart for node %s: it was deliberately shut down "
+            "(auto_restart_disabled); only an explicit restart can bring it back",
+            node.get_id(),
+        )
+        return False
+
     cluster = db.get_cluster_by_id(node.cluster_id)
     if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED,
                               Cluster.STATUS_READONLY, Cluster.STATUS_UNREADY, Cluster.STATUS_SUSPENDED]:

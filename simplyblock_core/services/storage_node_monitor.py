@@ -160,6 +160,13 @@ def _requeue_stuck_auto_restarts(cluster_id):
             if node.status not in (StorageNode.STATUS_OFFLINE,
                                    StorageNode.STATUS_SCHEDULABLE):
                 continue
+            # Nodes stopped on purpose (`sn shutdown`) land in OFFLINE just
+            # like a failure-detected node, but must NOT be auto-restarted.
+            # add_node_to_auto_restart enforces this too, but skip them here
+            # so the scan does not log a misleading "re-queuing" line every
+            # tick for a node that is intentionally down.
+            if node.auto_restart_disabled:
+                continue
             if tasks_controller.get_active_node_restart_task(cluster_id, node.get_id()):
                 continue
             logger.info(

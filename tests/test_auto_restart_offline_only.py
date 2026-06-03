@@ -42,11 +42,14 @@ def _make_cluster(status=Cluster.STATUS_ACTIVE, distr_npcs=2):
 
 
 def _make_node(status, uuid="node-under-test", cluster_id="cluster-1",
-               mgmt_ip="10.0.0.1"):
+               mgmt_ip="10.0.0.1", auto_restart_disabled=False):
     n = MagicMock(spec=StorageNode)
     n.status = status
     n.cluster_id = cluster_id
     n.mgmt_ip = mgmt_ip
+    # Default False: a bare MagicMock attribute is truthy, which would trip
+    # the deliberate-shutdown guard and reject every node.
+    n.auto_restart_disabled = auto_restart_disabled
     n.get_id = MagicMock(return_value=uuid)
     return n
 
@@ -148,6 +151,23 @@ class TestAddNodeToAutoRestartGuard(unittest.TestCase):
         node = _make_node(StorageNode.STATUS_OFFLINE)
         cluster = _make_cluster(status="unavailable")
         result, add_task = self._call(node, cluster=cluster)
+        self.assertFalse(result)
+        add_task.assert_not_called()
+
+    # --- deliberate-shutdown guard ------------------------------------------
+
+    def test_OFFLINE_rejected_when_deliberately_shut_down(self):
+        # A node stopped on purpose via `sn shutdown` lands in OFFLINE just
+        # like a failure-detected node, but carries auto_restart_disabled=True.
+        # Auto-restart must refuse it so a deliberate stop stays stopped.
+        node = _make_node(StorageNode.STATUS_OFFLINE, auto_restart_disabled=True)
+        result, add_task = self._call(node)
+        self.assertFalse(result)
+        add_task.assert_not_called()
+
+    def test_SCHEDULABLE_rejected_when_deliberately_shut_down(self):
+        node = _make_node(StorageNode.STATUS_SCHEDULABLE, auto_restart_disabled=True)
+        result, add_task = self._call(node)
         self.assertFalse(result)
         add_task.assert_not_called()
 
@@ -257,6 +277,48 @@ class TestCheckNodeTail(unittest.TestCase):
         # Sanity: the spdk_process_is_up=False branch still calls
         # set_node_offline (which is the legitimate OFFLINE trigger).
         self.assertIn("set_node_offline(snode)", body)
+
+
+class TestDeliberateShutdownWiring(unittest.TestCase):
+    """Source-level guards for the deliberate-shutdown flag lifecycle:
+    set on shutdown, cleared on the ONLINE transition, and honored by the
+    monitor's re-queue scan. Source-level (like TestCheckNodeTail) because
+    the runtime paths need a live DBController.
+    """
+
+    def _read(self, *parts):
+        import os
+        path = os.path.join(os.path.dirname(__file__), "..", *parts)
+        with open(path, "r") as f:
+            return f.read()
+
+    def _func_body(self, src, signature):
+        start = src.index(signature)
+        nxt = src.index("\ndef ", start + 1)
+        return src[start:nxt]
+
+    def test_shutdown_sets_flag(self):
+        src = self._read("simplyblock_core", "storage_node_ops.py")
+        body = self._func_body(src, "def shutdown_storage_node(")
+        self.assertIn("auto_restart_disabled = True", body,
+                      "shutdown_storage_node must mark the node "
+                      "auto_restart_disabled so the monitor leaves it alone")
+
+    def test_set_node_status_clears_flag_on_online(self):
+        src = self._read("simplyblock_core", "storage_node_ops.py")
+        body = self._func_body(src, "def set_node_status(")
+        # The clear must live inside the ONLINE branch.
+        idx = body.index("STATUS_ONLINE:")
+        window = body[idx:idx + 800]
+        self.assertIn("auto_restart_disabled = False", window,
+                      "set_node_status must clear auto_restart_disabled "
+                      "when the node returns ONLINE")
+
+    def test_requeue_scan_skips_deliberately_shut_down(self):
+        src = self._read("simplyblock_core", "services", "storage_node_monitor.py")
+        body = self._func_body(src, "def _requeue_stuck_auto_restarts(")
+        self.assertIn("auto_restart_disabled", body,
+                      "the re-queue scan must skip deliberately shut-down nodes")
 
 
 if __name__ == "__main__":

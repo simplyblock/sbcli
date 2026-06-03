@@ -1989,6 +1989,42 @@ def format_device_with_4k(pci_device):
         logger.error(f"Failed to format device with 4K {e}")
 
 
+_HUGEPAGES_BASELINE_DIR = "/tmp/simplyblock"
+
+
+def _get_user_hugepages_baseline(node, current_hugepages):
+    """Return the per-NUMA user hugepage baseline, persisted across calls within a boot.
+
+    On first call for a given NUMA node (no baseline file), the current allocatable
+    hugepage count is the user's reservation — simplyblock hasn't touched it yet.
+    That value is written to /tmp/simplyblock/hugepages_baseline_node{N}.
+    On subsequent calls the file is read directly; /tmp/simplyblock is cleared on
+    reboot (host tmpfs / Docker/K8s hostPath volume) so the baseline is always
+    fresh after a reboot.
+    """
+    baseline_file = os.path.join(_HUGEPAGES_BASELINE_DIR, f"hugepages_baseline_node{node}")
+
+    if os.path.exists(baseline_file):
+        try:
+            with open(baseline_file) as f:
+                val = int(f.read().strip())
+            logger.debug(f"Node {node}: hugepage baseline from cache: {val}")
+            return val
+        except Exception as e:
+            logger.warning(f"Node {node}: could not read baseline file {baseline_file}: {e}")
+
+    # First call this boot — current value is the pre-simplyblock baseline.
+    try:
+        os.makedirs(_HUGEPAGES_BASELINE_DIR, exist_ok=True)
+        with open(baseline_file, "w") as f:
+            f.write(str(current_hugepages))
+        logger.info(f"Node {node}: saved hugepage baseline: {current_hugepages} -> {baseline_file}")
+    except Exception as e:
+        logger.warning(f"Node {node}: could not save hugepage baseline to {baseline_file}: {e}")
+
+    return current_hugepages
+
+
 def set_hugepages_if_needed(node, hugepages_needed, page_size_kb=2048):
     """Set hugepages for a specific NUMA node if current number is less than needed."""
     hugepage_path = f"/sys/devices/system/node/node{node}/hugepages/hugepages-{page_size_kb}kB/nr_hugepages"
@@ -1997,14 +2033,17 @@ def set_hugepages_if_needed(node, hugepages_needed, page_size_kb=2048):
         with open(hugepage_path, "r") as f:
             current_hugepages = int(f.read().strip())
 
-        if current_hugepages >= hugepages_needed:
-            logger.debug(f"Node {node}: already has {current_hugepages} hugepages, no change needed.")
+        user_baseline = _get_user_hugepages_baseline(node, current_hugepages)
+        required = user_baseline + hugepages_needed
+
+        if current_hugepages >= required:
+            logger.debug(f"Node {node}: already has {current_hugepages} hugepages >= required {required}, no change needed.")
         else:
-            hugepages_needed = adjust_hugepages(hugepages_needed)
-            logger.debug(f"Node {node}: has {current_hugepages} hugepages, setting to {hugepages_needed}...")
-            cmd = f"echo {hugepages_needed} | sudo tee /sys/devices/system/node/node{node}/hugepages/hugepages-2048kB/nr_hugepages"
+            required = adjust_hugepages(required)
+            logger.debug(f"Node {node}: setting to {required} (user baseline={user_baseline} + simplyblock={hugepages_needed})...")
+            cmd = f"echo {required} | sudo tee /sys/devices/system/node/node{node}/hugepages/hugepages-2048kB/nr_hugepages"
             subprocess.run(cmd, shell=True, check=True)
-            logger.debug(f"Node {node}: hugepages updated to {hugepages_needed}.")
+            logger.debug(f"Node {node}: hugepages updated to {required}.")
 
     except FileNotFoundError:
         logger.error(f"Node {node}: Hugepage path not found. Is hugepage support enabled?")

@@ -2598,6 +2598,7 @@ def _restart_storage_node_impl(
                     snode.ssd_pcie.append(new_ssd)
 
         fdb_connection = cluster.db_connection
+        snode_api.set_hugepages()
         results, err = snode_api.spdk_process_start(
             snode.l_cores, snode.spdk_mem, snode.spdk_image, spdk_debug, cluster_ip, fdb_connection,
             snode.namespace, snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password,
@@ -3613,6 +3614,14 @@ def shutdown_storage_node(node_id, force=False):
     set_node_status(node_id, StorageNode.STATUS_IN_SHUTDOWN)
     snode = db_controller.get_storage_node_by_id(node_id)
 
+    # Mark this as a deliberate stop so the monitor's auto-restart leaves it
+    # alone. We set it here — as soon as the intent is committed — rather than
+    # at the final OFFLINE flip, so an interrupted/forced shutdown that never
+    # reaches a clean OFFLINE is still protected from being auto-restarted.
+    # Cleared in set_node_status() when the node deliberately returns ONLINE.
+    snode.auto_restart_disabled = True
+    snode.write_to_db(db_controller.kv_store)
+
     # Step 2: cancel migration tasks while controllers are still up.
     pending_tasks = db_controller.get_job_tasks(snode.cluster_id)
     for task in pending_tasks:
@@ -4063,7 +4072,8 @@ def start_storage_node_api_container(node_ip, cluster_ip=None):
             # /mnt/ramdisk/spdk_<port>/spdk.sock. Without this, the endpoint
             # has to fall through to dockerd, which can stall for 60-80s
             # during post-outage Swarm reconciliation (incident 2026-04-24).
-            '/mnt/ramdisk:/mnt/ramdisk'],
+            '/mnt/ramdisk:/mnt/ramdisk',
+            '/tmp/simplyblock:/tmp/simplyblock'],
         restart_policy={"Name": "always"},
         environment=[
             f"DOCKER_IP={node_ip}",
@@ -4321,6 +4331,11 @@ def set_node_status(node_id, status, caused_by="monitor"):
     snode.updated_at = str(datetime.datetime.now(datetime.timezone.utc))
     if status == StorageNode.STATUS_ONLINE:
         snode.online_since = str(datetime.datetime.now(datetime.timezone.utc))
+        # The node is back ONLINE — necessarily via a deliberate restart while
+        # auto-restart was blocked, or via the normal restart path. Either way
+        # a prior deliberate-shutdown marker no longer applies; clear it so
+        # future genuine failures auto-restart this node again.
+        snode.auto_restart_disabled = False
     else:
         snode.online_since = ""
     snode.write_to_db(db_controller.kv_store)
