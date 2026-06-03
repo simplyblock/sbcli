@@ -31,6 +31,13 @@ class StorageNode(BaseNodeObject):
     alceml_worker_cpu_index: int = 0
     api_endpoint: str = ""
     app_thread_mask: str = ""
+    # Set when the node is stopped on purpose via `sn shutdown` (CLI/API),
+    # with or without --force. While True the monitor's auto-restart is
+    # refused for this node: a deliberate stop must stay stopped until an
+    # operator deliberately brings it back. Cleared automatically the moment
+    # the node transitions to ONLINE (which only a deliberate `sn restart`
+    # can achieve while auto-restart is blocked). See add_node_to_auto_restart.
+    auto_restart_disabled: bool = False
     baseboard_sn: str = ""
     cloud_instance_id: str = ""
     cloud_instance_public_ip: str = ""

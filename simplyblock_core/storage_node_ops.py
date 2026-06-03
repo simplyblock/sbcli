@@ -3613,6 +3613,14 @@ def shutdown_storage_node(node_id, force=False):
     set_node_status(node_id, StorageNode.STATUS_IN_SHUTDOWN)
     snode = db_controller.get_storage_node_by_id(node_id)
 
+    # Mark this as a deliberate stop so the monitor's auto-restart leaves it
+    # alone. We set it here — as soon as the intent is committed — rather than
+    # at the final OFFLINE flip, so an interrupted/forced shutdown that never
+    # reaches a clean OFFLINE is still protected from being auto-restarted.
+    # Cleared in set_node_status() when the node deliberately returns ONLINE.
+    snode.auto_restart_disabled = True
+    snode.write_to_db(db_controller.kv_store)
+
     # Step 2: cancel migration tasks while controllers are still up.
     pending_tasks = db_controller.get_job_tasks(snode.cluster_id)
     for task in pending_tasks:
@@ -4321,6 +4329,11 @@ def set_node_status(node_id, status, caused_by="monitor"):
     snode.updated_at = str(datetime.datetime.now(datetime.timezone.utc))
     if status == StorageNode.STATUS_ONLINE:
         snode.online_since = str(datetime.datetime.now(datetime.timezone.utc))
+        # The node is back ONLINE — necessarily via a deliberate restart while
+        # auto-restart was blocked, or via the normal restart path. Either way
+        # a prior deliberate-shutdown marker no longer applies; clear it so
+        # future genuine failures auto-restart this node again.
+        snode.auto_restart_disabled = False
     else:
         snode.online_since = ""
     snode.write_to_db(db_controller.kv_store)

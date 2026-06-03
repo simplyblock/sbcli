@@ -70,6 +70,9 @@ def _node(uuid, status=StorageNode.STATUS_ONLINE, mgmt_ip=None,
     n.status = status
     n.cluster_id = cluster_id
     n.mgmt_ip = mgmt_ip or f"10.0.0.{abs(hash(uuid)) % 250 + 1}"
+    # Default False: a bare MagicMock attribute is truthy, which would make
+    # the re-queue scan treat every node as a deliberate shutdown and skip it.
+    n.auto_restart_disabled = False
     n.jm_vuid = jm_vuid
     n.rpc_port = rpc_port
     n.online_since = online_since
@@ -311,6 +314,19 @@ class TestUpdateClusterStatusRequeuesOffline(unittest.TestCase):
             for call in mocks["tc"].add_node_to_auto_restart.call_args_list
         ]
         self.assertEqual(called_for, ["sched-1"])
+
+    def test_deliberately_shut_down_offline_node_not_requeued(self):
+        # An OFFLINE node carrying auto_restart_disabled=True was stopped on
+        # purpose via `sn shutdown`; the re-queue scan must leave it alone
+        # even though it has no active restart task.
+        off = _node("off-1", status=StorageNode.STATUS_OFFLINE,
+                    n_online_devs=0, n_offline_devs=2)
+        off.auto_restart_disabled = True
+        nodes = [off, _node("on-1", status=StorageNode.STATUS_ONLINE)]
+        c = _cluster(status=Cluster.STATUS_DEGRADED, distr_ndcs=1, distr_npcs=2)
+        mod, mocks = self._patched_mod(c, nodes)
+        mod.update_cluster_status("cluster-1")
+        mocks["tc"].add_node_to_auto_restart.assert_not_called()
 
     def test_online_nodes_never_requeued(self):
         nodes = [_node(f"n{i}", status=StorageNode.STATUS_ONLINE) for i in range(3)]
