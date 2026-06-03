@@ -93,8 +93,8 @@ class LVol(BaseModel):
 
 
 class LVolReplication(BaseModel):
-    source_lvol: LVol = None
-    target_lvol: LVol = None
+    source_lvol: LVol = None # type: ignore[assignment]
+    target_lvol: LVol = None # type: ignore[assignment]
     source_cluster_id: str = ""
     target_cluster_id: str = ""
 

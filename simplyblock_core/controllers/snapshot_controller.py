@@ -809,7 +809,7 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
         # with the secondary ("Duplicate cntlid 1000 ... rejecting"). Keyed by
         # node id so the index is stable whether a node proceeds now or is
         # queued for deferred registration.
-        secondary_index_map = {}
+        secondary_index_map: dict[str,int]= {}
         for candidate in all_nodes:
             if candidate.get_id() == primary_node.get_id():
                 continue

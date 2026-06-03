@@ -1473,8 +1473,8 @@ def delete_lvol(id_or_name, force_delete=False):
                     f"Exception during subsystem delete on "
                     f"{role_id[:8]} ({role_label})")
 
-        # if primary_subsys_deleted:
-        #     time.sleep(2)
+        if primary_subsys_deleted:
+            time.sleep(1)
 
         all_sec_nodes = []
         for sec_id in lvol.nodes[1:]:
