@@ -458,8 +458,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
 
     cluster_size_prov = 0
     cluster_size_total = 0
-    for lvol in all_lvols:
-        cluster_size_prov += lvol.size
+    cluster_size_prov += sum([lv.size for lv in all_lvols])
 
     dev_count = 0
     snodes = db_controller.get_storage_nodes_by_cluster_id(cl.get_id())
@@ -1890,7 +1889,7 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
                     logger.info(f"LVol with same nqn already exists on target cluster: {lv.get_id()}")
                     lvol = lv
                     break
-
+    lvol = db_controller.get_lvol_by_id(lvol.get_id())
     out = []
     nodes_ids = []
     if lvol.ha_type == 'single':
