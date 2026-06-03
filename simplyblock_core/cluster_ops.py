@@ -27,6 +27,7 @@ from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.prom_client import PromClient
 from simplyblock_core.utils import pull_docker_image_with_retry
+from simplyblock_core.settings import Settings
 
 logger = utils.get_logger(__name__)
 
@@ -237,6 +238,9 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
             raise ValueError("max_fault_tolerance > 1 requires ha_type='ha'")
         if distr_npcs < 2:
             raise ValueError("max_fault_tolerance > 1 requires distr_npcs >= 2")
+
+    if (hashicorp_vault_settings is not None) and (Settings().tls_connect != "authenticated"):
+        raise ValueError("External KMS requires mTLS authentication to be used")
 
     if ingress_host_source == "dns" or ingress_host_source == "loadbalancer":
         if not dns_name:
@@ -483,6 +487,9 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
             raise ValueError("max_fault_tolerance > 1 requires ha_type='ha'")
         if distr_npcs < 2:
             raise ValueError("max_fault_tolerance > 1 requires distr_npcs >= 2")
+
+    if (hashicorp_vault_settings is not None) and (Settings().tls_connect != "authenticated"):
+        raise ValueError("External KMS requires mTLS authentication to be used")
 
     monitoring_secret = os.environ.get("MONITORING_SECRET", "")
 
