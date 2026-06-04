@@ -1547,7 +1547,8 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
              small_bufsize=0, large_bufsize=0,
              num_partitions_per_dev=0, jm_percent=0, enable_test_device=False,
              namespace=None, enable_ha_jm=False, cr_name=None, cr_namespace=None, cr_plural=None,
-             id_device_by_nqn=False, partition_size="", ha_jm_count=None, format_4k=False, spdk_proxy_image=None):
+             id_device_by_nqn=False, partition_size="", ha_jm_count=None, format_4k=False,
+             spdk_proxy_image=None, spdk_sys_mem=None):
     snode_api = SNodeClient(node_addr)
     node_info, _ = snode_api.info()
     if node_info.get("nodes_config") and node_info["nodes_config"].get("nodes"):
@@ -1644,7 +1645,10 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             return False
 
         # Calculate minimum sys memory
-        minimum_sys_memory = node_config.get("sys_memory")
+        if spdk_sys_mem:
+            minimum_sys_memory = int(utils.parse_size(spdk_sys_mem))
+        else:
+            minimum_sys_memory = node_config.get("sys_memory")
         max_lvol = node_config.get("max_lvol")
         ssd_pcie = node_config.get("ssd_pcis")
 
