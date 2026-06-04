@@ -140,6 +140,10 @@ class StorageNode(BaseNodeObject):
     restart_phases: dict = {}
     nvmf_port: int = 4420
     physical_label: int = 0
+    # Operator-supplied failure-domain tag (rack/cabinet/DC). Mandatory when the
+    # cluster has enable_failure_domain set; empty otherwise. Used as an
+    # anti-affinity key for chunk/JM/secondary placement.
+    failure_domain: str = ""
     hublvol: HubLVol = None  # type: ignore[assignment]
     active_tcp: bool = True
     active_rdma: bool = False
