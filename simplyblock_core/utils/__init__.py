@@ -48,7 +48,14 @@ CONFIG_KEYS = [
 ]
 
 UUID_PATTERN = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
-
+NQN_PATTERN = re.compile(
+    r'nqn\.'
+    r'\d{4}-\d{2}'
+    r'\.'
+    r'(?:[a-zA-Z0-9](?:[a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)*'
+    r'[a-zA-Z]{2,}'
+    r'(?::[a-zA-Z0-9.\-:_]+)?'  # optional unique name
+)
 
 def get_env_var(name, default=None, is_required=False):
     if not name:
