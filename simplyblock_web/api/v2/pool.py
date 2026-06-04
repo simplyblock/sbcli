@@ -1,7 +1,7 @@
 from typing import Annotated, List, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel
 
 from simplyblock_core.db_controller import DBController
@@ -42,24 +42,23 @@ class StoragePoolParams(BaseModel):
     cr_plural: str = ""
 
 
-@api.post('/', name='clusters:storage-pools:create', status_code=201, responses={201: {"content": None}})
-def add(request: Request, cluster: Cluster, parameters: StoragePoolParams) -> Response:
+@api.post('/', name='clusters:storage-pools:create', status_code=201)
+def add(cluster: Cluster, parameters: StoragePoolParams):
     for pool in db.get_pools(cluster.get_id()):
         if pool.pool_name == parameters.name:
             raise HTTPException(409, f'Pool {parameters.name} already exists')
 
-    id_or_false =  pool_controller.add_pool(
+    pool_id = pool_controller.add_pool(
         parameters.name, parameters.pool_max, parameters.volume_max_size, parameters.max_rw_iops, parameters.max_rw_mbytes,
         parameters.max_r_mbytes, parameters.max_w_mbytes, cluster.get_id(),
         parameters.cr_name, parameters.cr_namespace, parameters.cr_plural,
         dhchap=parameters.dhchap,
     )
 
-    if not id_or_false:
-        raise ValueError('Failed to create pool')
+    if not pool_id:
+        raise HTTPException(500, 'Failed to create pool')
 
-    pool = db.get_pool_by_id(id_or_false)
-    return pool.to_dict()
+    return db.get_pool_by_id(pool_id).to_dict()
 
 
 instance_api = APIRouter(prefix='/{pool_id}')

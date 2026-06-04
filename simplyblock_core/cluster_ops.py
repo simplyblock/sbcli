@@ -14,6 +14,7 @@ import requests
 
 from docker.errors import DockerException
 from simplyblock_core import utils, scripts, constants, mgmt_node_ops, storage_node_ops
+from simplyblock_core.settings import Settings
 from simplyblock_core.controllers import backup_controller, cluster_events, device_controller, qos_controller, tasks_controller, tcp_ports_events
 from simplyblock_core.fw_api_client import FirewallClient
 from simplyblock_core.db_controller import DBController
@@ -570,6 +571,18 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     cluster.nvmf_base_port = nvmf_base_port
     cluster.rpc_base_port = rpc_base_port
     cluster.snode_api_port = snode_api_port
+    if hashicorp_vault_settings:
+        settings = Settings()
+        missing = [
+            path
+            for path in [settings.tls_certificate_authority, settings.tls_certificate, settings.tls_key]
+            if not path.is_file()
+        ]
+        if missing:
+            raise ValueError(
+                "HashiCorp Vault requires TLS certificates that are not present: "
+                + ", ".join(map(str, missing))
+            )
     cluster.hashicorp_vault_settings = hashicorp_vault_settings
     if backup_config:
         cluster.backup_config = backup_config
