@@ -760,7 +760,6 @@ def pre_create_on_target(lvol_id, target_node_id,
         return None, None, f"Source node {src_node_id} not found"
     tgt_is_src_sec = (target_node_id == (src_node.secondary_node_id or ""))
     tgt_sec_is_src = ((tgt_node.secondary_node_id or "") == src_node_id)
-    has_overlap    = tgt_is_src_sec or tgt_sec_is_src
 
     cluster = db.get_cluster_by_id(tgt_node.cluster_id)
     tgt_rpc  = tgt_node.rpc_client()
@@ -830,12 +829,21 @@ def pre_create_on_target(lvol_id, target_node_id,
                 f"pre_create_on_target: secondary registration error (continuing): {_e}")
 
     # ── 2. Subsystem + listeners on TGT-prim ──────────────────────────────────
-    # Case A overlap: TGT-prim IS SRC-sec — its subsystem already exists there.
-    # Skip creation; the task runner handles the namespace swap at cutover.
+    # Case A overlap: TGT-prim IS SRC-sec — subsystem already exists there.
+    # Add an inaccessible listener at TGT-prim's native lvstore port so the client
+    # can pre-connect to the TGT endpoint before cutover.
     if tgt_is_src_sec:
         logger.info(
             f"pre_create_on_target: TGT is SRC-sec (Case A overlap) — "
-            f"skipping subsystem create on TGT-prim (subsystem already exists)")
+            f"adding inaccessible listener(s) at TGT-prim native port {tgt_port}")
+        for nic in tgt_node.data_nics:
+            if not nic.ip4_address:
+                continue
+            trtype = nic.trtype.lower()
+            if trtype != lvol.fabric:
+                continue
+            tgt_rpc.listeners_create(nqn, trtype, nic.ip4_address, tgt_port,
+                                     ana_state="inaccessible")
     else:
         if not tgt_rpc.subsystem_list(nqn):
             tgt_rpc.subsystem_create(
@@ -849,9 +857,10 @@ def pre_create_on_target(lvol_id, target_node_id,
                 continue
             tgt_rpc.listeners_create(nqn, trtype, nic.ip4_address, tgt_port,
                                      ana_state="inaccessible")
-        # Non-overlap: add namespace so the client can pre-connect and see the device.
-        # Listeners stay inaccessible until migration completes and ANA is flipped.
-        if not has_overlap:
+        # Add namespace unless TGT-prim IS SRC-sec (Case A): in that case the
+        # subsystem already exists on TGT-prim with a live NS pointing to source.
+        # Case B (TGT-sec IS SRC) does not affect TGT-prim — add NS normally.
+        if not tgt_is_src_sec:
             _ns_prim = tgt_rpc.nvmf_subsystem_add_ns(
                 nqn, composite, lvol.uuid, lvol.guid)
             if _ns_prim:
@@ -864,7 +873,7 @@ def pre_create_on_target(lvol_id, target_node_id,
                     f"for {composite}")
         logger.info(
             f"pre_create_on_target: subsystem {nqn} ready on TGT-prim "
-            f"(namespace={'added' if not has_overlap else 'deferred to migration'})")
+            f"(namespace={'added' if not tgt_is_src_sec else 'deferred to migration'})")
 
     # ── HA secondary ──────────────────────────────────────────────────────────
     sec_node = None
@@ -902,8 +911,10 @@ def pre_create_on_target(lvol_id, target_node_id,
                     sec_rpc.listeners_create(nqn, trtype, nic.ip4_address, sec_port,
                                              ana_state="inaccessible")
 
-                # Non-overlap: add namespace on secondary too
-                if not has_overlap:
+                # Add namespace unless TGT-sec IS SRC (Case B): in that case the
+                # subsystem already exists on SRC with a live NS pointing to source.
+                # Case A (TGT-prim IS SRC-sec) does not affect TGT-sec — add NS normally.
+                if not tgt_sec_is_src:
                     _ns_sec = sec_rpc.nvmf_subsystem_add_ns(
                         nqn, composite, lvol.uuid, lvol.guid)
                     if _ns_sec:
@@ -916,7 +927,7 @@ def pre_create_on_target(lvol_id, target_node_id,
                             f"on TGT-sec for {composite}")
                 logger.info(
                     f"pre_create_on_target: subsystem {nqn} ready on TGT-sec "
-                    f"(namespace={'added' if not has_overlap else 'deferred to migration'})")
+                    f"(namespace={'added' if not tgt_sec_is_src else 'deferred to migration'})")
 
     # ── 4. Build connect strings for the target node ──────────────────────────
     host_entry = None
