@@ -224,10 +224,6 @@ def get_distr_cluster_map(snodes, target_node, distr_name=""):
             }
             if (dev.physical_label>0):
                 dev_map[dev.cluster_device_order].update({"physical_label": dev.physical_label})
-            # Failure-domain anti-affinity: hand the operator-supplied tag to
-            # the data plane so it spreads chunks across distinct domains.
-            if cluster.enable_failure_domain and dev.failure_domain:
-                dev_map[dev.cluster_device_order].update({"failure_domain": dev.failure_domain})
 
             if dev.status in [NVMeDevice.STATUS_FAILED, NVMeDevice.STATUS_FAILED_AND_MIGRATED]:
                 dev_w_map[dev.cluster_device_order] = {"weight": dev_w_gib, "id": -1}
@@ -241,6 +237,12 @@ def get_distr_cluster_map(snodes, target_node, distr_name=""):
         map_cluster[snode.get_id()] = {
             "status": node_status,
             "devices": dev_map}
+        # Failure-domain anti-affinity: hand the per-node failure-domain id to
+        # the data plane (32-bit int, default -1; a value >= 0 activates the
+        # feature) so it spreads chunks across distinct domains. Set at node
+        # level in map_cluster, alongside "status" and "devices".
+        if cluster.enable_failure_domain and snode.failure_domain >= 0:
+            map_cluster[snode.get_id()]["failure_domain"] = snode.failure_domain
         map_prob[snode.get_id()] = {
             "weight": node_w,
             "items": [d for k, d in dev_w_map.items()]}

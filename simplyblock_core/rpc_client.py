@@ -661,7 +661,7 @@ class RPCClient:
     def bdev_distrib_create(self, name, vuid, ndcs, npcs, num_blocks, block_size, jm_names,
                             chunk_size, ha_comm_addrs=None, ha_inode_self=None, pba_page_size=2097152,
                             distrib_cpu_mask="", ha_is_non_leader=True, jm_vuid=0, write_protection=False,
-                            full_page_unmap=True, shared_placement=False, failure_domain_enabled=False):
+                            full_page_unmap=True, shared_placement=False):
         """"
             // Optional (not specified = no HA)
             // Comma-separated communication addresses, for each node, e.g. "192.168.10.1:45001,192.168.10.1:32768".
@@ -705,11 +705,6 @@ class RPCClient:
             params["use_map_whole_page_on_1st_write"] = True
         if shared_placement:
             params["shared_placement"] = True
-        # TODO(failure-domain): PROVISIONAL parameter — replace
-        # "failure_domain_enabled" with the real SPDK bdev_distrib_create
-        # contract once the data-plane API is finalized.
-        if failure_domain_enabled:
-            params["failure_domain_enabled"] = True
         return self._request("bdev_distrib_create", params)
 
     def distr_shared_placement(self, name=None, enable=True):
