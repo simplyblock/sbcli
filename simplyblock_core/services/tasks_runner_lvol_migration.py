@@ -1427,39 +1427,7 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
     # exists with nsid=1 pointing to the old source-secondary bdev.
     tgt_is_src_secondary = (tgt_node.get_id() == src_node.secondary_node_id)
 
-    if tgt_is_src_secondary:
-        logger.info(
-            f"Adjacent migration: TGT {tgt_node.get_id()} == SRC secondary — "
-            f"swapping existing namespace to {tgt_lvol_composite}")
-        try:
-            tgt_rpc.nvmf_subsystem_remove_ns(nqn, 1)
-            logger.info(f"Removed old nsid=1 from TGT subsystem {nqn}")
-        except Exception as e:
-            logger.warning(f"Could not remove old nsid=1 from TGT (non-fatal): {e}")
-        try:
-            ns_ret = tgt_rpc.nvmf_subsystem_add_ns(
-                nqn, tgt_lvol_composite, lvol.uuid, lvol.guid)
-            if ns_ret:
-                logger.info(
-                    f"Added {tgt_lvol_composite} nsid={ns_ret} to TGT subsystem {nqn}")
-            else:
-                logger.error(
-                    f"nvmf_subsystem_add_ns failed on TGT for adjacent case")
-        except Exception as e:
-            logger.error(f"TGT namespace add failed (adjacent): {e}")
-        # Ensure TGT's native port listener exists — ANA flip happens in _update_ana_states.
-        tgt_adj_trtype, tgt_adj_ip = _get_migration_nic(tgt_node)
-        tgt_adj_port   = src_node.get_lvol_subsys_port(src_node.lvstore)
-        tgt_native_port = tgt_node.get_lvol_subsys_port(tgt_node.lvstore)
-        if tgt_native_port != tgt_adj_port:
-            try:
-                tgt_rpc.nvmf_subsystem_add_listener(
-                    nqn, tgt_adj_trtype, tgt_adj_ip, tgt_native_port)
-                logger.info(
-                    f"Added TGT native listener {tgt_adj_ip}:{tgt_native_port} to {nqn}")
-            except Exception as e:
-                logger.warning(f"TGT native listener add (non-fatal): {e}")
-    else:
+    if not tgt_is_src_secondary:
         # Independent (non-adjacent) case.
         # Namespace may already exist if pre_create_on_target added it.
         # Check first to avoid a redundant RPC that SPDK rejects with -32602.
@@ -1580,14 +1548,77 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         except KeyError:
             pass
 
-    # Flip ANA states in the correct order so clients always have a live path.
-    # Use tgt_sec_for_ana (not tgt_sec) so TGT-sec is always promoted from
-    # inaccessible → non_optimized regardless of namespace-setup outcome above.
-    _update_ana_states(lvol, src_node, tgt_node, src_rpc, tgt_rpc,
-                       tgt_sec=tgt_sec_for_ana, sec_rpc=sec_rpc_for_ana,
-                       tgt_sec_is_src=tgt_sec_is_src,
-                       tgt_is_src_sec=tgt_is_src_secondary,
-                       src_sec=src_sec, src_sec_rpc=src_sec_rpc)
+    if tgt_is_src_secondary:
+        # Case A ordered sequence: TGT-prim=SRC-sec, TGT-sec=node2, SRC-prim=node0
+        _a_tgt_trtype, _a_tgt_ip = _get_migration_nic(tgt_node)
+        _a_tgt_port = tgt_node.get_lvol_subsys_port(tgt_node.lvstore)
+        _a_src_trtype, _a_src_ip = _get_migration_nic(src_node)
+        _a_src_port = src_node.get_lvol_subsys_port(src_node.lvstore)
+
+        def _flip_a(rpc, ip, port, trtype, state, label):
+            try:
+                rpc.nvmf_subsystem_listener_set_ana_state(
+                    nqn, ip, port, trtype=trtype, ana=state)
+                logger.info(f"ANA[A] {nqn} {label} {ip}:{port} → {state}")
+            except Exception as e:
+                logger.error(f"ANA[A] {label} failed (non-fatal): {e}")
+
+        # Step 7: TGT-sec → optimized (give client a live path before touching TGT-prim)
+        _a_tgt_sec_trtype = _a_tgt_sec_ip = _a_tgt_sec_port = None
+        if tgt_sec_for_ana is not None and sec_rpc_for_ana is not None:
+            _a_tgt_sec_trtype, _a_tgt_sec_ip = _get_migration_nic(tgt_sec_for_ana)
+            _a_tgt_sec_port = tgt_sec_for_ana.get_lvol_subsys_port(tgt_node.lvstore)
+            _flip_a(sec_rpc_for_ana, _a_tgt_sec_ip, _a_tgt_sec_port,
+                    _a_tgt_sec_trtype, "optimized", "TGT-sec")
+
+        # Step 8: SRC-prim → inaccessible
+        _flip_a(src_rpc, _a_src_ip, _a_src_port, _a_src_trtype, "inaccessible", "SRC-prim")
+
+        # Step 9: TGT-prim (acting as SRC-sec) → inaccessible at the SRC-sec listener port
+        _flip_a(tgt_rpc, _a_tgt_ip, _a_src_port, _a_tgt_trtype, "inaccessible", "TGT-prim(SRC-sec port)")
+
+        # Step 10: remove old NS (SRC-sec bdev, nsid=1) from TGT-prim subsystem
+        try:
+            tgt_rpc.nvmf_subsystem_remove_ns(nqn, 1)
+            logger.info(f"Step 10: removed nsid=1 from TGT-prim subsystem {nqn}")
+        except Exception as e:
+            logger.warning(f"Step 10: remove old ns (non-fatal): {e}")
+
+        # Step 11: add new NS (TGT lvol) to TGT-prim subsystem
+        try:
+            _a_ns_ret = tgt_rpc.nvmf_subsystem_add_ns(
+                nqn, tgt_lvol_composite, lvol.uuid, lvol.guid)
+            if _a_ns_ret:
+                logger.info(f"Step 11: added {tgt_lvol_composite} nsid={_a_ns_ret} to TGT-prim {nqn}")
+            else:
+                logger.error(f"Step 11: nvmf_subsystem_add_ns failed on TGT-prim")
+        except Exception as e:
+            logger.error(f"Step 11: TGT-prim namespace add failed: {e}")
+
+        # Step 12: TGT-prim → optimized at TGT native port (added in pre-create step 2)
+        _flip_a(tgt_rpc, _a_tgt_ip, _a_tgt_port, _a_tgt_trtype, "optimized", "TGT-prim")
+
+        # Step 13: remove old SRC-sec listener from TGT-prim subsystem
+        if _a_src_port != _a_tgt_port:
+            try:
+                tgt_rpc.listeners_del(nqn, _a_tgt_trtype, _a_tgt_ip, _a_src_port)
+                logger.info(
+                    f"Step 13: removed SRC-sec listener {_a_tgt_ip}:{_a_src_port} from {nqn}")
+            except Exception as e:
+                logger.warning(f"Step 13: remove SRC-sec listener (non-fatal): {e}")
+
+        # Step 14: TGT-sec → non_optimized
+        if tgt_sec_for_ana is not None and sec_rpc_for_ana is not None:
+            _flip_a(sec_rpc_for_ana, _a_tgt_sec_ip, _a_tgt_sec_port,
+                    _a_tgt_sec_trtype, "non_optimized", "TGT-sec")
+    else:
+        # Non-adjacent case: use standard ANA flip helper.
+        # Use tgt_sec_for_ana so TGT-sec is always promoted even if namespace setup failed.
+        _update_ana_states(lvol, src_node, tgt_node, src_rpc, tgt_rpc,
+                           tgt_sec=tgt_sec_for_ana, sec_rpc=sec_rpc_for_ana,
+                           tgt_sec_is_src=tgt_sec_is_src,
+                           tgt_is_src_sec=False,
+                           src_sec=src_sec, src_sec_rpc=src_sec_rpc)
 
     # Save source snap bdev names before apply_migration_to_db updates
     # them — PHASE_CLEANUP_SOURCE uses this map to derive the correct
@@ -1615,12 +1646,7 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         tgt_lvol_uuid=tgt_uuid_carry.get('tgt_lvol_uuid'),
         tgt_lvol_bdev=tgt_uuid_carry.get('tgt_lvol_bdev'))
 
-    tgt_uuid_carry['cutover_notified_at'] = time.time()
-    migration.status = LVolMigration.STATUS_CUTOVER
-    logger.info(
-        f"Migration {migration.uuid}: STATUS_CUTOVER set — "
-        f"TGT subsystem live, grace period starts, "
-        f"client should reconnect now")
+    logger.info(f"Migration {migration.uuid}: PHASE_LVOL_MIGRATE done — TGT subsystem live")
     return True, False, None
 
 
@@ -1746,19 +1772,6 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
     # begins when PHASE_LVOL_MIGRATE sets cutover_notified_at and changes
     # migration.status to STATUS_CUTOVER — the test script polls for that
     # status and triggers client reconnect immediately upon seeing it.
-    cutover_notified_at = ctx.get('cutover_notified_at', 0)
-    if cutover_notified_at and ctx.get('stage') != 'cleanup_src':
-        elapsed = time.time() - cutover_notified_at
-        grace = 30.0
-        if elapsed < grace:
-            logger.info(
-                f"PHASE_CLEANUP_SOURCE: cutover grace — "
-                f"{grace - elapsed:.1f}s remaining for client reconnect")
-            return False, False, None
-        logger.info(
-            f"PHASE_CLEANUP_SOURCE: cutover grace elapsed "
-            f"({elapsed:.1f}s >= {grace}s), proceeding with source cleanup")
-
     # --- First entry: initialize cleanup state ---
     if ctx.get('stage') != 'cleanup_src':
         # Preserve the target lvol UUID and bdev name written by PHASE_LVOL_MIGRATE
