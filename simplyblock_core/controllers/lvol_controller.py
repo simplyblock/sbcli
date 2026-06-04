@@ -509,7 +509,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
         logger.warning(f"Cluster provisioned cap warning, util: {cluster_size_prov_util}% of cluster util: {cl.prov_cap_warn}")
 
     if not distr_vuid:
-        vuid = utils.get_random_vuid()
+        vuid = utils.get_random_vuid(all_lvols=all_lvols, all_snapshots=all_snaps)
     else:
         vuid = distr_vuid
 
@@ -2507,6 +2507,24 @@ def clone_lvol(lvol_id, clone_name, new_size=None, pvc_name=None):
 
     all_lvols = db_controller.get_mini_lvols()
     all_snaps = db_controller.get_mini_snapshots()
+
+    # Resolve the namespace slot early so we can (a) skip the subsystem limit
+    # check when the clone fits into an existing subsystem, and (b) reuse the
+    # result below instead of calling get_next_available_subsystem_on_node twice.
+    _available_subsys = get_next_available_subsystem_on_node(lvol.node_id, all_lvols=all_lvols)
+
+    if not _available_subsys:
+        subsys_count = len(set(
+            lv.nqn for lv in all_lvols if lv.node_id == lvol.node_id and
+            lv.status not in [LVol.STATUS_IN_DELETION, LVol.STATUS_DELETED]
+        ))
+        snode = db_controller.get_storage_node_by_id(lvol.node_id)
+
+        if subsys_count >= snode.max_lvol:
+            error = f"Too many subsystems on node: {snode.get_id()}, max subsystems reached: {snode.max_lvol}"
+            logger.error(error)
+            return False, error
+
     snapshot_uuid = None
     for snap in all_snaps:
         if snap.snap_name == clone_name and snap.lvol.node_id == lvol.node_id:
