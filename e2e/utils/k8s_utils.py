@@ -1858,10 +1858,17 @@ class K8sSbcliUtils:
         return data if isinstance(data, list) else [data]
 
     def get_management_nodes(self):
-        """Return ``{'results': [{'mgmt_ip': ip, ...}]}`` from MNODES env var."""
-        mnodes_env = os.environ.get("MNODES", os.environ.get("K3S_MNODES", ""))
-        mgmt_ips = [ip.strip() for ip in mnodes_env.split() if ip.strip()]
-        return {"results": [{"mgmt_ip": ip, "uuid": ip} for ip in mgmt_ips]}
+        """Return ``{'results': [{'mgmt_ip': ip, ...}]}`` via sbctl cp list."""
+        items = self._run_json(f"{self.sbcli_cmd} cp list --json")
+        results = []
+        for item in items:
+            results.append({
+                "mgmt_ip": item.get("IP", ""),
+                "uuid": item.get("UUID", ""),
+                "hostname": item.get("Hostname", ""),
+                "status": item.get("Status", ""),
+            })
+        return {"results": results}
 
     def get_all_nodes_ip(self):
         """Return ``(mgmt_node_ips, storage_node_ips)`` as lists of strings."""

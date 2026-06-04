@@ -50,7 +50,11 @@ class TestSingleNodeResizeLvolCone(TestClusterBase):
         self.sbcli_utils.add_storage_pool(
             pool_name=self.pool_name
         )
-        fio_threads = []
+
+        if self.k8s_test:
+            self._k8s_ensure_storage_class()
+
+        fio_handles = []
 
         lvol_size = 5
         node_id = self.sbcli_utils.get_node_without_lvols()
@@ -59,97 +63,62 @@ class TestSingleNodeResizeLvolCone(TestClusterBase):
             lvol_name = f"{self.lvol_name}_{i}"
             mount_path = f"{self.mount_path}_{i}"
             log_path = f"{self.log_path}_{i}"
-            self.sbcli_utils.add_lvol(
+
+            self._create_lvol_dual(
                 lvol_name=lvol_name,
                 pool_name=self.pool_name,
                 size="5G",
-                host_id=node_id
+                host_id=node_id,
             )
             lvols = self.sbcli_utils.list_lvols()
             assert lvol_name in list(lvols.keys()), \
                 f"Lvol {lvol_name} is not present in list of lvols post add: {lvols}"
 
-            initial_devices = self.ssh_obj.get_devices(node=self.client_machines[0])
+            device, mount = self._connect_and_mount_dual(
+                lvol_name, mount_path=mount_path
+            )
 
-            connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)
-            for connect_str in connect_ls:
-                self.ssh_obj.exec_command(node=self.client_machines[0], command=connect_str)
+            fio_handle = self._run_fio_dual(
+                lvol_name=lvol_name,
+                mount_path=mount if not self.k8s_test else None,
+                log_path=log_path if not self.k8s_test else None,
+                name=f"fio_run_{i}",
+                runtime=350,
+                time_based=True,
+            )
+            fio_handles.append(fio_handle)
 
-            final_devices = self.ssh_obj.get_devices(node=self.client_machines[0])
-            disk_use = None
-            self.logger.info("Initial vs final disk:")
-            self.logger.info(f"Initial: {initial_devices}")
-            self.logger.info(f"Final: {final_devices}")
-            for device in final_devices:
-                if device not in initial_devices:
-                    self.logger.info(f"Using disk: /dev/{device.strip()}")
-                    disk_use = f"/dev/{device.strip()}"
-                    break
-            self.ssh_obj.unmount_path(node=self.client_machines[0],
-                                    device=disk_use)
-            self.ssh_obj.format_disk(node=self.client_machines[0],
-                                    device=disk_use)
-            self.ssh_obj.mount_path(node=self.client_machines[0],
-                                    device=disk_use,
-                                    mount_path=mount_path)
-
-            fio_thread = threading.Thread(target=self.ssh_obj.run_fio_test, args=(self.client_machines[0], None, mount_path, log_path,),
-                                        kwargs={"name": f"fio_run_{i}",
-                                                "runtime": 350,
-                                                "time_based": True,
-                                                "debug": self.fio_debug})
-            fio_thread.start()
-            fio_threads.append(fio_thread)
-
-        
         for i in range(1, 6):
             lvol_name = f"{self.lvol_name}_{i}"
             snap_name = f"{lvol_name}_snap"
             clone_name = f"{lvol_name}_clone"
             mount_path = f"{self.mount_path}_cl_{i}"
             log_path = f"{self.log_path}_cl_{i}"
+
             self.logger.info("Taking snapshot")
-            self.sbcli_utils.add_snapshot(
-                lvol_id=self.sbcli_utils.get_lvol_id(lvol_name),
-                snapshot_name=snap_name
-            )
+            snapshot_id = self._create_snapshot_dual(lvol_name, snap_name)
             sleep_n_sec(5)
-            snapshot_id = self.sbcli_utils.get_snapshot_id(snap_name=snap_name)
-            
-            self.sbcli_utils.add_clone(snapshot_id=snapshot_id, clone_name=clone_name)
-            
+
+            _, cl_mount = self._create_clone_dual(
+                snapshot_id=snapshot_id,
+                clone_name=clone_name,
+                mount_path=mount_path if not self.k8s_test else None,
+                format_disk=False,
+            )
+
             clone = self.sbcli_utils.list_lvols()
             assert clone_name in list(clone.keys()), \
-                f"Clone {clone_name} is not present in list of lvols post add: {lvols}"
-            
-            initial_devices = self.ssh_obj.get_devices(node=self.client_machines[0])
-            connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=clone_name)
-            for connect_str in connect_ls:
-                self.ssh_obj.exec_command(node=self.client_machines[0], command=connect_str)
-            
-            final_devices = self.ssh_obj.get_devices(node=self.client_machines[0])
-            disk_use = None
-            self.logger.info("Initial vs final disk:")
-            self.logger.info(f"Initial: {initial_devices}")
-            self.logger.info(f"Final: {final_devices}")
-            for device in final_devices:
-                if device not in initial_devices:
-                    self.logger.info(f"Using disk: /dev/{device.strip()}")
-                    disk_use = f"/dev/{device.strip()}"
-                    break
-            self.ssh_obj.unmount_path(node=self.client_machines[0],
-                                    device=disk_use)
-            self.ssh_obj.mount_path(node=self.client_machines[0],
-                                    device=disk_use,
-                                    mount_path=mount_path)
-            
-            fio_thread = threading.Thread(target=self.ssh_obj.run_fio_test, args=(self.client_machines[0], None, mount_path, log_path,),
-                                        kwargs={"name": f"fio_run_cl_{i}",
-                                                "runtime": 350,
-                                                "time_based": True,
-                                                "debug": self.fio_debug})
-            fio_thread.start()
-            fio_threads.append(fio_thread)
+                f"Clone {clone_name} is not present in list of lvols post add: {clone}"
+
+            fio_handle = self._run_fio_dual(
+                lvol_name=clone_name,
+                mount_path=cl_mount if not self.k8s_test else None,
+                log_path=log_path if not self.k8s_test else None,
+                name=f"fio_run_cl_{i}",
+                runtime=350,
+                time_based=True,
+            )
+            fio_handles.append(fio_handle)
 
         if not self.k8s_test:
             for node in self.storage_nodes:
@@ -162,8 +131,7 @@ class TestSingleNodeResizeLvolCone(TestClusterBase):
             for j in range(1, 6):
                 lvol_name = f"{self.lvol_name}_{j}"
                 clone_name = f"{lvol_name}_clone"
-                self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(lvol_name),
-                                            new_size=f"{lvol_size + i}G")
+                self._resize_lvol_dual(lvol_name, f"{lvol_size + i}G")
                 sleep_n_sec(10)
                 if not self.k8s_test:
                     for node in self.storage_nodes:
@@ -172,8 +140,7 @@ class TestSingleNodeResizeLvolCone(TestClusterBase):
                         if "core.react" in files:
                             raise Exception("Core file present after lvol resize! Not continuing resize!!")
 
-                self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(clone_name),
-                                             new_size=f"{lvol_size + i}G")
+                self._resize_lvol_dual(clone_name, f"{lvol_size + i}G")
                 sleep_n_sec(10)
                 if not self.k8s_test:
                     for node in self.storage_nodes:
@@ -181,32 +148,39 @@ class TestSingleNodeResizeLvolCone(TestClusterBase):
                         self.logger.info(f"Files in /etc/simplyblock: {files}")
                         if "core.react" in files:
                             raise Exception("Core file present after clone resize! Not continuing resize!!")
-            
+
         lvol_size = lvol_size + 20
-        
-        self.common_utils.manage_fio_threads(node=self.client_machines[0],
-                                             threads=fio_threads,
-                                             timeout=1000)
-        
-        for i in range(1,6):
-            log_path = f"{self.log_path}_{i}"
-            cl_log_path = f"{self.log_path}_cl_{i}"
-            self.common_utils.validate_fio_test(node=self.client_machines[0],log_file=log_path)
-            self.common_utils.validate_fio_test(node=self.client_machines[0],log_file=cl_log_path)
-        
+
+        self._wait_fio_dual(fio_handles, timeout=1000)
+        if not self.k8s_test:
+            for h in fio_handles:
+                if isinstance(h, threading.Thread):
+                    h.join()
+
+        for i in range(1, 6):
+            lvol_handle = fio_handles[i - 1] if (i - 1) < len(fio_handles) else None
+            cl_handle = fio_handles[i + 4] if (i + 4) < len(fio_handles) else None
+            if lvol_handle:
+                self._validate_fio_dual(lvol_handle, log_path=f"{self.log_path}_{i}")
+            if cl_handle:
+                self._validate_fio_dual(cl_handle, log_path=f"{self.log_path}_cl_{i}")
+
         lvol_check_sum = {}
-        
+
         for i in range(1, 6):
             lvol_name = f"{self.lvol_name}_{i}"
             clone_name = f"{lvol_name}_clone"
             mount_path = f"{self.mount_path}_{i}"
             cl_mount_path = f"{self.mount_path}_cl_{i}"
-            
-            lvol_files = self.ssh_obj.find_files(self.client_machines[0], directory=mount_path)
-            original_checksum = self.ssh_obj.generate_checksums(self.client_machines[0], lvol_files)
 
-            clone_files = self.ssh_obj.find_files(self.client_machines[0], directory=cl_mount_path)
-            cl_original_checksum = self.ssh_obj.generate_checksums(self.client_machines[0], clone_files)
+            original_checksum = self._generate_checksums_dual(
+                lvol_name,
+                directory=mount_path if not self.k8s_test else None,
+            )
+            cl_original_checksum = self._generate_checksums_dual(
+                clone_name,
+                directory=cl_mount_path if not self.k8s_test else None,
+            )
 
             lvol_check_sum[lvol_name] = original_checksum
             lvol_check_sum[clone_name] = cl_original_checksum
@@ -216,8 +190,7 @@ class TestSingleNodeResizeLvolCone(TestClusterBase):
             clone_name = f"{lvol_name}_clone"
             mount_path = f"{self.mount_path}_{i}"
             cl_mount_path = f"{self.mount_path}_cl_{i}"
-            self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(lvol_name),
-                                        new_size=f"{lvol_size}G")
+            self._resize_lvol_dual(lvol_name, f"{lvol_size}G")
             sleep_n_sec(10)
             if not self.k8s_test:
                 for node in self.storage_nodes:
@@ -225,8 +198,7 @@ class TestSingleNodeResizeLvolCone(TestClusterBase):
                     self.logger.info(f"Files in /etc/simplyblock: {files}")
                     if "core.react" in files:
                         raise Exception("Core file present after lvol resize! Not continuing resize!!")
-            self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(clone_name),
-                                         new_size=f"{lvol_size}G")
+            self._resize_lvol_dual(clone_name, f"{lvol_size}G")
             sleep_n_sec(10)
             if not self.k8s_test:
                 for node in self.storage_nodes:
@@ -234,12 +206,15 @@ class TestSingleNodeResizeLvolCone(TestClusterBase):
                     self.logger.info(f"Files in /etc/simplyblock: {files}")
                     if "core.react" in files:
                         raise Exception("Core file present after clone resize! Not continuing resize!!")
-            
-            lvol_files = self.ssh_obj.find_files(self.client_machines[0], directory=mount_path)
-            final_checksum = self.ssh_obj.generate_checksums(self.client_machines[0], lvol_files)
 
-            clone_files = self.ssh_obj.find_files(self.client_machines[0], directory=cl_mount_path)
-            cl_final_checksum = self.ssh_obj.generate_checksums(self.client_machines[0], clone_files)
+            final_checksum = self._generate_checksums_dual(
+                lvol_name,
+                directory=mount_path if not self.k8s_test else None,
+            )
+            cl_final_checksum = self._generate_checksums_dual(
+                clone_name,
+                directory=cl_mount_path if not self.k8s_test else None,
+            )
 
             original_checksum = lvol_check_sum[lvol_name]
             cl_original_checksum = lvol_check_sum[clone_name]

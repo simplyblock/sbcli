@@ -23,22 +23,22 @@ class TestSingleNodeOutage(TestClusterBase):
         b. Suspend the Node via API or CLI while the fio test is running.
         c. Shutdown the Node via API or CLI while the fio test is running.
         d. Check status of objects during outage:
-            - the node is in status “offline”
-            - the devices of the node are in status “unavailable”
-            - lvols remain in “online” state
+            - the node is in status "offline"
+            - the devices of the node are in status "unavailable"
+            - lvols remain in "online" state
             - the event log contains the records indicating the object status
               changes; the event log also contains records indicating read and
               write IO errors.
             - select a cluster map from any of the two lvols (lvol get-cluster-map)
               and verify that the status changes of the node and devices are reflected in
               the other cluster map. Other two nodes and 4 devices remain online.
-            - health-check status of all nodes and devices is “true”
+            - health-check status of all nodes and devices is "true"
         e. check that fio remains running without interruption.
 
     8. Restart the node again.
         a. check the status again:
-            - the status of all nodes is “online”
-            - all devices in the cluster are in status “online”
+            - the status of all nodes is "online"
+            - all devices in the cluster are in status "online"
             - the event log contains the records indicating the object status changes
             - select a cluster map from any of the two lvols (lvol get-cluster-map)
               and verify that all nodes and all devices appear online
@@ -54,7 +54,6 @@ class TestSingleNodeOutage(TestClusterBase):
         """ Performs each step of the testcase
         """
         self.logger.info("Inside run function")
-        initial_devices = self.ssh_obj.get_devices(node=self.client_machines[0])
 
         self.sbcli_utils.add_storage_pool(
             pool_name=self.pool_name
@@ -74,7 +73,10 @@ class TestSingleNodeOutage(TestClusterBase):
             pool_name=self.pool_name
         )
 
-        self.sbcli_utils.add_lvol(
+        if self.k8s_test:
+            self._k8s_ensure_storage_class()
+
+        self._create_lvol_dual(
             lvol_name=self.lvol_name,
             pool_name=self.pool_name,
             size="800M"
@@ -83,37 +85,19 @@ class TestSingleNodeOutage(TestClusterBase):
         assert self.lvol_name in list(lvols.keys()), \
             f"Lvol {self.lvol_name} present in list of lvols post add: {lvols}"
 
-        connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=self.lvol_name)
-        for connect_str in connect_ls:
-            self.ssh_obj.exec_command(node=self.client_machines[0], command=connect_str)
+        device, mount = self._connect_and_mount_dual(
+            self.lvol_name, mount_path=self.mount_path
+        )
 
-        final_devices = self.ssh_obj.get_devices(node=self.client_machines[0])
-        disk_use = None
-        self.logger.info("Initial vs final disk:")
-        self.logger.info(f"Initial: {initial_devices}")
-        self.logger.info(f"Final: {final_devices}")
-        for device in final_devices:
-            if device not in initial_devices:
-                self.logger.info(f"Using disk: /dev/{device.strip()}")
-                disk_use = f"/dev/{device.strip()}"
-                break
-        self.ssh_obj.unmount_path(node=self.client_machines[0],
-                                  device=disk_use)
-        self.ssh_obj.format_disk(node=self.client_machines[0],
-                                 device=disk_use)
-        self.ssh_obj.mount_path(node=self.client_machines[0],
-                                device=disk_use,
-                                mount_path=self.mount_path)
-        
         log_path = f"{os.path.dirname(self.mount_path)}"
 
-        fio_thread1 = threading.Thread(target=self.ssh_obj.run_fio_test, args=(self.client_machines[0], None, self.mount_path, self.log_path,),
-                                       kwargs={"name": "fio_run_1",
-                                               "runtime": 300,
-                                               "log_avg_msec": 1000,
-                                               "iolog_file": f"{log_path}/{self.lvol_name}_fio_iolog",
-                                               "debug": self.fio_debug})
-        fio_thread1.start()
+        fio_handle = self._run_fio_dual(
+            lvol_name=self.lvol_name,
+            mount_path=mount if not self.k8s_test else None,
+            name="fio_run_1",
+            runtime=300,
+            time_based=True,
+        )
 
         no_lvol_node_uuid = self.sbcli_utils.get_node_without_lvols()
 
@@ -135,20 +119,11 @@ class TestSingleNodeOutage(TestClusterBase):
                          )
 
         self.logger.info("Taking snapshot")
-        lvol_id_for_snap = self.sbcli_utils.get_lvol_id(self.lvol_name)
-        if self.k8s_test:
-            self.sbcli_utils.add_snapshot(lvol_id=lvol_id_for_snap,
-                                          snapshot_name=f"{self.snapshot_name}_1")
-            snapshot_id_1 = self.sbcli_utils.get_snapshot_id(snap_name=f"{self.snapshot_name}_1")
-        else:
-            self.ssh_obj.add_snapshot(node=self.mgmt_nodes[0],
-                                      lvol_id=lvol_id_for_snap,
-                                      snapshot_name=f"{self.snapshot_name}_1")
-            snapshot_id_1 = self.ssh_obj.get_snapshot_id(node=self.mgmt_nodes[0],
-                                                         snapshot_name=f"{self.snapshot_name}_1")
+        snapshot_id_1 = self._create_snapshot_dual(
+            self.lvol_name, f"{self.snapshot_name}_1"
+        )
 
-        self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
-                                     new_size="20G")
+        self._resize_lvol_dual(self.lvol_name, "20G")
 
         timestamp = int(datetime.now().timestamp())
 
@@ -198,10 +173,9 @@ class TestSingleNodeOutage(TestClusterBase):
                          health_check_status=True,
                          device_health_check=None
                          )
-        
-        self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
-                                     new_size="25G")
-        
+
+        self._resize_lvol_dual(self.lvol_name, "25G")
+
         node_details = self.sbcli_utils.get_storage_node_details(no_lvol_node_uuid)
         node_details[0]["mgmt_ip"]
         if not self.k8s_test:
@@ -229,97 +203,45 @@ class TestSingleNodeOutage(TestClusterBase):
         }
         self.common_utils.validate_event_logs(cluster_id=self.cluster_id,
                                               operations=steps)
-        
-        self.common_utils.manage_fio_threads(node=self.client_machines[0],
-                                             threads=[fio_thread1],
-                                             timeout=600)
-        
-        lvol_id_for_snap2 = self.sbcli_utils.get_lvol_id(self.lvol_name)
-        if self.k8s_test:
-            self.sbcli_utils.add_snapshot(lvol_id=lvol_id_for_snap2,
-                                          snapshot_name=f"{self.snapshot_name}_2")
-            snapshot_id_2 = self.sbcli_utils.get_snapshot_id(snap_name=f"{self.snapshot_name}_2")
-        else:
-            self.ssh_obj.add_snapshot(node=self.mgmt_nodes[0],
-                                      lvol_id=lvol_id_for_snap2,
-                                      snapshot_name=f"{self.snapshot_name}_2")
-            snapshot_id_2 = self.ssh_obj.get_snapshot_id(node=self.mgmt_nodes[0],
-                                                         snapshot_name=f"{self.snapshot_name}_2")
 
-        lvol_files = self.ssh_obj.find_files(self.client_machines[0], directory=self.mount_path)
-        original_checksum = self.ssh_obj.generate_checksums(self.client_machines[0], lvol_files)
+        self._wait_fio_dual([fio_handle], timeout=600)
+        if not self.k8s_test:
+            if isinstance(fio_handle, threading.Thread):
+                fio_handle.join()
+
+        self.logger.info("Taking snapshot 2")
+        snapshot_id_2 = self._create_snapshot_dual(
+            self.lvol_name, f"{self.snapshot_name}_2"
+        )
+
+        original_checksum = self._generate_checksums_dual(
+            self.lvol_name, directory=self.mount_path if not self.k8s_test else None
+        )
 
         clone_mount_file = f"{self.mount_path}_cl"
 
-        if self.k8s_test:
-            self.sbcli_utils.add_clone(snapshot_id=snapshot_id_1,
-                                       clone_name=f"{self.lvol_name}_cl_1")
-            self.sbcli_utils.add_clone(snapshot_id=snapshot_id_2,
-                                       clone_name=f"{self.lvol_name}_cl_2")
-        else:
-            self.ssh_obj.add_clone(node=self.mgmt_nodes[0],
-                                   snapshot_id=snapshot_id_1,
-                                   clone_name=f"{self.lvol_name}_cl_1")
-            self.ssh_obj.add_clone(node=self.mgmt_nodes[0],
-                                   snapshot_id=snapshot_id_2,
-                                   clone_name=f"{self.lvol_name}_cl_2")
-        
-        initial_devices = self.ssh_obj.get_devices(node=self.client_machines[0])
-        connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=f"{self.lvol_name}_cl_1")
-        for connect_str in connect_ls:
-            self.ssh_obj.exec_command(node=self.client_machines[0], command=connect_str)
-        
-        final_devices = self.ssh_obj.get_devices(node=self.client_machines[0])
-        disk_use = None
-        self.logger.info("Initial vs final disk:")
-        self.logger.info(f"Initial: {initial_devices}")
-        self.logger.info(f"Final: {final_devices}")
-        for device in final_devices:
-            if device not in initial_devices:
-                self.logger.info(f"Using disk: /dev/{device.strip()}")
-                disk_use = f"/dev/{device.strip()}"
-                break
-        self.ssh_obj.unmount_path(node=self.client_machines[0],
-                                  device=disk_use)
-        # self.ssh_obj.format_disk(node=self.mgmt_nodes[0],
-        #                          device=disk_use)
-        self.ssh_obj.mount_path(node=self.client_machines[0],
-                                device=disk_use,
-                                mount_path=f"{clone_mount_file}_1")
-        
-        initial_devices = final_devices
-        connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=f"{self.lvol_name}_cl_2")
-        for connect_str in connect_ls:
-            self.ssh_obj.exec_command(node=self.client_machines[0], command=connect_str)
-        
-        final_devices = self.ssh_obj.get_devices(node=self.client_machines[0])
-        disk_use = None
-        self.logger.info("Initial vs final disk:")
-        self.logger.info(f"Initial: {initial_devices}")
-        self.logger.info(f"Final: {final_devices}")
-        for device in final_devices:
-            if device not in initial_devices:
-                self.logger.info(f"Using disk: /dev/{device.strip()}")
-                disk_use = f"/dev/{device.strip()}"
-                break
-        self.ssh_obj.unmount_path(node=self.client_machines[0],
-                                  device=disk_use)
-        # self.ssh_obj.format_disk(node=self.mgmt_nodes[0],
-        #                          device=disk_use)
-        self.ssh_obj.mount_path(node=self.client_machines[0],
-                                device=disk_use,
-                                mount_path=f"{clone_mount_file}_2")
+        _, cl1_mount = self._create_clone_dual(
+            snapshot_id=snapshot_id_1,
+            clone_name=f"{self.lvol_name}_cl_1",
+            mount_path=f"{clone_mount_file}_1" if not self.k8s_test else None,
+            format_disk=False,
+        )
+        _, cl2_mount = self._create_clone_dual(
+            snapshot_id=snapshot_id_2,
+            clone_name=f"{self.lvol_name}_cl_2",
+            mount_path=f"{clone_mount_file}_2" if not self.k8s_test else None,
+            format_disk=False,
+        )
 
-        self.common_utils.validate_fio_test(node=self.client_machines[0],
-                                            log_file=self.log_path)
-        
-        self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(f"{self.lvol_name}_cl_1"),
-                                     new_size="30G")
-        self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(f"{self.lvol_name}_cl_2"),
-                                     new_size="30G")
-        
-        clone_files = self.ssh_obj.find_files(self.client_machines[0], directory=f"{clone_mount_file}_2")
-        final_checksum = self.ssh_obj.generate_checksums(self.client_machines[0], clone_files)
+        self._validate_fio_dual(fio_handle, log_path=self.log_path)
+
+        self._resize_lvol_dual(f"{self.lvol_name}_cl_1", "30G")
+        self._resize_lvol_dual(f"{self.lvol_name}_cl_2", "30G")
+
+        final_checksum = self._generate_checksums_dual(
+            f"{self.lvol_name}_cl_2",
+            directory=f"{clone_mount_file}_2" if not self.k8s_test else None,
+        )
 
         self.logger.info(f"Original checksum: {original_checksum}")
         self.logger.info(f"Final checksum: {final_checksum}")
@@ -331,11 +253,12 @@ class TestSingleNodeOutage(TestClusterBase):
 
         assert original_checksum == final_checksum, "Checksum mismatch for lvol and clone"
 
-        self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(f"{self.lvol_name}_cl_1"),
-                                     new_size="30G")
+        self._resize_lvol_dual(f"{self.lvol_name}_cl_1", "30G")
 
-        lvol_files = self.ssh_obj.find_files(self.client_machines[0], directory=self.mount_path)
-        final_lvl_checksum = self.ssh_obj.generate_checksums(self.client_machines[0], lvol_files)
+        final_lvl_checksum = self._generate_checksums_dual(
+            self.lvol_name,
+            directory=self.mount_path if not self.k8s_test else None,
+        )
         final_lvl_checksum = set(final_lvl_checksum.values())
 
         assert original_checksum == final_lvl_checksum, "Checksum mismatch for lvol before and after clone"
@@ -356,22 +279,22 @@ class TestHASingleNodeOutage(TestClusterBase):
         a. In a cluster with three nodes, select one node, which has the lvol
         b. Reboot the node
         c. Check status of objects during outage:
-            - the node is in status “offline”
-            - the devices of the node are in status “unavailable”
-            - lvols remain in “online” state
+            - the node is in status "offline"
+            - the devices of the node are in status "unavailable"
+            - lvols remain in "online" state
             - the event log contains the records indicating the object status
               changes; the event log also contains records indicating read and
               write IO errors.
             - select a cluster map from any of the two lvols (lvol get-cluster-map)
               and verify that the status changes of the node and devices are reflected in
               the other cluster map. Other two nodes and 4 devices remain online.
-            - health-check status of all nodes and devices is “true”
+            - health-check status of all nodes and devices is "true"
         d. check that fio remains running without interruption.
 
     8. Wait for node to become online.
         a. check the status again:
-            - the status of all nodes is “online”
-            - all devices in the cluster are in status “online”
+            - the status of all nodes is "online"
+            - all devices in the cluster are in status "online"
             - the event log contains the records indicating the object status changes
             - select a cluster map from any of the two lvols (lvol get-cluster-map)
               and verify that all nodes and all devices appear online
@@ -382,7 +305,7 @@ class TestHASingleNodeOutage(TestClusterBase):
         super().__init__(**kwargs)
         self.fio_runtime = 5*60
         self.logger = setup_logger(__name__)
-        self.fio_threads = []
+        self.fio_handles = []
         self.test_name = "single_node_outage_ha"
 
     def run(self):
@@ -394,11 +317,12 @@ class TestHASingleNodeOutage(TestClusterBase):
             pool_name=self.pool_name
         )
 
+        if self.k8s_test:
+            self._k8s_ensure_storage_class()
+
         for i in range(3):
             lvol_name = f"LVOL_{i}"
             self.add_lvol_and_run_fio(lvol_name)
-
-        # no_lvol_node_uuid = self.sbcli_utils.get_lvol_by_id(lvol_id)['results'][0]['node_id']
 
         no_lvol_node = None
         for node in self.sbcli_utils.get_storage_nodes()['results'][::-1]:
@@ -417,9 +341,8 @@ class TestHASingleNodeOutage(TestClusterBase):
                          health_check_status=True,
                          device_health_check=None
                          )
-        
-        self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
-                                     new_size="20G")
+
+        self._resize_lvol_dual(self.lvol_name, "20G")
 
         for i in range(2):
             timestamp = int(datetime.now().timestamp())
@@ -491,25 +414,21 @@ class TestHASingleNodeOutage(TestClusterBase):
         }
         self.common_utils.validate_event_logs(cluster_id=self.cluster_id,
                                               operations=steps)
-        
-        self.sbcli_utils.resize_lvol(lvol_id=self.sbcli_utils.get_lvol_id(self.lvol_name),
-                                     new_size="25G")
 
-        self.common_utils.manage_fio_threads(node=self.client_machines[0],
-                                             threads=self.fio_threads,
-                                             timeout=1000)
+        self._resize_lvol_dual(self.lvol_name, "25G")
+
+        self._wait_fio_dual(self.fio_handles, timeout=1000)
+        if not self.k8s_test:
+            for h in self.fio_handles:
+                if isinstance(h, threading.Thread):
+                    h.join()
 
         for i in range(3):
             lvol_name = f"LVOL_{i}"
-
-            self.common_utils.validate_fio_test(node=self.client_machines[0],
-                                                log_file=self.log_path+f"/{lvol_name}.log")
-
-            # total_fio_runtime = end_time - self.ssh_obj.fio_runtime[f"fio_run_{lvol_name}"]
-            # self.logger.info(f"FIO Run Time: {total_fio_runtime}")
-
-            # assert  total_fio_runtime >= self.fio_runtime, \
-            #     f'FIO Run Time Interrupted before given runtime. Actual: {self.ssh_obj.fio_runtime[f"fio_run_{lvol_name}"]}'
+            handle = self.fio_handles[i] if i < len(self.fio_handles) else None
+            if handle:
+                self._validate_fio_dual(handle,
+                                        log_path=self.log_path + f"/{lvol_name}.log")
 
         self.logger.info("TEST CASE PASSED !!!")
 
@@ -522,49 +441,28 @@ class TestHASingleNodeOutage(TestClusterBase):
 
         host_id = self.sbcli_utils.get_node_without_lvols()
 
-        self.sbcli_utils.add_lvol(
+        self._create_lvol_dual(
             lvol_name=self.lvol_name,
             pool_name=self.pool_name,
             size="10G",
-            host_id=host_id
+            host_id=host_id,
         )
-
-        initial_devices = self.ssh_obj.get_devices(node=self.client_machines[0])
 
         lvols = self.sbcli_utils.list_lvols()
         assert self.lvol_name in list(lvols.keys()), \
             f"Lvol {self.lvol_name} not present in list of lvols post add: {lvols}"
 
-        connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=self.lvol_name)
+        device, mount = self._connect_and_mount_dual(
+            self.lvol_name, mount_path=mount_path, fs_type='xfs'
+        )
 
-        for connect_str in connect_ls:
-            self.ssh_obj.exec_command(node=self.client_machines[0], command=connect_str)
-
-        final_devices = self.ssh_obj.get_devices(node=self.client_machines[0])
-        disk_use = None
-        self.logger.info("Initial vs final disk:")
-        self.logger.info(f"Initial: {initial_devices}")
-        self.logger.info(f"Final: {final_devices}")
-        for device in final_devices:
-            if device not in initial_devices:
-                self.logger.info(f"Using disk: /dev/{device.strip()}")
-                disk_use = f"/dev/{device.strip()}"
-                break
-        self.ssh_obj.unmount_path(node=self.client_machines[0],
-                                  device=disk_use)
-        self.ssh_obj.format_disk(node=self.client_machines[0],
-                                 device=disk_use, fs_type='xfs')
-        self.ssh_obj.mount_path(node=self.client_machines[0],
-                                device=disk_use,
-                                mount_path=mount_path)
-
-        fio_thread1 = threading.Thread(target=self.ssh_obj.run_fio_test,
-                                       args=(self.client_machines[0], None, mount_path, log_path,),
-                                       kwargs={"name": f"fio_run_{lvol_name}",
-                                               "runtime": self.fio_runtime,
-                                               "log_avg_msec": 1000,
-                                               "iolog_file": f"{self.log_path}/{self.lvol_name}_fio_iolog",
-                                               "debug": self.fio_debug})
-        fio_thread1.start()
-        self.fio_threads.append(fio_thread1)
+        fio_handle = self._run_fio_dual(
+            lvol_name=self.lvol_name,
+            mount_path=mount if not self.k8s_test else None,
+            log_path=log_path if not self.k8s_test else None,
+            name=f"fio_run_{lvol_name}",
+            runtime=self.fio_runtime,
+            time_based=True,
+        )
+        self.fio_handles.append(fio_handle)
         return lvols[self.lvol_name]
