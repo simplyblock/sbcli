@@ -1308,7 +1308,6 @@ def addNvmeDevices(rpc_client, snode, devs):
         pass
 
     next_physical_label = snode.physical_label
-    node_failure_domain = snode.failure_domain
     for pcie in devs:
 
         if pcie in ctr_map:
@@ -1371,7 +1370,6 @@ def addNvmeDevices(rpc_client, snode, devs):
                     'device_name': nvme_dict['name'],
                     'size': total_size,
                     'physical_label': next_physical_label,
-                    'failure_domain': node_failure_domain,
                     'pcie_address': nvme_driver_data['pci_address'],
                     'model_id': model_number,
                     'serial_number': serial_number,

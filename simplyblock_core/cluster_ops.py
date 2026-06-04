@@ -661,7 +661,7 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     # domains; with fewer, placement falls back to host-disjoint and a domain
     # outage may exceed the cluster's fault tolerance.
     if cluster.enable_failure_domain:
-        distinct_domains = {node.failure_domain for node in online_nodes if node.failure_domain}
+        distinct_domains = {node.failure_domain for node in online_nodes if node.failure_domain >= 0}
         min_domains = cluster.distr_npcs + 1
         if len(distinct_domains) < min_domains:
             logger.warning(
