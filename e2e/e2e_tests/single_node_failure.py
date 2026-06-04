@@ -55,9 +55,7 @@ class TestSingleNodeFailure(TestClusterBase):
         """
         self.logger.info(f"Inside run function. Base command: {self.base_cmd}")
 
-        self.sbcli_utils.add_storage_pool(
-            pool_name=self.pool_name
-        )
+        self._add_pool_dual(pool_name=self.pool_name)
 
         if self.k8s_test:
             self._k8s_ensure_storage_class()
@@ -301,9 +299,7 @@ class TestHASingleNodeFailure(TestClusterBase):
         """
         self.logger.info(f"Inside run function. Base command: {self.base_cmd}")
 
-        self.sbcli_utils.add_storage_pool(
-            pool_name=self.pool_name
-        )
+        self._add_pool_dual(pool_name=self.pool_name)
 
         if self.k8s_test:
             self._k8s_ensure_storage_class()

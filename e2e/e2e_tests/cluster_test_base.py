@@ -221,7 +221,16 @@ class TestClusterBase:
         sleep_n_sec(2)
         self.sbcli_utils.delete_all_lvols()
         sleep_n_sec(2)
-        self.sbcli_utils.delete_all_storage_pools()
+        if not self.k8s_test:
+            self.sbcli_utils.delete_all_storage_pools()
+        else:
+            # In K8s mode, avoid deleting pools during setup — the Pool CRD
+            # reconciliation is async and deleting+recreating pools between
+            # tests causes long waits or failures.  Tests create pools via
+            # _add_pool_dual() which reuses existing pools.
+            self.logger.info(
+                "[setup] K8s mode: skipping pool deletion (will reuse existing pool)"
+            )
         aws_access_key = os.environ.get("AWS_ACCESS_KEY_ID", None)
         aws_secret_key = os.environ.get("AWS_SECRET_ACCESS_KEY", None)
         if aws_access_key and aws_secret_key:
@@ -323,6 +332,47 @@ class TestClusterBase:
         """Normalize a name for K8s resource naming (lowercase, hyphens)."""
         import re
         return re.sub(r"[^a-z0-9-]", "-", name.lower()).strip("-")[:63]
+
+    def _add_pool_dual(self, pool_name=None, **kwargs):
+        """Create a storage pool, updating self.pool_name to the actual name.
+
+        In K8s mode, the operator may assign a pool name that differs from
+        the requested name. This method captures the return value and updates
+        self.pool_name so that StorageClass creation and assertions use the
+        correct name.
+
+        Returns the actual pool name.
+        """
+        pool_name = pool_name or self.pool_name
+        result = self.sbcli_utils.add_storage_pool(pool_name=pool_name, **kwargs)
+        if self.k8s_test and result:
+            if result != self.pool_name:
+                self.logger.info(
+                    f"[dual] Pool name adjusted: '{self.pool_name}' -> '{result}'"
+                )
+            self.pool_name = result
+        return self.pool_name
+
+    def _delete_pool_dual(self, pool_name=None):
+        """Delete a storage pool. In K8s mode, deletes the Pool CRD.
+
+        Skipped entirely when pool_name doesn't match any existing pool
+        (avoids errors from trying to delete a pool that was already
+        cleaned up or renamed by the operator).
+        """
+        pool_name = pool_name or self.pool_name
+        if self.k8s_test:
+            pools = self.sbcli_utils.list_storage_pools()
+            if pool_name not in pools:
+                # Try to find the pool by CRD name pattern
+                k8s_name = f"simplyblock-{pool_name.lower().replace('_', '-')}"
+                ns = self._ensure_k8s_utils().namespace
+                self._ensure_k8s_utils()._exec_kubectl(
+                    f"kubectl delete pools {k8s_name} -n {ns} "
+                    f"--timeout=60s 2>/dev/null || true"
+                )
+                return
+        self.sbcli_utils.delete_storage_pool(pool_name=pool_name)
 
     def _k8s_ensure_storage_class(self):
         """Create StorageClass + VolumeSnapshotClass if in K8s mode."""

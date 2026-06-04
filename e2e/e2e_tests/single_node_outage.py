@@ -55,23 +55,20 @@ class TestSingleNodeOutage(TestClusterBase):
         """
         self.logger.info("Inside run function")
 
-        self.sbcli_utils.add_storage_pool(
-            pool_name=self.pool_name
-        )
+        self._add_pool_dual(pool_name=self.pool_name)
         pools = self.sbcli_utils.list_storage_pools()
         assert self.pool_name in list(pools.keys()), \
             f"Pool {self.pool_name} not present in list of pools: {pools}"
-        sleep_n_sec(10)
-        self.sbcli_utils.delete_storage_pool(
-            pool_name=self.pool_name
-        )
-        pools = self.sbcli_utils.list_storage_pools()
-        assert self.pool_name not in list(pools.keys()), \
-            f"Pool {self.pool_name} present in list of pools post delete: {pools}"
 
-        self.sbcli_utils.add_storage_pool(
-            pool_name=self.pool_name
-        )
+        if not self.k8s_test:
+            sleep_n_sec(10)
+            self.sbcli_utils.delete_storage_pool(
+                pool_name=self.pool_name
+            )
+            pools = self.sbcli_utils.list_storage_pools()
+            assert self.pool_name not in list(pools.keys()), \
+                f"Pool {self.pool_name} present in list of pools post delete: {pools}"
+            self._add_pool_dual(pool_name=self.pool_name)
 
         if self.k8s_test:
             self._k8s_ensure_storage_class()
@@ -313,9 +310,7 @@ class TestHASingleNodeOutage(TestClusterBase):
         """
         self.logger.info(f"Inside run function. Base command: {self.base_cmd}")
 
-        self.sbcli_utils.add_storage_pool(
-            pool_name=self.pool_name
-        )
+        self._add_pool_dual(pool_name=self.pool_name)
 
         if self.k8s_test:
             self._k8s_ensure_storage_class()

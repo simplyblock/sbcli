@@ -1725,7 +1725,14 @@ class K8sSbcliUtils:
     def _run_json(self, cmd: str):
         """Execute *cmd* in the admin pod and parse stdout as JSON."""
         raw = self._run(cmd)
-        return json.loads(raw)
+        if not raw:
+            self.logger.warning(f"[_run_json] Empty output from: {cmd}")
+            return []
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError as e:
+            self.logger.warning(f"[_run_json] JSON parse error from: {cmd}\n  raw={raw[:200]}\n  error={e}")
+            return []
 
     # ── lvol methods ──────────────────────────────────────────────────────────
 
@@ -1988,20 +1995,43 @@ class K8sSbcliUtils:
         )
 
         self.logger.info(
-            f"[pool] No pools found — creating '{pool_name}' (cluster={cluster_name}) via kubectl apply"
+            f"[pool] No pools found — creating '{pool_name}' "
+            f"(CRD={k8s_resource_name}, cluster={cluster_name}) via kubectl apply"
         )
         yaml_escaped = yaml_content.replace("'", "'\\''")
         self.k8s._exec_kubectl(f"echo '{yaml_escaped}' | kubectl apply -f -")
 
-        # Wait up to 90s for the pool to become visible in sbcli
-        for _ in range(18):
-            pools = self.list_storage_pools()
+        # Verify the Pool CRD was applied
+        crd_check, _ = self.k8s._exec_kubectl(
+            f"kubectl get pools {k8s_resource_name} -n {ns} "
+            f"-o jsonpath='{{.metadata.name}}' 2>/dev/null || true"
+        )
+        if not crd_check.strip():
+            self.logger.error(
+                f"[pool] Pool CRD '{k8s_resource_name}' not found after kubectl apply!"
+            )
+
+        # Wait up to 180s for the pool to become visible in sbcli
+        for attempt in range(36):
+            try:
+                pools = self.list_storage_pools()
+            except Exception as e:
+                self.logger.warning(f"[pool] list_storage_pools failed (attempt {attempt}): {e}")
+                sleep_n_sec(5)
+                continue
             if pools:
                 actual = next(iter(pools))
-                self.logger.info(f"[pool] Pool '{actual}' is ready")
+                self.logger.info(f"[pool] Pool '{actual}' is ready (attempt {attempt})")
                 return actual
+            if attempt % 6 == 5:
+                # Log CRD status periodically for debugging
+                status_out, _ = self.k8s._exec_kubectl(
+                    f"kubectl get pools {k8s_resource_name} -n {ns} "
+                    f"-o jsonpath='{{.status}}' 2>/dev/null || echo 'no status'"
+                )
+                self.logger.info(f"[pool] CRD status (attempt {attempt}): {status_out.strip()}")
             sleep_n_sec(5)
-        self.logger.warning("[pool] Pool not confirmed after kubectl apply")
+        self.logger.warning(f"[pool] Pool '{pool_name}' not confirmed after 180s of polling")
         return pool_name
 
     def ensure_pool_exists(self, pool_name, cluster_id=None, encryption=False):

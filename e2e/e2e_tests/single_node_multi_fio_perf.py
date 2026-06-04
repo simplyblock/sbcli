@@ -21,11 +21,12 @@ class TestLvolFioBase(TestClusterBase):
         self.lvol_devices = {}
         self.fio_handles = {}
 
-        pools = self.sbcli_utils.list_storage_pools()
-        assert self.pool_name not in list(pools.keys()), \
-            f"Pool {self.pool_name} present in list of pools post delete: {pools}"
+        if not self.k8s_test:
+            pools = self.sbcli_utils.list_storage_pools()
+            assert self.pool_name not in list(pools.keys()), \
+                f"Pool {self.pool_name} present in list of pools post delete: {pools}"
 
-        self.sbcli_utils.add_storage_pool(
+        self._add_pool_dual(
             pool_name=self.pool_name,
             cluster_id=self.cluster_id,
             max_rw_iops=30000,
