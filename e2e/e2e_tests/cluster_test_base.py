@@ -353,6 +353,20 @@ class TestClusterBase:
             self.pool_name = result
         return self.pool_name
 
+    def _verify_pool_exists_dual(self, pool_name=None):
+        """Assert that a pool exists. In K8s mode checks the Pool CRD;
+        in Docker mode checks sbcli pool list."""
+        pool_name = pool_name or self.pool_name
+        if self.k8s_test:
+            exists = self.sbcli_utils.pool_crd_exists(pool_name)
+            assert exists, (
+                f"Pool CRD for '{pool_name}' not found in K8s"
+            )
+        else:
+            pools = self.sbcli_utils.list_storage_pools()
+            assert pool_name in list(pools.keys()), \
+                f"Pool {pool_name} not present in list of pools: {pools}"
+
     def _delete_pool_dual(self, pool_name=None):
         """Delete a storage pool. In K8s mode, deletes the Pool CRD.
 
@@ -375,17 +389,45 @@ class TestClusterBase:
         self.sbcli_utils.delete_storage_pool(pool_name=pool_name)
 
     def _k8s_ensure_storage_class(self):
-        """Create StorageClass + VolumeSnapshotClass if in K8s mode."""
+        """Create StorageClass + VolumeSnapshotClass if in K8s mode.
+
+        If the operator already created a simplyblock StorageClass (from the
+        Pool CRD), reuse it instead of creating a new one.
+        """
         if not self.k8s_test:
             return
         k8s = self._ensure_k8s_utils()
-        k8s.create_storage_class(
-            name=self._k8s_storage_class_name,
-            cluster_id=self.cluster_id,
-            pool_name=self.pool_name,
-            ndcs=self.ndcs,
-            npcs=self.npcs,
+
+        # Check if a simplyblock StorageClass already exists
+        out, _ = k8s._exec_kubectl(
+            "kubectl get storageclass -o jsonpath="
+            "'{range .items[?(@.provisioner==\"csi.simplyblock.io\")]}"
+            "{.metadata.name}{\"\\n\"}{end}' 2>/dev/null || true"
         )
+        existing_sc = [s.strip() for s in out.strip().splitlines() if s.strip()]
+        if existing_sc:
+            self.logger.info(
+                f"[k8s] Found existing simplyblock StorageClass(es): {existing_sc}"
+            )
+            # Prefer our name if it exists, otherwise use the first available
+            if self._k8s_storage_class_name in existing_sc:
+                self.logger.info(
+                    f"[k8s] Using existing SC '{self._k8s_storage_class_name}'"
+                )
+            else:
+                self._k8s_storage_class_name = existing_sc[0]
+                self.logger.info(
+                    f"[k8s] Using operator-created SC '{self._k8s_storage_class_name}'"
+                )
+        else:
+            # No simplyblock SC exists — create one
+            k8s.create_storage_class(
+                name=self._k8s_storage_class_name,
+                cluster_id=self.cluster_id,
+                pool_name=self.pool_name,
+                ndcs=self.ndcs,
+                npcs=self.npcs,
+            )
         k8s.create_volume_snapshot_class(name=self._k8s_snapshot_class_name)
 
     def _create_lvol_dual(self, lvol_name, size, pool_name=None,

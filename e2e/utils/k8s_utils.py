@@ -1970,11 +1970,26 @@ class K8sSbcliUtils:
         existing pool with a different name was found).
         """
         existing = self.list_storage_pools()
-        self.logger.info(f"[pool] existing pools: {list(existing.keys())}")
+        self.logger.info(f"[pool] existing pools (sbcli): {list(existing.keys())}")
         if existing:
             actual = next(iter(existing))
             self.logger.info(f"[pool] Using existing pool '{actual}' (K8s: no new pool created)")
             return actual
+
+        # Check if any Pool CRDs already exist (operator may have created one
+        # during cluster setup that isn't visible via sbcli pool list)
+        ns = self.k8s.namespace
+        out, _ = self.k8s._exec_kubectl(
+            f"kubectl get pools -n {ns} --no-headers "
+            f"-o custom-columns=NAME:.metadata.name 2>/dev/null || true"
+        )
+        existing_crds = [r.strip() for r in out.strip().splitlines() if r.strip()]
+        if existing_crds:
+            self.logger.info(
+                f"[pool] Found existing Pool CRD(s): {existing_crds} — "
+                f"skipping creation of '{pool_name}'"
+            )
+            return pool_name
 
         # No pools at all — create one via kubectl apply
         cid = cluster_id or self.cluster_id
@@ -2001,38 +2016,45 @@ class K8sSbcliUtils:
         yaml_escaped = yaml_content.replace("'", "'\\''")
         self.k8s._exec_kubectl(f"echo '{yaml_escaped}' | kubectl apply -f -")
 
-        # Verify the Pool CRD was applied
-        crd_check, _ = self.k8s._exec_kubectl(
-            f"kubectl get pools {k8s_resource_name} -n {ns} "
+        # Verify the Pool CRD was created
+        for attempt in range(6):
+            crd_check, _ = self.k8s._exec_kubectl(
+                f"kubectl get pools {k8s_resource_name} -n {ns} "
+                f"-o jsonpath='{{.metadata.name}}' 2>/dev/null || true"
+            )
+            if crd_check.strip():
+                self.logger.info(
+                    f"[pool] Pool CRD '{k8s_resource_name}' verified "
+                    f"(attempt {attempt})"
+                )
+                return pool_name
+            sleep_n_sec(5)
+
+        self.logger.error(
+            f"[pool] Pool CRD '{k8s_resource_name}' not found after kubectl apply!"
+        )
+        return pool_name
+
+    def pool_crd_exists(self, pool_name):
+        """Check if a Pool CRD exists in K8s (with or without simplyblock- prefix).
+
+        Returns True if the Pool CRD is found, False otherwise.
+        """
+        ns = self.k8s.namespace
+        # Try with simplyblock- prefix first (add_storage_pool creates these)
+        k8s_name = f"simplyblock-{pool_name.lower().replace('_', '-')}"
+        out, _ = self.k8s._exec_kubectl(
+            f"kubectl get pools {k8s_name} -n {ns} "
             f"-o jsonpath='{{.metadata.name}}' 2>/dev/null || true"
         )
-        if not crd_check.strip():
-            self.logger.error(
-                f"[pool] Pool CRD '{k8s_resource_name}' not found after kubectl apply!"
-            )
-
-        # Wait up to 180s for the pool to become visible in sbcli
-        for attempt in range(36):
-            try:
-                pools = self.list_storage_pools()
-            except Exception as e:
-                self.logger.warning(f"[pool] list_storage_pools failed (attempt {attempt}): {e}")
-                sleep_n_sec(5)
-                continue
-            if pools:
-                actual = next(iter(pools))
-                self.logger.info(f"[pool] Pool '{actual}' is ready (attempt {attempt})")
-                return actual
-            if attempt % 6 == 5:
-                # Log CRD status periodically for debugging
-                status_out, _ = self.k8s._exec_kubectl(
-                    f"kubectl get pools {k8s_resource_name} -n {ns} "
-                    f"-o jsonpath='{{.status}}' 2>/dev/null || echo 'no status'"
-                )
-                self.logger.info(f"[pool] CRD status (attempt {attempt}): {status_out.strip()}")
-            sleep_n_sec(5)
-        self.logger.warning(f"[pool] Pool '{pool_name}' not confirmed after 180s of polling")
-        return pool_name
+        if out.strip():
+            return True
+        # Try with exact pool_name (ensure_pool_exists creates these)
+        out, _ = self.k8s._exec_kubectl(
+            f"kubectl get pools {pool_name} -n {ns} "
+            f"-o jsonpath='{{.metadata.name}}' 2>/dev/null || true"
+        )
+        return bool(out.strip())
 
     def ensure_pool_exists(self, pool_name, cluster_id=None, encryption=False):
         """Verify a specific pool exists; create it via kubectl if missing.

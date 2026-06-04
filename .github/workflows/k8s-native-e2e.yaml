@@ -62,15 +62,10 @@ on:
         required: false
         default: '/mnt/nfs_share/'
       testname:
-        description: 'Test category to run (empty = default e2e suite)'
+        description: 'Test to run: empty=default suite, or category (backup/backup-stress/security), or class name (e.g. TestLvolFioNpcsCustom)'
         required: false
         default: ''
-        type: choice
-        options:
-          - ''
-          - backup
-          - backup-stress
-          - security
+        type: string
       cluster_security:
         description: "Cluster setup mode. 'backup' deploys MinIO and enables backup on StorageCluster. Auto-enabled when testname is backup/backup-stress."
         required: false

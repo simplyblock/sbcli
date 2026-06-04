@@ -34,9 +34,7 @@ class TestLvolFioBase(TestClusterBase):
             max_w_mbytes=100
         )
 
-        pools = self.sbcli_utils.list_storage_pools()
-        assert self.pool_name in list(pools.keys()), \
-            f"Pool {self.pool_name} not present in list of pools post add: {pools}"
+        self._verify_pool_exists_dual()
 
         if self.k8s_test:
             self._k8s_ensure_storage_class()

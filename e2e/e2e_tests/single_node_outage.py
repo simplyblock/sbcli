@@ -56,9 +56,7 @@ class TestSingleNodeOutage(TestClusterBase):
         self.logger.info("Inside run function")
 
         self._add_pool_dual(pool_name=self.pool_name)
-        pools = self.sbcli_utils.list_storage_pools()
-        assert self.pool_name in list(pools.keys()), \
-            f"Pool {self.pool_name} not present in list of pools: {pools}"
+        self._verify_pool_exists_dual()
 
         if not self.k8s_test:
             sleep_n_sec(10)
