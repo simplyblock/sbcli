@@ -1629,20 +1629,24 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
 
         ha_jm_count = resolve_ha_jm_count(cluster, ha_jm_count)
 
-        # Failure-domain tag is mandatory exactly when the cluster has the
+        # Failure-domain id is mandatory exactly when the cluster has the
         # feature enabled (deploy-time only — clusters cannot be upgraded into
-        # it, so the flag is fixed for the cluster's lifetime).
-        failure_domain_tag = (failure_domain or "").strip()
+        # it, so the flag is fixed for the cluster's lifetime). 32-bit int,
+        # >= 0 to activate; -1/None means unset.
         if cluster.enable_failure_domain:
-            if not failure_domain_tag:
+            if failure_domain is None or failure_domain < 0:
                 logger.error("This cluster was created with --enable-failure-domain; "
-                             "--failure-domain <tag> is required when adding a node.")
+                             "--failure-domain <id> (a non-negative integer) is required "
+                             "when adding a node.")
                 return False
-        elif failure_domain_tag:
-            logger.error("--failure-domain was given but this cluster does not have the "
-                         "failure-domain feature enabled. Redeploy the cluster with "
-                         "--enable-failure-domain to use failure domains.")
-            return False
+            failure_domain_id = failure_domain
+        else:
+            if failure_domain is not None and failure_domain >= 0:
+                logger.error("--failure-domain was given but this cluster does not have the "
+                             "failure-domain feature enabled. Redeploy the cluster with "
+                             "--enable-failure-domain to use failure domains.")
+                return False
+            failure_domain_id = -1
 
         logger.info(f"Adding Storage node: {node_addr}")
 
@@ -1991,7 +1995,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         else:
             snode.physical_label = get_next_physical_device_order(snode)
 
-        snode.failure_domain = failure_domain_tag
+        snode.failure_domain = failure_domain_id
 
         snode.num_partitions_per_dev = num_partitions_per_dev
         snode.jm_percent = jm_percent
@@ -3282,7 +3286,7 @@ def list_storage_nodes(cluster_id=None):
     data = []
     all_lvols = db_controller.get_mini_lvols()
     # Only surface the failure-domain column when the feature is actually in use.
-    show_failure_domain = any(node.failure_domain for node in nodes)
+    show_failure_domain = any(node.failure_domain >= 0 for node in nodes)
     for node in nodes:
         logger.debug(node)
         logger.debug("*" * 20)
@@ -3318,7 +3322,7 @@ def list_storage_nodes(cluster_id=None):
 
         }
         if show_failure_domain:
-            row["Failure Domain"] = node.failure_domain or "-"
+            row["Failure Domain"] = node.failure_domain if node.failure_domain >= 0 else "-"
         data.append(row)
 
     return data
@@ -6805,7 +6809,7 @@ def get_sorted_ha_jms(current_node):
         if node.jm_device and node.jm_device.status == JMDevice.STATUS_ONLINE and node.jm_device.get_id():
             jm_count[node.jm_device.get_id()] = 0
             jm_dev_to_mgmt_ip[node.jm_device.get_id()] = node.mgmt_ip
-            jm_dev_to_fd[node.jm_device.get_id()] = node.failure_domain
+            jm_dev_to_fd[node.jm_device.get_id()] = node.failure_domain  # int, -1 if unset
 
     for node in db_controller.get_storage_nodes_by_cluster_id(current_node.cluster_id):
         if node.get_id() == current_node.get_id():  # pass
@@ -6836,13 +6840,14 @@ def get_sorted_ha_jms(current_node):
             if jm_dev_to_mgmt_ip[jm_id] == current_node.mgmt_ip:
                 continue
             # Failure-domain disjointness is enforced on the first pass and
-            # relaxed on the fallback pass (best-effort placement).
+            # relaxed on the fallback pass (best-effort placement). Domain 0 is
+            # a valid id, so guard on >= 0 rather than truthiness.
             if enforce_fd:
-                fd = jm_dev_to_fd.get(jm_id, "")
-                if fd and (fd in fds or fd == current_node.failure_domain):
+                fd = jm_dev_to_fd.get(jm_id, -1)
+                if fd >= 0 and (fd in fds or fd == current_node.failure_domain):
                     continue
             mgmt_ips.append(jm_dev_to_mgmt_ip[jm_id])
-            fds.append(jm_dev_to_fd.get(jm_id, ""))
+            fds.append(jm_dev_to_fd.get(jm_id, -1))
             out.append(jm_id)
 
     if fd_enabled:
@@ -6905,7 +6910,8 @@ def get_secondary_nodes(current_node, exclude_ids=None):
                 continue
             elif node.status == StorageNode.STATUS_ONLINE and node.mgmt_ip != current_node.mgmt_ip:
                 # elif node.status == StorageNode.STATUS_ONLINE :
-                if forbidden_fds and node.failure_domain and node.failure_domain in forbidden_fds:
+                # Domain 0 is a valid id, so guard on >= 0 rather than truthiness.
+                if forbidden_fds and node.failure_domain >= 0 and node.failure_domain in forbidden_fds:
                     continue
                 if node.is_secondary_node:
                     nodes.append(node.get_id())
@@ -6920,7 +6926,7 @@ def get_secondary_nodes(current_node, exclude_ids=None):
     # Failure-domain anti-affinity (best-effort): prefer a secondary in a
     # different failure domain than the primary; fall back to host-disjoint
     # only when no domain-disjoint candidate exists.
-    if cluster.enable_failure_domain and current_node.failure_domain:
+    if cluster.enable_failure_domain and current_node.failure_domain >= 0:
         result = _candidates({current_node.failure_domain})
         if result:
             return result
@@ -6971,7 +6977,8 @@ def get_secondary_nodes_2(current_node, exclude_ids=None, exclude_mgmt_ips=None,
                     nod_found = True
                 continue
             elif node.status == StorageNode.STATUS_ONLINE and node.mgmt_ip not in forbidden_ips:
-                if forbidden_fds and node.failure_domain and node.failure_domain in forbidden_fds:
+                # Domain 0 is a valid id, so guard on >= 0 rather than truthiness.
+                if forbidden_fds and node.failure_domain >= 0 and node.failure_domain in forbidden_fds:
                     continue
                 if node.is_secondary_node:
                     nodes.append(node.get_id())
@@ -6983,10 +6990,10 @@ def get_secondary_nodes_2(current_node, exclude_ids=None, exclude_mgmt_ips=None,
 
         return nodes
 
-    if cluster.enable_failure_domain and current_node.failure_domain:
+    if cluster.enable_failure_domain and current_node.failure_domain >= 0:
         forbidden_fds = {current_node.failure_domain}
         if exclude_failure_domains:
-            forbidden_fds.update(fd for fd in exclude_failure_domains if fd)
+            forbidden_fds.update(fd for fd in exclude_failure_domains if fd is not None and fd >= 0)
         result = _candidates(forbidden_fds)
         if result:
             return result
@@ -7049,14 +7056,10 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
         # same flag without having to re-fetch the cluster setting.
         if cluster.shared_placement:
             distrib_params["shared_placement"] = True
-        # Failure-domain anti-affinity is a cluster-wide deploy-time opt-in.
-        # Persist the activation flag on each stack entry so restarts re-create
-        # the bdev with the feature enabled. The per-device failure-domain tags
-        # themselves travel in the distrib cluster map (get_distr_cluster_map).
-        # NOTE: the RPC parameter name below is PROVISIONAL — replace
-        # "failure_domain_enabled" with the real SPDK contract once finalized.
-        if cluster.enable_failure_domain:
-            distrib_params["failure_domain_enabled"] = True
+        # Failure-domain placement is activated implicitly via the per-node
+        # failure_domain id (>= 0) in the distrib cluster map sent by
+        # distr_send_cluster_map / distr_add_nodes (see get_distr_cluster_map);
+        # there is no separate bdev_distrib_create flag.
         lvstore_stack.extend(
             [
                 {

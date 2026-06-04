@@ -3,19 +3,23 @@
 test_failure_domain.py – unit tests for the failure-domain feature.
 
 Failure domains are an operator-defined, deploy-time-only grouping of storage
-nodes (rack/cabinet/DC). When the cluster has enable_failure_domain set, every
-node carries a failure_domain tag and placement spreads data/parity chunks,
-HA journal copies and secondary/tertiary nodes across distinct domains, with a
-best-effort fallback to host-disjoint placement.
+nodes (rack/cabinet/DC), identified by a 32-bit integer id (default -1 = unset;
+a value >= 0 activates the feature for the node). When the cluster has
+enable_failure_domain set, every node carries a failure_domain id and placement
+spreads data/parity chunks, HA journal copies and secondary/tertiary nodes
+across distinct domains, with a best-effort fallback to host-disjoint placement.
+
+The data plane consumes the id at node level inside the distrib cluster map
+(map_cluster[node]["failure_domain"]) via distr_send_cluster_map /
+distr_add_nodes.
 
 Tests cover:
-  - model defaults (Cluster / StorageNode / NVMeDevice)
-  - get_secondary_nodes domain-disjoint preference + fallback
+  - model defaults (Cluster / StorageNode)
+  - get_secondary_nodes domain-disjoint preference + fallback (incl. domain 0)
   - get_secondary_nodes_2 domain-disjoint preference (incl. secondary's
     domain) + fallback
-  - get_sorted_ha_jms domain-disjoint preference + fallback
-  - get_distr_cluster_map emits the tag only when the feature is enabled
-  - bdev_distrib_create RPC parameter injection (provisional name)
+  - get_sorted_ha_jms domain-disjoint preference + fallback + host invariant
+  - get_distr_cluster_map emits the node-level int only when enabled
 
 All external dependencies (FDB, RPC) are mocked.
 """
@@ -42,7 +46,7 @@ def _cluster(enable_failure_domain=False, distr_npcs=2, cluster_id="cluster-1"):
     return c
 
 
-def _node(uuid, mgmt_ip, failure_domain="", status=StorageNode.STATUS_ONLINE,
+def _node(uuid, mgmt_ip, failure_domain=-1, status=StorageNode.STATUS_ONLINE,
           cluster_id="cluster-1", is_secondary_node=False,
           lvstore_stack_secondary="", lvstore_stack_tertiary="",
           jm_device=None, jm_ids=None, ha_jm_count=3):
@@ -78,17 +82,14 @@ class TestModelDefaults(unittest.TestCase):
     def test_cluster_default_disabled(self):
         assert Cluster().enable_failure_domain is False
 
-    def test_storage_node_default_empty(self):
-        assert StorageNode().failure_domain == ""
-
-    def test_nvme_device_default_empty(self):
-        assert NVMeDevice().failure_domain == ""
+    def test_storage_node_default_unset(self):
+        assert StorageNode().failure_domain == -1
 
     def test_values_round_trip(self):
         c = _cluster(enable_failure_domain=True)
         assert c.to_dict()["enable_failure_domain"] is True
-        n = _node("n1", "10.0.0.1", failure_domain="rack-a")
-        assert n.to_dict()["failure_domain"] == "rack-a"
+        n = _node("n1", "10.0.0.1", failure_domain=0)
+        assert n.to_dict()["failure_domain"] == 0
 
 
 # ===========================================================================
@@ -106,9 +107,9 @@ class TestGetSecondaryNodes(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.DBController")
     def test_disabled_ignores_failure_domain(self, MockDBCtrl):
         import simplyblock_core.storage_node_ops as ops
-        primary = _node("primary", "10.0.0.1", failure_domain="rack-a")
+        primary = _node("primary", "10.0.0.1", failure_domain=0)
         # Same domain as primary; with the feature OFF this is still eligible.
-        sec = _node("sec-1", "10.0.0.2", failure_domain="rack-a", is_secondary_node=True)
+        sec = _node("sec-1", "10.0.0.2", failure_domain=0, is_secondary_node=True)
         MockDBCtrl.return_value = self._mock_db(_cluster(False), [primary, sec])
 
         result = ops.get_secondary_nodes(primary)
@@ -117,13 +118,14 @@ class TestGetSecondaryNodes(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.DBController")
     def test_enabled_prefers_other_domain(self, MockDBCtrl):
         import simplyblock_core.storage_node_ops as ops
-        primary = _node("primary", "10.0.0.1", failure_domain="rack-a")
-        same = _node("same", "10.0.0.2", failure_domain="rack-a", is_secondary_node=True)
-        other = _node("other", "10.0.0.3", failure_domain="rack-b", is_secondary_node=True)
+        # Domain 0 must behave like any other id (regression guard against
+        # truthiness checks that would treat 0 as "unset").
+        primary = _node("primary", "10.0.0.1", failure_domain=0)
+        same = _node("same", "10.0.0.2", failure_domain=0, is_secondary_node=True)
+        other = _node("other", "10.0.0.3", failure_domain=1, is_secondary_node=True)
         MockDBCtrl.return_value = self._mock_db(_cluster(True), [primary, same, other])
 
         result = ops.get_secondary_nodes(primary)
-        # Only the different-domain node should be offered.
         assert "other" in result
         assert "same" not in result
 
@@ -132,9 +134,9 @@ class TestGetSecondaryNodes(unittest.TestCase):
         import simplyblock_core.storage_node_ops as ops
         # Three nodes (avoids the 2-node early-return shortcut), all in the
         # same domain as the primary, so no domain-disjoint candidate exists.
-        primary = _node("primary", "10.0.0.1", failure_domain="rack-a")
-        cand1 = _node("cand1", "10.0.0.2", failure_domain="rack-a")
-        cand2 = _node("cand2", "10.0.0.3", failure_domain="rack-a")
+        primary = _node("primary", "10.0.0.1", failure_domain=0)
+        cand1 = _node("cand1", "10.0.0.2", failure_domain=0)
+        cand2 = _node("cand2", "10.0.0.3", failure_domain=0)
         MockDBCtrl.return_value = self._mock_db(_cluster(True), [primary, cand1, cand2])
 
         with self.assertLogs("root.simplyblock_core.storage_node_ops", level="WARNING") as cm:
@@ -158,16 +160,16 @@ class TestGetSecondaryNodes2(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.DBController")
     def test_excludes_primary_and_secondary_domains(self, MockDBCtrl):
         import simplyblock_core.storage_node_ops as ops
-        primary = _node("primary", "10.0.0.1", failure_domain="rack-a")
-        # secondary is rack-b; caller passes it via exclude_failure_domains
-        in_sec_domain = _node("c1", "10.0.0.3", failure_domain="rack-b")
-        in_prim_domain = _node("c2", "10.0.0.4", failure_domain="rack-a")
-        fresh = _node("c3", "10.0.0.5", failure_domain="rack-c")
+        primary = _node("primary", "10.0.0.1", failure_domain=0)
+        # secondary is domain 1; caller passes it via exclude_failure_domains
+        in_sec_domain = _node("c1", "10.0.0.3", failure_domain=1)
+        in_prim_domain = _node("c2", "10.0.0.4", failure_domain=0)
+        fresh = _node("c3", "10.0.0.5", failure_domain=2)
         MockDBCtrl.return_value = self._mock_db(
             _cluster(True), [primary, in_sec_domain, in_prim_domain, fresh])
 
         result = ops.get_secondary_nodes_2(
-            primary, exclude_mgmt_ips=["10.0.0.2"], exclude_failure_domains=["rack-b"])
+            primary, exclude_mgmt_ips=["10.0.0.2"], exclude_failure_domains=[1])
         assert "c3" in result
         assert "c1" not in result  # secondary's domain
         assert "c2" not in result  # primary's domain
@@ -176,18 +178,16 @@ class TestGetSecondaryNodes2(unittest.TestCase):
     def test_falls_back_when_only_shared_domains(self, MockDBCtrl):
         import simplyblock_core.storage_node_ops as ops
         # Three nodes (avoids the 2-node early-return shortcut). Every candidate
-        # is in either the primary's (rack-a) or the secondary's (rack-b)
-        # domain, so the domain-disjoint pass finds nothing and falls back.
-        primary = _node("primary", "10.0.0.1", failure_domain="rack-a")
-        n_b = _node("n_b", "10.0.0.4", failure_domain="rack-b")
-        n_a = _node("n_a", "10.0.0.5", failure_domain="rack-a")
+        # is in either the primary's (0) or the secondary's (1) domain, so the
+        # domain-disjoint pass finds nothing and falls back.
+        primary = _node("primary", "10.0.0.1", failure_domain=0)
+        n_b = _node("n_b", "10.0.0.4", failure_domain=1)
+        n_a = _node("n_a", "10.0.0.5", failure_domain=0)
         MockDBCtrl.return_value = self._mock_db(_cluster(True), [primary, n_b, n_a])
 
         with self.assertLogs("root.simplyblock_core.storage_node_ops", level="WARNING") as cm:
             result = ops.get_secondary_nodes_2(
-                primary, exclude_mgmt_ips=["10.0.0.2"], exclude_failure_domains=["rack-b"])
-        # Both remaining domains are forbidden, so best-effort fallback offers a
-        # host-disjoint candidate anyway, with a warning.
+                primary, exclude_mgmt_ips=["10.0.0.2"], exclude_failure_domains=[1])
         assert result
         assert any("falling back" in m for m in cm.output)
 
@@ -207,10 +207,10 @@ class TestGetSortedHaJms(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.DBController")
     def test_prefers_distinct_domains(self, MockDBCtrl):
         import simplyblock_core.storage_node_ops as ops
-        current = _node("current", "10.0.0.1", failure_domain="rack-a", ha_jm_count=3)
-        b = _node("b", "10.0.0.2", failure_domain="rack-b", jm_device=_jm("jb"))
-        c = _node("c", "10.0.0.3", failure_domain="rack-c", jm_device=_jm("jc"))
-        d = _node("d", "10.0.0.4", failure_domain="rack-b", jm_device=_jm("jd"))
+        current = _node("current", "10.0.0.1", failure_domain=0, ha_jm_count=3)
+        b = _node("b", "10.0.0.2", failure_domain=1, jm_device=_jm("jb"))
+        c = _node("c", "10.0.0.3", failure_domain=2, jm_device=_jm("jc"))
+        d = _node("d", "10.0.0.4", failure_domain=1, jm_device=_jm("jd"))
         MockDBCtrl.return_value = self._mock_db(_cluster(True), [current, b, c, d])
 
         result = ops.get_sorted_ha_jms(current)
@@ -220,11 +220,11 @@ class TestGetSortedHaJms(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.DBController")
     def test_falls_back_to_host_disjoint(self, MockDBCtrl):
         import simplyblock_core.storage_node_ops as ops
-        current = _node("current", "10.0.0.1", failure_domain="rack-a", ha_jm_count=3)
-        # current's own domain (rack-a) is skipped on the first pass; only one
-        # other domain (rack-b) exists, so the second copy needs the fallback.
-        b = _node("b", "10.0.0.2", failure_domain="rack-a", jm_device=_jm("jb"))
-        c = _node("c", "10.0.0.3", failure_domain="rack-b", jm_device=_jm("jc"))
+        current = _node("current", "10.0.0.1", failure_domain=0, ha_jm_count=3)
+        # current's own domain (0) is skipped on the first pass; only one other
+        # domain (1) exists, so the second copy needs the fallback.
+        b = _node("b", "10.0.0.2", failure_domain=0, jm_device=_jm("jb"))
+        c = _node("c", "10.0.0.3", failure_domain=1, jm_device=_jm("jc"))
         MockDBCtrl.return_value = self._mock_db(_cluster(True), [current, b, c])
 
         with self.assertLogs("root.simplyblock_core.storage_node_ops", level="WARNING") as cm:
@@ -236,11 +236,11 @@ class TestGetSortedHaJms(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.DBController")
     def test_never_two_copies_on_same_host(self, MockDBCtrl):
         import simplyblock_core.storage_node_ops as ops
-        current = _node("current", "10.0.0.1", failure_domain="rack-a", ha_jm_count=3)
+        current = _node("current", "10.0.0.1", failure_domain=0, ha_jm_count=3)
         # Two JMs on the SAME host (mgmt_ip) but different domains — host
         # disjointness is a hard invariant, so only one may be selected.
-        b = _node("b", "10.0.0.2", failure_domain="rack-b", jm_device=_jm("jb"))
-        c = _node("c", "10.0.0.2", failure_domain="rack-c", jm_device=_jm("jc"))
+        b = _node("b", "10.0.0.2", failure_domain=1, jm_device=_jm("jb"))
+        c = _node("c", "10.0.0.2", failure_domain=2, jm_device=_jm("jc"))
         MockDBCtrl.return_value = self._mock_db(_cluster(True), [current, b, c])
 
         result = ops.get_sorted_ha_jms(current)
@@ -253,7 +253,7 @@ class TestGetSortedHaJms(unittest.TestCase):
 
 class TestDistrClusterMap(unittest.TestCase):
 
-    def _target_node(self, failure_domain="rack-a"):
+    def _target_node(self, failure_domain=0):
         node = _node("tnode", "10.0.0.1", failure_domain=failure_domain)
         dev = NVMeDevice()
         dev.uuid = "dev-1"
@@ -262,62 +262,34 @@ class TestDistrClusterMap(unittest.TestCase):
         dev.alceml_bdev = "alceml_0"
         dev.size = 1073741824  # 1 GiB
         dev.physical_label = 1
-        dev.failure_domain = failure_domain
         node.nvme_devices = [dev]
         node.remote_devices = []
         return node
 
     @patch("simplyblock_core.distr_controller.DBController")
-    def test_emits_tag_when_enabled(self, MockDBCtrl):
+    def test_emits_node_level_int_when_enabled(self, MockDBCtrl):
         import simplyblock_core.distr_controller as dc
-        node = self._target_node("rack-a")
+        node = self._target_node(failure_domain=0)  # domain 0 must be emitted
         mock_db = MagicMock()
         mock_db.get_cluster_by_id.return_value = _cluster(True)
         MockDBCtrl.return_value = mock_db
 
         cl_map = dc.get_distr_cluster_map([node], node)
-        dev_entry = cl_map["map_cluster"]["tnode"]["devices"][0]
-        assert dev_entry["failure_domain"] == "rack-a"
+        node_entry = cl_map["map_cluster"]["tnode"]
+        assert node_entry["failure_domain"] == 0
+        # The tag is node-level, not inside the per-device entries.
+        assert "failure_domain" not in node_entry["devices"][0]
 
     @patch("simplyblock_core.distr_controller.DBController")
     def test_omits_tag_when_disabled(self, MockDBCtrl):
         import simplyblock_core.distr_controller as dc
-        node = self._target_node("rack-a")
+        node = self._target_node(failure_domain=0)
         mock_db = MagicMock()
         mock_db.get_cluster_by_id.return_value = _cluster(False)
         MockDBCtrl.return_value = mock_db
 
         cl_map = dc.get_distr_cluster_map([node], node)
-        dev_entry = cl_map["map_cluster"]["tnode"]["devices"][0]
-        assert "failure_domain" not in dev_entry
-
-
-# ===========================================================================
-# 6. bdev_distrib_create RPC parameter (PROVISIONAL name)
-# ===========================================================================
-
-class TestBdevDistribCreateParam(unittest.TestCase):
-
-    def _client(self):
-        from simplyblock_core.rpc_client import RPCClient
-        client = RPCClient.__new__(RPCClient)
-        client.get_bdevs = MagicMock(side_effect=Exception("not found"))
-        captured = {}
-        client._request = lambda method, params: captured.setdefault("params", params)
-        return client, captured
-
-    def test_param_injected_when_enabled(self):
-        client, captured = self._client()
-        client.bdev_distrib_create(
-            "distrib_1", 1, 1, 1, 10, 4096, ["jm0"], 4096,
-            failure_domain_enabled=True)
-        assert captured["params"].get("failure_domain_enabled") is True
-
-    def test_param_absent_when_disabled(self):
-        client, captured = self._client()
-        client.bdev_distrib_create(
-            "distrib_1", 1, 1, 1, 10, 4096, ["jm0"], 4096)
-        assert "failure_domain_enabled" not in captured["params"]
+        assert "failure_domain" not in cl_map["map_cluster"]["tnode"]
 
 
 if __name__ == "__main__":
