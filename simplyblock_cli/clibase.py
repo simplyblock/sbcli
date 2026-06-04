@@ -170,6 +170,7 @@ class CLIWrapperBase:
         format_4k = args.format_4k
         num_partitions_per_dev = 0 if args.enable_journal_device else 1
         spdk_sys_mem = getattr(args, 'spdk_sys_mem', None)
+        failure_domain = getattr(args, 'failure_domain', None)
 
         try:
             out = storage_ops.add_node(
@@ -193,6 +194,7 @@ class CLIWrapperBase:
                 format_4k=format_4k,
                 spdk_proxy_image=getattr(args, 'spdk_proxy_image', None),
                 spdk_sys_mem=spdk_sys_mem,
+                failure_domain=failure_domain,
             )
         except Exception as e:
             print(e)
@@ -987,6 +989,7 @@ class CLIWrapperBase:
         strict_node_anti_affinity = args.strict_node_anti_affinity
         is_single_node = args.is_single_node
         client_data_nic = args.client_data_nic
+        enable_failure_domain = args.enable_failure_domain
 
         max_fault_tolerance = min(distr_npcs, 2) if distr_npcs >= 1 else 1
 
@@ -1003,6 +1006,7 @@ class CLIWrapperBase:
             client_data_nic, max_fault_tolerance=max_fault_tolerance, backup_config=backup_config,
             nvmf_base_port=args.nvmf_base_port, rpc_base_port=args.rpc_base_port, snode_api_port=args.snode_api_port,
             hashicorp_vault_settings=HashicorpVaultSettings({"base_url": args.hashicorp_vault_url}) if args.hashicorp_vault_url else None,
+            enable_failure_domain=enable_failure_domain,
         )
 
     def cluster_create(self, args):
@@ -1040,6 +1044,7 @@ class CLIWrapperBase:
         is_single_node = args.is_single_node
         fabric = args.fabric
         client_data_nic = args.client_data_nic
+        enable_failure_domain = args.enable_failure_domain
 
         max_fault_tolerance = min(distr_npcs, 2) if distr_npcs >= 1 else 1
 
@@ -1059,6 +1064,7 @@ class CLIWrapperBase:
             backup_config=backup_config,
             nvmf_base_port=args.nvmf_base_port, rpc_base_port=args.rpc_base_port, snode_api_port=args.snode_api_port,
             hashicorp_vault_settings=HashicorpVaultSettings({"base_url": args.hashicorp_vault_url}) if args.hashicorp_vault_url else None,
+            enable_failure_domain=enable_failure_domain,
         )
 
     def query_yes_no(self, question, default="yes"):
