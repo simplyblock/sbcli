@@ -1572,7 +1572,7 @@ class RPCClient:
         """Mark *name* (composite lvol bdev) as a migration-target lvol."""
         return self._request("bdev_lvol_set_migration_flag", {"lvol_name": name})
 
-    def bdev_lvol_transfer(self, name, offset, batch_size, bdev_name, operation="migrate"):
+    def bdev_lvol_transfer(self, name, offset, batch_size, bdev_name, operation="migrate", lvol_id=0):
         """
         Start an async blob transfer from *name* (source composite bdev) to the
         NVMe-oF bdev *bdev_name* attached on the caller's node.
@@ -1582,6 +1582,7 @@ class RPCClient:
         """
         return self._request("bdev_lvol_transfer", {
             "lvol_name": name,
+            "lvol_id": lvol_id,
             "offset": offset,
             "cluster_batch": batch_size,
             "gateway": bdev_name,
