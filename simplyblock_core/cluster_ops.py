@@ -228,6 +228,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    nvmeof_tls_config=None, max_fault_tolerance=1, backup_config=None,
                    nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001, container_image_prefix=None,
                    hashicorp_vault_settings : t.Optional[HashicorpVaultSettings] = None,
+                   enable_failure_domain=False,
 ) -> str:
 
     if distr_ndcs == 0 and distr_npcs == 0:
@@ -359,6 +360,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.max_queue_size = max_queue_size
     cluster.inflight_io_threshold = inflight_io_threshold
     cluster.strict_node_anti_affinity = strict_node_anti_affinity
+    cluster.enable_failure_domain = enable_failure_domain
     cluster.contact_point = contact_point
     cluster.disable_monitoring = disable_monitoring
     cluster.mode = mode
@@ -467,6 +469,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
                 client_data_nic="", max_fault_tolerance=1, backup_config=None,
                 nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001,
                 hashicorp_vault_settings : t.Optional[HashicorpVaultSettings] = None,
+                enable_failure_domain=False,
 ) -> str:
 
 
@@ -515,6 +518,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     cluster.nqn = f"{constants.CLUSTER_NQN}:{cluster.uuid}"
     cluster.secret = utils.generate_string(20)
     cluster.strict_node_anti_affinity = strict_node_anti_affinity
+    cluster.enable_failure_domain = enable_failure_domain
     if default_cluster:
         cluster.mode = default_cluster.mode
         cluster.db_connection = default_cluster.db_connection
@@ -652,6 +656,21 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
         set_cluster_status(cl_id, ols_status)
         raise ValueError(f"Failed to activate cluster, No enough online device.. Minimum is {minimum_devices}")
 
+    # Failure-domain coverage check (best-effort: warn, don't block). To
+    # survive losing a whole failure domain we need at least npcs+1 distinct
+    # domains; with fewer, placement falls back to host-disjoint and a domain
+    # outage may exceed the cluster's fault tolerance.
+    if cluster.enable_failure_domain:
+        distinct_domains = {node.failure_domain for node in online_nodes if node.failure_domain}
+        min_domains = cluster.distr_npcs + 1
+        if len(distinct_domains) < min_domains:
+            logger.warning(
+                "Failure-domain feature is enabled but only %d distinct failure "
+                "domain(s) are present (%s); at least %d are recommended to "
+                "tolerate a full domain outage. Activating anyway with "
+                "best-effort placement.",
+                len(distinct_domains), sorted(distinct_domains) or "none", min_domains)
+
     for node in online_nodes:
         if cluster.is_single_node or len(online_nodes) <= 2:
             node.physical_label = 0
@@ -696,6 +715,7 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                     snode,
                     exclude_ids=[snode.secondary_node_id] + used_nodes_as_tertiary,
                     exclude_mgmt_ips=[sec_node.mgmt_ip],
+                    exclude_failure_domains=[sec_node.failure_domain],
                 )
                 if not secondary_nodes_2:
                     set_cluster_status(cl_id, ols_status)

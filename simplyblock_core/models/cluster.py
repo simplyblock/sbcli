@@ -98,6 +98,14 @@ class Cluster(BaseModel):
     shared_placement_migration_pending: bool = False
     full_page_unmap: bool = True
     is_single_node: bool = False
+    # Failure-domain anti-affinity. When True, every storage node carries an
+    # operator-supplied failure_domain tag (rack/cabinet/DC) and placement
+    # spreads data/parity chunks, HA journal copies and secondary/tertiary
+    # nodes across distinct failure domains (best-effort: falls back to
+    # host-disjoint placement when a domain-disjoint placement is impossible).
+    # Deploy-time only — set at cluster create/add, never toggled at runtime;
+    # an existing cluster must be redeployed to gain the feature.
+    enable_failure_domain: bool = False
     snapshot_replication_target_cluster: str = ""
     snapshot_replication_target_pool: str = ""
     snapshot_replication_timeout: int = 60*10

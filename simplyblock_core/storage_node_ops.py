@@ -1604,7 +1604,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
              num_partitions_per_dev=0, jm_percent=0, enable_test_device=False,
              namespace=None, enable_ha_jm=False, cr_name=None, cr_namespace=None, cr_plural=None,
              id_device_by_nqn=False, partition_size="", ha_jm_count=None, format_4k=False,
-             spdk_proxy_image=None, spdk_sys_mem=None, expansion=False):
+             spdk_proxy_image=None, spdk_sys_mem=None, expansion=False, failure_domain=None):
     snode_api = SNodeClient(node_addr)
     node_info, _ = snode_api.info()
     if node_info.get("nodes_config") and node_info["nodes_config"].get("nodes"):
@@ -1627,6 +1627,21 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             return False
 
         ha_jm_count = resolve_ha_jm_count(cluster, ha_jm_count)
+
+        # Failure-domain tag is mandatory exactly when the cluster has the
+        # feature enabled (deploy-time only — clusters cannot be upgraded into
+        # it, so the flag is fixed for the cluster's lifetime).
+        failure_domain_tag = (failure_domain or "").strip()
+        if cluster.enable_failure_domain:
+            if not failure_domain_tag:
+                logger.error("This cluster was created with --enable-failure-domain; "
+                             "--failure-domain <tag> is required when adding a node.")
+                return False
+        elif failure_domain_tag:
+            logger.error("--failure-domain was given but this cluster does not have the "
+                         "failure-domain feature enabled. Redeploy the cluster with "
+                         "--enable-failure-domain to use failure domains.")
+            return False
 
         logger.info(f"Adding Storage node: {node_addr}")
 
@@ -1969,6 +1984,8 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             snode.physical_label = 0
         else:
             snode.physical_label = get_next_physical_device_order(snode)
+
+        snode.failure_domain = failure_domain_tag
 
         snode.num_partitions_per_dev = num_partitions_per_dev
         snode.jm_percent = jm_percent
@@ -3246,6 +3263,8 @@ def list_storage_nodes(is_json, cluster_id=None):
     data = []
     output = ""
     all_lvols = db_controller.get_mini_lvols()
+    # Only surface the failure-domain column when the feature is actually in use.
+    show_failure_domain = any(node.failure_domain for node in nodes)
     for node in nodes:
         logger.debug(node)
         logger.debug("*" * 20)
@@ -3256,7 +3275,7 @@ def list_storage_nodes(is_json, cluster_id=None):
             if dev.status == NVMeDevice.STATUS_ONLINE:
                 online_devices += 1
         lvs = [lv for lv in all_lvols if lv.node_id == node.get_id()]
-        data.append({
+        row = {
             "UUID": node.uuid,
             "Hostname": node.hostname,
             "Management IP": node.mgmt_ip,
@@ -3279,7 +3298,10 @@ def list_storage_nodes(is_json, cluster_id=None):
             # "Ext IP": node.cloud_instance_public_ip,
             "Secondary node ID": node.secondary_node_id,
 
-        })
+        }
+        if show_failure_domain:
+            row["Failure Domain"] = node.failure_domain or "-"
+        data.append(row)
 
     if not data:
         return output
@@ -6699,8 +6721,10 @@ def add_lvol_thread(lvol, snode, lvol_ana_state="optimized"):
 
 def get_sorted_ha_jms(current_node):
     db_controller = DBController()
+    cluster = db_controller.get_cluster_by_id(current_node.cluster_id)
     jm_count = {}
     jm_dev_to_mgmt_ip = {}
+    jm_dev_to_fd = {}
 
     for node in db_controller.get_storage_nodes_by_cluster_id(current_node.cluster_id):
         if node.get_id() == current_node.get_id():  # pass
@@ -6709,6 +6733,7 @@ def get_sorted_ha_jms(current_node):
         if node.jm_device and node.jm_device.status == JMDevice.STATUS_ONLINE and node.jm_device.get_id():
             jm_count[node.jm_device.get_id()] = 0
             jm_dev_to_mgmt_ip[node.jm_device.get_id()] = node.mgmt_ip
+            jm_dev_to_fd[node.jm_device.get_id()] = node.failure_domain
 
     for node in db_controller.get_storage_nodes_by_cluster_id(current_node.cluster_id):
         if node.get_id() == current_node.get_id():  # pass
@@ -6719,18 +6744,46 @@ def get_sorted_ha_jms(current_node):
             if rem_jm_id in jm_count:
                 jm_count[rem_jm_id] += 1
 
-    mgmt_ips = []
     jm_count = dict(sorted(jm_count.items(), key=lambda x: x[1]))
+    target = current_node.ha_jm_count - 1
+    fd_enabled = cluster.enable_failure_domain
+    mgmt_ips = []
+    fds = []
     out = []
-    for jm_id in jm_count.keys():
-        if jm_id:
+
+    def _select(enforce_fd):
+        for jm_id in jm_count.keys():
+            if not jm_id or jm_id in out:
+                continue
+            if len(out) >= target:
+                break
+            # Host-disjointness is a hard invariant in both passes: never place
+            # two HA journal copies on the same physical host.
             if jm_dev_to_mgmt_ip[jm_id] in mgmt_ips:
                 continue
             if jm_dev_to_mgmt_ip[jm_id] == current_node.mgmt_ip:
                 continue
+            # Failure-domain disjointness is enforced on the first pass and
+            # relaxed on the fallback pass (best-effort placement).
+            if enforce_fd:
+                fd = jm_dev_to_fd.get(jm_id, "")
+                if fd and (fd in fds or fd == current_node.failure_domain):
+                    continue
             mgmt_ips.append(jm_dev_to_mgmt_ip[jm_id])
+            fds.append(jm_dev_to_fd.get(jm_id, ""))
             out.append(jm_id)
-    return out[:current_node.ha_jm_count - 1]
+
+    if fd_enabled:
+        _select(enforce_fd=True)
+        if len(out) < target:
+            logger.warning(
+                "Could only place %d/%d HA journal copies on distinct failure "
+                "domains for node %s; relaxing to host-disjoint placement for "
+                "the remaining copies.", len(out), target, current_node.get_id())
+            _select(enforce_fd=False)
+    else:
+        _select(enforce_fd=False)
+    return out[:target]
 
 
 def get_node_jm_names(current_node, remote_node=None):
@@ -6763,33 +6816,50 @@ def get_secondary_nodes(current_node, exclude_ids=None):
     if exclude_ids is None:
         exclude_ids = []
     db_controller = DBController()
-    nodes = []
-    nod_found = False
+    cluster = db_controller.get_cluster_by_id(current_node.cluster_id)
     all_nodes = db_controller.get_storage_nodes_by_cluster_id(current_node.cluster_id)
     if len(all_nodes) == 2:
         for node in all_nodes:
             if node.get_id() != current_node.get_id() and node.get_id() not in exclude_ids:
                 return [node.get_id()]
 
-    for node in all_nodes:
-        if node.get_id() == current_node.get_id() or node.get_id() in exclude_ids:
-            if node.get_id() == current_node.get_id():
-                nod_found = True
-            continue
-        elif node.status == StorageNode.STATUS_ONLINE and node.mgmt_ip != current_node.mgmt_ip:
-            # elif node.status == StorageNode.STATUS_ONLINE :
-            if node.is_secondary_node:
-                nodes.append(node.get_id())
+    def _candidates(forbidden_fds):
+        nodes = []
+        nod_found = False
+        for node in all_nodes:
+            if node.get_id() == current_node.get_id() or node.get_id() in exclude_ids:
+                if node.get_id() == current_node.get_id():
+                    nod_found = True
+                continue
+            elif node.status == StorageNode.STATUS_ONLINE and node.mgmt_ip != current_node.mgmt_ip:
+                # elif node.status == StorageNode.STATUS_ONLINE :
+                if forbidden_fds and node.failure_domain and node.failure_domain in forbidden_fds:
+                    continue
+                if node.is_secondary_node:
+                    nodes.append(node.get_id())
 
-            elif not node.lvstore_stack_secondary:
-                nodes.append(node.get_id())
-                if nod_found:
-                    return [node.get_id()]
+                elif not node.lvstore_stack_secondary:
+                    nodes.append(node.get_id())
+                    if nod_found:
+                        return [node.get_id()]
 
-    return nodes
+        return nodes
+
+    # Failure-domain anti-affinity (best-effort): prefer a secondary in a
+    # different failure domain than the primary; fall back to host-disjoint
+    # only when no domain-disjoint candidate exists.
+    if cluster.enable_failure_domain and current_node.failure_domain:
+        result = _candidates({current_node.failure_domain})
+        if result:
+            return result
+        logger.warning(
+            "No failure-domain-disjoint secondary available for node %s; "
+            "falling back to host-disjoint placement.", current_node.get_id())
+    return _candidates(None)
 
 
-def get_secondary_nodes_2(current_node, exclude_ids=None, exclude_mgmt_ips=None):
+def get_secondary_nodes_2(current_node, exclude_ids=None, exclude_mgmt_ips=None,
+                          exclude_failure_domains=None):
     """Get candidate nodes for second secondary assignment (dual fault tolerance).
     Unlike get_secondary_nodes, this checks lvstore_stack_tertiary instead of
     lvstore_stack_secondary, since nodes that already serve as first secondary
@@ -6800,6 +6870,12 @@ def get_secondary_nodes_2(current_node, exclude_ids=None, exclude_mgmt_ips=None)
     take out two of the four HA journal members and violate the cluster's
     fault-tolerance guarantee. Caller passes the secondary's mgmt_ip via
     exclude_mgmt_ips to enforce this.
+
+    When the cluster has failure domains enabled, the tertiary is additionally
+    preferred to be in a different failure domain than both the primary and the
+    first secondary (caller passes the secondary's tag via
+    exclude_failure_domains). This is best-effort: if no domain-disjoint
+    candidate exists, placement falls back to host-disjoint only.
     """
     if exclude_ids is None:
         exclude_ids = []
@@ -6807,29 +6883,45 @@ def get_secondary_nodes_2(current_node, exclude_ids=None, exclude_mgmt_ips=None)
     if exclude_mgmt_ips:
         forbidden_ips.update(exclude_mgmt_ips)
     db_controller = DBController()
-    nodes = []
-    nod_found = False
+    cluster = db_controller.get_cluster_by_id(current_node.cluster_id)
     all_nodes = db_controller.get_storage_nodes_by_cluster_id(current_node.cluster_id)
     if len(all_nodes) == 2:
         for node in all_nodes:
             if node.get_id() != current_node.get_id() and node.get_id() not in exclude_ids:
                 return [node.get_id()]
 
-    for node in all_nodes:
-        if node.get_id() == current_node.get_id() or node.get_id() in exclude_ids:
-            if node.get_id() == current_node.get_id():
-                nod_found = True
-            continue
-        elif node.status == StorageNode.STATUS_ONLINE and node.mgmt_ip not in forbidden_ips:
-            if node.is_secondary_node:
-                nodes.append(node.get_id())
+    def _candidates(forbidden_fds):
+        nodes = []
+        nod_found = False
+        for node in all_nodes:
+            if node.get_id() == current_node.get_id() or node.get_id() in exclude_ids:
+                if node.get_id() == current_node.get_id():
+                    nod_found = True
+                continue
+            elif node.status == StorageNode.STATUS_ONLINE and node.mgmt_ip not in forbidden_ips:
+                if forbidden_fds and node.failure_domain and node.failure_domain in forbidden_fds:
+                    continue
+                if node.is_secondary_node:
+                    nodes.append(node.get_id())
 
-            elif not node.lvstore_stack_tertiary:
-                nodes.append(node.get_id())
-                if nod_found:
-                    return [node.get_id()]
+                elif not node.lvstore_stack_tertiary:
+                    nodes.append(node.get_id())
+                    if nod_found:
+                        return [node.get_id()]
 
-    return nodes
+        return nodes
+
+    if cluster.enable_failure_domain and current_node.failure_domain:
+        forbidden_fds = {current_node.failure_domain}
+        if exclude_failure_domains:
+            forbidden_fds.update(fd for fd in exclude_failure_domains if fd)
+        result = _candidates(forbidden_fds)
+        if result:
+            return result
+        logger.warning(
+            "No failure-domain-disjoint tertiary available for node %s; "
+            "falling back to host-disjoint placement.", current_node.get_id())
+    return _candidates(None)
 
 
 def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blocks, max_size):
@@ -6885,6 +6977,14 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
         # same flag without having to re-fetch the cluster setting.
         if cluster.shared_placement:
             distrib_params["shared_placement"] = True
+        # Failure-domain anti-affinity is a cluster-wide deploy-time opt-in.
+        # Persist the activation flag on each stack entry so restarts re-create
+        # the bdev with the feature enabled. The per-device failure-domain tags
+        # themselves travel in the distrib cluster map (get_distr_cluster_map).
+        # NOTE: the RPC parameter name below is PROVISIONAL — replace
+        # "failure_domain_enabled" with the real SPDK contract once finalized.
+        if cluster.enable_failure_domain:
+            distrib_params["failure_domain_enabled"] = True
         lvstore_stack.extend(
             [
                 {

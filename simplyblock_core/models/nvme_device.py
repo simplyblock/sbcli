@@ -50,6 +50,9 @@ class NVMeDevice(BaseModel):
     nvmf_multipath: bool = False
     pcie_address: str = ""
     physical_label: int = 0
+    # Failure-domain tag inherited from the owning storage node; emitted into
+    # the distrib cluster map for failure-domain-aware chunk placement.
+    failure_domain: str = ""
     pt_bdev: str = ""
     qos_bdev: str = ""
     remote_bdev: str = ""
