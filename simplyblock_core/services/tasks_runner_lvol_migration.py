@@ -140,11 +140,29 @@ def _ensure_hub_attached(src_rpc, tgt_node, migration, trtype, target_ip):
     The name is deterministic so crash recovery can locate it without FDB state.
 
     Returns (ctrl_name, hub_bdev, error_string|None).
+    ctrl_name is None when the source reuses its existing secondary bdev —
+    in that case no new controller was attached and cleanup must not detach.
     """
     ctrl_name = f"mighub_{migration.uuid[:8]}"
     hub_bdev = f"{ctrl_name}n1"
+
+    # Check if we already attached our hub controller in a prior iteration.
     if src_rpc.get_bdevs(hub_bdev):
         return ctrl_name, hub_bdev, None
+
+    # Case B overlap: when SRC is TGT-sec, the source already maintains a
+    # permanent NVMe connection to the target's hublvol subsystem as part of
+    # its HA secondary role.  That bdev lives at {tgt_lvstore}/hublvol on the
+    # source.  SPDK rejects a second controller to the same TRID (same target
+    # IP + port + NQN) with EEXIST (-17), so we must reuse this path instead.
+    existing_hub = f"{tgt_node.lvstore}/hublvol"
+    if src_rpc.get_bdevs(existing_hub):
+        logger.info(
+            f"_ensure_hub_attached: reusing existing secondary hub bdev "
+            f"{existing_hub} (src is tgt-sec; no new controller needed)"
+        )
+        return None, existing_hub, None
+
     hub_nqn = tgt_node.hublvol.nqn
     hub_port = tgt_node.hublvol.nvmf_port
     ret = src_rpc.bdev_nvme_attach_controller(ctrl_name, hub_nqn, target_ip, hub_port, trtype)
@@ -618,8 +636,6 @@ def _setup_snap_transfer(snap, snap_index, migration, src_node, tgt_node,
         return None, hub_err
 
     # Step 6: fire async transfer via hub
-    # ret = src_rpc.bdev_lvol_final_migration(
-    # src_lvol_composite, tgt_map_id, tgt_snap_composite, 2, hub_bdev)
     ret = src_rpc.bdev_lvol_transfer(src_composite, 0, 16, hub_bdev, "migrate", lvol_id=tgt_map_id)
     if ret is None:
         _cleanup()
@@ -1316,29 +1332,42 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
 
         # Step 3: connect source to target hub lvol
         ctrl_name = f"mighub_{migration.uuid[:8]}"
-        hub_nqn = tgt_node.hublvol.nqn
-        hub_port = tgt_node.hublvol.nvmf_port
-        ret = src_rpc.bdev_nvme_attach_controller(ctrl_name, hub_nqn, target_ip, hub_port, trtype)
-        if not ret:
-            # Attachment can fail with EEXIST (-17) if the task runner crashed
-            # after creating the hub controller in a previous attempt but before
-            # persisting transfer_context to the DB.  The zombie controller is
-            # still alive on the source SPDK.  Check whether the controller's
-            # namespace bdev already exists; if so, reuse it (idempotent retry).
-            if src_rpc.get_bdevs(f"{ctrl_name}n1"):
-                logger.info(
-                    f"Hub controller {ctrl_name} already exists on source "
-                    f"(zombie from previous attempt); reusing"
-                )
-            else:
-                _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc, secondary_rpc=sec_setup_rpc)
-                return False, True, "Failed to connect source to target hub"
 
-        hub_bdev = f"{ctrl_name}n1"
+        # Case B overlap: when SRC is TGT-sec the source already has a
+        # permanent secondary bdev for the target's hublvol.  Reuse it
+        # instead of attaching a new controller to the same TRID.
+        existing_hub = f"{tgt_node.lvstore}/hublvol"
+        if src_rpc.get_bdevs(existing_hub):
+            logger.info(
+                f"LVOL_MIGRATE Step 3: reusing existing secondary hub bdev "
+                f"{existing_hub} (src is tgt-sec)"
+            )
+            hub_bdev = existing_hub
+            ctrl_name = None  # no new controller — cleanup must not detach
+        else:
+            hub_nqn = tgt_node.hublvol.nqn
+            hub_port = tgt_node.hublvol.nvmf_port
+            ret = src_rpc.bdev_nvme_attach_controller(ctrl_name, hub_nqn, target_ip, hub_port, trtype)
+            if not ret:
+                # Attachment can fail with EEXIST (-17) if the task runner crashed
+                # after creating the hub controller in a previous attempt but before
+                # persisting transfer_context to the DB.  The zombie controller is
+                # still alive on the source SPDK.  Check whether the controller's
+                # namespace bdev already exists; if so, reuse it (idempotent retry).
+                if src_rpc.get_bdevs(f"{ctrl_name}n1"):
+                    logger.info(
+                        f"Hub controller {ctrl_name} already exists on source "
+                        f"(zombie from previous attempt); reusing"
+                    )
+                else:
+                    _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc, secondary_rpc=sec_setup_rpc)
+                    return False, True, "Failed to connect source to target hub"
+            hub_bdev = f"{ctrl_name}n1"
 
         # Step 4: locate the last migrated snapshot's composite name on the target
         if not migration.snaps_migrated:
-            src_rpc.bdev_nvme_detach_controller(ctrl_name)
+            if ctrl_name:
+                src_rpc.bdev_nvme_detach_controller(ctrl_name)
             _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc, secondary_rpc=sec_setup_rpc)
             return False, True, "No snapshots migrated; cannot perform final migration"
 
@@ -1346,7 +1375,8 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         try:
             last_snap = db.get_snapshot_by_id(last_snap_uuid)
         except KeyError:
-            src_rpc.bdev_nvme_detach_controller(ctrl_name)
+            if ctrl_name:
+                src_rpc.bdev_nvme_detach_controller(ctrl_name)
             _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc, secondary_rpc=sec_setup_rpc)
             return False, True, f"Last snapshot {last_snap_uuid} not found"
 
@@ -1360,7 +1390,8 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         ret = src_rpc.bdev_lvol_final_migration(
             src_lvol_composite, tgt_map_id, tgt_snap_composite, 2, hub_bdev)
         if ret is None:
-            src_rpc.bdev_nvme_detach_controller(ctrl_name)
+            if ctrl_name:
+                src_rpc.bdev_nvme_detach_controller(ctrl_name)
             _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc, secondary_rpc=sec_setup_rpc)
             return False, True, "bdev_lvol_final_migration failed"
 
