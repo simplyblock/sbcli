@@ -2499,6 +2499,20 @@ def _restart_storage_node_impl(
                 if dev['serial_number'] in known_sn:
                     snode_api.bind_device_to_spdk(dev['address'])
 
+    # Pre-flight: if the node agent (SNodeAPI) is unreachable, fail this restart
+    # attempt fast and let the task runner reschedule, instead of wedging in the
+    # upcoming info()/spdk_process_start RPC retry+backoff (incident 2026-06-03
+    # LVS_8720: spdk_process_start against an unreachable vm202 agent retried for
+    # ~8 minutes, holding the restart task and a peer-port block the whole time).
+    # An unreachable agent means the host cannot host SPDK anyway, so there is
+    # nothing to start here.
+    from simplyblock_core.controllers import health_controller
+    if not health_controller._check_node_api(snode):
+        logger.error(
+            "Node agent for %s is unreachable; aborting this restart attempt "
+            "(task runner will retry)", snode.get_id())
+        return False
+
     active_tcp = False
     active_rdma = False
     fabric_tcp = cluster.fabric_tcp
