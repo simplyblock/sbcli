@@ -62,6 +62,7 @@ def _make_node(node_id, status=StorageNode.STATUS_ONLINE,
 
     rpc = MagicMock()
     rpc.distr_shared_placement = MagicMock(return_value=True)
+    rpc.jm_set_shared_placement = MagicMock(return_value=True)
     n.rpc_client_mock = rpc
     n.rpc_client.return_value = rpc
 
@@ -231,6 +232,36 @@ class TestEnableHappyPath(_Patched):
             # No name -> applies to all distrib bdevs on the node.
             self.assertNotIn("name", kwargs)
 
+    def test_dispatches_jm_shared_placement_to_every_online_node(self):
+        # JM is migrated in full analogy with distrib, in the same loop.
+        c = _make_cluster()
+        nodes = [_make_node("n1"), _make_node("n2"), _make_node("n3")]
+        mod, _db = self._patch(c, nodes)
+
+        ok = mod.set_shared_placement(c.uuid, enable=True)
+
+        self.assertTrue(ok)
+        for n in nodes:
+            n.rpc_client_mock.jm_set_shared_placement.assert_called_once()
+            kwargs = n.rpc_client_mock.jm_set_shared_placement.call_args.kwargs
+            self.assertEqual(kwargs.get("enable"), True)
+            # No name -> applies to all JM bdevs on the node.
+            self.assertNotIn("name", kwargs)
+
+    def test_jm_rpc_failure_without_force_aborts_persist(self):
+        # A JM RPC rejection alone (distrib OK) must still abort + not persist.
+        c = _make_cluster()
+        n1 = _make_node("n1")
+        n2 = _make_node("n2")
+        n2.rpc_client_mock.jm_set_shared_placement.return_value = False
+        mod, _db = self._patch(c, [n1, n2])
+
+        ok = mod.set_shared_placement(c.uuid, enable=True, force=False)
+
+        self.assertFalse(ok)
+        self.assertFalse(c.shared_placement)
+        c.write_to_db.assert_not_called()
+
     def test_persists_flag_on_cluster_and_every_node_stack(self):
         c = _make_cluster()
         nodes = [
@@ -354,6 +385,58 @@ class TestRpcMethodShape(unittest.TestCase):
         params = mock_req.call_args.args[1]
         self.assertEqual(params, {"enable": True})
         self.assertNotIn("name", params)
+
+    # --- JM analog ---------------------------------------------------------
+
+    def test_bdev_jm_create_emits_shared_placement_default_on(self):
+        from simplyblock_core.rpc_client import (
+            RPCClient, JM_SHARED_PLACEMENT_DEFAULT)
+
+        with patch("requests.session"):
+            c = RPCClient("127.0.0.1", 8081, "u", "p", timeout=1, retry=0)
+        with patch.object(c, "_request", return_value=True) as mock_req:
+            c.bdev_jm_create(name="jm_1", name_storage1="alceml_1")
+
+        self.assertEqual(mock_req.call_args.args[0], "bdev_jm_create")
+        params = mock_req.call_args.args[1]
+        # Hard-coded default: every JM is created in shared-placement mode.
+        self.assertEqual(params["shared_placement"], JM_SHARED_PLACEMENT_DEFAULT)
+        self.assertTrue(params["shared_placement"])
+
+    def test_jm_set_shared_placement_single_bdev(self):
+        from simplyblock_core.rpc_client import RPCClient
+
+        with patch("requests.session"):
+            c = RPCClient("127.0.0.1", 8081, "u", "p", timeout=1, retry=0)
+        with patch.object(c, "_request", return_value=True) as mock_req:
+            c.jm_set_shared_placement(name="jm_1", enable=True)
+
+        self.assertEqual(mock_req.call_args.args[0], "jm_set_shared_placement")
+        self.assertEqual(mock_req.call_args.args[1],
+                         {"name": "jm_1", "enable": True})
+
+    def test_jm_set_shared_placement_all_bdevs_when_name_omitted(self):
+        from simplyblock_core.rpc_client import RPCClient
+
+        with patch("requests.session"):
+            c = RPCClient("127.0.0.1", 8081, "u", "p", timeout=1, retry=0)
+        with patch.object(c, "_request", return_value=True) as mock_req:
+            c.jm_set_shared_placement(enable=True)
+
+        params = mock_req.call_args.args[1]
+        self.assertEqual(params, {"enable": True})
+        self.assertNotIn("name", params)
+
+    def test_jm_set_shared_placement_disable(self):
+        from simplyblock_core.rpc_client import RPCClient
+
+        with patch("requests.session"):
+            c = RPCClient("127.0.0.1", 8081, "u", "p", timeout=1, retry=0)
+        with patch.object(c, "_request", return_value=True) as mock_req:
+            c.jm_set_shared_placement(name="jm_1", enable=False)
+
+        self.assertEqual(mock_req.call_args.args[1],
+                         {"name": "jm_1", "enable": False})
 
 
 if __name__ == "__main__":
