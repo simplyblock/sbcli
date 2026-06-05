@@ -5489,6 +5489,46 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
     return True
 
 
+def _release_lvs_subsys_port_on_peers(lvs_node, exclude_node_id, db_controller):
+    """Best-effort release of an LVS subsystem port on every replica peer.
+
+    recreate_lvstore / recreate_lvstore_on_non_leader block the LVS port on
+    the surviving leader (and other peers) while a restarting node rebuilds
+    its lvstore, and release it only via their internal abort/success paths.
+    A RAW RPC exception mid-rebuild (e.g. the restarting node's SPDK going
+    unreachable) unwinds PAST those release points, leaving a peer's client
+    IO blocked for the entire failed restart and its retries — the
+    2026-06-03 LVS_8720 incident, where vm203 (the sole surviving leader)
+    stayed port-blocked for 10m12s. Calling this on any recreate failure
+    guarantees the port is reopened. Idempotent: 'allow' is a no-op when the
+    port is not blocked.
+    """
+    try:
+        port = lvs_node.get_lvol_subsys_port(lvs_node.lvstore)
+    except Exception as e:
+        logger.error("Defensive unblock: could not resolve LVS port for %s: %s",
+                     lvs_node.get_id(), e)
+        return
+    peer_ids = {pid for pid in (lvs_node.get_id(),
+                                lvs_node.secondary_node_id,
+                                lvs_node.tertiary_node_id)
+                if pid and pid != exclude_node_id}
+    for pid in peer_ids:
+        try:
+            peer = db_controller.get_storage_node_by_id(pid)
+            if not peer or peer.status != StorageNode.STATUS_ONLINE:
+                continue
+            port_type = "udp" if peer.active_rdma else "tcp"
+            FirewallClient(peer, timeout=5, retry=2).firewall_set_port(
+                port, port_type, "allow", peer.rpc_port)
+            tcp_ports_events.port_allowed(peer, port)
+            logger.info("Defensive unblock: allowed LVS port %s on peer %s after "
+                        "failed recreate of %s", port, pid, lvs_node.lvstore)
+        except Exception as e:
+            logger.error("Defensive unblock of LVS port %s on %s failed: %s",
+                         port, pid, e)
+
+
 def recreate_all_lvstores(snode, force=False):
     """Recreate all LVS stacks on a restarting node: primary, secondary, tertiary.
 
@@ -5499,15 +5539,25 @@ def recreate_all_lvstores(snode, force=False):
 
     # --- Step 1: Primary LVS ---
     logger.info("=== Phase: Primary LVS recreation ===")
-    ret = recreate_lvstore(snode, force=force)
+    try:
+        ret = recreate_lvstore(snode, force=force)
+    except Exception:
+        # A raw RPC exception (e.g. the restarting node's SPDK going
+        # unreachable mid-rebuild) unwinds past recreate_lvstore's internal
+        # abort/unblock, leaving the surviving leader's LVS port blocked for
+        # the whole failed restart (incident 2026-06-03 LVS_8720). Release it.
+        _release_lvs_subsys_port_on_peers(snode, snode.get_id(), db_controller)
+        raise
     snode = db_controller.get_storage_node_by_id(snode.get_id())
     if not ret:
         logger.error("Failed to recreate primary lvstore")
+        _release_lvs_subsys_port_on_peers(snode, snode.get_id(), db_controller)
         return False
 
     # --- Step 2: Secondary LVS ---
     if snode.lvstore_stack_secondary:
         logger.info("=== Phase: Secondary LVS recreation ===")
+        secondary_primary_node = None
         try:
             secondary_primary_node = db_controller.get_storage_node_by_id(snode.lvstore_stack_secondary)
             secondary_primary_node.lvstore_status = "in_creation"
@@ -5530,10 +5580,14 @@ def recreate_all_lvstores(snode, force=False):
                 logger.error(f"Failed to recreate secondary LVS {secondary_primary_node.lvstore}")
         except Exception as e:
             logger.error("Secondary LVS recreation failed: %s", e)
+            if secondary_primary_node is not None:
+                _release_lvs_subsys_port_on_peers(
+                    secondary_primary_node, snode.get_id(), db_controller)
 
     # --- Step 3: Tertiary LVS ---
     if snode.lvstore_stack_tertiary:
         logger.info("=== Phase: Tertiary LVS recreation ===")
+        tertiary_primary_node = None
         try:
             tertiary_primary_node = db_controller.get_storage_node_by_id(snode.lvstore_stack_tertiary)
             tertiary_primary_node.lvstore_status = "in_creation"
@@ -5569,6 +5623,9 @@ def recreate_all_lvstores(snode, force=False):
                 logger.error(f"Failed to recreate tertiary LVS {tertiary_primary_node.lvstore}")
         except Exception as e:
             logger.error("Tertiary LVS recreation failed: %s", e)
+            if tertiary_primary_node is not None:
+                _release_lvs_subsys_port_on_peers(
+                    tertiary_primary_node, snode.get_id(), db_controller)
 
     return True
 
