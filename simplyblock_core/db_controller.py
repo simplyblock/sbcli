@@ -183,6 +183,7 @@ class DBController(metaclass=Singleton):
     def get_mini_lvols(self) -> List[LVolMini]:
         start_time = time.time()
         lvols = LVolMini().read_from_db(self.kv_store)
+        lvols = [lvol for lvol in lvols if lvol.status != LVol.STATUS_DELETED]
         ret = sorted(lvols, key=lambda x: x.create_dt)
         end_time = time.time()
         logger.debug(f"time taken to read all mini lvols: {round(end_time - start_time, 2)}s")
