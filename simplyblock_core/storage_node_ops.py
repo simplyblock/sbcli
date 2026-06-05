@@ -3116,7 +3116,7 @@ def list_storage_nodes(is_json, cluster_id=None):
         nodes = db_controller.get_storage_nodes()
     data = []
     output = ""
-    all_lvols = db_controller.get_lvols()
+    all_lvols = db_controller.get_mini_lvols()
     for node in nodes:
         logger.debug(node)
         logger.debug("*" * 20)
@@ -5009,7 +5009,7 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
         else:
             logger.info("creating subsystem %s (allow_any_host=%s)", lvol.nqn, allow_any)
             snode_rpc_client.subsystem_create(lvol.nqn, lvol.ha_type, lvol.uuid, min_cntlid,
-                                              max_namespaces=constants.LVO_MAX_NAMESPACES_PER_SUBSYS,
+                                              max_namespaces=lvol.max_namespace_per_subsys,
                                               allow_any_host=allow_any)
         if lvol.allowed_hosts:
             _reapply_allowed_hosts(lvol, snode, snode_rpc_client)
@@ -5799,7 +5799,7 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
         else:
             logger.info("creating subsystem %s (allow_any_host=%s)", lvol.nqn, allow_any)
             ret = rpc_client.subsystem_create(lvol.nqn, lvol.ha_type, lvol.uuid, 1,
-                                              max_namespaces=constants.LVO_MAX_NAMESPACES_PER_SUBSYS,
+                                              max_namespaces=lvol.max_namespace_per_subsys,
                                               allow_any_host=allow_any)
             if ret:
                 created_subsystems.append(lvol.nqn)

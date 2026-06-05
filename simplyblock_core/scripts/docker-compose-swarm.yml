@@ -32,6 +32,72 @@ services:
         reservations:
           memory: 4g
 
+
+  fdb-server2:
+    <<: *service-base
+    image: foundationdb/foundationdb:7.3.63
+    networks:
+      - hostnet
+    environment:
+      FDB_CLUSTER_FILE_CONTENTS: '$FDB_CLUSTER_FILE_CONTENTS'
+      FDB_NETWORKING_MODE: 'container'
+      FDB_PORT: 4501
+    volumes:
+      - "fdb_server_data_2:/var/fdb"
+    deploy:
+      mode: global
+      placement:
+        constraints: [ node.role == manager ]
+
+  fdb-server3:
+    <<: *service-base
+    image: foundationdb/foundationdb:7.3.63
+    networks:
+      - hostnet
+    environment:
+      FDB_CLUSTER_FILE_CONTENTS: '$FDB_CLUSTER_FILE_CONTENTS'
+      FDB_NETWORKING_MODE: 'container'
+      FDB_PORT: 4502
+    volumes:
+      - "fdb_server_data_3:/var/fdb"
+    deploy:
+      mode: global
+      placement:
+        constraints: [ node.role == manager ]
+
+  fdb-server4:
+    <<: *service-base
+    image: foundationdb/foundationdb:7.3.63
+    networks:
+      - hostnet
+    environment:
+      FDB_CLUSTER_FILE_CONTENTS: '$FDB_CLUSTER_FILE_CONTENTS'
+      FDB_NETWORKING_MODE: 'container'
+      FDB_PORT: 4503
+    volumes:
+      - "fdb_server_data_4:/var/fdb"
+    deploy:
+      mode: global
+      placement:
+        constraints: [ node.role == manager ]
+
+  fdb-server5:
+    <<: *service-base
+    image: foundationdb/foundationdb:7.3.63
+    networks:
+      - hostnet
+    environment:
+      FDB_CLUSTER_FILE_CONTENTS: '$FDB_CLUSTER_FILE_CONTENTS'
+      FDB_NETWORKING_MODE: 'container'
+      FDB_PORT: 4504
+    volumes:
+      - "fdb_server_data_5:/var/fdb"
+    deploy:
+      mode: global
+      placement:
+        constraints: [ node.role == manager ]
+
+
   fdb-backup-agent:
     <<: *service-base
     image: foundationdb/foundationdb:7.3.63
@@ -63,6 +129,83 @@ services:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
       FLASK_DEBUG: "False"
       FLASK_ENV: "production"
+      FLASK_PORT: 5000
+
+  WebAppAPI2:
+    <<: *service-base
+    image: $SIMPLYBLOCK_DOCKER_IMAGE
+    command: "python3 simplyblock_web/app.py"
+    networks:
+      - localnet
+    deploy:
+      endpoint_mode: dnsrr
+      mode: global
+      placement:
+        constraints: [node.role == manager]
+    volumes:
+      - "/etc/foundationdb:/etc/foundationdb"
+    environment:
+      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      FLASK_DEBUG: "False"
+      FLASK_ENV: "production"
+      FLASK_PORT: 5001
+
+  WebAppAPI3:
+    <<: *service-base
+    image: $SIMPLYBLOCK_DOCKER_IMAGE
+    command: "python3 simplyblock_web/app.py"
+    networks:
+      - localnet
+    deploy:
+      endpoint_mode: dnsrr
+      mode: global
+      placement:
+        constraints: [node.role == manager]
+    volumes:
+      - "/etc/foundationdb:/etc/foundationdb"
+    environment:
+      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      FLASK_DEBUG: "False"
+      FLASK_ENV: "production"
+      FLASK_PORT: 5002
+
+  WebAppAPI4:
+    <<: *service-base
+    image: $SIMPLYBLOCK_DOCKER_IMAGE
+    command: "python3 simplyblock_web/app.py"
+    networks:
+      - localnet
+    deploy:
+      endpoint_mode: dnsrr
+      mode: global
+      placement:
+        constraints: [node.role == manager]
+    volumes:
+      - "/etc/foundationdb:/etc/foundationdb"
+    environment:
+      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      FLASK_DEBUG: "False"
+      FLASK_ENV: "production"
+      FLASK_PORT: 5003
+
+  WebAppAPI5:
+    <<: *service-base
+    image: $SIMPLYBLOCK_DOCKER_IMAGE
+    command: "python3 simplyblock_web/app.py"
+    networks:
+      - localnet
+    deploy:
+      endpoint_mode: dnsrr
+      mode: global
+      placement:
+        constraints: [node.role == manager]
+    volumes:
+      - "/etc/foundationdb:/etc/foundationdb"
+    environment:
+      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+      FLASK_DEBUG: "False"
+      FLASK_ENV: "production"
+      FLASK_PORT: 5004
 
   StorageNodeMonitor:
     <<: *service-base
@@ -433,3 +576,10 @@ networks:
     ipam:
       config:
         - subnet: 192.168.1.0/24
+
+
+volumes:
+  fdb_server_data_2:
+  fdb_server_data_3:
+  fdb_server_data_4:
+  fdb_server_data_5:

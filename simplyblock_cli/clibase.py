@@ -589,9 +589,6 @@ class CLIWrapperBase:
     def volume__list(self, sub_command, args):
         return lvol_controller.list_lvols(args.json, args.cluster_id, args.pool, args.all)
 
-    def volume__list_mem(self, sub_command, args):
-        return lvol_controller.list_lvols_mem(args.json, args.csv)
-
     def volume__get(self, sub_command, args):
         return lvol_controller.get_lvol(args.volume_id, args.json)
 

@@ -94,6 +94,7 @@ class RPCClient:
 
     # ref: https://spdk.io/doc/jsonrpc.html
     DEFAULT_ALLOWED_METHODS = ["HEAD", "GET", "PUT", "DELETE", "OPTIONS", "TRACE", "POST"]
+    RPC_NO_PRINT_OUTPUT = ["bdev_get_bdevs", "nvmf_get_subsystems", "bdev_get_iostat"]
 
     def __init__(self, host, port, username, password, timeout=180, retry=3):
         self.host = host
@@ -159,7 +160,7 @@ class RPCClient:
         if ret_code == 200:
             try:
                 data = response.json()
-                if method != "bdev_get_bdevs":
+                if method not in self.RPC_NO_PRINT_OUTPUT:
                     logger.debug("Response json: %s", json.dumps(data))
             except Exception:
                 logger.debug("Response ret_content: %s", ret_content)
@@ -379,7 +380,11 @@ class RPCClient:
         }
         return self._request2("ultra21_alloc_ns_init", params)
 
-    def nvmf_subsystem_add_ns(self, nqn, dev_name, uuid=None, nguid=None, nsid=None, eui64=None,
+    def nvmf_subsystem_add_ns(self, nqn, dev_name, uuid=None, nguid=None, nsid=None, eui64=None, idempotent=True):
+        ret, err = self.nvmf_subsystem_add_ns2(nqn, dev_name, uuid, nguid, nsid, eui64, idempotent)
+        return ret
+
+    def nvmf_subsystem_add_ns2(self, nqn, dev_name, uuid=None, nguid=None, nsid=None, eui64=None,
                               idempotent=True):
         """Add a namespace to an NVMe-oF subsystem.
 
@@ -445,7 +450,7 @@ class RPCClient:
             params['namespace']['ptpl_file'] = "/mnt/ns_resv"+eui64+".json"
 
 
-        return self._request("nvmf_subsystem_add_ns", params)
+        return self._request2("nvmf_subsystem_add_ns", params)
 
     def nvmf_subsystem_remove_ns(self, nqn, nsid):
         params = {
@@ -540,10 +545,14 @@ class RPCClient:
         return self._request("bdev_lvol_set_read_only", params)
 
     def lvol_create_snapshot(self, lvol_id, snapshot_name):
+        ret, _ = self.lvol_create_snapshot2(lvol_id, snapshot_name)
+        return ret
+
+    def lvol_create_snapshot2(self, lvol_id, snapshot_name):
         params = {
             "lvol_name": lvol_id,
             "snapshot_name": snapshot_name}
-        return self._request("bdev_lvol_snapshot", params)
+        return self._request2("bdev_lvol_snapshot", params)
 
     def lvol_clone(self, snapshot_name, clone_name):
         params = {

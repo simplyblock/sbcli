@@ -371,7 +371,7 @@ def sum_records(records):
 def _used_bdev_name_numbers(db_controller, all_lvols=None, all_snapshots=None):
     used = set()
     if not all_lvols:
-        all_lvols = db_controller.get_lvols()
+        all_lvols = db_controller.get_mini_lvols()
 
     if not all_snapshots:
         all_snapshots = db_controller.get_snapshots()
@@ -388,7 +388,7 @@ def get_random_vuid(all_lvols=None, all_snapshots=None):
     from simplyblock_core.db_controller import DBController
     db_controller = DBController()
     if not all_lvols:
-        all_lvols = db_controller.get_lvols()
+        all_lvols = db_controller.get_mini_lvols()
 
     used_vuids = []
     nodes = db_controller.get_storage_nodes()

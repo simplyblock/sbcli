@@ -373,7 +373,6 @@ class TestDataPlaneEscalateNoPeersFallback(unittest.TestCase):
         votes_p = patch.object(mod, "_count_data_plane_votes", return_value=votes)
         sno_p = patch.object(mod, "set_node_offline")
         mock_db = db_p.start()
-        mock_votes = votes_p.start()
         mock_sno = sno_p.start()
         self.addCleanup(db_p.stop)
         self.addCleanup(votes_p.stop)
