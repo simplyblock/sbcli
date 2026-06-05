@@ -16,6 +16,13 @@ from urllib3 import Retry
 
 logger = utils.get_logger()
 
+# Default shared-placement mode for newly-created JM bdevs. Hard-coded ON so
+# every JM created post-upgrade (including on a node restart) comes up in
+# shared-placement mode, analogous to the distrib shared_placement flag. The
+# runtime flip for already-existing JMs is done by jm_set_shared_placement
+# (invoked from cluster_ops.set_shared_placement after an upgrade).
+JM_SHARED_PLACEMENT_DEFAULT = True
+
 # Shared per-node cache for expensive read-only RPCs (e.g. bdev_get_bdevs, nvmf_get_subsystems).
 # Key: (host, port, method_name), Value: (timestamp, result)
 _rpc_cache: dict[tuple, tuple[float, Any]] = {}
@@ -723,6 +730,24 @@ class RPCClient:
             params["name"] = name
         return self._request("distr_shared_placement", params)
 
+    def jm_set_shared_placement(self, name=None, enable=True):
+        """Flip the shared_placement mode of JM bdevs at runtime.
+
+        The JM analog of ``distr_shared_placement`` — invoked once after an
+        upgrade (from ``cluster_ops.set_shared_placement``) to migrate
+        already-existing JM bdevs into shared-placement mode. New JMs are
+        created in this mode by default (see JM_SHARED_PLACEMENT_DEFAULT).
+
+        Args:
+            name: target a single JM bdev. If None / empty, the flag is
+                applied to every JM bdev on this node.
+            enable: True to enable shared-placement mode, False to disable.
+        """
+        params: dict = {"enable": bool(enable)}
+        if name:
+            params["name"] = name
+        return self._request("jm_set_shared_placement", params)
+
     def bdev_lvol_delete_lvstore(self, name):
         params = {"lvs_name": name}
         return self._request2("bdev_lvol_delete_lvstore", params)
@@ -1032,7 +1057,11 @@ class RPCClient:
         params = {
             "name": name,
             "name_storage1": name_storage1,
-            "block_size": block_size
+            "block_size": block_size,
+            # Created in shared-placement mode by default (post-upgrade), the
+            # JM analog of distrib's shared_placement create flag. Set after a
+            # restart too, since JM recreation goes through this same call.
+            "shared_placement": JM_SHARED_PLACEMENT_DEFAULT,
         }
         if jm_cpu_mask:
             params["bdb_lcpu_mask"] = int(jm_cpu_mask, 16)
