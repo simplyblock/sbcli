@@ -2382,6 +2382,24 @@ def restart_storage_node(
                     post_node, StorageNode.STATUS_OFFLINE, post_node.status,
                     caused_by="restart_cleanup")
                 distr_controller.send_node_status_event(post_node, StorageNode.STATUS_OFFLINE)
+
+                # Failback compensation. The restart impl demotes this primary's
+                # first_sec to non_optimized (trigger_ana_failback_for_node) in
+                # anticipation of the primary resuming leadership. Since the
+                # restart FAILED and the node is now OFFLINE, that demotion would
+                # otherwise leave the LVS with NO optimized path — the
+                # 2026-06-03 LVS_8720 zero-leader outage, where the primary's
+                # SPDK was killed mid-restart just after the surviving secondary
+                # had been handed leadership back. Re-promote the secondary so it
+                # serves IO again. Idempotent; a no-op for non-primary nodes or
+                # an offline first_sec.
+                try:
+                    trigger_ana_failover_for_node(post_node)
+                except Exception as ana_exc:
+                    logger.error(
+                        f"Restart cleanup: re-promoting secondary (ANA failover) "
+                        f"for {node_id} raised: {ana_exc}"
+                    )
         except Exception as cleanup_exc:
             logger.error(f"Failed to reset node {node_id} after failed restart: {cleanup_exc}")
     return result
