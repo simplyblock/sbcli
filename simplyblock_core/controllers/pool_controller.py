@@ -102,13 +102,13 @@ def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes,
         pool.dhchap_ctrlr_key = utils.generate_dhchap_key(length=32)
 
 
-    with create_kms_connection(cluster) as kms:
-        try:
+    try:
+        with create_kms_connection(cluster) as kms:
             kms.create_key_encryption_key(pool.get_id())
             logger.info("Created pool key")
-        except KMSException:
-            logger.exception("Failed to create pool key")
-            return False
+    except KMSException:
+        logger.exception("Failed to create pool key")
+        return False
 
     pool.status = "active"
     pool.write_to_db(db_controller.kv_store)
@@ -132,6 +132,9 @@ def add_host_to_pool(pool_id, host_nqn):
 
     if not pool.dhchap:
         return False, "Pool does not have DHCHAP enabled"
+
+    if utils.NQN_PATTERN.match(host_nqn) is None:
+        return False, f"Invalid host NQN format: {host_nqn}"
 
     if host_nqn in pool.allowed_hosts:
         return False, f"Host {host_nqn} is already in the pool's allowed list"
@@ -369,7 +372,8 @@ def list_pools(is_json, cluster_id=None):
     db_controller = DBController()
     pools = db_controller.get_pools(cluster_id)
     data = []
-    all_lvols = db_controller.get_lvols() or []
+    all_lvols = db_controller.get_mini_lvols() or []
+    all_snapshots = db_controller.get_mini_snapshots() or []
     for pool in pools:
         lvols_count = 0
         for lvol in all_lvols:
@@ -378,7 +382,7 @@ def list_pools(is_json, cluster_id=None):
         data.append({
             "UUID": pool.get_id(),
             "Name": pool.pool_name,
-            "Capacity": utils.humanbytes(get_pool_total_capacity(pool.get_id())),
+            "Capacity": utils.humanbytes(get_pool_total_capacity(pool.get_id(), all_lvols=all_lvols, all_snaps=all_snapshots)),
             "Max size": utils.humanbytes(pool.pool_max_size),
             "LVol Max Size": utils.humanbytes(pool.lvol_max_size),
             "LVols": f"{lvols_count}",
@@ -503,7 +507,7 @@ def get_pool_total_capacity(pool_id, all_lvols=None, all_snaps=None):
         total += lvol.size
 
     if not all_snaps:
-        all_snaps = db_controller.get_snapshots()
+        all_snaps = db_controller.get_mini_snapshots()
     for snap in all_snaps:
         if snap.lvol.pool_uuid == pool_id:
             total += snap.used_size

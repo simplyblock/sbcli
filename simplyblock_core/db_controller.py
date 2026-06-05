@@ -2,6 +2,7 @@
 import json
 import logging
 import os.path
+import time
 
 import fdb
 from typing import List, Optional
@@ -10,7 +11,7 @@ from simplyblock_core import constants
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.job_schedule import JobSchedule
-from simplyblock_core.models.lvol_model import LVol
+from simplyblock_core.models.lvol_model import LVol, LVolReplication, LVolMini
 from simplyblock_core.models.mgmt_node import MgmtNode
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
 from simplyblock_core.models.pool import Pool
@@ -18,7 +19,7 @@ from simplyblock_core.models.port_stat import PortStat
 from simplyblock_core.models.backup import Backup, BackupChainLock, BackupPolicy, BackupPolicyAttachment
 from simplyblock_core.models.lvol_migration import LVolMigration
 from simplyblock_core.models.qos import QOSClass
-from simplyblock_core.models.snapshot import SnapShot
+from simplyblock_core.models.snapshot import SnapShot, SnapShotMini
 from simplyblock_core.models.stats import DeviceStatObject, NodeStatObject, ClusterStatObject, LVolStatObject, \
     PoolStatObject, CachedLVolStatObject
 from simplyblock_core.models.storage_node import StorageNode, NodeLVolDelLock
@@ -140,8 +141,12 @@ class DBController(metaclass=Singleton):
         return cluster_lvols
 
     def get_all_lvols(self) -> List[LVol]:
+        start_time = time.time()
         lvols = LVol().read_from_db(self.kv_store)
-        return sorted(lvols, key=lambda x: x.create_dt)
+        ret = sorted(lvols, key=lambda x: x.create_dt)
+        end_time = time.time()
+        logger.debug(f"time taken to read all LVols: {round(end_time - start_time, 2)}s")
+        return ret
 
     def get_lvols_by_node_id(self, node_id) -> List[LVol]:
         lvols = []
@@ -157,13 +162,6 @@ class DBController(metaclass=Singleton):
                 lvols.append(lvol)
         return sorted(lvols, key=lambda x: x.create_dt)
 
-    def get_lvols_by_namespace(self, namespace) -> List[LVol]:
-        lvols = []
-        for lvol in self.get_lvols():
-            if lvol.namespace and lvol.namespace == namespace:
-                lvols.append(lvol)
-        return sorted(lvols, key=lambda x: x.create_dt)
-
     def get_hostnames_by_pool_id(self, pool_id) -> List[str]:
         lvols = self.get_lvols_by_pool_id(pool_id)
         hostnames = []
@@ -173,10 +171,30 @@ class DBController(metaclass=Singleton):
         return hostnames
 
     def get_snapshots(self, cluster_id=None) -> List[SnapShot]:
+        start_time = time.time()
         snaps = SnapShot().read_from_db(self.kv_store)
         if cluster_id:
             snaps = [n for n in snaps if n.cluster_id == cluster_id]
-        return sorted(snaps, key=lambda x: x.created_at)
+        ret = sorted(snaps, key=lambda x: x.created_at)
+        end_time = time.time()
+        logger.debug(f"time taken to read all SnapShots: {round(end_time - start_time, 2)}s")
+        return ret
+
+    def get_mini_lvols(self) -> List[LVolMini]:
+        start_time = time.time()
+        lvols = LVolMini().read_from_db(self.kv_store)
+        ret = sorted(lvols, key=lambda x: x.create_dt)
+        end_time = time.time()
+        logger.debug(f"time taken to read all mini lvols: {round(end_time - start_time, 2)}s")
+        return ret
+
+    def get_mini_snapshots(self) -> List[SnapShotMini]:
+        start_time = time.time()
+        snaps = SnapShotMini().read_from_db(self.kv_store)
+        ret = sorted(snaps, key=lambda x: x.created_at)
+        end_time = time.time()
+        logger.debug(f"time taken to read all mini snapshots: {round(end_time - start_time, 2)}s")
+        return ret
 
     def get_snapshot_by_id(self, id) -> SnapShot:
         ret = SnapShot().read_from_db(self.kv_store, id)
@@ -189,6 +207,10 @@ class DBController(metaclass=Singleton):
         if not lvols:
             raise KeyError(f'LVol {id} not found')
         return lvols[0]
+
+    def get_lvol_replication_objects(self) -> List[LVolReplication]:
+        ret = LVolReplication().read_from_db(self.kv_store)
+        return sorted(ret, key=lambda x: x.create_dt)
 
     def get_lvol_by_name(self, lvol_name) -> LVol:
         for lvol in self.get_lvols():
@@ -293,7 +315,7 @@ class DBController(metaclass=Singleton):
 
     def get_snapshots_by_node_id(self, node_id) -> List[SnapShot]:
         ret = []
-        snaps = SnapShot().read_from_db(self.kv_store)
+        snaps = self.get_snapshots()
         for snap in snaps:
             if snap.lvol.node_id == node_id:
                 ret.append(snap)
@@ -301,7 +323,7 @@ class DBController(metaclass=Singleton):
 
     def get_snapshots_by_pool_id(self, pool_id) -> List[SnapShot]:
         ret = []
-        snaps = SnapShot().read_from_db(self.kv_store)
+        snaps = self.get_snapshots()
         for snap in snaps:
             if snap.pool_uuid == pool_id:
                 ret.append(snap)

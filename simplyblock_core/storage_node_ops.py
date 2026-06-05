@@ -1547,7 +1547,8 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
              small_bufsize=0, large_bufsize=0,
              num_partitions_per_dev=0, jm_percent=0, enable_test_device=False,
              namespace=None, enable_ha_jm=False, cr_name=None, cr_namespace=None, cr_plural=None,
-             id_device_by_nqn=False, partition_size="", ha_jm_count=None, format_4k=False, spdk_proxy_image=None):
+             id_device_by_nqn=False, partition_size="", ha_jm_count=None, format_4k=False,
+             spdk_proxy_image=None, spdk_sys_mem=None):
     snode_api = SNodeClient(node_addr)
     node_info, _ = snode_api.info()
     if node_info.get("nodes_config") and node_info["nodes_config"].get("nodes"):
@@ -1644,7 +1645,10 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             return False
 
         # Calculate minimum sys memory
-        minimum_sys_memory = node_config.get("sys_memory")
+        if spdk_sys_mem:
+            minimum_sys_memory = int(utils.parse_size(spdk_sys_mem))
+        else:
+            minimum_sys_memory = node_config.get("sys_memory")
         max_lvol = node_config.get("max_lvol")
         ssd_pcie = node_config.get("ssd_pcis")
 
@@ -2307,7 +2311,7 @@ def restart_storage_node(
             clear_data=clear_data, new_ssd_pcie=new_ssd_pcie,
             force_lvol_recreate=force_lvol_recreate, spdk_proxy_image=spdk_proxy_image)
     except Exception:
-        logger.exception("restart_storage_node raised unexpectedly")
+        logger.error("restart_storage_node raised unexpectedly")
     finally:
         # Trust the DB. If the impl raised after the ONLINE write was
         # already committed, the node IS factually online — peers see
@@ -2616,6 +2620,7 @@ def _restart_storage_node_impl(
                     snode.ssd_pcie.append(new_ssd)
 
         fdb_connection = cluster.db_connection
+        snode_api.set_hugepages()
         results, err = snode_api.spdk_process_start(
             snode.l_cores, snode.spdk_mem, snode.spdk_image, spdk_debug, cluster_ip, fdb_connection,
             snode.namespace, snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password,
@@ -3111,7 +3116,7 @@ def list_storage_nodes(is_json, cluster_id=None):
         nodes = db_controller.get_storage_nodes()
     data = []
     output = ""
-    all_lvols = db_controller.get_lvols()
+    all_lvols = db_controller.get_mini_lvols()
     for node in nodes:
         logger.debug(node)
         logger.debug("*" * 20)
@@ -3561,11 +3566,17 @@ def shutdown_storage_node(node_id, force=False):
 
     logger.info("Node found: %s in state: %s", snode.hostname, snode.status)
 
-    if not force:
-        allowed, reason = _check_ftt_allows_node_removal(node_id, db_controller)
-        if not allowed:
-            logger.error(f"Cannot shutdown node: {reason}")
-            return False, reason
+    # NOTE: shutdown does not consult _check_ftt_allows_node_removal.
+    # Removal and shutdown are different operations: removing a node
+    # permanently changes the cluster's storage budget, while shutting one
+    # down is a transient state that the cluster is meant to absorb under
+    # its FTT contract. Conflating the two was added in commit fbdffea3
+    # (2026-03-28) and caused soak/operator workflows to wait for
+    # rebalancing to drain — the wrong policy for an operation whose
+    # whole point is to disrupt the cluster on purpose. The web API
+    # layer (simplyblock_web/api/v{1,2}/storage_node.py) still gates on
+    # this for its own non-force shutdown endpoint, where the policy
+    # decision belongs.
 
     # Guard: no concurrent shutdown + restart (design: mutual exclusion)
     for peer in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
@@ -4083,7 +4094,8 @@ def start_storage_node_api_container(node_ip, cluster_ip=None):
             # /mnt/ramdisk/spdk_<port>/spdk.sock. Without this, the endpoint
             # has to fall through to dockerd, which can stall for 60-80s
             # during post-outage Swarm reconciliation (incident 2026-04-24).
-            '/mnt/ramdisk:/mnt/ramdisk'],
+            '/mnt/ramdisk:/mnt/ramdisk',
+            '/tmp/simplyblock:/tmp/simplyblock'],
         restart_policy={"Name": "always"},
         environment=[
             f"DOCKER_IP={node_ip}",
@@ -4997,7 +5009,7 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
         else:
             logger.info("creating subsystem %s (allow_any_host=%s)", lvol.nqn, allow_any)
             snode_rpc_client.subsystem_create(lvol.nqn, lvol.ha_type, lvol.uuid, min_cntlid,
-                                              max_namespaces=constants.LVO_MAX_NAMESPACES_PER_SUBSYS,
+                                              max_namespaces=lvol.max_namespace_per_subsys,
                                               allow_any_host=allow_any)
         if lvol.allowed_hosts:
             _reapply_allowed_hosts(lvol, snode, snode_rpc_client)
@@ -5787,7 +5799,7 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
         else:
             logger.info("creating subsystem %s (allow_any_host=%s)", lvol.nqn, allow_any)
             ret = rpc_client.subsystem_create(lvol.nqn, lvol.ha_type, lvol.uuid, 1,
-                                              max_namespaces=constants.LVO_MAX_NAMESPACES_PER_SUBSYS,
+                                              max_namespaces=lvol.max_namespace_per_subsys,
                                               allow_any_host=allow_any)
             if ret:
                 created_subsystems.append(lvol.nqn)

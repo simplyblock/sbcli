@@ -261,6 +261,10 @@ commands:
             type: int
             default: 5000
             private: true
+          - name: "--spdk-sys-mem"
+            help: "System memory reserved for non-SPDK use (e.g. 2G, 4096M). Overrides the auto-calculated minimum_sys_memory. If not set, the value is derived from the node configuration."
+            dest: spdk_sys_mem
+            type: str
           - name: "--spdk-proxy-image"
             help: "The SPDK proxy image URI."
             dest: spdk_proxy_image
@@ -1700,20 +1704,6 @@ commands:
             dest: all
             type: bool
             action: store_true
-      - name: list-mem
-        help: "Gets the size and max_size of a logical volume."
-        private: true
-        arguments:
-          - name: "--json"
-            help: "Print outputs in json format."
-            dest: json
-            type: bool
-            action: store_true
-          - name: "--csv"
-            help: "Print outputs in csv format."
-            dest: csv
-            type: bool
-            action: store_true
       - name: get
         help: "Gets the logical volume details."
         arguments:
@@ -2199,13 +2189,6 @@ commands:
           - name: "host_nqn"
             help: "The host NQN to remove."
             dest: host_nqn
-            type: str
-      - name: get-master-lvols
-        help: "Return a list of master lvols (not namespaced lvol) from a storage pool."
-        arguments:
-          - name: "pool_id"
-            help: "The storage pool id."
-            dest: pool_id
             type: str
   - name: "snapshot"
     help: "Snapshot Commands"

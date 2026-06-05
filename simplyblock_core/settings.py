@@ -58,7 +58,7 @@ class Settings(BaseSettings):
         if not self.tls_serve and self.tls_connect == "disabled":
             return self
 
-        if self.tls_serve and (
+        if (self.tls_serve or (self.tls_connect == "authenticated")) and (
             missing := [
                 name
                 for name in ["tls_certificate", "tls_key"]
@@ -66,7 +66,7 @@ class Settings(BaseSettings):
             ]
         ):
             raise ValueError(
-                "SB_TLS_SERVE=true requires TLS files to exist: " + ", ".join(missing)
+                "SB_TLS_SERVE=true/SB_TLS_CONNECT=authenticated require TLS files to exist: " + ", ".join(missing)
             )
 
         if (

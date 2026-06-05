@@ -128,7 +128,7 @@ def add_lvol():
     if not pool:
         return utils.get_response(None, f"Pool not found: {pool_id_or_name}", 400)
 
-    for lvol in db.get_lvols():  # pass
+    for lvol in db.get_mini_lvols():  # pass
         if lvol.pool_uuid == pool.get_id():
             if lvol.lvol_name == name:
                 return utils.get_response(lvol.get_id())

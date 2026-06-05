@@ -52,6 +52,7 @@ class StorageNodeParams(BaseModel):
     ha_jm_count: Optional[int] = Field(None)
     format_4k: bool = Field(False)
     spdk_proxy_image: Optional[str] = None
+    spdk_sys_mem: Optional[str] = None
 
 
 @api.post('/', name='clusters:storage-nodes:create', status_code=201, responses={201: {"content": None}})
@@ -80,6 +81,7 @@ def add(cluster: Cluster, parameters: StorageNodeParams):
             "ha_jm_count": parameters.ha_jm_count,
             "format_4k": parameters.format_4k,
             "spdk_proxy_image": parameters.spdk_proxy_image,
+            "spdk_sys_mem": parameters.spdk_sys_mem,
         }
     )
     if not task_id_or_false:
@@ -90,11 +92,14 @@ def add(cluster: Cluster, parameters: StorageNodeParams):
 instance_api = APIRouter(prefix='/{storage_node_id}')
 
 
-def _lookup_storage_node(storage_node_id: UUID) -> StorageNodeModel:
+def _lookup_storage_node(storage_node_id: UUID, cluster: Cluster) -> StorageNodeModel:
     try:
-        return db.get_storage_node_by_id(str(storage_node_id))
+        storage_node = db.get_storage_node_by_id(str(storage_node_id))
     except KeyError as e:
         raise HTTPException(404, str(e))
+    if storage_node.cluster_id != cluster.get_id():
+        raise HTTPException(404, f'StorageNode {storage_node_id} not found')
+    return storage_node
 
 
 StorageNode = Annotated[StorageNodeModel, Depends(_lookup_storage_node)]

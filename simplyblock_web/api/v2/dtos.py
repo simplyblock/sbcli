@@ -387,7 +387,6 @@ class VolumeDTO(BaseModel):
     nqn: str
     hostname: str
     priority_class: util.Unsigned
-    access_mode: str
     namespace: str
     fabric: str
     nodes: List[util.UrlPath]
@@ -443,7 +442,6 @@ class VolumeDTO(BaseModel):
             hostname=model.hostname,
             priority_class=model.lvol_priority_class,
             namespace=model.namespace,
-            access_mode=model.mode,
             fabric=model.fabric,
             nodes=[
                 str(

@@ -113,7 +113,6 @@ def process_snap_delete_finish(snap, leader_node):
     snap.remove(db.kv_store)
 
 
-
 def process_snap_delete_try_again(snap):
     snap = db.get_snapshot_by_id(snap.get_id())
     snap.deletion_status = ""
@@ -150,7 +149,7 @@ def process_snap_delete(snap, snode):
     if not leader_node:
         raise Exception("Failed to get leader node")
 
-    for lvol in db.get_lvols():
+    for lvol in db.get_mini_lvols():
         if lvol.cloned_from_snap and lvol.cloned_from_snap == snap.get_id():
             if lvol.status == SnapShot.STATUS_IN_DELETION:
                 logger.error("Cannot delete snapshot while it's clone is in deletion")
@@ -258,14 +257,14 @@ while True:
         if cluster.status in [Cluster.STATUS_INACTIVE, Cluster.STATUS_UNREADY, Cluster.STATUS_IN_ACTIVATION]:
             logger.warning(f"Cluster {cluster.get_id()} is in {cluster.status} state, skipping")
             continue
-
+        all_snaps = db.get_snapshots(cluster.get_id())
         for snode in db.get_storage_nodes_by_cluster_id(cluster.get_id()):
             node_bdev_names = []
             sec_node_bdev_names = {}
             sec_node = None
 
             if snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
-                rpc_client = snode.rpc_client(timeout=3, retry=2)
+                rpc_client = snode.rpc_client()
                 try:
                     node_bdevs = rpc_client.get_bdevs()
                 except Exception as e:
@@ -286,7 +285,7 @@ while True:
                     continue
                 if sec_node and sec_node.status in [
                     StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
-                    sec_rpc_client = sec_node.rpc_client(timeout=3, retry=2)
+                    sec_rpc_client = sec_node.rpc_client()
                     try:
                         ret = sec_rpc_client.get_bdevs()
                     except Exception as e:
@@ -296,7 +295,9 @@ while True:
                         for bdev in ret:
                             sec_node_bdev_names[bdev['name']] = bdev
 
-            for snap in db.get_snapshots_by_node_id(snode.get_id()):
+            for snap in all_snaps:
+                if snap.lvol.node_id != snode.get_id():
+                    continue
                 if snap.status == SnapShot.STATUS_ONLINE:
                     present = health_controller.check_bdev(snap.snap_bdev, bdev_names=node_bdev_names)
                     if snode.lvstore_status == "ready":

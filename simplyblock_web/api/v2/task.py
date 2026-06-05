@@ -26,9 +26,11 @@ def list(cluster: Cluster) -> List[TaskDTO]:
 instance_api = APIRouter(prefix='/{task_id}')
 
 
-def _lookup_task(task_id: UUID) -> JobSchedule:
+def _lookup_task(task_id: UUID, cluster: Cluster) -> JobSchedule:
     task = db.get_task_by_id(str(task_id))
     if task is None:
+        raise HTTPException(404, 'Task does not exist')
+    if task.cluster_id != cluster.get_id():
         raise HTTPException(404, 'Task does not exist')
     return task
 

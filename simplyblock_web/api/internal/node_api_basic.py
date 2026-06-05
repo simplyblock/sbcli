@@ -86,7 +86,7 @@ def get_info():
 class _NVMeParams(BaseModel):
     ip: str = Field(pattern=utils.IP_PATTERN)
     port: int = Field(ge=0, le=65536)
-    nqn: str
+    nqn: str = Field(pattern=utils.NQN_PATTERN)
 
 
 @api.post('/nvme_connect',

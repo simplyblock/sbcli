@@ -39,6 +39,10 @@ spec:
     - name: etc-simplyblock
       hostPath:
         path: /var/simplyblock
+    - name: tmp-simplyblock
+      hostPath:
+        path: /tmp/simplyblock
+        type: DirectoryOrCreate
     - name: host-modules
       hostPath:
         path: /lib/modules
@@ -142,6 +146,8 @@ spec:
       volumeMounts:
         - name: socket-dir
           mountPath: /mnt/ramdisk
+        - name: tmp-simplyblock
+          mountPath: /tmp/simplyblock
         {% if TLS_SERVE or TLS_CONNECT != "disabled" %}
         - name: tls
           mountPath: /etc/simplyblock/tls

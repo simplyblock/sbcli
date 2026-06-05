@@ -120,7 +120,7 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
         return False, msg
 
     if not all_lvols:
-        all_lvols = db_controller.get_lvols()
+        all_lvols = db_controller.get_mini_lvols()
     if pool.pool_max_size > 0:
         total = pool_controller.get_pool_total_capacity(pool.get_id(), all_lvols, all_snaps)
         if total + size > pool.pool_max_size:
@@ -217,7 +217,17 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
                 rpc_client = primary_node.rpc_client()
 
                 logger.info("Creating Snapshot bdev")
-                ret = rpc_client.lvol_create_snapshot(f"{lvol.lvs_name}/{lvol.lvol_bdev}", snap_bdev_name)
+                ret = False
+                for i in range(5):
+                    ret, err = rpc_client.lvol_create_snapshot2(f"{lvol.lvs_name}/{lvol.lvol_bdev}", snap_bdev_name)
+                    if not ret:
+                        if err and err.get("code") == -32602: # {"code": -32602, "message": "Device or resource busy"}}
+                            logger.error(f"Failed to create snapshot, retrying: {err}")
+                            time.sleep(0.1)
+                        else:
+                            break
+                    else:
+                        break
                 if not ret:
                     return False, f"Failed to create snapshot on node: {snode.get_id()}"
 
@@ -275,6 +285,7 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
     snap.fabric = lvol.fabric
     snap.vuid = snap_vuid
     snap.status = SnapShot.STATUS_ONLINE
+    snap.create_dt = str(datetime.now())
 
     snap.write_to_db(db_controller.kv_store)
 
@@ -354,7 +365,7 @@ def list(all=False, cluster_id=None, with_details=False, pool_id_or_name=None):
     # Build snap_id → clone list in one pass instead of rescanning all lvols
     # for every snapshot (was O(M×N) in-memory).
     clones_by_snap: dict[str, builtins.list[str]] = {}
-    for lv in db_controller.get_lvols():
+    for lv in db_controller.get_mini_lvols():
         if lv.cloned_from_snap:
             clones_by_snap.setdefault(lv.cloned_from_snap, []).append(lv.get_id())
 
@@ -456,7 +467,7 @@ def delete(snapshot_uuid, force_delete=False):
     # once SPDK has actually removed the bdev (deletion_status set).
     clones = []
     in_deletion_clones = []
-    for lvol in db_controller.get_lvols(snode.cluster_id):
+    for lvol in db_controller.get_mini_lvols():
         if not lvol.cloned_from_snap or lvol.cloned_from_snap != snapshot_uuid:
             continue
 
@@ -638,12 +649,12 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
         return False, f"Cluster is not active, status: {cluster.status}"
 
     if not all_lvols:
-        all_lvols = db_controller.get_lvols()
+        all_lvols = db_controller.get_mini_lvols()
     for lvol in all_lvols:
         if lvol.pool_uuid != pool.get_id() or lvol.lvol_name != clone_name:
             continue
         if lvol.cloned_from_snap == snapshot_id:
-            if lvol.status in [LVol.STATUS_IN_DELETION, lvol.STATUS_IN_CREATION]:
+            if lvol.status in [LVol.STATUS_IN_DELETION, LVol.STATUS_IN_CREATION]:
                 msg = f"Clone status {lvol.status} can not proceed"
                 logger.error(msg)
                 return False, msg
@@ -697,7 +708,6 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     lvol.hostname = snode.hostname
     lvol.node_id = snode.get_id()
     lvol.nodes = snap.lvol.nodes
-    lvol.mode = 'read-write'
     lvol.cloned_from_snap = snapshot_id
     lvol.pool_uuid = pool.get_id()
     lvol.ha_type = snap.lvol.ha_type
@@ -827,7 +837,7 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
         # with the secondary ("Duplicate cntlid 1000 ... rejecting"). Keyed by
         # node id so the index is stable whether a node proceeds now or is
         # queued for deferred registration.
-        secondary_index_map = {}
+        secondary_index_map: dict[str,int]= {}
         for candidate in all_nodes:
             if candidate.get_id() == primary_node.get_id():
                 continue
@@ -1000,7 +1010,7 @@ def list_by_node(node_id=None, is_json=False):
     # Build snap_id → clone list once instead of a full DB read per snapshot
     # (was O(M×N) DB reads).
     clones_by_snap: dict[str, builtins.list[str]] = {}
-    for lv in db_controller.get_lvols():
+    for lv in db_controller.get_mini_lvols():
         if lv.cloned_from_snap:
             clones_by_snap.setdefault(lv.cloned_from_snap, []).append(lv.get_id())
 
