@@ -161,8 +161,32 @@ def spdk_process_start(body: SPDKParams):
     spdk_mem_mib = core_utils.convert_size(body.spdk_mem, 'MiB')
 
     node_docker = get_docker_client(timeout=60 * 3)
-    for name in {f"/spdk_{body.rpc_port}", f"/spdk_proxy_{body.rpc_port}"}:
+    spdk_names = [f"/spdk_{body.rpc_port}", f"/spdk_proxy_{body.rpc_port}"]
+    for name in spdk_names:
         core_utils.remove_container(node_docker, name, graceful_timeout=0)
+
+    # Confirm the previous instances are actually gone before we start a fresh
+    # one under the SAME name. remove_container() can return before dockerd has
+    # finished teardown under post-outage load; running while the old
+    # `spdk_<port>` record still exists risks a name collision and feeds the
+    # kill/start race (a teardown in flight for the old container vs. the new
+    # one). Bounded poll until both names resolve to NotFound; proceed with a
+    # warning if dockerd is still wedged after the budget so we never hang the
+    # restart indefinitely.
+    from docker.errors import NotFound
+    for name in spdk_names:
+        for _ in range(20):  # ~10s budget
+            try:
+                node_docker.containers.get(name)
+            except NotFound:
+                break
+            except Exception as exc:
+                logger.warning("confirm-gone probe for %s failed: %s", name, exc)
+                break
+            time.sleep(0.5)
+        else:
+            logger.warning(
+                "%s still present after teardown budget; starting anyway", name)
 
     if body.cluster_ip is not None:
         log_config = LogConfig(type=LogConfig.types.GELF, config={"gelf-address": f"tcp://{body.cluster_ip}:12202"})
@@ -273,27 +297,45 @@ def spdk_process_kill(query: utils.RPCPortParams):
     client = get_docker_client()
     names = [f"/spdk_{query.rpc_port}", f"/spdk_proxy_{query.rpc_port}"]
 
-    def _kill_one(name):
+    # Resolve each name to a concrete container — and thus a fixed container
+    # ID — ONCE, up front. Both the SIGKILL and the (detached, possibly
+    # delayed) remove then operate on THIS captured object via its id, never
+    # re-resolving the name later. This closes the kill/start race
+    # (incident 2026-06-03, LVS_8720): spdk_process_start reuses the same
+    # name `spdk_<port>` for a brand-new container with a DIFFERENT id, so a
+    # teardown stuck behind a wedged dockerd can no longer reap the
+    # replacement instance — it NotFound-skips on the stale id instead of
+    # SIGKILLing whatever currently answers to the name.
+    targets = []
+    for name in names:
         try:
-            client.containers.get(name).kill(signal="SIGKILL")
+            targets.append(client.containers.get(name))
         except NotFound:
             pass
         except Exception as exc:
-            logger.warning("SIGKILL on %s failed: %s", name, exc)
+            logger.warning("resolving %s for kill failed: %s", name, exc)
 
-    def _remove_one(name):
+    def _kill_one(container):
         try:
-            client.containers.get(name).remove(force=True)
+            container.kill(signal="SIGKILL")  # targets container.id, not the name
         except NotFound:
             pass
         except Exception as exc:
-            logger.warning("remove(%s) failed: %s", name, exc)
+            logger.warning("SIGKILL on %s failed: %s", container.id[:12], exc)
+
+    def _remove_one(container):
+        try:
+            container.remove(force=True)  # targets container.id, not the name
+        except NotFound:
+            pass
+        except Exception as exc:
+            logger.warning("remove(%s) failed: %s", container.id[:12], exc)
 
     # 1) Parallel synchronous SIGKILL — bounded so a wedged dockerd can't
     #    hang the request indefinitely. We do *not* wait for the kernel
     #    reap; SIGKILL delivery is enough to make the kernel close fds.
-    kill_threads = [threading.Thread(target=_kill_one, args=(n,), daemon=True)
-                    for n in names]
+    kill_threads = [threading.Thread(target=_kill_one, args=(c,), daemon=True)
+                    for c in targets]
     for t in kill_threads:
         t.start()
     for t in kill_threads:
@@ -301,8 +343,10 @@ def spdk_process_kill(query: utils.RPCPortParams):
 
     # 2) Detached remove — peer is already dead, the record cleanup is
     #    just dockerd bookkeeping. Fire-and-forget; HTTP returns now.
-    for name in names:
-        threading.Thread(target=_remove_one, args=(name,), daemon=True).start()
+    #    Safe even if delayed: it removes the captured id, never a same-named
+    #    successor created by a later spdk_process_start.
+    for c in targets:
+        threading.Thread(target=_remove_one, args=(c,), daemon=True).start()
 
     return utils.get_response(True)
 

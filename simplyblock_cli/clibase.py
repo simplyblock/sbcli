@@ -169,6 +169,7 @@ class CLIWrapperBase:
         ha_jm_count = args.ha_jm_count
         format_4k = args.format_4k
         num_partitions_per_dev = 0 if args.enable_journal_device else 1
+        spdk_sys_mem = getattr(args, 'spdk_sys_mem', None)
 
         try:
             out = storage_ops.add_node(
@@ -191,6 +192,7 @@ class CLIWrapperBase:
                 ha_jm_count=ha_jm_count,
                 format_4k=format_4k,
                 spdk_proxy_image=getattr(args, 'spdk_proxy_image', None),
+                spdk_sys_mem=spdk_sys_mem,
             )
         except Exception as e:
             print(e)
@@ -776,9 +778,6 @@ class CLIWrapperBase:
             print(f"Error: {err}")
             return False
         return True
-
-    def storage_pool__get_master_lvols(self, sub_command, args):
-        return lvol_controller.get_master_lvols_by_pool_uuid(args.pool_id)
 
     def snapshot__add(self, sub_command, args):
         backup = getattr(args, 'backup', False)

@@ -133,6 +133,9 @@ def add_host_to_pool(pool_id, host_nqn):
     if not pool.dhchap:
         return False, "Pool does not have DHCHAP enabled"
 
+    if utils.NQN_PATTERN.match(host_nqn) is None:
+        return False, f"Invalid host NQN format: {host_nqn}"
+
     if host_nqn in pool.allowed_hosts:
         return False, f"Host {host_nqn} is already in the pool's allowed list"
 

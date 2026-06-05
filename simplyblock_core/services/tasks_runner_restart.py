@@ -89,7 +89,6 @@ def _ensure_spdk_killed(node):
     try:
         logger.info(f"Killing SPDK on node {node.get_id()} (rpc_port={node.rpc_port})")
         node.client(timeout=10, retry=5).spdk_process_kill(node.rpc_port, node.cluster_id)
-        return True
     except SNodeClientException as exc:
         logger.error(
             f"Failed to kill SPDK on {node.get_id()}: {exc}; "
@@ -103,6 +102,36 @@ def _ensure_spdk_killed(node):
             f"assuming SPDK is not serving"
         )
         return True
+
+    # Confirm the process is actually gone before reporting success. The kill
+    # RPC returns as soon as SIGKILL is *delivered* — the SNodeAPI handler does
+    # not wait for the kernel reap or dockerd record cleanup — so trusting its
+    # bare return races a subsequent spdk_process_start that would launch a
+    # fresh SPDK while the old instance (or its teardown) is still settling.
+    # That is the kill/start race behind the 2026-06-03 LVS_8720 zero-leader
+    # outage. Poll spdk_process_is_up (a Unix-socket liveness probe) until it
+    # reports down, bounded; refuse to declare "killed" if it never does.
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        try:
+            is_up, _ = node.client(timeout=5, retry=2).spdk_process_is_up(
+                node.rpc_port, node.cluster_id)
+        except Exception as exc:
+            logger.warning(
+                f"spdk_process_is_up confirm-probe failed on {node.get_id()}: "
+                f"{exc}; assuming SPDK is down"
+            )
+            return True
+        if not is_up:
+            logger.info(f"Confirmed SPDK down on {node.get_id()} after kill")
+            return True
+        time.sleep(2)
+
+    logger.error(
+        f"SPDK on {node.get_id()} still up 30s after kill; refusing to report it "
+        f"killed (would race a fresh spdk_process_start)"
+    )
+    return False
 
 
 def _reset_if_transient(node_id):
