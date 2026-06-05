@@ -158,7 +158,11 @@ def _log_port_check_failure(db_controller, snode, port, exc):
 
 def check_port_on_node(snode, port_id):
     fw_api = FirewallClient(snode, timeout=5, retry=5)
-    iptables_command_output, _ = fw_api.get_firewall(snode.rpc_port)
+    try:
+        iptables_command_output, _ = fw_api.get_firewall(snode.rpc_port)
+    except Exception as e:
+        logger.error(f"Firewall service unreachable on {snode.mgmt_ip}:{snode.firewall_port}: {e}")
+        return False
     if type(iptables_command_output) is str:
         iptables_command_output = [iptables_command_output]
     for rules in iptables_command_output:
