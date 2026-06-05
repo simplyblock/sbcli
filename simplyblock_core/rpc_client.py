@@ -1414,10 +1414,11 @@ class RPCClient:
         }
         return self._request("bdev_lvol_set_lvs_read_only", params)
 
-    def bdev_lvol_create_hublvol(self, lvs):
-        return self._request('bdev_lvol_create_hublvol', {
-            "uuid" if utils.UUID_PATTERN.match(lvs) else "lvs_name": lvs,
-        })
+    def bdev_lvol_create_hublvol(self, lvs, name=None):
+        params = {"uuid" if utils.UUID_PATTERN.match(lvs) else "lvs_name": lvs}
+        if name:
+            params["name"] = name
+        return self._request('bdev_lvol_create_hublvol', params)
 
     def bdev_lvol_delete_hublvol(self, lvs):
         return self._request('bdev_lvol_delete_hublvol', {
