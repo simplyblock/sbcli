@@ -815,10 +815,11 @@ def _create_bdev_stack(lvol, snode, is_primary=True):
     rpc_client = snode.rpc_client()
 
     node_bdevs = rpc_client.get_bdevs()
+    node_bdev_names = []
     if node_bdevs:
-        node_bdev_names = [b['name'] for b in node_bdevs]
-    else:
-        node_bdev_names = []
+        for bdev in node_bdevs:
+            node_bdev_names.append(bdev['name'])
+            node_bdev_names.extend(bdev['aliases'])
 
     created_bdevs = []
     for bdev in lvol.bdev_stack:
@@ -948,7 +949,7 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
 
     ret, msg = _create_bdev_stack(lvol, snode, is_primary=is_primary)
     if not ret:
-        return False, msg
+        return _fail_after_bdev(lvol, rpc_client, msg)
 
     if _resolve_namespaced_subsystem(lvol, rpc_client, snode):
         if is_primary:

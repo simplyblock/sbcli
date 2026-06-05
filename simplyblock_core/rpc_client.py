@@ -94,6 +94,7 @@ class RPCClient:
 
     # ref: https://spdk.io/doc/jsonrpc.html
     DEFAULT_ALLOWED_METHODS = ["HEAD", "GET", "PUT", "DELETE", "OPTIONS", "TRACE", "POST"]
+    RPC_NO_PRINT_OUTPUT = ["bdev_get_bdevs", "nvmf_get_subsystems", "bdev_get_iostat"]
 
     def __init__(self, host, port, username, password, timeout=180, retry=3):
         self.host = host
@@ -159,7 +160,7 @@ class RPCClient:
         if ret_code == 200:
             try:
                 data = response.json()
-                if method not in ["bdev_get_bdevs", "nvmf_get_subsystems"]:
+                if method not in self.RPC_NO_PRINT_OUTPUT:
                     logger.debug("Response json: %s", json.dumps(data))
             except Exception:
                 logger.debug("Response ret_content: %s", ret_content)
