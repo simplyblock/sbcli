@@ -311,9 +311,14 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster = Cluster()
     cluster.uuid = str(uuid.uuid4())
     cluster.cluster_name = name
-    # New clusters auto-switch to per-chunk placement after their first
-    # activation + rebalance (consumed by storage_node_monitor).
-    cluster.shared_placement_migration_pending = True
+    # New clusters use per-chunk (shared) placement from the start: every
+    # distrib and JM created at add-node / activation / restart picks up the
+    # flag via cluster.shared_placement (see create_lvstore and
+    # bdev_jm_create). No legacy-then-migrate phase. The deferred migration
+    # path (shared_placement_migration_pending) is only for clusters UPGRADED
+    # from a legacy release, whose pre-existing bdevs need the one-shot
+    # runtime flip via set_shared_placement.
+    cluster.shared_placement = True
     cluster.blk_size = blk_size
     cluster.page_size_in_blocks = page_size_in_blocks
     cluster.nqn = f"{constants.CLUSTER_NQN}:{cluster.uuid}"
@@ -497,9 +502,14 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     cluster = Cluster()
     cluster.uuid = str(uuid.uuid4())
     cluster.cluster_name = name
-    # New clusters auto-switch to per-chunk placement after their first
-    # activation + rebalance (consumed by storage_node_monitor).
-    cluster.shared_placement_migration_pending = True
+    # New clusters use per-chunk (shared) placement from the start: every
+    # distrib and JM created at add-node / activation / restart picks up the
+    # flag via cluster.shared_placement (see create_lvstore and
+    # bdev_jm_create). No legacy-then-migrate phase. The deferred migration
+    # path (shared_placement_migration_pending) is only for clusters UPGRADED
+    # from a legacy release, whose pre-existing bdevs need the one-shot
+    # runtime flip via set_shared_placement.
+    cluster.shared_placement = True
     cluster.blk_size = blk_size
     cluster.page_size_in_blocks = page_size_in_blocks
     cluster.nqn = f"{constants.CLUSTER_NQN}:{cluster.uuid}"
