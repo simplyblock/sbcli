@@ -9,8 +9,10 @@ with # TODO(migration-rpc): replace with real RPC call.
 
 Workflow
 --------
-1. Caller invokes ``start_migration(lvol_id, target_node_id)``.
-2. Controller validates preconditions and builds the ordered snapshot chain.
+1. Caller invokes ``pre_create_on_target(lvol_id, target_node_id)`` to set up
+   target infrastructure and receive the migration_id and connect strings.
+2. Caller invokes ``start_migration(migration_id)`` to promote the record to
+   PHASE_SNAP_COPY and launch the task runner.
 3. A ``JobSchedule`` task (FN_LVOL_MIG) is created; the task runner drives
    the actual data-plane operations asynchronously.
 4. The caller can poll ``get_migration(lvol_id)`` or ``list_migrations(cluster_id)``
@@ -60,153 +62,79 @@ db = DBController()
 # Public API
 # ---------------------------------------------------------------------------
 
-def start_migration(lvol_id=None, target_node_id=None,
+def start_migration(migration_id,
                     max_retries=constants.LVOL_MIG_MAX_RETRIES,
-                    deadline_seconds=constants.LVOL_MIG_DEADLINE_SEC,
-                    migration_id=None):
+                    deadline_seconds=constants.LVOL_MIG_DEADLINE_SEC):
     """
-    Initiate a live migration.
-
-    Two call modes:
-      1. Pre-create flow: pass only ``migration_id`` (returned by
-         pre_create_on_target).  lvol_id, target_node_id, and the target
-         infrastructure are all derived from the existing PHASE_PRE_CREATED record.
-      2. Direct flow: pass ``lvol_id`` and ``target_node_id``; the migration
-         record is created fresh.
+    Promote a PHASE_PRE_CREATED migration record to PHASE_SNAP_COPY and launch
+    the task runner.  Always call pre_create_on_target first to set up target
+    infrastructure and obtain the migration_id and connect strings.
 
     Returns (migration_uuid, None) on success or (False, error_message) on failure.
     """
-    # ── Pre-create flow: derive everything from the existing record ───────────
-    if migration_id:
-        try:
-            migration = db.get_migration_by_id(migration_id)
-        except KeyError:
-            return False, f"Migration {migration_id} not found"
+    try:
+        migration = db.get_migration_by_id(migration_id)
+    except KeyError:
+        return False, f"Migration {migration_id} not found"
 
-        if migration.phase != LVolMigration.PHASE_PRE_CREATED:
-            return False, (
-                f"Migration {migration_id} is not in PHASE_PRE_CREATED "
-                f"(phase={migration.phase})"
-            )
-
-        lvol_id        = migration.lvol_id
-        target_node_id = migration.target_node_id
-
-        try:
-            lvol = db.get_lvol_by_id(lvol_id)
-        except KeyError as e:
-            return False, str(e)
-
-        if lvol.status != LVol.STATUS_ONLINE:
-            return False, f"Volume is not online (status={lvol.status})"
-
-        source_node_id = lvol.node_id
-
-        try:
-            source_node = db.get_storage_node_by_id(source_node_id)
-        except KeyError as e:
-            return False, str(e)
-
-        try:
-            target_node = db.get_storage_node_by_id(target_node_id)
-        except KeyError as e:
-            return False, str(e)
-
-        if source_node_id == target_node_id:
-            return False, "Source and target nodes must be different"
-
-        if source_node.status != StorageNode.STATUS_ONLINE:
-            return False, f"Source node is not online (status={source_node.status})"
-
-        if target_node.status != StorageNode.STATUS_ONLINE:
-            return False, f"Target node is not online (status={target_node.status})"
-
-        snap_plan = get_snapshot_chain(lvol_id, source_node_id)
-
-        migration.source_node_id = source_node_id
-        migration.phase = LVolMigration.PHASE_SNAP_COPY
-        migration.snap_migration_plan = snap_plan
-        migration.snaps_migrated = []
-        migration.intermediate_snaps = []
-        migration.next_snap_index = 0
-        migration.intermediate_snap_rounds = 0
-        migration.started_at = int(time.time())
-        migration.deadline = int(time.time()) + deadline_seconds if deadline_seconds else 0
-        migration.max_retries = max_retries
-        migration.status = LVolMigration.STATUS_NEW
-        migration.write_to_db(db.kv_store)
-        logger.info(
-            f"Promoting pre-created migration {migration.uuid} → PHASE_SNAP_COPY "
-            f"lvol={lvol_id} src={source_node_id} dst={target_node_id}"
+    if migration.phase != LVolMigration.PHASE_PRE_CREATED:
+        return False, (
+            f"Migration {migration_id} is not in PHASE_PRE_CREATED "
+            f"(phase={migration.phase})"
         )
 
-    else:
-        # ── Direct flow ───────────────────────────────────────────────────────
-        if not lvol_id or not target_node_id:
-            return False, "Either migration_id or both lvol_id and target_node_id are required"
+    lvol_id        = migration.lvol_id
+    target_node_id = migration.target_node_id
 
-        try:
-            lvol = db.get_lvol_by_id(lvol_id)
-        except KeyError as e:
-            return False, str(e)
+    try:
+        lvol = db.get_lvol_by_id(lvol_id)
+    except KeyError as e:
+        return False, str(e)
 
-        if lvol.status != LVol.STATUS_ONLINE:
-            return False, f"Volume is not online (status={lvol.status})"
+    if lvol.status != LVol.STATUS_ONLINE:
+        return False, f"Volume is not online (status={lvol.status})"
 
-        source_node_id = lvol.node_id
+    source_node_id = lvol.node_id
 
-        try:
-            source_node = db.get_storage_node_by_id(source_node_id)
-        except KeyError as e:
-            return False, str(e)
+    try:
+        source_node = db.get_storage_node_by_id(source_node_id)
+    except KeyError as e:
+        return False, str(e)
 
-        try:
-            target_node = db.get_storage_node_by_id(target_node_id)
-        except KeyError as e:
-            return False, str(e)
+    try:
+        target_node = db.get_storage_node_by_id(target_node_id)
+    except KeyError as e:
+        return False, str(e)
 
-        if source_node_id == target_node_id:
-            return False, "Source and target nodes must be different"
+    if source_node_id == target_node_id:
+        return False, "Source and target nodes must be different"
 
-        if source_node.status != StorageNode.STATUS_ONLINE:
-            return False, f"Source node is not online (status={source_node.status})"
+    if source_node.status != StorageNode.STATUS_ONLINE:
+        return False, f"Source node is not online (status={source_node.status})"
 
-        if target_node.status != StorageNode.STATUS_ONLINE:
-            return False, f"Target node is not online (status={target_node.status})"
+    if target_node.status != StorageNode.STATUS_ONLINE:
+        return False, f"Target node is not online (status={target_node.status})"
 
-        cluster_id = source_node.cluster_id
-        snap_plan  = get_snapshot_chain(lvol_id, source_node_id)
-        # ── Direct flow: conflict checks + fresh record ───────────────────────
-        existing = get_active_migration_on_node(cluster_id, source_node_id)
-        if existing:
-            return False, (
-                f"Another migration is already active on source node {source_node_id} "
-                f"(migration_id={existing.uuid})"
-            )
+    snap_plan = get_snapshot_chain(lvol_id, source_node_id)
 
-        active = get_active_migration_for_lvol(lvol_id, cluster_id)
-        if active:
-            return False, f"Volume already has an active migration (migration_id={active.uuid})"
+    migration.source_node_id = source_node_id
+    migration.phase = LVolMigration.PHASE_SNAP_COPY
+    migration.snap_migration_plan = snap_plan
+    migration.snaps_migrated = []
+    migration.intermediate_snaps = []
+    migration.next_snap_index = 0
+    migration.intermediate_snap_rounds = 0
+    migration.started_at = int(time.time())
+    migration.deadline = int(time.time()) + deadline_seconds if deadline_seconds else 0
+    migration.max_retries = max_retries
+    migration.status = LVolMigration.STATUS_NEW
+    migration.write_to_db(db.kv_store)
+    logger.info(
+        f"Promoting pre-created migration {migration.uuid} → PHASE_SNAP_COPY "
+        f"lvol={lvol_id} src={source_node_id} dst={target_node_id}"
+    )
 
-        migration = LVolMigration()
-        migration.uuid = str(uuid.uuid4())
-        migration.cluster_id = cluster_id
-        migration.lvol_id = lvol_id
-        migration.source_node_id = source_node_id
-        migration.target_node_id = target_node_id
-        migration.phase = LVolMigration.PHASE_SNAP_COPY
-        migration.snap_migration_plan = snap_plan
-        migration.snaps_migrated = []
-        migration.intermediate_snaps = []
-        migration.next_snap_index = 0
-        migration.intermediate_snap_rounds = 0
-        migration.started_at = int(time.time())
-        migration.deadline = int(time.time()) + deadline_seconds if deadline_seconds else 0
-        migration.max_retries = max_retries
-        migration.status = LVolMigration.STATUS_NEW
-        migration.write_to_db(db.kv_store)
-
-    # --- Create backing JobSchedule task (reuses _add_task for event logging) ---
+    # --- Create backing JobSchedule task ---
     task_uuid = tasks_controller.add_lvol_mig_task(migration)
     if not task_uuid:
         migration.status = LVolMigration.STATUS_FAILED
@@ -283,34 +211,68 @@ def _cleanup_pre_created(migration):
     bdev_short = lvol.lvol_bdev + _MIGRATION_BDEV_SUFFIX
     composite = f"{tgt_node.lvstore}/{bdev_short}"
 
-    # Recompute overlap so we only clean up what pre_create_on_target actually created.
+    # Compute overlap: nodes shared between SRC and TGT paths.
+    # Overlap nodes own their subsystem from the SRC role — we only added a
+    # listener at the TGT port; remove that listener rather than the subsystem.
+    src_node_ids = {migration.source_node_id}
     try:
-        _src_node = db.get_storage_node_by_id(lvol.node_id)
+        _src_node = db.get_storage_node_by_id(migration.source_node_id)
+        if _src_node.secondary_node_id:
+            src_node_ids.add(_src_node.secondary_node_id)
     except KeyError:
-        _src_node = None
-    _tgt_is_src_sec = (_src_node is not None and
-                       migration.target_node_id == (_src_node.secondary_node_id or ""))
-    _tgt_sec_is_src = ((tgt_node.secondary_node_id or "") == lvol.node_id)
+        pass
+
+    tgt_node_ids = {migration.target_node_id}
+    if tgt_node.secondary_node_id:
+        tgt_node_ids.add(tgt_node.secondary_node_id)
+    overlap_ids = src_node_ids & tgt_node_ids
 
     tgt_rpc = tgt_node.rpc_client()
+    tgt_port = tgt_node.get_lvol_subsys_port(tgt_node.lvstore)
 
-    # Secondary first — only if we created the secondary subsystem
-    # (skip Case B: TGT-sec is SRC-prim, subsystem there belongs to SRC)
-    if tgt_node.secondary_node_id and not _tgt_sec_is_src:
+    # Secondary cleanup
+    if tgt_node.secondary_node_id:
         try:
             sec_node = db.get_storage_node_by_id(tgt_node.secondary_node_id)
-            sec_rpc = sec_node.rpc_client()
-            sec_rpc.subsystem_delete(nqn)
-            logger.info(f"_cleanup_pre_created: deleted TGT-sec subsystem {nqn} on {sec_node.get_id()}")
+            sec_rpc  = sec_node.rpc_client()
+            sec_port = sec_node.get_lvol_subsys_port(tgt_node.lvstore)
+            if sec_node.get_id() in overlap_ids:
+                for nic in sec_node.data_nics:
+                    if nic.ip4_address and nic.trtype.lower() == lvol.fabric:
+                        try:
+                            sec_rpc.listeners_del(nqn, nic.trtype.lower(),
+                                                  nic.ip4_address, sec_port)
+                        except Exception:
+                            pass
+                logger.info(
+                    f"_cleanup_pre_created: removed TGT-port listeners from "
+                    f"overlap TGT-sec {sec_node.get_id()[:8]}")
+            else:
+                sec_rpc.subsystem_delete(nqn)
+                logger.info(
+                    f"_cleanup_pre_created: deleted TGT-sec subsystem {nqn} "
+                    f"on {sec_node.get_id()}")
         except Exception as e:
-            logger.warning(f"_cleanup_pre_created: could not clean TGT-sec subsystem: {e}")
+            logger.warning(f"_cleanup_pre_created: could not clean TGT-sec: {e}")
 
-    # Primary subsystem — only if we created it
-    # (skip Case A: TGT-prim is SRC-sec, subsystem there belongs to SRC)
-    if not _tgt_is_src_sec:
+    # Primary cleanup
+    if migration.target_node_id in overlap_ids:
+        for nic in tgt_node.data_nics:
+            if nic.ip4_address and nic.trtype.lower() == lvol.fabric:
+                try:
+                    tgt_rpc.listeners_del(nqn, nic.trtype.lower(),
+                                          nic.ip4_address, tgt_port)
+                except Exception:
+                    pass
+        logger.info(
+            f"_cleanup_pre_created: removed TGT-port listeners from "
+            f"overlap TGT-prim {tgt_node.get_id()[:8]}")
+    else:
         try:
             tgt_rpc.subsystem_delete(nqn)
-            logger.info(f"_cleanup_pre_created: deleted TGT-prim subsystem {nqn} on {tgt_node.get_id()}")
+            logger.info(
+                f"_cleanup_pre_created: deleted TGT-prim subsystem {nqn} "
+                f"on {tgt_node.get_id()}")
         except Exception as e:
             logger.warning(f"_cleanup_pre_created: could not clean TGT-prim subsystem: {e}")
 
@@ -750,16 +712,11 @@ def pre_create_on_target(lvol_id, target_node_id,
     if not tgt_node.lvstore:
         return None, None, f"Target node {target_node_id} has no lvstore"
 
-    # Overlap detection (must happen before any SPDK calls):
-    #   Case A: TGT-prim == SRC-sec  → subsystem already exists on TGT (don't recreate, no ns)
-    #   Case B: TGT-sec  == SRC-prim → TGT-sec is the source (skip TGT-sec subsystem, no ns)
     src_node_id = lvol.node_id
     try:
         src_node = db.get_storage_node_by_id(src_node_id)
     except KeyError:
         return None, None, f"Source node {src_node_id} not found"
-    tgt_is_src_sec = (target_node_id == (src_node.secondary_node_id or ""))
-    tgt_sec_is_src = ((tgt_node.secondary_node_id or "") == src_node_id)
 
     cluster = db.get_cluster_by_id(tgt_node.cluster_id)
     tgt_rpc  = tgt_node.rpc_client()
@@ -828,106 +785,100 @@ def pre_create_on_target(lvol_id, target_node_id,
             logger.warning(
                 f"pre_create_on_target: secondary registration error (continuing): {_e}")
 
-    # ── 2. Subsystem + listeners on TGT-prim ──────────────────────────────────
-    # Case A overlap: TGT-prim IS SRC-sec — subsystem already exists there.
-    # Add an inaccessible listener at TGT-prim's native lvstore port so the client
-    # can pre-connect to the TGT endpoint before cutover.
-    if tgt_is_src_sec:
-        logger.info(
-            f"pre_create_on_target: TGT is SRC-sec (Case A overlap) — "
-            f"adding inaccessible listener(s) at TGT-prim native port {tgt_port}")
-        for nic in tgt_node.data_nics:
-            if not nic.ip4_address:
-                continue
-            trtype = nic.trtype.lower()
-            if trtype != lvol.fabric:
-                continue
-            tgt_rpc.listeners_create(nqn, trtype, nic.ip4_address, tgt_port,
-                                     ana_state="inaccessible")
-    else:
-        if not tgt_rpc.subsystem_list(nqn):
-            tgt_rpc.subsystem_create(
-                nqn, lvol.ha_type, lvol.uuid, min_cntlid=2000,
-                max_namespaces=constants.LVO_MAX_NAMESPACES_PER_SUBSYS)
-        for nic in tgt_node.data_nics:
-            if not nic.ip4_address:
-                continue
-            trtype = nic.trtype.lower()
-            if trtype != lvol.fabric:
-                continue
-            tgt_rpc.listeners_create(nqn, trtype, nic.ip4_address, tgt_port,
-                                     ana_state="inaccessible")
-        # Add namespace unless TGT-prim IS SRC-sec (Case A): in that case the
-        # subsystem already exists on TGT-prim with a live NS pointing to source.
-        # Case B (TGT-sec IS SRC) does not affect TGT-prim — add NS normally.
-        if not tgt_is_src_sec:
-            _ns_prim = tgt_rpc.nvmf_subsystem_add_ns(
-                nqn, composite, lvol.uuid, lvol.guid)
-            if _ns_prim:
+    # ── 2. Subsystem + listeners on all TGT nodes ────────────────────────────
+    # Compute overlap: node IDs present in both SRC path and TGT path.
+    # Overlap nodes already own a live subsystem from their SRC role — we add
+    # only an inaccessible listener at the TGT port.  Non-overlap nodes get a
+    # full subsystem, listeners, allowed_hosts, and a namespace pointing to the
+    # migration bdev so clients can pre-connect before cutover.
+    src_node_ids = {src_node_id}
+    if src_node.secondary_node_id:
+        src_node_ids.add(src_node.secondary_node_id)
+
+    tgt_sec_node = None
+    if lvol.ha_type in ("ha", "ha3") and tgt_node.secondary_node_id:
+        tgt_sec_node = (_pre_sec_node if _pre_sec_node is not None else None)
+        if tgt_sec_node is None:
+            try:
+                tgt_sec_node = db.get_storage_node_by_id(tgt_node.secondary_node_id)
+            except KeyError:
+                pass
+
+    tgt_node_ids = {target_node_id}
+    if tgt_sec_node is not None:
+        tgt_node_ids.add(tgt_sec_node.get_id())
+    overlap_ids = src_node_ids & tgt_node_ids
+
+    # Ordered TGT entries: (node, rpc, port, min_cntlid)
+    tgt_entries = [(tgt_node, tgt_rpc, tgt_port, 2000)]
+    if tgt_sec_node is not None:
+        _sec_rpc2  = tgt_sec_node.rpc_client()
+        _sec_port2 = tgt_sec_node.get_lvol_subsys_port(tgt_node.lvstore)
+        tgt_entries.append((tgt_sec_node, _sec_rpc2, _sec_port2, 3000))
+
+    sec_node = None   # populated for the secondary (used by connect strings below)
+    sec_port = None
+
+    for _i, (_node, _rpc, _port, _min_cntlid) in enumerate(tgt_entries):
+        _node_id = _node.get_id()
+        if _i == 1:
+            sec_node = _node
+            sec_port = _port
+
+        if _node_id in overlap_ids:
+            # Subsystem already exists from SRC role — add inaccessible listener
+            # at TGT port so clients can pre-connect to the future TGT endpoint.
+            for nic in _node.data_nics:
+                if not nic.ip4_address or nic.trtype.lower() != lvol.fabric:
+                    continue
+                try:
+                    _rpc.listeners_create(nqn, nic.trtype.lower(), nic.ip4_address,
+                                          _port, ana_state="inaccessible")
+                    logger.info(
+                        f"pre_create_on_target: inaccessible listener on overlap node "
+                        f"{_node_id[:8]} {nic.ip4_address}:{_port}")
+                except Exception as _e:
+                    logger.warning(
+                        f"pre_create_on_target: listener on overlap {_node_id[:8]} "
+                        f"(non-fatal): {_e}")
+        else:
+            if not _rpc.subsystem_list(nqn):
+                _rpc.subsystem_create(
+                    nqn, lvol.ha_type, lvol.uuid, min_cntlid=_min_cntlid,
+                    max_namespaces=constants.LVO_MAX_NAMESPACES_PER_SUBSYS)
+
+            if lvol.allowed_hosts:
+                try:
+                    from simplyblock_core.storage_node_ops import _reapply_allowed_hosts
+                    _reapply_allowed_hosts(lvol, _node, _rpc)
+                except Exception as _e:
+                    logger.warning(
+                        f"pre_create_on_target: allowed_hosts reapply on "
+                        f"{_node_id[:8]} (non-fatal): {_e}")
+
+            for nic in _node.data_nics:
+                if not nic.ip4_address or nic.trtype.lower() != lvol.fabric:
+                    continue
+                try:
+                    _rpc.listeners_create(nqn, nic.trtype.lower(), nic.ip4_address,
+                                          _port, ana_state="inaccessible")
+                except Exception as _e:
+                    logger.warning(
+                        f"pre_create_on_target: listener on {_node_id[:8]} "
+                        f"(non-fatal): {_e}")
+
+            _ns = _rpc.nvmf_subsystem_add_ns(nqn, composite, lvol.uuid, lvol.guid)
+            if _ns:
                 logger.info(
-                    f"pre_create_on_target: namespace {composite} "
-                    f"added on TGT-prim nsid={_ns_prim}")
+                    f"pre_create_on_target: namespace {composite} added on "
+                    f"{'TGT-prim' if _i == 0 else 'TGT-sec'} {_node_id[:8]} nsid={_ns}")
             else:
                 logger.warning(
-                    f"pre_create_on_target: nvmf_subsystem_add_ns failed on TGT-prim "
-                    f"for {composite}")
-        logger.info(
-            f"pre_create_on_target: subsystem {nqn} ready on TGT-prim "
-            f"(namespace={'added' if not tgt_is_src_sec else 'deferred to migration'})")
+                    f"pre_create_on_target: nvmf_subsystem_add_ns failed on "
+                    f"{'TGT-prim' if _i == 0 else 'TGT-sec'} {_node_id[:8]}")
 
-    # ── HA secondary ──────────────────────────────────────────────────────────
-    sec_node = None
-    sec_port = None
-    if lvol.ha_type in ("ha", "ha3"):
-        if tgt_sec_is_src:
-            # Case B overlap: TGT-sec IS SRC-prim — subsystem exists on SRC; skip.
             logger.info(
-                f"pre_create_on_target: TGT-sec is SRC (Case B overlap) — "
-                f"skipping secondary subsystem create")
-        else:
-            try:
-                if tgt_node.secondary_node_id:
-                    sec_node = (_pre_sec_node
-                                if _pre_sec_node is not None
-                                else db.get_storage_node_by_id(tgt_node.secondary_node_id))
-            except KeyError:
-                sec_node = None
-
-            if sec_node is not None:
-                sec_rpc   = sec_node.rpc_client()
-                sec_port  = sec_node.get_lvol_subsys_port(tgt_node.lvstore)
-
-                if not sec_rpc.subsystem_list(nqn):
-                    sec_rpc.subsystem_create(
-                        nqn, lvol.ha_type, lvol.uuid, min_cntlid=3000,
-                        max_namespaces=constants.LVO_MAX_NAMESPACES_PER_SUBSYS)
-
-                for nic in sec_node.data_nics:
-                    if not nic.ip4_address:
-                        continue
-                    trtype = nic.trtype.lower()
-                    if trtype != lvol.fabric:
-                        continue
-                    sec_rpc.listeners_create(nqn, trtype, nic.ip4_address, sec_port,
-                                             ana_state="inaccessible")
-
-                # Add namespace unless TGT-sec IS SRC (Case B): in that case the
-                # subsystem already exists on SRC with a live NS pointing to source.
-                # Case A (TGT-prim IS SRC-sec) does not affect TGT-sec — add NS normally.
-                if not tgt_sec_is_src:
-                    _ns_sec = sec_rpc.nvmf_subsystem_add_ns(
-                        nqn, composite, lvol.uuid, lvol.guid)
-                    if _ns_sec:
-                        logger.info(
-                            f"pre_create_on_target: namespace {composite} "
-                            f"added on TGT-sec nsid={_ns_sec}")
-                    else:
-                        logger.warning(
-                            f"pre_create_on_target: nvmf_subsystem_add_ns failed "
-                            f"on TGT-sec for {composite}")
-                logger.info(
-                    f"pre_create_on_target: subsystem {nqn} ready on TGT-sec "
-                    f"(namespace={'added' if not tgt_sec_is_src else 'deferred to migration'})")
+                f"pre_create_on_target: subsystem {nqn} ready on {_node_id[:8]}")
 
     # ── 4. Build connect strings for the target node ──────────────────────────
     host_entry = None
