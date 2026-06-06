@@ -174,7 +174,7 @@ def _ensure_hub_attached(src_rpc, tgt_rpc, tgt_node, trtype, target_ip):
     # Expose migration hublvol via its own NVMe-oF subsystem (idempotent).
     # Reuse the node's hub port — different NQN means different TRID, no conflict.
     hub_port = tgt_node.hublvol.nvmf_port
-    nguid = tgt_node.lvstore.replace('-', '')[:32].ljust(32, '0')
+    nguid = mig_hub_uuid.replace('-', '')
     tgt_node.expose_bdev(
         nqn=mig_hub_nqn,
         bdev_name=mig_hub_bdev,
@@ -188,7 +188,20 @@ def _ensure_hub_attached(src_rpc, tgt_rpc, tgt_node, trtype, target_ip):
     # Attach NVMe controller on source to the migration subsystem.
     ret = src_rpc.bdev_nvme_attach_controller(ctrl_name, mig_hub_nqn, target_ip, hub_port, trtype)
     if not ret:
-        return None, None, f"Failed to attach migration hub controller to {tgt_node.get_id()}"
+        # Attach can fail with EEXIST if a prior crashed attempt attached the controller
+        # but the namespace wasn't in the subsystem yet (e.g. due to a bad nguid on the
+        # add_ns call).  Detach the zombie and retry once so the controller reconnects
+        # to a now-populated subsystem.
+        if src_rpc.bdev_nvme_controller_list(ctrl_name):
+            logger.info(
+                f"_ensure_hub_attached: zombie mighub controller found (no bdev); "
+                f"detaching and reattaching"
+            )
+            src_rpc.bdev_nvme_detach_controller(ctrl_name)
+            ret = src_rpc.bdev_nvme_attach_controller(
+                ctrl_name, mig_hub_nqn, target_ip, hub_port, trtype)
+        if not ret:
+            return None, None, f"Failed to attach migration hub controller to {tgt_node.get_id()}"
     return ctrl_name, hub_bdev, None
 
 
