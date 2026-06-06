@@ -389,20 +389,6 @@ def _build_paths(src_node, tgt_node, src_rpc, tgt_rpc):
     return src_paths, tgt_paths, overlap_ids
 
 
-def _add_ns_idempotent(rpc, nqn, bdev_composite, uuid, guid, label):
-    """Add a namespace to an NVMe-oF subsystem if not already present."""
-    sub = rpc.subsystem_list(nqn)
-    s = (sub[0] if isinstance(sub, list) else sub) if sub else None
-    if s and any(ns.get('bdev_name') == bdev_composite or ns.get('uuid') == uuid
-                 for ns in s.get('namespaces', [])):
-        logger.info(f"NS already present on {label}: {bdev_composite}")
-        return True
-    ret = rpc.nvmf_subsystem_add_ns(nqn, bdev_composite, uuid, guid)
-    if not ret:
-        logger.error(f"nvmf_subsystem_add_ns failed on {label}")
-    return bool(ret)
-
-
 def _swap_namespace(rpc, nqn, new_bdev, uuid, guid, label):
     """Remove the existing namespace from a subsystem and add a new one.
 
@@ -682,69 +668,6 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         _snap_lvol_size_mib = _bytes_to_mib(_lvol_for_size.size)
     except KeyError:
         _snap_lvol_size_mib = None
-
-    # Ensure TGT subsystems with inaccessible listeners exist on the very first
-    # call (before any snapshot is transferred).  When migrate-pre-create was
-    # called first the subsystems are already present and this is a no-op.
-    # For direct migrations (no pre-create) this creates them now so the client
-    # can pre-connect during the snapshot-transfer window.
-    #
-    # Generalized: _build_paths produces one entry per TGT node; overlap nodes
-    # (whose subsystem already exists from their SRC role) get only a listener
-    # added at their TGT port.  Non-overlap nodes get a full subsystem + listener.
-    # Adding tertiary support = _build_paths appends one more entry automatically.
-    if not migration.snaps_migrated and not ctx:
-        try:
-            lvol_pre = db.get_lvol_by_id(migration.lvol_id)
-            nqn_pre = lvol_pre.nqn
-            _, tgt_paths_pre, overlap_ids_pre = _build_paths(
-                src_node, tgt_node, src_rpc, tgt_rpc)
-            for i, tgt in enumerate(tgt_paths_pre):
-                min_cntlid = 2000 if i == 0 else 3000
-                try:
-                    if tgt['node_id'] in overlap_ids_pre:
-                        # Subsystem already exists from SRC role — only add listener
-                        # at TGT port so clients can pre-connect.  Namespace is added
-                        # after final migration (step 4 of the ANA sequence).
-                        ret_l, err_l = tgt['rpc'].nvmf_subsystem_add_listener(
-                            nqn_pre, tgt['trtype'], tgt['ip'], tgt['port'], "inaccessible")
-                        if not ret_l:
-                            if isinstance(err_l, dict) and err_l.get("code") == -32602:
-                                logger.info(
-                                    f"Precreate: listener already exists on overlap TGT "
-                                    f"{tgt['node_id'][:8]} {tgt['ip']}:{tgt['port']}")
-                            else:
-                                logger.warning(
-                                    f"Precreate: listener add on overlap TGT "
-                                    f"{tgt['node_id'][:8]}: {err_l}")
-                        else:
-                            logger.info(
-                                f"Precreate: added inaccessible listener on overlap TGT "
-                                f"{tgt['node_id'][:8]} {tgt['ip']}:{tgt['port']}")
-                    else:
-                        if not tgt['rpc'].subsystem_list(nqn_pre):
-                            tgt['rpc'].subsystem_create(
-                                nqn_pre, lvol_pre.ha_type, lvol_pre.uuid,
-                                min_cntlid=min_cntlid,
-                                max_namespaces=constants.LVO_MAX_NAMESPACES_PER_SUBSYS)
-                            if lvol_pre.allowed_hosts:
-                                from simplyblock_core.storage_node_ops import _reapply_allowed_hosts
-                                _reapply_allowed_hosts(lvol_pre, tgt['node'], tgt['rpc'])
-                            tgt['rpc'].listeners_create(
-                                nqn_pre, tgt['trtype'], tgt['ip'], tgt['port'],
-                                ana_state="inaccessible")
-                            logger.info(
-                                f"Precreate: created subsystem {nqn_pre} on TGT "
-                                f"{tgt['node_id'][:8]} {tgt['ip']}:{tgt['port']} inaccessible")
-                        else:
-                            logger.info(
-                                f"Precreate: subsystem {nqn_pre} already exists on TGT "
-                                f"{tgt['node_id'][:8]} (from pre-create)")
-                except Exception as e:
-                    logger.warning(
-                        f"Precreate: TGT {tgt['node_id'][:8]} setup failed (non-fatal): {e}")
-        except Exception as e:
-            logger.warning(f"Subsystem setup failed (non-fatal, continuing): {e}")
 
     # ── A. Launch / resume planned snapshots one at a time ───────────────────
     # SPDK only supports one bdev_lvol_transfer per poller group at a time;
@@ -1324,19 +1247,6 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
     # overlap_ids: nodes that appear in BOTH source and target paths — they already
     # have a subsystem (from SRC role); their namespace is swapped in step 4 below.
     src_paths, tgt_paths, overlap_ids = _build_paths(src_node, tgt_node, src_rpc, tgt_rpc)
-
-    # Pre-ANA: add namespace to non-overlap TGT paths now.
-    # Overlap paths get their namespace swapped in step 4 (after inaccessible flips).
-    # bdev_lvol_final_migration already chains the lvol to its predecessor snapshot
-    # on both primary and secondary — no explicit add_clone needed here.
-    for tgt in tgt_paths:
-        if tgt['node_id'] not in overlap_ids:
-            try:
-                _add_ns_idempotent(
-                    tgt['rpc'], nqn, tgt_lvol_composite,
-                    lvol.uuid, lvol.guid, tgt['node_id'][:8])
-            except Exception as e:
-                logger.error(f"Pre-ANA namespace add on {tgt['node_id'][:8]} failed: {e}")
 
     # Generalized 6-step ANA + namespace-swap sequence.
     # Works for any topology (non-overlap, Case A, Case B, future tertiary).
