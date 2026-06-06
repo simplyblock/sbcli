@@ -245,8 +245,9 @@ class TestEnableHappyPath(_Patched):
             n.rpc_client_mock.jm_set_shared_placement.assert_called_once()
             kwargs = n.rpc_client_mock.jm_set_shared_placement.call_args.kwargs
             self.assertEqual(kwargs.get("enable"), True)
-            # No name -> applies to all JM bdevs on the node.
-            self.assertNotIn("name", kwargs)
+            # The JM RPC requires an explicit bdev name (one JM per node,
+            # named jm_<node_id>) — unlike distrib's all-bdevs no-name form.
+            self.assertEqual(kwargs.get("name"), f"jm_{n.get_id()}")
 
     def test_jm_rpc_failure_without_force_aborts_persist(self):
         # A JM RPC rejection alone (distrib OK) must still abort + not persist.
@@ -388,20 +389,31 @@ class TestRpcMethodShape(unittest.TestCase):
 
     # --- JM analog ---------------------------------------------------------
 
-    def test_bdev_jm_create_emits_shared_placement_default_on(self):
-        from simplyblock_core.rpc_client import (
-            RPCClient, JM_SHARED_PLACEMENT_DEFAULT)
+    def test_bdev_jm_create_emits_shared_placement_when_true(self):
+        from simplyblock_core.rpc_client import RPCClient
+
+        with patch("requests.session"):
+            c = RPCClient("127.0.0.1", 8081, "u", "p", timeout=1, retry=0)
+        with patch.object(c, "_request", return_value=True) as mock_req:
+            c.bdev_jm_create(name="jm_1", name_storage1="alceml_1",
+                             shared_placement=True)
+
+        self.assertEqual(mock_req.call_args.args[0], "bdev_jm_create")
+        params = mock_req.call_args.args[1]
+        self.assertEqual(params["shared_placement"], True)
+
+    def test_bdev_jm_create_omits_shared_placement_by_default(self):
+        from simplyblock_core.rpc_client import RPCClient
 
         with patch("requests.session"):
             c = RPCClient("127.0.0.1", 8081, "u", "p", timeout=1, retry=0)
         with patch.object(c, "_request", return_value=True) as mock_req:
             c.bdev_jm_create(name="jm_1", name_storage1="alceml_1")
 
-        self.assertEqual(mock_req.call_args.args[0], "bdev_jm_create")
         params = mock_req.call_args.args[1]
-        # Hard-coded default: every JM is created in shared-placement mode.
-        self.assertEqual(params["shared_placement"], JM_SHARED_PLACEMENT_DEFAULT)
-        self.assertTrue(params["shared_placement"])
+        # Absent (not False) when the cluster has not opted in — matches the
+        # spec's "Default: false" semantics and the distrib create flag.
+        self.assertNotIn("shared_placement", params)
 
     def test_jm_set_shared_placement_single_bdev(self):
         from simplyblock_core.rpc_client import RPCClient
@@ -415,17 +427,16 @@ class TestRpcMethodShape(unittest.TestCase):
         self.assertEqual(mock_req.call_args.args[1],
                          {"name": "jm_1", "enable": True})
 
-    def test_jm_set_shared_placement_all_bdevs_when_name_omitted(self):
+    def test_jm_set_shared_placement_requires_name(self):
+        # The data-plane RPC mandates a bdev name (one JM per node); the
+        # client signature enforces it rather than silently sending an
+        # all-bdevs request the way distr_shared_placement does.
         from simplyblock_core.rpc_client import RPCClient
 
         with patch("requests.session"):
             c = RPCClient("127.0.0.1", 8081, "u", "p", timeout=1, retry=0)
-        with patch.object(c, "_request", return_value=True) as mock_req:
+        with self.assertRaises(TypeError):
             c.jm_set_shared_placement(enable=True)
-
-        params = mock_req.call_args.args[1]
-        self.assertEqual(params, {"enable": True})
-        self.assertNotIn("name", params)
 
     def test_jm_set_shared_placement_disable(self):
         from simplyblock_core.rpc_client import RPCClient

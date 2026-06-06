@@ -664,7 +664,8 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
         return False
 
     jm_bdev = f"jm_{snode.get_id()}"
-    ret = rpc_client.bdev_jm_create(jm_bdev, alceml_name, jm_cpu_mask=snode.jm_cpu_mask)
+    ret = rpc_client.bdev_jm_create(jm_bdev, alceml_name, jm_cpu_mask=snode.jm_cpu_mask,
+                                    shared_placement=cluster.shared_placement)
     if not ret:
         logger.error(f"Failed to create {jm_bdev}")
         return False
@@ -749,7 +750,8 @@ def _create_jm_stack_on_device(rpc_client, nvme, snode, after_restart):
         return False
 
     jm_bdev = f"jm_{snode.get_id()}"
-    ret = rpc_client.bdev_jm_create(jm_bdev, alceml_name, jm_cpu_mask=snode.jm_cpu_mask)
+    ret = rpc_client.bdev_jm_create(jm_bdev, alceml_name, jm_cpu_mask=snode.jm_cpu_mask,
+                                    shared_placement=cluster.shared_placement)
     if not ret:
         logger.error(f"Failed to create {jm_bdev}")
         return False
@@ -1140,7 +1142,8 @@ def _prepare_cluster_devices_on_restart(snode, clear_data=False):
             return False
 
         jm_bdev = f"jm_{snode.get_id()}"
-        ret = rpc_client.bdev_jm_create(jm_bdev, jm_device.alceml_bdev, jm_cpu_mask=snode.jm_cpu_mask)
+        ret = rpc_client.bdev_jm_create(jm_bdev, jm_device.alceml_bdev, jm_cpu_mask=snode.jm_cpu_mask,
+                                        shared_placement=cluster.shared_placement)
         if not ret:
             logger.error(f"Failed to create {jm_bdev}")
             return False
