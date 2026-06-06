@@ -41,7 +41,7 @@ SN_COUNT = len(SN_IPS)
 USER = "root"
 IFACE = "eth0"
 DATA_IFACE = "eth1"
-BRANCH = "inline-checksum-validation"
+BRANCH = "R26.2-PRE"
 MAX_LVOL = "100"
 
 # Same volume plan layout as the AWS variant; consumed by downstream perf tooling.
