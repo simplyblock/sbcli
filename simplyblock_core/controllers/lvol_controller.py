@@ -3228,13 +3228,11 @@ def get_next_available_subsystem_on_node(node_id, all_lvols=None):
     for lvol in all_lvols:
         if lvol.node_id != node_id:
             continue
-
         if lvol.status in [LVol.STATUS_IN_DELETION, LVol.STATUS_DELETED, LVol.STATUS_IN_CREATION]:
             continue
+        if lvol.nqn in ns_counts and ns_counts.get(lvol.nqn, 0) < lvol.max_namespace_per_subsys:
+            ret.append((lvol.get_id(), lvol.nqn))
 
-        if not lvol.namespace:
-            if lvol.nqn in ns_counts and ns_counts.get(lvol.nqn, 0) < lvol.max_namespace_per_subsys:
-                ret.append((lvol.get_id(), lvol.nqn))
     if ret:
         return ret[random.randint(0, len(ret) - 1)]
     return None
