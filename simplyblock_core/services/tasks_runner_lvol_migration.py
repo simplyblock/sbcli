@@ -114,8 +114,8 @@ _WAIT = object()
 # Intermediate snapshots represent a small dirty delta so they should complete
 # quickly; we spin at _INTERMEDIATE_POLL_INTERVAL_S rather than waiting for
 # the next 3-second service-loop iteration.
-_INTERMEDIATE_POLL_INTERVAL_S = 0.1   # seconds between stat checks
-_INTERMEDIATE_POLL_MAX = 3000          # max iterations ≈ 5 min
+_INTERMEDIATE_POLL_INTERVAL_S = 1      # seconds between stat checks
+_INTERMEDIATE_POLL_MAX = 300           # max iterations ≈ 5 min
 
 
 # ---------------------------------------------------------------------------
