@@ -710,6 +710,7 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     lvol.nodes = snap.lvol.nodes
     lvol.cloned_from_snap = snapshot_id
     lvol.pool_uuid = pool.get_id()
+    lvol.pool_name = pool.pool_name
     lvol.ha_type = snap.lvol.ha_type
     lvol.lvol_type = 'lvol'
     lvol.guid = utils.generate_hex_string(16)
