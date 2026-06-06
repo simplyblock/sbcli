@@ -1248,13 +1248,20 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
     # have a subsystem (from SRC role); their namespace is swapped in step 4 below.
     src_paths, tgt_paths, overlap_ids = _build_paths(src_node, tgt_node, src_rpc, tgt_rpc)
 
-    # Generalized 6-step ANA + namespace-swap sequence.
+    # Generalized ANA + namespace-swap sequence.
     # Works for any topology (non-overlap, Case A, Case B, future tertiary).
+    #
+    # No-overlap fast path (steps 1+5 merged):
+    #   Step 1 — all TGT paths: final ANA state (prim=optimized, rest=non_optimized)
+    #   Step 3 — all SRC paths → inaccessible
+    #   (steps 2, 4, 5, 6 skipped — no overlap nodes)
+    #
+    # Overlap path:
     #   Step 1 — first non-overlap TGT → optimized  (live path before touching overlap)
     #   Step 2 — overlap SRC paths    → inaccessible (at SRC port)
     #   Step 3 — non-overlap SRC paths → inaccessible
     #   Step 4 — overlap TGT paths: swap namespace (remove old, add new)
-    #   Step 5 — all TGT paths: correct ANA state at TGT port (prim=optimized, rest=non_optimized)
+    #   Step 5 — all TGT paths: correct ANA state at TGT port
     #   Step 6 — overlap TGT paths: remove old SRC listener if port changed
     src_port_by_id = {p['node_id']: p['port'] for p in src_paths}
 
@@ -1266,39 +1273,51 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         except Exception as e:
             logger.error(f"ANA {label} failed (non-fatal): {e}")
 
-    # Step 1: first non-overlap TGT → optimized
-    for tgt in tgt_paths:
-        if tgt['node_id'] not in overlap_ids:
+    if not overlap_ids:
+        # Step 1 (no-overlap): set all TGT to final states before killing SRC
+        for i, tgt in enumerate(tgt_paths):
+            state = "optimized" if i == 0 else "non_optimized"
             _flip(tgt['rpc'], tgt['ip'], tgt['port'], tgt['trtype'],
-                  "optimized", f"TGT-{tgt['node_id'][:8]}(pre)")
-            break
+                  state, f"TGT-{tgt['node_id'][:8]}")
 
-    # Step 2: overlap SRC paths → inaccessible at SRC port
-    for src in src_paths:
-        if src['node_id'] in overlap_ids:
-            _flip(src['rpc'], src['ip'], src['port'], src['trtype'],
-                  "inaccessible", f"SRC-{src['node_id'][:8]}(overlap)")
-
-    # Step 3: non-overlap SRC paths → inaccessible
-    for src in src_paths:
-        if src['node_id'] not in overlap_ids:
+        # Step 3 (no-overlap): all SRC paths → inaccessible
+        for src in src_paths:
             _flip(src['rpc'], src['ip'], src['port'], src['trtype'],
                   "inaccessible", f"SRC-{src['node_id'][:8]}")
+    else:
+        # Step 1: first non-overlap TGT → optimized (live path before touching overlap)
+        for tgt in tgt_paths:
+            if tgt['node_id'] not in overlap_ids:
+                _flip(tgt['rpc'], tgt['ip'], tgt['port'], tgt['trtype'],
+                      "optimized", f"TGT-{tgt['node_id'][:8]}(pre)")
+                break
 
-    # Step 4: namespace swap on overlap TGT paths
-    for tgt in tgt_paths:
-        if tgt['node_id'] in overlap_ids:
-            try:
-                _swap_namespace(tgt['rpc'], nqn, tgt_lvol_composite,
-                                lvol.uuid, lvol.guid, tgt['node_id'][:8])
-            except Exception as e:
-                logger.error(f"Namespace swap on {tgt['node_id'][:8]} failed: {e}")
+        # Step 2: overlap SRC paths → inaccessible at SRC port
+        for src in src_paths:
+            if src['node_id'] in overlap_ids:
+                _flip(src['rpc'], src['ip'], src['port'], src['trtype'],
+                      "inaccessible", f"SRC-{src['node_id'][:8]}(overlap)")
 
-    # Step 5: all TGT paths → correct ANA state at TGT port
-    for i, tgt in enumerate(tgt_paths):
-        state = "optimized" if i == 0 else "non_optimized"
-        _flip(tgt['rpc'], tgt['ip'], tgt['port'], tgt['trtype'],
-              state, f"TGT-{tgt['node_id'][:8]}")
+        # Step 3: non-overlap SRC paths → inaccessible
+        for src in src_paths:
+            if src['node_id'] not in overlap_ids:
+                _flip(src['rpc'], src['ip'], src['port'], src['trtype'],
+                      "inaccessible", f"SRC-{src['node_id'][:8]}")
+
+        # Step 4: namespace swap on overlap TGT paths
+        for tgt in tgt_paths:
+            if tgt['node_id'] in overlap_ids:
+                try:
+                    _swap_namespace(tgt['rpc'], nqn, tgt_lvol_composite,
+                                    lvol.uuid, lvol.guid, tgt['node_id'][:8])
+                except Exception as e:
+                    logger.error(f"Namespace swap on {tgt['node_id'][:8]} failed: {e}")
+
+        # Step 5: all TGT paths → correct ANA state at TGT port
+        for i, tgt in enumerate(tgt_paths):
+            state = "optimized" if i == 0 else "non_optimized"
+            _flip(tgt['rpc'], tgt['ip'], tgt['port'], tgt['trtype'],
+                  state, f"TGT-{tgt['node_id'][:8]}")
 
     # Step 6: overlap TGT paths → remove old SRC listener if port changed
     for tgt in tgt_paths:
