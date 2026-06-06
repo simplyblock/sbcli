@@ -1138,9 +1138,12 @@ def set_shared_placement(cl_id, enable=True, force=False) -> bool:
                     "Node %s rejected distr_shared_placement(enable=%s)",
                     node.get_id()[:8], enable)
             # JM shares the same shared-placement migration as distrib: flip
-            # every JM bdev on the node too (full analogy with the distrib
-            # call above). New JMs are already created shared-placement.
-            ok_jm = rpc.jm_set_shared_placement(enable=enable)
+            # this node's JM bdev too. Unlike distr_shared_placement, the JM
+            # RPC requires an explicit bdev name (there is exactly one JM per
+            # node, named jm_<node_id>). New JMs created after this point pick
+            # up the mode from cluster.shared_placement at (re)create time.
+            jm_name = f"jm_{node.get_id()}"
+            ok_jm = rpc.jm_set_shared_placement(name=jm_name, enable=enable)
             if not ok_jm:
                 failures.append(node.get_id())
                 logger.warning(
