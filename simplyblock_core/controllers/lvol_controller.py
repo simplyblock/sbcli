@@ -951,7 +951,12 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
     if not ret:
         return _fail_after_bdev(lvol, rpc_client, msg)
 
-    if _resolve_namespaced_subsystem(lvol, rpc_client, snode):
+    try:
+        resolve_subsys = _resolve_namespaced_subsystem(lvol, rpc_client, snode)
+    except Exception as e:
+        return _fail_after_bdev(lvol, rpc_client, str(e))
+
+    if resolve_subsys:
         if is_primary:
             min_cntlid = 1
         else:
@@ -1072,7 +1077,7 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
                 if subsys_count >= snode.max_lvol:
                     error = f"Too many subsystems on node: {snode.get_id()}, max subsystems reached: {snode.max_lvol}"
                     logger.error(error)
-                    raise Exception(error)
+                    return _fail_after_bdev(lvol, rpc_client, error)
 
                 cluster = DBController().get_cluster_by_id(snode.cluster_id)
                 lvol.nqn = cluster.nqn + ":lvol:" + lvol.uuid
