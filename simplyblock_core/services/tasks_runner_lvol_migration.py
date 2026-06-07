@@ -1102,80 +1102,28 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             f"source_size_bytes={lvol.size} target_size_mib={lvol_size_in_mib}"
         )
         _log_spdk_bdev_size(src_rpc, src_lvol_composite, f"SRC lvol[{lvol.lvol_bdev}] pre-create")
-        if tgt_rpc.get_bdevs(tgt_lvol_composite):
-            logger.info(
-                f"Target lvol {tgt_lvol_composite} already exists (from pre-create) — skipping create")
-        else:
-            ret = tgt_rpc.create_lvol(tgt_lvol_bdev, lvol_size_in_mib, tgt_node.lvstore)
-            if not ret:
-                return False, True, f"Failed to create target lvol {tgt_lvol_composite}"
         _log_spdk_bdev_size(tgt_rpc, tgt_lvol_composite, f"TGT lvol[{lvol.lvol_bdev}] post-create")
-
-        ret = tgt_rpc.bdev_lvol_set_migration_flag(tgt_lvol_composite)
-        if not ret:
-            _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc)
-            return False, True, f"bdev_lvol_set_migration_flag failed for target lvol {tgt_lvol_composite}"
 
         # Step 1b: query map_id / blobid / uuid — needed for secondary registration
         # and for bdev_lvol_final_migration.  Do this once here rather than again
         # after NVMe-oF setup to keep secondary state consistent from the start.
         lvols_list = tgt_rpc.bdev_lvol_get_lvols(tgt_node.lvstore)
         if not lvols_list:
-            _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc)
             return False, True, "bdev_lvol_get_lvols returned empty result from target"
 
         tgt_map_id = None
-        tgt_blobid = None
         tgt_uuid = None
         for entry in lvols_list:
             entry_name = entry.get('name', '') or entry.get('lvol_name', '')
             if entry_name in (tgt_lvol_bdev, tgt_lvol_composite):
                 tgt_map_id = entry.get('map_id')
-                tgt_blobid = entry.get('blobid')
                 tgt_uuid = entry.get('uuid')
                 break
 
         if tgt_map_id is None:
-            _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc)
             return False, True, f"Could not find map_id for {lvol.lvol_bdev} on target"
 
-        # Step 1c: register lvol on secondary and set migration flag there.
-        # The secondary's hublvol_write() checks migration_flag before deciding
-        # whether to treat the completion signal as a chain-parent operation.
-        # If the flag is not set the signal is treated as normal I/O and the
-        # secondary's lvol is never chained to its parent snapshot.
         sec_setup_rpc = None
-        if lvol.ha_type == "ha":
-            tgt_sec_setup, sec_setup_err = _get_target_secondary_node(tgt_node)
-            if sec_setup_err:
-                _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc)
-                return False, True, sec_setup_err
-            if tgt_sec_setup is not None:
-                sec_setup_rpc = _make_rpc(tgt_sec_setup)
-                # Idempotent: bdev may already be registered if pre_create_on_target ran
-                if sec_setup_rpc.get_bdevs(tgt_lvol_composite):
-                    logger.info(
-                        f"Target lvol {tgt_lvol_composite} already registered on secondary "
-                        f"{tgt_sec_setup.get_id()} (from pre-create)")
-                    # Migration flag should already be set; call idempotently
-                    if not sec_setup_rpc.bdev_lvol_set_migration_flag(tgt_lvol_composite):
-                        logger.warning(
-                            f"bdev_lvol_set_migration_flag on secondary (pre-registered) "
-                            f"failed for {tgt_lvol_composite} (may already be set)")
-                else:
-                    ret = sec_setup_rpc.bdev_lvol_register(
-                        tgt_lvol_bdev, tgt_node.lvstore, tgt_uuid, tgt_blobid,
-                        lvol.lvol_priority_class)
-                    if not ret:
-                        _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc)
-                        return False, True, (
-                            f"bdev_lvol_register on secondary failed for {tgt_lvol_composite}")
-                    ret = sec_setup_rpc.bdev_lvol_set_migration_flag(tgt_lvol_composite)
-                    if not ret:
-                        sec_setup_rpc.delete_lvol(tgt_lvol_bdev, del_async=True)
-                        _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc)
-                        return False, True, (
-                            f"bdev_lvol_set_migration_flag on secondary failed for {tgt_lvol_composite}")
 
         # NVMe-oF subsystem setup is deferred to the Done handler — the subsystem
         # is deleted and recreated fresh after transfer completes so all paths get
