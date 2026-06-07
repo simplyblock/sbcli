@@ -916,7 +916,7 @@ def _resolve_namespaced_subsystem(lvol, rpc_client, snode):
             all_lvols = db_ctrl.get_mini_lvols()
             subsys_count = len(set(
                 lv.nqn for lv in all_lvols if lv.node_id == snode.get_id() and
-                lv.status not in [LVol.STATUS_IN_DELETION, LVol.STATUS_DELETED, LVol.STATUS_IN_CREATION]
+                lv.status not in [LVol.STATUS_IN_DELETION, LVol.STATUS_DELETED]
             ))
             if subsys_count >= snode.max_lvol:
                 error = f"Too many subsystems on node: {snode.get_id()}, max subsystems reached: {snode.max_lvol}"
@@ -3228,7 +3228,7 @@ def get_next_available_subsystem_on_node(node_id, all_lvols=None)-> Optional[LVo
     for lv in all_lvols:
         if lv.node_id != node_id:
             continue
-        if lv.status not in [LVol.STATUS_IN_DELETION, LVol.STATUS_DELETED, LVol.STATUS_IN_CREATION]:
+        if lv.status not in [LVol.STATUS_IN_DELETION, LVol.STATUS_DELETED]:
             ns_counts[lv.nqn] = ns_counts.get(lv.nqn, 0) + 1
 
     ret = []
