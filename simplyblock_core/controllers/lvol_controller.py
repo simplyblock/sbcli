@@ -1086,7 +1086,6 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
                 cluster = DBController().get_cluster_by_id(snode.cluster_id)
                 lvol.nqn = cluster.nqn + ":lvol:" + lvol.uuid
                 lvol.namespace = ""
-                lvol.max_namespace_per_subsys = constants.LVO_MAX_NAMESPACES_PER_SUBSYS
             return add_lvol_on_node(lvol, snode, is_primary=is_primary, secondary_index=secondary_index)
         else:
             return _fail_after_bdev(
