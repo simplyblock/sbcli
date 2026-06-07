@@ -651,6 +651,20 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
             logger.error(msg)
             return False, msg
 
+    records = db_controller.get_cluster_capacity(cluster, 1)
+    if records:
+        rec = records[0]
+        cluster_size_prov_util = int(((rec.size_prov+size) / rec.size_total) * 100)
+
+        if cluster.prov_cap_crit and cluster.prov_cap_crit < cluster_size_prov_util:
+            msg = f"Cluster provisioned cap critical would be, util: {cluster_size_prov_util}% of cluster util: {cluster.prov_cap_crit}"
+            logger.error(msg)
+            return False, msg
+
+        elif cluster.prov_cap_warn and cluster.prov_cap_warn < cluster_size_prov_util:
+            logger.warning(f"Cluster provisioned cap warning, util: {cluster_size_prov_util}% of cluster util: {cluster.prov_cap_warn}")
+
+
     # Resolve the namespace slot early so we can (a) skip the subsystem limit
     # check when the clone fits into an existing subsystem, and (b) reuse the
     # result below instead of calling get_next_available_subsystem_on_node twice.
