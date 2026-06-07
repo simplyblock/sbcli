@@ -53,7 +53,6 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret, mo
         db_connection = cluster_data['db_connection']
         scripts.set_db_config(db_connection)
         time.sleep(1)
-        hostname = utils.get_hostname()
         db_controller = DBController()
         nodes = db_controller.get_mgmt_nodes()
         if not nodes:

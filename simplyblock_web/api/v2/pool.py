@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
 
 from simplyblock_core.db_controller import DBController
-from simplyblock_core.controllers import pool_controller, lvol_controller
+from simplyblock_core.controllers import pool_controller
 from simplyblock_core import utils as core_utils
 from simplyblock_core.models.pool import Pool as PoolModel
 
