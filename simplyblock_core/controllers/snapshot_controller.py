@@ -10,7 +10,7 @@ from datetime import datetime
 from simplyblock_core.controllers import lvol_controller, snapshot_events, pool_controller, tasks_controller, \
     migration_controller
 
-from simplyblock_core import utils
+from simplyblock_core import utils, constants
 from simplyblock_core.kms import create_kms_connection
 from simplyblock_core.kms._exceptions import KMSException
 from simplyblock_core.db_controller import DBController
@@ -697,14 +697,14 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
 
     # Create a new subsystem by default unless namespaced is set
     lvol.nqn = cluster.nqn + ":lvol:" + lvol.uuid
-    lvol.max_namespace_per_subsys = snap.lvol.max_namespace_per_subsys
+    lvol.max_namespace_per_subsys = constants.LVO_MAX_NAMESPACES_PER_SUBSYS
 
     if namespaced:
         # reuse the slot resolved above — avoids a second DB read
         if _available_subsys:
-            namespace, free_nqn = _available_subsys
-            lvol.nqn = free_nqn
-            lvol.namespace = namespace
+            lvol.nqn = _available_subsys.nqn
+            lvol.namespace = _available_subsys.uuid
+            lvol.max_namespace_per_subsys = _available_subsys.max_namespace_per_subsys
 
     if pvc_name:
         lvol.pvc_name = pvc_name

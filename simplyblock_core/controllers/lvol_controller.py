@@ -6,7 +6,7 @@ import sys
 import time
 import uuid
 from datetime import datetime
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
 from simplyblock_core import utils, constants
 from simplyblock_core.controllers import snapshot_controller, pool_controller, lvol_events, tasks_controller, \
@@ -565,9 +565,9 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     if namespaced:
         result = get_next_available_subsystem_on_node(host_node.get_id(), all_lvols)
         if result:
-            namespace, free_nqn = result
-            lvol.nqn = free_nqn
-            lvol.namespace = namespace
+            lvol.nqn = result.nqn
+            lvol.namespace = result.uuid
+            lvol.max_namespace_per_subsys = result.max_namespace_per_subsys
 
     s_node = db_controller.get_storage_node_by_id(host_node.secondary_node_id)
     attr_name = f"active_{fabric}"
@@ -892,40 +892,44 @@ def _resolve_namespaced_subsystem(lvol, rpc_client, snode):
     if not lvol.namespace:
         return True
 
-    subsys = rpc_client.subsystem_list(lvol.nqn)
-    if not subsys:
-        return True
-
+    look_for_another_ns = False
     if lvol.node_id == snode.get_id():
-        subsys_max_ns = subsys[0]["max_namespaces"]
-        subsys_ns = subsys[0]["namespaces"]
-        if subsys_max_ns == len(subsys_ns):
-            logger.info("Subsys is full, looking for another one")
-            result = get_next_available_subsystem_on_node(lvol.node_id)
-            if result:
-                namespace, free_nqn = result
-                lvol.nqn = free_nqn
-                lvol.namespace = namespace
-                return False
-            else:
-                all_lvols = db_ctrl.get_mini_lvols()
-                subsys_count = len(set(
-                    lv.nqn for lv in all_lvols if lv.node_id == snode.get_id() and
-                    lv.status not in [LVol.STATUS_IN_DELETION, LVol.STATUS_DELETED]
-                ))
-                if subsys_count >= snode.max_lvol:
-                    error = f"Too many subsystems on node: {snode.get_id()}, max subsystems reached: {snode.max_lvol}"
-                    logger.error(error)
-                    raise Exception(error)
-
-                cluster = db_ctrl.get_cluster_by_id(snode.cluster_id)
-                lvol.nqn = cluster.nqn + ":lvol:" + lvol.uuid
-                lvol.namespace = ""
-                return True
+        subsys = rpc_client.subsystem_list(lvol.nqn)
+        if not subsys:
+            logger.warning(f"LVol subsystem {lvol.nqn} not found on node {snode.get_id()}, looking for another one")
+            look_for_another_ns = True
         else:
-            return False
+            subsys_max_ns = subsys[0]["max_namespaces"]
+            subsys_ns = subsys[0]["namespaces"]
+            if subsys_max_ns == len(subsys_ns):
+                logger.info("Subsys is full, looking for another one")
+                look_for_another_ns = True
 
-    return False
+    if look_for_another_ns:
+        result = get_next_available_subsystem_on_node(lvol.node_id)
+        if result:
+            lvol.nqn = result.nqn
+            lvol.namespace = result.uuid
+            lvol.max_namespace_per_subsys = result.max_namespace_per_subsys
+            return False
+        else:
+            all_lvols = db_ctrl.get_mini_lvols()
+            subsys_count = len(set(
+                lv.nqn for lv in all_lvols if lv.node_id == snode.get_id() and
+                lv.status not in [LVol.STATUS_IN_DELETION, LVol.STATUS_DELETED, LVol.STATUS_IN_CREATION]
+            ))
+            if subsys_count >= snode.max_lvol:
+                error = f"Too many subsystems on node: {snode.get_id()}, max subsystems reached: {snode.max_lvol}"
+                logger.error(error)
+                raise Exception(error)
+
+            cluster = db_ctrl.get_cluster_by_id(snode.cluster_id)
+            lvol.nqn = cluster.nqn + ":lvol:" + lvol.uuid
+            lvol.namespace = ""
+            lvol.max_namespace_per_subsys = constants.LVO_MAX_NAMESPACES_PER_SUBSYS
+            return True
+    else:
+        return False
 
 
 def _fail_after_bdev(lvol, rpc_client, msg):
@@ -1066,9 +1070,9 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
             all_lvols = DBController().get_mini_lvols()
             result = get_next_available_subsystem_on_node(lvol.node_id, all_lvols)
             if result:
-                namespace, free_nqn = result
-                lvol.nqn = free_nqn
-                lvol.namespace = namespace
+                lvol.nqn = result.nqn
+                lvol.namespace = result.uuid
+                lvol.max_namespace_per_subsys = result.max_namespace_per_subsys
             else:
                 subsys_count = len(set(
                     lv.nqn for lv in all_lvols if lv.node_id == snode.get_id() and
@@ -3214,7 +3218,7 @@ def get_namespaces_per_lvol(lvol):
     return ns_count
 
 
-def get_next_available_subsystem_on_node(node_id, all_lvols=None):
+def get_next_available_subsystem_on_node(node_id, all_lvols=None)-> Optional[LVol]:
     db_controller = DBController()
     if not all_lvols:
         all_lvols = db_controller.get_mini_lvols()
@@ -3236,7 +3240,8 @@ def get_next_available_subsystem_on_node(node_id, all_lvols=None):
         if lvol.status in [LVol.STATUS_IN_DELETION, LVol.STATUS_DELETED, LVol.STATUS_IN_CREATION]:
             continue
         if lvol.nqn in ns_counts and ns_counts.get(lvol.nqn, 0) < lvol.max_namespace_per_subsys:
-            ret.append((lvol.get_id(), lvol.nqn))
+            if lvol not in ret:
+                ret.append(lvol)
 
     if ret:
         return ret[random.randint(0, len(ret) - 1)]
