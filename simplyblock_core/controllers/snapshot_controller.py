@@ -10,7 +10,7 @@ from datetime import datetime
 from simplyblock_core.controllers import lvol_controller, snapshot_events, pool_controller, tasks_controller, \
     migration_controller
 
-from simplyblock_core import utils, constants
+from simplyblock_core import utils
 from simplyblock_core.kms import create_kms_connection
 from simplyblock_core.kms._exceptions import KMSException
 from simplyblock_core.db_controller import DBController
