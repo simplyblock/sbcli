@@ -926,7 +926,6 @@ def _resolve_namespaced_subsystem(lvol, rpc_client, snode):
             cluster = db_ctrl.get_cluster_by_id(snode.cluster_id)
             lvol.nqn = cluster.nqn + ":lvol:" + lvol.uuid
             lvol.namespace = ""
-            lvol.max_namespace_per_subsys = constants.LVO_MAX_NAMESPACES_PER_SUBSYS
             return True
     else:
         return False
