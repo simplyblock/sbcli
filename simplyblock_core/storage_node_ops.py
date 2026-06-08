@@ -6394,7 +6394,7 @@ def add_lvol_thread(lvol, snode, lvol_ana_state="optimized"):
 
     rpc_client = snode.rpc_client(timeout=10, retry=2)
 
-    pool = db_controller.get_pool_by_id(lvol.pool_id)
+    pool = db_controller.get_pool_by_id(lvol.pool_uuid)
     if pool.has_qos():
         lvol_controller.connect_lvol_to_pool(lvol.uuid, snode.get_id())
 
