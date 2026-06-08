@@ -978,7 +978,7 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
         if lvol.allowed_hosts:
             db_ctrl = DBController()
             cluster = db_ctrl.get_cluster_by_id(snode.cluster_id)
-            pool = None
+            pool = None # type: ignore[assignment]
             logger.info("[DHCHAP-DEBUG] add_lvol_on_node: lvol.pool_uuid=%s", lvol.pool_uuid)
             if lvol.pool_uuid:
                 try:
