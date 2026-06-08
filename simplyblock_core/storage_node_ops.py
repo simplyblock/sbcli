@@ -3092,23 +3092,6 @@ def _restart_storage_node_impl(
         lvol_list = db_controller.get_lvols_by_node_id(snode.get_id())
         logger.info(f"Found {len(lvol_list)} lvols")
 
-        # connect lvols to their respect pool
-        for lvol in lvol_list:
-            lvol_controller.connect_lvol_to_pool(lvol.uuid)
-
-        # recreate pools
-        pools = db_controller.get_pools()
-        for pool in pools:
-            ret = rpc_client.bdev_lvol_set_qos_limit(pool.numeric_id,
-                                                     pool.max_rw_ios_per_sec,
-                                                     pool.max_rw_mbytes_per_sec,
-                                                     pool.max_r_mbytes_per_sec,
-                                                     pool.max_w_mbytes_per_sec,
-                                                     )
-            if not ret:
-                logger.error("RPC failed bdev_lvol_set_qos_limit")
-                return False
-
         # Phase 10: start data migration, set node online
         online_devices_list = []
         for dev in snode.nvme_devices:
@@ -6410,6 +6393,10 @@ def add_lvol_thread(lvol, snode, lvol_ana_state="optimized"):
     db_controller = DBController()
 
     rpc_client = snode.rpc_client(timeout=10, retry=2)
+
+    pool = db_controller.get_pool_by_id(lvol.pool_uuid)
+    if pool.has_qos():
+        lvol_controller.connect_lvol_to_pool(lvol.uuid, snode.get_id())
 
     if "crypto" in lvol.lvol_type:
         cluster = db_controller.get_cluster_by_id(snode.cluster_id)

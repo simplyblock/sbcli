@@ -796,9 +796,6 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     lvol.write_to_db(db_controller.kv_store)
     lvol_events.lvol_create(lvol)
 
-    if pool.has_qos():
-        connect_lvol_to_pool(lvol.uuid)
-
     # set QOS
     if max_rw_iops >= 0 or max_rw_mbytes >= 0 or max_r_mbytes >= 0 or max_w_mbytes >= 0:
         set_lvol(lvol.uuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes)
@@ -954,6 +951,11 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
     if not ret:
         return _fail_after_bdev(lvol, rpc_client, msg)
 
+    db_controller = DBController()
+    pool = db_controller.get_pool_by_id(lvol.pool_uuid)
+    if pool.has_qos():
+        connect_lvol_to_pool(lvol.uuid, snode.get_id())
+
     try:
         resolve_subsys = _resolve_namespaced_subsystem(lvol, rpc_client, snode)
     except Exception as e:
@@ -976,7 +978,7 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
         if lvol.allowed_hosts:
             db_ctrl = DBController()
             cluster = db_ctrl.get_cluster_by_id(snode.cluster_id)
-            pool = None
+            pool = None # type: ignore[assignment]
             logger.info("[DHCHAP-DEBUG] add_lvol_on_node: lvol.pool_uuid=%s", lvol.pool_uuid)
             if lvol.pool_uuid:
                 try:
@@ -1571,10 +1573,10 @@ def delete_lvol(id_or_name, force_delete=False):
     logger.info("Done")
     return True
 
-def connect_lvol_to_pool(uuid):
+def connect_lvol_to_pool(lvol_id, node_id):
     db_controller = DBController()
     try:
-        lvol = db_controller.get_lvol_by_id(uuid)
+        lvol = db_controller.get_lvol_by_id(lvol_id)
     except KeyError as e:
         logger.error(e)
         return False
@@ -1583,7 +1585,7 @@ def connect_lvol_to_pool(uuid):
         logger.error("Pool is disabled")
         return False
 
-    snode = db_controller.get_storage_node_by_id(lvol.node_id)
+    snode = db_controller.get_storage_node_by_id(node_id)
     rpc_client = snode.rpc_client()
 
     if pool.has_qos():
@@ -1600,8 +1602,6 @@ def connect_lvol_to_pool(uuid):
             logger.error("RPC failed bdev_set_qos_limit")
             return False
 
-    lvol.write_to_db(db_controller.kv_store)
-    pool.write_to_db(db_controller.kv_store)
     logger.info("Done")
     return True
 
@@ -1617,7 +1617,7 @@ def set_lvol(uuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, name=
         logger.error("Pool is disabled")
         return False
     if pool.has_qos():
-        logger.error("Pool already has QOS settings")
+        logger.info("Pool already has QOS settings")
         return False
 
     if name:
