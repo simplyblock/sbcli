@@ -437,6 +437,28 @@ def _swap_namespace(rpc, nqn, new_bdev, uuid, guid, label):
         logger.error(f"Swap NS add failed on {label}")
 
 
+def _release_ns_claim(rpc, nqn, label):
+    """Remove a subsystem's namespace to release the exclusive bdev write claim.
+
+    The NVMe-oF Target holds an exclusive_write claim on any bdev used as a
+    namespace. bdev_crypto_create cannot open that bdev as a base until the
+    claim is released. Call this on non-overlap TGT paths before creating a
+    crypto bdev on top of the pre-created plain migration lvol.
+    """
+    sub = rpc.subsystem_list(nqn)
+    s = (sub[0] if isinstance(sub, list) else sub) if sub else None
+    ns_list = s.get('namespaces', []) if s else []
+    if not ns_list:
+        logger.info(f"Release NS claim {label}: no namespace present")
+        return
+    nsid = ns_list[0]['nsid']
+    try:
+        rpc.nvmf_subsystem_remove_ns(nqn, nsid)
+        logger.info(f"Released NS claim on {label}: removed nsid={nsid}")
+    except Exception as e:
+        logger.warning(f"Release NS claim on {label} (non-fatal): {e}")
+
+
 def _create_migration_crypto_bdev(rpc, lvol, tgt_lvstore, tgt_lvol_bdev, cluster):
     """Create the crypto bdev layer for a migration target lvol.
 
@@ -1283,6 +1305,11 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         tgt_crypto_bdev = f"crypto_{tgt_lvol_bdev}"
         cluster = db.get_cluster_by_id(migration.cluster_id)
         for tgt in tgt_paths:
+            if tgt['node_id'] not in overlap_ids:
+                # Pre-created subsystem holds an exclusive_write claim on the
+                # base lvol via its namespace. Release the claim so
+                # bdev_crypto_create can open the bdev as its base.
+                _release_ns_claim(tgt['rpc'], nqn, tgt['node_id'][:8])
             _create_migration_crypto_bdev(
                 tgt['rpc'], lvol, tgt_node.lvstore, tgt_lvol_bdev, cluster)
         tgt_ns_bdev = tgt_crypto_bdev
