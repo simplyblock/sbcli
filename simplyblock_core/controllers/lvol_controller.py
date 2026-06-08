@@ -952,7 +952,7 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
         return _fail_after_bdev(lvol, rpc_client, msg)
 
     db_controller = DBController()
-    pool = db_controller.get_pool_by_id(lvol.pool_id)
+    pool = db_controller.get_pool_by_id(lvol.pool_uuid)
     if pool.has_qos():
         connect_lvol_to_pool(lvol.uuid, snode.get_id())
 
