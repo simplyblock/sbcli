@@ -1060,7 +1060,7 @@ jobs:
           if [[ -z "$CN" ]]; then echo "NO_SPDK_CONTAINER"; exit 0; fi
           SOCK="/mnt/ramdisk/${CN}/spdk.sock"
 
-          BDEV_JSON="$(sudo docker exec "$CN" bash -lc "python spdk/scripts/rpc.py -s '$SOCK' bdev_get_bdevs" 2>/dev/null || true)"
+          BDEV_JSON="$(sudo docker exec "$CN" bash -lc "sudo python spdk/scripts/rpc.py -s '$SOCK' bdev_get_bdevs" 2>/dev/null || true)"
           if [[ -z "$BDEV_JSON" ]]; then echo "BDEV_EMPTY"; exit 0; fi
 
           if command -v jq >/dev/null 2>&1; then
@@ -1084,14 +1084,14 @@ jobs:
           PYIN
 
             sudo docker cp "$JF" "$CN:$JF" || true
-            sudo docker exec "$CN" bash -lc "python scripts/rpc_sock.py '$JF' '$SOCK' > /tmp/rpc_${d}.log 2>&1 || true" || true
+            sudo docker exec "$CN" bash -lc "sudo python scripts/rpc_sock.py '$JF' '$SOCK' > /tmp/rpc_${d}.log 2>&1 || true" || true
             sudo docker cp "$CN:/tmp/rpc_${d}.log" "$STAGING/rpc_${d}.log" 2>/dev/null || true
 
-            for f in $(sudo docker exec "$CN" bash -lc "ls /tmp 2>/dev/null | grep -F \\\"$d\\\" || true"); do
+            for f in $(sudo docker exec "$CN" bash -lc "sudo ls /tmp 2>/dev/null | grep -F \\\"$d\\\" || true"); do
               sudo docker cp "$CN:/tmp/$f" "$STAGING/${CN}__$f" 2>/dev/null || true
             done
 
-            sudo docker exec "$CN" bash -lc "rm -f '$JF' '/tmp/rpc_${d}.log'" || true
+            sudo docker exec "$CN" bash -lc "sudo rm -f '$JF' '/tmp/rpc_${d}.log'" || true
             rm -f "$JF" || true
           done
 

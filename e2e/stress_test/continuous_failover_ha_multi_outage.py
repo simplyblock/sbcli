@@ -38,9 +38,8 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
         self.lvol_name = f"lvl{generate_random_sequence(15)}"
         self.clone_name = f"cln{generate_random_sequence(15)}"
         self.snapshot_name = f"snap{generate_random_sequence(15)}"
-        self.lvol_size = "150G"
-        self.int_lvol_size = 150
-        self.fio_size = "6G"
+        self.lvol_size = "30G"
+        self.int_lvol_size = 30
         self.fio_num_jobs = 5
         self.fio_threads = []
         self.clone_mount_details = {}
@@ -886,6 +885,7 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
             self.spdk_mem_thread.start()
 
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self._compute_fio_size(extra_lvols=self.total_lvols)
         self.create_lvols_with_fio(self.total_lvols)
 
         sleep_n_sec(30)
@@ -900,11 +900,13 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                 )
 
             if iteration > 1:
+                self._compute_fio_size()
                 self.restart_fio(iteration=iteration)
 
             outage_events = self.perform_n_plus_k_outages()
 
             self.delete_random_lvols(5)
+            self._compute_fio_size(extra_lvols=5)
             self.create_lvols_with_fio(5)
             self.create_snapshots_and_clones()
             sleep_n_sec(280)

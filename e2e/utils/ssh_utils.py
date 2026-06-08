@@ -2656,7 +2656,7 @@ class SshUtils:
         self.exec_command(storage_node_ip, f"sudo mkdir -p '{base_path}' && sudo chmod -R 777 '{base_path}'")
         bdev_cmd = (
             f"sudo docker exec {container_name} bash -lc "
-            f"\"python spdk/scripts/rpc.py -s /mnt/ramdisk/{container_name}/spdk.sock bdev_get_bdevs\""
+            f"\"sudo python spdk/scripts/rpc.py -s /mnt/ramdisk/{container_name}/spdk.sock bdev_get_bdevs\""
         )
         bdev_output, bdev_err = self.exec_command(storage_node_ip, bdev_cmd)
         if (bdev_err and bdev_err.strip()) and not bdev_output:
@@ -2726,17 +2726,17 @@ EOF_JSON
     sudo docker cp "$JF" "$CN:/tmp/stack_${{d}}.json"
 
     # Run rpc inside container (socket path respected)
-    sudo docker exec "$CN" bash -lc "python scripts/rpc_sock.py /tmp/stack_${{d}}.json {shlex.quote('/mnt/ramdisk/'+container_name+'/spdk.sock')} > /tmp/rpc_${{d}}.log 2>&1 || true"
+    sudo docker exec "$CN" bash -lc "sudo python scripts/rpc_sock.py /tmp/stack_${{d}}.json {shlex.quote('/mnt/ramdisk/'+container_name+'/spdk.sock')} > /tmp/rpc_${{d}}.log 2>&1 || true"
 
     # Copy any files for this distrib out to host staging (rpc log + any matching /tmp/*d*)
     sudo docker cp "$CN:/tmp/rpc_${{d}}.log" "$HOST_STAGING/rpc_${{d}}.log" 2>/dev/null || true
     # try to pull any distrib-related artifacts
-    for f in $(sudo docker exec "$CN" bash -lc "ls /tmp/ 2>/dev/null | grep -F \"$d\" || true"); do
+    for f in $(sudo docker exec "$CN" bash -lc "sudo ls /tmp/ 2>/dev/null | grep -F \"$d\" || true"); do
       sudo docker cp "$CN:/tmp/$f" "$HOST_STAGING/$f" 2>/dev/null || true
     done
 
     # cleanup container temp for this distrib
-    sudo docker exec "$CN" bash -lc "rm -f /tmp/stack_${{d}}.json /tmp/rpc_${{d}}.log" || true
+    sudo docker exec "$CN" bash -lc "sudo rm -f /tmp/stack_${{d}}.json /tmp/rpc_${{d}}.log" || true
     rm -f "$JF" || true
   ) &
 
@@ -3067,12 +3067,12 @@ echo "$WORKDIR_HOST/{os.path.basename(remote_tar)}"
                 container_name = container_name_output.strip()
                 # Commands to run inside the SPDK container
                 iptables_reset_cmds = [
-                    f"sudo docker exec {container_name} iptables -L -v -n",
-                    f"sudo docker exec {container_name} iptables -P INPUT ACCEPT",
-                    f"sudo docker exec {container_name} iptables -P OUTPUT ACCEPT",
-                    f"sudo docker exec {container_name} iptables -P FORWARD ACCEPT",
-                    f"sudo docker exec {container_name} iptables -F",
-                    f"sudo docker exec {container_name} iptables -L -v -n"
+                    f"sudo docker exec {container_name} sudo iptables -L -v -n",
+                    f"sudo docker exec {container_name} sudo iptables -P INPUT ACCEPT",
+                    f"sudo docker exec {container_name} sudo iptables -P OUTPUT ACCEPT",
+                    f"sudo docker exec {container_name} sudo iptables -P FORWARD ACCEPT",
+                    f"sudo docker exec {container_name} sudo iptables -F",
+                    f"sudo docker exec {container_name} sudo iptables -L -v -n"
                 ]
 
                 # Execute each command

@@ -39,8 +39,8 @@ class RandomFailoverTest(TestLvolHACluster):
         # At 5 lvols/node (typical): 5×5×8G = 200G/node.
         self.TARGET_DATA_PER_NODE_GB = 200
         self.fio_numjobs = 5
-        self.lvol_size = "150G"
-        self.int_lvol_size = 150
+        self.lvol_size = "50G"
+        self.int_lvol_size = 50
         self.fio_size = "8G"  # default; overridden by _compute_fio_size()
         self.fio_threads = []
         self.clone_mount_details = {}

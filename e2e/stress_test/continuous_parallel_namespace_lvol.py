@@ -66,6 +66,7 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
 
         # ── Concurrency ───────────────────────────────────────────────────
         self.MAX_WORKERS_CREATE = 20
+        self.MAX_WORKERS_SUBMIT = 50          # for fire-all (just kubectl apply, no wait)
         self.MAX_WORKERS_DELETE = 30
         self.BATCH_SIZE = 50
         self.TASK_TIMEOUT = 300
@@ -76,6 +77,11 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
         # ── Retry ─────────────────────────────────────────────────────────
         self.RETRY_MAX = 10
         self.RETRY_INTERVAL = 30
+
+        # ── FIO validation ───────────────────────────────────────────────
+        self.FIO_VALIDATION_RUNTIME = 600        # 10 minutes
+        self.FIO_VALIDATION_SAMPLE_SIZE = 100    # PVCs to run FIO on (K8s)
+        self.FIO_VALIDATION_SIZE = "50M"         # FIO file size
 
         # ── Thread-safe state ─────────────────────────────────────────────
         self._lock = threading.Lock()
@@ -518,6 +524,10 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
 
     def _mount_verify_single_clone(self, item):
         """Subclass must implement: connect/mount clone, FIO read, verify."""
+        raise NotImplementedError
+
+    def _phase_fio_validation(self):
+        """Subclass must implement: run sustained FIO on a sample of resources."""
         raise NotImplementedError
 
     def _verify_nodes_healthy(self):
@@ -1753,6 +1763,7 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
                     ("create_clones", self._phase_create_clones),
                     ("verify_clones", self._verify_all_clones_exist),
                     ("mount_verify_clones", self._phase_mount_verify_clones),
+                    ("fio_validation", self._phase_fio_validation),
                     ("verify_nodes_final", self._verify_nodes_healthy),
                     ("delete_all", self._phase_delete_all),
                     ("verify_cleanup", self._phase_verify_cleanup),
@@ -1795,6 +1806,8 @@ class TestParallelNamespaceLvolDocker(_ParallelNamespaceLvolBase):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.test_name = "parallel_namespace_lvol_docker"
+        # Docker sbcli API is faster than CSI — use more workers
+        self.MAX_WORKERS_CREATE = 40
 
     # ── Setup / Cleanup ───────────────────────────────────────────────────
 
@@ -2434,6 +2447,128 @@ class TestParallelNamespaceLvolDocker(_ParallelNamespaceLvolBase):
                 except Exception:
                     pass
 
+    # ── FIO validation phase ─────────────────────────────────────────────
+
+    def _phase_fio_validation(self):
+        """Run sustained FIO (10 min) on parent lvols via SSH.
+
+        Connects all 20 parents, runs FIO on each parent device
+        simultaneously, then disconnects.
+        """
+        with self._lock:
+            parent_items = [
+                {"parent_name": pname, "lvol_id": pinfo["id"]}
+                for pname, pinfo in self._parent_registry.items()
+            ]
+
+        if not parent_items:
+            self.logger.warning("[fio_validation] No parents to run FIO on")
+            return
+
+        self.logger.info(
+            f"[fio_validation] Running {self.FIO_VALIDATION_RUNTIME}s FIO on "
+            f"{len(parent_items)} parent lvols via SSH"
+        )
+
+        fio_t0 = time.time()
+        ok, fail = self._batch_parallel(
+            parent_items, self._fio_validation_parent_docker,
+            min(self.MAX_WORKERS_CREATE, len(parent_items)),
+            "fio_validation",
+        )
+        fio_elapsed = time.time() - fio_t0
+
+        self.logger.info(
+            f"[fio_validation] Done: {ok}/{len(parent_items)} OK, "
+            f"{fail} failed in {fio_elapsed:.1f}s"
+        )
+        if fail > 0:
+            fail_pct = fail * 100 / max(len(parent_items), 1)
+            self.logger.warning(
+                f"[fio_validation] {fail}/{len(parent_items)} "
+                f"({fail_pct:.1f}%) FIO validation groups failed"
+            )
+            if fail_pct > 50:
+                raise RuntimeError(
+                    f"[fio_validation] {fail_pct:.1f}% FIO failures "
+                    f"exceeds 50% threshold"
+                )
+
+    def _fio_validation_parent_docker(self, item):
+        """Connect a parent lvol, run sustained FIO, disconnect."""
+        parent_name = item["parent_name"]
+        client = self.fio_node[0]
+        nqn = None
+
+        try:
+            # 1. NVMe-connect
+            connect_strs = self.sbcli_utils.get_lvol_connect_str(parent_name)
+            if not connect_strs:
+                raise RuntimeError(
+                    f"No connect strings for {parent_name}"
+                )
+            nqn = self._extract_nqn(connect_strs)
+            for cs in connect_strs:
+                self.ssh_obj.exec_command(client, cs)
+            sleep_n_sec(3)
+
+            # 2. Find device
+            device = self._find_device_by_nqn(client, nqn) if nqn else None
+            if not device:
+                raise RuntimeError(
+                    f"No device found for {parent_name} (nqn={nqn})"
+                )
+
+            # 3. Run sustained FIO
+            fio_log = f"/tmp/fio_validation_{parent_name[:30]}.log"
+            t0 = time.time()
+            self.ssh_obj.exec_command(
+                client,
+                f"sudo fio --name=fio-{parent_name[:20]} "
+                f"--filename={device} "
+                f"--size={self.FIO_VALIDATION_SIZE} --bs=4k "
+                f"--rw=randrw --rwmixread=50 "
+                f"--direct=1 --ioengine=libaio "
+                f"--iodepth=1 --numjobs=1 "
+                f"--time_based --runtime={self.FIO_VALIDATION_RUNTIME} "
+                f"--output={fio_log}",
+                timeout=self.FIO_VALIDATION_RUNTIME + 120,
+            )
+            elapsed = time.time() - t0
+
+            # 4. Check FIO log for errors
+            fio_output, _ = self.ssh_obj.exec_command(
+                client, f"cat {fio_log}", supress_logs=True,
+            )
+            fio_output = fio_output or ""
+            import re
+            for line in fio_output.splitlines():
+                if "err=" in line:
+                    m = re.search(r"err=\s*(\d+)", line)
+                    if m and int(m.group(1)) != 0:
+                        self.logger.error(
+                            f"[fio_validation] FIO error on {parent_name}:\n"
+                            f"{fio_output[-500:]}"
+                        )
+                        raise RuntimeError(
+                            f"FIO validation error on {parent_name}: "
+                            f"{line.strip()}"
+                        )
+
+            self.logger.info(
+                f"[fio_validation] {parent_name} OK ({elapsed:.1f}s)"
+            )
+
+        finally:
+            # Always disconnect
+            if nqn:
+                try:
+                    self.ssh_obj.exec_command(
+                        client, f"sudo nvme disconnect -n {nqn}",
+                    )
+                except Exception:
+                    pass
+
     # ── Delete implementations (with verification) ────────────────────────
 
     def _delete_clone_impl(self, clone_name: str):
@@ -2607,10 +2742,198 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
         self.logger.warning(f"VolumeSnapshot {snap_name} still exists after {timeout}s")
         return time.time() - start
 
+    # ── CSI provisioner tuning ────────────────────────────────────────────
+
+    def _patch_csi_provisioner(self):
+        """Increase CSI provisioner worker-threads for higher create parallelism."""
+        self.logger.info("[csi_patch] Patching CSI provisioner for 5 worker-threads")
+        patch_json = (
+            '{"spec":{"template":{"spec":{"containers":[{"name":"csi-provisioner",'
+            '"args":["--v=5","--csi-address=unix:///csi/csi-provisioner.sock",'
+            '"--timeout=180s","--kube-api-qps=50","--kube-api-burst=100",'
+            '"--worker-threads=5","--retry-interval-start=2s",'
+            '"--leader-election=false","--extra-create-metadata=true",'
+            '"--feature-gates=Topology=true"]}]}}}}'
+        )
+        try:
+            self.k8s_utils._exec_kubectl(
+                f"kubectl patch statefulset simplyblock-csi-controller "
+                f"-n simplyblock --type='strategic' "
+                f"-p='{patch_json}'"
+            )
+            self.logger.info("[csi_patch] Waiting for CSI controller rollout")
+            self.k8s_utils._exec_kubectl(
+                "kubectl rollout status statefulset/simplyblock-csi-controller "
+                "-n simplyblock --timeout=120s"
+            )
+            sleep_n_sec(10)
+            self.logger.info("[csi_patch] CSI provisioner patched successfully")
+        except Exception as exc:
+            self.logger.warning(f"[csi_patch] Patch failed (non-fatal): {exc}")
+
+    # ── Fire-all-then-wait-all helpers ────────────────────────────────────
+
+    def _submit_pvc(self, name: str, sc_name: str = None):
+        """Apply PVC YAML without waiting for Bound.  Fire-and-forget."""
+        sc = sc_name or self.STORAGE_CLASS_NAME
+        ns = self.k8s_utils.namespace
+        yaml_content = (
+            f"apiVersion: v1\n"
+            f"kind: PersistentVolumeClaim\n"
+            f"metadata:\n"
+            f"  name: {name}\n"
+            f"  labels:\n"
+            f"    test: ns-stress\n"
+            f"spec:\n"
+            f"  accessModes:\n"
+            f"    - ReadWriteOnce\n"
+            f"  storageClassName: {sc}\n"
+            f"  resources:\n"
+            f"    requests:\n"
+            f"      storage: {self.PVC_SIZE}\n"
+        )
+        self.k8s_utils.apply_yaml(yaml_content, namespace=ns)
+
+    def _wait_all_pvcs_bound(self, names: list, timeout: int = 600,
+                             poll_interval: int = 10) -> tuple:
+        """Bulk-poll until all target PVCs are Bound.
+
+        Returns ``(bound_set, unbound_set, bind_timestamps)`` where
+        *bind_timestamps* maps ``pvc_name -> epoch`` of when it was first
+        seen Bound.
+        """
+        target = set(names)
+        ns = self.k8s_utils.namespace
+        bound = set()
+        bind_ts = {}
+        deadline = time.time() + timeout
+
+        while time.time() < deadline and bound != target:
+            out, _ = self.k8s_utils._exec_kubectl(
+                f"kubectl get pvc -l test=ns-stress -n {ns} "
+                f"-o jsonpath='{{range .items}}{{.metadata.name}} "
+                f"{{.status.phase}}{{\"\\n\"}}{{end}}' 2>/dev/null || true",
+                supress_logs=True,
+            )
+            now = time.time()
+            for line in (out or "").strip().splitlines():
+                parts = line.strip().split()
+                if len(parts) >= 2 and parts[0] in target and parts[1] == "Bound":
+                    if parts[0] not in bound:
+                        bound.add(parts[0])
+                        bind_ts[parts[0]] = now
+
+            remaining = len(target) - len(bound)
+            self.logger.info(
+                f"[bulk_wait_pvc] {len(bound)}/{len(target)} Bound "
+                f"({remaining} remaining)"
+            )
+            if bound == target:
+                break
+            time.sleep(poll_interval)
+
+        unbound = target - bound
+        if unbound:
+            self.logger.warning(
+                f"[bulk_wait_pvc] {len(unbound)} PVCs NOT Bound "
+                f"after {timeout}s: {sorted(list(unbound))[:10]}..."
+            )
+        return bound, unbound, bind_ts
+
+    def _submit_snapshot(self, name: str, pvc_name: str):
+        """Apply VolumeSnapshot YAML without waiting for readyToUse."""
+        ns = self.k8s_utils.namespace
+        yaml_content = (
+            f"apiVersion: snapshot.storage.k8s.io/v1\n"
+            f"kind: VolumeSnapshot\n"
+            f"metadata:\n"
+            f"  name: {name}\n"
+            f"  labels:\n"
+            f"    test: ns-stress\n"
+            f"spec:\n"
+            f"  volumeSnapshotClassName: {self.SNAPSHOT_CLASS_NAME}\n"
+            f"  source:\n"
+            f"    persistentVolumeClaimName: {pvc_name}\n"
+        )
+        self.k8s_utils.apply_yaml(yaml_content, namespace=ns)
+
+    def _wait_all_snapshots_ready(self, names: list, timeout: int = 600,
+                                  poll_interval: int = 10) -> tuple:
+        """Bulk-poll until all target VolumeSnapshots are readyToUse.
+
+        Returns ``(ready_set, not_ready_set, ready_timestamps)``.
+        """
+        target = set(names)
+        ns = self.k8s_utils.namespace
+        ready = set()
+        ready_ts = {}
+        deadline = time.time() + timeout
+
+        while time.time() < deadline and ready != target:
+            out, _ = self.k8s_utils._exec_kubectl(
+                f"kubectl get volumesnapshot -l test=ns-stress -n {ns} "
+                f"-o jsonpath='{{range .items}}{{.metadata.name}} "
+                f"{{.status.readyToUse}}{{\"\\n\"}}{{end}}' 2>/dev/null || true",
+                supress_logs=True,
+            )
+            now = time.time()
+            for line in (out or "").strip().splitlines():
+                parts = line.strip().split()
+                if len(parts) >= 2 and parts[0] in target and parts[1] == "true":
+                    if parts[0] not in ready:
+                        ready.add(parts[0])
+                        ready_ts[parts[0]] = now
+
+            remaining = len(target) - len(ready)
+            self.logger.info(
+                f"[bulk_wait_snap] {len(ready)}/{len(target)} ready "
+                f"({remaining} remaining)"
+            )
+            if ready == target:
+                break
+            time.sleep(poll_interval)
+
+        not_ready = target - ready
+        if not_ready:
+            self.logger.warning(
+                f"[bulk_wait_snap] {len(not_ready)} snapshots NOT ready "
+                f"after {timeout}s: {sorted(list(not_ready))[:10]}..."
+            )
+        return ready, not_ready, ready_ts
+
+    def _submit_clone(self, name: str, snap_name: str, sc_name: str = None):
+        """Apply clone PVC YAML (dataSource=VolumeSnapshot) without waiting."""
+        sc = sc_name or self.STORAGE_CLASS_NAME
+        ns = self.k8s_utils.namespace
+        yaml_content = (
+            f"apiVersion: v1\n"
+            f"kind: PersistentVolumeClaim\n"
+            f"metadata:\n"
+            f"  name: {name}\n"
+            f"  labels:\n"
+            f"    test: ns-stress\n"
+            f"spec:\n"
+            f"  accessModes:\n"
+            f"    - ReadWriteOnce\n"
+            f"  storageClassName: {sc}\n"
+            f"  resources:\n"
+            f"    requests:\n"
+            f"      storage: {self.PVC_SIZE}\n"
+            f"  dataSource:\n"
+            f"    name: {snap_name}\n"
+            f"    kind: VolumeSnapshot\n"
+            f"    apiGroup: snapshot.storage.k8s.io\n"
+        )
+        self.k8s_utils.apply_yaml(yaml_content, namespace=ns)
+
     # ── Setup / Cleanup ───────────────────────────────────────────────────
 
     def _phase_setup(self):
         self._init_k8s_utils()
+
+        # Patch CSI provisioner for higher parallelism (5 worker-threads)
+        self._patch_csi_provisioner()
+
         # Create pool via sbcli
         actual_pool = self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
         if actual_pool and actual_pool != self.pool_name:
@@ -3030,26 +3353,31 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
     # ── Two-phase subsystem creation: parents then parallel children ────
 
     def _phase_create_subsystems(self):
-        """Sub-phase 1: create all parent PVCs sequentially.
-        Sub-phase 2: create children for PARALLEL_PARENTS subsystems
-        concurrently."""
+        """Fire-all-then-wait-all: submit all PVC YAMLs in parallel,
+        then bulk-poll until Bound.
+
+        Sub-phase 1: submit + wait all parent PVCs.
+        Sub-phase 2: submit + wait all child PVCs.
+        """
         pvcs_per_subsys = 1 + self.CHILDREN_PER_PARENT
         total = self.NUM_PARENTS * pvcs_per_subsys
         self.logger.info(
             f"[create_subsystems] {self.NUM_PARENTS} subsystems × "
             f"{pvcs_per_subsys} PVCs = {total} total "
-            f"(parallel={self.PARALLEL_PARENTS})"
+            f"(submit workers={self.MAX_WORKERS_SUBMIT})"
         )
 
-        # ── Sub-phase 1: Create all parent PVCs (parallel) ─────────
+        # ── Sub-phase 1a: Submit all parent PVCs in parallel ────────
         parent_items = []
         parent_names = []
+        parent_sc_map = {}  # name -> sc_name
         for i in range(self.NUM_PARENTS):
             pname = f"ns-pvc-{_rand_seq(6)}-{i:04d}"
             sc_name = random.choice([self.STORAGE_CLASS_NAME, self.XFS_STORAGE_CLASS_NAME])
             fs_type = "xfs" if sc_name == self.XFS_STORAGE_CLASS_NAME else "ext4"
-            parent_items.append({"name": pname, "idx": i, "sc_name": sc_name})
+            parent_items.append({"name": pname, "sc_name": sc_name})
             parent_names.append(pname)
+            parent_sc_map[pname] = sc_name
             # Pre-register so children can reference parents
             self._parent_registry[pname] = {
                 "id": pname,
@@ -3059,65 +3387,105 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
                 "storage_class": sc_name,
                 "fs_type": fs_type,
             }
+
         self.logger.info(
-            f"[create_subsystems][sub1] Creating {self.NUM_PARENTS} parent "
-            f"PVCs (parallel, workers={self.MAX_WORKERS_CREATE})"
+            f"[create_subsystems][sub1] Submitting {self.NUM_PARENTS} parent "
+            f"PVCs (workers={self.MAX_WORKERS_SUBMIT})"
         )
         parents_t0 = time.time()
-        _ok, parent_fail = self._batch_parallel(
+        _ok, parent_submit_fail = self._batch_parallel(
             parent_items,
-            self._create_single_parent_k8s,
-            self.MAX_WORKERS_CREATE,
-            "create_parents",
+            self._submit_single_parent_k8s,
+            self.MAX_WORKERS_SUBMIT,
+            "submit_parents",
+        )
+
+        # ── Sub-phase 1b: Bulk-wait all parents to bind ────────────
+        self.logger.info(
+            f"[create_subsystems][sub1] Bulk-waiting for "
+            f"{len(parent_names)} parents to bind"
+        )
+        bound_parents, unbound_parents, parent_bind_ts = (
+            self._wait_all_pvcs_bound(parent_names, timeout=600)
         )
         parents_elapsed = time.time() - parents_t0
+
+        # Record timings for bound parents
+        inv = self._snapshot_inventory()
+        for pname in bound_parents:
+            elapsed = parent_bind_ts[pname] - parents_t0
+            self._record_timing("create_parent", pname, elapsed, inv)
+            self._inc("counts", "parents_created")
         self._log_op_stats(
             "create_parent", batch_label="all parents",
             batch_elapsed=parents_elapsed,
         )
 
-        # Remove failed parents from registry (they were pre-registered)
-        failed_parents = []
-        if parent_fail > 0:
-            created_parents = {
-                s["name"] for s in self._timing_samples
-                if s["op"] == "create_parent"
-            }
-            for pname in list(parent_names):
-                if pname not in created_parents:
-                    failed_parents.append(pname)
-                    parent_names.remove(pname)
-                    self._parent_registry.pop(pname, None)
+        # Remove failed/unbound parents from registry
+        failed_parents = list(unbound_parents)
+        for pname in failed_parents:
+            parent_names.remove(pname)
+            self._parent_registry.pop(pname, None)
 
         self.logger.info(
-            f"[create_subsystems][sub1] {len(parent_names)} parents "
-            f"created in {parents_elapsed:.1f}s"
+            f"[create_subsystems][sub1] {len(bound_parents)} parents "
+            f"Bound in {parents_elapsed:.1f}s"
             f"{f', {len(failed_parents)} FAILED: {failed_parents}' if failed_parents else ''}"
         )
 
-        # ── Sub-phase 2: Create ALL child PVCs in parallel ─────────
+        # ── Sub-phase 2a: Submit ALL child PVCs in parallel ────────
         total_children = len(parent_names) * self.CHILDREN_PER_PARENT
         self.logger.info(
-            f"[create_subsystems][sub2] Creating {total_children} child "
-            f"PVCs in parallel (workers={self.MAX_WORKERS_CREATE})"
+            f"[create_subsystems][sub2] Submitting {total_children} child "
+            f"PVCs (workers={self.MAX_WORKERS_SUBMIT})"
         )
         # Build flat list of all children with parent assignment
         child_items = []
+        child_names = []
+        child_parent_map = {}  # child_name -> parent_name
         for pi, pname in enumerate(parent_names):
+            sc_name = parent_sc_map.get(pname, self.STORAGE_CLASS_NAME)
             for c in range(self.CHILDREN_PER_PARENT):
                 child_idx = pi * pvcs_per_subsys + 1 + c
+                cname = f"ns-pvc-{_rand_seq(6)}-{child_idx:04d}"
                 child_items.append({
-                    "name": f"ns-pvc-{_rand_seq(6)}-{child_idx:04d}",
+                    "name": cname,
+                    "sc_name": sc_name,
                     "parent_name": pname,
                 })
+                child_names.append(cname)
+                child_parent_map[cname] = pname
+
         children_t0 = time.time()
-        _ok, child_fail = self._batch_parallel(
+        _ok, child_submit_fail = self._batch_parallel(
             child_items,
-            self._create_single_child_k8s,
-            self.MAX_WORKERS_CREATE,
-            "create_children",
+            self._submit_single_child_k8s,
+            self.MAX_WORKERS_SUBMIT,
+            "submit_children",
+        )
+
+        # ── Sub-phase 2b: Bulk-wait all children to bind ──────────
+        self.logger.info(
+            f"[create_subsystems][sub2] Bulk-waiting for "
+            f"{len(child_names)} children to bind"
+        )
+        bound_children, unbound_children, child_bind_ts = (
+            self._wait_all_pvcs_bound(child_names, timeout=600)
         )
         children_elapsed = time.time() - children_t0
+
+        # Record timings and register bound children
+        inv = self._snapshot_inventory()
+        for cname in bound_children:
+            elapsed = child_bind_ts[cname] - children_t0
+            self._record_timing("create_child", cname, elapsed, inv)
+            pname = child_parent_map[cname]
+            with self._lock:
+                self._child_registry[cname] = {
+                    "id": cname, "parent_name": pname,
+                }
+                self._parent_registry[pname]["children"].append(cname)
+            self._inc("counts", "children_created")
         self._log_op_stats(
             "create_child", batch_label="all children",
             batch_elapsed=children_elapsed,
@@ -3125,13 +3493,9 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
 
         # Identify failed children
         failed_children = []
-        if child_fail > 0:
-            created_children = set(self._child_registry.keys())
-            for item in child_items:
-                if item["name"] not in created_children:
-                    failed_children.append(
-                        f"{item['name']} (parent={item['parent_name']})"
-                    )
+        for cname in unbound_children:
+            pname = child_parent_map.get(cname, "?")
+            failed_children.append(f"{cname} (parent={pname})")
 
         # ── Failure summary ──────────────────────────────────────────
         total_attempted = self.NUM_PARENTS + total_children
@@ -3177,44 +3541,258 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
             f"{f' ({total_failed} failures tolerated)' if total_failed else ''}"
         )
 
-    def _create_single_parent_k8s(self, item):
-        """Create a single parent PVC. Called from _batch_parallel."""
-        name = item["name"]
-        sc_name = item.get("sc_name", self.STORAGE_CLASS_NAME)
-        t0 = time.time()
-        self._create_pvc(name, sc_name=sc_name)
-        self._record_timing(
-            "create_parent", name,
-            time.time() - t0, self._snapshot_inventory(),
-        )
-        self._inc("counts", "parents_created")
+    def _submit_single_parent_k8s(self, item):
+        """Submit a single parent PVC YAML (no wait). Called from _batch_parallel."""
+        self._submit_pvc(item["name"], sc_name=item.get("sc_name"))
 
-    def _create_single_child_k8s(self, item):
-        """Create a single child PVC and register it under its parent.
+    def _submit_single_child_k8s(self, item):
+        """Submit a single child PVC YAML (no wait). Called from _batch_parallel."""
+        self._submit_pvc(item["name"], sc_name=item.get("sc_name"))
 
-        Called from _batch_parallel with MAX_WORKERS_CREATE concurrency —
-        all children for all parents run in parallel."""
-        child_name = item["name"]
-        parent_name = item["parent_name"]
-        # Children inherit StorageClass (and thus fs_type) from parent
-        sc_name = self._parent_registry.get(parent_name, {}).get(
-            "storage_class", self.STORAGE_CLASS_NAME
-        )
-        t0 = time.time()
-        self._create_pvc(child_name, sc_name=sc_name)
-        elapsed = time.time() - t0
-        self._record_timing(
-            "create_child", child_name,
-            elapsed, self._snapshot_inventory(),
-        )
+    # ── Snapshot phase: fire-all-then-wait-all ────────────────────────────
+
+    def _phase_create_snapshots(self):
+        """Fire-all-then-wait-all: submit all snapshot YAMLs, then bulk-wait."""
+        items = []
         with self._lock:
-            self._child_registry[child_name] = {
-                "id": child_name, "parent_name": parent_name,
-            }
-            self._parent_registry[parent_name]["children"].append(
-                child_name
+            snap_lvols = []
+            for pname, pinfo in self._parent_registry.items():
+                snap_lvols.append((pname, pinfo["id"]))
+            chosen_child = getattr(self, "_snapshot_child", None)
+            child_names = list(self._child_registry.keys())
+            if not chosen_child and child_names:
+                chosen_child = random.choice(child_names)
+            if chosen_child and chosen_child in self._child_registry:
+                cinfo = self._child_registry[chosen_child]
+                snap_lvols.append((chosen_child, cinfo["id"]))
+                self.logger.info(
+                    f"[create_snapshots] Also snapshotting child: {chosen_child}"
+                )
+
+        snap_names = []
+        snap_pvc_map = {}  # snap_name -> lvol_name
+        for lvol_name, lvol_id in snap_lvols:
+            for s in range(self.SNAPSHOTS_PER_LVOL):
+                snap_name = f"snap-{_rand_seq(6)}-{lvol_name[-8:]}-{s}"
+                items.append({
+                    "name": snap_name,
+                    "lvol_name": lvol_name,
+                })
+                snap_names.append(snap_name)
+                snap_pvc_map[snap_name] = lvol_name
+
+        self.logger.info(
+            f"[create_snapshots] Submitting {len(items)} snapshots "
+            f"({len(snap_lvols)} lvols × {self.SNAPSHOTS_PER_LVOL}) "
+            f"(workers={self.MAX_WORKERS_SUBMIT})"
+        )
+
+        # Submit all snapshot YAMLs in parallel
+        snap_t0 = time.time()
+        submit_items = [
+            {"name": it["name"], "pvc_name": it["lvol_name"]}
+            for it in items
+        ]
+        _ok, submit_fail = self._batch_parallel(
+            submit_items,
+            lambda it: self._submit_snapshot(it["name"], it["pvc_name"]),
+            self.MAX_WORKERS_SUBMIT,
+            "submit_snapshots",
+        )
+
+        # Bulk-wait all snapshots to be readyToUse
+        self.logger.info(
+            f"[create_snapshots] Bulk-waiting for {len(snap_names)} "
+            f"snapshots to be ready"
+        )
+        ready, not_ready, ready_ts = self._wait_all_snapshots_ready(
+            snap_names, timeout=600,
+        )
+        snap_elapsed = time.time() - snap_t0
+
+        # Record timings and register
+        inv = self._snapshot_inventory()
+        for sname in ready:
+            elapsed = ready_ts[sname] - snap_t0
+            self._record_timing("create_snapshot", sname, elapsed, inv)
+            lvol_name = snap_pvc_map[sname]
+            with self._lock:
+                self._snap_registry[sname] = {
+                    "snap_id": sname,
+                    "lvol_name": lvol_name,
+                    "clones": [],
+                }
+                if lvol_name in self._parent_registry:
+                    self._parent_registry[lvol_name]["snapshots"].append(sname)
+                self._metrics["counts"]["snapshots_created"] += 1
+
+        self._log_op_stats(
+            "create_snapshot", batch_label="all snapshots",
+            batch_elapsed=snap_elapsed,
+        )
+
+        fail = len(not_ready)
+        snap_fail_pct = fail * 100 / max(len(items), 1)
+        if fail > 0:
+            self.logger.warning(
+                f"[create_snapshots] {fail}/{len(items)} "
+                f"({snap_fail_pct:.1f}%) snapshots failed: "
+                f"{sorted(list(not_ready))[:10]}..."
             )
-        self._inc("counts", "children_created")
+        if snap_fail_pct > 50:
+            raise RuntimeError(
+                f"[create_snapshots] {snap_fail_pct:.1f}% snapshot failures "
+                f"exceeds 50% threshold — {fail}/{len(items)}"
+            )
+
+    # ── Clone phase: fire-all-then-wait-all (batched) ─────────────────────
+
+    def _phase_create_clones(self):
+        """Fire-all-then-wait-all: submit clone PVCs in batches,
+        bulk-wait each batch."""
+        with self._lock:
+            snap_names_available = list(self._snap_registry.keys())
+        if not snap_names_available:
+            self.logger.warning("[create_clones] No snapshots available!")
+            return
+        chosen_snap = random.choice(snap_names_available)
+        with self._lock:
+            snap_id = self._snap_registry[chosen_snap]["snap_id"]
+            snap_parent = self._snap_registry[chosen_snap].get("lvol_name", "")
+            clone_sc = self._parent_registry.get(snap_parent, {}).get(
+                "storage_class", self.STORAGE_CLASS_NAME
+            )
+        self.logger.info(
+            f"[create_clones] Chosen snapshot: {chosen_snap} (id={snap_id})"
+        )
+
+        all_items = []
+        for i in range(self.NUM_CLONES):
+            clone_name = f"cln-{_rand_seq(6)}-{i:04d}"
+            all_items.append({
+                "name": clone_name,
+                "snap_name": chosen_snap,
+                "snap_id": snap_id,
+                "sc_name": clone_sc,
+            })
+
+        total_batches = (
+            (len(all_items) + self.CLONE_BATCH_SIZE - 1)
+            // self.CLONE_BATCH_SIZE
+        )
+        overall_t0 = time.time()
+        total_clone_fail = 0
+
+        for batch_idx in range(0, len(all_items), self.CLONE_BATCH_SIZE):
+            batch = all_items[batch_idx:batch_idx + self.CLONE_BATCH_SIZE]
+            batch_num = batch_idx // self.CLONE_BATCH_SIZE + 1
+            batch_names = [it["name"] for it in batch]
+            self.logger.info(
+                f"[create_clones] Batch {batch_num}/{total_batches}: "
+                f"submitting {len(batch)} clones"
+            )
+
+            # Submit all clones in this batch in parallel
+            batch_t0 = time.time()
+            _ok, submit_fail = self._batch_parallel(
+                batch,
+                lambda it: self._submit_clone(
+                    it["name"], it["snap_name"],
+                    sc_name=it.get("sc_name"),
+                ),
+                self.MAX_WORKERS_SUBMIT,
+                f"submit_clones_b{batch_num}",
+            )
+
+            # Bulk-wait this batch to bind
+            self.logger.info(
+                f"[create_clones] Batch {batch_num}: bulk-waiting for "
+                f"{len(batch_names)} clones to bind"
+            )
+            bound, unbound, bind_ts = self._wait_all_pvcs_bound(
+                batch_names, timeout=self.CLONE_BIND_TIMEOUT,
+            )
+            batch_elapsed = time.time() - batch_t0
+            batch_fail = len(unbound)
+            total_clone_fail += batch_fail
+
+            # Record timings and register
+            inv = self._snapshot_inventory()
+            for cname in bound:
+                elapsed = bind_ts[cname] - batch_t0
+                self._record_timing("create_clone", cname, elapsed, inv)
+                with self._lock:
+                    self._clone_registry[cname] = {
+                        "id": cname, "snap_name": chosen_snap,
+                    }
+                    if chosen_snap in self._snap_registry:
+                        self._snap_registry[chosen_snap]["clones"].append(cname)
+                    self._metrics["counts"]["clones_created"] += 1
+
+            if batch_fail > 0:
+                self.logger.warning(
+                    f"[create_clones] Batch {batch_num}: "
+                    f"{batch_fail}/{len(batch)} clones failed"
+                )
+
+            # Per-batch stats
+            with self._lock:
+                batch_samples = [
+                    s["elapsed_sec"] for s in self._timing_samples
+                    if (s["iteration"] == self._current_iteration
+                        and s["op"] == "create_clone"
+                        and s["timestamp"] >= batch_t0)
+                ]
+            if batch_samples:
+                bs = sorted(batch_samples)
+                n = len(bs)
+                throughput = n / batch_elapsed if batch_elapsed > 0 else 0
+                effective_per_clone = batch_elapsed / n if n > 0 else 0
+                self.logger.info(
+                    f"[create_clones] Batch {batch_num} stats: "
+                    f"{n} ops in {batch_elapsed:.1f}s — "
+                    f"avg_wall={sum(bs)/n:.2f}s "
+                    f"p50={bs[n//2]:.2f}s "
+                    f"p95={bs[min(int(n*0.95), n-1)]:.2f}s "
+                    f"min={bs[0]:.2f}s max={bs[-1]:.2f}s | "
+                    f"throughput={throughput:.2f} clones/s "
+                    f"effective_per_clone={effective_per_clone:.2f}s"
+                )
+                with self._lock:
+                    self._batch_timings.append({
+                        "iteration": self._current_iteration,
+                        "op": "create_clone",
+                        "batch_label": f"batch {batch_num}/{total_batches}",
+                        "batch_elapsed": round(batch_elapsed, 2),
+                        "count": n,
+                        "avg_wall": round(sum(bs) / n, 4),
+                        "p50": round(bs[n // 2], 4),
+                        "p95": round(bs[min(int(n * 0.95), n - 1)], 4),
+                        "min": round(bs[0], 4),
+                        "max": round(bs[-1], 4),
+                        "throughput_per_sec": round(throughput, 4),
+                        "effective_per_clone": round(effective_per_clone, 4),
+                    })
+
+        overall_elapsed = time.time() - overall_t0
+        self._log_op_stats(
+            "create_clone", batch_label="all clones",
+            batch_elapsed=overall_elapsed,
+        )
+
+        # Overall clone failure check
+        clone_fail_pct = total_clone_fail * 100 / max(len(all_items), 1)
+        if total_clone_fail > 0:
+            self.logger.warning(
+                f"[create_clones] Total: {total_clone_fail}/{len(all_items)} "
+                f"({clone_fail_pct:.1f}%) clones failed across all batches"
+            )
+        if clone_fail_pct > 50:
+            raise RuntimeError(
+                f"[create_clones] {clone_fail_pct:.1f}% clone failures "
+                f"exceeds 50% threshold — "
+                f"{total_clone_fail}/{len(all_items)}"
+            )
 
     def _create_pvc(self, name: str, sc_name: str = None):
         """Create a single PVC with label and wait for Bound."""
@@ -3570,6 +4148,159 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
                 )
             except Exception:
                 pass
+
+    # ── FIO validation phase ─────────────────────────────────────────────
+
+    def _phase_fio_validation(self):
+        """Run sustained FIO (10 min) on a sample of PVCs via K8s Jobs.
+
+        Samples: 20 parents + 30 random children + 50 random clones = ~100 PVCs.
+        Creates FIO K8s Jobs, waits for completion, validates exit codes.
+        """
+        # Build sample list
+        with self._lock:
+            parent_names = list(self._parent_registry.keys())
+            child_names = list(self._child_registry.keys())
+            clone_names = list(self._clone_registry.keys())
+
+        sample_parents = parent_names  # all parents
+        sample_children = random.sample(
+            child_names, min(30, len(child_names))
+        ) if child_names else []
+        sample_clones = random.sample(
+            clone_names, min(50, len(clone_names))
+        ) if clone_names else []
+
+        all_targets = sample_parents + sample_children + sample_clones
+        if not all_targets:
+            self.logger.warning("[fio_validation] No PVCs to run FIO on")
+            return
+
+        self.logger.info(
+            f"[fio_validation] Running {self.FIO_VALIDATION_RUNTIME}s FIO on "
+            f"{len(all_targets)} PVCs ({len(sample_parents)} parents, "
+            f"{len(sample_children)} children, {len(sample_clones)} clones)"
+        )
+
+        ns = self.k8s_utils.namespace
+        fio_timeout = self.FIO_VALIDATION_RUNTIME + 300
+        fio_items = [{"pvc_name": pvc} for pvc in all_targets]
+
+        fio_t0 = time.time()
+        ok, fail = self._batch_parallel(
+            fio_items, self._run_fio_validation_job_k8s,
+            min(self.MAX_WORKERS_CREATE, len(all_targets)),
+            "fio_validation",
+        )
+        fio_elapsed = time.time() - fio_t0
+
+        self.logger.info(
+            f"[fio_validation] Done: {ok}/{len(all_targets)} OK, "
+            f"{fail} failed in {fio_elapsed:.1f}s"
+        )
+
+        # Bulk cleanup FIO validation jobs
+        try:
+            self.k8s_utils._exec_kubectl(
+                f"kubectl delete job -l purpose=fio-validation "
+                f"-n {ns} --wait=false --ignore-not-found 2>/dev/null || true"
+            )
+        except Exception:
+            pass
+
+        if fail > 0:
+            fail_pct = fail * 100 / max(len(all_targets), 1)
+            self.logger.warning(
+                f"[fio_validation] {fail}/{len(all_targets)} "
+                f"({fail_pct:.1f}%) FIO validation jobs failed"
+            )
+            if fail_pct > 50:
+                raise RuntimeError(
+                    f"[fio_validation] {fail_pct:.1f}% FIO failures "
+                    f"exceeds 50% threshold"
+                )
+
+    def _run_fio_validation_job_k8s(self, item):
+        """Create a K8s Job running sustained FIO on a PVC."""
+        pvc_name = item["pvc_name"]
+        ns = self.k8s_utils.namespace
+        job_name = f"fiov-{pvc_name[:35]}-{_rand_seq(4)}"
+        t0 = time.time()
+
+        yaml_content = (
+            f"apiVersion: batch/v1\n"
+            f"kind: Job\n"
+            f"metadata:\n"
+            f"  name: {job_name}\n"
+            f"  labels:\n"
+            f"    test: ns-stress\n"
+            f"    purpose: fio-validation\n"
+            f"spec:\n"
+            f"  backoffLimit: 0\n"
+            f"  template:\n"
+            f"    spec:\n"
+            f"      restartPolicy: Never\n"
+            f"      containers:\n"
+            f"      - name: fio\n"
+            f"        image: dockerpinata/fio:2.1\n"
+            f"        command:\n"
+            f"        - fio\n"
+            f"        args:\n"
+            f"        - --name=fio-{pvc_name[:20]}\n"
+            f"        - --filename=/data/testfile\n"
+            f"        - --size={self.FIO_VALIDATION_SIZE}\n"
+            f"        - --bs=4k\n"
+            f"        - --rw=randrw\n"
+            f"        - --rwmixread=50\n"
+            f"        - --direct=1\n"
+            f"        - --ioengine=libaio\n"
+            f"        - --iodepth=1\n"
+            f"        - --numjobs=1\n"
+            f"        - --time_based\n"
+            f"        - --runtime={self.FIO_VALIDATION_RUNTIME}\n"
+            f"        - --verify=md5\n"
+            f"        volumeMounts:\n"
+            f"        - name: vol\n"
+            f"          mountPath: /data\n"
+            f"      volumes:\n"
+            f"      - name: vol\n"
+            f"        persistentVolumeClaim:\n"
+            f"          claimName: {pvc_name}\n"
+        )
+        self.k8s_utils.apply_yaml(yaml_content, namespace=ns)
+        result = self.k8s_utils.wait_job_complete(
+            job_name, timeout=self.FIO_VALIDATION_RUNTIME + 300,
+            namespace=ns,
+        )
+        elapsed = time.time() - t0
+
+        if result != "succeeded":
+            # Try to get pod logs for debugging
+            try:
+                pod_out, _ = self.k8s_utils._exec_kubectl(
+                    f"kubectl get pods -n {ns} -l job-name={job_name} "
+                    f"-o jsonpath='{{.items[0].metadata.name}}' 2>/dev/null",
+                    supress_logs=True,
+                )
+                pod_name = (pod_out or "").strip()
+                if pod_name:
+                    fio_output = self.k8s_utils.get_pod_logs(
+                        pod_name, namespace=ns, tail=50,
+                    )
+                    self.logger.error(
+                        f"[fio_validation] {job_name} failed: {result}\n"
+                        f"FIO output:\n{fio_output}"
+                    )
+            except Exception:
+                pass
+            raise RuntimeError(
+                f"FIO validation job {job_name} for {pvc_name} "
+                f"failed: {result}"
+            )
+
+        self.logger.info(
+            f"[fio_validation] {pvc_name} OK ({elapsed:.1f}s)"
+        )
 
     # ── Delete implementations (with verification) ────────────────────────
 

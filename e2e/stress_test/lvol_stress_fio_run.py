@@ -30,9 +30,9 @@ class TestStressLvolCloneClusterFioRun(TestLvolHACluster):
         self.lvol_name = f"lvl{random_char(3)}"
         self.clone_name = f"cln{random_char(3)}"
         self.snapshot_name = f"snap{random_char(3)}"
-        self.lvol_size = "150G"
-        self.int_lvol_size = 150
-        self.fio_size = "6G"
+        self.lvol_size = "100G"
+        self.int_lvol_size = 100
+        self.fio_numjobs = 5
         self.fio_threads = []
         self.clone_mount_details = {}
         self.lvol_mount_details = {}
@@ -373,6 +373,7 @@ class TestStressLvolCloneClusterFioRun(TestLvolHACluster):
 
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
 
+        self._compute_fio_size(extra_lvols=self.total_lvols)
         self.create_lvols_with_fio(self.total_lvols)
         storage_nodes = self.sbcli_utils.get_storage_nodes()
 
@@ -388,6 +389,7 @@ class TestStressLvolCloneClusterFioRun(TestLvolHACluster):
             validation_thread.start()
             sleep_n_sec(600)
             self.delete_random_lvols(3)
+            self._compute_fio_size(extra_lvols=2)
             self.create_lvols_with_fio(2)
             self.create_snapshots_and_clones()
 

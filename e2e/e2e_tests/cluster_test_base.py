@@ -1258,7 +1258,7 @@ class TestClusterBase:
             # ---------------------------------------------------------------
             rpc_cmd = (
                 f"sudo docker exec {container_name} "
-                f"python spdk/scripts/rpc.py "
+                f"sudo python spdk/scripts/rpc.py "
                 f"-s /mnt/ramdisk/{container_name}/spdk.sock "
                 f"env_dpdk_get_mem_stats > {host_json}"
             )
@@ -1315,7 +1315,7 @@ class TestClusterBase:
             self.ssh_obj.exec_command(
                 storage_node_ip,
                 f"sudo docker exec {container_name} "
-                f"cp {container_txt} {container_txt_tmp}"
+                f"sudo cp {container_txt} {container_txt_tmp}"
             )
 
             # ---------------------------------------------------------------
@@ -1363,7 +1363,7 @@ class TestClusterBase:
             self.ssh_obj.exec_command(
                 storage_node_ip,
                 f"sudo docker exec {container_name} "
-                f"rm -f {container_txt_tmp}"
+                f"sudo rm -f {container_txt_tmp}"
             )
 
             self.logger.info(

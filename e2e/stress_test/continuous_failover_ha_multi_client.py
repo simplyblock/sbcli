@@ -36,9 +36,11 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
         self.lvol_name = f"lvl{generate_random_sequence(15)}"
         self.clone_name = f"cln{generate_random_sequence(15)}"
         self.snapshot_name = f"snap{generate_random_sequence(15)}"
-        self.lvol_size = "150G"
-        self.int_lvol_size = 150
-        self.fio_size = "6G"
+        self.lvol_size = "30G"
+        self.int_lvol_size = 30
+        self.TARGET_DATA_PER_NODE_GB = 200
+        self.fio_numjobs = 5
+        self.fio_size = "6G"  # default; overridden by _compute_fio_size()
         self.fio_threads = []
         self.clone_mount_details = {}
         self.lvol_mount_details = {}
@@ -287,6 +289,45 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
             f"Lvols: {self.pending_deletions['lvols']}, "
             f"Snapshots: {self.pending_deletions['snapshots']}"
         )
+
+    def _compute_fio_size(self, extra_lvols: int = 0) -> str:
+        """Compute fio_size dynamically to target ~TARGET_DATA_PER_NODE_GB per node.
+
+        As lvol + clone count varies across iterations, fio_size adjusts
+        so total disk usage per node stays approximately constant.
+
+        Args:
+            extra_lvols: Number of lvols about to be created (not yet tracked).
+
+        Returns:
+            The computed fio_size string (e.g. ``"6G"``).  Also updates
+            ``self.fio_size`` in place.
+        """
+        num_nodes = len(self.sn_nodes) or 4
+        current_lvols = len(self.lvol_mount_details) + len(self.clone_mount_details)
+        total_lvols = current_lvols + extra_lvols
+        if total_lvols < 1:
+            total_lvols = self.total_lvols
+
+        lvols_per_node = total_lvols / num_nodes
+        # Each lvol runs fio_numjobs parallel FIO jobs, each writing fio_size
+        jobs_per_node = lvols_per_node * self.fio_numjobs
+        fio_size_gb = int(self.TARGET_DATA_PER_NODE_GB / max(1, jobs_per_node))
+
+        # Cap: all numjobs × fio_size must fit in the formatted filesystem.
+        # Usable capacity ≈ 80% of lvol_size (ext4/xfs overhead ~5-15%).
+        max_fio_gb = int(self.int_lvol_size * 0.80) // max(1, self.fio_numjobs)
+        fio_size_gb = min(fio_size_gb, max_fio_gb)
+        fio_size_gb = max(fio_size_gb, 1)
+
+        self.fio_size = f"{fio_size_gb}G"
+        self.logger.info(
+            f"[fio_size] Computed fio_size={self.fio_size} "
+            f"(target={self.TARGET_DATA_PER_NODE_GB}G/node, "
+            f"total_lvols={total_lvols}, nodes={num_nodes}, "
+            f"jobs/node={jobs_per_node:.1f})"
+        )
+        return self.fio_size
 
     def create_lvols_with_fio(self, count):
         """Create lvols and start FIO with random configurations."""
@@ -1289,6 +1330,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                 self.runner_k8s_log.restart_logging()
             self.logger.info("Creating 5 new lvols, clones, and snapshots.")
             self.collect_outage_diagnostics(f"pre_outage_node_{self.current_outage_node}")
+            self._compute_fio_size(extra_lvols=5)
             self.create_lvols_with_fio(5)
             if not self.k8s_test:
                 for node in self.storage_nodes:
@@ -1470,6 +1512,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
 
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
 
+        self._compute_fio_size(extra_lvols=self.total_lvols)
         self.create_lvols_with_fio(self.total_lvols)
         storage_nodes = self.sbcli_utils.get_storage_nodes()
 
@@ -1497,6 +1540,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
             validation_thread = threading.Thread(target=self.validate_iostats_continuously, daemon=True)
             validation_thread.start()
             if iteration > 1:
+                self._compute_fio_size()
                 self.restart_fio(iteration=iteration)
             outage_type = self.perform_random_outage()
             if not self.sbcli_utils.is_secondary_node(self.current_outage_node):
@@ -1513,6 +1557,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                     self.runner_k8s_log.restart_logging()
 
                 self.collect_outage_diagnostics(f"pre_outage_node_{self.current_outage_node}")
+                self._compute_fio_size(extra_lvols=3)
                 self.create_lvols_with_fio(3)
                 if not self.k8s_test:
                     for node in self.storage_nodes:

@@ -1687,6 +1687,40 @@ class K8sUtils:
         self.logger.info(f"[K8sUtils] Deleting pod '{pod_name}'")
         self.delete_resource("pod", pod_name, namespace=ns)
 
+    def verify_pvc_mount(self, pvc_name: str, namespace: str = None,
+                         timeout: int = 120) -> tuple:
+        """Create a temporary pod to verify a PVC is mountable.
+
+        Returns ``(success: bool, message: str)``.
+        The temporary utility pod is always cleaned up after verification.
+        """
+        import random
+        import string
+        suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=6))
+        pod_name_safe = pvc_name[:40].lower().replace("_", "-")
+        pod_name_v = f"mount-verify-{pod_name_safe}-{suffix}"
+        ns = namespace or self.namespace
+        try:
+            self.create_utility_pod(pod_name_v, pvc_name, namespace=ns)
+            self.wait_pod_running(pod_name_v, timeout=timeout, namespace=ns)
+            out, _ = self.exec_in_pod(
+                pod_name_v,
+                "df -h /spdkvol && ls -la /spdkvol",
+                namespace=ns,
+            )
+            return True, f"Mount OK: {out.strip()[:200]}"
+        except TimeoutError as e:
+            return False, f"Mount timeout: {e}"
+        except RuntimeError as e:
+            return False, f"Pod failed: {e}"
+        except Exception as e:
+            return False, f"Mount error: {e}"
+        finally:
+            try:
+                self.delete_resource("pod", pod_name_v, namespace=ns)
+            except Exception:
+                pass
+
 
 # ── K8s-native sbcli_utils replacement ──────────────────────────────────────
 

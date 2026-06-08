@@ -40,8 +40,9 @@ class RandomRapidFailoverNoGap(TestLvolHACluster):
 
         # Base knobs
         self.total_lvols = 20
-        self.lvol_size = "150G"
-        self.fio_size = "15G"
+        self.lvol_size = "50G"
+        self.int_lvol_size = 50
+        self.fio_numjobs = 2
 
         # Validation cadence & FIO runtime
         self.validate_every = 5
@@ -142,10 +143,12 @@ class RandomRapidFailoverNoGap(TestLvolHACluster):
         self.logger.info(f"[LFNG] SN sec map: {self.sn_primary_secondary_map}")
 
         # initial lvols + mount + then later clone from snapshots
+        self._compute_fio_size(extra_lvols=self.total_lvols)
         self._create_lvols(count=self.total_lvols)  # start_fio=False → we launch after clones
         self._seed_snapshots_and_clones()           # also mounts clones
 
         # Start 30 min FIO on all (lvols + clones)
+        self._compute_fio_size()
         self._kick_fio_for_all(runtime=self._per_wave_fio_runtime)
 
         # start container logs
@@ -557,6 +560,7 @@ class RandomRapidFailoverNoGap(TestLvolHACluster):
                 sleep_n_sec(10)
 
                 # Re-kick next 30min wave
+                self._compute_fio_size()
                 self._kick_fio_for_all(runtime=self._per_wave_fio_runtime)
                 self.logger.info("[LFNG] Next FIO wave started")
 
@@ -1301,6 +1305,7 @@ class RandomRapidFailoverNoGapV2WithMigration(RandomRapidFailoverNoGap):
                 self.logger.info("[V2] FIO validated; pausing briefly for migration window")
                 sleep_n_sec(10)
 
+                self._compute_fio_size()
                 self._kick_fio_for_all(runtime=self._per_wave_fio_runtime)
                 self.logger.info("[V2] Next FIO wave started")
 
@@ -1412,6 +1417,7 @@ class RandomRapidFailoverNoGapV2NoMigration(RandomRapidFailoverNoGapV2WithMigrat
                 # Migration disabled — skip migration window pause
                 self.logger.info("[V2-NM] FIO validated; migration disabled, skipping migration window")
 
+                self._compute_fio_size()
                 self._kick_fio_for_all(runtime=self._per_wave_fio_runtime)
                 self.logger.info("[V2-NM] Next FIO wave started")
 

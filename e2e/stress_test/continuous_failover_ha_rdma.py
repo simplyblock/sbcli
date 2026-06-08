@@ -35,9 +35,9 @@ class RandomRDMAFailoverTest(TestLvolHACluster):
         self.lvol_name = f"lvl{generate_random_sequence(15)}"
         self.clone_name = f"cln{generate_random_sequence(15)}"
         self.snapshot_name = f"snap{generate_random_sequence(15)}"
-        self.lvol_size = "150G"
-        self.int_lvol_size = 150
-        self.fio_size = "6G"
+        self.lvol_size = "30G"
+        self.int_lvol_size = 30
+        self.fio_numjobs = 5
         self.fio_threads = []
         self.clone_mount_details = {}
         self.lvol_mount_details = {}
@@ -1075,6 +1075,7 @@ class RandomRDMAFailoverTest(TestLvolHACluster):
 
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
 
+        self._compute_fio_size(extra_lvols=self.total_lvols)
         self.create_lvols_with_fio(self.total_lvols)
         storage_nodes = self.sbcli_utils.get_storage_nodes()
 
@@ -1094,6 +1095,7 @@ class RandomRDMAFailoverTest(TestLvolHACluster):
             validation_thread = threading.Thread(target=self.validate_iostats_continuously, daemon=True)
             validation_thread.start()
             if iteration > 1:
+                self._compute_fio_size()
                 self.restart_fio(iteration=iteration)
             outage_type = self.perform_random_outage()
             if not self.sbcli_utils.is_secondary_node(self.current_outage_node):
@@ -1110,6 +1112,7 @@ class RandomRDMAFailoverTest(TestLvolHACluster):
                     self.runner_k8s_log.restart_logging()
 
                 self.collect_outage_diagnostics(f"pre_outage_node_{self.current_outage_node}")
+                self._compute_fio_size(extra_lvols=5)
                 self.create_lvols_with_fio(5)
                 if not self.k8s_test:
                     for node in self.storage_nodes:

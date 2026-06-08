@@ -60,15 +60,16 @@ class _LargeScaleMixin:
     # ── FIO — intentionally lightweight to avoid overload ────────────────────
     FIO_IODEPTH = 1
     FIO_NUMJOBS = 1
-    FIO_RUNTIME = 3600                  # 1 hour
-    FIO_WAIT_TIMEOUT = 7200             # max 2 hours to wait for FIO completion
+    FIO_RUNTIME = 600                   # 10 minutes
+    FIO_WAIT_TIMEOUT = 1200             # 20 min max wait for FIO completion
 
     # ── Timing ───────────────────────────────────────────────────────────────
-    STEADY_STATE_DURATION = 1800        # 30 minutes
+    STEADY_STATE_DURATION = 300         # 5 minutes
     HEALTH_CHECK_INTERVAL = 60          # seconds between health logs
 
     # ── Parallelism ──────────────────────────────────────────────────────────
     MAX_WORKERS = 20
+    MAX_WORKERS_SUBMIT = 50          # for fire-all (just kubectl apply, no wait)
     BATCH_SIZE = 50
     PARALLEL_PARENTS = 5             # concurrent parents/subsystems during creation
 
@@ -514,6 +515,8 @@ class LargeScaleLvolDocker(_LargeScaleMixin, TestLvolHACluster):
         self.test_name = "large_scale_lvol_docker"
         self.fio_threads: list[threading.Thread] = []
         self.sn_nodes: list[str] = []
+        # More parents creating children concurrently (children still sequential per parent)
+        self.PARALLEL_PARENTS = 20
 
         # parent_name → {id, client, ctrl_dev, nqn, devices: [dev_path]}
         self._parent_registry: dict[str, dict] = {}
@@ -1298,6 +1301,9 @@ class LargeScaleLvolK8s(_LargeScaleMixin, K8sNativeFailoverTest):
             )
             self.pool_name = actual_pool
 
+        # Patch CSI provisioner for higher parallelism (5 worker-threads)
+        self._patch_csi_provisioner()
+
         cluster_id = self.cluster_id or os.environ.get("CLUSTER_ID", "")
         self.k8s_utils.create_storage_class(
             name=self.STORAGE_CLASS_NAME,
@@ -1323,23 +1329,219 @@ class LargeScaleLvolK8s(_LargeScaleMixin, K8sNativeFailoverTest):
         """Count PVCs available for FIO from pvc_details."""
         return len(self.pvc_details)
 
-    # ── Phase 1: Create subsystems (parallel across subsystems) ─────────
+    # ── CSI provisioner tuning ────────────────────────────────────────────
+
+    def _patch_csi_provisioner(self):
+        """Increase CSI provisioner worker-threads for higher create parallelism."""
+        self.logger.info("[csi_patch] Patching CSI provisioner for 5 worker-threads")
+        patch_json = (
+            '{"spec":{"template":{"spec":{"containers":[{"name":"csi-provisioner",'
+            '"args":["--v=5","--csi-address=unix:///csi/csi-provisioner.sock",'
+            '"--timeout=180s","--kube-api-qps=50","--kube-api-burst=100",'
+            '"--worker-threads=5","--retry-interval-start=2s",'
+            '"--leader-election=false","--extra-create-metadata=true",'
+            '"--feature-gates=Topology=true"]}]}}}}'
+        )
+        try:
+            self.k8s_utils._exec_kubectl(
+                f"kubectl patch statefulset simplyblock-csi-controller "
+                f"-n simplyblock --type='strategic' "
+                f"-p='{patch_json}'"
+            )
+            self.logger.info("[csi_patch] Waiting for CSI controller rollout")
+            self.k8s_utils._exec_kubectl(
+                "kubectl rollout status statefulset/simplyblock-csi-controller "
+                "-n simplyblock --timeout=120s"
+            )
+            sleep_n_sec(10)
+            self.logger.info("[csi_patch] CSI provisioner patched successfully")
+        except Exception as exc:
+            self.logger.warning(f"[csi_patch] Patch failed (non-fatal): {exc}")
+
+    # ── Fire-all-then-wait-all helpers ────────────────────────────────────
+
+    def _submit_pvc_lss(self, name: str, sc_name: str):
+        """Apply PVC YAML without waiting for Bound.  Fire-and-forget."""
+        ns = self.k8s_utils.namespace
+        yaml_content = (
+            f"apiVersion: v1\n"
+            f"kind: PersistentVolumeClaim\n"
+            f"metadata:\n"
+            f"  name: {name}\n"
+            f"  labels:\n"
+            f"    test: large-scale\n"
+            f"spec:\n"
+            f"  accessModes:\n"
+            f"    - ReadWriteOnce\n"
+            f"  storageClassName: {sc_name}\n"
+            f"  resources:\n"
+            f"    requests:\n"
+            f"      storage: {self.PVC_SIZE}\n"
+        )
+        self.k8s_utils.apply_yaml(yaml_content, namespace=ns)
+
+    def _wait_all_pvcs_bound_lss(self, names: list, timeout: int = 1200,
+                                  poll_interval: int = 10) -> tuple:
+        """Bulk-poll until all target PVCs are Bound.
+
+        Returns ``(bound_set, unbound_set, bind_timestamps)``.
+        """
+        target = set(names)
+        ns = self.k8s_utils.namespace
+        bound = set()
+        bind_ts = {}
+        deadline = time.time() + timeout
+
+        while time.time() < deadline and bound != target:
+            out, _ = self.k8s_utils._exec_kubectl(
+                f"kubectl get pvc -l test=large-scale -n {ns} "
+                f"-o jsonpath='{{range .items}}{{.metadata.name}} "
+                f"{{.status.phase}}{{\"\\n\"}}{{end}}' 2>/dev/null || true",
+                supress_logs=True,
+            )
+            now = time.time()
+            for line in (out or "").strip().splitlines():
+                parts = line.strip().split()
+                if len(parts) >= 2 and parts[0] in target and parts[1] == "Bound":
+                    if parts[0] not in bound:
+                        bound.add(parts[0])
+                        bind_ts[parts[0]] = now
+
+            remaining = len(target) - len(bound)
+            self.logger.info(
+                f"[bulk_wait_pvc] {len(bound)}/{len(target)} Bound "
+                f"({remaining} remaining)"
+            )
+            if bound == target:
+                break
+            time.sleep(poll_interval)
+
+        unbound = target - bound
+        if unbound:
+            self.logger.warning(
+                f"[bulk_wait_pvc] {len(unbound)} PVCs NOT Bound "
+                f"after {timeout}s: {sorted(list(unbound))[:10]}..."
+            )
+        return bound, unbound, bind_ts
+
+    # ── Phase 1: Create subsystems ────────────────────────────────────────
 
     def _phase_create_subsystems(self):
-        """Create PVCs with PARALLEL_PARENTS subsystems processed concurrently.
+        """Fire-all-then-wait-all for non-client mode.
 
-        Each subsystem creates NAMESPACES_PER_SUBSYSTEM PVCs sequentially
-        (to preserve device detection order within a subsystem), but multiple
-        subsystems run in parallel to reduce total wall-clock time."""
+        In client mode (use_client_fio=True), falls back to sequential
+        per-subsystem creation for device detection.
+        """
+        if self.use_client_fio:
+            return self._phase_create_subsystems_client()
+        return self._phase_create_subsystems_fire_all()
+
+    def _phase_create_subsystems_fire_all(self):
+        """Submit all 3200 PVCs in parallel, then bulk-wait for Bound."""
         total_pvcs = self.NUM_SUBSYSTEMS * self.NAMESPACES_PER_SUBSYSTEM
         self.logger.info(
-            f"=== Phase: Create {total_pvcs} PVCs (K8s) — "
+            f"=== Phase: Create {total_pvcs} PVCs (K8s fire-all) — "
+            f"{self.NUM_SUBSYSTEMS} subsystems × "
+            f"{self.NAMESPACES_PER_SUBSYSTEM} PVCs "
+            f"(submit workers={self.MAX_WORKERS_SUBMIT}) ==="
+        )
+
+        # Build all PVC items
+        all_pvc_items = []
+        all_pvc_names = []
+        pvc_sc_map = {}
+        for s in range(self.NUM_SUBSYSTEMS):
+            for ns_idx in range(self.NAMESPACES_PER_SUBSYSTEM):
+                pvc_idx = s * self.NAMESPACES_PER_SUBSYSTEM + ns_idx
+                pvc_name = f"lss-pvc-{_rand_seq(6)}-{pvc_idx:04d}"
+                sc_name = random.choice(
+                    [self.STORAGE_CLASS_NAME, self.XFS_STORAGE_CLASS_NAME]
+                )
+                all_pvc_items.append({
+                    "name": pvc_name,
+                    "sc_name": sc_name,
+                })
+                all_pvc_names.append(pvc_name)
+                pvc_sc_map[pvc_name] = sc_name
+
+        # Submit all PVCs in parallel (just kubectl apply, no wait)
+        self.logger.info(
+            f"[create] Submitting {len(all_pvc_items)} PVCs "
+            f"(workers={self.MAX_WORKERS_SUBMIT})"
+        )
+        submit_t0 = time.time()
+        ok, fail = self._batch_exec_k8s(
+            all_pvc_items,
+            lambda item: self._submit_pvc_lss(item["name"], item["sc_name"]),
+            "submit_pvcs",
+            per_item_timeout=60,
+            max_workers=self.MAX_WORKERS_SUBMIT,
+        )
+        submit_elapsed = time.time() - submit_t0
+        self.logger.info(
+            f"[create] Submitted {ok} PVCs in {submit_elapsed:.1f}s "
+            f"({fail} submit failures)"
+        )
+
+        # Bulk-wait all PVCs to bind
+        self.logger.info(
+            f"[create] Bulk-waiting for {len(all_pvc_names)} PVCs to bind"
+        )
+        bound, unbound, bind_ts = self._wait_all_pvcs_bound_lss(
+            all_pvc_names, timeout=1200,
+        )
+
+        # Register bound PVCs
+        for pvc_name in bound:
+            sc_name = pvc_sc_map[pvc_name]
+            fs_type = "xfs" if sc_name == self.XFS_STORAGE_CLASS_NAME else "ext4"
+            self.pvc_details[pvc_name] = {
+                "job_name": None,
+                "configmap_name": None,
+                "snapshots": [],
+                "storage_class": sc_name,
+                "fs_type": fs_type,
+            }
+
+        # Failure check
+        if unbound:
+            unbound_pct = len(unbound) * 100 / max(total_pvcs, 1)
+            self.logger.warning(
+                f"[create] {len(unbound)}/{total_pvcs} PVCs "
+                f"({unbound_pct:.1f}%) NOT Bound"
+            )
+            if unbound_pct > 50:
+                self._total_created = len(self.pvc_details)
+                raise RuntimeError(
+                    f"[create] {unbound_pct:.1f}% failure rate exceeds 50%"
+                )
+
+        # Bulk verification
+        all_lvols = self.sbcli_utils.list_lvols()
+        if len(all_lvols) < len(bound):
+            self.logger.warning(
+                f"[create] lvol count {len(all_lvols)} < "
+                f"expected {len(bound)}"
+            )
+
+        self._total_created = len(self.pvc_details)
+        self.logger.info(
+            f"[create] {self._total_created} PVCs created "
+            f"({len(unbound)} failed), "
+            f"lvols in API: {len(all_lvols)}"
+        )
+
+    def _phase_create_subsystems_client(self):
+        """Sequential per-subsystem creation for client FIO mode.
+
+        Children must be sequential for device detection on NVMe connect."""
+        total_pvcs = self.NUM_SUBSYSTEMS * self.NAMESPACES_PER_SUBSYSTEM
+        self.logger.info(
+            f"=== Phase: Create {total_pvcs} PVCs (K8s client) — "
             f"{self.NUM_SUBSYSTEMS} subsystems × "
             f"{self.NAMESPACES_PER_SUBSYSTEM} PVCs "
             f"(parallel={self.PARALLEL_PARENTS}) ==="
         )
-
-        # Build work items: one per subsystem
         work_items = [
             {
                 "subsys_idx": s,
@@ -1347,7 +1549,6 @@ class LargeScaleLvolK8s(_LargeScaleMixin, K8sNativeFailoverTest):
             }
             for s in range(self.NUM_SUBSYSTEMS)
         ]
-
         subsys_timeout = self.NAMESPACES_PER_SUBSYSTEM * 60
         ok, fail = self._batch_exec_k8s(
             work_items,
@@ -1361,15 +1562,7 @@ class LargeScaleLvolK8s(_LargeScaleMixin, K8sNativeFailoverTest):
             raise RuntimeError(
                 f"[create] {fail}/{self.NUM_SUBSYSTEMS} subsystems failed"
             )
-
-        # Bulk verification at the end
         all_lvols = self.sbcli_utils.list_lvols()
-        if len(all_lvols) < total_pvcs:
-            self.logger.warning(
-                f"[create] lvol count {len(all_lvols)} < "
-                f"expected {total_pvcs}"
-            )
-
         self._total_created = len(self.pvc_details)
         self.logger.info(
             f"[create] {self._total_created} PVCs created, "

@@ -76,16 +76,15 @@ class K8sNativeFailoverTest(TestClusterBase):
         self.FIO_IMAGE = "dockerpinata/fio:2.1"
         self.tls_enabled = str(kwargs.get("tls_enabled", os.environ.get("TLS_ENABLED", "false"))).lower() == "true"
 
-        # Sizing — each iteration must produce 180-250 GB of FIO
-        # working-set data per storage node.  fio_size is computed
-        # dynamically by _compute_fio_size() before each FIO start/restart
-        # so total disk usage stays bounded as PVC count grows.
-        # pvc_size=150Gi → 80% cap = 120G per PVC (numjobs=1).
-        # At 1.5 jobs/node: 1.5×120 = 180G.  At 2+: ~200G.
+        # Sizing — fio_size is computed dynamically by _compute_fio_size()
+        # before each FIO start/restart so total disk usage stays bounded.
+        # pvc_size=100Gi → 80% cap = 80G per PVC (numjobs=1).
+        # At start (8 PVCs / 4 nodes): fio_size=80G, ~160G/node.
+        # At peak (36 total / 4 nodes): fio_size=22G, ~200G/node.
         # Thin-provisioned: only written data consumes backend storage.
         self.TARGET_DATA_PER_NODE_GB = 200
-        self.pvc_size = "150Gi"
-        self.int_pvc_size = 150
+        self.pvc_size = "100Gi"
+        self.int_pvc_size = 100
         self.fio_size = "40G"  # default; overridden by _compute_fio_size()
         self.FIO_RUNTIME = 4000
 
@@ -893,7 +892,7 @@ class K8sNativeFailoverTest(TestClusterBase):
             f"name={name}-warmup\n"
             f"filename_format=/spdkvol/fio-{run_id}.$jobnum\n"
             f"rw=write\n"
-            f"bs={bs}\n"
+            f"bs=1m\n"
             f"iodepth=32\n"
             f"direct=1\n"
             f"ioengine=libaio\n"

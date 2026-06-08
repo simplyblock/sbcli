@@ -103,6 +103,11 @@ from stress_test.continuous_failover_ha_security import (
     RandomSecurityFailoverTest,
     RandomAllSecurityFailoverTest,
 )
+from stress_test.k8s_native_namespace_failover import (
+    K8sNativeNamespacedFailoverTest,
+    K8sNativeRapidLifecycleTest,
+    K8sNativeMountVerifiedFailoverTest,
+)
 
 from e2e_tests.security.test_lvol_security import (
     TestLvolSecurityCombinations,
@@ -277,6 +282,9 @@ ALL_TESTS = [
     K8sNativeFailoverTest,
     K8sNativeBasicFailoverTest,
     K8sNativeResilientFailoverTest,
+    K8sNativeNamespacedFailoverTest,
+    K8sNativeRapidLifecycleTest,
+    K8sNativeMountVerifiedFailoverTest,
     TestParallelNamespaceLvolDocker,
     TestParallelNamespaceLvolK8s,
     BulkLvolDeleteDocker,
@@ -404,6 +412,9 @@ def get_stress_tests():
         K8sNativeFailoverTest,
         K8sNativeBasicFailoverTest,
         K8sNativeResilientFailoverTest,
+        K8sNativeNamespacedFailoverTest,
+        K8sNativeRapidLifecycleTest,
+        K8sNativeMountVerifiedFailoverTest,
         TestParallelNamespaceLvolDocker,
         TestParallelNamespaceLvolK8s,
         BulkLvolDeleteDocker,
