@@ -1115,8 +1115,11 @@ class TestRecreateLvstoreNonLeaderLvolMismatch(unittest.TestCase):
             recreate_lvstore_on_non_leader(
                 secondary, leader_node=primary, primary_node=primary, force=False)
         self.assertIn("Expected lvols not registered", str(cm.exception))
-        # Node must be marked offline by the abort path
-        mock_set_status.assert_any_call(secondary.get_id(), StorageNode.STATUS_OFFLINE)
+        # Node must be marked offline by the abort path. The abort path tags
+        # the transition with caused_by="restart_cleanup" (commit 4ad4e63f)
+        # so the in_restart→OFFLINE clobber guard can distinguish it.
+        mock_set_status.assert_any_call(secondary.get_id(), StorageNode.STATUS_OFFLINE,
+                                        caused_by="restart_cleanup")
 
     @patch("simplyblock_core.storage_node_ops._check_peer_disconnected",
            side_effect=lambda peer, **kw: peer.status in ["offline"])
@@ -1250,8 +1253,10 @@ class TestRecreateLvstoreNonLeaderPortBlockFailure(unittest.TestCase):
         self.assertIn("Failed to block leader", str(cm.exception))
         # All 3 attempts must have been tried
         self.assertEqual(fw.firewall_set_port.call_count, 3)
-        # Abort path sets the restarting node offline
-        mock_set_status.assert_any_call(secondary.get_id(), StorageNode.STATUS_OFFLINE)
+        # Abort path sets the restarting node offline, tagged
+        # caused_by="restart_cleanup" (commit 4ad4e63f).
+        mock_set_status.assert_any_call(secondary.get_id(), StorageNode.STATUS_OFFLINE,
+                                        caused_by="restart_cleanup")
 
     @patch("simplyblock_core.storage_node_ops.time.sleep", return_value=None)
     @patch("simplyblock_core.storage_node_ops._check_peer_disconnected",

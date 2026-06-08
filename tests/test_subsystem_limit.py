@@ -49,17 +49,28 @@ def _lvol(uuid, node_id, nqn=None):
 
 
 def _call_get_next_3_nodes(nodes, lvols_by_node, cluster_id="cluster-1"):
-    """Call _get_next_3_nodes with fully mocked DB and lvol_sync_del."""
+    """Call _get_next_3_nodes with fully mocked DB and lvol_sync_del.
+
+    _get_next_3_nodes now does a single cluster-wide lvol read via
+    ``DBController.get_mini_lvols()`` and buckets lvols per node by
+    ``lv.node_id`` (commit 2b5ddb3f), instead of one
+    ``get_lvols_by_node_id`` call per node. ``lvols_by_node`` may be a flat
+    list of all cluster lvols, or a callable ``node_id -> [lvols]`` which we
+    flatten across the supplied ``nodes`` into the single cluster-wide list.
+    """
+    if callable(lvols_by_node):
+        all_lvols = []
+        for node in nodes:
+            all_lvols.extend(lvols_by_node(node.get_id()))
+    else:
+        all_lvols = list(lvols_by_node)
+
     with patch("simplyblock_core.controllers.lvol_controller.DBController") as mock_db_cls:
         from simplyblock_core.controllers.lvol_controller import _get_next_3_nodes
 
         db = MagicMock()
         db.get_storage_nodes_by_cluster_id.return_value = nodes
-
-        if callable(lvols_by_node):
-            db.get_lvols_by_node_id.side_effect = lvols_by_node
-        else:
-            db.get_lvols_by_node_id.return_value = lvols_by_node
+        db.get_mini_lvols.return_value = all_lvols
 
         mock_db_cls.return_value = db
 

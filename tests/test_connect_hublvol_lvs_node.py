@@ -210,34 +210,40 @@ class TestSourceCallSites(unittest.TestCase):
             cls.src = f.read()
 
     def test_recreate_on_non_leader_passes_lvs_node_for_tertiary_branch(self):
-        # The tertiary branch must pass lvs_node=primary_node when the
-        # sync_target may be a peer (acting leader for an LVS that
-        # primary_node owns but is offline for).
+        # The tertiary branch resolves its hublvol attach target into
+        # ``attach_target = sync_target`` (which may be a peer acting as
+        # leader for an LVS that primary_node owns but is offline for).
+        # The subsequent connect_to_hublvol on that target must pass
+        # lvs_node=primary_node so LVS metadata comes from the configured
+        # primary, not the peer.
         start = self.src.index("def recreate_lvstore_on_non_leader(")
         end = self.src.index("\ndef ", start + 1)
         body = self.src[start:end]
-        # Find the tertiary branch (sync_target is not None)
-        tertiary_idx = body.index("if sync_target is not None:")
-        tertiary_window = body[tertiary_idx:tertiary_idx + 1500]
+        # Tertiary branch maps sync_target onto attach_target.
+        tertiary_idx = body.index("attach_target = sync_target")
+        tertiary_window = body[tertiary_idx:tertiary_idx + 2000]
         self.assertIn(
             "lvs_node=primary_node",
             tertiary_window,
             "tertiary branch in recreate_lvstore_on_non_leader must pass "
             "lvs_node=primary_node so connect_to_hublvol uses the right "
-            "LVS metadata when sync_target is a peer",
+            "LVS metadata when the attach target is a peer",
         )
 
     def test_recreate_on_non_leader_passes_lvs_node_for_secondary_branch(self):
         start = self.src.index("def recreate_lvstore_on_non_leader(")
         end = self.src.index("\ndef ", start + 1)
         body = self.src[start:end]
-        # Secondary branch: snode.connect_to_hublvol(leader_node, ...)
-        sec_idx = body.index("snode.connect_to_hublvol(leader_node")
-        sec_window = body[sec_idx:sec_idx + 800]
+        # Secondary branch sets attach_target = leader_node, then the
+        # shared connect call (snode.connect_to_hublvol(attach_target, ...))
+        # must route LVS metadata via lvs_node=primary_node since the
+        # leader may be a peer.
+        sec_idx = body.index("attach_target = leader_node")
+        sec_window = body[sec_idx:sec_idx + 2000]
         self.assertIn(
             "lvs_node=primary_node",
             sec_window,
-            "secondary branch must also pass lvs_node=primary_node "
+            "secondary branch must also route via lvs_node=primary_node "
             "(leader_node may be a peer)",
         )
 

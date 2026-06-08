@@ -408,10 +408,14 @@ class TestRecreateLvstoreRoles(unittest.TestCase):
         # sec2 (node-3) → tertiary, single-path attach against snode only;
         # the secondary failover (node-2) is added asynchronously
         # post-port-unblock via ``add_hublvol_failover_path``.
+        # Non-takeover recreate ⇒ lvs_node is snode itself; the peer-loop
+        # connect call routes LVS metadata via lvs_node=snode.
         nodes["node-2"].connect_to_hublvol.assert_called_once_with(
-            snode, failover_node=None, role="secondary", rpc_timeout=0.2)
+            snode, failover_node=None, role="secondary", rpc_timeout=0.2,
+            lvs_node=snode)
         nodes["node-3"].connect_to_hublvol.assert_called_once_with(
-            snode, failover_node=None, role="tertiary", rpc_timeout=0.2)
+            snode, failover_node=None, role="tertiary", rpc_timeout=0.2,
+            lvs_node=snode)
         nodes["node-3"].add_hublvol_failover_path.assert_called_once_with(
             snode, nodes["node-2"])
 
@@ -480,7 +484,8 @@ class TestRecreateLvstoreRoles(unittest.TestCase):
         # Only sec1 should be called, with role="secondary".
         # FTT=1 ⇒ no tertiary in topology ⇒ no deferred failover-path attach.
         nodes["node-2"].connect_to_hublvol.assert_called_once_with(
-            snode, failover_node=None, role="secondary", rpc_timeout=0.2)
+            snode, failover_node=None, role="secondary", rpc_timeout=0.2,
+            lvs_node=snode)
         nodes["node-3"].connect_to_hublvol.assert_not_called()
 
 

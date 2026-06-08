@@ -372,9 +372,10 @@ class TestAttachControllerTimeoutCap(unittest.TestCase):
 
     @patch("simplyblock_core.storage_node_ops.time.sleep", return_value=None)
     @patch("simplyblock_core.models.storage_node.RPCClient")
+    @patch("simplyblock_core.db_controller.DBController")
     @patch("simplyblock_core.storage_node_ops.DBController")
     def test_connect_device_caps_attach_timeout_at_1s(
-            self, MockDBCtrl, MockRPC, _sleep):
+            self, MockDBCtrl, MockModelDBCtrl, MockRPC, _sleep):
         """connect_device must build its attach RPC client with timeout<=1."""
         import simplyblock_core.storage_node_ops as ops
 
@@ -406,6 +407,17 @@ class TestAttachControllerTimeoutCap(unittest.TestCase):
         mock_db = MagicMock()
         mock_db.get_storage_node_by_id.return_value = node
         MockDBCtrl.return_value = mock_db
+
+        # device.lock_device_connection()/release_device_connection() reach
+        # NVMeDevice.__change_dev_connection_to, which does a local
+        # ``from simplyblock_core.db_controller import DBController`` and
+        # walks get_storage_nodes(). That import bypasses the
+        # storage_node_ops.DBController patch above, so without this it hits
+        # the real (FDB-less, kv_store=None) singleton and raises. Return no
+        # nodes so the connection-flag walk is a harmless no-op.
+        model_db = MagicMock()
+        model_db.get_storage_nodes.return_value = []
+        MockModelDBCtrl.return_value = model_db
 
         # No caller-specified timeout: should default-cap at 1.
         ops.connect_device("remote-fake", device, node,

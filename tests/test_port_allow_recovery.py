@@ -590,7 +590,9 @@ class TestSourceShapeStrictGate(unittest.TestCase):
         self.assertIn("def _hublvol_verified_open", self.src)
         self.assertIn("bdev_nvme_controller_list", self.src)
         # Two-condition strict check: enabled path AND namespace bdev.
-        self.assertIn('state") == "enabled"', self.src)
+        # The enabled-path guard is expressed as a skip-if-not-enabled
+        # (`if ct.get("state") != "enabled": continue`), so match that form.
+        self.assertIn('state") != "enabled"', self.src)
         self.assertIn('+ "n1"', self.src)
 
     def test_abort_helper_present_and_used(self):

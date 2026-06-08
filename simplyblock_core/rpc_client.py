@@ -422,7 +422,7 @@ class RPCClient:
                             "nvmf_subsystem_add_ns: %s already has %s at nsid=%s, "
                             "skipping duplicate add",
                             nqn, dev_name, existing_nsid)
-                        return existing_nsid
+                        return existing_nsid, None
             except Exception as e:
                 # Don't let an idempotency probe block the legitimate add.
                 logger.debug(

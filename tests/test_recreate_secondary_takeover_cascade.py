@@ -528,12 +528,13 @@ class TestRecreateLvstoreStep8bHublvolWiring(unittest.TestCase):
             return f"nqn-{primary_node.lvstore}"
 
         def fake_connect(self_node, primary_node, failover_node=None,
-                         role=None, timeout=None):
+                         role=None, timeout=None, lvs_node=None):
             captured["connect_calls"].append({
                 "self_id": self_node.get_id(),
                 "primary_node_id": primary_node.get_id(),
                 "failover_id": failover_node.get_id() if failover_node else None,
                 "role": role,
+                "lvs_node_id": lvs_node.get_id() if lvs_node else None,
             })
             return True
 
@@ -561,9 +562,9 @@ class TestRecreateLvstoreStep8bHublvolWiring(unittest.TestCase):
             n.create_secondary_hublvol = lambda primary_node, cluster_nqn, _self=n: \
                 fake_create_sec(_self, primary_node, cluster_nqn)
             n.connect_to_hublvol = lambda primary_node, failover_node=None, role=None, \
-                                          timeout=None, rpc_timeout=None, _self=n: \
+                                          timeout=None, rpc_timeout=None, lvs_node=None, _self=n: \
                 fake_connect(_self, primary_node, failover_node=failover_node,
-                             role=role, timeout=timeout)
+                             role=role, timeout=timeout, lvs_node=lvs_node)
             n.client = MagicMock(return_value=MagicMock())
 
         with patch("simplyblock_core.storage_node_ops._check_peer_disconnected",

@@ -378,10 +378,13 @@ class TestRecreateLvstoreDualSecondary(unittest.TestCase):
         # called with a SINGLE path against snode (the new leader). The
         # tertiary→secondary failover path is deferred to after port_unblock
         # via ``add_hublvol_failover_path`` (asserted separately below).
+        # lvs_node is passed so the peer wires up the correct LVS metadata
+        # (commit 2c99806d). On a non-takeover primary restart lvs_node is
+        # the restarting primary itself (snode).
         nodes["node-2"].connect_to_hublvol.assert_called_once_with(
-            snode, failover_node=None, role="secondary", rpc_timeout=0.2)
+            snode, failover_node=None, role="secondary", rpc_timeout=0.2, lvs_node=snode)
         nodes["node-3"].connect_to_hublvol.assert_called_once_with(
-            snode, failover_node=None, role="tertiary", rpc_timeout=0.2)
+            snode, failover_node=None, role="tertiary", rpc_timeout=0.2, lvs_node=snode)
         nodes["node-3"].add_hublvol_failover_path.assert_called_once_with(
             snode, nodes["node-2"])
 
