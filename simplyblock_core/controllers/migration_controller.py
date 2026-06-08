@@ -44,6 +44,7 @@ import uuid
 
 from simplyblock_core import constants, utils
 from simplyblock_core.controllers import migration_events, tasks_controller
+from simplyblock_core.kms import create_kms_connection
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.lvol_migration import LVolMigration
 from simplyblock_core.models.lvol_model import LVol
@@ -825,6 +826,37 @@ def pre_create_on_target(lvol_id, target_node_id,
             sec_node = _node
             sec_port = _port
 
+        # Crypto: create key + bdev on this TGT node before touching the subsystem.
+        # The NVMe-oF Target holds an exclusive_write claim on any bdev used as a
+        # namespace, so the crypto bdev must be stacked before the namespace is added.
+        _ns_bdev = composite
+        if lvol.crypto_bdev:
+            _crypto_short = f"crypto_{bdev_short}"
+            if _rpc.get_bdevs(_crypto_short):
+                logger.info(f"pre_create_on_target: crypto bdev {_crypto_short} "
+                            f"already exists on {_node_id[:8]}")
+                _ns_bdev = _crypto_short
+            else:
+                try:
+                    with create_kms_connection(cluster) as kms:
+                        _key1, _key2 = kms.get_data_encryption_keys(lvol)
+                    _key_name = f"key_{_crypto_short}"
+                    _ret = _rpc.lvol_crypto_key_create(_key_name, _key1, _key2)
+                    if not _ret:
+                        logger.warning(f"pre_create_on_target: crypto key create for "
+                                       f"{_key_name} on {_node_id[:8]} failed (key may exist)")
+                    _ret = _rpc.lvol_crypto_create(_crypto_short, composite, _key_name)
+                    if _ret:
+                        logger.info(f"pre_create_on_target: created crypto bdev "
+                                    f"{_crypto_short} on {_node_id[:8]}")
+                        _ns_bdev = _crypto_short
+                    else:
+                        logger.error(f"pre_create_on_target: bdev_crypto_create failed "
+                                     f"for {_crypto_short} on {_node_id[:8]}")
+                except Exception as _e:
+                    logger.error(f"pre_create_on_target: crypto bdev setup on "
+                                 f"{_node_id[:8]} failed: {_e}")
+
         if _node_id in overlap_ids:
             # Subsystem already exists from SRC role — add inaccessible listener
             # at TGT port so clients can pre-connect to the future TGT endpoint.
@@ -867,10 +899,10 @@ def pre_create_on_target(lvol_id, target_node_id,
                         f"pre_create_on_target: listener on {_node_id[:8]} "
                         f"(non-fatal): {_e}")
 
-            _ns = _rpc.nvmf_subsystem_add_ns(nqn, composite, lvol.uuid, lvol.guid)
+            _ns = _rpc.nvmf_subsystem_add_ns(nqn, _ns_bdev, lvol.uuid, lvol.guid)
             if _ns:
                 logger.info(
-                    f"pre_create_on_target: namespace {composite} added on "
+                    f"pre_create_on_target: namespace {_ns_bdev} added on "
                     f"{'TGT-prim' if _i == 0 else 'TGT-sec'} {_node_id[:8]} nsid={_ns}")
             else:
                 logger.warning(

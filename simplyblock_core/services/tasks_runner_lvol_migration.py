@@ -94,7 +94,6 @@ from simplyblock_core import db_controller as db_mod, utils, constants
 from simplyblock_core.controllers import (
     migration_controller, migration_events, snapshot_controller, tasks_controller, tasks_events
 )
-from simplyblock_core.kms import create_kms_connection
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_migration import LVolMigration
@@ -435,63 +434,6 @@ def _swap_namespace(rpc, nqn, new_bdev, uuid, guid, label):
     ret = rpc.nvmf_subsystem_add_ns(nqn, new_bdev, uuid, guid)
     if not ret:
         logger.error(f"Swap NS add failed on {label}")
-
-
-def _release_ns_claim(rpc, nqn, label):
-    """Remove a subsystem's namespace to release the exclusive bdev write claim.
-
-    The NVMe-oF Target holds an exclusive_write claim on any bdev used as a
-    namespace. bdev_crypto_create cannot open that bdev as a base until the
-    claim is released. Call this on non-overlap TGT paths before creating a
-    crypto bdev on top of the pre-created plain migration lvol.
-    """
-    sub = rpc.subsystem_list(nqn)
-    s = (sub[0] if isinstance(sub, list) else sub) if sub else None
-    ns_list = s.get('namespaces', []) if s else []
-    if not ns_list:
-        logger.info(f"Release NS claim {label}: no namespace present")
-        return
-    nsid = ns_list[0]['nsid']
-    try:
-        rpc.nvmf_subsystem_remove_ns(nqn, nsid)
-        logger.info(f"Released NS claim on {label}: removed nsid={nsid}")
-    except Exception as e:
-        logger.warning(f"Release NS claim on {label} (non-fatal): {e}")
-
-
-def _create_migration_crypto_bdev(rpc, lvol, tgt_lvstore, tgt_lvol_bdev, cluster):
-    """Create the crypto bdev layer for a migration target lvol.
-
-    Uses the source lvol's KMS keys (same encryption, new SPDK bdev name with
-    the migration suffix).  Idempotent: skips creation if the bdev already exists.
-    Returns True on success, False on failure.
-    """
-    name = f"crypto_{tgt_lvol_bdev}"
-    base_name = f"{tgt_lvstore}/{tgt_lvol_bdev}"
-
-    if rpc.get_bdevs(name):
-        logger.info(f"Crypto migration bdev {name} already exists, skipping")
-        return True
-
-    try:
-        with create_kms_connection(cluster) as kms:
-            key1, key2 = kms.get_data_encryption_keys(lvol)
-    except Exception as e:
-        logger.error(f"Failed to get crypto keys for migration bdev {name}: {e}")
-        return False
-
-    key_name = f"key_{name}"
-    ret = rpc.lvol_crypto_key_create(key_name, key1, key2)
-    if not ret:
-        logger.warning(f"lvol_crypto_key_create for {key_name} returned failure (key may exist)")
-
-    ret = rpc.lvol_crypto_create(name, base_name, key_name)
-    if not ret:
-        logger.error(f"Failed to create crypto migration bdev {name}")
-        return False
-
-    logger.info(f"Created crypto migration bdev {name} on {tgt_lvstore}")
-    return True
 
 
 # ---------------------------------------------------------------------------
@@ -1298,37 +1240,26 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
     # have a subsystem (from SRC role); their namespace is swapped in step 4 below.
     src_paths, tgt_paths, overlap_ids = _build_paths(src_node, tgt_node, src_rpc, tgt_rpc)
 
-    # For crypto lvols: create the crypto bdev layer on every TGT path so the
-    # namespace points to the encrypted bdev, not the raw base lvol.
+    # For crypto lvols the namespace already points to the crypto bdev (set up
+    # during pre_create_on_target). tgt_ns_bdev is used by overlap step 4 to
+    # swap the SRC namespace to the correct bdev at cutover.
     tgt_ns_bdev = tgt_lvol_composite  # plain default
     if lvol.crypto_bdev:
-        tgt_crypto_bdev = f"crypto_{tgt_lvol_bdev}"
-        cluster = db.get_cluster_by_id(migration.cluster_id)
-        for tgt in tgt_paths:
-            if tgt['node_id'] not in overlap_ids:
-                # Pre-created subsystem holds an exclusive_write claim on the
-                # base lvol via its namespace. Release the claim so
-                # bdev_crypto_create can open the bdev as its base.
-                _release_ns_claim(tgt['rpc'], nqn, tgt['node_id'][:8])
-            _create_migration_crypto_bdev(
-                tgt['rpc'], lvol, tgt_node.lvstore, tgt_lvol_bdev, cluster)
-        tgt_ns_bdev = tgt_crypto_bdev
+        tgt_ns_bdev = f"crypto_{tgt_lvol_bdev}"
 
     # Generalized ANA + namespace-swap sequence.
     # Works for any topology (non-overlap, Case A, Case B, tertiary).
     #
-    # No-overlap fast path (steps 1+5 merged):
+    # No-overlap fast path:
     #   Step 1 — all TGT paths: final ANA state (prim=optimized, rest=non_optimized)
     #   Step 3 — all SRC paths → inaccessible
     #   (steps 2, 4, 5, 6 skipped — no overlap nodes)
-    #   For crypto: namespace swap (plain→crypto) on all TGT paths before ANA flip.
     #
     # Overlap path:
     #   Step 1 — first non-overlap TGT → optimized  (live path before touching overlap)
     #   Step 2 — overlap SRC paths    → inaccessible (at SRC port)
     #   Step 3 — non-overlap SRC paths → inaccessible
     #   Step 4 — overlap TGT paths: swap namespace (SRC bdev → tgt_ns_bdev)
-    #   Step 4b— non-overlap TGT paths: swap namespace if crypto (plain→crypto)
     #   Step 5 — all TGT paths: correct ANA state at TGT port
     #   Step 6 — overlap TGT paths: remove old SRC listener if port changed
     src_port_by_id = {p['node_id']: p['port'] for p in src_paths}
@@ -1342,16 +1273,6 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             logger.error(f"ANA {label} failed (non-fatal): {e}")
 
     if not overlap_ids:
-        # Crypto: swap namespace on all TGT paths (plain bdev → crypto bdev)
-        # before flipping ANA so the subsystem never exposes the unencrypted bdev.
-        if lvol.crypto_bdev:
-            for tgt in tgt_paths:
-                try:
-                    _swap_namespace(tgt['rpc'], nqn, tgt_ns_bdev,
-                                    lvol.uuid, lvol.guid, tgt['node_id'][:8])
-                except Exception as e:
-                    logger.error(f"Crypto NS swap on {tgt['node_id'][:8]} failed: {e}")
-
         # Step 1 (no-overlap): set all TGT to final states before killing SRC
         for i, tgt in enumerate(tgt_paths):
             state = "optimized" if i == 0 else "non_optimized"
@@ -1382,7 +1303,9 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                 _flip(src['rpc'], src['ip'], src['port'], src['trtype'],
                       "inaccessible", f"SRC-{src['node_id'][:8]}")
 
-        # Step 4: namespace swap on overlap TGT paths (SRC bdev → tgt_ns_bdev)
+        # Step 4: namespace swap on overlap TGT paths (SRC bdev → tgt_ns_bdev).
+        # For crypto, tgt_ns_bdev is crypto_LVOL_xxxxm which was created during
+        # pre_create_on_target; for plain it is the raw migration lvol.
         for tgt in tgt_paths:
             if tgt['node_id'] in overlap_ids:
                 try:
@@ -1390,17 +1313,6 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                                     lvol.uuid, lvol.guid, tgt['node_id'][:8])
                 except Exception as e:
                     logger.error(f"Namespace swap on {tgt['node_id'][:8]} failed: {e}")
-
-        # Step 4b: crypto — also swap namespace on non-overlap TGT paths
-        # (pre_create set up the namespace with the plain base bdev; replace it)
-        if lvol.crypto_bdev:
-            for tgt in tgt_paths:
-                if tgt['node_id'] not in overlap_ids:
-                    try:
-                        _swap_namespace(tgt['rpc'], nqn, tgt_ns_bdev,
-                                        lvol.uuid, lvol.guid, tgt['node_id'][:8])
-                    except Exception as e:
-                        logger.error(f"Crypto NS swap on {tgt['node_id'][:8]} failed: {e}")
 
         # Step 5: all TGT paths → correct ANA state at TGT port
         for i, tgt in enumerate(tgt_paths):
