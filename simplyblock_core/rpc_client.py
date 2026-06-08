@@ -93,7 +93,16 @@ _response_validator = jsonschema.validators.validator_for(_response_schema)(_res
 class RPCClient:
 
     # ref: https://spdk.io/doc/jsonrpc.html
-    DEFAULT_ALLOWED_METHODS = ["HEAD", "GET", "PUT", "DELETE", "OPTIONS", "TRACE", "POST"]
+    # POST is deliberately EXCLUDED. SPDK JSON-RPC sends every call — including
+    # non-idempotent mutations (bdev/snapshot create, resize, add_ns, transfer)
+    # — as a POST. urllib3 gates *read*-error retries (e.g. a read timeout after
+    # the request was already delivered and is executing on the node) on this
+    # set, so retrying POST here silently re-applies a mutation that may already
+    # have taken effect — e.g. a second snapshot, a re-triggered async transfer.
+    # Connection-error retries (`connect=`) are independent of this set and
+    # still apply, since a failed *connect* means the request never reached the
+    # node and is safe to resend.
+    DEFAULT_ALLOWED_METHODS = ["HEAD", "GET", "PUT", "DELETE", "OPTIONS", "TRACE"]
     RPC_NO_PRINT_OUTPUT = ["bdev_get_bdevs", "nvmf_get_subsystems", "bdev_get_iostat"]
 
     def __init__(self, host, port, username, password, timeout=180, retry=3):

@@ -3,6 +3,7 @@ import time
 
 
 from simplyblock_core import db_controller, storage_node_ops, utils, constants
+from simplyblock_core.controllers import tasks_controller
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.cluster import Cluster
 
@@ -71,15 +72,31 @@ while True:
             for task in tasks:
                 delay_seconds = constants.TASK_EXEC_INTERVAL_SEC
                 if task.function_name == JobSchedule.FN_NODE_ADD:
-                    while task.status != JobSchedule.STATUS_DONE:
-                        # get new task object because it could be changed from cancel task
-                        task = db.get_task_by_id(task.uuid)
-                        res = process_task(task)
-                        if res:
-                            if task.status == JobSchedule.STATUS_DONE:
+                    # Per-task isolation: a crash in process_task must not escape
+                    # to the outer `while True` and kill the node-add service.
+                    try:
+                        while task.status != JobSchedule.STATUS_DONE:
+                            # get new task object because it could be changed from cancel task
+                            task = db.get_task_by_id(task.uuid)
+                            # Lease gate: skip a task another live runner host owns.
+                            if not tasks_controller.claim_task(task):
+                                logger.info(f"Node-add task {task.uuid} owned by another runner host; skipping")
                                 break
-                        else:
-                            delay_seconds *= 2
-                        time.sleep(delay_seconds)
+                            res = process_task(task)
+                            if res:
+                                if task.status == JobSchedule.STATUS_DONE:
+                                    break
+                            else:
+                                # Cap the exponential backoff so a permanently
+                                # failing node-add can't grow the sleep without
+                                # bound and stall other node-add tasks for hours.
+                                delay_seconds = min(
+                                    delay_seconds * 2,
+                                    constants.RESTART_TASK_EXEC_INTERVAL_MAX_SEC,
+                                )
+                            time.sleep(delay_seconds)
+                    except Exception as e:
+                        logger.error(f"Node-add task {task.uuid} processing crashed: {e}")
+                        logger.exception(e)
 
     time.sleep(constants.TASK_EXEC_INTERVAL_SEC)

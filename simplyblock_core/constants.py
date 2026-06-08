@@ -98,6 +98,21 @@ RESTART_TASK_EXEC_INTERVAL_SEC = 3
 # transient peer-recovery waits without giving up prematurely.
 RESTART_TASK_EXEC_INTERVAL_MAX_SEC = 3600
 
+# A JobSchedule's lease is held by the runner host (by hostname) that last
+# touched it. Another host may only take over a task whose lease is older than
+# this — i.e. the owning runner is presumed dead. Must exceed the longest
+# single task_runner() invocation that does not write the task back (the
+# restart runner can block on RPCs for several minutes), so a live owner is
+# never falsely preempted. A runner restarting on the SAME host re-claims its
+# own tasks immediately regardless of this value (owner id is the hostname).
+TASK_LEASE_TTL_SEC = 1200
+
+# An LVol left in STATUS_IN_CREATION longer than this is treated as an orphaned
+# create (the creating process died before reaching ONLINE) and is cleaned up
+# by lvol_monitor. Must be comfortably longer than the slowest legitimate
+# create (HA multi-node registration) so an in-progress create is never killed.
+LVOL_IN_CREATION_STALE_SEC = 600
+
 SIMPLY_BLOCK_SPDK_CORE_IMAGE = "simplyblock/spdk-core:v24.05-tag-latest"
 SIMPLY_BLOCK_DOCKER_IMAGE = get_config_var(
         "SIMPLY_BLOCK_DOCKER_IMAGE","simplyblock/simplyblock:main")

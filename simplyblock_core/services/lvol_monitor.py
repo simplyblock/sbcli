@@ -230,6 +230,29 @@ def check_node(snode, all_lvols):
             continue
 
         if lvol.status == LVol.STATUS_IN_CREATION:
+            # A create that died (process killed) between writing the
+            # IN_CREATION record and the final ONLINE transition leaves a
+            # permanent zombie: nothing advances it, yet it keeps counting
+            # against pool capacity and max_lvol. Detect a stale IN_CREATION —
+            # far older than any real create — and route it through the normal
+            # force-delete so partial data-plane state is torn down and the DB
+            # record (and its reserved capacity) is freed. An in-progress
+            # create is younger than the threshold and is left untouched.
+            stale = True
+            if lvol.create_dt:
+                try:
+                    age = (datetime.now() - datetime.fromisoformat(lvol.create_dt)).total_seconds()
+                    stale = age > constants.LVOL_IN_CREATION_STALE_SEC
+                except (ValueError, TypeError):
+                    stale = True
+            if stale:
+                logger.error(
+                    f"LVol {lvol.get_id()} stuck in {LVol.STATUS_IN_CREATION} "
+                    f"since {lvol.create_dt}; cleaning up orphaned create")
+                try:
+                    lvol_controller.delete_lvol(lvol.get_id(), force_delete=True)
+                except Exception as e:
+                    logger.error(f"Failed to clean up orphaned in_creation lvol {lvol.get_id()}: {e}")
             continue
 
         if lvol.status == lvol.STATUS_IN_DELETION:

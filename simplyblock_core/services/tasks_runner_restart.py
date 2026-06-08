@@ -478,18 +478,33 @@ while True:
                     # exponential backoff at RESTART_TASK_EXEC_INTERVAL_MAX_SEC
                     # so recovery time is bounded even after several retries.
                     delay_seconds = constants.RESTART_TASK_EXEC_INTERVAL_SEC
-                    while task.status != JobSchedule.STATUS_DONE:
-                        # get new task object because it could be changed from cancel task
-                        task = db.get_task_by_id(task.uuid)
-                        res = task_runner(task)
-                        if res:
-                            if task.status == JobSchedule.STATUS_DONE:
+                    # Per-task isolation: an unhandled exception in task_runner
+                    # must not escape to the outer `while True`, which would kill
+                    # the whole restart service and block recovery of every other
+                    # node. Log it and move on to the next task.
+                    try:
+                        while task.status != JobSchedule.STATUS_DONE:
+                            # get new task object because it could be changed from cancel task
+                            task = db.get_task_by_id(task.uuid)
+                            # Lease gate: refuse to drive a task another live runner
+                            # host already owns (prevents a second replica issuing a
+                            # concurrent shutdown/restart). Re-checked every iteration
+                            # so the lease stays fresh while we hold it.
+                            if not tasks_controller.claim_task(task):
+                                logger.info(f"Restart task {task.uuid} owned by another runner host; skipping")
                                 break
-                        else:
-                            delay_seconds = min(
-                                delay_seconds * 2,
-                                constants.RESTART_TASK_EXEC_INTERVAL_MAX_SEC,
-                            )
-                        time.sleep(delay_seconds)
+                            res = task_runner(task)
+                            if res:
+                                if task.status == JobSchedule.STATUS_DONE:
+                                    break
+                            else:
+                                delay_seconds = min(
+                                    delay_seconds * 2,
+                                    constants.RESTART_TASK_EXEC_INTERVAL_MAX_SEC,
+                                )
+                            time.sleep(delay_seconds)
+                    except Exception as e:
+                        logger.error(f"Restart task {task.uuid} processing crashed: {e}")
+                        logger.exception(e)
 
     time.sleep(constants.TASK_EXEC_INTERVAL_SEC)
