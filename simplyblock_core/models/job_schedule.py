@@ -40,6 +40,11 @@ class JobSchedule(BaseModel):
     node_id: str = ""
     retry: int = 0
     sub_tasks: list = []
+    # Hostname of the runner that currently holds this task's lease. Empty
+    # means unclaimed. Combined with updated_at (refreshed on every write) this
+    # gives a soft lease: a different host may take over only once the lease
+    # goes stale (see constants.TASK_LEASE_TTL_SEC). See tasks_controller.claim_task.
+    owner: str = ""
 
     def write_to_db(self, kv_store=None):
         self.updated_at = str(datetime.datetime.now(datetime.timezone.utc))

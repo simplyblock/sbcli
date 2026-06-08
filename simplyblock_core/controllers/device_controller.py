@@ -274,7 +274,12 @@ def _def_create_device_stack(device_obj, snode, force=False, clear_data=False):
     rpc_client = snode.rpc_client(timeout=600)
 
     bdev_names = []
-    for dev in rpc_client.get_bdevs():
+    bdevs = rpc_client.get_bdevs()
+    if bdevs is None:
+        # None is an RPC failure (timeout / non-200), not an empty bdev list;
+        # fail loudly instead of crashing on a None iteration below.
+        raise Exception(f"get_bdevs failed on node {snode.get_id()}")
+    for dev in bdevs:
         bdev_names.append(dev['name'])
 
     nvme_bdev = device_obj.nvme_bdev
@@ -1026,7 +1031,10 @@ def restart_jm_device(device_id, force=False, format_alceml=False):
     if snode.jm_device:
         rpc_client = snode.rpc_client()
         if snode.jm_device.raid_bdev:
-            bdevs_names = [d['name'] for d in rpc_client.get_bdevs()]
+            bdevs = rpc_client.get_bdevs()
+            if bdevs is None:
+                raise Exception(f"get_bdevs failed on node {snode.get_id()}")
+            bdevs_names = [d['name'] for d in bdevs]
             jm_nvme_bdevs = []
             for dev in snode.nvme_devices:
                 if dev.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_NEW]:

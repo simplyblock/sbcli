@@ -1544,13 +1544,15 @@ def delete_lvol(id_or_name, force_delete=False):
     elif lvol.cloned_from_snap:
         try:
             snap = db_controller.get_snapshot_by_id(lvol.cloned_from_snap)
+            # Atomic decrement: a plain read-modify-write races a concurrent
+            # clone-create's increment and loses one update, leaving ref_count
+            # too high (snapshot leaks, never freed) or too low.
             if snap.snap_ref_id:
                 ref_snap = db_controller.get_snapshot_by_id(snap.snap_ref_id)
-                ref_snap.ref_count -= 1
-                ref_snap.write_to_db(db_controller.kv_store)
+                if ref_snap:
+                    db_controller.atomic_update(ref_snap, lambda s: setattr(s, "ref_count", s.ref_count - 1))
             else:
-                snap.ref_count -= 1
-                snap.write_to_db(db_controller.kv_store)
+                db_controller.atomic_update(snap, lambda s: setattr(s, "ref_count", s.ref_count - 1))
             if snap.deleted is True:
                 snapshot_controller.delete(snap.get_id())
         except KeyError:

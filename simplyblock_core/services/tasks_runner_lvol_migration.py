@@ -89,7 +89,7 @@ import time
 
 from simplyblock_core import db_controller as db_mod, utils, constants
 from simplyblock_core.controllers import (
-    migration_controller, migration_events, snapshot_controller, tasks_events
+    migration_controller, migration_events, snapshot_controller, tasks_controller, tasks_events
 )
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
@@ -1625,6 +1625,12 @@ if __name__ == "__main__":
         else:
             for cl in clusters:
                 for task in db.get_active_migration_tasks(cl.get_id()):
+                    # Lease gate: skip a task another live runner host owns, so
+                    # two replicas can't both drive the same migration's
+                    # multi-phase data-plane state-machine concurrently.
+                    if not tasks_controller.claim_task(task):
+                        logger.info(f"LVol-migration task {task.uuid} owned by another runner host; skipping")
+                        continue
                     task_runner(task)
 
         time.sleep(3)

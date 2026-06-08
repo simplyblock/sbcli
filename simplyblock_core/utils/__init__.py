@@ -1244,7 +1244,12 @@ def addNvmeDevices(rpc_client, snode, devs):
         if pcie in ctr_map:
             nvme_controller = ctr_map[pcie]
             nvme_bdevs = []
-            for bdev in rpc_client.get_bdevs():
+            bdevs = rpc_client.get_bdevs()
+            if bdevs is None:
+                # None is an RPC failure (timeout / non-200), not an empty
+                # list; fail loudly instead of crashing on a None iteration.
+                raise Exception(f"get_bdevs failed on {rpc_client.host}")
+            for bdev in bdevs:
                 if bdev['name'].startswith(nvme_controller):
                     nvme_bdevs.append(bdev['name'])
         else:

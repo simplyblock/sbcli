@@ -613,7 +613,10 @@ def get_next_physical_device_order(snode):
 
 def _search_for_partitions(rpc_client, nvme_device):
     partitioned_devices = []
-    for bdev in rpc_client.get_bdevs():
+    bdevs = rpc_client.get_bdevs()
+    if bdevs is None:
+        raise RPCException(f"get_bdevs failed on {rpc_client.host}")
+    for bdev in bdevs:
         name = bdev['name']
         if name.startswith(f"{nvme_device.nvme_bdev}p"):
             new_dev = NVMeDevice(nvme_device.to_dict())
@@ -982,7 +985,13 @@ def _prepare_cluster_devices_partitions(snode, devices):
 
     # create jm device
     jm_devices = []
-    bdevs_names = [d['name'] for d in snode.rpc_client().get_bdevs()]
+    bdevs = snode.rpc_client().get_bdevs()
+    if bdevs is None:
+        # None means the RPC failed (timeout / non-200), not "no bdevs".
+        # Without this guard the comprehension below crashes with an opaque
+        # TypeError; raise a clear, catchable error instead.
+        raise RPCException(f"get_bdevs failed on node {snode.get_id()}")
+    bdevs_names = [d['name'] for d in bdevs]
     for nvme in new_devices:
         if nvme.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_NEW]:
             dev_part = f"{nvme.nvme_bdev[:-2]}p1"
@@ -4332,53 +4341,88 @@ def set_node_status(node_id, status, caused_by="monitor"):
 
     db_controller = DBController()
     snode = db_controller.get_storage_node_by_id(node_id)
-    if snode.status == status:
-        return True
-
-    if status == StorageNode.STATUS_ONLINE and snode.status not in _ALLOWED_PRE_STATUSES_FOR_ONLINE:
-        # Hard reject: ONLINE may only be reached from RESTARTING (restart
-        # path), IN_CREATION (add_node path), or SUSPENDED (resume path).
-        # Other paths must route through one of those states first.
-        logger.error(
-            f"Refusing illegal status transition for {node_id}: "
-            f"{snode.status} -> ONLINE. Only {_ALLOWED_PRE_STATUSES_FOR_ONLINE} -> ONLINE is allowed."
-        )
+    if snode is None:
+        logger.error(f"set_node_status: node {node_id} not found")
         return False
 
-    if (status == StorageNode.STATUS_OFFLINE
-            and snode.status == StorageNode.STATUS_RESTARTING
-            and caused_by not in _ALLOWED_CAUSED_BY_RESTARTING_TO_OFFLINE):
-        # Symmetric to the ONLINE guard above: RESTARTING is the restart
-        # impl's exclusive lock. Anything else clobbering it to OFFLINE
-        # mid-flight (HealthCheck, StorageNodeMonitor, MainDistrEventCollector,
-        # auto-restart task races) strands the node — the impl's later
-        # set_node_status(ONLINE, caused_by="restart") then hits the
-        # OFFLINE → ONLINE rejection above, returns False, and the CLI
-        # exits silently with the node parked in OFFLINE forever.
-        # Observed: incident 2026-05-20 iter 57 (forced restart of
-        # 5110e910 stuck offline for 16 min until soak gave up).
+    now = str(datetime.datetime.now(datetime.timezone.utc))
+    # verdict communicates the (single, committed) outcome of the mutator out
+    # of the transaction so the irreversible work — event emission, peer
+    # broadcast, task cancellation, error logging — happens exactly once,
+    # AFTER commit. The mutator itself must stay side-effect-free because
+    # fdb.transactional replays it on write conflicts.
+    outcome: dict = {"verdict": None, "old_status": None, "from": None}
+
+    def _mutate(n):
+        if n.status == status:
+            outcome["verdict"] = "noop"
+            return False
+        if status == StorageNode.STATUS_ONLINE and n.status not in _ALLOWED_PRE_STATUSES_FOR_ONLINE:
+            # Hard reject: ONLINE may only be reached from RESTARTING (restart
+            # path), IN_CREATION (add_node path), or SUSPENDED (resume path).
+            # Other paths must route through one of those states first.
+            outcome["verdict"] = "reject_online"
+            outcome["from"] = n.status
+            return False
+        if (status == StorageNode.STATUS_OFFLINE
+                and n.status == StorageNode.STATUS_RESTARTING
+                and caused_by not in _ALLOWED_CAUSED_BY_RESTARTING_TO_OFFLINE):
+            # Symmetric to the ONLINE guard above: RESTARTING is the restart
+            # impl's exclusive lock. Anything else clobbering it to OFFLINE
+            # mid-flight (HealthCheck, StorageNodeMonitor, MainDistrEventCollector,
+            # auto-restart task races) strands the node — the impl's later
+            # set_node_status(ONLINE, caused_by="restart") then hits the
+            # OFFLINE → ONLINE rejection above, returns False, and the CLI
+            # exits silently with the node parked in OFFLINE forever.
+            # Observed: incident 2026-05-20 iter 57 (forced restart of
+            # 5110e910 stuck offline for 16 min until soak gave up).
+            outcome["verdict"] = "reject_offline"
+            outcome["from"] = n.status
+            return False
+
+        outcome["verdict"] = "changed"
+        outcome["old_status"] = n.status
+        n.status = status
+        n.updated_at = now
+        if status == StorageNode.STATUS_ONLINE:
+            n.online_since = now
+            # The node is back ONLINE — necessarily via a deliberate restart
+            # while auto-restart was blocked, or via the normal restart path.
+            # Either way a prior deliberate-shutdown marker no longer applies;
+            # clear it so future genuine failures auto-restart this node again.
+            n.auto_restart_disabled = False
+        else:
+            n.online_since = ""
+        return True
+
+    # Atomic compare-and-set: the guard checks above are evaluated against the
+    # FRESH row inside the transaction, and the write can no longer clobber a
+    # concurrent update from another service (HealthCheck/Monitor/restart task)
+    # — the lost-update race this function's incident comments document.
+    snode = db_controller.atomic_update(snode, _mutate)
+    if snode is None:
+        logger.error(f"set_node_status: node {node_id} disappeared during update")
+        return False
+
+    verdict = outcome["verdict"]
+    if verdict == "noop":
+        return True
+    if verdict == "reject_online":
         logger.error(
             f"Refusing illegal status transition for {node_id}: "
-            f"{snode.status} -> OFFLINE from caused_by={caused_by!r}. "
+            f"{outcome['from']} -> ONLINE. Only {_ALLOWED_PRE_STATUSES_FOR_ONLINE} -> ONLINE is allowed."
+        )
+        return False
+    if verdict == "reject_offline":
+        logger.error(
+            f"Refusing illegal status transition for {node_id}: "
+            f"{outcome['from']} -> OFFLINE from caused_by={caused_by!r}. "
             f"Only {_ALLOWED_CAUSED_BY_RESTARTING_TO_OFFLINE} may flip "
             f"a RESTARTING node to OFFLINE."
         )
         return False
 
-    old_status = snode.status
-    snode.status = status
-    snode.updated_at = str(datetime.datetime.now(datetime.timezone.utc))
-    if status == StorageNode.STATUS_ONLINE:
-        snode.online_since = str(datetime.datetime.now(datetime.timezone.utc))
-        # The node is back ONLINE — necessarily via a deliberate restart while
-        # auto-restart was blocked, or via the normal restart path. Either way
-        # a prior deliberate-shutdown marker no longer applies; clear it so
-        # future genuine failures auto-restart this node again.
-        snode.auto_restart_disabled = False
-    else:
-        snode.online_since = ""
-    snode.write_to_db(db_controller.kv_store)
-    storage_events.snode_status_change(snode, snode.status, old_status, caused_by=caused_by)
+    storage_events.snode_status_change(snode, snode.status, outcome["old_status"], caused_by=caused_by)
     distr_controller.send_node_status_event(snode, status)
 
     if status == StorageNode.STATUS_ONLINE:

@@ -449,6 +449,48 @@ class DBController(metaclass=Singleton):
         transactional = fdb.transactional(DBController._release_backup_chain_locks_tx)
         transactional(self, self.kv_store, ordered_snapshot_ids)
 
+    # ---- Generic atomic read-modify-write (Single FDB Transaction) ----
+
+    def _atomic_update_tx(self, tr, key, model_cls, mutate_fn):
+        raw = tr.get(key).wait()
+        if not raw.present():
+            return None
+        obj = model_cls().from_dict(json.loads(raw))
+        if mutate_fn(obj) is False:
+            return obj
+        tr[key] = json.dumps(obj.to_dict()).encode()
+        return obj
+
+    def atomic_update(self, obj, mutate_fn):
+        """Transactional read-modify-write of a single object.
+
+        Re-reads ``obj`` fresh from FDB inside a transaction, applies
+        ``mutate_fn(fresh)`` (which must mutate the object in place), and writes
+        it back atomically. FoundationDB's serializable isolation plus the
+        automatic conflict-retry of ``fdb.transactional`` make this a true
+        compare-and-set: if another writer commits between this read and the
+        write, the whole transaction (including ``mutate_fn``) is replayed on
+        the new value. This avoids the lost-update that plain
+        ``read(); obj.x = y; obj.write_to_db()`` suffers — the latter writes the
+        entire serialized object and silently clobbers concurrent updates to
+        other fields.
+
+        IMPORTANT: ``mutate_fn`` may be invoked more than once (on conflict
+        retry), so it MUST be free of side effects other than mutating the
+        object passed to it — no RPCs, no DB writes, no event emission. Do that
+        work after this returns. Return ``False`` from ``mutate_fn`` to abort
+        the write (e.g. when a guard condition no longer holds on the fresh
+        object).
+
+        Returns the fresh, post-mutation object, or ``None`` if the object no
+        longer exists in the DB.
+        """
+        if not self.kv_store:
+            return None
+        key = obj.get_db_id().encode()
+        transactional = fdb.transactional(DBController._atomic_update_tx)
+        return transactional(self, self.kv_store, key, type(obj), mutate_fn)
+
     # ---- Pre-Restart Guard (Single FDB Transaction) ----
 
     def _try_set_node_restarting_tx(self, tr, cluster_id, node_id):

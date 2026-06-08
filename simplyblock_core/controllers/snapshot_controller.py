@@ -76,6 +76,23 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
     except KeyError:
         pass
 
+    # Block while a live volume migration holds the snapshot-freeze on this
+    # source node. The migration runner freezes the source LVS to copy a
+    # consistent snapshot chain; a snapshot created mid-migration races that
+    # freeze and can corrupt the per-node snapshot plan. This enforces the
+    # one-migration-per-source-node invariant the migration controller
+    # documents but previously never checked (is_migration_active_on_node had
+    # no callers). cluster_id is omitted because LVol has no cluster_id field;
+    # the predicate matches on node_id, so an all-clusters scan is correct.
+    try:
+        if migration_controller.is_migration_active_on_node(lvol.node_id):
+            msg = (f"Cannot create snapshot: a live volume migration is active "
+                   f"on node {lvol.node_id}")
+            logger.error(msg)
+            return False, msg
+    except Exception as e:
+        logger.warning(f"Migration-active check failed for node {lvol.node_id}: {e}")
+
     pool = db_controller.get_pool_by_id(lvol.pool_uuid)
     if pool.status == Pool.STATUS_INACTIVE:
         msg = "Pool is disabled"
@@ -285,10 +302,16 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
             if original_snap.snap_ref_id:
                 original_snap = db_controller.get_snapshot_by_id(original_snap.snap_ref_id)
 
-            original_snap.ref_count += 1
-            original_snap.write_to_db(db_controller.kv_store)
-            snap.snap_ref_id = original_snap.get_id()
-            snap.write_to_db(db_controller.kv_store)
+            # Atomic increment: a plain read-modify-write loses an increment
+            # when two clones of the same snapshot run concurrently, which can
+            # under-count ref_count and let a still-referenced snapshot be
+            # deleted (data loss).
+            if original_snap:
+                original_snap = db_controller.atomic_update(
+                    original_snap, lambda s: setattr(s, "ref_count", s.ref_count + 1))
+            if original_snap:
+                snap.snap_ref_id = original_snap.get_id()
+                snap.write_to_db(db_controller.kv_store)
 
     for sn in all_snaps:
         if sn.get_id() == snap.get_id():
@@ -882,13 +905,14 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     lvol.status = LVol.STATUS_ONLINE
     lvol.write_to_db(db_controller.kv_store)
 
+    # Atomic increment (see add() above): concurrent clones must not lose a
+    # ref_count bump.
     if snap.snap_ref_id:
         ref_snap = db_controller.get_snapshot_by_id(snap.snap_ref_id)
-        ref_snap.ref_count += 1
-        ref_snap.write_to_db(db_controller.kv_store)
+        if ref_snap:
+            db_controller.atomic_update(ref_snap, lambda s: setattr(s, "ref_count", s.ref_count + 1))
     else:
-        snap.ref_count += 1
-        snap.write_to_db(db_controller.kv_store)
+        db_controller.atomic_update(snap, lambda s: setattr(s, "ref_count", s.ref_count + 1))
 
     logger.info("Done")
     snapshot_events.snapshot_clone(snap, lvol)

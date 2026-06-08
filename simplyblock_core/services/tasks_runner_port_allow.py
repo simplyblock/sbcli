@@ -544,6 +544,10 @@ def _main():
                 for task in tasks:
                     if task.function_name == JobSchedule.FN_PORT_ALLOW:
                         if task.status != JobSchedule.STATUS_DONE:
+                            # Lease gate: skip a task another live runner host owns.
+                            if not tasks_controller.claim_task(task):
+                                logger.info(f"Port-allow task {task.uuid} owned by another runner host; skipping")
+                                continue
                             exec_port_allow_task(task)
 
         time.sleep(5)
