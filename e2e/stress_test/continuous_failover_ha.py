@@ -30,9 +30,18 @@ class RandomFailoverTest(TestLvolHACluster):
         self.lvol_name = f"lvl{generate_random_sequence(15)}"
         self.clone_name = f"cln{generate_random_sequence(15)}"
         self.snapshot_name = f"snap{generate_random_sequence(15)}"
-        self.lvol_size = "10G"
-        self.int_lvol_size = 10
-        self.fio_size = "1G"
+        # Sizing — each iteration must produce 180-250 GB of FIO
+        # working-set data per storage node.  fio_size is computed
+        # dynamically by _compute_fio_size() so total disk usage stays
+        # bounded.  numjobs=5 per lvol, so each lvol uses
+        # numjobs × fio_size of disk.  Cap = (lvol_size × 0.80) / numjobs
+        # ensures all jobs fit in the formatted filesystem.
+        # At 5 lvols/node (typical): 5×5×8G = 200G/node.
+        self.TARGET_DATA_PER_NODE_GB = 200
+        self.fio_numjobs = 5
+        self.lvol_size = "150G"
+        self.int_lvol_size = 150
+        self.fio_size = "8G"  # default; overridden by _compute_fio_size()
         self.fio_threads = []
         self.clone_mount_details = {}
         self.lvol_mount_details = {}
@@ -117,6 +126,45 @@ class RandomFailoverTest(TestLvolHACluster):
             self.logger.warning(
                 f"[local-log] No containers known for {node_ip} — skipping local log switch"
             )
+
+    def _compute_fio_size(self, extra_lvols: int = 0) -> str:
+        """Compute fio_size dynamically to target ~TARGET_DATA_PER_NODE_GB per node.
+
+        As lvol + clone count varies across iterations, fio_size adjusts
+        so total disk usage per node stays approximately constant.
+
+        Args:
+            extra_lvols: Number of lvols about to be created (not yet tracked).
+
+        Returns:
+            The computed fio_size string (e.g. ``"6G"``).  Also updates
+            ``self.fio_size`` in place.
+        """
+        num_nodes = len(self.sn_nodes) or 4
+        current_lvols = len(self.lvol_mount_details) + len(self.clone_mount_details)
+        total_lvols = current_lvols + extra_lvols
+        if total_lvols < 1:
+            total_lvols = self.total_lvols
+
+        lvols_per_node = total_lvols / num_nodes
+        # Each lvol runs fio_numjobs parallel FIO jobs, each writing fio_size
+        jobs_per_node = lvols_per_node * self.fio_numjobs
+        fio_size_gb = int(self.TARGET_DATA_PER_NODE_GB / max(1, jobs_per_node))
+
+        # Cap: all numjobs × fio_size must fit in the formatted filesystem.
+        # Usable capacity ≈ 80% of lvol_size (ext4/xfs overhead ~5-15%).
+        max_fio_gb = int(self.int_lvol_size * 0.80) // max(1, self.fio_numjobs)
+        fio_size_gb = min(fio_size_gb, max_fio_gb)
+        fio_size_gb = max(fio_size_gb, 1)
+
+        self.fio_size = f"{fio_size_gb}G"
+        self.logger.info(
+            f"[fio_size] Computed fio_size={self.fio_size} "
+            f"(target={self.TARGET_DATA_PER_NODE_GB}G/node, "
+            f"total_lvols={total_lvols}, nodes={num_nodes}, "
+            f"jobs/node={jobs_per_node:.1f})"
+        )
+        return self.fio_size
 
     def create_lvols_with_fio(self, count):
         """Create lvols and start FIO with random configurations."""
@@ -903,23 +951,26 @@ class RandomFailoverTest(TestLvolHACluster):
 
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
 
+        self._compute_fio_size(extra_lvols=self.total_lvols)
         self.create_lvols_with_fio(self.total_lvols)
         storage_nodes = self.sbcli_utils.get_storage_nodes()
 
         for result in storage_nodes['results']:
             self.sn_nodes.append(result["uuid"])
             self.sn_nodes_with_sec.append(result["uuid"])
-        
+
         sleep_n_sec(30)
-        
+
         while True:
             validation_thread = threading.Thread(target=self.validate_iostats_continuously, daemon=True)
             validation_thread.start()
             if iteration > 1:
+                self._compute_fio_size()
                 self.restart_fio(iteration=iteration)
             outage_type = self.perform_random_outage()
             if not self.sbcli_utils.is_secondary_node(self.current_outage_node):
                 self.delete_random_lvols(8)
+                self._compute_fio_size(extra_lvols=5)
                 self.create_lvols_with_fio(5)
                 self.create_snapshots_and_clones()
             else:

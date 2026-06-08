@@ -30,9 +30,9 @@ class TestStressLvolCloneClusterFioRun(TestLvolHACluster):
         self.lvol_name = f"lvl{random_char(3)}"
         self.clone_name = f"cln{random_char(3)}"
         self.snapshot_name = f"snap{random_char(3)}"
-        self.lvol_size = "10G"
-        self.int_lvol_size = 10
-        self.fio_size = "1G"
+        self.lvol_size = "150G"
+        self.int_lvol_size = 150
+        self.fio_size = "6G"
         self.fio_threads = []
         self.clone_mount_details = {}
         self.lvol_mount_details = {}

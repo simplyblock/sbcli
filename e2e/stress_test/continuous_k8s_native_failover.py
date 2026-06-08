@@ -76,10 +76,17 @@ class K8sNativeFailoverTest(TestClusterBase):
         self.FIO_IMAGE = "dockerpinata/fio:2.1"
         self.tls_enabled = str(kwargs.get("tls_enabled", os.environ.get("TLS_ENABLED", "false"))).lower() == "true"
 
-        # Sizing
-        self.pvc_size = "10Gi"
-        self.int_pvc_size = 10
-        self.fio_size = "1G"
+        # Sizing — each iteration must produce 180-250 GB of FIO
+        # working-set data per storage node.  fio_size is computed
+        # dynamically by _compute_fio_size() before each FIO start/restart
+        # so total disk usage stays bounded as PVC count grows.
+        # pvc_size=150Gi → 80% cap = 120G per PVC (numjobs=1).
+        # At 1.5 jobs/node: 1.5×120 = 180G.  At 2+: ~200G.
+        # Thin-provisioned: only written data consumes backend storage.
+        self.TARGET_DATA_PER_NODE_GB = 200
+        self.pvc_size = "150Gi"
+        self.int_pvc_size = 150
+        self.fio_size = "40G"  # default; overridden by _compute_fio_size()
         self.FIO_RUNTIME = 4000
 
         # Counts — total_pvcs is set dynamically to len(sn_nodes) in run()
@@ -899,6 +906,46 @@ class K8sNativeFailoverTest(TestClusterBase):
         )
 
         return main_config, warmup_config
+
+    # ── Dynamic FIO sizing ────────────────────────────────────────────────
+
+    def _compute_fio_size(self, extra_jobs: int = 0) -> str:
+        """Compute fio_size dynamically to target ~TARGET_DATA_PER_NODE_GB per node.
+
+        As PVC + clone count grows across iterations, fio_size shrinks
+        proportionally so that total actual disk usage per node stays
+        approximately constant — preventing cluster-full scenarios.
+
+        Args:
+            extra_jobs: Number of FIO jobs about to be created (not yet tracked).
+
+        Returns:
+            The computed fio_size string (e.g. ``"40G"``).  Also updates
+            ``self.fio_size`` in place.
+        """
+        num_nodes = len(self.sn_nodes) or 4
+        current_jobs = len(self.pvc_details) + len(self.clone_details)
+        total_jobs = current_jobs + extra_jobs
+        if total_jobs < 1:
+            total_jobs = self.total_pvcs  # estimate before first batch
+
+        jobs_per_node = total_jobs / num_nodes
+        fio_size_gb = int(self.TARGET_DATA_PER_NODE_GB / max(1, jobs_per_node))
+
+        # Cap at ~80% of PVC capacity to account for filesystem formatting
+        # overhead (ext4/xfs journal, inode tables, superblock = ~5-15%)
+        max_fio_gb = int(self.int_pvc_size * 0.80)
+        fio_size_gb = min(fio_size_gb, max_fio_gb)
+        fio_size_gb = max(fio_size_gb, 1)  # at least 1G
+
+        self.fio_size = f"{fio_size_gb}G"
+        self.logger.info(
+            f"[fio_size] Computed fio_size={self.fio_size} "
+            f"(target={self.TARGET_DATA_PER_NODE_GB}G/node, "
+            f"total_jobs={total_jobs}, nodes={num_nodes}, "
+            f"jobs/node={jobs_per_node:.1f})"
+        )
+        return self.fio_size
 
     # ── PVC → lvol mapping helpers ─────────────────────────────────────────
 
@@ -2842,6 +2889,7 @@ class K8sNativeFailoverTest(TestClusterBase):
 
         # Create initial PVCs: first 1 per storage node (pinned), then extras unpinned
         initial_pvcs = max(self.total_pvcs, len(self.sn_nodes))
+        self._compute_fio_size(extra_jobs=initial_pvcs)
         self.logger.info(f"Creating {initial_pvcs} initial PVCs ({len(self.sn_nodes)} pinned + {initial_pvcs - len(self.sn_nodes)} extra)")
         self.create_pvcs_with_fio(len(self.sn_nodes), node_ids=list(self.sn_nodes))
         if initial_pvcs > len(self.sn_nodes):
@@ -2862,6 +2910,7 @@ class K8sNativeFailoverTest(TestClusterBase):
                 validation_thread.start()
 
                 if iteration > 1:
+                    self._compute_fio_size()
                     self.restart_fio(iteration)
 
                 # ── Outage phase ──
@@ -2877,6 +2926,7 @@ class K8sNativeFailoverTest(TestClusterBase):
 
                 # Scale up: add 2 more PVCs each iteration (net growth = 2)
                 create_count = delete_count + 2
+                self._compute_fio_size(extra_jobs=create_count)
                 self.logger.info(f"[scale] Creating {create_count} PVCs (total will be ~{len(self.pvc_details) + create_count})")
                 self.create_pvcs_with_fio(create_count)
                 sleep_n_sec(280)
@@ -3219,6 +3269,7 @@ class K8sNativeBasicFailoverTest(K8sNativeFailoverTest):
 
         # ── One-time setup: Create PVCs (1 per node, pinned) ──
         self.total_pvcs = len(self.sn_nodes)
+        self._compute_fio_size(extra_jobs=self.total_pvcs)
         self.logger.info(f"Creating {self.total_pvcs} PVCs (1 per node, pinned)")
         self.create_pvcs_with_fio(self.total_pvcs, node_ids=list(self.sn_nodes))
         sleep_n_sec(30)
@@ -3243,6 +3294,7 @@ class K8sNativeBasicFailoverTest(K8sNativeFailoverTest):
                 validation_thread.start()
 
                 if iteration > 1:
+                    self._compute_fio_size()
                     self.restart_fio(iteration)
 
                 # Outage phase
@@ -4228,6 +4280,7 @@ class K8sNativeResilientFailoverTest(K8sNativeFailoverTest):
             for _ in range(self.PERMANENT_PVCS_PER_NODE):
                 pinned_ids.append(node_id)
 
+        self._compute_fio_size(extra_jobs=num_permanent)
         self.logger.info(
             f"[permanent] Creating {num_permanent} permanent PVCs "
             f"({self.PERMANENT_PVCS_PER_NODE} per node, pinned)"
@@ -4281,6 +4334,7 @@ class K8sNativeResilientFailoverTest(K8sNativeFailoverTest):
                 validation_thread.start()
 
                 if iteration > 1:
+                    self._compute_fio_size()
                     self.restart_fio(iteration)
 
                 # ── Outage phase ──
@@ -4293,6 +4347,7 @@ class K8sNativeResilientFailoverTest(K8sNativeFailoverTest):
                     p for p in self.pvc_details
                     if p not in self.permanent_pvcs
                 ]
+                del_count = 0
                 if dynamic_pvcs:
                     del_count = min(
                         iteration, len(dynamic_pvcs)
@@ -4359,12 +4414,12 @@ class K8sNativeResilientFailoverTest(K8sNativeFailoverTest):
                 self.validate_pending_deletions()
 
                 # ── Bind deferred PVCs + start FIO ──
+                self._compute_fio_size()
                 self._bind_deferred_pvcs_and_start_fio()
 
                 # ── Create snapshots + clones (post-recovery) ──
-                # NOTE: Clone creation disabled — uncomment to re-enable
-                # if self._is_cluster_fully_online():
-                #     self.create_snapshots_and_clones()
+                if self._is_cluster_fully_online():
+                    self.create_snapshots_and_clones()
 
                 # ── Enforce lvol cap ──
                 self._enforce_lvol_cap()

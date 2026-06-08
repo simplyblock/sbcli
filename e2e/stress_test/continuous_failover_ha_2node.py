@@ -35,9 +35,9 @@ class RandomMultiClient2NodeFailoverTest(TestLvolHACluster):
         self.lvol_name = f"lvl{generate_random_sequence(15)}"
         self.clone_name = f"cln{generate_random_sequence(15)}"
         self.snapshot_name = f"snap{generate_random_sequence(15)}"
-        self.lvol_size = "5G"
-        self.int_lvol_size = 5
-        self.fio_size = "1G"
+        self.lvol_size = "150G"
+        self.int_lvol_size = 150
+        self.fio_size = "6G"
         self.fio_threads = []
         self.clone_mount_details = {}
         self.lvol_mount_details = {}

@@ -1968,70 +1968,85 @@ class K8sSbcliUtils:
 
         Returns the actual pool name to use (may differ from *pool_name* if an
         existing pool with a different name was found).
+
+        The operator creates pools from Pool CRDs. The pool name in the
+        backend (visible via ``sbcli pool list``) is set by the operator and
+        may differ from the CRD metadata.name.  This method waits for the
+        operator to reconcile the pool so that the real pool name can be
+        returned.
         """
+        # 1. Check if sbcli already sees a pool
         existing = self.list_storage_pools()
         self.logger.info(f"[pool] existing pools (sbcli): {list(existing.keys())}")
         if existing:
             actual = next(iter(existing))
-            self.logger.info(f"[pool] Using existing pool '{actual}' (K8s: no new pool created)")
+            self.logger.info(f"[pool] Using existing pool '{actual}'")
             return actual
 
-        # Check if any Pool CRDs already exist (operator may have created one
-        # during cluster setup that isn't visible via sbcli pool list)
+        # 2. Check if Pool CRDs exist (operator may still be reconciling)
         ns = self.k8s.namespace
         out, _ = self.k8s._exec_kubectl(
             f"kubectl get pools -n {ns} --no-headers "
             f"-o custom-columns=NAME:.metadata.name 2>/dev/null || true"
         )
         existing_crds = [r.strip() for r in out.strip().splitlines() if r.strip()]
-        if existing_crds:
+
+        if not existing_crds:
+            # 3. No pools at all — create one via kubectl apply
+            cid = cluster_id or self.cluster_id
+            cluster_details = self.get_cluster_details(cluster_id=cid)
+            cluster_name = cluster_details.get("name") or cluster_details.get("Name", cid)
+
+            k8s_resource_name = f"simplyblock-{pool_name.lower().replace('_', '-')}"
+
+            yaml_content = (
+                f"apiVersion: storage.simplyblock.io/v1alpha1\n"
+                f"kind: Pool\n"
+                f"metadata:\n"
+                f"  name: {k8s_resource_name}\n"
+                f"  namespace: {ns}\n"
+                f"spec:\n"
+                f"  clusterName: {cluster_name}\n"
+            )
+
+            self.logger.info(
+                f"[pool] No pools found — creating '{pool_name}' "
+                f"(CRD={k8s_resource_name}, cluster={cluster_name}) via kubectl apply"
+            )
+            yaml_escaped = yaml_content.replace("'", "'\\''")
+            self.k8s._exec_kubectl(f"echo '{yaml_escaped}' | kubectl apply -f -")
+            existing_crds = [k8s_resource_name]
+        else:
             self.logger.info(
                 f"[pool] Found existing Pool CRD(s): {existing_crds} — "
-                f"skipping creation of '{pool_name}'"
+                f"waiting for operator to reconcile"
             )
-            return pool_name
 
-        # No pools at all — create one via kubectl apply
-        cid = cluster_id or self.cluster_id
-        cluster_details = self.get_cluster_details(cluster_id=cid)
-        cluster_name = cluster_details.get("name") or cluster_details.get("Name", cid)
-
-        k8s_resource_name = f"simplyblock-{pool_name.lower().replace('_', '-')}"
-        ns = self.k8s.namespace
-
-        yaml_content = (
-            f"apiVersion: storage.simplyblock.io/v1alpha1\n"
-            f"kind: Pool\n"
-            f"metadata:\n"
-            f"  name: {k8s_resource_name}\n"
-            f"  namespace: {ns}\n"
-            f"spec:\n"
-            f"  clusterName: {cluster_name}\n"
-        )
-
-        self.logger.info(
-            f"[pool] No pools found — creating '{pool_name}' "
-            f"(CRD={k8s_resource_name}, cluster={cluster_name}) via kubectl apply"
-        )
-        yaml_escaped = yaml_content.replace("'", "'\\''")
-        self.k8s._exec_kubectl(f"echo '{yaml_escaped}' | kubectl apply -f -")
-
-        # Verify the Pool CRD was created
-        for attempt in range(6):
-            crd_check, _ = self.k8s._exec_kubectl(
-                f"kubectl get pools {k8s_resource_name} -n {ns} "
-                f"-o jsonpath='{{.metadata.name}}' 2>/dev/null || true"
-            )
-            if crd_check.strip():
+        # 4. Wait for operator to reconcile the Pool CRD into an actual pool
+        #    visible via sbcli pool list.  The stress tests show this works
+        #    once the operator has had time to reconcile.
+        for attempt in range(24):  # up to 120s
+            pools = self.list_storage_pools()
+            if pools:
+                actual = next(iter(pools))
                 self.logger.info(
-                    f"[pool] Pool CRD '{k8s_resource_name}' verified "
+                    f"[pool] Operator reconciled pool '{actual}' "
                     f"(attempt {attempt})"
                 )
-                return pool_name
+                return actual
+            if attempt % 5 == 4:
+                self.logger.info(
+                    f"[pool] Still waiting for operator to reconcile "
+                    f"Pool CRD(s) {existing_crds} (attempt {attempt})"
+                )
             sleep_n_sec(5)
 
-        self.logger.error(
-            f"[pool] Pool CRD '{k8s_resource_name}' not found after kubectl apply!"
+        # 5. Fallback: pool not in sbcli but CRD exists.
+        #    Use the CRD name directly — the CSI driver may accept it.
+        self.logger.warning(
+            f"[pool] Pool not visible in sbcli after 120s. "
+            f"Pool CRD(s): {existing_crds}. "
+            f"Falling back to pool_name='{pool_name}'"
         )
         return pool_name
 

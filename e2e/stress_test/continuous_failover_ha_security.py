@@ -824,8 +824,9 @@ class RandomSecurityFailoverTest(RandomFailoverTest):
         self.logger = setup_logger(__name__)
         self.test_name = "continuous_random_security_failover_ha"
         self.total_lvols = 20
-        self.lvol_size = "10G"
-        self.fio_size = "1G"
+        self.lvol_size = "150G"
+        self.int_lvol_size = 150
+        self.fio_size = "6G"
         self._sec_cycle = itertools.cycle(_SEC_TYPES_NEW)
         self._cached_host_nqn: str | None = None
         self.available_fabrics = ["tcp"]

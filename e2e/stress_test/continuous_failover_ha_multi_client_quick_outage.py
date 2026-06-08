@@ -40,7 +40,7 @@ class RandomRapidFailoverNoGap(TestLvolHACluster):
 
         # Base knobs
         self.total_lvols = 20
-        self.lvol_size = "40G"
+        self.lvol_size = "150G"
         self.fio_size = "15G"
 
         # Validation cadence & FIO runtime
