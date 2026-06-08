@@ -4,6 +4,7 @@ import json
 import logging
 from typing import Annotated
 from json.decoder import JSONDecodeError
+from uuid import UUID
 
 import kubernetes.client
 import kubernetes.config
@@ -69,28 +70,23 @@ def _is_kubernetes_jwt(token: str) -> bool:
         return False
 
 
-def check_k8s_token(
+def authenticated_service_account(
     credentials: Annotated[HTTPAuthorizationCredentials, Depends(security)],
-) -> bool:
-    """FastAPI dependency: authenticate via Kubernetes service account JWT.
+) -> str | None:
+    """FastAPI dependency: identify which k8s service account a bearer token authenticates as.
 
-    Returns `True` only when:
-    - the token has JWT structure,
-    - the k8s API is reachable, and
-    - the token belongs to a configured admin service account.
-
-    Returns `False` in all other cases without raising.
+    Returns the service account username when the token has JWT structure, the
+    k8s API is reachable, and the TokenReview confirms it is authenticated.
+    Returns `None` otherwise. Authorization (whether the SA is permitted) is
+    handled by the caller.
     """
     token = credentials.credentials
     if not _is_kubernetes_jwt(token):
-        return False
-
-    if not _web_settings.k8s_admin_service_accounts:
-        return False
+        return None
 
     auth_api = _get_k8s_auth_api()
     if auth_api is None:
-        return False
+        return None
 
     try:
         review = auth_api.create_token_review(
@@ -98,40 +94,58 @@ def check_k8s_token(
                 spec=kubernetes.client.V1TokenReviewSpec(token=token)
             )
         )
-        return (
-            review.status.authenticated
-            and review.status.user.username in _web_settings.k8s_admin_service_accounts
-        )
     except Exception:
         _logger.warning("k8s TokenReview failed", exc_info=True)
-        return False
+        return None
+
+    if not review.status.authenticated:
+        return None
+
+    return review.status.user.username
 
 
-def check_cluster_secret(
+def authorized_cluster(
     credentials: Annotated[HTTPAuthorizationCredentials, Depends(security)],
-    cluster_id: str | None = None,
-) -> bool:
-    """FastAPI dependency: authenticate via cluster secret.
+) -> UUID | None:
+    """FastAPI dependency: identify which cluster a bearer token authenticates as.
 
-    Returns `True` when the bearer token matches a cluster secret and, if
-    *cluster_id* is present in the path, belongs to that specific cluster.
-
-    Returns `False` in all other cases without raising.
+    Returns the UUID of the cluster whose secret matches the bearer token, or
+    `None` if no cluster matches (or the matched ID isn't a valid UUID).
     """
     token = credentials.credentials
-    authorized_cluster_id = next((
+    matched_id = next((
         cluster.id
         for cluster in _db.get_clusters()
         if hmac.compare_digest(cluster.secret, token)
     ), None)
 
-    return (authorized_cluster_id is not None) and (cluster_id is None or cluster_id == authorized_cluster_id)
+    if matched_id is None:
+        return None
+    try:
+        return UUID(matched_id)
+    except ValueError:
+        return None
 
 
 def verify_api_token(
-    k8s_ok: Annotated[bool, Depends(check_k8s_token)],
-    secret_ok: Annotated[bool, Depends(check_cluster_secret)],
+    sa_name: Annotated[str | None, Depends(authenticated_service_account)],
+    authorized_cluster_id: Annotated[UUID | None, Depends(authorized_cluster)],
+    cluster_id: UUID | None = None,
 ) -> None:
-    """FastAPI dependency: succeed if any auth check passes, raise 401 otherwise."""
-    if not (k8s_ok or secret_ok):
+    """FastAPI dependency: enforce authentication and per-cluster authorization.
+
+    Succeeds when either:
+    - the token authenticates as an admin service account, or
+    - the token authenticates as a cluster, and that cluster matches *cluster_id*
+      (or no specific cluster is being addressed).
+
+    Raises 401 otherwise.
+    """
+    if sa_name is not None and sa_name in _web_settings.k8s_admin_service_accounts:
+        return
+
+    if authorized_cluster_id is None:
+        raise HTTPException(401, 'Invalid token')
+
+    if cluster_id is not None and authorized_cluster_id != cluster_id:
         raise HTTPException(401, 'Invalid token')
