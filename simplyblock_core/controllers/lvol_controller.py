@@ -1520,7 +1520,11 @@ def delete_lvol(id_or_name, force_delete=False):
                     f"sync delete lvol {lvol.get_id()} on {nl.get_id()[:8]}")
             elif action == "proceed":
                 try:
-                    delete_lvol_from_node(lvol.get_id(), nl.get_id(), force=force_delete)
+                    if pool.has_qos():
+                        ret =  nl.rpc_client().bdev_lvol_remove_from_group(pool.numeric_id, [lvol.top_bdev])
+                        if not ret:
+                            logger.error("RPC failed bdev_lvol_remove_from_group")
+                    _remove_lvol_subsys_from_node(lvol, nl.rpc_client())
                 except Exception as e:
                     logger.warning(f"Failed sync delete on {nl.get_id()}: {e}")
                     # Post-leader-op: check if we should kill or queue
