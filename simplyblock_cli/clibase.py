@@ -719,29 +719,14 @@ class CLIWrapperBase:
     def storage_pool__add(self, sub_command, args):
         return pool_controller.add_pool(
             args.name,
-            args.pool_max,
-            args.lvol_max,
-            args.max_rw_iops,
-            args.max_rw_mbytes,
-            args.max_r_mbytes,
-            args.max_w_mbytes,
-            args.cluster_id,
-            args.qos_host,
+            pool_max=args.pool_max,
+            lvol_max=args.lvol_max,
+            cluster_id=args.cluster_id,
             dhchap=args.dhchap,
         )
 
     def storage_pool__set(self, sub_command, args):
-        pool_max = args.pool_max
-        lvol_max = args.lvol_max
-
-        ret, err = pool_controller.set_pool(
-            args.pool_id,
-            pool_max,
-            lvol_max,
-            args.max_rw_iops,
-            args.max_rw_mbytes,
-            args.max_r_mbytes,
-            args.max_w_mbytes)
+        ret, err = pool_controller.set_pool(args.pool_id, args.pool_max, args.lvol_max)
         return ret
 
     def storage_pool__list(self, sub_command, args):

@@ -32,10 +32,6 @@ class StoragePoolParams(BaseModel):
     name: str
     pool_max: util.Unsigned = 0
     volume_max_size: util.Unsigned = 0
-    max_rw_iops: util.Unsigned = 0
-    max_rw_mbytes: util.Unsigned = 0
-    max_r_mbytes: util.Unsigned = 0
-    max_w_mbytes: util.Unsigned = 0
     dhchap: bool = False
     cr_name: str = ""
     cr_namespace: str = ""
@@ -48,11 +44,15 @@ def add(request: Request, cluster: Cluster, parameters: StoragePoolParams) -> Re
         if pool.pool_name == parameters.name:
             raise HTTPException(409, f'Pool {parameters.name} already exists')
 
-    id_or_false =  pool_controller.add_pool(
-        parameters.name, parameters.pool_max, parameters.volume_max_size, parameters.max_rw_iops, parameters.max_rw_mbytes,
-        parameters.max_r_mbytes, parameters.max_w_mbytes, cluster.get_id(),
-        parameters.cr_name, parameters.cr_namespace, parameters.cr_plural,
+    id_or_false = pool_controller.add_pool(
+        parameters.name,
+        pool_max=parameters.pool_max,
+        lvol_max=parameters.volume_max_size,
+        cluster_id=cluster.get_id(),
         dhchap=parameters.dhchap,
+        cr_name=parameters.cr_name,
+        cr_namespace=parameters.cr_namespace,
+        cr_plural=parameters.cr_plural,
     )
 
     if not id_or_false:
@@ -99,10 +99,6 @@ class UpdatableStoragePoolParams(BaseModel):
     name: Optional[str] = None
     max_size: Optional[util.Unsigned] = None
     volume_max_size: Optional[util.Unsigned] = None
-    max_rw_iops: Optional[util.Unsigned] = None
-    max_rw_mbytes: Optional[util.Unsigned] = None
-    max_r_mbytes: Optional[util.Unsigned] = None
-    max_w_mbytes: Optional[util.Unsigned] = None
     lvols_cr_name: Optional[str] = None
     lvols_cr_namespace: Optional[str] = None
     lvols_cr_plural: Optional[str] = None
