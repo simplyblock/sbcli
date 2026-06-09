@@ -40,6 +40,37 @@ VOLUME_PLAN = [
 ]
 
 
+# --- Rocky 9 public-mirror fallback for package installs ---
+# AWS RHUI (rhui.us-east-1.aws.ce.redhat.com) intermittently rate-limits/refuses
+# our egress IP under parallel load, breaking dnf with "Connection refused". These
+# leaf tools are ABI-compatible across the RHEL9 family, so install them from Rocky
+# Linux 9's public mirrors via a temporary, disabled-by-default repo, bypassing RHUI.
+ROCKY_REPO_SETUP = (
+    "sudo sh -c 'cat >/etc/yum.repos.d/rocky-temp.repo <<EOF\n"
+    "[rocky-baseos]\n"
+    "name=Rocky9 BaseOS\n"
+    "baseurl=https://dl.rockylinux.org/pub/rocky/9/BaseOS/x86_64/os/\n"
+    "gpgcheck=0\n"
+    "enabled=0\n"
+    "\n"
+    "[rocky-appstream]\n"
+    "name=Rocky9 AppStream\n"
+    "baseurl=https://dl.rockylinux.org/pub/rocky/9/AppStream/x86_64/os/\n"
+    "gpgcheck=0\n"
+    "enabled=0\n"
+    "EOF'"
+)
+
+
+def rocky_install(packages):
+    """dnf install <packages> from the Rocky mirrors only, with a light retry for transient blips."""
+    return (
+        "sudo sh -c 'for i in 1 2 3; do "
+        "dnf --disablerepo=\"*\" --enablerepo=\"rocky-*\" install -y " + packages + " && exit 0; "
+        "echo \"rocky dnf attempt $i failed; sleeping 10s\"; sleep 10; done; exit 1'"
+    )
+
+
 # --- Helper: Management Node with 30GB Root ---
 def launch_mgmt():
     print("Launching Management Node with 30GB Root Volume...")
@@ -400,9 +431,11 @@ def main():
 
     # --- 4. Parallel Setup (Phase 1) ---
     install_cmds = [
-        "sudo sh -c 'for i in $(seq 1 6); do dnf clean all >/dev/null 2>&1; "
-        "dnf install -y git python3-pip nvme-cli && exit 0; "
-        "echo \"dnf attempt $i failed; sleeping $((i*15))s\"; sleep $((i*15)); done; exit 1'",
+        # AWS RHUI (rhui.us-east-1.aws.ce.redhat.com) intermittently rate-limits/
+        # refuses our egress IP, breaking dnf. Pull these RHEL9-ABI-compatible leaf
+        # packages from Rocky Linux 9's public mirrors instead, bypassing RHUI.
+        ROCKY_REPO_SETUP,
+        rocky_install("git python3-pip nvme-cli"),
         "sudo /usr/bin/python3 -m pip install --upgrade pip setuptools wheel",
         "sudo /usr/bin/python3 -m pip install ruamel.yaml",
         "sudo pip install git+https://github.com/simplyblock-io/sbcli@performance-optimization --upgrade --force --ignore-installed requests",
@@ -508,9 +541,8 @@ def main():
 
     # Commands for Performance Clients
     client_prep_cmds = [
-        "sudo sh -c 'for i in $(seq 1 6); do dnf clean all >/dev/null 2>&1; "
-        "dnf install -y nvme-cli fio && exit 0; "
-        "echo \"dnf attempt $i failed; sleeping $((i*15))s\"; sleep $((i*15)); done; exit 1'",
+        ROCKY_REPO_SETUP,
+        rocky_install("nvme-cli fio"),
         "sudo modprobe nvme-tcp",
         "echo 'nvme-tcp' | sudo tee /etc/modules-load.d/nvme-tcp.conf"
     ]
