@@ -353,7 +353,8 @@ def _run_merge(task):
     keep_backup.status = Backup.STATUS_COMPLETED
     keep_backup.write_to_db()
 
-    old_backup.remove(db.kv_store)
+    old_backup.status = Backup.STATUS_MERGED
+    old_backup.write_to_db()
 
     task.function_result = "Merge completed"
     task.status = JobSchedule.STATUS_DONE
