@@ -86,7 +86,7 @@ class K8sNativeFailoverTest(TestClusterBase):
         self.pvc_size = "100Gi"
         self.int_pvc_size = 100
         self.fio_size = "40G"  # default; overridden by _compute_fio_size()
-        self.FIO_RUNTIME = 4000
+        self.FIO_RUNTIME = 4000  # overridden dynamically by _compute_fio_size()
 
         # Counts — total_pvcs is set dynamically to len(sn_nodes) in run()
         self.total_pvcs = 6
@@ -938,8 +938,16 @@ class K8sNativeFailoverTest(TestClusterBase):
         fio_size_gb = max(fio_size_gb, 1)  # at least 1G
 
         self.fio_size = f"{fio_size_gb}G"
+
+        # Compute FIO_RUNTIME proportional to fio_size.
+        # Worst case: 4k bs at ~20MB/s → fio_size_gb * 50s per GB.
+        # Use 60s/GB for safety margin (covers verify overhead, random IO).
+        computed_runtime = fio_size_gb * 60
+        self.FIO_RUNTIME = computed_runtime if computed_runtime >= 1000 else 2000
+
         self.logger.info(
-            f"[fio_size] Computed fio_size={self.fio_size} "
+            f"[fio_size] Computed fio_size={self.fio_size}, "
+            f"FIO_RUNTIME={self.FIO_RUNTIME}s "
             f"(target={self.TARGET_DATA_PER_NODE_GB}G/node, "
             f"total_jobs={total_jobs}, nodes={num_nodes}, "
             f"jobs/node={jobs_per_node:.1f})"
@@ -2960,7 +2968,7 @@ class K8sNativeFailoverTest(TestClusterBase):
                 self.validate_pending_deletions()
 
                 # ── Validation phase ──
-                sleep_n_sec(300)
+                sleep_n_sec(120)
                 self.check_core_dump()
 
                 time_duration = self.common_utils.calculate_time_duration(
@@ -3330,7 +3338,7 @@ class K8sNativeBasicFailoverTest(K8sNativeFailoverTest):
                 self.validate_pending_deletions()
 
                 # Validation phase
-                sleep_n_sec(300)
+                sleep_n_sec(120)
                 self.check_core_dump()
 
                 time_duration = self.common_utils.calculate_time_duration(
@@ -4424,7 +4432,7 @@ class K8sNativeResilientFailoverTest(K8sNativeFailoverTest):
                 self._enforce_lvol_cap()
 
                 # ── Validation phase ──
-                sleep_n_sec(300)
+                sleep_n_sec(120)
                 self.check_core_dump()
 
                 time_duration = (

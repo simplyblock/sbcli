@@ -48,7 +48,6 @@ def main():
     parser.add_argument('--preserve_resources_on_failure', type=bool,
                         help="Skip K8s resource cleanup when test fails (preserve PVCs/pods for debugging)",
                         default=False)
-
     args = parser.parse_args()
     
     tests = get_stress_tests()

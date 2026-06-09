@@ -1031,7 +1031,7 @@ class K8sUtils:
             f"  name: {job_name}\n"
             f"  namespace: {ns}\n"
             f"spec:\n"
-            f"  backoffLimit: 4\n"
+            f"  backoffLimit: 0\n"
             f"  template:\n"
             f"    metadata:\n"
             f"      labels:\n"
@@ -1101,15 +1101,20 @@ class K8sUtils:
         self.logger.warning(f"[K8sUtils] Job '{job_name}' timed out after {timeout}s")
         return "timeout"
 
-    def get_job_pod_name(self, job_name: str, namespace: str = None) -> str:
-        """Get the pod name created by a Job."""
+    def get_job_pod_names(self, job_name: str, namespace: str = None) -> list:
+        """Get all pod names created by a Job."""
         ns = namespace or self.namespace
         out, _ = self._exec_kubectl(
             f"kubectl get pods -n {ns} --selector=job-name={job_name} "
-            f"--no-headers -o custom-columns=:metadata.name | head -1",
+            f"--no-headers -o custom-columns=:metadata.name",
             supress_logs=True,
         )
-        return out.strip()
+        return [p.strip() for p in out.strip().splitlines() if p.strip()]
+
+    def get_job_pod_name(self, job_name: str, namespace: str = None) -> str:
+        """Get the first pod name created by a Job."""
+        pods = self.get_job_pod_names(job_name, namespace=namespace)
+        return pods[0] if pods else ""
 
     def get_pod_node_name(self, pod_name: str, namespace: str = None) -> str:
         """Return the K8s node hostname where a pod is/was scheduled."""
@@ -1321,7 +1326,11 @@ class K8sUtils:
 
     def validate_fio_job(self, job_name: str, namespace: str = None,
                          timeout: int = 600) -> bool:
-        """Check Job succeeded and pod logs have no FIO error keywords.
+        """Check Job succeeded and ALL pod logs have no FIO error keywords.
+
+        Checks every pod created by the Job (not just the latest) so that
+        failures from earlier attempts that were retried via backoffLimit
+        are not silently masked.
 
         Returns True if valid.  Raises RuntimeError on failure.
         """
@@ -1331,20 +1340,31 @@ class K8sUtils:
             raise RuntimeError(
                 f"FIO Job '{job_name}' did not succeed (status={status})"
             )
-        pod_name = self.get_job_pod_name(job_name, namespace=ns)
-        if not pod_name:
+        pod_names = self.get_job_pod_names(job_name, namespace=ns)
+        if not pod_names:
             self.logger.warning(
                 f"[K8sUtils] Could not find pod for Job '{job_name}'; skipping log check"
             )
             return True
-        logs = self.get_pod_logs(pod_name, namespace=ns, tail=500)
-        fail_words = ["error", "fail", "interrupt", "terminate"]
-        logs_lower = logs.lower()
-        for word in fail_words:
-            if word in logs_lower:
+        for pod_name in pod_names:
+            logs = self.get_pod_logs(pod_name, namespace=ns, tail=500)
+            if not logs:
+                continue
+            logs_lower = logs.lower()
+            # Check for FIO numeric error codes (e.g. err=110, err=5)
+            err_match = re.search(r'\berr=([1-9]\d*)\b', logs)
+            if err_match:
                 raise RuntimeError(
-                    f"FIO Job '{job_name}' pod logs contain '{word}'"
+                    f"FIO Job '{job_name}' pod '{pod_name}' reported "
+                    f"err={err_match.group(1)}"
                 )
+            fail_words = ["error", "fail", "interrupt", "terminate"]
+            for word in fail_words:
+                if word in logs_lower:
+                    raise RuntimeError(
+                        f"FIO Job '{job_name}' pod '{pod_name}' logs "
+                        f"contain '{word}'"
+                    )
         return True
 
     # ── StorageBackup CRD operations ─────────────────────────────────────────
