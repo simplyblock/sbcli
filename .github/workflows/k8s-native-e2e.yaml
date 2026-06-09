@@ -442,7 +442,8 @@ jobs:
           done
 
           echo "=== Phase 3c: Delete PVs ==="
-          for PV in $(kubectl get pv --no-headers -o custom-columns=:metadata.name 2>/dev/null | grep -i simplyblock 2>/dev/null); do
+          for PV in $(kubectl get pv --no-headers -o custom-columns=:metadata.name 2>/dev/null | grep -v -i vault 2>/dev/null); do
+            echo "Force-deleting PV: $PV"
             kubectl patch pv "$PV" \
               --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
             kubectl delete pv "$PV" --force --grace-period=0 2>/dev/null || true
@@ -599,17 +600,38 @@ jobs:
           # 1. Create minio namespace + deployment + service
           kubectl create ns minio --dry-run=client -o yaml | kubectl apply -f -
 
-          kubectl -n minio create deployment minio \
-            --image=minio/minio \
-            -- /bin/sh -c "minio server /data --console-address :9001" \
-            --dry-run=client -o yaml | kubectl apply -f -
+          cat <<'MINIO_EOF' | kubectl apply -f -
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: minio
+            namespace: minio
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: minio
+            template:
+              metadata:
+                labels:
+                  app: minio
+              spec:
+                containers:
+                - name: minio
+                  image: minio/minio
+                  command: ["/bin/sh", "-c", "minio server /data --console-address :9001"]
+                  env:
+                  - name: MINIO_ROOT_USER
+                    value: minioadmin
+                  - name: MINIO_ROOT_PASSWORD
+                    value: minioadmin123
+                  ports:
+                  - containerPort: 9000
+                  - containerPort: 9001
+          MINIO_EOF
 
           kubectl -n minio expose deploy/minio --port 9000 \
             --dry-run=client -o yaml | kubectl apply -f -
-
-          kubectl -n minio set env deploy/minio \
-            MINIO_ROOT_USER=minioadmin \
-            MINIO_ROOT_PASSWORD=minioadmin123
 
           # 2. Wait for MinIO pod to be ready (up to 5 min)
           echo "Waiting for MinIO pod to be ready..."

@@ -36,8 +36,8 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
         self.lvol_name = f"lvl{generate_random_sequence(15)}"
         self.clone_name = f"cln{generate_random_sequence(15)}"
         self.snapshot_name = f"snap{generate_random_sequence(15)}"
-        self.lvol_size = "30G"
-        self.int_lvol_size = 30
+        self.lvol_size = "60G"
+        self.int_lvol_size = 60
         self.TARGET_DATA_PER_NODE_GB = 200
         self.fio_numjobs = 5
         self.fio_size = "6G"  # default; overridden by _compute_fio_size()

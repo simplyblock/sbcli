@@ -135,7 +135,10 @@ for PVC in $(kubectl -n $NAMESPACE get pvc --no-headers -o custom-columns=:metad
 done
 
 echo "=== Phase 3c: Delete PVs ==="
-for PV in $(kubectl get pv --no-headers -o custom-columns=:metadata.name 2>/dev/null | grep -i simplyblock 2>/dev/null); do
+# Clean all PVs except vault-related ones.  CSI-provisioned PVs are named
+# pvc-<uuid> (not "simplyblock"), so filter by storageclass or catch-all.
+for PV in $(kubectl get pv --no-headers -o custom-columns=:metadata.name 2>/dev/null | grep -v -i vault 2>/dev/null); do
+  echo "Force-deleting PV: $PV"
   kubectl patch pv "$PV" \
     --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
   kubectl delete pv "$PV" --force --grace-period=0 2>/dev/null || true

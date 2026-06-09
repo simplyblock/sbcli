@@ -411,7 +411,8 @@ jobs:
           done
 
           echo "=== Phase 3c: Delete PVs ==="
-          for PV in $(kubectl get pv --no-headers -o custom-columns=:metadata.name 2>/dev/null | grep -i simplyblock 2>/dev/null); do
+          for PV in $(kubectl get pv --no-headers -o custom-columns=:metadata.name 2>/dev/null | grep -v -i vault 2>/dev/null); do
+            echo "Force-deleting PV: $PV"
             kubectl patch pv "$PV" \
               --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
             kubectl delete pv "$PV" --force --grace-period=0 2>/dev/null || true
