@@ -259,7 +259,7 @@ def _snapshot_has_backup(snapshot_id):
     """Check if a snapshot already has a non-failed backup."""
     backups = db_controller.get_backups_by_snapshot_id(snapshot_id)
     return any(b.status in (Backup.STATUS_PENDING, Backup.STATUS_IN_PROGRESS,
-                            Backup.STATUS_COMPLETED) for b in backups)
+                            Backup.STATUS_COMPLETED, Backup.STATUS_MERGED) for b in backups)
 
 
 def _create_single_backup(snapshot, lvol, node_id, cluster_id, prev_backup):
@@ -366,6 +366,7 @@ def backup_snapshot(snapshot_id, cluster_id=None):
                 continue
 
             backup = _create_single_backup(snap, lvol, node_id, cluster_id, prev_backup)
+            time.sleep(1)
             prev_backup = backup
             if snap.get_id() == snapshot_id:
                 final_backup_id = backup.uuid
@@ -556,6 +557,7 @@ def list_backups(cluster_id=None):
     backups = sorted(backups, key=lambda b: (b.created_at, b.uuid), reverse=True)
     data = []
     for b in backups:
+        logger.debug(b)
         source = b.source_cluster_id or b.cluster_id
         is_external = source != b.cluster_id
         entry = {
