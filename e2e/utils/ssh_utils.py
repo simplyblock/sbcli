@@ -2642,50 +2642,64 @@ class SshUtils:
                            validate_async=False, error_sink=None):
         self.logger.info(f"Fetching distrib logs for Storage Node ID: {storage_node_id} on {storage_node_ip}")
 
-        # 0) Find SPDK container name
+        # 0) Find ALL SPDK containers on this host (dual-node hosts have 2)
         find_container_cmd = "sudo docker ps --format '{{.Names}}' | grep -E '^spdk_[0-9]+$' || true"
         container_name_out, _ = self.exec_command(storage_node_ip, find_container_cmd)
-        container_name = (container_name_out or "").strip()
-        if not container_name:
+        containers = [c.strip() for c in (container_name_out or "").strip().splitlines() if c.strip()]
+        if not containers:
             self.logger.warning(f"No SPDK container found on {storage_node_ip}")
             return True
 
-        # 1) Get bdevs via correct sock 
+        self.logger.info(f"[{storage_node_ip}] Found SPDK containers: {containers}")
+
         timestamp = datetime.now().strftime("%Y%m%d_%H-%M-%S")
-        base_path = f"{logs_path}/{storage_node_ip}/distrib_bdev_logs"
-        self.exec_command(storage_node_ip, f"sudo mkdir -p '{base_path}' && sudo chmod -R 777 '{base_path}'")
-        bdev_cmd = (
-            f"sudo docker exec {container_name} bash -lc "
-            f"\"sudo python spdk/scripts/rpc.py -s /mnt/ramdisk/{container_name}/spdk.sock bdev_get_bdevs\""
-        )
-        bdev_output, bdev_err = self.exec_command(storage_node_ip, bdev_cmd)
-        if (bdev_err and bdev_err.strip()) and not bdev_output:
-            self.logger.error(f"bdev_get_bdevs error on {storage_node_ip}: {bdev_err.strip()}")
-            return True
+        # Include node_id in path so dual-node hosts get separate directories
+        node_id_short = storage_node_id[:8] if len(storage_node_id) > 8 else storage_node_id
+        node_base_path = f"{logs_path}/{storage_node_ip}_{node_id_short}/distrib_bdev_logs"
 
-        # Parse distrib names
-        try:
-            bdevs = json.loads(bdev_output)
-            distribs = sorted({
-                b.get("name", "")
-                for b in bdevs
-                if isinstance(b, dict) and str(b.get("name","")).startswith("distrib_")
-            })
-        except json.JSONDecodeError as e:
-            self.logger.error(f"JSON parsing failed on {storage_node_ip}: {e}")
-            return True
-        if not distribs:
-            self.logger.warning(f"No distrib_* bdevs found on {storage_node_ip}.")
-            return True
-        self.logger.info(f"[{storage_node_ip}] Distributions: {distribs}")
+        all_distribs = {}  # container_name -> list of distribs
+        all_base_paths = {}  # container_name -> base_path
 
-        # 2) Run multiple docker exec in parallel from ONE SSH exec
-        distrib_list_str = " ".join(shlex.quote(d) for d in distribs)
-        remote_tar = f"/tmp/distrib_logs_{timestamp}.tar.gz"
+        for container_name in containers:
+            # Per-container subdirectory
+            base_path = f"{node_base_path}/{container_name}"
+            all_base_paths[container_name] = base_path
+            self.exec_command(storage_node_ip, f"sudo mkdir -p '{base_path}' && sudo chmod -R 777 '{base_path}'")
 
-        # IMPORTANT: This script runs on the HOST and spawns many `docker exec ... &` in parallel.
-        # It throttles with MAXJ, waits, then tars outputs from /tmp inside the container into one tarball on the host.
-        remote_script = f"""\
+            # 1) Get bdevs via correct sock
+            bdev_cmd = (
+                f"sudo docker exec {container_name} bash -lc "
+                f"\"sudo python spdk/scripts/rpc.py -s /mnt/ramdisk/{container_name}/spdk.sock bdev_get_bdevs\""
+            )
+            bdev_output, bdev_err = self.exec_command(storage_node_ip, bdev_cmd)
+            if (bdev_err and bdev_err.strip()) and not bdev_output:
+                self.logger.error(f"bdev_get_bdevs error on {storage_node_ip} ({container_name}): {bdev_err.strip()}")
+                continue
+
+            # Parse distrib names
+            try:
+                bdevs = json.loads(bdev_output)
+                distribs = sorted({
+                    b.get("name", "")
+                    for b in bdevs
+                    if isinstance(b, dict) and str(b.get("name","")).startswith("distrib_")
+                })
+            except json.JSONDecodeError as e:
+                self.logger.error(f"JSON parsing failed on {storage_node_ip} ({container_name}): {e}")
+                continue
+            if not distribs:
+                self.logger.warning(f"No distrib_* bdevs found on {storage_node_ip} ({container_name}).")
+                continue
+            self.logger.info(f"[{storage_node_ip}/{container_name}] Distributions: {distribs}")
+            all_distribs[container_name] = distribs
+
+            # 2) Run multiple docker exec in parallel from ONE SSH exec
+            distrib_list_str = " ".join(shlex.quote(d) for d in distribs)
+            remote_tar = f"/tmp/distrib_logs_{container_name}_{timestamp}.tar.gz"
+
+            # IMPORTANT: This script runs on the HOST and spawns many `docker exec ... &` in parallel.
+            # It throttles with MAXJ, waits, then tars outputs from /tmp inside the container into one tarball on the host.
+            remote_script = f"""\
 set -euo pipefail
 CN={shlex.quote(container_name)}
 SOCK="/mnt/ramdisk/$CN/spdk.sock"
@@ -2695,7 +2709,7 @@ WORKDIR_HOST="{base_path}"
 mkdir -p "$WORKDIR_HOST"
 
 # Make a temporary host folder to collect per-distrib files copied out of the container
-HOST_STAGING="/tmp/distrib_host_collect_$TS"
+HOST_STAGING="/tmp/distrib_host_collect_{container_name}_$TS"
 mkdir -p "$HOST_STAGING"
 
 pids=()
@@ -2760,57 +2774,65 @@ rm -rf "$HOST_STAGING" || true
 echo "$WORKDIR_HOST/{os.path.basename(remote_tar)}"
 """
 
-        run_many_cmd = "bash -lc " + shlex.quote(remote_script)
-        tar_out, tar_err = self.exec_command(storage_node_ip, run_many_cmd)
-        if (tar_err and tar_err.strip()) and not tar_out:
-            self.logger.error(f"[{storage_node_ip}] Parallel docker-exec script error: {tar_err.strip()}")
+            run_many_cmd = "bash -lc " + shlex.quote(remote_script)
+            tar_out, tar_err = self.exec_command(storage_node_ip, run_many_cmd)
+            if (tar_err and tar_err.strip()) and not tar_out:
+                self.logger.error(f"[{storage_node_ip}/{container_name}] Parallel docker-exec script error: {tar_err.strip()}")
+                continue
+
+            final_tar = (tar_out or "").strip().splitlines()[-1] if tar_out else f"{base_path}/{os.path.basename(remote_tar)}"
+            self.logger.info(f"[{storage_node_ip}/{container_name}] Distrib logs saved: {base_path} (tar: {final_tar})")
+
+        if not all_distribs:
+            self.logger.warning(f"No distribs found across any container on {storage_node_ip}")
             return True
 
-        final_tar = (tar_out or "").strip().splitlines()[-1] if tar_out else f"{base_path}/{os.path.basename(remote_tar)}"
-        self.logger.info(f"[{storage_node_ip}] Distrib logs saved: {base_path} (tar: {final_tar})")
-
         # ------------------------------
-        # Validate placement dump files
+        # Validate placement dump files (per container)
         # ------------------------------
         if validate_async:
-            # Run validation in background — each file gets up to 1 hour to appear.
-            # Raises ValueError immediately if a file exists but has no lpgi data.
-            # Any failure is appended to error_sink for the caller to check later.
             _sink = error_sink if error_sink is not None else []
             _node_ip = storage_node_ip
+            _all_distribs = dict(all_distribs)
+            _all_base_paths = dict(all_base_paths)
 
             def _bg_validate():
-                try:
-                    ok = self._validate_distrib_dumps(base_path, distribs, timeout=3600)
-                    if not ok:
-                        msg = (
-                            f"[PLACEMENT_DUMP] Validation FAILED for {_node_ip} "
-                            f"(file missing after 1 hour): {base_path}"
-                        )
+                for cn, distribs in _all_distribs.items():
+                    bp = _all_base_paths[cn]
+                    try:
+                        ok = self._validate_distrib_dumps(bp, distribs, timeout=3600)
+                        if not ok:
+                            msg = (
+                                f"[PLACEMENT_DUMP] Validation FAILED for {_node_ip}/{cn} "
+                                f"(file missing after 1 hour): {bp}"
+                            )
+                            self.logger.error(msg)
+                            _sink.append(msg)
+                        else:
+                            self.logger.info(f"[{_node_ip}/{cn}] Placement dump validation passed (async).")
+                    except ValueError as e:
+                        self.logger.error(str(e))
+                        _sink.append(str(e))
+                    except Exception as e:
+                        msg = f"[PLACEMENT_DUMP] Unexpected error for {_node_ip}/{cn}: {e}"
                         self.logger.error(msg)
                         _sink.append(msg)
-                    else:
-                        self.logger.info(f"[{_node_ip}] Placement dump validation passed (async).")
-                except ValueError as e:
-                    # Corrupt data — fail immediately
-                    self.logger.error(str(e))
-                    _sink.append(str(e))
-                except Exception as e:
-                    msg = f"[PLACEMENT_DUMP] Unexpected error for {_node_ip}: {e}"
-                    self.logger.error(msg)
-                    _sink.append(msg)
 
             t = threading.Thread(target=_bg_validate, daemon=True)
             t.start()
             return t
 
-        ok = self._validate_distrib_dumps(base_path, distribs)
-        if not ok:
-            self.logger.error(f"[{storage_node_ip}] Placement dump validation FAILED.")
-            return False
+        overall_ok = True
+        for cn, distribs in all_distribs.items():
+            bp = all_base_paths[cn]
+            ok = self._validate_distrib_dumps(bp, distribs)
+            if not ok:
+                self.logger.error(f"[{storage_node_ip}/{cn}] Placement dump validation FAILED.")
+                overall_ok = False
+            else:
+                self.logger.info(f"[{storage_node_ip}/{cn}] Placement dump validation passed.")
 
-        self.logger.info(f"[{storage_node_ip}] Placement dump validation passed.")
-        return True
+        return overall_ok
 
     def clone_mount_gen_uuid(self, node, device):
         """Repair the XFS filesystem and generate a new UUID.
@@ -3064,22 +3086,24 @@ echo "$WORKDIR_HOST/{os.path.basename(remote_tar)}"
             container_name_output, _ = self.exec_command(node_ip, find_container_cmd)
 
             if container_name_output:
-                container_name = container_name_output.strip()
-                # Commands to run inside the SPDK container
-                iptables_reset_cmds = [
-                    f"sudo docker exec {container_name} sudo iptables -L -v -n",
-                    f"sudo docker exec {container_name} sudo iptables -P INPUT ACCEPT",
-                    f"sudo docker exec {container_name} sudo iptables -P OUTPUT ACCEPT",
-                    f"sudo docker exec {container_name} sudo iptables -P FORWARD ACCEPT",
-                    f"sudo docker exec {container_name} sudo iptables -F",
-                    f"sudo docker exec {container_name} sudo iptables -L -v -n"
-                ]
+                containers = [c.strip() for c in container_name_output.strip().splitlines() if c.strip()]
+                for container_name in containers:
+                    self.logger.info(f"Resetting iptables in container {container_name} on {node_ip}.")
+                    # Commands to run inside the SPDK container
+                    iptables_reset_cmds = [
+                        f"sudo docker exec {container_name} sudo iptables -L -v -n",
+                        f"sudo docker exec {container_name} sudo iptables -P INPUT ACCEPT",
+                        f"sudo docker exec {container_name} sudo iptables -P OUTPUT ACCEPT",
+                        f"sudo docker exec {container_name} sudo iptables -P FORWARD ACCEPT",
+                        f"sudo docker exec {container_name} sudo iptables -F",
+                        f"sudo docker exec {container_name} sudo iptables -L -v -n"
+                    ]
 
-                # Execute each command
-                for cmd in iptables_reset_cmds:
-                    self.exec_command(node_ip, cmd)
+                    # Execute each command
+                    for cmd in iptables_reset_cmds:
+                        self.exec_command(node_ip, cmd)
 
-                self.logger.info(f"Successfully reset iptables inside SPDK container on {node_ip}.")
+                self.logger.info(f"Successfully reset iptables inside {len(containers)} SPDK container(s) on {node_ip}.")
             else:
                 self.logger.warning(f"No SPDK container found on {node_ip}")
         except Exception as e:
