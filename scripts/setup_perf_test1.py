@@ -400,7 +400,9 @@ def main():
 
     # --- 4. Parallel Setup (Phase 1) ---
     install_cmds = [
-        "sudo dnf install git python3-pip nvme-cli -y",
+        "sudo sh -c 'for i in $(seq 1 6); do dnf clean all >/dev/null 2>&1; "
+        "dnf install -y git python3-pip nvme-cli && exit 0; "
+        "echo \"dnf attempt $i failed; sleeping $((i*15))s\"; sleep $((i*15)); done; exit 1'",
         "sudo /usr/bin/python3 -m pip install --upgrade pip setuptools wheel",
         "sudo /usr/bin/python3 -m pip install ruamel.yaml",
         "sudo pip install git+https://github.com/simplyblock-io/sbcli@performance-optimization --upgrade --force --ignore-installed requests",
@@ -506,7 +508,9 @@ def main():
 
     # Commands for Performance Clients
     client_prep_cmds = [
-        "sudo dnf install nvme-cli fio -y",
+        "sudo sh -c 'for i in $(seq 1 6); do dnf clean all >/dev/null 2>&1; "
+        "dnf install -y nvme-cli fio && exit 0; "
+        "echo \"dnf attempt $i failed; sleeping $((i*15))s\"; sleep $((i*15)); done; exit 1'",
         "sudo modprobe nvme-tcp",
         "echo 'nvme-tcp' | sudo tee /etc/modules-load.d/nvme-tcp.conf"
     ]
