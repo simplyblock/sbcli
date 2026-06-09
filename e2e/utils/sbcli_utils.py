@@ -114,12 +114,14 @@ class SbcliUtils:
                 self.logger.info(f"Retrying API {api_url}. Attempt: {10 - retry + 1}")
                 sleep_n_sec(3)
 
-    def delete_request(self, api_url, headers=None, expected_error_code=None):
+    def delete_request(self, api_url, headers=None, expected_error_code=None, treat_404_as_success=False):
         """Performs delete request on the given API URL
 
         Args:
             api_url (str): Endpoint to request
             headers (dict, optional): Headers needed. Defaults to None.
+            treat_404_as_success (bool): If True, treat HTTP 404 as idempotent
+                success (resource already deleted). Defaults to False.
 
         Returns:
             dict: response returned
@@ -134,10 +136,13 @@ class SbcliUtils:
                 if resp.status_code == HTTPStatus.OK:
                     data = resp.json()
                     return data
+                elif resp.status_code == HTTPStatus.NOT_FOUND and treat_404_as_success:
+                    self.logger.info(f"DELETE {api_url} returned 404 — resource already deleted, treating as success")
+                    return {"status": True, "results": [], "error": None}
                 else:
                     self.logger.error(f"request failed. status_code: {resp.status_code}, text: {resp.text}")
                     resp.raise_for_status()
-                
+
             except requests.exceptions.HTTPError as e:
                 self.logger.debug(f"API call {api_url} failed with error:{e}")
                 if expected_error_code:
@@ -503,7 +508,13 @@ class SbcliUtils:
             raise Exception(f"Lvol {lvol_name} does not exist")
         self.logger.info(f"ledoo {lvol_name}, {lvol_id}")
 
-        data = self.delete_request(api_url=f"/lvol/{lvol_id}")
+        try:
+            data = self.delete_request(api_url=f"/lvol/{lvol_id}", treat_404_as_success=True)
+        except Exception as e:
+            if skip_error:
+                self.logger.warning(f"delete_lvol DELETE request for {lvol_name} ({lvol_id}) failed: {e}. Continuing with skip_error=True")
+                return False
+            raise
         self.logger.info(f"Delete lvol resp: {data}")
 
         lvols = self.list_lvols()
@@ -521,7 +532,7 @@ class SbcliUtils:
                     continue
                 if cur_state in ("online", "in_deletion"):
                     self.logger.info(f"Lvol {lvol_name} in {cur_state} state. Retrying Delete!")
-                    data = self.delete_request(api_url=f"/lvol/{lvol_id}")
+                    data = self.delete_request(api_url=f"/lvol/{lvol_id}", treat_404_as_success=True)
                     self.logger.info(f"Delete lvol resp: {data}")
             if attempt > max_attempt:
                 if skip_error:
@@ -1052,7 +1063,7 @@ class SbcliUtils:
                 return
             raise Exception(f"Snapshot not found. snap_name={snap_name}")
 
-        resp = self.delete_request(api_url=f"/snapshot/{snap_id}")
+        resp = self.delete_request(api_url=f"/snapshot/{snap_id}", treat_404_as_success=True)
         self.logger.info(f"Delete snapshot resp: {resp}")
 
         # wait for removal
