@@ -403,20 +403,34 @@ jobs:
             PVC_TIMEOUT=$((PVC_TIMEOUT - 5))
           done
 
-          for PVC in $(kubectl -n $NAMESPACE get pvc --no-headers -o custom-columns=:metadata.name 2>/dev/null); do
-            echo "Force-deleting stuck PVC: $PVC"
-            kubectl -n $NAMESPACE patch pvc "$PVC" \
-              --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
-            kubectl -n $NAMESPACE delete pvc "$PVC" --force --grace-period=0 2>/dev/null || true
-          done
+          STUCK_PVCS=$(kubectl -n $NAMESPACE get pvc --no-headers -o custom-columns=:metadata.name 2>/dev/null)
+          if [ -n "$STUCK_PVCS" ]; then
+            echo "Patching finalizers on stuck PVCs..."
+            echo "$STUCK_PVCS" | while read PVC; do
+              kubectl -n $NAMESPACE patch pvc "$PVC" \
+                --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null &
+            done
+            wait
+            kubectl -n $NAMESPACE delete pvc --all --force --grace-period=0 --wait=false 2>/dev/null || true
+            echo "PVC force-delete issued"
+          fi
 
           echo "=== Phase 3c: Delete PVs ==="
-          for PV in $(kubectl get pv --no-headers -o custom-columns=:metadata.name 2>/dev/null | grep -v -i vault 2>/dev/null); do
-            echo "Force-deleting PV: $PV"
-            kubectl patch pv "$PV" \
-              --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
-            kubectl delete pv "$PV" --force --grace-period=0 2>/dev/null || true
-          done
+          PV_LIST=$(kubectl get pv --no-headers -o custom-columns=NAME:.metadata.name,CLAIM:.spec.claimRef.namespace 2>/dev/null \
+            | grep -v -E '\bvault\b' 2>/dev/null | awk '{print $1}')
+          if [ -n "$PV_LIST" ]; then
+            echo "Patching finalizers on $(echo "$PV_LIST" | wc -l) PVs..."
+            echo "$PV_LIST" | while read PV; do
+              kubectl patch pv "$PV" \
+                --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null &
+            done
+            wait
+            echo "$PV_LIST" | while read PV; do
+              kubectl delete pv "$PV" --force --grace-period=0 --wait=false 2>/dev/null &
+            done
+            wait
+            echo "PV force-delete issued"
+          fi
 
           echo "=== Phase 3d: Force delete remaining namespaced resources ==="
           for RTYPE in pod jobs service ds statefulset deployment replicaset secret sa configmap; do

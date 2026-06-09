@@ -126,23 +126,39 @@ while [ $PVC_TIMEOUT -gt 0 ]; do
   PVC_TIMEOUT=$((PVC_TIMEOUT - 5))
 done
 
-# If PVCs are still stuck, patch finalizers and force delete
-for PVC in $(kubectl -n $NAMESPACE get pvc --no-headers -o custom-columns=:metadata.name 2>/dev/null); do
-  echo "Force-deleting stuck PVC: $PVC"
-  kubectl -n $NAMESPACE patch pvc "$PVC" \
-    --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
-  kubectl -n $NAMESPACE delete pvc "$PVC" --force --grace-period=0 2>/dev/null || true
-done
+# If PVCs are still stuck, patch all finalizers in parallel then bulk delete
+STUCK_PVCS=$(kubectl -n $NAMESPACE get pvc --no-headers -o custom-columns=:metadata.name 2>/dev/null)
+if [ -n "$STUCK_PVCS" ]; then
+  echo "Patching finalizers on stuck PVCs..."
+  echo "$STUCK_PVCS" | while read PVC; do
+    kubectl -n $NAMESPACE patch pvc "$PVC" \
+      --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null &
+  done
+  wait
+  kubectl -n $NAMESPACE delete pvc --all --force --grace-period=0 --wait=false 2>/dev/null || true
+  echo "PVC force-delete issued"
+fi
 
 echo "=== Phase 3c: Delete PVs ==="
-# Clean all PVs except vault-related ones.  CSI-provisioned PVs are named
-# pvc-<uuid> (not "simplyblock"), so filter by storageclass or catch-all.
-for PV in $(kubectl get pv --no-headers -o custom-columns=:metadata.name 2>/dev/null | grep -v -i vault 2>/dev/null); do
-  echo "Force-deleting PV: $PV"
-  kubectl patch pv "$PV" \
-    --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
-  kubectl delete pv "$PV" --force --grace-period=0 2>/dev/null || true
-done
+# Clean all PVs except vault ones.  Filter by CLAIM column (namespace/name)
+# since PV names are pvc-<uuid> and don't contain "vault".
+# Also exclude local-hostpath storageclass PVs used by vault.
+PV_LIST=$(kubectl get pv --no-headers -o custom-columns=NAME:.metadata.name,CLAIM:.spec.claimRef.namespace 2>/dev/null \
+  | grep -v -E '\bvault\b' 2>/dev/null | awk '{print $1}')
+if [ -n "$PV_LIST" ]; then
+  echo "Patching finalizers on $(echo "$PV_LIST" | wc -l) PVs..."
+  echo "$PV_LIST" | while read PV; do
+    kubectl patch pv "$PV" \
+      --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null &
+  done
+  wait
+  echo "Deleting PVs..."
+  echo "$PV_LIST" | while read PV; do
+    kubectl delete pv "$PV" --force --grace-period=0 --wait=false 2>/dev/null &
+  done
+  wait
+  echo "PV force-delete issued"
+fi
 
 echo "=== Phase 3d: Force delete remaining namespaced resources ==="
 for RTYPE in pod jobs service ds statefulset deployment replicaset secret sa configmap; do
