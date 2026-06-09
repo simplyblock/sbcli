@@ -2,4 +2,4 @@ SIMPLY_BLOCK_COMMAND_NAME=sbcli-dev
 SIMPLY_BLOCK_VERSION=19.2.34
 
 SIMPLY_BLOCK_DOCKER_IMAGE=simplyblock/simplyblock:performance-optimization
-SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=simplyblock/spdk:compression-thread-latest
+SIMPLY_BLOCK_SPDK_ULTRA_IMAGE=simplyblock/spdk:compression-thread-profiling-latest
