@@ -1,5 +1,5 @@
 # coding=utf-8
-from typing import List
+from typing import List, Optional
 
 from simplyblock_core.models.base_model import BaseModel
 
@@ -36,7 +36,8 @@ class NVMeDevice(BaseModel):
     cluster_device_order: int = -1
     cluster_id: str = ""
     device_name: str = ""
-    health_check: bool = True
+    # None => not applicable (owning node not in ONLINE/DOWN)
+    health_check: Optional[bool] = True
     io_error: bool = False
     is_partition: bool = False
     model_id: str = ""

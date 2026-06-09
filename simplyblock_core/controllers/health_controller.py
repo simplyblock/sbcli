@@ -15,6 +15,29 @@ from simplyblock_core.controllers import device_controller
 
 logger = utils.get_logger(__name__)
 
+# A node's health is only meaningful when it is ONLINE or DOWN. In every other
+# state (offline, in_restart, in_shutdown, unreachable, schedulable, removed,
+# in_creation, suspended) the stack is being torn down / rebuilt or the node is
+# administratively parked, so we do not compute or report a health value at all.
+HEALTH_RELEVANT_NODE_STATUSES = (StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN)
+
+
+def _peer_connections_relevant(peer_node) -> bool:
+    """Whether a connection to/from ``peer_node`` should affect health.
+
+    Connections (remote NVMe controllers to devices, remote JMs, hublvols)
+    are only expected to exist when the peer node is ONLINE, DOWN or
+    UNREACHABLE. When the peer is in any other state (in_restart, in_shutdown,
+    offline, schedulable, removed, in_creation, suspended) a missing connection
+    is the expected consequence of that peer's teardown/rebuild and MUST NOT
+    fail the health check — it is reported (logged) but not counted as a fault.
+    """
+    return peer_node is not None and peer_node.status in (
+        StorageNode.STATUS_ONLINE,
+        StorageNode.STATUS_DOWN,
+        StorageNode.STATUS_UNREACHABLE,
+    )
+
 
 def _restart_owns_lvs(primary_node) -> bool:
     """True if the restart task currently owns ``primary_node.lvstore``.
@@ -632,23 +655,19 @@ def check_node(node_id, with_devices=True):
         logger.exception("node not found")
         return False
 
-    # Skip HealthCheck entirely while the node is in a transient state.
-    # During IN_SHUTDOWN / RESTARTING / UNREACHABLE / SUSPENDED / IN_CREATION
-    # the upper stack is being torn down or rebuilt by the runner (or the
-    # operator) and the data-plane state read back here — distrib cluster_map
-    # on peers, lvstore_stack comparisons, remote device reachability — is
-    # momentarily inconsistent with FDB. Acting on that mismatch (e.g.
-    # device_set_unavailable, recreate secondary hublvol) clobbers the
-    # in-progress restart. Lower-stack self-heal during a restart is the
-    # runner's job.
-    if snode.status in [StorageNode.STATUS_OFFLINE,
-                        StorageNode.STATUS_REMOVED,
-                        StorageNode.STATUS_IN_SHUTDOWN,
-                        StorageNode.STATUS_RESTARTING,
-                        StorageNode.STATUS_UNREACHABLE,
-                        StorageNode.STATUS_SUSPENDED,
-                        StorageNode.STATUS_IN_CREATION]:
-        logger.info(f"Skipping ,node status is {snode.status}")
+    # Health is only meaningful for ONLINE or DOWN nodes. In every other state
+    # (offline, in_restart, in_shutdown, unreachable, schedulable, removed,
+    # in_creation, suspended) the upper stack is being torn down or rebuilt by
+    # the runner (or the operator) and the data-plane state read back here —
+    # distrib cluster_map on peers, lvstore_stack comparisons, remote device
+    # reachability — is momentarily inconsistent with FDB. Acting on that
+    # mismatch (e.g. device_set_unavailable, recreate secondary hublvol)
+    # clobbers the in-progress transition, and reporting a true/false health
+    # for a parked node is misleading. So we report "not applicable" and skip.
+    if snode.status not in HEALTH_RELEVANT_NODE_STATUSES:
+        msg = f"Node status is {snode.status}; health check is not applicable (only ONLINE/DOWN)"
+        logger.info(msg)
+        print(msg)
         return True
 
     logger.info(f"Checking node {node_id}, status: {snode.status}")
@@ -723,7 +742,18 @@ def check_node(node_id, with_devices=True):
         print("*" * 100)
         rpc_client = snode.rpc_client(timeout=5, retry=1)
         for remote_device in snode.remote_devices:
-            node_remote_devices_check &= check_remote_device(remote_device.get_id(), snode)
+            ret = check_remote_device(remote_device.get_id(), snode)
+            try:
+                owner = db_controller.get_storage_node_by_id(remote_device.node_id)
+            except KeyError:
+                owner = None
+            if _peer_connections_relevant(owner):
+                node_remote_devices_check &= ret
+            elif not ret:
+                logger.info(
+                    "Remote device %s missing, but owning node %s is %s — expected, "
+                    "not failing health", remote_device.get_id(), remote_device.node_id,
+                    owner.status if owner else "not-found")
             print("*" * 100)
 
         if snode.jm_device:
@@ -746,7 +776,17 @@ def check_node(node_id, with_devices=True):
                 bdev_info = rpc_client.get_bdevs(name)
                 logger.log(INFO if bdev_info else ERROR,
                            f"Checking bdev: {name} ... " + ('ok' if bdev_info else 'failed'))
-                node_remote_devices_check &= bool(bdev_info)
+                try:
+                    jm_owner = db_controller.get_storage_node_by_id(remote_device.node_id)
+                except KeyError:
+                    jm_owner = None
+                if _peer_connections_relevant(jm_owner):
+                    node_remote_devices_check &= bool(bdev_info)
+                elif not bdev_info:
+                    logger.info(
+                        "Remote JM %s missing, but owning node %s is %s — expected, "
+                        "not failing health", name, remote_device.node_id,
+                        jm_owner.status if jm_owner else "not-found")
                 connected_jms.append(remote_device.get_id())
 
                 controller_info = rpc_client.bdev_nvme_controller_list(f'remote_{remote_device.jm_bdev}')
@@ -769,9 +809,14 @@ def check_node(node_id, with_devices=True):
                 if jm_id and jm_id not in connected_jms:
                     for nd in db_controller.get_storage_nodes():
                         if nd.jm_device and nd.jm_device.get_id() == jm_id:
-                            if nd.status == StorageNode.STATUS_ONLINE:
+                            if _peer_connections_relevant(nd):
                                 node_remote_devices_check = False
                                 logger.error(f"JM device {jm_id} is not connected")
+                            else:
+                                logger.info(
+                                    "JM device %s not connected, but owning node %s is %s "
+                                    "— expected, not failing health", jm_id, nd.get_id(), nd.status)
+                            break
 
         print("*" * 100)
         if snode.lvstore_stack:

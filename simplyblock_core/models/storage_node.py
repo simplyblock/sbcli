@@ -54,7 +54,9 @@ class StorageNode(BaseNodeObject):
     enable_ha_jm: bool = False
     ha_jm_count: int = 3
     enable_test_device: bool = False
-    health_check: bool = True
+    # None => health check is not applicable (node not in ONLINE/DOWN);
+    # health is only measured/shown for ONLINE or DOWN nodes.
+    health_check: Optional[bool] = True
     host_nqn: str = ""
     host_secret: str = ""
     hostname: str = ""

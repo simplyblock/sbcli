@@ -150,7 +150,8 @@ class DeviceDTO(BaseModel):
     nvme_controller: str
     pcie_address: str
     status: str
-    health_check: bool
+    # None => health check not applicable (owning node not ONLINE/DOWN)
+    health_check: Optional[bool]
     retries_exhausted: bool
     size: int
     cluster_device_order: util.Unsigned
@@ -305,7 +306,8 @@ class StorageNodeDTO(BaseModel):
     hublvol_port: util.Port
     nvmf_port: util.Port
     mgmt_ip: IPv4Address
-    health_check: bool
+    # None => health check not applicable (node not ONLINE/DOWN)
+    health_check: Optional[bool]
     device_count: int
     online_device_count: int
     capacity: CapacityStatDTO
