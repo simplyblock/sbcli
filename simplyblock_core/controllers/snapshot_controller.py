@@ -272,6 +272,7 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
 
     snap = SnapShot()
     snap.uuid = str(uuid.uuid4())
+    snap.data_uuid = str(uuid.uuid4())
     snap.snap_uuid = snap_uuid
     snap.size = size
     snap.used_size = used_size
