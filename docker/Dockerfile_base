@@ -13,7 +13,7 @@ RUN dnf install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-10.
 
 RUN dnf install -y wget dmidecode pciutils sudo nano gdisk openssh-clients util-linux pkg-config hostname\
     ca-certificates curl kmod python3.13 python3-pip iputils iproute iscsi-initiator-utils \
-    procps-ng libcap-2.69-7.el10_2.1 openssh-9.9p1-23.el10_2 systemd-257-23.el10_2.1
+    procps-ng libcap-2.69 openssh-9.9p1 systemd-257
 
 ARG TARGETPLATFORM
 RUN if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
