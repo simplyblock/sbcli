@@ -119,10 +119,16 @@ def start_migration(migration_id,
 
     snap_plan = get_snapshot_chain(lvol_id, source_node_id)
 
+    snaps_migrated = []
+    snapshots_data_ids = set(snap.data_uuid for snap in snap_plan)
+    for snap in db.get_snapshots_by_node_id(target_node_id):
+        if snap.data_uuid in snapshots_data_ids:
+            snaps_migrated.append(snap.uuid)
+
     migration.source_node_id = source_node_id
     migration.phase = LVolMigration.PHASE_SNAP_COPY
     migration.snap_migration_plan = snap_plan
-    migration.snaps_migrated = []
+    migration.snaps_migrated = snaps_migrated
     migration.intermediate_snaps = []
     migration.next_snap_index = 0
     migration.intermediate_snap_rounds = 0
@@ -582,7 +588,7 @@ def apply_migration_to_db(migration, tgt_lvol_uuid=None, tgt_lvol_bdev=None):
             if short:
                 spdk_info[short] = {
                     'uuid':   entry.get('uuid', ''),
-                    'blobid': entry.get('driver_specific', {}).get('lvol', {}).get('blobid', 0),
+                    'blobid': entry.get('blobid', 0)
                 }
         logger.info(f"apply_migration_to_db: queried {len(spdk_info)} bdevs from target lvstore {tgt_node.lvstore}")
     except Exception as e:
