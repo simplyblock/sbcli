@@ -53,6 +53,9 @@ jobs:
   cleanup:
     runs-on: self-hosted
     steps:
+      - name: Fix workspace permissions
+        run: sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" 2>/dev/null || true
+
       - name: Checkout deployment tooling
         uses: actions/checkout@v4
         with:
@@ -88,6 +91,9 @@ jobs:
     runs-on: self-hosted
     needs: deploy
     steps:
+      - name: Fix workspace permissions
+        run: sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" 2>/dev/null || true
+
       - name: Checkout code
         uses: actions/checkout@v4
 

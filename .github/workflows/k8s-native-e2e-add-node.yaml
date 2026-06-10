@@ -118,6 +118,9 @@ jobs:
       SSH_USER: ${{ github.event.inputs.ssh_user || 'root' }}
       SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
     steps:
+      - name: Fix workspace permissions
+        run: sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" 2>/dev/null || true
+
       - name: Checkout code
         uses: actions/checkout@v4
 
