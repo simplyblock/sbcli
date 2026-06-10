@@ -19,6 +19,7 @@ from docker.types import LogConfig
 
 from simplyblock_core import constants, scripts, distr_controller, cluster_ops
 from simplyblock_core import utils
+from simplyblock_core import jm_raid
 from simplyblock_core.constants import LINUX_DRV_MASS_STORAGE_NVME_TYPE_ID, LINUX_DRV_MASS_STORAGE_ID
 from simplyblock_core.controllers import lvol_controller, storage_events, snapshot_controller, device_events, \
     device_controller, tasks_controller, health_controller, tcp_ports_events, qos_controller
@@ -630,24 +631,34 @@ def _search_for_partitions(rpc_client, nvme_device):
 
 
 def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
-    if snode.jm_device and snode.jm_device.raid_bdev:
-        raid_bdev = snode.jm_device.raid_bdev
-        if raid_bdev.startswith("raid_jm_"):
-            raid_level = "1"
-            ret = rpc_client.bdev_raid_create(raid_bdev, jm_nvme_bdevs, raid_level)
-            if not ret:
-                logger.error(f"Failed to create raid_jm_{snode.get_id()}")
-                return False
+    # RAID 0+1 journal layout (see simplyblock_core/jm_raid.py):
+    #   1 device   -> no raid (bare device)
+    #   2 devices  -> raid1 over two single-device legs  (a 2-way mirror)
+    #   > 2 devices-> two ±1 balanced raid0 legs, mirrored by a top raid1
+    # The top raid bdev keeps the name raid_jm_<node> so the alceml/jm stack
+    # above is unchanged; the two raid0 legs are raid_jm_<node>_l{0,1}. This
+    # caps journal write amplification at 2x/node instead of N-way mirroring.
+    node = snode.get_id()
+    plan = jm_raid.plan_topology(jm_nvme_bdevs)
+    leg_bdevs = []
+    leg_members = []
+    if plan["level"] == jm_raid.RAID_NONE:
+        raid_bdev = plan["base"]
     else:
-        if len(jm_nvme_bdevs) > 1:
-            raid_bdev = f"raid_jm_{snode.get_id()}"
-            raid_level = "1"
-            ret = rpc_client.bdev_raid_create(raid_bdev, jm_nvme_bdevs, raid_level)
-            if not ret:
-                logger.error(f"Failed to create raid_jm_{snode.get_id()}")
-                return False
-        else:
-            raid_bdev = jm_nvme_bdevs[0]
+        for i, leg in enumerate(plan["legs"]):
+            if len(leg) == 1:
+                leg_bdev = leg[0]  # single-drive leg: use the bare device
+            else:
+                leg_bdev = f"raid_jm_{node}_l{i}"
+                if not rpc_client.bdev_raid_create(leg_bdev, leg, "0"):
+                    logger.error(f"Failed to create JM raid0 leg {leg_bdev}")
+                    return False
+            leg_bdevs.append(leg_bdev)
+            leg_members.append(leg)
+        raid_bdev = f"raid_jm_{node}"
+        if not rpc_client.bdev_raid_create(raid_bdev, leg_bdevs, "1"):
+            logger.error(f"Failed to create raid_jm_{node}")
+            return False
 
     alceml_id = snode.get_id()
     alceml_name = f"alceml_jm_{snode.get_id()}"
@@ -714,6 +725,8 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
         'status': JMDevice.STATUS_ONLINE,
         'jm_nvme_bdev_list': jm_nvme_bdevs,
         'raid_bdev': raid_bdev,
+        'jm_leg_bdevs': leg_bdevs,
+        'jm_leg_members': leg_members,
         'alceml_bdev': alceml_name,
         'alceml_name': alceml_name,
         'jm_bdev': jm_bdev,

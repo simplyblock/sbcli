@@ -99,6 +99,11 @@ class JMDevice(NVMeDevice):
     jm_bdev: str = ""
     jm_nvme_bdev_list: List[str] = []
     raid_bdev: str = ""
+    # RAID 0+1 layout: the two leg bdev names fed to the top raid1 (each is a
+    # raid0 over a drive group, or a bare device for a single-drive leg), and
+    # the per-leg member partitions. Empty for single-device (no-raid) JMs.
+    jm_leg_bdevs: List[str] = []
+    jm_leg_members: List = []
 
 
 class RemoteDevice(BaseModel):
