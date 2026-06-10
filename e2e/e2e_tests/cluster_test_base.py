@@ -1042,6 +1042,30 @@ class TestClusterBase:
         except Exception as e:
             self.logger.warning(f"[k8s collect_mgmt] storage node loop: {e}")
 
+        # Collect kubectl describe pods + events for the simplyblock namespace
+        ns = getattr(k8s, "namespace", "simplyblock")
+        kubectl_diag = [
+            (f"pod_describe{suffix}.txt",
+             f"kubectl describe pods -n {ns}"),
+            (f"events{suffix}.txt",
+             f"kubectl get events -n {ns} --sort-by=.lastTimestamp"),
+            (f"pod_status{suffix}.txt",
+             f"kubectl get pods -n {ns} -o wide"),
+            (f"storagebackup_list{suffix}.txt",
+             f"kubectl get storagebackup -n {ns} -o yaml 2>/dev/null || true"),
+            (f"volumesnapshot_list{suffix}.txt",
+             f"kubectl get volumesnapshot -n {ns} -o yaml 2>/dev/null || true"),
+            (f"pvc_list{suffix}.txt",
+             f"kubectl get pvc -n {ns} -o wide 2>/dev/null || true"),
+        ]
+        for filename, cmd in kubectl_diag:
+            try:
+                out, _ = k8s._exec_kubectl(cmd, supress_logs=True)
+                with open(os.path.join(base_path, filename), "w") as fh:
+                    fh.write(out or "")
+            except Exception as e:
+                self.logger.warning(f"[k8s collect_mgmt] {filename}: {e}")
+
         # Collect journalctl + dmesg final snapshot from client/fio nodes (accessible via SSH)
         for node in self.client_machines:
             try:

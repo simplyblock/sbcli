@@ -1403,6 +1403,7 @@ class K8sUtils:
                 self.logger.info(f"[K8sUtils] StorageBackup '{name}' is Done")
                 return res
             if phase == "failed":
+                self._dump_backup_diagnostics(name, ns)
                 raise AssertionError(
                     f"StorageBackup '{name}' failed: {status}")
             self.logger.info(
@@ -1410,9 +1411,70 @@ class K8sUtils:
                 f"(phase={status.get('phase', 'unknown')})"
             )
             time.sleep(10)
+        self._dump_backup_diagnostics(name, ns)
         raise TimeoutError(
             f"StorageBackup '{name}' not Done within {timeout}s"
         )
+
+    def _dump_backup_diagnostics(self, backup_name: str,
+                                  namespace: str) -> None:
+        """Log diagnostic info when a StorageBackup times out or fails."""
+        self.logger.error(
+            f"[backup-diag] StorageBackup '{backup_name}' did not reach Done. "
+            f"Dumping diagnostics..."
+        )
+        # 1. kubectl describe the StorageBackup CRD
+        try:
+            out, _ = self._exec_kubectl(
+                f"kubectl describe storagebackup {backup_name} -n {namespace}",
+                supress_logs=True,
+            )
+            self.logger.error(f"[backup-diag] describe storagebackup:\n{out}")
+        except Exception as e:
+            self.logger.warning(f"[backup-diag] describe failed: {e}")
+
+        # 2. Recent events in the namespace related to backup
+        try:
+            out, _ = self._exec_kubectl(
+                f"kubectl get events -n {namespace} --sort-by=.lastTimestamp "
+                f"--field-selector involvedObject.name={backup_name} "
+                f"2>/dev/null || true",
+                supress_logs=True,
+            )
+            if out and out.strip():
+                self.logger.error(f"[backup-diag] events:\n{out}")
+            else:
+                self.logger.error("[backup-diag] No events found for StorageBackup")
+        except Exception as e:
+            self.logger.warning(f"[backup-diag] events query failed: {e}")
+
+        # 3. admin-control pod logs (last 50 lines) — the operator that should reconcile
+        try:
+            out, _ = self._exec_kubectl(
+                f"kubectl logs -n {namespace} -l app=simplyblock-admin-control "
+                f"--tail=50 --all-containers 2>/dev/null || true",
+                supress_logs=True,
+            )
+            if out and out.strip():
+                self.logger.error(
+                    f"[backup-diag] admin-control logs (tail 50):\n{out}"
+                )
+        except Exception as e:
+            self.logger.warning(f"[backup-diag] admin-control logs failed: {e}")
+
+        # 4. tasks pod backup runner logs (last 50 lines)
+        try:
+            out, _ = self._exec_kubectl(
+                f"kubectl logs -n {namespace} -l app=simplyblock-tasks "
+                f"--tail=50 --all-containers 2>/dev/null || true",
+                supress_logs=True,
+            )
+            if out and out.strip():
+                self.logger.error(
+                    f"[backup-diag] tasks pod logs (tail 50):\n{out}"
+                )
+        except Exception as e:
+            self.logger.warning(f"[backup-diag] tasks pod logs failed: {e}")
 
     def get_storage_backup_id(self, name: str,
                                namespace: str = None) -> str:
