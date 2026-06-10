@@ -3711,22 +3711,57 @@ class TestBackupPolicyVersionsOne(BackupTestBase):
             sleep_n_sec(5)
 
         # TC-BCK-157: verify only 1 backup retained
-        # Retention pruning is async — poll until the policy trims old backups
-        self.logger.info("TC-BCK-157: Waiting for retention pruning (versions=1) …")
-        deadline = time.time() + 120  # wait up to 2 min
-        lvol_backups = []
-        while time.time() < deadline:
+        # Phase 1: wait until we see at least one 'merging' or 'merged' entry
+        #          (confirms the retention pruner has started working).
+        # Phase 2: wait until no 'merging'/'merged' entries remain for this
+        #          lvol, then assert ≤ 1 active backup.
+        _MERGING_STATUSES = {"merging", "merged"}
+        self.logger.info("TC-BCK-157: Phase 1 — waiting for merging to start …")
+        phase1_deadline = time.time() + 300  # up to 5 min for pruner to kick in
+        saw_merging = False
+        while time.time() < phase1_deadline:
             backups = self._list_backups()
-            lvol_backups = [
+            lvol_all = [
                 b for b in backups
                 if any(lvol_name in str(v) or lvol_id in str(v) for v in b.values())
             ]
-            self.logger.info(f"TC-BCK-157: Backups for lvol: {len(lvol_backups)}")
-            if len(lvol_backups) <= 2:
+            merging_entries = [
+                b for b in lvol_all
+                if str(b.get("Status") or b.get("status") or "").lower() in _MERGING_STATUSES
+            ]
+            if merging_entries:
+                self.logger.info(
+                    f"TC-BCK-157: Detected {len(merging_entries)} merging/merged "
+                    f"entry(ies) — pruning has started")
+                saw_merging = True
+                break
+            self.logger.info(f"TC-BCK-157: No merging yet, {len(lvol_all)} backups total")
+            sleep_n_sec(10)
+        assert saw_merging, \
+            "TC-BCK-157: Timed out waiting for retention pruner to start merging"
+
+        self.logger.info("TC-BCK-157: Phase 2 — waiting for merged entries to be cleaned up …")
+        phase2_deadline = time.time() + 600  # up to 10 min for cleanup
+        lvol_backups = []
+        while time.time() < phase2_deadline:
+            backups = self._list_backups()
+            lvol_all = [
+                b for b in backups
+                if any(lvol_name in str(v) or lvol_id in str(v) for v in b.values())
+            ]
+            merging_entries = [
+                b for b in lvol_all
+                if str(b.get("Status") or b.get("status") or "").lower() in _MERGING_STATUSES
+            ]
+            lvol_backups = [b for b in lvol_all if b not in merging_entries]
+            self.logger.info(
+                f"TC-BCK-157: {len(lvol_backups)} active, "
+                f"{len(merging_entries)} merging/merged")
+            if not merging_entries and len(lvol_backups) <= 1:
                 break
             sleep_n_sec(10)
-        assert len(lvol_backups) <= 2, \
-            f"versions=1 policy should keep ≤ 2 backups (delta + base), found {len(lvol_backups)}"
+        assert len(lvol_backups) <= 1, \
+            f"versions=1 policy should keep ≤ 1 backup after merge cleanup, found {len(lvol_backups)}"
         self.logger.info("TC-BCK-157: PASSED")
 
         # TC-BCK-158: restore latest backup

@@ -445,14 +445,10 @@ class SbcliUtils:
     def add_lvol(self, lvol_name, pool_name, size="256M", distr_ndcs=0, distr_npcs=0,
                  distr_bs=4096, distr_chunk_bs=4096, max_rw_iops=0, max_rw_mbytes=0,
                  max_r_mbytes=0, max_w_mbytes=0, host_id=None, retry=10,
-                 crypto=False, key1=None, key2=None, fabric="tcp", cluster_id=None,
+                 crypto=False, fabric="tcp", cluster_id=None,
                  max_namespace_per_subsys=None, namespace=None):
         """Adds lvol with given params
         """
-
-        if crypto:
-            if not key1 or not key2:
-                raise Exception("Need two keys for crypto lvols")
         lvols = self.list_lvols()
         for name in list(lvols.keys()):
             if name == lvol_name:
@@ -478,8 +474,6 @@ class SbcliUtils:
             body["host_id"] = host_id
         if crypto:
             body["crypto"] = True
-            body["crypto_key1"] = key1
-            body["crypto_key2"] = key2
         
         if max_namespace_per_subsys is not None:
             body["max_namespace_per_subsys"] = int(max_namespace_per_subsys)
