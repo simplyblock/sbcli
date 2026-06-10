@@ -1,5 +1,7 @@
 ### simplyblock e2e tests
 import argparse
+import os
+import shutil
 import traceback
 from __init__ import get_all_tests, get_security_tests, get_backup_tests, get_backup_stress_tests, ALL_TESTS
 from logger_config import setup_logger
@@ -222,6 +224,17 @@ def main():
             logger.error(f"Error During Teardown for test: {test.__name__}")
             logger.error(traceback.format_exc())
         finally:
+            # Copy e2e/logs/ folder to NFS so automation logs are accessible post-run
+            log_path = getattr(test_obj, "docker_logs_path", "")
+            if log_path:
+                logs_src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+                if os.path.isdir(logs_src):
+                    logs_dest = os.path.join(log_path, "automation_logs")
+                    try:
+                        shutil.copytree(logs_src, logs_dest, dirs_exist_ok=True)
+                        logger.info(f"Automation logs copied to: {logs_dest}")
+                    except Exception as _copy_err:
+                        logger.warning(f"Failed to copy automation logs to NFS: {_copy_err}")
             if not args.run_k8s and check_for_dumps():
                 logger.info("Found a core dump during test execution. "
                             "Cannot execute more tests as cluster is not stable. Exiting")

@@ -85,7 +85,7 @@ from utils.common_utils import sleep_n_sec
 
 
 def _rand_suffix(n: int = 6) -> str:
-    letters = string.ascii_uppercase
+    letters = string.ascii_lowercase
     return random.choice(letters) + "".join(
         random.choices(letters + string.digits, k=n - 1)
     )
@@ -827,12 +827,12 @@ class BackupTestBase(TestClusterBase):
         varying column names across sbcli versions.
         Note: backup list shows lvol name (not UUID) and snapshot name (not UUID).
         """
-        all_values = " ".join(str(v) for v in backup.values())
+        all_values = " ".join(str(v) for v in backup.values()).lower().replace("_", "-")
         if lvol_name:
-            assert lvol_name in all_values, \
+            assert lvol_name.lower().replace("_", "-") in all_values, \
                 f"Backup entry does not reference lvol_name {lvol_name}: {backup}"
         if snap_name:
-            assert snap_name in all_values, \
+            assert snap_name.lower().replace("_", "-") in all_values, \
                 f"Backup entry does not reference snapshot name {snap_name}: {backup}"
 
     def _wait_for_backup_by_snap(self, snap_name: str, label: str = "") -> str:
@@ -849,12 +849,15 @@ class BackupTestBase(TestClusterBase):
                                   backups: list = None) -> dict:
         """Return the backup entry that references *snap_name*, or None.
 
-        Note: backup list shows snapshot name (not snapshot UUID).
+        Matching is case-insensitive and normalizes underscores to hyphens
+        so that the original snap name (e.g. ``snap1_X7PCEW``) matches K8s
+        resource names (e.g. ``bck-snap1-x7pcew``).
         """
         if backups is None:
             backups = self._list_backups()
+        needle = snap_name.lower().replace("_", "-")
         for b in backups:
-            if any(snap_name in str(v) for v in b.values()):
+            if any(needle in str(v).lower().replace("_", "-") for v in b.values()):
                 return b
         return None
 
