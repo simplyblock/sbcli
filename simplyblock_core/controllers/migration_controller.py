@@ -815,11 +815,11 @@ def pre_create_on_target(lvol_id, target_node_id,
     overlap_ids = src_node_ids & tgt_node_ids
 
     # Ordered TGT entries: (node, rpc, port, min_cntlid)
-    tgt_entries = [(tgt_node, tgt_rpc, tgt_port, 2000)]
+    tgt_entries = [(tgt_node, tgt_rpc, tgt_port, 1)]
     if tgt_sec_node is not None:
         _sec_rpc2  = tgt_sec_node.rpc_client()
         _sec_port2 = tgt_sec_node.get_lvol_subsys_port(tgt_node.lvstore)
-        tgt_entries.append((tgt_sec_node, _sec_rpc2, _sec_port2, 3000))
+        tgt_entries.append((tgt_sec_node, _sec_rpc2, _sec_port2, 1000))
 
     sec_node = None   # populated for the secondary (used by connect strings below)
     sec_port = None
@@ -861,6 +861,13 @@ def pre_create_on_target(lvol_id, target_node_id,
                     logger.error(f"pre_create_on_target: crypto bdev setup on "
                                  f"{_node_id[:8]} failed: {_e}")
 
+        subsys_min_cntlid_used = set()
+        if _node_id in overlap_ids:
+            # Subsystem already exists from SRC role — add inaccessible listener
+            # at TGT port so clients can pre-connect to the future TGT endpoint.
+            subsys = _rpc.subsystem_list(nqn)[0]
+            subsys_min_cntlid_used.add(subsys.get('min_cntlid', 0))
+
         if _node_id in overlap_ids:
             # Subsystem already exists from SRC role — add inaccessible listener
             # at TGT port so clients can pre-connect to the future TGT endpoint.
@@ -879,6 +886,8 @@ def pre_create_on_target(lvol_id, target_node_id,
                         f"(non-fatal): {_e}")
         else:
             if not _rpc.subsystem_list(nqn):
+                if _min_cntlid in subsys_min_cntlid_used:
+                    _min_cntlid = _min_cntlid + 10000
                 _rpc.subsystem_create(
                     nqn, lvol.ha_type, lvol.uuid, min_cntlid=_min_cntlid,
                     max_namespaces=constants.LVO_MAX_NAMESPACES_PER_SUBSYS)
