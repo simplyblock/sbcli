@@ -1553,6 +1553,23 @@ jobs:
           test_wise="$(grep -E '(PASSED|FAILED|SKIPPED) CASE' "${out_log}" 2>/dev/null \
             | sed 's/\x1b\[[0-9;]*m//g' | sed 's/.*INFO - //' || true)"
 
+          # --- per-test log paths ---
+          # Build an associative map of test class name -> NFS log path.
+          # The log contains pairs:
+          #   "Running Test <class '...TestBackupBasicPositive'>"
+          #   "Logs Path: /mnt/nfs_share/backup_basic_positive-YYYYMMDD-HHMMSS"
+          declare -A test_log_paths
+          current_test=""
+          while IFS= read -r line; do
+            line="$(echo "$line" | sed 's/\x1b\[[0-9;]*m//g')"
+            if [[ "$line" =~ Running\ Test\ \<class\ \'.*\.([A-Za-z0-9_]+)\'\> ]]; then
+              current_test="${BASH_REMATCH[1]}"
+            elif [[ "$line" =~ Logs\ Path:\ (.+)$ && -n "$current_test" ]]; then
+              test_log_paths["$current_test"]="${BASH_REMATCH[1]}"
+              current_test=""
+            fi
+          done < <(grep -E 'Running Test <class|Logs Path:' "${out_log}" 2>/dev/null || true)
+
           # --- failure reason ---
           failure_summary="(unknown)"
           log_tail=""
@@ -1588,10 +1605,22 @@ jobs:
             echo ""
             echo "### Test Results"
             echo "- **Total:** ${total_cases} | **Passed:** ${passed_cnt} | **Failed:** ${failed_cnt} | **Skipped:** ${skipped_cnt}"
+            echo ""
             if [[ -n "${test_wise}" ]]; then
-              echo '```'
-              printf '%s\n' "${test_wise}"
-              echo '```'
+              echo "| Status | Test Case | NFS Log Path |"
+              echo "|--------|-----------|--------------|"
+              while IFS= read -r result_line; do
+                tc_name="$(echo "$result_line" | sed 's/ \(PASSED\|FAILED\|SKIPPED\) CASE\.$//')"
+                if echo "$result_line" | grep -q "PASSED"; then
+                  status_icon="PASSED"
+                elif echo "$result_line" | grep -q "FAILED"; then
+                  status_icon="FAILED"
+                else
+                  status_icon="SKIPPED"
+                fi
+                log_dir="${test_log_paths[$tc_name]:-—}"
+                echo "| ${status_icon} | \`${tc_name}\` | \`${log_dir}\` |"
+              done <<< "${test_wise}"
             fi
             echo ""
             echo "### Failure Reason"
