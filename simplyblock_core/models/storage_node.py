@@ -93,6 +93,10 @@ class StorageNode(BaseNodeObject):
     number_of_alceml_devices: int = 0
     nvme_devices: List[NVMeDevice] = []
     online_since: str = ""
+    # ISO timestamp of when this node entered STATUS_DOWN (cleared on any other
+    # status). Used to apply a grace window before a DOWN node counts toward the
+    # cluster suspend threshold — a transient DOWN must not suspend the cluster.
+    down_since: str = ""
     partitions_count: int = 0  # Unused
     poller_cpu_cores: List[int] = []
     ssd_pcie: List = []

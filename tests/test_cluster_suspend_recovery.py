@@ -38,11 +38,23 @@ with no restart queued.
 """
 
 import unittest
+from datetime import datetime, timezone, timedelta
 from unittest.mock import MagicMock, patch
 
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.nvme_device import NVMeDevice
+
+
+def _down_ts(seconds_ago):
+    """ISO timestamp `seconds_ago` in the past, for node.down_since."""
+    return (datetime.now(timezone.utc) - timedelta(seconds=seconds_ago)).isoformat()
+
+
+# storage_node_monitor.DOWN_SUSPEND_GRACE_SEC == 60: a DOWN node only counts
+# toward the suspend threshold once it has been DOWN at least that long.
+_SUSTAINED_DOWN = _down_ts(300)   # well past the 60s grace -> counts
+_TRANSIENT_DOWN = _down_ts(5)     # inside the grace window -> does NOT count
 
 
 # ---------------------------------------------------------------------------
@@ -59,12 +71,16 @@ def _dev(status=NVMeDevice.STATUS_ONLINE, uuid="dev-x"):
 
 def _node(uuid, status=StorageNode.STATUS_ONLINE, mgmt_ip=None,
           n_online_devs=2, n_offline_devs=0, cluster_id="cluster-1",
-          jm_vuid=999, rpc_port=8080, online_since=""):
+          jm_vuid=999, rpc_port=8080, online_since="", down_since=_SUSTAINED_DOWN):
     """Build a mock StorageNode with a populated nvme_devices list.
 
     The default 2 online / 0 offline devices matches a healthy node and
     also matches what ``set_node_down`` leaves behind (devices stay
     ONLINE even though node status flipped to DOWN).
+
+    ``down_since`` defaults to a sustained (>grace) timestamp so DOWN nodes
+    count toward the suspend bucket unless a test explicitly makes them
+    transient — this preserves the pre-grace-window assertions.
     """
     n = MagicMock(spec=StorageNode)
     n.status = status
@@ -76,6 +92,7 @@ def _node(uuid, status=StorageNode.STATUS_ONLINE, mgmt_ip=None,
     n.jm_vuid = jm_vuid
     n.rpc_port = rpc_port
     n.online_since = online_since
+    n.down_since = down_since
     n.lvstore = "LVS_X"
     n.lvstore_status = "ready"
     n.get_id = MagicMock(return_value=uuid)
@@ -212,6 +229,91 @@ class TestGetNextClusterStatusCountsNonOnline(unittest.TestCase):
         ]
         c = _cluster(distr_ndcs=1, distr_npcs=2)
         # 0 affected, 3 online -> ACTIVE
+        self.assertEqual(self._run(nodes, c), Cluster.STATUS_ACTIVE)
+
+
+# ===========================================================================
+# DOWN grace window: a transient DOWN must not tip the cluster into suspend
+# ===========================================================================
+
+
+class TestDownGraceWindow(unittest.TestCase):
+    """A DOWN node is temporary (SPDK + devices alive, only the client port is
+    blocked) and commonly self-heals in seconds. It must only count toward the
+    suspend threshold after DOWN_SUSPEND_GRACE_SEC (60s) — so a brief blip on a
+    third physical node can't tip an otherwise-survivable outage into a full
+    cluster suspend (incident 2026-06-08: cbc62adc DOWN ~6.5s suspended the
+    cluster). A sustained DOWN still counts so auto-restart can recover.
+    """
+
+    def _run(self, nodes, cluster):
+        from simplyblock_core.services import storage_node_monitor as mod
+        with patch.object(mod, "db") as mock_db:
+            mock_db.get_cluster_by_id.return_value = cluster
+            mock_db.get_primary_storage_nodes_by_cluster_id.return_value = nodes
+            return mod.get_next_cluster_status("cluster-1")
+
+    def test_transient_down_third_node_does_not_suspend(self):
+        # The incident shape: 2 physical nodes genuinely OFFLINE (affected==k,
+        # survivable) + a 3rd node only briefly DOWN. The transient DOWN must
+        # NOT be counted -> cluster stays DEGRADED, not SUSPENDED.
+        nodes = [
+            _node("off-1", status=StorageNode.STATUS_OFFLINE,
+                  mgmt_ip="10.0.0.1", n_online_devs=0, n_offline_devs=2),
+            _node("off-2", status=StorageNode.STATUS_OFFLINE,
+                  mgmt_ip="10.0.0.2", n_online_devs=0, n_offline_devs=2),
+            _node("down-transient", status=StorageNode.STATUS_DOWN,
+                  mgmt_ip="10.0.0.3", n_online_devs=2, n_offline_devs=0,
+                  down_since=_TRANSIENT_DOWN),
+            _node("on-1", status=StorageNode.STATUS_ONLINE, mgmt_ip="10.0.0.4"),
+        ]
+        c = _cluster(distr_ndcs=1, distr_npcs=2)
+        self.assertEqual(self._run(nodes, c), Cluster.STATUS_DEGRADED)
+
+    def test_sustained_down_third_node_suspends(self):
+        # Same shape but the 3rd node has been DOWN past the grace window:
+        # now it counts -> affected 3 > k=2 -> SUSPENDED (so auto-restart fires).
+        nodes = [
+            _node("off-1", status=StorageNode.STATUS_OFFLINE,
+                  mgmt_ip="10.0.0.1", n_online_devs=0, n_offline_devs=2),
+            _node("off-2", status=StorageNode.STATUS_OFFLINE,
+                  mgmt_ip="10.0.0.2", n_online_devs=0, n_offline_devs=2),
+            _node("down-sustained", status=StorageNode.STATUS_DOWN,
+                  mgmt_ip="10.0.0.3", n_online_devs=2, n_offline_devs=0,
+                  down_since=_SUSTAINED_DOWN),
+            _node("on-1", status=StorageNode.STATUS_ONLINE, mgmt_ip="10.0.0.4"),
+        ]
+        c = _cluster(distr_ndcs=1, distr_npcs=2)
+        self.assertEqual(self._run(nodes, c), Cluster.STATUS_SUSPENDED)
+
+    def test_transient_down_missing_timestamp_counts(self):
+        # Conservative fallback: a DOWN node with a blank down_since (legacy row
+        # / never stamped) is treated as sustained and still counts.
+        nodes = [
+            _node("off-1", status=StorageNode.STATUS_OFFLINE,
+                  mgmt_ip="10.0.0.1", n_online_devs=0, n_offline_devs=2),
+            _node("off-2", status=StorageNode.STATUS_OFFLINE,
+                  mgmt_ip="10.0.0.2", n_online_devs=0, n_offline_devs=2),
+            _node("down-blank", status=StorageNode.STATUS_DOWN,
+                  mgmt_ip="10.0.0.3", n_online_devs=2, n_offline_devs=0,
+                  down_since=""),
+            _node("on-1", status=StorageNode.STATUS_ONLINE, mgmt_ip="10.0.0.4"),
+        ]
+        c = _cluster(distr_ndcs=1, distr_npcs=2)
+        self.assertEqual(self._run(nodes, c), Cluster.STATUS_SUSPENDED)
+
+    def test_lone_transient_down_stays_active(self):
+        # A single transient DOWN with everything else healthy: not counted,
+        # cluster is ACTIVE (no degradation at all).
+        nodes = [
+            _node("down-transient", status=StorageNode.STATUS_DOWN,
+                  mgmt_ip="10.0.0.1", n_online_devs=2, n_offline_devs=0,
+                  down_since=_TRANSIENT_DOWN),
+            _node("on-1", status=StorageNode.STATUS_ONLINE, mgmt_ip="10.0.0.2"),
+            _node("on-2", status=StorageNode.STATUS_ONLINE, mgmt_ip="10.0.0.3"),
+            _node("on-3", status=StorageNode.STATUS_ONLINE, mgmt_ip="10.0.0.4"),
+        ]
+        c = _cluster(distr_ndcs=1, distr_npcs=2)
         self.assertEqual(self._run(nodes, c), Cluster.STATUS_ACTIVE)
 
 

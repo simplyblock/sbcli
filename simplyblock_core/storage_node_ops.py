@@ -4394,6 +4394,13 @@ def set_node_status(node_id, status, caused_by="monitor"):
             n.auto_restart_disabled = False
         else:
             n.online_since = ""
+        # Stamp/clear the DOWN entry time so get_next_cluster_status can apply a
+        # grace window: a transient DOWN (self-healing writer conflict) must not
+        # tip the cluster into suspend, but a sustained DOWN still must.
+        if status == StorageNode.STATUS_DOWN:
+            n.down_since = now
+        else:
+            n.down_since = ""
         return True
 
     # Atomic compare-and-set: the guard checks above are evaluated against the
@@ -5517,10 +5524,14 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
             logger.error("Error adding deferred hublvol failover path on %s: %s",
                          snode.get_id(), e)
 
-    ### 9- add lvols to subsystems (always non_optimized for non-leader)
+    ### 9- add lvols to subsystems (non_optimized for non-leader; INACCESSIBLE
+    # during (re)activation so no client IO flows before hublvol redirects are
+    # connected and leadership settles — cluster_activate sets the correct ANA
+    # in a dedicated pass before flipping the cluster to ACTIVE).
+    non_leader_ana_state = "inaccessible" if activation_mode else "non_optimized"
     executor = ThreadPoolExecutor(max_workers=50)
     for lvol in lvol_list:
-        executor.submit(add_lvol_thread, lvol, snode, lvol_ana_state="non_optimized")
+        executor.submit(add_lvol_thread, lvol, snode, lvol_ana_state=non_leader_ana_state)
     executor.shutdown(wait=True)
 
     if not activation_mode:
@@ -5843,7 +5854,15 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
             if lv.deletion_status == '':
                 lvol_list.append(lv)
 
-    lvol_ana_state = "optimized"
+    # During (re)activation, bring client-facing listeners up INACCESSIBLE so no
+    # client IO can flow before the hublvol redirects exist and leadership is
+    # settled (Pass 3 of cluster_activate). Surfacing them optimized here opens a
+    # window where this node serves writes with no redirect to its peers -> a
+    # dual-write / writer-conflict against a peer that is also mid-activation.
+    # cluster_activate sets the correct ANA state (optimized for primary,
+    # non_optimized for secondary/tertiary) in a dedicated pass before it flips
+    # the cluster to ACTIVE.
+    lvol_ana_state = "inaccessible" if activation_mode else "optimized"
 
     ### 2- create lvols nvmf subsystems (idempotent: probe SPDK first; mirrors
     ### the pattern in recreate_lvstore_on_non_leader so a re-activation that
