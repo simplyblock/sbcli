@@ -724,6 +724,32 @@ jobs:
       - name: Setup KMS (vault) for encryption
         if: ${{ github.event.inputs.use_existing_cluster != 'true' && github.event.inputs.tls_enabled == 'true' }}
         run: |
+          # Ensure vault namespace from previous run is fully terminated before installing.
+          echo "Checking if vault namespace is still terminating..."
+          for i in $(seq 1 60); do
+            NS_STATUS=$(kubectl get namespace vault -o jsonpath='{.status.phase}' 2>/dev/null || echo "gone")
+            if [ "$NS_STATUS" = "gone" ]; then
+              echo "vault namespace does not exist — ready to install."
+              break
+            fi
+            if [ "$NS_STATUS" = "Terminating" ]; then
+              echo "vault namespace still Terminating ($i/60), clearing stuck finalizers..."
+              kubectl get all -n vault --no-headers -o name 2>/dev/null | while read -r res; do
+                kubectl patch "$res" -n vault --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
+              done
+              kubectl patch namespace vault --type=merge -p '{"spec":{"finalizers":[]}}' 2>/dev/null || true
+            else
+              echo "vault namespace in phase '$NS_STATUS' ($i/60), waiting..."
+            fi
+            sleep 5
+          done
+          if kubectl get namespace vault &>/dev/null; then
+            echo "WARNING: vault namespace still exists after 300s, force-deleting resources..."
+            kubectl delete all --all -n vault --force --grace-period=0 2>/dev/null || true
+            kubectl delete namespace vault --force --grace-period=0 2>/dev/null || true
+            sleep 10
+          fi
+
           # Auto-detect default StorageClass for vault PVCs
           STORAGE_CLASS=$(kubectl get sc -o jsonpath='{.items[?(@.metadata.annotations.storageclass\.kubernetes\.io/is-default-class=="true")].metadata.name}' | awk '{print $1}')
           if [ -z "$STORAGE_CLASS" ]; then
