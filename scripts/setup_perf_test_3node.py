@@ -11,9 +11,9 @@ import select
 # --- INPUT PARAMETERS ---
 # 3 x i3en.12xlarge storage nodes (48 vCPU / 2 NUMA sockets each), single mgmt,
 # NO client. Branch: main. FTT 1+1 (ndcs=1, npcs=1). simplyblock deployed on
-# NUMA socket 0 only, using ~100% of that socket's cores (--cores-percentage is
-# per-socket and capped at 99 -> 23 of 24 socket-0 cores to SPDK; socket 1's
-# 24 cores left for the OS/rest).
+# NUMA socket 0 only, using 50% of that socket's cores (--cores-percentage is
+# per-socket -> 12 of 24 socket-0 cores to SPDK; the rest of socket 0 plus
+# socket 1's 24 cores left for the OS/rest).
 AMI_ID = "ami-0dfc569a8686b9320"  # Rocky 9 us-east-1
 KEY_NAME = "mtes01"
 KEY_PATH = os.path.expanduser("~/.ssh/mtes01.pem")
@@ -31,7 +31,7 @@ MGMT_TYPE = "m6i.2xlarge"
 # --- simplyblock NUMA / core allocation (per-socket) ---
 SOCKETS_TO_USE = "0"      # deploy SPDK on NUMA socket 0 only
 NODES_PER_SOCKET = 1
-CORES_PERCENTAGE = 98     # % of socket-0 cores for SPDK (CLI range is [0,99) -> max 98)
+CORES_PERCENTAGE = 50     # % of socket-0 cores for SPDK (CLI range is [0,99))
 
 # --- Fault tolerance: 1+1 (ndcs, npcs) ---
 NDCS = 1
@@ -334,7 +334,7 @@ def main():
     ], check=True)
     print("Phase 2a: DONE - cluster created.")
 
-    # --- Phase 2b: Configure storage nodes (socket 0 only, ~100% of its cores) ---
+    # --- Phase 2b: Configure storage nodes (socket 0 only, 50% of its cores) ---
     print("Phase 2b: Configuring storage nodes...")
     configure_cmd = (
         f"sudo /usr/local/bin/sbctl -d sn configure --max-lvol {MAX_LVOL}"
