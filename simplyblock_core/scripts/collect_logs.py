@@ -75,10 +75,6 @@ MAX_RESULT_WINDOW = 100_000
 # Docker Swarm service names that run on the management / control-plane node.
 CONTROL_PLANE_SERVICES_DOCKER = [
     "WebAppAPI",
-    "WebAppAPI2",
-    "WebAppAPI3",
-    "WebAppAPI4",
-    "WebAppAPI5",
     "fdb-server",
     "fdb-backup-agent",
     "StorageNodeMonitor",
@@ -1158,7 +1154,7 @@ def main():
                     out_f = node_dir / fname
                     gl_q = (
                         f'kubernetes_pod_name:{_gl_escape(pod_name)} '
-                        f'AND kubernetes_container_name:/.*{_gl_escape(cname)}.*/'
+                        f'AND kubernetes_container_name:.*{_gl_escape(cname)}.*'
                     )
                     n = fetch(
                         gl_query=gl_q,
