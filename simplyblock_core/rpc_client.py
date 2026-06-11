@@ -1504,7 +1504,7 @@ class RPCClient:
     def nvmf_port_block(self, port, is_reject=False):
         params = {
             "port": port,
-            "is_reject": bool(is_reject),
+            "reject": bool(is_reject),
         }
         return self._request_raise("nvmf_port_block", params)
 
