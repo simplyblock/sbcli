@@ -10,7 +10,7 @@ import select
 
 # --- INPUT PARAMETERS ---
 # 3 x i3en.12xlarge storage nodes (48 vCPU / 2 NUMA sockets each), single mgmt,
-# NO client. Branch: main. FTT 1+1 (ndcs=1, npcs=1). simplyblock deployed on
+# NO client. Branch: performance-optimization. FTT 1+1 (ndcs=1, npcs=1). simplyblock deployed on
 # NUMA socket 0 only, using 50% of that socket's cores (--cores-percentage is
 # per-socket -> 12 of 24 socket-0 cores to SPDK; the rest of socket 0 plus
 # socket 1's 24 cores left for the OS/rest).
@@ -19,7 +19,7 @@ KEY_NAME = "mtes01"
 KEY_PATH = os.path.expanduser("~/.ssh/mtes01.pem")
 AZ = "us-east-1a"
 SG_NAME = "default"
-BRANCH = "main"
+BRANCH = "performance-optimization"
 MAX_LVOL = "100"
 # --- Manual Network Config ---
 SUBNET_ID = "subnet-0593459d6b931ee4c"
