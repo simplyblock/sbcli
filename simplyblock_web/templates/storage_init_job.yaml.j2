@@ -11,6 +11,7 @@ spec:
         kubernetes.io/hostname: {{ HOSTNAME }}
       hostNetwork: true
       hostPID: true
+      dnsPolicy: ClusterFirstWithHostNet
       serviceAccountName: simplyblock-storage-node-sa
       tolerations:
         - effect: NoSchedule
@@ -112,7 +113,7 @@ spec:
                 NODE_HUGEPAGES_RAW=$(curl -s --cacert "$KUBE_CA" \
                   -H "Authorization: Bearer $KUBE_TOKEN" \
                   "https://kubernetes.default.svc/api/v1/nodes/$NODE_NAME" \
-                  | grep -o '"hugepages-2Mi":"[^"]*"' | head -1 | cut -d'"' -f4)
+                  | grep -o '"hugepages-2Mi": *"[^"]*"' | head -1 | grep -o '"[^"]*"$' | tr -d '"' -f4)
                 echo "[INFO] Node hugepages-2Mi reported by Kubernetes: $NODE_HUGEPAGES_RAW"
 
                 # Convert Kubernetes value (e.g. 13Gi) to kB to compare with /proc/meminfo
@@ -124,8 +125,11 @@ spec:
                 fi
                 echo "[INFO] Node hugepages-2Mi in kB: $NODE_HUGEPAGES_KB"
 
-                if [ "$HUGEPAGES_AFTER" -gt "$NODE_HUGEPAGES_KB" ]; then
-                  echo "[INFO] Hugepages increased beyond what Kubernetes knows ($HUGEPAGES_AFTER kB > $NODE_HUGEPAGES_KB kB), restarting kubelet..."
+                HUGEPAGES_AFTER_KB=$((HUGEPAGES_AFTER * 2048))
+                echo "[INFO] Hugepages after (kB): $HUGEPAGES_AFTER_KB"
+
+                if [ "$HUGEPAGES_AFTER_KB" -gt "$NODE_HUGEPAGES_KB" ]; then
+                  echo "[INFO] Hugepages increased beyond what Kubernetes knows ($HUGEPAGES_AFTER_KB kB > $NODE_HUGEPAGES_KB kB), restarting kubelet..."
                   nsenter --target 1 --mount --uts --ipc --net --pid -- /bin/sh -c '
                     if command -v systemctl >/dev/null 2>&1; then
                       if systemctl cat kubelet.service >/dev/null 2>&1; then
