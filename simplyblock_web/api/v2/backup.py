@@ -1,7 +1,7 @@
 from typing import Annotated, List, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel
 
 from simplyblock_core.db_controller import DBController
@@ -9,6 +9,7 @@ from simplyblock_core.controllers import backup_controller
 from simplyblock_core.models.backup import BackupPolicy
 from simplyblock_core.models.cluster import Cluster as ClusterModel
 from simplyblock_core.models.lvol_model import LVol
+from .util import CreationResponseFormatParameter, creation_response
 
 from .cluster import Cluster
 from .dtos import BackupDTO, BackupPolicyDTO
@@ -29,12 +30,20 @@ class _BackupSnapshotParams(BaseModel):
 
 
 @api.post('/', name='clusters:backups:create', status_code=201, responses={201: {"content": None}})
-def create_backup(cluster: Cluster, parameters: _BackupSnapshotParams) -> Response:
+def create_backup(request: Request, cluster: Cluster, parameters: _BackupSnapshotParams, response_format: CreationResponseFormatParameter = "empty") -> Response:
     backup_id, error = backup_controller.backup_snapshot(
         parameters.snapshot_id, cluster_id=cluster.get_id())
     if error:
         raise HTTPException(400, error)
-    return Response(status_code=201, headers={'X-Backup-Id': backup_id})
+
+    return creation_response(
+        request, response_format,
+        entity_id=UUID(backup_id),
+        route_name='clusters:backups:detail',
+        route_kwargs={'cluster_id': UUID(cluster.get_id())},
+        get_full=lambda id: BackupDTO.from_model(db.get_backup_by_id(str(id))),
+        extra_headers={'X-Backup-Id': backup_id},  # For backwards compatibility
+    )
 
 
 class _RestoreParams(BaseModel):
