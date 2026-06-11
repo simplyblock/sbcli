@@ -1,11 +1,12 @@
 from typing import List
+from uuid import UUID
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel
 
 from .._dependencies import Cluster, Migration
 from .._dtos import MigrationDTO
-
+from ..util import CreationResponseFormatParameter, creation_response
 
 api = APIRouter()
 
@@ -25,9 +26,10 @@ class _MigrateParams(BaseModel):
     deadline_seconds: int = 14400
 
 
-@api.post('/', name='clusters:migrations:create', status_code=201)
-def start_migration(cluster: Cluster, parameters: _MigrateParams):
+@api.post('/', name='clusters:migrations:create', status_code=201, responses={201: {"content": None}})
+def start_migration(request: Request, cluster: Cluster, parameters: _MigrateParams, response_format: CreationResponseFormatParameter = "identifier") -> Response:
     from simplyblock_core.controllers import migration_controller
+    from simplyblock_core.db_controller import DBController
     migration_id, error = migration_controller.start_migration(
         parameters.volume_id,
         parameters.target_node_id,
@@ -36,7 +38,13 @@ def start_migration(cluster: Cluster, parameters: _MigrateParams):
     )
     if error:
         raise HTTPException(400, error)
-    return {"migration_id": migration_id}
+    return creation_response(
+        request, response_format,
+        entity_id=UUID(migration_id),
+        route_name='clusters:migrations:detail',
+        route_kwargs={'cluster_id': UUID(cluster.get_id()), 'migration_id': UUID(migration_id)},
+        get_full=lambda id: MigrationDTO.from_model(DBController().get_migration_by_id(str(id))),
+    )
 
 
 instance_api = APIRouter(prefix='/{migration_id}')

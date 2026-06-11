@@ -1,6 +1,8 @@
 from threading import Thread
 from typing import Annotated, List, Literal, Optional
-from fastapi import APIRouter, HTTPException, Response
+from uuid import UUID
+
+from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 from pydantic.networks import AnyUrl, UrlConstraints
 
@@ -99,7 +101,7 @@ def list() -> List[ClusterDTO]:
 
 
 @api.post('/', name='clusters:create', status_code=201, responses={201: {"content": None}})
-def add(parameters: ClusterParams):
+def add(request: Request, parameters: ClusterParams, response_format: util.CreationResponseFormatParameter = "full"):
     try:
         params = parameters.model_dump(exclude_none=True)
         npcs = params.get('distr_npcs', 1)
@@ -113,7 +115,14 @@ def add(parameters: ClusterParams):
         raise ValueError('Failed to create cluster')
 
     cluster = db.get_cluster_by_id(cluster_id_or_false)
-    return ClusterDTO.from_model(cluster)
+
+    return util.creation_response(
+        request, response_format,
+        entity_id=UUID(cluster.get_id()),
+        route_name='clusters:detail',
+        route_kwargs={'cluster_id': UUID(cluster.get_id())},
+        get_full=lambda _: ClusterDTO.from_model(cluster),
+    )
 
 
 instance_api = APIRouter(prefix='/{cluster_id}')
