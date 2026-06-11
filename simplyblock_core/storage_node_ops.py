@@ -152,7 +152,11 @@ def _kill_spdk_until_dead(snode, max_attempts=3, poll_per_attempt_sec=5,
         deadline = time.time() + poll_per_attempt_sec
         while time.time() < deadline:
             try:
-                up = snode_api.spdk_process_is_up(snode.rpc_port, snode.cluster_id)
+                # spdk_process_is_up returns a (result, error) tuple; unpack it.
+                # Treating the raw tuple as a bool is always truthy, so the
+                # kill loop would never observe SPDK as down (it would burn all
+                # attempts and log a false "did NOT die" even after a clean kill).
+                up, _ = snode_api.spdk_process_is_up(snode.rpc_port, snode.cluster_id)
             except Exception:
                 up = False
             if not up:
