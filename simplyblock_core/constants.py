@@ -212,6 +212,12 @@ FAST_FAIL_TO=0
 RECONNECT_DELAY_CLUSTER=1
 LVOL_CLUSTER_RATIO=1
 
+# Per-branch feature gate for the SPDK compression-thread JM layout (see
+# calculate_core_allocations and device_controller.bdev_jm_create). OFF on
+# main: when False the CPU allocation and JM-create RPC are byte-for-byte
+# unchanged from the pre-compression-thread behaviour.
+JM_COMPRESSION_THREAD_ENABLED = False
+
 # Fixed size (in bytes) each distrib bdev reports up to the raid0/lvstore
 # layer, independent of cluster raw capacity or number_of_distribs. 1 PiB.
 #
