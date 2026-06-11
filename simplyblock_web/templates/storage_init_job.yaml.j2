@@ -106,12 +106,13 @@ spec:
                   echo "[INFO] Hugepages changed, restarting kubelet..."
                   nsenter --target 1 --mount --uts --ipc --net --pid -- /bin/sh -c '
                     if command -v systemctl >/dev/null 2>&1; then
-                      if systemctl restart kubelet 2>/dev/null; then
-                        echo "Kubelet restarted"
-                      elif systemctl restart k3s-agent 2>/dev/null; then
-                        echo "k3s-agent restarted"
+                      if systemctl cat kubelet.service >/dev/null 2>&1; then
+                        systemctl restart kubelet && echo "Kubelet restarted" || echo "Kubelet restart failed"
+                      elif systemctl cat k3s-agent.service >/dev/null 2>&1; then
+                        echo "kubelet service not found, restarting k3s-agent..."
+                        systemctl restart k3s-agent && echo "k3s-agent restarted" || echo "k3s-agent restart failed"
                       else
-                        echo "Neither kubelet nor k3s-agent could be restarted"
+                        echo "Neither kubelet nor k3s-agent service found, skipping restart"
                       fi
                     fi
                   '
