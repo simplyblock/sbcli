@@ -1,7 +1,8 @@
 from threading import Thread
 from typing import List, Optional
+from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Response
+from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from simplyblock_core.db_controller import DBController
@@ -11,7 +12,7 @@ from simplyblock_core import storage_node_ops
 from ... import util as util
 from ..._dependencies import Cluster, StorageNode
 from .device import api as device_api
-from ..._dtos import StorageNodeDTO
+from ..._dtos import StorageNodeDTO, TaskDTO
 
 
 api = APIRouter()
@@ -55,7 +56,7 @@ class StorageNodeParams(BaseModel):
 
 
 @api.post('/', name='clusters:storage-nodes:create', status_code=201, responses={201: {"content": None}})
-def add(cluster: Cluster, parameters: StorageNodeParams):
+def add(request: Request, cluster: Cluster, parameters: StorageNodeParams, response_format: util.CreationResponseFormatParameter = "identifier"):
     task_id_or_false = tasks_controller.add_node_add_task(
         cluster.get_id(),
         {
@@ -85,7 +86,14 @@ def add(cluster: Cluster, parameters: StorageNodeParams):
     )
     if not task_id_or_false:
         raise ValueError('Failed to create add-node task')
-    return task_id_or_false
+
+    return util.creation_response(
+        request, response_format,
+        entity_id=UUID(task_id_or_false),
+        route_name='clusters:tasks:detail',
+        route_kwargs={'cluster_id': UUID(cluster.get_id()), 'volume_id': UUID(task_id_or_false)},
+        get_full=lambda id: TaskDTO.from_model(db.get_task_by_id(str(id))),
+    )
 
 
 instance_api = APIRouter(prefix='/{storage_node_id}')

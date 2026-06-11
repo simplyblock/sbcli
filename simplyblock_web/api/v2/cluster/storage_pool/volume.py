@@ -1,4 +1,5 @@
 from typing import Annotated, List, Literal, Optional, Union
+from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field, RootModel
@@ -60,7 +61,8 @@ class _CloneParams(BaseModel):
 @api.post('/', name='clusters:storage-pools:volumes:create', status_code=201, responses={201: {"content": None}})
 def add(
         request: Request, cluster: Cluster, pool: StoragePool,
-        parameters: RootModel[Union[_CreateParams, _CloneParams]]
+        parameters: RootModel[Union[_CreateParams, _CloneParams]],
+        response_format: util.CreationResponseFormatParameter = "empty",
 ) -> Response:
     data = parameters.root
     try:
@@ -110,13 +112,17 @@ def add(
     if volume_id_or_false == False:  # noqa
         raise ValueError(error)
 
-    entity_url = request.app.url_path_for(
-            'clusters:storage-pools:volumes:detail',
-            cluster_id=cluster.get_id(),
-            pool_id=pool.get_id(),
-            volume_id=volume_id_or_false,
+    return util.creation_response(
+        request, response_format,
+        entity_id=UUID(volume_id_or_false),
+        route_name='clusters:storage-pools:volumes:detail',
+        route_kwargs={
+            'cluster_id': UUID(cluster.get_id()),
+            'pool_id': UUID(pool.get_id()),
+            'volume_id': UUID(volume_id_or_false),
+        },
+        get_full=lambda id: VolumeDTO.from_model(db.get_lvol_by_id(str(id)), request, cluster.get_id()),
     )
-    return Response(status_code=201, headers={'Location': entity_url})
 
 
 class ReplicateLVolParams(BaseModel):
