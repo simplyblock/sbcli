@@ -106,7 +106,8 @@ spec:
 
               if [ "$OS_ID" != "talos" ]; then
                 HUGEPAGES_AFTER=$(grep HugePages_Total /proc/meminfo | awk '{print $2}')
-                echo "[INFO] Hugepages after: $HUGEPAGES_AFTER"
+                HUGEPAGES_AFTER_KB=$((HUGEPAGES_AFTER * 2048))
+                echo "[INFO] Hugepages after (kB): $HUGEPAGES_AFTER_KB"
 
                 KUBE_TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
                 KUBE_CA=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
@@ -125,8 +126,6 @@ spec:
                 fi
                 echo "[INFO] Node hugepages-2Mi in kB: $NODE_HUGEPAGES_KB"
 
-                HUGEPAGES_AFTER_KB=$((HUGEPAGES_AFTER * 2048))
-                echo "[INFO] Hugepages after (kB): $HUGEPAGES_AFTER_KB"
 
                 if [ "$HUGEPAGES_AFTER_KB" -gt "$NODE_HUGEPAGES_KB" ]; then
                   echo "[INFO] Hugepages increased beyond what Kubernetes knows ($HUGEPAGES_AFTER_KB kB > $NODE_HUGEPAGES_KB kB), restarting kubelet..."
