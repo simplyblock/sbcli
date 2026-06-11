@@ -139,13 +139,13 @@ def _create_crypto_lvol(rpc_client, lvol, cluster):
 
     with create_kms_connection(cluster) as kms:
         try:
-            original_key1, original_key2 = kms.get_data_encryption_keys(lvol)
+            wrapped_keys = kms.get_wrapped_data_encryption_keys(lvol)
         except KMSException:
             logger.exception(f"Failed to get keys for lvol: {name} from KMS")
             return False
 
     key_name = f'key_{name}'
-    ret = rpc_client.lvol_crypto_key_create(key_name, original_key1, original_key2)
+    ret = rpc_client.lvol_crypto_key_create(key_name, wrapped_keys)
     if not ret:
         # SPDK returns failure when the key name already exists. On
         # re-activation that's the same node re-issuing the same key —

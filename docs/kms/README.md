@@ -50,6 +50,10 @@ kubectl -n vault exec -it vault-0 -- env VAULT_ADDR=https://vault.vault:8200/ VA
 Using this shell, configure the vault. Note that the certificate path needs to be adapted depending on Openbao/HCP-vault:
 ```
 # Configure auth
+
+# The web API manages KEKs, generates and stores wrapped DEKs, but never
+# performs decryption — plaintext key material is only ever produced on the
+# storage node by the SPDK proxy.
 $CLI policy write simplyblock-webappapi-policy - <<EOF
 path "simplyblock/transit/keys/*" {
   capabilities = ["create", "update", "read", "delete"]
@@ -64,22 +68,37 @@ path "simplyblock/transit/datakey/wrapped/*" {
 }
 
 path "simplyblock/transit/encrypt/*" {
-  capabilities = ["create", "update"]
-}
-
-path "simplyblock/transit/decrypt/*" {
-  capabilities = ["create", "update"]
+  capabilities = ["update"]
 }
 
 path "simplyblock/kv/*" {
   capabilities = ["create", "read", "update", "delete"]
 }
 EOF
+
+# The SPDK proxy receives wrapped DEKs from the control plane and decrypts
+# them locally on the storage node. It requires no access to the KV store
+# or key management operations.
+$CLI policy write simplyblock-spdk-proxy-policy - <<EOF
+path "simplyblock/transit/decrypt/*" {
+  capabilities = ["update"]
+}
+EOF
+
 $CLI auth enable cert
 $CLI write auth/cert/certs/simplyblock-webappapi \
     certificate=@/{openbao,vault}/tls/ca.crt \
     allowed_dns_sans="simplyblock-webappapi" \
     token_policies=simplyblock-webappapi-policy \
+    token_ttl=10m \
+    token_max_ttl=30m
+
+# The allowed_dns_sans value must match the DNS SAN present in the TLS
+# certificate issued to the storage node pods.
+$CLI write auth/cert/certs/simplyblock-spdk-proxy \
+    certificate=@/{openbao,vault}/tls/ca.crt \
+    allowed_dns_sans="simplyblock-storagenode" \
+    token_policies=simplyblock-spdk-proxy-policy \
     token_ttl=10m \
     token_max_ttl=30m
 
