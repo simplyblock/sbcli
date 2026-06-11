@@ -17,7 +17,7 @@ then
   echo '{
   "log-driver": "json-file",
   "log-opts": {
-    "max-size": "30m",
+    "max-size": "300m",
     "max-file": "3"
   }
 }

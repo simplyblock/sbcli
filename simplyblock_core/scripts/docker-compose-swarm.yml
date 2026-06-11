@@ -5,6 +5,8 @@ x-service-base: &service-base
     driver: gelf
     options:
       gelf-address: "tcp://${CLUSTER_IP}:12202"
+      "mode": "non-blocking",
+      "max-buffer-size": "40m"
 
 
 services:
