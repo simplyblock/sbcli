@@ -337,7 +337,7 @@ def main():
     # --- Phase 2b: Configure storage nodes (socket 0 only, 50% of its cores) ---
     print("Phase 2b: Configuring storage nodes...")
     configure_cmd = (
-        f"sudo /usr/local/bin/sbctl -d sn configure --max-lvol {MAX_LVOL}"
+        f"sudo /usr/local/bin/sbctl -d sn configure --max-subsys {MAX_LVOL}"
         f" --sockets-to-use {SOCKETS_TO_USE}"
         f" --nodes-per-socket {NODES_PER_SOCKET}"
         f" --cores-percentage {CORES_PERCENTAGE}"

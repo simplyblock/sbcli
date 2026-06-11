@@ -94,7 +94,7 @@ class CLIWrapperBase:
 
     def storage_node__configure(self, sub_command, args):
         if not args.max_lvol:
-            self.parser.error(f"Mandatory argument '--max-lvol' not provided for {sub_command}")
+            self.parser.error(f"Mandatory argument '--max-subsys' not provided for {sub_command}")
         max_size = getattr(args, "max_prov") or 0
         number_of_devices = getattr(args, "number_of_devices") or 0
         sockets_to_use = [0]

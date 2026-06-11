@@ -93,7 +93,7 @@ class CLIWrapper(CLIWrapperBase):
 
     def init_storage_node__configure(self, subparser):
         subcommand = self.add_sub_command(subparser, 'configure', 'Prepare a configuration file to be used when adding the storage node.')
-        argument = subcommand.add_argument('--max-lvol', help='The max logical volume per storage node.', type=int, dest='max_lvol', required=True)
+        argument = subcommand.add_argument('--max-subsys', help='The max number of subsystems per storage node.', type=int, dest='max_lvol', required=True)
         argument = subcommand.add_argument('--max-size', help='The maximum amount of Huge Pages to be set on the node.', type=str, dest='max_prov', required=False)
         argument = subcommand.add_argument('--nodes-per-socket', help='The number of each node to be added per each socket. Default: `1`.', type=int, default=1, dest='nodes_per_socket')
         argument = subcommand.add_argument('--sockets-to-use', help='The system socket to use when adding the storage nodes. Default: `0`.', type=str, default='0', dest='sockets_to_use')
@@ -104,7 +104,7 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--size-range', help='NVMe SSD device size range separated by -, can be X(m,g,t) or bytes as integer, example: --size-range 50G-1T or --size-range 1232345-67823987, --device-model and --size-range must be set together.', type=str, default='', dest='size_range', required=False)
         argument = subcommand.add_argument('--nvme-names', help='Comma separated list of nvme namespace names like nvme0n1,nvme1n1.', type=str, default='', dest='nvme_names', required=False)
         argument = subcommand.add_argument('--force', help='Force format detected or passed nvme pci address to 4K and clean partitions.', dest='force', action='store_true')
-        argument = subcommand.add_argument('--calculate-hp-only', help='Calculate the minimum required huge pages, it depends on the following params: --cores-percentage, --sockets-to-use, --max-lvol, --nodes-per-socket, --number-of-devices.', dest='calculate_hp_only', action='store_true')
+        argument = subcommand.add_argument('--calculate-hp-only', help='Calculate the minimum required huge pages, it depends on the following params: --cores-percentage, --sockets-to-use, --max-subsys, --nodes-per-socket, --number-of-devices.', dest='calculate_hp_only', action='store_true')
         argument = subcommand.add_argument('--number-of-devices', help='Number of devices that will be used on this host. For calculating huge pages memory only.', type=int, dest='number_of_devices')
 
     def init_storage_node__configure_upgrade(self, subparser):
@@ -175,7 +175,7 @@ class CLIWrapper(CLIWrapperBase):
     def init_storage_node__restart(self, subparser):
         subcommand = self.add_sub_command(subparser, 'restart', 'Restarts a storage node.')
         subcommand.add_argument('node_id', help='Storage node id', type=str).completer = self._completer_get_sn_list
-        argument = subcommand.add_argument('--max-lvol', help='The max logical volume per storage node. Default: `0`.', type=int, default=0, dest='max_lvol')
+        argument = subcommand.add_argument('--max-subsys', help='The max number of subsystems per storage node. Default: `0`.', type=int, default=0, dest='max_lvol')
         if self.developer_mode:
             argument = subcommand.add_argument('--max-snap', help='The max snapshot per storage node. Default: `5000`.', type=int, default=5000, dest='max_snap')
         if self.developer_mode:
