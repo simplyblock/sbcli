@@ -476,27 +476,51 @@ def calculate_core_allocations(vcpu_list, alceml_count=2):
         return vcpus[:count]
 
     assigned = {}
+    # Compression-thread CPU layout (gated per-branch, off on main):
+    #  - <32 vCPU: the lvs thread (lvol_poller) co-locates with the app thread to
+    #    free a core, and the compression thread co-locates with jc-singleton.
+    #  - >=32 vCPU: the lvs thread keeps its own core and the compression thread
+    #    gets a dedicated core.
+    # When the gate is off the original layout is reproduced exactly.
+    comp_enabled = constants.JM_COMPRESSION_THREAD_ENABLED
+    colocate_lvs = comp_enabled and len(vcpu_list) < 32
+    dedicate_comp = comp_enabled and len(vcpu_list) >= 32
     if (len(vcpu_list) < 12):
-        vcpu = reserve_n(5)
+        vcpu = reserve_n(4 if colocate_lvs else 5)
         assigned["app_thread_core"] = vcpu[0:1]
         assigned["jm_cpu_core"] = vcpu[1:2]
         assigned["jc_singleton_core"] = vcpu[2:3]
         assigned["alceml_cpu_cores"] = vcpu[3:4]
-        assigned["lvol_poller_core"] = vcpu[4:5]
+        assigned["lvol_poller_core"] = vcpu[0:1] if colocate_lvs else vcpu[4:5]
     elif (len(vcpu_list) < 22):
-        vcpu = reserve_n(6)
+        vcpu = reserve_n(5 if colocate_lvs else 6)
         assigned["app_thread_core"] = vcpu[0:1]
         assigned["jm_cpu_core"] = vcpu[1:2]
         assigned["jc_singleton_core"] = vcpu[2:3]
         assigned["alceml_cpu_cores"] = vcpu[3:5]
-        assigned["lvol_poller_core"] = vcpu[5:6]
+        assigned["lvol_poller_core"] = vcpu[0:1] if colocate_lvs else vcpu[5:6]
     else:
-        vcpus = reserve_n(4+alceml_count)
+        # base threads: app, jm, jc (+ own lvol_poller unless co-located) (+ dedicated compression)
+        base = 3 if colocate_lvs else 4
+        if dedicate_comp:
+            base += 1
+        vcpus = reserve_n(base + alceml_count)
         assigned["app_thread_core"] = vcpus[0:1]
         assigned["jm_cpu_core"] = vcpus[1:2]
         assigned["jc_singleton_core"] = vcpus[2:3]
-        assigned["lvol_poller_core"] = vcpus[3:4]
-        assigned["alceml_cpu_cores"] = vcpus[4:4+alceml_count]
+        idx = 3
+        if colocate_lvs:
+            assigned["lvol_poller_core"] = vcpus[0:1]
+        else:
+            assigned["lvol_poller_core"] = vcpus[idx:idx + 1]
+            idx += 1
+        if dedicate_comp:
+            assigned["compression_core"] = vcpus[idx:idx + 1]
+            idx += 1
+        assigned["alceml_cpu_cores"] = vcpus[idx:idx + alceml_count]
+    # Compression thread co-locates with jc-singleton unless it got a dedicated core.
+    if comp_enabled and "compression_core" not in assigned:
+        assigned["compression_core"] = assigned.get("jc_singleton_core", [])
     dp = int(len(remaining) / 2)
     if 17 > dp >= 12:
         poller_n = len(remaining) - 12
@@ -530,6 +554,7 @@ def calculate_core_allocations(vcpu_list, alceml_count=2):
         assigned.get("distrib_cpu_cores", []),
         assigned.get("jc_singleton_core", []),
         assigned.get("lvol_poller_core", []),
+        assigned.get("compression_core", []),
     )
 
 
@@ -1745,7 +1770,8 @@ def regenerate_config(new_config, old_config, force=False):
                 "alceml_worker_cpu_cores": get_core_indexes(core_to_index, distribution[4]),
                 "distrib_cpu_cores": get_core_indexes(core_to_index, distribution[5]),
                 "jc_singleton_core": get_core_indexes(core_to_index, distribution[6]),
-                "lvol_poller_core": get_core_indexes(core_to_index, distribution[7])}
+                "lvol_poller_core": get_core_indexes(core_to_index, distribution[7]),
+                "compression_core": get_core_indexes(core_to_index, distribution[8])}
 
         isolated_cores = old_config["nodes"][i]["isolated"]
         number_of_distribs = 2
@@ -1899,7 +1925,8 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
                     #                                            core_group["distribution"][4]),
                     "distrib_cpu_cores": get_core_indexes(core_group["core_to_index"], core_group["distribution"][5]),
                     "jc_singleton_core": get_core_indexes(core_group["core_to_index"], core_group["distribution"][6]),
-                    "lvol_poller_core": get_core_indexes(core_group["core_to_index"], core_group["distribution"][7])
+                    "lvol_poller_core": get_core_indexes(core_group["core_to_index"], core_group["distribution"][7]),
+                    "compression_core": get_core_indexes(core_group["core_to_index"], core_group["distribution"][8])
                 },
                 "ssd_pcis": [],
                 "nic_ports": system_info[nid]["nics"]
@@ -3344,7 +3371,8 @@ def recalculate_cores_distribution(cores, number_of_alcemls):
         "alceml_worker_cpu_cores": get_core_indexes(core_to_index, distribution[4]),
         "distrib_cpu_cores": get_core_indexes(core_to_index, distribution[5]),
         "jc_singleton_core": get_core_indexes(core_to_index, distribution[6]),
-        "lvol_poller_core": get_core_indexes(core_to_index, distribution[7])}
+        "lvol_poller_core": get_core_indexes(core_to_index, distribution[7]),
+        "compression_core": get_core_indexes(core_to_index, distribution[8])}
 
 
 def resolve_address(host_port: str) -> str:

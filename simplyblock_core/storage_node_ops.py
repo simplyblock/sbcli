@@ -5576,9 +5576,7 @@ def _release_lvs_subsys_port_on_peers(lvs_node, exclude_node_id, db_controller):
             peer = db_controller.get_storage_node_by_id(pid)
             if not peer or peer.status != StorageNode.STATUS_ONLINE:
                 continue
-            port_type = "udp" if peer.active_rdma else "tcp"
-            FirewallClient(peer, timeout=5, retry=2).firewall_set_port(
-                port, port_type, "allow", peer.rpc_port)
+            port_block.set_port(peer, port, block=False, timeout=5, retry=2)
             tcp_ports_events.port_allowed(peer, port)
             logger.info("Defensive unblock: allowed LVS port %s on peer %s after "
                         "failed recreate of %s", port, pid, lvs_node.lvstore)

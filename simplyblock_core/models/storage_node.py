@@ -69,6 +69,7 @@ class StorageNode(BaseNodeObject):
     iobuf_small_pool_count: int = 0
     is_secondary_node: bool = False
     jc_singleton_mask: str = ""
+    compression_cpu_mask: str = ""
     jm_cpu_mask: str = ""
     jm_device: JMDevice = None # type: ignore[assignment]
     jm_percent: int = 3
