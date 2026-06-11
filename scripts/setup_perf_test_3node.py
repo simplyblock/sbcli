@@ -46,6 +46,38 @@ IFACE = "eth0"
 MAX_LVOL = "100"
 
 
+# --- Rocky 9 public-mirror fallback for package installs ---
+# AWS RHUI (rhui.us-east-1.aws.ce.redhat.com) intermittently rate-limits/refuses
+# our egress IP under parallel load, hanging dnf on repo-metadata downloads until
+# the 600s SSH timeout. These leaf tools are ABI-compatible across the RHEL9
+# family, so install them from Rocky Linux 9's public mirrors via a temporary,
+# disabled-by-default repo, bypassing RHUI.
+ROCKY_REPO_SETUP = (
+    "sudo sh -c 'cat >/etc/yum.repos.d/rocky-temp.repo <<EOF\n"
+    "[rocky-baseos]\n"
+    "name=Rocky9 BaseOS\n"
+    "baseurl=https://dl.rockylinux.org/pub/rocky/9/BaseOS/x86_64/os/\n"
+    "gpgcheck=0\n"
+    "enabled=0\n"
+    "\n"
+    "[rocky-appstream]\n"
+    "name=Rocky9 AppStream\n"
+    "baseurl=https://dl.rockylinux.org/pub/rocky/9/AppStream/x86_64/os/\n"
+    "gpgcheck=0\n"
+    "enabled=0\n"
+    "EOF'"
+)
+
+
+def rocky_install(packages):
+    """dnf install <packages> from the Rocky mirrors only, with a light retry for transient blips."""
+    return (
+        "sudo sh -c 'for i in 1 2 3; do "
+        "dnf --disablerepo=\"*\" --enablerepo=\"rocky-*\" install -y " + packages + " && exit 0; "
+        "echo \"rocky dnf attempt $i failed; sleeping 10s\"; sleep 10; done; exit 1'"
+    )
+
+
 # --- Helper: Management Node with 30GB Root ---
 def launch_mgmt():
     print("Launching Management Node with 30GB Root Volume...")
@@ -312,7 +344,8 @@ def main():
 
     # --- Phase 1: Parallel install ---
     install_cmds = [
-        "sudo dnf install git python3-pip nvme-cli -y",
+        ROCKY_REPO_SETUP,
+        rocky_install("git python3-pip nvme-cli"),
         "sudo /usr/bin/python3 -m pip install --upgrade pip setuptools wheel",
         "sudo /usr/bin/python3 -m pip install ruamel.yaml",
         f"sudo pip install git+https://github.com/simplyblock-io/sbcli@{BRANCH} --upgrade --force --ignore-installed requests",
