@@ -1056,7 +1056,8 @@ class RPCClient:
         }
         return self._request("ultra21_lvol_dismount", params)
 
-    def bdev_jm_create(self, name, name_storage1, block_size=4096, jm_cpu_mask="", shared_placement=False):
+    def bdev_jm_create(self, name, name_storage1, block_size=4096, jm_cpu_mask="", shared_placement=False,
+                       compression_thread=False, compression_cpu_mask=""):
         params = {
             "name": name,
             "name_storage1": name_storage1,
@@ -1072,6 +1073,14 @@ class RPCClient:
             params["shared_placement"] = True
         if jm_cpu_mask:
             params["bdb_lcpu_mask"] = int(jm_cpu_mask, 16)
+        # Compression thread: enabled per-branch (constants.JM_COMPRESSION_THREAD_ENABLED).
+        # compression_cpu_mask is a hex mask string co-located with jc-singleton on
+        # nodes <32 vCPU, or a dedicated core on >=32 vCPU; the data plane wants it as
+        # an int, matching bdb_lcpu_mask above.
+        if compression_thread:
+            params["compression_thread"] = True
+            if compression_cpu_mask:
+                params["compression_cpu_mask"] = int(compression_cpu_mask, 16)
         return self._request("bdev_jm_create", params)
 
     def bdev_jm_delete(self, name, safe_removal=False):

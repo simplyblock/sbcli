@@ -678,7 +678,9 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
 
     jm_bdev = f"jm_{snode.get_id()}"
     ret = rpc_client.bdev_jm_create(jm_bdev, alceml_name, jm_cpu_mask=snode.jm_cpu_mask,
-                                    shared_placement=cluster.shared_placement)
+                                    shared_placement=cluster.shared_placement,
+                                    compression_thread=constants.JM_COMPRESSION_THREAD_ENABLED,
+                                    compression_cpu_mask=snode.compression_cpu_mask)
     if not ret:
         logger.error(f"Failed to create {jm_bdev}")
         return False
@@ -766,7 +768,9 @@ def _create_jm_stack_on_device(rpc_client, nvme, snode, after_restart):
 
     jm_bdev = f"jm_{snode.get_id()}"
     ret = rpc_client.bdev_jm_create(jm_bdev, alceml_name, jm_cpu_mask=snode.jm_cpu_mask,
-                                    shared_placement=cluster.shared_placement)
+                                    shared_placement=cluster.shared_placement,
+                                    compression_thread=constants.JM_COMPRESSION_THREAD_ENABLED,
+                                    compression_cpu_mask=snode.compression_cpu_mask)
     if not ret:
         logger.error(f"Failed to create {jm_bdev}")
         return False
@@ -1164,7 +1168,9 @@ def _prepare_cluster_devices_on_restart(snode, clear_data=False):
 
         jm_bdev = f"jm_{snode.get_id()}"
         ret = rpc_client.bdev_jm_create(jm_bdev, jm_device.alceml_bdev, jm_cpu_mask=snode.jm_cpu_mask,
-                                        shared_placement=cluster.shared_placement)
+                                        shared_placement=cluster.shared_placement,
+                                        compression_thread=constants.JM_COMPRESSION_THREAD_ENABLED,
+                                        compression_cpu_mask=snode.compression_cpu_mask)
         if not ret:
             logger.error(f"Failed to create {jm_bdev}")
             return False
@@ -1635,6 +1641,8 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         alceml_worker_cpu_index = 0
         distrib_cpu_index = 0
         jc_singleton_mask = ""
+        compression_cpu_mask = ""
+        compression_core = None
 
         req_cpu_count = len(node_config.get("isolated"))
 
@@ -1782,6 +1790,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             jm_cpu_core = new_distribution.get("jm_cpu_core")
             lvol_poller_core = new_distribution.get("lvol_poller_core")
             lvol_poller_mask = utils.generate_mask(lvol_poller_core)
+            compression_core = new_distribution.get("compression_core")
         else:
             poller_cpu_cores = node_config.get("distribution").get("poller_cpu_cores")
             alceml_cpu_cores = node_config.get("distribution").get("alceml_cpu_cores")
@@ -1792,6 +1801,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             jm_cpu_core = node_config.get("distribution").get("jm_cpu_core")
             lvol_poller_core =  node_config.get("distribution").get("lvol_poller_core")
             lvol_poller_mask = utils.generate_mask(lvol_poller_core)
+            compression_core = node_config.get("distribution").get("compression_core")
 
         number_of_distribs = node_config.get("number_of_distribs")
 
@@ -1800,6 +1810,8 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
 
         if jc_singleton_core:
             jc_singleton_mask = utils.decimal_to_hex_power_of_2(jc_singleton_core[0])
+        if compression_core:
+            compression_cpu_mask = utils.generate_mask(compression_core)
         jm_cpu_mask = utils.generate_mask(jm_cpu_core)
 
 
@@ -1910,6 +1922,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         snode.alceml_worker_cpu_cores = alceml_worker_cpu_cores
         snode.distrib_cpu_cores = distrib_cpu_cores
         snode.jc_singleton_mask = jc_singleton_mask or ""
+        snode.compression_cpu_mask = compression_cpu_mask or ""
         snode.nvmf_port = utils.get_next_dev_port(cluster_id)
         snode.poller_cpu_cores = poller_cpu_cores or []
         snode.socket = node_socket
@@ -2687,6 +2700,9 @@ def _restart_storage_node_impl(
 
         if jc_singleton_core:
             snode.jc_singleton_mask = utils.decimal_to_hex_power_of_2(jc_singleton_core[0])
+        compression_core = new_distribution.get("compression_core")
+        if compression_core:
+            snode.compression_cpu_mask = utils.generate_mask(compression_core)
         snode.jm_cpu_mask = utils.generate_mask(jm_cpu_core)
 
     if not results:
