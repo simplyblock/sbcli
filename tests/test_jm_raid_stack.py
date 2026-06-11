@@ -11,7 +11,6 @@ for different drive counts, with the RPC client and dependencies mocked.
 """
 
 import os
-import sys
 import unittest
 from unittest.mock import MagicMock, patch
 
