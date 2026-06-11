@@ -212,6 +212,17 @@ FAST_FAIL_TO=0
 RECONNECT_DELAY_CLUSTER=1
 LVOL_CLUSTER_RATIO=1
 
+# Fixed size (in bytes) each distrib bdev reports up to the raid0/lvstore
+# layer, independent of cluster raw capacity or number_of_distribs. 1 PiB.
+#
+# BIRTH-TIME ONLY: this is the size used when an lvstore is first created
+# (create_lvstore). It must NEVER be read on the recreate/restart path --
+# recreate_lvstore replays the persisted lvstore_stack verbatim, preserving
+# each distrib's original num_blocks. Resizing a distrib under a live
+# raid0/lvstore would corrupt the geometry, so existing lvstores must keep
+# their persisted size across upgrades even if this constant changes.
+DISTRIB_SIZE_BYTES = 1125899906842624
+
 
 SENTRY_SDK_DNS = "https://745047b017ac424b4173550e19910fb7@o4508953941311488.ingest.de.sentry.io/4508996361584720"
 ONE_KB = 1024

@@ -6597,7 +6597,9 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
     lvstore_stack: List[dict] = []
     distrib_list = []
     distrib_vuids = []
-    size = max_size // snode.number_of_distribs
+    # Fixed size per distrib, reported up to the raid0/lvstore layer,
+    # regardless of cluster raw capacity (max_size) or number_of_distribs.
+    size = constants.DISTRIB_SIZE_BYTES
     distr_page_size = page_size_in_blocks
     # distr_page_size = (ndcs + npcs) * page_size_in_blocks
     # cluster_sz = ndcs * page_size_in_blocks
