@@ -440,6 +440,25 @@ jobs:
             kubectl -n $NAMESPACE delete $RTYPE --all --force --grace-period=0 2>/dev/null || true
           done
 
+          echo "=== Phase 4: Cleanup cluster-scoped and kube-system resources ==="
+          for SC in $(kubectl get sc --no-headers -o custom-columns=:metadata.name 2>/dev/null | grep -i simplyblock 2>/dev/null); do
+            kubectl delete sc "$SC" --ignore-not-found 2>/dev/null || true
+          done
+          kubectl delete clusterrole simplyblock-storage-node-role --ignore-not-found 2>/dev/null || true
+          kubectl delete clusterrolebinding simplyblock-storage-node-binding --ignore-not-found 2>/dev/null || true
+          # Clean up simplyblock resources in kube-system (snapshot-controller, numa-plugin, etc.)
+          for RTYPE in deployment service ds sa configmap; do
+            for NAME in $(kubectl -n kube-system get $RTYPE --no-headers -o custom-columns=:metadata.name 2>/dev/null | grep -i simplyblock 2>/dev/null); do
+              kubectl -n kube-system delete $RTYPE "$NAME" --ignore-not-found 2>/dev/null || true
+            done
+          done
+          # Clean up simplyblock clusterroles and clusterrolebindings
+          for RES in clusterrole clusterrolebinding; do
+            for NAME in $(kubectl get $RES --no-headers -o custom-columns=:metadata.name 2>/dev/null | grep -i simplyblock 2>/dev/null); do
+              kubectl delete $RES "$NAME" --ignore-not-found 2>/dev/null || true
+            done
+          done
+
           echo "=== Phase 5: Verify nothing remains ==="
           echo "Namespaced resources:"
           kubectl -n $NAMESPACE get all 2>/dev/null || echo "No resources found"
@@ -486,7 +505,22 @@ jobs:
           done
 
           echo "=== Phase 8: Delete CRDs ==="
-          kubectl delete -f $GITHUB_WORKSPACE/helm-charts/charts/simplyblock-operator/crds/ --ignore-not-found 2>/dev/null || true
+          # Clear finalizers on all remaining CR instances so CRD deletion doesn't hang
+          for crd in $(kubectl get crd -o name 2>/dev/null | grep simplyblock); do
+            crd_name="${crd#customresourcedefinition.apiextensions.k8s.io/}"
+            for cr in $(kubectl get "$crd_name" -A --no-headers -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name 2>/dev/null); do
+              IFS=' ' read -r ns name <<< "$cr"
+              kubectl patch "$crd_name" "$name" -n "$ns" --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
+            done
+            kubectl patch crd "$crd_name" --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
+          done
+          kubectl delete -f $GITHUB_WORKSPACE/helm-charts/charts/simplyblock-operator/crds/ --ignore-not-found --timeout=60s 2>/dev/null || true
+          # Force-delete any CRDs that survived the timeout
+          for crd in $(kubectl get crd -o name 2>/dev/null | grep simplyblock); do
+            crd_name="${crd#customresourcedefinition.apiextensions.k8s.io/}"
+            kubectl patch crd "$crd_name" --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
+            kubectl delete crd "$crd_name" --ignore-not-found --timeout=30s 2>/dev/null || true
+          done
 
           echo "=== Cleanup complete ==="
 

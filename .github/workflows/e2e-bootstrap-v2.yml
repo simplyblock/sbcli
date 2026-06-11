@@ -40,7 +40,7 @@ on:
       NFS_MOUNTPOINT:
         type: string
         default: "/mnt/nfs_share"
-      BOOTSTRAP_MAX_LVOL:
+      BOOTSTRAP_MAX_SUBSYS:
         type: string
         default: "300"
       BOOTSTRAP_DATA_CHUNKS:
@@ -174,7 +174,7 @@ jobs:
       NFS_MOUNTPOINT: ${{ inputs.NFS_MOUNTPOINT || '/mnt/nfs_share' }}
 
       # Bootstrap params
-      BOOTSTRAP_MAX_LVOL: ${{ inputs.BOOTSTRAP_MAX_LVOL || '300' }}
+      BOOTSTRAP_MAX_SUBSYS: ${{ inputs.BOOTSTRAP_MAX_SUBSYS || '300' }}
       BOOTSTRAP_DATA_CHUNKS: ${{ inputs.BOOTSTRAP_DATA_CHUNKS || '2' }}
       BOOTSTRAP_PARITY_CHUNKS: ${{ inputs.BOOTSTRAP_PARITY_CHUNKS || '2' }}
       BOOTSTRAP_JOURNAL_PARTITION: ${{ inputs.BOOTSTRAP_JOURNAL_PARTITION || '1' }}
@@ -301,7 +301,7 @@ jobs:
               'NFS_MOUNTPOINT':              cfg.get('nfs_mount', ''),
               'NR_HUGEPAGES':                cfg.get('nr_hugepages', ''),
               'SBCLI_CMD':                   cfg.get('sbcli_cmd', ''),
-              'BOOTSTRAP_MAX_LVOL':          bsc.get('max_lvol', ''),
+              'BOOTSTRAP_MAX_SUBSYS':          bsc.get('max_subsys', ''),
               'BOOTSTRAP_DATA_CHUNKS':       bsc.get('data_chunks', ''),
               'BOOTSTRAP_PARITY_CHUNKS':     bsc.get('parity_chunks', ''),
               'BOOTSTRAP_JOURNAL_PARTITION': bsc.get('journal_partition', ''),
@@ -740,7 +740,7 @@ jobs:
           set +e
           ./bootstrap-cluster.sh \
             --sbcli-cmd "${SBCLI_CMD}" \
-            --max-lvol "${BOOTSTRAP_MAX_LVOL}" \
+            --max-subsys "${BOOTSTRAP_MAX_SUBSYS}" \
             --data-chunks-per-stripe "${BOOTSTRAP_DATA_CHUNKS}" \
             --parity-chunks-per-stripe "${BOOTSTRAP_PARITY_CHUNKS}" \
             --journal-partition "${BOOTSTRAP_JOURNAL_PARTITION}" \

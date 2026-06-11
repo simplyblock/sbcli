@@ -80,7 +80,11 @@ for CR_TYPE in \
   "devices.storage.simplyblock.io" \
   "storagenodes.storage.simplyblock.io" \
   "storageclusters.storage.simplyblock.io" \
-  "snapshotreplications.storage.simplyblock.io"; do
+  "snapshotreplications.storage.simplyblock.io" \
+  "storagebackups.storage.simplyblock.io" \
+  "backuprestores.storage.simplyblock.io" \
+  "backuppolicies.storage.simplyblock.io" \
+  "backupimports.storage.simplyblock.io"; do
   for CR_NAME in $(kubectl -n $NAMESPACE get "$CR_TYPE" --no-headers -o custom-columns=:metadata.name 2>/dev/null); do
     kubectl -n $NAMESPACE patch "$CR_TYPE" "$CR_NAME" \
       --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
@@ -196,6 +200,13 @@ kubectl -n kube-system delete cm simplyblock-numa-resource-plugin-config --ignor
 kubectl delete clusterrole simplyblock-numa-resource-plugin --ignore-not-found 2>/dev/null || true
 kubectl delete clusterrolebinding simplyblock-numa-resource-plugin --ignore-not-found 2>/dev/null || true
 
+# Clean up snapshot-controller and any other simplyblock deployments/services in kube-system
+for RTYPE in deployment service sa configmap; do
+  for NAME in $(kubectl -n kube-system get $RTYPE --no-headers -o custom-columns=:metadata.name 2>/dev/null | grep -i simplyblock 2>/dev/null); do
+    kubectl -n kube-system delete $RTYPE "$NAME" --ignore-not-found 2>/dev/null || true
+  done
+done
+
 echo "=== Phase 5: Verify nothing remains ==="
 echo "Namespaced resources:"
 kubectl -n $NAMESPACE get all 2>/dev/null || echo "No resources found"
@@ -209,7 +220,11 @@ for CR_TYPE in \
   "pool.storage.simplyblock.io" \
   "lvol.storage.simplyblock.io" \
   "storagenodes.storage.simplyblock.io" \
-  "storageclusters.storage.simplyblock.io"; do
+  "storageclusters.storage.simplyblock.io" \
+  "storagebackups.storage.simplyblock.io" \
+  "backuprestores.storage.simplyblock.io" \
+  "backuppolicies.storage.simplyblock.io" \
+  "backupimports.storage.simplyblock.io"; do
   kubectl -n $NAMESPACE get "$CR_TYPE" 2>/dev/null || true
 done
 

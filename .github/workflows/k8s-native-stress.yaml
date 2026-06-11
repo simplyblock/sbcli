@@ -468,36 +468,24 @@ jobs:
             kubectl -n $NAMESPACE delete $RTYPE --all --force --grace-period=0 2>/dev/null || true
           done
 
-          # echo "=== Phase 4: Cleanup cluster-scoped resources ==="
-          # Delete StorageClasses
-          # for SC in $(kubectl get sc --no-headers -o custom-columns=:metadata.name 2>/dev/null | grep -i simplyblock 2>/dev/null); do
-          #   kubectl delete sc "$SC" --ignore-not-found 2>/dev/null || true
-          # done
-          # kubectl delete clusterrole simplyblock-storage-node-role --ignore-not-found 2>/dev/null || true
-          # kubectl delete clusterrolebinding simplyblock-storage-node-binding --ignore-not-found 2>/dev/null || true
-
-          # echo "=== Phase 4b: Cleanup leftover secrets, SAs, and kube-system resources ==="
-          # kubectl -n $NAMESPACE delete secret simplyblock-csi-secret-v2 --ignore-not-found 2>/dev/null || true
-          # kubectl -n $NAMESPACE delete sa simplyblock-storage-node-sa --ignore-not-found 2>/dev/null || true
-
-          # # Clean up kube-system resources from previous helm installs
-          # for RES in sa clusterrole clusterrolebinding; do
-          #   for NAME in $(kubectl get $RES -A --no-headers 2>/dev/null | grep -i simplyblock | awk '{print $1 ":" $2}' 2>/dev/null); do
-          #     NS=$(echo "$NAME" | cut -d: -f1)
-          #     RNAME=$(echo "$NAME" | cut -d: -f2)
-          #     if [ "$RES" = "sa" ]; then
-          #       kubectl -n "$NS" delete sa "$RNAME" --ignore-not-found 2>/dev/null || true
-          #     else
-          #       kubectl delete "$RES" "$RNAME" --ignore-not-found 2>/dev/null || true
-          #     fi
-          #   done
-          # done
-          # # Specifically clean numa-resource-plugin resources in kube-system
-          # kubectl -n kube-system delete ds simplyblock-numa-resource-plugin --ignore-not-found 2>/dev/null || true
-          # kubectl -n kube-system delete sa simplyblock-numa-resource-plugin --ignore-not-found 2>/dev/null || true
-          # kubectl -n kube-system delete cm simplyblock-numa-resource-plugin-config --ignore-not-found 2>/dev/null || true
-          # kubectl delete clusterrole simplyblock-numa-resource-plugin --ignore-not-found 2>/dev/null || true
-          # kubectl delete clusterrolebinding simplyblock-numa-resource-plugin --ignore-not-found 2>/dev/null || true
+          echo "=== Phase 4: Cleanup cluster-scoped and kube-system resources ==="
+          for SC in $(kubectl get sc --no-headers -o custom-columns=:metadata.name 2>/dev/null | grep -i simplyblock 2>/dev/null); do
+            kubectl delete sc "$SC" --ignore-not-found 2>/dev/null || true
+          done
+          kubectl delete clusterrole simplyblock-storage-node-role --ignore-not-found 2>/dev/null || true
+          kubectl delete clusterrolebinding simplyblock-storage-node-binding --ignore-not-found 2>/dev/null || true
+          # Clean up simplyblock resources in kube-system (snapshot-controller, numa-plugin, etc.)
+          for RTYPE in deployment service ds sa configmap; do
+            for NAME in $(kubectl -n kube-system get $RTYPE --no-headers -o custom-columns=:metadata.name 2>/dev/null | grep -i simplyblock 2>/dev/null); do
+              kubectl -n kube-system delete $RTYPE "$NAME" --ignore-not-found 2>/dev/null || true
+            done
+          done
+          # Clean up simplyblock clusterroles and clusterrolebindings
+          for RES in clusterrole clusterrolebinding; do
+            for NAME in $(kubectl get $RES --no-headers -o custom-columns=:metadata.name 2>/dev/null | grep -i simplyblock 2>/dev/null); do
+              kubectl delete $RES "$NAME" --ignore-not-found 2>/dev/null || true
+            done
+          done
 
           echo "=== Phase 5: Verify nothing remains ==="
           echo "Namespaced resources:"
@@ -545,7 +533,22 @@ jobs:
           done
 
           echo "=== Phase 8: Delete CRDs ==="
-          kubectl delete -f $GITHUB_WORKSPACE/helm-charts/charts/simplyblock-operator/crds/ --ignore-not-found 2>/dev/null || true
+          # Clear finalizers on all remaining CR instances so CRD deletion doesn't hang
+          for crd in $(kubectl get crd -o name 2>/dev/null | grep simplyblock); do
+            crd_name="${crd#customresourcedefinition.apiextensions.k8s.io/}"
+            for cr in $(kubectl get "$crd_name" -A --no-headers -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name 2>/dev/null); do
+              IFS=' ' read -r ns name <<< "$cr"
+              kubectl patch "$crd_name" "$name" -n "$ns" --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
+            done
+            kubectl patch crd "$crd_name" --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
+          done
+          kubectl delete -f $GITHUB_WORKSPACE/helm-charts/charts/simplyblock-operator/crds/ --ignore-not-found --timeout=60s 2>/dev/null || true
+          # Force-delete any CRDs that survived the timeout
+          for crd in $(kubectl get crd -o name 2>/dev/null | grep simplyblock); do
+            crd_name="${crd#customresourcedefinition.apiextensions.k8s.io/}"
+            kubectl patch crd "$crd_name" --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
+            kubectl delete crd "$crd_name" --ignore-not-found --timeout=30s 2>/dev/null || true
+          done
 
           echo "=== Cleanup complete ==="
 
