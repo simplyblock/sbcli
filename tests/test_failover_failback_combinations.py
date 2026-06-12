@@ -139,18 +139,42 @@ def _mock_rpc():
 
 
 def _mock_fw_factory():
-    """Create a FirewallClient factory that tracks instances."""
-    instances = []
+    """A ``port_block.set_port`` replacement that tracks per-node spies.
 
-    def make_fw(*args, **kwargs):
-        node = args[0] if args else None
-        fw = MagicMock()
-        fw._node_id = node.uuid if node and hasattr(node, 'uuid') else str(node)
-        fw.firewall_set_port = MagicMock(return_value=True)
-        instances.append(fw)
-        return fw
+    Port blocking moved off the directly-imported ``FirewallClient`` onto
+    ``port_block.set_port(node, port, block=...)`` (RPC-first with iptables
+    fallback). To keep these tests' intent ("a block/allow landed on node
+    X") and their assertions intact, this shim lazily creates one spy per
+    target node and records each call in the *legacy* shape
+    ``firewall_set_port(port, "tcp", action, rpc_port)`` where ``action`` is
+    "block"/"allow". Returns ``(set_port_impl, fw_instances)``."""
+    instances = []
+    by_node = {}
+
+    def make_fw(node, port, block, is_reject=False, timeout=5, retry=2):
+        nid = node.uuid if node is not None and hasattr(node, 'uuid') else str(node)
+        fw = by_node.get(nid)
+        if fw is None:
+            fw = MagicMock()
+            fw._node_id = nid
+            fw.firewall_set_port = MagicMock(return_value=True)
+            by_node[nid] = fw
+            instances.append(fw)
+        action = "block" if block else "allow"
+        return fw.firewall_set_port(port, "tcp", action, getattr(node, "rpc_port", None))
 
     return make_fw, instances
+
+
+def _set_port_to_fw(fw):
+    """Return a ``port_block.set_port`` replacement that routes every call
+    into a single ``fw.firewall_set_port(port, "tcp", action, rpc_port)``
+    spy, so side_effects (raising) and call_count assertions on that one
+    spy keep working after the port_block migration."""
+    def _impl(node, port, block, is_reject=False, timeout=5, retry=2):
+        action = "block" if block else "allow"
+        return fw.firewall_set_port(port, "tcp", action, getattr(node, "rpc_port", None))
+    return _impl
 
 
 def _setup_node_methods(nodes, rpc):
@@ -404,7 +428,7 @@ _RECREATE_PATCHES = [
     "simplyblock_core.storage_node_ops.tcp_ports_events",
     "simplyblock_core.storage_node_ops.storage_events",
     "simplyblock_core.storage_node_ops.tasks_controller",
-    "simplyblock_core.storage_node_ops.FirewallClient",
+    "simplyblock_core.port_block.set_port",
     "simplyblock_core.models.storage_node.RPCClient",
     "simplyblock_core.storage_node_ops._connect_to_remote_jm_devs",
     "simplyblock_core.storage_node_ops._create_bdev_stack",
@@ -483,7 +507,7 @@ class TestRecreateLvstoreFTT2(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
     @patch("simplyblock_core.storage_node_ops.storage_events")
     @patch("simplyblock_core.storage_node_ops.tasks_controller")
-    @patch("simplyblock_core.storage_node_ops.FirewallClient")
+    @patch("simplyblock_core.port_block.set_port")
     @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._connect_to_remote_jm_devs")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
@@ -530,7 +554,7 @@ class TestRecreateLvstoreFTT2(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
     @patch("simplyblock_core.storage_node_ops.storage_events")
     @patch("simplyblock_core.storage_node_ops.tasks_controller")
-    @patch("simplyblock_core.storage_node_ops.FirewallClient")
+    @patch("simplyblock_core.port_block.set_port")
     @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._connect_to_remote_jm_devs")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
@@ -581,7 +605,7 @@ class TestRecreateLvstoreOnSecPrimaryOnline(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
     @patch("simplyblock_core.storage_node_ops.storage_events")
     @patch("simplyblock_core.storage_node_ops.tasks_controller")
-    @patch("simplyblock_core.storage_node_ops.FirewallClient")
+    @patch("simplyblock_core.port_block.set_port")
     @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
@@ -642,7 +666,7 @@ class TestRecreateLvstoreOnSecPrimaryOffline(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
     @patch("simplyblock_core.storage_node_ops.storage_events")
     @patch("simplyblock_core.storage_node_ops.tasks_controller")
-    @patch("simplyblock_core.storage_node_ops.FirewallClient")
+    @patch("simplyblock_core.port_block.set_port")
     @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
@@ -708,7 +732,7 @@ class TestRecreateLvstoreOnSecPrimaryOffline(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
     @patch("simplyblock_core.storage_node_ops.storage_events")
     @patch("simplyblock_core.storage_node_ops.tasks_controller")
-    @patch("simplyblock_core.storage_node_ops.FirewallClient")
+    @patch("simplyblock_core.port_block.set_port")
     @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
@@ -773,7 +797,7 @@ class TestRecreateLvstoreOnSecPrimaryOffline(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
     @patch("simplyblock_core.storage_node_ops.storage_events")
     @patch("simplyblock_core.storage_node_ops.tasks_controller")
-    @patch("simplyblock_core.storage_node_ops.FirewallClient")
+    @patch("simplyblock_core.port_block.set_port")
     @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
@@ -836,7 +860,7 @@ class TestRecreateLvstoreOnSecANAFailback(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
     @patch("simplyblock_core.storage_node_ops.storage_events")
     @patch("simplyblock_core.storage_node_ops.tasks_controller")
-    @patch("simplyblock_core.storage_node_ops.FirewallClient")
+    @patch("simplyblock_core.port_block.set_port")
     @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
@@ -892,7 +916,7 @@ class TestSequentialFailbackScenario(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
     @patch("simplyblock_core.storage_node_ops.storage_events")
     @patch("simplyblock_core.storage_node_ops.tasks_controller")
-    @patch("simplyblock_core.storage_node_ops.FirewallClient")
+    @patch("simplyblock_core.port_block.set_port")
     @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._connect_to_remote_jm_devs")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
@@ -1095,7 +1119,7 @@ class TestRecreateLvstoreNonLeaderLvolMismatch(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.tasks_controller")
     @patch("simplyblock_core.storage_node_ops.set_node_status")
     @patch("simplyblock_core.storage_node_ops.SNodeClient")
-    @patch("simplyblock_core.storage_node_ops.FirewallClient")
+    @patch("simplyblock_core.port_block.set_port")
     @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
@@ -1130,7 +1154,7 @@ class TestRecreateLvstoreNonLeaderLvolMismatch(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.tasks_controller")
     @patch("simplyblock_core.storage_node_ops.set_node_status")
     @patch("simplyblock_core.storage_node_ops.SNodeClient")
-    @patch("simplyblock_core.storage_node_ops.FirewallClient")
+    @patch("simplyblock_core.port_block.set_port")
     @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
@@ -1158,7 +1182,7 @@ class TestRecreateLvstoreNonLeaderLvolMismatch(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.tasks_controller")
     @patch("simplyblock_core.storage_node_ops.set_node_status")
     @patch("simplyblock_core.storage_node_ops.SNodeClient")
-    @patch("simplyblock_core.storage_node_ops.FirewallClient")
+    @patch("simplyblock_core.port_block.set_port")
     @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
@@ -1204,11 +1228,13 @@ class TestRecreateLvstoreNonLeaderPortBlockFailure(unittest.TestCase):
         mock_rpc_cls.return_value = rpc
         mock_create_bdev.return_value = (True, None)
 
-        # Single FirewallClient mock whose firewall_set_port raises as directed
+        # Single firewall spy whose firewall_set_port raises as directed.
+        # port_block.set_port is routed into it so call_count / side_effect
+        # assertions on the retry-then-abort path keep working.
         fw = MagicMock()
         if fw_set_port_side_effect is not None:
             fw.firewall_set_port.side_effect = fw_set_port_side_effect
-        mock_fw_cls.return_value = fw
+        mock_fw_cls.side_effect = _set_port_to_fw(fw)
 
         _setup_node_methods(nodes, rpc)
         return secondary, primary, rpc, fw
@@ -1223,7 +1249,7 @@ class TestRecreateLvstoreNonLeaderPortBlockFailure(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.tasks_controller")
     @patch("simplyblock_core.storage_node_ops.set_node_status")
     @patch("simplyblock_core.storage_node_ops.SNodeClient")
-    @patch("simplyblock_core.storage_node_ops.FirewallClient")
+    @patch("simplyblock_core.port_block.set_port")
     @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
@@ -1268,7 +1294,7 @@ class TestRecreateLvstoreNonLeaderPortBlockFailure(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.tasks_controller")
     @patch("simplyblock_core.storage_node_ops.set_node_status")
     @patch("simplyblock_core.storage_node_ops.SNodeClient")
-    @patch("simplyblock_core.storage_node_ops.FirewallClient")
+    @patch("simplyblock_core.port_block.set_port")
     @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
@@ -1302,7 +1328,7 @@ class TestRecreateLvstoreNonLeaderPortBlockFailure(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.tasks_controller")
     @patch("simplyblock_core.storage_node_ops.set_node_status")
     @patch("simplyblock_core.storage_node_ops.SNodeClient")
-    @patch("simplyblock_core.storage_node_ops.FirewallClient")
+    @patch("simplyblock_core.port_block.set_port")
     @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")

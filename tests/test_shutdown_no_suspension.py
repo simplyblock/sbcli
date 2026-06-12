@@ -327,15 +327,15 @@ class TestSuspendAndResumeAreNoops(unittest.TestCase):
 
     def test_suspend_is_noop(self):
         from simplyblock_core import storage_node_ops as sno
-        with patch.object(sno, "FirewallClient") as fw_cls:
+        with patch.object(sno, "port_block") as pb:
             self.assertTrue(sno.suspend_storage_node("any-node-id"))
-            fw_cls.assert_not_called()
+            pb.set_port.assert_not_called()
 
     def test_resume_is_noop(self):
         from simplyblock_core import storage_node_ops as sno
-        with patch.object(sno, "FirewallClient") as fw_cls:
+        with patch.object(sno, "port_block") as pb:
             self.assertTrue(sno.resume_storage_node("any-node-id"))
-            fw_cls.assert_not_called()
+            pb.set_port.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -419,7 +419,7 @@ class TestShutdownStorageNodeGraceful(unittest.TestCase):
         for p in patches:
             p.start()
             self.addCleanup(p.stop)
-        fw_patch = patch.object(sno, "FirewallClient")  # MUST NOT be used
+        fw_patch = patch.object(sno, "port_block")  # MUST NOT be used
         fw_mock = fw_patch.start()
         self.addCleanup(fw_patch.stop)
 
@@ -462,7 +462,7 @@ class TestShutdownStorageNodeGraceful(unittest.TestCase):
         from simplyblock_core import storage_node_ops as sno
         env = self._patch()
         sno.shutdown_storage_node(env["snode"].get_id(), force=False)
-        env["fw_mock"].assert_not_called()
+        env["fw_mock"].set_port.assert_not_called()
 
     def test_force_skips_loops(self):
         """--force keeps the legacy "go straight to kill" semantics:

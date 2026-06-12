@@ -328,7 +328,7 @@ class TestRecreateLvstoreRoleDerivation(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.health_controller")
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
     @patch("simplyblock_core.storage_node_ops.storage_events")
-    @patch("simplyblock_core.storage_node_ops.FirewallClient")
+    @patch("simplyblock_core.port_block.set_port")
     @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._connect_to_remote_jm_devs", return_value=[])
     @patch("simplyblock_core.storage_node_ops._connect_to_remote_devs", return_value=[])
@@ -574,7 +574,7 @@ class TestRecreateLvstoreStep8bHublvolWiring(unittest.TestCase):
              patch("simplyblock_core.storage_node_ops.health_controller") as mh, \
              patch("simplyblock_core.storage_node_ops.tcp_ports_events"), \
              patch("simplyblock_core.storage_node_ops.storage_events"), \
-             patch("simplyblock_core.storage_node_ops.FirewallClient",
+             patch("simplyblock_core.port_block.set_port",
                    return_value=MagicMock()), \
              patch("simplyblock_core.rpc_client.RPCClient",
                    return_value=MagicMock(

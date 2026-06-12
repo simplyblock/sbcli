@@ -119,19 +119,15 @@ class _BasePortAllowTest(unittest.TestCase):
                     return _side
                 getattr(rpc, method).side_effect = _make_side()
 
-        # FirewallClient factory + spy
-        fw_node = MagicMock(name="fw_node")
-        fw_sec = MagicMock(name="fw_sec")
-        def _firewall_side_effect(target, *a, **kw):
-            fw = fw_node if target is self.node else fw_sec
-            target_uuid = target.uuid
-            def _spy(port, ptype, action, *a, **kw):
-                self.calls.append(("firewall_set_port", target_uuid, port, action))
-                return True
-            fw.firewall_set_port = _spy
-            return fw
-        self.fw_node = fw_node
-        self.fw_sec = fw_sec
+        # port_block.set_port spy. Port (un)blocking moved off the
+        # directly-imported FirewallClient onto port_block.set_port(node,
+        # port, block=...). Record each call in the legacy
+        # ("firewall_set_port", target_uuid, port, action) shape so the
+        # assertions below keep working unchanged.
+        def _set_port_side_effect(node, port, block, *a, **kw):
+            action = "block" if block else "allow"
+            self.calls.append(("firewall_set_port", node.uuid, port, action))
+            return True
 
         self._patches = [
             patch(
@@ -178,8 +174,8 @@ class _BasePortAllowTest(unittest.TestCase):
                 return_value=None,
             ),
             patch(
-                "simplyblock_core.services.tasks_runner_port_allow.FirewallClient",
-                side_effect=_firewall_side_effect,
+                "simplyblock_core.port_block.set_port",
+                side_effect=_set_port_side_effect,
             ),
             patch(
                 "simplyblock_core.services.tasks_runner_port_allow.tcp_ports_events.port_deny",

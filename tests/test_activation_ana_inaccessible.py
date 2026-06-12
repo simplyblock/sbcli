@@ -153,13 +153,6 @@ class TestClusterActivatePass4(unittest.TestCase):
         db.get_lvols_by_node_id.side_effect = \
             lambda nid: lvols if nid == primary.get_id() else []
 
-        class FakeFW:
-            def __init__(self, node, timeout=3, retry=1):
-                pass
-
-            def firewall_set_port(self, *a, **kw):
-                pass
-
         def _ana(lvol, node, ana_state):
             events.append(("ana", node.get_id(), ana_state))
 
@@ -178,7 +171,7 @@ class TestClusterActivatePass4(unittest.TestCase):
         patches = [
             patch.object(cluster_ops, "db_controller", db),
             patch.object(cluster_ops, "DBController", return_value=db),
-            patch.object(cluster_ops, "FirewallClient", FakeFW),
+            patch("simplyblock_core.port_block.set_port", lambda *a, **k: None),
             patch.object(cluster_ops.tcp_ports_events, "port_deny", lambda *a, **k: None),
             patch.object(cluster_ops.tcp_ports_events, "port_allowed", lambda *a, **k: None),
             patch.object(cluster_ops.tasks_controller, "add_port_allow_task", lambda *a, **k: None),

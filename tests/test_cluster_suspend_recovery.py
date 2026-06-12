@@ -53,8 +53,15 @@ def _down_ts(seconds_ago):
 
 # storage_node_monitor.DOWN_SUSPEND_GRACE_SEC == 60: a DOWN node only counts
 # toward the suspend threshold once it has been DOWN at least that long.
-_SUSTAINED_DOWN = _down_ts(300)   # well past the 60s grace -> counts
-_TRANSIENT_DOWN = _down_ts(5)     # inside the grace window -> does NOT count
+#
+# These are *sentinels*, not precomputed timestamps: the production grace check
+# compares ``down_since`` against the real wall clock, so a timestamp frozen at
+# module-import time silently crosses the 60s grace once the surrounding suite
+# runs long enough (the full suite takes minutes), flipping a "transient" node
+# into a "sustained" one and failing TestDownGraceWindow. _node() resolves these
+# to a *fresh* offset at test-execution time, right before the assertion runs.
+_SUSTAINED_DOWN = "__sustained_down__"   # well past the 60s grace -> counts
+_TRANSIENT_DOWN = "__transient_down__"   # inside the grace window -> does NOT count
 
 
 # ---------------------------------------------------------------------------
@@ -92,6 +99,12 @@ def _node(uuid, status=StorageNode.STATUS_ONLINE, mgmt_ip=None,
     n.jm_vuid = jm_vuid
     n.rpc_port = rpc_port
     n.online_since = online_since
+    # Resolve down_since sentinels to a fresh timestamp at call time so the
+    # grace-window comparison is stable regardless of how long the suite runs.
+    if down_since == _SUSTAINED_DOWN:
+        down_since = _down_ts(300)   # well past 60s grace -> counts
+    elif down_since == _TRANSIENT_DOWN:
+        down_since = _down_ts(5)     # inside 60s grace -> does NOT count
     n.down_since = down_since
     n.lvstore = "LVS_X"
     n.lvstore_status = "ready"
