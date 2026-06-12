@@ -16,9 +16,9 @@ from simplyblock_core.models.hublvol import HubLVol
 from simplyblock_core.models.lvol_model import LVol
 
 
-def _node(uuid, lvstore="", secondary_node_id="", secondary_node_id_2="",
+def _node(uuid, lvstore="", secondary_node_id="", tertiary_node_id="",
           lvstore_stack=None,
-          lvstore_stack_secondary_1="", lvstore_stack_secondary_2="",
+          lvstore_stack_secondary="", lvstore_stack_tertiary="",
           mgmt_ip=""):
     n = StorageNode()
     n.uuid = uuid
@@ -27,10 +27,10 @@ def _node(uuid, lvstore="", secondary_node_id="", secondary_node_id_2="",
     n.hostname = f"host-{uuid[:8]}"
     n.lvstore = lvstore
     n.secondary_node_id = secondary_node_id
-    n.secondary_node_id_2 = secondary_node_id_2
+    n.tertiary_node_id = tertiary_node_id
     n.lvstore_stack = list(lvstore_stack) if lvstore_stack else []
-    n.lvstore_stack_secondary_1 = lvstore_stack_secondary_1
-    n.lvstore_stack_secondary_2 = lvstore_stack_secondary_2
+    n.lvstore_stack_secondary = lvstore_stack_secondary
+    n.lvstore_stack_tertiary = lvstore_stack_tertiary
     n.mgmt_ip = mgmt_ip or f"10.0.0.{abs(hash(uuid)) % 254 + 1}"
     n.rpc_port = 8080
     n.rpc_username = "user"
@@ -89,10 +89,10 @@ class TestTeardownNonLeaderLvstore(unittest.TestCase):
 
     @patch("simplyblock_core.storage_node_ops.RPCClient")
     @patch("simplyblock_core.storage_node_ops.DBController")
-    def test_donor_is_sec1_full_teardown(self, mock_db_cls, mock_rpc_cls):
+    def test_donor_is_secondary_full_teardown(self, mock_db_cls, mock_rpc_cls):
         from simplyblock_core.storage_node_ops import teardown_non_leader_lvstore
 
-        donor = _node("donor-id", lvstore_stack_secondary_1="primary-id")
+        donor = _node("donor-id", lvstore_stack_secondary="primary-id")
         primary = _node("primary-id", lvstore="LVS_100",
                         secondary_node_id="donor-id",
                         lvstore_stack=_stack("LVS_100"))
@@ -118,18 +118,18 @@ class TestTeardownNonLeaderLvstore(unittest.TestCase):
         rpc.bdev_nvme_detach_controller.assert_called_once_with(
             primary.hublvol.bdev_name)
         # Back-reference cleared on donor and persisted
-        self.assertEqual(donor.lvstore_stack_secondary_1, "")
+        self.assertEqual(donor.lvstore_stack_secondary, "")
         donor.write_to_db.assert_called_once()
 
     @patch("simplyblock_core.storage_node_ops.RPCClient")
     @patch("simplyblock_core.storage_node_ops.DBController")
-    def test_donor_is_sec2_clears_secondary_2(self, mock_db_cls, mock_rpc_cls):
+    def test_donor_is_tertiary_clears_tertiary(self, mock_db_cls, mock_rpc_cls):
         from simplyblock_core.storage_node_ops import teardown_non_leader_lvstore
 
-        donor = _node("donor-id", lvstore_stack_secondary_2="primary-id")
+        donor = _node("donor-id", lvstore_stack_tertiary="primary-id")
         primary = _node("primary-id", lvstore="LVS_200",
                         secondary_node_id="other-sec-id",
-                        secondary_node_id_2="donor-id",
+                        tertiary_node_id="donor-id",
                         lvstore_stack=_stack("LVS_200"))
         rpc = self._setup_mocks(primary, donor, [],
                                 mock_db_cls, mock_rpc_cls)
@@ -142,9 +142,9 @@ class TestTeardownNonLeaderLvstore(unittest.TestCase):
         # Stack still removed
         rpc.bdev_lvol_delete_lvstore.assert_called_once_with("LVS_200")
         # Correct field cleared
-        self.assertEqual(donor.lvstore_stack_secondary_2, "")
+        self.assertEqual(donor.lvstore_stack_tertiary, "")
         # secondary_1 left untouched
-        self.assertEqual(donor.lvstore_stack_secondary_1, "")  # was "" already
+        self.assertEqual(donor.lvstore_stack_secondary, "")  # was "" already
 
     @patch("simplyblock_core.storage_node_ops.RPCClient")
     @patch("simplyblock_core.storage_node_ops.DBController")
@@ -155,7 +155,7 @@ class TestTeardownNonLeaderLvstore(unittest.TestCase):
         # primary points at a different node for both sec slots
         primary = _node("primary-id", lvstore="LVS_300",
                         secondary_node_id="sec-x",
-                        secondary_node_id_2="sec-y",
+                        tertiary_node_id="sec-y",
                         lvstore_stack=_stack("LVS_300"))
         rpc = self._setup_mocks(primary, donor, [],
                                 mock_db_cls, mock_rpc_cls)
@@ -174,7 +174,7 @@ class TestTeardownNonLeaderLvstore(unittest.TestCase):
     def test_skips_lvols_in_deletion(self, mock_db_cls, mock_rpc_cls):
         from simplyblock_core.storage_node_ops import teardown_non_leader_lvstore
 
-        donor = _node("donor-id", lvstore_stack_secondary_1="primary-id")
+        donor = _node("donor-id", lvstore_stack_secondary="primary-id")
         primary = _node("primary-id", lvstore="LVS_100",
                         secondary_node_id="donor-id",
                         lvstore_stack=_stack("LVS_100"))
@@ -201,7 +201,7 @@ class TestTeardownNonLeaderLvstore(unittest.TestCase):
         is much worse than logging the failure and continuing."""
         from simplyblock_core.storage_node_ops import teardown_non_leader_lvstore
 
-        donor = _node("donor-id", lvstore_stack_secondary_1="primary-id")
+        donor = _node("donor-id", lvstore_stack_secondary="primary-id")
         primary = _node("primary-id", lvstore="LVS_100",
                         secondary_node_id="donor-id",
                         lvstore_stack=_stack("LVS_100"))
@@ -214,7 +214,7 @@ class TestTeardownNonLeaderLvstore(unittest.TestCase):
 
         self.assertTrue(ok)
         rpc.bdev_lvol_delete_lvstore.assert_called_once_with("LVS_100")
-        self.assertEqual(donor.lvstore_stack_secondary_1, "")
+        self.assertEqual(donor.lvstore_stack_secondary, "")
 
     @patch("simplyblock_core.storage_node_ops.RPCClient")
     @patch("simplyblock_core.storage_node_ops.DBController")
@@ -226,7 +226,7 @@ class TestTeardownNonLeaderLvstore(unittest.TestCase):
         recreates."""
         from simplyblock_core.storage_node_ops import teardown_non_leader_lvstore
 
-        donor = _node("donor-id", lvstore_stack_secondary_1="primary-id")
+        donor = _node("donor-id", lvstore_stack_secondary="primary-id")
         original_stack = _stack("LVS_100")
         primary = _node("primary-id", lvstore="LVS_100",
                         secondary_node_id="donor-id",

@@ -34,7 +34,7 @@ from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.prom_client import PromClient
-from simplyblock_core.rpc_client import RPCException
+from simplyblock_core.rpc_client import RPCClient, RPCException
 from simplyblock_core.snode_client import SNodeClient, SNodeClientException
 from simplyblock_web import node_utils
 from simplyblock_core.utils import addNvmeDevices
@@ -7142,6 +7142,70 @@ def _remove_bdev_stack(bdev_stack, rpc_client, remove_distr_only=False):
         # time.sleep(1)
 
 
+def recreate_lvstore_on_sec(snode):
+    """Build (or rebuild) the non-leader LVS stack on ``snode`` for every
+    primary that currently points at it as secondary or tertiary.
+
+    Iterates by DB query — so callers that want to drive a *specific*
+    new role onto ``snode`` set the back-references first
+    (``snode.lvstore_stack_secondary`` / ``lvstore_stack_tertiary`` plus
+    the primary's ``secondary_node_id`` / ``tertiary_node_id``) and let
+    this function pick them up. Idempotent on roles ``snode`` already
+    serves: re-running for an existing peer just reapplies the stack
+    via :func:`recreate_lvstore_on_non_leader`, the same path used by
+    every node restart.
+
+    Parameters
+    ----------
+    snode:
+        The non-leader (recipient / holder) node where the stack will be
+        built. RPCs target this node's SPDK process.
+
+    Returns
+    -------
+    bool
+        True iff every primary's stack came up successfully. False if
+        any one failed — the orchestrator treats that as a fatal
+        executor error and aborts.
+
+    Notes
+    -----
+    The expansion executor calls this after updating DB pointers for
+    a newly-assigned role; by then ``get_primary_storage_nodes_by_secondary_node_id``
+    returns exactly the new primary plus any pre-existing peers that
+    haven't moved. Re-running for unchanged peers is the cost of
+    delegating discovery to the DB rather than threading a per-call
+    primary argument — the production restart path makes the same
+    trade-off.
+    """
+    db_controller = DBController()
+    primaries = db_controller.get_primary_storage_nodes_by_secondary_node_id(
+        snode.get_id())
+    if not primaries:
+        logger.info(
+            f"recreate_lvstore_on_sec: no primaries point at "
+            f"{snode.get_id()} — nothing to do")
+        return True
+
+    overall_ok = True
+    for primary in primaries:
+        try:
+            ok = recreate_lvstore_on_non_leader(
+                snode, leader_node=primary, primary_node=primary)
+        except Exception as e:
+            logger.exception(
+                f"recreate_lvstore_on_sec: recreate failed for "
+                f"primary {primary.get_id()} on {snode.get_id()}: {e}")
+            overall_ok = False
+            continue
+        if ok is False:
+            logger.error(
+                f"recreate_lvstore_on_sec: recreate returned False for "
+                f"primary {primary.get_id()} on {snode.get_id()}")
+            overall_ok = False
+    return overall_ok
+
+
 def teardown_non_leader_lvstore(donor_node, primary_node, slot=None):
     """Tear down a non-leader (secondary or tertiary) LVStore stack on
     ``donor_node`` for the LVS owned by ``primary_node``, in-place.
@@ -7163,12 +7227,14 @@ def teardown_non_leader_lvstore(donor_node, primary_node, slot=None):
     Two modes:
 
     * ``slot=None`` (default): the helper auto-detects the slot from
-      ``primary_node.secondary_node_id`` / ``_2``. Use this when the
-      primary's pointer has not yet been moved away from the donor.
-    * ``slot="_1"`` or ``slot="_2"``: the caller asserts which slot the
-      donor previously occupied. Used by the expansion executor, which
-      flips the primary's pointer to the recipient *before* tearing down
-      the donor (so the discovered pointer no longer matches).
+      ``primary_node.secondary_node_id`` / ``tertiary_node_id``. Use this
+      when the primary's pointer has not yet been moved away from the
+      donor.
+    * ``slot="secondary"`` or ``slot="tertiary"``: the caller asserts
+      which slot the donor previously occupied. Used by the expansion
+      executor, which flips the primary's pointer to the recipient
+      *before* tearing down the donor (so the discovered pointer no
+      longer matches).
 
     Steps performed:
       1. Delete per-lvol nvmf subsystems on the donor for every lvol owned
@@ -7179,11 +7245,13 @@ def teardown_non_leader_lvstore(donor_node, primary_node, slot=None):
       3. Detach the hublvol nvme controller on the donor (best-effort —
          may already be gone if the controller was never attached).
       4. Clear the corresponding back-reference field
-         (``lvstore_stack_secondary_1`` or ``_2``) on the donor and persist.
+         (``lvstore_stack_secondary`` or ``lvstore_stack_tertiary``) on
+         the donor and persist.
 
     What this does NOT do (orchestrator's responsibility):
-      * Update ``primary_node.secondary_node_id`` / ``_2`` pointers — the
-        orchestrator knows the new holder and will overwrite there.
+      * Update ``primary_node.secondary_node_id`` / ``tertiary_node_id``
+        pointers — the orchestrator knows the new holder and will
+        overwrite there.
       * Reconfigure the sibling sec/tert (e.g., when sec_1 is being torn
         down, sec_2's multipath controller still references the donor and
         must be re-attached separately).
@@ -7197,25 +7265,23 @@ def teardown_non_leader_lvstore(donor_node, primary_node, slot=None):
         not actually a sec/tert for this primary (no-op refused) or the
         bdev stack delete returned an error.
     """
-    if slot  == "_1":
-        sec_attr = "lvstore_stack_secondary"
-    elif slot == "_2":
-        sec_attr = "lvstore_stack_tertiary"
+    if slot in ("secondary", "tertiary"):
+        sec_attr = f"lvstore_stack_{slot}"
     elif slot is None:
         if primary_node.secondary_node_id == donor_node.get_id():
             sec_attr = 'lvstore_stack_secondary'
-        elif primary_node.lvstore_stack_tertiary == donor_node.get_id():
+        elif primary_node.tertiary_node_id == donor_node.get_id():
             sec_attr = 'lvstore_stack_tertiary'
         else:
             logger.error(
                 f"teardown_non_leader_lvstore: donor {donor_node.get_id()} "
-                f"is not sec_1 nor sec_2 for primary {primary_node.get_id()}; "
-                f"refusing")
+                f"is not secondary nor tertiary for primary "
+                f"{primary_node.get_id()}; refusing")
             return False
     else:
         raise ValueError(
-            f"teardown_non_leader_lvstore: slot must be None, '_1', or '_2', "
-            f"got {slot!r}")
+            f"teardown_non_leader_lvstore: slot must be None, "
+            f"'secondary', or 'tertiary', got {slot!r}")
 
     db_controller = DBController()
     rpc_client = donor_node.rpc_client()

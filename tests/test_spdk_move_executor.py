@@ -25,17 +25,17 @@ from simplyblock_core.models.storage_node import StorageNode
 
 
 def _node(uuid, status=StorageNode.STATUS_ONLINE,
-          lvstore="", secondary_node_id="", secondary_node_id_2="",
-          lvstore_stack_secondary_1="", lvstore_stack_secondary_2=""):
+          lvstore="", secondary_node_id="", tertiary_node_id="",
+          lvstore_stack_secondary="", lvstore_stack_tertiary=""):
     n = StorageNode()
     n.uuid = uuid
     n.status = status
     n.cluster_id = "cluster-1"
     n.lvstore = lvstore
     n.secondary_node_id = secondary_node_id
-    n.secondary_node_id_2 = secondary_node_id_2
-    n.lvstore_stack_secondary_1 = lvstore_stack_secondary_1
-    n.lvstore_stack_secondary_2 = lvstore_stack_secondary_2
+    n.tertiary_node_id = tertiary_node_id
+    n.lvstore_stack_secondary = lvstore_stack_secondary
+    n.lvstore_stack_tertiary = lvstore_stack_tertiary
     n.mgmt_ip = f"10.0.0.{abs(hash(uuid)) % 254 + 1}"
     n.rpc_port = 8080
     n.rpc_username = "u"
@@ -134,18 +134,18 @@ class TestCreateSec(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.recreate_lvstore_on_sec")
     def test_create_secondary_sets_back_ref_and_pointer(self, mock_recreate):
         primary, holder = self._setup(mock_recreate, ROLE_SECONDARY)
-        self.assertEqual(holder.lvstore_stack_secondary_1, "primary-1")
-        self.assertEqual(holder.lvstore_stack_secondary_2, "")
+        self.assertEqual(holder.lvstore_stack_secondary, "primary-1")
+        self.assertEqual(holder.lvstore_stack_tertiary, "")
         self.assertEqual(primary.secondary_node_id, "holder-1")
-        self.assertEqual(primary.secondary_node_id_2, "")
+        self.assertEqual(primary.tertiary_node_id, "")
         mock_recreate.assert_called_once_with(holder)
 
     @patch("simplyblock_core.storage_node_ops.recreate_lvstore_on_sec")
-    def test_create_tertiary_sets_secondary_2_slot(self, mock_recreate):
+    def test_create_tertiary_sets_tertiary_slot(self, mock_recreate):
         primary, holder = self._setup(mock_recreate, ROLE_TERTIARY)
-        self.assertEqual(holder.lvstore_stack_secondary_2, "primary-1")
-        self.assertEqual(holder.lvstore_stack_secondary_1, "")
-        self.assertEqual(primary.secondary_node_id_2, "holder-1")
+        self.assertEqual(holder.lvstore_stack_tertiary, "primary-1")
+        self.assertEqual(holder.lvstore_stack_secondary, "")
+        self.assertEqual(primary.tertiary_node_id, "holder-1")
         self.assertEqual(primary.secondary_node_id, "")
 
     @patch("simplyblock_core.storage_node_ops.recreate_lvstore_on_sec")
@@ -165,22 +165,22 @@ class TestCreateSec(unittest.TestCase):
 
 class TestRehomeSec(unittest.TestCase):
 
-    def _build(self, slot_suffix="_1"):
-        """Set up a primary with donor in the given sec slot and a healthy
+    def _build(self, slot="secondary"):
+        """Set up a primary with donor in the given role slot and a healthy
         sibling in the other slot."""
         primary = _node(
             "primary-1", lvstore="LVS_100",
-            secondary_node_id="donor-1" if slot_suffix == "_1" else "sib-1",
-            secondary_node_id_2="sib-1" if slot_suffix == "_1" else "donor-1")
+            secondary_node_id="donor-1" if slot == "secondary" else "sib-1",
+            tertiary_node_id="sib-1" if slot == "secondary" else "donor-1")
         donor = _node(
             "donor-1",
-            lvstore_stack_secondary_1="primary-1" if slot_suffix == "_1" else "",
-            lvstore_stack_secondary_2="primary-1" if slot_suffix == "_2" else "")
+            lvstore_stack_secondary="primary-1" if slot == "secondary" else "",
+            lvstore_stack_tertiary="primary-1" if slot == "tertiary" else "")
         recipient = _node("recipient-1")
         sibling = _node(
             "sib-1",
-            lvstore_stack_secondary_1="primary-1" if slot_suffix == "_2" else "",
-            lvstore_stack_secondary_2="primary-1" if slot_suffix == "_1" else "")
+            lvstore_stack_secondary="primary-1" if slot == "tertiary" else "",
+            lvstore_stack_tertiary="primary-1" if slot == "secondary" else "")
         return primary, donor, recipient, sibling
 
     @patch("simplyblock_core.storage_node_ops.reattach_sibling_failover")
@@ -188,7 +188,7 @@ class TestRehomeSec(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.recreate_lvstore_on_sec")
     def test_rehome_secondary_full_sequence(
             self, mock_recreate, mock_teardown, mock_reattach):
-        primary, donor, recipient, sibling = self._build(slot_suffix="_1")
+        primary, donor, recipient, sibling = self._build(slot="secondary")
         nodes = {n.get_id(): n for n in (primary, donor, recipient, sibling)}
         db = _db_with_nodes(nodes)
         mock_recreate.return_value = True
@@ -198,7 +198,7 @@ class TestRehomeSec(unittest.TestCase):
         ex.execute(RoleMove("primary-1", ROLE_SECONDARY, "donor-1", "recipient-1"))
 
         # DB state set up correctly
-        self.assertEqual(recipient.lvstore_stack_secondary_1, "primary-1")
+        self.assertEqual(recipient.lvstore_stack_secondary, "primary-1")
         self.assertEqual(primary.secondary_node_id, "recipient-1")
         # Recreate called on recipient
         mock_recreate.assert_called_once_with(recipient)
@@ -207,8 +207,8 @@ class TestRehomeSec(unittest.TestCase):
         td_kwargs = mock_teardown.call_args.kwargs
         td_args = mock_teardown.call_args.args
         self.assertEqual(td_args[0].get_id(), "donor-1")
-        self.assertEqual(td_kwargs.get("slot"), "_1")
-        # Sibling reattach for sec_1 move
+        self.assertEqual(td_kwargs.get("slot"), "secondary")
+        # Sibling reattach for secondary move (the tertiary is the sibling)
         mock_reattach.assert_called_once()
         ra_kwargs = mock_reattach.call_args.kwargs
         ra_args = mock_reattach.call_args.args
@@ -221,7 +221,7 @@ class TestRehomeSec(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.recreate_lvstore_on_sec")
     def test_rehome_tertiary_skips_sibling_reattach(
             self, mock_recreate, mock_teardown, mock_reattach):
-        primary, donor, recipient, sibling = self._build(slot_suffix="_2")
+        primary, donor, recipient, sibling = self._build(slot="tertiary")
         nodes = {n.get_id(): n for n in (primary, donor, recipient, sibling)}
         db = _db_with_nodes(nodes)
         mock_recreate.return_value = True
@@ -230,11 +230,11 @@ class TestRehomeSec(unittest.TestCase):
         ex = SpdkMoveExecutor(cluster=_cluster(), db_controller=db)
         ex.execute(RoleMove("primary-1", ROLE_TERTIARY, "donor-1", "recipient-1"))
 
-        self.assertEqual(recipient.lvstore_stack_secondary_2, "primary-1")
-        self.assertEqual(primary.secondary_node_id_2, "recipient-1")
+        self.assertEqual(recipient.lvstore_stack_tertiary, "primary-1")
+        self.assertEqual(primary.tertiary_node_id, "recipient-1")
         td_kwargs = mock_teardown.call_args.kwargs
-        self.assertEqual(td_kwargs.get("slot"), "_2")
-        # Sec_2 moves do NOT trigger sibling reattach.
+        self.assertEqual(td_kwargs.get("slot"), "tertiary")
+        # Tertiary moves do NOT trigger sibling reattach.
         mock_reattach.assert_not_called()
 
     @patch("simplyblock_core.storage_node_ops.recreate_lvstore_on_sec")
@@ -268,12 +268,12 @@ class TestRehomeSec(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.reattach_sibling_failover")
     @patch("simplyblock_core.storage_node_ops.teardown_non_leader_lvstore")
     @patch("simplyblock_core.storage_node_ops.recreate_lvstore_on_sec")
-    def test_rehome_skips_sibling_reattach_if_no_sec_2(
+    def test_rehome_skips_sibling_reattach_if_no_tertiary(
             self, mock_recreate, mock_teardown, mock_reattach):
         primary = _node("primary-1", lvstore="LVS_100",
                         secondary_node_id="donor-1",
-                        secondary_node_id_2="")  # FTT1: no sec_2
-        donor = _node("donor-1", lvstore_stack_secondary_1="primary-1")
+                        tertiary_node_id="")  # FTT1: no tertiary
+        donor = _node("donor-1", lvstore_stack_secondary="primary-1")
         recipient = _node("recipient-1")
         nodes = {n.get_id(): n for n in (primary, donor, recipient)}
         db = _db_with_nodes(nodes)

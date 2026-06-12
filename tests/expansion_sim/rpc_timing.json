@@ -1,0 +1,355 @@
+{
+  "source": "/tmp/sb_logs_for_timing/sb_logs_20260423_202000_15m",
+  "rpcs": {
+    "accel_set_options": {
+      "count": 3,
+      "p50_ms": 6.0,
+      "p95_ms": 6.0,
+      "min_ms": 5.0,
+      "max_ms": 6.0
+    },
+    "alceml_get_pages_usage": {
+      "count": 1351,
+      "p50_ms": 7.0,
+      "p95_ms": 8.0,
+      "min_ms": 0.0,
+      "max_ms": 12.0
+    },
+    "bdev_alceml_create": {
+      "count": 6,
+      "p50_ms": 33.5,
+      "p95_ms": 56.0,
+      "min_ms": 8.0,
+      "max_ms": 75.0
+    },
+    "bdev_distrib_check_inflight_io": {
+      "count": 3,
+      "p50_ms": 8.0,
+      "p95_ms": 8.0,
+      "min_ms": 4.0,
+      "max_ms": 9.0
+    },
+    "bdev_distrib_create": {
+      "count": 2,
+      "p50_ms": 172.0,
+      "p95_ms": 6.0,
+      "min_ms": 6.0,
+      "max_ms": 338.0
+    },
+    "bdev_distrib_force_to_non_leader": {
+      "count": 6,
+      "p50_ms": 8.0,
+      "p95_ms": 8.0,
+      "min_ms": 7.0,
+      "max_ms": 9.0
+    },
+    "bdev_examine": {
+      "count": 9,
+      "p50_ms": 6.0,
+      "p95_ms": 6.0,
+      "min_ms": 5.0,
+      "max_ms": 6.0
+    },
+    "bdev_get_bdevs": {
+      "count": 2657,
+      "p50_ms": 8.0,
+      "p95_ms": 10.0,
+      "min_ms": 0.0,
+      "max_ms": 13.0
+    },
+    "bdev_get_iostat": {
+      "count": 1344,
+      "p50_ms": 8.0,
+      "p95_ms": 10.0,
+      "min_ms": 0.0,
+      "max_ms": 18.0
+    },
+    "bdev_jm_create": {
+      "count": 3,
+      "p50_ms": 5.0,
+      "p95_ms": 5.0,
+      "min_ms": 5.0,
+      "max_ms": 6.0
+    },
+    "bdev_lvol_connect_hublvol": {
+      "count": 6,
+      "p50_ms": 5.5,
+      "p95_ms": 8.0,
+      "min_ms": 5.0,
+      "max_ms": 9.0
+    },
+    "bdev_lvol_create_hublvol": {
+      "count": 3,
+      "p50_ms": 6.0,
+      "p95_ms": 6.0,
+      "min_ms": 6.0,
+      "max_ms": 6.0
+    },
+    "bdev_lvol_create_poller_group": {
+      "count": 3,
+      "p50_ms": 6.0,
+      "p95_ms": 6.0,
+      "min_ms": 6.0,
+      "max_ms": 6.0
+    },
+    "bdev_lvol_get_lvstores": {
+      "count": 1343,
+      "p50_ms": 7.0,
+      "p95_ms": 9.0,
+      "min_ms": 0.0,
+      "max_ms": 10.0
+    },
+    "bdev_lvol_set_leader_all": {
+      "count": 6,
+      "p50_ms": 6.0,
+      "p95_ms": 7.0,
+      "min_ms": 5.0,
+      "max_ms": 8.0
+    },
+    "bdev_lvol_set_lvs_opts": {
+      "count": 9,
+      "p50_ms": 8.0,
+      "p95_ms": 8.0,
+      "min_ms": 5.0,
+      "max_ms": 9.0
+    },
+    "bdev_nvme_attach_controller": {
+      "count": 113,
+      "p50_ms": 11.0,
+      "p95_ms": 88.0,
+      "min_ms": 0.0,
+      "max_ms": 92.0
+    },
+    "bdev_nvme_detach_controller": {
+      "count": 3,
+      "p50_ms": 314.0,
+      "p95_ms": 314.0,
+      "min_ms": 313.0,
+      "max_ms": 314.0
+    },
+    "bdev_nvme_get_controllers": {
+      "count": 544,
+      "p50_ms": 5.0,
+      "p95_ms": 9.0,
+      "min_ms": 0.0,
+      "max_ms": 10.0
+    },
+    "bdev_nvme_set_options": {
+      "count": 3,
+      "p50_ms": 6.0,
+      "p95_ms": 6.0,
+      "min_ms": 5.0,
+      "max_ms": 6.0
+    },
+    "bdev_ptnonexcl_create": {
+      "count": 8,
+      "p50_ms": 3.5,
+      "p95_ms": 6.0,
+      "min_ms": 1.0,
+      "max_ms": 6.0
+    },
+    "bdev_raid_create": {
+      "count": 9,
+      "p50_ms": 6.0,
+      "p95_ms": 6.0,
+      "min_ms": 5.0,
+      "max_ms": 6.0
+    },
+    "bdev_set_options": {
+      "count": 3,
+      "p50_ms": 5.0,
+      "p95_ms": 5.0,
+      "min_ms": 5.0,
+      "max_ms": 6.0
+    },
+    "bdev_wait_for_examine": {
+      "count": 9,
+      "p50_ms": 6.0,
+      "p95_ms": 78.0,
+      "min_ms": 5.0,
+      "max_ms": 78.0
+    },
+    "distr_dump_cluster_map": {
+      "count": 302,
+      "p50_ms": 7.0,
+      "p95_ms": 9.0,
+      "min_ms": 1.0,
+      "max_ms": 9.0
+    },
+    "distr_migration_expansion_start": {
+      "count": 11,
+      "p50_ms": 7.0,
+      "p95_ms": 8.0,
+      "min_ms": 3.0,
+      "max_ms": 8.0
+    },
+    "distr_migration_status": {
+      "count": 27,
+      "p50_ms": 7.0,
+      "p95_ms": 9.0,
+      "min_ms": 3.0,
+      "max_ms": 9.0
+    },
+    "distr_send_cluster_map": {
+      "count": 6,
+      "p50_ms": 7.0,
+      "p95_ms": 8.0,
+      "min_ms": 3.0,
+      "max_ms": 11.0
+    },
+    "distr_status_events_discard_then_get": {
+      "count": 2126,
+      "p50_ms": 7.0,
+      "p95_ms": 8.0,
+      "min_ms": 1.0,
+      "max_ms": 10.0
+    },
+    "distr_status_events_update": {
+      "count": 397,
+      "p50_ms": 9.0,
+      "p95_ms": 15.0,
+      "min_ms": 0.0,
+      "max_ms": 661.0
+    },
+    "framework_get_reactors": {
+      "count": 119,
+      "p50_ms": 6.0,
+      "p95_ms": 9.0,
+      "min_ms": 1.0,
+      "max_ms": 11.0
+    },
+    "framework_start_init": {
+      "count": 3,
+      "p50_ms": 13.0,
+      "p95_ms": 13.0,
+      "min_ms": 12.0,
+      "max_ms": 13.0
+    },
+    "iobuf_set_options": {
+      "count": 3,
+      "p50_ms": 7.0,
+      "p95_ms": 7.0,
+      "min_ms": 5.0,
+      "max_ms": 8.0
+    },
+    "jc_compression": {
+      "count": 3,
+      "p50_ms": 4.0,
+      "p95_ms": 4.0,
+      "min_ms": 4.0,
+      "max_ms": 8.0
+    },
+    "jc_get_jm_status": {
+      "count": 1191,
+      "p50_ms": 5.0,
+      "p95_ms": 9.0,
+      "min_ms": 0.0,
+      "max_ms": 10.0
+    },
+    "jc_set_hint_lcpu_mask": {
+      "count": 3,
+      "p50_ms": 6.0,
+      "p95_ms": 6.0,
+      "min_ms": 6.0,
+      "max_ms": 6.0
+    },
+    "jc_suspend_compression": {
+      "count": 9,
+      "p50_ms": 6.0,
+      "p95_ms": 6.0,
+      "min_ms": 5.0,
+      "max_ms": 8.0
+    },
+    "log_set_print_level": {
+      "count": 3,
+      "p50_ms": 6.0,
+      "p95_ms": 6.0,
+      "min_ms": 5.0,
+      "max_ms": 6.0
+    },
+    "nvmf_create_subsystem": {
+      "count": 18,
+      "p50_ms": 5.0,
+      "p95_ms": 6.0,
+      "min_ms": 1.0,
+      "max_ms": 7.0
+    },
+    "nvmf_create_transport": {
+      "count": 3,
+      "p50_ms": 6.0,
+      "p95_ms": 6.0,
+      "min_ms": 6.0,
+      "max_ms": 6.0
+    },
+    "nvmf_get_subsystems": {
+      "count": 1276,
+      "p50_ms": 7.0,
+      "p95_ms": 8.0,
+      "min_ms": 0.0,
+      "max_ms": 14.0
+    },
+    "nvmf_set_config": {
+      "count": 3,
+      "p50_ms": 6.0,
+      "p95_ms": 6.0,
+      "min_ms": 5.0,
+      "max_ms": 6.0
+    },
+    "nvmf_set_max_subsystems": {
+      "count": 3,
+      "p50_ms": 6.0,
+      "p95_ms": 6.0,
+      "min_ms": 6.0,
+      "max_ms": 6.0
+    },
+    "nvmf_subsystem_add_listener": {
+      "count": 21,
+      "p50_ms": 6.0,
+      "p95_ms": 7.0,
+      "min_ms": 1.0,
+      "max_ms": 8.0
+    },
+    "nvmf_subsystem_add_ns": {
+      "count": 15,
+      "p50_ms": 5.0,
+      "p95_ms": 6.0,
+      "min_ms": 1.0,
+      "max_ms": 6.0
+    },
+    "nvmf_subsystem_listener_set_ana_state": {
+      "count": 23,
+      "p50_ms": 10.0,
+      "p95_ms": 12.0,
+      "min_ms": 5.0,
+      "max_ms": 13.0
+    },
+    "sock_impl_set_options": {
+      "count": 3,
+      "p50_ms": 6.0,
+      "p95_ms": 6.0,
+      "min_ms": 6.0,
+      "max_ms": 6.0
+    },
+    "spdk_get_version": {
+      "count": 660,
+      "p50_ms": 7.0,
+      "p95_ms": 9.0,
+      "min_ms": 1.0,
+      "max_ms": 11.0
+    },
+    "thread_get_stats": {
+      "count": 125,
+      "p50_ms": 5.0,
+      "p95_ms": 9.0,
+      "min_ms": 1.0,
+      "max_ms": 9.0
+    },
+    "thread_set_cpumask": {
+      "count": 3,
+      "p50_ms": 6.0,
+      "p95_ms": 6.0,
+      "min_ms": 6.0,
+      "max_ms": 6.0
+    }
+  }
+}
