@@ -2004,18 +2004,18 @@ def resize_lvol(id, new_size) -> None:
     if lvol.size == new_size:
         return  # Nothing to do
     elif lvol.size > new_size:
-        raise PreconditionError(f"New size {utils.humanbytes(new_size)} must be higher than the original size {utils.humanbytes(lvol.size)}")
+        raise PreconditionError(f"New size {new_size} must be larger than the original size {lvol.size}")
 
     if new_size > lvol.max_size:
-        raise PreconditionError(f"New size {utils.humanbytes(new_size)} must not be larger than the max size {utils.humanbytes(lvol.max_size)}")
+        raise PreconditionError(f"New size {new_size} must not be larger than the max size {lvol.max_size}")
 
     if 0 < pool.lvol_max_size < new_size:
-        raise PreconditionError(f"New size {utils.humanbytes(new_size)} must not be larger than the pool max size {utils.humanbytes(pool.lvol_max_size)}")
+        raise PreconditionError(f"New size {new_size} must not be larger than the pool max size {pool.lvol_max_size}")
 
     if pool.pool_max_size > 0:
         total = pool_controller.get_pool_total_capacity(pool.get_id())
         if total + new_size > pool.pool_max_size:
-            raise PreconditionError(f"Invalid LVol size: {utils.humanbytes(new_size)}, Pool max size has reached {utils.humanbytes(total+new_size)} of {utils.humanbytes(pool.pool_max_size)}")
+            raise PreconditionError(f"Invalid LVol size: {new_size}, Pool max size has reached {total + new_size} of {pool.pool_max_size}")
 
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
 
