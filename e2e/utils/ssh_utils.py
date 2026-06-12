@@ -2640,7 +2640,14 @@ class SshUtils:
 
     def fetch_distrib_logs(self, storage_node_ip, storage_node_id, logs_path,
                            validate_async=False, error_sink=None):
-        self.logger.info(f"Fetching distrib logs for Storage Node ID: {storage_node_id} on {storage_node_ip}")
+        # Skipping distrib dump fetch — distr_debug_placement_map_dump RPC
+        # times out on degraded distribs (non-leader / blocked JMs), blocking
+        # the diagnostics thread and delaying recovery.
+        self.logger.warning(
+            f"Skipping fetch_distrib_logs for node {storage_node_id} on "
+            f"{storage_node_ip} (disabled — causes RPC timeout on degraded distribs)"
+        )
+        return True
 
         # 0) Find ALL SPDK containers on this host (dual-node hosts have 2)
         find_container_cmd = "sudo docker ps --format '{{.Names}}' | grep -E '^spdk_[0-9]+$' || true"

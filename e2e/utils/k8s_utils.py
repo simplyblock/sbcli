@@ -277,6 +277,14 @@ class K8sUtils:
           4. kubectl cp result files from /tmp inside container → logs_path/<pod_name>/distrib_logs/.
         Returns True (non-fatal failures are logged and skipped).
         """
+        # Skipping distrib dump fetch — distr_debug_placement_map_dump RPC
+        # times out on degraded distribs (non-leader / blocked JMs), blocking
+        # the diagnostics thread and delaying recovery.
+        self.logger.warning(
+            f"Skipping fetch_distrib_logs_k8s for node {storage_node_id} on "
+            f"{storage_node_ip} (disabled — causes RPC timeout on degraded distribs)"
+        )
+        return True
         try:
             pod_name = self.get_spdk_pod_name(storage_node_ip)
             sock = self._find_spdk_sock(pod_name)
