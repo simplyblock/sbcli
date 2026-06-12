@@ -34,6 +34,11 @@ class SnapShot(BaseModel):
     next_snap_uuid: str = ""
     prev_snap_uuid: str = ""
     instances: list = []
+    # Uniquely identifies the data block device that backs this snapshot.
+    # It is created once Snapshot is created from an LVol
+    # On Snapshot transfer or replicate this field is the same
+    # This value can be used to identify the same snapshot on other nodes
+    data_uuid: str = ""
 
     def write_to_db(self, kv_store=None):
         super().write_to_db(kv_store)

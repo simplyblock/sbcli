@@ -119,10 +119,16 @@ def start_migration(migration_id,
 
     snap_plan = get_snapshot_chain(lvol_id, source_node_id)
 
+    snaps_migrated = []
+    snapshots_data_ids = set(snap.data_uuid for snap in snap_plan)
+    for snap in db.get_snapshots_by_node_id(target_node_id):
+        if snap.data_uuid in snapshots_data_ids:
+            snaps_migrated.append(snap.uuid)
+
     migration.source_node_id = source_node_id
     migration.phase = LVolMigration.PHASE_SNAP_COPY
     migration.snap_migration_plan = snap_plan
-    migration.snaps_migrated = []
+    migration.snaps_migrated = snaps_migrated
     migration.intermediate_snaps = []
     migration.next_snap_index = 0
     migration.intermediate_snap_rounds = 0
@@ -582,7 +588,7 @@ def apply_migration_to_db(migration, tgt_lvol_uuid=None, tgt_lvol_bdev=None):
             if short:
                 spdk_info[short] = {
                     'uuid':   entry.get('uuid', ''),
-                    'blobid': entry.get('driver_specific', {}).get('lvol', {}).get('blobid', 0),
+                    'blobid': entry.get('blobid', 0)
                 }
         logger.info(f"apply_migration_to_db: queried {len(spdk_info)} bdevs from target lvstore {tgt_node.lvstore}")
     except Exception as e:
@@ -809,11 +815,11 @@ def pre_create_on_target(lvol_id, target_node_id,
     overlap_ids = src_node_ids & tgt_node_ids
 
     # Ordered TGT entries: (node, rpc, port, min_cntlid)
-    tgt_entries = [(tgt_node, tgt_rpc, tgt_port, 2000)]
+    tgt_entries = [(tgt_node, tgt_rpc, tgt_port, 1)]
     if tgt_sec_node is not None:
         _sec_rpc2  = tgt_sec_node.rpc_client()
         _sec_port2 = tgt_sec_node.get_lvol_subsys_port(tgt_node.lvstore)
-        tgt_entries.append((tgt_sec_node, _sec_rpc2, _sec_port2, 3000))
+        tgt_entries.append((tgt_sec_node, _sec_rpc2, _sec_port2, 1000))
 
     sec_node = None   # populated for the secondary (used by connect strings below)
     sec_port = None
@@ -855,6 +861,13 @@ def pre_create_on_target(lvol_id, target_node_id,
                     logger.error(f"pre_create_on_target: crypto bdev setup on "
                                  f"{_node_id[:8]} failed: {_e}")
 
+        subsys_min_cntlid_used = set()
+        if _node_id in overlap_ids:
+            # Subsystem already exists from SRC role — add inaccessible listener
+            # at TGT port so clients can pre-connect to the future TGT endpoint.
+            subsys = _rpc.subsystem_list(nqn)[0]
+            subsys_min_cntlid_used.add(subsys.get('min_cntlid', 0))
+
         if _node_id in overlap_ids:
             # Subsystem already exists from SRC role — add inaccessible listener
             # at TGT port so clients can pre-connect to the future TGT endpoint.
@@ -873,6 +886,8 @@ def pre_create_on_target(lvol_id, target_node_id,
                         f"(non-fatal): {_e}")
         else:
             if not _rpc.subsystem_list(nqn):
+                if _min_cntlid in subsys_min_cntlid_used:
+                    _min_cntlid = _min_cntlid + 10000
                 _rpc.subsystem_create(
                     nqn, lvol.ha_type, lvol.uuid, min_cntlid=_min_cntlid,
                     max_namespaces=constants.LVO_MAX_NAMESPACES_PER_SUBSYS)
