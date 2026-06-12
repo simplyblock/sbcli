@@ -8,7 +8,7 @@ SPDK or the existing SPDK glue.
 """
 
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from simplyblock_core.cluster_expand_executor import (
     integrate_new_node_into_cluster,
@@ -16,7 +16,6 @@ from simplyblock_core.cluster_expand_executor import (
 from simplyblock_core.cluster_expand_orchestrator import NoopMoveExecutor
 from simplyblock_core.cluster_expand_planner import (
     EXPAND_PHASE_COMPLETED,
-    ROLE_PRIMARY,
     compute_role_diff,
     make_expand_state,
 )

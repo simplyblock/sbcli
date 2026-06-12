@@ -11,7 +11,6 @@ A passing test here validates the entire scaffolding end-to-end:
 * the final cluster layout is correct (per the rotation invariants)
 """
 
-import pytest
 
 # Pytest discovers this file via tests/expansion_sim/__init__.py;
 # fixtures come from conftest.py in the same directory.

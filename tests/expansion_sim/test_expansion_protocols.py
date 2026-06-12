@@ -26,16 +26,13 @@ regression spec.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
-from typing import List
 
 import pytest
 
 from simplyblock_core.cluster_expand_planner import (
     ROLE_PRIMARY,
     ROLE_SECONDARY,
-    ROLE_TERTIARY,
 )
 from tests.expansion_sim.protocol_generator import (
     ScenarioSpec,

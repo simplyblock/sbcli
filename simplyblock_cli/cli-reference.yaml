@@ -270,6 +270,12 @@ commands:
             dest: spdk_proxy_image
             type: str
             private: true
+          - name: "--expansion"
+            help: "After adding the node, integrate it into the cluster by re-homing existing secondary/tertiary roles. Use this to add a single node to an FTT2 cluster instead of staging FTT+1 nodes at once."
+            dest: expansion
+            type: bool
+            default: false
+            action: store_true
       - name: delete
         help: "Deletes a storage node object from the state database."
         usage: >
