@@ -1566,13 +1566,16 @@ class TestBackupBasicPositive(BackupTestBase):
         if parsed_8:
             self.logger.info(
                 "TC-BCK-008: validating --cluster-id filter entry references correct lvol_id")
+            # CLI output uses volume handle (lvol_id) in LVol column,
+            # not PVC name.  In K8s mode these differ.
+            search_key = lvol_id if self.k8s_test else lvol_name
             entry_8 = next(
-                (b for b in parsed_8 if lvol_name in (b.get("LVol") or b.get("lvol") or "")),
+                (b for b in parsed_8 if search_key in (b.get("LVol") or b.get("lvol") or "")),
                 None
             )
             assert entry_8 is not None, \
-                f"TC-BCK-008: no backup entry for lvol {lvol_name} in cluster-id filtered list"
-            self._validate_backup_fields(entry_8, lvol_name=lvol_name)
+                f"TC-BCK-008: no backup entry for lvol {search_key} in cluster-id filtered list"
+            self._validate_backup_fields(entry_8, lvol_name=search_key)
             self.logger.info("TC-BCK-008: cluster-id filter backup entry references correct lvol ✓")
 
         # --- TC-BCK-009: policy-list returns no error even when empty ---
