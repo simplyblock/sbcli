@@ -166,9 +166,7 @@ def update(cluster: Cluster, pool: StoragePool, volume: Volume, body: UpdatableL
         raise ValueError('Failed to update volume')
 
     if 'size' in body.model_fields_set:
-        success, msg = lvol_controller.resize_lvol(volume.get_id(), body.size)
-        if not success:
-            raise HTTPException(400, msg)
+        lvol_controller.resize_lvol(volume.get_id(), body.size)
 
     return Response(status_code=204)
 
