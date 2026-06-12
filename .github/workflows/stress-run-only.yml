@@ -306,7 +306,7 @@ jobs:
           rm -rf sbcli
 
           wf_branch="${{ github.ref_name }}"
-          fallback_branch="${SBCLI_BRANCH}"
+          fallback_branch="${SBCLI_BRANCH:-main}"
 
           echo "Workflow branch: $wf_branch"
           echo "Fallback sbcli branch: $fallback_branch"
