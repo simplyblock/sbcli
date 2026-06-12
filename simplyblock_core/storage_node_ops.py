@@ -5057,19 +5057,19 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
     if snode.lvstore:
         lvstore_ports[snode.lvstore] = {
             "lvol_subsys_port": snode.lvol_subsys_port,
-            "hublvol_port": snode.hublvol.nvmf_port,
+            "hublvol_port": snode.hublvol.nvmf_port if snode.hublvol else 0,
         }
     if snode.lvstore_stack_secondary:
         nd = db_controller.get_storage_node_by_id(snode.lvstore_stack_secondary)
         lvstore_ports[nd.lvstore] = {
             "lvol_subsys_port": nd.lvol_subsys_port,
-            "hublvol_port": nd.hublvol.nvmf_port,
+            "hublvol_port": nd.hublvol.nvmf_port if nd.hublvol else 0,
         }
     if snode.lvstore_stack_tertiary:
         nd = db_controller.get_storage_node_by_id(snode.lvstore_stack_tertiary)
         lvstore_ports[nd.lvstore] = {
             "lvol_subsys_port": nd.lvol_subsys_port,
-            "hublvol_port": nd.hublvol.nvmf_port,
+            "hublvol_port": nd.hublvol.nvmf_port if nd.hublvol else 0,
         }
     snode.lvstore_ports = lvstore_ports
     snode.write_to_db()
