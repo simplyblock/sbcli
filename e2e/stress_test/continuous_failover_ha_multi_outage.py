@@ -639,6 +639,7 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                 )
             fs_type = self.lvol_mount_details[lvol]["FS"]
             client = self.lvol_mount_details[lvol]["Client"]
+            parent_host_nqn = self.lvol_mount_details[lvol].get("host_nqn")
             self.clone_mount_details[clone_name] = {
                    "ID": self.sbcli_utils.get_lvol_id(clone_name),
                    "Command": None,
@@ -651,6 +652,8 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                    "Client": client,
                    "iolog_base_path": f"{self.log_path}/{clone_name}_fio_iolog",
                    "pending_connect": False,
+                   "host_nqn": parent_host_nqn,
+                   "sec_type": self.lvol_mount_details[lvol].get("sec_type", "plain"),
             }
 
             self.logger.info(f"Created clone {clone_name}.")
@@ -671,7 +674,17 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                 self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
                                           command=f"{self.base_cmd} lvol list")
 
-            connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=clone_name)
+            if parent_host_nqn:
+                clone_id = self.clone_mount_details[clone_name]["ID"]
+                connect_ls, _err = self.ssh_obj.get_lvol_connect_str_with_host_nqn(
+                    self.mgmt_nodes[0], clone_id, parent_host_nqn)
+                if _err or not connect_ls:
+                    self.logger.warning(
+                        f"get_lvol_connect_str_with_host_nqn failed for "
+                        f"clone {clone_name}: {_err}")
+                    continue
+            else:
+                connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=clone_name)
             self.clone_mount_details[clone_name]["Command"] = connect_ls
 
             # if self.secondary_outage:
