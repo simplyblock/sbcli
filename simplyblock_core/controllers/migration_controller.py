@@ -51,6 +51,7 @@ from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.storage_node_ops import _reapply_allowed_hosts
 
 # Note: JobSchedule is not imported directly here; task creation is delegated to
 # tasks_controller.add_lvol_mig_task() which handles event logging consistently.
@@ -692,32 +693,29 @@ def pre_create_on_target(lvol_id, target_node_id,
       4. Create an LVolMigration record in PHASE_PRE_CREATED so that
          cancel_migration can tear everything down on request.
 
-    Returns:
-      (migration_id, connect_strings, error_str)
-      migration_id: str UUID of the newly created migration record
-      connect_strings: list[dict]  — same format as lvol_controller.connect_lvol()
-      On error: (None, None, error_message)
+    Returns (migration_id, connect_strings) on success.
+    Raises ValueError on any validation or setup failure.
     """
     db = DBController()
 
     try:
         lvol = db.get_lvol_by_id(lvol_id)
     except KeyError:
-        return None, None, f"LVol {lvol_id} not found"
+        raise ValueError(f"LVol {lvol_id} not found")
 
     try:
         tgt_node = db.get_storage_node_by_id(target_node_id)
     except KeyError:
-        return None, None, f"Target node {target_node_id} not found"
+        raise ValueError(f"Target node {target_node_id} not found")
 
     if not tgt_node.lvstore:
-        return None, None, f"Target node {target_node_id} has no lvstore"
+        raise ValueError(f"Target node {target_node_id} has no lvstore")
 
     src_node_id = lvol.node_id
     try:
         src_node = db.get_storage_node_by_id(src_node_id)
     except KeyError:
-        return None, None, f"Source node {src_node_id} not found"
+        raise ValueError(f"Source node {src_node_id} not found")
 
     cluster = db.get_cluster_by_id(tgt_node.cluster_id)
     tgt_rpc  = tgt_node.rpc_client()
@@ -734,7 +732,7 @@ def pre_create_on_target(lvol_id, target_node_id,
             lvol_priority_class=lvol.lvol_priority_class,
             ndcs=lvol.ndcs, npcs=lvol.npcs)
         if not ret:
-            return None, None, f"bdev_lvol_create failed for {composite} on {target_node_id}"
+            raise ValueError(f"bdev_lvol_create failed for {composite} on {target_node_id}")
         logger.info(f"pre_create_on_target: created bdev {composite}")
     else:
         logger.info(f"pre_create_on_target: bdev {composite} already exists — skipping create")
@@ -881,7 +879,6 @@ def pre_create_on_target(lvol_id, target_node_id,
 
             if lvol.allowed_hosts:
                 try:
-                    from simplyblock_core.storage_node_ops import _reapply_allowed_hosts
                     _reapply_allowed_hosts(lvol, _node, _rpc)
                 except Exception as _e:
                     logger.warning(
@@ -921,8 +918,7 @@ def pre_create_on_target(lvol_id, target_node_id,
                 break
 
     if lvol.allowed_hosts and not host_nqn:
-        return None, None, (f"Volume {lvol_id} has allowed hosts configured; "
-                            f"--host-nqn is required")
+        raise ValueError(f"Volume {lvol_id} has allowed hosts configured; --host-nqn is required")
 
     out = []
     for nic in tgt_node.data_nics:
@@ -1052,6 +1048,6 @@ def pre_create_on_target(lvol_id, target_node_id,
     logger.info(
         f"pre_create_on_target: done for lvol={lvol_id} target={target_node_id} "
         f"migration_id={migration.uuid} connect_strings={len(out)}")
-    return migration.uuid, out, None
+    return migration.uuid, out
 
 
