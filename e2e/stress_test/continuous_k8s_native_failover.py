@@ -11,8 +11,10 @@ Only sbcli (via kubectl exec) is used for:
   - Diagnostics (cluster details, core dump checks)
 
 Outage types:
-  container_stop     → kubectl delete pod snode-spdk-pod-<x> (auto-restarts)
-  graceful_shutdown  → sbcli sn shutdown via kubectl exec
+  container_stop                    → kubectl delete pod snode-spdk-pod-<x> (auto-restarts)
+  graceful_shutdown                 → sbcli sn shutdown via kubectl exec
+  interface_full_network_interrupt  → self-restoring iptables via kubectl exec into SPDK pod
+                                      (privileged + hostNetwork:true — no SSH needed)
 
 Loop structure mirrors RandomMultiClientMultiFailoverTest.run():
   1. Create StorageClass + VolumeSnapshotClass + Pool
@@ -94,8 +96,8 @@ class K8sNativeFailoverTest(TestClusterBase):
 
         # Outage config
         self.npcs = kwargs.get("npcs", 1)
-        self.outage_types = ["graceful_shutdown"]
-        self.outage_types2 = ["container_stop", "graceful_shutdown"]
+        self.outage_types = ["graceful_shutdown", "interface_full_network_interrupt"]
+        self.outage_types2 = ["container_stop", "graceful_shutdown", "interface_full_network_interrupt"]
 
         # ── Tracking dicts ──
         # pvc_name → {job_name, configmap_name, snapshots: [snap_name, ...], node_id}
@@ -1977,6 +1979,32 @@ class K8sNativeFailoverTest(TestClusterBase):
                 )
             self.logger.info(f"Node {node} not yet offline; retrying shutdown...")
 
+    def _k8s_network_outage(self, node_ip: str, duration: int) -> int:
+        """Trigger self-restoring full network outage on a K8s storage node.
+
+        Uses kubectl exec into the privileged SPDK pod (hostNetwork:true) to
+        run iptables DROP rules with auto-flush after *duration* seconds.
+        No SSH to storage nodes required.
+
+        Returns the chosen duration.
+        """
+        self._ensure_k8s_utils()
+        cmd = (
+            f"sudo nohup bash -c '"
+            f"sleep 5 && "
+            f"iptables -A INPUT -j DROP && "
+            f"iptables -A OUTPUT -j DROP && "
+            f"sleep {duration} && "
+            f"iptables -F"
+            f"' > /tmp/k8s_nw_outage.log 2>&1 &"
+        )
+        self.k8s_utils.exec_in_spdk_container(node_ip, cmd)
+        self.logger.info(
+            f"[K8s] Network outage triggered on {node_ip} "
+            f"(self-restoring after {duration}s)"
+        )
+        return duration
+
     def perform_n_plus_k_outages(self):
         """Select K nodes and trigger outages simultaneously.
 
@@ -2028,17 +2056,23 @@ class K8sNativeFailoverTest(TestClusterBase):
         outage_errors = {}
 
         def _run_outage(node, outage_type, node_ip):
+            node_outage_dur = 0
             try:
                 self.logger.info(f"Performing {outage_type} on node {node}")
                 if outage_type == "container_stop":
                     self._k8s_stop_spdk_pod(node_ip, node)
                 elif outage_type == "graceful_shutdown":
                     self._graceful_shutdown_node(node)
+                elif outage_type == "interface_full_network_interrupt":
+                    duration = random.choice([30, 300, 600])
+                    node_outage_dur = self._k8s_network_outage(node_ip, duration)
                 self.log_outage_event(node, outage_type, "Outage started")
             except Exception as e:
                 self.logger.error(f"Outage {outage_type} on node {node} failed: {e}")
                 outage_errors[node] = e
+            outage_results[node] = (outage_type, node_outage_dur)
 
+        outage_results = {}
         threads = []
         for idx, (node, outage_type, node_ip, _rpc_port) in enumerate(node_plans):
             if idx > 0:
@@ -2047,7 +2081,6 @@ class K8sNativeFailoverTest(TestClusterBase):
             t = threading.Thread(target=_run_outage, args=(node, outage_type, node_ip))
             t.start()
             threads.append(t)
-            outage_combinations.append((node, outage_type, 0))
             self.current_outage_nodes.append(node)
 
         for t in threads:
@@ -2056,6 +2089,11 @@ class K8sNativeFailoverTest(TestClusterBase):
         if outage_errors:
             failed = ", ".join(f"{n}: {e}" for n, e in outage_errors.items())
             raise RuntimeError(f"Outage(s) failed: {failed}")
+
+        outage_combinations = []
+        for node, outage_type, node_ip, _rpc_port in node_plans:
+            _, node_outage_dur = outage_results.get(node, (outage_type, 0))
+            outage_combinations.append((node, outage_type, node_outage_dur))
 
         self.outage_start_time = int(datetime.now().timestamp())
         return outage_combinations
@@ -2132,6 +2170,18 @@ class K8sNativeFailoverTest(TestClusterBase):
             else:
                 self.sbcli_utils.wait_for_storage_node_status(node, "online", timeout=300)
                 self.log_outage_event(node, outage_type, "Node restarted", outage_time=2)
+
+        elif "interface_full_network_interrupt" in outage_type:
+            # Self-restoring: iptables auto-flushes after the chosen duration.
+            # Just wait for the node to come back online.
+            self.logger.info(
+                f"Network outage on {node} is self-restoring — "
+                f"waiting for node to come online..."
+            )
+            self.sbcli_utils.wait_for_storage_node_status(node, "online", timeout=900)
+            self.log_outage_event(
+                node, outage_type, "Node recovered (network restored)"
+            )
 
         # Health check deferred to after all outage nodes are online
         self.outage_end_time = int(datetime.now().timestamp())

@@ -19,9 +19,10 @@ Adds:
   - sbcli CLI commands via kubectl exec into simplyblock-admin-control pod
 
 K8s failover mapping:
-  container_stop               → kubectl delete pod snode-spdk-pod-<x> (pod auto-restarts)
-  graceful_shutdown            → sbcli sn shutdown via kubectl exec
-  network outage               → not supported (no direct SSH to storage nodes)
+  container_stop                    → kubectl delete pod snode-spdk-pod-<x> (pod auto-restarts)
+  graceful_shutdown                 → sbcli sn shutdown via kubectl exec
+  interface_full_network_interrupt  → self-restoring iptables via kubectl exec into SPDK pod
+                                      (privileged + hostNetwork:true — no SSH needed)
 
 Usage (K8s):
   test = RandomK8sMultiOutageFailoverTest(k8s_run=True, ...)
@@ -73,9 +74,8 @@ class RandomK8sMultiOutageFailoverTest(RandomMultiClientMultiFailoverTest):
         self.k8s_utils: K8sUtils | None = None
         self.fio_num_jobs = 2
         self.persistent_lvols: set[str] = set()
-        # Network outage not supported in K8s (no direct SSH to storage nodes).
-        self.outage_types = ["graceful_shutdown"]
-        self.outage_types2 = ["container_stop", "graceful_shutdown"]
+        self.outage_types = ["graceful_shutdown", "interface_full_network_interrupt"]
+        self.outage_types2 = ["container_stop", "graceful_shutdown", "interface_full_network_interrupt"]
 
     # ── Setup ────────────────────────────────────────────────────────────────
 
@@ -501,6 +501,35 @@ class RandomK8sMultiOutageFailoverTest(RandomMultiClientMultiFailoverTest):
             f"[K8s] container_stop: deleted SPDK pod {pod_name!r} for node {node_ip}"
         )
 
+    def _k8s_network_outage(self, node_ip: str, duration: int) -> int:
+        """Trigger self-restoring full network outage on a K8s storage node.
+
+        Uses kubectl exec into the privileged SPDK pod (hostNetwork:true) to
+        run iptables DROP rules with auto-flush after *duration* seconds.
+        No SSH to storage nodes required.
+
+        Returns the chosen duration.
+        """
+        if not self.k8s_utils:
+            raise RuntimeError(
+                "[K8s] k8s_utils not initialised — was setup() called with k8s_run=True?"
+            )
+        cmd = (
+            f"sudo nohup bash -c '"
+            f"sleep 5 && "
+            f"iptables -A INPUT -j DROP && "
+            f"iptables -A OUTPUT -j DROP && "
+            f"sleep {duration} && "
+            f"iptables -F"
+            f"' > /tmp/k8s_nw_outage.log 2>&1 &"
+        )
+        self.k8s_utils.exec_in_spdk_container(node_ip, cmd)
+        self.logger.info(
+            f"[K8s] Network outage triggered on {node_ip} "
+            f"(self-restoring after {duration}s)"
+        )
+        return duration
+
     def perform_n_plus_k_outages(self):
         """
         Two-phase K8s override of perform_n_plus_k_outages.
@@ -569,7 +598,11 @@ class RandomK8sMultiOutageFailoverTest(RandomMultiClientMultiFailoverTest):
                 self._disconnect_partial_interface(node, node_ip)
                 node_outage_dur = 300
             elif outage_type == "interface_full_network_interrupt":
-                node_outage_dur = self._disconnect_full_interface(node, node_ip)
+                if self.k8s_test and self.k8s_utils:
+                    duration = random.choice([30, 300, 600])
+                    node_outage_dur = self._k8s_network_outage(node_ip, duration)
+                else:
+                    node_outage_dur = self._disconnect_full_interface(node, node_ip)
             self.log_outage_event(node, outage_type, "Outage started")
             outage_results[node] = (outage_type, node_outage_dur)
 
@@ -590,6 +623,33 @@ class RandomK8sMultiOutageFailoverTest(RandomMultiClientMultiFailoverTest):
 
         self.outage_start_time = int(datetime.now().timestamp())
         return outage_combinations
+
+    # ── recovery ────────────────────────────────────────────────────────────
+
+    def restart_nodes_after_failover(self, outage_type, restart=False):
+        """Override parent recovery for K8s self-restoring network outages.
+
+        For K8s mode with interface_full_network_interrupt, the iptables rules
+        auto-flush after the chosen duration — no SSH or explicit restart
+        needed.  Just wait (with a generous timeout) for the node to come
+        back online.  All other outage types delegate to the parent.
+        """
+        if (self.k8s_test and self.k8s_utils
+                and "interface_full_network_interrupt" in outage_type):
+            self.logger.info(
+                f"[K8s] Network outage on {self.current_outage_node} is "
+                f"self-restoring — waiting for node to come online "
+                f"(timeout=900s)..."
+            )
+            self.sbcli_utils.wait_for_storage_node_status(
+                self.current_outage_node, "online", timeout=900
+            )
+            self.log_outage_event(
+                self.current_outage_node, outage_type,
+                "Node recovered (network restored)"
+            )
+            return
+        super().restart_nodes_after_failover(outage_type, restart)
 
     # ── run ──────────────────────────────────────────────────────────────────
 
@@ -620,7 +680,7 @@ class RandomK8sMultiOutageFailoverTest(RandomMultiClientMultiFailoverTest):
             self.logger.info(
                 "K8s mode: pod logging via runner_k8s_log; "
                 "container_stop uses kubectl delete pod; "
-                "network outage disabled."
+                "network outage via self-restoring iptables (kubectl exec)."
             )
 
         # K8s: never delete pools; use existing pool or create one if none exist.

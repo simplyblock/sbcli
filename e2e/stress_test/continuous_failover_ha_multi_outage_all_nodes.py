@@ -34,10 +34,11 @@ class RandomMultiClientMultiFailoverAllNodesTest(RandomMultiClientMultiFailoverT
         self.test_name = "n_plus_k_failover_multi_client_ha_all_nodes"
 
         # FIO configuration: 64 parallel IO streams per node
-        self.total_lvols = 32           # 8 lvols per node x 4 nodes
+        self.total_lvols = 40           # 8 lvols per node x 5 nodes
         self.lvol_size = "20G"
         self.int_lvol_size = 20
         self.fio_num_jobs = 8           # 8 numjobs x 8 lvols/node = 64 per node
+        self.fio_numjobs = 8            # must match — _compute_fio_size() uses this attr
 
         # Expanded outage types with varied timing to catch races
         self.outage_types = [
@@ -173,7 +174,7 @@ class RandomMultiClientMultiFailoverAllNodesTest(RandomMultiClientMultiFailoverT
             elif outage_type == "forced_shutdown":
                 self._forced_shutdown_node(node)
             elif outage_type == "storage_node_reboot":
-                self.ssh_obj.exec_command(node_ip, "sudo reboot")
+                self.ssh_obj.reboot_node(node_ip, wait_time=300)
             elif outage_type == "interface_partial_network_interrupt":
                 self._disconnect_partial_interface(node, node_ip)
                 node_outage_dur = 300

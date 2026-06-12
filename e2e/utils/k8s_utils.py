@@ -204,6 +204,18 @@ class K8sUtils:
         )
         return pod_name
 
+    def exec_in_spdk_container(self, node_ip: str, command: str) -> tuple:
+        """Execute a command inside the spdk-container of the SPDK pod
+        for the given storage node IP.
+
+        Returns (stdout, stderr).
+        """
+        pod_name = self.get_spdk_pod_name(node_ip)
+        return self._exec_kubectl(
+            f"kubectl exec {pod_name} -c spdk-container -n {self.namespace} -- "
+            f"bash -c {shlex.quote(command)}"
+        )
+
     def _find_spdk_sock(self, pod_name: str) -> str:
         """Return the spdk.sock path inside spdk-container (searches /mnt/ramdisk)."""
         out, _ = self._exec_kubectl(
