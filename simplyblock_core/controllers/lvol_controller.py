@@ -2010,7 +2010,9 @@ def resize_lvol(id, new_size):
         logger.error(msg)
         return False, msg
 
-    if lvol.size >= new_size:
+    if lvol.size == new_size:
+        return True, None  # Nothing to do
+    elif lvol.size > new_size:
         msg = f"New size {utils.humanbytes(new_size)} must be higher than the original size {utils.humanbytes(lvol.size)}"
         logger.error(msg)
         return False, msg
