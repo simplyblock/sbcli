@@ -114,7 +114,6 @@ def _host_rotation_layout(hosts: List[List[str]], ftt: int):
     H = len(hosts)
     if H == 0:
         return
-    p = len(hosts[0])
     for i, host in enumerate(hosts):
         sec_host = hosts[(i + 1) % H]
         tert_host = hosts[(i + 2) % H] if ftt >= 2 else None

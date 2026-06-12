@@ -35,9 +35,8 @@ target for the live integration tests.
 
 from __future__ import annotations
 
-import dataclasses
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 

@@ -14,7 +14,7 @@ FTT2 (2+2) and 8-node baselines.
 from __future__ import annotations
 
 import datetime
-from typing import Dict, List, Tuple
+from typing import List, Tuple
 
 from tests.expansion_sim._rpc_sim import (
     BdevSim,

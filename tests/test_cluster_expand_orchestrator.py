@@ -22,7 +22,6 @@ from simplyblock_core.cluster_expand_planner import (
     EXPAND_PHASE_IN_PROGRESS,
     EXPAND_STATE_SCHEMA_VERSION,
     ROLE_PRIMARY,
-    ROLE_SECONDARY,
     ROLE_TERTIARY,
     RoleMove,
     compute_role_diff,

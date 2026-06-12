@@ -16,7 +16,6 @@ matter.
 """
 
 import os
-import sys
 import pytest
 
 _FDB_CLUSTER_FILE = os.environ.get(

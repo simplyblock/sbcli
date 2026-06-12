@@ -152,7 +152,7 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--spdk-sys-mem', help='System memory reserved for non-SPDK use (e.g. 2G, 4096M). Overrides the auto-calculated minimum_sys_memory. If not set, the value is derived from the node configuration.', type=str, dest='spdk_sys_mem')
         if self.developer_mode:
             argument = subcommand.add_argument('--spdk-proxy-image', help='The SPDK proxy image URI.', type=str, dest='spdk_proxy_image')
-        argument = subcommand.add_argument('--expansion', help='After adding the node, integrate it into the cluster by re-homing existing secondary/tertiary roles. Use this to add a single node to an FTT2 cluster instead of staging FTT+1 nodes at once.', dest='expansion', action='store_true')
+        argument = subcommand.add_argument('--expansion', help='After adding the node, integrate it into the cluster by re-homing existing secondary/tertiary roles. Use this to add a single node to an FTT2 cluster instead of staging FTT+1 nodes at once.', default=False, dest='expansion', action='store_true')
 
     def init_storage_node__delete(self, subparser):
         subcommand = self.add_sub_command(subparser, 'delete', 'Deletes a storage node object from the state database.')
