@@ -1357,5 +1357,136 @@ class TestRecreateLvstoreNonLeaderPortBlockFailure(unittest.TestCase):
         self.assertGreaterEqual(fw.firewall_set_port.call_count, 3)
 
 
+# ===========================================================================
+# jc_disable_replication: suspend-or-retry after the leader port-block
+# ===========================================================================
+
+class TestRecreateLvstoreReplicationSuspend(unittest.TestCase):
+    """recreate_lvstore (restart as leader) blocks the current leader's LVS
+    port and then calls jc_disable_replication(jm_vuid) on it:
+
+      True  -> no active replication; it is suspended (~12s) -> proceed with
+               the drain + leadership drop.
+      False -> active replication present -> unblock the leader port, re-wait
+               for replication to finish, and retry the whole block sequence;
+               after a bounded number of attempts, abort (kill SPDK, OFFLINE).
+
+    The block sequence no longer has a fixed pre-block sleep.
+    """
+
+    def _run(self, jc_disable_side=None, jc_disable_return=True):
+        """Drive recreate_lvstore on an FTT1 primary (node-1) whose secondary
+        (node-2) is the current acting leader. Returns
+        (result_or_exc, fw_calls, rpc, snode_api, nodes) where fw_calls is a
+        list of (node_uuid, action) with action in {"block","allow"}."""
+        nodes = _build_ftt1_nodes()
+        primary = nodes["node-1"]
+
+        db = _make_db_mock(nodes)
+        rpc = _mock_rpc()
+        if jc_disable_side is not None:
+            rpc.jc_disable_replication.side_effect = jc_disable_side
+        else:
+            rpc.jc_disable_replication.return_value = jc_disable_return
+
+        _setup_node_methods(nodes, rpc)
+
+        # SPDK-kill sink for the abort path. spdk_process_is_up returns a
+        # (up, err) tuple — report down so _kill_spdk_until_dead returns fast.
+        snode_api = MagicMock()
+        snode_api.spdk_process_kill.return_value = True
+        snode_api.spdk_process_is_up.return_value = (False, None)
+        for n in nodes.values():
+            n.client = MagicMock(return_value=snode_api)
+
+        make_fw, fw_instances = _mock_fw_factory()
+
+        patches = [
+            patch("simplyblock_core.storage_node_ops.DBController", return_value=db),
+            patch("simplyblock_core.storage_node_ops._create_bdev_stack", return_value=(True, None)),
+            patch("simplyblock_core.storage_node_ops._connect_to_remote_jm_devs", return_value=[]),
+            patch("simplyblock_core.storage_node_ops.health_controller"),
+            patch("simplyblock_core.storage_node_ops.tcp_ports_events"),
+            patch("simplyblock_core.storage_node_ops.storage_events"),
+            patch("simplyblock_core.storage_node_ops.tasks_controller"),
+            patch("simplyblock_core.storage_node_ops.set_node_status"),
+            patch("simplyblock_core.storage_node_ops._set_restart_phase"),
+            patch("simplyblock_core.storage_node_ops._failback_primary_ana"),
+            patch("simplyblock_core.storage_node_ops._check_peer_disconnected",
+                  side_effect=lambda peer, **kw: peer.status in ["offline"]),
+            patch("simplyblock_core.storage_node_ops.time.sleep", return_value=None),
+            patch("simplyblock_core.models.storage_node.RPCClient", return_value=rpc),
+            patch("simplyblock_core.port_block.set_port", side_effect=make_fw),
+        ]
+        for p in patches:
+            p.start()
+        self.addCleanup(lambda: [p.stop() for p in patches])
+
+        from simplyblock_core.storage_node_ops import recreate_lvstore
+        try:
+            result = recreate_lvstore(primary)
+        except Exception as e:
+            result = e
+
+        fw_calls = []
+        for fw in fw_instances:
+            for c in fw.firewall_set_port.call_args_list:
+                # firewall_set_port(port, "tcp", action, rpc_port)
+                fw_calls.append((fw._node_id, c[0][2]))
+        return result, fw_calls, rpc, snode_api, nodes
+
+    def _leader(self, fw_calls, action):
+        return [a for nid, a in fw_calls if nid == "node-2" and a == action]
+
+    def test_replication_suspended_true_proceeds(self):
+        """jc_disable_replication True on the first try: block once, suspend,
+        proceed to completion; leader port unblocked after its hublvol connect."""
+        result, fw_calls, rpc, _api, _nodes = self._run(jc_disable_return=True)
+        self.assertIs(result, True)
+        self.assertEqual(rpc.jc_disable_replication.call_count, 1)
+        self.assertEqual(len(self._leader(fw_calls, "block")), 1)
+        # unblocked once at ### 8c after connect_to_hublvol
+        self.assertEqual(len(self._leader(fw_calls, "allow")), 1)
+
+    def test_replication_active_then_suspends_retries(self):
+        """First jc_disable_replication reports active replication (False),
+        second succeeds. The leader port is unblocked and the full block
+        sequence (incl. the replication wait) re-runs before the retry."""
+        result, fw_calls, rpc, _api, nodes = self._run(jc_disable_side=[False, True])
+        self.assertIs(result, True)
+        self.assertEqual(rpc.jc_disable_replication.call_count, 2)
+        # replication wait re-ran on the retry (once per attempt)
+        self.assertEqual(
+            nodes["node-2"].wait_for_jm_rep_tasks_to_finish.call_count, 2)
+        # blocked twice (one per attempt); allowed twice (retry unblock + final 8c)
+        self.assertEqual(len(self._leader(fw_calls, "block")), 2)
+        self.assertEqual(len(self._leader(fw_calls, "allow")), 2)
+
+    def test_replication_never_suspends_aborts(self):
+        """jc_disable_replication always False -> abort after the bounded
+        number of attempts: SPDK killed, leader left unblocked, raises."""
+        result, fw_calls, rpc, api, _nodes = self._run(jc_disable_return=False)
+        self.assertIsInstance(result, Exception)
+        self.assertIn("suspend journal replication", str(result).lower())
+        self.assertEqual(rpc.jc_disable_replication.call_count, 10)
+        # 10 block attempts, each followed by a retry unblock
+        self.assertEqual(len(self._leader(fw_calls, "block")), 10)
+        self.assertEqual(len(self._leader(fw_calls, "allow")), 10)
+        self.assertGreaterEqual(api.spdk_process_kill.call_count, 1)
+
+    def test_jc_disable_replication_raise_aborts(self):
+        """A raise from jc_disable_replication aborts the restart (kill SPDK,
+        unblock the leader) rather than proceeding against active replication."""
+        result, fw_calls, rpc, api, _nodes = self._run(
+            jc_disable_side=Exception("simulated jc RPC timeout"))
+        self.assertIsInstance(result, Exception)
+        self.assertIn("jc_disable_replication", str(result).lower())
+        self.assertEqual(rpc.jc_disable_replication.call_count, 1)
+        # blocked once, then unblocked by the abort unwind
+        self.assertEqual(len(self._leader(fw_calls, "block")), 1)
+        self.assertEqual(len(self._leader(fw_calls, "allow")), 1)
+        self.assertGreaterEqual(api.spdk_process_kill.call_count, 1)
+
+
 if __name__ == '__main__':
     unittest.main()

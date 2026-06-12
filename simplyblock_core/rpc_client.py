@@ -1448,6 +1448,20 @@ class RPCClient:
         }
         return self._request("jc_get_jm_status", params)
 
+    def jc_disable_replication(self, jm_vuid):
+        """Suspend journal replication on the target JM before a leadership flap.
+
+        Return value:
+            True  - no active replication; replication is now suspended for ~12s.
+            False - active replication present; management must unblock the LVS
+                    port, wait for replication to finish, and retry the full
+                    block sequence.
+        """
+        params = {
+            "jm_vuid": jm_vuid,
+        }
+        return self._request("jc_disable_replication", params)
+
     def bdev_distrib_check_inflight_io(self, jm_vuid):
         params = {
             "jm_vuid": jm_vuid,

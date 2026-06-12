@@ -5951,44 +5951,82 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
         raise Exception(f"Abort restart: {reason}")
 
     if not activation_mode:
-        # Wait for replication to finish on the current leader only
-        if current_leader and current_leader.get_id() not in disconnected_peers:
-            try:
-                ret = current_leader.wait_for_jm_rep_tasks_to_finish(lvs_jm_vuid)
-                if not ret:
-                    msg = f"JM replication task found on leader {current_leader.get_id()} for jm {lvs_jm_vuid}"
-                    logger.error(msg)
-                    storage_events.jm_repl_tasks_found(current_leader, lvs_jm_vuid)
-            except Exception as e:
-                raise Exception(
-                    f"Abort restart: replication-wait on leader {current_leader.get_id()} failed: {e}")
-
-        ### 3- block LVS port on every connected peer (leader + non-leaders).
-        # Without blocking the tertiary, client IO can leak to it during the
+        ### 3- block LVS port on every connected peer (leader + non-leaders),
+        # then suspend the leader's journal replication before the flap.
+        #
+        # Per attempt against the current leader:
+        #   a. wait for any in-flight JM replication task to finish (loops
+        #      internally) so we don't block mid-replication;
+        #   b. mark the leader in_creation and block its LVS port;
+        #   c. jc_disable_replication(jm_vuid):
+        #        True  -> no active replication; it is now suspended (~12s) ->
+        #                 proceed with the drain + leadership drop below.
+        #        False -> active replication present -> unblock the leader port
+        #                 and retry the whole sequence (re-wait, re-block,
+        #                 re-disable).
+        #
+        # Without blocking the tertiary too, client IO can leak to it during the
         # leader flap: tertiary's LVOL listener stays open and serves writes
         # whose hublvol redirect target is mid-transition, producing
-        # writer_conflict events on the journal. Each peer stays blocked
-        # until its connect_to_hublvol succeeds in ### 8b.
+        # writer_conflict events on the journal. Non-leader peers are blocked
+        # once, after the leader's replication is confirmed suspended. Each peer
+        # stays blocked until its connect_to_hublvol succeeds in ### 8b.
         if current_leader and current_leader.get_id() not in disconnected_peers:
-            try:
-                current_leader.lvstore_status = "in_creation"
-                current_leader.write_to_db()
-                time.sleep(3)
+            _REPL_SUSPEND_MAX_ATTEMPTS = 10
+            replication_suspended = False
+            for _attempt in range(_REPL_SUSPEND_MAX_ATTEMPTS):
+                # a. ensure no active replication on the leader (loops internally)
+                try:
+                    ret = current_leader.wait_for_jm_rep_tasks_to_finish(lvs_jm_vuid)
+                    if not ret:
+                        msg = f"JM replication task found on leader {current_leader.get_id()} for jm {lvs_jm_vuid}"
+                        logger.error(msg)
+                        storage_events.jm_repl_tasks_found(current_leader, lvs_jm_vuid)
+                except Exception as e:
+                    raise Exception(
+                        f"Abort restart: replication-wait on leader {current_leader.get_id()} failed: {e}")
 
-                port_block.set_port(current_leader, snode_lvs_port, block=True, timeout=5, retry=2)
-                tcp_ports_events.port_deny(current_leader, snode_lvs_port)
-                blocked_peers.append(current_leader)
-            except Exception as e:
-                # Failing to port-block the current leader means we cannot
-                # safely promote snode: the old leader may still be serving
-                # IO, and a parallel leader on snode would produce a writer
-                # conflict (observed 2026-04-25, LVS_6609 incident).
-                # _check_hublvol_connected from snode is meaningless here —
-                # snode hasn't reconnected to peer hublvols yet — so we
-                # cannot use it to discriminate "peer gone" from "peer slow".
-                # Abort the attempt; the task runner will retry.
+                # b. block the leader's LVS port
+                try:
+                    current_leader.lvstore_status = "in_creation"
+                    current_leader.write_to_db()
+                    port_block.set_port(current_leader, snode_lvs_port, block=True, timeout=5, retry=2)
+                    tcp_ports_events.port_deny(current_leader, snode_lvs_port)
+                    blocked_peers.append(current_leader)
+                except Exception as e:
+                    # Failing to port-block the current leader means we cannot
+                    # safely promote snode: the old leader may still be serving
+                    # IO, and a parallel leader on snode would produce a writer
+                    # conflict (observed 2026-04-25, LVS_6609 incident).
+                    # _check_hublvol_connected from snode is meaningless here —
+                    # snode hasn't reconnected to peer hublvols yet — so we
+                    # cannot use it to discriminate "peer gone" from "peer slow".
+                    # Abort the attempt; the task runner will retry.
+                    _abort_restart_and_unblock(
+                        f"Failed to port-block leader {current_leader.get_id()}: {e}")
+
+                # c. suspend journal replication while the port is blocked
+                try:
+                    repl_disabled = current_leader.rpc_client().jc_disable_replication(lvs_jm_vuid)
+                except Exception as e:
+                    _abort_restart_and_unblock(
+                        f"jc_disable_replication on leader {current_leader.get_id()} failed: {e}")
+                if repl_disabled:
+                    replication_suspended = True
+                    break
+
+                # Active replication still present: unblock the leader port and
+                # retry the full sequence from the replication wait.
+                logger.warning(
+                    "jc_disable_replication reports active replication on leader %s "
+                    "(attempt %d/%d); unblocking and retrying",
+                    current_leader.get_id(), _attempt + 1, _REPL_SUSPEND_MAX_ATTEMPTS)
+                _unblock_peer_port(current_leader)
+
+            if not replication_suspended:
                 _abort_restart_and_unblock(
-                    f"Failed to port-block leader {current_leader.get_id()}: {e}")
+                    f"Could not suspend journal replication on leader "
+                    f"{current_leader.get_id()} after {_REPL_SUSPEND_MAX_ATTEMPTS} attempts")
 
         # Also block non-leader peers (tertiary). The leader's demote+drain
         # below is leader-specific; non-leaders just need the port shut so
