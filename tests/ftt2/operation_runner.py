@@ -228,8 +228,11 @@ class OperationRunner:
         """Resize a volume via lvol_controller.resize_lvol()."""
         def _do():
             from simplyblock_core.controllers import lvol_controller
-            result = lvol_controller.resize_lvol(lvol_id, new_size)
-            self._result.success = bool(result)
+            try:
+                lvol_controller.resize_lvol(lvol_id, new_size)
+                self._result.success = True
+            except Exception:
+                self._result.success = False
 
         self.start(_do)
         return self

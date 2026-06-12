@@ -12,6 +12,7 @@ from simplyblock_core import utils, constants
 from simplyblock_core.controllers import snapshot_controller, pool_controller, lvol_events, tasks_controller, \
     snapshot_events
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.kms import KMSException, create_kms_connection
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
@@ -1979,61 +1980,42 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
     return out, None
 
 
-def resize_lvol(id, new_size):
+def resize_lvol(id, new_size) -> None:
     db_controller = DBController()
-    try:
-        lvol = db_controller.get_lvol_by_id(id)
-    except KeyError as e:
-        logger.error(e)
-        return False, str(e)
+    lvol = db_controller.get_lvol_by_id(id)
 
     # Block during restart Phase 5
     try:
         snode = db_controller.get_storage_node_by_id(lvol.node_id)
         if snode.lvstore_status == "in_creation":
-            msg = f"Cannot resize lvol {lvol.uuid}: node LVStore restart in progress"
-            logger.error(msg)
-            return False, msg
+            raise PreconditionError(f"Cannot resize lvol {lvol.uuid}: node LVStore restart in progress")
     except KeyError:
         pass
 
     from simplyblock_core.controllers import migration_controller
     active_mig = migration_controller.get_active_migration_for_lvol(lvol.uuid)
     if active_mig:
-        msg = f"Cannot resize lvol {lvol.uuid}: active migration {active_mig.uuid}"
-        logger.error(msg)
-        return False, msg
+        raise PreconditionError(f"Cannot resize lvol {lvol.uuid}: active migration {active_mig.uuid}")
 
     pool = db_controller.get_pool_by_id(lvol.pool_uuid)
     if pool.status == Pool.STATUS_INACTIVE:
-        msg = f"Pool is disabled {pool.get_id()}"
-        logger.error(msg)
-        return False, msg
+        raise PreconditionError(f"Pool is disabled {pool.get_id()}")
 
     if lvol.size == new_size:
-        return True, None  # Nothing to do
+        return  # Nothing to do
     elif lvol.size > new_size:
-        msg = f"New size {utils.humanbytes(new_size)} must be higher than the original size {utils.humanbytes(lvol.size)}"
-        logger.error(msg)
-        return False, msg
+        raise PreconditionError(f"New size {utils.humanbytes(new_size)} must be higher than the original size {utils.humanbytes(lvol.size)}")
 
-    if lvol.max_size < new_size:
-        msg = f"New size {new_size} must be smaller than the max size {lvol.max_size}"
-        logger.error(msg)
-        return False, msg
+    if new_size > lvol.max_size:
+        raise PreconditionError(f"New size {utils.humanbytes(new_size)} must not be larger than the max size {utils.humanbytes(lvol.max_size)}")
 
     if 0 < pool.lvol_max_size < new_size:
-        msg = f"Pool Max LVol size is: {utils.humanbytes(pool.lvol_max_size)}, "\
-              f"LVol size: {utils.humanbytes(new_size)} must be below this limit"
-        logger.error(msg)
-        return False, msg
+        raise PreconditionError(f"New size {utils.humanbytes(new_size)} must not be larger than the pool max size {utils.humanbytes(pool.lvol_max_size)}")
 
     if pool.pool_max_size > 0:
         total = pool_controller.get_pool_total_capacity(pool.get_id())
         if total + new_size > pool.pool_max_size:
-            msg =f"Invalid LVol size: {utils.humanbytes(new_size)}, Pool max size has reached {utils.humanbytes(total+new_size)} of {utils.humanbytes(pool.pool_max_size)}"
-            logger.error(msg)
-            return False, msg
+            raise PreconditionError(f"Invalid LVol size: {utils.humanbytes(new_size)}, Pool max size has reached {utils.humanbytes(total+new_size)} of {utils.humanbytes(pool.pool_max_size)}")
 
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
 
@@ -2048,12 +2030,9 @@ def resize_lvol(id, new_size):
     rpc_client = snode.rpc_client()
 
     if lvol.ha_type == "single":
-
         ret = rpc_client.bdev_lvol_resize(f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib)
         if not ret:
-            msg = f"Error resizing lvol on node: {snode.get_id()}"
-            logger.error(msg)
-            return False, msg
+            raise RuntimeError(f"Error resizing lvol on node: {snode.get_id()}")
 
     else:
         primary_node = None
@@ -2089,9 +2068,7 @@ def resize_lvol(id, new_size):
             action = check_non_leader_for_operation(
                 candidate.get_id(), lvol.lvs_name, operation_type="create")
             if action == "reject":
-                msg = f"Cannot resize: non-leader {candidate.get_id()[:8]} unreachable but fabric healthy"
-                logger.error(msg)
-                return False, msg
+                raise RuntimeError(f"Cannot resize: non-leader {candidate.get_id()[:8]} unreachable but fabric healthy")
             elif action == "proceed":
                 secondary_nodes.append(candidate)
             elif action == "queue":
@@ -2107,25 +2084,19 @@ def resize_lvol(id, new_size):
             rpc_client = primary_node.rpc_client()
             ret = rpc_client.bdev_lvol_resize(f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib)
             if not ret:
-                msg = f"Error resizing lvol on node: {primary_node.get_id()}"
-                logger.error(msg)
-                return False, msg
+                raise RuntimeError(f"Error resizing lvol on node: {primary_node.get_id()}")
 
         for sec in secondary_nodes:
             logger.info(f"Resizing LVol: {lvol.get_id()} on node: {sec.get_id()}")
             sec_rpc_client = sec.rpc_client()
             ret = sec_rpc_client.bdev_lvol_resize(f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib)
             if not ret:
-                msg = f"Error resizing lvol on node: {sec.get_id()}"
-                logger.error(msg)
-                return False, msg
+                raise RuntimeError(f"Error resizing lvol on node: {sec.get_id()}")
 
     lvol = db_controller.get_lvol_by_id(id)
     lvol.size = new_size
     lvol.write_to_db(db_controller.kv_store)
     logger.info("Done")
-
-    return True, None
 
 
 def create_snapshot(lvol_id, snapshot_name, backup=False):

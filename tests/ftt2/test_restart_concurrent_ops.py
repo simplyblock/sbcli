@@ -161,8 +161,8 @@ class StressRunner:
                     from simplyblock_core.controllers import lvol_controller
                     lvol = random.choice(created_lvols)
                     new_size = lvol.size + 1_073_741_824
-                    result = lvol_controller.resize_lvol(lvol.uuid, new_size)
-                    self._record("resize", bool(result), t0, time.time(), lvol.uuid)
+                    lvol_controller.resize_lvol(lvol.uuid, new_size)
+                    self._record("resize", True, t0, time.time(), lvol.uuid)
 
             except Exception as e:
                 self._record(op, False, t0, time.time(), str(e))
