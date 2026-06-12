@@ -40,12 +40,13 @@ from simplyblock_core.models.storage_node import StorageNode
 logger = utils.get_logger(__name__)
 
 
-# Map planner role string → (which_sec slot field-suffix on
-# storage_node, primary's pointer attribute name). ``"primary"`` is not in
-# this map — the create-primary path bypasses it.
+# Map planner role string → (slot name used for the holder's
+# ``lvstore_stack_{slot}`` back-reference field, primary's pointer
+# attribute name). ``"primary"`` is not in this map — the create-primary
+# path bypasses it.
 _SEC_SLOT_BY_ROLE = {
-    ROLE_SECONDARY: ("_1", "secondary_node_id"),
-    ROLE_TERTIARY: ("_2", "tertiary_node_id"),
+    ROLE_SECONDARY: ("secondary", "secondary_node_id"),
+    ROLE_TERTIARY: ("tertiary", "tertiary_node_id"),
 }
 
 
@@ -101,11 +102,11 @@ class SpdkMoveExecutor(MoveExecutor):
         if move.role not in _SEC_SLOT_BY_ROLE:
             raise ValueError(f"unknown role in RoleMove: {move.role!r}")
 
-        slot_suffix, primary_ptr_attr = _SEC_SLOT_BY_ROLE[move.role]
+        slot, primary_ptr_attr = _SEC_SLOT_BY_ROLE[move.role]
         if move.is_create:
-            self._execute_create_sec(move, slot_suffix, primary_ptr_attr)
+            self._execute_create_sec(move, slot, primary_ptr_attr)
         else:
-            self._execute_rehome_sec(move, slot_suffix, primary_ptr_attr)
+            self._execute_rehome_sec(move, slot, primary_ptr_attr)
 
     # -- create-primary (Phase B) ------------------------------------------
 
@@ -137,7 +138,7 @@ class SpdkMoveExecutor(MoveExecutor):
     # -- create-secondary / create-tertiary (Phase B) ----------------------
 
     def _execute_create_sec(self, move: RoleMove,
-                            slot_suffix: str, primary_ptr_attr: str) -> None:
+                            slot: str, primary_ptr_attr: str) -> None:
         from simplyblock_core import storage_node_ops
         db = self._db_ctrl()
 
@@ -146,7 +147,7 @@ class SpdkMoveExecutor(MoveExecutor):
 
         # 1. Set holder's back-reference (string field that
         #    recreate_lvstore_on_sec uses to discover its iteration set).
-        holder.lvstore_stack_secondary = primary.get_id()
+        setattr(holder, f"lvstore_stack_{slot}", primary.get_id())
         holder.jm_ids = list(set(primary.jm_ids+holder.jm_ids))
         holder.write_to_db()
 
@@ -167,7 +168,7 @@ class SpdkMoveExecutor(MoveExecutor):
     # -- re-home secondary / re-home tertiary (Phase A) --------------------
 
     def _execute_rehome_sec(self, move: RoleMove,
-                            slot_suffix: str, primary_ptr_attr: str) -> None:
+                            slot: str, primary_ptr_attr: str) -> None:
         from simplyblock_core import storage_node_ops
         db = self._db_ctrl()
 
@@ -193,7 +194,8 @@ class SpdkMoveExecutor(MoveExecutor):
         #    leaves the recipient's record claiming to host a role its
         #    primary isn't yet pointing at — recoverable on resume by
         #    re-running the same move.
-        recipient.lvstore_stack_secondary = primary.get_id()
+        setattr(recipient,
+                f"lvstore_stack_{slot}", primary.get_id())
         recipient.write_to_db()
 
         setattr(primary, primary_ptr_attr, recipient.get_id())
@@ -216,15 +218,16 @@ class SpdkMoveExecutor(MoveExecutor):
         donor = db.get_storage_node_by_id(donor.get_id())
         primary = db.get_storage_node_by_id(primary.get_id())
         if not storage_node_ops.teardown_non_leader_lvstore(
-                donor, primary, slot=slot_suffix):
+                donor, primary, slot=slot):
             raise RuntimeError(
                 f"teardown_non_leader_lvstore failed for donor "
                 f"{donor.get_id()} of LVS@{primary.get_id()}")
 
-        # 4. Sec_1 moves require the sibling sec_2 to repoint its multipath
-        #    failover path from donor to recipient. Sec_2 moves don't have
-        #    this problem (sec_1 was unchanged; only sec_2 itself moved).
-        if slot_suffix == "_1":
+        # 4. Secondary moves require the tertiary sibling to repoint its
+        #    multipath failover path from donor to recipient. Tertiary
+        #    moves don't have this problem (the secondary was unchanged;
+        #    only the tertiary itself moved).
+        if slot == "secondary":
             primary = db.get_storage_node_by_id(primary.get_id())
             if primary.tertiary_node_id:
                 sibling = db.get_storage_node_by_id(primary.tertiary_node_id)
@@ -242,10 +245,10 @@ class SpdkMoveExecutor(MoveExecutor):
                             f"restarts)")
                 else:
                     logger.warning(
-                        f"re-home sec_1 for LVS@{primary.get_id()}: sibling "
-                        f"sec_2 {sibling.get_id()} is {sibling.status!r}, "
-                        f"skipping failover reattach (will be re-established "
-                        f"when the sibling restarts)")
+                        f"re-home secondary for LVS@{primary.get_id()}: "
+                        f"tertiary sibling {sibling.get_id()} is "
+                        f"{sibling.status!r}, skipping failover reattach "
+                        f"(will be re-established when the sibling restarts)")
 
 
 def integrate_new_node_into_cluster(cluster, new_snode, executor=None,

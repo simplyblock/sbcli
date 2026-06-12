@@ -75,15 +75,15 @@ def test_4_to_5_ftt1_happy_path(fdb_clean, db_controller_singleton_reset,
     # 4. Each LVS's secondary holder records the back-reference.
     for primary_id, sec_id in expected.items():
         sec_node = nodes[sec_id]
-        # The sec node's lvstore_stack_secondary_1 should match the
+        # The sec node's lvstore_stack_secondary should match the
         # primary it hosts, except some nodes host multiple secs after
         # rotation — we only check the at-least-one invariant per
         # secondary node.
         # In the 4→5 layout, every node is sec_1 for exactly one primary,
         # so equality holds.
-        assert sec_node.lvstore_stack_secondary_1 == primary_id, (
-            f"node {sec_id} lvstore_stack_secondary_1 expected "
-            f"{primary_id}, got {sec_node.lvstore_stack_secondary_1!r}")
+        assert sec_node.lvstore_stack_secondary == primary_id, (
+            f"node {sec_id} lvstore_stack_secondary expected "
+            f"{primary_id}, got {sec_node.lvstore_stack_secondary!r}")
 
     # 5. Simulator-side sanity: n5's simulator now holds a lvstore bdev
     # plus the primary stack bdevs.

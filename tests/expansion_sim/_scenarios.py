@@ -55,9 +55,9 @@ def _make_node_record(uuid: str, cluster_id: str,
                       mgmt_ip: str, rpc_port: int,
                       lvstore: str = "",
                       secondary_node_id: str = "",
-                      secondary_node_id_2: str = "",
-                      lvstore_stack_secondary_1: str = "",
-                      lvstore_stack_secondary_2: str = "",
+                      tertiary_node_id: str = "",
+                      lvstore_stack_secondary: str = "",
+                      lvstore_stack_tertiary: str = "",
                       jm_vuid: int = 0):
     from simplyblock_core.models.storage_node import StorageNode
     from simplyblock_core.models.iface import IFace
@@ -76,9 +76,9 @@ def _make_node_record(uuid: str, cluster_id: str,
     n.lvstore_status = "ready" if lvstore else ""
     n.lvol_subsys_port = 4420
     n.secondary_node_id = secondary_node_id
-    n.secondary_node_id_2 = secondary_node_id_2
-    n.lvstore_stack_secondary_1 = lvstore_stack_secondary_1
-    n.lvstore_stack_secondary_2 = lvstore_stack_secondary_2
+    n.tertiary_node_id = tertiary_node_id
+    n.lvstore_stack_secondary = lvstore_stack_secondary
+    n.lvstore_stack_tertiary = lvstore_stack_tertiary
     n.lvstore_stack = []
     n.lvstore_ports = {lvstore: {"lvol_subsys_port": 4420,
                                   "hublvol_port": 4421}} if lvstore else {}
@@ -195,7 +195,7 @@ def build_4_node_ftt1_baseline(cluster_sim: ClusterSim, db) -> Tuple[str, List[s
             rpc_port=8080 + i,
             lvstore=f"LVS_{nid}",
             secondary_node_id=sec_of[nid],
-            lvstore_stack_secondary_1=primary_of_sec.get(nid, ""),
+            lvstore_stack_secondary=primary_of_sec.get(nid, ""),
             jm_vuid=1000 + i,
         )
         # Realistic-ish primary lvstore_stack: one distrib + one raid +
