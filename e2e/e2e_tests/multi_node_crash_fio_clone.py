@@ -37,14 +37,13 @@ class TestMultiFioSnapshotDowntime(TestClusterBase):
             lvol_name = f"test_lvol_{i + 1}"
             self.logger.info(f"Creating LVOL {lvol_name} on node {node_ip}")
             self.sbcli_utils.add_lvol(lvol_name=lvol_name, pool_name=self.pool_name, size=self.lvol_size, host_id=node_uuid,
-                                      crypto=True, key1=self.lvol_crypt_keys[0],
-                                      key2=self.lvol_crypt_keys[1])
+                                      crypto=True)
             lvol_vs_node[lvol_name] = node_uuid
 
             # Get devices and mount them for non-trimwrite workloads
             initial_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
             self.logger.info(f"Initial devices on node {self.mgmt_nodes[0]}: {initial_devices}")
-            
+
             # Step 3: Check for new device after connecting the LVOL
             sleep_n_sec(2)
 
@@ -57,7 +56,7 @@ class TestMultiFioSnapshotDowntime(TestClusterBase):
             new_device = [dev for dev in final_devices if dev not in initial_devices]
             self.logger.info(f"Final devices after LVOL connection: {final_devices}")
             self.logger.info(f"Using device for lvol {lvol_name}: {new_device[0]}")
-            
+
             lvol_fio_info[lvol_name] = {"device": f"/dev/{new_device[0]}" if new_device else None}
 
         # Step 4: Create 3 more LVOLs on the same two nodes with LVOLs (to leave 1 node without LVOLs)
@@ -66,8 +65,7 @@ class TestMultiFioSnapshotDowntime(TestClusterBase):
             lvol_name = f"test_lvol_{i + 1}"
             self.logger.info(f"Creating LVOL {lvol_name} on node {node_uuid}")
             self.sbcli_utils.add_lvol(lvol_name=lvol_name, pool_name=self.pool_name, size=self.lvol_size, host_id=node_uuid,
-                                      crypto=True, key1=self.lvol_crypt_keys[0],
-                                      key2=self.lvol_crypt_keys[1])
+                                      crypto=True)
             
             lvol_vs_node[lvol_name] = self.node_id_ip[node_uuid]
 

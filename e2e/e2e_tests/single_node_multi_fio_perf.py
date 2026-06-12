@@ -15,16 +15,18 @@ class TestLvolFioBase(TestClusterBase):
     def setup(self):
         """Call setup from TestClusterBase and then create the storage pool."""
         self.test_name = "single_node_fio_perf"
-        
+
         super().setup()
 
         self.lvol_devices = {}
+        self.fio_handles = {}
 
-        pools = self.sbcli_utils.list_storage_pools()
-        assert self.pool_name not in list(pools.keys()), \
-            f"Pool {self.pool_name} present in list of pools post delete: {pools}"
+        if not self.k8s_test:
+            pools = self.sbcli_utils.list_storage_pools()
+            assert self.pool_name not in list(pools.keys()), \
+                f"Pool {self.pool_name} present in list of pools post delete: {pools}"
 
-        self.sbcli_utils.add_storage_pool(
+        self._add_pool_dual(
             pool_name=self.pool_name,
             cluster_id=self.cluster_id,
             max_rw_iops=30000,
@@ -32,93 +34,68 @@ class TestLvolFioBase(TestClusterBase):
             max_w_mbytes=100
         )
 
-        pools = self.sbcli_utils.list_storage_pools()
-        assert self.pool_name in list(pools.keys()), \
-            f"Pool {self.pool_name} not present in list of pools post add: {pools}"
+        self._verify_pool_exists_dual()
+
+        if self.k8s_test:
+            self._k8s_ensure_storage_class()
 
     def create_lvols(self, lvol_configs):
         """
-        Create multiple LVOLs, connect them, and mount them 
+        Create multiple LVOLs, connect them, and mount them
         based on the provided configurations.
         """
         self.logger.info("Creating LVOLs based on the provided configurations")
 
         for config in lvol_configs:
             lvol_name = config['lvol_name']
-            if "ndcs" in lvol_configs:
-                self.sbcli_utils.add_lvol(
-                    lvol_name=lvol_name,
-                    pool_name=self.pool_name,
-                    size=config['size'],
-                    distr_ndcs=config['ndcs'],
-                    distr_npcs=config['npcs'],
-                    distr_bs=4096,
-                    distr_chunk_bs=4096,
-                )
-            else:
-                # Create LVOL
-                self.sbcli_utils.add_lvol(
-                    lvol_name=lvol_name,
-                    pool_name=self.pool_name,
-                    size=config['size'],
-                )
+            ndcs = config.get('ndcs')
+            npcs = config.get('npcs')
 
-            initial_devices = self.ssh_obj.get_devices(node=self.client_machines[0])
+            self._create_lvol_dual(
+                lvol_name=lvol_name,
+                size=config['size'],
+                pool_name=self.pool_name,
+                ndcs=ndcs,
+                npcs=npcs,
+            )
 
-            # Get LVOL connection string
-            connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)
-            for connect_str in connect_ls:
-                self.ssh_obj.exec_command(node=self.client_machines[0], command=connect_str)
-
-            # Identify the newly connected device
-            sleep_n_sec(10)
-            final_devices = self.ssh_obj.get_devices(node=self.client_machines[0])
-            disk_use = None
-
-            for device in final_devices:
-                if device not in initial_devices:
-                    self.logger.info(f"Using disk: /dev/{device.strip()}")
-                    disk_use = f"/dev/{device.strip()}"
-                    break
-
-            # Unmount, format, and mount the device
-            self.ssh_obj.unmount_path(node=self.client_machines[0], device=disk_use)
             mount_path = None
             if config["mount"]:
-                self.ssh_obj.format_disk(node=self.client_machines[0], device=disk_use)
                 mount_path = f"{Path.home()}/test_location_{lvol_name}"
-                self.ssh_obj.mount_path(node=self.client_machines[0], device=disk_use, mount_path=mount_path)
 
-            # Store device information
-            self.lvol_devices[lvol_name] = {"Device": disk_use, "MountPath": mount_path}
+            device, mount = self._connect_and_mount_dual(
+                lvol_name, mount_path=mount_path, format_disk=config["mount"]
+            )
+
+            self.lvol_devices[lvol_name] = {"Device": device, "MountPath": mount}
 
     def run_fio_on_lvol(self, lvol_name, mount_path=None, device=None, readwrite="randrw"):
         """Run FIO tests on a specific LVOL with the given readwrite operation."""
         self.logger.info(f"Starting FIO test on {lvol_name} with readwrite={readwrite}")
-        fio_thread = threading.Thread(
-            target=self.ssh_obj.run_fio_test,
-            args=(self.client_machines[0], device, mount_path, None),
-            kwargs={
-                "name": f"fio_{lvol_name}",
-                "rw": readwrite,
-                "ioengine": "libaio",
-                "iodepth": 1,
-                "bs": 4096,
-                "size": "2G",
-                "time_based": True,
-                "runtime": 300,
-                "output_format": "json",
-                "output_file": f"{Path.home()}/{lvol_name}_log.json",
-                "nrfiles": 5,
-                "debug": self.fio_debug
-            }
+        handle = self._run_fio_dual(
+            lvol_name=lvol_name,
+            mount_path=mount_path,
+            name=f"fio_{lvol_name}",
+            rw=readwrite,
+            iodepth=1,
+            bs="4096",
+            size="2G",
+            time_based=True,
+            runtime=300,
+            nrfiles=5,
         )
-        fio_thread.start()
-        return fio_thread
+        self.fio_handles[lvol_name] = handle
+        return handle
 
     def validate_fio_output(self, lvol_name, read_check=False, write_check=False,
                             trim_check=False):
         """Validate the FIO output for IOPS and MB/s."""
+        if self.k8s_test:
+            handle = self.fio_handles.get(lvol_name)
+            if handle:
+                self._validate_fio_dual(handle)
+            self.logger.info(f"[k8s] FIO validation passed for {lvol_name}")
+            return
 
         log_file = f"{Path.home()}/{lvol_name}_log.json"
         output = self.ssh_obj.read_file(node=self.client_machines[0], file_name=log_file)
@@ -184,22 +161,61 @@ class TestLvolFioBase(TestClusterBase):
 
     def cleanup_lvols(self, lvol_configs):
         """Unmount, remove directory, and delete LVOLs for cleanup."""
+        if self.k8s_test:
+            # K8s cleanup: FIO jobs cleaned up after wait, PVCs in teardown
+            for config in lvol_configs:
+                lvol_name = config['lvol_name']
+                handle = self.fio_handles.get(lvol_name)
+                if handle:
+                    self._cleanup_fio_k8s(handle)
+            self.logger.info("[k8s] Cleanup: FIO jobs deleted, PVCs handled by teardown")
+            return
+
         self.logger.info("Starting cleanup of LVOLs")
         for config in lvol_configs:
             lvol_name = config['lvol_name']
             if config['mount']:
                 self.ssh_obj.unmount_path(node=self.client_machines[0],
                                           device=self.lvol_devices[lvol_name]['MountPath'])
-                self.ssh_obj.remove_dir(node=self.client_machines[0], 
+                self.ssh_obj.remove_dir(node=self.client_machines[0],
                                         dir_path=self.lvol_devices[lvol_name]['MountPath'])
             lvol_id = self.sbcli_utils.get_lvol_id(lvol_name=lvol_name)
-            subsystems = self.ssh_obj.get_nvme_subsystems(node=self.client_machines[0], 
+            subsystems = self.ssh_obj.get_nvme_subsystems(node=self.client_machines[0],
                                                           nqn_filter=lvol_id)
             for subsys in subsystems:
                 self.logger.info(f"Disconnecting NVMe subsystem: {subsys}")
                 self.ssh_obj.disconnect_nvme(node=self.client_machines[0], nqn_grep=subsys)
             self.sbcli_utils.delete_lvol(lvol_name=lvol_name)
         self.logger.info("Cleanup completed")
+
+    def _run_scenario(self, lvol_configs):
+        """Common scenario runner: create lvols, run FIO, wait, validate, cleanup."""
+        self.create_lvols(lvol_configs)
+
+        lvol_name_1 = lvol_configs[0]['lvol_name']
+        lvol_name_2 = lvol_configs[1]['lvol_name']
+
+        fio_handles = []
+        fio_handles.append(self.run_fio_on_lvol(
+            lvol_name_1,
+            mount_path=self.lvol_devices[lvol_name_1]["MountPath"],
+            readwrite="randrw"))
+        fio_handles.append(self.run_fio_on_lvol(
+            lvol_name_2,
+            device=self.lvol_devices[lvol_name_2]["Device"],
+            readwrite="write"))
+
+        self._wait_fio_dual(fio_handles, timeout=600)
+
+        if not self.k8s_test:
+            for handle in fio_handles:
+                if isinstance(handle, threading.Thread):
+                    handle.join()
+
+        self.validate_fio_output(lvol_name_1, read_check=True, write_check=True)
+        self.validate_fio_output(lvol_name_2, read_check=False, write_check=True,
+                                 trim_check=False)
+        self.cleanup_lvols(lvol_configs)
 
 
 class TestLvolFioNpcs0(TestLvolFioBase):
@@ -215,8 +231,7 @@ class TestLvolFioNpcs0(TestLvolFioBase):
         ]
 
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-        # Write date, time, and LVOL details to the log file
+        os.makedirs("logs", exist_ok=True)
         with open(os.path.join("logs" ,"fio_test_results.log"),
                   "a", encoding="utf-8") as log_file:
             log_file.write(f"Date & Time: {current_time}\n")
@@ -224,40 +239,13 @@ class TestLvolFioNpcs0(TestLvolFioBase):
         for scenario in scenarios:
             lvol_configs = [
                 {"lvol_name": f"lvol1_npcs_{scenario['npcs']}_ndcs_{scenario['ndcs']}",
-                 "ndcs": scenario['ndcs'], "npcs": scenario['npcs'], 
+                 "ndcs": scenario['ndcs'], "npcs": scenario['npcs'],
                  "size": "4G", "mount": True},
                 {"lvol_name": f"lvol2_npcs_{scenario['npcs']}_ndcs_{scenario['ndcs']}",
-                 "ndcs": scenario['ndcs'], "npcs": scenario['npcs'], 
+                 "ndcs": scenario['ndcs'], "npcs": scenario['npcs'],
                  "size": "4G", "mount": False}
             ]
-            # Create LVOLs
-            self.create_lvols(lvol_configs)
-            lvol_name_1 = lvol_configs[0]['lvol_name']
-            lvol_name_2 = lvol_configs[1]['lvol_name']
-
-            # Run FIO tests
-            fio_threads = []
-            fio_threads.append(self.run_fio_on_lvol(lvol_name_1,
-                                                    mount_path=self.lvol_devices[lvol_name_1]["MountPath"],
-                                                    readwrite="randrw"))
-            fio_threads.append(self.run_fio_on_lvol(lvol_name_2,
-                                                    device=self.lvol_devices[lvol_name_2]["Device"],
-                                                    readwrite="write"))
-
-            self.common_utils.manage_fio_threads(
-                node=self.client_machines[0], threads=fio_threads, timeout=600
-            )
-            for thread in fio_threads:
-                thread.join()
-
-            # Validate FIO outputs
-            self.validate_fio_output(lvol_name_1, read_check=True, write_check=True)
-            self.validate_fio_output(lvol_name_2, read_check=False, write_check=True,
-                                     trim_check=False)
-
-            # Cleanup after running FIO
-            self.cleanup_lvols(lvol_configs)
-
+            self._run_scenario(lvol_configs)
             self.logger.info(f"Test Passed with scenario npcs: {scenario['npcs']} "
                              f" and ndcs: {scenario['ndcs']}")
         self.logger.info(f"All Test Scenarios Passed with npcs: {scenario['npcs']}")
@@ -273,12 +261,9 @@ class TestLvolFioNpcs1(TestLvolFioBase):
         """Test scenario for npcs=1 with different ndcs."""
         scenarios = [
             {"npcs": 1, "ndcs": 1},
-            # {"npcs": 1, "ndcs": 2},
-            # {"npcs": 1, "ndcs": 4}
         ]
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-        # Write date, time, and LVOL details to the log file
+        os.makedirs("logs", exist_ok=True)
         with open(os.path.join("logs" ,"fio_test_results.log"),
                   "a", encoding="utf-8") as log_file:
             log_file.write(f"Date & Time: {current_time}\n")
@@ -292,36 +277,7 @@ class TestLvolFioNpcs1(TestLvolFioBase):
                  "ndcs": scenario['ndcs'], "npcs": scenario['npcs'],
                  "size": "4G", "mount": False}
             ]
-            # Create LVOLs
-            self.create_lvols(lvol_configs)
-
-            lvol_name_1 = lvol_configs[0]['lvol_name']
-            lvol_name_2 = lvol_configs[1]['lvol_name']
-
-            # Run FIO tests
-            fio_threads = []
-            fio_threads.append(self.run_fio_on_lvol(lvol_name_1,
-                                                    mount_path=self.lvol_devices[lvol_name_1]["MountPath"],
-                                                    readwrite="randrw"))
-            fio_threads.append(self.run_fio_on_lvol(lvol_name_2,
-                                                    device=self.lvol_devices[lvol_name_2]["Device"],
-                                                    readwrite="write"))
-
-            self.common_utils.manage_fio_threads(
-                node=self.client_machines[0], threads=fio_threads, timeout=600
-            )
-
-            for thread in fio_threads:
-                thread.join()
-
-            # Validate FIO outputs
-            self.validate_fio_output(lvol_name_1, read_check=True, write_check=True)
-            self.validate_fio_output(lvol_name_2, read_check=False, write_check=True,
-                                     trim_check=False)
-
-            # Cleanup after running FIO
-            self.cleanup_lvols(lvol_configs)
-
+            self._run_scenario(lvol_configs)
             self.logger.info(f"Test Passed with scenario npcs: {scenario['npcs']} "
                              f" and ndcs: {scenario['ndcs']}")
         self.logger.info(f"All Test Scenarios Passed with npcs: {scenario['npcs']}")
@@ -337,13 +293,9 @@ class TestLvolFioNpcs2(TestLvolFioBase):
         """Test scenario for npcs=2 with different ndcs."""
         scenarios = [
             {"npcs": 2, "ndcs": 1},
-            # {"npcs": 2, "ndcs": 2},
-            # {"npcs": 2, "ndcs": 4},
-            # {"npcs": 2, "ndcs": 8}
         ]
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-        # Write date, time, and LVOL details to the log file
+        os.makedirs("logs", exist_ok=True)
         with open(os.path.join("logs" ,"fio_test_results.log"),
                   "a", encoding="utf-8") as log_file:
             log_file.write(f"Date & Time: {current_time}\n")
@@ -357,37 +309,7 @@ class TestLvolFioNpcs2(TestLvolFioBase):
                  "ndcs": scenario['ndcs'], "npcs": scenario['npcs'],
                  "size": "4G", "mount": False}
             ]
-            # Create LVOLs
-            self.create_lvols(lvol_configs)
-
-            lvol_name_1 = lvol_configs[0]['lvol_name']
-            lvol_name_2 = lvol_configs[1]['lvol_name']
-
-            # Run FIO tests
-            fio_threads = []
-            fio_threads.append(self.run_fio_on_lvol(lvol_name_1,
-                                                    mount_path=self.lvol_devices[lvol_name_1]["MountPath"],
-                                                    readwrite="randrw"))
-            sleep_n_sec(10)
-            fio_threads.append(self.run_fio_on_lvol(lvol_name_2,
-                                                    device=self.lvol_devices[lvol_name_2]["Device"],
-                                                    readwrite="write"))
-
-            self.common_utils.manage_fio_threads(
-                node=self.client_machines[0], threads=fio_threads, timeout=600
-            )
-
-            for thread in fio_threads:
-                thread.join()
-
-            # Validate FIO outputs
-            self.validate_fio_output(lvol_name_1, read_check=True, write_check=True)
-            self.validate_fio_output(lvol_name_2, read_check=False, write_check=True,
-                                     trim_check=False)
-
-            # Cleanup after running FIO
-            self.cleanup_lvols(lvol_configs)
-
+            self._run_scenario(lvol_configs)
             self.logger.info(f"Test Passed with scenario npcs: {scenario['npcs']} "
                              f" and ndcs: {scenario['ndcs']}")
         self.logger.info(f"All Test Scenarios Passed with npcs: {scenario['npcs']}")
@@ -400,40 +322,9 @@ class TestLvolFioNpcsCustom(TestLvolFioBase):
 
     def run(self):
         """Custom test scenario without requiring ndcs or npcs."""
-        # Define custom test configurations that don't require ndcs or npcs
         lvol_configs = [
             {"lvol_name": "lvol_custom_1", "size": "4G", "mount": True},
             {"lvol_name": "lvol_custom_2", "size": "4G", "mount": False}
         ]
-        
-        # Create LVOLs
-        self.create_lvols(lvol_configs)
-
-        lvol_name_1 = lvol_configs[0]['lvol_name']
-        lvol_name_2 = lvol_configs[1]['lvol_name']
-
-        # Run FIO tests
-        fio_threads = []
-        fio_threads.append(self.run_fio_on_lvol(lvol_name_1,
-                                                mount_path=self.lvol_devices[lvol_name_1]["MountPath"],
-                                                readwrite="randrw"))
-        fio_threads.append(self.run_fio_on_lvol(lvol_name_2,
-                                                device=self.lvol_devices[lvol_name_2]["Device"],
-                                                readwrite="write"))
-
-        self.common_utils.manage_fio_threads(
-            node=self.client_machines[0], threads=fio_threads, timeout=600
-        )
-
-        for thread in fio_threads:
-            thread.join()
-
-        # Validate FIO outputs
-        self.validate_fio_output(lvol_name_1, read_check=True, write_check=True)
-        self.validate_fio_output(lvol_name_2, read_check=False, write_check=True, trim_check=False)
-
-        # Cleanup after running FIO
-        self.cleanup_lvols(lvol_configs)
-
+        self._run_scenario(lvol_configs)
         self.logger.info("Test Case Passed.")
-

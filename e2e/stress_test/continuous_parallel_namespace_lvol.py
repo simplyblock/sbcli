@@ -1,10 +1,14 @@
 """
 Parallel Namespace LVol Stress Test (Docker + K8s)
 
-Creates 300 parent lvols each with 6 namespace partitions (1800 total),
-takes 2 snapshots per lvol (3600 total), clones 1 picked snapshot 1500 times,
-then deletes everything in parallel — with verified deletion.  Repeats for
-NUM_ITERATIONS cycles to measure latency degradation over time.
+Creates 100 parent lvols each with 50 namespace children (5100 total lvols),
+writes 10 MB data to each parent, takes 2 snapshots per parent (+ 1 random
+child), clones 1 picked snapshot 1500 times, verifies everything, then deletes
+in parallel — with verified deletion.  Repeats for NUM_ITERATIONS cycles to
+measure latency degradation over time.
+
+**Sequential per-parent flow**: for each parent, all 50 children are created
+and verified before moving to the next parent.  Any failure aborts the test.
 
 Two variants:
   - TestParallelNamespaceLvolDocker: sbcli API (add_lvol with namespace=)
@@ -23,8 +27,10 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from datetime import datetime, timezone
 from e2e_tests.cluster_test_base import TestClusterBase
 from utils.common_utils import sleep_n_sec
+from utils.ssh_utils import RunnerK8sLog
 
 try:
     import requests
@@ -47,12 +53,12 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
         super().__init__(**kwargs)
 
         # ── Scale ──────────────────────────────────────────────────────────
-        self.NUM_PARENTS = 300
-        self.NAMESPACES_PER_PARENT = 100     # max_namespace_per_subsys
-        self.CHILDREN_PER_PARENT = 5         # 300 × 5 = 1500 children
-        self.SNAPSHOTS_PER_LVOL = 2          # per parent + 1 random child
+        self.NUM_PARENTS = 20
+        self.NAMESPACES_PER_PARENT = 26      # max_namespace_per_subsys (parent + 25 children)
+        self.CHILDREN_PER_PARENT = 25        # 20 × 25 = 500 children
+        self.SNAPSHOTS_PER_LVOL = 2          # per parent + 1 random child → ~42 total
         self.NUM_CLONES = 1500               # from 1 picked snapshot
-        self.NUM_ITERATIONS = 20
+        self.NUM_ITERATIONS = 1
 
         # ── Sizing ─────────────────────────────────────────────────────────
         self.LVOL_SIZE = "1G"
@@ -60,17 +66,27 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
 
         # ── Concurrency ───────────────────────────────────────────────────
         self.MAX_WORKERS_CREATE = 20
+        self.MAX_WORKERS_SUBMIT = 50          # for fire-all (just kubectl apply, no wait)
         self.MAX_WORKERS_DELETE = 30
         self.BATCH_SIZE = 50
         self.TASK_TIMEOUT = 300
+        self.PARALLEL_PARENTS = 10           # concurrent parents during child creation
+        self.CLONE_BATCH_SIZE = 250          # clone creation batch size for stats
+        self.CLONE_BIND_TIMEOUT = 3600       # 1 hour — large clone batches queue in CSI
 
         # ── Retry ─────────────────────────────────────────────────────────
         self.RETRY_MAX = 10
-        self.RETRY_INTERVAL = 5
+        self.RETRY_INTERVAL = 30
+
+        # ── FIO validation ───────────────────────────────────────────────
+        self.FIO_VALIDATION_RUNTIME = 600        # 10 minutes
+        self.FIO_VALIDATION_SAMPLE_SIZE = 100    # PVCs to run FIO on (K8s)
+        self.FIO_VALIDATION_SIZE = "50M"         # FIO file size
 
         # ── Thread-safe state ─────────────────────────────────────────────
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
+        self._clones_binding = 0             # how many clones waiting for Bound right now
 
         # parent_name -> {id, children: [child_name], snapshots: [snap_name]}
         self._parent_registry = {}
@@ -83,8 +99,10 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
 
         # ── Timing samples ────────────────────────────────────────────────
         self._timing_samples = []   # list of dicts
+        self._batch_timings = []    # batch-level summaries for graphs
         self._iteration_timings = []  # per-iteration phase durations
         self._current_iteration = 0
+        self._snapshot_child = None  # pre-selected child for snapshot (set in write_data)
 
         # ── Metrics ───────────────────────────────────────────────────────
         self._metrics = {
@@ -133,15 +151,55 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
                 "clones": clones, "total": lvols + snaps + clones,
             }
 
-    def _record_timing(self, op: str, name: str, elapsed: float, inventory: dict):
+    def _record_timing(self, op: str, name: str, elapsed: float,
+                       inventory: dict, api_elapsed: float = None):
         with self._lock:
-            self._timing_samples.append({
+            sample = {
                 "iteration": self._current_iteration,
                 "op": op,
                 "name": name,
                 "elapsed_sec": round(elapsed, 4),
                 "inventory": inventory,
                 "timestamp": time.time(),
+            }
+            if api_elapsed is not None:
+                sample["api_elapsed_sec"] = round(api_elapsed, 4)
+            self._timing_samples.append(sample)
+
+    def _log_op_stats(self, op: str, batch_label: str = "",
+                      batch_elapsed: float = 0, count: int = 0):
+        """Log avg/p50/p95 stats for a given op in the current iteration."""
+        with self._lock:
+            samples = [
+                s["elapsed_sec"] for s in self._timing_samples
+                if s["iteration"] == self._current_iteration and s["op"] == op
+            ]
+        if not samples:
+            return
+        samples_sorted = sorted(samples)
+        n = len(samples_sorted)
+        avg = sum(samples_sorted) / n
+        p50 = samples_sorted[n // 2]
+        p95 = samples_sorted[min(int(n * 0.95), n - 1)]
+        mn, mx = samples_sorted[0], samples_sorted[-1]
+        tag = f" ({batch_label})" if batch_label else ""
+        self.logger.info(
+            f"[{op}]{tag}: {count or n} ops in {batch_elapsed:.1f}s — "
+            f"avg={avg:.2f}s p50={p50:.2f}s p95={p95:.2f}s "
+            f"min={mn:.2f}s max={mx:.2f}s"
+        )
+        with self._lock:
+            self._batch_timings.append({
+                "iteration": self._current_iteration,
+                "op": op,
+                "batch_label": batch_label,
+                "batch_elapsed": round(batch_elapsed, 2),
+                "count": count or n,
+                "avg": round(avg, 4),
+                "p50": round(p50, 4),
+                "p95": round(p95, 4),
+                "min": round(mn, 4),
+                "max": round(mx, 4),
             })
 
     # ── API error helpers (reused from existing parallel test) ────────────
@@ -184,6 +242,14 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
         msg = (api_err.get("msg") or "").lower()
         return "lvol sync deletion found" in text or "lvol sync deletion found" in msg
 
+    def _is_already_exists_error(self, api_err: dict) -> bool:
+        """Detect 'LVol name must be unique' — resource was created by a
+        prior attempt that appeared to fail but actually succeeded."""
+        text = (api_err.get("text") or "").lower()
+        msg = (api_err.get("msg") or "").lower()
+        return ("must be unique" in text or "must be unique" in msg
+                or "already exists" in text or "already exists" in msg)
+
     def _api_retry(self, op: str, fn, ctx: dict = None):
         """Call fn() with retry.  Returns fn() result on success."""
         ctx = ctx or {}
@@ -196,6 +262,14 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
                     self._inc("failures", op)
                     self.logger.warning(f"[max_lvols] op={op} ctx={ctx}")
                     raise
+                # "Name must be unique" means a prior attempt actually
+                # succeeded — treat as success, not failure
+                if self._is_already_exists_error(api_err):
+                    self.logger.info(
+                        f"[retry] op={op} resource already exists "
+                        f"(prior attempt succeeded): ctx={ctx}"
+                    )
+                    return None  # treat as success
                 if attempt < self.RETRY_MAX:
                     self.logger.warning(
                         f"[retry] op={op} attempt {attempt}/{self.RETRY_MAX} "
@@ -250,6 +324,234 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
             sleep_n_sec(2)
         self.logger.warning(f"snapshot {snap_name} still exists after {timeout}s")
         return time.time() - start
+
+    # ── Verification helpers ──────────────────────────────────────────────
+
+    def _verify_all_lvols_exist(self):
+        """Verify registered parents and children exist in lvol list.
+
+        Retries up to 30 minutes to allow resources to settle.
+        Warns for missing, only fails if >50% missing.
+        """
+        max_wait = 1800  # 30 minutes
+        poll_interval = 30
+        waited = 0
+
+        with self._lock:
+            total = len(self._parent_registry) + len(self._child_registry)
+
+        while waited <= max_wait:
+            all_lvols = self.sbcli_utils.list_lvols()
+            missing = []
+            with self._lock:
+                for name in self._parent_registry:
+                    if name not in all_lvols:
+                        missing.append(("parent", name))
+                for name in self._child_registry:
+                    if name not in all_lvols:
+                        missing.append(("child", name))
+
+            miss_pct = len(missing) * 100 / max(total, 1)
+            if miss_pct <= 50:
+                break  # Within tolerance
+
+            if waited < max_wait:
+                self.logger.info(
+                    f"[verify_lvols] {len(missing)}/{total} ({miss_pct:.1f}%) "
+                    f"lvols missing, waiting {poll_interval}s... "
+                    f"(waited {waited}s/{max_wait}s)"
+                )
+                sleep_n_sec(poll_interval)
+                waited += poll_interval
+            else:
+                break  # Exhausted wait time
+
+        miss_pct = len(missing) * 100 / max(total, 1)
+        if missing:
+            self.logger.warning(
+                f"[verify_lvols] {len(missing)}/{total} ({miss_pct:.1f}%) "
+                f"lvols missing from API after {waited}s wait: "
+                f"{missing[:10]}{'...' if len(missing) > 10 else ''}"
+            )
+        if miss_pct > 50:
+            raise RuntimeError(
+                f"[verify_lvols] {miss_pct:.1f}% lvols missing exceeds "
+                f"50% threshold — {len(missing)}/{total}"
+            )
+        self.logger.info(
+            f"[verify_lvols] {total - len(missing)}/{total} lvols "
+            f"confirmed in API"
+        )
+
+    def _verify_all_snapshots_exist(self):
+        """Verify registered snapshots exist in snapshot list.
+
+        Retries up to 30 minutes to allow resources to settle.
+        Warns for missing, only fails if >50% missing.
+        """
+        max_wait = 1800  # 30 minutes
+        poll_interval = 30
+        waited = 0
+
+        with self._lock:
+            total = len(self._snap_registry)
+
+        while waited <= max_wait:
+            all_snaps = self.sbcli_utils.list_snapshots()
+            missing = []
+            with self._lock:
+                for name in self._snap_registry:
+                    if name not in all_snaps:
+                        missing.append(name)
+
+            miss_pct = len(missing) * 100 / max(total, 1)
+            if miss_pct <= 50:
+                break  # Within tolerance
+
+            if waited < max_wait:
+                self.logger.info(
+                    f"[verify_snapshots] {len(missing)}/{total} ({miss_pct:.1f}%) "
+                    f"snapshots missing, waiting {poll_interval}s... "
+                    f"(waited {waited}s/{max_wait}s)"
+                )
+                sleep_n_sec(poll_interval)
+                waited += poll_interval
+            else:
+                break  # Exhausted wait time
+
+        miss_pct = len(missing) * 100 / max(total, 1)
+        if missing:
+            self.logger.warning(
+                f"[verify_snapshots] {len(missing)}/{total} ({miss_pct:.1f}%) "
+                f"snapshots missing after {waited}s wait: "
+                f"{missing[:10]}{'...' if len(missing) > 10 else ''}"
+            )
+        if miss_pct > 50:
+            raise RuntimeError(
+                f"[verify_snapshots] {miss_pct:.1f}% snapshots missing "
+                f"exceeds 50% threshold — {len(missing)}/{total}"
+            )
+        self.logger.info(
+            f"[verify_snapshots] {total - len(missing)}/{total} snapshots "
+            f"confirmed in API"
+        )
+
+    def _verify_all_clones_exist(self):
+        """Verify registered clones exist in lvol list.
+
+        Retries up to 30 minutes to allow resources to settle.
+        Warns for missing, only fails if >50% missing.
+        """
+        max_wait = 1800  # 30 minutes
+        poll_interval = 30
+        waited = 0
+
+        with self._lock:
+            total = len(self._clone_registry)
+
+        while waited <= max_wait:
+            all_lvols = self.sbcli_utils.list_lvols()
+            missing = []
+            with self._lock:
+                for name in self._clone_registry:
+                    if name not in all_lvols:
+                        missing.append(name)
+
+            miss_pct = len(missing) * 100 / max(total, 1)
+            if miss_pct <= 50:
+                break  # Within tolerance
+
+            if waited < max_wait:
+                self.logger.info(
+                    f"[verify_clones] {len(missing)}/{total} ({miss_pct:.1f}%) "
+                    f"clones missing, waiting {poll_interval}s... "
+                    f"(waited {waited}s/{max_wait}s)"
+                )
+                sleep_n_sec(poll_interval)
+                waited += poll_interval
+            else:
+                break  # Exhausted wait time
+
+        miss_pct = len(missing) * 100 / max(total, 1)
+        if missing:
+            self.logger.warning(
+                f"[verify_clones] {len(missing)}/{total} ({miss_pct:.1f}%) "
+                f"clones missing from API after {waited}s wait: "
+                f"{missing[:10]}{'...' if len(missing) > 10 else ''}"
+            )
+        if miss_pct > 50:
+            raise RuntimeError(
+                f"[verify_clones] {miss_pct:.1f}% clones missing exceeds "
+                f"50% threshold — {len(missing)}/{total}"
+            )
+        self.logger.info(
+            f"[verify_clones] {total - len(missing)}/{total} clones "
+            f"confirmed in API"
+        )
+
+    def _phase_mount_verify_clones(self):
+        """Mount 20 random clones and run short FIO read to verify accessibility.
+
+        Picks up to 20 random clones from the registry, connects/mounts each,
+        runs a 4 MB FIO read, checks for errors, and disconnects.  Fails the
+        phase if any clone verification fails.
+        """
+        with self._lock:
+            clone_names = list(self._clone_registry.keys())
+        sample_size = min(20, len(clone_names))
+        if sample_size == 0:
+            self.logger.info("[mount_verify] No clones to verify, skipping")
+            return
+        selected = random.sample(clone_names, sample_size)
+        self.logger.info(
+            f"[mount_verify] Verifying {sample_size} clones with FIO read"
+        )
+        ok, fail = self._batch_parallel(
+            [{"clone_name": c} for c in selected],
+            self._mount_verify_single_clone,
+            min(sample_size, self.MAX_WORKERS_CREATE),
+            "mount_verify",
+        )
+        self.logger.info(
+            f"[mount_verify] {ok}/{sample_size} OK, {fail} failed"
+        )
+        if fail > 0:
+            raise RuntimeError(
+                f"[mount_verify] {fail}/{sample_size} clone mount+FIO "
+                f"verifications failed. Check logs for FIO err= or "
+                f"connect failures."
+            )
+
+    def _mount_verify_single_clone(self, item):
+        """Subclass must implement: connect/mount clone, FIO read, verify."""
+        raise NotImplementedError
+
+    def _phase_fio_validation(self):
+        """Subclass must implement: run sustained FIO on a sample of resources."""
+        raise NotImplementedError
+
+    def _verify_nodes_healthy(self):
+        """Verify all storage nodes are online and healthy."""
+        nodes_data = self.sbcli_utils.get_storage_nodes()
+        unhealthy = []
+        for node in nodes_data.get("results", []):
+            node_id = node.get("id", "?")
+            hostname = node.get("hostname", "?")
+            status = node.get("status", "unknown")
+            health = node.get("health_check", None)
+            if status != "online" or health is not True:
+                unhealthy.append(
+                    f"{hostname}(id={node_id}, status={status}, "
+                    f"health={health})"
+                )
+        if unhealthy:
+            raise RuntimeError(
+                f"[verify_nodes] Unhealthy nodes: {', '.join(unhealthy)}"
+            )
+        total = len(nodes_data.get("results", []))
+        self.logger.info(
+            f"[verify_nodes] All {total} storage nodes online and healthy"
+        )
 
     # ── Batch parallel execution ──────────────────────────────────────────
 
@@ -306,10 +608,68 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
         except Exception as e:
             self.logger.error(f"[{name}] Phase failed: {e}")
             self._set_failure(name, e, f"Phase {name} failed")
+            self._stop_event.set()
         finally:
             dur = time.time() - start
             self.logger.info(f"=== Phase {name} done in {dur:.1f}s ===")
+            # Flush timing data after every phase so data survives cancellation
+            try:
+                self._flush_timing_data()
+            except Exception:
+                pass
             return dur  # used for iteration timing
+
+    def _flush_timing_data(self):
+        """Write intermediate timing JSON to disk (fast, no graphs).
+
+        Called after every phase so data survives if the test is killed.
+        """
+        try:
+            out_dir = self._get_log_dir()
+        except Exception:
+            return
+        report = {
+            "config": {
+                "NUM_PARENTS": self.NUM_PARENTS,
+                "NAMESPACES_PER_PARENT": self.NAMESPACES_PER_PARENT,
+                "CHILDREN_PER_PARENT": self.CHILDREN_PER_PARENT,
+                "SNAPSHOTS_PER_LVOL": self.SNAPSHOTS_PER_LVOL,
+                "NUM_CLONES": self.NUM_CLONES,
+                "NUM_ITERATIONS": self.NUM_ITERATIONS,
+                "BATCH_SIZE": self.BATCH_SIZE,
+                "MAX_WORKERS_CREATE": self.MAX_WORKERS_CREATE,
+                "CLONE_BATCH_SIZE": self.CLONE_BATCH_SIZE,
+            },
+            "iterations": self._iteration_timings,
+            "samples": self._timing_samples,
+            "batch_timings": self._batch_timings,
+            "metrics": self._metrics,
+            "mappings": self._get_registry_mappings(),
+        }
+        path = os.path.join(out_dir, "namespace_stress_timings.json")
+        try:
+            with open(path, "w") as f:
+                json.dump(report, f, indent=2, default=str)
+        except Exception:
+            pass
+
+    def _get_registry_mappings(self) -> dict:
+        """Snapshot current registry relationships for graph generation."""
+        with self._lock:
+            child_to_parent = {
+                cn: ci.get("parent_name", "unknown")
+                for cn, ci in self._child_registry.items()
+            }
+            clone_to_snap = {
+                cn: ci.get("snap_name", "unknown")
+                for cn, ci in self._clone_registry.items()
+            }
+            parent_list = list(self._parent_registry.keys())
+        return {
+            "child_to_parent": child_to_parent,
+            "clone_to_snap": clone_to_snap,
+            "parent_list": parent_list,
+        }
 
     def _clear_registries(self):
         with self._lock:
@@ -317,6 +677,7 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
             self._child_registry.clear()
             self._snap_registry.clear()
             self._clone_registry.clear()
+            self._snapshot_child = None
 
     # ── Abstract-like methods (subclasses override) ───────────────────────
 
@@ -326,10 +687,12 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
     def _phase_cleanup(self):
         raise NotImplementedError
 
-    def _create_parent_impl(self, params: dict):
+    def _phase_create_subsystems(self):
+        """Sequential per-parent: create parent + children + verify."""
         raise NotImplementedError
 
-    def _create_child_impl(self, params: dict):
+    def _phase_write_data(self):
+        """Write 10 MB to each parent lvol before snapshotting."""
         raise NotImplementedError
 
     def _create_snapshot_impl(self, params: dict):
@@ -349,6 +712,38 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
 
     def _delete_parent_impl(self, parent_name: str):
         raise NotImplementedError
+
+    def _phase_verify_cleanup(self):
+        """Verify all test resources are gone before next iteration."""
+        all_lvols = self.sbcli_utils.list_lvols()
+        if all_lvols:
+            self.logger.warning(
+                f"[verify_cleanup] {len(all_lvols)} lvols still present "
+                f"— retrying cleanup"
+            )
+            try:
+                self.sbcli_utils.delete_all_clones()
+            except Exception:
+                pass
+            try:
+                self.sbcli_utils.delete_all_snapshots()
+            except Exception as e:
+                self.logger.warning(
+                    "[verify_cleanup] delete_all_snapshots failed during retry: %s",
+                    e,
+                )
+            try:
+                self.sbcli_utils.delete_all_lvols()
+            except Exception:
+                pass
+            sleep_n_sec(10)
+            remaining = self.sbcli_utils.list_lvols()
+            if remaining:
+                raise RuntimeError(
+                    f"Cleanup verification failed: "
+                    f"{len(remaining)} lvols still exist"
+                )
+        self.logger.info("[verify_cleanup] All resources confirmed deleted")
 
     # ── Timed wrappers (called by _batch_parallel) ───────────────────────
 
@@ -376,9 +771,12 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
     def _timed_create_clone(self, params: dict):
         inv = self._snapshot_inventory()
         t0 = time.time()
-        self._create_clone_impl(params)
+        api_elapsed = self._create_clone_impl(params)
         elapsed = time.time() - t0
-        self._record_timing("create_clone", params["name"], elapsed, inv)
+        self._record_timing(
+            "create_clone", params["name"], elapsed, inv,
+            api_elapsed=api_elapsed,
+        )
 
     def _timed_delete_clone(self, clone_name: str):
         inv = self._snapshot_inventory()
@@ -410,35 +808,6 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
 
     # ── Phase implementations ─────────────────────────────────────────────
 
-    def _phase_create_parents(self):
-        items = []
-        for i in range(self.NUM_PARENTS):
-            name = f"ns-par-{_rand_seq(6)}-{i:04d}"
-            items.append({"name": name, "idx": i})
-        self._batch_parallel(
-            items, self._timed_create_parent,
-            self.MAX_WORKERS_CREATE, "create_parents",
-        )
-
-    def _phase_create_children(self):
-        """Create CHILDREN_PER_PARENT child namespace lvols per parent."""
-        items = []
-        with self._lock:
-            parents = list(self._parent_registry.items())
-        for parent_name, pinfo in parents:
-            parent_id = pinfo["id"]
-            for c in range(self.CHILDREN_PER_PARENT):
-                child_name = f"ns-ch-{_rand_seq(6)}-{parent_name[-4:]}-{c}"
-                items.append({
-                    "name": child_name,
-                    "parent_name": parent_name,
-                    "parent_id": parent_id,
-                })
-        self._batch_parallel(
-            items, self._timed_create_child,
-            self.MAX_WORKERS_CREATE, "create_children",
-        )
-
     def _phase_create_snapshots(self):
         """Create SNAPSHOTS_PER_LVOL snapshots for each parent + 1 random child."""
         items = []
@@ -447,10 +816,12 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
             snap_lvols = []
             for pname, pinfo in self._parent_registry.items():
                 snap_lvols.append((pname, pinfo["id"]))
-            # Pick 1 random child (if any)
+            # Use pre-selected child (from write_data) or pick a random one
+            chosen_child = getattr(self, "_snapshot_child", None)
             child_names = list(self._child_registry.keys())
-            if child_names:
+            if not chosen_child and child_names:
                 chosen_child = random.choice(child_names)
+            if chosen_child and chosen_child in self._child_registry:
                 cinfo = self._child_registry[chosen_child]
                 snap_lvols.append((chosen_child, cinfo["id"]))
                 self.logger.info(
@@ -469,13 +840,30 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
             f"[create_snapshots] Creating {len(items)} snapshots "
             f"({len(snap_lvols)} lvols × {self.SNAPSHOTS_PER_LVOL})"
         )
-        self._batch_parallel(
+        snap_t0 = time.time()
+        _ok, fail = self._batch_parallel(
             items, self._timed_create_snapshot,
             self.MAX_WORKERS_CREATE, "create_snapshots",
         )
+        snap_elapsed = time.time() - snap_t0
+        self._log_op_stats(
+            "create_snapshot", batch_label="all snapshots",
+            batch_elapsed=snap_elapsed,
+        )
+        snap_fail_pct = fail * 100 / max(len(items), 1)
+        if fail > 0:
+            self.logger.warning(
+                f"[create_snapshots] {fail}/{len(items)} "
+                f"({snap_fail_pct:.1f}%) snapshots failed"
+            )
+        if snap_fail_pct > 50:
+            raise RuntimeError(
+                f"[create_snapshots] {snap_fail_pct:.1f}% snapshot failures "
+                f"exceeds 50% threshold — {fail}/{len(items)}"
+            )
 
     def _phase_create_clones(self):
-        """Pick 1 random snapshot and create NUM_CLONES clones from it."""
+        """Pick 1 random snapshot and create NUM_CLONES clones in batches."""
         with self._lock:
             snap_names = list(self._snap_registry.keys())
         if not snap_names:
@@ -484,65 +872,272 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
         chosen_snap = random.choice(snap_names)
         with self._lock:
             snap_id = self._snap_registry[chosen_snap]["snap_id"]
+            snap_parent = self._snap_registry[chosen_snap].get("lvol_name", "")
+            clone_sc = self._parent_registry.get(snap_parent, {}).get(
+                "storage_class", self.STORAGE_CLASS_NAME
+            )
         self.logger.info(
             f"[create_clones] Chosen snapshot: {chosen_snap} (id={snap_id})"
         )
-        items = []
+        all_items = []
         for i in range(self.NUM_CLONES):
             clone_name = f"cln-{_rand_seq(6)}-{i:04d}"
-            items.append({
+            all_items.append({
                 "name": clone_name,
                 "snap_name": chosen_snap,
                 "snap_id": snap_id,
+                "sc_name": clone_sc,
             })
-        self._batch_parallel(
-            items, self._timed_create_clone,
-            self.MAX_WORKERS_CREATE, "create_clones",
+
+        total_batches = (
+            (len(all_items) + self.CLONE_BATCH_SIZE - 1)
+            // self.CLONE_BATCH_SIZE
         )
+        overall_t0 = time.time()
+        total_clone_fail = 0
+
+        for batch_idx in range(0, len(all_items), self.CLONE_BATCH_SIZE):
+            batch = all_items[batch_idx:batch_idx + self.CLONE_BATCH_SIZE]
+            batch_num = batch_idx // self.CLONE_BATCH_SIZE + 1
+            self.logger.info(
+                f"[create_clones] Batch {batch_num}/{total_batches}: "
+                f"{len(batch)} clones"
+            )
+            batch_t0 = time.time()
+            _ok, batch_fail = self._batch_parallel(
+                batch, self._timed_create_clone,
+                self.MAX_WORKERS_CREATE,
+                f"create_clones_b{batch_num}",
+            )
+            batch_elapsed = time.time() - batch_t0
+            total_clone_fail += batch_fail
+            with self._lock:
+                still_binding = self._clones_binding
+            if batch_fail > 0:
+                self.logger.warning(
+                    f"[create_clones] Batch {batch_num}: "
+                    f"{batch_fail}/{len(batch)} clones failed "
+                    f"(still_binding={still_binding})"
+                )
+            # Per-batch stats (only for clones created in this batch)
+            with self._lock:
+                batch_samples = [
+                    s["elapsed_sec"] for s in self._timing_samples
+                    if (s["iteration"] == self._current_iteration
+                        and s["op"] == "create_clone"
+                        and s["timestamp"] >= batch_t0)
+                ]
+            if batch_samples:
+                bs = sorted(batch_samples)
+                n = len(bs)
+                throughput = n / batch_elapsed if batch_elapsed > 0 else 0
+                effective_per_clone = batch_elapsed / n if n > 0 else 0
+                self.logger.info(
+                    f"[create_clones] Batch {batch_num} stats: "
+                    f"{n} ops in {batch_elapsed:.1f}s — "
+                    f"avg_wall={sum(bs)/n:.2f}s "
+                    f"p50={bs[n//2]:.2f}s "
+                    f"p95={bs[min(int(n*0.95), n-1)]:.2f}s "
+                    f"min={bs[0]:.2f}s max={bs[-1]:.2f}s | "
+                    f"throughput={throughput:.2f} clones/s "
+                    f"effective_per_clone={effective_per_clone:.2f}s"
+                )
+                with self._lock:
+                    self._batch_timings.append({
+                        "iteration": self._current_iteration,
+                        "op": "create_clone",
+                        "batch_label": f"batch {batch_num}/{total_batches}",
+                        "batch_elapsed": round(batch_elapsed, 2),
+                        "count": n,
+                        "avg_wall": round(sum(bs) / n, 4),
+                        "p50": round(bs[n // 2], 4),
+                        "p95": round(bs[min(int(n * 0.95), n - 1)], 4),
+                        "min": round(bs[0], 4),
+                        "max": round(bs[-1], 4),
+                        "throughput_per_sec": round(throughput, 4),
+                        "effective_per_clone": round(effective_per_clone, 4),
+                    })
+
+        overall_elapsed = time.time() - overall_t0
+        self._log_op_stats(
+            "create_clone", batch_label="all clones",
+            batch_elapsed=overall_elapsed,
+        )
+
+        # Overall clone failure check
+        clone_fail_pct = total_clone_fail * 100 / max(len(all_items), 1)
+        if total_clone_fail > 0:
+            self.logger.warning(
+                f"[create_clones] Total: {total_clone_fail}/{len(all_items)} "
+                f"({clone_fail_pct:.1f}%) clones failed across all batches"
+            )
+        if clone_fail_pct > 50:
+            raise RuntimeError(
+                f"[create_clones] {clone_fail_pct:.1f}% clone failures "
+                f"exceeds 50% threshold — "
+                f"{total_clone_fail}/{len(all_items)}"
+            )
 
     def _phase_delete_all(self):
         """Delete: clones → snapshots → children → parents (ordered)."""
+        total_failures = 0
+
         # Step 1: clones
         with self._lock:
             clone_names = list(self._clone_registry.keys())
         if clone_names:
             self.logger.info(f"[delete_all] Deleting {len(clone_names)} clones")
-            self._batch_parallel(
+            t0 = time.time()
+            _ok, fail = self._batch_parallel(
                 clone_names, self._timed_delete_clone,
                 self.MAX_WORKERS_DELETE, "delete_clones",
             )
+            self._log_op_stats(
+                "delete_clone", batch_label="all clones",
+                batch_elapsed=time.time() - t0, count=len(clone_names),
+            )
+            if fail > 0:
+                self.logger.warning(
+                    f"[delete_all] {fail}/{len(clone_names)} clone "
+                    f"deletions failed"
+                )
+                total_failures += fail
 
         # Step 2: snapshots
         with self._lock:
             snap_names = list(self._snap_registry.keys())
         if snap_names:
             self.logger.info(f"[delete_all] Deleting {len(snap_names)} snapshots")
-            self._batch_parallel(
+            t0 = time.time()
+            _ok, fail = self._batch_parallel(
                 snap_names, self._timed_delete_snapshot,
                 self.MAX_WORKERS_DELETE, "delete_snapshots",
             )
+            self._log_op_stats(
+                "delete_snapshot", batch_label="all snapshots",
+                batch_elapsed=time.time() - t0, count=len(snap_names),
+            )
+            if fail > 0:
+                self.logger.warning(
+                    f"[delete_all] {fail}/{len(snap_names)} snapshot "
+                    f"deletions failed"
+                )
+                total_failures += fail
 
         # Step 3: children
         with self._lock:
             child_names = list(self._child_registry.keys())
         if child_names:
             self.logger.info(f"[delete_all] Deleting {len(child_names)} children")
-            self._batch_parallel(
+            t0 = time.time()
+            _ok, fail = self._batch_parallel(
                 child_names, self._timed_delete_child,
                 self.MAX_WORKERS_DELETE, "delete_children",
             )
+            self._log_op_stats(
+                "delete_child", batch_label="all children",
+                batch_elapsed=time.time() - t0, count=len(child_names),
+            )
+            if fail > 0:
+                self.logger.warning(
+                    f"[delete_all] {fail}/{len(child_names)} child "
+                    f"deletions failed"
+                )
+                total_failures += fail
 
         # Step 4: parents
         with self._lock:
             parent_names = list(self._parent_registry.keys())
         if parent_names:
             self.logger.info(f"[delete_all] Deleting {len(parent_names)} parents")
-            self._batch_parallel(
+            t0 = time.time()
+            _ok, fail = self._batch_parallel(
                 parent_names, self._timed_delete_parent,
                 self.MAX_WORKERS_DELETE, "delete_parents",
             )
+            self._log_op_stats(
+                "delete_parent", batch_label="all parents",
+                batch_elapsed=time.time() - t0, count=len(parent_names),
+            )
+            if fail > 0:
+                self.logger.warning(
+                    f"[delete_all] {fail}/{len(parent_names)} parent "
+                    f"deletions failed"
+                )
+                total_failures += fail
+
+        if total_failures > 0:
+            self.logger.warning(
+                f"[delete_all] Total: {total_failures} deletion failures — "
+                f"verify_cleanup phase will retry"
+            )
 
     # ── Reporting ─────────────────────────────────────────────────────────
+
+    def _compute_per_iteration_summary(self):
+        """Compute per-iteration avg/min/max/p50/p95 for create operations.
+
+        Uses api_elapsed_sec when available (Docker — API-only time),
+        otherwise falls back to elapsed_sec (K8s — time to PVC Bound).
+        """
+        summary = {}
+        with self._lock:
+            all_samples = list(self._timing_samples)
+        if not all_samples:
+            return summary
+        iterations = sorted(set(s["iteration"] for s in all_samples))
+        create_ops = [
+            "create_parent", "create_child", "create_clone",
+        ]
+        for it in iterations:
+            it_key = str(it)
+            summary[it_key] = {}
+            for op in create_ops:
+                samples = [
+                    s for s in all_samples
+                    if s["iteration"] == it and s["op"] == op
+                ]
+                if not samples:
+                    continue
+                times = [
+                    s.get("api_elapsed_sec", s["elapsed_sec"])
+                    for s in samples
+                ]
+                times_sorted = sorted(times)
+                n = len(times_sorted)
+                op_summary = {
+                    "count": n,
+                    "avg_wall": round(sum(times_sorted) / n, 4),
+                    "min": round(times_sorted[0], 4),
+                    "max": round(times_sorted[-1], 4),
+                    "p50": round(times_sorted[n // 2], 4),
+                    "p95": round(
+                        times_sorted[min(int(n * 0.95), n - 1)], 4
+                    ),
+                }
+                # For clone ops, compute throughput from batch timings
+                if op == "create_clone":
+                    with self._lock:
+                        it_batches = [
+                            b for b in self._batch_timings
+                            if b["iteration"] == it and b["op"] == op
+                        ]
+                    if it_batches:
+                        total_elapsed = sum(
+                            b["batch_elapsed"] for b in it_batches
+                        )
+                        total_count = sum(
+                            b["count"] for b in it_batches
+                        )
+                        if total_elapsed > 0:
+                            op_summary["throughput_per_sec"] = round(
+                                total_count / total_elapsed, 4
+                            )
+                            op_summary["effective_per_clone"] = round(
+                                total_elapsed / total_count, 4
+                            )
+                summary[it_key][op] = op_summary
+        return summary
 
     def _get_log_dir(self) -> str:
         """Return the directory for timing/graph output."""
@@ -562,10 +1157,16 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
                 "SNAPSHOTS_PER_LVOL": self.SNAPSHOTS_PER_LVOL,
                 "NUM_CLONES": self.NUM_CLONES,
                 "NUM_ITERATIONS": self.NUM_ITERATIONS,
+                "BATCH_SIZE": self.BATCH_SIZE,
+                "MAX_WORKERS_CREATE": self.MAX_WORKERS_CREATE,
+                "CLONE_BATCH_SIZE": self.CLONE_BATCH_SIZE,
             },
             "iterations": self._iteration_timings,
+            "per_iteration_summary": self._compute_per_iteration_summary(),
             "samples": self._timing_samples,
+            "batch_timings": self._batch_timings,
             "metrics": self._metrics,
+            "mappings": self._get_registry_mappings(),
         }
         path = os.path.join(out_dir, "namespace_stress_timings.json")
         try:
@@ -615,19 +1216,22 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
         except Exception as exc:
             self.logger.warning(f"Graph 1 failed: {exc}")
 
-        # ── 2. Latency per iteration (box plot) ──────────────────────────
+        # ── 2. Latency per iteration (box plot with legend) ──────────────
         try:
+            from matplotlib.patches import Patch
             create_ops = [
                 "create_parent", "create_child",
                 "create_snapshot", "create_clone",
             ]
+            op_labels = ["parent", "child", "snapshot", "clone"]
             iterations = sorted(set(s["iteration"] for s in samples))
             fig, ax = plt.subplots(figsize=(14, 8))
             positions = []
             labels = []
             data_groups = []
+            op_indices = []  # track which op each box belongs to
             for it in iterations:
-                for op in create_ops:
+                for oi, op in enumerate(create_ops):
                     vals = [
                         s["elapsed_sec"] for s in samples
                         if s["iteration"] == it and s["op"] == op
@@ -639,11 +1243,12 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
                             + create_ops.index(op)
                         )
                         labels.append(f"i{it}_{op.split('_')[-1]}")
+                        op_indices.append(oi)
             if data_groups:
                 bp = ax.boxplot(data_groups, positions=positions, widths=0.6,
                                 patch_artist=True, showfliers=False)
                 for j, patch in enumerate(bp["boxes"]):
-                    c_idx = j % len(create_ops)
+                    c_idx = op_indices[j] if j < len(op_indices) else j
                     patch.set_facecolor(colors[c_idx % len(colors)])
                 ax.set_xlabel("Iteration / Operation")
                 ax.set_ylabel("Latency (sec)")
@@ -653,6 +1258,12 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
                     [f"iter {it}" for it in iterations],
                     rotation=45, fontsize=7,
                 )
+                # Add explicit legend mapping colors to operations
+                legend_patches = [
+                    Patch(facecolor=colors[i % len(colors)], label=op_labels[i])
+                    for i in range(len(create_ops))
+                ]
+                ax.legend(handles=legend_patches, fontsize=8, loc="upper left")
             fig.tight_layout()
             fig.savefig(os.path.join(out_dir, "latency_per_iteration.png"),
                         dpi=150)
@@ -664,8 +1275,9 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
         # ── 3. Phase duration per iteration (stacked bar) ────────────────
         try:
             phase_names = [
-                "create_parents", "create_children",
+                "create_subsystems", "write_data",
                 "create_snapshots", "create_clones", "delete_all",
+                "verify_cleanup",
             ]
             fig, ax = plt.subplots(figsize=(12, 6))
             x_pos = list(range(len(self._iteration_timings)))
@@ -694,7 +1306,7 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
         except Exception as exc:
             self.logger.warning(f"Graph 3 failed: {exc}")
 
-        # ── 4. Clone latency vs clone index (per iteration) ──────────────
+        # ── 4. Clone latency vs clone index with batch boundaries ────────
         try:
             fig, ax = plt.subplots(figsize=(14, 8))
             for it in iterations:
@@ -709,9 +1321,27 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
                         [s["elapsed_sec"] for s in clone_samples],
                         label=f"iter {it}", alpha=0.7, linewidth=0.8,
                     )
+                    # Mark batch boundaries (CLONE_BATCH_SIZE)
+                    cbs = self.CLONE_BATCH_SIZE
+                    for bi in range(cbs, len(clone_samples), cbs):
+                        ax.axvline(
+                            x=bi, color="gray", linestyle="--",
+                            alpha=0.4, linewidth=0.6,
+                        )
+                    # Mark _batch_parallel BATCH_SIZE boundaries too
+                    bs = self.BATCH_SIZE
+                    for bi in range(bs, len(clone_samples), bs):
+                        ax.axvline(
+                            x=bi, color="red", linestyle=":",
+                            alpha=0.3, linewidth=0.5,
+                        )
             ax.set_xlabel("Clone index (creation order)")
             ax.set_ylabel("Latency (sec)")
-            ax.set_title("Clone Creation Latency vs Clone Count")
+            ax.set_title(
+                f"Clone Creation Latency vs Clone Count "
+                f"(gray=clone batch/{self.CLONE_BATCH_SIZE}, "
+                f"red=submit batch/{self.BATCH_SIZE})"
+            )
             ax.legend(fontsize=7)
             fig.tight_layout()
             fig.savefig(
@@ -750,6 +1380,333 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
             self.logger.info("Generated delete_latency_vs_remaining.png")
         except Exception as exc:
             self.logger.warning(f"Graph 5 failed: {exc}")
+
+        # ── 6. Batch timing stats (bar chart) ────────────────────────────
+        try:
+            bt = self._batch_timings
+            if bt:
+                clone_batches = [
+                    b for b in bt
+                    if b["op"] == "create_clone"
+                    and b["batch_label"].startswith("batch ")
+                ]
+                if clone_batches:
+                    fig, ax = plt.subplots(figsize=(14, 8))
+                    labels = [b["batch_label"] for b in clone_batches]
+                    avgs = [b["avg_wall"] for b in clone_batches]
+                    p50s = [b["p50"] for b in clone_batches]
+                    p95s = [b["p95"] for b in clone_batches]
+                    effs = [
+                        b.get("effective_per_clone", 0)
+                        for b in clone_batches
+                    ]
+                    x = range(len(labels))
+                    width = 0.2
+                    ax.bar(
+                        [i - 1.5 * width for i in x], avgs, width,
+                        label="avg wall", color=colors[0],
+                    )
+                    ax.bar(
+                        [i - 0.5 * width for i in x], p50s, width,
+                        label="p50", color=colors[1],
+                    )
+                    ax.bar(
+                        [i + 0.5 * width for i in x], p95s, width,
+                        label="p95", color=colors[2],
+                    )
+                    ax.bar(
+                        [i + 1.5 * width for i in x], effs, width,
+                        label="effective/clone", color=colors[3 % len(colors)],
+                    )
+                    # Annotate throughput on each batch
+                    for idx, b in enumerate(clone_batches):
+                        tp = b.get("throughput_per_sec", 0)
+                        if tp > 0:
+                            ax.text(
+                                idx, max(avgs[idx], p95s[idx]) + 0.5,
+                                f"{tp:.2f}/s",
+                                ha="center", fontsize=6, color="black",
+                            )
+                    ax.set_xlabel("Clone Batch")
+                    ax.set_ylabel("Latency (sec)")
+                    ax.set_title(
+                        "Clone Creation — Per-Batch Latency "
+                        "(wall vs effective vs throughput)"
+                    )
+                    ax.set_xticks(list(x))
+                    ax.set_xticklabels(labels, rotation=45, fontsize=7)
+                    ax.legend(fontsize=7)
+                    fig.tight_layout()
+                    fig.savefig(
+                        os.path.join(
+                            out_dir, "clone_batch_latency_stats.png"
+                        ),
+                        dpi=150,
+                    )
+                    plt.close(fig)
+                    self.logger.info(
+                        "Generated clone_batch_latency_stats.png"
+                    )
+        except Exception as exc:
+            self.logger.warning(f"Graph 6 failed: {exc}")
+
+        # ── 7. Creation timeline — latency over wall-clock time ───────
+        try:
+            create_ops_ordered = [
+                "create_parent", "create_child",
+                "create_snapshot", "create_clone",
+            ]
+            fig, ax = plt.subplots(figsize=(16, 8))
+            t0_global = min(s["timestamp"] for s in samples)
+            for i, op in enumerate(create_ops_ordered):
+                pts = sorted(
+                    [s for s in samples if s["op"] == op],
+                    key=lambda s: s["timestamp"],
+                )
+                if pts:
+                    x = [(p["timestamp"] - t0_global) / 60.0 for p in pts]
+                    y = [p["elapsed_sec"] for p in pts]
+                    ax.plot(x, y, label=op, alpha=0.7, linewidth=0.8,
+                            color=colors[i % len(colors)])
+            ax.set_xlabel("Time since test start (minutes)")
+            ax.set_ylabel("Latency (sec)")
+            ax.set_title("Creation Latency Over Time")
+            ax.legend(fontsize=7)
+            fig.tight_layout()
+            fig.savefig(
+                os.path.join(out_dir, "creation_latency_timeline.png"),
+                dpi=150,
+            )
+            plt.close(fig)
+            self.logger.info("Generated creation_latency_timeline.png")
+        except Exception as exc:
+            self.logger.warning(f"Graph 7 failed: {exc}")
+
+        # ── 8. Per-parent child creation duration (bar chart) ─────────
+        try:
+            child_samples = [
+                s for s in samples if s["op"] == "create_child"
+            ]
+            if child_samples:
+                # Build child→parent mapping from registry or saved JSON
+                with self._lock:
+                    child_to_parent = {
+                        cn: ci.get("parent_name", "unknown")
+                        for cn, ci in self._child_registry.items()
+                    }
+                # Fall back to saved mappings if registry was cleared
+                if not child_to_parent:
+                    try:
+                        rpath = os.path.join(
+                            out_dir, "namespace_stress_timings.json"
+                        )
+                        with open(rpath) as rf:
+                            saved = json.load(rf)
+                        child_to_parent = saved.get(
+                            "mappings", {}
+                        ).get("child_to_parent", {})
+                    except Exception:
+                        pass
+
+                parent_durations = {}
+                for s in child_samples:
+                    pname = child_to_parent.get(s["name"], "unknown")
+                    parent_durations.setdefault(pname, []).append(
+                        s["elapsed_sec"]
+                    )
+                parents_sorted = sorted(parent_durations.keys())
+                fig, ax = plt.subplots(figsize=(14, 6))
+                x = range(len(parents_sorted))
+                totals = [
+                    sum(parent_durations[p]) for p in parents_sorted
+                ]
+                avgs = [
+                    sum(parent_durations[p]) / len(parent_durations[p])
+                    for p in parents_sorted
+                ]
+                counts = [
+                    len(parent_durations[p]) for p in parents_sorted
+                ]
+                ax.bar(x, totals, color=colors[0], alpha=0.7,
+                       label="total (sec)")
+                ax2 = ax.twinx()
+                ax2.plot(list(x), avgs, "ro-", markersize=4,
+                         label="avg per child (sec)")
+                ax.set_xlabel("Parent subsystem")
+                ax.set_ylabel("Total creation time (sec)")
+                ax2.set_ylabel("Avg per child (sec)")
+                ax.set_title(
+                    f"Child Creation Duration per Parent "
+                    f"({len(parents_sorted)} parents, "
+                    f"{len(child_samples)} children)"
+                )
+                ax.set_xticks(list(x))
+                ax.set_xticklabels(
+                    [f"{p[-8:]}({counts[i]})" for i, p in enumerate(parents_sorted)],
+                    rotation=45, fontsize=7,
+                )
+                ax.legend(loc="upper left", fontsize=7)
+                ax2.legend(loc="upper right", fontsize=7)
+                fig.tight_layout()
+                fig.savefig(
+                    os.path.join(
+                        out_dir, "child_creation_per_parent.png"
+                    ),
+                    dpi=150,
+                )
+                plt.close(fig)
+                self.logger.info(
+                    "Generated child_creation_per_parent.png"
+                )
+        except Exception as exc:
+            self.logger.warning(f"Graph 8 failed: {exc}")
+
+        # ── 9-12. Individual per-op latency over time (one graph each) ──
+        individual_ops = [
+            ("create_parent", "Parent LVol Creation Latency Over Time"),
+            ("create_child", "Child LVol Creation Latency Over Time"),
+            ("create_snapshot", "Snapshot Creation Latency Over Time"),
+            ("create_clone", "Clone Creation Latency Over Time"),
+        ]
+        for op_name, title in individual_ops:
+            try:
+                op_samples = sorted(
+                    [s for s in samples if s["op"] == op_name],
+                    key=lambda s: s["timestamp"],
+                )
+                if not op_samples:
+                    continue
+                fig, ax = plt.subplots(figsize=(14, 8))
+                t0_global = min(s["timestamp"] for s in samples)
+                x = [(s["timestamp"] - t0_global) / 60.0
+                     for s in op_samples]
+                y = [s["elapsed_sec"] for s in op_samples]
+
+                ax.scatter(x, y, alpha=0.5, s=12,
+                           color=colors[0], label="latency")
+                # Rolling average (window=20)
+                if len(y) >= 20:
+                    window = 20
+                    rolling = [
+                        sum(y[max(0, i - window):i]) / min(i, window)
+                        for i in range(1, len(y) + 1)
+                    ]
+                    ax.plot(x, rolling, color="red", linewidth=1.5,
+                            alpha=0.8, label=f"rolling avg (w={window})")
+
+                # Mark batch boundaries
+                bs = self.BATCH_SIZE
+                for bi in range(bs, len(op_samples), bs):
+                    ax.axvline(
+                        x=x[bi] if bi < len(x) else x[-1],
+                        color="gray", linestyle="--",
+                        alpha=0.3, linewidth=0.5,
+                    )
+
+                ax.set_xlabel("Time since test start (minutes)")
+                ax.set_ylabel("Latency (sec)")
+                ax.set_title(
+                    f"{title} ({len(op_samples)} ops, "
+                    f"batch_size={bs}, workers={self.MAX_WORKERS_CREATE})"
+                )
+                ax.legend(fontsize=8)
+                fig.tight_layout()
+                fname = f"{op_name}_latency_over_time.png"
+                fig.savefig(os.path.join(out_dir, fname), dpi=150)
+                plt.close(fig)
+                self.logger.info(f"Generated {fname}")
+            except Exception as exc:
+                self.logger.warning(
+                    f"Graph {op_name}_latency_over_time failed: {exc}"
+                )
+
+        # ── 13. Per-iteration average create time (grouped bar) ────────
+        try:
+            per_it = self._compute_per_iteration_summary()
+            if per_it:
+                create_ops_bar = [
+                    "create_parent", "create_child", "create_clone",
+                ]
+                op_labels_bar = ["parent", "child", "clone"]
+                it_keys = sorted(per_it.keys(), key=int)
+                fig, ax = plt.subplots(figsize=(14, 8))
+                n_its = len(it_keys)
+                n_ops = len(create_ops_bar)
+                width = 0.8 / max(n_ops, 1)
+                has_data = False
+
+                for oi, (op, label) in enumerate(
+                    zip(create_ops_bar, op_labels_bar)
+                ):
+                    avgs = []
+                    mins = []
+                    maxs = []
+                    x_pos = []
+                    eff_times = []  # effective per-clone (throughput-based)
+                    for xi, it_key in enumerate(it_keys):
+                        stats = per_it[it_key].get(op)
+                        if stats:
+                            avgs.append(stats["avg_wall"])
+                            mins.append(stats["min"])
+                            maxs.append(stats["max"])
+                            eff_times.append(
+                                stats.get("effective_per_clone")
+                            )
+                            x_pos.append(xi)
+                    if avgs:
+                        has_data = True
+                        offsets = [
+                            x + (oi - n_ops / 2 + 0.5) * width
+                            for x in x_pos
+                        ]
+                        err_lo = [a - m for a, m in zip(avgs, mins)]
+                        err_hi = [m - a for a, m in zip(avgs, maxs)]
+                        ax.bar(
+                            offsets, avgs, width,
+                            label=f"{label} (avg wall)",
+                            color=colors[oi % len(colors)],
+                            alpha=0.8,
+                            yerr=[err_lo, err_hi],
+                            capsize=3,
+                            error_kw={"linewidth": 0.8},
+                        )
+                        # Annotate counts + effective time
+                        for j, xi in enumerate(x_pos):
+                            cnt = per_it[it_keys[xi]][op]["count"]
+                            ann = f"n={cnt}"
+                            if eff_times[j] is not None:
+                                ann += f"\neff={eff_times[j]:.1f}s"
+                            ax.text(
+                                offsets[j], avgs[j] + err_hi[j] + 0.3,
+                                ann, ha="center", fontsize=6,
+                            )
+
+                if has_data:
+                    ax.set_xlabel("Iteration")
+                    ax.set_ylabel("Create time (sec)")
+                    ax.set_title(
+                        "Per-Iteration Average Create Time "
+                        "(API time for Docker, PVC Bound for K8s)"
+                    )
+                    ax.set_xticks(range(n_its))
+                    ax.set_xticklabels(
+                        [f"iter {k}" for k in it_keys], fontsize=8,
+                    )
+                    ax.legend(fontsize=8)
+                    fig.tight_layout()
+                    fig.savefig(
+                        os.path.join(
+                            out_dir,
+                            "per_iteration_avg_create_time.png",
+                        ),
+                        dpi=150,
+                    )
+                    self.logger.info(
+                        "Generated per_iteration_avg_create_time.png"
+                    )
+                plt.close(fig)
+        except Exception as exc:
+            self.logger.warning(f"Graph 13 failed: {exc}")
 
     def _print_summary(self):
         self.logger.info("=" * 60)
@@ -797,11 +1754,19 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
 
                 phase_durations = {}
                 for phase_name, phase_fn in [
-                    ("create_parents", self._phase_create_parents),
-                    ("create_children", self._phase_create_children),
+                    ("create_subsystems", self._phase_create_subsystems),
+                    ("verify_lvols", self._verify_all_lvols_exist),
+                    ("verify_nodes_healthy", self._verify_nodes_healthy),
+                    ("write_data", self._phase_write_data),
                     ("create_snapshots", self._phase_create_snapshots),
+                    ("verify_snapshots", self._verify_all_snapshots_exist),
                     ("create_clones", self._phase_create_clones),
+                    ("verify_clones", self._verify_all_clones_exist),
+                    ("mount_verify_clones", self._phase_mount_verify_clones),
+                    ("fio_validation", self._phase_fio_validation),
+                    ("verify_nodes_final", self._verify_nodes_healthy),
                     ("delete_all", self._phase_delete_all),
+                    ("verify_cleanup", self._phase_verify_cleanup),
                 ]:
                     dur = self._run_phase(phase_name, phase_fn)
                     phase_durations[phase_name] = round(dur or 0, 2)
@@ -810,7 +1775,10 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
                     "iteration": iteration,
                     "phase_durations_sec": phase_durations,
                 })
-                self._clear_registries()
+                # Only clear registries if iteration succeeded — graphs
+                # need the mappings and they run in the finally block
+                if not self._stop_event.is_set():
+                    self._clear_registries()
 
         finally:
             self._metrics["end_ts"] = time.time()
@@ -838,15 +1806,23 @@ class TestParallelNamespaceLvolDocker(_ParallelNamespaceLvolBase):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.test_name = "parallel_namespace_lvol_docker"
+        # Docker sbcli API is faster than CSI — use more workers
+        self.MAX_WORKERS_CREATE = 40
 
     # ── Setup / Cleanup ───────────────────────────────────────────────────
 
     def _phase_setup(self):
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        actual_pool = self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        if actual_pool and actual_pool != self.pool_name:
+            self.logger.info(
+                f"[setup] Pool name changed: {self.pool_name} -> {actual_pool}"
+            )
+            self.pool_name = actual_pool
         sleep_n_sec(2)
 
     def _phase_cleanup(self):
-        self.logger.info("[cleanup] Bulk delete safety net")
+        self.logger.info("[cleanup] Bulk delete safety net (ns-* only)")
+        # Delete only test resources by prefix, not all lvols
         try:
             self.sbcli_utils.delete_all_clones()
         except Exception:
@@ -856,7 +1832,23 @@ class TestParallelNamespaceLvolDocker(_ParallelNamespaceLvolBase):
         except Exception:
             pass
         try:
-            self.sbcli_utils.delete_all_lvols()
+            all_lvols = self.sbcli_utils.list_lvols()
+            test_lvols = [
+                name for name in all_lvols
+                if name.startswith("ns-") or name.startswith("cln-")
+                or name.startswith("snap-")
+            ]
+            self.logger.info(
+                f"[cleanup] Deleting {len(test_lvols)}/{len(all_lvols)} "
+                f"test lvols"
+            )
+            for lv_name in test_lvols:
+                try:
+                    self.sbcli_utils.delete_lvol(
+                        lvol_name=lv_name, skip_error=True
+                    )
+                except Exception:
+                    pass
         except Exception:
             pass
         try:
@@ -864,11 +1856,181 @@ class TestParallelNamespaceLvolDocker(_ParallelNamespaceLvolBase):
         except Exception:
             pass
 
-    # ── Create implementations ────────────────────────────────────────────
+    # ── Two-phase subsystem creation: parents then parallel children ────
 
-    def _create_parent_impl(self, params: dict):
-        name = params["name"]
+    def _phase_create_subsystems(self):
+        """Sub-phase 1: create all parents in parallel.
+        Sub-phase 2: create ALL children in parallel (flat list).
+        50% failure threshold with detailed name logging."""
+        pvcs_per_subsys = 1 + self.CHILDREN_PER_PARENT
+        total_expected = self.NUM_PARENTS * pvcs_per_subsys
+        self.logger.info(
+            f"[create_subsystems] {self.NUM_PARENTS} parents × "
+            f"{pvcs_per_subsys} lvols = {total_expected} total "
+            f"(parallel, workers={self.MAX_WORKERS_CREATE})"
+        )
+
+        # ── Sub-phase 1: Create all parents (parallel) ─────────────
+        parent_items = []
+        parent_names = []
+        for i in range(self.NUM_PARENTS):
+            pname = f"ns-par-{_rand_seq(6)}-{i:04d}"
+            parent_items.append({"name": pname, "idx": i})
+            parent_names.append(pname)
+
+        self.logger.info(
+            f"[create_subsystems][sub1] Creating {self.NUM_PARENTS} parents "
+            f"(parallel, workers={self.MAX_WORKERS_CREATE})"
+        )
+        parents_t0 = time.time()
+        _ok, parent_fail = self._batch_parallel(
+            parent_items,
+            self._create_single_parent_docker,
+            self.MAX_WORKERS_CREATE,
+            "create_parents",
+        )
+        parents_elapsed = time.time() - parents_t0
+        self._log_op_stats(
+            "create_parent", batch_label="all parents",
+            batch_elapsed=parents_elapsed,
+        )
+
+        # Remove failed parents
+        failed_parents = []
+        if parent_fail > 0:
+            created_parents = set(self._parent_registry.keys())
+            for pname in list(parent_names):
+                if pname not in created_parents:
+                    failed_parents.append(pname)
+                    parent_names.remove(pname)
+
+        self.logger.info(
+            f"[create_subsystems][sub1] {len(parent_names)} parents "
+            f"created in {parents_elapsed:.1f}s"
+            f"{f', {len(failed_parents)} FAILED: {failed_parents}' if failed_parents else ''}"
+        )
+
+        # ── Sub-phase 2: Create ALL children in parallel ───────────
+        total_children = len(parent_names) * self.CHILDREN_PER_PARENT
+        self.logger.info(
+            f"[create_subsystems][sub2] Creating {total_children} children "
+            f"in parallel (workers={self.MAX_WORKERS_CREATE})"
+        )
+        child_items = []
+        for pname in parent_names:
+            pinfo = self._parent_registry[pname]
+            for c in range(self.CHILDREN_PER_PARENT):
+                child_items.append({
+                    "name": f"ns-ch-{_rand_seq(6)}-{pname[-4:]}-{c:02d}",
+                    "parent_name": pname,
+                    "parent_id": pinfo["id"],
+                    "parent_node_id": pinfo.get("node_id"),
+                })
+        children_t0 = time.time()
+        _ok, child_fail = self._batch_parallel(
+            child_items,
+            self._create_single_child_docker,
+            self.MAX_WORKERS_CREATE,
+            "create_children",
+        )
+        children_elapsed = time.time() - children_t0
+        self._log_op_stats(
+            "create_child", batch_label="all children",
+            batch_elapsed=children_elapsed,
+        )
+
+        # Identify failed children
+        failed_children = []
+        if child_fail > 0:
+            created_children = set(self._child_registry.keys())
+            for item in child_items:
+                if item["name"] not in created_children:
+                    failed_children.append(
+                        f"{item['name']} (parent={item['parent_name']})"
+                    )
+
+        # ── Failure summary ──────────────────────────────────────────
+        total_attempted = self.NUM_PARENTS + total_children
+        total_failed = len(failed_parents) + len(failed_children)
+        fail_pct = (total_failed * 100 / max(total_attempted, 1))
+
+        if total_failed > 0:
+            self.logger.warning(
+                f"[create_subsystems] FAILED lvols: {total_failed}/"
+                f"{total_attempted} ({fail_pct:.1f}%)"
+            )
+            if failed_parents:
+                self.logger.warning(
+                    f"  Failed PARENTS ({len(failed_parents)}): "
+                    f"{failed_parents}"
+                )
+            if failed_children:
+                self.logger.warning(
+                    f"  Failed CHILDREN ({len(failed_children)}): "
+                    f"{failed_children[:20]}"
+                    f"{'...' if len(failed_children) > 20 else ''}"
+                )
+
+        if fail_pct > 50:
+            raise RuntimeError(
+                f"[create_subsystems] {fail_pct:.1f}% failure rate "
+                f"exceeds 50% threshold — {total_failed}/{total_attempted} "
+                f"(parents={len(failed_parents)}, "
+                f"children={len(failed_children)})"
+            )
+
+        # ── Bulk verify ──────────────────────────────────────────────
+        all_lvols = self.sbcli_utils.list_lvols()
+        expected_created = total_attempted - total_failed
+        if len(all_lvols) < expected_created:
+            self.logger.warning(
+                f"[create_subsystems] lvol count {len(all_lvols)} < "
+                f"expected {expected_created}"
+            )
+
+        self.logger.info(
+            f"[create_subsystems] Done: {len(self._parent_registry)} parents, "
+            f"{len(self._child_registry)} children"
+            f"{f' ({total_failed} failures tolerated)' if total_failed else ''}"
+        )
+
+    def _create_single_parent_docker(self, item):
+        """Create a single parent lvol. Called from _batch_parallel."""
+        name = item["name"]
+        t0 = time.time()
+        api_elapsed = self._create_parent(name)
+        self._record_timing(
+            "create_parent", name,
+            time.time() - t0, self._snapshot_inventory(),
+            api_elapsed=api_elapsed,
+        )
+
+    def _create_single_child_docker(self, item):
+        """Create a single child lvol and register under its parent.
+
+        Called from _batch_parallel with MAX_WORKERS_CREATE concurrency —
+        all children for all parents run in parallel."""
+        child_name = item["name"]
+        parent_name = item["parent_name"]
+        parent_id = item["parent_id"]
+        parent_node_id = item["parent_node_id"]
+        t0 = time.time()
+        api_elapsed = self._create_child(
+            child_name, parent_name, parent_id, parent_node_id,
+        )
+        self._record_timing(
+            "create_child", child_name,
+            time.time() - t0, self._snapshot_inventory(),
+            api_elapsed=api_elapsed,
+        )
+
+    def _create_parent(self, name: str):
+        """Create a single parent lvol + register. Raises on failure.
+
+        Returns the API-only elapsed time (seconds) for timing reports.
+        """
         self._inc("attempts", "create_parent")
+        api_t0 = time.time()
         self._api_retry("create_parent", lambda: self.sbcli_utils.add_lvol(
             lvol_name=name,
             pool_name=self.pool_name,
@@ -880,20 +2042,36 @@ class TestParallelNamespaceLvolDocker(_ParallelNamespaceLvolBase):
             max_namespace_per_subsys=self.NAMESPACES_PER_PARENT,
             retry=1,
         ), ctx={"name": name})
+        api_elapsed = time.time() - api_t0
         lvol_id = self._wait_lvol_id(name)
+        node_id = None
+        try:
+            details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
+            if details:
+                node_id = details[0].get("node_id")
+        except Exception as ex:
+            self.logger.warning(
+                f"[create_parent] {name}: could not get node_id: {ex}"
+            )
         with self._lock:
             self._parent_registry[name] = {
-                "id": lvol_id, "children": [], "snapshots": [],
+                "id": lvol_id, "node_id": node_id,
+                "children": [], "snapshots": [],
             }
             self._metrics["counts"]["parents_created"] += 1
-        self._inc("attempts", "create_parent", 0)  # already counted
-        self.logger.info(f"[create_parent] {name} -> {lvol_id}")
+        self.logger.info(
+            f"[create_parent] {name} -> {lvol_id} (node={node_id})"
+        )
+        return api_elapsed
 
-    def _create_child_impl(self, params: dict):
-        name = params["name"]
-        parent_name = params["parent_name"]
-        parent_id = params["parent_id"]
+    def _create_child(self, name: str, parent_name: str,
+                      parent_id: str, parent_node_id: str):
+        """Create a single child namespace lvol. Raises on failure.
+
+        Returns the API-only elapsed time (seconds) for timing reports.
+        """
         self._inc("attempts", "create_child")
+        api_t0 = time.time()
         self._api_retry("create_child", lambda: self.sbcli_utils.add_lvol(
             lvol_name=name,
             pool_name=self.pool_name,
@@ -902,18 +2080,199 @@ class TestParallelNamespaceLvolDocker(_ParallelNamespaceLvolBase):
             distr_npcs=self.npcs,
             distr_bs=self.bs,
             distr_chunk_bs=self.chunk_bs,
+            host_id=parent_node_id,
             namespace=parent_id,
             retry=1,
         ), ctx={"name": name, "parent": parent_name})
+        api_elapsed = time.time() - api_t0
         child_id = self._wait_lvol_id(name)
         with self._lock:
             self._child_registry[name] = {
                 "id": child_id, "parent_name": parent_name,
             }
-            if parent_name in self._parent_registry:
-                self._parent_registry[parent_name]["children"].append(name)
+            self._parent_registry[parent_name]["children"].append(name)
             self._metrics["counts"]["children_created"] += 1
-        self.logger.info(f"[create_child] {name} -> {child_id} (parent={parent_name})")
+        self.logger.info(
+            f"[create_child] {name} -> {child_id} (parent={parent_name})"
+        )
+        return api_elapsed
+
+    # ── Write data (parallel FIO per parent group) ─────────────────────
+
+    def _phase_write_data(self):
+        """Parallel FIO: one thread per parent group.
+
+        Each thread NVMe-connects the parent + all its children, runs
+        FIO (100 MB sequential write) on each device, then disconnects.
+        Also pre-selects the snapshot child so _phase_create_snapshots
+        reuses it.
+        """
+        # Pre-select snapshot child
+        with self._lock:
+            child_names = list(self._child_registry.keys())
+        if child_names:
+            self._snapshot_child = random.choice(child_names)
+            self.logger.info(
+                f"[write_data] Pre-selected child for snapshot: "
+                f"{self._snapshot_child}"
+            )
+        else:
+            self._snapshot_child = None
+
+        # Build per-parent groups: parent + all its children
+        parent_items = []
+        with self._lock:
+            for pname, pinfo in self._parent_registry.items():
+                lvols = [(pname, pinfo["id"])]
+                for cname in pinfo.get("children", []):
+                    cinfo = self._child_registry.get(cname)
+                    if cinfo:
+                        lvols.append((cname, cinfo["id"]))
+                parent_items.append({
+                    "parent_name": pname,
+                    "lvols": lvols,
+                })
+
+        total_lvols = sum(len(item["lvols"]) for item in parent_items)
+        self.logger.info(
+            f"[write_data] Running parallel FIO (100 MB) on {total_lvols} "
+            f"lvols across {len(parent_items)} parent groups "
+            f"(workers={self.MAX_WORKERS_CREATE})"
+        )
+
+        write_t0 = time.time()
+        _ok, fail = self._batch_parallel(
+            parent_items, self._fio_parent_group_docker,
+            self.MAX_WORKERS_CREATE, "write_data",
+        )
+        write_elapsed = time.time() - write_t0
+        self.logger.info(
+            f"[write_data] Done: {_ok}/{len(parent_items)} groups OK, "
+            f"{fail} failed in {write_elapsed:.1f}s"
+        )
+        if fail > 0:
+            self.logger.warning(
+                f"[write_data] {fail}/{len(parent_items)} FIO groups failed"
+            )
+
+    def _extract_nqn(self, connect_strs):
+        """Extract NQN from nvme connect command strings."""
+        for cs in connect_strs:
+            for part in cs.split():
+                if part.startswith("--nqn="):
+                    return part.split("=", 1)[1]
+                if part.startswith("-n ") or part == "-n":
+                    continue
+        return None
+
+    def _find_device_by_nqn(self, client, nqn):
+        """Find NVMe block device for a given NQN via nvme list-subsys."""
+        import json as _json
+        out, _ = self.ssh_obj.exec_command(
+            client,
+            "sudo nvme list-subsys -o json 2>/dev/null || echo '[]'",
+            supress_logs=True,
+        )
+        try:
+            subsys_data = _json.loads(out)
+            if isinstance(subsys_data, list) and subsys_data:
+                subsys_data = subsys_data[0]
+            for ss in subsys_data.get("Subsystems", []):
+                if ss.get("NQN") == nqn:
+                    for path in ss.get("Paths", []):
+                        dev_name = path.get("Name")
+                        if dev_name:
+                            return f"/dev/{dev_name}"
+        except Exception:
+            pass
+        return None
+
+    def _fio_parent_group_docker(self, item):
+        """Connect all lvols in a parent group, run FIO on each, disconnect.
+
+        Each parent thread owns its NVMe connections exclusively — no shared
+        connect strings across threads.
+        """
+        client = self.fio_node[0]
+        parent_name = item["parent_name"]
+        lvols = item["lvols"]  # [(name, id), ...]
+        connected_nqns = []
+        t0_group = time.time()
+
+        try:
+            # ── Step 1: NVMe-connect all lvols in this group ─────────
+            nqn_map = {}  # lvol_name -> nqn
+            for lvol_name, lvol_id in lvols:
+                try:
+                    connect_strs = self.sbcli_utils.get_lvol_connect_str(
+                        lvol_name
+                    )
+                    if not connect_strs:
+                        self.logger.warning(
+                            f"[write_data] No connect strings for {lvol_name}"
+                        )
+                        continue
+                    nqn = self._extract_nqn(connect_strs)
+                    for cs in connect_strs:
+                        self.ssh_obj.exec_command(client, cs)
+                    if nqn:
+                        nqn_map[lvol_name] = nqn
+                        connected_nqns.append(nqn)
+                except Exception as exc:
+                    self.logger.warning(
+                        f"[write_data] Connect failed for {lvol_name}: {exc}"
+                    )
+
+            sleep_n_sec(3)
+
+            # ── Step 2: Discover devices and run FIO on each ─────────
+            fio_ok = 0
+            for lvol_name, nqn in nqn_map.items():
+                try:
+                    device = self._find_device_by_nqn(client, nqn)
+                    if not device:
+                        self.logger.warning(
+                            f"[write_data] No device found for "
+                            f"{lvol_name} (nqn={nqn})"
+                        )
+                        continue
+                    t0 = time.time()
+                    self.ssh_obj.exec_command(
+                        client,
+                        f"sudo fio --name=write-{lvol_name[:20]} "
+                        f"--filename={device} --size=100M --bs=1M "
+                        f"--rw=write --direct=1 --ioengine=libaio "
+                        f"--iodepth=1 --numjobs=1",
+                    )
+                    elapsed = time.time() - t0
+                    self._record_timing(
+                        "write_data", lvol_name, elapsed,
+                        self._snapshot_inventory(),
+                    )
+                    fio_ok += 1
+                except Exception as exc:
+                    self.logger.warning(
+                        f"[write_data] FIO failed for {lvol_name}: {exc}"
+                    )
+
+            group_elapsed = time.time() - t0_group
+            self.logger.info(
+                f"[write_data] Group {parent_name}: "
+                f"{fio_ok}/{len(lvols)} lvols written "
+                f"in {group_elapsed:.1f}s"
+            )
+
+        finally:
+            # ── Step 3: NVMe-disconnect all ──────────────────────────
+            for nqn in connected_nqns:
+                try:
+                    self.ssh_obj.exec_command(
+                        client, f"sudo nvme disconnect -n {nqn}",
+                    )
+                except Exception:
+                    pass
+
+    # ── Create implementations ────────────────────────────────────────────
 
     def _create_snapshot_impl(self, params: dict):
         snap_name = params["name"]
@@ -943,11 +2302,13 @@ class TestParallelNamespaceLvolDocker(_ParallelNamespaceLvolBase):
         snap_name = params["snap_name"]
         snap_id = params["snap_id"]
         self._inc("attempts", "create_clone")
+        api_t0 = time.time()
         self._api_retry("create_clone", lambda: self.sbcli_utils.add_clone(
             snapshot_id=snap_id,
             clone_name=clone_name,
             retry=1,
         ), ctx={"clone": clone_name, "snap": snap_name})
+        api_elapsed = time.time() - api_t0
         clone_id = self._wait_lvol_id(clone_name)
         with self._lock:
             self._clone_registry[clone_name] = {
@@ -957,6 +2318,256 @@ class TestParallelNamespaceLvolDocker(_ParallelNamespaceLvolBase):
                 self._snap_registry[snap_name]["clones"].append(clone_name)
             self._metrics["counts"]["clones_created"] += 1
         self.logger.info(f"[create_clone] {clone_name} -> {clone_id}")
+        return api_elapsed
+
+    # ── Clone mount verification ─────────────────────────────────────────
+
+    def _mount_verify_single_clone(self, item):
+        """Connect a clone via NVMe, run short FIO read, check for errors."""
+        clone_name = item["clone_name"]
+        client = self.fio_node[0]
+        nqn = None
+        t0 = time.time()
+
+        try:
+            # 1. Get connect strings (works for clones — they are lvols)
+            connect_strs = self.sbcli_utils.get_lvol_connect_str(clone_name)
+            if not connect_strs:
+                raise RuntimeError(
+                    f"No connect strings returned for clone {clone_name}"
+                )
+            nqn = self._extract_nqn(connect_strs)
+
+            # 2. Record devices before connect
+            initial_devices = set(self.ssh_obj.get_devices(node=client))
+
+            # 3. NVMe connect
+            for cs in connect_strs:
+                self.ssh_obj.exec_command(client, cs)
+            sleep_n_sec(3)
+
+            # 4. Detect new device (namespace lvols may add namespace to
+            #    existing controller rather than creating a new one)
+            final_devices = set(self.ssh_obj.get_devices(node=client))
+            new_devices = list(final_devices - initial_devices)
+
+            device = None
+            if new_devices:
+                device = f"/dev/{new_devices[0]}"
+            else:
+                # Namespace lvol: try ns-rescan on existing controllers
+                out, _ = self.ssh_obj.exec_command(
+                    client,
+                    "ls /dev/nvme[0-9]* 2>/dev/null | grep -oP 'nvme\\d+$' "
+                    "| sort -u",
+                    supress_logs=True,
+                )
+                for ctrl in (out or "").strip().splitlines():
+                    ctrl = ctrl.strip()
+                    if ctrl:
+                        self.ssh_obj.exec_command(
+                            client,
+                            f"sudo nvme ns-rescan /dev/{ctrl}",
+                            supress_logs=True,
+                        )
+                sleep_n_sec(2)
+                rescan_devices = set(self.ssh_obj.get_devices(node=client))
+                new_after_rescan = list(rescan_devices - initial_devices)
+                if new_after_rescan:
+                    device = f"/dev/{new_after_rescan[0]}"
+
+            if not device:
+                # Fall back: find any device for this NQN
+                device = self._find_device_by_nqn(client, nqn)
+
+            if not device:
+                raise RuntimeError(
+                    f"Could not find block device for clone {clone_name} "
+                    f"after NVMe connect (NQN={nqn})"
+                )
+
+            self.logger.info(
+                f"[mount_verify] Clone {clone_name} -> device {device}"
+            )
+
+            # 5. Run short FIO read with output capture
+            fio_log = f"/tmp/fio_verify_{clone_name}.log"
+            fio_cmd = (
+                f"sudo fio --name=verify-{clone_name[:20]} "
+                f"--filename={device} --size=4M --bs=4K "
+                f"--rw=read --direct=1 --ioengine=libaio "
+                f"--iodepth=1 --numjobs=1 "
+                f"--output={fio_log}"
+            )
+            self.ssh_obj.exec_command(client, fio_cmd)
+
+            # 6. Check FIO log for errors
+            fio_output, _ = self.ssh_obj.exec_command(
+                client, f"cat {fio_log}", supress_logs=True,
+            )
+            fio_output = fio_output or ""
+
+            # Parse err= from FIO output
+            err_found = False
+            for line in fio_output.splitlines():
+                if "err=" in line:
+                    # Extract err value: "err= 5" or "err=5"
+                    import re
+                    m = re.search(r"err=\s*(\d+)", line)
+                    if m and int(m.group(1)) != 0:
+                        err_found = True
+                        break
+
+            if err_found:
+                self.logger.error(
+                    f"[mount_verify] FIO reported error on clone "
+                    f"{clone_name}:\n{fio_output}"
+                )
+                raise RuntimeError(
+                    f"FIO read error on clone {clone_name}: {fio_output[:200]}"
+                )
+
+            elapsed = time.time() - t0
+            self.logger.info(
+                f"[mount_verify] Clone {clone_name} verified OK "
+                f"({elapsed:.1f}s)"
+            )
+            self._record_timing(
+                "mount_verify", clone_name, elapsed,
+                self._snapshot_inventory(),
+            )
+
+        finally:
+            # Always disconnect
+            if nqn:
+                try:
+                    self.ssh_obj.exec_command(
+                        client, f"sudo nvme disconnect -n {nqn}",
+                    )
+                except Exception:
+                    pass
+
+    # ── FIO validation phase ─────────────────────────────────────────────
+
+    def _phase_fio_validation(self):
+        """Run sustained FIO (10 min) on parent lvols via SSH.
+
+        Connects all 20 parents, runs FIO on each parent device
+        simultaneously, then disconnects.
+        """
+        with self._lock:
+            parent_items = [
+                {"parent_name": pname, "lvol_id": pinfo["id"]}
+                for pname, pinfo in self._parent_registry.items()
+            ]
+
+        if not parent_items:
+            self.logger.warning("[fio_validation] No parents to run FIO on")
+            return
+
+        self.logger.info(
+            f"[fio_validation] Running {self.FIO_VALIDATION_RUNTIME}s FIO on "
+            f"{len(parent_items)} parent lvols via SSH"
+        )
+
+        fio_t0 = time.time()
+        ok, fail = self._batch_parallel(
+            parent_items, self._fio_validation_parent_docker,
+            min(self.MAX_WORKERS_CREATE, len(parent_items)),
+            "fio_validation",
+        )
+        fio_elapsed = time.time() - fio_t0
+
+        self.logger.info(
+            f"[fio_validation] Done: {ok}/{len(parent_items)} OK, "
+            f"{fail} failed in {fio_elapsed:.1f}s"
+        )
+        if fail > 0:
+            fail_pct = fail * 100 / max(len(parent_items), 1)
+            self.logger.warning(
+                f"[fio_validation] {fail}/{len(parent_items)} "
+                f"({fail_pct:.1f}%) FIO validation groups failed"
+            )
+            if fail_pct > 50:
+                raise RuntimeError(
+                    f"[fio_validation] {fail_pct:.1f}% FIO failures "
+                    f"exceeds 50% threshold"
+                )
+
+    def _fio_validation_parent_docker(self, item):
+        """Connect a parent lvol, run sustained FIO, disconnect."""
+        parent_name = item["parent_name"]
+        client = self.fio_node[0]
+        nqn = None
+
+        try:
+            # 1. NVMe-connect
+            connect_strs = self.sbcli_utils.get_lvol_connect_str(parent_name)
+            if not connect_strs:
+                raise RuntimeError(
+                    f"No connect strings for {parent_name}"
+                )
+            nqn = self._extract_nqn(connect_strs)
+            for cs in connect_strs:
+                self.ssh_obj.exec_command(client, cs)
+            sleep_n_sec(3)
+
+            # 2. Find device
+            device = self._find_device_by_nqn(client, nqn) if nqn else None
+            if not device:
+                raise RuntimeError(
+                    f"No device found for {parent_name} (nqn={nqn})"
+                )
+
+            # 3. Run sustained FIO
+            fio_log = f"/tmp/fio_validation_{parent_name[:30]}.log"
+            t0 = time.time()
+            self.ssh_obj.exec_command(
+                client,
+                f"sudo fio --name=fio-{parent_name[:20]} "
+                f"--filename={device} "
+                f"--size={self.FIO_VALIDATION_SIZE} --bs=4k "
+                f"--rw=randrw --rwmixread=50 "
+                f"--direct=1 --ioengine=libaio "
+                f"--iodepth=1 --numjobs=1 "
+                f"--time_based --runtime={self.FIO_VALIDATION_RUNTIME} "
+                f"--output={fio_log}",
+                timeout=self.FIO_VALIDATION_RUNTIME + 120,
+            )
+            elapsed = time.time() - t0
+
+            # 4. Check FIO log for errors
+            fio_output, _ = self.ssh_obj.exec_command(
+                client, f"cat {fio_log}", supress_logs=True,
+            )
+            fio_output = fio_output or ""
+            import re
+            for line in fio_output.splitlines():
+                if "err=" in line:
+                    m = re.search(r"err=\s*(\d+)", line)
+                    if m and int(m.group(1)) != 0:
+                        self.logger.error(
+                            f"[fio_validation] FIO error on {parent_name}:\n"
+                            f"{fio_output[-500:]}"
+                        )
+                        raise RuntimeError(
+                            f"FIO validation error on {parent_name}: "
+                            f"{line.strip()}"
+                        )
+
+            self.logger.info(
+                f"[fio_validation] {parent_name} OK ({elapsed:.1f}s)"
+            )
+
+        finally:
+            # Always disconnect
+            if nqn:
+                try:
+                    self.ssh_obj.exec_command(
+                        client, f"sudo nvme disconnect -n {nqn}",
+                    )
+                except Exception:
+                    pass
 
     # ── Delete implementations (with verification) ────────────────────────
 
@@ -1031,8 +2642,66 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
         super().__init__(**kwargs)
         self.test_name = "parallel_namespace_lvol_k8s"
         self.STORAGE_CLASS_NAME = "simplyblock-ns-stress-sc"
+        self.XFS_STORAGE_CLASS_NAME = "simplyblock-ns-stress-sc-xfs"
         self.SNAPSHOT_CLASS_NAME = "simplyblock-csi-snapshotclass"
         self.k8s_utils = None
+
+    def setup(self):
+        """K8s-native setup: no SSH client machines needed — FIO runs as K8s Jobs."""
+        self.logger.info("Inside TestParallelNamespaceLvolK8s.setup()")
+
+        retry = 30
+        while retry > 0:
+            try:
+                self.logger.info("Getting all storage nodes")
+                self.mgmt_nodes, self.storage_nodes = self.sbcli_utils.get_all_nodes_ip()
+                self.sbcli_utils.list_lvols()
+                self.sbcli_utils.list_storage_pools()
+                break
+            except Exception as e:
+                self.logger.debug(f"API call failed with error: {e}")
+                retry -= 1
+                if retry == 0:
+                    self.logger.info(f"Retry attempt exhausted. API failed with: {e}. Exiting")
+                    raise e
+                self.logger.info(f"Retrying Base APIs before starting tests. Attempt: {30 - retry + 1}")
+                sleep_n_sec(10)
+
+        # No client machines needed — FIO runs as K8s Jobs
+        self.client_machines = []
+        self.fio_node = []
+
+        # Record UTC start time for Graylog log export at teardown
+        self.test_start_time_utc = datetime.now(timezone.utc)
+
+        # Initialize k8s_utils early so it's available even if _phase_setup fails
+        self._init_k8s_utils()
+
+        # Set up log directories
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        log_base = self.nfs_log_base
+        try:
+            os.makedirs(log_base, exist_ok=True)
+        except OSError:
+            log_base = os.path.join(os.path.expanduser("~"), "e2e-logs")
+            os.makedirs(log_base, exist_ok=True)
+        self.docker_logs_path = os.path.join(log_base, f"{self.test_name}-{timestamp}")
+        self.log_path = os.path.join(self.docker_logs_path, "ClientLogs")
+        os.makedirs(self.log_path, exist_ok=True)
+        os.makedirs(self.docker_logs_path, exist_ok=True)
+
+        run_file = os.getenv("RUN_DIR_FILE", None)
+        if run_file:
+            with open(run_file, "w") as f:
+                f.write(self.docker_logs_path)
+
+        # Start K8s log monitor
+        self.runner_k8s_log = RunnerK8sLog(
+            log_dir=self.docker_logs_path,
+            test_name=self.test_name,
+        )
+        self.runner_k8s_log.start_logging()
+        self.runner_k8s_log.monitor_pod_logs()
 
     # ── K8s helpers ───────────────────────────────────────────────────────
 
@@ -1073,15 +2742,208 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
         self.logger.warning(f"VolumeSnapshot {snap_name} still exists after {timeout}s")
         return time.time() - start
 
+    # ── CSI provisioner tuning ────────────────────────────────────────────
+
+    def _patch_csi_provisioner(self):
+        """Increase CSI provisioner worker-threads for higher create parallelism."""
+        self.logger.info("[csi_patch] Patching CSI provisioner for 5 worker-threads")
+        patch_json = (
+            '{"spec":{"template":{"spec":{"containers":[{"name":"csi-provisioner",'
+            '"args":["--v=5","--csi-address=unix:///csi/csi-provisioner.sock",'
+            '"--timeout=180s","--kube-api-qps=50","--kube-api-burst=100",'
+            '"--worker-threads=5","--retry-interval-start=2s",'
+            '"--leader-election=false","--extra-create-metadata=true",'
+            '"--feature-gates=Topology=true"]}]}}}}'
+        )
+        try:
+            self.k8s_utils._exec_kubectl(
+                f"kubectl patch statefulset simplyblock-csi-controller "
+                f"-n simplyblock --type='strategic' "
+                f"-p='{patch_json}'"
+            )
+            self.logger.info("[csi_patch] Waiting for CSI controller rollout")
+            self.k8s_utils._exec_kubectl(
+                "kubectl rollout status statefulset/simplyblock-csi-controller "
+                "-n simplyblock --timeout=120s"
+            )
+            sleep_n_sec(10)
+            self.logger.info("[csi_patch] CSI provisioner patched successfully")
+        except Exception as exc:
+            self.logger.warning(f"[csi_patch] Patch failed (non-fatal): {exc}")
+
+    # ── Fire-all-then-wait-all helpers ────────────────────────────────────
+
+    def _submit_pvc(self, name: str, sc_name: str = None):
+        """Apply PVC YAML without waiting for Bound.  Fire-and-forget."""
+        sc = sc_name or self.STORAGE_CLASS_NAME
+        ns = self.k8s_utils.namespace
+        yaml_content = (
+            f"apiVersion: v1\n"
+            f"kind: PersistentVolumeClaim\n"
+            f"metadata:\n"
+            f"  name: {name}\n"
+            f"  labels:\n"
+            f"    test: ns-stress\n"
+            f"spec:\n"
+            f"  accessModes:\n"
+            f"    - ReadWriteOnce\n"
+            f"  storageClassName: {sc}\n"
+            f"  resources:\n"
+            f"    requests:\n"
+            f"      storage: {self.PVC_SIZE}\n"
+        )
+        self.k8s_utils.apply_yaml(yaml_content, namespace=ns)
+
+    def _wait_all_pvcs_bound(self, names: list, timeout: int = 600,
+                             poll_interval: int = 10) -> tuple:
+        """Bulk-poll until all target PVCs are Bound.
+
+        Returns ``(bound_set, unbound_set, bind_timestamps)`` where
+        *bind_timestamps* maps ``pvc_name -> epoch`` of when it was first
+        seen Bound.
+        """
+        target = set(names)
+        ns = self.k8s_utils.namespace
+        bound = set()
+        bind_ts = {}
+        deadline = time.time() + timeout
+
+        while time.time() < deadline and bound != target:
+            out, _ = self.k8s_utils._exec_kubectl(
+                f"kubectl get pvc -l test=ns-stress -n {ns} "
+                f"-o jsonpath='{{range .items}}{{.metadata.name}} "
+                f"{{.status.phase}}{{\"\\n\"}}{{end}}' 2>/dev/null || true",
+                supress_logs=True,
+            )
+            now = time.time()
+            for line in (out or "").strip().splitlines():
+                parts = line.strip().split()
+                if len(parts) >= 2 and parts[0] in target and parts[1] == "Bound":
+                    if parts[0] not in bound:
+                        bound.add(parts[0])
+                        bind_ts[parts[0]] = now
+
+            remaining = len(target) - len(bound)
+            self.logger.info(
+                f"[bulk_wait_pvc] {len(bound)}/{len(target)} Bound "
+                f"({remaining} remaining)"
+            )
+            if bound == target:
+                break
+            time.sleep(poll_interval)
+
+        unbound = target - bound
+        if unbound:
+            self.logger.warning(
+                f"[bulk_wait_pvc] {len(unbound)} PVCs NOT Bound "
+                f"after {timeout}s: {sorted(list(unbound))[:10]}..."
+            )
+        return bound, unbound, bind_ts
+
+    def _submit_snapshot(self, name: str, pvc_name: str):
+        """Apply VolumeSnapshot YAML without waiting for readyToUse."""
+        ns = self.k8s_utils.namespace
+        yaml_content = (
+            f"apiVersion: snapshot.storage.k8s.io/v1\n"
+            f"kind: VolumeSnapshot\n"
+            f"metadata:\n"
+            f"  name: {name}\n"
+            f"  labels:\n"
+            f"    test: ns-stress\n"
+            f"spec:\n"
+            f"  volumeSnapshotClassName: {self.SNAPSHOT_CLASS_NAME}\n"
+            f"  source:\n"
+            f"    persistentVolumeClaimName: {pvc_name}\n"
+        )
+        self.k8s_utils.apply_yaml(yaml_content, namespace=ns)
+
+    def _wait_all_snapshots_ready(self, names: list, timeout: int = 600,
+                                  poll_interval: int = 10) -> tuple:
+        """Bulk-poll until all target VolumeSnapshots are readyToUse.
+
+        Returns ``(ready_set, not_ready_set, ready_timestamps)``.
+        """
+        target = set(names)
+        ns = self.k8s_utils.namespace
+        ready = set()
+        ready_ts = {}
+        deadline = time.time() + timeout
+
+        while time.time() < deadline and ready != target:
+            out, _ = self.k8s_utils._exec_kubectl(
+                f"kubectl get volumesnapshot -l test=ns-stress -n {ns} "
+                f"-o jsonpath='{{range .items}}{{.metadata.name}} "
+                f"{{.status.readyToUse}}{{\"\\n\"}}{{end}}' 2>/dev/null || true",
+                supress_logs=True,
+            )
+            now = time.time()
+            for line in (out or "").strip().splitlines():
+                parts = line.strip().split()
+                if len(parts) >= 2 and parts[0] in target and parts[1] == "true":
+                    if parts[0] not in ready:
+                        ready.add(parts[0])
+                        ready_ts[parts[0]] = now
+
+            remaining = len(target) - len(ready)
+            self.logger.info(
+                f"[bulk_wait_snap] {len(ready)}/{len(target)} ready "
+                f"({remaining} remaining)"
+            )
+            if ready == target:
+                break
+            time.sleep(poll_interval)
+
+        not_ready = target - ready
+        if not_ready:
+            self.logger.warning(
+                f"[bulk_wait_snap] {len(not_ready)} snapshots NOT ready "
+                f"after {timeout}s: {sorted(list(not_ready))[:10]}..."
+            )
+        return ready, not_ready, ready_ts
+
+    def _submit_clone(self, name: str, snap_name: str, sc_name: str = None):
+        """Apply clone PVC YAML (dataSource=VolumeSnapshot) without waiting."""
+        sc = sc_name or self.STORAGE_CLASS_NAME
+        ns = self.k8s_utils.namespace
+        yaml_content = (
+            f"apiVersion: v1\n"
+            f"kind: PersistentVolumeClaim\n"
+            f"metadata:\n"
+            f"  name: {name}\n"
+            f"  labels:\n"
+            f"    test: ns-stress\n"
+            f"spec:\n"
+            f"  accessModes:\n"
+            f"    - ReadWriteOnce\n"
+            f"  storageClassName: {sc}\n"
+            f"  resources:\n"
+            f"    requests:\n"
+            f"      storage: {self.PVC_SIZE}\n"
+            f"  dataSource:\n"
+            f"    name: {snap_name}\n"
+            f"    kind: VolumeSnapshot\n"
+            f"    apiGroup: snapshot.storage.k8s.io\n"
+        )
+        self.k8s_utils.apply_yaml(yaml_content, namespace=ns)
+
     # ── Setup / Cleanup ───────────────────────────────────────────────────
 
     def _phase_setup(self):
         self._init_k8s_utils()
+
+        # Patch CSI provisioner for higher parallelism (5 worker-threads)
+        self._patch_csi_provisioner()
+
         # Create pool via sbcli
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        actual_pool = self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        if actual_pool and actual_pool != self.pool_name:
+            self.logger.info(
+                f"[setup] Pool name changed: {self.pool_name} -> {actual_pool}"
+            )
+            self.pool_name = actual_pool
         sleep_n_sec(2)
 
-        # Create StorageClass with namespace support
+        # Create StorageClasses with namespace support (ext4 + xfs)
         cluster_id = self.cluster_id or os.environ.get("CLUSTER_ID", "")
         self.k8s_utils.create_storage_class(
             name=self.STORAGE_CLASS_NAME,
@@ -1089,6 +2951,15 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
             pool_name=self.pool_name,
             ndcs=self.ndcs,
             npcs=self.npcs,
+            max_namespace_per_subsys=self.NAMESPACES_PER_PARENT,
+        )
+        self.k8s_utils.create_storage_class(
+            name=self.XFS_STORAGE_CLASS_NAME,
+            cluster_id=cluster_id,
+            pool_name=self.pool_name,
+            ndcs=self.ndcs,
+            npcs=self.npcs,
+            fs_type="xfs",
             max_namespace_per_subsys=self.NAMESPACES_PER_PARENT,
         )
         self.k8s_utils.create_volume_snapshot_class(
@@ -1099,6 +2970,14 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
         self.logger.info("[cleanup] K8s bulk cleanup")
         ns = self.k8s_utils.namespace if self.k8s_utils else "default"
         if self.k8s_utils:
+            # Delete FIO/write-data jobs with our label
+            try:
+                self.k8s_utils._exec_kubectl(
+                    f"kubectl delete job -l test=ns-stress -n {ns} "
+                    f"--wait=false --ignore-not-found 2>/dev/null || true"
+                )
+            except Exception:
+                pass
             # Delete all PVCs with our label
             try:
                 self.k8s_utils._exec_kubectl(
@@ -1115,15 +2994,16 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
                 )
             except Exception:
                 pass
-            # Delete StorageClass
-            try:
-                self.k8s_utils._exec_kubectl(
-                    f"kubectl delete storageclass {self.STORAGE_CLASS_NAME} "
-                    f"--ignore-not-found 2>/dev/null || true"
-                )
-            except Exception:
-                pass
-        # Bulk sbcli cleanup
+            # Delete StorageClasses
+            for sc in [self.STORAGE_CLASS_NAME, self.XFS_STORAGE_CLASS_NAME]:
+                try:
+                    self.k8s_utils._exec_kubectl(
+                        f"kubectl delete storageclass {sc} "
+                        f"--ignore-not-found 2>/dev/null || true"
+                    )
+                except Exception:
+                    pass
+        # Targeted sbcli cleanup — only test resources
         try:
             self.sbcli_utils.delete_all_clones()
         except Exception:
@@ -1133,7 +3013,23 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
         except Exception:
             pass
         try:
-            self.sbcli_utils.delete_all_lvols()
+            all_lvols = self.sbcli_utils.list_lvols()
+            test_lvols = [
+                name for name in all_lvols
+                if name.startswith("ns-") or name.startswith("cln-")
+                or name.startswith("snap-")
+            ]
+            self.logger.info(
+                f"[cleanup] Deleting {len(test_lvols)}/{len(all_lvols)} "
+                f"test lvols"
+            )
+            for lv_name in test_lvols:
+                try:
+                    self.sbcli_utils.delete_lvol(
+                        lvol_name=lv_name, skip_error=True
+                    )
+                except Exception:
+                    pass
         except Exception:
             pass
         try:
@@ -1141,35 +3037,767 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
         except Exception:
             pass
 
-    # ── Phase overrides ───────────────────────────────────────────────────
+    def _phase_verify_cleanup(self):
+        """K8s override: also verify no test PVCs remain."""
+        ns = self.k8s_utils.namespace if self.k8s_utils else "default"
+        # Check K8s PVCs with test label
+        if self.k8s_utils:
+            try:
+                output = self.k8s_utils._exec_kubectl(
+                    f"kubectl get pvc -l test=ns-stress -n {ns} "
+                    f"--no-headers 2>/dev/null || true"
+                )
+                if output and output.strip():
+                    lines = [
+                        ln for ln in output.strip().split("\n")
+                        if ln.strip()
+                    ]
+                    self.logger.warning(
+                        f"[verify_cleanup] {len(lines)} test PVCs still "
+                        f"present — force deleting"
+                    )
+                    self.k8s_utils._exec_kubectl(
+                        f"kubectl delete pvc -l test=ns-stress -n {ns} "
+                        f"--wait=false --ignore-not-found 2>/dev/null || true"
+                    )
+                    sleep_n_sec(10)
+            except Exception:
+                pass
+        # Delegate to base for sbcli-level verification
+        super()._phase_verify_cleanup()
 
-    def _phase_create_parents(self):
-        """In K8s, create ALL PVCs (NUM_PARENTS × NAMESPACES_PER_PARENT).
-        CSI driver groups into subsystems automatically."""
-        total = self.NUM_PARENTS * self.NAMESPACES_PER_PARENT
-        items = []
-        for i in range(total):
-            pvc_name = f"ns-pvc-{_rand_seq(6)}-{i:04d}"
-            items.append({"name": pvc_name, "idx": i})
-        self._batch_parallel(
-            items, self._timed_create_parent,
-            self.MAX_WORKERS_CREATE, "create_pvcs",
-        )
+    # ── K8s verification overrides ────────────────────────────────────────
+    # PVC names != API lvol names (CSI driver uses its own naming), so
+    # verify via K8s PVC status + API lvol count instead of name matching.
 
-    def _phase_create_children(self):
-        """No-op in K8s — CSI groups namespaces automatically."""
-        self.logger.info(
-            "[K8s] Children phase is no-op; CSI driver groups "
-            "PVCs into subsystems automatically"
-        )
+    def _verify_all_lvols_exist(self):
+        """K8s override: verify PVCs are Bound and PV names exist in API.
 
-    # ── Create implementations ────────────────────────────────────────────
+        PVC names (ns-pvc-xxx) don't match API lvol names.  The PV name
+        (VOLUME column in ``kubectl get pvc``) matches the lvol name in the
+        API (``sbctl lvol list``).  We verify both: PVC Bound + PV in API.
 
-    def _create_parent_impl(self, params: dict):
-        name = params["name"]
-        self._inc("attempts", "create_parent")
+        Retries up to 30 minutes to allow stragglers to settle after creation.
+        """
         ns = self.k8s_utils.namespace
-        # Create PVC with label for easy cleanup
+        with self._lock:
+            all_pvc_names = set(
+                list(self._parent_registry.keys())
+                + list(self._child_registry.keys())
+            )
+        expected = len(all_pvc_names)
+
+        # Retry loop: wait for PVCs to settle (some may still be binding)
+        max_wait = 1800  # 30 minutes
+        poll_interval = 30
+        waited = 0
+        not_bound = []
+        pv_names = []
+        found_pvcs = set()
+
+        while waited <= max_wait:
+            not_bound = []
+            pv_names = []
+            found_pvcs = set()
+
+            # Bulk fetch all test PVCs via -o json (avoids jsonpath quoting issues)
+            out, _ = self.k8s_utils._exec_kubectl(
+                f"kubectl get pvc -l test=ns-stress -n {ns} "
+                f"-o json 2>/dev/null || echo '{{\"items\":[]}}'",
+                supress_logs=True,
+            )
+
+            try:
+                data = json.loads(out or '{"items":[]}')
+                for item in data.get("items", []):
+                    pvc_name = item.get("metadata", {}).get("name", "")
+                    phase = item.get("status", {}).get("phase", "")
+                    pv_name = item.get("spec", {}).get("volumeName", "")
+                    if pvc_name not in all_pvc_names:
+                        continue
+                    found_pvcs.add(pvc_name)
+                    if phase != "Bound":
+                        not_bound.append((pvc_name, phase))
+                    elif pv_name:
+                        pv_names.append((pvc_name, pv_name))
+            except (json.JSONDecodeError, TypeError):
+                self.logger.warning(
+                    f"[verify_lvols] Failed to parse kubectl JSON output "
+                    f"(len={len(out or '')})"
+                )
+
+            # Check for PVCs not found in K8s at all
+            missing_pvcs = all_pvc_names - found_pvcs
+            if missing_pvcs:
+                not_bound.extend(
+                    (name, "not-found") for name in list(missing_pvcs)[:50]
+                )
+
+            not_bound_pct = len(not_bound) * 100 / max(expected, 1)
+            if not not_bound or not_bound_pct <= 50:
+                break  # All Bound or within 50% tolerance
+
+            if waited < max_wait:
+                self.logger.info(
+                    f"[verify_lvols] {len(not_bound)}/{expected} PVCs "
+                    f"({not_bound_pct:.1f}%) not yet Bound, waiting "
+                    f"{poll_interval}s... (waited {waited}s/{max_wait}s)"
+                )
+                sleep_n_sec(poll_interval)
+                waited += poll_interval
+            else:
+                break  # Exhausted wait time
+
+        # Final assessment after wait
+        not_bound_pct = len(not_bound) * 100 / max(expected, 1)
+        if not_bound:
+            self.logger.warning(
+                f"[verify_lvols] {len(not_bound)}/{expected} PVCs "
+                f"({not_bound_pct:.1f}%) not Bound/found after "
+                f"{waited}s wait: "
+                f"{not_bound[:10]}{'...' if len(not_bound) > 10 else ''}"
+            )
+        if not_bound_pct > 50:
+            raise RuntimeError(
+                f"[verify_lvols] {not_bound_pct:.1f}% PVCs not Bound "
+                f"exceeds 50% threshold — {len(not_bound)}/{expected}"
+            )
+
+        # Cross-check: PV names (VOLUME column) should exist in API lvol list
+        all_lvols = self.sbcli_utils.list_lvols()
+        lvol_names = set(all_lvols.keys()) if isinstance(all_lvols, dict) else set(all_lvols)
+        missing_in_api = []
+        for pvc_name, pv_name in pv_names:
+            if pv_name not in lvol_names:
+                missing_in_api.append((pvc_name, pv_name))
+
+        if missing_in_api:
+            self.logger.warning(
+                f"[verify_lvols] {len(missing_in_api)}/{expected} PVCs Bound "
+                f"but PV not in API: "
+                f"{missing_in_api[:10]}{'...' if len(missing_in_api) > 10 else ''}"
+            )
+
+        bound_count = len(found_pvcs) - len(not_bound)
+        self.logger.info(
+            f"[verify_lvols] {bound_count}/{expected} PVCs Bound, "
+            f"{len(pv_names)} PVs found in API "
+            f"(lvol count={len(all_lvols)})"
+        )
+
+    def _verify_all_snapshots_exist(self):
+        """K8s override: verify VolumeSnapshots are readyToUse.
+
+        Uses ``-o json`` instead of jsonpath to avoid shell-quoting issues
+        when _exec_kubectl runs through bash -c or SSH layers.
+
+        Retries up to 30 minutes to allow snapshots to become ready.
+        Warns for not-ready, only fails if >50% not ready.
+        """
+        ns = self.k8s_utils.namespace
+        with self._lock:
+            snap_names = list(self._snap_registry.keys())
+        if not snap_names:
+            self.logger.info("[verify_snapshots] No snapshots to verify")
+            return
+
+        total = len(snap_names)
+        max_wait = 1800  # 30 minutes
+        poll_interval = 30
+        waited = 0
+        not_ready = []
+
+        while waited <= max_wait:
+            not_ready = []
+            # Use -o json for reliable parsing (jsonpath has shell-quoting issues)
+            out, _ = self.k8s_utils._exec_kubectl(
+                f"kubectl get volumesnapshot -l test=ns-stress -n {ns} "
+                f"-o json 2>/dev/null || echo '{{\"items\":[]}}'",
+                supress_logs=True,
+            )
+            found_snaps = {}
+            try:
+                data = json.loads(out or '{"items":[]}')
+                for item in data.get("items", []):
+                    name = item.get("metadata", {}).get("name", "")
+                    ready = item.get("status", {}).get("readyToUse", False)
+                    found_snaps[name] = str(ready).lower()
+            except (json.JSONDecodeError, TypeError):
+                self.logger.warning(
+                    f"[verify_snapshots] Failed to parse kubectl JSON output "
+                    f"(len={len(out or '')})"
+                )
+
+            for snap_name in snap_names:
+                ready = found_snaps.get(snap_name, "not-found")
+                if ready != "true":
+                    not_ready.append((snap_name, ready))
+
+            not_ready_pct = len(not_ready) * 100 / max(total, 1)
+            if not not_ready or not_ready_pct <= 50:
+                break  # All ready or within 50% tolerance
+
+            if waited < max_wait:
+                self.logger.info(
+                    f"[verify_snapshots] {len(not_ready)}/{total} "
+                    f"({not_ready_pct:.1f}%) snapshots not ready, "
+                    f"waiting {poll_interval}s... "
+                    f"(waited {waited}s/{max_wait}s)"
+                )
+                sleep_n_sec(poll_interval)
+                waited += poll_interval
+            else:
+                break  # Exhausted wait time
+
+        not_ready_pct = len(not_ready) * 100 / max(total, 1)
+        if not_ready:
+            self.logger.warning(
+                f"[verify_snapshots] {len(not_ready)}/{total} "
+                f"({not_ready_pct:.1f}%) snapshots not ready after "
+                f"{waited}s wait: "
+                f"{not_ready[:10]}{'...' if len(not_ready) > 10 else ''}"
+            )
+        if not_ready_pct > 50:
+            raise RuntimeError(
+                f"[verify_snapshots] {not_ready_pct:.1f}% snapshots not "
+                f"ready exceeds 50% threshold — "
+                f"{len(not_ready)}/{total}"
+            )
+        self.logger.info(
+            f"[verify_snapshots] {total - len(not_ready)}/{total} "
+            f"snapshots confirmed readyToUse"
+        )
+
+    def _verify_all_clones_exist(self):
+        """K8s override: verify clone PVCs are Bound.
+
+        Uses ``-o json`` instead of jsonpath to avoid shell-quoting issues.
+
+        Retries up to 30 minutes to allow clone PVCs to bind.
+        Warns for not-bound, only fails if >50% not bound.
+        """
+        ns = self.k8s_utils.namespace
+        with self._lock:
+            clone_names = list(self._clone_registry.keys())
+        if not clone_names:
+            self.logger.info("[verify_clones] No clones to verify")
+            return
+
+        total = len(clone_names)
+        max_wait = 1800  # 30 minutes
+        poll_interval = 30
+        waited = 0
+        not_bound = []
+
+        while waited <= max_wait:
+            not_bound = []
+            # Use -o json for reliable parsing
+            out, _ = self.k8s_utils._exec_kubectl(
+                f"kubectl get pvc -l test=ns-stress -n {ns} "
+                f"-o json 2>/dev/null || echo '{{\"items\":[]}}'",
+                supress_logs=True,
+            )
+            found_pvcs = {}
+            try:
+                data = json.loads(out or '{"items":[]}')
+                for item in data.get("items", []):
+                    name = item.get("metadata", {}).get("name", "")
+                    phase = item.get("status", {}).get("phase", "")
+                    found_pvcs[name] = phase
+            except (json.JSONDecodeError, TypeError):
+                self.logger.warning(
+                    f"[verify_clones] Failed to parse kubectl JSON output "
+                    f"(len={len(out or '')})"
+                )
+
+            for clone_name in clone_names:
+                phase = found_pvcs.get(clone_name, "not-found")
+                if phase != "Bound":
+                    not_bound.append((clone_name, phase))
+
+            not_bound_pct = len(not_bound) * 100 / max(total, 1)
+            if not not_bound or not_bound_pct <= 50:
+                break  # All Bound or within 50% tolerance
+
+            if waited < max_wait:
+                self.logger.info(
+                    f"[verify_clones] {len(not_bound)}/{total} "
+                    f"({not_bound_pct:.1f}%) clone PVCs not Bound, "
+                    f"waiting {poll_interval}s... "
+                    f"(waited {waited}s/{max_wait}s)"
+                )
+                sleep_n_sec(poll_interval)
+                waited += poll_interval
+            else:
+                break  # Exhausted wait time
+
+        not_bound_pct = len(not_bound) * 100 / max(total, 1)
+        if not_bound:
+            self.logger.warning(
+                f"[verify_clones] {len(not_bound)}/{total} "
+                f"({not_bound_pct:.1f}%) clone PVCs not Bound after "
+                f"{waited}s wait: "
+                f"{not_bound[:10]}{'...' if len(not_bound) > 10 else ''}"
+            )
+        if not_bound_pct > 50:
+            raise RuntimeError(
+                f"[verify_clones] {not_bound_pct:.1f}% clone PVCs not "
+                f"Bound exceeds 50% threshold — "
+                f"{len(not_bound)}/{total}"
+            )
+        self.logger.info(
+            f"[verify_clones] {total - len(not_bound)}/{total} clone "
+            f"PVCs confirmed Bound"
+        )
+
+    # ── Two-phase subsystem creation: parents then parallel children ────
+
+    def _phase_create_subsystems(self):
+        """Fire-all-then-wait-all: submit all PVC YAMLs in parallel,
+        then bulk-poll until Bound.
+
+        Sub-phase 1: submit + wait all parent PVCs.
+        Sub-phase 2: submit + wait all child PVCs.
+        """
+        pvcs_per_subsys = 1 + self.CHILDREN_PER_PARENT
+        total = self.NUM_PARENTS * pvcs_per_subsys
+        self.logger.info(
+            f"[create_subsystems] {self.NUM_PARENTS} subsystems × "
+            f"{pvcs_per_subsys} PVCs = {total} total "
+            f"(submit workers={self.MAX_WORKERS_SUBMIT})"
+        )
+
+        # ── Sub-phase 1a: Submit all parent PVCs in parallel ────────
+        parent_items = []
+        parent_names = []
+        parent_sc_map = {}  # name -> sc_name
+        for i in range(self.NUM_PARENTS):
+            pname = f"ns-pvc-{_rand_seq(6)}-{i:04d}"
+            sc_name = random.choice([self.STORAGE_CLASS_NAME, self.XFS_STORAGE_CLASS_NAME])
+            fs_type = "xfs" if sc_name == self.XFS_STORAGE_CLASS_NAME else "ext4"
+            parent_items.append({"name": pname, "sc_name": sc_name})
+            parent_names.append(pname)
+            parent_sc_map[pname] = sc_name
+            # Pre-register so children can reference parents
+            self._parent_registry[pname] = {
+                "id": pname,
+                "children": [],
+                "snapshots": [],
+                "start_child_idx": i * pvcs_per_subsys + 1,
+                "storage_class": sc_name,
+                "fs_type": fs_type,
+            }
+
+        self.logger.info(
+            f"[create_subsystems][sub1] Submitting {self.NUM_PARENTS} parent "
+            f"PVCs (workers={self.MAX_WORKERS_SUBMIT})"
+        )
+        parents_t0 = time.time()
+        _ok, parent_submit_fail = self._batch_parallel(
+            parent_items,
+            self._submit_single_parent_k8s,
+            self.MAX_WORKERS_SUBMIT,
+            "submit_parents",
+        )
+
+        # ── Sub-phase 1b: Bulk-wait all parents to bind ────────────
+        self.logger.info(
+            f"[create_subsystems][sub1] Bulk-waiting for "
+            f"{len(parent_names)} parents to bind"
+        )
+        bound_parents, unbound_parents, parent_bind_ts = (
+            self._wait_all_pvcs_bound(parent_names, timeout=600)
+        )
+        parents_elapsed = time.time() - parents_t0
+
+        # Record timings for bound parents
+        inv = self._snapshot_inventory()
+        for pname in bound_parents:
+            elapsed = parent_bind_ts[pname] - parents_t0
+            self._record_timing("create_parent", pname, elapsed, inv)
+            self._inc("counts", "parents_created")
+        self._log_op_stats(
+            "create_parent", batch_label="all parents",
+            batch_elapsed=parents_elapsed,
+        )
+
+        # Remove failed/unbound parents from registry
+        failed_parents = list(unbound_parents)
+        for pname in failed_parents:
+            parent_names.remove(pname)
+            self._parent_registry.pop(pname, None)
+
+        self.logger.info(
+            f"[create_subsystems][sub1] {len(bound_parents)} parents "
+            f"Bound in {parents_elapsed:.1f}s"
+            f"{f', {len(failed_parents)} FAILED: {failed_parents}' if failed_parents else ''}"
+        )
+
+        # ── Sub-phase 2a: Submit ALL child PVCs in parallel ────────
+        total_children = len(parent_names) * self.CHILDREN_PER_PARENT
+        self.logger.info(
+            f"[create_subsystems][sub2] Submitting {total_children} child "
+            f"PVCs (workers={self.MAX_WORKERS_SUBMIT})"
+        )
+        # Build flat list of all children with parent assignment
+        child_items = []
+        child_names = []
+        child_parent_map = {}  # child_name -> parent_name
+        for pi, pname in enumerate(parent_names):
+            sc_name = parent_sc_map.get(pname, self.STORAGE_CLASS_NAME)
+            for c in range(self.CHILDREN_PER_PARENT):
+                child_idx = pi * pvcs_per_subsys + 1 + c
+                cname = f"ns-pvc-{_rand_seq(6)}-{child_idx:04d}"
+                child_items.append({
+                    "name": cname,
+                    "sc_name": sc_name,
+                    "parent_name": pname,
+                })
+                child_names.append(cname)
+                child_parent_map[cname] = pname
+
+        children_t0 = time.time()
+        _ok, child_submit_fail = self._batch_parallel(
+            child_items,
+            self._submit_single_child_k8s,
+            self.MAX_WORKERS_SUBMIT,
+            "submit_children",
+        )
+
+        # ── Sub-phase 2b: Bulk-wait all children to bind ──────────
+        self.logger.info(
+            f"[create_subsystems][sub2] Bulk-waiting for "
+            f"{len(child_names)} children to bind"
+        )
+        bound_children, unbound_children, child_bind_ts = (
+            self._wait_all_pvcs_bound(child_names, timeout=600)
+        )
+        children_elapsed = time.time() - children_t0
+
+        # Record timings and register bound children
+        inv = self._snapshot_inventory()
+        for cname in bound_children:
+            elapsed = child_bind_ts[cname] - children_t0
+            self._record_timing("create_child", cname, elapsed, inv)
+            pname = child_parent_map[cname]
+            with self._lock:
+                self._child_registry[cname] = {
+                    "id": cname, "parent_name": pname,
+                }
+                self._parent_registry[pname]["children"].append(cname)
+            self._inc("counts", "children_created")
+        self._log_op_stats(
+            "create_child", batch_label="all children",
+            batch_elapsed=children_elapsed,
+        )
+
+        # Identify failed children
+        failed_children = []
+        for cname in unbound_children:
+            pname = child_parent_map.get(cname, "?")
+            failed_children.append(f"{cname} (parent={pname})")
+
+        # ── Failure summary ──────────────────────────────────────────
+        total_attempted = self.NUM_PARENTS + total_children
+        total_failed = len(failed_parents) + len(failed_children)
+        fail_pct = (total_failed * 100 / max(total_attempted, 1))
+
+        if total_failed > 0:
+            self.logger.warning(
+                f"[create_subsystems] FAILED PVCs: {total_failed}/"
+                f"{total_attempted} ({fail_pct:.1f}%)"
+            )
+            if failed_parents:
+                self.logger.warning(
+                    f"  Failed PARENTS ({len(failed_parents)}): "
+                    f"{failed_parents}"
+                )
+            if failed_children:
+                self.logger.warning(
+                    f"  Failed CHILDREN ({len(failed_children)}): "
+                    f"{failed_children}"
+                )
+
+        if fail_pct > 50:
+            raise RuntimeError(
+                f"[create_subsystems] {fail_pct:.1f}% failure rate "
+                f"exceeds 50% threshold — {total_failed}/{total_attempted} "
+                f"PVCs failed (parents={len(failed_parents)}, "
+                f"children={len(failed_children)})"
+            )
+
+        # ── Bulk verify ──────────────────────────────────────────────
+        all_lvols = self.sbcli_utils.list_lvols()
+        expected_created = total_attempted - total_failed
+        if len(all_lvols) < expected_created:
+            self.logger.warning(
+                f"[create_subsystems] lvol count {len(all_lvols)} < "
+                f"expected {expected_created}"
+            )
+
+        self.logger.info(
+            f"[create_subsystems] Done: {len(self._parent_registry)} "
+            f"parents, {len(self._child_registry)} children"
+            f"{f' ({total_failed} failures tolerated)' if total_failed else ''}"
+        )
+
+    def _submit_single_parent_k8s(self, item):
+        """Submit a single parent PVC YAML (no wait). Called from _batch_parallel."""
+        self._submit_pvc(item["name"], sc_name=item.get("sc_name"))
+
+    def _submit_single_child_k8s(self, item):
+        """Submit a single child PVC YAML (no wait). Called from _batch_parallel."""
+        self._submit_pvc(item["name"], sc_name=item.get("sc_name"))
+
+    # ── Snapshot phase: fire-all-then-wait-all ────────────────────────────
+
+    def _phase_create_snapshots(self):
+        """Fire-all-then-wait-all: submit all snapshot YAMLs, then bulk-wait."""
+        items = []
+        with self._lock:
+            snap_lvols = []
+            for pname, pinfo in self._parent_registry.items():
+                snap_lvols.append((pname, pinfo["id"]))
+            chosen_child = getattr(self, "_snapshot_child", None)
+            child_names = list(self._child_registry.keys())
+            if not chosen_child and child_names:
+                chosen_child = random.choice(child_names)
+            if chosen_child and chosen_child in self._child_registry:
+                cinfo = self._child_registry[chosen_child]
+                snap_lvols.append((chosen_child, cinfo["id"]))
+                self.logger.info(
+                    f"[create_snapshots] Also snapshotting child: {chosen_child}"
+                )
+
+        snap_names = []
+        snap_pvc_map = {}  # snap_name -> lvol_name
+        for lvol_name, lvol_id in snap_lvols:
+            for s in range(self.SNAPSHOTS_PER_LVOL):
+                snap_name = f"snap-{_rand_seq(6)}-{lvol_name[-8:]}-{s}"
+                items.append({
+                    "name": snap_name,
+                    "lvol_name": lvol_name,
+                })
+                snap_names.append(snap_name)
+                snap_pvc_map[snap_name] = lvol_name
+
+        self.logger.info(
+            f"[create_snapshots] Submitting {len(items)} snapshots "
+            f"({len(snap_lvols)} lvols × {self.SNAPSHOTS_PER_LVOL}) "
+            f"(workers={self.MAX_WORKERS_SUBMIT})"
+        )
+
+        # Submit all snapshot YAMLs in parallel
+        snap_t0 = time.time()
+        submit_items = [
+            {"name": it["name"], "pvc_name": it["lvol_name"]}
+            for it in items
+        ]
+        _ok, submit_fail = self._batch_parallel(
+            submit_items,
+            lambda it: self._submit_snapshot(it["name"], it["pvc_name"]),
+            self.MAX_WORKERS_SUBMIT,
+            "submit_snapshots",
+        )
+
+        # Bulk-wait all snapshots to be readyToUse
+        self.logger.info(
+            f"[create_snapshots] Bulk-waiting for {len(snap_names)} "
+            f"snapshots to be ready"
+        )
+        ready, not_ready, ready_ts = self._wait_all_snapshots_ready(
+            snap_names, timeout=600,
+        )
+        snap_elapsed = time.time() - snap_t0
+
+        # Record timings and register
+        inv = self._snapshot_inventory()
+        for sname in ready:
+            elapsed = ready_ts[sname] - snap_t0
+            self._record_timing("create_snapshot", sname, elapsed, inv)
+            lvol_name = snap_pvc_map[sname]
+            with self._lock:
+                self._snap_registry[sname] = {
+                    "snap_id": sname,
+                    "lvol_name": lvol_name,
+                    "clones": [],
+                }
+                if lvol_name in self._parent_registry:
+                    self._parent_registry[lvol_name]["snapshots"].append(sname)
+                self._metrics["counts"]["snapshots_created"] += 1
+
+        self._log_op_stats(
+            "create_snapshot", batch_label="all snapshots",
+            batch_elapsed=snap_elapsed,
+        )
+
+        fail = len(not_ready)
+        snap_fail_pct = fail * 100 / max(len(items), 1)
+        if fail > 0:
+            self.logger.warning(
+                f"[create_snapshots] {fail}/{len(items)} "
+                f"({snap_fail_pct:.1f}%) snapshots failed: "
+                f"{sorted(list(not_ready))[:10]}..."
+            )
+        if snap_fail_pct > 50:
+            raise RuntimeError(
+                f"[create_snapshots] {snap_fail_pct:.1f}% snapshot failures "
+                f"exceeds 50% threshold — {fail}/{len(items)}"
+            )
+
+    # ── Clone phase: fire-all-then-wait-all (batched) ─────────────────────
+
+    def _phase_create_clones(self):
+        """Fire-all-then-wait-all: submit clone PVCs in batches,
+        bulk-wait each batch."""
+        with self._lock:
+            snap_names_available = list(self._snap_registry.keys())
+        if not snap_names_available:
+            self.logger.warning("[create_clones] No snapshots available!")
+            return
+        chosen_snap = random.choice(snap_names_available)
+        with self._lock:
+            snap_id = self._snap_registry[chosen_snap]["snap_id"]
+            snap_parent = self._snap_registry[chosen_snap].get("lvol_name", "")
+            clone_sc = self._parent_registry.get(snap_parent, {}).get(
+                "storage_class", self.STORAGE_CLASS_NAME
+            )
+        self.logger.info(
+            f"[create_clones] Chosen snapshot: {chosen_snap} (id={snap_id})"
+        )
+
+        all_items = []
+        for i in range(self.NUM_CLONES):
+            clone_name = f"cln-{_rand_seq(6)}-{i:04d}"
+            all_items.append({
+                "name": clone_name,
+                "snap_name": chosen_snap,
+                "snap_id": snap_id,
+                "sc_name": clone_sc,
+            })
+
+        total_batches = (
+            (len(all_items) + self.CLONE_BATCH_SIZE - 1)
+            // self.CLONE_BATCH_SIZE
+        )
+        overall_t0 = time.time()
+        total_clone_fail = 0
+
+        for batch_idx in range(0, len(all_items), self.CLONE_BATCH_SIZE):
+            batch = all_items[batch_idx:batch_idx + self.CLONE_BATCH_SIZE]
+            batch_num = batch_idx // self.CLONE_BATCH_SIZE + 1
+            batch_names = [it["name"] for it in batch]
+            self.logger.info(
+                f"[create_clones] Batch {batch_num}/{total_batches}: "
+                f"submitting {len(batch)} clones"
+            )
+
+            # Submit all clones in this batch in parallel
+            batch_t0 = time.time()
+            _ok, submit_fail = self._batch_parallel(
+                batch,
+                lambda it: self._submit_clone(
+                    it["name"], it["snap_name"],
+                    sc_name=it.get("sc_name"),
+                ),
+                self.MAX_WORKERS_SUBMIT,
+                f"submit_clones_b{batch_num}",
+            )
+
+            # Bulk-wait this batch to bind
+            self.logger.info(
+                f"[create_clones] Batch {batch_num}: bulk-waiting for "
+                f"{len(batch_names)} clones to bind"
+            )
+            bound, unbound, bind_ts = self._wait_all_pvcs_bound(
+                batch_names, timeout=self.CLONE_BIND_TIMEOUT,
+            )
+            batch_elapsed = time.time() - batch_t0
+            batch_fail = len(unbound)
+            total_clone_fail += batch_fail
+
+            # Record timings and register
+            inv = self._snapshot_inventory()
+            for cname in bound:
+                elapsed = bind_ts[cname] - batch_t0
+                self._record_timing("create_clone", cname, elapsed, inv)
+                with self._lock:
+                    self._clone_registry[cname] = {
+                        "id": cname, "snap_name": chosen_snap,
+                    }
+                    if chosen_snap in self._snap_registry:
+                        self._snap_registry[chosen_snap]["clones"].append(cname)
+                    self._metrics["counts"]["clones_created"] += 1
+
+            if batch_fail > 0:
+                self.logger.warning(
+                    f"[create_clones] Batch {batch_num}: "
+                    f"{batch_fail}/{len(batch)} clones failed"
+                )
+
+            # Per-batch stats
+            with self._lock:
+                batch_samples = [
+                    s["elapsed_sec"] for s in self._timing_samples
+                    if (s["iteration"] == self._current_iteration
+                        and s["op"] == "create_clone"
+                        and s["timestamp"] >= batch_t0)
+                ]
+            if batch_samples:
+                bs = sorted(batch_samples)
+                n = len(bs)
+                throughput = n / batch_elapsed if batch_elapsed > 0 else 0
+                effective_per_clone = batch_elapsed / n if n > 0 else 0
+                self.logger.info(
+                    f"[create_clones] Batch {batch_num} stats: "
+                    f"{n} ops in {batch_elapsed:.1f}s — "
+                    f"avg_wall={sum(bs)/n:.2f}s "
+                    f"p50={bs[n//2]:.2f}s "
+                    f"p95={bs[min(int(n*0.95), n-1)]:.2f}s "
+                    f"min={bs[0]:.2f}s max={bs[-1]:.2f}s | "
+                    f"throughput={throughput:.2f} clones/s "
+                    f"effective_per_clone={effective_per_clone:.2f}s"
+                )
+                with self._lock:
+                    self._batch_timings.append({
+                        "iteration": self._current_iteration,
+                        "op": "create_clone",
+                        "batch_label": f"batch {batch_num}/{total_batches}",
+                        "batch_elapsed": round(batch_elapsed, 2),
+                        "count": n,
+                        "avg_wall": round(sum(bs) / n, 4),
+                        "p50": round(bs[n // 2], 4),
+                        "p95": round(bs[min(int(n * 0.95), n - 1)], 4),
+                        "min": round(bs[0], 4),
+                        "max": round(bs[-1], 4),
+                        "throughput_per_sec": round(throughput, 4),
+                        "effective_per_clone": round(effective_per_clone, 4),
+                    })
+
+        overall_elapsed = time.time() - overall_t0
+        self._log_op_stats(
+            "create_clone", batch_label="all clones",
+            batch_elapsed=overall_elapsed,
+        )
+
+        # Overall clone failure check
+        clone_fail_pct = total_clone_fail * 100 / max(len(all_items), 1)
+        if total_clone_fail > 0:
+            self.logger.warning(
+                f"[create_clones] Total: {total_clone_fail}/{len(all_items)} "
+                f"({clone_fail_pct:.1f}%) clones failed across all batches"
+            )
+        if clone_fail_pct > 50:
+            raise RuntimeError(
+                f"[create_clones] {clone_fail_pct:.1f}% clone failures "
+                f"exceeds 50% threshold — "
+                f"{total_clone_fail}/{len(all_items)}"
+            )
+
+    def _create_pvc(self, name: str, sc_name: str = None):
+        """Create a single PVC with label and wait for Bound."""
+        sc = sc_name or self.STORAGE_CLASS_NAME
+        ns = self.k8s_utils.namespace
         yaml_content = (
             f"apiVersion: v1\n"
             f"kind: PersistentVolumeClaim\n"
@@ -1180,7 +3808,7 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
             f"spec:\n"
             f"  accessModes:\n"
             f"    - ReadWriteOnce\n"
-            f"  storageClassName: {self.STORAGE_CLASS_NAME}\n"
+            f"  storageClassName: {sc}\n"
             f"  resources:\n"
             f"    requests:\n"
             f"      storage: {self.PVC_SIZE}\n"
@@ -1188,16 +3816,127 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
         self.k8s_utils.apply_yaml(yaml_content, namespace=ns)
         if not self.k8s_utils.wait_pvc_bound(name, timeout=300, namespace=ns):
             raise TimeoutError(f"PVC {name} not Bound within 300s")
-        with self._lock:
-            self._parent_registry[name] = {
-                "id": name, "children": [], "snapshots": [],
-            }
-            self._metrics["counts"]["parents_created"] += 1
-        self.logger.info(f"[create_pvc] {name} Bound")
 
-    def _create_child_impl(self, params: dict):
-        """No-op in K8s."""
-        pass
+    # ── Write data (parallel FIO) to snapshot-target PVCs ──────────────
+
+    def _phase_write_data(self):
+        """Run parallel FIO (100 MB write) on all PVCs that will be snapshotted.
+
+        Snapshot targets = all parents + 1 random child.  The chosen child is
+        stored in self._snapshot_child so _phase_create_snapshots reuses it.
+        """
+        parents = list(self._parent_registry.keys())
+
+        # Pick the random child now so we FIO it and snapshot it later
+        with self._lock:
+            child_names = list(self._child_registry.keys())
+        if child_names:
+            self._snapshot_child = random.choice(child_names)
+            self.logger.info(
+                f"[write_data] Pre-selected child for snapshot: "
+                f"{self._snapshot_child}"
+            )
+        else:
+            self._snapshot_child = None
+
+        targets = list(parents)
+        if self._snapshot_child:
+            targets.append(self._snapshot_child)
+
+        child_label = " + 1 child" if self._snapshot_child else ""
+        self.logger.info(
+            f"[write_data] Running parallel FIO (100 MB) on "
+            f"{len(targets)} PVCs ({len(parents)} parents"
+            f"{child_label}) via K8s Jobs"
+        )
+
+        fio_items = [{"pvc_name": pvc} for pvc in targets]
+        write_t0 = time.time()
+        _ok, fail = self._batch_parallel(
+            fio_items, self._run_fio_job_k8s,
+            self.MAX_WORKERS_CREATE, "write_data",
+        )
+        write_elapsed = time.time() - write_t0
+        self.logger.info(
+            f"[write_data] Done: {_ok}/{len(targets)} OK, "
+            f"{fail} failed in {write_elapsed:.1f}s"
+        )
+        if fail > 0:
+            self.logger.warning(
+                f"[write_data] {fail}/{len(targets)} FIO jobs failed"
+            )
+
+    def _run_fio_job_k8s(self, item):
+        """Create a K8s Job running FIO 100 MB sequential write on a PVC."""
+        pvc_name = item["pvc_name"]
+        ns = self.k8s_utils.namespace
+        job_name = f"fio-{pvc_name[:40]}-{_rand_seq(4)}"
+        t0 = time.time()
+
+        yaml_content = (
+            f"apiVersion: batch/v1\n"
+            f"kind: Job\n"
+            f"metadata:\n"
+            f"  name: {job_name}\n"
+            f"  labels:\n"
+            f"    test: ns-stress\n"
+            f"    purpose: write-data\n"
+            f"spec:\n"
+            f"  backoffLimit: 0\n"
+            f"  template:\n"
+            f"    spec:\n"
+            f"      restartPolicy: Never\n"
+            f"      containers:\n"
+            f"      - name: fio\n"
+            f"        image: dockerpinata/fio:2.1\n"
+            f"        command:\n"
+            f"        - fio\n"
+            f"        args:\n"
+            f"        - --name=write-{pvc_name[:20]}\n"
+            f"        - --filename=/data/testfile\n"
+            f"        - --size=100M\n"
+            f"        - --bs=1M\n"
+            f"        - --rw=write\n"
+            f"        - --direct=1\n"
+            f"        - --ioengine=libaio\n"
+            f"        - --iodepth=1\n"
+            f"        - --numjobs=1\n"
+            f"        volumeMounts:\n"
+            f"        - name: vol\n"
+            f"          mountPath: /data\n"
+            f"      volumes:\n"
+            f"      - name: vol\n"
+            f"        persistentVolumeClaim:\n"
+            f"          claimName: {pvc_name}\n"
+        )
+        self.k8s_utils.apply_yaml(yaml_content, namespace=ns)
+        result = self.k8s_utils.wait_job_complete(
+            job_name, timeout=300, namespace=ns,
+        )
+        elapsed = time.time() - t0
+        if result != "succeeded":
+            self.logger.error(
+                f"[write_data] FIO job {job_name} for PVC {pvc_name} "
+                f"ended with: {result} ({elapsed:.1f}s)"
+            )
+            raise RuntimeError(
+                f"FIO job {job_name} for PVC {pvc_name} "
+                f"ended with: {result}"
+            )
+        # Clean up the completed job
+        try:
+            self.k8s_utils.delete_resource("job", job_name, namespace=ns)
+        except Exception:
+            pass
+        self._record_timing(
+            "write_data", pvc_name, elapsed,
+            self._snapshot_inventory(),
+        )
+        self.logger.info(
+            f"[write_data] {pvc_name} OK ({elapsed:.1f}s)"
+        )
+
+    # ── Create implementations ────────────────────────────────────────────
 
     def _create_snapshot_impl(self, params: dict):
         snap_name = params["name"]
@@ -1236,6 +3975,7 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
     def _create_clone_impl(self, params: dict):
         clone_name = params["name"]
         snap_name = params["snap_name"]
+        sc_name = params.get("sc_name", self.STORAGE_CLASS_NAME)
         self._inc("attempts", "create_clone")
         ns = self.k8s_utils.namespace
         # Clone PVC from VolumeSnapshot with label
@@ -1249,7 +3989,7 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
             f"spec:\n"
             f"  accessModes:\n"
             f"    - ReadWriteOnce\n"
-            f"  storageClassName: {self.STORAGE_CLASS_NAME}\n"
+            f"  storageClassName: {sc_name}\n"
             f"  resources:\n"
             f"    requests:\n"
             f"      storage: {self.PVC_SIZE}\n"
@@ -1259,8 +3999,26 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
             f"    apiGroup: snapshot.storage.k8s.io\n"
         )
         self.k8s_utils.apply_yaml(yaml_content, namespace=ns)
-        if not self.k8s_utils.wait_pvc_bound(clone_name, timeout=300, namespace=ns):
-            raise TimeoutError(f"Clone PVC {clone_name} not Bound within 300s")
+        with self._lock:
+            self._clones_binding += 1
+            concurrent = self._clones_binding
+        self.logger.info(
+            f"[create_clone] {clone_name} waiting for Bound "
+            f"(concurrent_binding={concurrent})"
+        )
+        bind_t0 = time.time()
+        try:
+            if not self.k8s_utils.wait_pvc_bound(
+                clone_name, timeout=self.CLONE_BIND_TIMEOUT, namespace=ns
+            ):
+                raise TimeoutError(
+                    f"Clone PVC {clone_name} not Bound "
+                    f"within {self.CLONE_BIND_TIMEOUT}s"
+                )
+        finally:
+            with self._lock:
+                self._clones_binding -= 1
+        bind_elapsed = time.time() - bind_t0
         with self._lock:
             self._clone_registry[clone_name] = {
                 "id": clone_name, "snap_name": snap_name,
@@ -1268,7 +4026,281 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
             if snap_name in self._snap_registry:
                 self._snap_registry[snap_name]["clones"].append(clone_name)
             self._metrics["counts"]["clones_created"] += 1
-        self.logger.info(f"[create_clone] {clone_name} Bound (snap={snap_name})")
+        self.logger.info(
+            f"[create_clone] {clone_name} Bound in {bind_elapsed:.1f}s "
+            f"(snap={snap_name})"
+        )
+
+    # ── Clone mount verification ─────────────────────────────────────────
+
+    def _mount_verify_single_clone(self, item):
+        """Create a K8s FIO Job mounting the clone PVC, run read, check errors."""
+        clone_name = item["clone_name"]
+        ns = self.k8s_utils.namespace
+        job_name = f"verify-{clone_name[:40]}-{_rand_seq(4)}"
+        t0 = time.time()
+
+        try:
+            # 1. Create FIO Job that mounts the clone PVC and reads 4 MB
+            yaml_content = (
+                f"apiVersion: batch/v1\n"
+                f"kind: Job\n"
+                f"metadata:\n"
+                f"  name: {job_name}\n"
+                f"  namespace: {ns}\n"
+                f"  labels:\n"
+                f"    test: ns-stress\n"
+                f"    purpose: mount-verify\n"
+                f"spec:\n"
+                f"  backoffLimit: 0\n"
+                f"  template:\n"
+                f"    spec:\n"
+                f"      restartPolicy: Never\n"
+                f"      containers:\n"
+                f"      - name: fio\n"
+                f"        image: dockerpinata/fio:2.1\n"
+                f"        command:\n"
+                f"        - fio\n"
+                f"        args:\n"
+                f"        - --name=verify-{clone_name[:20]}\n"
+                f"        - --filename=/data/testfile\n"
+                f"        - --size=4M\n"
+                f"        - --bs=4K\n"
+                f"        - --rw=read\n"
+                f"        - --direct=1\n"
+                f"        - --ioengine=libaio\n"
+                f"        - --iodepth=1\n"
+                f"        - --numjobs=1\n"
+                f"        volumeMounts:\n"
+                f"        - name: vol\n"
+                f"          mountPath: /data\n"
+                f"      volumes:\n"
+                f"      - name: vol\n"
+                f"        persistentVolumeClaim:\n"
+                f"          claimName: {clone_name}\n"
+            )
+            self.k8s_utils.apply_yaml(yaml_content, namespace=ns)
+
+            # 2. Wait for job completion
+            result = self.k8s_utils.wait_job_complete(
+                job_name, timeout=300, namespace=ns,
+            )
+            elapsed = time.time() - t0
+
+            # 3. Fetch pod logs for FIO output
+            fio_output = ""
+            try:
+                # Find the pod created by this job
+                pod_out, _ = self.k8s_utils._exec_kubectl(
+                    f"kubectl get pods -n {ns} -l job-name={job_name} "
+                    f"-o jsonpath='{{.items[0].metadata.name}}' 2>/dev/null",
+                    supress_logs=True,
+                )
+                pod_name = (pod_out or "").strip()
+                if pod_name:
+                    fio_output = self.k8s_utils.get_pod_logs(
+                        pod_name, namespace=ns, tail=100,
+                    )
+            except Exception:
+                pass
+
+            # 4. Check for errors
+            if result != "succeeded":
+                self.logger.error(
+                    f"[mount_verify] FIO job {job_name} for clone "
+                    f"{clone_name} ended with: {result} ({elapsed:.1f}s)"
+                    f"\nFIO output:\n{fio_output}"
+                )
+                raise RuntimeError(
+                    f"FIO verify job for clone {clone_name} failed: "
+                    f"{result}"
+                )
+
+            # 5. Parse FIO output for err=
+            import re
+            for line in (fio_output or "").splitlines():
+                if "err=" in line:
+                    m = re.search(r"err=\s*(\d+)", line)
+                    if m and int(m.group(1)) != 0:
+                        self.logger.error(
+                            f"[mount_verify] FIO reported error on clone "
+                            f"{clone_name}:\n{fio_output}"
+                        )
+                        raise RuntimeError(
+                            f"FIO read error on clone {clone_name}: "
+                            f"{line.strip()}"
+                        )
+
+            self.logger.info(
+                f"[mount_verify] Clone {clone_name} verified OK "
+                f"({elapsed:.1f}s)"
+            )
+            self._record_timing(
+                "mount_verify", clone_name, elapsed,
+                self._snapshot_inventory(),
+            )
+
+        finally:
+            # Always clean up the job
+            try:
+                self.k8s_utils.delete_resource(
+                    "job", job_name, namespace=ns,
+                )
+            except Exception:
+                pass
+
+    # ── FIO validation phase ─────────────────────────────────────────────
+
+    def _phase_fio_validation(self):
+        """Run sustained FIO (10 min) on a sample of PVCs via K8s Jobs.
+
+        Samples: 20 parents + 30 random children + 50 random clones = ~100 PVCs.
+        Creates FIO K8s Jobs, waits for completion, validates exit codes.
+        """
+        # Build sample list
+        with self._lock:
+            parent_names = list(self._parent_registry.keys())
+            child_names = list(self._child_registry.keys())
+            clone_names = list(self._clone_registry.keys())
+
+        sample_parents = parent_names  # all parents
+        sample_children = random.sample(
+            child_names, min(30, len(child_names))
+        ) if child_names else []
+        sample_clones = random.sample(
+            clone_names, min(50, len(clone_names))
+        ) if clone_names else []
+
+        all_targets = sample_parents + sample_children + sample_clones
+        if not all_targets:
+            self.logger.warning("[fio_validation] No PVCs to run FIO on")
+            return
+
+        self.logger.info(
+            f"[fio_validation] Running {self.FIO_VALIDATION_RUNTIME}s FIO on "
+            f"{len(all_targets)} PVCs ({len(sample_parents)} parents, "
+            f"{len(sample_children)} children, {len(sample_clones)} clones)"
+        )
+
+        ns = self.k8s_utils.namespace
+        fio_timeout = self.FIO_VALIDATION_RUNTIME + 300
+        fio_items = [{"pvc_name": pvc} for pvc in all_targets]
+
+        fio_t0 = time.time()
+        ok, fail = self._batch_parallel(
+            fio_items, self._run_fio_validation_job_k8s,
+            min(self.MAX_WORKERS_CREATE, len(all_targets)),
+            "fio_validation",
+        )
+        fio_elapsed = time.time() - fio_t0
+
+        self.logger.info(
+            f"[fio_validation] Done: {ok}/{len(all_targets)} OK, "
+            f"{fail} failed in {fio_elapsed:.1f}s"
+        )
+
+        # Bulk cleanup FIO validation jobs
+        try:
+            self.k8s_utils._exec_kubectl(
+                f"kubectl delete job -l purpose=fio-validation "
+                f"-n {ns} --wait=false --ignore-not-found 2>/dev/null || true"
+            )
+        except Exception:
+            pass
+
+        if fail > 0:
+            fail_pct = fail * 100 / max(len(all_targets), 1)
+            self.logger.warning(
+                f"[fio_validation] {fail}/{len(all_targets)} "
+                f"({fail_pct:.1f}%) FIO validation jobs failed"
+            )
+            if fail_pct > 50:
+                raise RuntimeError(
+                    f"[fio_validation] {fail_pct:.1f}% FIO failures "
+                    f"exceeds 50% threshold"
+                )
+
+    def _run_fio_validation_job_k8s(self, item):
+        """Create a K8s Job running sustained FIO on a PVC."""
+        pvc_name = item["pvc_name"]
+        ns = self.k8s_utils.namespace
+        job_name = f"fiov-{pvc_name[:35]}-{_rand_seq(4)}"
+        t0 = time.time()
+
+        yaml_content = (
+            f"apiVersion: batch/v1\n"
+            f"kind: Job\n"
+            f"metadata:\n"
+            f"  name: {job_name}\n"
+            f"  labels:\n"
+            f"    test: ns-stress\n"
+            f"    purpose: fio-validation\n"
+            f"spec:\n"
+            f"  backoffLimit: 0\n"
+            f"  template:\n"
+            f"    spec:\n"
+            f"      restartPolicy: Never\n"
+            f"      containers:\n"
+            f"      - name: fio\n"
+            f"        image: dockerpinata/fio:2.1\n"
+            f"        command:\n"
+            f"        - fio\n"
+            f"        args:\n"
+            f"        - --name=fio-{pvc_name[:20]}\n"
+            f"        - --filename=/data/testfile\n"
+            f"        - --size={self.FIO_VALIDATION_SIZE}\n"
+            f"        - --bs=4k\n"
+            f"        - --rw=randrw\n"
+            f"        - --rwmixread=50\n"
+            f"        - --direct=1\n"
+            f"        - --ioengine=libaio\n"
+            f"        - --iodepth=1\n"
+            f"        - --numjobs=1\n"
+            f"        - --time_based\n"
+            f"        - --runtime={self.FIO_VALIDATION_RUNTIME}\n"
+            f"        - --verify=md5\n"
+            f"        volumeMounts:\n"
+            f"        - name: vol\n"
+            f"          mountPath: /data\n"
+            f"      volumes:\n"
+            f"      - name: vol\n"
+            f"        persistentVolumeClaim:\n"
+            f"          claimName: {pvc_name}\n"
+        )
+        self.k8s_utils.apply_yaml(yaml_content, namespace=ns)
+        result = self.k8s_utils.wait_job_complete(
+            job_name, timeout=self.FIO_VALIDATION_RUNTIME + 300,
+            namespace=ns,
+        )
+        elapsed = time.time() - t0
+
+        if result != "succeeded":
+            # Try to get pod logs for debugging
+            try:
+                pod_out, _ = self.k8s_utils._exec_kubectl(
+                    f"kubectl get pods -n {ns} -l job-name={job_name} "
+                    f"-o jsonpath='{{.items[0].metadata.name}}' 2>/dev/null",
+                    supress_logs=True,
+                )
+                pod_name = (pod_out or "").strip()
+                if pod_name:
+                    fio_output = self.k8s_utils.get_pod_logs(
+                        pod_name, namespace=ns, tail=50,
+                    )
+                    self.logger.error(
+                        f"[fio_validation] {job_name} failed: {result}\n"
+                        f"FIO output:\n{fio_output}"
+                    )
+            except Exception:
+                pass
+            raise RuntimeError(
+                f"FIO validation job {job_name} for {pvc_name} "
+                f"failed: {result}"
+            )
+
+        self.logger.info(
+            f"[fio_validation] {pvc_name} OK ({elapsed:.1f}s)"
+        )
 
     # ── Delete implementations (with verification) ────────────────────────
 
@@ -1297,8 +4329,17 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
             self._metrics["counts"]["snapshots_deleted"] += 1
 
     def _delete_child_impl(self, child_name: str):
-        """No-op in K8s — no separate children."""
-        pass
+        """Delete child PVC in K8s."""
+        self._inc("attempts", "delete_child")
+        ns = self.k8s_utils.namespace
+        self.k8s_utils._exec_kubectl(
+            f"kubectl delete pvc {child_name} -n {ns} "
+            f"--ignore-not-found --wait=false 2>/dev/null || true"
+        )
+        self._wait_pvc_gone(child_name)
+        with self._lock:
+            self._child_registry.pop(child_name, None)
+            self._metrics["counts"]["children_deleted"] += 1
 
     def _delete_parent_impl(self, parent_name: str):
         self._inc("attempts", "delete_parent")

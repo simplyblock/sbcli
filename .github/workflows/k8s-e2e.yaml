@@ -50,9 +50,12 @@ jobs:
       group: ${{ github.workflow }}
       cancel-in-progress: false
     steps:
+      - name: Fix workspace permissions
+        run: sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" 2>/dev/null || true
+
       - name: Checkout code
         uses: actions/checkout@v4
-    
+
       - name: Set send_slack_notification for scheduled and push events
         if: github.event_name == 'schedule' || github.event_name == 'push'
         run: echo "send_slack_notification=true" >> $GITHUB_ENV

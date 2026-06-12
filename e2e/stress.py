@@ -45,7 +45,9 @@ def main():
     parser.add_argument('--send_debug_notification', type=bool, help="Send notification for debug", default=False)
     parser.add_argument('--upload_logs', type=bool, help="Upload Logs", default=False)
     parser.add_argument('--tls_enabled', type=str, help="TLS enabled", default="false")
-
+    parser.add_argument('--preserve_resources_on_failure', type=bool,
+                        help="Skip K8s resource cleanup when test fails (preserve PVCs/pods for debugging)",
+                        default=False)
     args = parser.parse_args()
     
     tests = get_stress_tests()
@@ -111,7 +113,8 @@ def main():
                         bs=args.bs,
                         chunk_bs=args.chunk_bs,
                         k8s_run=args.run_k8s,
-                        tls_enabled=args.tls_enabled)
+                        tls_enabled=args.tls_enabled,
+                        preserve_resources_on_failure=args.preserve_resources_on_failure)
         try:
             test_obj.setup()
             if i == 0:
@@ -134,7 +137,11 @@ def main():
             if not args.run_k8s:
                 test_obj.ssh_obj.collect_final_docker_logs_simple(all_nodes, test_obj.docker_logs_path)
             test_obj.export_graylog_logs()
-            test_obj.teardown(delete_lvols=False, close_ssh=True)
+            _test_failed = f"{test.__name__}" in errors
+            _skip_k8s = _test_failed and test_obj.preserve_resources_on_failure
+            if _skip_k8s:
+                logger.info(f"[cleanup] Test {test.__name__} failed — preserving K8s resources for debugging (--preserve_resources_on_failure)")
+            test_obj.teardown(delete_lvols=False, close_ssh=True, skip_k8s_cleanup=_skip_k8s)
             # pass
         except Exception as _:
             logger.error(f"Error During Teardown for test: {test.__name__}")

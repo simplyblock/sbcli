@@ -85,7 +85,7 @@ from utils.common_utils import sleep_n_sec
 
 
 def _rand_suffix(n: int = 6) -> str:
-    letters = string.ascii_uppercase
+    letters = string.ascii_lowercase
     return random.choice(letters) + "".join(
         random.choices(letters + string.digits, k=n - 1)
     )
@@ -155,6 +155,28 @@ class BackupTestBase(TestClusterBase):
         if not k8s:
             raise RuntimeError("K8sUtils not available -- was k8s_run=True passed?")
         return k8s
+
+    def _ensure_pool_and_sc(self, pool_name=None):
+        """Create (or reuse) a storage pool and set up the StorageClass.
+
+        In K8s mode, ``add_storage_pool`` may return a pre-existing pool with
+        a different name (e.g. ``simplyblock-pool`` instead of the requested
+        ``bck_test_pool``).  This helper captures that actual name, updates
+        ``self.pool_name`` (or the given attribute), and then creates the
+        StorageClass pointing at the correct pool.
+        """
+        target = pool_name or self.pool_name
+        actual = self.sbcli_utils.add_storage_pool(pool_name=target)
+        if actual and actual != target:
+            self.logger.info(
+                f"[pool] Requested '{target}' but using existing '{actual}'")
+        if actual:
+            if pool_name is None or pool_name == self.pool_name:
+                self.pool_name = actual
+            else:
+                return actual  # caller manages a secondary pool name
+        self._k8s_setup_storage_class()
+        return self.pool_name
 
     def _k8s_setup_storage_class(self):
         """In k8s mode, create StorageClass + VolumeSnapshotClass for backup tests."""
@@ -805,12 +827,12 @@ class BackupTestBase(TestClusterBase):
         varying column names across sbcli versions.
         Note: backup list shows lvol name (not UUID) and snapshot name (not UUID).
         """
-        all_values = " ".join(str(v) for v in backup.values())
+        all_values = " ".join(str(v) for v in backup.values()).lower().replace("_", "-")
         if lvol_name:
-            assert lvol_name in all_values, \
+            assert lvol_name.lower().replace("_", "-") in all_values, \
                 f"Backup entry does not reference lvol_name {lvol_name}: {backup}"
         if snap_name:
-            assert snap_name in all_values, \
+            assert snap_name.lower().replace("_", "-") in all_values, \
                 f"Backup entry does not reference snapshot name {snap_name}: {backup}"
 
     def _wait_for_backup_by_snap(self, snap_name: str, label: str = "") -> str:
@@ -827,12 +849,15 @@ class BackupTestBase(TestClusterBase):
                                   backups: list = None) -> dict:
         """Return the backup entry that references *snap_name*, or None.
 
-        Note: backup list shows snapshot name (not snapshot UUID).
+        Matching is case-insensitive and normalizes underscores to hyphens
+        so that the original snap name (e.g. ``snap1_X7PCEW``) matches K8s
+        resource names (e.g. ``bck-snap1-x7pcew``).
         """
         if backups is None:
             backups = self._list_backups()
+        needle = snap_name.lower().replace("_", "-")
         for b in backups:
-            if any(snap_name in str(v) for v in b.values()):
+            if any(needle in str(v).lower().replace("_", "-") for v in b.values()):
                 return b
         return None
 
@@ -939,7 +964,7 @@ class BackupTestBase(TestClusterBase):
         if self.k8s_test:
             k8s = self._ensure_k8s_utils()
             out, _ = k8s._exec_kubectl(
-                "get backuppolicy -o json", namespace=k8s.namespace)
+                f"kubectl -n {k8s.namespace} get backuppolicy -o json")
             import json
             try:
                 data = json.loads(out)
@@ -1007,8 +1032,6 @@ class BackupTestBase(TestClusterBase):
             pool_name=self.pool_name,
             size=size,
             crypto=crypto,
-            key1=self.lvol_crypt_keys[0] if crypto else None,
-            key2=self.lvol_crypt_keys[1] if crypto else None,
         )
         if ndcs is not None:
             kwargs["distr_ndcs"] = ndcs
@@ -1169,13 +1192,27 @@ class BackupTestBase(TestClusterBase):
         """
         Very simple columnar table parser that handles sbcli ASCII output.
         Returns a list of dicts keyed by the header row values.
+
+        Skips any non-table content (e.g. DEBUG log lines from ``-d`` flag)
+        that appears before the first ``+---`` table separator.
         """
         if not text:
             return []
-        lines = [ln for ln in text.splitlines() if ln.strip()]
+        raw_lines = text.splitlines()
+
+        # Find the first table separator line (e.g. "+------+------+")
+        # to skip any DEBUG / log noise that precedes the table.
+        table_start = 0
+        for i, ln in enumerate(raw_lines):
+            stripped = ln.strip()
+            if stripped and set(stripped) <= set("-+| ") and "+" in stripped and "-" in stripped:
+                table_start = i
+                break
+
+        lines = [ln for ln in raw_lines[table_start:] if ln.strip()]
         if len(lines) < 2:
             return []
-        # Find header line (first non-separator line)
+        # Find header line (first non-separator line after table start)
         header_line = None
         data_lines = []
         for line in lines:
@@ -1250,7 +1287,7 @@ class BackupTestBase(TestClusterBase):
 
     # ── teardown ──────────────────────────────────────────────────────────────
 
-    def teardown(self, delete_lvols=True, close_ssh=True):
+    def teardown(self, delete_lvols=True, close_ssh=True, skip_k8s_cleanup=False):
         self.logger.info("BackupTestBase teardown started.")
 
         if delete_lvols:
@@ -1270,7 +1307,7 @@ class BackupTestBase(TestClusterBase):
             except Exception:
                 pass
 
-        super().teardown(delete_lvols=delete_lvols, close_ssh=close_ssh)
+        super().teardown(delete_lvols=delete_lvols, close_ssh=close_ssh, skip_k8s_cleanup=skip_k8s_cleanup)
 
     def _k8s_teardown(self):
         """Delete all K8s resources created during the test."""
@@ -1426,8 +1463,7 @@ class TestBackupBasicPositive(BackupTestBase):
     def run(self):
         self.logger.info("=== TestBackupBasicPositive START ===")
         self.fio_node = self.fio_node[0]
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
-        self._k8s_setup_storage_class()
+        self._ensure_pool_and_sc()
 
         # --- TC-BCK-001: Create lvol, write data, snapshot + backup flag ---
         lvol_name, lvol_id = self._create_lvol()
@@ -1627,8 +1663,7 @@ class TestBackupRestoreDataIntegrity(BackupTestBase):
     def run(self):
         self.logger.info("=== TestBackupRestoreDataIntegrity START ===")
         self.fio_node = self.fio_node[0]
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
-        self._k8s_setup_storage_class()
+        self._ensure_pool_and_sc()
 
         # Setup: create lvol, write known data, record checksums
         lvol_name, lvol_id = self._create_lvol()
@@ -1715,7 +1750,8 @@ class TestBackupRestoreDataIntegrity(BackupTestBase):
         pool2_name = f"pool2rest_{_rand_suffix()}"
         p2_mount = f"{self.mount_path}/pool2_{_rand_suffix()}"
         try:
-            self.sbcli_utils.add_storage_pool(pool_name=self.pool_name2)
+            actual_p2 = self._ensure_pool_and_sc(pool_name=self.pool_name2)
+            self.pool_name2 = actual_p2
             self._restore_backup(backup_id, pool2_name, pool_name=self.pool_name2)
             self._wait_for_restore(pool2_name)
             pool2_id = self._get_lvol_id(pool2_name)
@@ -1799,14 +1835,15 @@ class TestBackupRestoreDataIntegrity(BackupTestBase):
 
         self.logger.info("=== TestBackupRestoreDataIntegrity PASSED ===")
 
-    def teardown(self, delete_lvols=True, close_ssh=True):
+    def teardown(self, delete_lvols=True, close_ssh=True, skip_k8s_cleanup=False):
         if delete_lvols:
             try:
                 self.sbcli_utils.delete_storage_pools(
                     pool_name=self.pool_name2, skip_error=True)
             except Exception:
                 pass
-        super().teardown(delete_lvols=delete_lvols, close_ssh=close_ssh)
+        super().teardown(delete_lvols=delete_lvols, close_ssh=close_ssh,
+                         skip_k8s_cleanup=skip_k8s_cleanup)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1837,8 +1874,7 @@ class TestBackupPolicy(BackupTestBase):
     def run(self):
         self.logger.info("=== TestBackupPolicy START ===")
         self.fio_node = self.fio_node[0]
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
-        self._k8s_setup_storage_class()
+        self._ensure_pool_and_sc()
         pool_id = self.sbcli_utils.get_storage_pool_id(pool_name=self.pool_name)
 
         # --- TC-BCK-020: policy-add --versions 3 --age 1d ---
@@ -1957,8 +1993,7 @@ class TestBackupNegative(BackupTestBase):
     def run(self):
         self.logger.info("=== TestBackupNegative START ===")
         self.fio_node = self.fio_node[0]
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
-        self._k8s_setup_storage_class()
+        self._ensure_pool_and_sc()
 
         # --- TC-BCK-030: restore invalid backup_id → error ---
         self.logger.info("TC-BCK-030: restore invalid backup_id")
@@ -2092,8 +2127,7 @@ class TestBackupCryptoLvol(BackupTestBase):
     def run(self):
         self.logger.info("=== TestBackupCryptoLvol START ===")
         self.fio_node = self.fio_node[0]
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
-        self._k8s_setup_storage_class()
+        self._ensure_pool_and_sc()
 
         # --- TC-BCK-050: create crypto lvol ---
         self.logger.info("TC-BCK-050: create encrypted lvol")
@@ -2173,8 +2207,7 @@ class TestBackupCustomGeometry(BackupTestBase):
     def run(self):
         self.logger.info("=== TestBackupCustomGeometry START ===")
         self.fio_node = self.fio_node[0]
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
-        self._k8s_setup_storage_class()
+        self._ensure_pool_and_sc()
 
         for ndcs, npcs in self._geometries:
             self.logger.info(f"--- geometry ndcs={ndcs} npcs={npcs} ---")
@@ -2253,8 +2286,7 @@ class TestBackupDeleteAndRestore(BackupTestBase):
     def run(self):
         self.logger.info("=== TestBackupDeleteAndRestore START ===")
         self.fio_node = self.fio_node[0]
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
-        self._k8s_setup_storage_class()
+        self._ensure_pool_and_sc()
 
         # ── TC-BCK-077: Setup — lvol + 3 chain backups ────────────────────
         self.logger.info("TC-BCK-077: create lvol, write data, build 3-backup chain")
@@ -2490,8 +2522,7 @@ class TestBackupCrossClusterRestore(BackupTestBase):
             f"TC-BCK-070: prerequisites OK — Cluster-2 ID={self._cluster2_id}")
 
         self.fio_node = self.fio_node[0]
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
-        self._k8s_setup_storage_class()
+        self._ensure_pool_and_sc()
 
         # ── Cluster-1: write data → snapshot + backup → wait ──────────────────
 
@@ -2622,7 +2653,7 @@ class TestBackupCrossClusterRestore(BackupTestBase):
 
     # ── teardown ──────────────────────────────────────────────────────────────
 
-    def teardown(self, delete_lvols=True, close_ssh=True):
+    def teardown(self, delete_lvols=True, close_ssh=True, skip_k8s_cleanup=False):
         # Safety: ensure Cluster-2's source is switched back to local (always)
         try:
             self._sbcli_c2("backup source-switch local")
@@ -2646,7 +2677,8 @@ class TestBackupCrossClusterRestore(BackupTestBase):
                 except Exception:
                     pass
 
-        super().teardown(delete_lvols=delete_lvols, close_ssh=close_ssh)
+        super().teardown(delete_lvols=delete_lvols, close_ssh=close_ssh,
+                         skip_k8s_cleanup=skip_k8s_cleanup)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -2671,8 +2703,7 @@ class TestBackupConcurrentIO(BackupTestBase):
     def run(self):
         self.logger.info("=== TestBackupConcurrentIO START ===")
         self.fio_node = self.fio_node[0]
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
-        self._k8s_setup_storage_class()
+        self._ensure_pool_and_sc()
 
         # TC-BCK-100: create lvol + mount
         self.logger.info("TC-BCK-100: create lvol and mount")
@@ -2739,8 +2770,7 @@ class TestBackupMultipleRestores(BackupTestBase):
     def run(self):
         self.logger.info("=== TestBackupMultipleRestores START ===")
         self.fio_node = self.fio_node[0]
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
-        self._k8s_setup_storage_class()
+        self._ensure_pool_and_sc()
 
         # TC-BCK-104: create lvol + write data + backup
         self.logger.info("TC-BCK-104: create lvol + write data + backup")
@@ -2807,8 +2837,7 @@ class TestBackupDeltaChainPointInTime(BackupTestBase):
     def run(self):
         self.logger.info("=== TestBackupDeltaChainPointInTime START ===")
         self.fio_node = self.fio_node[0]
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
-        self._k8s_setup_storage_class()
+        self._ensure_pool_and_sc()
 
         lvol_name, lvol_id = self._create_lvol()
         device, mount = self._connect_and_mount(lvol_name, lvol_id)
@@ -2924,8 +2953,7 @@ class TestBackupEmptyLvol(BackupTestBase):
     def run(self):
         self.logger.info("=== TestBackupEmptyLvol START ===")
         self.fio_node = self.fio_node[0]
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
-        self._k8s_setup_storage_class()
+        self._ensure_pool_and_sc()
 
         # TC-BCK-114: create + format (no user data) + backup
         self.logger.info("TC-BCK-114: create lvol, format ext4 (no data write), backup")
@@ -2984,8 +3012,7 @@ class TestBackupPoolRecreateRestore(BackupTestBase):
     def run(self):
         self.logger.info("=== TestBackupPoolRecreateRestore START ===")
         self.fio_node = self.fio_node[0]
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
-        self._k8s_setup_storage_class()
+        self._ensure_pool_and_sc()
 
         # TC-BCK-117: create lvol + write data + backup
         self.logger.info("TC-BCK-117: create lvol + write data + backup")
@@ -3047,8 +3074,7 @@ class TestBackupPoolRecreateRestore(BackupTestBase):
 
         # TC-BCK-119: recreate pool with same name
         self.logger.info("TC-BCK-119: recreate storage pool")
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
-        self._k8s_setup_storage_class()
+        self._ensure_pool_and_sc()
         self.logger.info("TC-BCK-119: pool recreated ✓")
 
         # TC-BCK-120: restore backup into new pool
@@ -3095,8 +3121,7 @@ class TestBackupPolicyAgeOnly(BackupTestBase):
     def run(self):
         self.logger.info("=== TestBackupPolicyAgeOnly START ===")
         self.fio_node = self.fio_node[0]
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
-        self._k8s_setup_storage_class()
+        self._ensure_pool_and_sc()
 
         # TC-BCK-122: create policy with age-only retention
         self.logger.info("TC-BCK-122: create policy with --age 7d (no --versions)")
@@ -3163,8 +3188,7 @@ class TestBackupSnapshotClone(BackupTestBase):
     def run(self):
         self.logger.info("=== TestBackupSnapshotClone START ===")
         self.fio_node = self.fio_node[0]
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
-        self._k8s_setup_storage_class()
+        self._ensure_pool_and_sc()
 
         # TC-BCK-127: create source lvol + write data + snapshot
         self.logger.info("TC-BCK-127: create source lvol + snapshot")
@@ -3278,8 +3302,7 @@ class TestBackupFilesystemXFS(BackupTestBase):
     def run(self):
         self.logger.info("=== TestBackupFilesystemXFS START ===")
         self.fio_node = self.fio_node[0]
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
-        self._k8s_setup_storage_class()
+        self._ensure_pool_and_sc()
         if self.k8s_test:
             # Create a dedicated XFS StorageClass so the PVC is formatted
             # with XFS by the CSI driver instead of the default ext4.
@@ -3353,8 +3376,7 @@ class TestBackupLargeLvol(BackupTestBase):
     def run(self):
         self.logger.info("=== TestBackupLargeLvol START ===")
         self.fio_node = self.fio_node[0]
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
-        self._k8s_setup_storage_class()
+        self._ensure_pool_and_sc()
 
         # TC-BCK-136: create 20G lvol + write 3G data + backup
         self.logger.info("TC-BCK-136: create 20G lvol + write 3G data + backup")
@@ -3420,8 +3442,7 @@ class TestBackupDeleteInProgress(BackupTestBase):
     def run(self):
         self.logger.info("=== TestBackupDeleteInProgress START ===")
         self.fio_node = self.fio_node[0]
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
-        self._k8s_setup_storage_class()
+        self._ensure_pool_and_sc()
 
         # TC-BCK-139: create lvol + write data + trigger backup (NO wait)
         self.logger.info("TC-BCK-139: create lvol + trigger backup without waiting")
@@ -3483,8 +3504,7 @@ class TestBackupPolicyMultipleLvols(BackupTestBase):
     def run(self):
         self.logger.info("=== TestBackupPolicyMultipleLvols START ===")
         self.fio_node = self.fio_node[0]
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
-        self._k8s_setup_storage_class()
+        self._ensure_pool_and_sc()
 
         # TC-BCK-143: create 3 lvols + write data + record checksums
         self.logger.info("TC-BCK-143: create 3 lvols with data")
@@ -3590,8 +3610,7 @@ class TestBackupSecurityLvol(BackupTestBase):
     def run(self):
         self.logger.info("=== TestBackupSecurityLvol START ===")
         self.fio_node = self.fio_node[0]
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
-        self._k8s_setup_storage_class()
+        self._ensure_pool_and_sc()
 
         # TC-BCK-150: create DHCHAP+crypto lvol and write data
         self.logger.info("TC-BCK-150: Creating DHCHAP+crypto lvol …")
@@ -3662,8 +3681,7 @@ class TestBackupPolicyVersionsOne(BackupTestBase):
     def run(self):
         self.logger.info("=== TestBackupPolicyVersionsOne START ===")
         self.fio_node = self.fio_node[0]
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
-        self._k8s_setup_storage_class()
+        self._ensure_pool_and_sc()
 
         # TC-BCK-155: create lvol + policy with versions=1
         self.logger.info("TC-BCK-155: Creating lvol and versions=1 policy …")
@@ -3693,22 +3711,57 @@ class TestBackupPolicyVersionsOne(BackupTestBase):
             sleep_n_sec(5)
 
         # TC-BCK-157: verify only 1 backup retained
-        # Retention pruning is async — poll until the policy trims old backups
-        self.logger.info("TC-BCK-157: Waiting for retention pruning (versions=1) …")
-        deadline = time.time() + 120  # wait up to 2 min
-        lvol_backups = []
-        while time.time() < deadline:
+        # Phase 1: wait until we see at least one 'merging' or 'merged' entry
+        #          (confirms the retention pruner has started working).
+        # Phase 2: wait until no 'merging'/'merged' entries remain for this
+        #          lvol, then assert ≤ 1 active backup.
+        _MERGING_STATUSES = {"merging", "merged"}
+        self.logger.info("TC-BCK-157: Phase 1 — waiting for merging to start …")
+        phase1_deadline = time.time() + 300  # up to 5 min for pruner to kick in
+        saw_merging = False
+        while time.time() < phase1_deadline:
             backups = self._list_backups()
-            lvol_backups = [
+            lvol_all = [
                 b for b in backups
                 if any(lvol_name in str(v) or lvol_id in str(v) for v in b.values())
             ]
-            self.logger.info(f"TC-BCK-157: Backups for lvol: {len(lvol_backups)}")
-            if len(lvol_backups) <= 2:
+            merging_entries = [
+                b for b in lvol_all
+                if str(b.get("Status") or b.get("status") or "").lower() in _MERGING_STATUSES
+            ]
+            if merging_entries:
+                self.logger.info(
+                    f"TC-BCK-157: Detected {len(merging_entries)} merging/merged "
+                    f"entry(ies) — pruning has started")
+                saw_merging = True
+                break
+            self.logger.info(f"TC-BCK-157: No merging yet, {len(lvol_all)} backups total")
+            sleep_n_sec(10)
+        assert saw_merging, \
+            "TC-BCK-157: Timed out waiting for retention pruner to start merging"
+
+        self.logger.info("TC-BCK-157: Phase 2 — waiting for merged entries to be cleaned up …")
+        phase2_deadline = time.time() + 600  # up to 10 min for cleanup
+        lvol_backups = []
+        while time.time() < phase2_deadline:
+            backups = self._list_backups()
+            lvol_all = [
+                b for b in backups
+                if any(lvol_name in str(v) or lvol_id in str(v) for v in b.values())
+            ]
+            merging_entries = [
+                b for b in lvol_all
+                if str(b.get("Status") or b.get("status") or "").lower() in _MERGING_STATUSES
+            ]
+            lvol_backups = [b for b in lvol_all if b not in merging_entries]
+            self.logger.info(
+                f"TC-BCK-157: {len(lvol_backups)} active, "
+                f"{len(merging_entries)} merging/merged")
+            if not merging_entries and len(lvol_backups) <= 1:
                 break
             sleep_n_sec(10)
-        assert len(lvol_backups) <= 2, \
-            f"versions=1 policy should keep ≤ 2 backups (delta + base), found {len(lvol_backups)}"
+        assert len(lvol_backups) <= 1, \
+            f"versions=1 policy should keep ≤ 1 backup after merge cleanup, found {len(lvol_backups)}"
         self.logger.info("TC-BCK-157: PASSED")
 
         # TC-BCK-158: restore latest backup
@@ -3745,8 +3798,7 @@ class TestBackupPolicyMultipleOnSameLvol(BackupTestBase):
     def run(self):
         self.logger.info("=== TestBackupPolicyMultipleOnSameLvol START ===")
         self.fio_node = self.fio_node[0]
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
-        self._k8s_setup_storage_class()
+        self._ensure_pool_and_sc()
 
         # TC-BCK-159: create lvol + two policies
         self.logger.info("TC-BCK-159: Creating lvol + 2 policies …")
@@ -3827,8 +3879,7 @@ class TestBackupPolicyLvolLevel(BackupTestBase):
     def run(self):
         self.logger.info("=== TestBackupPolicyLvolLevel START ===")
         self.fio_node = self.fio_node[0]
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
-        self._k8s_setup_storage_class()
+        self._ensure_pool_and_sc()
 
         # TC-BCK-164: two lvols; policy on lvol_A only
         self.logger.info("TC-BCK-164: Creating 2 lvols + attaching policy to lvol_A only …")
@@ -3897,8 +3948,7 @@ class TestBackupResizedLvol(BackupTestBase):
     def run(self):
         self.logger.info("=== TestBackupResizedLvol START ===")
         self.fio_node = self.fio_node[0]
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
-        self._k8s_setup_storage_class()
+        self._ensure_pool_and_sc()
 
         # TC-BCK-168: 5G lvol, FIO, backup v1
         self.logger.info("TC-BCK-168: Creating 5G lvol and backup v1 …")
@@ -4002,8 +4052,7 @@ class TestBackupListFields(BackupTestBase):
     def run(self):
         self.logger.info("=== TestBackupListFields START ===")
         self.fio_node = self.fio_node[0]
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
-        self._k8s_setup_storage_class()
+        self._ensure_pool_and_sc()
 
         # TC-BCK-173: create lvol + backup
         self.logger.info("TC-BCK-173: Creating lvol and backup …")
@@ -4075,8 +4124,7 @@ class TestBackupUpgradeCompatibility(BackupTestBase):
     def run(self):
         self.logger.info("=== TestBackupUpgradeCompatibility START ===")
         self.fio_node = self.fio_node[0]
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
-        self._k8s_setup_storage_class()
+        self._ensure_pool_and_sc()
 
         # TC-BCK-177: create backup
         self.logger.info("TC-BCK-177: Creating lvol and backup …")
@@ -4156,8 +4204,7 @@ class TestBackupRestoreEdgeCases(BackupTestBase):
     def run(self):
         self.logger.info("=== TestBackupRestoreEdgeCases START ===")
         self.fio_node = self.fio_node[0]
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
-        self._k8s_setup_storage_class()
+        self._ensure_pool_and_sc()
 
         # Create one backup to use across all TCs
         lvol_name, lvol_id = self._create_lvol()
@@ -4260,8 +4307,7 @@ class TestBackupSourceSwitch(BackupTestBase):
     def run(self):
         self.logger.info("=== TestBackupSourceSwitch START ===")
         self.fio_node = self.fio_node[0]
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
-        self._k8s_setup_storage_class()
+        self._ensure_pool_and_sc()
 
         # TC-BCK-186: create first backup (primary target)
         self.logger.info("TC-BCK-186: Creating lvol and first backup …")
@@ -4546,8 +4592,7 @@ class TestBackupInterruptedBackup(_InterruptedTestBase):
     def run(self):
         self.logger.info("=== TestBackupInterruptedBackup START ===")
         self.fio_node = self.fio_node[0]
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
-        self._k8s_setup_storage_class()
+        self._ensure_pool_and_sc()
 
         # ── Plain lvol scenario ────────────────────────────────────────────
 
@@ -4714,8 +4759,7 @@ class TestBackupInterruptedRestore(_InterruptedTestBase):
     def run(self):
         self.logger.info("=== TestBackupInterruptedRestore START ===")
         self.fio_node = self.fio_node[0]
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
-        self._k8s_setup_storage_class()
+        self._ensure_pool_and_sc()
 
         # ── Setup: complete backup to use as restore source ────────────────
 

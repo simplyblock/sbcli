@@ -63,6 +63,9 @@ jobs:
   k8s:
     runs-on: ${{ inputs.runs_on }}
     steps:
+    - name: Fix workspace permissions
+      run: sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" 2>/dev/null || true
+
     - name: Checkout deployment tooling
       uses: actions/checkout@v4
       with:
@@ -89,6 +92,9 @@ jobs:
       storage_private_ips: ${{ steps.deployment.outputs.storage_private_ips }}
 
     steps:
+    - name: Fix workspace permissions
+      run: sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" 2>/dev/null || true
+
     - name: Checkout sbcli
       uses: actions/checkout@v4
       with:
@@ -217,7 +223,10 @@ jobs:
     needs: [k8s, deploy]
     runs-on: ${{ inputs.runs_on }}
     if: ${{ inputs.k8s_snode == true }}
-    steps:  
+    steps:
+    - name: Fix workspace permissions
+      run: sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" 2>/dev/null || true
+
     - name: Checkout spdk-csi
       uses: actions/checkout@v4
       with:

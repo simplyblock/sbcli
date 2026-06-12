@@ -97,7 +97,7 @@ jobs:
       NFS_MOUNTPOINT: '/mnt/nfs_share'
 
       # Bootstrap params
-      BOOTSTRAP_MAX_LVOL: '300'
+      BOOTSTRAP_MAX_SUBSYS: '300'
       BOOTSTRAP_DATA_CHUNKS: '2'
       BOOTSTRAP_PARITY_CHUNKS: '2'
       BOOTSTRAP_JOURNAL_PARTITION: '1'
@@ -213,7 +213,7 @@ jobs:
               'NFS_MOUNTPOINT':              cfg.get('nfs_mount', ''),
               'NR_HUGEPAGES':                cfg.get('nr_hugepages', ''),
               'SBCLI_CMD':                   cfg.get('sbcli_cmd', ''),
-              'BOOTSTRAP_MAX_LVOL':          bsc.get('max_lvol', ''),
+              'BOOTSTRAP_MAX_SUBSYS':          bsc.get('max_subsys', ''),
               'BOOTSTRAP_DATA_CHUNKS':       bsc.get('data_chunks', ''),
               'BOOTSTRAP_PARITY_CHUNKS':     bsc.get('parity_chunks', ''),
               'BOOTSTRAP_JOURNAL_PARTITION': bsc.get('journal_partition', ''),
@@ -648,7 +648,7 @@ jobs:
           set +e
           ./bootstrap-cluster.sh \
             --sbcli-cmd "${SBCLI_CMD}" \
-            --max-lvol "${BOOTSTRAP_MAX_LVOL}" \
+            --max-subsys "${BOOTSTRAP_MAX_SUBSYS}" \
             --data-chunks-per-stripe "${BOOTSTRAP_DATA_CHUNKS}" \
             --parity-chunks-per-stripe "${BOOTSTRAP_PARITY_CHUNKS}" \
             --journal-partition "${BOOTSTRAP_JOURNAL_PARTITION}" \
@@ -752,6 +752,15 @@ jobs:
           echo "TEST_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           echo "TEST_START_HUMAN=$(date -u +'%Y-%m-%d %H:%M:%S UTC')" >> "$GITHUB_ENV"
 
+      - name: Enable shared placement
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ssh_opts="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ${KEY_PATH}"
+          mgmt_ip="$(echo "${MNODES}" | awk '{print $1}')"
+          ssh ${ssh_opts} "${SSH_USER}@${mgmt_ip}" \
+            "${SBCLI_CMD} cluster set-shared-placement ${CLUSTER_ID} --force" || true
+
       - name: Run stress (foreground; runs until failure)
         shell: bash
         working-directory: sbcli/e2e
@@ -822,7 +831,7 @@ jobs:
           echo "TEST_END_HUMAN=$(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> "$GITHUB_ENV"
 
       - name: Collect Graylog/OpenSearch logs
-        if: always()
+        if: '!cancelled()'
         timeout-minutes: 240
         shell: bash
         run: |
@@ -1077,7 +1086,7 @@ jobs:
           if [[ -z "$CN" ]]; then echo "NO_SPDK_CONTAINER"; exit 0; fi
           SOCK="/mnt/ramdisk/${CN}/spdk.sock"
 
-          BDEV_JSON="$(sudo docker exec "$CN" bash -lc "python spdk/scripts/rpc.py -s '$SOCK' bdev_get_bdevs" 2>/dev/null || true)"
+          BDEV_JSON="$(sudo docker exec "$CN" bash -lc "sudo python spdk/scripts/rpc.py -s '$SOCK' bdev_get_bdevs" 2>/dev/null || true)"
           if [[ -z "$BDEV_JSON" ]]; then echo "BDEV_EMPTY"; exit 0; fi
 
           if command -v jq >/dev/null 2>&1; then
@@ -1101,14 +1110,14 @@ jobs:
           PYIN
 
             sudo docker cp "$JF" "$CN:$JF" || true
-            sudo docker exec "$CN" bash -lc "python scripts/rpc_sock.py '$JF' '$SOCK' > /tmp/rpc_${d}.log 2>&1 || true" || true
+            sudo docker exec "$CN" bash -lc "sudo python scripts/rpc_sock.py '$JF' '$SOCK' > /tmp/rpc_${d}.log 2>&1 || true" || true
             sudo docker cp "$CN:/tmp/rpc_${d}.log" "$STAGING/rpc_${d}.log" 2>/dev/null || true
 
-            for f in $(sudo docker exec "$CN" bash -lc "ls /tmp 2>/dev/null | grep -F \\"$d\\" || true"); do
+            for f in $(sudo docker exec "$CN" bash -lc "sudo ls /tmp 2>/dev/null | grep -F \\"$d\\" || true"); do
               sudo docker cp "$CN:/tmp/$f" "$STAGING/${CN}__$f" 2>/dev/null || true
             done
 
-            sudo docker exec "$CN" bash -lc "rm -f '$JF' '/tmp/rpc_${d}.log'" || true
+            sudo docker exec "$CN" bash -lc "sudo rm -f '$JF' '/tmp/rpc_${d}.log'" || true
             rm -f "$JF" || true
           done
 

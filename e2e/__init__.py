@@ -27,6 +27,11 @@ from e2e_tests.cloning_and_snapshot.multi_lvol_snapshot_fio import TestMultiLvol
 from e2e_tests.ha_journal.lvol_journal_device_node_restart import TestDeviceNodeRestart
 from e2e_tests.data_migration.data_migration_ha_fio import FioWorkloadTest
 from e2e_tests.multi_node_crash_fio_clone import TestMultiFioSnapshotDowntime
+from e2e_tests.test_multi_node_outage import (
+    TestMultiNodeOutageDocker,
+    TestMultiNodeOutageK8s,
+    TestMultiNodeVMRebootDocker
+)
 
 
 from e2e_tests.add_node_fio_run import (
@@ -85,12 +90,24 @@ from stress_test.large_scale_lvol_stress import (
     LargeScaleLvolK8s,
 )
 from stress_test.device_failure_migration import (
-    DeviceFailureMigrationNoLoad,
-    DeviceFailureMigrationUnderLoad,
+    DeviceFailureMigrationNoLoadDocker,
+    DeviceFailureMigrationUnderLoadDocker,
+    DeviceFailureMigrationPCIeNoLoadDocker,
+    DeviceFailureMigrationPCIeUnderLoadDocker,
+    DeviceFailureMigrationNoLoadK8s,
+    DeviceFailureMigrationUnderLoadK8s,
+    DeviceFailureMigrationPCIeNoLoadK8s,
+    DeviceFailureMigrationPCIeUnderLoadK8s,
 )
 from stress_test.continuous_failover_ha_security import (
     RandomSecurityFailoverTest,
     RandomAllSecurityFailoverTest,
+)
+from stress_test.mgmt_node_network_outage import MgmtNodeNetworkOutageTest
+from stress_test.k8s_native_namespace_failover import (
+    K8sNativeNamespacedFailoverTest,
+    K8sNativeRapidLifecycleTest,
+    K8sNativeMountVerifiedFailoverTest,
 )
 
 from e2e_tests.security.test_lvol_security import (
@@ -266,6 +283,9 @@ ALL_TESTS = [
     K8sNativeFailoverTest,
     K8sNativeBasicFailoverTest,
     K8sNativeResilientFailoverTest,
+    K8sNativeNamespacedFailoverTest,
+    K8sNativeRapidLifecycleTest,
+    K8sNativeMountVerifiedFailoverTest,
     TestParallelNamespaceLvolDocker,
     TestParallelNamespaceLvolK8s,
     BulkLvolDeleteDocker,
@@ -274,8 +294,18 @@ ALL_TESTS = [
     BulkLvolHotDeleteK8s,
     LargeScaleLvolDocker,
     LargeScaleLvolK8s,
-    DeviceFailureMigrationNoLoad,
-    DeviceFailureMigrationUnderLoad,
+    DeviceFailureMigrationNoLoadDocker,
+    DeviceFailureMigrationUnderLoadDocker,
+    DeviceFailureMigrationPCIeNoLoadDocker,
+    DeviceFailureMigrationPCIeUnderLoadDocker,
+    DeviceFailureMigrationNoLoadK8s,
+    DeviceFailureMigrationUnderLoadK8s,
+    DeviceFailureMigrationPCIeNoLoadK8s,
+    DeviceFailureMigrationPCIeUnderLoadK8s,
+    TestMultiNodeOutageDocker,
+    TestMultiNodeOutageK8s,
+    TestMultiNodeVMRebootDocker,
+    MgmtNodeNetworkOutageTest,
 ]
 
 def get_all_tests(custom=True, ha_test=False):
@@ -374,6 +404,7 @@ def get_stress_tests():
         RandomRDMAFailoverTest,
         RandomRDMAMultiFailoverTest,
         RandomK8sMultiOutageFailoverTest,
+        MgmtNodeNetworkOutageTest,
         RandomRapidFailoverNoGap,
         RandomRapidFailoverNoGapV2WithMigration,
         RandomRapidFailoverNoGapV2NoMigration,
@@ -384,6 +415,9 @@ def get_stress_tests():
         K8sNativeFailoverTest,
         K8sNativeBasicFailoverTest,
         K8sNativeResilientFailoverTest,
+        K8sNativeNamespacedFailoverTest,
+        K8sNativeRapidLifecycleTest,
+        K8sNativeMountVerifiedFailoverTest,
         TestParallelNamespaceLvolDocker,
         TestParallelNamespaceLvolK8s,
         BulkLvolDeleteDocker,
@@ -392,8 +426,14 @@ def get_stress_tests():
         BulkLvolHotDeleteK8s,
         LargeScaleLvolDocker,
         LargeScaleLvolK8s,
-        DeviceFailureMigrationNoLoad,
-        DeviceFailureMigrationUnderLoad,
+        DeviceFailureMigrationNoLoadDocker,
+        DeviceFailureMigrationUnderLoadDocker,
+        DeviceFailureMigrationPCIeNoLoadDocker,
+        DeviceFailureMigrationPCIeUnderLoadDocker,
+        DeviceFailureMigrationNoLoadK8s,
+        DeviceFailureMigrationUnderLoadK8s,
+        DeviceFailureMigrationPCIeNoLoadK8s,
+        DeviceFailureMigrationPCIeUnderLoadK8s,
     ]
     return tests
 
@@ -409,9 +449,16 @@ def get_monitoring_tests():
         BulkLvolHotDeleteK8s,
         LargeScaleLvolDocker,
         LargeScaleLvolK8s,
-        DeviceFailureMigrationNoLoad,
-        DeviceFailureMigrationUnderLoad,
+        DeviceFailureMigrationNoLoadDocker,
+        DeviceFailureMigrationUnderLoadDocker,
+        DeviceFailureMigrationPCIeNoLoadDocker,
+        DeviceFailureMigrationPCIeUnderLoadDocker,
+        DeviceFailureMigrationNoLoadK8s,
+        DeviceFailureMigrationUnderLoadK8s,
+        DeviceFailureMigrationPCIeNoLoadK8s,
+        DeviceFailureMigrationPCIeUnderLoadK8s,
         TestLvolOutageLoadTest,
+        TestParallelLvolSnapshotCloneAPI,
     ]
 
 def get_backup_tests():

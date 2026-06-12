@@ -31,8 +31,8 @@ class TestLvolHAClusterWithClones(TestLvolHACluster):
         self.lvol_name = f"lvl{random_char(3)}"
         self.clone_name = f"cln{random_char(3)}"
         self.snapshot_name = f"snap{random_char(3)}"
-        self.lvol_size = "50G"
-        self.fio_size = "1G"
+        self.lvol_size = "100G"
+        self.int_lvol_size = 100
         self.total_lvols = 5
         self.snapshot_per_lvol = 10
         self.total_clones_per_lvol = 1

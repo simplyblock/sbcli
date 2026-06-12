@@ -114,12 +114,14 @@ class SbcliUtils:
                 self.logger.info(f"Retrying API {api_url}. Attempt: {10 - retry + 1}")
                 sleep_n_sec(3)
 
-    def delete_request(self, api_url, headers=None, expected_error_code=None):
+    def delete_request(self, api_url, headers=None, expected_error_code=None, treat_404_as_success=False):
         """Performs delete request on the given API URL
 
         Args:
             api_url (str): Endpoint to request
             headers (dict, optional): Headers needed. Defaults to None.
+            treat_404_as_success (bool): If True, treat HTTP 404 as idempotent
+                success (resource already deleted). Defaults to False.
 
         Returns:
             dict: response returned
@@ -134,10 +136,13 @@ class SbcliUtils:
                 if resp.status_code == HTTPStatus.OK:
                     data = resp.json()
                     return data
+                elif resp.status_code == HTTPStatus.NOT_FOUND and treat_404_as_success:
+                    self.logger.info(f"DELETE {api_url} returned 404 — resource already deleted, treating as success")
+                    return {"status": True, "results": [], "error": None}
                 else:
                     self.logger.error(f"request failed. status_code: {resp.status_code}, text: {resp.text}")
                     resp.raise_for_status()
-                
+
             except requests.exceptions.HTTPError as e:
                 self.logger.debug(f"API call {api_url} failed with error:{e}")
                 if expected_error_code:
@@ -440,14 +445,10 @@ class SbcliUtils:
     def add_lvol(self, lvol_name, pool_name, size="256M", distr_ndcs=0, distr_npcs=0,
                  distr_bs=4096, distr_chunk_bs=4096, max_rw_iops=0, max_rw_mbytes=0,
                  max_r_mbytes=0, max_w_mbytes=0, host_id=None, retry=10,
-                 crypto=False, key1=None, key2=None, fabric="tcp", cluster_id=None,
+                 crypto=False, fabric="tcp", cluster_id=None,
                  max_namespace_per_subsys=None, namespace=None):
         """Adds lvol with given params
         """
-
-        if crypto:
-            if not key1 or not key2:
-                raise Exception("Need two keys for crypto lvols")
         lvols = self.list_lvols()
         for name in list(lvols.keys()):
             if name == lvol_name:
@@ -473,15 +474,13 @@ class SbcliUtils:
             body["host_id"] = host_id
         if crypto:
             body["crypto"] = True
-            body["crypto_key1"] = key1
-            body["crypto_key2"] = key2
         
         if max_namespace_per_subsys is not None:
             body["max_namespace_per_subsys"] = int(max_namespace_per_subsys)
 
         if namespace:
-            # parent lvol id
-            body["namespace"] = namespace
+            # flag for auto-grouping into existing parent subsystem
+            body["namespaced"] = True
         
         self.post_request(api_url="/lvol", body=body, retry=retry)
 
@@ -503,7 +502,13 @@ class SbcliUtils:
             raise Exception(f"Lvol {lvol_name} does not exist")
         self.logger.info(f"ledoo {lvol_name}, {lvol_id}")
 
-        data = self.delete_request(api_url=f"/lvol/{lvol_id}")
+        try:
+            data = self.delete_request(api_url=f"/lvol/{lvol_id}", treat_404_as_success=True)
+        except Exception as e:
+            if skip_error:
+                self.logger.warning(f"delete_lvol DELETE request for {lvol_name} ({lvol_id}) failed: {e}. Continuing with skip_error=True")
+                return False
+            raise
         self.logger.info(f"Delete lvol resp: {data}")
 
         lvols = self.list_lvols()
@@ -521,7 +526,7 @@ class SbcliUtils:
                     continue
                 if cur_state in ("online", "in_deletion"):
                     self.logger.info(f"Lvol {lvol_name} in {cur_state} state. Retrying Delete!")
-                    data = self.delete_request(api_url=f"/lvol/{lvol_id}")
+                    data = self.delete_request(api_url=f"/lvol/{lvol_id}", treat_404_as_success=True)
                     self.logger.info(f"Delete lvol resp: {data}")
             if attempt > max_attempt:
                 if skip_error:
@@ -722,25 +727,50 @@ class SbcliUtils:
         self.logger.info(f"Value: {value_match}")
         return all(value_match)
     
-    def wait_for_device_status(self, node_id, status, timeout=60):
+    def wait_for_device_status(self, node_id, status, timeout=60, device_id=None):
+        """Wait for device(s) to reach the expected status.
+
+        Args:
+            node_id: Storage node UUID.
+            status: Expected status string or list of status strings.
+            timeout: Max seconds to wait.
+            device_id: If provided, only check this specific device.
+                       If None, check ALL devices on the node (legacy behaviour).
+        """
+        status = status if isinstance(status, list) else [status]
         device_ids = {}
         device_details = self.get_device_details(storage_node_id=node_id)
         total_devices = len(device_details)
         while timeout > 0:
             self.logger.info("Retrying Device Status check")
             device_details = self.get_device_details(storage_node_id=node_id)
-            for device in device_details:
-                device_ids[device['id']] = device['status']
-                status = status if isinstance(status, list) else [status]
+
+            if device_id:
+                # Single-device mode: only check the specified device
+                for device in device_details:
+                    if device['id'] == device_id:
+                        actual = device['status']
+                        self.logger.info(f"Device ID: {device_id} Expected Status: {status} / Actual Status: {actual}")
+                        if actual in status:
+                            return device_details
+                        break
+                else:
+                    self.logger.warning(f"Device {device_id} not found on node {node_id}")
+            else:
+                # All-devices mode (legacy): require every device to match
+                device_ids = {}
+                for device in device_details:
+                    device_ids[device['id']] = device['status']
                 self.logger.info(f"Device statuses: {device_ids}")
-                if device['status'] in status:
-                    if len(device_ids) == total_devices and self.all_expected_status(device_ids, status):
-                        return device_details
-                self.logger.info(f"Device ID: {device['id']} Expected Status: {status} / Actual Status: {device['status']}")
+                if len(device_ids) == total_devices and self.all_expected_status(device_ids, status):
+                    return device_details
+                for did, dstatus in device_ids.items():
+                    self.logger.info(f"Device ID: {did} Expected Status: {status} / Actual Status: {dstatus}")
+
             sleep_n_sec(1)
             timeout -= 1
-        raise TimeoutError(f"Timed out waiting for device status, Node id: {node_id}, Device id: {list(device_ids.keys())}"
-                            f"Expected status: {status}, Actual status: {list(device_ids.values())}")
+        raise TimeoutError(f"Timed out waiting for device status, Node id: {node_id}, Device id: {device_id or list(device_ids.keys())}, "
+                            f"Expected status: {status}, Actual status: {list(device_ids.values()) if not device_id else 'see above'}")
     
     def wait_for_health_status(self, node_id, status, timeout=60, device_id=None):
         actual_status = None
@@ -782,10 +812,10 @@ class SbcliUtils:
 
     def list_migration_tasks(self, cluster_id):
         """List all migration tasks for a given cluster."""
-        return self.get_request(f"/cluster/list-tasks/{cluster_id}?limit=0")
+        return self.get_request(f"/cluster/get-tasks/{cluster_id}?limit=0")
 
     def wait_migration_tasks_complete(self, timeout=3600):
-        """Wait until all FN_FAILED_DEV_MIG tasks finish.
+        """Wait until all failed_device_migration tasks finish.
 
         Polls ``list_migration_tasks`` every 10 seconds until no active
         failure-migration tasks remain or *timeout* seconds elapse.
@@ -803,10 +833,15 @@ class SbcliUtils:
         start = _time.time()
         active = []
         while _time.time() - start < timeout:
-            tasks = self.list_migration_tasks(self.cluster_id)
+            try:
+                tasks = self.list_migration_tasks(self.cluster_id)
+            except Exception as exc:
+                self.logger.warning(f"list_migration_tasks API failed: {exc}")
+                sleep_n_sec(10)
+                continue
             active = [
                 t for t in tasks.get("results", [])
-                if t.get("function_name") == "FN_FAILED_DEV_MIG"
+                if t.get("function_name") == "failed_device_migration"
                 and t.get("status") not in ("done", "cancelled", "error")
             ]
             if not active:
@@ -1022,7 +1057,7 @@ class SbcliUtils:
                 return
             raise Exception(f"Snapshot not found. snap_name={snap_name}")
 
-        resp = self.delete_request(api_url=f"/snapshot/{snap_id}")
+        resp = self.delete_request(api_url=f"/snapshot/{snap_id}", treat_404_as_success=True)
         self.logger.info(f"Delete snapshot resp: {resp}")
 
         # wait for removal

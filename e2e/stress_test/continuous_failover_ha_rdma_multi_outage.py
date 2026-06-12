@@ -89,8 +89,7 @@ class RandomRDMAMultiFailoverTest(RandomMultiClientMultiFailoverTest):
                     host_id = [n for n in self.sn_nodes_with_sec if n not in skip_nodes]
                     self.sbcli_utils.add_lvol(
                         lvol_name=lvol_name, pool_name=self.pool_name, size=self.lvol_size,
-                        crypto=is_crypto, key1=self.lvol_crypt_keys[0],
-                        key2=self.lvol_crypt_keys[1], host_id=host_id[0], fabric=fabric,
+                        crypto=is_crypto, host_id=host_id[0], fabric=fabric,
                     )
                 elif self.current_outage_node:
                     skip_nodes = [
@@ -102,14 +101,12 @@ class RandomRDMAMultiFailoverTest(RandomMultiClientMultiFailoverTest):
                     host_id = [n for n in self.sn_nodes_with_sec if n not in skip_nodes]
                     self.sbcli_utils.add_lvol(
                         lvol_name=lvol_name, pool_name=self.pool_name, size=self.lvol_size,
-                        crypto=is_crypto, key1=self.lvol_crypt_keys[0],
-                        key2=self.lvol_crypt_keys[1], host_id=host_id[0], fabric=fabric,
+                        crypto=is_crypto, host_id=host_id[0], fabric=fabric,
                     )
                 else:
                     self.sbcli_utils.add_lvol(
                         lvol_name=lvol_name, pool_name=self.pool_name, size=self.lvol_size,
-                        crypto=is_crypto, key1=self.lvol_crypt_keys[0],
-                        key2=self.lvol_crypt_keys[1], fabric=fabric,
+                        crypto=is_crypto, fabric=fabric,
                     )
             except Exception as e:
                 self.logger.warning(f"Lvol creation failed: {e}. Retrying with different name.")
@@ -126,14 +123,12 @@ class RandomRDMAMultiFailoverTest(RandomMultiClientMultiFailoverTest):
                         host_id = [n for n in self.sn_nodes_with_sec if n not in skip_nodes]
                         self.sbcli_utils.add_lvol(
                             lvol_name=lvol_name, pool_name=self.pool_name, size=self.lvol_size,
-                            crypto=is_crypto, key1=self.lvol_crypt_keys[0],
-                            key2=self.lvol_crypt_keys[1], host_id=host_id[0], fabric=fabric,
+                            crypto=is_crypto, host_id=host_id[0], fabric=fabric,
                         )
                     else:
                         self.sbcli_utils.add_lvol(
                             lvol_name=lvol_name, pool_name=self.pool_name, size=self.lvol_size,
-                            crypto=is_crypto, key1=self.lvol_crypt_keys[0],
-                            key2=self.lvol_crypt_keys[1], fabric=fabric,
+                            crypto=is_crypto, fabric=fabric,
                         )
                 except Exception as exp:
                     self.logger.warning(f"Retry lvol creation failed: {exp}.")
