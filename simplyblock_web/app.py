@@ -9,7 +9,7 @@ import time
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.wsgi import WSGIMiddleware
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 import uvicorn
 from uvicorn.config import Config
@@ -17,6 +17,7 @@ from uvicorn.config import Config
 from simplyblock_web.api import public, v1
 from simplyblock_core import constants, utils as core_utils
 from simplyblock_core.settings import Settings
+from simplyblock_core.exceptions import PreconditionError
 
 logger = core_utils.get_logger(__name__)
 logger.setLevel(constants.LOG_WEB_LEVEL)
@@ -68,6 +69,26 @@ class AccessLogMiddleware(BaseHTTPMiddleware):
 
 
 app: FastAPI = FastAPI()
+
+
+@app.exception_handler(PreconditionError)
+async def precondition_handler(request: Request, exc: PreconditionError):
+    logger.exception("Preciondition checks failed", exc_info=exc)
+    return JSONResponse(status_code=400, content={
+        "error": "Preconditions are not met",
+        "detail": str(exc),
+    })
+
+
+@app.exception_handler(RuntimeError)
+async def runtime_error_handler(request: Request, exc: RuntimeError):
+    logger.exception("Unexcpected error while processing request", exc_info=exc)
+    return JSONResponse(status_code=500, content={
+        "status": "An error occured while processing the request",
+        "detail": str(exc),
+    })
+
+
 app.add_middleware(AccessLogMiddleware)
 app.include_router(public, prefix='/api')
 app.mount('/api/v1', WSGIMiddleware(v1.api))  # For some reason this fails if done in `api/__init__.py`
