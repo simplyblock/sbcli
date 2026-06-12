@@ -131,16 +131,16 @@ class TestCreateSec(unittest.TestCase):
         ex.execute(RoleMove("primary-1", role, "", "holder-1"))
         return primary, holder
 
-    @patch("simplyblock_core.storage_node_ops.recreate_lvstore_on_sec")
+    @patch("simplyblock_core.storage_node_ops.recreate_lvstore_on_non_leader")
     def test_create_secondary_sets_back_ref_and_pointer(self, mock_recreate):
         primary, holder = self._setup(mock_recreate, ROLE_SECONDARY)
         self.assertEqual(holder.lvstore_stack_secondary, "primary-1")
         self.assertEqual(holder.lvstore_stack_tertiary, "")
         self.assertEqual(primary.secondary_node_id, "holder-1")
         self.assertEqual(primary.tertiary_node_id, "")
-        mock_recreate.assert_called_once_with(holder)
+        mock_recreate.assert_called_once_with(holder, primary, primary, activation_mode=True)
 
-    @patch("simplyblock_core.storage_node_ops.recreate_lvstore_on_sec")
+    @patch("simplyblock_core.storage_node_ops.recreate_lvstore_on_non_leader")
     def test_create_tertiary_sets_tertiary_slot(self, mock_recreate):
         primary, holder = self._setup(mock_recreate, ROLE_TERTIARY)
         self.assertEqual(holder.lvstore_stack_tertiary, "primary-1")
@@ -148,7 +148,7 @@ class TestCreateSec(unittest.TestCase):
         self.assertEqual(primary.tertiary_node_id, "holder-1")
         self.assertEqual(primary.secondary_node_id, "")
 
-    @patch("simplyblock_core.storage_node_ops.recreate_lvstore_on_sec")
+    @patch("simplyblock_core.storage_node_ops.recreate_lvstore_on_non_leader")
     def test_recreate_failure_raises(self, mock_recreate):
         primary = _node("primary-1", lvstore="LVS_100")
         holder = _node("holder-1")
@@ -185,7 +185,7 @@ class TestRehomeSec(unittest.TestCase):
 
     @patch("simplyblock_core.storage_node_ops.reattach_sibling_failover")
     @patch("simplyblock_core.storage_node_ops.teardown_non_leader_lvstore")
-    @patch("simplyblock_core.storage_node_ops.recreate_lvstore_on_sec")
+    @patch("simplyblock_core.storage_node_ops.recreate_lvstore_on_non_leader")
     def test_rehome_secondary_full_sequence(
             self, mock_recreate, mock_teardown, mock_reattach):
         primary, donor, recipient, sibling = self._build(slot="secondary")
@@ -201,7 +201,7 @@ class TestRehomeSec(unittest.TestCase):
         self.assertEqual(recipient.lvstore_stack_secondary, "primary-1")
         self.assertEqual(primary.secondary_node_id, "recipient-1")
         # Recreate called on recipient
-        mock_recreate.assert_called_once_with(recipient)
+        mock_recreate.assert_called_once_with(recipient, primary, primary, activation_mode=True)
         # Teardown called on donor with explicit slot
         mock_teardown.assert_called_once()
         td_kwargs = mock_teardown.call_args.kwargs
@@ -218,7 +218,7 @@ class TestRehomeSec(unittest.TestCase):
 
     @patch("simplyblock_core.storage_node_ops.reattach_sibling_failover")
     @patch("simplyblock_core.storage_node_ops.teardown_non_leader_lvstore")
-    @patch("simplyblock_core.storage_node_ops.recreate_lvstore_on_sec")
+    @patch("simplyblock_core.storage_node_ops.recreate_lvstore_on_non_leader")
     def test_rehome_tertiary_skips_sibling_reattach(
             self, mock_recreate, mock_teardown, mock_reattach):
         primary, donor, recipient, sibling = self._build(slot="tertiary")
@@ -237,7 +237,7 @@ class TestRehomeSec(unittest.TestCase):
         # Tertiary moves do NOT trigger sibling reattach.
         mock_reattach.assert_not_called()
 
-    @patch("simplyblock_core.storage_node_ops.recreate_lvstore_on_sec")
+    @patch("simplyblock_core.storage_node_ops.recreate_lvstore_on_non_leader")
     def test_rehome_aborts_if_donor_offline(self, mock_recreate):
         primary, donor, recipient, sibling = self._build()
         donor.status = StorageNode.STATUS_OFFLINE
@@ -253,7 +253,7 @@ class TestRehomeSec(unittest.TestCase):
         primary.write_to_db.assert_not_called()
         mock_recreate.assert_not_called()
 
-    @patch("simplyblock_core.storage_node_ops.recreate_lvstore_on_sec")
+    @patch("simplyblock_core.storage_node_ops.recreate_lvstore_on_non_leader")
     def test_rehome_aborts_if_recipient_offline(self, mock_recreate):
         primary, donor, recipient, sibling = self._build()
         recipient.status = StorageNode.STATUS_OFFLINE
@@ -267,7 +267,7 @@ class TestRehomeSec(unittest.TestCase):
 
     @patch("simplyblock_core.storage_node_ops.reattach_sibling_failover")
     @patch("simplyblock_core.storage_node_ops.teardown_non_leader_lvstore")
-    @patch("simplyblock_core.storage_node_ops.recreate_lvstore_on_sec")
+    @patch("simplyblock_core.storage_node_ops.recreate_lvstore_on_non_leader")
     def test_rehome_skips_sibling_reattach_if_no_tertiary(
             self, mock_recreate, mock_teardown, mock_reattach):
         primary = _node("primary-1", lvstore="LVS_100",
