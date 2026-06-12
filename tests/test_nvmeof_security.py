@@ -1063,7 +1063,7 @@ class TestRecreateSubsystemSecurity(unittest.TestCase):
         MockRPC.return_value = mock_rpc_inst
 
         with patch.object(sec_node, 'connect_to_hublvol'):
-            with patch.object(primary_node, 'write_to_db'):
+            with patch.object(primary_node, 'write_to_db'), patch.object(sec_node, 'write_to_db'):
                 mock_bdev_stack.return_value = (True, None)
                 mock_fw_inst = MagicMock()
                 MockFW.return_value = mock_fw_inst
