@@ -32,7 +32,7 @@ from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.prom_client import PromClient
-from simplyblock_core.rpc_client import RPCException
+from simplyblock_core.rpc_client import RPCClient, RPCException  # noqa: F401  (RPCClient kept as a patch target for tests)
 from simplyblock_core.snode_client import SNodeClient, SNodeClientException
 from simplyblock_web import node_utils
 from simplyblock_core.utils import addNvmeDevices
@@ -5097,11 +5097,16 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
         primary_node.write_to_db()
         return False
 
-    try:
-        snode.connect_to_hublvol(primary_node, failover_node=None)
-    except Exception as e:
-        logger.error("Error establishing hublvol: %s", e)
-        # return False
+    # Expansion/activate (activation_mode=True) skips the port-blocked
+    # retry block below, so it establishes the hublvol here. A normal
+    # restart (activation_mode=False) connects in that block instead —
+    # connecting here too would double the hublvol attach.
+    if activation_mode:
+        try:
+            snode.connect_to_hublvol(primary_node, failover_node=None)
+        except Exception as e:
+            logger.error("Error establishing hublvol: %s", e)
+            # return False
 
     # Resume JC compression for this LVS group on the restarting node
     ret, err = snode.rpc_client().jc_suspend_compression(jm_vuid=primary_node.jm_vuid, suspend=False)
