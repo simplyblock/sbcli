@@ -364,20 +364,39 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
     return snap.uuid, False
 
 
-def list(all=False, cluster_id=None, with_details=False, pool_id_or_name=None):
-    if pool_id_or_name:
+def list_snapshots(cluster_id=None, node_id=None, lvol_id=None,pool_id_or_name=None, with_details=False, is_json=False):
+    all_snaps = db_controller.get_snapshots()
+    if lvol_id:
         try:
-            pool = (
-                    db_controller.get_pool_by_id(pool_id_or_name)
+            lvol = (db_controller.get_lvol_by_id(lvol_id) if utils.UUID_PATTERN.match(lvol_id) is not None
+                    else db_controller.get_lvol_by_name(lvol_id))
+            snaps = [sn for sn in all_snaps if sn.lvol.get_id() == lvol.get_id()]
+        except KeyError:
+            logger.error("Can not find lvol with provided lvol_id_or_name: %s", lvol_id)
+            return False
+    elif pool_id_or_name:
+        try:
+            pool = (db_controller.get_pool_by_id(pool_id_or_name)
                     if utils.UUID_PATTERN.match(pool_id_or_name) is not None
-                    else db_controller.get_pool_by_name(pool_id_or_name)
-            )
+                    else db_controller.get_pool_by_name(pool_id_or_name))
             snaps = db_controller.get_snapshots_by_pool_id(pool.get_id())
         except KeyError:
             logger.error("Can not find pool with provided pool_id_or_name: %s", pool_id_or_name)
             return False
+    elif node_id:
+        try:
+            node = (db_controller.get_storage_node_by_id(node_id)
+                    if utils.UUID_PATTERN.match(node_id) is not None
+                    else db_controller.get_storage_nodes_by_hostname(node_id)[0])
+            snaps = [sn for sn in all_snaps if sn.lvol.node_id == node.get_id()]
+        except KeyError:
+            logger.error("Can not find node with provided value: %s", node_id)
+            return False
+
+    elif cluster_id:
+        snaps = [sn for sn in all_snaps if sn.cluster_id == cluster_id]
     else:
-        snaps = db_controller.get_snapshots(cluster_id)
+        snaps = all_snaps
 
     snaps = sorted(snaps, key=lambda snap: snap.created_at)
 
@@ -413,11 +432,19 @@ def list(all=False, cluster_id=None, with_details=False, pool_id_or_name=None):
             "Status": snap.status,
         }
         if with_details:
+            instances = []
+            if snap.instances:
+                instances.extend([SnapShot(**i).lvol.node_id for i in snap.instances])
             d["Replication target snap"] = snap.target_replicated_snap_uuid
             d["Replication source snap"] = snap.source_replicated_snap_uuid
             d["Rrev snap"] = snap.prev_snap_uuid
             d["Next snap"] = snap.next_snap_uuid
+            d["Instance on other nodes"] = instances
         data.append(d)
+
+    if is_json and data:
+        return json.dumps(data, indent=2)
+
     return utils.print_table(data)
 
 
@@ -1047,39 +1074,3 @@ def set_value(snapshot_uuid, attr, value) -> bool:
     setattr(snap, attr, value)
     snap.write_to_db()
     return True
-
-def list_by_node(node_id=None, is_json=False):
-    snaps = db_controller.get_snapshots()
-    snaps = sorted(snaps, key=lambda snap: snap.created_at)
-
-    # Build snap_id → clone list once instead of a full DB read per snapshot
-    # (was O(M×N) DB reads).
-    clones_by_snap: dict[str, builtins.list[str]] = {}
-    for lv in db_controller.get_mini_lvols():
-        if lv.cloned_from_snap:
-            clones_by_snap.setdefault(lv.cloned_from_snap, []).append(lv.get_id())
-
-    data = []
-    for snap in snaps:
-        if node_id:
-            if snap.lvol.node_id != node_id:
-                continue
-        logger.debug(snap)
-        clones = clones_by_snap.get(snap.get_id(), [])
-        data.append({
-            "UUID": snap.uuid,
-            "BDdev UUID": snap.snap_uuid,
-            "BlobID": snap.blobid,
-            "Name": snap.snap_name,
-            "Size": utils.humanbytes(snap.used_size),
-            "BDev": snap.snap_bdev.split("/")[1],
-            "Node ID": snap.lvol.node_id,
-            "LVol ID": snap.lvol.get_id(),
-            "Created At": time.strftime("%H:%M:%S, %d/%m/%Y", time.gmtime(snap.created_at)),
-            "Base Snapshot": snap.snap_ref_id,
-            "Clones": clones,
-            "Status": snap.status,
-        })
-    if is_json:
-        return json.dumps(data, indent=2)
-    return utils.print_table(data)
