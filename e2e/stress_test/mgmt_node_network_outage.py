@@ -3,12 +3,16 @@
 Stop the management node's network for 1 hour while IO is active on all
 storage nodes.  Ensure no storage node failures and no IO failures.
 
+Creates lvols with all security/filesystem combinations on every node:
+  plain, crypto, auth (DHCHAP), crypto_auth  x  ext4, xfs
+
 Self-restoring iptables approach:
     A nohup background script on the mgmt node blocks all traffic for
     ``outage_duration`` seconds, then automatically flushes the rules.
     This guarantees recovery even if the test runner crashes.
 """
 
+import itertools
 import threading
 import time
 import random
@@ -18,8 +22,21 @@ from e2e_tests.cluster_test_base import TestClusterBase, generate_random_sequenc
 from utils.common_utils import sleep_n_sec
 
 
+# Security type configurations
+_SEC_CONFIGS = [
+    {"label": "plain",       "crypto": False, "needs_nqn": False},
+    {"label": "crypto",      "crypto": True,  "needs_nqn": False},
+    {"label": "auth",        "crypto": False, "needs_nqn": True},
+    {"label": "crypto_auth", "crypto": True,  "needs_nqn": True},
+]
+_FS_TYPES = ["ext4", "xfs"]
+
+
 class MgmtNodeNetworkOutageTest(TestClusterBase):
-    """Block mgmt-node network for 1 hour with active FIO on every storage node."""
+    """Block mgmt-node network for 1 hour with active FIO on every storage node.
+
+    Lvol matrix (per node): plain/crypto/auth/crypto_auth x ext4/xfs = 8 lvols.
+    """
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -30,8 +47,8 @@ class MgmtNodeNetworkOutageTest(TestClusterBase):
         self.outage_duration = 3600
         # FIO runtime: 2 hours (covers outage + recovery validation)
         self.fio_runtime = 7200
-        self.fio_num_jobs = 5
-        self.lvol_size = "10G"
+        self.fio_num_jobs = 2
+        self.lvol_size = "20G"
 
     def run(self):
         fio_threads = []
@@ -39,40 +56,109 @@ class MgmtNodeNetworkOutageTest(TestClusterBase):
         self.logger.info("=== MgmtNodeNetworkOutageTest: starting ===")
 
         # ------------------------------------------------------------------
-        # Step 1: Create pool + 1 lvol per storage node, connect from fio client
+        # Step 1: Create pools — plain + DHCHAP
         # ------------------------------------------------------------------
         self.sbcli_utils.add_storage_pool(self.pool_name)
+
+        dhchap_pool = f"dhchap_{self.pool_name}"
+        self.logger.info(f"Creating DHCHAP pool: {dhchap_pool}")
+        self.ssh_obj.add_storage_pool(
+            self.mgmt_nodes[0], dhchap_pool,
+            self.cluster_id, dhchap=True,
+        )
 
         fio_nodes = self.fio_node if isinstance(self.fio_node, list) else [self.fio_node]
         fio_node = random.choice(fio_nodes)
 
-        for i, snode in enumerate(self.storage_nodes):
-            node_uuid = self.sbcli_utils.get_node_without_lvols()
-            lvol_name = f"mgmt_outage_{generate_random_sequence(4)}_{i}"
-            self.sbcli_utils.add_lvol(lvol_name, self.pool_name,
-                                      size=self.lvol_size, host_id=node_uuid)
-
-            lvol_id = self.sbcli_utils.get_lvol_id(lvol_name)
-            connect_cmds = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)
-            for cmd in connect_cmds:
-                self.ssh_obj.exec_command(fio_node, cmd)
-
-            device = self.ssh_obj.get_lvol_vs_device(fio_node, lvol_id)
-            mount_path = f"{self.mount_base}/{lvol_name}"
-            log_path = f"{self.log_base}/{lvol_name}.log"
-
-            self.ssh_obj.format_disk(fio_node, device)
-            self.ssh_obj.mount_path(fio_node, device, mount_path)
-
-            lvol_details[lvol_name] = {
-                "ID": lvol_id,
-                "Mount": mount_path,
-                "Log": log_path,
-                "Device": device,
-            }
+        # Register client NQN on DHCHAP pool
+        host_nqn = self.ssh_obj.get_client_host_nqn(fio_node)
+        dhchap_pool_id = self.sbcli_utils.get_storage_pool_id(dhchap_pool)
+        if dhchap_pool_id and host_nqn:
+            self.logger.info(
+                f"Registering host NQN on DHCHAP pool: nqn={host_nqn}")
+            self.ssh_obj.add_host_to_pool(
+                self.mgmt_nodes[0], dhchap_pool_id, host_nqn)
 
         # ------------------------------------------------------------------
-        # Step 2: Start FIO on every volume (time_based, runtime=7200)
+        # Step 2: Get primary storage node UUIDs
+        # ------------------------------------------------------------------
+        sn_resp = self.sbcli_utils.get_storage_nodes()
+        node_uuids = [
+            sn["uuid"] for sn in sn_resp["results"]
+            if not sn.get("is_secondary_node")
+        ]
+        self.logger.info(
+            f"Primary storage nodes ({len(node_uuids)}): "
+            f"{[u[:8] for u in node_uuids]}")
+
+        # ------------------------------------------------------------------
+        # Step 3: Create lvols — every (sec_type x fs_type) on every node
+        # ------------------------------------------------------------------
+        combos = list(itertools.product(_SEC_CONFIGS, _FS_TYPES))
+        total = len(combos) * len(node_uuids)
+        self.logger.info(
+            f"Creating {len(combos)} combos x {len(node_uuids)} nodes "
+            f"= {total} lvols")
+
+        idx = 0
+        for node_uuid in node_uuids:
+            for sec_cfg, fs_type in combos:
+                label = sec_cfg["label"]
+                prefix = {"plain": "pl", "crypto": "cr",
+                          "auth": "au", "crypto_auth": "ca"}[label]
+                lvol_name = (
+                    f"mo_{prefix}_{fs_type}_"
+                    f"{generate_random_sequence(4)}_{idx}"
+                )
+                pool = dhchap_pool if sec_cfg["needs_nqn"] else self.pool_name
+
+                self.logger.info(
+                    f"  [{idx + 1}/{total}] {label}/{fs_type} -> "
+                    f"node {node_uuid[:8]}, pool={pool}")
+
+                self.sbcli_utils.add_lvol(
+                    lvol_name, pool,
+                    size=self.lvol_size,
+                    host_id=node_uuid,
+                    crypto=sec_cfg["crypto"],
+                )
+
+                lvol_id = self.sbcli_utils.get_lvol_id(lvol_name)
+
+                # Connect — DHCHAP volumes need host_nqn
+                if sec_cfg["needs_nqn"] and host_nqn:
+                    connect_cmds, _ = (
+                        self.ssh_obj.get_lvol_connect_str_with_host_nqn(
+                            self.mgmt_nodes[0], lvol_id, host_nqn))
+                else:
+                    connect_cmds = self.sbcli_utils.get_lvol_connect_str(
+                        lvol_name=lvol_name)
+
+                for cmd in connect_cmds:
+                    self.ssh_obj.exec_command(fio_node, cmd)
+
+                device = self.ssh_obj.get_lvol_vs_device(fio_node, lvol_id)
+                mount_path = f"{self.mount_base}/{lvol_name}"
+                log_path = f"{self.log_base}/{lvol_name}.log"
+
+                self.ssh_obj.format_disk(fio_node, device, fs_type=fs_type)
+                self.ssh_obj.mount_path(fio_node, device, mount_path)
+
+                lvol_details[lvol_name] = {
+                    "ID": lvol_id,
+                    "Mount": mount_path,
+                    "Log": log_path,
+                    "Device": device,
+                    "sec_type": label,
+                    "fs_type": fs_type,
+                    "node": node_uuid[:8],
+                }
+                idx += 1
+
+        self.logger.info(f"All {len(lvol_details)} lvols created and mounted")
+
+        # ------------------------------------------------------------------
+        # Step 4: Start FIO on every volume (time_based, runtime=7200)
         # ------------------------------------------------------------------
         self.logger.info(f"Starting FIO on {len(lvol_details)} volumes "
                          f"(runtime={self.fio_runtime}s, numjobs={self.fio_num_jobs})")
@@ -82,7 +168,7 @@ class MgmtNodeNetworkOutageTest(TestClusterBase):
                 target=self.ssh_obj.run_fio_test,
                 args=(fio_node, None, detail["Mount"], detail["Log"]),
                 kwargs={
-                    "size": "500M",
+                    "size": "5G",
                     "name": f"{lvol_name}_fio",
                     "rw": "randrw",
                     "nrfiles": 5,
@@ -101,7 +187,7 @@ class MgmtNodeNetworkOutageTest(TestClusterBase):
         sleep_n_sec(60)
 
         # ------------------------------------------------------------------
-        # Step 3: Record pre-outage state
+        # Step 5: Record pre-outage state
         # ------------------------------------------------------------------
         self.logger.info("Recording pre-outage cluster/node state ...")
         pre_cluster = self.sbcli_utils.get_cluster_details()
@@ -114,7 +200,7 @@ class MgmtNodeNetworkOutageTest(TestClusterBase):
             self.logger.info(f"  Storage node {sn['uuid'][:8]} — {sn['status']}")
 
         # ------------------------------------------------------------------
-        # Step 4: Block mgmt node network (self-restoring iptables)
+        # Step 6: Block mgmt node network (self-restoring iptables)
         # ------------------------------------------------------------------
         mgmt_ip = self.mgmt_nodes[0]
         self.logger.info(f"Blocking ALL network on mgmt node {mgmt_ip} "
@@ -141,7 +227,7 @@ class MgmtNodeNetworkOutageTest(TestClusterBase):
                          "sleeping for outage duration ...")
 
         # ------------------------------------------------------------------
-        # Step 5: Wait for outage duration
+        # Step 7: Wait for outage duration
         # ------------------------------------------------------------------
         # Log a heartbeat every 5 minutes so the runner knows we are alive
         elapsed = 0
@@ -153,7 +239,7 @@ class MgmtNodeNetworkOutageTest(TestClusterBase):
             self.logger.info(f"  Outage heartbeat: {elapsed}/{self.outage_duration}s elapsed")
 
         # ------------------------------------------------------------------
-        # Step 6: Wait for mgmt node to recover (iptables auto-flushed)
+        # Step 8: Wait for mgmt node to recover (iptables auto-flushed)
         # ------------------------------------------------------------------
         self.logger.info("Outage duration elapsed — waiting for mgmt node recovery ...")
         # Give iptables flush a few extra seconds
@@ -182,7 +268,7 @@ class MgmtNodeNetworkOutageTest(TestClusterBase):
         sleep_n_sec(120)
 
         # ------------------------------------------------------------------
-        # Step 7: Verify cluster and storage node health
+        # Step 9: Verify cluster and storage node health
         # ------------------------------------------------------------------
         self.logger.info("Verifying cluster status is 'active' ...")
         self.sbcli_utils.wait_for_cluster_status(status="active", timeout=600)
@@ -201,25 +287,28 @@ class MgmtNodeNetworkOutageTest(TestClusterBase):
             self.logger.info(f"  Storage node {node_id[:8]} — online + healthy")
 
         # ------------------------------------------------------------------
-        # Step 8: Wait for FIO completion
+        # Step 10: Wait for FIO completion
         # ------------------------------------------------------------------
         self.logger.info("Waiting for all FIO threads to complete ...")
         self.common_utils.manage_fio_threads(fio_node, fio_threads, timeout=self.fio_runtime + 1800)
         self.logger.info("All FIO threads completed.")
 
         # ------------------------------------------------------------------
-        # Step 9: Validate FIO logs — no IO errors
+        # Step 11: Validate FIO logs — no IO errors
         # ------------------------------------------------------------------
         self.logger.info("Validating FIO logs for every volume ...")
         for lvol_name, detail in lvol_details.items():
-            self.logger.info(f"  Validating {lvol_name} ...")
+            self.logger.info(
+                f"  Validating {lvol_name} "
+                f"({detail['sec_type']}/{detail['fs_type']} "
+                f"on node {detail['node']}) ...")
             self.common_utils.validate_fio_test(
                 node=fio_node, log_file=detail["Log"]
             )
         self.logger.info("All FIO logs validated — zero IO errors.")
 
         # ------------------------------------------------------------------
-        # Step 10: Compare post-outage node status with pre-outage
+        # Step 12: Compare post-outage node status with pre-outage
         # ------------------------------------------------------------------
         self.logger.info("Comparing pre/post node statuses ...")
         storage_nodes_resp = self.sbcli_utils.get_storage_nodes()
