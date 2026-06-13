@@ -2041,27 +2041,6 @@ commands:
             dest: lvol_max
             type: size
             default: "0"
-          - name: "--max-rw-iops"
-            help: "Maximum Read Write IO Per Second."
-            dest: max_rw_iops
-            type: int
-          - name: "--max-rw-mbytes"
-            help: "Maximum Read Write Megabytes Per Second."
-            dest: max_rw_mbytes
-            type: int
-          - name: "--max-r-mbytes"
-            help: "Maximum Read Megabytes Per Second."
-            dest: max_r_mbytes
-            type: int
-          - name: "--max-w-mbytes"
-            help: "Maximum Write Megabytes Per Second."
-            dest: max_w_mbytes
-            type: int
-          - name: "--qos-host"
-            help: "The node id for QoS pool."
-            dest: qos_host
-            type: str
-            required: false
           - name: "--dhchap"
             help: "Enable DH-HMAC-CHAP authentication for all volumes in the pool."
             dest: dhchap
@@ -2083,22 +2062,7 @@ commands:
             help: "Logical volume maximum size: 20M, 20G."
             dest: lvol_max
             type: size
-          - name: "--max-rw-iops"
-            help: "Maximum Read Write IO Per Second."
-            dest: max_rw_iops
-            type: int
-          - name: "--max-rw-mbytes"
-            help: "Maximum Read Write Megabytes Per Second."
-            dest: max_rw_mbytes
-            type: int
-          - name: "--max-r-mbytes"
-            help: "Maximum Read Megabytes Per Second."
-            dest: max_r_mbytes
-            type: int
-          - name: "--max-w-mbytes"
-            help: "Maximum Write Megabytes Per Second."
-            dest: max_w_mbytes
-            type: int
+
       - name: list
         help: "Lists all storage pools."
         arguments:

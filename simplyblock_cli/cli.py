@@ -815,11 +815,6 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('cluster_id', help='The cluster id.', type=str)
         argument = subcommand.add_argument('--pool-max', help='Pool maximum size: 20M, 20G, 0. Default: `0`.', type=size_type(), default='0', dest='pool_max')
         argument = subcommand.add_argument('--lvol-max', help='Logical volume maximum size: 20M, 20G, 0. Default: `0`.', type=size_type(), default='0', dest='lvol_max')
-        argument = subcommand.add_argument('--max-rw-iops', help='Maximum Read Write IO Per Second.', type=int, dest='max_rw_iops')
-        argument = subcommand.add_argument('--max-rw-mbytes', help='Maximum Read Write Megabytes Per Second.', type=int, dest='max_rw_mbytes')
-        argument = subcommand.add_argument('--max-r-mbytes', help='Maximum Read Megabytes Per Second.', type=int, dest='max_r_mbytes')
-        argument = subcommand.add_argument('--max-w-mbytes', help='Maximum Write Megabytes Per Second.', type=int, dest='max_w_mbytes')
-        argument = subcommand.add_argument('--qos-host', help='The node id for QoS pool.', type=str, dest='qos_host', required=False)
         argument = subcommand.add_argument('--dhchap', help='Enable DH-HMAC-CHAP authentication for all volumes in the pool.', default=False, dest='dhchap', action='store_true')
 
     def init_storage_pool__set(self, subparser):
@@ -827,10 +822,6 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('pool_id', help='The storage pool id.', type=str)
         argument = subcommand.add_argument('--pool-max', help='Pool maximum size: 20M, 20G.', type=size_type(), dest='pool_max')
         argument = subcommand.add_argument('--lvol-max', help='Logical volume maximum size: 20M, 20G.', type=size_type(), dest='lvol_max')
-        argument = subcommand.add_argument('--max-rw-iops', help='Maximum Read Write IO Per Second.', type=int, dest='max_rw_iops')
-        argument = subcommand.add_argument('--max-rw-mbytes', help='Maximum Read Write Megabytes Per Second.', type=int, dest='max_rw_mbytes')
-        argument = subcommand.add_argument('--max-r-mbytes', help='Maximum Read Megabytes Per Second.', type=int, dest='max_r_mbytes')
-        argument = subcommand.add_argument('--max-w-mbytes', help='Maximum Write Megabytes Per Second.', type=int, dest='max_w_mbytes')
 
     def init_storage_pool__list(self, subparser):
         subcommand = self.add_sub_command(subparser, 'list', 'Lists all storage pools.')

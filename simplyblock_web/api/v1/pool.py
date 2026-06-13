@@ -49,10 +49,7 @@ def add_pool():
         | cluster_id (required) | Cluster uuid
         | pool_max        | Pool maximum size: 10M, 10G, 10(bytes)
         | lvol_max        | LVol maximum size: 10M, 10G, 10(bytes)
-        | max_rw_iops     | Maximum Read Write IO Per Second
-        | max_rw_mbytes   | Maximum Read Write Mega Bytes Per Second
-        | max_r_mbytes    | Maximum Read Mega Bytes Per Second
-        | max_w_mbytes    | Maximum Write Mega Bytes Per Second
+        | dhchap          | Enable DHCHAP authentication for this pool's lvols. Default false.
     """
     pool_data = request.get_json()
     if 'name' not in pool_data:
@@ -75,17 +72,15 @@ def add_pool():
     if 'lvol_max' in pool_data:
         lvol_max_size = core_utils.parse_size(pool_data['lvol_max'])
 
-    max_rw_iops = utils.get_int_value_or_default(pool_data, "max_rw_iops", 0)
-    max_rw_mbytes = utils.get_int_value_or_default(pool_data, "max_rw_mbytes", 0)
-    max_r_mbytes_per_sec = utils.get_int_value_or_default(pool_data, "max_r_mbytes", 0)
-    max_w_mbytes_per_sec = utils.get_int_value_or_default(pool_data, "max_w_mbytes", 0)
-
     dhchap = bool(pool_data.get('dhchap', False))
 
     ret = pool_controller.add_pool(
-        name, pool_max_size, lvol_max_size, max_rw_iops, max_rw_mbytes,
-        max_r_mbytes_per_sec, max_w_mbytes_per_sec, cluster_id,
-        dhchap=dhchap)
+        name,
+        pool_max=pool_max_size,
+        lvol_max=lvol_max_size,
+        cluster_id=cluster_id,
+        dhchap=dhchap
+    )
 
     return utils.get_response(ret)
 
@@ -134,18 +129,6 @@ def update_pool(uuid):
 
     if 'lvol_max' in pool_data:
         fn_params['lvol_max'] = core_utils.parse_size(pool_data['lvol_max'])
-
-    if 'max_rw_iops' in pool_data:
-        fn_params['max_rw_iops'] = core_utils.parse_size(pool_data['max_rw_iops'])
-
-    if 'max_rw_mbytes' in pool_data:
-        fn_params['max_rw_mbytes'] = core_utils.parse_size(pool_data['max_rw_mbytes'])
-
-    if 'max_r_mbytes' in pool_data:
-        fn_params['max_r_mbytes'] = core_utils.parse_size(pool_data['max_r_mbytes'])
-
-    if 'max_w_mbytes' in pool_data:
-        fn_params['max_w_mbytes'] = core_utils.parse_size(pool_data['max_w_mbytes'])
 
     ret, err = pool_controller.set_pool(**fn_params)
 
