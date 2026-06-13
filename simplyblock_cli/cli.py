@@ -907,10 +907,12 @@ class CLIWrapper(CLIWrapperBase):
 
     def init_snapshot__list(self, subparser):
         subcommand = self.add_sub_command(subparser, 'list', 'Lists all snapshots.')
-        argument = subcommand.add_argument('--all', help='List soft deleted snapshots.', dest='all', action='store_true')
-        argument = subcommand.add_argument('--cluster-id', help='Filter snapshots by cluster UUID', type=str, dest='cluster_id', required=False)
-        argument = subcommand.add_argument('--with-details', help='List snapshots with replicate and chaining details', dest='with_details', action='store_true')
-        argument = subcommand.add_argument('--pool', help='List snapshots in particular pool id or name.', type=str, dest='pool')
+        argument = subcommand.add_argument('--lvol-id', '-l', help='List snapshots for a specific logical volume.', type=str, dest='lvol_id', required=False)
+        argument = subcommand.add_argument('--node-id', '-n', help='List snapshots for a specific node uuid', type=str, dest='node_id', required=False)
+        argument = subcommand.add_argument('--pool', '-p', help='List snapshots in particular pool id or name.', type=str, dest='pool')
+        argument = subcommand.add_argument('--cluster-id', '-c', help='Filter snapshots by cluster UUID', type=str, dest='cluster_id', required=False)
+        argument = subcommand.add_argument('--with-details', '-w', help='List snapshots with replicate and chaining details', dest='with_details', action='store_true')
+        argument = subcommand.add_argument('--json', '-j', help='List snapshots in JSON format', dest='json', action='store_true')
 
     def init_snapshot__delete(self, subparser):
         subcommand = self.add_sub_command(subparser, 'delete', 'Deletes a snapshot.')
