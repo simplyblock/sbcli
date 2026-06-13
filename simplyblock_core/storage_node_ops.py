@@ -5156,6 +5156,14 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
         if lv.status not in [LVol.STATUS_IN_DELETION, LVol.STATUS_IN_CREATION]:
             lvol_list.append(lv)
 
+    # Probe whether the raid already exists BEFORE step 1 (re)builds the stack.
+    # On a real restart SPDK has just started and the raid (superblock=False)
+    # cannot persist, so this is False and step 1 freshly builds it. It is only
+    # True on an activation retry where a prior pass already created AND examined
+    # the raid (SPDK then rejects re-examine). This distinguishes the normal
+    # restart path (just examine) from the convergence trap (drop + re-create).
+    raid_preexisted = _rpc_bdev_exists(snode_rpc_client, primary_node.raid)
+
     ### 1- create distribs and raid
     # Set restart phase: pre_block — sync deletes and registrations can still complete.
     # IMPORTANT: every exit path after this point MUST clear the phase (either by
@@ -5307,9 +5315,9 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
             "Raid %s and lvstore %s already present on %s; skipping examine",
             primary_node.raid, primary_node.lvstore, snode.get_id())
     else:
-        if raid_already and not lvstore_already:
-            # Same convergence trap as in recreate_lvstore: the raid was
-            # examined on a prior pass and the lvstore module did not
+        if raid_already and not lvstore_already and raid_preexisted:
+            # Convergence trap (activation retry only): the raid was created
+            # AND examined on a prior pass and the lvstore module did not
             # surface it. SPDK rejects re-examine of an already-examined
             # bdev with "Duplicate bdev name for manual examine", so a
             # plain bdev_examine here is a silent no-op that loops the
@@ -5333,6 +5341,15 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
                 logger.error(
                     "Failed to rebuild bdev stack on %s after raid drop: %s",
                     snode.get_id(), err)
+        elif raid_already and not lvstore_already:
+            # Normal restart: the raid was freshly built this pass in step 1
+            # and has never been examined, so the first-time bdev_examine below
+            # surfaces the lvstore. Dropping+recreating it here would be pure
+            # churn inside the (minimized) port-block window — the duplicate
+            # bdev_raid_create observed 2026-06-12 (LVS_5199).
+            logger.info(
+                "Raid %s freshly built this pass on %s; examining without drop",
+                primary_node.raid, snode.get_id())
 
         # Examine is required whenever the lvstore isn't surfaced — whether
         # the raid was freshly created by _create_bdev_stack (normal restart
@@ -5928,6 +5945,14 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
                 raise Exception(
                     f"Abort restart: jc_compression check on leader {current_leader.get_id()} failed: {e}")
 
+    # Probe whether the raid already exists BEFORE step 1 (re)builds the stack.
+    # On a real restart SPDK has just started and the raid (superblock=False)
+    # cannot persist, so this is False and step 1 freshly builds it. It is only
+    # True on an activation retry where a prior pass already created AND examined
+    # the raid (SPDK then rejects re-examine). This distinguishes the normal
+    # restart path (just examine) from the convergence trap (drop + re-create).
+    raid_preexisted = _rpc_bdev_exists(snode.rpc_client(), lvs_raid)
+
     ### 1- create distribs and raid
     _set_restart_phase(snode, lvs_name, StorageNode.RESTART_PHASE_PRE_BLOCK, db_controller)
 
@@ -6238,9 +6263,9 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
             "Raid %s and lvstore %s already present on %s; skipping examine",
             lvs_raid, lvs_name, snode.get_id())
     else:
-        if raid_already and not lvstore_already:
-            # Raid is present but the lvstore module never surfaced it on
-            # this SPDK process (e.g. a prior activation pass examined the
+        if raid_already and not lvstore_already and raid_preexisted:
+            # Raid pre-existed this pass and the lvstore module never surfaced
+            # it on this SPDK process (a prior activation pass examined the
             # raid and the lvstore-side examine failed/was incomplete).
             # SPDK rejects re-examine of an already-examined bdev with
             # "Duplicate bdev name for manual examine: <raid>", so calling
@@ -6273,6 +6298,15 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
                     "Failed to rebuild bdev stack on %s after raid drop: %s",
                     snode.get_id(), err)
                 # Fall through; bdev_examine below will surface what we have.
+        elif raid_already and not lvstore_already:
+            # Normal restart: the raid was freshly built this pass in step 1
+            # and has never been examined, so the first-time bdev_examine below
+            # surfaces the lvstore. Dropping+recreating it here would be pure
+            # churn inside the (minimized) port-block window — the duplicate
+            # bdev_raid_create observed 2026-06-12 (LVS_5199).
+            logger.info(
+                "Raid %s freshly built this pass on %s; examining without drop",
+                lvs_raid, snode.get_id())
 
         # Examine is required whenever the lvstore isn't surfaced — whether
         # the raid was freshly created by _create_bdev_stack (normal restart
