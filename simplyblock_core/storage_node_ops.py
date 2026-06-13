@@ -32,7 +32,7 @@ from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.prom_client import PromClient
-from simplyblock_core.rpc_client import RPCException
+from simplyblock_core.rpc_client import RPCClient, RPCException  # noqa: F401  (RPCClient kept as a patch target for tests)
 from simplyblock_core.snode_client import SNodeClient, SNodeClientException
 from simplyblock_web import node_utils
 from simplyblock_core.utils import addNvmeDevices
@@ -1582,7 +1582,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
              num_partitions_per_dev=0, jm_percent=0, enable_test_device=False,
              namespace=None, enable_ha_jm=False, cr_name=None, cr_namespace=None, cr_plural=None,
              id_device_by_nqn=False, partition_size="", ha_jm_count=None, format_4k=False,
-             spdk_proxy_image=None, spdk_sys_mem=None):
+             spdk_proxy_image=None, spdk_sys_mem=None, expansion=False):
     snode_api = SNodeClient(node_addr)
     node_info, _ = snode_api.info()
     if node_info.get("nodes_config") and node_info["nodes_config"].get("nodes"):
@@ -2151,9 +2151,15 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         logger.info("Setting node status to Active")
         set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE, caused_by="add_node")
 
-        for dev in snode.nvme_devices:
-            if dev.status == NVMeDevice.STATUS_ONLINE:
-                tasks_controller.add_new_device_mig_task(dev.get_id())
+        # In --expansion mode the caller (clibase) triggers expansion
+        # migration explicitly *after* integrate_new_node_into_cluster has
+        # built the post-rotation lvstore_stack and flipped cluster status
+        # back to ACTIVE. Skipping it here avoids racing the half-built
+        # rotation and double-queueing.
+        if not expansion:
+            for dev in snode.nvme_devices:
+                if dev.status == NVMeDevice.STATUS_ONLINE:
+                    tasks_controller.add_new_device_mig_task(dev.get_id())
 
         storage_events.snode_add(snode)
 
@@ -5047,12 +5053,26 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
                            snode.get_id(), e)
 
     # Ensure snode has per-lvstore ports from primary
-    if primary_node.lvstore_ports and primary_node.lvstore in primary_node.lvstore_ports:
-        if not snode.lvstore_ports:
-            snode.lvstore_ports = {}
-        snode.lvstore_ports[primary_node.lvstore] = \
-            primary_node.lvstore_ports[primary_node.lvstore].copy()
-        snode.write_to_db()
+    lvstore_ports = {}
+    if snode.lvstore:
+        lvstore_ports[snode.lvstore] = {
+            "lvol_subsys_port": snode.lvol_subsys_port,
+            "hublvol_port": snode.hublvol.nvmf_port if snode.hublvol else 0,
+        }
+    if snode.lvstore_stack_secondary:
+        nd = db_controller.get_storage_node_by_id(snode.lvstore_stack_secondary)
+        lvstore_ports[nd.lvstore] = {
+            "lvol_subsys_port": nd.lvol_subsys_port,
+            "hublvol_port": nd.hublvol.nvmf_port if nd.hublvol else 0,
+        }
+    if snode.lvstore_stack_tertiary:
+        nd = db_controller.get_storage_node_by_id(snode.lvstore_stack_tertiary)
+        lvstore_ports[nd.lvstore] = {
+            "lvol_subsys_port": nd.lvol_subsys_port,
+            "hublvol_port": nd.hublvol.nvmf_port if nd.hublvol else 0,
+        }
+    snode.lvstore_ports = lvstore_ports
+    snode.write_to_db()
 
     lvol_list = []
     for lv in db_controller.get_lvols_by_node_id(primary_node.get_id()):
@@ -5076,6 +5096,17 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
         primary_node.lvstore_status = "ready"
         primary_node.write_to_db()
         return False
+
+    # Expansion/activate (activation_mode=True) skips the port-blocked
+    # retry block below, so it establishes the hublvol here. A normal
+    # restart (activation_mode=False) connects in that block instead —
+    # connecting here too would double the hublvol attach.
+    if activation_mode:
+        try:
+            snode.connect_to_hublvol(primary_node, failover_node=None)
+        except Exception as e:
+            logger.error("Error establishing hublvol: %s", e)
+            # return False
 
     # Resume JC compression for this LVS group on the restarting node
     ret, err = snode.rpc_client().jc_suspend_compression(jm_vuid=primary_node.jm_vuid, suspend=False)
@@ -6814,14 +6845,14 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
         sec_node.write_to_db()
 
     # Create hublvol on primary after all secondaries have their stacks
-    if secondary_ids:
-        cluster = db_controller.get_cluster_by_id(snode.cluster_id)
-        try:
-            snode.create_hublvol(cluster_nqn=cluster.nqn)
-        except RPCException as e:
-            logger.error("Error establishing hublvol: %s", e.message)
-            # return False
+    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+    try:
+        snode.create_hublvol(cluster_nqn=cluster.nqn)
+    except RPCException as e:
+        logger.error("Error establishing hublvol: %s", e.message)
+        # return False
 
+    if secondary_ids:
         # Create secondary hublvol on sec_1 so tertiary can multipath
         sec1 = db_controller.get_storage_node_by_id(secondary_ids[0])
         if sec1 and sec1.status == StorageNode.STATUS_ONLINE:
@@ -6955,6 +6986,280 @@ def _remove_bdev_stack(bdev_stack, rpc_client, remove_distr_only=False):
 
         bdev['status'] = 'deleted'
         # time.sleep(1)
+
+
+def recreate_lvstore_on_sec(snode):
+    """Build (or rebuild) the non-leader LVS stack on ``snode`` for every
+    primary that currently points at it as secondary or tertiary.
+
+    Iterates by DB query — so callers that want to drive a *specific*
+    new role onto ``snode`` set the back-references first
+    (``snode.lvstore_stack_secondary`` / ``lvstore_stack_tertiary`` plus
+    the primary's ``secondary_node_id`` / ``tertiary_node_id``) and let
+    this function pick them up. Idempotent on roles ``snode`` already
+    serves: re-running for an existing peer just reapplies the stack
+    via :func:`recreate_lvstore_on_non_leader`, the same path used by
+    every node restart.
+
+    Parameters
+    ----------
+    snode:
+        The non-leader (recipient / holder) node where the stack will be
+        built. RPCs target this node's SPDK process.
+
+    Returns
+    -------
+    bool
+        True iff every primary's stack came up successfully. False if
+        any one failed — the orchestrator treats that as a fatal
+        executor error and aborts.
+
+    Notes
+    -----
+    The expansion executor calls this after updating DB pointers for
+    a newly-assigned role; by then ``get_primary_storage_nodes_by_secondary_node_id``
+    returns exactly the new primary plus any pre-existing peers that
+    haven't moved. Re-running for unchanged peers is the cost of
+    delegating discovery to the DB rather than threading a per-call
+    primary argument — the production restart path makes the same
+    trade-off.
+    """
+    db_controller = DBController()
+    primaries = db_controller.get_primary_storage_nodes_by_secondary_node_id(
+        snode.get_id())
+    if not primaries:
+        logger.info(
+            f"recreate_lvstore_on_sec: no primaries point at "
+            f"{snode.get_id()} — nothing to do")
+        return True
+
+    overall_ok = True
+    for primary in primaries:
+        try:
+            ok = recreate_lvstore_on_non_leader(
+                snode, leader_node=primary, primary_node=primary)
+        except Exception as e:
+            logger.exception(
+                f"recreate_lvstore_on_sec: recreate failed for "
+                f"primary {primary.get_id()} on {snode.get_id()}: {e}")
+            overall_ok = False
+            continue
+        if ok is False:
+            logger.error(
+                f"recreate_lvstore_on_sec: recreate returned False for "
+                f"primary {primary.get_id()} on {snode.get_id()}")
+            overall_ok = False
+    return overall_ok
+
+
+def teardown_non_leader_lvstore(donor_node, primary_node, slot=None):
+    """Tear down a non-leader (secondary or tertiary) LVStore stack on
+    ``donor_node`` for the LVS owned by ``primary_node``, in-place.
+
+    This is the inverse of ``recreate_lvstore_on_sec`` for a single
+    (primary, donor) pair and is used by the single-node-expansion orchestrator
+    when re-homing a sec/tert role from one node to another.
+
+    Pre-conditions (caller's responsibility — not enforced here):
+      * A replacement holder for the same role has already been created
+        elsewhere and is in sync (so the LVS still meets FTT after this
+        teardown).
+      * IO quiescing / port-blocking is *not* performed here. Callers needing
+        coordinated leadership transitions must do it before calling this
+        function; this helper only removes the donor-side bdevs/subsystems.
+
+    Slot discovery
+    --------------
+    Two modes:
+
+    * ``slot=None`` (default): the helper auto-detects the slot from
+      ``primary_node.secondary_node_id`` / ``tertiary_node_id``. Use this
+      when the primary's pointer has not yet been moved away from the
+      donor.
+    * ``slot="secondary"`` or ``slot="tertiary"``: the caller asserts
+      which slot the donor previously occupied. Used by the expansion
+      executor, which flips the primary's pointer to the recipient
+      *before* tearing down the donor (so the discovered pointer no
+      longer matches).
+
+    Steps performed:
+      1. Delete per-lvol nvmf subsystems on the donor for every lvol owned
+         by ``primary_node``.
+      2. Remove the donor's bdev stack (distrib + raid + lvstore + ptnonexcl)
+         via ``_remove_bdev_stack`` using ``primary_node.lvstore_stack`` as
+         the structural template.
+      3. Detach the hublvol nvme controller on the donor (best-effort —
+         may already be gone if the controller was never attached).
+      4. Clear the corresponding back-reference field
+         (``lvstore_stack_secondary`` or ``lvstore_stack_tertiary``) on
+         the donor and persist.
+
+    What this does NOT do (orchestrator's responsibility):
+      * Update ``primary_node.secondary_node_id`` / ``tertiary_node_id``
+        pointers — the orchestrator knows the new holder and will
+        overwrite there.
+      * Reconfigure the sibling sec/tert (e.g., when sec_1 is being torn
+        down, sec_2's multipath controller still references the donor and
+        must be re-attached separately).
+      * Remove ``donor_node.lvstore_ports[primary.lvstore]`` — left in place
+        so a subsequent re-add to the same donor reuses the same ports.
+
+    Returns
+    -------
+    bool
+        True if all donor-side cleanup completed; False if the donor was
+        not actually a sec/tert for this primary (no-op refused) or the
+        bdev stack delete returned an error.
+    """
+    if slot in ("secondary", "tertiary"):
+        sec_attr = f"lvstore_stack_{slot}"
+    elif slot is None:
+        if primary_node.secondary_node_id == donor_node.get_id():
+            sec_attr = 'lvstore_stack_secondary'
+        elif primary_node.tertiary_node_id == donor_node.get_id():
+            sec_attr = 'lvstore_stack_tertiary'
+        else:
+            logger.error(
+                f"teardown_non_leader_lvstore: donor {donor_node.get_id()} "
+                f"is not secondary nor tertiary for primary "
+                f"{primary_node.get_id()}; refusing")
+            return False
+    else:
+        raise ValueError(
+            f"teardown_non_leader_lvstore: slot must be None, "
+            f"'secondary', or 'tertiary', got {slot!r}")
+
+    db_controller = DBController()
+    rpc_client = donor_node.rpc_client()
+
+    # 1. Delete per-lvol subsystems on the donor.
+    for lvol in db_controller.get_lvols_by_node_id(primary_node.get_id()):
+        if lvol.status == LVol.STATUS_IN_DELETION:
+            continue
+        try:
+            rpc_client.subsystem_delete(lvol.nqn)
+        except Exception as e:
+            logger.warning(
+                f"teardown_non_leader_lvstore: subsystem_delete({lvol.nqn}) "
+                f"on {donor_node.get_id()} raised {e}; continuing")
+
+    # 2. Best-effort: detach the hublvol nvme controller.
+    if primary_node.hublvol and primary_node.hublvol.bdev_name:
+        try:
+            rpc_client.bdev_nvme_detach_controller(
+                primary_node.hublvol.bdev_name)
+        except Exception as e:
+            logger.debug(
+                f"teardown_non_leader_lvstore: hublvol detach raised {e} "
+                f"(likely already detached)")
+
+    # 3. Remove the bdev stack. The donor instantiated the stack from
+    #    primary_node.lvstore_stack; we use the same list as the structural
+    #    template so _remove_bdev_stack walks it in the right order.
+    if primary_node.lvstore_stack:
+        # _remove_bdev_stack mutates 'status' fields — work on a shallow copy
+        # of the dicts so we don't accidentally persist 'deleted' markers
+        # back into primary_node.lvstore_stack on subsequent writes.
+        stack_copy = [dict(b) for b in primary_node.lvstore_stack]
+        _remove_bdev_stack(stack_copy, rpc_client)
+
+
+    # 4. Clear the back-reference on the donor and persist. Re-fetch so we
+    #    don't clobber unrelated concurrent edits to the donor record.
+    fresh_donor = db_controller.get_storage_node_by_id(donor_node.get_id())
+    setattr(fresh_donor, sec_attr, "")
+    if fresh_donor.lvstore_ports and primary_node.lvstore in fresh_donor.lvstore_ports:
+        del fresh_donor.lvstore_ports[primary_node.lvstore]
+    fresh_donor.write_to_db()
+
+    logger.info(
+        f"teardown_non_leader_lvstore: tore down {sec_attr} for primary "
+        f"{primary_node.get_id()} on donor {donor_node.get_id()}")
+    return True
+
+
+def reattach_sibling_failover(sibling_node, primary_node,
+                              old_failover_node, new_failover_node):
+    """Surgically reconfigure a sibling secondary's NVMe-oF multipath group
+    so its failover path points at the new sec_1 holder instead of the old
+    one.
+
+    Used by the single-node-expansion executor when ``primary_node``'s
+    sec_1 is re-homed from ``old_failover_node`` to ``new_failover_node``.
+    The sec_2 node (``sibling_node``) currently has an NVMe controller
+    attached to ``primary_node``'s hublvol bdev with paths
+    ``{primary, old_failover}``; after this call the paths are
+    ``{primary, new_failover}``.
+
+    The two RPCs are issued in additive-then-subtractive order so that the
+    sibling never has fewer than the prior path count: the new failover
+    path is attached first, then the old one is removed. If the additive
+    step fails on every NIC the function raises (the operator must
+    intervene); if only the subtractive cleanup fails it logs and returns
+    success — the dead path will be inert once the donor's stack is torn
+    down.
+    """
+    if primary_node.hublvol is None or not primary_node.hublvol.bdev_name:
+        logger.debug(
+            "reattach_sibling_failover: primary %s has no hublvol; nothing to do",
+            primary_node.get_id())
+        return
+
+    bdev_name = primary_node.hublvol.bdev_name
+    nqn = primary_node.hublvol.nqn
+    port = primary_node.hublvol.nvmf_port
+    rpc_client = sibling_node.rpc_client()
+
+    def _tr_type_for(node, iface):
+        if node.active_rdma and iface.trtype == "RDMA":
+            return "RDMA"
+        if not node.active_rdma and node.active_tcp and iface.trtype == "TCP":
+            return "TCP"
+        return None
+
+    # Add new failover path(s).
+    new_attached = 0
+    for iface in new_failover_node.data_nics:
+        tr_type = _tr_type_for(new_failover_node, iface)
+        if tr_type is None:
+            continue
+        try:
+            ret = rpc_client.bdev_nvme_attach_controller(
+                bdev_name, nqn, iface.ip4_address, port, tr_type,
+                multipath="multipath")
+            if ret:
+                new_attached += 1
+        except Exception as e:
+            logger.warning(
+                f"reattach_sibling_failover: attach new failover path "
+                f"{iface.ip4_address}:{port} on {sibling_node.get_id()} "
+                f"raised {e}")
+
+    if new_attached == 0:
+        raise RuntimeError(
+            f"reattach_sibling_failover: failed to attach any new failover "
+            f"path for primary {primary_node.get_id()} on sibling "
+            f"{sibling_node.get_id()}")
+
+    # Remove old failover path(s). Best-effort: the dead path is also
+    # naturally inert once the donor's stack is torn down.
+    for iface in old_failover_node.data_nics:
+        tr_type = _tr_type_for(old_failover_node, iface)
+        if tr_type is None:
+            continue
+        try:
+            rpc_client.bdev_nvme_remove_trid(
+                bdev_name, iface.ip4_address, port, trtype=tr_type)
+        except Exception as e:
+            logger.warning(
+                f"reattach_sibling_failover: remove old failover path "
+                f"{iface.ip4_address}:{port} on {sibling_node.get_id()} "
+                f"raised {e} (path will be inert after donor teardown)")
+
+    logger.info(
+        f"reattach_sibling_failover: sibling {sibling_node.get_id()} for "
+        f"LVS@{primary_node.get_id()} repointed failover "
+        f"{old_failover_node.get_id()} -> {new_failover_node.get_id()}")
 
 
 def send_cluster_map(node_id):
