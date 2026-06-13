@@ -1323,9 +1323,9 @@ def _remove_lvol_subsys_from_node(lvol, rpc_client):
     for ns in subsystem[0]["namespaces"]:
         if ns["uuid"] == lvol.uuid:
             logger.info("Removing namespace %s from subsystem %s", ns["uuid"], lvol.nqn)
-            ret = bool(rpc_client.nvmf_subsystem_remove_ns(lvol.nqn, lvol.ns_id))
+            ret = bool(rpc_client.nvmf_subsystem_remove_ns(lvol.nqn, ns['nsid']))
             if not ret:
-                logger.error(f"Failed to remove namespace {lvol.ns_id} from subsystem {lvol.nqn}")
+                logger.error(f"Failed to remove namespace {ns['nsid']} from subsystem {lvol.nqn}")
             subsystem = rpc_client.subsystem_list(lvol.nqn)
             break
 

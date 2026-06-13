@@ -600,6 +600,13 @@ def apply_migration_to_db(migration, tgt_lvol_uuid=None, tgt_lvol_bdev=None):
                     'blobid': entry.get('blobid', 0)
                 }
         logger.info(f"apply_migration_to_db: queried {len(spdk_info)} bdevs from target lvstore {tgt_node.lvstore}")
+
+        subsys = tgt_rpc.subsystem_list(lvol.nqn)
+        if subsys:
+            for ns in subsys[0].get('namespaces'):
+                if ns['uuid'] == lvol.uuid:
+                    lvol.ns_id = ns['nsid']
+                    break
     except Exception as e:
         logger.warning(f"apply_migration_to_db: could not query target SPDK — snap_uuid/blobid will not be updated: {e}")
 
@@ -621,6 +628,9 @@ def apply_migration_to_db(migration, tgt_lvol_uuid=None, tgt_lvol_bdev=None):
             entry['params']['lvs_name'] = tgt_node.lvstore
             if tgt_lvol_bdev:
                 entry['params']['name'] = tgt_lvol_bdev
+        elif entry.get('type') == 'bdev_lvol_clone':
+            entry['params']['clone_name'] = lvol.lvol_bdev
+            entry['name'] = lvol.top_bdev
 
     if lvol.lvol_bdev in spdk_info:
         lvol.blobid = spdk_info[lvol.lvol_bdev]['blobid']
