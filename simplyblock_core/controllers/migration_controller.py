@@ -50,7 +50,6 @@ from simplyblock_core.models.lvol_migration import LVolMigration
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.storage_node_ops import _reapply_allowed_hosts
 
 # Note: JobSchedule is not imported directly here; task creation is delegated to
 # tasks_controller.add_lvol_mig_task() which handles event logging consistently.
@@ -916,6 +915,7 @@ def pre_create_on_target(lvol_id, target_node_id,
                     max_namespaces=constants.LVO_MAX_NAMESPACES_PER_SUBSYS)
 
             if lvol.allowed_hosts:
+                from simplyblock_core.storage_node_ops import _reapply_allowed_hosts
                 try:
                     _reapply_allowed_hosts(lvol, _node, _rpc)
                 except Exception as _e:
