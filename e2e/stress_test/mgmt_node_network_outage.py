@@ -204,7 +204,7 @@ class MgmtNodeNetworkOutageTest(TestClusterBase):
         # Step 8: Wait for FIO completion
         # ------------------------------------------------------------------
         self.logger.info("Waiting for all FIO threads to complete ...")
-        self.common_utils.manage_fio_threads(fio_node, fio_threads, timeout=1800)
+        self.common_utils.manage_fio_threads(fio_node, fio_threads, timeout=self.fio_runtime + 1800)
         self.logger.info("All FIO threads completed.")
 
         # ------------------------------------------------------------------
