@@ -437,7 +437,7 @@ def list_snapshots(cluster_id=None, node_id=None, lvol_id=None,pool_id_or_name=N
                 instances.extend([SnapShot(**i).lvol.node_id for i in snap.instances])
             d["Replication target snap"] = snap.target_replicated_snap_uuid
             d["Replication source snap"] = snap.source_replicated_snap_uuid
-            d["Rrev snap"] = snap.prev_snap_uuid
+            d["Prev snap"] = snap.prev_snap_uuid
             d["Next snap"] = snap.next_snap_uuid
             d["Instance on other nodes"] = instances
         data.append(d)
