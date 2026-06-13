@@ -3,7 +3,7 @@ graylog:
   passwordSecret: "is6SP2EdWg0NdmVGv6CEp5hRHNL7BKVMFem4t9pouMqDQnHwXMSomas1qcbKSt5yISr8eBHv4Y7Dbswhyz84Ut0TW6kqsiPs"
 
 monitoring:
-  enabled: true
+  enabled: false
   secret: "sWbpOgba1bKnCfcPkVQi"
 
 log:
@@ -19,7 +19,7 @@ grafana:
 image:
   simplyblock: 
     repository: "public.ecr.aws/simply-block/simplyblock"
-    tag: "25.10.5"
+    tag: "remove_snode_init_container"
     pullPolicy: "Always"
 
 ports:
@@ -60,7 +60,7 @@ opensearch:
   antiAffinity: "hard"
   persistence:
     enabled: true
-    storageClass: local-hostpath
+    storageClass: local-path
     size: 10Gi
 
   resources:
@@ -126,7 +126,7 @@ prometheus:
     persistentVolume:
       enabled: true
       size: 5Gi
-      storageClass: local-hostpath
+      storageClass: local-path
     extraArgs:
       storage.tsdb.min-block-duration: 2h
       storage.tsdb.max-block-duration: 2h
@@ -180,7 +180,7 @@ prometheus:
     enabled: false
 
 ingress:
-  enabled: true
+  enabled: false
   ingressClassName: nginx
   useDNS: false
   host: ""

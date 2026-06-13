@@ -29,14 +29,6 @@ data:
           password:
   {{- end }}
 
-      - job_name: 'node'
-        kubernetes_sd_configs:
-        - role: endpoints
-        relabel_configs:
-        - source_labels: [__meta_kubernetes_endpoints_name]
-          action: keep
-          regex: 'simplyblock-node-exporter'
-
 ---
 apiVersion: v1
 kind: ConfigMap
