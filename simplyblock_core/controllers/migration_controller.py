@@ -130,9 +130,14 @@ def start_migration(migration_id,
         if instance_found:
             snaps_found_on_target.append(snap_id)
 
+    snap_migration_plan = []
+    for snap_id in snap_plan:
+        if snap_id not in snaps_found_on_target:
+            snap_migration_plan.append(snap_id)
+
     migration.source_node_id = source_node_id
     migration.phase = LVolMigration.PHASE_SNAP_COPY
-    migration.snap_migration_plan = list(set(snap_plan) - set(snaps_found_on_target))
+    migration.snap_migration_plan = snap_migration_plan
     migration.snaps_migrated = []
     migration.snaps_preexisting_on_target = snaps_found_on_target
     migration.intermediate_snaps = []
