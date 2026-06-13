@@ -11,6 +11,7 @@ spec:
         kubernetes.io/hostname: {{ HOSTNAME }}
       hostNetwork: true
       hostPID: true
+      dnsPolicy: ClusterFirstWithHostNet
       serviceAccountName: simplyblock-storage-node-sa
       tolerations:
         - effect: NoSchedule
@@ -35,6 +36,15 @@ spec:
           image: simplyblock/alpine-tools:3.21.3
           securityContext:
             privileged: true
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
           volumeMounts:
             - name: host-proc
               mountPath: /proc
@@ -55,7 +65,6 @@ spec:
               HUGEPAGES_BEFORE=$(grep HugePages_Total /proc/meminfo | awk '{print $2}')
               echo "[INFO] Hugepages before: $HUGEPAGES_BEFORE"
 
-              NODE_IP=$(ip route get 1.1.1.1 | grep -oE 'src [0-9.]+' | awk '{print $2}')
               echo "Detected node IP: $NODE_IP"
 
               echo "--- Checking OS ---"
@@ -100,17 +109,43 @@ spec:
 
               if [ "$OS_ID" != "talos" ]; then
                 HUGEPAGES_AFTER=$(grep HugePages_Total /proc/meminfo | awk '{print $2}')
-                echo "[INFO] Hugepages after: $HUGEPAGES_AFTER"
+                HUGEPAGES_AFTER_KB=$((HUGEPAGES_AFTER * 2048))
+                echo "[INFO] Hugepages after (kB): $HUGEPAGES_AFTER_KB"
 
-                if [ "$HUGEPAGES_BEFORE" != "$HUGEPAGES_AFTER" ]; then
-                  echo "[INFO] Hugepages changed, restarting kubelet..."
+                KUBE_TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+                KUBE_CA=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+                K8S_NODE_HUGEPAGES_RAW=$(curl -s --cacert "$KUBE_CA" \
+                  -H "Authorization: Bearer $KUBE_TOKEN" \
+                  "https://kubernetes.default.svc/api/v1/nodes/$NODE_NAME" \
+                  | grep -o '"hugepages-2Mi": *"[^"]*"' | head -1 | grep -o '"[^"]*"$' | tr -d '"' -f4)
+                echo "[INFO] Node hugepages-2Mi reported by Kubernetes: $K8S_NODE_HUGEPAGES_RAW"
+
+                # Convert Kubernetes value (e.g. 13Gi) to kB to compare with /proc/meminfo
+                K8S_NODE_HUGEPAGES_KB=0
+                if echo "$K8S_NODE_HUGEPAGES_RAW" | grep -q 'Gi'; then
+                  K8S_NODE_HUGEPAGES_KB=$(echo "$K8S_NODE_HUGEPAGES_RAW" | sed 's/Gi//' | awk '{printf "%d", $1 * 1024 * 1024}')
+                elif echo "$K8S_NODE_HUGEPAGES_RAW" | grep -q 'Mi'; then
+                  K8S_NODE_HUGEPAGES_KB=$(echo "$K8S_NODE_HUGEPAGES_RAW" | sed 's/Mi//' | awk '{printf "%d", $1 * 1024}')
+                fi
+                echo "[INFO] Node hugepages-2Mi in kB: $K8S_NODE_HUGEPAGES_KB"
+
+
+                if [ "$HUGEPAGES_AFTER_KB" -gt "$K8S_NODE_HUGEPAGES_KB" ]; then
+                  echo "[INFO] Hugepages increased beyond what Kubernetes knows ($HUGEPAGES_AFTER_KB kB > $K8S_NODE_HUGEPAGES_KB kB), restarting kubelet..."
                   nsenter --target 1 --mount --uts --ipc --net --pid -- /bin/sh -c '
                     if command -v systemctl >/dev/null 2>&1; then
-                      systemctl restart kubelet && echo "Kubelet restarted" || echo "Kubelet restart failed"
+                      if systemctl cat kubelet.service >/dev/null 2>&1; then
+                        systemctl restart kubelet && echo "Kubelet restarted" || echo "Kubelet restart failed"
+                      elif systemctl cat k3s-agent.service >/dev/null 2>&1; then
+                        echo "kubelet service not found, restarting k3s-agent..."
+                        systemctl restart k3s-agent && echo "k3s-agent restarted" || echo "k3s-agent restart failed"
+                      else
+                        echo "Neither kubelet nor k3s-agent service found, skipping restart"
+                      fi
                     fi
                   '
                 else
-                  echo "[INFO] Hugepages unchanged, skipping kubelet restart."
+                  echo "[INFO] Hugepages not greater than what Kubernetes reports, skipping kubelet restart."
                 fi
               else
                 echo "Talos detected - skipping nsenter and kubelet restart."
