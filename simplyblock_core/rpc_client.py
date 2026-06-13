@@ -467,6 +467,27 @@ class RPCClient:
             "nsid": nsid}
         return self._request("nvmf_subsystem_remove_ns", params)
 
+    def nvmf_subsystem_ns_update(self, nqn, nsid, bdev_name):
+        """Atomically swap the bdev backing *nsid* in *nqn* for *bdev_name*.
+
+        Keeps the same nsid, UUID, NGUID, and ANA group — the client sees the
+        namespace as unchanged (no AER namespace-change event, no rediscovery
+        delay).  Available in SPDK ≥ 24.01.
+
+        Returns the SPDK result on success, or None if the RPC is unavailable
+        or the call fails (caller should fall back to remove + add_ns).
+        """
+        params = {
+            "nqn": nqn,
+            "nsid": nsid,
+            "bdev_name": bdev_name,
+        }
+        try:
+            return self._request("nvmf_subsystem_ns_update", params)
+        except Exception as e:
+            logger.debug("nvmf_subsystem_ns_update not available or failed: %s", e)
+            return None
+
     def nvmf_subsystem_listener_set_ana_state(self, nqn, ip, port, trtype="TCP", is_optimized=True, ana=None):
         params = {
             "nqn": nqn,
@@ -1393,10 +1414,11 @@ class RPCClient:
         }
         return self._request("bdev_lvol_set_lvs_read_only", params)
 
-    def bdev_lvol_create_hublvol(self, lvs):
-        return self._request('bdev_lvol_create_hublvol', {
-            "uuid" if utils.UUID_PATTERN.match(lvs) else "lvs_name": lvs,
-        })
+    def bdev_lvol_create_hublvol(self, lvs, name=None):
+        params = {"uuid" if utils.UUID_PATTERN.match(lvs) else "lvs_name": lvs}
+        if name:
+            params["name"] = name
+        return self._request('bdev_lvol_create_hublvol', params)
 
     def bdev_lvol_delete_hublvol(self, lvs):
         return self._request('bdev_lvol_delete_hublvol', {
@@ -1551,7 +1573,7 @@ class RPCClient:
         """Mark *name* (composite lvol bdev) as a migration-target lvol."""
         return self._request("bdev_lvol_set_migration_flag", {"lvol_name": name})
 
-    def bdev_lvol_transfer(self, name, offset, batch_size, bdev_name, operation="migrate"):
+    def bdev_lvol_transfer(self, name, offset, batch_size, bdev_name, operation="migrate", lvol_id=0):
         """
         Start an async blob transfer from *name* (source composite bdev) to the
         NVMe-oF bdev *bdev_name* attached on the caller's node.
@@ -1561,6 +1583,7 @@ class RPCClient:
         """
         return self._request("bdev_lvol_transfer", {
             "lvol_name": name,
+            "lvol_id": lvol_id,
             "offset": offset,
             "cluster_batch": batch_size,
             "gateway": bdev_name,

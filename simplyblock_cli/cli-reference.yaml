@@ -1922,12 +1922,12 @@ commands:
         help: "Migrate a logical volume to a different storage node."
         private: true
         arguments:
-          - name: "volume_id"
-            help: "The logical volume id."
-            dest: volume_id
+          - name: "volume_or_migration_id"
+            help: "Migration ID (from migrate-pre-create) or volume ID."
+            dest: volume_or_migration_id
             type: str
-          - name: "target_node_id"
-            help: "The target storage node id."
+          - name: "--target-node-id"
+            help: "Target storage node ID. Required when passing a volume ID; omit when passing a migration ID."
             dest: target_node_id
             type: str
           - name: "--max-retries"
@@ -1960,6 +1960,27 @@ commands:
           - name: "migration_id"
             help: "The migration id."
             dest: migration_id
+            type: str
+      - name: migrate-pre-create
+        help: "Pre-create the target NVMe-oF subsystem and bdev for a future migration. Returns NVMe connect strings for the target node (inaccessible ANA state)."
+        private: true
+        arguments:
+          - name: "volume_id"
+            help: "The volume id."
+            dest: volume_id
+            type: str
+          - name: "target_node_id"
+            help: "The target storage node id."
+            dest: target_node_id
+            type: str
+          - name: "--ctrl-loss-tmo"
+            help: "NVMe ctrl-loss-tmo in seconds."
+            dest: ctrl_loss_tmo
+            type: int
+            default: 3600
+          - name: "--host-nqn"
+            help: "Host NQN for DH-HMAC-CHAP authentication (required when volume has allowed hosts)."
+            dest: host_nqn
             type: str
   - name: "control-plane"
     help: "Control Plane Commands"

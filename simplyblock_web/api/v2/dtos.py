@@ -6,6 +6,8 @@ from uuid import UUID
 from fastapi import Request
 from pydantic import BaseModel
 
+from simplyblock_core.controllers import migration_controller
+from simplyblock_core.db_controller import DBController
 from simplyblock_core.utils import hexa_to_cpu_list
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
@@ -254,8 +256,6 @@ class SnapshotDTO(BaseModel):
     def from_model(
         model: SnapShot, request: Request, cluster_id, pool_id, volume_id=None
     ):
-        from simplyblock_core.controllers import migration_controller
-
         is_migrating = False
         if model.lvol is not None:
             active_mig = migration_controller.get_active_migration_for_lvol(
@@ -425,11 +425,8 @@ class VolumeDTO(BaseModel):
         stat_obj: Optional[StatsObject] = None,
         rep_info=None,
     ):
-        from simplyblock_core.controllers import migration_controller
-        from simplyblock_core.db_controller import DBController as _DBC
-
         active_mig = migration_controller.get_active_migration_for_lvol(model.uuid)
-        _db = _DBC()
+        _db = DBController()
         eff_policy = _db.get_policy_for_lvol(model)
         return VolumeDTO(
             id=UUID(model.get_id()),
@@ -562,6 +559,8 @@ class MigrationDTO(BaseModel):
     status: str
     snaps_total: int
     snaps_migrated: int
+    intermediate_snap_rounds: int
+    max_intermediate_snap_rounds: int
     retry_count: int
     max_retries: int
     error_message: str
@@ -579,6 +578,8 @@ class MigrationDTO(BaseModel):
             status=model.status,
             snaps_total=len(model.snap_migration_plan),
             snaps_migrated=len(model.snaps_migrated),
+            intermediate_snap_rounds=model.intermediate_snap_rounds,
+            max_intermediate_snap_rounds=model.max_intermediate_snap_rounds,
             retry_count=model.retry_count,
             max_retries=model.max_retries,
             error_message=model.error_message or "",

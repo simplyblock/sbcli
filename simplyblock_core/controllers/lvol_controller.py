@@ -2423,12 +2423,20 @@ def replication_start(lvol_id, replication_cluster_id=None):
             return False
     logger.info("Setting LVol do_replicate: True")
 
-    for snap in db_controller.get_snapshots():
+    all_snaps = db_controller.get_snapshots()
+    for snap in all_snaps:
         if snap.lvol.uuid == lvol.uuid:
             if not snap.target_replicated_snap_uuid:
-                task = tasks_controller.add_snapshot_replication_task(snap.cluster_id, snap.lvol.node_id, snap.get_id())
-                if task:
-                    snapshot_events.replication_task_created(snap)
+                for sn in all_snaps:
+                    if sn.lvol.node_id == lvol.replication_node_id and sn.data_uuid == snap.data_uuid:
+                        snap = db_controller.get_snapshot_by_id(snap.get_id())
+                        snap.target_replicated_snap_uuid = sn.get_id()
+                        snap.write_to_db()
+                        break
+                else:
+                    task = tasks_controller.add_snapshot_replication_task(snap.cluster_id, snap.lvol.node_id, snap.get_id())
+                    if task:
+                        snapshot_events.replication_task_created(snap)
     return True
 
 

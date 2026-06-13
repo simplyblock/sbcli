@@ -678,12 +678,21 @@ class CLIWrapperBase:
         return lvol_controller.clone_lvol(args.volume_id, args.clone_name)
 
     def volume__migrate(self, sub_command, args):
-        migration_id, error = migration_controller.start_migration(
-            args.volume_id,
-            args.target_node_id,
-            max_retries=args.max_retries,
-            deadline_seconds=args.deadline_seconds,
-        )
+        if args.target_node_id is None:
+            # Pre-create flow: first arg is the migration_id
+            migration_id, error = migration_controller.start_migration(
+                migration_id=args.volume_or_migration_id,
+                max_retries=args.max_retries,
+                deadline_seconds=args.deadline_seconds,
+            )
+        else:
+            # Direct flow: first arg is volume_id, second is target_node_id
+            migration_id, error = migration_controller.start_migration(
+                lvol_id=args.volume_or_migration_id,
+                target_node_id=args.target_node_id,
+                max_retries=args.max_retries,
+                deadline_seconds=args.deadline_seconds,
+            )
         if error:
             print(f"Error: {error}")
             return False
@@ -699,6 +708,22 @@ class CLIWrapperBase:
             print(f"Error: {error}")
             return False
         print(f"Migration {args.migration_id} cancelled")
+        return True
+
+    def volume__migrate_pre_create(self, sub_command, args):
+        try:
+            migration_id, connect_strings = migration_controller.pre_create_on_target(
+                args.volume_id,
+                args.target_node_id,
+                ctrl_loss_tmo=args.ctrl_loss_tmo,
+                host_nqn=getattr(args, 'host_nqn', None),
+            )
+        except ValueError as e:
+            print(f"Error: {e}")
+            return False
+        print(f"Migration ID: {migration_id}")
+        if connect_strings:
+            return "\n".join(c['connect'] for c in connect_strings)
         return True
 
     def control_plane__add(self, sub_command, args):
