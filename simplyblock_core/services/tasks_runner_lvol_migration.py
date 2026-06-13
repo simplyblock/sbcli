@@ -533,7 +533,7 @@ def _setup_snap_transfer(snap, snap_index, migration, src_node, tgt_node,
             snap_short, tgt_node.lvstore, snap_uuid_on_tgt, snap_blobid,
             snap.lvol.lvol_priority_class if hasattr(snap, 'lvol') else 0)
         if not ret_sec:
-            _delete_bdev_blocking(tgt_composite, tgt_rpc)
+            _delete_bdev_blocking(tgt_composite, tgt_rpc, sec_rpc)
             return None, f"bdev_lvol_register on secondary failed for snap {snap_uuid}"
         sec_registered = True
 
@@ -779,7 +779,7 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                     logger.info(
                         f"Removing leftover target bdev {tgt_composite} from failed attempt")
                     try:
-                        _delete_bdev_blocking(tgt_composite, tgt_rpc)
+                        _delete_bdev_blocking(tgt_composite, tgt_rpc, sec_rpc)
                     except Exception as e:
                         logger.warning(f"Pre-cleanup of {tgt_composite} failed (continuing): {e}")
 
