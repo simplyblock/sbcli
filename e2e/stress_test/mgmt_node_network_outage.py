@@ -14,9 +14,7 @@ Self-restoring iptables approach:
 
 import itertools
 import threading
-import time
 import random
-from pathlib import Path
 
 from e2e_tests.cluster_test_base import TestClusterBase, generate_random_sequence
 from utils.common_utils import sleep_n_sec
@@ -41,8 +39,7 @@ class MgmtNodeNetworkOutageTest(TestClusterBase):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.test_name = "mgmt_node_network_outage"
-        self.mount_base = "/mnt/"
-        self.log_base = f"{Path.home()}/"
+        self.mount_base = "/mnt"
         # 1 hour outage
         self.outage_duration = 3600
         # FIO runtime: 2 hours (covers outage + recovery validation)
@@ -52,6 +49,7 @@ class MgmtNodeNetworkOutageTest(TestClusterBase):
 
     def run(self):
         fio_threads = []
+        fio_errors = []  # Collect exceptions from FIO threads
         lvol_details = {}
         self.logger.info("=== MgmtNodeNetworkOutageTest: starting ===")
 
@@ -139,7 +137,7 @@ class MgmtNodeNetworkOutageTest(TestClusterBase):
 
                 device = self.ssh_obj.get_lvol_vs_device(fio_node, lvol_id)
                 mount_path = f"{self.mount_base}/{lvol_name}"
-                log_path = f"{self.log_base}/{lvol_name}.log"
+                log_path = f"{self.log_path}/{lvol_name}.log"
 
                 self.ssh_obj.format_disk(fio_node, device, fs_type=fs_type)
                 self.ssh_obj.mount_path(fio_node, device, mount_path)
@@ -163,10 +161,21 @@ class MgmtNodeNetworkOutageTest(TestClusterBase):
         self.logger.info(f"Starting FIO on {len(lvol_details)} volumes "
                          f"(runtime={self.fio_runtime}s, numjobs={self.fio_num_jobs})")
 
+        def _fio_wrapper(name, *args, **kwargs):
+            """Run FIO and capture any exception for later reporting."""
+            try:
+                self.ssh_obj.run_fio_test(*args, **kwargs)
+            except Exception as exc:
+                self.logger.error(f"FIO thread for {name} failed: {exc}")
+                fio_errors.append((name, exc))
+
         for lvol_name, detail in lvol_details.items():
             t = threading.Thread(
-                target=self.ssh_obj.run_fio_test,
-                args=(fio_node, None, detail["Mount"], detail["Log"]),
+                target=_fio_wrapper,
+                args=(
+                    lvol_name,
+                    fio_node, None, detail["Mount"], detail["Log"],
+                ),
                 kwargs={
                     "size": "5G",
                     "name": f"{lvol_name}_fio",
@@ -293,6 +302,16 @@ class MgmtNodeNetworkOutageTest(TestClusterBase):
         self.common_utils.manage_fio_threads(fio_node, fio_threads, timeout=self.fio_runtime + 1800)
         self.logger.info("All FIO threads completed.")
 
+        # Check for thread-level FIO errors
+        if fio_errors:
+            failed = [f"{name}: {exc}" for name, exc in fio_errors]
+            self.logger.error(
+                f"{len(fio_errors)}/{len(lvol_details)} FIO threads failed:\n"
+                + "\n".join(failed))
+            raise RuntimeError(
+                f"{len(fio_errors)} FIO thread(s) failed: "
+                + "; ".join(f"{n}: {e}" for n, e in fio_errors))
+
         # ------------------------------------------------------------------
         # Step 11: Validate FIO logs — no IO errors
         # ------------------------------------------------------------------
@@ -302,6 +321,11 @@ class MgmtNodeNetworkOutageTest(TestClusterBase):
                 f"  Validating {lvol_name} "
                 f"({detail['sec_type']}/{detail['fs_type']} "
                 f"on node {detail['node']}) ...")
+            log_content = self.ssh_obj.read_file(fio_node, detail["Log"])
+            if not log_content or not log_content.strip():
+                raise RuntimeError(
+                    f"FIO log missing or empty for {lvol_name}: "
+                    f"{detail['Log']}")
             self.common_utils.validate_fio_test(
                 node=fio_node, log_file=detail["Log"]
             )
