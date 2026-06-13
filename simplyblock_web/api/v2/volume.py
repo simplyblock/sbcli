@@ -110,7 +110,7 @@ def add(
         raise AssertionError('unreachable')
 
     if volume_id_or_false == False:  # noqa
-        raise ValueError(error)
+        raise HTTPException(422, error)
 
     entity_url = request.app.url_path_for(
             'clusters:storage-pools:volumes:detail',
