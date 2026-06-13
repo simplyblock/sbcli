@@ -1635,24 +1635,25 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
     logger.info("Updating mgmt cluster")
     if cluster.mode == "docker":
         cluster_docker = utils.get_docker_client(cluster_id)
-        logger.info(f"Pulling image {constants.SIMPLY_BLOCK_DOCKER_IMAGE}")
-        pull_docker_image_with_retry(cluster_docker, constants.SIMPLY_BLOCK_DOCKER_IMAGE)
-        image_without_tag = constants.SIMPLY_BLOCK_DOCKER_IMAGE.split(":")[0]
-        image_without_tag = image_without_tag.split("/")
-        image_parts = "/".join(image_without_tag[-2:])
         service_image = constants.SIMPLY_BLOCK_DOCKER_IMAGE
         if mgmt_image:
             service_image = mgmt_image
+        logger.info(f"Pulling image {service_image}")
+        pull_docker_image_with_retry(cluster_docker, service_image)
         service_names = []
+        image_parts = ["simplyblock-io/simplyblock:", "simplyblock/simplyblock:", "simply-block/simplyblock:"]
         for service in cluster_docker.services.list():
-            if image_parts in service.attrs['Spec']['Labels']['com.docker.stack.image']:
-                if service.name in ["app_CachingNodeMonitor", "app_CachedLVolStatsCollector"]:
-                    logger.info(f"Removing service {service.name}")
-                    service.remove()
-                else:
-                    logger.info(f"Updating service {service.name}")
-                    service.update(image=service_image, force_update=True)
-                    service_names.append(service.attrs['Spec']['Name'])
+            service_image=service.attrs['Spec']['Labels']['com.docker.stack.image']
+            for part in image_parts:
+                if part in service_image:
+                    if service.name in ["app_CachingNodeMonitor", "app_CachedLVolStatsCollector"]:
+                        logger.info(f"Removing service {service.name}")
+                        service.remove()
+                    else:
+                        logger.info(f"Updating service {service.name}")
+                        service.update(image=service_image, force_update=True)
+                        service_names.append(service.attrs['Spec']['Name'])
+                    break
 
         if "app_SnapshotMonitor" not in service_names:
             utils.create_docker_service(
@@ -1681,8 +1682,7 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
         utils.load_kube_config_with_fallback()
         apps_v1 = k8s_client.AppsV1Api()
         namespace = constants.K8S_NAMESPACE
-        image_without_tag = constants.SIMPLY_BLOCK_DOCKER_IMAGE.split(":")[0]
-        image_parts = "/".join(image_without_tag.split("/")[-2:])
+        image_parts = ["simplyblock-io/simplyblock:", "simplyblock/simplyblock:", "simply-block/simplyblock:"]
         service_image = mgmt_image or constants.SIMPLY_BLOCK_DOCKER_IMAGE
         deployment_names = []
         # Update Deployments
@@ -1693,17 +1693,18 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                 continue
             deployment_names.append(deploy.metadata.name)
             for c in deploy.spec.template.spec.containers:
-                if image_parts in c.image:
-                    logger.info(f"Updating deployment {deploy.metadata.name} image to {service_image}")
-                    c.image = service_image
-                    annotations = deploy.spec.template.metadata.annotations or {}
-                    annotations["pod.kubernetes.io/restartedAt"] = datetime.datetime.utcnow().isoformat()
-                    deploy.spec.template.metadata.annotations = annotations
-                    apps_v1.patch_namespaced_deployment(
-                        name=deploy.metadata.name,
-                        namespace=namespace,
-                        body={"spec": {"template": deploy.spec.template}}
-                    )
+                for part in image_parts:
+                    if part in c.image:
+                        logger.info(f"Updating deployment {deploy.metadata.name} image to {service_image}")
+                        c.image = service_image
+                        annotations = deploy.spec.template.metadata.annotations or {}
+                        annotations["pod.kubernetes.io/restartedAt"] = datetime.datetime.utcnow().isoformat()
+                        deploy.spec.template.metadata.annotations = annotations
+                        apps_v1.patch_namespaced_deployment(
+                            name=deploy.metadata.name,
+                            namespace=namespace,
+                            body={"spec": {"template": deploy.spec.template}})
+                        break
 
         if "simplyblock-tasks-runner-sync-lvol-del" not in deployment_names:
             utils.create_k8s_service(
@@ -1725,17 +1726,18 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
         daemonsets = apps_v1.list_namespaced_daemon_set(namespace=namespace)
         for ds in daemonsets.items:
             for c in ds.spec.template.spec.containers:
-                if image_parts in c.image:
-                    logger.info(f"Updating daemonset {ds.metadata.name} image to {service_image}")
-                    c.image = service_image
-                    annotations = ds.spec.template.metadata.annotations or {}
-                    annotations["pod.kubernetes.io/restartedAt"] = datetime.datetime.utcnow().isoformat()
-                    ds.spec.template.metadata.annotations = annotations
-                    apps_v1.patch_namespaced_daemon_set(
-                        name=ds.metadata.name,
-                        namespace=namespace,
-                        body={"spec": {"template": ds.spec.template}}
-                        )
+                for part in image_parts:
+                    if part in c.image:
+                        logger.info(f"Updating daemonset {ds.metadata.name} image to {service_image}")
+                        c.image = service_image
+                        annotations = ds.spec.template.metadata.annotations or {}
+                        annotations["pod.kubernetes.io/restartedAt"] = datetime.datetime.utcnow().isoformat()
+                        ds.spec.template.metadata.annotations = annotations
+                        apps_v1.patch_namespaced_daemon_set(
+                            name=ds.metadata.name,
+                            namespace=namespace,
+                            body={"spec": {"template": ds.spec.template}})
+                        break
 
         logger.info("Done updating mgmt cluster")
 
