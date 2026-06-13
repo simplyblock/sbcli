@@ -50,7 +50,6 @@ from simplyblock_core.models.lvol_migration import LVolMigration
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.storage_node_ops import _reapply_allowed_hosts
 
 # Note: JobSchedule is not imported directly here; task creation is delegated to
@@ -119,16 +118,23 @@ def start_migration(migration_id,
 
     snap_plan = get_snapshot_chain(lvol_id, source_node_id)
 
-    snaps_migrated = []
-    snapshots_data_ids = set(snap.data_uuid for snap in snap_plan)
-    for snap in db.get_snapshots_by_node_id(target_node_id):
-        if snap.data_uuid in snapshots_data_ids:
-            snaps_migrated.append(snap.uuid)
+    snaps_found_on_target = []
+    for snap_id in snap_plan:
+        snap = db.get_snapshot_by_id(snap_id)
+        instance_found = False
+        if snap.instances:
+            for snap_instance in snap.instances:
+                if snap_instance.get('lvol').get("node_id") == target_node_id:
+                    instance_found = True
+                    break
+        if instance_found:
+            snaps_found_on_target.append(snap_id)
 
     migration.source_node_id = source_node_id
     migration.phase = LVolMigration.PHASE_SNAP_COPY
-    migration.snap_migration_plan = snap_plan
-    migration.snaps_migrated = snaps_migrated
+    migration.snap_migration_plan = list(set(snap_plan) - set(snaps_found_on_target))
+    migration.snaps_migrated = []
+    migration.snaps_preexisting_on_target = snaps_found_on_target
     migration.intermediate_snaps = []
     migration.next_snap_index = 0
     migration.intermediate_snap_rounds = 0
@@ -639,11 +645,6 @@ def apply_migration_to_db(migration, tgt_lvol_uuid=None, tgt_lvol_bdev=None):
             logger.warning(f"apply_migration_to_db: snapshot not found: {snap_uuid}")
             continue
 
-        # Only fully update snapshots owned by the migrating volume.
-        # Shared ancestry snaps (from a clone chain) belong to a different
-        # volume and keep their current location until that volume migrates.
-        if snap.lvol.uuid != migration.lvol_id:
-            continue
 
         # snap_bdev: update lvstore prefix and add migration suffix.
         # On the target the bdev was created as <src_short> + _MIGRATION_BDEV_SUFFIX
@@ -676,7 +677,29 @@ def apply_migration_to_db(migration, tgt_lvol_uuid=None, tgt_lvol_bdev=None):
         if tgt_lvol_uuid:
             snap.lvol.lvol_uuid = tgt_lvol_uuid
 
-        snap.write_to_db(db.kv_store)
+        # If the snapshot does not belong to this lvol then add as an instance to the original
+        # snap record on the source node
+        if snap.lvol.uuid != migration.lvol_id:
+            logger.debug(f"apply_migration_to_db: snapshot {snap_uuid} belongs to another lvol {snap.lvol.uuid}")
+            original_snap = db.get_snapshot_by_id(snap_uuid)
+            original_snap.instances.append(snap)
+            original_snap.write_to_db(db.kv_store)
+        else:
+            # If the snapshot is used by other LVols (clones) then add as an instance to the original
+            # snap record on the source node
+            for lvol in db.get_mini_lvols():
+                if lvol.uuid == migration.lvol_id:
+                    continue
+                if lvol.cloned_from_snap and lvol.cloned_from_snap == snap_uuid:
+                    logger.debug(f"apply_migration_to_db: snapshot {snap_uuid} is still referenced by lvol {lvol.uuid}")
+                    original_snap = db.get_snapshot_by_id(snap_uuid)
+                    original_snap.instances.append(snap)
+                    original_snap.write_to_db(db.kv_store)
+                    break
+            else:
+                # If the snapshot belongs to this LVol, then it is fine to transfer it to the target node
+                snap.write_to_db(db.kv_store)
+
         logger.debug(f"apply_migration_to_db: updated snapshot {snap_uuid} snap_bdev={snap.snap_bdev}")
 
     return True

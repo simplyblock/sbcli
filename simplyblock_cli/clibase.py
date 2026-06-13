@@ -373,7 +373,7 @@ class CLIWrapperBase:
         return device_controller.new_device_from_failed(args.device_id)
 
     def storage_node__list_snapshots(self, sub_command, args):
-        return snapshot_controller.list_by_node(args.node_id, args.json)
+        return snapshot_controller.list_snapshots(node_id=args.node_id, is_json=args.json)
 
     def storage_node__list_lvols(self, sub_command, args):
         return lvol_controller.list_by_node(args.node_id, args.json)
@@ -683,19 +683,37 @@ class CLIWrapperBase:
             migration_id, error = migration_controller.start_migration(
                 migration_id=args.volume_or_migration_id,
                 max_retries=args.max_retries,
-                deadline_seconds=args.deadline_seconds,
-            )
+                deadline_seconds=args.deadline_seconds)
+            if not migration_id:
+                print("Error: Failed to pre-create migration on target")
+                print(error)
+                return False
         else:
-            # Direct flow: first arg is volume_id, second is target_node_id
-            migration_id, error = migration_controller.start_migration(
-                lvol_id=args.volume_or_migration_id,
-                target_node_id=args.target_node_id,
-                max_retries=args.max_retries,
-                deadline_seconds=args.deadline_seconds,
-            )
-        if error:
-            print(f"Error: {error}")
-            return False
+            try:
+                migration_id, connect_strings = migration_controller.pre_create_on_target(
+                    args.volume_or_migration_id,
+                    args.target_node_id,
+                    host_nqn=getattr(args, 'host_nqn', None),
+                )
+                if connect_strings:
+                    con = "\n".join(c['connect'] for c in connect_strings)
+                    print(con)
+                if not migration_id:
+                    print("Error: Failed to pre-create migration on target")
+                    return False
+
+                migration_id, error = migration_controller.start_migration(
+                    migration_id=migration_id,
+                    max_retries=args.max_retries,
+                    deadline_seconds=args.deadline_seconds,
+                )
+                if error:
+                    print(f"Error: {error}")
+                    return False
+            except ValueError as e:
+                print(f"Error: {e}")
+                return False
+
         print(f"Migration started: {migration_id}")
         return True
 
@@ -818,7 +836,7 @@ class CLIWrapperBase:
         return True
 
     def snapshot__list(self, sub_command, args):
-        return snapshot_controller.list(args.all, args.cluster_id, args.with_details, args.pool)
+        return snapshot_controller.list_snapshots(args.cluster_id, args.node_id, args.lvol_id, args.pool, args.with_details, args.json)
 
     def snapshot__delete(self, sub_command, args):
         return snapshot_controller.delete(args.snapshot_id, args.force)

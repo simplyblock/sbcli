@@ -84,11 +84,7 @@ the 3-second service-loop gap between phases.
 
 import datetime
 import time
-
-
-def _now_ms():
-    """Return current wall-clock time as an ISO-8601 string with milliseconds."""
-    return datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3]
+from typing import Optional
 
 from simplyblock_core import db_controller as db_mod, utils, constants
 from simplyblock_core.controllers import (
@@ -98,7 +94,8 @@ from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_migration import LVolMigration
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.rpc_client import RPCException
+from simplyblock_core.models.snapshot import SnapShot
+from simplyblock_core.rpc_client import RPCException, RPCClient
 
 logger = utils.get_logger(__name__)
 db = db_mod.DBController()
@@ -116,6 +113,11 @@ _WAIT = object()
 # the next 3-second service-loop iteration.
 _INTERMEDIATE_POLL_INTERVAL_S = 1      # seconds between stat checks
 _INTERMEDIATE_POLL_MAX = 300           # max iterations ≈ 5 min
+
+
+def _now_ms():
+    """Return current wall-clock time as an ISO-8601 string with milliseconds."""
+    return datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3]
 
 
 # ---------------------------------------------------------------------------
@@ -583,8 +585,8 @@ def _setup_snap_transfer(snap, snap_index, migration, src_node, tgt_node,
     }, None
 
 
-def _post_process_snap(snap, tgt_node, tgt_rpc, migration, t,
-                       tgt_sec=None, sec_rpc=None):
+def _post_process_snap(snap: SnapShot, tgt_node: StorageNode, tgt_rpc: RPCClient, migration: LVolMigration,
+                       transfer: dict, tgt_sec:Optional[StorageNode]=None, sec_rpc: Optional[RPCClient]=None):
     """
     Post-transfer steps for a single snapshot whose data has been fully copied:
       add_clone → convert (on primary, then mirrored on secondary) → cleanup.
@@ -593,14 +595,22 @@ def _post_process_snap(snap, tgt_node, tgt_rpc, migration, t,
     Returns (ok: bool, error: str|None).
     """
     snap_uuid = snap.uuid
-    snap_short = t['snap_short']
+    snap_short = transfer['snap_short']
     tgt_composite = f"{tgt_node.lvstore}/{snap_short}"
 
     # Link to predecessor snapshot in target's ancestry chain.
     # add_clone must succeed on BOTH primary and secondary before we convert
-    # either — once convert runs the lvol is immutable and cannot be re-linked.
-    if migration.snaps_migrated:
-        pred_uuid = migration.snaps_migrated[-1]
+    # either — once the convert runs, the lvol is immutable and cannot be re-linked.
+    pred_uuid = None
+    for snap_rec in migration_controller.get_snapshot_chain(migration.lvol_id):
+        if snap_rec == snap_uuid:
+            break
+        pred_uuid = snap_rec
+
+    if pred_uuid:
+        if pred_uuid not in [migration.snaps_migrated+migration.snaps_preexisting_on_target]:
+            return False, f"Predecessor {pred_uuid} not in migration chain"
+
         try:
             pred_snap = db.get_snapshot_by_id(pred_uuid)
             # Predecessor was created on target with the migration suffix — build
@@ -634,10 +644,11 @@ def _post_process_snap(snap, tgt_node, tgt_rpc, migration, t,
     # update (with migration suffix and all other fields) happens in
     # apply_migration_to_db() at the end of CLEANUP_SOURCE.
     try:
-        snap_rec = db.get_snapshot_by_id(snap_uuid)
-        if snap_rec.lvol.uuid == migration.lvol_id:
-            snap_rec.lvol.node_id = tgt_node.get_id()
-            snap_rec.write_to_db(db.kv_store)
+        if snap_uuid in migration.snaps_migrated:
+            snap_rec = db.get_snapshot_by_id(snap_uuid)
+            if snap_rec.lvol.uuid == migration.lvol_id:
+                snap_rec.lvol.node_id = tgt_node.get_id()
+                snap_rec.write_to_db(db.kv_store)
     except KeyError:
         logger.warning(f"Snapshot {snap_uuid} not found in DB for early node update")
 

@@ -7074,7 +7074,7 @@ def auto_repair(node_id, validate_only=False, force_remove_inconsistent=False, f
     # #sbctl sn list-snapshots d4577fa7-545f-4506-b127-7e81fc3a6e34 --json > snaps_8080.json
     # with open('snaps_8082.json', 'r') as file:
     #     snaps = json.load(file)
-    snaps = snapshot_controller.list_by_node(node_id, is_json=True)
+    snaps = snapshot_controller.list_snapshots(node_id=node_id, is_json=True)
     if snaps:
         snaps = json.loads(snaps)
 
