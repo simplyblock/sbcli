@@ -608,7 +608,7 @@ def _post_process_snap(snap: SnapShot, tgt_node: StorageNode, tgt_rpc: RPCClient
         pred_uuid = snap_rec
 
     if pred_uuid:
-        if pred_uuid not in [migration.snaps_migrated+migration.snaps_preexisting_on_target+migration.snap_migration_plan]:
+        if pred_uuid not in migration.snaps_migrated+migration.snaps_preexisting_on_target+migration.snap_migration_plan:
             return False, f"Predecessor {pred_uuid} not in migration chain"
 
         try:

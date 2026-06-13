@@ -41,6 +41,7 @@ import json
 import logging
 import time
 import uuid
+from datetime import datetime
 
 from simplyblock_core import constants, utils
 from simplyblock_core.controllers import migration_events, tasks_controller
@@ -329,6 +330,8 @@ def is_migration_active_on_node(node_id, cluster_id=None):
 def list_migrations(cluster_id=None, is_json=False):
     """Return a formatted list (table or JSON) of all migrations."""
     migrations = db.get_migrations(cluster_id)
+    migrations = sorted(migrations, key=lambda x: x.create_dt)
+
     data = []
     for m in reversed(migrations):  # newest first
         logger.debug(m)
@@ -1094,6 +1097,7 @@ def pre_create_on_target(lvol_id, target_node_id,
     migration.snaps_migrated = []
     migration.intermediate_snaps = []
     migration.started_at = int(time.time())
+    migration.create_dt = str(datetime.now())
     migration.write_to_db(db.kv_store)
 
     logger.info(
