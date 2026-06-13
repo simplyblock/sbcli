@@ -681,9 +681,15 @@ def apply_migration_to_db(migration, tgt_lvol_uuid=None, tgt_lvol_bdev=None):
         # snap record on the source node
         if snap.lvol.uuid != migration.lvol_id:
             logger.debug(f"apply_migration_to_db: snapshot {snap_uuid} belongs to another lvol {snap.lvol.uuid}")
+            added = False
             original_snap = db.get_snapshot_by_id(snap_uuid)
-            original_snap.instances.append(snap)
-            original_snap.write_to_db(db.kv_store)
+            for s in original_snap.instances:
+                if s.lvol.node_id == snap.lvol.node_id:
+                    added = True
+                    break
+            if not added:
+                original_snap.instances.append(snap)
+                original_snap.write_to_db(db.kv_store)
         else:
             # If the snapshot is used by other LVols (clones) then add as an instance to the original
             # snap record on the source node
@@ -692,9 +698,15 @@ def apply_migration_to_db(migration, tgt_lvol_uuid=None, tgt_lvol_bdev=None):
                     continue
                 if lvol.cloned_from_snap and lvol.cloned_from_snap == snap_uuid:
                     logger.debug(f"apply_migration_to_db: snapshot {snap_uuid} is still referenced by lvol {lvol.uuid}")
+                    added = False
                     original_snap = db.get_snapshot_by_id(snap_uuid)
-                    original_snap.instances.append(snap)
-                    original_snap.write_to_db(db.kv_store)
+                    for s in original_snap.instances:
+                        if s.lvol.node_id == snap.lvol.node_id:
+                            added = True
+                            break
+                    if not added:
+                        original_snap.instances.append(snap)
+                        original_snap.write_to_db(db.kv_store)
                     break
             else:
                 # If the snapshot belongs to this LVol, then it is fine to transfer it to the target node
