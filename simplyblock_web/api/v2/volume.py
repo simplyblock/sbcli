@@ -8,6 +8,7 @@ from simplyblock_core.db_controller import DBController
 from simplyblock_core import utils as core_utils
 from simplyblock_core.controllers import backup_controller, lvol_controller, snapshot_controller
 from simplyblock_core.models.lvol_model import LVol
+from .util import CreationResponseFormatParameter, creation_response
 
 from .cluster import Cluster
 from .pool import StoragePool
@@ -62,7 +63,8 @@ class _CloneParams(BaseModel):
 @api.post('/', name='clusters:storage-pools:volumes:create', status_code=201, responses={201: {"content": None}})
 def add(
         request: Request, cluster: Cluster, pool: StoragePool,
-        parameters: RootModel[Union[_CreateParams, _CloneParams]]
+        parameters: RootModel[Union[_CreateParams, _CloneParams]],
+        response_format: CreationResponseFormatParameter = "empty",
 ) -> Response:
     data = parameters.root
     try:
@@ -112,13 +114,17 @@ def add(
     if volume_id_or_false == False:  # noqa
         raise ValueError(error)
 
-    entity_url = request.app.url_path_for(
-            'clusters:storage-pools:volumes:detail',
-            cluster_id=cluster.get_id(),
-            pool_id=pool.get_id(),
-            volume_id=volume_id_or_false,
+    return creation_response(
+        request, response_format,
+        entity_id=UUID(volume_id_or_false),
+        route_name='clusters:storage-pools:volumes:detail',
+        route_kwargs={
+            'cluster_id': UUID(cluster.get_id()),
+            'pool_id': UUID(pool.get_id()),
+            'volume_id': UUID(volume_id_or_false),
+        },
+        get_full=lambda id: VolumeDTO.from_model(db.get_lvol_by_id(str(id)), request, cluster.get_id()),
     )
-    return Response(status_code=201, headers={'Location': entity_url})
 
 
 instance_api = APIRouter(prefix='/{volume_id}')

@@ -8,6 +8,7 @@ from simplyblock_core.db_controller import DBController
 from simplyblock_core.controllers import pool_controller
 from simplyblock_core import utils as core_utils
 from simplyblock_core.models.pool import Pool as PoolModel
+from .util import CreationResponseFormatParameter, creation_response
 
 from . import util as util
 from .cluster import Cluster
@@ -43,7 +44,7 @@ class StoragePoolParams(BaseModel):
 
 
 @api.post('/', name='clusters:storage-pools:create', status_code=201, responses={201: {"content": None}})
-def add(request: Request, cluster: Cluster, parameters: StoragePoolParams) -> Response:
+def add(request: Request, cluster: Cluster, parameters: StoragePoolParams, response_format: CreationResponseFormatParameter = "full") -> Response:
     for pool in db.get_pools(cluster.get_id()):
         if pool.pool_name == parameters.name:
             raise HTTPException(409, f'Pool {parameters.name} already exists')
@@ -58,8 +59,14 @@ def add(request: Request, cluster: Cluster, parameters: StoragePoolParams) -> Re
     if not id_or_false:
         raise ValueError('Failed to create pool')
 
-    pool = db.get_pool_by_id(id_or_false)
-    return pool.to_dict()
+    return creation_response(
+        request, response_format,
+        entity_id=UUID(id_or_false),
+        route_name='clusters:storage-pools:volumes:detail',
+        route_kwargs={'cluster_id': UUID(cluster.get_id()), 'pool_id': UUID(id_or_false)},
+        get_full=lambda id: StoragePoolDTO.from_model(db.get_pool_by_id(str(id))),
+    )
+
 
 
 instance_api = APIRouter(prefix='/{pool_id}')
