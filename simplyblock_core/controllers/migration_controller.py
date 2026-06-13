@@ -702,7 +702,7 @@ def apply_migration_to_db(migration, tgt_lvol_uuid=None, tgt_lvol_bdev=None):
             added = False
             original_snap = db.get_snapshot_by_id(snap_uuid)
             for s in original_snap.instances:
-                if s.lvol.node_id == snap.lvol.node_id:
+                if s.get("lvol").get("node_id") == snap.lvol.node_id:
                     added = True
                     break
             if not added:
@@ -719,7 +719,7 @@ def apply_migration_to_db(migration, tgt_lvol_uuid=None, tgt_lvol_bdev=None):
                     added = False
                     original_snap = db.get_snapshot_by_id(snap_uuid)
                     for s in original_snap.instances:
-                        if s.lvol.node_id == snap.lvol.node_id:
+                        if s.get("lvol").get("node_id") == snap.lvol.node_id:
                             added = True
                             break
                     if not added:
