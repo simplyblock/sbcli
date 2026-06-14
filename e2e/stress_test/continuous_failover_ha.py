@@ -711,7 +711,9 @@ class RandomFailoverTest(TestLvolHACluster):
 
             sleep_n_sec(10)
 
-            self.ssh_obj.delete_files(self.fio_node, [f"{mount_point}/*fio*"])
+            # Delete ALL inherited data from parent so the clone has enough
+            # free space for its own FIO run (not just *fio* — catches all files).
+            self.ssh_obj.exec_command(self.fio_node, f"sudo rm -rf {mount_point}/*")
             self.ssh_obj.delete_files(self.fio_node, [f"{self.log_path}/local-{clone_name}_fio*"])
 
             sleep_n_sec(5)

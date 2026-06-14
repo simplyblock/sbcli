@@ -236,16 +236,47 @@ class MgmtNodeNetworkOutageTest(TestClusterBase):
                          "sleeping for outage duration ...")
 
         # ------------------------------------------------------------------
-        # Step 7: Wait for outage duration
+        # Step 7: Wait for outage duration + SPDK health checks
         # ------------------------------------------------------------------
-        # Log a heartbeat every 5 minutes so the runner knows we are alive
+        # Log a heartbeat every 5 minutes so the runner knows we are alive.
+        # At each heartbeat, verify SPDK containers and processes on every
+        # storage node — they must stay running even while mgmt is down.
         elapsed = 0
         heartbeat_interval = 300
+        spdk_failures = []
         while elapsed < self.outage_duration:
             chunk = min(heartbeat_interval, self.outage_duration - elapsed)
             sleep_n_sec(chunk)
             elapsed += chunk
             self.logger.info(f"  Outage heartbeat: {elapsed}/{self.outage_duration}s elapsed")
+
+            # Check SPDK on every storage node
+            for sn_ip in self.storage_nodes:
+                try:
+                    containers = self.ssh_obj.get_running_containers(sn_ip)
+                    spdk_containers = [c for c in containers if "spdk" in c.lower()]
+                    if not spdk_containers:
+                        msg = (f"No SPDK containers running on {sn_ip} "
+                               f"at {elapsed}s into outage")
+                        self.logger.error(msg)
+                        spdk_failures.append(msg)
+                    else:
+                        self.logger.info(
+                            f"  {sn_ip}: SPDK containers OK — "
+                            f"{spdk_containers}")
+                except Exception as e:
+                    msg = (f"Cannot reach storage node {sn_ip} "
+                           f"at {elapsed}s into outage: {e}")
+                    self.logger.error(msg)
+                    spdk_failures.append(msg)
+
+        if spdk_failures:
+            self.logger.error(
+                f"SPDK health check failures during outage:\n"
+                + "\n".join(spdk_failures))
+            raise RuntimeError(
+                f"{len(spdk_failures)} SPDK health check failure(s) "
+                f"during mgmt outage: {spdk_failures[0]}")
 
         # ------------------------------------------------------------------
         # Step 8: Wait for mgmt node to recover (iptables auto-flushed)

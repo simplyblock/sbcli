@@ -1058,6 +1058,14 @@ class SshUtils:
             verify_backlog_batch = 32
         vbatch_opt = f" --verify_backlog_batch={verify_backlog_batch}" if verify_backlog_batch else ""
 
+        # Pre-flight: check free space and auto-adjust FIO size if needed
+        target_path = directory or device
+        if target_path and not kwargs.get("skip_space_check"):
+            try:
+                size = self.check_fio_space(node, target_path, size, numjobs)
+            except Exception as exc:
+                self.logger.warning(f"[space_check] Non-fatal error: {exc}")
+
         # raw fio command
         fio_cmd = (
             f"fio --name={name} {location} --ioengine={ioengine} --direct=1 --iodepth={iodepth} "
@@ -1554,6 +1562,69 @@ class SshUtils:
                     raise ValueError(message or f"Checksum mismatch for file {file}")
                 else:
                     self.logger.info(f"Checksum match for file: {file}")
+
+    def get_mount_free_gb(self, node, path):
+        """Return free space in GB for the filesystem containing *path*."""
+        # df --output=avail gives available 1K-blocks; convert to GB
+        out, _ = self.exec_command(
+            node, f"df --output=avail -B1G '{path}' | tail -1",
+            max_retries=1)
+        try:
+            return int(out.strip())
+        except (ValueError, TypeError):
+            return None
+
+    @staticmethod
+    def _parse_size_to_gb(size_str):
+        """Convert a FIO size string (e.g. ``"5G"``, ``"500M"``) to float GB."""
+        s = str(size_str).strip().upper()
+        if s.endswith("G"):
+            return float(s[:-1])
+        if s.endswith("M"):
+            return float(s[:-1]) / 1024
+        if s.endswith("T"):
+            return float(s[:-1]) * 1024
+        return float(s) / (1024 ** 3)  # assume bytes
+
+    def check_fio_space(self, node, mount_point, fio_size_str, numjobs):
+        """Check free space and return an adjusted FIO size if needed.
+
+        If the mount has enough room for ``fio_size_str * numjobs``, the
+        original size string is returned unchanged.  Otherwise the size is
+        reduced so that ``new_size * numjobs`` fits within 80 % of the
+        available space (leaving headroom for FS metadata).
+
+        Returns:
+            The (possibly reduced) FIO ``--size`` value as a string, e.g.
+            ``"5G"`` or ``"2G"``.
+        """
+        size_gb = self._parse_size_to_gb(fio_size_str)
+        needed_gb = size_gb * numjobs
+
+        avail_gb = self.get_mount_free_gb(node, mount_point)
+        if avail_gb is None:
+            self.logger.warning(
+                f"[space_check] Could not determine free space on "
+                f"{node}:{mount_point} — keeping size={fio_size_str}")
+            return fio_size_str
+
+        self.logger.info(
+            f"[space_check] {node}:{mount_point} — "
+            f"available={avail_gb}G, needed={needed_gb:.1f}G "
+            f"(size={fio_size_str} x {numjobs} jobs)")
+
+        if avail_gb >= needed_gb:
+            return fio_size_str
+
+        # Reduce: use 80% of available space divided across jobs (min 1G)
+        usable_gb = avail_gb * 0.80
+        new_size_gb = max(1, int(usable_gb / max(1, numjobs)))
+        new_size_str = f"{new_size_gb}G"
+        self.logger.warning(
+            f"[space_check] Adjusting FIO size: {fio_size_str} -> "
+            f"{new_size_str} on {node}:{mount_point} "
+            f"(available={avail_gb}G, jobs={numjobs})")
+        return new_size_str
 
     def delete_files(self, node, files):
         for file in files:
