@@ -1176,20 +1176,35 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             return False, True, hub_err
 
         # Step 4: locate the last migrated snapshot's composite name on the target
-        if not migration.snaps_migrated:
+        if not migration.snaps_migrated and not migration.snaps_preexisting_on_target:
             src_rpc.bdev_nvme_detach_controller(ctrl_name)
             _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc, secondary_rpc=sec_setup_rpc)
             return False, True, "No snapshots migrated; cannot perform final migration"
 
-        last_snap_uuid = migration.snaps_migrated[-1]
-        try:
+        tgt_snap_composite = ""
+        if migration.snaps_migrated:
+            last_snap_uuid = migration.snaps_migrated[-1]
+            try:
+                last_snap = db.get_snapshot_by_id(last_snap_uuid)
+            except KeyError:
+                src_rpc.bdev_nvme_detach_controller(ctrl_name)
+                _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc, secondary_rpc=sec_setup_rpc)
+                return False, True, f"Last snapshot {last_snap_uuid} not found"
+            tgt_snap_composite = f"{tgt_node.lvstore}/{_snap_short_name(last_snap) + _MIGRATION_BDEV_SUFFIX}"
+        else:
+            last_snap_uuid = migration.snaps_preexisting_on_target[-1]
             last_snap = db.get_snapshot_by_id(last_snap_uuid)
-        except KeyError:
+            if last_snap.lvol.node_id == tgt_node.get_id():
+                tgt_snap_composite = last_snap.snap_bdev
+            else:
+                for instance in last_snap.instances:
+                    if instance.get("lvol").get("node_id") == tgt_node.get_id():
+                        tgt_snap_composite = instance.get("snap_bdev")
+
+        if not tgt_snap_composite:
             src_rpc.bdev_nvme_detach_controller(ctrl_name)
             _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc, secondary_rpc=sec_setup_rpc)
-            return False, True, f"Last snapshot {last_snap_uuid} not found"
-
-        tgt_snap_composite = f"{tgt_node.lvstore}/{_snap_short_name(last_snap) + _MIGRATION_BDEV_SUFFIX}"
+            return False, True, f"snapshot {last_snap_uuid} not found on target"
 
         # Step 5: start final migration — synchronous: blocks until SPDK completes
         # the IO drain and delta copy.  Returns success/failure directly; no polling needed.
