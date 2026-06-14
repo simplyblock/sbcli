@@ -161,21 +161,10 @@ class MgmtNodeNetworkOutageTest(TestClusterBase):
         self.logger.info(f"Starting FIO on {len(lvol_details)} volumes "
                          f"(runtime={self.fio_runtime}s, numjobs={self.fio_num_jobs})")
 
-        def _fio_wrapper(name, *args, **kwargs):
-            """Run FIO and capture any exception for later reporting."""
-            try:
-                self.ssh_obj.run_fio_test(*args, **kwargs)
-            except Exception as exc:
-                self.logger.error(f"FIO thread for {name} failed: {exc}")
-                fio_errors.append((name, exc))
-
         for lvol_name, detail in lvol_details.items():
-            t = threading.Thread(
-                target=_fio_wrapper,
-                args=(
-                    lvol_name,
-                    fio_node, None, detail["Mount"], detail["Log"],
-                ),
+            fio_thread = threading.Thread(
+                target=self.ssh_obj.run_fio_test,
+                args=(fio_node, None, detail["Mount"], detail["Log"]),
                 kwargs={
                     "size": "5G",
                     "name": f"{lvol_name}_fio",
@@ -187,9 +176,9 @@ class MgmtNodeNetworkOutageTest(TestClusterBase):
                     "runtime": self.fio_runtime,
                 },
             )
-            t.start()
-            fio_threads.append(t)
-            sleep_n_sec(3)
+            fio_thread.start()
+            fio_threads.append(fio_thread)
+            sleep_n_sec(10)
 
         # Let FIO warm up before triggering the outage
         self.logger.info("Waiting 60s for FIO to stabilise before outage ...")

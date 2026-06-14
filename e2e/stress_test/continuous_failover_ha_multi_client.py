@@ -693,7 +693,7 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
         node_details = self.sbcli_utils.get_storage_node_details(self.current_outage_node)
         node_ip = node_details[0]["mgmt_ip"]
         self.logger.info(f"Performing/Waiting for {outage_type} restart on node {self.current_outage_node}.")
-        if outage_type == "graceful_shutdown":
+        if outage_type in ("graceful_shutdown", "forced_shutdown", "storage_node_reboot"):
             max_retries = 4
             retry_delay = 10  # seconds
 
