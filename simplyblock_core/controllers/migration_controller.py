@@ -619,6 +619,7 @@ def apply_migration_to_db(migration, tgt_lvol_uuid=None, tgt_lvol_bdev=None):
     lvol.node_id  = tgt_node.get_id()
     lvol.hostname = tgt_node.hostname
     lvol.lvs_name = tgt_node.lvstore
+    lvol.subsys_port = tgt_node.lvol_subsys_port
     if tgt_lvol_bdev:
         lvol.lvol_bdev = tgt_lvol_bdev
     lvol.top_bdev = f"{tgt_node.lvstore}/{lvol.lvol_bdev}"
