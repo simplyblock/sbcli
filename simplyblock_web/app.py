@@ -42,9 +42,9 @@ class AccessLogMiddleware(BaseHTTPMiddleware):
         client_ip = request.client.host if request.client else '-'
         request_size = request.headers.get('content-length', '-')
 
+        # Query strings can carry credentials (?secret=…, ?token=…) and have
+        # no type info to mask by, so log the path only.
         path = request.url.path
-        if request.url.query:
-            path = f'{path}?{request.url.query}'
 
         start = time.monotonic()
         response = await call_next(request)

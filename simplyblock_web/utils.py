@@ -1,4 +1,5 @@
 import base64
+import logging
 import random
 import re
 import string
@@ -120,8 +121,9 @@ def get_cluster_id(request):
                     if tkn:
                         cluster_id = tkn.split(":")[0]
                         cluster_secret = tkn.split(":")[1]
-                except Exception as e:
-                    print(e)
+                except Exception:
+                    # Exception message can carry the decoded b64 payload.
+                    logging.exception("Failed to decode Basic Auth header")
                     return
 
             return cluster_id

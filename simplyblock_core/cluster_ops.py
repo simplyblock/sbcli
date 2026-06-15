@@ -465,7 +465,7 @@ def _cleanup_nvme(mount_point, nqn_value) -> None:
 def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
                 distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity, qpair_count,
                 max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name, cr_name=None,
-                cr_namespace=None, cr_plural=None, fabric="tcp", cluster_ip=None, grafana_secret=None,
+                cr_namespace=None, cr_plural=None, fabric="tcp", cluster_ip=None, grafana_secret: t.Optional[SecretStr] = None,
                 client_data_nic="", max_fault_tolerance=1, backup_config=None,
                 nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001,
                 hashicorp_vault_settings : t.Optional[HashicorpVaultSettings] = None,
@@ -519,7 +519,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     if default_cluster:
         cluster.mode = default_cluster.mode
         cluster.db_connection = default_cluster.db_connection
-        cluster.grafana_secret = SecretStr(grafana_secret) if grafana_secret else default_cluster.grafana_secret
+        cluster.grafana_secret = grafana_secret if grafana_secret else default_cluster.grafana_secret
         cluster.grafana_endpoint = default_cluster.grafana_endpoint
     else:
         # creating first cluster on k8s
