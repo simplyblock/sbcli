@@ -536,7 +536,7 @@ class _DeviceFailureMigrationBase:
         # Step 2: set-failed via CLI (no REST endpoint exists)
         t1 = time.time()
         mgmt_ip = self.mgmt_nodes[0]
-        cmd = f"{self.base_cmd} sn set-failed-device {self._target_device_id}"
+        cmd = f"{self.base_cmd} -d sn set-failed-device {self._target_device_id}"
         self.logger.info(f"Setting device failed via CLI: {cmd}")
         result = self.ssh_obj.exec_command(mgmt_ip, cmd)
         self.logger.info(f"set-failed-device result: {result}")
@@ -613,7 +613,7 @@ class _DeviceFailureMigrationBase:
             )
 
         mgmt_ip = self.mgmt_nodes[0]
-        cmd = f"{self.base_cmd} sn set-failed-device {self._target_device_id}"
+        cmd = f"{self.base_cmd} -d sn set-failed-device {self._target_device_id}"
         self.logger.info(f"Setting device failed via CLI: {cmd}")
         result = self.ssh_obj.exec_command(mgmt_ip, cmd)
         self.logger.info(f"set-failed-device result: {result}")
@@ -766,7 +766,7 @@ class _DeviceFailureMigrationBase:
                 # Output is a pipe-delimited table:
                 # | UUID | StorgeID | Name | Size | Serial | PCIe | Status | IO Err | Health |
                 cmd = (
-                    f"{self.base_cmd} sn list-devices "
+                    f"{self.base_cmd} -d sn list-devices "
                     f"{self._target_node_id}"
                 )
                 try:
@@ -915,7 +915,7 @@ class _DeviceFailureMigrationBase:
                     "and waiting for migration before recovery"
                 )
                 cmd = (
-                    f"{self.base_cmd} sn set-failed-device "
+                    f"{self.base_cmd} -d sn set-failed-device "
                     f"{self._target_device_id}"
                 )
                 self.ssh_obj.exec_command(mgmt_ip, cmd)
@@ -939,7 +939,7 @@ class _DeviceFailureMigrationBase:
                     device_id=self._target_device_id,
                 )
                 cmd = (
-                    f"{self.base_cmd} sn set-failed-device "
+                    f"{self.base_cmd} -d sn set-failed-device "
                     f"{self._target_device_id}"
                 )
                 self.ssh_obj.exec_command(mgmt_ip, cmd)
@@ -960,7 +960,7 @@ class _DeviceFailureMigrationBase:
         # Step 1: create new device from failed device
         try:
             cmd = (
-                f"{self.base_cmd} sn new-device-from-failed "
+                f"{self.base_cmd} -d sn new-device-from-failed "
                 f"{self._target_device_id}"
             )
             self.logger.info(f"Creating new device from failed: {cmd}")
