@@ -464,20 +464,37 @@ def main():
     cluster_uuid = cluster_match.group(1)
     print(f"Cluster UUID: {cluster_uuid}")
 
-    print("Phase 3: Adding storage nodes to cluster...")
-    for priv_ip in sn_priv_ips:
+    print("Phase 3: Adding storage nodes to cluster (in parallel)...")
+
+    # Node-add is now parallel-safe: the control plane serializes only the
+    # cross-node mesh wiring (per-cluster ClusterAddNodeLock) and allocates
+    # ports transactionally (PortReservation), so the slow per-node SPDK
+    # bring-up overlaps instead of running back-to-back. `sbctl sn add-node`
+    # runs add_node synchronously and each invocation is its own process, so we
+    # fire them all at once and let the FDB-based lock/reservations coordinate.
+    def add_one_node(priv_ip):
         for attempt in range(5):
             try:
                 ssh_exec(mgmt_ip, [
                     f"sudo /usr/local/bin/sbctl -d sn add-node {cluster_uuid} {priv_ip}:5000 {IFACE} --ha-jm-count 4"
                 ], check=True)
-                break
+                return
             except RuntimeError:
                 if attempt < 4:
                     print(f"  Retrying add-node for {priv_ip} in 30s (attempt {attempt+2}/5)...")
                     time.sleep(30)
                 else:
                     raise
+
+    with ThreadPoolExecutor(max_workers=max(1, len(sn_priv_ips))) as executor:
+        futures = {executor.submit(add_one_node, ip): ip for ip in sn_priv_ips}
+        for f in futures:
+            ip = futures[f]
+            try:
+                f.result()
+            except Exception as e:
+                print(f"  add-node FAILED for {ip}: {e}")
+                raise
     print("Phase 3: DONE - all nodes added.")
 
     # Verify all nodes are visible
