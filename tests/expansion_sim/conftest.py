@@ -22,6 +22,36 @@ _FDB_CLUSTER_FILE = os.environ.get(
     "FDB_CLUSTER_FILE", "/etc/foundationdb/fdb.cluster")
 
 
+@pytest.fixture(autouse=True)
+def fast_sleep(monkeypatch):
+    """Neutralize real ``time.sleep`` for the duration of every sim test.
+
+    The expansion path runs through ``storage_node_ops`` helpers
+    (recreate_lvstore_on_sec, teardown_non_leader_lvstore, the JC-compression
+    wait, etc.) that contain many multi-second-to-multi-minute sleeps and
+    poll-until-deadline loops. Against the in-memory RPC simulator those waits
+    serve no purpose but run in real wall-clock — they are the reason the
+    end-to-end sim suite took hours. Patching ``time.sleep`` to a no-op on the
+    modules the expansion drives turns the simulation into a logic check that
+    completes in milliseconds. Real deployments keep the real sleeps.
+    """
+    import time as _time
+    _real_sleep = _time.sleep
+
+    def _no_sleep(_seconds):
+        # Yield nothing; honor a zero/near-zero sleep so any genuine
+        # cooperative-yield semantics still hold without the wall-clock cost.
+        return None
+
+    # ``storage_node_ops`` does ``import time``; patch the bound module attr so
+    # every ``time.sleep(...)`` in the expansion path becomes a no-op without
+    # touching the 200+ call sites or affecting unrelated modules.
+    import simplyblock_core.storage_node_ops as sno
+    monkeypatch.setattr(sno.time, "sleep", _no_sleep)
+    # Keep a reference so a test that genuinely needs to wait can opt back in.
+    yield _real_sleep
+
+
 def _require_fdb():
     if not os.path.isfile(_FDB_CLUSTER_FILE):
         pytest.skip(f"FDB cluster file not found at {_FDB_CLUSTER_FILE}; "

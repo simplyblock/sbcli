@@ -1,5 +1,5 @@
 # coding=utf-8
-"""Unit tests for ``simplyblock_core.cluster_expand_planner.compute_role_diff``.
+"""Unit tests for ``simplyblock_core.controllers.cluster_expansion.planner.compute_role_diff``.
 
 These tests exercise the pure planning logic for single-node cluster expansion
 and assert the ordering / invariants the orchestrator relies on. No SPDK or
@@ -9,7 +9,7 @@ DB access is involved — the planner is intentionally side-effect-free.
 import json
 import unittest
 
-from simplyblock_core.cluster_expand_planner import (
+from simplyblock_core.controllers.cluster_expansion.planner import (
     EXPAND_PHASE_ABORTED,
     EXPAND_PHASE_COMPLETED,
     EXPAND_PHASE_IN_PROGRESS,
@@ -27,6 +27,7 @@ from simplyblock_core.cluster_expand_planner import (
     is_expand_in_progress,
     is_expand_state_compatible,
     make_expand_state,
+    expand_state_rearm,
     move_from_dict,
     move_to_dict,
     pending_moves,
@@ -216,7 +217,7 @@ class TestPostExpandLayoutInvariants(unittest.TestCase):
     LVS still has distinct primary/secondary/tertiary on different nodes."""
 
     def _reconstruct(self, existing, new_node_id, ftt):
-        from simplyblock_core.cluster_expand_planner import _rotation_layout
+        from simplyblock_core.controllers.cluster_expansion.planner import _rotation_layout
         layout = {
             primary: {ROLE_PRIMARY: primary,
                       ROLE_SECONDARY: sec,
@@ -756,6 +757,52 @@ class TestCurrentLayoutOverride(unittest.TestCase):
                          RoleMove("n1", ROLE_SECONDARY, "n3", "n2"))
         self.assertEqual(idx[("n1", ROLE_TERTIARY)],
                          RoleMove("n1", ROLE_TERTIARY, "n4", "n3"))
+
+
+class TestExpandStateRearm(unittest.TestCase):
+    """``expand_state_rearm`` flips an aborted state back to in_progress for
+    retry-by-resume, preserving the cursor."""
+
+    def _aborted(self, cursor=2):
+        moves = compute_role_diff(["n1", "n2", "n3", "n4"], "n5", ftt=2)
+        state = make_expand_state("n5", moves)
+        state["cursor"] = cursor
+        return expand_state_abort(state, reason="boom")
+
+    def test_aborted_becomes_in_progress_preserving_cursor(self):
+        aborted = self._aborted(cursor=3)
+        rearmed = expand_state_rearm(aborted)
+        self.assertEqual(rearmed["phase"], EXPAND_PHASE_IN_PROGRESS)
+        self.assertEqual(rearmed["cursor"], 3)
+        self.assertTrue(is_expand_in_progress(rearmed))
+
+    def test_abort_reason_moved_to_history(self):
+        rearmed = expand_state_rearm(self._aborted())
+        self.assertNotIn("abort_reason", rearmed)
+        self.assertEqual(rearmed["last_abort_reason"], "boom")
+
+    def test_does_not_mutate_input(self):
+        aborted = self._aborted()
+        expand_state_rearm(aborted)
+        self.assertEqual(aborted["phase"], EXPAND_PHASE_ABORTED)
+
+    def test_in_progress_is_idempotent(self):
+        moves = compute_role_diff(["n1", "n2", "n3", "n4"], "n5", ftt=2)
+        state = make_expand_state("n5", moves)
+        rearmed = expand_state_rearm(state)
+        self.assertEqual(rearmed["phase"], EXPAND_PHASE_IN_PROGRESS)
+
+    def test_completed_cannot_be_rearmed(self):
+        moves = compute_role_diff(["n1", "n2", "n3", "n4"], "n5", ftt=2)
+        state = make_expand_state("n5", moves)
+        state["cursor"] = len(state["moves"])
+        completed = expand_state_complete(state)
+        with self.assertRaises(ValueError):
+            expand_state_rearm(completed)
+
+    def test_empty_cannot_be_rearmed(self):
+        with self.assertRaises(ValueError):
+            expand_state_rearm({})
 
 
 if __name__ == "__main__":

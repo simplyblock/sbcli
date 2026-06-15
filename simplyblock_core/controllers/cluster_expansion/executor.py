@@ -22,11 +22,11 @@ Per-move algorithms are documented in ``step6_design.md``.
 """
 
 from simplyblock_core import utils
-from simplyblock_core.cluster_expand_orchestrator import (
+from simplyblock_core.controllers.cluster_expansion.orchestrator import (
     MoveExecutor,
     execute_expand_plan,
 )
-from simplyblock_core.cluster_expand_planner import (
+from simplyblock_core.controllers.cluster_expansion.planner import (
     ROLE_PRIMARY,
     ROLE_SECONDARY,
     ROLE_TERTIARY,

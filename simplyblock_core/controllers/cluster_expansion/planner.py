@@ -487,6 +487,40 @@ def expand_state_abort(state: dict, reason: str) -> dict:
     return new_state
 
 
+def expand_state_rearm(state: dict) -> dict:
+    """Return an ``aborted`` state flipped back to ``in_progress`` so the
+    orchestrator resumes it from the preserved cursor on the next attempt.
+
+    Used by the task runner to retry a failed expansion by *resuming* the
+    same plan (re-attempting the move the cursor points at) rather than
+    recomputing a fresh role diff against a topology that the aborted run
+    may have already partially mutated.
+
+    The ``abort_reason`` is cleared (kept under ``last_abort_reason`` for
+    history). Idempotent on an already-in-progress state.
+
+    Raises
+    ------
+    ValueError
+        If the state is empty or in a terminal ``completed`` phase (a
+        finished expansion has nothing to resume).
+    """
+    if not state:
+        raise ValueError("cannot rearm: state is empty")
+    phase = state.get("phase")
+    if phase == EXPAND_PHASE_IN_PROGRESS:
+        return dict(state)
+    if phase != EXPAND_PHASE_ABORTED:
+        raise ValueError(
+            f"cannot rearm: phase is {phase!r}, expected "
+            f"{EXPAND_PHASE_ABORTED!r}")
+    new_state = dict(state)
+    new_state["phase"] = EXPAND_PHASE_IN_PROGRESS
+    if "abort_reason" in new_state:
+        new_state["last_abort_reason"] = new_state.pop("abort_reason")
+    return new_state
+
+
 def is_expand_state_compatible(state: dict) -> bool:
     """Cheap version-check before resuming a persisted state. Returns True
     only when the schema_version matches the current code's expected version

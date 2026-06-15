@@ -1,5 +1,5 @@
 # coding=utf-8
-"""Unit tests for ``cluster_expand_executor.SpdkMoveExecutor``.
+"""Unit tests for ``cluster_expansion.executor.SpdkMoveExecutor``.
 
 Mocks the DB, RPC client, and the existing primitives
 (``recreate_lvstore_on_sec``, ``create_lvstore``,
@@ -11,8 +11,8 @@ touching SPDK.
 import unittest
 from unittest.mock import MagicMock, patch
 
-from simplyblock_core.cluster_expand_executor import SpdkMoveExecutor
-from simplyblock_core.cluster_expand_planner import (
+from simplyblock_core.controllers.cluster_expansion.executor import SpdkMoveExecutor
+from simplyblock_core.controllers.cluster_expansion.planner import (
     ROLE_PRIMARY,
     ROLE_SECONDARY,
     ROLE_TERTIARY,

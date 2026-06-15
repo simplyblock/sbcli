@@ -1,7 +1,7 @@
 # coding=utf-8
 """End-to-end-shape unit tests for the single-node expansion entry point.
 
-Covers ``cluster_expand_executor.integrate_new_node_into_cluster`` plus
+Covers ``cluster_expansion.executor.integrate_new_node_into_cluster`` plus
 ``storage_node_ops.reattach_sibling_failover``. Mocks the DB and the
 executor so the planning + dispatch wiring is exercised without touching
 SPDK or the existing SPDK glue.
@@ -10,11 +10,11 @@ SPDK or the existing SPDK glue.
 import unittest
 from unittest.mock import MagicMock
 
-from simplyblock_core.cluster_expand_executor import (
+from simplyblock_core.controllers.cluster_expansion.executor import (
     integrate_new_node_into_cluster,
 )
-from simplyblock_core.cluster_expand_orchestrator import NoopMoveExecutor
-from simplyblock_core.cluster_expand_planner import (
+from simplyblock_core.controllers.cluster_expansion.orchestrator import NoopMoveExecutor
+from simplyblock_core.controllers.cluster_expansion.planner import (
     EXPAND_PHASE_COMPLETED,
     compute_role_diff,
     make_expand_state,

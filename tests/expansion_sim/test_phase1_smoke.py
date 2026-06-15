@@ -87,7 +87,7 @@ def test_f_planner_against_db(fdb_clean, db_controller_singleton_reset,
     move count for 4 -> 5 FTT1 (3 moves: 1 re-home + 2 newcomer creates)."""
     _say("start test_f_planner_against_db")
     from tests.expansion_sim._scenarios import build_4_node_ftt1_baseline
-    from simplyblock_core.cluster_expand_planner import compute_role_diff
+    from simplyblock_core.controllers.cluster_expansion.planner import compute_role_diff
     from simplyblock_core.db_controller import DBController
 
     db = DBController()

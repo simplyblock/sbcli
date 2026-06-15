@@ -1,7 +1,7 @@
 # coding=utf-8
 """Orchestrator for single-node cluster expansion.
 
-Consumes a list of :class:`~simplyblock_core.cluster_expand_planner.RoleMove`
+Consumes a list of :class:`~simplyblock_core.controllers.cluster_expansion.planner.RoleMove`
 objects (produced by ``compute_role_diff``) and drives them to completion,
 persisting a resumability cursor on the cluster's
 :attr:`~simplyblock_core.models.cluster.Cluster.expand_state` field after every
@@ -39,7 +39,7 @@ from abc import ABC, abstractmethod
 from typing import List, Optional
 
 from simplyblock_core import utils
-from simplyblock_core.cluster_expand_planner import (
+from simplyblock_core.controllers.cluster_expansion.planner import (
     RoleMove,
     expand_state_abort,
     expand_state_advance,

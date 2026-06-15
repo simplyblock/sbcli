@@ -98,6 +98,7 @@ CONTROL_PLANE_SERVICES_DOCKER = [
     "TasksRunnerClusterStatus",
     "TasksRunnerNewDeviceMigration",
     "TasksNodeAddRunner",
+    "TasksRunnerClusterExpand",
     "TasksRunnerPortAllow",
     "TasksRunnerJCCompResume",
     "TasksRunnerLVolSyncDelete",

@@ -1,5 +1,5 @@
 # coding=utf-8
-"""Unit tests for ``cluster_expand_orchestrator.execute_expand_plan``.
+"""Unit tests for ``cluster_expansion.orchestrator.execute_expand_plan``.
 
 These exercise the cursor / persistence / abort loop without touching SPDK.
 A fake Cluster object captures every ``write_to_db`` invocation so we can
@@ -10,12 +10,12 @@ crash-resume correctness).
 import unittest
 from typing import List
 
-from simplyblock_core.cluster_expand_orchestrator import (
+from simplyblock_core.controllers.cluster_expansion.orchestrator import (
     MoveExecutor,
     NoopMoveExecutor,
     execute_expand_plan,
 )
-from simplyblock_core.cluster_expand_planner import (
+from simplyblock_core.controllers.cluster_expansion.planner import (
     EXPAND_PHASE_ABORTED,
     EXPAND_PHASE_COMPLETED,
     EXPAND_PHASE_IN_PROGRESS,

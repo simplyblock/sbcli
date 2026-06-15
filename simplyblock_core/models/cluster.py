@@ -114,7 +114,7 @@ class Cluster(BaseModel):
 
     # Single-node-expansion resumability cursor. Empty dict means no expansion
     # is in flight. Populated/advanced/cleared via the helpers in
-    # ``simplyblock_core.cluster_expand_planner``. See the feature plan
+    # ``simplyblock_core.controllers.cluster_expansion.planner``. See the feature plan
     # ``single_node_expansion_plan.md`` for the schema.
     expand_state: dict = {}
 

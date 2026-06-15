@@ -30,7 +30,7 @@ from pathlib import Path
 
 import pytest
 
-from simplyblock_core.cluster_expand_planner import (
+from simplyblock_core.controllers.cluster_expansion.planner import (
     ROLE_PRIMARY,
     ROLE_SECONDARY,
 )

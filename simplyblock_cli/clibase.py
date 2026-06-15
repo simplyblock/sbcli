@@ -219,12 +219,7 @@ class CLIWrapperBase:
             # the pre-add snapshot. The CLI returns "Success" (truthy) on
             # successful add_node, so `out` being truthy is the success
             # signal we condition on.
-            from simplyblock_core.cluster_expand_executor import (
-                integrate_new_node_into_cluster,
-            )
-            from simplyblock_core.models.nvme_device import NVMeDevice
             db = DBController()
-            cluster = db.get_cluster_by_id(cluster_id)
             after = db.get_storage_nodes_by_cluster_id(cluster_id)
             new_snodes = [n for n in after if n.get_id() not in before_ids]
             if len(new_snodes) != 1:
@@ -232,22 +227,20 @@ class CLIWrapperBase:
                     f"--expansion: expected exactly 1 new storage node after "
                     f"add_node, found {len(new_snodes)}; cannot integrate")
                 return False
-            try:
-                integrate_new_node_into_cluster(
-                    cluster, new_snodes[0], manage_cluster_status=True)
-            except Exception as e:
-                print(f"--expansion integration failed: {e}")
+            # Queue the integration as a background task rather than driving
+            # it inline: the rebalance runs the heavy SPDK recreate/teardown
+            # path (minutes), and the orchestrator persists a resume cursor
+            # so the runner survives a mgmt-node restart mid-expansion. The
+            # post-integration new-device-migration trigger now lives in the
+            # runner's success path (it must run after the rotation lands).
+            task_id = tasks_controller.add_cluster_expand_task(
+                cluster_id, new_snodes[0].get_id())
+            if not task_id:
+                print("--expansion: an expansion task already exists for "
+                      "this cluster")
                 return False
-
-            # Replaces the trigger that the OLD path runs inside add_node.
-            # Done here, post-integration, so tasks are queued against the
-            # post-rotation lvstore_stack (which now includes the newcomer's
-            # primary distr) and against an ACTIVE cluster (the runner
-            # suspends FN_NEW_DEV_MIG while status is IN_EXPANSION).
-            new_snode = db.get_storage_node_by_id(new_snodes[0].get_id())
-            for dev in new_snode.nvme_devices:
-                if dev.status == NVMeDevice.STATUS_ONLINE:
-                    tasks_controller.add_new_device_mig_task(dev.get_id())
+            print(f"--expansion: queued integration task {task_id} for "
+                  f"{new_snodes[0].get_id()}; monitor with `sbctl task list`")
 
         return out
 
