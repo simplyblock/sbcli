@@ -13,6 +13,8 @@ from kubernetes import client as k8s_client
 import requests
 
 from docker.errors import DockerException
+from pydantic import SecretStr
+
 from simplyblock_core import utils, scripts, constants, mgmt_node_ops, storage_node_ops
 from simplyblock_core import port_block
 from simplyblock_core.controllers import backup_controller, cluster_events, device_controller, qos_controller, tasks_controller, tcp_ports_events
@@ -322,9 +324,9 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.blk_size = blk_size
     cluster.page_size_in_blocks = page_size_in_blocks
     cluster.nqn = f"{constants.CLUSTER_NQN}:{cluster.uuid}"
-    cluster.cli_pass = cli_pass
-    cluster.secret = utils.generate_string(20)
-    cluster.grafana_secret = monitoring_secret if mode == "kubernetes" else cluster.secret
+    cluster.cli_pass = SecretStr(cli_pass)
+    cluster.secret = SecretStr(utils.generate_string(20))
+    cluster.grafana_secret = SecretStr(monitoring_secret) if mode == "kubernetes" else cluster.secret
     if cap_warn and cap_warn > 0:
         cluster.cap_warn = cap_warn
     if cap_crit and cap_crit > 0:
@@ -380,18 +382,18 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
 
     if mode == "docker":
         if not disable_monitoring:
-            utils.render_and_deploy_alerting_configs(contact_point, cluster.grafana_endpoint, cluster.uuid, cluster.secret)
+            utils.render_and_deploy_alerting_configs(contact_point, cluster.grafana_endpoint, cluster.uuid, cluster.secret.get_secret_value())
 
         logger.info("Deploying swarm stack ...")
         log_level = "DEBUG" if constants.LOG_WEB_DEBUG else "INFO"
-        scripts.deploy_stack(cli_pass, dev_ip, constants.SIMPLY_BLOCK_DOCKER_IMAGE, cluster.secret, cluster.uuid,
+        scripts.deploy_stack(cli_pass, dev_ip, constants.SIMPLY_BLOCK_DOCKER_IMAGE, cluster.secret.get_secret_value(), cluster.uuid,
                                 log_del_interval, metrics_retention_period, log_level, cluster.grafana_endpoint, str(disable_monitoring))
         logger.info("Deploying swarm stack > Done")
 
         logger.info("Configuring DB...")
         scripts.set_db_config_single()
         logger.info("Configuring DB > Done")
-        monitoring_secret = cluster.secret
+        monitoring_secret = cluster.secret.get_secret_value()
 
     elif mode == "kubernetes":
         logger.info("Retrieving foundationdb connection string...")
@@ -399,7 +401,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         db_connection = fdb_cluster_string
 
         logger.info("Patching prometheus configmap...")
-        utils.patch_prometheus_configmap(cluster.uuid, cluster.secret)
+        utils.patch_prometheus_configmap(cluster.uuid, cluster.secret.get_secret_value())
 
         if ingress_host_source == "hostip":
             dns_name = dev_ip
@@ -419,7 +421,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     if not disable_monitoring:
         _set_max_result_window(os_endpoint)
         _add_graylog_input(graylog_endpoint, monitoring_secret)
-        _create_update_user(cluster.uuid, cluster.grafana_endpoint, monitoring_secret, cluster.secret)
+        _create_update_user(cluster.uuid, cluster.grafana_endpoint, monitoring_secret, cluster.secret.get_secret_value())
 
     cluster.db_connection = db_connection  # type: ignore[assignment]
     cluster.status = Cluster.STATUS_UNREADY
@@ -513,12 +515,12 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     cluster.blk_size = blk_size
     cluster.page_size_in_blocks = page_size_in_blocks
     cluster.nqn = f"{constants.CLUSTER_NQN}:{cluster.uuid}"
-    cluster.secret = utils.generate_string(20)
+    cluster.secret = SecretStr(utils.generate_string(20))
     cluster.strict_node_anti_affinity = strict_node_anti_affinity
     if default_cluster:
         cluster.mode = default_cluster.mode
         cluster.db_connection = default_cluster.db_connection
-        cluster.grafana_secret = grafana_secret if grafana_secret else default_cluster.grafana_secret
+        cluster.grafana_secret = SecretStr(grafana_secret) if grafana_secret else default_cluster.grafana_secret
         cluster.grafana_endpoint = default_cluster.grafana_endpoint
     else:
         # creating first cluster on k8s
@@ -527,9 +529,9 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
         fdb_cluster_string = utils.get_fdb_cluster_string(constants.FDB_CONFIG_NAME, constants.K8S_NAMESPACE)
         cluster.db_connection = fdb_cluster_string
         if monitoring_secret:
-            cluster.grafana_secret = monitoring_secret
+            cluster.grafana_secret = SecretStr(monitoring_secret)
         elif enable_monitoring != "true":
-            cluster.grafana_secret = ""
+            cluster.grafana_secret = SecretStr("")
         else:
             raise Exception("monitoring_secret is required")
         cluster.grafana_endpoint = constants.GRAFANA_K8S_ENDPOINT
@@ -541,14 +543,14 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
         if enable_monitoring == "true":
             graylog_endpoint = constants.GRAYLOG_K8S_ENDPOINT
             os_endpoint = constants.OS_K8S_ENDPOINT
-            _create_update_user(cluster.uuid, cluster.grafana_endpoint, cluster.grafana_secret, cluster.secret)
+            _create_update_user(cluster.uuid, cluster.grafana_endpoint, cluster.grafana_secret.get_secret_value(), cluster.secret.get_secret_value())
 
             _set_max_result_window(os_endpoint)
 
             _add_graylog_input(graylog_endpoint, monitoring_secret)
 
     if cluster.mode == "kubernetes":
-        utils.patch_prometheus_configmap(cluster.uuid, cluster.secret)
+        utils.patch_prometheus_configmap(cluster.uuid, cluster.secret.get_secret_value())
 
     cluster.distr_ndcs = distr_ndcs
     cluster.distr_npcs = distr_npcs
@@ -1570,11 +1572,11 @@ def get_iostats_history(cluster_id, history_string, records_count=20, with_sizes
 
 
 def get_ssh_pass(cluster_id) -> str:
-    return db_controller.get_cluster_by_id(cluster_id).cli_pass
+    return db_controller.get_cluster_by_id(cluster_id).cli_pass.get_secret_value()
 
 
 def get_secret(cluster_id) -> str:
-    return db_controller.get_cluster_by_id(cluster_id).secret
+    return db_controller.get_cluster_by_id(cluster_id).secret.get_secret_value()
 
 
 def set_secret(cluster_id, secret) -> None:
@@ -1583,9 +1585,9 @@ def set_secret(cluster_id, secret) -> None:
     if len(secret) < 20:
         raise ValueError("Secret must be at least 20 char")
 
-    _create_update_user(cluster_id, cluster.grafana_endpoint, cluster.grafana_secret, secret, update_secret=True)
+    _create_update_user(cluster_id, cluster.grafana_endpoint, cluster.grafana_secret.get_secret_value(), secret, update_secret=True)
 
-    cluster.secret = secret
+    cluster.secret = SecretStr(secret)
     cluster.write_to_db(db_controller.kv_store)
 
 

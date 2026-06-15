@@ -16,6 +16,7 @@ import uuid
 
 import docker
 from docker.types import LogConfig
+from pydantic import SecretStr
 
 from simplyblock_core import constants, scripts, distr_controller, cluster_ops
 from simplyblock_core import port_block, utils
@@ -1912,11 +1913,11 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         snode.primary_ip = mgmt_ip
         snode.rpc_port = rpc_port
         snode.rpc_username = rpc_user
-        snode.rpc_password = rpc_pass
+        snode.rpc_password = SecretStr(rpc_pass)
         snode.cluster_id = cluster_id
         snode.api_endpoint = node_addr
-        snode.host_secret = utils.generate_string(20)
-        snode.ctrl_secret = utils.generate_string(20)
+        snode.host_secret = SecretStr(utils.generate_string(20))
+        snode.ctrl_secret = SecretStr(utils.generate_string(20))
         snode.number_of_distribs = number_of_distribs
         snode.number_of_alceml_devices = number_of_alceml_devices
         snode.enable_ha_jm = enable_ha_jm
@@ -2764,7 +2765,7 @@ def _restart_storage_node_impl(
         snode_api.set_hugepages()
         results, err = snode_api.spdk_process_start(
             snode.l_cores, snode.spdk_mem, snode.spdk_image, spdk_debug, cluster_ip, fdb_connection,
-            snode.namespace, snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password,
+            snode.namespace, snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password.get_secret_value(),
             multi_threading_enabled=constants.SPDK_PROXY_MULTI_THREADING_ENABLED, timeout=constants.SPDK_PROXY_TIMEOUT,
             ssd_pcie=snode.ssd_pcie, total_mem=total_mem, system_mem=minimum_sys_memory, cluster_mode=cluster.mode,
             socket=snode.socket, cluster_id=snode.cluster_id,
@@ -4258,7 +4259,7 @@ def get_host_secret(node_id):
         logger.error("node not found")
         return False
 
-    return node.host_secret
+    return node.host_secret.get_secret_value()
 
 
 def get_ctrl_secret(node_id):
@@ -4269,7 +4270,7 @@ def get_ctrl_secret(node_id):
         logger.error("node not found")
         return False
 
-    return node.ctrl_secret
+    return node.ctrl_secret.get_secret_value()
 
 
 def health_check(node_id):

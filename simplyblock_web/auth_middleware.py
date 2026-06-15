@@ -83,7 +83,7 @@ def token_required(f: F) -> Callable[..., ResponseType]:
                 cluster = db_controller.get_cluster_by_id(cluster_id)
                 
                 # Validate cluster secret
-                if not hmac.compare_digest(cluster.secret, cluster_secret):
+                if not hmac.compare_digest(cluster.secret.get_secret_value(), cluster_secret):
                     return (
                         {
                             "message": "Invalid Cluster secret",
