@@ -419,15 +419,21 @@ class TestDHCHAPE2E(unittest.TestCase):
         nic.trtype = "TCP"
         node.data_nics = [nic]
 
+        # Pool-level DHCHAP: keys live on the pool. connect_lvol unconditionally
+        # injects the pool's keys onto the matched host_entry (PR #1074), so the
+        # allowed_hosts entry only needs the nqn and the pool supplies the keys.
+        from simplyblock_core.models.pool import Pool
+        pool = Pool()
+        pool.uuid = "pool-1"
+        pool.dhchap_key = dhchap_key
+        pool.dhchap_ctrlr_key = dhchap_ctrlr_key
+
         lvol = LVol()
         lvol.uuid = "lvol-1"
         lvol.node_id = "node-1"
         lvol.nqn = "nqn:test:lvol-1"
-        lvol.allowed_hosts = [{
-            "nqn": host_nqn,
-            "dhchap_key": dhchap_key,
-            "dhchap_ctrlr_key": dhchap_ctrlr_key,
-        }]
+        lvol.pool_uuid = "pool-1"
+        lvol.allowed_hosts = [{"nqn": host_nqn}]
         lvol.nodes = ["node-1"]
         lvol.subsys_port = 9090
         lvol.ns_id = 1
@@ -438,6 +444,7 @@ class TestDHCHAPE2E(unittest.TestCase):
         mock_db.get_lvol_by_id.return_value = lvol
         mock_db.get_storage_node_by_id.return_value = node
         mock_db.get_cluster_by_id.return_value = cl
+        mock_db.get_pool_by_id.return_value = pool
 
         with patch("simplyblock_core.controllers.lvol_controller.DBController",
                     return_value=mock_db):

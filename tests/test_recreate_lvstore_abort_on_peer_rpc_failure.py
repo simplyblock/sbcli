@@ -161,7 +161,7 @@ class TestRecreateLvstoreAbortsOnPeerRPCFailure(unittest.TestCase):
             patch("simplyblock_core.storage_node_ops.health_controller"),
             patch("simplyblock_core.storage_node_ops.tcp_ports_events"),
             patch("simplyblock_core.storage_node_ops.storage_events"),
-            patch("simplyblock_core.storage_node_ops.FirewallClient"),
+            patch("simplyblock_core.port_block.set_port"),
             patch("simplyblock_core.models.storage_node.RPCClient"),
             patch("simplyblock_core.storage_node_ops._connect_to_remote_jm_devs"),
             patch("simplyblock_core.storage_node_ops._connect_to_remote_devs"),
@@ -251,18 +251,13 @@ class TestRecreateLvstoreAbortsOnPeerRPCFailure(unittest.TestCase):
         # FirewallClient: raises only when called against the secondary (leader)
         fw_calls = []
 
-        def make_fw(node, **kwargs):
-            fw = MagicMock()
+        def make_fw(node, port, block, is_reject=False, timeout=5, retry=2):
             peer_id = getattr(node, "uuid", None)
-
-            def _set_port(port, ptype, action, rpc_port):
-                fw_calls.append((peer_id, port, action, rpc_port))
-                if peer_id == "951ffc7a":  # the current leader (.206)
-                    raise Exception("simulated SnodeAPI/firewall timeout")
-                return True
-
-            fw.firewall_set_port.side_effect = _set_port
-            return fw
+            action = "block" if block else "allow"
+            fw_calls.append((peer_id, port, action, getattr(node, "rpc_port", None)))
+            if peer_id == "951ffc7a":  # the current leader (.206)
+                raise Exception("simulated SnodeAPI/firewall timeout")
+            return True
 
         m["fw_cls"].side_effect = make_fw
 
@@ -310,18 +305,13 @@ class TestRecreateLvstoreAbortsOnPeerRPCFailure(unittest.TestCase):
         # (sec=.206 is current leader). Tertiary block call (target=ea5eb8ef) raises.
         fw_calls = []
 
-        def make_fw(node, **kwargs):
-            fw = MagicMock()
+        def make_fw(node, port, block, is_reject=False, timeout=5, retry=2):
             peer_id = getattr(node, "uuid", None)
-
-            def _set_port(port, ptype, action, rpc_port):
-                fw_calls.append((peer_id, port, action, rpc_port))
-                if peer_id == "ea5eb8ef" and action == "block":
-                    raise Exception("simulated tertiary firewall timeout")
-                return True
-
-            fw.firewall_set_port.side_effect = _set_port
-            return fw
+            action = "block" if block else "allow"
+            fw_calls.append((peer_id, port, action, getattr(node, "rpc_port", None)))
+            if peer_id == "ea5eb8ef" and action == "block":
+                raise Exception("simulated tertiary firewall timeout")
+            return True
 
         m["fw_cls"].side_effect = make_fw
 

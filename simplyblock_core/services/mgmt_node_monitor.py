@@ -101,31 +101,42 @@ while True:
         time.sleep(3)
         continue
 
-    nodes = db.get_mgmt_nodes()
-    reachable_ips = set(backend.get_reachable_nodes())
+    try:
+        nodes = db.get_mgmt_nodes()
+        reachable_ips = set(backend.get_reachable_nodes())
+    except Exception as e:
+        logger.error(f"Failed to enumerate mgmt nodes / reachable IPs: {e}")
+        time.sleep(3)
+        continue
 
     for node in nodes:
-        if node.status not in [MgmtNode.STATUS_ONLINE, MgmtNode.STATUS_UNREACHABLE]:
-            logger.info(f"Node status is: {node.status}, skipping")
-            continue
+        # Per-node isolation: a failure on one mgmt node must not abort the
+        # sweep over the remaining nodes for this tick.
+        try:
+            if node.status not in [MgmtNode.STATUS_ONLINE, MgmtNode.STATUS_UNREACHABLE]:
+                logger.info(f"Node status is: {node.status}, skipping")
+                continue
 
-        # 1- check node ping
-        ping_check = health_controller._check_node_ping(node.mgmt_ip)
-        logger.info(f"Check: ping mgmt ip {node.mgmt_ip} ... {ping_check}")
-        if not ping_check:
-            time.sleep(1)
+            # 1- check node ping
             ping_check = health_controller._check_node_ping(node.mgmt_ip)
-            logger.info(f"Check 2: ping mgmt ip {node.mgmt_ip} ... {ping_check}")
+            logger.info(f"Check: ping mgmt ip {node.mgmt_ip} ... {ping_check}")
+            if not ping_check:
+                time.sleep(1)
+                ping_check = health_controller._check_node_ping(node.mgmt_ip)
+                logger.info(f"Check 2: ping mgmt ip {node.mgmt_ip} ... {ping_check}")
 
-        if not ping_check:
-            logger.info(f"Node {node.hostname} is offline")
-            set_node_offline(node)
-            continue
+            if not ping_check:
+                logger.info(f"Node {node.hostname} is offline")
+                set_node_offline(node)
+                continue
 
-        if node.mgmt_ip in reachable_ips:
-            set_node_online(node)
-        else:
-            set_node_offline(node)
+            if node.mgmt_ip in reachable_ips:
+                set_node_online(node)
+            else:
+                set_node_offline(node)
+        except Exception as e:
+            logger.error(f"Mgmt node monitor failed for node {node.get_id()}: {e}")
+            logger.exception(e)
 
     logger.info(f"Sleeping for {constants.NODE_MONITOR_INTERVAL_SEC} seconds")
     time.sleep(constants.NODE_MONITOR_INTERVAL_SEC)

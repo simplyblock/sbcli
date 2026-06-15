@@ -12,6 +12,7 @@ class Backup(BaseModel):
     STATUS_COMPLETED = 'completed'
     STATUS_FAILED = 'failed'
     STATUS_MERGING = 'merging'
+    STATUS_MERGED = 'merged'
     STATUS_DELETING = 'deleting'
 
     _STATUS_CODE_MAP = {
@@ -21,6 +22,7 @@ class Backup(BaseModel):
         STATUS_FAILED: 3,
         STATUS_MERGING: 4,
         STATUS_DELETING: 5,
+        STATUS_MERGED: 6,
     }
 
     s3_id: int = 0

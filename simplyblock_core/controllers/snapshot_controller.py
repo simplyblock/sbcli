@@ -76,6 +76,23 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
     except KeyError:
         pass
 
+    # Block while a live volume migration holds the snapshot-freeze on this
+    # source node. The migration runner freezes the source LVS to copy a
+    # consistent snapshot chain; a snapshot created mid-migration races that
+    # freeze and can corrupt the per-node snapshot plan. This enforces the
+    # one-migration-per-source-node invariant the migration controller
+    # documents but previously never checked (is_migration_active_on_node had
+    # no callers). cluster_id is omitted because LVol has no cluster_id field;
+    # the predicate matches on node_id, so an all-clusters scan is correct.
+    try:
+        if migration_controller.is_migration_active_on_node(lvol.node_id):
+            msg = (f"Cannot create snapshot: a live volume migration is active "
+                   f"on node {lvol.node_id}")
+            logger.error(msg)
+            return False, msg
+    except Exception as e:
+        logger.warning(f"Migration-active check failed for node {lvol.node_id}: {e}")
+
     pool = db_controller.get_pool_by_id(lvol.pool_uuid)
     if pool.status == Pool.STATUS_INACTIVE:
         msg = "Pool is disabled"
@@ -108,7 +125,7 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
         return False, msg
 
     if not all_lvols:
-        all_lvols = db_controller.get_lvols()
+        all_lvols = db_controller.get_mini_lvols()
     if pool.pool_max_size > 0:
         total = pool_controller.get_pool_total_capacity(pool.get_id(), all_lvols, all_snaps)
         if total + size > pool.pool_max_size:
@@ -205,7 +222,17 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
                 rpc_client = primary_node.rpc_client()
 
                 logger.info("Creating Snapshot bdev")
-                ret = rpc_client.lvol_create_snapshot(f"{lvol.lvs_name}/{lvol.lvol_bdev}", snap_bdev_name)
+                ret = False
+                for i in range(5):
+                    ret, err = rpc_client.lvol_create_snapshot2(f"{lvol.lvs_name}/{lvol.lvol_bdev}", snap_bdev_name)
+                    if not ret:
+                        if err and err.get("code") == -32602: # {"code": -32602, "message": "Device or resource busy"}}
+                            logger.error(f"Failed to create snapshot, retrying: {err}")
+                            time.sleep(0.1)
+                        else:
+                            break
+                    else:
+                        break
                 if not ret:
                     return False, f"Failed to create snapshot on node: {snode.get_id()}"
 
@@ -263,6 +290,7 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
     snap.fabric = lvol.fabric
     snap.vuid = snap_vuid
     snap.status = SnapShot.STATUS_ONLINE
+    snap.create_dt = str(datetime.now())
 
     snap.write_to_db(db_controller.kv_store)
 
@@ -274,10 +302,16 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
             if original_snap.snap_ref_id:
                 original_snap = db_controller.get_snapshot_by_id(original_snap.snap_ref_id)
 
-            original_snap.ref_count += 1
-            original_snap.write_to_db(db_controller.kv_store)
-            snap.snap_ref_id = original_snap.get_id()
-            snap.write_to_db(db_controller.kv_store)
+            # Atomic increment: a plain read-modify-write loses an increment
+            # when two clones of the same snapshot run concurrently, which can
+            # under-count ref_count and let a still-referenced snapshot be
+            # deleted (data loss).
+            if original_snap:
+                original_snap = db_controller.atomic_update(
+                    original_snap, lambda s: setattr(s, "ref_count", s.ref_count + 1))
+            if original_snap:
+                snap.snap_ref_id = original_snap.get_id()
+                snap.write_to_db(db_controller.kv_store)
 
     for sn in all_snaps:
         if sn.get_id() == snap.get_id():
@@ -342,7 +376,7 @@ def list(all=False, cluster_id=None, with_details=False, pool_id_or_name=None):
     # Build snap_id → clone list in one pass instead of rescanning all lvols
     # for every snapshot (was O(M×N) in-memory).
     clones_by_snap: dict[str, builtins.list[str]] = {}
-    for lv in db_controller.get_lvols():
+    for lv in db_controller.get_mini_lvols():
         if lv.cloned_from_snap:
             clones_by_snap.setdefault(lv.cloned_from_snap, []).append(lv.get_id())
 
@@ -444,7 +478,7 @@ def delete(snapshot_uuid, force_delete=False):
     # once SPDK has actually removed the bdev (deletion_status set).
     clones = []
     in_deletion_clones = []
-    for lvol in db_controller.get_lvols(snode.cluster_id):
+    for lvol in db_controller.get_mini_lvols():
         if not lvol.cloned_from_snap or lvol.cloned_from_snap != snapshot_uuid:
             continue
 
@@ -610,12 +644,12 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
         return False, f"Cluster is not active, status: {cluster.status}"
 
     if not all_lvols:
-        all_lvols = db_controller.get_lvols()
+        all_lvols = db_controller.get_mini_lvols()
     for lvol in all_lvols:
         if lvol.pool_uuid != pool.get_id() or lvol.lvol_name != clone_name:
             continue
         if lvol.cloned_from_snap == snapshot_id:
-            if lvol.status in [LVol.STATUS_IN_DELETION, lvol.STATUS_IN_CREATION]:
+            if lvol.status in [LVol.STATUS_IN_DELETION, LVol.STATUS_IN_CREATION]:
                 msg = f"Clone status {lvol.status} can not proceed"
                 logger.error(msg)
                 return False, msg
@@ -639,6 +673,20 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
             msg = f"Invalid LVol size: {utils.humanbytes(size)}. Pool max size has reached {utils.humanbytes(total+size)} of {utils.humanbytes(pool.pool_max_size)}"
             logger.error(msg)
             return False, msg
+
+    records = db_controller.get_cluster_capacity(cluster, 1)
+    if records:
+        rec = records[0]
+        cluster_size_prov_util = int(((rec.size_prov+size) / rec.size_total) * 100)
+
+        if cluster.prov_cap_crit and cluster.prov_cap_crit < cluster_size_prov_util:
+            msg = f"Cluster provisioned cap critical would be, util: {cluster_size_prov_util}% of cluster util: {cluster.prov_cap_crit}"
+            logger.error(msg)
+            return False, msg
+
+        elif cluster.prov_cap_warn and cluster.prov_cap_warn < cluster_size_prov_util:
+            logger.warning(f"Cluster provisioned cap warning, util: {cluster_size_prov_util}% of cluster util: {cluster.prov_cap_warn}")
+
 
     # Resolve the namespace slot early so we can (a) skip the subsystem limit
     # check when the clone fits into an existing subsystem, and (b) reuse the
@@ -669,9 +717,9 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     lvol.hostname = snode.hostname
     lvol.node_id = snode.get_id()
     lvol.nodes = snap.lvol.nodes
-    lvol.mode = 'read-write'
     lvol.cloned_from_snap = snapshot_id
     lvol.pool_uuid = pool.get_id()
+    lvol.pool_name = pool.pool_name
     lvol.ha_type = snap.lvol.ha_type
     lvol.lvol_type = 'lvol'
     lvol.guid = utils.generate_hex_string(16)
@@ -691,9 +739,9 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     if namespaced:
         # reuse the slot resolved above — avoids a second DB read
         if _available_subsys:
-            namespace, free_nqn = _available_subsys
-            lvol.nqn = free_nqn
-            lvol.namespace = namespace
+            lvol.nqn = _available_subsys.nqn
+            lvol.namespace = _available_subsys.uuid
+            lvol.max_namespace_per_subsys = _available_subsys.max_namespace_per_subsys
 
     if pvc_name:
         lvol.pvc_name = pvc_name
@@ -799,7 +847,7 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
         # with the secondary ("Duplicate cntlid 1000 ... rejecting"). Keyed by
         # node id so the index is stable whether a node proceeds now or is
         # queued for deferred registration.
-        secondary_index_map = {}
+        secondary_index_map: dict[str,int]= {}
         for candidate in all_nodes:
             if candidate.get_id() == primary_node.get_id():
                 continue
@@ -857,18 +905,24 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     lvol.status = LVol.STATUS_ONLINE
     lvol.write_to_db(db_controller.kv_store)
 
+    # Atomic increment (see add() above): concurrent clones must not lose a
+    # ref_count bump.
     if snap.snap_ref_id:
         ref_snap = db_controller.get_snapshot_by_id(snap.snap_ref_id)
-        ref_snap.ref_count += 1
-        ref_snap.write_to_db(db_controller.kv_store)
+        if ref_snap:
+            db_controller.atomic_update(ref_snap, lambda s: setattr(s, "ref_count", s.ref_count + 1))
     else:
-        snap.ref_count += 1
-        snap.write_to_db(db_controller.kv_store)
+        db_controller.atomic_update(snap, lambda s: setattr(s, "ref_count", s.ref_count + 1))
 
     logger.info("Done")
     snapshot_events.snapshot_clone(snap, lvol)
     if new_size and conv_new_size > snap.lvol.size:
-        lvol_controller.resize_lvol(lvol.get_id(), new_size)
+        try:
+            lvol_controller.resize_lvol(lvol.get_id(), new_size)
+        except Exception:
+            msg = "Resize failed"
+            logger.exception(msg)
+            return False, msg
     return lvol.uuid, False
 
 
@@ -972,7 +1026,7 @@ def list_by_node(node_id=None, is_json=False):
     # Build snap_id → clone list once instead of a full DB read per snapshot
     # (was O(M×N) DB reads).
     clones_by_snap: dict[str, builtins.list[str]] = {}
-    for lv in db_controller.get_lvols():
+    for lv in db_controller.get_mini_lvols():
         if lv.cloned_from_snap:
             clones_by_snap.setdefault(lv.cloned_from_snap, []).append(lv.get_id())
 

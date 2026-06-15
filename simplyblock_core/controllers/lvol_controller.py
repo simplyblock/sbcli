@@ -6,17 +6,18 @@ import sys
 import time
 import uuid
 from datetime import datetime
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
 from simplyblock_core import utils, constants
 from simplyblock_core.controllers import snapshot_controller, pool_controller, lvol_events, tasks_controller, \
     snapshot_events
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.kms import KMSException, create_kms_connection
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.pool import Pool
-from simplyblock_core.models.lvol_model import LVol
+from simplyblock_core.models.lvol_model import LVol, LVolReplication
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.prom_client import PromClient
 
@@ -245,7 +246,7 @@ def validate_add_lvol_func(name, size, host_id_or_name, pool_id_or_name,
                           f"Pool max size has reached {utils.humanbytes(total+size)} of {utils.humanbytes(pool.pool_max_size)}"
 
     if not all_lvols:
-        all_lvols = db_controller.get_lvols(pool.cluster_id)
+        all_lvols = db_controller.get_mini_lvols()
     for lvol in all_lvols:
         if lvol.pool_uuid == pool.get_id():
             if lvol.lvol_name == name:
@@ -263,7 +264,7 @@ def _get_next_3_nodes(cluster_id, lvol_size=0, all_lvols=None):
     snodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
 
     if not all_lvols:
-        all_lvols = db_controller.get_lvols(cluster_id)
+        all_lvols = db_controller.get_mini_lvols()
     # Build node→subsystem-count map with a single cluster-wide DB read instead
     # of one read per node (was O(K×N) where K = number of nodes).
     node_nqns: dict[str, set] = {}
@@ -444,7 +445,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     max_r_mbytes = max_r_mbytes or 0
     max_w_mbytes = max_w_mbytes or 0
 
-    all_lvols = db_controller.get_lvols(cl.get_id())
+    all_lvols = db_controller.get_mini_lvols()
     all_snaps = db_controller.get_snapshots(cl.get_id())
     result, error = validate_add_lvol_func(name, size, None, pool_id_or_name,
                                            max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, all_lvols, all_snaps)
@@ -458,8 +459,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
 
     cluster_size_prov = 0
     cluster_size_total = 0
-    for lvol in all_lvols:
-        cluster_size_prov += lvol.size
+    cluster_size_prov += sum([lv.size for lv in all_lvols])
 
     dev_count = 0
     snodes = db_controller.get_storage_nodes_by_cluster_id(cl.get_id())
@@ -510,7 +510,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
         logger.warning(f"Cluster provisioned cap warning, util: {cluster_size_prov_util}% of cluster util: {cl.prov_cap_warn}")
 
     if not distr_vuid:
-        vuid = utils.get_random_vuid()
+        vuid = utils.get_random_vuid(all_lvols=all_lvols, all_snapshots=all_snaps)
     else:
         vuid = distr_vuid
 
@@ -545,7 +545,6 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     lvol.crypto_bdev = ''
     lvol.comp_bdev = ''
 
-    lvol.mode = 'read-write'
     lvol.lvol_type = 'lvol'
     if lvol_priority_class:
         lvol.lvol_priority_class = lvol_priority_class
@@ -567,9 +566,9 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     if namespaced:
         result = get_next_available_subsystem_on_node(host_node.get_id(), all_lvols)
         if result:
-            namespace, free_nqn = result
-            lvol.nqn = free_nqn
-            lvol.namespace = namespace
+            lvol.nqn = result.nqn
+            lvol.namespace = result.uuid
+            lvol.max_namespace_per_subsys = result.max_namespace_per_subsys
 
     s_node = db_controller.get_storage_node_by_id(host_node.secondary_node_id)
     attr_name = f"active_{fabric}"
@@ -798,9 +797,6 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     lvol.write_to_db(db_controller.kv_store)
     lvol_events.lvol_create(lvol)
 
-    if pool.has_qos():
-        connect_lvol_to_pool(lvol.uuid)
-
     # set QOS
     if max_rw_iops >= 0 or max_rw_mbytes >= 0 or max_r_mbytes >= 0 or max_w_mbytes >= 0:
         set_lvol(lvol.uuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes)
@@ -816,13 +812,22 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
 def _create_bdev_stack(lvol, snode, is_primary=True):
     rpc_client = snode.rpc_client()
 
+    node_bdevs = rpc_client.get_bdevs()
+    node_bdev_names = []
+    if node_bdevs:
+        for bdev in node_bdevs:
+            node_bdev_names.append(bdev['name'])
+            node_bdev_names.extend(bdev['aliases'])
+
     created_bdevs = []
     for bdev in lvol.bdev_stack:
         type = bdev['type']
         name = bdev['name']
         params = bdev['params']
-        ret = None
+        if name in node_bdev_names:
+            continue
 
+        ret = None
         if type == "bmap_init":
             ret = rpc_client.ultra21_lvol_bmap_init(**params)
 
@@ -885,39 +890,43 @@ def _resolve_namespaced_subsystem(lvol, rpc_client, snode):
     if not lvol.namespace:
         return True
 
-    subsys = rpc_client.subsystem_list(lvol.nqn)
-    if not subsys:
-        return True
-
+    look_for_another_ns = False
     if lvol.node_id == snode.get_id():
-        subsys_max_ns = subsys[0]["max_namespaces"]
-        subsys_ns = subsys[0]["namespaces"]
-        if subsys_max_ns == len(subsys_ns):
-            logger.info("Subsys is full, looking for another one")
-            result = get_next_available_subsystem_on_node(lvol.node_id)
-            if result:
-                namespace, free_nqn = result
-                lvol.nqn = free_nqn
-                lvol.namespace = namespace
-                return False
-            else:
-                all_lvols = db_ctrl.get_lvols(snode.cluster_id)
-                subsys_count = len(set(
-                    lv.nqn for lv in all_lvols if lv.node_id == snode.get_id() and
-                    lv.status not in [LVol.STATUS_IN_DELETION, LVol.STATUS_DELETED]
-                ))
-                if subsys_count >= snode.max_lvol:
-                    error = f"Too many subsystems on node: {snode.get_id()}, max subsystems reached: {snode.max_lvol}"
-                    logger.error(error)
-                    raise Exception(error)
-
-                lvol.nqn = snode.cluster_id + ":lvol:" + lvol.uuid
-                lvol.namespace = ""
-                return True
+        subsys = rpc_client.subsystem_list(lvol.nqn)
+        if not subsys:
+            logger.warning(f"LVol subsystem {lvol.nqn} not found on node {snode.get_id()}, looking for another one")
+            look_for_another_ns = True
         else:
-            return False
+            subsys_max_ns = subsys[0]["max_namespaces"]
+            subsys_ns = subsys[0]["namespaces"]
+            if subsys_max_ns == len(subsys_ns):
+                logger.info("Subsys is full, looking for another one")
+                look_for_another_ns = True
 
-    return False
+    if look_for_another_ns:
+        result = get_next_available_subsystem_on_node(lvol.node_id)
+        if result:
+            lvol.nqn = result.nqn
+            lvol.namespace = result.uuid
+            lvol.max_namespace_per_subsys = result.max_namespace_per_subsys
+            return False
+        else:
+            all_lvols = db_ctrl.get_mini_lvols()
+            subsys_count = len(set(
+                lv.nqn for lv in all_lvols if lv.node_id == snode.get_id() and
+                lv.status not in [LVol.STATUS_IN_DELETION, LVol.STATUS_DELETED]
+            ))
+            if subsys_count >= snode.max_lvol:
+                error = f"Too many subsystems on node: {snode.get_id()}, max subsystems reached: {snode.max_lvol}"
+                logger.error(error)
+                raise Exception(error)
+
+            cluster = db_ctrl.get_cluster_by_id(snode.cluster_id)
+            lvol.nqn = cluster.nqn + ":lvol:" + lvol.uuid
+            lvol.namespace = ""
+            return True
+    else:
+        return False
 
 
 def _fail_after_bdev(lvol, rpc_client, msg):
@@ -941,9 +950,19 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
 
     ret, msg = _create_bdev_stack(lvol, snode, is_primary=is_primary)
     if not ret:
-        return False, msg
+        return _fail_after_bdev(lvol, rpc_client, msg)
 
-    if _resolve_namespaced_subsystem(lvol, rpc_client, snode):
+    db_controller = DBController()
+    pool = db_controller.get_pool_by_id(lvol.pool_uuid)
+    if pool.has_qos():
+        connect_lvol_to_pool(lvol.uuid, snode.get_id())
+
+    try:
+        resolve_subsys = _resolve_namespaced_subsystem(lvol, rpc_client, snode)
+    except Exception as e:
+        return _fail_after_bdev(lvol, rpc_client, str(e))
+
+    if resolve_subsys:
         if is_primary:
             min_cntlid = 1
         else:
@@ -960,7 +979,7 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
         if lvol.allowed_hosts:
             db_ctrl = DBController()
             cluster = db_ctrl.get_cluster_by_id(snode.cluster_id)
-            pool = None
+            pool = None # type: ignore[assignment]
             logger.info("[DHCHAP-DEBUG] add_lvol_on_node: lvol.pool_uuid=%s", lvol.pool_uuid)
             if lvol.pool_uuid:
                 try:
@@ -1046,15 +1065,35 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
                             f"Failed to create listener for {lvol.get_id()}")
 
     logger.info("Add BDev to subsystem")
-    ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid)
-    if not ret:
-        return _fail_after_bdev(
-            lvol, rpc_client, "Failed to add bdev to subsystem")
-    lvol.ns_id = int(ret)
+    ret, err = rpc_client.nvmf_subsystem_add_ns2(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid)
+    if  err:
+        if err and err["code"] == -32602 and lvol.namespace and lvol.node_id == snode.get_id():
+            logger.info("Error adding namespace to subsystem, finding new subsystem for namespaced lvol")
+            all_lvols = DBController().get_mini_lvols()
+            result = get_next_available_subsystem_on_node(lvol.node_id, all_lvols)
+            if result:
+                lvol.nqn = result.nqn
+                lvol.namespace = result.uuid
+                lvol.max_namespace_per_subsys = result.max_namespace_per_subsys
+            else:
+                subsys_count = len(set(
+                    lv.nqn for lv in all_lvols if lv.node_id == snode.get_id() and
+                    lv.status not in [LVol.STATUS_IN_DELETION, LVol.STATUS_DELETED]
+                ))
+                if subsys_count >= snode.max_lvol:
+                    error = f"Too many subsystems on node: {snode.get_id()}, max subsystems reached: {snode.max_lvol}"
+                    logger.error(error)
+                    return _fail_after_bdev(lvol, rpc_client, error)
 
-    spdk_mem_info_after = rpc_client.ultra21_util_get_malloc_stats()
-    logger.debug("ultra21_util_get_malloc_stats:")
-    logger.debug(spdk_mem_info_after)
+                cluster = DBController().get_cluster_by_id(snode.cluster_id)
+                lvol.nqn = cluster.nqn + ":lvol:" + lvol.uuid
+                lvol.namespace = ""
+            return add_lvol_on_node(lvol, snode, is_primary=is_primary, secondary_index=secondary_index)
+        else:
+            return _fail_after_bdev(
+                lvol, rpc_client, "Failed to add bdev to subsystem")
+
+    lvol.ns_id = int(ret)
 
     ret = rpc_client.get_bdevs(f"{lvol.lvs_name}/{lvol.lvol_bdev}")
     if ret:
@@ -1087,7 +1126,7 @@ def recreate_lvol_on_node(lvol, snode, ha_inode_self=0, ana_state=None):
     allow_any = not bool(lvol.allowed_hosts)
     logger.info("creating subsystem %s (allow_any_host=%s)", lvol.nqn, allow_any)
     rpc_client.subsystem_create(lvol.nqn, lvol.ha_type, lvol.uuid, min_cntlid,
-                                max_namespaces=constants.LVO_MAX_NAMESPACES_PER_SUBSYS,
+                                max_namespaces=lvol.max_namespace_per_subsys,
                                 allow_any_host=allow_any)
 
     # Re-apply allowed hosts on subsystem recreate
@@ -1343,8 +1382,8 @@ def delete_lvol(id_or_name, force_delete=False):
         logger.error(f"lvol node id not found: {lvol.node_id}")
         if not force_delete:
             return False
-        lvol.status = LVol.STATUS_DELETED
-        lvol.write_to_db(db_controller.kv_store)
+
+        lvol.remove(db_controller.kv_store)
 
         # if lvol is clone and snapshot is deleted, then delete snapshot
         if lvol.cloned_from_snap:
@@ -1352,7 +1391,7 @@ def delete_lvol(id_or_name, force_delete=False):
                 snap = db_controller.get_snapshot_by_id(lvol.cloned_from_snap)
                 if snap.deleted is True:
                     lvols_count = sum(
-                        1 for lv in db_controller.get_lvols()
+                        1 for lv in db_controller.get_mini_lvols()
                         if lv.cloned_from_snap == snap.get_id()
                     )
                     if lvols_count == 0:
@@ -1380,6 +1419,7 @@ def delete_lvol(id_or_name, force_delete=False):
         old_status = lvol.status
         lvol.status = LVol.STATUS_IN_DELETION
         lvol.write_to_db(db_controller.kv_store)
+
         try:
             lvol_events.lvol_status_change(lvol, lvol.status, old_status)
         except KeyError:
@@ -1444,7 +1484,7 @@ def delete_lvol(id_or_name, force_delete=False):
                     f"{role_id[:8]} ({role_label})")
 
         if primary_subsys_deleted:
-            time.sleep(2)
+            time.sleep(1)
 
         all_sec_nodes = []
         for sec_id in lvol.nodes[1:]:
@@ -1507,13 +1547,15 @@ def delete_lvol(id_or_name, force_delete=False):
     elif lvol.cloned_from_snap:
         try:
             snap = db_controller.get_snapshot_by_id(lvol.cloned_from_snap)
+            # Atomic decrement: a plain read-modify-write races a concurrent
+            # clone-create's increment and loses one update, leaving ref_count
+            # too high (snapshot leaks, never freed) or too low.
             if snap.snap_ref_id:
                 ref_snap = db_controller.get_snapshot_by_id(snap.snap_ref_id)
-                ref_snap.ref_count -= 1
-                ref_snap.write_to_db(db_controller.kv_store)
+                if ref_snap:
+                    db_controller.atomic_update(ref_snap, lambda s: setattr(s, "ref_count", s.ref_count - 1))
             else:
-                snap.ref_count -= 1
-                snap.write_to_db(db_controller.kv_store)
+                db_controller.atomic_update(snap, lambda s: setattr(s, "ref_count", s.ref_count - 1))
             if snap.deleted is True:
                 snapshot_controller.delete(snap.get_id())
         except KeyError:
@@ -1532,10 +1574,10 @@ def delete_lvol(id_or_name, force_delete=False):
     logger.info("Done")
     return True
 
-def connect_lvol_to_pool(uuid):
+def connect_lvol_to_pool(lvol_id, node_id):
     db_controller = DBController()
     try:
-        lvol = db_controller.get_lvol_by_id(uuid)
+        lvol = db_controller.get_lvol_by_id(lvol_id)
     except KeyError as e:
         logger.error(e)
         return False
@@ -1544,7 +1586,7 @@ def connect_lvol_to_pool(uuid):
         logger.error("Pool is disabled")
         return False
 
-    snode = db_controller.get_storage_node_by_id(lvol.node_id)
+    snode = db_controller.get_storage_node_by_id(node_id)
     rpc_client = snode.rpc_client()
 
     if pool.has_qos():
@@ -1561,8 +1603,6 @@ def connect_lvol_to_pool(uuid):
             logger.error("RPC failed bdev_set_qos_limit")
             return False
 
-    lvol.write_to_db(db_controller.kv_store)
-    pool.write_to_db(db_controller.kv_store)
     logger.info("Done")
     return True
 
@@ -1578,7 +1618,7 @@ def set_lvol(uuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, name=
         logger.error("Pool is disabled")
         return False
     if pool.has_qos():
-        logger.error("Pool already has QOS settings")
+        logger.info("Pool already has QOS settings")
         return False
 
     if name:
@@ -1732,31 +1772,6 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
         return utils.print_table(data)
 
 
-def list_lvols_mem(is_json, is_csv):
-    db_controller = DBController()
-    lvols = db_controller.get_lvols()
-    data = []
-    for lvol in lvols:
-        if lvol.deleted is True:
-            continue
-        logger.debug(lvol)
-        data.append({
-            "id": lvol.uuid,
-            "size": utils.humanbytes(lvol.size),
-            "max_size": utils.humanbytes(lvol.max_size),
-            **lvol.mem_diff
-        })
-
-    if is_json:
-        return json.dumps(data, indent=2)
-    elif is_csv:
-        print(";".join(data[0].keys()))
-        for d in data:
-            print(";".join([str(v) for v in d.values()]))
-    else:
-        return utils.print_table(data)
-
-
 def get_replication_info(lvol_id_or_name):
     db_controller = DBController()
     lvol = None
@@ -1831,8 +1846,6 @@ def get_lvol(lvol_id_or_name, is_json):
 
     data = lvol.get_clean_dict()
 
-    del data['nvme_dev']
-
     from simplyblock_core.controllers import migration_controller
     active_mig = migration_controller.get_active_migration_for_lvol(lvol.uuid)
     data['migrating'] = active_mig.uuid if active_mig else ""
@@ -1865,16 +1878,9 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
         for h in lvol.allowed_hosts:
             if h["nqn"] == host_nqn:
                 host_entry = h
-                # Do NOT inject pool DHCHAP keys into host_entry here.
-                # Pool-level keys are registered on the target's nvmf
-                # keyring via _register_pool_dhchap_keys_on_node and
-                # used during in-band auth; embedding them in the
-                # connect string overrides explicit host-level keys,
-                # injects keys when the pool has no DHCHAP configured,
-                # and conflicts with hosts using PSK/TLS. Contract is
-                # pinned by tests in tests/test_dhchap_pool_level.py
-                # (test_host_with_psk_sets_tls_flag,
-                # test_pool_level_dhchap_lvol_has_no_secret_in_connect_cmd).
+                pool = db_controller.get_pool_by_id(lvol.pool_uuid)
+                host_entry["dhchap_key"] = pool.dhchap_key
+                host_entry["dhchap_ctrlr_key"] = pool.dhchap_ctrlr_key
                 break
         if not host_entry:
             return False, f"Host NQN {host_nqn} not found in allowed hosts for volume {uuid}"
@@ -1887,12 +1893,14 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
     cluster = db_controller.get_cluster_by_id(node.cluster_id)
     if cluster.status == Cluster.STATUS_SUSPENDED and cluster.snapshot_replication_target_cluster:
         logger.error("Cluster is suspended, looking for replicated lvol")
-        for lv in db_controller.get_lvols(cluster.snapshot_replication_target_cluster):
+        for lv in db_controller.get_mini_lvols():
             if lv.nqn == lvol.nqn:
-                logger.info(f"LVol with same nqn already exists on target cluster: {lv.get_id()}")
-                lvol = lv
-                break
-
+                n = db_controller.get_storage_node_by_id(lv.node_id)
+                if n.cluster_id == cluster.snapshot_replication_target_cluster:
+                    logger.info(f"LVol with same nqn already exists on target cluster: {lv.get_id()}")
+                    lvol = lv # type: ignore[assignment]
+                    break
+    lvol = db_controller.get_lvol_by_id(lvol.get_id())
     out = []
     nodes_ids = []
     if lvol.ha_type == 'single':
@@ -1972,59 +1980,42 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
     return out, None
 
 
-def resize_lvol(id, new_size):
+def resize_lvol(id, new_size) -> None:
     db_controller = DBController()
-    try:
-        lvol = db_controller.get_lvol_by_id(id)
-    except KeyError as e:
-        logger.error(e)
-        return False, str(e)
+    lvol = db_controller.get_lvol_by_id(id)
 
     # Block during restart Phase 5
     try:
         snode = db_controller.get_storage_node_by_id(lvol.node_id)
         if snode.lvstore_status == "in_creation":
-            msg = f"Cannot resize lvol {lvol.uuid}: node LVStore restart in progress"
-            logger.error(msg)
-            return False, msg
+            raise PreconditionError(f"Cannot resize lvol {lvol.uuid}: node LVStore restart in progress")
     except KeyError:
         pass
 
     from simplyblock_core.controllers import migration_controller
     active_mig = migration_controller.get_active_migration_for_lvol(lvol.uuid)
     if active_mig:
-        msg = f"Cannot resize lvol {lvol.uuid}: active migration {active_mig.uuid}"
-        logger.error(msg)
-        return False, msg
+        raise PreconditionError(f"Cannot resize lvol {lvol.uuid}: active migration {active_mig.uuid}")
 
     pool = db_controller.get_pool_by_id(lvol.pool_uuid)
     if pool.status == Pool.STATUS_INACTIVE:
-        msg = f"Pool is disabled {pool.get_id()}"
-        logger.error(msg)
-        return False, msg
+        raise PreconditionError(f"Pool is disabled {pool.get_id()}")
 
-    if lvol.size >= new_size:
-        msg = f"New size {utils.humanbytes(new_size)} must be higher than the original size {utils.humanbytes(lvol.size)}"
-        logger.error(msg)
-        return False, msg
+    if lvol.size == new_size:
+        return  # Nothing to do
+    elif lvol.size > new_size:
+        raise PreconditionError(f"New size {new_size} must be larger than the original size {lvol.size}")
 
-    if lvol.max_size < new_size:
-        msg = f"New size {new_size} must be smaller than the max size {lvol.max_size}"
-        logger.error(msg)
-        return False, msg
+    if new_size > lvol.max_size:
+        raise PreconditionError(f"New size {new_size} must not be larger than the max size {lvol.max_size}")
 
     if 0 < pool.lvol_max_size < new_size:
-        msg = f"Pool Max LVol size is: {utils.humanbytes(pool.lvol_max_size)}, "\
-              f"LVol size: {utils.humanbytes(new_size)} must be below this limit"
-        logger.error(msg)
-        return False, msg
+        raise PreconditionError(f"New size {new_size} must not be larger than the pool max size {pool.lvol_max_size}")
 
     if pool.pool_max_size > 0:
         total = pool_controller.get_pool_total_capacity(pool.get_id())
         if total + new_size > pool.pool_max_size:
-            msg =f"Invalid LVol size: {utils.humanbytes(new_size)}, Pool max size has reached {utils.humanbytes(total+new_size)} of {utils.humanbytes(pool.pool_max_size)}"
-            logger.error(msg)
-            return False, msg
+            raise PreconditionError(f"Invalid LVol size: {new_size}, Pool max size has reached {total + new_size} of {pool.pool_max_size}")
 
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
 
@@ -2039,12 +2030,9 @@ def resize_lvol(id, new_size):
     rpc_client = snode.rpc_client()
 
     if lvol.ha_type == "single":
-
         ret = rpc_client.bdev_lvol_resize(f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib)
         if not ret:
-            msg = f"Error resizing lvol on node: {snode.get_id()}"
-            logger.error(msg)
-            return False, msg
+            raise RuntimeError(f"Error resizing lvol on node: {snode.get_id()}")
 
     else:
         primary_node = None
@@ -2080,9 +2068,7 @@ def resize_lvol(id, new_size):
             action = check_non_leader_for_operation(
                 candidate.get_id(), lvol.lvs_name, operation_type="create")
             if action == "reject":
-                msg = f"Cannot resize: non-leader {candidate.get_id()[:8]} unreachable but fabric healthy"
-                logger.error(msg)
-                return False, msg
+                raise RuntimeError(f"Cannot resize: non-leader {candidate.get_id()[:8]} unreachable but fabric healthy")
             elif action == "proceed":
                 secondary_nodes.append(candidate)
             elif action == "queue":
@@ -2098,58 +2084,19 @@ def resize_lvol(id, new_size):
             rpc_client = primary_node.rpc_client()
             ret = rpc_client.bdev_lvol_resize(f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib)
             if not ret:
-                msg = f"Error resizing lvol on node: {primary_node.get_id()}"
-                logger.error(msg)
-                return False, msg
+                raise RuntimeError(f"Error resizing lvol on node: {primary_node.get_id()}")
 
         for sec in secondary_nodes:
             logger.info(f"Resizing LVol: {lvol.get_id()} on node: {sec.get_id()}")
             sec_rpc_client = sec.rpc_client()
             ret = sec_rpc_client.bdev_lvol_resize(f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib)
             if not ret:
-                msg = f"Error resizing lvol on node: {sec.get_id()}"
-                logger.error(msg)
-                return False, msg
+                raise RuntimeError(f"Error resizing lvol on node: {sec.get_id()}")
 
     lvol = db_controller.get_lvol_by_id(id)
     lvol.size = new_size
     lvol.write_to_db(db_controller.kv_store)
     logger.info("Done")
-
-    return True, None
-
-
-
-def set_read_only(id):
-    db_controller = DBController()
-    try:
-        lvol = db_controller.get_lvol_by_id(id)
-    except KeyError as e:
-        logger.error(e)
-        return False
-
-    pool = db_controller.get_pool_by_id(lvol.pool_uuid)
-    if pool.status == Pool.STATUS_INACTIVE:
-        logger.error("Pool is disabled")
-        return False
-
-    logger.info(f"Setting LVol: {lvol.get_id()} read only")
-
-    snode = db_controller.get_storage_node_by_id(lvol.node_id)
-
-    rpc_client = snode.rpc_client()
-
-    ret = rpc_client.lvol_read_only(lvol.lvol_bdev)
-    if not ret:
-        return "Error"
-
-    old_status = lvol.mode
-    lvol.mode = 'read-only'
-    lvol.write_to_db(db_controller.kv_store)
-    logger.info("Done")
-    lvol_events.lvol_status_change(lvol, lvol.mode, old_status)
-
-    return True
 
 
 def create_snapshot(lvol_id, snapshot_name, backup=False):
@@ -2541,8 +2488,26 @@ def clone_lvol(lvol_id, clone_name, new_size=None, pvc_name=None):
     #         logger.error(error)
     #         return False, error
 
-    all_lvols = db_controller.get_lvols()
-    all_snaps = db_controller.get_snapshots()
+    all_lvols = db_controller.get_mini_lvols()
+    all_snaps = db_controller.get_mini_snapshots()
+
+    # Resolve the namespace slot early so we can (a) skip the subsystem limit
+    # check when the clone fits into an existing subsystem, and (b) reuse the
+    # result below instead of calling get_next_available_subsystem_on_node twice.
+    _available_subsys = get_next_available_subsystem_on_node(lvol.node_id, all_lvols=all_lvols)
+
+    if not _available_subsys:
+        subsys_count = len(set(
+            lv.nqn for lv in all_lvols if lv.node_id == lvol.node_id and
+            lv.status not in [LVol.STATUS_IN_DELETION, LVol.STATUS_DELETED]
+        ))
+        snode = db_controller.get_storage_node_by_id(lvol.node_id)
+
+        if subsys_count >= snode.max_lvol:
+            error = f"Too many subsystems on node: {snode.get_id()}, max subsystems reached: {snode.max_lvol}"
+            logger.error(error)
+            return False, error
+
     snapshot_uuid = None
     for snap in all_snaps:
         if snap.snap_name == clone_name and snap.lvol.node_id == lvol.node_id:
@@ -2713,6 +2678,16 @@ def replicate_lvol_on_target_cluster(lvol_id):
     lvol = db_controller.get_lvol_by_id(lvol_id)
     lvol.from_source = False
     lvol.write_to_db()
+
+    lvol_replication = LVolReplication()
+    lvol_replication.uuid = str(uuid.uuid4())
+    lvol_replication.create_dt = str(datetime.now())
+    lvol_replication.source_lvol=lvol
+    lvol_replication.target_lvol=new_lvol
+    lvol_replication.source_cluster_id=source_cluster.get_id()
+    lvol_replication.target_cluster_id=target_cluster.get_id()
+    lvol_replication.write_to_db(db_controller.kv_store)
+
     lvol_events.lvol_replicated(lvol, new_lvol)
 
     return new_lvol.lvol_uuid
@@ -2805,11 +2780,21 @@ def resume_lvol(lvol_id):
 
 def replicate_lvol_on_source_cluster(lvol_id, cluster_id=None, pool_uuid=None):
     db_controller = DBController()
+    lvol = None
     try:
         lvol = db_controller.get_lvol_by_id(lvol_id)
-    except KeyError as e:
-        logger.error(e)
-        return False
+    except KeyError:
+        logger.warning(f"LVol not found: {lvol_id}, looking in lvol replications")
+        # look for it in lvol replication
+        lvol_replications = db_controller.get_lvol_replication_objects()
+        lvol_replications.reverse()
+        for lvol_replication in lvol_replications:
+            if lvol_replication.source_lvol.get_id() == lvol_id:
+                lvol = lvol_replication.source_lvol
+                break
+        if not lvol:
+            logger.error(f"LVol not found: {lvol_id}")
+            return False
 
     source_node = None
     new_source_cluster = None
@@ -3206,10 +3191,10 @@ def get_namespaces_per_lvol(lvol):
     return ns_count
 
 
-def get_next_available_subsystem_on_node(node_id, all_lvols=None):
+def get_next_available_subsystem_on_node(node_id, all_lvols=None)-> Optional[LVol]:
     db_controller = DBController()
     if not all_lvols:
-        all_lvols = db_controller.get_lvols_by_node_id(node_id)
+        all_lvols = db_controller.get_mini_lvols()
 
     # Count active namespaces per NQN in a single pass instead of issuing a
     # separate DB read for every subsystem root (was O(N²)).
@@ -3221,10 +3206,16 @@ def get_next_available_subsystem_on_node(node_id, all_lvols=None):
         if lv.status not in [LVol.STATUS_IN_DELETION, LVol.STATUS_DELETED]:
             ns_counts[lv.nqn] = ns_counts.get(lv.nqn, 0) + 1
 
+    ret = []
     for lvol in all_lvols:
         if lvol.node_id != node_id:
             continue
-        if not lvol.namespace:
-            if ns_counts.get(lvol.nqn, 0) < lvol.max_namespace_per_subsys:
-                return lvol.get_id(), lvol.nqn
+        if lvol.status in [LVol.STATUS_IN_DELETION, LVol.STATUS_DELETED, LVol.STATUS_IN_CREATION]:
+            continue
+        if lvol.nqn in ns_counts and ns_counts.get(lvol.nqn, 0) < lvol.max_namespace_per_subsys:
+            if lvol not in ret:
+                ret.append(lvol)
+
+    if ret:
+        return ret[random.randint(0, len(ret) - 1)]
     return None

@@ -2,6 +2,7 @@
 import datetime
 import json
 import logging
+import socket
 import time
 import uuid
 
@@ -13,6 +14,60 @@ from simplyblock_core.models.storage_node import StorageNode
 
 logger = logging.getLogger()
 db = db_controller.DBController()
+
+# Identity used for task leases. Hostname (not pid) so a runner that crashes
+# and restarts on the same host re-claims its own in-flight tasks immediately.
+_RUNNER_HOST = socket.gethostname()
+
+
+def _task_lease_is_stale(task):
+    """True if the task's lease (its last write) is older than the TTL, i.e.
+    the owning runner host is presumed dead and another host may take over."""
+    if not task.updated_at:
+        return True
+    try:
+        last = datetime.datetime.fromisoformat(task.updated_at)
+    except (ValueError, TypeError):
+        return True
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=datetime.timezone.utc)
+    age = (datetime.datetime.now(datetime.timezone.utc) - last).total_seconds()
+    return age > constants.TASK_LEASE_TTL_SEC
+
+
+def claim_task(task, owner=None):
+    """Atomically claim a task for this runner host before executing it.
+
+    Returns True if this host now holds the lease and may run the task, or
+    False if another still-alive host owns it (caller must skip it this cycle).
+
+    The lease is keyed by hostname and refreshed (via updated_at) on every
+    claim and on every task write. A second runner replica on a *different*
+    host is locked out until the lease goes stale (constants.TASK_LEASE_TTL_SEC),
+    which is what prevents two replicas from both executing the same
+    side-effecting task during a rolling deploy or a transient dual-manager
+    window. A runner on the *same* host always wins immediately, so the common
+    single-replica deployment is unaffected (this gate returns True).
+
+    Done/canceled tasks are never claimed.
+    """
+    owner = owner or _RUNNER_HOST
+    decision = {"won": False}
+    now = str(datetime.datetime.now(datetime.timezone.utc))
+
+    def _mutate(t):
+        if t.status == JobSchedule.STATUS_DONE or t.canceled:
+            return False  # not claimable; decision stays False
+        if t.owner and t.owner != owner and not _task_lease_is_stale(t):
+            return False  # owned by another live host
+        t.owner = owner
+        t.updated_at = now  # refresh the lease (atomic_update bypasses write_to_db)
+        decision["won"] = True
+        return True
+
+    if db.atomic_update(task, _mutate) is None:
+        return False
+    return decision["won"]
 
 
 def _validate_new_task_dev_restart(cluster_id, node_id, device_id):
@@ -177,6 +232,21 @@ def add_node_to_auto_restart(node):
             "Refusing to queue auto-restart for node %s in status %s "
             "(only OFFLINE / SCHEDULABLE are valid triggers)",
             node.get_id(), node.status,
+        )
+        return False
+
+    # A node stopped deliberately via `sn shutdown` (CLI/API, ±--force) must
+    # never be auto-restarted — it stays stopped until an operator brings it
+    # back. This is the single chokepoint for every auto-restart queue path
+    # (set_node_offline, set_node_schedulable, the monitor's re-queue scan,
+    # device_monitor, the restart runner's give-up re-queue), so guarding it
+    # here closes all of them. The flag is cleared in set_node_status() once
+    # the node deliberately returns ONLINE.
+    if node.auto_restart_disabled:
+        logger.info(
+            "Refusing auto-restart for node %s: it was deliberately shut down "
+            "(auto_restart_disabled); only an explicit restart can bring it back",
+            node.get_id(),
         )
         return False
 

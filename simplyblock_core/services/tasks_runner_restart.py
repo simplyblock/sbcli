@@ -89,7 +89,6 @@ def _ensure_spdk_killed(node):
     try:
         logger.info(f"Killing SPDK on node {node.get_id()} (rpc_port={node.rpc_port})")
         node.client(timeout=10, retry=5).spdk_process_kill(node.rpc_port, node.cluster_id)
-        return True
     except SNodeClientException as exc:
         logger.error(
             f"Failed to kill SPDK on {node.get_id()}: {exc}; "
@@ -103,6 +102,36 @@ def _ensure_spdk_killed(node):
             f"assuming SPDK is not serving"
         )
         return True
+
+    # Confirm the process is actually gone before reporting success. The kill
+    # RPC returns as soon as SIGKILL is *delivered* — the SNodeAPI handler does
+    # not wait for the kernel reap or dockerd record cleanup — so trusting its
+    # bare return races a subsequent spdk_process_start that would launch a
+    # fresh SPDK while the old instance (or its teardown) is still settling.
+    # That is the kill/start race behind the 2026-06-03 LVS_8720 zero-leader
+    # outage. Poll spdk_process_is_up (a Unix-socket liveness probe) until it
+    # reports down, bounded; refuse to declare "killed" if it never does.
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        try:
+            is_up, _ = node.client(timeout=5, retry=2).spdk_process_is_up(
+                node.rpc_port, node.cluster_id)
+        except Exception as exc:
+            logger.warning(
+                f"spdk_process_is_up confirm-probe failed on {node.get_id()}: "
+                f"{exc}; assuming SPDK is down"
+            )
+            return True
+        if not is_up:
+            logger.info(f"Confirmed SPDK down on {node.get_id()} after kill")
+            return True
+        time.sleep(2)
+
+    logger.error(
+        f"SPDK on {node.get_id()} still up 30s after kill; refusing to report it "
+        f"killed (would race a fresh spdk_process_start)"
+    )
+    return False
 
 
 def _reset_if_transient(node_id):
@@ -449,18 +478,33 @@ while True:
                     # exponential backoff at RESTART_TASK_EXEC_INTERVAL_MAX_SEC
                     # so recovery time is bounded even after several retries.
                     delay_seconds = constants.RESTART_TASK_EXEC_INTERVAL_SEC
-                    while task.status != JobSchedule.STATUS_DONE:
-                        # get new task object because it could be changed from cancel task
-                        task = db.get_task_by_id(task.uuid)
-                        res = task_runner(task)
-                        if res:
-                            if task.status == JobSchedule.STATUS_DONE:
+                    # Per-task isolation: an unhandled exception in task_runner
+                    # must not escape to the outer `while True`, which would kill
+                    # the whole restart service and block recovery of every other
+                    # node. Log it and move on to the next task.
+                    try:
+                        while task.status != JobSchedule.STATUS_DONE:
+                            # get new task object because it could be changed from cancel task
+                            task = db.get_task_by_id(task.uuid)
+                            # Lease gate: refuse to drive a task another live runner
+                            # host already owns (prevents a second replica issuing a
+                            # concurrent shutdown/restart). Re-checked every iteration
+                            # so the lease stays fresh while we hold it.
+                            if not tasks_controller.claim_task(task):
+                                logger.info(f"Restart task {task.uuid} owned by another runner host; skipping")
                                 break
-                        else:
-                            delay_seconds = min(
-                                delay_seconds * 2,
-                                constants.RESTART_TASK_EXEC_INTERVAL_MAX_SEC,
-                            )
-                        time.sleep(delay_seconds)
+                            res = task_runner(task)
+                            if res:
+                                if task.status == JobSchedule.STATUS_DONE:
+                                    break
+                            else:
+                                delay_seconds = min(
+                                    delay_seconds * 2,
+                                    constants.RESTART_TASK_EXEC_INTERVAL_MAX_SEC,
+                                )
+                            time.sleep(delay_seconds)
+                    except Exception as e:
+                        logger.error(f"Restart task {task.uuid} processing crashed: {e}")
+                        logger.exception(e)
 
     time.sleep(constants.TASK_EXEC_INTERVAL_SEC)

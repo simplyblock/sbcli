@@ -279,7 +279,7 @@ class TestRecreateLvstoreRoles(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.health_controller")
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
     @patch("simplyblock_core.storage_node_ops.storage_events")
-    @patch("simplyblock_core.storage_node_ops.FirewallClient")
+    @patch("simplyblock_core.port_block.set_port")
     @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._connect_to_remote_jm_devs")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
@@ -347,7 +347,7 @@ class TestRecreateLvstoreRoles(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.health_controller")
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
     @patch("simplyblock_core.storage_node_ops.storage_events")
-    @patch("simplyblock_core.storage_node_ops.FirewallClient")
+    @patch("simplyblock_core.port_block.set_port")
     @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._connect_to_remote_jm_devs")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
@@ -408,10 +408,14 @@ class TestRecreateLvstoreRoles(unittest.TestCase):
         # sec2 (node-3) → tertiary, single-path attach against snode only;
         # the secondary failover (node-2) is added asynchronously
         # post-port-unblock via ``add_hublvol_failover_path``.
+        # Non-takeover recreate ⇒ lvs_node is snode itself; the peer-loop
+        # connect call routes LVS metadata via lvs_node=snode.
         nodes["node-2"].connect_to_hublvol.assert_called_once_with(
-            snode, failover_node=None, role="secondary", rpc_timeout=0.2)
+            snode, failover_node=None, role="secondary", rpc_timeout=0.2,
+            lvs_node=snode)
         nodes["node-3"].connect_to_hublvol.assert_called_once_with(
-            snode, failover_node=None, role="tertiary", rpc_timeout=0.2)
+            snode, failover_node=None, role="tertiary", rpc_timeout=0.2,
+            lvs_node=snode)
         nodes["node-3"].add_hublvol_failover_path.assert_called_once_with(
             snode, nodes["node-2"])
 
@@ -422,7 +426,7 @@ class TestRecreateLvstoreRoles(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.health_controller")
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
     @patch("simplyblock_core.storage_node_ops.storage_events")
-    @patch("simplyblock_core.storage_node_ops.FirewallClient")
+    @patch("simplyblock_core.port_block.set_port")
     @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._connect_to_remote_jm_devs")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
@@ -480,7 +484,8 @@ class TestRecreateLvstoreRoles(unittest.TestCase):
         # Only sec1 should be called, with role="secondary".
         # FTT=1 ⇒ no tertiary in topology ⇒ no deferred failover-path attach.
         nodes["node-2"].connect_to_hublvol.assert_called_once_with(
-            snode, failover_node=None, role="secondary", rpc_timeout=0.2)
+            snode, failover_node=None, role="secondary", rpc_timeout=0.2,
+            lvs_node=snode)
         nodes["node-3"].connect_to_hublvol.assert_not_called()
 
 
@@ -515,7 +520,7 @@ class TestRecreateLvstoreOnSecRoles(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops._set_restart_phase")
     @patch("simplyblock_core.storage_node_ops._handle_rpc_failure_on_peer", return_value="skip")
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
-    @patch("simplyblock_core.storage_node_ops.FirewallClient")
+    @patch("simplyblock_core.port_block.set_port")
     @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._connect_to_remote_jm_devs")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
@@ -570,7 +575,7 @@ class TestRecreateLvstoreOnSecRoles(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops._set_restart_phase")
     @patch("simplyblock_core.storage_node_ops._handle_rpc_failure_on_peer", return_value="skip")
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
-    @patch("simplyblock_core.storage_node_ops.FirewallClient")
+    @patch("simplyblock_core.port_block.set_port")
     @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._connect_to_remote_jm_devs")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")

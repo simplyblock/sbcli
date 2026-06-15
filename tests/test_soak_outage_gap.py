@@ -22,7 +22,6 @@ import importlib.util
 import os
 import random
 import sys
-import types
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock

@@ -94,7 +94,7 @@ class CLIWrapperBase:
 
     def storage_node__configure(self, sub_command, args):
         if not args.max_lvol:
-            self.parser.error(f"Mandatory argument '--max-lvol' not provided for {sub_command}")
+            self.parser.error(f"Mandatory argument '--max-subsys' not provided for {sub_command}")
         max_size = getattr(args, "max_prov") or 0
         number_of_devices = getattr(args, "number_of_devices") or 0
         sockets_to_use = [0]
@@ -169,6 +169,7 @@ class CLIWrapperBase:
         ha_jm_count = args.ha_jm_count
         format_4k = args.format_4k
         num_partitions_per_dev = 0 if args.enable_journal_device else 1
+        spdk_sys_mem = getattr(args, 'spdk_sys_mem', None)
 
         try:
             out = storage_ops.add_node(
@@ -191,6 +192,7 @@ class CLIWrapperBase:
                 ha_jm_count=ha_jm_count,
                 format_4k=format_4k,
                 spdk_proxy_image=getattr(args, 'spdk_proxy_image', None),
+                spdk_sys_mem=spdk_sys_mem,
             )
         except Exception as e:
             print(e)
@@ -393,7 +395,11 @@ class CLIWrapperBase:
         return self.cluster_add(args)
 
     def cluster__activate(self, sub_command, args):
-        cluster_ops.cluster_activate(args.cluster_id, args.force, args.force_lvstore_create)
+        try:
+            cluster_ops.cluster_activate(args.cluster_id, args.force, args.force_lvstore_create)
+        except Exception as e:
+            print(f"Error activating cluster: {e}")
+            return False
         return True
 
     def cluster__list(self, sub_command, args):
@@ -583,9 +589,6 @@ class CLIWrapperBase:
     def volume__list(self, sub_command, args):
         return lvol_controller.list_lvols(args.json, args.cluster_id, args.pool, args.all)
 
-    def volume__list_mem(self, sub_command, args):
-        return lvol_controller.list_lvols_mem(args.json, args.csv)
-
     def volume__get(self, sub_command, args):
         return lvol_controller.get_lvol(args.volume_id, args.json)
 
@@ -610,8 +613,8 @@ class CLIWrapperBase:
     def volume__resize(self, sub_command, args):
         volume_id = args.volume_id
         size = args.size
-        ret, err = lvol_controller.resize_lvol(volume_id, size)
-        return ret
+        lvol_controller.resize_lvol(volume_id, size)
+        return True
 
     def volume__create_snapshot(self, sub_command, args):
         volume_id = args.volume_id
@@ -775,9 +778,6 @@ class CLIWrapperBase:
             print(f"Error: {err}")
             return False
         return True
-
-    def storage_pool__get_master_lvols(self, sub_command, args):
-        return lvol_controller.get_master_lvols_by_pool_uuid(args.pool_id)
 
     def snapshot__add(self, sub_command, args):
         backup = getattr(args, 'backup', False)

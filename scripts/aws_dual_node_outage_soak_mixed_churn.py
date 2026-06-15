@@ -48,6 +48,14 @@ AUTO_RECOVER_METHODS = (
     "network_outage_20", "network_outage_50",
 )
 
+# Node statuses that are TRANSIENT rather than a fault: the control plane's
+# StorageNodeMonitor can autonomously kick off a node_restart (hublvol
+# reconnect / ANA failback / leader role) and an auto-recover method can
+# still be settling. At inter-iteration sync points (no deliberate outage in
+# flight) these must be waited out, not treated as an FTT-budget breach.
+# Strings mirror StorageNode: STATUS_RESTARTING / STATUS_IN_SHUTDOWN.
+TRANSIENT_NODE_STATUSES = ("in_restart", "in_shutdown")
+
 # Scenario enumeration:
 #   3 role categories × P(M,2) ordered distinct-method pairs
 #   = 3 × M·(M-1) scenarios per cycle.
@@ -94,7 +102,7 @@ def parse_args():
     parser.add_argument("--metadata", default=str(default_metadata), help="Path to cluster metadata JSON.")
     parser.add_argument("--pool", default="pool01", help="Pool name for volume creation.")
     parser.add_argument("--expected-node-count", type=int, default=6, help="Required storage node count.")
-    parser.add_argument("--volume-size", default="25G", help="Volume size to create per storage node.")
+    parser.add_argument("--volume-size", default="200G", help="Volume size to create per storage node.")
     parser.add_argument("--runtime", type=int, default=72000, help="fio runtime in seconds.")
     parser.add_argument("--restart-timeout", type=int, default=900, help="Seconds to wait for restarted nodes.")
     parser.add_argument("--rebalance-timeout", type=int, default=7200, help="Seconds to wait for rebalancing.")
@@ -721,7 +729,18 @@ class SoakRunner:
             raise TestRunError("Cluster is suspended")
         return status
 
-    def wait_for_all_online(self, target_nodes=None, timeout=None):
+    def wait_for_all_online(self, target_nodes=None, timeout=None,
+                            tolerate_transient=False):
+        """Poll until every node is 'online' (and membership == expected).
+
+        Fails fast if any node NOT in ``target_nodes`` is not online — during
+        a deliberate outage that is an FTT-budget breach. ``tolerate_transient``
+        relaxes this for inter-iteration sync points (no outage in flight):
+        an unaffected node that is merely TRANSIENT_NODE_STATUSES (the CP is
+        autonomously restarting / shutting it down) is waited out instead of
+        aborting the soak, mirroring wait_for_outage_ready. A genuinely
+        offline/unknown unaffected node still raises immediately.
+        """
         timeout = timeout or self.args.restart_timeout
         expected = self.args.expected_node_count
         target_nodes = set(target_nodes or [])
@@ -735,6 +754,11 @@ class SoakRunner:
                 uuid for uuid, status in statuses.items()
                 if uuid not in target_nodes and status != "online"
             ]
+            if tolerate_transient:
+                unaffected_bad = [
+                    uuid for uuid in unaffected_bad
+                    if statuses[uuid] not in TRANSIENT_NODE_STATUSES
+                ]
             if unaffected_bad:
                 raise TestRunError(
                     "Unaffected nodes are not online: "
@@ -749,20 +773,81 @@ class SoakRunner:
             time.sleep(self.args.poll_interval)
         raise TestRunError("Timed out waiting for nodes to return online")
 
+    def wait_for_outage_ready(self, timeout=None, poll=None):
+        """Block until the cluster is safe to apply a fresh outage pair.
+
+        Stronger precondition than wait_for_all_online: besides every node
+        reporting 'online', NO node may be transiently in_restart /
+        in_shutdown. The control plane's StorageNodeMonitor autonomously
+        kicks off a node_restart during the quiet inter-iteration window,
+        and an auto-recover method (container_kill / host_reboot) in the
+        PREVIOUS pair can still be settling. The next pair's first
+        non-force `sn shutdown` (the graceful method) is then rejected with
+        rc=1 ("Node ... is restarting in this cluster, cannot shutdown ...
+        concurrently") whenever any peer is STATUS_RESTARTING /
+        STATUS_IN_SHUTDOWN (storage_node_ops.py:shutdown_storage_node) --
+        aborting the whole soak (observed 2026-06-04). Poll here so an
+        in-flight restart is waited out instead of raced, and so we never
+        stack a deliberate dual outage on top of a node the CP is already
+        restarting (which would also risk the FTT budget).
+
+        Unlike wait_for_all_online, a transient non-online state is NOT a
+        failure: we keep polling until it clears or the timeout expires.
+        Status strings mirror StorageNode: STATUS_RESTARTING='in_restart',
+        STATUS_IN_SHUTDOWN='in_shutdown', STATUS_ONLINE='online'.
+        """
+        timeout = timeout or self.args.restart_timeout
+        poll = poll or self.args.poll_interval
+        started = time.time()
+        while True:
+            self.assert_cluster_not_suspended()
+            nodes = self.ensure_expected_nodes()
+            statuses = {node["uuid"]: node["status"] for node in nodes}
+            not_ready = {
+                uuid: status for uuid, status in statuses.items()
+                if status != "online"
+            }
+            if not not_ready:
+                return nodes
+            if time.time() - started >= timeout:
+                raise TestRunError(
+                    "Timed out waiting for cluster to be outage-ready; "
+                    "nodes not online: "
+                    + ", ".join(f"{u}:{s}" for u, s in not_ready.items())
+                )
+            self.logger.log(
+                "Waiting for cluster to be outage-ready "
+                "(CP may be auto-healing a node): "
+                + ", ".join(f"{u}:{s}" for u, s in not_ready.items())
+            )
+            time.sleep(poll)
+
     def wait_for_cluster_stable(self, require_no_rebalance=True):
         cluster_id = self.get_cluster_id()
         started = time.time()
         while time.time() - started < self.args.rebalance_timeout:
             cluster_list = self.sbctl("cluster list --json", json_output=True)
             status = str(cluster_list[0].get("Status", "")).lower()
-            if status == "suspended":
+            # Cluster Status is a COMPOSITE string: while a background rebalance
+            # / data-migration is draining it reads "active - rebalancing", not
+            # plain "active". The base state is still active. Split off any
+            # " - <substate>" suffix so we judge "is the cluster active"
+            # independently of "is it rebalancing" — the rebalance question is
+            # gated separately by rebalance_ok / is_re_balancing below. Without
+            # this split, `status == "active"` never matches during a rebalance
+            # and the soak silently blocks on rebalance completion even when
+            # rebalance gating is DISABLED (require_no_rebalance=False, the
+            # default) — the regression that made the 200G soak hang for
+            # minutes per iteration.
+            base_status = status.split(" - ", 1)[0].strip()
+            if base_status == "suspended":
                 raise TestRunError("Cluster entered suspended state")
             cluster_info = self.sbctl(f"cluster get {cluster_id}", json_output=True)
             rebalancing = bool(cluster_info.get("is_re_balancing", False))
             nodes = self.ensure_expected_nodes()
             node_statuses = {node["uuid"]: node["status"] for node in nodes}
             rebalance_ok = (not rebalancing) or (not require_no_rebalance)
-            if status == "active" and rebalance_ok and all(
+            if base_status == "active" and rebalance_ok and all(
                 state == "online" for state in node_statuses.values()
             ):
                 self.logger.log(
@@ -860,7 +945,10 @@ class SoakRunner:
             self.wait_for_data_migration_complete(reason)
             return
         # Default: nodes must be back online, then a fixed settle window.
-        self.wait_for_all_online(timeout=self.args.restart_timeout)
+        # Tolerate a peer the CP is autonomously restarting/shutting down
+        # (no deliberate outage is in flight here) instead of aborting.
+        self.wait_for_all_online(timeout=self.args.restart_timeout,
+                                 tolerate_transient=True)
         self.logger.log(
             f"Fixed inter-iteration window before {reason}: "
             f"{self.args.inter_iteration_window}s "
@@ -892,12 +980,35 @@ class SoakRunner:
         That call has been removed from the CP — shutdown is supposed to
         proceed under the cluster's FTT contract, regardless of in-flight
         rebalance, so we no longer need to wait here either.
+
+        Still resilient to the CP's concurrent-shutdown guard: if a peer is
+        transiently STATUS_RESTARTING / STATUS_IN_SHUTDOWN — e.g. an
+        autonomous StorageNodeMonitor heal that landed in the narrow window
+        between wait_for_outage_ready and this call — `sn shutdown` returns
+        rc=1 with "... cannot shutdown ... concurrently". That is transient,
+        so retry with backoff (bounded by --restart-timeout) until the peer
+        settles, mirroring the restart-retry loop in run_outage_pair,
+        instead of aborting the whole soak.
         """
-        rc, stdout_text, stderr_text = self.sbctl_allow_failure(
-            f"sn shutdown {node_id}",
-            timeout=300,
-        )
-        if rc != 0:
+        deadline = time.time() + self.args.restart_timeout
+        while True:
+            rc, stdout_text, stderr_text = self.sbctl_allow_failure(
+                f"sn shutdown {node_id}",
+                timeout=300,
+            )
+            if rc == 0:
+                return
+            guard_hit = "concurrently" in (stdout_text or "")
+            if guard_hit and time.time() < deadline:
+                last = (stdout_text or "").strip().splitlines()
+                self.logger.log(
+                    f"Graceful shutdown of {node_id} rejected by CP "
+                    f"concurrent-shutdown guard (a peer is restarting / "
+                    f"shutting down); retrying in 15s: "
+                    f"{last[-1] if last else ''}"
+                )
+                time.sleep(15)
+                continue
             raise RemoteCommandError(
                 f"mgmt: command failed with rc={rc}: sbctl sn shutdown {node_id}"
                 f" | stdout={stdout_text.strip()} | stderr={stderr_text.strip()}"
@@ -1053,7 +1164,7 @@ class SoakRunner:
                 f"cd {shlex.quote(volume['mount_point'])} && "
                 f"fio --name={fio_name} --directory={shlex.quote(volume['mount_point'])} "
                 "--direct=1 --rw=randrw --bs=4K --group_reporting --time_based "
-                f"--numjobs={FIO_NUMJOBS} --iodepth=4 --size=4G --runtime={self.args.runtime} "
+                f"--numjobs={FIO_NUMJOBS} --iodepth=4 --size=40G --runtime={self.args.runtime} "
                 "--ioengine=aiolib --max_latency=20s --exitall_on_error=1 "
                 f"--output={shlex.quote(volume['fio_log'])}; "
                 "rc=$?; "
@@ -1692,7 +1803,10 @@ class SoakRunner:
             time.sleep(duration)
         finally:
             self._enable_nic_on_all_nodes(nic)
-        self.wait_for_all_online(timeout=self.args.restart_timeout)
+        # Tolerate an autonomous CP restart/shutdown that overlapped the chaos
+        # window; only a hard-offline peer aborts here.
+        self.wait_for_all_online(timeout=self.args.restart_timeout,
+                                 tolerate_transient=True)
         self.wait_for_cluster_stable(require_no_rebalance=self.args.wait_for_rebalance)
 
     def _network_outage(self, node_id, duration):
@@ -1870,14 +1984,36 @@ class SoakRunner:
         # span at least --min-outage-overlap seconds after node 2 goes
         # down — i.e., both nodes are simultaneously not-online for the
         # configured minimum.
-        gap = self._pick_outage_gap(method1)
+        # The only outage that consults the CP's concurrent-shutdown guard is
+        # a non-force `sn shutdown` (the "graceful" method): "forced" passes
+        # --force and bypasses it, and container_kill/host_reboot/network_*
+        # aren't sbctl operations at all. If graceful is applied *second*, the
+        # first node may already be RESTARTING (auto-recover method) or
+        # IN_SHUTDOWN (forced), and the guard rejects it -- observed
+        # 2026-06-04 iter 11: peer container_kill left 4d36a4a7 RESTARTING,
+        # graceful on 6c9be7f7 returned "cannot shutdown ... concurrently"
+        # (rc=1) and the soak aborted. Apply the graceful outage first so its
+        # shutdown lands while the peer is still online; the partner method is
+        # always safe to apply second. Methods in a pair are always distinct,
+        # so there is at most one graceful. The node<->method assignment is
+        # unchanged -- only the application order flips, and overlap still
+        # holds because graceful stays down until the manual restart below,
+        # well past the 2nd outage.
+        first_node, first_method = node1, method1
+        second_node, second_method = node2, method2
+        if method2 == "graceful" and method1 != "graceful":
+            first_node, first_method = node2, method2
+            second_node, second_method = node1, method1
+
+        gap = self._pick_outage_gap(first_method)
         t_outage1 = time.time()
-        self._apply_outage(node1, method1)
+        self._apply_outage(first_node, first_method)
         time.sleep(gap)
         t_outage2 = time.time()
-        self._apply_outage(node2, method2)
+        self._apply_outage(second_node, second_method)
         self.logger.log(
-            f"Outage pair applied: outage1 at t=0, outage2 at "
+            f"Outage pair applied: {first_node[:8]}={first_method} at t=0, "
+            f"{second_node[:8]}={second_method} at "
             f"t={t_outage2 - t_outage1:.1f}s (gap={gap}s)"
         )
 
@@ -2250,6 +2386,16 @@ class SoakRunner:
                 # masks failures, races the kernel's path-failover, and
                 # can leave the client in a partially-attached state.
                 with self.serial_lock:
+                    # Final readiness gate: the inter-iteration settle confirms
+                    # all-online only once and then sleeps blindly, during
+                    # which the CP can autonomously restart a node, and an
+                    # auto-recover peer from the previous pair may still be
+                    # settling. The count-only ensure_expected_nodes check
+                    # above does not catch a node in in_restart/in_shutdown.
+                    # Wait it out here so the first `sn shutdown` doesn't trip
+                    # the CP's concurrent-shutdown guard and abort the soak
+                    # (observed 2026-06-04).
+                    self.wait_for_outage_ready()
                     self.run_outage_pair(node1, node2, method1, method2)
                     # Post-outage fio check: any fio that exited during this
                     # iteration is a fault. Same contract as the base mixed
@@ -2257,19 +2403,26 @@ class SoakRunner:
                     # SIGTERM/SIGKILL — fio keeps running into the next
                     # iteration and across the upcoming churn cycles.
                     self.check_fio()
-                    # Bring nodes back online, then settle before the next
-                    # outage pair: either wait for rebalance / data-migration
-                    # to drain (--wait-for-rebalance) or a fixed window.
-                    self.wait_for_all_online(timeout=self.args.restart_timeout)
-                    self.settle_between_iterations("next outage pair")
+                    # Bring nodes back online, then run NIC chaos. NIC chaos
+                    # must stay under the lock (its nvme-path perturbation must
+                    # not overlap a churn disconnect/connect). The inter-
+                    # iteration settle is deliberately NOT done here: it runs
+                    # once, unlocked, below — a single quiet window per
+                    # iteration that lets churn proceed instead of two blind
+                    # sleeps that both starve the churn thread. Tolerate a peer
+                    # the CP is autonomously restarting (no deliberate outage in
+                    # flight) rather than aborting.
+                    self.wait_for_all_online(timeout=self.args.restart_timeout,
+                                             tolerate_transient=True)
                     self._inter_iteration_nic_chaos()
 
                 # Re-check for any churn fault that may have fired
                 # before we acquired the lock; exit at the next sync point.
                 self.reraise_churn_error()
-                # Settle before the next iteration: with --wait-for-rebalance,
-                # gate on rebalance / data-migration completion (device-migration
-                # runners active, `is_re_balancing`); otherwise a fixed window.
+                # The one inter-iteration settle, run unlocked so churn keeps
+                # going during it: with --wait-for-rebalance, gate on rebalance /
+                # data-migration completion (device-migration runners active,
+                # `is_re_balancing`); otherwise a fixed window.
                 self.settle_between_iterations("next iteration")
 
 

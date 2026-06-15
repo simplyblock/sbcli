@@ -139,18 +139,42 @@ def _mock_rpc():
 
 
 def _mock_fw_factory():
-    """Create a FirewallClient factory that tracks instances."""
-    instances = []
+    """A ``port_block.set_port`` replacement that tracks per-node spies.
 
-    def make_fw(*args, **kwargs):
-        node = args[0] if args else None
-        fw = MagicMock()
-        fw._node_id = node.uuid if node and hasattr(node, 'uuid') else str(node)
-        fw.firewall_set_port = MagicMock(return_value=True)
-        instances.append(fw)
-        return fw
+    Port blocking moved off the directly-imported ``FirewallClient`` onto
+    ``port_block.set_port(node, port, block=...)`` (RPC-first with iptables
+    fallback). To keep these tests' intent ("a block/allow landed on node
+    X") and their assertions intact, this shim lazily creates one spy per
+    target node and records each call in the *legacy* shape
+    ``firewall_set_port(port, "tcp", action, rpc_port)`` where ``action`` is
+    "block"/"allow". Returns ``(set_port_impl, fw_instances)``."""
+    instances = []
+    by_node = {}
+
+    def make_fw(node, port, block, is_reject=False, timeout=5, retry=2):
+        nid = node.uuid if node is not None and hasattr(node, 'uuid') else str(node)
+        fw = by_node.get(nid)
+        if fw is None:
+            fw = MagicMock()
+            fw._node_id = nid
+            fw.firewall_set_port = MagicMock(return_value=True)
+            by_node[nid] = fw
+            instances.append(fw)
+        action = "block" if block else "allow"
+        return fw.firewall_set_port(port, "tcp", action, getattr(node, "rpc_port", None))
 
     return make_fw, instances
+
+
+def _set_port_to_fw(fw):
+    """Return a ``port_block.set_port`` replacement that routes every call
+    into a single ``fw.firewall_set_port(port, "tcp", action, rpc_port)``
+    spy, so side_effects (raising) and call_count assertions on that one
+    spy keep working after the port_block migration."""
+    def _impl(node, port, block, is_reject=False, timeout=5, retry=2):
+        action = "block" if block else "allow"
+        return fw.firewall_set_port(port, "tcp", action, getattr(node, "rpc_port", None))
+    return _impl
 
 
 def _setup_node_methods(nodes, rpc):
@@ -404,7 +428,7 @@ _RECREATE_PATCHES = [
     "simplyblock_core.storage_node_ops.tcp_ports_events",
     "simplyblock_core.storage_node_ops.storage_events",
     "simplyblock_core.storage_node_ops.tasks_controller",
-    "simplyblock_core.storage_node_ops.FirewallClient",
+    "simplyblock_core.port_block.set_port",
     "simplyblock_core.models.storage_node.RPCClient",
     "simplyblock_core.storage_node_ops._connect_to_remote_jm_devs",
     "simplyblock_core.storage_node_ops._create_bdev_stack",
@@ -483,7 +507,7 @@ class TestRecreateLvstoreFTT2(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
     @patch("simplyblock_core.storage_node_ops.storage_events")
     @patch("simplyblock_core.storage_node_ops.tasks_controller")
-    @patch("simplyblock_core.storage_node_ops.FirewallClient")
+    @patch("simplyblock_core.port_block.set_port")
     @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._connect_to_remote_jm_devs")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
@@ -530,7 +554,7 @@ class TestRecreateLvstoreFTT2(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
     @patch("simplyblock_core.storage_node_ops.storage_events")
     @patch("simplyblock_core.storage_node_ops.tasks_controller")
-    @patch("simplyblock_core.storage_node_ops.FirewallClient")
+    @patch("simplyblock_core.port_block.set_port")
     @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._connect_to_remote_jm_devs")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
@@ -581,7 +605,7 @@ class TestRecreateLvstoreOnSecPrimaryOnline(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
     @patch("simplyblock_core.storage_node_ops.storage_events")
     @patch("simplyblock_core.storage_node_ops.tasks_controller")
-    @patch("simplyblock_core.storage_node_ops.FirewallClient")
+    @patch("simplyblock_core.port_block.set_port")
     @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
@@ -642,7 +666,7 @@ class TestRecreateLvstoreOnSecPrimaryOffline(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
     @patch("simplyblock_core.storage_node_ops.storage_events")
     @patch("simplyblock_core.storage_node_ops.tasks_controller")
-    @patch("simplyblock_core.storage_node_ops.FirewallClient")
+    @patch("simplyblock_core.port_block.set_port")
     @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
@@ -708,7 +732,7 @@ class TestRecreateLvstoreOnSecPrimaryOffline(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
     @patch("simplyblock_core.storage_node_ops.storage_events")
     @patch("simplyblock_core.storage_node_ops.tasks_controller")
-    @patch("simplyblock_core.storage_node_ops.FirewallClient")
+    @patch("simplyblock_core.port_block.set_port")
     @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
@@ -773,7 +797,7 @@ class TestRecreateLvstoreOnSecPrimaryOffline(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
     @patch("simplyblock_core.storage_node_ops.storage_events")
     @patch("simplyblock_core.storage_node_ops.tasks_controller")
-    @patch("simplyblock_core.storage_node_ops.FirewallClient")
+    @patch("simplyblock_core.port_block.set_port")
     @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
@@ -836,7 +860,7 @@ class TestRecreateLvstoreOnSecANAFailback(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
     @patch("simplyblock_core.storage_node_ops.storage_events")
     @patch("simplyblock_core.storage_node_ops.tasks_controller")
-    @patch("simplyblock_core.storage_node_ops.FirewallClient")
+    @patch("simplyblock_core.port_block.set_port")
     @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
@@ -892,7 +916,7 @@ class TestSequentialFailbackScenario(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
     @patch("simplyblock_core.storage_node_ops.storage_events")
     @patch("simplyblock_core.storage_node_ops.tasks_controller")
-    @patch("simplyblock_core.storage_node_ops.FirewallClient")
+    @patch("simplyblock_core.port_block.set_port")
     @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._connect_to_remote_jm_devs")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
@@ -1095,7 +1119,7 @@ class TestRecreateLvstoreNonLeaderLvolMismatch(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.tasks_controller")
     @patch("simplyblock_core.storage_node_ops.set_node_status")
     @patch("simplyblock_core.storage_node_ops.SNodeClient")
-    @patch("simplyblock_core.storage_node_ops.FirewallClient")
+    @patch("simplyblock_core.port_block.set_port")
     @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
@@ -1115,8 +1139,11 @@ class TestRecreateLvstoreNonLeaderLvolMismatch(unittest.TestCase):
             recreate_lvstore_on_non_leader(
                 secondary, leader_node=primary, primary_node=primary, force=False)
         self.assertIn("Expected lvols not registered", str(cm.exception))
-        # Node must be marked offline by the abort path
-        mock_set_status.assert_any_call(secondary.get_id(), StorageNode.STATUS_OFFLINE)
+        # Node must be marked offline by the abort path. The abort path tags
+        # the transition with caused_by="restart_cleanup" (commit 4ad4e63f)
+        # so the in_restart→OFFLINE clobber guard can distinguish it.
+        mock_set_status.assert_any_call(secondary.get_id(), StorageNode.STATUS_OFFLINE,
+                                        caused_by="restart_cleanup")
 
     @patch("simplyblock_core.storage_node_ops._check_peer_disconnected",
            side_effect=lambda peer, **kw: peer.status in ["offline"])
@@ -1127,7 +1154,7 @@ class TestRecreateLvstoreNonLeaderLvolMismatch(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.tasks_controller")
     @patch("simplyblock_core.storage_node_ops.set_node_status")
     @patch("simplyblock_core.storage_node_ops.SNodeClient")
-    @patch("simplyblock_core.storage_node_ops.FirewallClient")
+    @patch("simplyblock_core.port_block.set_port")
     @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
@@ -1155,7 +1182,7 @@ class TestRecreateLvstoreNonLeaderLvolMismatch(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.tasks_controller")
     @patch("simplyblock_core.storage_node_ops.set_node_status")
     @patch("simplyblock_core.storage_node_ops.SNodeClient")
-    @patch("simplyblock_core.storage_node_ops.FirewallClient")
+    @patch("simplyblock_core.port_block.set_port")
     @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
@@ -1201,11 +1228,13 @@ class TestRecreateLvstoreNonLeaderPortBlockFailure(unittest.TestCase):
         mock_rpc_cls.return_value = rpc
         mock_create_bdev.return_value = (True, None)
 
-        # Single FirewallClient mock whose firewall_set_port raises as directed
+        # Single firewall spy whose firewall_set_port raises as directed.
+        # port_block.set_port is routed into it so call_count / side_effect
+        # assertions on the retry-then-abort path keep working.
         fw = MagicMock()
         if fw_set_port_side_effect is not None:
             fw.firewall_set_port.side_effect = fw_set_port_side_effect
-        mock_fw_cls.return_value = fw
+        mock_fw_cls.side_effect = _set_port_to_fw(fw)
 
         _setup_node_methods(nodes, rpc)
         return secondary, primary, rpc, fw
@@ -1220,7 +1249,7 @@ class TestRecreateLvstoreNonLeaderPortBlockFailure(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.tasks_controller")
     @patch("simplyblock_core.storage_node_ops.set_node_status")
     @patch("simplyblock_core.storage_node_ops.SNodeClient")
-    @patch("simplyblock_core.storage_node_ops.FirewallClient")
+    @patch("simplyblock_core.port_block.set_port")
     @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
@@ -1250,8 +1279,10 @@ class TestRecreateLvstoreNonLeaderPortBlockFailure(unittest.TestCase):
         self.assertIn("Failed to block leader", str(cm.exception))
         # All 3 attempts must have been tried
         self.assertEqual(fw.firewall_set_port.call_count, 3)
-        # Abort path sets the restarting node offline
-        mock_set_status.assert_any_call(secondary.get_id(), StorageNode.STATUS_OFFLINE)
+        # Abort path sets the restarting node offline, tagged
+        # caused_by="restart_cleanup" (commit 4ad4e63f).
+        mock_set_status.assert_any_call(secondary.get_id(), StorageNode.STATUS_OFFLINE,
+                                        caused_by="restart_cleanup")
 
     @patch("simplyblock_core.storage_node_ops.time.sleep", return_value=None)
     @patch("simplyblock_core.storage_node_ops._check_peer_disconnected",
@@ -1263,7 +1294,7 @@ class TestRecreateLvstoreNonLeaderPortBlockFailure(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.tasks_controller")
     @patch("simplyblock_core.storage_node_ops.set_node_status")
     @patch("simplyblock_core.storage_node_ops.SNodeClient")
-    @patch("simplyblock_core.storage_node_ops.FirewallClient")
+    @patch("simplyblock_core.port_block.set_port")
     @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
@@ -1297,7 +1328,7 @@ class TestRecreateLvstoreNonLeaderPortBlockFailure(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.tasks_controller")
     @patch("simplyblock_core.storage_node_ops.set_node_status")
     @patch("simplyblock_core.storage_node_ops.SNodeClient")
-    @patch("simplyblock_core.storage_node_ops.FirewallClient")
+    @patch("simplyblock_core.port_block.set_port")
     @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.DBController")
@@ -1324,6 +1355,137 @@ class TestRecreateLvstoreNonLeaderPortBlockFailure(unittest.TestCase):
         self.assertTrue(result)
         # Block succeeded on the 3rd attempt; then unblock ran too (1 more call)
         self.assertGreaterEqual(fw.firewall_set_port.call_count, 3)
+
+
+# ===========================================================================
+# jc_disable_replication: suspend-or-retry after the leader port-block
+# ===========================================================================
+
+class TestRecreateLvstoreReplicationSuspend(unittest.TestCase):
+    """recreate_lvstore (restart as leader) blocks the current leader's LVS
+    port and then calls jc_disable_replication(jm_vuid) on it:
+
+      True  -> no active replication; it is suspended (~12s) -> proceed with
+               the drain + leadership drop.
+      False -> active replication present -> unblock the leader port, re-wait
+               for replication to finish, and retry the whole block sequence;
+               after a bounded number of attempts, abort (kill SPDK, OFFLINE).
+
+    The block sequence no longer has a fixed pre-block sleep.
+    """
+
+    def _run(self, jc_disable_side=None, jc_disable_return=True):
+        """Drive recreate_lvstore on an FTT1 primary (node-1) whose secondary
+        (node-2) is the current acting leader. Returns
+        (result_or_exc, fw_calls, rpc, snode_api, nodes) where fw_calls is a
+        list of (node_uuid, action) with action in {"block","allow"}."""
+        nodes = _build_ftt1_nodes()
+        primary = nodes["node-1"]
+
+        db = _make_db_mock(nodes)
+        rpc = _mock_rpc()
+        if jc_disable_side is not None:
+            rpc.jc_disable_replication.side_effect = jc_disable_side
+        else:
+            rpc.jc_disable_replication.return_value = jc_disable_return
+
+        _setup_node_methods(nodes, rpc)
+
+        # SPDK-kill sink for the abort path. spdk_process_is_up returns a
+        # (up, err) tuple — report down so _kill_spdk_until_dead returns fast.
+        snode_api = MagicMock()
+        snode_api.spdk_process_kill.return_value = True
+        snode_api.spdk_process_is_up.return_value = (False, None)
+        for n in nodes.values():
+            n.client = MagicMock(return_value=snode_api)
+
+        make_fw, fw_instances = _mock_fw_factory()
+
+        patches = [
+            patch("simplyblock_core.storage_node_ops.DBController", return_value=db),
+            patch("simplyblock_core.storage_node_ops._create_bdev_stack", return_value=(True, None)),
+            patch("simplyblock_core.storage_node_ops._connect_to_remote_jm_devs", return_value=[]),
+            patch("simplyblock_core.storage_node_ops.health_controller"),
+            patch("simplyblock_core.storage_node_ops.tcp_ports_events"),
+            patch("simplyblock_core.storage_node_ops.storage_events"),
+            patch("simplyblock_core.storage_node_ops.tasks_controller"),
+            patch("simplyblock_core.storage_node_ops.set_node_status"),
+            patch("simplyblock_core.storage_node_ops._set_restart_phase"),
+            patch("simplyblock_core.storage_node_ops._failback_primary_ana"),
+            patch("simplyblock_core.storage_node_ops._check_peer_disconnected",
+                  side_effect=lambda peer, **kw: peer.status in ["offline"]),
+            patch("simplyblock_core.storage_node_ops.time.sleep", return_value=None),
+            patch("simplyblock_core.models.storage_node.RPCClient", return_value=rpc),
+            patch("simplyblock_core.port_block.set_port", side_effect=make_fw),
+        ]
+        for p in patches:
+            p.start()
+        self.addCleanup(lambda: [p.stop() for p in patches])
+
+        from simplyblock_core.storage_node_ops import recreate_lvstore
+        try:
+            result = recreate_lvstore(primary)
+        except Exception as e:
+            result = e
+
+        fw_calls = []
+        for fw in fw_instances:
+            for c in fw.firewall_set_port.call_args_list:
+                # firewall_set_port(port, "tcp", action, rpc_port)
+                fw_calls.append((fw._node_id, c[0][2]))
+        return result, fw_calls, rpc, snode_api, nodes
+
+    def _leader(self, fw_calls, action):
+        return [a for nid, a in fw_calls if nid == "node-2" and a == action]
+
+    def test_replication_suspended_true_proceeds(self):
+        """jc_disable_replication True on the first try: block once, suspend,
+        proceed to completion; leader port unblocked after its hublvol connect."""
+        result, fw_calls, rpc, _api, _nodes = self._run(jc_disable_return=True)
+        self.assertIs(result, True)
+        self.assertEqual(rpc.jc_disable_replication.call_count, 1)
+        self.assertEqual(len(self._leader(fw_calls, "block")), 1)
+        # unblocked once at ### 8c after connect_to_hublvol
+        self.assertEqual(len(self._leader(fw_calls, "allow")), 1)
+
+    def test_replication_active_then_suspends_retries(self):
+        """First jc_disable_replication reports active replication (False),
+        second succeeds. The leader port is unblocked and the full block
+        sequence (incl. the replication wait) re-runs before the retry."""
+        result, fw_calls, rpc, _api, nodes = self._run(jc_disable_side=[False, True])
+        self.assertIs(result, True)
+        self.assertEqual(rpc.jc_disable_replication.call_count, 2)
+        # replication wait re-ran on the retry (once per attempt)
+        self.assertEqual(
+            nodes["node-2"].wait_for_jm_rep_tasks_to_finish.call_count, 2)
+        # blocked twice (one per attempt); allowed twice (retry unblock + final 8c)
+        self.assertEqual(len(self._leader(fw_calls, "block")), 2)
+        self.assertEqual(len(self._leader(fw_calls, "allow")), 2)
+
+    def test_replication_never_suspends_aborts(self):
+        """jc_disable_replication always False -> abort after the bounded
+        number of attempts: SPDK killed, leader left unblocked, raises."""
+        result, fw_calls, rpc, api, _nodes = self._run(jc_disable_return=False)
+        self.assertIsInstance(result, Exception)
+        self.assertIn("suspend journal replication", str(result).lower())
+        self.assertEqual(rpc.jc_disable_replication.call_count, 10)
+        # 10 block attempts, each followed by a retry unblock
+        self.assertEqual(len(self._leader(fw_calls, "block")), 10)
+        self.assertEqual(len(self._leader(fw_calls, "allow")), 10)
+        self.assertGreaterEqual(api.spdk_process_kill.call_count, 1)
+
+    def test_jc_disable_replication_raise_aborts(self):
+        """A raise from jc_disable_replication aborts the restart (kill SPDK,
+        unblock the leader) rather than proceeding against active replication."""
+        result, fw_calls, rpc, api, _nodes = self._run(
+            jc_disable_side=Exception("simulated jc RPC timeout"))
+        self.assertIsInstance(result, Exception)
+        self.assertIn("jc_disable_replication", str(result).lower())
+        self.assertEqual(rpc.jc_disable_replication.call_count, 1)
+        # blocked once, then unblocked by the abort unwind
+        self.assertEqual(len(self._leader(fw_calls, "block")), 1)
+        self.assertEqual(len(self._leader(fw_calls, "allow")), 1)
+        self.assertGreaterEqual(api.spdk_process_kill.call_count, 1)
 
 
 if __name__ == '__main__':

@@ -93,7 +93,7 @@ class CLIWrapper(CLIWrapperBase):
 
     def init_storage_node__configure(self, subparser):
         subcommand = self.add_sub_command(subparser, 'configure', 'Prepare a configuration file to be used when adding the storage node.')
-        argument = subcommand.add_argument('--max-lvol', help='The max logical volume per storage node.', type=int, dest='max_lvol', required=True)
+        argument = subcommand.add_argument('--max-subsys', help='The max number of subsystems per storage node.', type=int, dest='max_lvol', required=True)
         argument = subcommand.add_argument('--max-size', help='The maximum amount of Huge Pages to be set on the node.', type=str, dest='max_prov', required=False)
         argument = subcommand.add_argument('--nodes-per-socket', help='The number of each node to be added per each socket. Default: `1`.', type=int, default=1, dest='nodes_per_socket')
         argument = subcommand.add_argument('--sockets-to-use', help='The system socket to use when adding the storage nodes. Default: `0`.', type=str, default='0', dest='sockets_to_use')
@@ -104,7 +104,7 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--size-range', help='NVMe SSD device size range separated by -, can be X(m,g,t) or bytes as integer, example: --size-range 50G-1T or --size-range 1232345-67823987, --device-model and --size-range must be set together.', type=str, default='', dest='size_range', required=False)
         argument = subcommand.add_argument('--nvme-names', help='Comma separated list of nvme namespace names like nvme0n1,nvme1n1.', type=str, default='', dest='nvme_names', required=False)
         argument = subcommand.add_argument('--force', help='Force format detected or passed nvme pci address to 4K and clean partitions.', dest='force', action='store_true')
-        argument = subcommand.add_argument('--calculate-hp-only', help='Calculate the minimum required huge pages, it depends on the following params: --cores-percentage, --sockets-to-use, --max-lvol, --nodes-per-socket, --number-of-devices.', dest='calculate_hp_only', action='store_true')
+        argument = subcommand.add_argument('--calculate-hp-only', help='Calculate the minimum required huge pages, it depends on the following params: --cores-percentage, --sockets-to-use, --max-subsys, --nodes-per-socket, --number-of-devices.', dest='calculate_hp_only', action='store_true')
         argument = subcommand.add_argument('--number-of-devices', help='Number of devices that will be used on this host. For calculating huge pages memory only.', type=int, dest='number_of_devices')
 
     def init_storage_node__configure_upgrade(self, subparser):
@@ -149,6 +149,7 @@ class CLIWrapper(CLIWrapperBase):
             argument = subcommand.add_argument('--id-device-by-nqn', help='Use the device NQN instead of the serial number for identification. Default: `false`.', dest='id_device_by_nqn', action='store_true')
         if self.developer_mode:
             argument = subcommand.add_argument('--max-snap', help='The max snapshot per storage node. Default: `5000`.', type=int, default=5000, dest='max_snap')
+        argument = subcommand.add_argument('--spdk-sys-mem', help='System memory reserved for non-SPDK use (e.g. 2G, 4096M). Overrides the auto-calculated minimum_sys_memory. If not set, the value is derived from the node configuration.', type=str, dest='spdk_sys_mem')
         if self.developer_mode:
             argument = subcommand.add_argument('--spdk-proxy-image', help='The SPDK proxy image URI.', type=str, dest='spdk_proxy_image')
 
@@ -174,7 +175,7 @@ class CLIWrapper(CLIWrapperBase):
     def init_storage_node__restart(self, subparser):
         subcommand = self.add_sub_command(subparser, 'restart', 'Restarts a storage node.')
         subcommand.add_argument('node_id', help='Storage node id', type=str).completer = self._completer_get_sn_list
-        argument = subcommand.add_argument('--max-lvol', help='The max logical volume per storage node. Default: `0`.', type=int, default=0, dest='max_lvol')
+        argument = subcommand.add_argument('--max-subsys', help='The max number of subsystems per storage node. Default: `0`.', type=int, default=0, dest='max_lvol')
         if self.developer_mode:
             argument = subcommand.add_argument('--max-snap', help='The max snapshot per storage node. Default: `5000`.', type=int, default=5000, dest='max_snap')
         if self.developer_mode:
@@ -591,8 +592,6 @@ class CLIWrapper(CLIWrapperBase):
         self.init_volume__add(subparser)
         self.init_volume__qos_set(subparser)
         self.init_volume__list(subparser)
-        if self.developer_mode:
-            self.init_volume__list_mem(subparser)
         self.init_volume__get(subparser)
         self.init_volume__delete(subparser)
         self.init_volume__connect(subparser)
@@ -663,11 +662,6 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--pool', help='List logical volumes in particular pool id or name.', type=str, dest='pool')
         argument = subcommand.add_argument('--json', help='Print outputs in json format.', dest='json', action='store_true')
         argument = subcommand.add_argument('--all', help='List soft deleted logical volumes.', dest='all', action='store_true')
-
-    def init_volume__list_mem(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'list-mem', 'Gets the size and max_size of a logical volume.')
-        argument = subcommand.add_argument('--json', help='Print outputs in json format.', dest='json', action='store_true')
-        argument = subcommand.add_argument('--csv', help='Print outputs in csv format.', dest='csv', action='store_true')
 
     def init_volume__get(self, subparser):
         subcommand = self.add_sub_command(subparser, 'get', 'Gets the logical volume details.')
@@ -813,7 +807,6 @@ class CLIWrapper(CLIWrapperBase):
         self.init_storage_pool__get_io_stats(subparser)
         self.init_storage_pool__add_host(subparser)
         self.init_storage_pool__remove_host(subparser)
-        self.init_storage_pool__get_master_lvols(subparser)
 
 
     def init_storage_pool__add(self, subparser):
@@ -880,10 +873,6 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'remove-host', 'Remove an allowed host NQN from a storage pool.')
         subcommand.add_argument('pool_id', help='The storage pool id.', type=str)
         subcommand.add_argument('host_nqn', help='The host NQN to remove.', type=str)
-
-    def init_storage_pool__get_master_lvols(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'get-master-lvols', 'Return a list of master lvols (not namespaced lvol) from a storage pool.')
-        subcommand.add_argument('pool_id', help='The storage pool id.', type=str)
 
 
     def init_snapshot(self):
@@ -1317,12 +1306,6 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.volume__qos_set(sub_command, args)
                 elif sub_command in ['list']:
                     ret = self.volume__list(sub_command, args)
-                elif sub_command in ['list-mem']:
-                    if not self.developer_mode:
-                        print("This command is private.")
-                        ret = False
-                    else:
-                        ret = self.volume__list_mem(sub_command, args)
                 elif sub_command in ['get']:
                     ret = self.volume__get(sub_command, args)
                 elif sub_command in ['delete']:
@@ -1419,8 +1402,6 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.storage_pool__add_host(sub_command, args)
                 elif sub_command in ['remove-host']:
                     ret = self.storage_pool__remove_host(sub_command, args)
-                elif sub_command in ['get-master-lvols']:
-                    ret = self.storage_pool__get_master_lvols(sub_command, args)
                 else:
                     self.parser.print_help()
 

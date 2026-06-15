@@ -7,9 +7,12 @@ Spec (from PR #1050 review):
 1. Fixed role order tertiary -> secondary -> primary.
 2. Skip any role whose node status is not STATUS_ONLINE
    (down / in_restart / unreachable / etc).
-3. Exactly ONE 2-second sleep, placed immediately after the primary's
+3. Exactly ONE drain sleep, placed immediately after the primary's
    subsystem delete and BEFORE execute_on_leader_with_failover (which
-   targets the *current* leader — not necessarily the primary).
+   targets the *current* leader — not necessarily the primary). The
+   drain window was shortened from 2s to 1s in PR #1078; the contract
+   that matters is "exactly one sleep, gated on the primary teardown,
+   sitting between it and the leader op".
 4. If the primary's subsystem delete is skipped (primary not online),
    no sleep is performed.
 
@@ -81,8 +84,16 @@ def _make_node(uuid, status=StorageNode.STATUS_ONLINE,
     n.get_id.return_value = uuid
 
     rpc_mock = MagicMock()
-    # Default: subsystem exists with one namespace -> subsystem_delete path.
-    rpc_mock.subsystem_list.return_value = [{"namespaces": [{"nsid": 1}]}]
+    # Default: subsystem exists with one namespace whose uuid matches the
+    # lvol -> _remove_lvol_subsys_from_node removes the ns, the list then
+    # becomes empty, and the whole subsystem is deleted (subsystem_delete
+    # path). The namespace dict mirrors the real subsystem_list shape
+    # (nsid + bdev_name + uuid) that the production code now matches on.
+    rpc_mock.subsystem_list.side_effect = [
+        [{"namespaces": [{"nsid": 1, "bdev_name": "LVOL_1",
+                          "uuid": "lvol-uuid-1"}]}],
+        [{"namespaces": []}],
+    ]
     rpc_mock.subsystem_delete.return_value = True
     rpc_mock.nvmf_subsystem_remove_ns.return_value = True
     n.rpc_client_mock = rpc_mock
@@ -206,7 +217,7 @@ class TestSubsystemDeleteOrder(unittest.TestCase):
             ("subsystem_delete", "node-tertiary"),
             ("subsystem_delete", "node-secondary"),
             ("subsystem_delete", "node-primary"),
-            ("sleep", 2),
+            ("sleep", 1),
             ("leader_op", "node-primary"),
         ])
 
@@ -222,7 +233,7 @@ class TestSubsystemDeleteOrder(unittest.TestCase):
         self.assertEqual(events, [
             ("subsystem_delete", "node-secondary"),
             ("subsystem_delete", "node-primary"),
-            ("sleep", 2),
+            ("sleep", 1),
             ("leader_op", "node-primary"),
         ])
 
@@ -237,7 +248,7 @@ class TestSubsystemDeleteOrder(unittest.TestCase):
         self.assertEqual(events, [
             ("subsystem_delete", "node-tertiary"),
             ("subsystem_delete", "node-primary"),
-            ("sleep", 2),
+            ("sleep", 1),
             ("leader_op", "node-primary"),
         ])
 
@@ -260,16 +271,16 @@ class TestSubsystemDeleteOrder(unittest.TestCase):
 
     def test_only_one_sleep_total(self):
         """Even with all three peers online, there must be exactly one
-        sleep(2) and it must land immediately before the leader op."""
+        drain sleep and it must land immediately before the leader op."""
         mod, events, _p, _s, _t = self._patch()
         mod.delete_lvol("lvol-uuid-1", force_delete=False)
 
         sleeps = [e for e in events if e[0] == "sleep"]
         self.assertEqual(len(sleeps), 1)
-        self.assertEqual(sleeps[0], ("sleep", 2))
+        self.assertEqual(sleeps[0], ("sleep", 1))
 
         # And it sits exactly between the primary teardown and the leader op.
-        sleep_idx = events.index(("sleep", 2))
+        sleep_idx = events.index(("sleep", 1))
         self.assertEqual(events[sleep_idx - 1], ("subsystem_delete", "node-primary"))
         self.assertEqual(events[sleep_idx + 1][0], "leader_op")
 

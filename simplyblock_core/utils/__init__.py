@@ -48,7 +48,14 @@ CONFIG_KEYS = [
 ]
 
 UUID_PATTERN = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
-
+NQN_PATTERN = re.compile(
+    r'nqn\.'
+    r'\d{4}-\d{2}'
+    r'\.'
+    r'(?:[a-zA-Z0-9](?:[a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)*'
+    r'[a-zA-Z]{2,}'
+    r'(?::[a-zA-Z0-9.\-:_]+)?'  # optional unique name
+)
 
 def get_env_var(name, default=None, is_required=False):
     if not name:
@@ -364,7 +371,7 @@ def sum_records(records):
 def _used_bdev_name_numbers(db_controller, all_lvols=None, all_snapshots=None):
     used = set()
     if not all_lvols:
-        all_lvols = db_controller.get_lvols()
+        all_lvols = db_controller.get_mini_lvols()
 
     if not all_snapshots:
         all_snapshots = db_controller.get_snapshots()
@@ -381,7 +388,7 @@ def get_random_vuid(all_lvols=None, all_snapshots=None):
     from simplyblock_core.db_controller import DBController
     db_controller = DBController()
     if not all_lvols:
-        all_lvols = db_controller.get_lvols()
+        all_lvols = db_controller.get_mini_lvols()
 
     used_vuids = []
     nodes = db_controller.get_storage_nodes()
@@ -469,27 +476,51 @@ def calculate_core_allocations(vcpu_list, alceml_count=2):
         return vcpus[:count]
 
     assigned = {}
+    # Compression-thread CPU layout (gated per-branch, off on main):
+    #  - <32 vCPU: the lvs thread (lvol_poller) co-locates with the app thread to
+    #    free a core, and the compression thread co-locates with jc-singleton.
+    #  - >=32 vCPU: the lvs thread keeps its own core and the compression thread
+    #    gets a dedicated core.
+    # When the gate is off the original layout is reproduced exactly.
+    comp_enabled = constants.JM_COMPRESSION_THREAD_ENABLED
+    colocate_lvs = comp_enabled and len(vcpu_list) < 32
+    dedicate_comp = comp_enabled and len(vcpu_list) >= 32
     if (len(vcpu_list) < 12):
-        vcpu = reserve_n(5)
+        vcpu = reserve_n(4 if colocate_lvs else 5)
         assigned["app_thread_core"] = vcpu[0:1]
         assigned["jm_cpu_core"] = vcpu[1:2]
         assigned["jc_singleton_core"] = vcpu[2:3]
         assigned["alceml_cpu_cores"] = vcpu[3:4]
-        assigned["lvol_poller_core"] = vcpu[4:5]
+        assigned["lvol_poller_core"] = vcpu[0:1] if colocate_lvs else vcpu[4:5]
     elif (len(vcpu_list) < 22):
-        vcpu = reserve_n(6)
+        vcpu = reserve_n(5 if colocate_lvs else 6)
         assigned["app_thread_core"] = vcpu[0:1]
         assigned["jm_cpu_core"] = vcpu[1:2]
         assigned["jc_singleton_core"] = vcpu[2:3]
         assigned["alceml_cpu_cores"] = vcpu[3:5]
-        assigned["lvol_poller_core"] = vcpu[5:6]
+        assigned["lvol_poller_core"] = vcpu[0:1] if colocate_lvs else vcpu[5:6]
     else:
-        vcpus = reserve_n(4+alceml_count)
+        # base threads: app, jm, jc (+ own lvol_poller unless co-located) (+ dedicated compression)
+        base = 3 if colocate_lvs else 4
+        if dedicate_comp:
+            base += 1
+        vcpus = reserve_n(base + alceml_count)
         assigned["app_thread_core"] = vcpus[0:1]
         assigned["jm_cpu_core"] = vcpus[1:2]
         assigned["jc_singleton_core"] = vcpus[2:3]
-        assigned["lvol_poller_core"] = vcpus[3:4]
-        assigned["alceml_cpu_cores"] = vcpus[4:4+alceml_count]
+        idx = 3
+        if colocate_lvs:
+            assigned["lvol_poller_core"] = vcpus[0:1]
+        else:
+            assigned["lvol_poller_core"] = vcpus[idx:idx + 1]
+            idx += 1
+        if dedicate_comp:
+            assigned["compression_core"] = vcpus[idx:idx + 1]
+            idx += 1
+        assigned["alceml_cpu_cores"] = vcpus[idx:idx + alceml_count]
+    # Compression thread co-locates with jc-singleton unless it got a dedicated core.
+    if comp_enabled and "compression_core" not in assigned:
+        assigned["compression_core"] = assigned.get("jc_singleton_core", [])
     dp = int(len(remaining) / 2)
     if 17 > dp >= 12:
         poller_n = len(remaining) - 12
@@ -523,6 +554,7 @@ def calculate_core_allocations(vcpu_list, alceml_count=2):
         assigned.get("distrib_cpu_cores", []),
         assigned.get("jc_singleton_core", []),
         assigned.get("lvol_poller_core", []),
+        assigned.get("compression_core", []),
     )
 
 
@@ -1237,7 +1269,12 @@ def addNvmeDevices(rpc_client, snode, devs):
         if pcie in ctr_map:
             nvme_controller = ctr_map[pcie]
             nvme_bdevs = []
-            for bdev in rpc_client.get_bdevs():
+            bdevs = rpc_client.get_bdevs()
+            if bdevs is None:
+                # None is an RPC failure (timeout / non-200), not an empty
+                # list; fail loudly instead of crashing on a None iteration.
+                raise Exception(f"get_bdevs failed on {rpc_client.host}")
+            for bdev in bdevs:
                 if bdev['name'].startswith(nvme_controller):
                     nvme_bdevs.append(bdev['name'])
         else:
@@ -1733,7 +1770,8 @@ def regenerate_config(new_config, old_config, force=False):
                 "alceml_worker_cpu_cores": get_core_indexes(core_to_index, distribution[4]),
                 "distrib_cpu_cores": get_core_indexes(core_to_index, distribution[5]),
                 "jc_singleton_core": get_core_indexes(core_to_index, distribution[6]),
-                "lvol_poller_core": get_core_indexes(core_to_index, distribution[7])}
+                "lvol_poller_core": get_core_indexes(core_to_index, distribution[7]),
+                "compression_core": get_core_indexes(core_to_index, distribution[8])}
 
         isolated_cores = old_config["nodes"][i]["isolated"]
         number_of_distribs = 2
@@ -1887,7 +1925,8 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
                     #                                            core_group["distribution"][4]),
                     "distrib_cpu_cores": get_core_indexes(core_group["core_to_index"], core_group["distribution"][5]),
                     "jc_singleton_core": get_core_indexes(core_group["core_to_index"], core_group["distribution"][6]),
-                    "lvol_poller_core": get_core_indexes(core_group["core_to_index"], core_group["distribution"][7])
+                    "lvol_poller_core": get_core_indexes(core_group["core_to_index"], core_group["distribution"][7]),
+                    "compression_core": get_core_indexes(core_group["core_to_index"], core_group["distribution"][8])
                 },
                 "ssd_pcis": [],
                 "nic_ports": system_info[nid]["nics"]
@@ -1989,6 +2028,42 @@ def format_device_with_4k(pci_device):
         logger.error(f"Failed to format device with 4K {e}")
 
 
+_HUGEPAGES_BASELINE_DIR = "/tmp/simplyblock"
+
+
+def _get_user_hugepages_baseline(node, current_hugepages):
+    """Return the per-NUMA user hugepage baseline, persisted across calls within a boot.
+
+    On first call for a given NUMA node (no baseline file), the current allocatable
+    hugepage count is the user's reservation — simplyblock hasn't touched it yet.
+    That value is written to /tmp/simplyblock/hugepages_baseline_node{N}.
+    On subsequent calls the file is read directly; /tmp/simplyblock is cleared on
+    reboot (host tmpfs / Docker/K8s hostPath volume) so the baseline is always
+    fresh after a reboot.
+    """
+    baseline_file = os.path.join(_HUGEPAGES_BASELINE_DIR, f"hugepages_baseline_node{node}")
+
+    if os.path.exists(baseline_file):
+        try:
+            with open(baseline_file) as f:
+                val = int(f.read().strip())
+            logger.debug(f"Node {node}: hugepage baseline from cache: {val}")
+            return val
+        except Exception as e:
+            logger.warning(f"Node {node}: could not read baseline file {baseline_file}: {e}")
+
+    # First call this boot — current value is the pre-simplyblock baseline.
+    try:
+        os.makedirs(_HUGEPAGES_BASELINE_DIR, exist_ok=True)
+        with open(baseline_file, "w") as f:
+            f.write(str(current_hugepages))
+        logger.info(f"Node {node}: saved hugepage baseline: {current_hugepages} -> {baseline_file}")
+    except Exception as e:
+        logger.warning(f"Node {node}: could not save hugepage baseline to {baseline_file}: {e}")
+
+    return current_hugepages
+
+
 def set_hugepages_if_needed(node, hugepages_needed, page_size_kb=2048):
     """Set hugepages for a specific NUMA node if current number is less than needed."""
     hugepage_path = f"/sys/devices/system/node/node{node}/hugepages/hugepages-{page_size_kb}kB/nr_hugepages"
@@ -1997,14 +2072,17 @@ def set_hugepages_if_needed(node, hugepages_needed, page_size_kb=2048):
         with open(hugepage_path, "r") as f:
             current_hugepages = int(f.read().strip())
 
-        if current_hugepages >= hugepages_needed:
-            logger.debug(f"Node {node}: already has {current_hugepages} hugepages, no change needed.")
+        user_baseline = _get_user_hugepages_baseline(node, current_hugepages)
+        required = user_baseline + hugepages_needed
+
+        if current_hugepages >= required:
+            logger.debug(f"Node {node}: already has {current_hugepages} hugepages >= required {required}, no change needed.")
         else:
-            hugepages_needed = adjust_hugepages(hugepages_needed)
-            logger.debug(f"Node {node}: has {current_hugepages} hugepages, setting to {hugepages_needed}...")
-            cmd = f"echo {hugepages_needed} | sudo tee /sys/devices/system/node/node{node}/hugepages/hugepages-2048kB/nr_hugepages"
+            required = adjust_hugepages(required)
+            logger.debug(f"Node {node}: setting to {required} (user baseline={user_baseline} + simplyblock={hugepages_needed})...")
+            cmd = f"echo {required} | sudo tee /sys/devices/system/node/node{node}/hugepages/hugepages-2048kB/nr_hugepages"
             subprocess.run(cmd, shell=True, check=True)
-            logger.debug(f"Node {node}: hugepages updated to {hugepages_needed}.")
+            logger.debug(f"Node {node}: hugepages updated to {required}.")
 
     except FileNotFoundError:
         logger.error(f"Node {node}: Hugepage path not found. Is hugepage support enabled?")
@@ -3293,7 +3371,8 @@ def recalculate_cores_distribution(cores, number_of_alcemls):
         "alceml_worker_cpu_cores": get_core_indexes(core_to_index, distribution[4]),
         "distrib_cpu_cores": get_core_indexes(core_to_index, distribution[5]),
         "jc_singleton_core": get_core_indexes(core_to_index, distribution[6]),
-        "lvol_poller_core": get_core_indexes(core_to_index, distribution[7])}
+        "lvol_poller_core": get_core_indexes(core_to_index, distribution[7]),
+        "compression_core": get_core_indexes(core_to_index, distribution[8])}
 
 
 def resolve_address(host_port: str) -> str:

@@ -52,6 +52,7 @@ class StorageNodeParams(BaseModel):
     ha_jm_count: Optional[int] = Field(None)
     format_4k: bool = Field(False)
     spdk_proxy_image: Optional[str] = None
+    spdk_sys_mem: Optional[str] = None
 
 
 @api.post('/', name='clusters:storage-nodes:create', status_code=201, responses={201: {"content": None}})
@@ -80,6 +81,7 @@ def add(cluster: Cluster, parameters: StorageNodeParams):
             "ha_jm_count": parameters.ha_jm_count,
             "format_4k": parameters.format_4k,
             "spdk_proxy_image": parameters.spdk_proxy_image,
+            "spdk_sys_mem": parameters.spdk_sys_mem,
         }
     )
     if not task_id_or_false:

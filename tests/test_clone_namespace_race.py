@@ -82,16 +82,31 @@ def _lvol_for_add(uuid, namespace="", nqn=None):
 def _rpc_client():
     mock = MagicMock()
     mock.lvol_clone.return_value = {"uuid": "lvol-bdev-uuid"}
-    # Happy default: target subsystem exists.
-    mock.subsystem_list.return_value = [{"namespaces": [{"uuid": "x"}]}]
+    # Happy default: target subsystem exists with a free namespace slot.
+    mock.subsystem_list.return_value = [
+        {"max_namespaces": 32, "namespaces": [{"uuid": "x"}]}]
     mock.subsystem_create.return_value = True
     mock.nvmf_subsystem_add_listener.return_value = (True, None)
-    mock.nvmf_subsystem_add_ns.return_value = 7
+    # add_lvol_on_node uses nvmf_subsystem_add_ns2, which returns (ret, err).
+    mock.nvmf_subsystem_add_ns2.return_value = (7, None)
     mock.ultra21_util_get_malloc_stats.return_value = {}
-    mock.get_bdevs.return_value = [
-        {"uuid": "lvol-bdev-uuid",
-         "driver_specific": {"lvol": {"blobid": 12345}}},
-    ]
+
+    # get_bdevs() is called twice with different signatures:
+    #   - no args (in _create_bdev_stack) -> the full node bdev list, each
+    #     entry having 'name'/'aliases'. Names must NOT match the clone's
+    #     top_bdev or the clone create would be skipped.
+    #   - a specific bdev name (final lookup) -> the created lvol bdev with
+    #     its blobid.
+    final_bdev = {"uuid": "lvol-bdev-uuid", "name": "lvol-bdev-uuid",
+                  "aliases": [],
+                  "driver_specific": {"lvol": {"blobid": 12345}}}
+
+    def _get_bdevs(name=None):
+        if name:
+            return [final_bdev]
+        return [{"name": "some-other-bdev", "aliases": []}]
+
+    mock.get_bdevs.side_effect = _get_bdevs
     # _remove_bdev_stack's bdev_lvol_clone branch calls this.
     mock.delete_lvol.return_value = (True, None)
     return mock
@@ -115,7 +130,8 @@ class TestNamespacedAttachRace(unittest.TestCase):
                              nqn=original_nqn)
         node = _node()
         rpc = _rpc_client()
-        rpc.subsystem_list.return_value = [{"namespaces": [{"uuid": "y"}]}]
+        rpc.subsystem_list.return_value = [
+            {"max_namespaces": 32, "namespaces": [{"uuid": "y"}]}]
         node.rpc_client = MagicMock(return_value=rpc)
         mock_db_cls.return_value = MagicMock()
 
@@ -126,8 +142,8 @@ class TestNamespacedAttachRace(unittest.TestCase):
         rpc.subsystem_list.assert_called_with(original_nqn)
         rpc.subsystem_create.assert_not_called()
         rpc.nvmf_subsystem_add_listener.assert_not_called()
-        rpc.nvmf_subsystem_add_ns.assert_called_once()
-        self.assertEqual(rpc.nvmf_subsystem_add_ns.call_args[0][0],
+        rpc.nvmf_subsystem_add_ns2.assert_called_once()
+        self.assertEqual(rpc.nvmf_subsystem_add_ns2.call_args[0][0],
                          original_nqn)
         # lvol.namespace and lvol.nqn preserved
         self.assertEqual(lvol.namespace, "ex-host-lvol-id")
@@ -145,12 +161,6 @@ class TestNamespacedAttachRace(unittest.TestCase):
         lvol = _lvol_for_add("u2", namespace="ex-host-lvol-id",
                              nqn=original_nqn)
 
-        # Capture lvol state at each write_to_db call so we can prove the
-        # downgrade was persisted BEFORE the standalone block ran.
-        write_snapshots = []
-        lvol.write_to_db = MagicMock(side_effect=lambda kv: write_snapshots.append(
-            {"nqn": lvol.nqn, "namespace": lvol.namespace, "ns_id": lvol.ns_id}))
-
         node = _node()
         rpc = _rpc_client()
         rpc.subsystem_list.return_value = []  # subsystem gone
@@ -158,6 +168,9 @@ class TestNamespacedAttachRace(unittest.TestCase):
 
         db = MagicMock()
         db.get_cluster_by_id.return_value = _cluster()
+        # No replacement namespaced subsystem available on the node, so the
+        # resolver must downgrade this lvol to its own standalone subsystem.
+        db.get_mini_lvols.return_value = []
         db.kv_store = MagicMock()
         mock_db_cls.return_value = db
 
@@ -166,7 +179,9 @@ class TestNamespacedAttachRace(unittest.TestCase):
         self.assertIsNone(err)
         self.assertEqual(bdev["uuid"], "lvol-bdev-uuid")
 
-        # Downgrade happened
+        # Downgrade happened on the (in-memory) lvol: namespace cleared and
+        # NQN rewritten to this lvol's own subsystem. The caller
+        # (snapshot_controller.clone) persists this state after the add.
         self.assertEqual(lvol.namespace, "")
         self.assertEqual(lvol.nqn, "nqn.test:cluster-1:lvol:u2")
         self.assertEqual(lvol.ns_id, 7)  # set later by add_ns
@@ -176,15 +191,8 @@ class TestNamespacedAttachRace(unittest.TestCase):
         self.assertEqual(rpc.subsystem_create.call_args[0][0],
                          "nqn.test:cluster-1:lvol:u2")
         rpc.nvmf_subsystem_add_listener.assert_called()
-        self.assertEqual(rpc.nvmf_subsystem_add_ns.call_args[0][0],
+        self.assertEqual(rpc.nvmf_subsystem_add_ns2.call_args[0][0],
                          "nqn.test:cluster-1:lvol:u2")
-
-        # The downgraded state (namespace="", new NQN) was persisted to
-        # the DB at least once with namespace cleared.
-        self.assertTrue(any(w["namespace"] == "" and
-                            w["nqn"].endswith(":lvol:u2")
-                            for w in write_snapshots),
-                        f"downgrade not persisted; writes={write_snapshots}")
 
     @patch("simplyblock_core.controllers.lvol_controller.DBController")
     def test_standalone_lvol_unchanged(self, mock_db_cls):
@@ -204,7 +212,7 @@ class TestNamespacedAttachRace(unittest.TestCase):
         self.assertIsNone(err)
         rpc.subsystem_list.assert_not_called()
         rpc.subsystem_create.assert_called_once()
-        rpc.nvmf_subsystem_add_ns.assert_called_once()
+        rpc.nvmf_subsystem_add_ns2.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -224,7 +232,8 @@ class TestPostBdevStackRollback(unittest.TestCase):
         lvol = _lvol_for_add("u3")  # standalone path
         node = _node()
         rpc = _rpc_client()
-        rpc.nvmf_subsystem_add_ns.return_value = False
+        # add_ns fails with a non -32602 error -> hard failure + rollback.
+        rpc.nvmf_subsystem_add_ns2.return_value = (False, {"code": -32000})
         node.rpc_client = MagicMock(return_value=rpc)
         mock_db_cls.return_value = MagicMock()
 
@@ -255,7 +264,7 @@ class TestPostBdevStackRollback(unittest.TestCase):
         self.assertFalse(bdev)
         self.assertIn("Failed to create listener", err)
         # add_ns was never reached.
-        rpc.nvmf_subsystem_add_ns.assert_not_called()
+        rpc.nvmf_subsystem_add_ns2.assert_not_called()
         # Rollback fired.
         rpc.delete_lvol.assert_called()
         self.assertEqual(rpc.delete_lvol.call_args[0][0], lvol.top_bdev)
@@ -278,7 +287,7 @@ class TestPostBdevStackRollback(unittest.TestCase):
 
         self.assertIsNone(err)
         # add_ns was reached and succeeded.
-        rpc.nvmf_subsystem_add_ns.assert_called_once()
+        rpc.nvmf_subsystem_add_ns2.assert_called_once()
         # No rollback.
         rpc.delete_lvol.assert_not_called()
 

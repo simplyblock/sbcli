@@ -10,13 +10,13 @@ cl=$($CMD cluster list | tail -n -3 | awk '{print $2}')
 
 for sn_id in "${P_NODES[@]}"; do
 
-  $CMD -d --dev sn add-node $cl $sn_id:5000 eth0 --journal-partition 0  --number-of-devices 1 --max-lvol 1  \
+  $CMD -d --dev sn add-node $cl $sn_id:5000 eth0 --journal-partition 0  --number-of-devices 1 --max-subsys 1 \
       --max-size 1g --data-nics eth1  --vcpu-count 6 --ssd-pcie 0000:00:02.0 0000:00:03.0 0000:00:04.0 0000:00:05.0
 
-#  $CMD -d --dev sn add-node $cl $sn_id:5000 eth0 --journal-partition 0  --number-of-devices 1 --max-lvol 1  \
+#  $CMD -d --dev sn add-node $cl $sn_id:5000 eth0 --journal-partition 0  --number-of-devices 1 --max-subsys 1 \
 #      --max-size 1g --data-nics eth1  --vcpu-count 2 --ssd-pcie 0000:00:02.0 0000:00:03.0  --spdk-mem 6g
 #
-#  $CMD -d --dev sn add-node $cl $sn_id:5000 eth0 --journal-partition 0  --number-of-devices 1 --max-lvol 1  \
+#  $CMD -d --dev sn add-node $cl $sn_id:5000 eth0 --journal-partition 0  --number-of-devices 1 --max-subsys 1 \
 #      --max-size 1g --data-nics eth1  --vcpu-count 2 --ssd-pcie 0000:00:04.0 0000:00:05.0 --spdk-mem 6g
 done
 

@@ -297,6 +297,12 @@ class TestSnapshotDeleteWaitsForCloneInFlight(unittest.TestCase):
         mock_db.get_snapshot_by_id.return_value = snap
         mock_db.get_pool_by_id.return_value = _pool()
         mock_db.get_storage_node_by_id.return_value = node
+        # delete() scans clones via get_mini_lvols() (the lightweight
+        # LVolMini projection), not get_lvols(). Only cloned_from_snap,
+        # status and deletion_status are read off each entry, all of
+        # which the full LVol fixture exposes, so the fixture stands in
+        # for the mini projection here.
+        mock_db.get_mini_lvols.return_value = [clone]
         mock_db.get_lvols.return_value = [clone]
         mock_db.get_cluster_by_id.return_value = _cluster()
         mock_db.kv_store = MagicMock()
