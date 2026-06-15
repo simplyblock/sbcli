@@ -118,22 +118,43 @@ class MockSPDKHandler(BaseHTTPRequestHandler):
         return True  # default success for unknown methods
 
 
-def _start_mock_spdk(port):
-    server = HTTPServer(("127.0.0.1", port), MockSPDKHandler)
+def _free_port():
+    """Reserve a free localhost TCP port from the OS ephemeral range."""
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+    finally:
+        s.close()
+
+
+def _start_mock_spdk():
+    # Bind an ephemeral port (port 0) rather than a fixed one. Fixed ports made
+    # this suite flaky: a previous run's server socket (tearDownClass used to
+    # call shutdown() but never server_close(), so the socket lingered), a
+    # leaked SNodeAPI subprocess, or a concurrent test process would still hold
+    # the port and the bind here failed with EADDRINUSE — erroring every test
+    # in the class. The OS hands out a guaranteed-free port instead.
+    server = HTTPServer(("127.0.0.1", 0), MockSPDKHandler)
     t = Thread(target=server.serve_forever, daemon=True)
     t.start()
-    return server
+    return server, server.server_address[1]
 
 
 # ---------------------------------------------------------------------------
 # SNodeAPI management
 # ---------------------------------------------------------------------------
 
-SNODE_API_PORT = 15123  # use non-standard port to avoid conflicts
-MOCK_SPDK_PORT = 15124
+# Placeholders only. setUpClass reassigns both to OS-allocated ephemeral ports
+# before starting the servers, so the test methods (which read these globals)
+# never depend on a fixed port being free. Fixed ports were the source of the
+# recurring EADDRINUSE flake.
+SNODE_API_PORT = 0
+MOCK_SPDK_PORT = 0
 
 
-def _wait_for_http(url, timeout=15):
+def _wait_for_http(url, timeout=60):
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
@@ -191,18 +212,37 @@ class TestDHCHAPE2E(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        global SNODE_API_PORT, MOCK_SPDK_PORT
         _keyring_keys.clear()
         _subsystem_hosts.clear()
-        cls.mock_spdk = _start_mock_spdk(MOCK_SPDK_PORT)
-        cls.snode_proc = _start_snode_api()
+        cls.mock_spdk, MOCK_SPDK_PORT = _start_mock_spdk()
+        # Reserve a free port for the SNodeAPI subprocess just before launching
+        # it (the subprocess and the test methods read SNODE_API_PORT).
+        SNODE_API_PORT = _free_port()
+        try:
+            cls.snode_proc = _start_snode_api()
+        except Exception:
+            # Don't leak the mock server's socket if the API fails to come up.
+            cls.mock_spdk.shutdown()
+            cls.mock_spdk.server_close()
+            raise
 
     @classmethod
     def tearDownClass(cls):
         if cls.snode_proc:
             cls.snode_proc.terminate()
-            cls.snode_proc.wait(timeout=5)
+            try:
+                cls.snode_proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                # Hard-kill so a lingering subprocess can't keep holding its
+                # port and break a later run.
+                cls.snode_proc.kill()
+                cls.snode_proc.wait(timeout=5)
         if cls.mock_spdk:
             cls.mock_spdk.shutdown()
+            # server_close() releases the listening socket immediately;
+            # shutdown() alone only stops serve_forever and leaves it bound.
+            cls.mock_spdk.server_close()
         import shutil
         if _dhchap_tmpdir and os.path.isdir(_dhchap_tmpdir):
             shutil.rmtree(_dhchap_tmpdir, ignore_errors=True)
