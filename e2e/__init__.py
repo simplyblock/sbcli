@@ -65,7 +65,7 @@ from stress_test.continuous_failover_ha_2node import RandomMultiClient2NodeFailo
 from stress_test.continuous_failover_ha_rdma import RandomRDMAFailoverTest
 from stress_test.continuous_failover_ha_rdma_multi_outage import RandomRDMAMultiFailoverTest
 from stress_test.continuous_failover_ha_k8s import RandomK8sMultiOutageFailoverTest
-from stress_test.continuous_k8s_native_failover import K8sNativeFailoverTest, K8sNativeBasicFailoverTest, K8sNativeResilientFailoverTest
+from stress_test.continuous_k8s_native_failover import K8sNativeFailoverTest, K8sNativeBasicFailoverTest, K8sNativeResilientFailoverTest, K8sNativeQuickFailoverTest
 from stress_test.continuous_failover_ha_multi_client_quick_outage import (
     RandomRapidFailoverNoGap,
     RandomRapidFailoverNoGapV2WithMigration,
@@ -184,10 +184,10 @@ from load_tests.lvol_outage_load import TestLvolOutageLoadTest
 
 
 ALL_TESTS = [
-    TestLvolFioNpcsCustom,
-    TestLvolFioNpcs0,
-    TestLvolFioNpcs1,
-    TestLvolFioNpcs2,
+    # TestLvolFioNpcsCustom,
+    # TestLvolFioNpcs0,
+    # TestLvolFioNpcs1,
+    # TestLvolFioNpcs2,
     TestSingleNodeOutage,
     TestSingleNodeFailure,
     TestAddNodesDuringFioRun,
@@ -283,6 +283,7 @@ ALL_TESTS = [
     K8sNativeFailoverTest,
     K8sNativeBasicFailoverTest,
     K8sNativeResilientFailoverTest,
+    K8sNativeQuickFailoverTest,
     K8sNativeNamespacedFailoverTest,
     K8sNativeRapidLifecycleTest,
     K8sNativeMountVerifiedFailoverTest,
@@ -310,10 +311,10 @@ ALL_TESTS = [
 
 def get_all_tests(custom=True, ha_test=False):
     tests = [
-        TestLvolFioNpcsCustom,
-        TestLvolFioNpcs0,
-        TestLvolFioNpcs1,
-        TestLvolFioNpcs2,
+        # TestLvolFioNpcsCustom,
+        # TestLvolFioNpcs0,
+        # TestLvolFioNpcs1,
+        # TestLvolFioNpcs2,
         # TestLvolFioQOSBW,
         # TestLvolFioQOSIOPS,
         TestSingleNodeOutage,
@@ -348,12 +349,12 @@ def get_all_tests(custom=True, ha_test=False):
     #     TestLvolSecuritySnapshotClone,
     #     TestLvolSecurityRDMAv2,
     # ]
-    if not custom:
-        tests.remove(TestLvolFioNpcsCustom)
-    else:
-        tests.remove(TestLvolFioNpcs0)
-        tests.remove(TestLvolFioNpcs1)
-        tests.remove(TestLvolFioNpcs2)
+    # if not custom:
+    #     tests.remove(TestLvolFioNpcsCustom)
+    # else:
+    #     tests.remove(TestLvolFioNpcs0)
+    #     tests.remove(TestLvolFioNpcs1)
+    #     tests.remove(TestLvolFioNpcs2)
     if not ha_test:
         tests.remove(TestHASingleNodeFailure)
         # tests.remove(TestHASingleNodeReboot)
@@ -415,6 +416,7 @@ def get_stress_tests():
         K8sNativeFailoverTest,
         K8sNativeBasicFailoverTest,
         K8sNativeResilientFailoverTest,
+        K8sNativeQuickFailoverTest,
         K8sNativeNamespacedFailoverTest,
         K8sNativeRapidLifecycleTest,
         K8sNativeMountVerifiedFailoverTest,

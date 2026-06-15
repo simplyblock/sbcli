@@ -190,6 +190,21 @@ class _DeviceFailureMigrationBase:
         target_bytes = int(size_total_bytes * self.FILL_PERCENT / 100)
         lvol_bytes = self._parse_size(self.LVOL_SIZE)
         num_lvols = max(1, math.ceil(target_bytes / lvol_bytes))
+
+        # Fail fast if we'd exceed the node's max_lvol limit
+        node_details = self.sbcli_utils.get_storage_node_details(
+            self._target_node_id
+        )
+        max_lvol = node_details[0].get("max_lvol", 0) if node_details else 0
+        other_nodes = [n for n in self._sn_nodes if n != self._target_node_id]
+        total_needed = num_lvols + len(other_nodes)
+        if max_lvol > 0 and total_needed > max_lvol:
+            raise RuntimeError(
+                f"Need {total_needed} lvols ({num_lvols} target + "
+                f"{len(other_nodes)} other-node) but node max_lvol={max_lvol}. "
+                f"Recreate cluster with a higher max_lvol limit."
+            )
+
         self.logger.info(
             f"Node capacity: {size_total_bytes} bytes, "
             f"target fill: {target_bytes} bytes, "
@@ -204,7 +219,6 @@ class _DeviceFailureMigrationBase:
             self._lvols_on_target.append(name)
 
         # Create 1 lvol per OTHER node (for IO load variant)
-        other_nodes = [n for n in self._sn_nodes if n != self._target_node_id]
         for idx, node_id in enumerate(other_nodes):
             name = f"mig_other_{generate_random_sequence(4)}_{idx}"
             self._create_and_connect_lvol(name, node_id, client)
@@ -829,6 +843,7 @@ class _DeviceFailureMigrationBase:
         Runs in the finally block so it executes even if the test fails.
 
         Steps:
+          0. (PCIe mode) Rescan PCI bus so the physical device is visible again
           1. ``sbctl sn new-device-from-failed <failed_device_id>`` → new device ID
           2. ``sbctl sn add-device <new_device_id>``
           3. Wait for ``new_device_migration`` tasks to complete
@@ -838,6 +853,28 @@ class _DeviceFailureMigrationBase:
         self.logger.info(
             f"=== Phase: Recover device {self._target_device_id} ==="
         )
+
+        # Step 0: For PCIe mode, always rescan PCI bus to restore the
+        # physical device (in case the test crashed after hot-unplug
+        # but before the in-test rescan)
+        if self._failure_mode == "pcie" and self._target_node_id:
+            try:
+                node_details = self.sbcli_utils.get_storage_node_details(
+                    self._target_node_id
+                )
+                node_ip = node_details[0]["mgmt_ip"]
+                self.logger.info(
+                    f"Rescanning PCI bus on {node_ip} to ensure device is visible"
+                )
+                self.ssh_obj.exec_command(
+                    node=node_ip,
+                    command="echo 1 | sudo tee /sys/bus/pci/rescan"
+                )
+                sleep_n_sec(15)
+                self.logger.info("PCI bus rescan complete")
+            except Exception as exc:
+                self.logger.warning(f"PCI bus rescan failed: {exc}")
+
         mgmt_ip = self.mgmt_nodes[0]
 
         # Step 1: create new device from failed device

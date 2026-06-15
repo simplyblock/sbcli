@@ -4559,3 +4559,227 @@ class K8sNativeResilientFailoverTest(K8sNativeFailoverTest):
                 )
             else:
                 self._cleanup_all_k8s_resources()
+
+
+class K8sNativeQuickFailoverTest(K8sNativeBasicFailoverTest):
+    """Quick K8s-native failover test for Talos environments.
+
+    Identical to K8sNativeBasicFailoverTest but limited to a fixed number
+    of outage iterations (default 2).  Useful for local/CI validation on
+    Talos clusters where a full stress run is not needed.
+
+    Selectable via: --testname K8sNativeQuickFailover
+    Override iterations with env var: K8S_QUICK_ITERATIONS=3
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.test_name = "k8s_native_quick_failover"
+        self.max_iterations = int(
+            os.environ.get("K8S_QUICK_ITERATIONS", "2")
+        )
+
+    def run(self):
+        """Run the basic failover test with a capped iteration count."""
+        self._ensure_k8s_utils()
+        self._initialize_outage_log()
+        self.logger.info(
+            f"=== Starting K8sNativeQuickFailoverTest "
+            f"(max {self.max_iterations} iterations) ==="
+        )
+
+        # ── Cluster config ──
+        cluster_details = self.sbcli_utils.get_cluster_details()
+        self.max_fault_tolerance = cluster_details.get(
+            "max_fault_tolerance", 1
+        )
+        self.logger.info(
+            f"Cluster max_fault_tolerance: {self.max_fault_tolerance}"
+        )
+        if self.npcs == 1:
+            self.npcs = self.max_fault_tolerance
+        if self.npcs > self.max_fault_tolerance:
+            self.logger.warning(
+                f"npcs={self.npcs} exceeds max_fault_tolerance="
+                f"{self.max_fault_tolerance} — cluster may not "
+                f"survive all simultaneous outages!"
+            )
+        if self.max_fault_tolerance >= 2:
+            self.logger.info(
+                f"FTT={self.max_fault_tolerance} — outage "
+                f"candidates include ALL nodes"
+            )
+        self.logger.info(
+            f"Running with npcs={self.npcs} simultaneous outages"
+        )
+
+        # ── Clean slate ──
+        try:
+            self.sbcli_utils.delete_all_clones()
+        except Exception:
+            pass
+        try:
+            self.sbcli_utils.delete_all_snapshots()
+        except Exception:
+            pass
+        try:
+            self.sbcli_utils.delete_all_lvols()
+        except Exception:
+            pass
+        try:
+            self.sbcli_utils.delete_storage_pool(self.pool_name)
+        except Exception:
+            pass
+        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+
+        cluster_id = self.cluster_id or ""
+        self.k8s_utils.create_storage_class(
+            name=self.STORAGE_CLASS_NAME,
+            cluster_id=cluster_id,
+            pool_name=self.pool_name,
+            ndcs=self.ndcs,
+            npcs=self.npcs,
+        )
+        self.k8s_utils.create_storage_class(
+            name=self.XFS_STORAGE_CLASS_NAME,
+            cluster_id=cluster_id,
+            pool_name=self.pool_name,
+            ndcs=self.ndcs,
+            npcs=self.npcs,
+            fs_type="xfs",
+        )
+        self.k8s_utils.delete_volume_snapshot_class(self.SNAPSHOT_CLASS_NAME)
+        self.k8s_utils.create_volume_snapshot_class(self.SNAPSHOT_CLASS_NAME)
+        sleep_n_sec(5)
+
+        # Populate storage node maps
+        storage_nodes = self.sbcli_utils.get_storage_nodes()
+        for result in storage_nodes["results"]:
+            self.sn_nodes.append(result["uuid"])
+            self.sn_nodes_with_sec.append(result["uuid"])
+            self.sn_primary_secondary_map[result["uuid"]] = result["secondary_node_id"]
+        self.logger.info(
+            f"Storage nodes: {len(self.sn_nodes)}, "
+            f"secondary map: {self.sn_primary_secondary_map}"
+        )
+
+        # ── One-time setup: Create PVCs (1 per node, pinned) ──
+        self.total_pvcs = len(self.sn_nodes)
+        self._compute_fio_size(extra_jobs=self.total_pvcs)
+        self.logger.info(f"Creating {self.total_pvcs} PVCs (1 per node, pinned)")
+        self.create_pvcs_with_fio(self.total_pvcs, node_ids=list(self.sn_nodes))
+        sleep_n_sec(30)
+        self._ensure_per_node_coverage()
+
+        # ── One-time setup: Create snapshots + clones ──
+        self.logger.info(f"Creating {self.num_clones} snapshots + clones (with FIO file cleanup)")
+        self.create_snapshots_and_clones_with_cleanup(self.num_clones)
+        sleep_n_sec(30)
+
+        # ── Outage loop (capped at max_iterations) ──
+        iteration = 1
+        test_failed = False
+        try:
+            while iteration <= self.max_iterations:
+                self.logger.info(
+                    f"=== Iteration {iteration}/{self.max_iterations} ==="
+                )
+
+                # Start background IO stats validation
+                validation_thread = threading.Thread(
+                    target=self.validate_iostats_continuously, daemon=True
+                )
+                validation_thread.start()
+
+                if iteration > 1:
+                    self._compute_fio_size()
+                    self.restart_fio(iteration)
+
+                # Outage phase
+                outage_events = self.perform_n_plus_k_outages()
+                sleep_n_sec(280)
+
+                # Recovery phase: bring all nodes online
+                for node, outage_type, node_outage_dur in outage_events:
+                    self.current_outage_node = node
+                    if outage_type == "container_stop" and self.npcs > 1:
+                        self.restart_nodes_after_failover(outage_type, restart=True)
+                    else:
+                        self.restart_nodes_after_failover(outage_type)
+                    self.logger.info("Waiting for fallback recovery.")
+                    sleep_n_sec(100)
+
+                # Health check after all nodes are online
+                for node, outage_type, node_outage_dur in outage_events:
+                    try:
+                        self.sbcli_utils.wait_for_health_status(node, True, timeout=300)
+                    except Exception as exc:
+                        self.logger.warning(f"Health check did not pass for {node}: {exc}")
+
+                self.collect_outage_diagnostics("post_recovery")
+
+                # Process deferred operations
+                if self.use_client_fio:
+                    try:
+                        self.retry_failed_nvme_connects()
+                    except AssertionError as exc:
+                        self.logger.error(f"[iteration {iteration}] {exc}")
+                        test_failed = True
+                    self.retry_failed_secondary_connects()
+                self.validate_pending_deletions()
+
+                # Validation phase
+                sleep_n_sec(120)
+                self.check_core_dump()
+
+                time_duration = self.common_utils.calculate_time_duration(
+                    start_timestamp=self.outage_start_time,
+                    end_timestamp=self.outage_end_time,
+                )
+                try:
+                    self.common_utils.validate_io_stats(
+                        cluster_id=self.cluster_id,
+                        start_timestamp=self.outage_start_time,
+                        end_timestamp=self.outage_end_time,
+                        time_duration=time_duration,
+                        warn_only=True,
+                    )
+                except AssertionError as exc:
+                    self.logger.error(
+                        f"[iteration {iteration}] IO validation failed — "
+                        f"zero IO detected: {exc}"
+                    )
+                    test_failed = True
+                self.validate_migration_for_node(self.outage_start_time, 2000, None, 60)
+                self.wait_for_fio_complete()
+                self.validate_fio_jobs()
+
+                self.logger.info(
+                    f"=== Iteration {iteration}/{self.max_iterations} complete ==="
+                )
+                self.collect_outage_diagnostics(f"end_iteration_{iteration}")
+
+                if test_failed:
+                    self.logger.error(
+                        f"[iteration {iteration}] Test marked as FAILED — "
+                        f"stopping stress loop"
+                    )
+                    break
+
+                iteration += 1
+
+            if not test_failed:
+                self.logger.info(
+                    f"=== All {self.max_iterations} iterations completed "
+                    f"successfully ==="
+                )
+
+        except Exception:
+            test_failed = True
+            raise
+        finally:
+            if test_failed:
+                self.logger.info("[cleanup] Test failed — skipping resource cleanup to preserve state for debugging")
+                raise AssertionError("Quick failover test failed — see errors above")
+            else:
+                self._cleanup_all_k8s_resources()
