@@ -135,6 +135,20 @@ class TestAuthorizedCluster:
         with patch.object(auth, "_db", mock_db):
             assert auth.authorized_cluster(_make_credentials("s3cr3t")) is None
 
+    def test_returns_none_without_db_lookup_when_cluster_secret_auth_disabled(self):
+        import simplyblock_web.api.v2._auth as auth
+
+        mock_db = MagicMock()
+        mock_db.get_clusters.return_value = [self._cluster(self._CLUSTER_UUID, "s3cr3t")]
+        mock_settings = MagicMock()
+        mock_settings.enable_cluster_secret_auth = False
+
+        with patch.object(auth, "_db", mock_db), patch.object(auth, "_web_settings", mock_settings):
+            result = auth.authorized_cluster(_make_credentials("s3cr3t"))
+
+        assert result is None
+        mock_db.get_clusters.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # verify_api_token (orchestration)
