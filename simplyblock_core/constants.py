@@ -219,7 +219,7 @@ LVOL_CLUSTER_RATIO=1
 JM_COMPRESSION_THREAD_ENABLED = False
 
 # Fixed size (in bytes) each distrib bdev reports up to the raid0/lvstore
-# layer, independent of cluster raw capacity or number_of_distribs. 1 PiB.
+# layer, independent of cluster raw capacity or number_of_distribs. 250 TiB.
 #
 # BIRTH-TIME ONLY: this is the size used when an lvstore is first created
 # (create_lvstore). It must NEVER be read on the recreate/restart path --
@@ -227,7 +227,7 @@ JM_COMPRESSION_THREAD_ENABLED = False
 # each distrib's original num_blocks. Resizing a distrib under a live
 # raid0/lvstore would corrupt the geometry, so existing lvstores must keep
 # their persisted size across upgrades even if this constant changes.
-DISTRIB_SIZE_BYTES = 3752999689475
+DISTRIB_SIZE_BYTES = 274877906944000
 
 
 SENTRY_SDK_DNS = "https://745047b017ac424b4173550e19910fb7@o4508953941311488.ingest.de.sentry.io/4508996361584720"
