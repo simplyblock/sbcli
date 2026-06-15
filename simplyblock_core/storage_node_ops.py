@@ -939,6 +939,9 @@ def _create_device_partitions(rpc_client, nvme, snode, num_partitions_per_dev, j
         except RPCException:
             logger.error('Failed to create device partitions, retrying...')
             time.sleep(1)
+            if rpc_client.bdev_nvme_controller_list(nvme.nvme_controller):
+                break
+            time.sleep(1)
 
     time.sleep(1)
     rpc_client.bdev_examine(nvme.nvme_bdev)
