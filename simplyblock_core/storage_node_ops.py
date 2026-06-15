@@ -599,10 +599,16 @@ def get_next_cluster_device_order(db_controller, cluster_id):
     return 0
 
 
-def get_next_physical_device_order(snode):
+def get_next_physical_device_order(snode, exclude_node_id=None):
+    # exclude_node_id: skip this node when scanning. Needed when recomputing the
+    # label for a node that is already persisted with a provisional value —
+    # otherwise the same-mgmt_ip early-return below would just hand back that
+    # node's own stale label instead of a fresh cluster-unique one.
     db_controller = DBController()
     used_labels = []
     for node in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
+        if exclude_node_id and node.get_id() == exclude_node_id:
+            continue
         if node.physical_label > 0:
             if node.mgmt_ip == snode.mgmt_ip:
                 return node.physical_label
@@ -2158,6 +2164,29 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             daemon=True)
         hb_thread.start()
         try:
+            # Assign the cluster-wide device ordering under the lock. Both
+            # physical_label and cluster_device_order are sequential cluster-
+            # wide counters (get_next_physical_device_order /
+            # get_next_cluster_device_order are read-max-then-+1 over all
+            # nodes). Computed in the parallel node-local section — as they were
+            # via addNvmeDevices() and _prepare_cluster_devices_*() — concurrent
+            # adds read the same "next free" value and collide, producing
+            # DUPLICATE ids / physical labels in the distr cluster map, which
+            # makes bdev_lvol_create_lvstore fail with "Input/output error" at
+            # activation. Recompute them here: the lock serializes adds and this
+            # node's devices are persisted (snode.write_to_db below) before the
+            # lock is released, so the next add sees them and picks the next
+            # free values. The provisional values assigned earlier are
+            # overwritten here before they are ever persisted.
+            snode.physical_label = 0 if cluster.is_single_node else get_next_physical_device_order(
+                snode, exclude_node_id=snode.get_id())
+            dev_order = get_next_cluster_device_order(db_controller, snode.cluster_id)
+            for dev in snode.nvme_devices:
+                dev.physical_label = snode.physical_label
+                if dev.status == NVMeDevice.STATUS_ONLINE:
+                    dev.cluster_device_order = dev_order
+                    dev_order += 1
+
             logger.info("Connecting to remote devices")
             remote_devices = _connect_to_remote_devs(snode)
             snode.remote_devices = remote_devices

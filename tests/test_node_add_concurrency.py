@@ -23,6 +23,7 @@ from unittest.mock import MagicMock, patch
 
 from simplyblock_core import constants
 from simplyblock_core.models.cluster import ClusterAddNodeLock, PortReservation
+from simplyblock_core.models.storage_node import StorageNode
 
 
 # ---------------------------------------------------------------------------
@@ -490,6 +491,61 @@ class TestUtilsPortHelpers(unittest.TestCase):
         mock_db_cls.return_value.kv_store = MagicMock()
         with patch.object(PortReservation, "read_from_db", side_effect=RuntimeError("boom")):
             self.assertEqual(_get_active_port_reservations("c1"), set())
+
+
+# ---------------------------------------------------------------------------
+# 7. Cluster-wide device-order counters under parallel add
+#    (regression: parallel add produced duplicate physical_label /
+#     cluster_device_order -> corrupt distr map -> lvstore I/O error at
+#     activation)
+# ---------------------------------------------------------------------------
+
+class TestPhysicalLabelExcludeSelf(unittest.TestCase):
+
+    def _node(self, uuid, mgmt_ip, label, cluster_id="c1"):
+        n = StorageNode()
+        n.uuid = uuid
+        n.mgmt_ip = mgmt_ip
+        n.physical_label = label
+        n.cluster_id = cluster_id
+        return n
+
+    @patch("simplyblock_core.storage_node_ops.DBController")
+    def test_without_exclude_returns_own_stale_label(self, mock_db_cls):
+        """Demonstrates why exclude is needed: a node already persisted with a
+        provisional label matches its own mgmt_ip and gets that stale label
+        back."""
+        from simplyblock_core.storage_node_ops import get_next_physical_device_order
+        me = self._node("me", "10.0.0.9", 2)
+        nodes = [self._node("a", "10.0.0.1", 1), me]
+        mock_db_cls.return_value.get_storage_nodes_by_cluster_id.return_value = nodes
+        self.assertEqual(get_next_physical_device_order(me), 2)
+
+    @patch("simplyblock_core.storage_node_ops.DBController")
+    def test_exclude_self_picks_next_free_label(self, mock_db_cls):
+        from simplyblock_core.storage_node_ops import get_next_physical_device_order
+        me = self._node("me", "10.0.0.9", 2)  # stale provisional label
+        nodes = [
+            self._node("a", "10.0.0.1", 1),
+            self._node("b", "10.0.0.2", 2),
+            me,
+        ]
+        mock_db_cls.return_value.get_storage_nodes_by_cluster_id.return_value = nodes
+        # Self skipped; 1 and 2 used by peers -> next free is 3.
+        self.assertEqual(
+            get_next_physical_device_order(me, exclude_node_id=me.get_id()), 3)
+
+    @patch("simplyblock_core.storage_node_ops.DBController")
+    def test_exclude_self_still_shares_colocated_peer_label(self, mock_db_cls):
+        """A co-located peer (same mgmt_ip) still shares its label even when we
+        exclude self — that intentional sharing must survive the exclude."""
+        from simplyblock_core.storage_node_ops import get_next_physical_device_order
+        me = self._node("me", "10.0.0.1", 0)
+        peer_same_host = self._node("a", "10.0.0.1", 5)
+        mock_db_cls.return_value.get_storage_nodes_by_cluster_id.return_value = [
+            peer_same_host, me]
+        self.assertEqual(
+            get_next_physical_device_order(me, exclude_node_id=me.get_id()), 5)
 
 
 if __name__ == "__main__":
