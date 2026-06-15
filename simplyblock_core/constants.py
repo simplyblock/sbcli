@@ -227,7 +227,7 @@ JM_COMPRESSION_THREAD_ENABLED = False
 # each distrib's original num_blocks. Resizing a distrib under a live
 # raid0/lvstore would corrupt the geometry, so existing lvstores must keep
 # their persisted size across upgrades even if this constant changes.
-DISTRIB_SIZE_BYTES = 1125899906842624
+DISTRIB_SIZE_BYTES = 3752999689475
 
 
 SENTRY_SDK_DNS = "https://745047b017ac424b4173550e19910fb7@o4508953941311488.ingest.de.sentry.io/4508996361584720"
