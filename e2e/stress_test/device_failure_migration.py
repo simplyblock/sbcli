@@ -576,23 +576,41 @@ class _DeviceFailureMigrationBase:
         self.logger.info("PCIe device removed via sysfs")
         sleep_n_sec(10)
 
-        # Step 3: Wait for control plane to detect device loss
+        # Step 3: Wait for control plane to detect device loss.
+        # The control plane may auto-remove the device (unavailable → removed)
+        # before we poll, so accept both states.
         self.sbcli_utils.wait_for_device_status(
-            self._target_node_id, "unavailable", timeout=120,
+            self._target_node_id, ["unavailable", "removed"], timeout=120,
             device_id=self._target_device_id,
         )
         self._timing["remove_duration"] = time.time() - t0
+
+        # Check which state we landed in
+        devices = self.sbcli_utils.get_device_details(self._target_node_id)
+        actual_status = "unknown"
+        for d in devices:
+            if d["id"] == self._target_device_id:
+                actual_status = d["status"]
+                break
         self.logger.info(
-            f"Device detected as unavailable ({self._timing['remove_duration']:.1f}s)"
+            f"Device detected as {actual_status} "
+            f"({self._timing['remove_duration']:.1f}s)"
         )
 
-        # Step 4: Logical remove + set-failed to trigger migration
+        # Step 4: Logical remove + set-failed to trigger migration.
+        # If control plane already auto-removed, skip the remove step.
         t1 = time.time()
-        self.sbcli_utils.remove_device(self._target_device_id)
-        self.sbcli_utils.wait_for_device_status(
-            self._target_node_id, "removed", timeout=120,
-            device_id=self._target_device_id,
-        )
+        if actual_status != "removed":
+            self.sbcli_utils.remove_device(self._target_device_id)
+            self.sbcli_utils.wait_for_device_status(
+                self._target_node_id, "removed", timeout=120,
+                device_id=self._target_device_id,
+            )
+        else:
+            self.logger.info(
+                "Device already in 'removed' state (auto-removed by control plane), "
+                "skipping manual remove"
+            )
 
         mgmt_ip = self.mgmt_nodes[0]
         cmd = f"{self.base_cmd} sn set-failed-device {self._target_device_id}"
@@ -876,6 +894,68 @@ class _DeviceFailureMigrationBase:
                 self.logger.warning(f"PCI bus rescan failed: {exc}")
 
         mgmt_ip = self.mgmt_nodes[0]
+
+        # Step 0b: If the test crashed before set-failed-device was called,
+        # the device may still be in 'removed' state.  Drive it through
+        # set-failed → migration → failed_and_migrated so that
+        # new-device-from-failed will succeed.
+        try:
+            devices = self.sbcli_utils.get_device_details(self._target_node_id)
+            dev_status = "unknown"
+            for d in devices:
+                if d["id"] == self._target_device_id:
+                    dev_status = d["status"]
+                    break
+            self.logger.info(
+                f"Device {self._target_device_id} current status: {dev_status}"
+            )
+            if dev_status == "removed":
+                self.logger.info(
+                    "Device still in 'removed' state — running set-failed-device "
+                    "and waiting for migration before recovery"
+                )
+                cmd = (
+                    f"{self.base_cmd} sn set-failed-device "
+                    f"{self._target_device_id}"
+                )
+                self.ssh_obj.exec_command(mgmt_ip, cmd)
+                sleep_n_sec(5)
+                try:
+                    self.sbcli_utils.wait_migration_tasks_complete(
+                        timeout=self.MIGRATION_TIMEOUT
+                    )
+                except Exception as mig_exc:
+                    self.logger.warning(
+                        f"Migration wait during recovery failed: {mig_exc}"
+                    )
+            elif dev_status == "unavailable":
+                self.logger.info(
+                    "Device still in 'unavailable' state — running remove + "
+                    "set-failed-device and waiting for migration before recovery"
+                )
+                self.sbcli_utils.remove_device(self._target_device_id)
+                self.sbcli_utils.wait_for_device_status(
+                    self._target_node_id, "removed", timeout=120,
+                    device_id=self._target_device_id,
+                )
+                cmd = (
+                    f"{self.base_cmd} sn set-failed-device "
+                    f"{self._target_device_id}"
+                )
+                self.ssh_obj.exec_command(mgmt_ip, cmd)
+                sleep_n_sec(5)
+                try:
+                    self.sbcli_utils.wait_migration_tasks_complete(
+                        timeout=self.MIGRATION_TIMEOUT
+                    )
+                except Exception as mig_exc:
+                    self.logger.warning(
+                        f"Migration wait during recovery failed: {mig_exc}"
+                    )
+        except Exception as exc:
+            self.logger.warning(
+                f"Pre-recovery device status check/fix failed: {exc}"
+            )
 
         # Step 1: create new device from failed device
         try:
