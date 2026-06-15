@@ -206,6 +206,7 @@ class BaseNodeObject(BaseModel):
     STATUS_RESTARTING = 'in_restart'
 
     STATUS_IN_CREATION = 'in_creation'
+    STATUS_IN_REMOVAL = 'in_removal'
     STATUS_UNREACHABLE = 'unreachable'
     STATUS_SCHEDULABLE = 'schedulable'
     STATUS_DOWN = 'down'
@@ -218,6 +219,7 @@ class BaseNodeObject(BaseModel):
         STATUS_IN_CREATION: 10,
         STATUS_IN_SHUTDOWN: 11,
         STATUS_RESTARTING: 12,
+        STATUS_IN_REMOVAL: 13,
         STATUS_UNREACHABLE: 20,
         STATUS_SCHEDULABLE: 30,
         STATUS_DOWN: 40,

@@ -484,6 +484,20 @@ services:
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
 
+  TasksNodeRemovalRunner:
+    <<: *service-base
+    image: $SIMPLYBLOCK_DOCKER_IMAGE
+    command: "python3 simplyblock_core/services/tasks_runner_node_removal.py"
+    deploy:
+      placement:
+        constraints: [node.role == manager]
+    volumes:
+      - "/etc/foundationdb:/etc/foundationdb"
+    networks:
+      - hostnet
+    environment:
+      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+
   TasksRunnerPortAllow:
     <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
