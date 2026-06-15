@@ -10,6 +10,7 @@ from . import snapshot
 from . import storage_node
 from . import task
 from . import migration
+from . import meta
 from ._auth import verify_api_token
 
 # Assemble routes here to avoid circular imports
@@ -44,8 +45,7 @@ cluster.instance_api.include_router(migration.api)
 cluster.api.include_router(cluster.instance_api)
 management_node.api.include_router(management_node.instance_api)
 
-api = APIRouter(
-    dependencies=[Depends(verify_api_token)],
-)
-api.include_router(cluster.api)
-api.include_router(management_node.api)
+api = APIRouter()
+api.include_router(cluster.api, dependencies=[Depends(verify_api_token)])
+api.include_router(management_node.api, dependencies=[Depends(verify_api_token)])
+api.include_router(meta.api, prefix="/_meta")
