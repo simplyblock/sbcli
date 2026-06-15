@@ -3,6 +3,9 @@
 test_web_settings.py – unit tests for simplyblock_web.settings.
 """
 
+import pytest
+from pydantic import ValidationError
+
 from simplyblock_web.settings import Settings, _parse_str_list, _parse_int_list
 
 
@@ -108,3 +111,35 @@ class TestApiVersionsSetting:
         monkeypatch.setenv("SB_API_VERSIONS", "1,3")
         with pytest.raises(ValidationError, match="SB_API_VERSIONS"):
             Settings()
+
+
+class TestClusterSecretAuthSetting:
+    def test_enabled_by_default(self, monkeypatch):
+        monkeypatch.delenv("SB_ENABLE_CLUSTER_SECRET_AUTH", raising=False)
+        s = Settings()
+        assert s.enable_cluster_secret_auth is True
+
+    def test_can_disable_when_v1_not_in_api_versions(self, monkeypatch):
+        monkeypatch.setenv("SB_API_VERSIONS", "2")
+        monkeypatch.setenv("SB_ENABLE_CLUSTER_SECRET_AUTH", "false")
+        s = Settings()
+        assert s.enable_cluster_secret_auth is False
+
+    def test_disable_with_v1_in_api_versions_fails(self, monkeypatch):
+        monkeypatch.setenv("SB_API_VERSIONS", "1,2")
+        monkeypatch.setenv("SB_ENABLE_CLUSTER_SECRET_AUTH", "false")
+        with pytest.raises(ValidationError, match="SB_ENABLE_CLUSTER_SECRET_AUTH"):
+            Settings()
+
+    def test_disable_with_default_api_versions_fails(self, monkeypatch):
+        monkeypatch.delenv("SB_API_VERSIONS", raising=False)
+        monkeypatch.setenv("SB_ENABLE_CLUSTER_SECRET_AUTH", "false")
+        with pytest.raises(ValidationError, match="SB_ENABLE_CLUSTER_SECRET_AUTH"):
+            Settings()
+
+    def test_both_enabled_is_valid(self, monkeypatch):
+        monkeypatch.setenv("SB_API_VERSIONS", "1,2")
+        monkeypatch.setenv("SB_ENABLE_CLUSTER_SECRET_AUTH", "true")
+        s = Settings()
+        assert s.enable_cluster_secret_auth is True
+        assert 1 in s.api_versions

@@ -109,9 +109,14 @@ def authorized_cluster(
 ) -> UUID | None:
     """FastAPI dependency: identify which cluster a bearer token authenticates as.
 
-    Returns the UUID of the cluster whose secret matches the bearer token, or
-    `None` if no cluster matches (or the matched ID isn't a valid UUID).
+    Returns `None` immediately when cluster-secret authentication is disabled via
+    ``SB_ENABLE_CLUSTER_SECRET_AUTH=false``.  Otherwise returns the UUID of the
+    cluster whose secret matches the bearer token, or `None` if no cluster
+    matches (or the matched ID isn't a valid UUID).
     """
+    if not _web_settings.enable_cluster_secret_auth:
+        return None
+
     token = credentials.credentials
     matched_id = next((
         cluster.id
