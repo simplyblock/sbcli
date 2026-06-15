@@ -307,7 +307,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
 
 
     if not cli_pass:
-        cli_pass = utils.generate_string(10)
+        cli_pass = SecretStr(utils.generate_string(10))
 
     logger.info("Adding new cluster object")
     cluster = Cluster()
@@ -324,7 +324,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.blk_size = blk_size
     cluster.page_size_in_blocks = page_size_in_blocks
     cluster.nqn = f"{constants.CLUSTER_NQN}:{cluster.uuid}"
-    cluster.cli_pass = SecretStr(cli_pass)
+    cluster.cli_pass = cli_pass
     cluster.secret = SecretStr(utils.generate_string(20))
     cluster.grafana_secret = monitoring_secret if mode == "kubernetes" else cluster.secret
     if cap_warn and cap_warn > 0:
@@ -386,7 +386,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
 
         logger.info("Deploying swarm stack ...")
         log_level = "DEBUG" if constants.LOG_WEB_DEBUG else "INFO"
-        scripts.deploy_stack(cli_pass, dev_ip, constants.SIMPLY_BLOCK_DOCKER_IMAGE, cluster.secret.get_secret_value(), cluster.uuid,
+        scripts.deploy_stack(cli_pass.get_secret_value(), dev_ip, constants.SIMPLY_BLOCK_DOCKER_IMAGE, cluster.secret.get_secret_value(), cluster.uuid,
                                 log_del_interval, metrics_retention_period, log_level, cluster.grafana_endpoint, str(disable_monitoring))
         logger.info("Deploying swarm stack > Done")
 
@@ -1578,15 +1578,16 @@ def get_secret(cluster_id) -> str:
     return db_controller.get_cluster_by_id(cluster_id).secret.get_secret_value()
 
 
-def set_secret(cluster_id, secret) -> None:
+def set_secret(cluster_id, secret: SecretStr) -> None:
     cluster = db_controller.get_cluster_by_id(cluster_id)
-    secret = secret.strip()
-    if len(secret) < 20:
+    plain = secret.get_secret_value().strip()
+    if len(plain) < 20:
         raise ValueError("Secret must be at least 20 char")
+    secret = SecretStr(plain)
 
-    _create_update_user(cluster_id, cluster.grafana_endpoint, cluster.grafana_secret, SecretStr(secret), update_secret=True)
+    _create_update_user(cluster_id, cluster.grafana_endpoint, cluster.grafana_secret, secret, update_secret=True)
 
-    cluster.secret = SecretStr(secret)
+    cluster.secret = secret
     cluster.write_to_db(db_controller.kv_store)
 
 
