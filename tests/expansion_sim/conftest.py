@@ -16,10 +16,46 @@ matter.
 """
 
 import os
+import sys
 import pytest
 
 _FDB_CLUSTER_FILE = os.environ.get(
     "FDB_CLUSTER_FILE", "/etc/foundationdb/fdb.cluster")
+
+
+def _ensure_real_fdb():
+    """Restore the real FoundationDB client, replacing the stub that the
+    repo-wide ``tests/conftest.py`` installs for the stubbed unit suite.
+
+    Because ``simplyblock_core.db_controller`` does a top-level ``import fdb``,
+    it binds whatever ``sys.modules['fdb']`` is at first import. The unit-suite
+    stub (no ``api_version``) shadows the real client, so the expansion_sim
+    suite could never connect regardless of a running FDB. We pop the stub,
+    re-import the genuine package (needs ``libfdb_c`` on ``LD_LIBRARY_PATH``),
+    and rebind it on any simplyblock module that already grabbed the stub.
+
+    NOTE: this mutates global ``sys.modules``, so the expansion_sim suite must
+    run as its own pytest invocation, separate from the stubbed unit suite
+    (the intended multi-step layout: fast unit tier, then FDB-backed tier).
+    """
+    import importlib
+
+    current = sys.modules.get("fdb")
+    if current is not None and hasattr(current, "api_version"):
+        real = current  # real client already active
+    else:
+        sys.modules.pop("fdb", None)
+        sys.modules.pop("fdb.tuple", None)
+        real = importlib.import_module("fdb")
+        importlib.import_module("fdb.tuple")
+
+    # Rebind on modules that did `import fdb` at top level against the stub.
+    for mod_name in ("simplyblock_core.db_controller",
+                     "simplyblock_core.utils.hublvol_reconnect"):
+        mod = sys.modules.get(mod_name)
+        if mod is not None and getattr(mod, "fdb", None) is not real:
+            mod.fdb = real
+    return real
 
 
 @pytest.fixture(autouse=True)
@@ -57,9 +93,12 @@ def _require_fdb():
         pytest.skip(f"FDB cluster file not found at {_FDB_CLUSTER_FILE}; "
                     f"set FDB_CLUSTER_FILE or run on the EC2 sim host.")
     try:
-        import fdb
+        fdb = _ensure_real_fdb()
     except ImportError:
         pytest.skip("foundationdb python client not installed")
+    if not hasattr(fdb, "api_version"):
+        pytest.skip("real foundationdb client unavailable (stub active); "
+                    "run the expansion_sim suite as its own pytest invocation")
     return fdb
 
 
