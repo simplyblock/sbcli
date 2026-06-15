@@ -17,9 +17,18 @@ Variants:
   - DeviceFailureMigrationPCIeNoLoadK8s   — PCIe sysfs removal, no IO load
   - DeviceFailureMigrationPCIeUnderLoadK8s— PCIe sysfs removal, IO load running
 
+  PCIe restart (no migration — restart device after PCI rescan):
+  - DevicePCIeRestartNoLoadDocker             — PCIe unplug + restart, no IO load
+  - DevicePCIeRestartUnderLoadDocker          — PCIe unplug + restart, IO load running
+  - DevicePCIeRestartNoLoadK8s               — PCIe unplug + restart, no IO load (K8s)
+  - DevicePCIeRestartUnderLoadK8s            — PCIe unplug + restart, IO load running (K8s)
+
 Failure modes:
   - "api"  : Logical removal via REST API + set-failed-device CLI
   - "pcie" : Physical removal via /sys/bus/pci/devices/<addr>/remove
+
+Restart mode (PCIe only):
+  - PCIe unplug → PCI rescan → restart-device CLI (no set-failed, no migration)
 
 All tests work with any cluster geometry (ndcs/npcs) and require at least
 one storage node with a device.
@@ -124,6 +133,47 @@ class _DeviceFailureMigrationBase:
             if with_io_load:
                 self._phase_stop_io_load()  # kill FIO only if still running (failure path)
             self._phase_recover_device()
+            self._phase_cleanup()
+            self._timing["total_duration"] = time.time() - t0
+            self._print_migration_summary()
+            self._write_timing_json()
+            self._generate_charts()
+
+        self.logger.info("TEST CASE PASSED !!!")
+
+    def _run_restart_test(self, with_io_load=False):
+        """PCIe unplug → rescan → restart-device → verify cluster healthy.
+
+        Unlike _run_migration_test, this does NOT set-failed the device or
+        trigger failure migration.  Instead it rescans the PCI bus to make the
+        physical device visible again, then calls ``sbctl sn restart-device``
+        so the control plane re-attaches it.
+
+        Flow:
+          setup → fill → [start IO] → PCIe unplug → rescan → restart-device →
+          wait device online → wait any migration → verify cluster + FIO → cleanup
+        """
+        self._with_io_load = with_io_load
+        self._failure_mode = "pcie"
+        self._test_passed = False
+        t0 = time.time()
+        try:
+            self._phase_setup_pool_and_lvols()
+            self._phase_fill_devices()
+            if not with_io_load:
+                self._phase_compute_checksums()
+            if with_io_load:
+                self._phase_start_io_load()
+            self._phase_pcie_remove_and_restart()
+            self._phase_validate_restart()
+            if with_io_load:
+                self._phase_wait_fio_completion()
+                self._phase_validate_fio()
+            self._test_passed = True
+        finally:
+            if with_io_load:
+                self._phase_stop_io_load()
+            # No device recovery needed — restart-device already brought it back
             self._phase_cleanup()
             self._timing["total_duration"] = time.time() - t0
             self._print_migration_summary()
@@ -630,6 +680,157 @@ class _DeviceFailureMigrationBase:
         )
         sleep_n_sec(10)
         self.logger.info("PCI bus rescan complete")
+
+    # ── Phase 4c: PCIe remove → rescan → restart-device ─────────────────────
+
+    def _phase_pcie_remove_and_restart(self):
+        """PCIe hot-unplug, wait for detection, rescan PCI bus, restart device.
+
+        This is the "restart" variant — no set-failed, no failure migration.
+        The device is physically unplugged, the control plane detects the loss,
+        then we rescan PCI to make it visible again and call restart-device.
+        """
+        self.logger.info(
+            f"=== Phase: PCIe remove + restart device {self._target_device_id} ==="
+        )
+        t0 = time.time()
+
+        # Step 1: Get node IP and PCIe address
+        node_details = self.sbcli_utils.get_storage_node_details(
+            self._target_node_id
+        )
+        node_ip = node_details[0]["mgmt_ip"]
+        pcie_addr = self._target_device_info.get("pcie_address", "")
+        if not pcie_addr:
+            raise RuntimeError(
+                f"No pcie_address found for device {self._target_device_id}"
+            )
+        self.logger.info(
+            f"PCIe hot-unplug: device {self._target_device_id} "
+            f"at {pcie_addr} on {node_ip}"
+        )
+
+        # Step 2: PCIe hot-unplug via sysfs
+        self.ssh_obj.exec_command(
+            node=node_ip,
+            command=f"echo 1 | sudo tee /sys/bus/pci/devices/{pcie_addr}/remove"
+        )
+        self.logger.info("PCIe device removed via sysfs")
+        sleep_n_sec(10)
+
+        # Step 3: Wait for control plane to detect device loss
+        self.sbcli_utils.wait_for_device_status(
+            self._target_node_id, ["unavailable", "removed"], timeout=120,
+            device_id=self._target_device_id,
+        )
+        self._timing["remove_duration"] = time.time() - t0
+        self.logger.info(
+            f"Device detected as unavailable/removed "
+            f"({self._timing['remove_duration']:.1f}s)"
+        )
+
+        # Step 4: Rescan PCI bus to make the physical device visible again
+        self.logger.info("Rescanning PCI bus to restore physical device ...")
+        self.ssh_obj.exec_command(
+            node=node_ip,
+            command="echo 1 | sudo tee /sys/bus/pci/rescan"
+        )
+        sleep_n_sec(15)
+        self.logger.info("PCI bus rescan complete")
+
+        # Step 5: Restart device via CLI
+        t1 = time.time()
+        mgmt_ip = self.mgmt_nodes[0]
+        cmd = f"{self.base_cmd} -d sn restart-device {self._target_device_id}"
+        self.logger.info(f"Restarting device via CLI: {cmd}")
+        result = self.ssh_obj.exec_command(mgmt_ip, cmd)
+        self.logger.info(f"restart-device result: {result}")
+
+        # Step 6: Wait for device to come back online
+        self.logger.info("Waiting for device to come back online ...")
+        self.sbcli_utils.wait_for_device_status(
+            self._target_node_id, "online", timeout=600,
+            device_id=self._target_device_id,
+        )
+        self._timing["restart_duration"] = time.time() - t1
+        self.logger.info(
+            f"Device back online ({self._timing['restart_duration']:.1f}s)"
+        )
+
+        # Step 7: Wait for any migration tasks that may have been triggered
+        self.logger.info("Checking for any active migration tasks ...")
+        try:
+            migration_elapsed = self.sbcli_utils.wait_migration_tasks_complete(
+                timeout=self.MIGRATION_TIMEOUT
+            )
+            self._timing["migration_duration"] = migration_elapsed
+            self.logger.info(
+                f"Migration tasks complete ({migration_elapsed:.1f}s)"
+            )
+        except TimeoutError:
+            raise
+        except Exception as exc:
+            self.logger.info(f"No migration tasks or already done: {exc}")
+            self._timing["migration_duration"] = 0
+
+    def _phase_validate_restart(self):
+        """Validate after device restart: device online, nodes healthy, cluster active."""
+        self.logger.info("=== Phase: Validate restart results ===")
+
+        # 1. Target device should be back online
+        devices = self.sbcli_utils.get_device_details(self._target_node_id)
+        target_dev = None
+        for d in devices:
+            if d["id"] == self._target_device_id:
+                target_dev = d
+                break
+        assert target_dev is not None, (
+            f"Target device {self._target_device_id} not found"
+        )
+        assert target_dev["status"] == "online", (
+            f"Device {self._target_device_id} expected online, "
+            f"got {target_dev['status']}"
+        )
+        self.logger.info(
+            f"Device {self._target_device_id} status: {target_dev['status']}"
+        )
+
+        # 2. All storage nodes should be online and healthy
+        storage_nodes = self.sbcli_utils.get_storage_nodes()
+        for node in storage_nodes["results"]:
+            assert node["status"] == "online", (
+                f"Node {node['id']} is not online (status={node['status']})"
+            )
+            assert node["health_check"], (
+                f"Node {node['id']} health check failed"
+            )
+        self.logger.info(
+            f"All {len(storage_nodes['results'])} storage nodes online and healthy"
+        )
+
+        # 3. All other devices on target node should be online
+        for d in devices:
+            if d["id"] == self._target_device_id:
+                continue
+            if d["id"] in self._pre_existing_failed_devices:
+                continue
+            assert d["status"] == "online", (
+                f"Non-target device {d['id']} expected online, "
+                f"got {d['status']}"
+            )
+        self.logger.info("All non-target devices remain online")
+
+        # 4. Cluster should be active
+        cluster_details = self.sbcli_utils.get_cluster_details(
+            self.sbcli_utils.cluster_id
+        )
+        if cluster_details:
+            cl = cluster_details[0] if isinstance(cluster_details, list) else cluster_details
+            cluster_status = cl.get("status", "unknown")
+            self.logger.info(f"Cluster status: {cluster_status}")
+            assert cluster_status == "active", (
+                f"Cluster expected active, got {cluster_status}"
+            )
 
     # ── Shared migration wait + verify ───────────────────────────────────────
 
@@ -1351,6 +1552,44 @@ class DeviceFailureMigrationPCIeUnderLoadDocker(_DeviceFailureMigrationBase, Tes
         self._run_migration_test(with_io_load=True, failure_mode="pcie")
 
 
+class DevicePCIeRestartNoLoadDocker(_DeviceFailureMigrationBase, TestLvolHACluster):
+    """Fill device to 65 %, PCIe hot-unplug, rescan, restart device, verify — NO IO load.
+
+    Unlike the migration variants, this does NOT set-failed the device.
+    Instead it rescans the PCI bus and calls restart-device to bring it back.
+    Verifies device comes online, cluster healthy, no data loss.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.logger = setup_logger(__name__)
+        self._init_migration_state()
+        self.test_name = "device_pcie_restart_no_load"
+
+    def run(self):
+        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self._run_restart_test(with_io_load=False)
+
+
+class DevicePCIeRestartUnderLoadDocker(_DeviceFailureMigrationBase, TestLvolHACluster):
+    """Fill device to 65 %, start IO, PCIe hot-unplug, rescan, restart device, verify — UNDER LOAD.
+
+    Unlike the migration variants, this does NOT set-failed the device.
+    Instead it rescans the PCI bus and calls restart-device to bring it back.
+    Verifies device comes online, cluster healthy, FIO completed without errors.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.logger = setup_logger(__name__)
+        self._init_migration_state()
+        self.test_name = "device_pcie_restart_under_load"
+
+    def run(self):
+        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self._run_restart_test(with_io_load=True)
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #  K8s-native concrete test classes (PVC + FIO K8s Jobs)
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1942,3 +2181,61 @@ class DeviceFailureMigrationPCIeUnderLoadK8s(_DeviceFailureMigrationK8s, K8sNati
             npcs=self.npcs,
         )
         self._run_migration_test(with_io_load=True, failure_mode="pcie")
+
+
+class DevicePCIeRestartNoLoadK8s(_DeviceFailureMigrationK8s, K8sNativeFailoverTest):
+    """K8s-native: fill device to 65 %, PCIe hot-unplug, rescan, restart device — NO IO load."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.logger = setup_logger(__name__)
+        self._init_migration_state()
+        self.test_name = "device_pcie_restart_no_load_k8s"
+
+    def run(self):
+        storage_nodes = self.sbcli_utils.get_storage_nodes()
+        for result in storage_nodes["results"]:
+            self.sn_nodes.append(result["uuid"])
+            self.node_vs_pvc[result["uuid"]] = []
+
+        pool_test = self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self.pool_name = self.pool_name if pool_test == self.pool_name else pool_test
+
+        cluster_id = self.cluster_id or ""
+        self.k8s_utils.create_storage_class(
+            name=self.STORAGE_CLASS_NAME,
+            cluster_id=cluster_id,
+            pool_name=self.pool_name,
+            ndcs=self.ndcs,
+            npcs=self.npcs,
+        )
+        self._run_restart_test(with_io_load=False)
+
+
+class DevicePCIeRestartUnderLoadK8s(_DeviceFailureMigrationK8s, K8sNativeFailoverTest):
+    """K8s-native: fill device to 65 %, start IO, PCIe hot-unplug, rescan, restart device — UNDER LOAD."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.logger = setup_logger(__name__)
+        self._init_migration_state()
+        self.test_name = "device_pcie_restart_under_load_k8s"
+
+    def run(self):
+        storage_nodes = self.sbcli_utils.get_storage_nodes()
+        for result in storage_nodes["results"]:
+            self.sn_nodes.append(result["uuid"])
+            self.node_vs_pvc[result["uuid"]] = []
+
+        pool_test = self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self.pool_name = self.pool_name if pool_test == self.pool_name else pool_test
+
+        cluster_id = self.cluster_id or ""
+        self.k8s_utils.create_storage_class(
+            name=self.STORAGE_CLASS_NAME,
+            cluster_id=cluster_id,
+            pool_name=self.pool_name,
+            ndcs=self.ndcs,
+            npcs=self.npcs,
+        )
+        self._run_restart_test(with_io_load=True)
