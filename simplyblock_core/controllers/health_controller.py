@@ -969,6 +969,10 @@ def check_lvol_on_node(lvol_id, node_id, node_bdev_names=None, node_lvols_nqns=N
             if ret:
                 for bdev in ret:
                     node_bdev_names[bdev['name']] = bdev
+                    if "aliases" in bdev and bdev["aliases"]:
+                        alias = bdev["aliases"][0]
+                        node_bdev_names[alias] = bdev
+
         except Exception as e:
             logger.error(f"Failed to connect to node's SPDK: {e}")
 
@@ -988,8 +992,10 @@ def check_lvol_on_node(lvol_id, node_id, node_bdev_names=None, node_lvols_nqns=N
             bdev_name = bdev_info['name']
             if bdev_info['type'] in ["bdev_lvol", "bdev_lvol_clone"]:
                 bdev_name = lvol.lvol_uuid
-
-            passed &= check_bdev(bdev_name, bdev_names=node_bdev_names)
+            bdev_check = check_bdev(bdev_name, bdev_names=node_bdev_names)
+            if not bdev_check:
+                bdev_check = check_bdev(lvol.top_bdev, bdev_names=node_bdev_names)
+            passed &= bdev_check
 
         passed &= check_subsystem(lvol.nqn, nqns=node_lvols_nqns, ns_uuid=lvol.uuid)
 
