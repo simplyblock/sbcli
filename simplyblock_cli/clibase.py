@@ -7,7 +7,6 @@ import re
 import sys
 import time
 import argcomplete
-from pydantic import SecretStr
 
 from simplyblock_core import cluster_ops, utils, db_controller, constants
 from simplyblock_core.exceptions import MigrationConflictError, PreconditionError
@@ -771,7 +770,7 @@ class CLIWrapperBase:
     def control_plane__add(self, sub_command, args):
         cluster_id = args.cluster_id
         cluster_ip = args.cluster_ip
-        cluster_secret = SecretStr(args.cluster_secret)
+        cluster_secret = args.cluster_secret
         ifname = args.ifname
         mgmt_ip = args.mgmt_ip
         mode = args.mode
