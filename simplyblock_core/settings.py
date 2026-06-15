@@ -53,6 +53,17 @@ class Settings(BaseSettings):
     tls_key: Path = Path("/etc/simplyblock/tls/tls.key")
     tls_certificate_authority: Path = Path("/etc/simplyblock/tls/ca.crt")
 
+    log_response_bodies: Annotated[
+        bool,
+        Field(
+            description=(
+                "Log full HTTP response bodies at DEBUG. Default off — response "
+                "bodies can carry plaintext secrets (e.g. cluster.secret in a GET) "
+                "and the response stream has no type information to mask by."
+            )
+        ),
+    ] = False
+
     @model_validator(mode="after")
     def validate_tls_files(self):
         if not self.tls_serve and self.tls_connect == "disabled":
