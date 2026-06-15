@@ -49,6 +49,7 @@ from simplyblock_core.cluster_expand_planner import (
     make_expand_state,
     pending_moves,
 )
+from simplyblock_core.exceptions import PreconditionError
 
 
 logger = utils.get_logger(__name__)
@@ -88,14 +89,6 @@ class NoopMoveExecutor(MoveExecutor):
         self.executed.append(move)
 
 
-class ExpandPlanError(Exception):
-    """Raised by ``execute_expand_plan`` when a fatal precondition is not
-    met (e.g., trying to start a fresh plan while one is already in
-    progress, or resuming an incompatible-schema state). Distinct from the
-    underlying executor exception that triggers an abort, which is
-    re-raised as-is after the abort is persisted."""
-
-
 def execute_expand_plan(
     cluster,
     executor: MoveExecutor,
@@ -120,10 +113,12 @@ def execute_expand_plan(
 
     Raises
     ------
-    ExpandPlanError
+    PreconditionError
         On precondition failures — fresh start without a plan, or attempt
         to start while an in-progress state already exists, or schema
-        mismatch on resume.
+        mismatch on resume. Distinct from the underlying executor exception
+        that triggers an abort, which is re-raised as-is after the abort is
+        persisted.
     Exception
         Any exception raised by the executor is caught, recorded as the
         abort reason on the persisted state, and then re-raised so the
@@ -133,7 +128,7 @@ def execute_expand_plan(
 
     if is_expand_in_progress(state):
         if not is_expand_state_compatible(state):
-            raise ExpandPlanError(
+            raise PreconditionError(
                 f"persisted expand_state schema_version="
                 f"{state.get('schema_version')!r} is not understood by this "
                 f"version of the orchestrator; manual operator action required")
@@ -142,7 +137,7 @@ def execute_expand_plan(
             # know they're about to resume an existing plan, not start a new
             # one. The orchestrator could be permissive here, but a strict
             # contract makes the resume path obvious in logs.
-            raise ExpandPlanError(
+            raise PreconditionError(
                 "an expansion is already in progress; do not pass "
                 "planned_moves/new_node_id when resuming")
         logger.info(
@@ -150,7 +145,7 @@ def execute_expand_plan(
             f"cursor={state['cursor']}/{len(state['moves'])}")
     else:
         if planned_moves is None or new_node_id is None:
-            raise ExpandPlanError(
+            raise PreconditionError(
                 "no in-progress expansion to resume; planned_moves and "
                 "new_node_id are required to start a fresh plan")
         state = make_expand_state(new_node_id, planned_moves)

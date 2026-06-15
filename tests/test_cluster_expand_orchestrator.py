@@ -11,7 +11,6 @@ import unittest
 from typing import List
 
 from simplyblock_core.cluster_expand_orchestrator import (
-    ExpandPlanError,
     MoveExecutor,
     NoopMoveExecutor,
     execute_expand_plan,
@@ -27,6 +26,7 @@ from simplyblock_core.cluster_expand_planner import (
     compute_role_diff,
     make_expand_state,
 )
+from simplyblock_core.exceptions import PreconditionError
 
 
 class FakeCluster:
@@ -162,7 +162,7 @@ class TestResume(unittest.TestCase):
         state["cursor"] = 1
         cluster = FakeCluster(expand_state=state)
 
-        with self.assertRaises(ExpandPlanError):
+        with self.assertRaises(PreconditionError):
             execute_expand_plan(
                 cluster, NoopMoveExecutor(),
                 planned_moves=moves, new_node_id="n5")
@@ -251,7 +251,7 @@ class TestAbort(unittest.TestCase):
 
         # Resuming without a fresh plan should fail loudly, not silently
         # do nothing.
-        with self.assertRaises(ExpandPlanError):
+        with self.assertRaises(PreconditionError):
             execute_expand_plan(cluster, NoopMoveExecutor())
 
 
@@ -263,13 +263,13 @@ class TestPreconditions(unittest.TestCase):
 
     def test_fresh_start_requires_plan(self):
         cluster = FakeCluster()
-        with self.assertRaises(ExpandPlanError):
+        with self.assertRaises(PreconditionError):
             execute_expand_plan(cluster, NoopMoveExecutor())
 
     def test_fresh_start_requires_new_node_id(self):
         moves = compute_role_diff(["n1", "n2", "n3"], "n4", ftt=2)
         cluster = FakeCluster()
-        with self.assertRaises(ExpandPlanError):
+        with self.assertRaises(PreconditionError):
             execute_expand_plan(
                 cluster, NoopMoveExecutor(), planned_moves=moves)
 
@@ -278,7 +278,7 @@ class TestPreconditions(unittest.TestCase):
         state = make_expand_state("n4", moves)
         state["schema_version"] = EXPAND_STATE_SCHEMA_VERSION + 99
         cluster = FakeCluster(expand_state=state)
-        with self.assertRaises(ExpandPlanError):
+        with self.assertRaises(PreconditionError):
             execute_expand_plan(cluster, NoopMoveExecutor())
 
 
