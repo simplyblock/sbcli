@@ -107,6 +107,23 @@ RESTART_TASK_EXEC_INTERVAL_MAX_SEC = 3600
 # own tasks immediately regardless of this value (owner id is the hostname).
 TASK_LEASE_TTL_SEC = 1200
 
+# Node-add concurrency: the cross-node mesh section of add_node is serialized
+# per cluster behind a ClusterAddNodeLock. The holder refreshes the lock every
+# CLUSTER_ADD_LOCK_HEARTBEAT_SEC; a lock whose heartbeat is older than
+# CLUSTER_ADD_LOCK_TTL_SEC is treated as abandoned (holder crashed) and may be
+# reclaimed. TTL is kept well under TASK_LEASE_TTL_SEC so a dead holder's lock
+# is reclaimed before its task lease, and is several heartbeats wide so a live
+# (but momentarily slow) holder is never falsely preempted. The slow part of
+# add_node (SPDK boot) is OUTSIDE this lock, so the locked section is short.
+CLUSTER_ADD_LOCK_HEARTBEAT_SEC = 30
+CLUSTER_ADD_LOCK_TTL_SEC = 120
+
+# A node-add port reservation older than this is treated as abandoned and
+# ignored/reclaimed. Must exceed the worst-case time from port allocation to
+# persisting the node record (which spans the SPDK boot), so a live add never
+# loses its reserved port.
+PORT_RESERVATION_TTL_SEC = 600
+
 # An LVol left in STATUS_IN_CREATION longer than this is treated as an orphaned
 # create (the creating process died before reaching ONLINE) and is cleaned up
 # by lvol_monitor. Must be comfortably longer than the slowest legitimate

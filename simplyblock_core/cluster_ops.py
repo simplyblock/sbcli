@@ -1055,10 +1055,23 @@ def set_cluster_status(cl_id, status) -> None:
     if cluster.status == status:
         return
 
-    old_status = cluster.status
-    cluster.status = status
-    cluster.write_to_db(db_controller.kv_store)
-    cluster_events.cluster_status_change(cluster, cluster.status, old_status)
+    # Transactional compare-and-set: concurrent node-adds (now parallel) both
+    # call this, and a plain read+write_to_db would clobber any other cluster
+    # field a peer updated in between. atomic_update re-reads inside the tx and
+    # only writes the status field change.
+    captured = {}
+
+    def _mutate(fresh):
+        if fresh.status == status:
+            return False  # already at target (a peer won the race); don't write
+        captured['old'] = fresh.status
+        fresh.status = status
+        return True
+
+    updated = db_controller.atomic_update(cluster, _mutate)
+    if updated is None or 'old' not in captured:
+        return
+    cluster_events.cluster_status_change(updated, updated.status, captured['old'])
 
 
 def cluster_set_read_only(cl_id) -> None:

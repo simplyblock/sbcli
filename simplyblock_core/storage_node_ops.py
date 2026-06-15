@@ -1576,6 +1576,40 @@ def resolve_ha_jm_count(cluster, ha_jm_count) -> int:
     return ha_jm_count
 
 
+def _acquire_cluster_add_lock_blocking(db_controller, cluster_id, owner, timeout=300, poll=2):
+    """Block until the per-cluster node-add mesh lock is held by ``owner``.
+
+    Returns True once acquired, or False if ``timeout`` seconds elapse without
+    acquiring (caller should fail the task so it is retried — failing here is
+    cheaper than re-running the whole node-local setup). A lock abandoned by a
+    crashed holder is reclaimed automatically once its heartbeat goes stale
+    (constants.CLUSTER_ADD_LOCK_TTL_SEC), so the effective wait is bounded even
+    if a holder died."""
+    deadline = time.time() + timeout
+    while True:
+        won, current_owner = db_controller.acquire_cluster_add_lock(cluster_id, owner)
+        if won:
+            return True
+        if time.time() >= deadline:
+            logger.error(
+                f"Timed out waiting for cluster node-add lock (held by {current_owner})")
+            return False
+        logger.info(f"Cluster node-add lock held by {current_owner}; waiting")
+        time.sleep(poll)
+
+
+def _cluster_add_lock_heartbeat(db_controller, cluster_id, owner, stop_event):
+    """Refresh the node-add lock until ``stop_event`` is set, so a long mesh
+    section on a large cluster isn't reclaimed out from under a live holder."""
+    while not stop_event.wait(constants.CLUSTER_ADD_LOCK_HEARTBEAT_SEC):
+        if not db_controller.refresh_cluster_add_lock(cluster_id, owner):
+            # Lost the lock (reclaimed after a stall). Stop heartbeating; the
+            # critical section will finish and its owner-scoped release is a
+            # no-op against whoever holds it now.
+            logger.warning("Lost cluster node-add lock heartbeat (reclaimed)")
+            return
+
+
 def add_node(cluster_id, node_addr, iface_name, data_nics_list,
              max_snap, spdk_image=None, spdk_debug=False,
              small_bufsize=0, large_bufsize=0,
@@ -1728,7 +1762,14 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             return False
 
         mgmt_ip, mgmt_iface = mgmt_info
-        rpc_port = utils.get_next_nvmf_port(cluster_id)
+        # Generate the node uuid up front so it can own the port reservations
+        # made before the node record itself is persisted (the new node isn't
+        # written to the DB until after SPDK boots, so two concurrent adds would
+        # otherwise read the same "next free" port). reserve_cluster_nvmf_port
+        # allocates and reserves the port atomically against other concurrent
+        # node adds.
+        node_uuid = str(uuid.uuid4())
+        rpc_port = db_controller.reserve_cluster_nvmf_port(cluster_id, node_uuid)
         logger.info(f"mgmt interface is {mgmt_iface}")
 
         if not spdk_image:
@@ -1859,7 +1900,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         subsystem_nqn = f"{BASE_NQN}:{hostname}"
         # creating storage node object
         snode = StorageNode()
-        snode.uuid = str(uuid.uuid4())
+        snode.uuid = node_uuid
         snode.status = StorageNode.STATUS_IN_CREATION
         snode.baseboard_sn = node_info['system_id']
         snode.system_uuid = node_info['system_id']
@@ -1927,7 +1968,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         snode.distrib_cpu_cores = distrib_cpu_cores
         snode.jc_singleton_mask = jc_singleton_mask or ""
         snode.compression_cpu_mask = compression_cpu_mask or ""
-        snode.nvmf_port = utils.get_next_dev_port(cluster_id)
+        snode.nvmf_port = db_controller.reserve_cluster_nvmf_port(cluster_id, node_uuid)
         snode.poller_cpu_cores = poller_cpu_cores or []
         snode.socket = node_socket
         snode.iobuf_small_pool_count = small_pool_count or 0
@@ -2094,70 +2135,97 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 logger.error("Failed to set Alcemls QOS")
                 return False
 
-        logger.info("Connecting to remote devices")
-        remote_devices = _connect_to_remote_devs(snode)
-        snode.remote_devices = remote_devices
+        # --- Cluster-wide mesh critical section -------------------------
+        # Everything below wires this node into the cluster mesh: it connects
+        # to peers' remote devices, goes ONLINE, makes every peer reverse-
+        # connect to *this* node's devices (writing the peers' records), and
+        # pushes the cluster map. Two concurrent adds must not interleave here:
+        # the reverse-connect loop does full-object writes of *other* nodes,
+        # and a correct A<->B mesh requires whoever runs second to observe the
+        # first as ONLINE. So this whole block is serialized per cluster while
+        # the slow node-local setup above ran in parallel. A heartbeat keeps a
+        # long section on a large cluster from being reclaimed; the lock is
+        # always released (finally), including on the early `continue` and the
+        # reverse-connect failure path.
+        lock_owner = f"{socket.gethostname()}:{os.getpid()}:{node_uuid}"
+        if not _acquire_cluster_add_lock_blocking(db_controller, cluster_id, lock_owner):
+            logger.error("Could not acquire cluster node-add lock; failing for retry")
+            return False
+        stop_heartbeat = threading.Event()
+        hb_thread = threading.Thread(
+            target=_cluster_add_lock_heartbeat,
+            args=(db_controller, cluster_id, lock_owner, stop_heartbeat),
+            daemon=True)
+        hb_thread.start()
+        try:
+            logger.info("Connecting to remote devices")
+            remote_devices = _connect_to_remote_devs(snode)
+            snode.remote_devices = remote_devices
 
-        if snode.enable_ha_jm:
-            logger.info("Connecting to remote JMs")
-            snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
+            if snode.enable_ha_jm:
+                logger.info("Connecting to remote JMs")
+                snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
 
-        snode.write_to_db(kv_store)
+            snode.write_to_db(kv_store)
 
-        snode = db_controller.get_storage_node_by_id(snode.get_id())
-        old_status = snode.status
-        snode.status = StorageNode.STATUS_ONLINE
-        snode.updated_at = str(datetime.datetime.now(datetime.timezone.utc))
-        snode.online_since = str(datetime.datetime.now(datetime.timezone.utc))
-        snode.write_to_db(db_controller.kv_store)
+            snode = db_controller.get_storage_node_by_id(snode.get_id())
+            old_status = snode.status
+            snode.status = StorageNode.STATUS_ONLINE
+            snode.updated_at = str(datetime.datetime.now(datetime.timezone.utc))
+            snode.online_since = str(datetime.datetime.now(datetime.timezone.utc))
+            snode.write_to_db(db_controller.kv_store)
 
-        storage_events.snode_status_change(snode, snode.status, old_status, caused_by="monitor")
-        # distr_controller.send_node_status_event(snode, status)
+            storage_events.snode_status_change(snode, snode.status, old_status, caused_by="monitor")
+            # distr_controller.send_node_status_event(snode, status)
 
-        logger.info("Make other nodes connect to the node devices")
-        snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
-        for node in snodes:
-            if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
+            logger.info("Make other nodes connect to the node devices")
+            snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
+            for node in snodes:
+                if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
+                    continue
+                try:
+                    node.remote_devices = _connect_to_remote_devs(node)
+                except RuntimeError:
+                    logger.error('Failed to connect to remote devices')
+                    return False
+                node.write_to_db(kv_store)
+
+            if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY,
+                                      Cluster.STATUS_IN_EXPANSION]:
+                logger.warning(
+                    f"The cluster status is not active ({cluster.status}), adding the node without distribs and lvstore")
                 continue
-            try:
-                node.remote_devices = _connect_to_remote_devs(node)
-            except RuntimeError:
-                logger.error('Failed to connect to remote devices')
-                return False
-            node.write_to_db(kv_store)
 
-        if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY,
-                                  Cluster.STATUS_IN_EXPANSION]:
-            logger.warning(
-                f"The cluster status is not active ({cluster.status}), adding the node without distribs and lvstore")
-            continue
+            logger.info("Sending cluster map add node")
+            snode = db_controller.get_storage_node_by_id(snode.get_id())
+            snodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
+            for node_index, node in enumerate(snodes):
+                if node.status != StorageNode.STATUS_ONLINE or node.get_id() == snode.get_id():
+                    continue
+                ret = distr_controller.send_cluster_map_add_node(snode, node)
 
-        logger.info("Sending cluster map add node")
-        snode = db_controller.get_storage_node_by_id(snode.get_id())
-        snodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
-        for node_index, node in enumerate(snodes):
-            if node.status != StorageNode.STATUS_ONLINE or node.get_id() == snode.get_id():
-                continue
-            ret = distr_controller.send_cluster_map_add_node(snode, node)
+            # for dev in snode.nvme_devices:
+            #     if dev.status == NVMeDevice.STATUS_ONLINE:
+            #         device_controller.device_set_unavailable(dev.get_id())
 
-        # for dev in snode.nvme_devices:
-        #     if dev.status == NVMeDevice.STATUS_ONLINE:
-        #         device_controller.device_set_unavailable(dev.get_id())
+            # logger.info("Setting node status to suspended")
+            # set_node_status(snode.get_id(), StorageNode.STATUS_SUSPENDED)
+            # logger.info("Done")
 
-        # logger.info("Setting node status to suspended")
-        # set_node_status(snode.get_id(), StorageNode.STATUS_SUSPENDED)
-        # logger.info("Done")
+            logger.info("Setting node status to Active")
+            set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE, caused_by="add_node")
 
-        logger.info("Setting node status to Active")
-        set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE, caused_by="add_node")
+            for dev in snode.nvme_devices:
+                if dev.status == NVMeDevice.STATUS_ONLINE:
+                    tasks_controller.add_new_device_mig_task(dev.get_id())
 
-        for dev in snode.nvme_devices:
-            if dev.status == NVMeDevice.STATUS_ONLINE:
-                tasks_controller.add_new_device_mig_task(dev.get_id())
+            storage_events.snode_add(snode)
 
-        storage_events.snode_add(snode)
-
-        cluster_ops.set_cluster_status(cluster.get_id(), Cluster.STATUS_IN_EXPANSION)
+            cluster_ops.set_cluster_status(cluster.get_id(), Cluster.STATUS_IN_EXPANSION)
+        finally:
+            stop_heartbeat.set()
+            db_controller.release_cluster_add_lock(cluster_id, lock_owner)
+        # --- End cluster-wide mesh critical section ---------------------
     logger.info("Done")
     return "Success"
 

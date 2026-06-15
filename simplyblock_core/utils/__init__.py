@@ -911,8 +911,9 @@ def get_next_fw_port(cluster_id, mgmt_ip=None):
     return next_port
 
 
-def _get_all_nvmf_ports(cluster_id):
-    """Collect all NVMe-oF ports in use across the cluster (lvol, hublvol, device)."""
+def get_node_nvmf_ports(cluster_id):
+    """NVMe-oF ports persisted on the cluster's node records (lvol, hublvol,
+    device, rpc, per-lvstore)."""
     from simplyblock_core.db_controller import DBController
     db_controller = DBController()
     used_ports = set()
@@ -932,6 +933,45 @@ def _get_all_nvmf_ports(cluster_id):
                     if isinstance(p, int) and p > 0:
                         used_ports.add(p)
     return used_ports
+
+
+def get_nvmf_base_port(cluster_id):
+    """Base of the unified NVMe-oF port pool for the cluster."""
+    nvmf_base, _, _ = _get_cluster_port_config(cluster_id)
+    return nvmf_base
+
+
+def _get_active_port_reservations(cluster_id):
+    """Ports reserved by in-flight node adds that have not yet persisted their
+    node record. Stale (abandoned) reservations are ignored by TTL.
+
+    Best-effort hardening: the durable record of a port in use is the node
+    record itself, so if the reservation read fails we fall back to node-only
+    ports rather than break allocation."""
+    import time as _time
+    from simplyblock_core.db_controller import DBController
+    from simplyblock_core.models.cluster import PortReservation
+    db_controller = DBController()
+    reserved = set()
+    now = int(_time.time())
+    try:
+        for res in PortReservation().read_from_db(db_controller.kv_store, id=cluster_id):
+            if res.cluster_id != cluster_id:
+                continue
+            if (now - res.created_at) > constants.PORT_RESERVATION_TTL_SEC:
+                continue
+            reserved.add(res.port)
+    except Exception:
+        return set()
+    return reserved
+
+
+def _get_all_nvmf_ports(cluster_id):
+    """Collect all NVMe-oF ports in use across the cluster (lvol, hublvol,
+    device), including ports reserved by in-flight node adds whose node record
+    isn't persisted yet — so neither a concurrent node add nor an lvstore/lvol
+    allocation reuses a port a node-add is mid-flight on."""
+    return get_node_nvmf_ports(cluster_id) | _get_active_port_reservations(cluster_id)
 
 
 def get_next_nvmf_port(cluster_id):
