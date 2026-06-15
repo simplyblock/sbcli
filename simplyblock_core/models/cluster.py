@@ -2,6 +2,8 @@
 
 from typing import List, Optional
 
+from pydantic import SecretStr
+
 from simplyblock_core.models.base_model import BaseModel
 
 
@@ -40,7 +42,7 @@ class Cluster(BaseModel):
     blk_size: int = 0
     cap_crit: int = 90
     cap_warn: int = 80
-    cli_pass: str = ""
+    cli_pass: SecretStr = SecretStr("")
     cluster_max_devices: int = 0
     cluster_max_nodes: int = 0
     cluster_max_size: int = 0
@@ -53,7 +55,7 @@ class Cluster(BaseModel):
     enable_node_affinity: bool = False
     grafana_endpoint: str = ""
     mode: str = "docker"
-    grafana_secret: str = ""
+    grafana_secret: SecretStr = SecretStr("")
     contact_point: str = ""
     ha_type: str = "single"
     inflight_io_threshold: int = 4
@@ -69,7 +71,7 @@ class Cluster(BaseModel):
     fabric_tcp: bool = True
     fabric_rdma: bool = False
     client_qpair_count: int = 3
-    secret: str = ""
+    secret: SecretStr = SecretStr("")
     cr_name: str = ""
     cr_namespace: str = ""
     cr_plural: str = ""
@@ -123,11 +125,6 @@ class Cluster(BaseModel):
             return self.STATUS_CODE_MAP[self.status]
         else:
             return -1
-
-    def get_clean_dict(self):
-        data = super(Cluster, self).get_clean_dict()
-        data['status_code'] = self.get_status_code()
-        return data
 
     def is_qos_set(self) -> bool:
         # Import is here is to avoid circular import dependency

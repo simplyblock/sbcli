@@ -2,6 +2,8 @@
 
 from typing import List
 
+from pydantic import SecretStr
+
 from simplyblock_core.models.base_model import BaseModel
 
 
@@ -26,7 +28,7 @@ class Pool(BaseModel):
     pool_max_size: int = 0
     pool_name: str = ""
     numeric_id: int = 0
-    secret: str = ""  # unused
+    secret: SecretStr = SecretStr("")  # unused
     users: List[str] = []
     qos_host: str = ""
     cr_name: str = ""
@@ -37,8 +39,8 @@ class Pool(BaseModel):
     lvols_cr_plural: str = ""
     sec_options: dict = {}
     dhchap: bool = False
-    dhchap_key: str = ""
-    dhchap_ctrlr_key: str = ""
+    dhchap_key: SecretStr = SecretStr("")
+    dhchap_ctrlr_key: SecretStr = SecretStr("")
     allowed_hosts: List[str] = []
 
 

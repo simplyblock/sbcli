@@ -36,8 +36,8 @@ def _register_pool_dhchap_keys_on_node(pool, snode, rpc_client):
     key_names = {}
 
     for key_type, key_value in (
-        ("dhchap_key", pool.dhchap_key),
-        ("dhchap_ctrlr_key", pool.dhchap_ctrlr_key),
+        ("dhchap_key", pool.dhchap_key.get_secret_value()),
+        ("dhchap_ctrlr_key", pool.dhchap_ctrlr_key.get_secret_value()),
     ):
         if not key_value:
             continue

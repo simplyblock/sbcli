@@ -134,7 +134,7 @@ class ClusterDTO(BaseModel):
             provisioned_capacity_critical=model.prov_cap_crit,
             node_affinity=model.enable_node_affinity,
             anti_affinity=model.strict_node_anti_affinity,
-            secret=model.secret,
+            secret=model.secret.get_secret_value(),
             tls_enabled=model.tls,
             max_fault_tolerance=model.max_fault_tolerance,
             backup_enabled=bool(model.backup_config),
