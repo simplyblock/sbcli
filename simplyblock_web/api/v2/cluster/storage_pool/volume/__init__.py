@@ -195,6 +195,9 @@ def add_host(cluster: Cluster, pool: StoragePool, volume: Volume, body: _AddHost
 
 @instance_api.get('/hosts/{host_nqn}/secret', name='clusters:storage-pools:volumes:get-host-secret')
 def get_host_secret(cluster: Cluster, pool: StoragePool, volume: Volume, host_nqn: str):
+    # Sanctioned secret-egress endpoint: returns the DH-HMAC-CHAP key for the
+    # host so the client can configure NVMe-oF auth. The returned dict carries
+    # already-unwrapped plain-text key material — that is the contract.
     result, error = lvol_controller.get_host_secret(volume.get_id(), host_nqn)
     if error:
         raise HTTPException(404, error)

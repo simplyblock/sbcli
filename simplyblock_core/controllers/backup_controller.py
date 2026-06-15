@@ -11,6 +11,7 @@ from simplyblock_core.controllers import backup_events, tasks_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.backup import Backup, BackupPolicy, BackupPolicyAttachment
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.utils.secrets import unwrap_secret as _unwrap_secret
 
 logger = logging.getLogger()
 
@@ -176,9 +177,9 @@ def create_s3_bdev(node, backup_config):
     # Step 2: Ensure the S3 bucket exists, then register it with the S3 bdev
     bucket_name = backup_config.get("bucket_name", f"simplyblock-backup-{node.cluster_id}")
     try:
-        s3_kwargs = {
-            "aws_access_key_id": backup_config.get("access_key_id", ""),
-            "aws_secret_access_key": backup_config.get("secret_access_key", ""),
+        s3_kwargs: dict = {
+            "aws_access_key_id": _unwrap_secret(backup_config.get("access_key_id")) or "",
+            "aws_secret_access_key": _unwrap_secret(backup_config.get("secret_access_key")) or "",
         }
         endpoint_url = backup_config.get("local_endpoint", "")
         if endpoint_url:
@@ -725,9 +726,9 @@ def switch_backup_source(cluster_id, source_cluster_id):
 
     # Verify the bucket exists
     try:
-        s3_kwargs = {
-            "aws_access_key_id": backup_config.get("access_key_id", ""),
-            "aws_secret_access_key": backup_config.get("secret_access_key", ""),
+        s3_kwargs: dict = {
+            "aws_access_key_id": _unwrap_secret(backup_config.get("access_key_id")) or "",
+            "aws_secret_access_key": _unwrap_secret(backup_config.get("secret_access_key")) or "",
         }
         endpoint_url = backup_config.get("local_endpoint", "")
         if endpoint_url:

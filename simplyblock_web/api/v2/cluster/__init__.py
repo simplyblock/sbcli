@@ -3,7 +3,7 @@ from typing import Annotated, List, Literal, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr
 from pydantic.networks import AnyUrl, UrlConstraints
 
 from simplyblock_core.db_controller import DBController
@@ -35,8 +35,8 @@ class _UpdateParams(BaseModel):
 
 
 class BackupConfigParams(BaseModel):
-    access_key_id: Optional[str] = None
-    secret_access_key: Optional[str] = None
+    access_key_id: Optional[SecretStr] = None
+    secret_access_key: Optional[SecretStr] = None
     local_endpoint: Optional[str] = None
     bucket_name: Optional[str] = None
     snapshot_backups: Optional[bool] = None
@@ -77,7 +77,7 @@ class ClusterParams(BaseModel):
     cr_namespace: str = ""
     cr_plural: str = ""
     cluster_ip: str = ""
-    grafana_secret: str = ""
+    grafana_secret: SecretStr = SecretStr("")
     client_data_nic: str = ""
     max_fault_tolerance: int = 1
     nvmf_base_port: int = 4420
