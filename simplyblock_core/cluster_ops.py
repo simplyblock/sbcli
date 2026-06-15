@@ -35,9 +35,9 @@ logger = utils.get_logger(__name__)
 
 db_controller = DBController()
 
-def _create_update_user(cluster_id, grafana_url, grafana_secret, user_secret, update_secret=False):
+def _create_update_user(cluster_id, grafana_url, grafana_secret: SecretStr, user_secret: SecretStr, update_secret=False):
     session = requests.session()
-    session.auth = ("admin", grafana_secret)
+    session.auth = ("admin", grafana_secret.get_secret_value())
     headers = {
         'X-Requested-By': '',
         'Content-Type': 'application/json',
@@ -49,7 +49,7 @@ def _create_update_user(cluster_id, grafana_url, grafana_secret, user_secret, up
         userid = response.json().get("id")
 
         payload = json.dumps({
-            "password": user_secret
+            "password": user_secret.get_secret_value()
         })
 
         url = f"{grafana_url}/api/admin/users/{userid}/password"
@@ -68,7 +68,7 @@ def _create_update_user(cluster_id, grafana_url, grafana_secret, user_secret, up
         payload = json.dumps({
             "name": cluster_id,
             "login": cluster_id,
-            "password": user_secret
+            "password": user_secret.get_secret_value()
         })
         url = f"{grafana_url}/api/admin/users"
         while retries > 0:
@@ -82,14 +82,14 @@ def _create_update_user(cluster_id, grafana_url, grafana_secret, user_secret, up
             time.sleep(3)
 
 
-def _add_graylog_input(cluster_ip, password):
+def _add_graylog_input(cluster_ip, password: SecretStr):
     base_url = f"{cluster_ip}/api"
     input_url = f"{base_url}/system/inputs"
 
     retries = 30
     reachable = False
     session = requests.session()
-    session.auth = ("admin", password)
+    session.auth = ("admin", password.get_secret_value())
     headers = {
         'X-Requested-By': 'setup-script',
         'Content-Type': 'application/json',
@@ -117,17 +117,17 @@ def _add_graylog_input(cluster_ip, password):
             reachable = True
             break
 
-        logger.debug(response.text)
+        logger.debug("Graylog input POST returned status %s", response.status_code)
         retries -= 1
         time.sleep(5)
 
     if not reachable:
-        logger.error(f"Failed to create graylog input: {response.text}")
+        logger.error("Failed to create graylog input (status %s)", response.status_code)
         return False
 
     inputs_response = session.get(input_url, headers=headers)
     if inputs_response.status_code != 200:
-        logger.error(f"Failed to retrieve inputs: {inputs_response.text}")
+        logger.error("Failed to retrieve inputs (status %s)", inputs_response.status_code)
         return False
 
     input_id = None
@@ -156,7 +156,7 @@ def _add_graylog_input(cluster_ip, password):
 
     extractor_response = session.post(extractor_url, headers=headers, data=json.dumps(extractor_payload))
     if extractor_response.status_code != 201:
-        logger.error(f"Failed to add JSON extractor: {extractor_response.text}")
+        logger.error("Failed to add JSON extractor (status %s)", extractor_response.status_code)
         return False
 
     logger.info("JSON extractor added successfully.")
@@ -254,7 +254,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
             if existing.cluster_name and existing.cluster_name == name:
                 raise ValueError(f"A cluster with the name '{name}' already exists")
 
-    monitoring_secret = os.environ.get("MONITORING_SECRET", "")
+    monitoring_secret = SecretStr(os.environ.get("MONITORING_SECRET", ""))
 
     logger.info("Installing dependencies...")
     scripts.install_deps(mode)
@@ -326,7 +326,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.nqn = f"{constants.CLUSTER_NQN}:{cluster.uuid}"
     cluster.cli_pass = SecretStr(cli_pass)
     cluster.secret = SecretStr(utils.generate_string(20))
-    cluster.grafana_secret = SecretStr(monitoring_secret) if mode == "kubernetes" else cluster.secret
+    cluster.grafana_secret = monitoring_secret if mode == "kubernetes" else cluster.secret
     if cap_warn and cap_warn > 0:
         cluster.cap_warn = cap_warn
     if cap_crit and cap_crit > 0:
@@ -393,7 +393,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         logger.info("Configuring DB...")
         scripts.set_db_config_single()
         logger.info("Configuring DB > Done")
-        monitoring_secret = cluster.secret.get_secret_value()
+        monitoring_secret = cluster.secret
 
     elif mode == "kubernetes":
         logger.info("Retrieving foundationdb connection string...")
@@ -421,7 +421,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     if not disable_monitoring:
         _set_max_result_window(os_endpoint)
         _add_graylog_input(graylog_endpoint, monitoring_secret)
-        _create_update_user(cluster.uuid, cluster.grafana_endpoint, monitoring_secret, cluster.secret.get_secret_value())
+        _create_update_user(cluster.uuid, cluster.grafana_endpoint, monitoring_secret, cluster.secret)
 
     cluster.db_connection = db_connection  # type: ignore[assignment]
     cluster.status = Cluster.STATUS_UNREADY
@@ -473,7 +473,6 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
 
 
     default_cluster = None
-    monitoring_secret = os.environ.get("MONITORING_SECRET", "")
     enable_monitoring = os.environ.get("ENABLE_MONITORING", "")
     clusters = db_controller.get_clusters()
     if clusters:
@@ -498,7 +497,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     if (hashicorp_vault_settings is not None) and (Settings().tls_connect != "authenticated"):
         raise ValueError("External KMS requires mTLS authentication to be used")
 
-    monitoring_secret = os.environ.get("MONITORING_SECRET", "")
+    monitoring_secret = SecretStr(os.environ.get("MONITORING_SECRET", ""))
 
     logger.info("Adding new cluster")
     cluster = Cluster()
@@ -529,7 +528,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
         fdb_cluster_string = utils.get_fdb_cluster_string(constants.FDB_CONFIG_NAME, constants.K8S_NAMESPACE)
         cluster.db_connection = fdb_cluster_string
         if monitoring_secret:
-            cluster.grafana_secret = SecretStr(monitoring_secret)
+            cluster.grafana_secret = monitoring_secret
         elif enable_monitoring != "true":
             cluster.grafana_secret = SecretStr("")
         else:
@@ -543,7 +542,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
         if enable_monitoring == "true":
             graylog_endpoint = constants.GRAYLOG_K8S_ENDPOINT
             os_endpoint = constants.OS_K8S_ENDPOINT
-            _create_update_user(cluster.uuid, cluster.grafana_endpoint, cluster.grafana_secret.get_secret_value(), cluster.secret.get_secret_value())
+            _create_update_user(cluster.uuid, cluster.grafana_endpoint, cluster.grafana_secret, cluster.secret)
 
             _set_max_result_window(os_endpoint)
 
@@ -1585,7 +1584,7 @@ def set_secret(cluster_id, secret) -> None:
     if len(secret) < 20:
         raise ValueError("Secret must be at least 20 char")
 
-    _create_update_user(cluster_id, cluster.grafana_endpoint, cluster.grafana_secret.get_secret_value(), secret, update_secret=True)
+    _create_update_user(cluster_id, cluster.grafana_endpoint, cluster.grafana_secret, SecretStr(secret), update_secret=True)
 
     cluster.secret = SecretStr(secret)
     cluster.write_to_db(db_controller.kv_store)

@@ -186,7 +186,7 @@ class StorageNode(BaseNodeObject):
             host = f"{self._k8s_node_label()}.simplyblock-spdk-proxy.{self.cr_namespace}.svc.cluster.local"
         return RPCClient(
             host, self.rpc_port,
-            self.rpc_username, self.rpc_password.get_secret_value(), **kwargs)
+            self.rpc_username, self.rpc_password, **kwargs)
 
     def _k8s_node_label(self) -> str:
         return self.hostname.removesuffix(f"_{self.rpc_port}")
