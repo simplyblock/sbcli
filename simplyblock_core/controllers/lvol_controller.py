@@ -2427,14 +2427,17 @@ def replication_start(lvol_id, replication_cluster_id=None):
     for snap in all_snaps:
         if snap.lvol.uuid == lvol.uuid:
             if not snap.target_replicated_snap_uuid:
+                matched = False
                 for sn in all_snaps:
                     if sn.lvol.node_id == lvol.replication_node_id and sn.data_uuid == snap.data_uuid:
                         snap = db_controller.get_snapshot_by_id(snap.get_id())
                         snap.target_replicated_snap_uuid = sn.get_id()
                         snap.write_to_db()
+                        matched = True
                         break
-                else:
+                if not matched:
                     task = tasks_controller.add_snapshot_replication_task(snap.cluster_id, snap.lvol.node_id, snap.get_id())
+                    # task may be None if the scheduler is at capacity; the next poll cycle will retry
                     if task:
                         snapshot_events.replication_task_created(snap)
     return True

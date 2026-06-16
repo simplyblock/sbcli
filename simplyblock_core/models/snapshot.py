@@ -33,7 +33,7 @@ class SnapShot(BaseModel):
     source_replicated_snap_uuid: str = ""
     next_snap_uuid: str = ""
     prev_snap_uuid: str = ""
-    instances: list = []
+    instances: list[dict] = []
     # Uniquely identifies the data block device that backs this snapshot.
     # It is created once Snapshot is created from an LVol
     # On Snapshot transfer or replicate this field is the same
