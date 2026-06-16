@@ -144,7 +144,7 @@ class _DeviceFailureMigrationBase:
                 # Wait for FIO to finish naturally — do NOT kill it
                 self._phase_wait_fio_completion()
                 self._phase_validate_fio()
-                self._phase_collect_fio_bandwidth()
+                self._phase_collect_cluster_io_stats()
             self._test_passed = True
         finally:
             if with_io_load:
@@ -191,7 +191,7 @@ class _DeviceFailureMigrationBase:
             if with_io_load:
                 self._phase_wait_fio_completion()
                 self._phase_validate_fio()
-                self._phase_collect_fio_bandwidth()
+                self._phase_collect_cluster_io_stats()
             self._test_passed = True
         finally:
             if with_io_load:
@@ -1107,66 +1107,90 @@ class _DeviceFailureMigrationBase:
         except Exception as exc:
             self.logger.warning(f"Could not query device fill level: {exc}")
 
-    def _phase_collect_fio_bandwidth(self):
-        """Parse FIO logs and report write bandwidth (under-load variant)."""
-        self.logger.info("=== Phase: Collect FIO bandwidth stats ===")
-        client = self.fio_node[0]
-        bw_values = []
-        import re
-
-        all_lvol_names = self._lvols_on_target + self._lvols_on_others
-        for name in all_lvol_names:
-            info = self.lvol_mount_details.get(name)
-            if not info or not info.get("Log"):
-                continue
-            try:
-                log_data = self.ssh_obj.exec_command(
-                    client, f"cat {info['Log']} 2>/dev/null || true"
-                )
-                if not log_data:
-                    continue
-                log_str = log_data if isinstance(log_data, str) else str(log_data)
-                # Parse FIO output for write bandwidth
-                # Pattern: "write: IOPS=XXX, BW=XXXMiB/s" or similar
-                bw_match = re.search(
-                    r'write:.*BW=([0-9.]+)\s*([KMG]?i?B/s)', log_str
-                )
-                if bw_match:
-                    bw_val = float(bw_match.group(1))
-                    bw_unit = bw_match.group(2)
-                    # Normalise to KiB/s
-                    if "MiB" in bw_unit or "MB" in bw_unit:
-                        bw_val *= 1024
-                    elif "GiB" in bw_unit or "GB" in bw_unit:
-                        bw_val *= 1024 * 1024
-                    bw_values.append(bw_val)
-                    self.logger.info(
-                        f"  {name}: write BW = "
-                        f"{bw_match.group(1)} {bw_unit}"
+    def _phase_collect_cluster_io_stats(self):
+        """Collect cluster-wide IO stats from the API and compute averages."""
+        self.logger.info("=== Phase: Collect cluster IO stats ===")
+        try:
+            cluster_id = self.sbcli_utils.cluster_id
+            # Calculate time duration covering the test run (round up to next minute + 1m buffer)
+            total_elapsed = self._timing.get("total_duration", 0)
+            if total_elapsed <= 0:
+                # Estimate from known phase durations
+                total_elapsed = sum(
+                    self._timing.get(k, 0) for k in (
+                        "setup_duration", "fill_duration", "remove_duration",
+                        "migration_duration", "restart_duration",
+                        "fio_completion_duration",
                     )
-                else:
-                    self.logger.warning(
-                        f"  {name}: could not parse write BW from FIO log"
-                    )
-            except Exception as exc:
-                self.logger.warning(
-                    f"Could not parse FIO log for {name}: {exc}"
                 )
-
-        if bw_values:
-            avg_bw = sum(bw_values) / len(bw_values)
-            self._timing["avg_write_bw_kib_s"] = round(avg_bw, 1)
-            self._timing["total_write_bw_kib_s"] = round(sum(bw_values), 1)
-            self._timing["fio_lvol_count"] = len(bw_values)
+            minutes = max(5, int(total_elapsed / 60) + 2)  # at least 5m, +2m buffer
+            time_duration = f"{minutes}m"
             self.logger.info(
-                f"FIO bandwidth summary: "
-                f"avg={avg_bw:.1f} KiB/s ({avg_bw/1024:.1f} MiB/s), "
-                f"total={sum(bw_values):.1f} KiB/s "
-                f"({sum(bw_values)/1024:.1f} MiB/s), "
-                f"lvols={len(bw_values)}"
+                f"Fetching cluster IO stats for {cluster_id} "
+                f"over last {time_duration}"
             )
-        else:
-            self.logger.warning("No FIO bandwidth data collected")
+
+            io_stats = self.sbcli_utils.get_io_stats(cluster_id, time_duration)
+            self.logger.info(f"Got {len(io_stats) if io_stats else 0} IO stat records")
+
+            if not io_stats:
+                self.logger.warning("No cluster IO stats returned from API")
+                return
+
+            # Compute averages across all records
+            write_bps_vals = []
+            read_bps_vals = []
+            write_iops_vals = []
+            read_iops_vals = []
+            write_lat_vals = []
+            read_lat_vals = []
+
+            for stat in io_stats:
+                w_bps = stat.get("write_bytes_ps", 0)
+                r_bps = stat.get("read_bytes_ps", 0)
+                w_iops = stat.get("write_io_ps", 0)
+                r_iops = stat.get("read_io_ps", 0)
+                w_lat = stat.get("write_latency_ps", 0)
+                r_lat = stat.get("read_latency_ps", 0)
+                if w_bps or r_bps:  # skip records with zero IO
+                    write_bps_vals.append(w_bps)
+                    read_bps_vals.append(r_bps)
+                    write_iops_vals.append(w_iops)
+                    read_iops_vals.append(r_iops)
+                    write_lat_vals.append(w_lat)
+                    read_lat_vals.append(r_lat)
+
+            n = len(write_bps_vals)
+            if n == 0:
+                self.logger.warning("All cluster IO stat records have zero IO")
+                return
+
+            avg_write_bps = sum(write_bps_vals) / n
+            avg_read_bps = sum(read_bps_vals) / n
+            avg_write_iops = sum(write_iops_vals) / n
+            avg_read_iops = sum(read_iops_vals) / n
+            avg_write_lat = sum(write_lat_vals) / n
+            avg_read_lat = sum(read_lat_vals) / n
+
+            self._timing["cluster_io_records"] = n
+            self._timing["avg_write_bytes_ps"] = round(avg_write_bps, 1)
+            self._timing["avg_read_bytes_ps"] = round(avg_read_bps, 1)
+            self._timing["avg_write_iops"] = round(avg_write_iops, 1)
+            self._timing["avg_read_iops"] = round(avg_read_iops, 1)
+            self._timing["avg_write_latency_ps"] = round(avg_write_lat, 3)
+            self._timing["avg_read_latency_ps"] = round(avg_read_lat, 3)
+
+            self.logger.info(
+                f"Cluster IO stats ({n} records): "
+                f"avg write={avg_write_bps/(1024*1024):.1f} MiB/s, "
+                f"avg read={avg_read_bps/(1024*1024):.1f} MiB/s, "
+                f"avg write IOPS={avg_write_iops:.0f}, "
+                f"avg read IOPS={avg_read_iops:.0f}, "
+                f"avg write latency={avg_write_lat:.3f}us, "
+                f"avg read latency={avg_read_lat:.3f}us"
+            )
+        except Exception as exc:
+            self.logger.warning(f"Could not collect cluster IO stats: {exc}")
 
     # ── Phase: recover failed device ─────────────────────────────────────────
 
@@ -1437,10 +1461,14 @@ class _DeviceFailureMigrationBase:
         if isinstance(mig, (int, float)):
             self.logger.info(f"  {'migration/restart_time':30s} {mig:10.1f}s ({mig/60:.1f}m)")
         if self._with_io_load:
-            avg_bw = self._timing.get("avg_write_bw_kib_s", 0)
-            total_bw = self._timing.get("total_write_bw_kib_s", 0)
-            self.logger.info(f"  {'avg_write_bw':30s} {avg_bw:10.1f} KiB/s ({avg_bw/1024:.1f} MiB/s)")
-            self.logger.info(f"  {'total_write_bw':30s} {total_bw:10.1f} KiB/s ({total_bw/1024:.1f} MiB/s)")
+            avg_w = self._timing.get("avg_write_bytes_ps", 0)
+            avg_r = self._timing.get("avg_read_bytes_ps", 0)
+            avg_wiops = self._timing.get("avg_write_iops", 0)
+            avg_riops = self._timing.get("avg_read_iops", 0)
+            self.logger.info(f"  {'avg_write_bw':30s} {avg_w/(1024*1024):10.1f} MiB/s")
+            self.logger.info(f"  {'avg_read_bw':30s} {avg_r/(1024*1024):10.1f} MiB/s")
+            self.logger.info(f"  {'avg_write_iops':30s} {avg_wiops:10.0f}")
+            self.logger.info(f"  {'avg_read_iops':30s} {avg_riops:10.0f}")
         self.logger.info("-" * 70)
         # All timing entries
         for key, val in self._timing.items():
@@ -1492,11 +1520,20 @@ class _DeviceFailureMigrationBase:
             },
         }
         if self._with_io_load:
-            report["summary"]["avg_write_bw_kib_s"] = self._timing.get(
-                "avg_write_bw_kib_s", 0
+            report["summary"]["avg_write_bytes_ps"] = self._timing.get(
+                "avg_write_bytes_ps", 0
             )
-            report["summary"]["total_write_bw_kib_s"] = self._timing.get(
-                "total_write_bw_kib_s", 0
+            report["summary"]["avg_read_bytes_ps"] = self._timing.get(
+                "avg_read_bytes_ps", 0
+            )
+            report["summary"]["avg_write_iops"] = self._timing.get(
+                "avg_write_iops", 0
+            )
+            report["summary"]["avg_read_iops"] = self._timing.get(
+                "avg_read_iops", 0
+            )
+            report["summary"]["cluster_io_records"] = self._timing.get(
+                "cluster_io_records", 0
             )
 
         out_dir = Path("logs")
@@ -1641,10 +1678,16 @@ class _DeviceFailureMigrationBase:
         fill_pct = self._timing.get("device_fill_pct", 0)
         lines.append(f"| Device fill level | {fill_pct}% |")
         if self._with_io_load:
-            avg_bw = self._timing.get("avg_write_bw_kib_s", 0)
-            total_bw = self._timing.get("total_write_bw_kib_s", 0)
-            lines.append(f"| Avg write bandwidth | {avg_bw:.1f} KiB/s ({avg_bw/1024:.1f} MiB/s) |")
-            lines.append(f"| Total write bandwidth | {total_bw:.1f} KiB/s ({total_bw/1024:.1f} MiB/s) |")
+            avg_w = self._timing.get("avg_write_bytes_ps", 0)
+            avg_r = self._timing.get("avg_read_bytes_ps", 0)
+            avg_wiops = self._timing.get("avg_write_iops", 0)
+            avg_riops = self._timing.get("avg_read_iops", 0)
+            n_records = self._timing.get("cluster_io_records", 0)
+            lines.append(f"| Avg write bandwidth | {avg_w/(1024*1024):.1f} MiB/s |")
+            lines.append(f"| Avg read bandwidth | {avg_r/(1024*1024):.1f} MiB/s |")
+            lines.append(f"| Avg write IOPS | {avg_wiops:.0f} |")
+            lines.append(f"| Avg read IOPS | {avg_riops:.0f} |")
+            lines.append(f"| IO stat records | {n_records} |")
         lines.append("")
 
         # ── Lvol Distribution ──
@@ -1653,9 +1696,9 @@ class _DeviceFailureMigrationBase:
         lines.append("|------|---------|------|")
         other_nodes = [n for n in self._sn_nodes if n != self._target_node_id]
         lines.append(f"| `{self._target_node_id}` | {len(self._lvols_on_target)} | target |")
+        others_per_node = max(1, len(self._lvols_on_others)) // max(1, len(other_nodes)) if other_nodes else 0
         for node_id in other_nodes:
-            count = 1 if self._with_io_load else 0
-            lines.append(f"| `{node_id}` | {count} | other |")
+            lines.append(f"| `{node_id}` | {others_per_node} | other |")
         lines.append("")
 
         # ── Per-Node Capacity ──
@@ -1983,7 +2026,7 @@ class _DeviceAddAfterBootstrapBase:
             self._phase_validate_cluster()
             if with_io_load:
                 self._phase_stop_io_load()
-                self._phase_collect_fio_bandwidth()
+                self._phase_collect_cluster_io_stats()
             self._test_passed = True
         finally:
             if with_io_load:
@@ -2389,59 +2432,84 @@ class _DeviceAddAfterBootstrapBase:
         except Exception:
             pass
 
-    def _phase_collect_fio_bandwidth(self):
-        """Parse FIO logs and report write bandwidth."""
-        self.logger.info("=== Phase: Collect FIO bandwidth stats ===")
-        client = self.fio_node[0]
-        bw_values = []
-
-        for name in self._lvol_names:
-            info = self.lvol_mount_details.get(name)
-            if not info or not info.get("Log"):
-                continue
-            try:
-                log_data = self.ssh_obj.exec_command(
-                    client, f"cat {info['Log']} 2>/dev/null || true"
-                )
-                if not log_data:
-                    continue
-                log_str = log_data if isinstance(log_data, str) else str(log_data)
-                # Parse FIO output for write bandwidth
-                # Look for "write: IOPS=XXX, BW=XXX" pattern
-                import re
-                bw_match = re.search(
-                    r'write:.*BW=([0-9.]+)([KMG]?i?B/s)', log_str
-                )
-                if bw_match:
-                    bw_val = float(bw_match.group(1))
-                    bw_unit = bw_match.group(2)
-                    # Normalise to KiB/s
-                    if "MiB" in bw_unit or "MB" in bw_unit:
-                        bw_val *= 1024
-                    elif "GiB" in bw_unit or "GB" in bw_unit:
-                        bw_val *= 1024 * 1024
-                    bw_values.append(bw_val)
-                    self.logger.info(
-                        f"  {name}: write BW = "
-                        f"{bw_match.group(1)}{bw_unit}"
+    def _phase_collect_cluster_io_stats(self):
+        """Collect cluster-wide IO stats from the API and compute averages."""
+        self.logger.info("=== Phase: Collect cluster IO stats ===")
+        try:
+            cluster_id = self.sbcli_utils.cluster_id
+            total_elapsed = self._timing.get("total_duration", 0)
+            if total_elapsed <= 0:
+                total_elapsed = sum(
+                    self._timing.get(k, 0) for k in (
+                        "setup_duration", "fill_duration",
+                        "restart_duration", "migration_duration",
                     )
-            except Exception as exc:
-                self.logger.warning(
-                    f"Could not parse FIO log for {name}: {exc}"
                 )
-
-        if bw_values:
-            avg_bw = sum(bw_values) / len(bw_values)
-            self._timing["avg_write_bw_kib_s"] = round(avg_bw, 1)
-            self._timing["total_write_bw_kib_s"] = round(sum(bw_values), 1)
+            minutes = max(5, int(total_elapsed / 60) + 2)
+            time_duration = f"{minutes}m"
             self.logger.info(
-                f"Average write BW: {avg_bw:.1f} KiB/s "
-                f"({avg_bw/1024:.1f} MiB/s), "
-                f"Total: {sum(bw_values):.1f} KiB/s "
-                f"({sum(bw_values)/1024:.1f} MiB/s)"
+                f"Fetching cluster IO stats for {cluster_id} "
+                f"over last {time_duration}"
             )
-        else:
-            self.logger.warning("No FIO bandwidth data collected")
+
+            io_stats = self.sbcli_utils.get_io_stats(cluster_id, time_duration)
+            self.logger.info(f"Got {len(io_stats) if io_stats else 0} IO stat records")
+
+            if not io_stats:
+                self.logger.warning("No cluster IO stats returned from API")
+                return
+
+            write_bps_vals = []
+            read_bps_vals = []
+            write_iops_vals = []
+            read_iops_vals = []
+            write_lat_vals = []
+            read_lat_vals = []
+
+            for stat in io_stats:
+                w_bps = stat.get("write_bytes_ps", 0)
+                r_bps = stat.get("read_bytes_ps", 0)
+                w_iops = stat.get("write_io_ps", 0)
+                r_iops = stat.get("read_io_ps", 0)
+                w_lat = stat.get("write_latency_ps", 0)
+                r_lat = stat.get("read_latency_ps", 0)
+                if w_bps or r_bps:
+                    write_bps_vals.append(w_bps)
+                    read_bps_vals.append(r_bps)
+                    write_iops_vals.append(w_iops)
+                    read_iops_vals.append(r_iops)
+                    write_lat_vals.append(w_lat)
+                    read_lat_vals.append(r_lat)
+
+            n = len(write_bps_vals)
+            if n == 0:
+                self.logger.warning("All cluster IO stat records have zero IO")
+                return
+
+            avg_write_bps = sum(write_bps_vals) / n
+            avg_read_bps = sum(read_bps_vals) / n
+            avg_write_iops = sum(write_iops_vals) / n
+            avg_read_iops = sum(read_iops_vals) / n
+            avg_write_lat = sum(write_lat_vals) / n
+            avg_read_lat = sum(read_lat_vals) / n
+
+            self._timing["cluster_io_records"] = n
+            self._timing["avg_write_bytes_ps"] = round(avg_write_bps, 1)
+            self._timing["avg_read_bytes_ps"] = round(avg_read_bps, 1)
+            self._timing["avg_write_iops"] = round(avg_write_iops, 1)
+            self._timing["avg_read_iops"] = round(avg_read_iops, 1)
+            self._timing["avg_write_latency_ps"] = round(avg_write_lat, 3)
+            self._timing["avg_read_latency_ps"] = round(avg_read_lat, 3)
+
+            self.logger.info(
+                f"Cluster IO stats ({n} records): "
+                f"avg write={avg_write_bps/(1024*1024):.1f} MiB/s, "
+                f"avg read={avg_read_bps/(1024*1024):.1f} MiB/s, "
+                f"avg write IOPS={avg_write_iops:.0f}, "
+                f"avg read IOPS={avg_read_iops:.0f}"
+            )
+        except Exception as exc:
+            self.logger.warning(f"Could not collect cluster IO stats: {exc}")
 
     # ── Cleanup ───────────────────────────────────────────────────────────
 
@@ -2501,10 +2569,14 @@ class _DeviceAddAfterBootstrapBase:
         if isinstance(restart, (int, float)):
             self.logger.info(f"  {'restart_time':30s} {restart:10.1f}s ({restart/60:.1f}m)")
         if self._with_io_load:
-            avg_bw = self._timing.get("avg_write_bw_kib_s", 0)
-            total_bw = self._timing.get("total_write_bw_kib_s", 0)
-            self.logger.info(f"  {'avg_write_bw':30s} {avg_bw:10.1f} KiB/s ({avg_bw/1024:.1f} MiB/s)")
-            self.logger.info(f"  {'total_write_bw':30s} {total_bw:10.1f} KiB/s ({total_bw/1024:.1f} MiB/s)")
+            avg_w = self._timing.get("avg_write_bytes_ps", 0)
+            avg_r = self._timing.get("avg_read_bytes_ps", 0)
+            avg_wiops = self._timing.get("avg_write_iops", 0)
+            avg_riops = self._timing.get("avg_read_iops", 0)
+            self.logger.info(f"  {'avg_write_bw':30s} {avg_w/(1024*1024):10.1f} MiB/s")
+            self.logger.info(f"  {'avg_read_bw':30s} {avg_r/(1024*1024):10.1f} MiB/s")
+            self.logger.info(f"  {'avg_write_iops':30s} {avg_wiops:10.0f}")
+            self.logger.info(f"  {'avg_read_iops':30s} {avg_riops:10.0f}")
         self.logger.info("-" * 70)
         # All timing entries
         for key, val in self._timing.items():
@@ -2553,11 +2625,20 @@ class _DeviceAddAfterBootstrapBase:
             },
         }
         if self._with_io_load:
-            report["summary"]["avg_write_bw_kib_s"] = self._timing.get(
-                "avg_write_bw_kib_s", 0
+            report["summary"]["avg_write_bytes_ps"] = self._timing.get(
+                "avg_write_bytes_ps", 0
             )
-            report["summary"]["total_write_bw_kib_s"] = self._timing.get(
-                "total_write_bw_kib_s", 0
+            report["summary"]["avg_read_bytes_ps"] = self._timing.get(
+                "avg_read_bytes_ps", 0
+            )
+            report["summary"]["avg_write_iops"] = self._timing.get(
+                "avg_write_iops", 0
+            )
+            report["summary"]["avg_read_iops"] = self._timing.get(
+                "avg_read_iops", 0
+            )
+            report["summary"]["cluster_io_records"] = self._timing.get(
+                "cluster_io_records", 0
             )
 
         out_dir = Path("logs")
@@ -2613,10 +2694,16 @@ class _DeviceAddAfterBootstrapBase:
         fill_pct = self._timing.get("device_fill_pct", 0)
         lines.append(f"| Device fill level | {fill_pct}% |")
         if self._with_io_load:
-            avg_bw = self._timing.get("avg_write_bw_kib_s", 0)
-            total_bw = self._timing.get("total_write_bw_kib_s", 0)
-            lines.append(f"| Avg write bandwidth | {avg_bw:.1f} KiB/s ({avg_bw/1024:.1f} MiB/s) |")
-            lines.append(f"| Total write bandwidth | {total_bw:.1f} KiB/s ({total_bw/1024:.1f} MiB/s) |")
+            avg_w = self._timing.get("avg_write_bytes_ps", 0)
+            avg_r = self._timing.get("avg_read_bytes_ps", 0)
+            avg_wiops = self._timing.get("avg_write_iops", 0)
+            avg_riops = self._timing.get("avg_read_iops", 0)
+            n_records = self._timing.get("cluster_io_records", 0)
+            lines.append(f"| Avg write bandwidth | {avg_w/(1024*1024):.1f} MiB/s |")
+            lines.append(f"| Avg read bandwidth | {avg_r/(1024*1024):.1f} MiB/s |")
+            lines.append(f"| Avg write IOPS | {avg_wiops:.0f} |")
+            lines.append(f"| Avg read IOPS | {avg_riops:.0f} |")
+            lines.append(f"| IO stat records | {n_records} |")
         lines.append("")
 
         # ── Lvol Distribution ──
@@ -3176,67 +3263,6 @@ class _DeviceFailureMigrationK8s(_DeviceFailureMigrationBase):
             f"All FIO jobs finished ({elapsed:.1f}s)"
         )
 
-    # ── Phase: collect FIO bandwidth from K8s pod logs ──────────────────────
-
-    def _phase_collect_fio_bandwidth(self):
-        """Parse FIO pod logs and report write bandwidth (K8s variant)."""
-        self.logger.info("=== Phase: Collect FIO bandwidth stats (K8s) ===")
-        import re
-        bw_values = []
-
-        for job_name, _ in self._load_jobs:
-            pvc_name = job_name.replace("fio-load-", "", 1)
-            try:
-                pod_name = self.k8s_utils.get_job_pod_name(job_name)
-                if not pod_name:
-                    self.logger.warning(
-                        f"Could not find pod for FIO job {job_name}"
-                    )
-                    continue
-                logs = self.k8s_utils.get_pod_logs(pod_name, tail=200)
-                if not logs:
-                    continue
-                # Parse FIO output for write bandwidth
-                bw_match = re.search(
-                    r'write:.*BW=([0-9.]+)\s*([KMG]?i?B/s)', logs
-                )
-                if bw_match:
-                    bw_val = float(bw_match.group(1))
-                    bw_unit = bw_match.group(2)
-                    # Normalise to KiB/s
-                    if "MiB" in bw_unit or "MB" in bw_unit:
-                        bw_val *= 1024
-                    elif "GiB" in bw_unit or "GB" in bw_unit:
-                        bw_val *= 1024 * 1024
-                    bw_values.append(bw_val)
-                    self.logger.info(
-                        f"  {pvc_name}: write BW = "
-                        f"{bw_match.group(1)} {bw_unit}"
-                    )
-                else:
-                    self.logger.warning(
-                        f"  {pvc_name}: could not parse write BW from FIO pod log"
-                    )
-            except Exception as exc:
-                self.logger.warning(
-                    f"Could not parse FIO log for {pvc_name}: {exc}"
-                )
-
-        if bw_values:
-            avg_bw = sum(bw_values) / len(bw_values)
-            self._timing["avg_write_bw_kib_s"] = round(avg_bw, 1)
-            self._timing["total_write_bw_kib_s"] = round(sum(bw_values), 1)
-            self._timing["fio_lvol_count"] = len(bw_values)
-            self.logger.info(
-                f"FIO bandwidth summary: "
-                f"avg={avg_bw:.1f} KiB/s ({avg_bw/1024:.1f} MiB/s), "
-                f"total={sum(bw_values):.1f} KiB/s "
-                f"({sum(bw_values)/1024:.1f} MiB/s), "
-                f"lvols={len(bw_values)}"
-            )
-        else:
-            self.logger.warning("No FIO bandwidth data collected (K8s)")
-
     # ── Phase 5 override: stop IO load (K8s) ─────────────────────────────────
 
     def _phase_stop_io_load(self):
@@ -3307,10 +3333,16 @@ class _DeviceFailureMigrationK8s(_DeviceFailureMigrationBase):
         fill_pct = self._timing.get("device_fill_pct", 0)
         lines.append(f"| Device fill level | {fill_pct}% |")
         if self._with_io_load:
-            avg_bw = self._timing.get("avg_write_bw_kib_s", 0)
-            total_bw = self._timing.get("total_write_bw_kib_s", 0)
-            lines.append(f"| Avg write bandwidth | {avg_bw:.1f} KiB/s ({avg_bw/1024:.1f} MiB/s) |")
-            lines.append(f"| Total write bandwidth | {total_bw:.1f} KiB/s ({total_bw/1024:.1f} MiB/s) |")
+            avg_w = self._timing.get("avg_write_bytes_ps", 0)
+            avg_r = self._timing.get("avg_read_bytes_ps", 0)
+            avg_wiops = self._timing.get("avg_write_iops", 0)
+            avg_riops = self._timing.get("avg_read_iops", 0)
+            n_records = self._timing.get("cluster_io_records", 0)
+            lines.append(f"| Avg write bandwidth | {avg_w/(1024*1024):.1f} MiB/s |")
+            lines.append(f"| Avg read bandwidth | {avg_r/(1024*1024):.1f} MiB/s |")
+            lines.append(f"| Avg write IOPS | {avg_wiops:.0f} |")
+            lines.append(f"| Avg read IOPS | {avg_riops:.0f} |")
+            lines.append(f"| IO stat records | {n_records} |")
         lines.append("")
 
         # ── Lvol Distribution (K8s: uses node_vs_pvc) ──

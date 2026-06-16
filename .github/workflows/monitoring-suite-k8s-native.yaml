@@ -1199,6 +1199,7 @@ jobs:
           find $GITHUB_WORKSPACE/e2e/logs -name '*timing*.json' -exec cp {} "${artifact_dir}/" \; 2>/dev/null || true
           find $GITHUB_WORKSPACE/e2e/logs -name '*report*.json' -exec cp {} "${artifact_dir}/" \; 2>/dev/null || true
           find $GITHUB_WORKSPACE/e2e/logs -name '*.png' -exec cp {} "${artifact_dir}/" \; 2>/dev/null || true
+          cp $GITHUB_WORKSPACE/e2e/logs/test_summary.md "${artifact_dir}/test_summary.md" 2>/dev/null || true
           cp $GITHUB_WORKSPACE/e2e/output.log "${artifact_dir}/output.log" 2>/dev/null || true
           cat > "${artifact_dir}/meta.json" <<METAEOF
           {
@@ -1391,6 +1392,16 @@ jobs:
 
               if not pngs and not t.get("phases"):
                   lines.append(f"\n*No graphs or detailed timing data for {t['name']}.*\n")
+
+          # Include per-test detailed summary markdown (test_summary.md)
+          for t in tests:
+              td = test_dirs.get(t["name"])
+              if not td:
+                  continue
+              summary_md = td / "test_summary.md"
+              if summary_md.exists():
+                  lines.append(f"\n---\n")
+                  lines.append(summary_md.read_text())
 
           # Generate comparison bar chart (saved to file in artifacts + NFS)
           if len(tests) > 1:
