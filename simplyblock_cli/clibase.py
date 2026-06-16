@@ -678,57 +678,6 @@ class CLIWrapperBase:
         return lvol_controller.clone_lvol(args.volume_id, args.clone_name)
 
     def volume__migrate(self, sub_command, args):
-        if args.target_node_id is None:
-            # Pre-create flow: first arg is the migration_id
-            migration_id, error = migration_controller.start_migration(
-                migration_id=args.volume_or_migration_id,
-                max_retries=args.max_retries,
-                deadline_seconds=args.deadline_seconds)
-            if not migration_id:
-                print("Error: Failed to pre-create migration on target")
-                print(error)
-                return False
-        else:
-            try:
-                migration_id, connect_strings = migration_controller.pre_create_on_target(
-                    args.volume_or_migration_id,
-                    args.target_node_id,
-                    host_nqn=getattr(args, 'host_nqn', None),
-                )
-                if connect_strings:
-                    con = "\n".join(c['connect'] for c in connect_strings)
-                    print(con)
-                if not migration_id:
-                    print("Error: Failed to pre-create migration on target")
-                    return False
-
-                migration_id, error = migration_controller.start_migration(
-                    migration_id=migration_id,
-                    max_retries=args.max_retries,
-                    deadline_seconds=args.deadline_seconds,
-                )
-                if error:
-                    print(f"Error: {error}")
-                    return False
-            except ValueError as e:
-                print(f"Error: {e}")
-                return False
-
-        print(f"Migration started: {migration_id}")
-        return True
-
-    def volume__migrate_list(self, sub_command, args):
-        return migration_controller.list_migrations(cluster_id=args.cluster_id, is_json=args.json)
-
-    def volume__migrate_cancel(self, sub_command, args):
-        ok, error = migration_controller.cancel_migration(args.migration_id)
-        if not ok:
-            print(f"Error: {error}")
-            return False
-        print(f"Migration {args.migration_id} cancelled")
-        return True
-
-    def volume__migrate_pre_create(self, sub_command, args):
         try:
             migration_id, connect_strings = migration_controller.pre_create_on_target(
                 args.volume_id,
@@ -742,6 +691,31 @@ class CLIWrapperBase:
         print(f"Migration ID: {migration_id}")
         if connect_strings:
             return "\n".join(c['connect'] for c in connect_strings)
+        return True
+
+    def volume__migrate_continue(self, sub_command, args):
+        try:
+            migration_id = migration_controller.start_migration(
+                migration_id=args.migration_id,
+                max_retries=args.max_retries,
+                deadline_seconds=args.deadline_seconds,
+            )
+        except ValueError as e:
+            print(f"Error: {e}")
+            return False
+        print(f"Migration started: {migration_id}")
+        return True
+
+    def volume__migrate_list(self, sub_command, args):
+        return migration_controller.list_migrations(cluster_id=args.cluster_id, is_json=args.json)
+
+    def volume__migrate_cancel(self, sub_command, args):
+        try:
+            migration_controller.cancel_migration(args.migration_id)
+        except ValueError as e:
+            print(f"Error: {e}")
+            return False
+        print(f"Migration {args.migration_id} cancelled")
         return True
 
     def control_plane__add(self, sub_command, args):

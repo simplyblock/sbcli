@@ -51,6 +51,8 @@ from simplyblock_core.models.lvol_migration import LVolMigration
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.storage_node_ops import _reapply_allowed_hosts
+from simplyblock_core.utils.size_utils import convert_size
 
 # Note: JobSchedule is not imported directly here; task creation is delegated to
 # tasks_controller.add_lvol_mig_task() which handles event logging consistently.
@@ -71,69 +73,54 @@ def start_migration(migration_id,
     the task runner.  Always call pre_create_on_target first to set up target
     infrastructure and obtain the migration_id and connect strings.
 
-    Returns (migration_uuid, None) on success or (False, error_message) on failure.
+    Returns migration_uuid on success; raises ValueError on failure.
     """
     try:
         migration = db.get_migration_by_id(migration_id)
     except KeyError:
-        return False, f"Migration {migration_id} not found"
+        raise ValueError(f"Migration {migration_id} not found")
 
     if migration.phase != LVolMigration.PHASE_PRE_CREATED:
-        return False, (
+        raise ValueError(
             f"Migration {migration_id} is not in PHASE_PRE_CREATED "
             f"(phase={migration.phase})"
         )
 
-    lvol_id        = migration.lvol_id
+    lvol_id = migration.lvol_id
     target_node_id = migration.target_node_id
 
     try:
         lvol = db.get_lvol_by_id(lvol_id)
     except KeyError as e:
-        return False, str(e)
+        raise ValueError(str(e))
 
     if lvol.status != LVol.STATUS_ONLINE:
-        return False, f"Volume is not online (status={lvol.status})"
+        raise ValueError(f"Volume is not online (status={lvol.status})")
 
     source_node_id = lvol.node_id
 
     try:
         source_node = db.get_storage_node_by_id(source_node_id)
     except KeyError as e:
-        return False, str(e)
+        raise ValueError(str(e))
 
     try:
         target_node = db.get_storage_node_by_id(target_node_id)
     except KeyError as e:
-        return False, str(e)
+        raise ValueError(str(e))
 
     if source_node_id == target_node_id:
-        return False, "Source and target nodes must be different"
+        raise ValueError("Source and target nodes must be different")
 
     if source_node.status != StorageNode.STATUS_ONLINE:
-        return False, f"Source node is not online (status={source_node.status})"
+        raise ValueError(f"Source node is not online (status={source_node.status})")
 
     if target_node.status != StorageNode.STATUS_ONLINE:
-        return False, f"Target node is not online (status={target_node.status})"
+        raise ValueError(f"Target node is not online (status={target_node.status})")
 
     snap_plan = get_snapshot_chain(lvol_id, source_node_id)
-
-    snaps_found_on_target = []
-    for snap_id in snap_plan:
-        snap = db.get_snapshot_by_id(snap_id)
-        instance_found = False
-        if snap.instances:
-            for snap_instance in snap.instances:
-                if snap_instance.get('lvol').get("node_id") == target_node_id:
-                    instance_found = True
-                    break
-        if instance_found:
-            snaps_found_on_target.append(snap_id)
-
-    snap_migration_plan = []
-    for snap_id in snap_plan:
-        if snap_id not in snaps_found_on_target:
-            snap_migration_plan.append(snap_id)
+    snaps_found_on_target = [s for s in snap_plan if _is_snap_on_node(s, target_node_id)]
+    snap_migration_plan = [s for s in snap_plan if s not in snaps_found_on_target]
 
     migration.source_node_id = source_node_id
     migration.phase = LVolMigration.PHASE_SNAP_COPY
@@ -159,7 +146,7 @@ def start_migration(migration_id,
         migration.status = LVolMigration.STATUS_FAILED
         migration.error_message = "Failed to create backing task"
         migration.write_to_db(db.kv_store)
-        return False, migration.error_message
+        raise ValueError(migration.error_message)
 
     migration_events.migration_created(migration)
     logger.info(
@@ -167,7 +154,7 @@ def start_migration(migration_id,
         f"src={source_node_id} dst={target_node_id} "
         f"snaps_to_copy={len(snap_plan)}"
     )
-    return migration.uuid, None
+    return migration.uuid
 
 
 def cancel_migration(migration_id):
@@ -181,15 +168,15 @@ def cancel_migration(migration_id):
     For all other active phases, sets migration.canceled = True so the task
     runner picks it up and transitions to CLEANUP_TARGET.
 
-    Returns (True, None) on success, or (False, error_message) on failure.
+    Raises ValueError on failure.
     """
     try:
         migration = db.get_migration_by_id(migration_id)
     except KeyError as e:
-        return False, str(e)
+        raise ValueError(str(e))
 
     if not migration.is_active():
-        return False, f"Migration is not active (status={migration.status})"
+        raise ValueError(f"Migration is not active (status={migration.status})")
 
     if migration.phase == LVolMigration.PHASE_PRE_CREATED:
         _cleanup_pre_created(migration)
@@ -197,13 +184,12 @@ def cancel_migration(migration_id):
         migration.write_to_db(db.kv_store)
         migration_events.migration_cancelled(migration)
         logger.info(f"Pre-created migration cleaned up and cancelled: id={migration_id} lvol={migration.lvol_id}")
-        return True, None
+        return
 
     migration.canceled = True
     migration.write_to_db(db.kv_store)
     migration_events.migration_cancelled(migration)
     logger.info(f"Migration cancelled: id={migration_id} lvol={migration.lvol_id}")
-    return True, None
 
 
 def _cleanup_pre_created(migration):
@@ -421,6 +407,18 @@ def get_snapshot_chain(lvol_id, source_node_id=None):
     return result
 
 
+def _is_snap_on_node(snap_id, node_id):
+    """Return True if *snap_id* already has an instance on *node_id*."""
+    try:
+        snap = db.get_snapshot_by_id(snap_id)
+    except KeyError:
+        return False
+    return any(
+        inst.get('lvol', {}).get('node_id') == node_id
+        for inst in (snap.instances or [])
+    )
+
+
 def _get_snap_ancestry(snap_uuid):
     """
     Walk the ``snap_ref_id`` chain from *snap_uuid* upward to the root and
@@ -555,185 +553,58 @@ def _collect_snap_ancestry(snap_uuid, out_set):
 # Post-migration DB updates
 # ---------------------------------------------------------------------------
 
-# Suffix appended to every bdev the task runner creates on the target node
-# during migration. Prevents accidental collision with real pre-existing target
-# bdevs on retry / initial attempts. Must match _MIGRATION_BDEV_SUFFIX in the
-# task runner.
-_MIGRATION_BDEV_SUFFIX = 'm'
+_MIGRATION_BDEV_SUFFIX = constants.LVOL_MIG_BDEV_SUFFIX
 
 
-def apply_migration_to_db(migration, tgt_lvol_uuid=None, tgt_lvol_bdev=None):
-    """
-    Update control-plane DB records after a successful lvol migration.
-
-    Updates every field that is node- or lvstore-specific on the canonical
-    LVol record, its bdev_stack, and on every migrated SnapShot's own fields
-    plus the embedded snap.lvol copy — so that delete, clone, and health-check
-    paths all use correct target values with nothing stale.
-
-    ``tgt_lvol_bdev`` is the actual SPDK bdev short name on the target (carries
-    the migration suffix, e.g. ``LVOL_2882m``).  When provided, ``lvol.lvol_bdev``
-    and ``bdev_stack['params']['name']`` are updated to match.
-
-    ANA state changes (optimized/non-optimized/inaccessible) on the NVMe-oF
-    subsystems are handled by the task runner after this call.
-    """
-    try:
-        lvol = db.get_lvol_by_id(migration.lvol_id)
-    except KeyError as e:
-        logger.error(f"apply_migration_to_db: lvol not found: {e}")
-        return False
-
-    try:
-        tgt_node = db.get_storage_node_by_id(migration.target_node_id)
-    except KeyError as e:
-        logger.error(f"apply_migration_to_db: target node not found: {e}")
-        return False
-
-    # --- Query SPDK once for all bdevs on the target lvstore ---
-    # Used to update snap_uuid, blobid on snapshots and lvol.blobid.
-    # Degraded gracefully: if unreachable, location fields still get updated.
-    spdk_info = {}
-    try:
-        tgt_rpc = tgt_node.rpc_client()
-        raw = tgt_rpc.bdev_lvol_get_lvols(tgt_node.lvstore) or []
-        for entry in raw:
-            short = entry.get('name', '').split('/')[-1]
-            if short:
-                spdk_info[short] = {
-                    'uuid':   entry.get('uuid', ''),
-                    'blobid': entry.get('blobid', 0)
-                }
-        logger.info(f"apply_migration_to_db: queried {len(spdk_info)} bdevs from target lvstore {tgt_node.lvstore}")
-
-        subsys = tgt_rpc.subsystem_list(lvol.nqn)
-        if subsys:
-            for ns in subsys[0].get('namespaces'):
-                if ns['uuid'] == lvol.uuid:
-                    lvol.ns_id = ns['nsid']
-                    break
-    except Exception as e:
-        logger.warning(f"apply_migration_to_db: could not query target SPDK — snap_uuid/blobid will not be updated: {e}")
-
-    # --- Update canonical LVol record ---
-    lvol.node_id  = tgt_node.get_id()
-    lvol.hostname = tgt_node.hostname
-    lvol.lvs_name = tgt_node.lvstore
-    lvol.subsys_port = tgt_node.lvol_subsys_port
-    if tgt_lvol_bdev:
-        lvol.lvol_bdev = tgt_lvol_bdev
-    lvol.top_bdev = f"{tgt_node.lvstore}/{lvol.lvol_bdev}"
-    if tgt_lvol_uuid:
-        lvol.lvol_uuid = tgt_lvol_uuid
-
-    # bdev_stack: the 'bdev_lvol' entry bakes in lvs_name (and name) at creation
-    # time; _remove_bdev_stack() uses them to build the delete bdev composite, so
-    # both must reflect target values or the delete will hit the wrong bdev.
-    for entry in lvol.bdev_stack:
-        if entry.get('type') == 'bdev_lvol' and 'params' in entry:
-            entry['params']['lvs_name'] = tgt_node.lvstore
-            if tgt_lvol_bdev:
-                entry['params']['name'] = tgt_lvol_bdev
-        elif entry.get('type') == 'bdev_lvol_clone':
-            entry['params']['clone_name'] = lvol.lvol_bdev
-            entry['name'] = lvol.top_bdev
-
-    if lvol.lvol_bdev in spdk_info:
-        lvol.blobid = spdk_info[lvol.lvol_bdev]['blobid']
-
-    # Update the nodes list (primary + all secondaries)
-    lvol.nodes = [tgt_node.get_id()]
-    if tgt_node.secondary_node_id:
-        lvol.nodes.append(tgt_node.secondary_node_id)
-    if tgt_node.tertiary_node_id:
-        lvol.nodes.append(tgt_node.tertiary_node_id)
-
-    lvol.write_to_db(db.kv_store)
-    logger.info(
-        f"apply_migration_to_db: updated lvol {migration.lvol_id} "
-        f"node_id={tgt_node.get_id()}, lvs_name={tgt_node.lvstore}, nodes={lvol.nodes}"
-    )
-
-    # --- Update every migrated snapshot ---
-    tgt_subsys_port = tgt_node.get_lvol_subsys_port(tgt_node.lvstore)
-
-    for snap_uuid in migration.snaps_migrated:
-        try:
-            snap = db.get_snapshot_by_id(snap_uuid)
-        except KeyError:
-            logger.warning(f"apply_migration_to_db: snapshot not found: {snap_uuid}")
+def _build_connect_entries(node, port, lvol, nqn, ctrl_loss_tmo, cluster, host_entry, host_nqn):
+    """Build NVMe connect-string entries for each data NIC on *node* at *port*."""
+    entries = []
+    for nic in node.data_nics:
+        ip = nic.ip4_address
+        if not ip or nic.trtype.lower() != lvol.fabric:
             continue
-
-
-        # snap_bdev: update lvstore prefix and add migration suffix.
-        # On the target the bdev was created as <src_short> + _MIGRATION_BDEV_SUFFIX
-        # (e.g. SNAP_xxxm) to avoid collisions with real pre-existing target bdevs.
-        # Guard is idempotent: if this function is called twice (e.g. after a crash
-        # and retry), src_short already carries the suffix — do not append it again.
-        tgt_short = None
-        if snap.snap_bdev and '/' in snap.snap_bdev:
-            src_short = snap.snap_bdev.split('/', 1)[1]
-            if src_short.endswith(_MIGRATION_BDEV_SUFFIX):
-                tgt_short = src_short          # already updated on a previous call
-            else:
-                tgt_short = src_short + _MIGRATION_BDEV_SUFFIX
-            snap.snap_bdev = f"{tgt_node.lvstore}/{tgt_short}"
-
-        # SPDK-specific fields: snap_uuid (SPDK bdev UUID) and blobid
-        if tgt_short and tgt_short in spdk_info:
-            snap.snap_uuid = spdk_info[tgt_short]['uuid']
-            snap.blobid    = spdk_info[tgt_short]['blobid']
-
-        # snap.lvol: embedded copy of the parent lvol — update all node/location fields
-        snap.lvol.node_id     = tgt_node.get_id()
-        snap.lvol.hostname    = tgt_node.hostname
-        snap.lvol.lvs_name    = tgt_node.lvstore
-        if tgt_lvol_bdev:
-            snap.lvol.lvol_bdev = tgt_lvol_bdev
-        snap.lvol.top_bdev    = f"{tgt_node.lvstore}/{snap.lvol.lvol_bdev}"
-        snap.lvol.nodes       = list(lvol.nodes)
-        snap.lvol.subsys_port = tgt_subsys_port
-        if tgt_lvol_uuid:
-            snap.lvol.lvol_uuid = tgt_lvol_uuid
-
-        # If the snapshot does not belong to this lvol then add as an instance to the original
-        # snap record on the source node
-        if snap.lvol.uuid != migration.lvol_id:
-            logger.debug(f"apply_migration_to_db: snapshot {snap_uuid} belongs to another lvol {snap.lvol.uuid}")
-            added = False
-            original_snap = db.get_snapshot_by_id(snap_uuid)
-            for s in original_snap.instances:
-                if s.get("lvol").get("node_id") == snap.lvol.node_id:
-                    added = True
-                    break
-            if not added:
-                original_snap.instances.append(snap)
-                original_snap.write_to_db(db.kv_store)
-        else:
-            # If the snapshot is used by other LVols (clones) then add as an instance to the original
-            # snap record on the source node
-            for lvol in db.get_mini_lvols():
-                if lvol.uuid == migration.lvol_id:
-                    continue
-                if lvol.cloned_from_snap and lvol.cloned_from_snap == snap_uuid:
-                    logger.debug(f"apply_migration_to_db: snapshot {snap_uuid} is still referenced by lvol {lvol.uuid}")
-                    added = False
-                    original_snap = db.get_snapshot_by_id(snap_uuid)
-                    for s in original_snap.instances:
-                        if s.get("lvol").get("node_id") == snap.lvol.node_id:
-                            added = True
-                            break
-                    if not added:
-                        original_snap.instances.append(snap)
-                        original_snap.write_to_db(db.kv_store)
-                    break
-            else:
-                # If the snapshot belongs to this LVol, then it is fine to transfer it to the target node
-                snap.write_to_db(db.kv_store)
-
-        logger.debug(f"apply_migration_to_db: updated snapshot {snap_uuid} snap_bdev={snap.snap_bdev}")
-
-    return True
+        trtype = nic.trtype.lower()
+        keep_alive_tmo = (constants.LVOL_NVME_KEEP_ALIVE_TO_TCP
+                          if trtype == "tcp" else constants.LVOL_NVME_KEEP_ALIVE_TO)
+        client_data_nic_str = f"--host-iface={cluster.client_data_nic}" if cluster.client_data_nic else ""
+        tls_str = host_auth_str = ""
+        if host_entry:
+            host_auth_str = f" --hostnqn={host_nqn}"
+            if host_entry.get("psk"):
+                tls_str = " --tls"
+            if host_entry.get("dhchap_key"):
+                host_auth_str += f" --dhchap-secret={host_entry['dhchap_key']}"
+            if host_entry.get("dhchap_ctrlr_key"):
+                host_auth_str += f" --dhchap-ctrl-secret={host_entry['dhchap_ctrlr_key']}"
+        elif host_nqn:
+            host_auth_str = f" --hostnqn={host_nqn}"
+        connect_cmd = (
+            f"sudo nvme connect"
+            f" --reconnect-delay={constants.LVOL_NVME_CONNECT_RECONNECT_DELAY}"
+            f" --ctrl-loss-tmo={ctrl_loss_tmo}"
+            f" --fast_io_fail_tmo={constants.LVOL_NVME_CONNECT_FAST_IO_FAIL_TO}"
+            f" --nr-io-queues={cluster.client_qpair_count}"
+            f" --keep-alive-tmo={keep_alive_tmo}"
+            f" --transport={trtype} --traddr={ip} --trsvcid={port} --nqn={nqn}"
+            f" {client_data_nic_str}{tls_str}{host_auth_str}"
+        )
+        entry = {
+            "transport": trtype,
+            "ip": ip,
+            "port": port,
+            "nqn": nqn,
+            "reconnect-delay": constants.LVOL_NVME_CONNECT_RECONNECT_DELAY,
+            "ctrl-loss-tmo": ctrl_loss_tmo,
+            "fast_io_fail_tmo": constants.LVOL_NVME_CONNECT_FAST_IO_FAIL_TO,
+            "nr-io-queues": cluster.client_qpair_count,
+            "keep-alive-tmo": keep_alive_tmo,
+            "host-iface": cluster.client_data_nic,
+            "connect": connect_cmd,
+        }
+        if host_entry and host_entry.get("psk"):
+            entry["tls"] = True
+        entries.append(entry)
+    return entries
 
 
 def pre_create_on_target(lvol_id, target_node_id,
@@ -778,12 +649,12 @@ def pre_create_on_target(lvol_id, target_node_id,
         raise ValueError(f"Source node {src_node_id} not found")
 
     cluster = db.get_cluster_by_id(tgt_node.cluster_id)
-    tgt_rpc  = tgt_node.rpc_client()
-    nqn      = lvol.nqn
-    bdev_short  = lvol.lvol_bdev + _MIGRATION_BDEV_SUFFIX
-    composite   = f"{tgt_node.lvstore}/{bdev_short}"
-    size_in_mib = lvol.size // (1024 * 1024)
-    tgt_port    = tgt_node.get_lvol_subsys_port(tgt_node.lvstore)
+    tgt_rpc = tgt_node.rpc_client()
+    nqn = lvol.nqn
+    bdev_short = lvol.lvol_bdev + _MIGRATION_BDEV_SUFFIX
+    composite = f"{tgt_node.lvstore}/{bdev_short}"
+    size_in_mib = convert_size(lvol.size, 'MiB')
+    tgt_port = tgt_node.get_lvol_subsys_port(tgt_node.lvstore)
 
     # ── 1. Bdev ──────────────────────────────────────────────────────────────
     if not tgt_rpc.get_bdevs(composite):
@@ -947,7 +818,6 @@ def pre_create_on_target(lvol_id, target_node_id,
                     max_namespaces=constants.LVO_MAX_NAMESPACES_PER_SUBSYS)
 
             if lvol.allowed_hosts:
-                from simplyblock_core.storage_node_ops import _reapply_allowed_hosts
                 try:
                     _reapply_allowed_hosts(lvol, _node, _rpc)
                 except Exception as _e:
@@ -990,115 +860,9 @@ def pre_create_on_target(lvol_id, target_node_id,
     if lvol.allowed_hosts and not host_nqn:
         raise ValueError(f"Volume {lvol_id} has allowed hosts configured; --host-nqn is required")
 
-    out = []
-    for nic in tgt_node.data_nics:
-        ip = nic.ip4_address
-        if not ip:
-            continue
-        trtype = nic.trtype.lower()
-        if trtype != lvol.fabric:
-            continue
-
-        if trtype == "tcp":
-            keep_alive_tmo = constants.LVOL_NVME_KEEP_ALIVE_TO_TCP
-        else:
-            keep_alive_tmo = constants.LVOL_NVME_KEEP_ALIVE_TO
-
-        client_data_nic_str = (f"--host-iface={cluster.client_data_nic}"
-                               if cluster.client_data_nic else "")
-        tls_str = host_auth_str = ""
-        if host_entry:
-            host_auth_str = f" --hostnqn={host_nqn}"
-            if host_entry.get("psk"):
-                tls_str = " --tls"
-            if host_entry.get("dhchap_key"):
-                host_auth_str += f" --dhchap-secret={host_entry['dhchap_key']}"
-            if host_entry.get("dhchap_ctrlr_key"):
-                host_auth_str += f" --dhchap-ctrl-secret={host_entry['dhchap_ctrlr_key']}"
-        elif host_nqn:
-            host_auth_str = f" --hostnqn={host_nqn}"
-
-        connect_cmd = (
-            f"sudo nvme connect"
-            f" --reconnect-delay={constants.LVOL_NVME_CONNECT_RECONNECT_DELAY}"
-            f" --ctrl-loss-tmo={ctrl_loss_tmo}"
-            f" --fast_io_fail_tmo={constants.LVOL_NVME_CONNECT_FAST_IO_FAIL_TO}"
-            f" --nr-io-queues={cluster.client_qpair_count}"
-            f" --keep-alive-tmo={keep_alive_tmo}"
-            f" --transport={trtype} --traddr={ip} --trsvcid={tgt_port} --nqn={nqn}"
-            f" {client_data_nic_str}{tls_str}{host_auth_str}"
-        )
-        entry = {
-            "transport": trtype,
-            "ip": ip,
-            "port": tgt_port,
-            "nqn": nqn,
-            "reconnect-delay": constants.LVOL_NVME_CONNECT_RECONNECT_DELAY,
-            "ctrl-loss-tmo": ctrl_loss_tmo,
-            "fast_io_fail_tmo": constants.LVOL_NVME_CONNECT_FAST_IO_FAIL_TO,
-            "nr-io-queues": cluster.client_qpair_count,
-            "keep-alive-tmo": keep_alive_tmo,
-            "host-iface": cluster.client_data_nic,
-            "connect": connect_cmd,
-        }
-        if host_entry and host_entry.get("psk"):
-            entry["tls"] = True
-        out.append(entry)
-
+    out = _build_connect_entries(tgt_node, tgt_port, lvol, nqn, ctrl_loss_tmo, cluster, host_entry, host_nqn)
     if sec_node is not None and sec_port is not None:
-        for nic in sec_node.data_nics:
-            ip = nic.ip4_address
-            if not ip:
-                continue
-            trtype = nic.trtype.lower()
-            if trtype != lvol.fabric:
-                continue
-
-            if trtype == "tcp":
-                keep_alive_tmo = constants.LVOL_NVME_KEEP_ALIVE_TO_TCP
-            else:
-                keep_alive_tmo = constants.LVOL_NVME_KEEP_ALIVE_TO
-
-            client_data_nic_str = (f"--host-iface={cluster.client_data_nic}"
-                                   if cluster.client_data_nic else "")
-            tls_str = host_auth_str = ""
-            if host_entry:
-                host_auth_str = f" --hostnqn={host_nqn}"
-                if host_entry.get("psk"):
-                    tls_str = " --tls"
-                if host_entry.get("dhchap_key"):
-                    host_auth_str += f" --dhchap-secret={host_entry['dhchap_key']}"
-                if host_entry.get("dhchap_ctrlr_key"):
-                    host_auth_str += f" --dhchap-ctrl-secret={host_entry['dhchap_ctrlr_key']}"
-            elif host_nqn:
-                host_auth_str = f" --hostnqn={host_nqn}"
-
-            connect_cmd = (
-                f"sudo nvme connect"
-                f" --reconnect-delay={constants.LVOL_NVME_CONNECT_RECONNECT_DELAY}"
-                f" --ctrl-loss-tmo={ctrl_loss_tmo}"
-                f" --fast_io_fail_tmo={constants.LVOL_NVME_CONNECT_FAST_IO_FAIL_TO}"
-                f" --nr-io-queues={cluster.client_qpair_count}"
-                f" --keep-alive-tmo={keep_alive_tmo}"
-                f" --transport={trtype} --traddr={ip} --trsvcid={sec_port} --nqn={nqn}"
-                f" {client_data_nic_str}{tls_str}{host_auth_str}"
-            )
-            entry = {
-                "transport": trtype,
-                "ip": ip,
-                "port": sec_port,
-                "nqn": nqn,
-                "reconnect-delay": constants.LVOL_NVME_CONNECT_RECONNECT_DELAY,
-                "ctrl-loss-tmo": ctrl_loss_tmo,
-                "fast_io_fail_tmo": constants.LVOL_NVME_CONNECT_FAST_IO_FAIL_TO,
-                "nr-io-queues": cluster.client_qpair_count,
-                "keep-alive-tmo": keep_alive_tmo,
-                "host-iface": cluster.client_data_nic,
-                "connect": connect_cmd,
-            }
-            if host_entry and host_entry.get("psk"):
-                entry["tls"] = True
-            out.append(entry)
+        out.extend(_build_connect_entries(sec_node, sec_port, lvol, nqn, ctrl_loss_tmo, cluster, host_entry, host_nqn))
 
     # ── 4. Create migration record so cancel can clean up ─────────────────────
     migration = LVolMigration()

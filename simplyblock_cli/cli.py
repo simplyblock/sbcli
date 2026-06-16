@@ -614,11 +614,11 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             self.init_volume__migrate(subparser)
         if self.developer_mode:
+            self.init_volume__migrate_continue(subparser)
+        if self.developer_mode:
             self.init_volume__migrate_list(subparser)
         if self.developer_mode:
             self.init_volume__migrate_cancel(subparser)
-        if self.developer_mode:
-            self.init_volume__migrate_pre_create(subparser)
 
 
     def init_volume__add(self, subparser):
@@ -755,11 +755,17 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('clone_name', help='The new logical volume clone name.', type=str)
 
     def init_volume__migrate(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'migrate', 'Migrate a logical volume to a different storage node.')
-        subcommand.add_argument('volume_or_migration_id', help='Migration ID (from migrate-pre-create) or volume ID.', type=str)
-        argument = subcommand.add_argument('--target-node-id', help='Target storage node ID. Required when passing a volume ID; omit when passing a migration ID.', type=str, dest='target_node_id')
+        subcommand = self.add_sub_command(subparser, 'migrate', 'Pre-create the target NVMe-oF subsystem for a volume migration. Returns a migration ID and NVMe connect strings (inaccessible ANA state). Connect the client, then run migrate-continue.')
+        subcommand.add_argument('volume_id', help='The volume id.', type=str)
+        subcommand.add_argument('target_node_id', help='The target storage node id.', type=str)
+        argument = subcommand.add_argument('--ctrl-loss-tmo', help='NVMe ctrl-loss-tmo in seconds. Default: `3600`.', type=int, default=3600, dest='ctrl_loss_tmo')
+        argument = subcommand.add_argument('--host-nqn', help='Host NQN for DH-HMAC-CHAP authentication (required when volume has allowed hosts).', type=str, dest='host_nqn')
+
+    def init_volume__migrate_continue(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'migrate-continue', 'Advance a pre-created migration to the snapshot-copy phase and launch the task runner.')
+        subcommand.add_argument('migration_id', help='The migration id returned by migrate.', type=str)
         argument = subcommand.add_argument('--max-retries', help='Maximum retry attempts before aborting. Default: `10`.', type=int, default=10, dest='max_retries')
-        argument = subcommand.add_argument('--deadline', help='Migration deadline in seconds (0 = no deadline. Default: `14400`.', type=int, default=14400, dest='deadline_seconds')
+        argument = subcommand.add_argument('--deadline', help='Migration deadline in seconds (0 = no deadline). Default: `14400`.', type=int, default=14400, dest='deadline_seconds')
 
     def init_volume__migrate_list(self, subparser):
         subcommand = self.add_sub_command(subparser, 'migrate-list', 'List volume migrations.')
@@ -769,13 +775,6 @@ class CLIWrapper(CLIWrapperBase):
     def init_volume__migrate_cancel(self, subparser):
         subcommand = self.add_sub_command(subparser, 'migrate-cancel', 'Cancel an active volume migration.')
         subcommand.add_argument('migration_id', help='The migration id.', type=str)
-
-    def init_volume__migrate_pre_create(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'migrate-pre-create', 'Pre-create the target NVMe-oF subsystem and bdev for a future migration. Returns NVMe connect strings for the target node (inaccessible ANA state).')
-        subcommand.add_argument('volume_id', help='The volume id.', type=str)
-        subcommand.add_argument('target_node_id', help='The target storage node id.', type=str)
-        argument = subcommand.add_argument('--ctrl-loss-tmo', help='NVMe ctrl-loss-tmo in seconds.', type=int, default=3600, dest='ctrl_loss_tmo')
-        argument = subcommand.add_argument('--host-nqn', help='Host NQN for DH-HMAC-CHAP authentication (required when volume has allowed hosts).', type=str, dest='host_nqn')
 
 
     def init_control_plane(self):
@@ -1363,6 +1362,12 @@ class CLIWrapper(CLIWrapperBase):
                         ret = False
                     else:
                         ret = self.volume__migrate(sub_command, args)
+                elif sub_command in ['migrate-continue']:
+                    if not self.developer_mode:
+                        print("This command is private.")
+                        ret = False
+                    else:
+                        ret = self.volume__migrate_continue(sub_command, args)
                 elif sub_command in ['migrate-list']:
                     if not self.developer_mode:
                         print("This command is private.")
@@ -1375,12 +1380,6 @@ class CLIWrapper(CLIWrapperBase):
                         ret = False
                     else:
                         ret = self.volume__migrate_cancel(sub_command, args)
-                elif sub_command in ['migrate-pre-create']:
-                    if not self.developer_mode:
-                        print("This command is private.")
-                        ret = False
-                    else:
-                        ret = self.volume__migrate_pre_create(sub_command, args)
                 else:
                     self.parser.print_help()
 

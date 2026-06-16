@@ -1919,16 +1919,33 @@ commands:
             dest: clone_name
             type: str
       - name: migrate
-        help: "Migrate a logical volume to a different storage node."
+        help: "Pre-create the target NVMe-oF subsystem for a volume migration. Returns a migration ID and NVMe connect strings (inaccessible ANA state). Connect the client, then run migrate-continue."
         private: true
         arguments:
-          - name: "volume_or_migration_id"
-            help: "Migration ID (from migrate-pre-create) or volume ID."
-            dest: volume_or_migration_id
+          - name: "volume_id"
+            help: "The volume ID to migrate."
+            dest: volume_id
             type: str
-          - name: "--target-node-id"
-            help: "Target storage node ID. Required when passing a volume ID; omit when passing a migration ID."
+          - name: "target_node_id"
+            help: "The target storage node ID."
             dest: target_node_id
+            type: str
+          - name: "--ctrl-loss-tmo"
+            help: "NVMe ctrl-loss-tmo in seconds. Default: `3600`."
+            dest: ctrl_loss_tmo
+            type: int
+            default: 3600
+          - name: "--host-nqn"
+            help: "Host NQN for DH-HMAC-CHAP authentication (required when volume has allowed hosts)."
+            dest: host_nqn
+            type: str
+      - name: migrate-continue
+        help: "Advance a pre-created migration to the snapshot-copy phase and launch the task runner."
+        private: true
+        arguments:
+          - name: "migration_id"
+            help: "The migration ID returned by migrate."
+            dest: migration_id
             type: str
           - name: "--max-retries"
             help: "Maximum retry attempts before aborting. Default: `10`."
@@ -1936,7 +1953,7 @@ commands:
             type: int
             default: 10
           - name: "--deadline"
-            help: "Migration deadline in seconds (0 = no deadline. Default: `14400`."
+            help: "Migration deadline in seconds (0 = no deadline). Default: `14400`."
             dest: deadline_seconds
             type: int
             default: 14400
@@ -1960,27 +1977,6 @@ commands:
           - name: "migration_id"
             help: "The migration id."
             dest: migration_id
-            type: str
-      - name: migrate-pre-create
-        help: "Pre-create the target NVMe-oF subsystem and bdev for a future migration. Returns NVMe connect strings for the target node (inaccessible ANA state)."
-        private: true
-        arguments:
-          - name: "volume_id"
-            help: "The volume id."
-            dest: volume_id
-            type: str
-          - name: "target_node_id"
-            help: "The target storage node id."
-            dest: target_node_id
-            type: str
-          - name: "--ctrl-loss-tmo"
-            help: "NVMe ctrl-loss-tmo in seconds."
-            dest: ctrl_loss_tmo
-            type: int
-            default: 3600
-          - name: "--host-nqn"
-            help: "Host NQN for DH-HMAC-CHAP authentication (required when volume has allowed hosts)."
-            dest: host_nqn
             type: str
   - name: "control-plane"
     help: "Control Plane Commands"

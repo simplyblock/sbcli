@@ -87,6 +87,7 @@ import time
 from typing import Optional
 
 from simplyblock_core import db_controller as db_mod, utils, constants
+from simplyblock_core.utils.size_utils import convert_size
 from simplyblock_core.controllers import (
     migration_controller, migration_events, snapshot_controller, tasks_events
 )
@@ -207,11 +208,172 @@ def _ensure_hub_attached(src_rpc, tgt_rpc, tgt_node, trtype, target_ip):
     return ctrl_name, hub_bdev, None
 
 
-# Suffix appended to every bdev created on the target node during migration so
-# that we never accidentally operate on a real pre-existing target bdev during
-# retry or initial attempts.  Must match _MIGRATION_BDEV_SUFFIX in
-# migration_controller.py.
-_MIGRATION_BDEV_SUFFIX = 'm'
+_MIGRATION_BDEV_SUFFIX = constants.LVOL_MIG_BDEV_SUFFIX
+
+
+def _apply_migration_to_db(migration, tgt_lvol_uuid=None, tgt_lvol_bdev=None):
+    """
+    Update control-plane DB records after a successful lvol migration.
+
+    Updates every field that is node- or lvstore-specific on the canonical
+    LVol record, its bdev_stack, and on every migrated SnapShot's own fields
+    plus the embedded snap.lvol copy — so that delete, clone, and health-check
+    paths all use correct target values with nothing stale.
+
+    ``tgt_lvol_bdev`` is the actual SPDK bdev short name on the target (carries
+    the migration suffix, e.g. ``LVOL_2882m``).  When provided, ``lvol.lvol_bdev``
+    and ``bdev_stack['params']['name']`` are updated to match.
+
+    ANA state changes (optimized/non-optimized/inaccessible) on the NVMe-oF
+    subsystems are handled by the task runner after this call.
+    """
+    try:
+        lvol = db.get_lvol_by_id(migration.lvol_id)
+    except KeyError as e:
+        logger.error(f"_apply_migration_to_db: lvol not found: {e}")
+        return False
+
+    try:
+        tgt_node = db.get_storage_node_by_id(migration.target_node_id)
+    except KeyError as e:
+        logger.error(f"_apply_migration_to_db: target node not found: {e}")
+        return False
+
+    # Query SPDK once for all bdevs on the target lvstore.
+    # Used to update snap_uuid, blobid on snapshots and lvol.blobid.
+    # Degrades gracefully: if unreachable, location fields still get updated.
+    spdk_info = {}
+    try:
+        tgt_rpc = tgt_node.rpc_client()
+        raw = tgt_rpc.bdev_lvol_get_lvols(tgt_node.lvstore) or []
+        for entry in raw:
+            short = entry.get('name', '').split('/')[-1]
+            if short:
+                spdk_info[short] = {
+                    'uuid': entry.get('uuid', ''),
+                    'blobid': entry.get('blobid', 0),
+                }
+        logger.info(
+            f"_apply_migration_to_db: queried {len(spdk_info)} bdevs "
+            f"from target lvstore {tgt_node.lvstore}")
+        subsys = tgt_rpc.subsystem_list(lvol.nqn)
+        if subsys:
+            for ns in subsys[0].get('namespaces'):
+                if ns['uuid'] == lvol.uuid:
+                    lvol.ns_id = ns['nsid']
+                    break
+    except Exception as e:
+        logger.warning(
+            f"_apply_migration_to_db: could not query target SPDK — "
+            f"snap_uuid/blobid will not be updated: {e}")
+
+    # Update canonical LVol record
+    lvol.node_id = tgt_node.get_id()
+    lvol.hostname = tgt_node.hostname
+    lvol.lvs_name = tgt_node.lvstore
+    lvol.subsys_port = tgt_node.lvol_subsys_port
+    if tgt_lvol_bdev:
+        lvol.lvol_bdev = tgt_lvol_bdev
+    lvol.top_bdev = f"{tgt_node.lvstore}/{lvol.lvol_bdev}"
+    if tgt_lvol_uuid:
+        lvol.lvol_uuid = tgt_lvol_uuid
+
+    # bdev_stack: the 'bdev_lvol' entry bakes in lvs_name (and name) at creation
+    # time; _remove_bdev_stack() uses them to build the delete bdev composite, so
+    # both must reflect target values or the delete will hit the wrong bdev.
+    for entry in lvol.bdev_stack:
+        if entry.get('type') == 'bdev_lvol' and 'params' in entry:
+            entry['params']['lvs_name'] = tgt_node.lvstore
+            if tgt_lvol_bdev:
+                entry['params']['name'] = tgt_lvol_bdev
+        elif entry.get('type') == 'bdev_lvol_clone':
+            entry['params']['clone_name'] = lvol.lvol_bdev
+            entry['name'] = lvol.top_bdev
+
+    if lvol.lvol_bdev in spdk_info:
+        lvol.blobid = spdk_info[lvol.lvol_bdev]['blobid']
+
+    lvol.nodes = [tgt_node.get_id()]
+    if tgt_node.secondary_node_id:
+        lvol.nodes.append(tgt_node.secondary_node_id)
+    if tgt_node.tertiary_node_id:
+        lvol.nodes.append(tgt_node.tertiary_node_id)
+
+    lvol.write_to_db(db.kv_store)
+    logger.info(
+        f"_apply_migration_to_db: updated lvol {migration.lvol_id} "
+        f"node_id={tgt_node.get_id()}, lvs_name={tgt_node.lvstore}, nodes={lvol.nodes}"
+    )
+
+    tgt_subsys_port = tgt_node.get_lvol_subsys_port(tgt_node.lvstore)
+
+    for snap_uuid in migration.snaps_migrated:
+        try:
+            snap = db.get_snapshot_by_id(snap_uuid)
+        except KeyError:
+            logger.warning(f"_apply_migration_to_db: snapshot not found: {snap_uuid}")
+            continue
+
+        # snap_bdev: update lvstore prefix and add migration suffix.
+        # Guard is idempotent: if called twice after crash+retry, src_short
+        # already carries the suffix — do not append it again.
+        tgt_short = None
+        if snap.snap_bdev and '/' in snap.snap_bdev:
+            src_short = snap.snap_bdev.split('/', 1)[1]
+            if src_short.endswith(_MIGRATION_BDEV_SUFFIX):
+                tgt_short = src_short
+            else:
+                tgt_short = src_short + _MIGRATION_BDEV_SUFFIX
+            snap.snap_bdev = f"{tgt_node.lvstore}/{tgt_short}"
+
+        if tgt_short and tgt_short in spdk_info:
+            snap.snap_uuid = spdk_info[tgt_short]['uuid']
+            snap.blobid = spdk_info[tgt_short]['blobid']
+
+        snap.lvol.node_id = tgt_node.get_id()
+        snap.lvol.hostname = tgt_node.hostname
+        snap.lvol.lvs_name = tgt_node.lvstore
+        if tgt_lvol_bdev:
+            snap.lvol.lvol_bdev = tgt_lvol_bdev
+        snap.lvol.top_bdev = f"{tgt_node.lvstore}/{snap.lvol.lvol_bdev}"
+        snap.lvol.nodes = list(lvol.nodes)
+        snap.lvol.subsys_port = tgt_subsys_port
+        if tgt_lvol_uuid:
+            snap.lvol.lvol_uuid = tgt_lvol_uuid
+
+        if snap.lvol.uuid != migration.lvol_id:
+            logger.debug(
+                f"_apply_migration_to_db: snapshot {snap_uuid} "
+                f"belongs to another lvol {snap.lvol.uuid}")
+            original_snap = db.get_snapshot_by_id(snap_uuid)
+            if not any(s.get('lvol', {}).get('node_id') == snap.lvol.node_id
+                       for s in original_snap.instances):
+                original_snap.instances.append(snap)
+                original_snap.write_to_db(db.kv_store)
+        else:
+            referenced = False
+            for mini in db.get_mini_lvols():
+                if mini.uuid == migration.lvol_id:
+                    continue
+                if mini.cloned_from_snap and mini.cloned_from_snap == snap_uuid:
+                    logger.debug(
+                        f"_apply_migration_to_db: snapshot {snap_uuid} "
+                        f"is still referenced by lvol {mini.uuid}")
+                    original_snap = db.get_snapshot_by_id(snap_uuid)
+                    if not any(s.get('lvol', {}).get('node_id') == snap.lvol.node_id
+                               for s in original_snap.instances):
+                        original_snap.instances.append(snap)
+                        original_snap.write_to_db(db.kv_store)
+                    referenced = True
+                    break
+            if not referenced:
+                snap.write_to_db(db.kv_store)
+
+        logger.debug(
+            f"_apply_migration_to_db: updated snapshot {snap_uuid} "
+            f"snap_bdev={snap.snap_bdev}")
+
+    return True
 
 
 def _snap_short_name(snap):
@@ -916,14 +1078,14 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         _threshold = constants.LVOL_MIG_INTERMEDIATE_SNAP_THRESHOLD_BYTES
         if _delta is not None and _delta <= _threshold:
             logger.info(
-                f"Intermediate snapshot skipped: delta {_delta // (1024 * 1024)} MB "
-                f"<= {_threshold // (1024 * 1024)} MB threshold "
+                f"Intermediate snapshot skipped: delta {convert_size(_delta, 'MiB')} MiB "
+                f"<= {convert_size(_threshold, 'MiB')} MiB threshold "
                 f"(round {migration.intermediate_snap_rounds}/{migration.max_intermediate_snap_rounds})")
             break
         logger.info(
             f"Intermediate snapshot triggered: delta "
-            f"{'unknown' if _delta is None else str(_delta // (1024 * 1024)) + ' MB'} "
-            f"exceeds {_threshold // (1024 * 1024)} MB threshold")
+            f"{'unknown' if _delta is None else str(convert_size(_delta, 'MiB')) + ' MiB'} "
+            f"exceeds {convert_size(_threshold, 'MiB')} MiB threshold")
         _take_intermediate_snapshot(migration)
         plan = migration.snap_migration_plan
         snap_uuid = plan[-1]
@@ -1380,7 +1542,7 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
 
     # Apply DB records now so sbctl volume connect returns TGT endpoints
     # for clients polling migration status at cutover time.
-    migration_controller.apply_migration_to_db(
+    _apply_migration_to_db(
         migration,
         tgt_lvol_uuid=tgt_uuid_carry.get('tgt_lvol_uuid'),
         tgt_lvol_bdev=tgt_uuid_carry.get('tgt_lvol_bdev'))
@@ -1494,7 +1656,7 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
     if _SKIP_CLEANUP_SOURCE:
         logger.info("SKIP_CLEANUP_SOURCE flag is set — skipping source cleanup, applying DB only")
         _ctx = migration.transfer_context or {}
-        migration_controller.apply_migration_to_db(
+        _apply_migration_to_db(
             migration,
             tgt_lvol_uuid=_ctx.get('tgt_lvol_uuid'),
             tgt_lvol_bdev=_ctx.get('tgt_lvol_bdev'))
@@ -1640,7 +1802,7 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
     tgt_lvol_uuid = ctx.get('tgt_lvol_uuid')
     tgt_lvol_bdev = ctx.get('tgt_lvol_bdev')
     migration.transfer_context = {}
-    if not migration_controller.apply_migration_to_db(
+    if not _apply_migration_to_db(
             migration, tgt_lvol_uuid=tgt_lvol_uuid, tgt_lvol_bdev=tgt_lvol_bdev):
         return False, False, "Failed to update DB records after source cleanup"
 
