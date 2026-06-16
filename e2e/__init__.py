@@ -102,6 +102,8 @@ from stress_test.device_failure_migration import (
     DevicePCIeRestartUnderLoadDocker,
     DevicePCIeRestartNoLoadK8s,
     DevicePCIeRestartUnderLoadK8s,
+    DeviceAddAfterBootstrapDocker,
+    DeviceAddAfterBootstrapUnderLoadDocker,
 )
 from stress_test.continuous_failover_ha_security import (
     RandomSecurityFailoverTest,
@@ -311,6 +313,8 @@ ALL_TESTS = [
     DevicePCIeRestartUnderLoadDocker,
     DevicePCIeRestartNoLoadK8s,
     DevicePCIeRestartUnderLoadK8s,
+    DeviceAddAfterBootstrapDocker,
+    DeviceAddAfterBootstrapUnderLoadDocker,
     TestMultiNodeOutageDocker,
     TestMultiNodeOutageK8s,
     TestMultiNodeVMRebootDocker,
@@ -448,6 +452,8 @@ def get_stress_tests():
         DevicePCIeRestartUnderLoadDocker,
         DevicePCIeRestartNoLoadK8s,
         DevicePCIeRestartUnderLoadK8s,
+        DeviceAddAfterBootstrapDocker,
+        DeviceAddAfterBootstrapUnderLoadDocker,
     ]
     return tests
 
@@ -475,6 +481,8 @@ def get_monitoring_tests():
         DevicePCIeRestartUnderLoadDocker,
         DevicePCIeRestartNoLoadK8s,
         DevicePCIeRestartUnderLoadK8s,
+        DeviceAddAfterBootstrapDocker,
+        DeviceAddAfterBootstrapUnderLoadDocker,
         TestLvolOutageLoadTest,
         TestParallelLvolSnapshotCloneAPI,
     ]

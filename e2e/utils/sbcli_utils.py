@@ -975,6 +975,20 @@ class SbcliUtils:
         self.logger.info(f"Node capacity for {node_id}: {data}")
         return data["results"]
 
+    def get_device_capacity(self, device_id):
+        """Get per-device capacity statistics.
+
+        Args:
+            device_id (str): Device UUID.
+
+        Returns:
+            list: Capacity records with keys *size_total*, *size_used*,
+            *size_free*, *size_util*.
+        """
+        url = f"/device/capacity/{device_id}"
+        data = self.get_request(api_url=url)
+        return data.get("results", [])
+
     def activate_cluster(self, cluster_id):
         """Activate the given cluster
 

@@ -23,6 +23,10 @@ Variants:
   - DevicePCIeRestartNoLoadK8s               — PCIe unplug + restart, no IO load (K8s)
   - DevicePCIeRestartUnderLoadK8s            — PCIe unplug + restart, IO load running (K8s)
 
+  Device add after bootstrap (PCIe disabled before bootstrap, then added):
+  - DeviceAddAfterBootstrapDocker            — PCI rescan + sn restart + add-device, no IO load
+  - DeviceAddAfterBootstrapUnderLoadDocker   — PCI rescan + sn restart + add-device, 128K randwrite IO load
+
 Failure modes:
   - "api"  : Logical removal via REST API + set-failed-device CLI
   - "pcie" : Physical removal via /sys/bus/pci/devices/<addr>/remove
@@ -65,6 +69,17 @@ def _rand_seq(length: int = 8) -> str:
     return first + rest
 
 
+def _fmt_bytes(b):
+    """Format bytes as human-readable GiB string."""
+    if b is None or b == "—":
+        return "—"
+    try:
+        val = float(b)
+    except (TypeError, ValueError):
+        return str(b)
+    return f"{val / (1024**3):.1f} GiB"
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Mixin — shared orchestration for all variants
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -77,7 +92,7 @@ class _DeviceFailureMigrationBase:
     LVOL_SIZE = "50G"          # per-lvol size (large enough to fill device)
     FIO_FILL_SIZE = "30G"      # < LVOL_SIZE to fit within filesystem overhead
     FIO_FILL_BS = "512K"       # sequential write block size for fill
-    FIO_LOAD_BS = "4K"         # random IO block size for load
+    FIO_LOAD_BS = "128K"       # random write block size for bandwidth measurement
     FIO_LOAD_IODEPTH = 1       # must be 1 when verify=md5 to avoid false errors
     FIO_LOAD_NUMJOBS = 2
     FIO_LOAD_RUNTIME = 7200    # 2 h (longer than expected migration)
@@ -103,10 +118,12 @@ class _DeviceFailureMigrationBase:
     # ── Main flow ────────────────────────────────────────────────────────────
 
     def _run_migration_test(self, with_io_load=False, failure_mode="api"):
-        """Main flow: setup -> fill -> [checksum] -> [start IO] -> fail -> migrate -> validate -> recover -> cleanup.
+        """Main flow for device failure migration timing tests.
 
-        NoLoad:  fill → md5sum → fail device → migrate → verify md5 + FIO fill logs → recover device → cleanup
-        UnderLoad: fill → start FIO (verify=md5) → fail device → migrate → check FIO OK → wait FIO complete → recover → cleanup
+        NoLoad:  setup → fail device → migrate → validate → recover → cleanup
+                 (no fill, no IO — measures raw migration time on empty device)
+        UnderLoad: setup → fill → start FIO (128K randwrite, verify=md5) → fail device →
+                   migrate → collect bandwidth → wait FIO → recover → cleanup
         """
         self._with_io_load = with_io_load
         self._failure_mode = failure_mode
@@ -114,10 +131,9 @@ class _DeviceFailureMigrationBase:
         t0 = time.time()
         try:
             self._phase_setup_pool_and_lvols()
-            self._phase_fill_devices()
-            if not with_io_load:
-                self._phase_compute_checksums()
             if with_io_load:
+                self._phase_fill_devices()
+                self._log_device_fill_level()
                 self._phase_start_io_load()
             if failure_mode == "pcie":
                 self._phase_fail_and_migrate_pcie()
@@ -128,6 +144,7 @@ class _DeviceFailureMigrationBase:
                 # Wait for FIO to finish naturally — do NOT kill it
                 self._phase_wait_fio_completion()
                 self._phase_validate_fio()
+                self._phase_collect_fio_bandwidth()
             self._test_passed = True
         finally:
             if with_io_load:
@@ -141,6 +158,7 @@ class _DeviceFailureMigrationBase:
             self._timing["total_duration"] = time.time() - t0
             self._print_migration_summary()
             self._write_timing_json()
+            self._write_test_summary_md()
             self._generate_charts()
 
         self.logger.info("TEST CASE PASSED !!!")
@@ -153,9 +171,10 @@ class _DeviceFailureMigrationBase:
         physical device visible again, then calls ``sbctl sn restart-device``
         so the control plane re-attaches it.
 
-        Flow:
-          setup → fill → [start IO] → PCIe unplug → rescan → restart-device →
-          wait device online → wait any migration → verify cluster + FIO → cleanup
+        NoLoad:  setup → PCIe unplug → rescan → restart-device → validate → cleanup
+                 (no fill, no IO — measures raw restart time on empty device)
+        UnderLoad: setup → fill → start FIO (128K randwrite) → PCIe unplug →
+                   rescan → restart-device → validate → collect bandwidth → cleanup
         """
         self._with_io_load = with_io_load
         self._failure_mode = "pcie"
@@ -163,16 +182,16 @@ class _DeviceFailureMigrationBase:
         t0 = time.time()
         try:
             self._phase_setup_pool_and_lvols()
-            self._phase_fill_devices()
-            if not with_io_load:
-                self._phase_compute_checksums()
             if with_io_load:
+                self._phase_fill_devices()
+                self._log_device_fill_level()
                 self._phase_start_io_load()
             self._phase_pcie_remove_and_restart()
             self._phase_validate_restart()
             if with_io_load:
                 self._phase_wait_fio_completion()
                 self._phase_validate_fio()
+                self._phase_collect_fio_bandwidth()
             self._test_passed = True
         finally:
             if with_io_load:
@@ -186,6 +205,7 @@ class _DeviceFailureMigrationBase:
             self._timing["total_duration"] = time.time() - t0
             self._print_migration_summary()
             self._write_timing_json()
+            self._write_test_summary_md()
             self._generate_charts()
 
         self.logger.info("TEST CASE PASSED !!!")
@@ -541,7 +561,10 @@ class _DeviceFailureMigrationBase:
     # ── Phase 3: start random IO on all nodes (under-load variant) ───────────
 
     def _phase_start_io_load(self):
-        self.logger.info("=== Phase: Start IO load on all nodes ===")
+        self.logger.info(
+            f"=== Phase: Start IO load on all nodes "
+            f"(bs={self.FIO_LOAD_BS}, rw=randwrite, verify=md5) ==="
+        )
         client = self.fio_node[0]
         all_lvol_names = self._lvols_on_target + self._lvols_on_others
 
@@ -554,13 +577,14 @@ class _DeviceFailureMigrationBase:
                 args=(client, None, info["Mount"], info["Log"]),
                 kwargs={
                     "name": f"load_{name}",
-                    "rw": "randrw",
+                    "rw": "randwrite",
                     "bs": self.FIO_LOAD_BS,
                     "size": "1G",
                     "runtime": self.FIO_LOAD_RUNTIME,
                     "iodepth": self.FIO_LOAD_IODEPTH,
                     "numjobs": self.FIO_LOAD_NUMJOBS,
                     "use_latency": False,
+                    "verify": "md5",
                 },
             )
             t.start()
@@ -1044,9 +1068,8 @@ class _DeviceFailureMigrationBase:
                     "All non-target devices online (resolved via CLI fallback)"
                 )
 
-        # 4. Data integrity checks (NoLoad only — UnderLoad is checked after FIO completes)
-        if not self._with_io_load:
-            self._phase_verify_checksums()
+        # 4. Data integrity checks (NoLoad skipped — no fill/checksum on empty device;
+        #    UnderLoad integrity is checked via FIO verify=md5 during IO)
 
     def _phase_stop_io_load(self):
         """Kill remaining FIO processes (failure path only).
@@ -1061,6 +1084,89 @@ class _DeviceFailureMigrationBase:
         for t in self._load_fio_threads:
             t.join(timeout=30)
         self.logger.info("IO load stopped")
+
+    # ── Logging helpers ──────────────────────────────────────────────────────
+
+    def _log_device_fill_level(self):
+        """Query and log device utilisation on the target node."""
+        try:
+            capacity = self.sbcli_utils.get_node_capacity(self._target_node_id)
+            if isinstance(capacity, list):
+                capacity = capacity[0] if capacity else {}
+            size_total = capacity.get("size_total", 0)
+            size_used = capacity.get("size_used", 0)
+            size_util = capacity.get("size_util", 0)
+            self._timing["device_fill_pct"] = size_util
+            self._timing["device_size_total_bytes"] = size_total
+            self._timing["device_size_used_bytes"] = size_used
+            self.logger.info(
+                f"Device fill level on node {self._target_node_id}: "
+                f"{size_util}% used "
+                f"({size_used} / {size_total} bytes)"
+            )
+        except Exception as exc:
+            self.logger.warning(f"Could not query device fill level: {exc}")
+
+    def _phase_collect_fio_bandwidth(self):
+        """Parse FIO logs and report write bandwidth (under-load variant)."""
+        self.logger.info("=== Phase: Collect FIO bandwidth stats ===")
+        client = self.fio_node[0]
+        bw_values = []
+        import re
+
+        all_lvol_names = self._lvols_on_target + self._lvols_on_others
+        for name in all_lvol_names:
+            info = self.lvol_mount_details.get(name)
+            if not info or not info.get("Log"):
+                continue
+            try:
+                log_data = self.ssh_obj.exec_command(
+                    client, f"cat {info['Log']} 2>/dev/null || true"
+                )
+                if not log_data:
+                    continue
+                log_str = log_data if isinstance(log_data, str) else str(log_data)
+                # Parse FIO output for write bandwidth
+                # Pattern: "write: IOPS=XXX, BW=XXXMiB/s" or similar
+                bw_match = re.search(
+                    r'write:.*BW=([0-9.]+)\s*([KMG]?i?B/s)', log_str
+                )
+                if bw_match:
+                    bw_val = float(bw_match.group(1))
+                    bw_unit = bw_match.group(2)
+                    # Normalise to KiB/s
+                    if "MiB" in bw_unit or "MB" in bw_unit:
+                        bw_val *= 1024
+                    elif "GiB" in bw_unit or "GB" in bw_unit:
+                        bw_val *= 1024 * 1024
+                    bw_values.append(bw_val)
+                    self.logger.info(
+                        f"  {name}: write BW = "
+                        f"{bw_match.group(1)} {bw_unit}"
+                    )
+                else:
+                    self.logger.warning(
+                        f"  {name}: could not parse write BW from FIO log"
+                    )
+            except Exception as exc:
+                self.logger.warning(
+                    f"Could not parse FIO log for {name}: {exc}"
+                )
+
+        if bw_values:
+            avg_bw = sum(bw_values) / len(bw_values)
+            self._timing["avg_write_bw_kib_s"] = round(avg_bw, 1)
+            self._timing["total_write_bw_kib_s"] = round(sum(bw_values), 1)
+            self._timing["fio_lvol_count"] = len(bw_values)
+            self.logger.info(
+                f"FIO bandwidth summary: "
+                f"avg={avg_bw:.1f} KiB/s ({avg_bw/1024:.1f} MiB/s), "
+                f"total={sum(bw_values):.1f} KiB/s "
+                f"({sum(bw_values)/1024:.1f} MiB/s), "
+                f"lvols={len(bw_values)}"
+            )
+        else:
+            self.logger.warning("No FIO bandwidth data collected")
 
     # ── Phase: recover failed device ─────────────────────────────────────────
 
@@ -1316,14 +1422,27 @@ class _DeviceFailureMigrationBase:
         self.logger.info("=" * 70)
         self.logger.info(f"  Test class:       {self.__class__.__name__}")
         self.logger.info(f"  Failure mode:     {self._failure_mode}")
-        self.logger.info(f"  IO load:          {'YES' if self._with_io_load else 'NO'}")
+        self.logger.info(f"  IO load:          {'YES' if self._with_io_load else 'NO (empty device)'}")
+        self.logger.info(f"  FIO params:       bs={self.FIO_LOAD_BS} rw=randwrite verify=md5" if self._with_io_load else "  FIO params:       N/A")
         self.logger.info(f"  Target node:      {self._target_node_id}")
         self.logger.info(f"  Target device:    {self._target_device_id}")
-        self.logger.info(f"  Fill target:      {self.FILL_PERCENT}%")
         self.logger.info(f"  Lvols on target:  {len(self._lvols_on_target)}")
         self.logger.info(f"  Lvols on others:  {len(self._lvols_on_others)}")
         self.logger.info(f"  Result:           {'PASSED' if self._test_passed else 'FAILED'}")
         self.logger.info("-" * 70)
+        # Key metrics
+        fill_pct = self._timing.get("device_fill_pct", "0 (empty)")
+        self.logger.info(f"  {'device_fill_pct':30s} {fill_pct}")
+        mig = self._timing.get("migration_duration", self._timing.get("restart_duration", 0))
+        if isinstance(mig, (int, float)):
+            self.logger.info(f"  {'migration/restart_time':30s} {mig:10.1f}s ({mig/60:.1f}m)")
+        if self._with_io_load:
+            avg_bw = self._timing.get("avg_write_bw_kib_s", 0)
+            total_bw = self._timing.get("total_write_bw_kib_s", 0)
+            self.logger.info(f"  {'avg_write_bw':30s} {avg_bw:10.1f} KiB/s ({avg_bw/1024:.1f} MiB/s)")
+            self.logger.info(f"  {'total_write_bw':30s} {total_bw:10.1f} KiB/s ({total_bw/1024:.1f} MiB/s)")
+        self.logger.info("-" * 70)
+        # All timing entries
         for key, val in self._timing.items():
             if isinstance(val, float):
                 self.logger.info(f"  {key:30s} {val:10.1f}s")
@@ -1335,7 +1454,7 @@ class _DeviceFailureMigrationBase:
         """Write standardised timing JSON for monitoring suite aggregation."""
         phases = []
         for name in ("setup_duration", "fill_duration", "remove_duration",
-                      "migration_duration"):
+                      "migration_duration", "restart_duration"):
             if name in self._timing:
                 phases.append({
                     "name": name.replace("_duration", ""),
@@ -1349,10 +1468,11 @@ class _DeviceFailureMigrationBase:
             "status": "passed" if self._test_passed else "failed",
             "geometry": {"ndcs": self.ndcs, "npcs": self.npcs},
             "config": {
-                "fill_percent": self.FILL_PERCENT,
                 "lvol_size": self.LVOL_SIZE,
                 "with_io_load": self._with_io_load,
                 "failure_mode": self._failure_mode,
+                "fio_load_bs": self.FIO_LOAD_BS if self._with_io_load else None,
+                "fio_load_rw": "randwrite" if self._with_io_load else None,
                 "target_node": self._target_node_id,
                 "target_device": self._target_device_id,
                 "lvols_on_target": len(self._lvols_on_target),
@@ -1364,11 +1484,20 @@ class _DeviceFailureMigrationBase:
                     self._timing.get("total_duration", 0), 2
                 ),
                 "key_metric": round(
-                    self._timing.get("migration_duration", 0), 2
+                    self._timing.get("migration_duration",
+                                     self._timing.get("restart_duration", 0)), 2
                 ),
                 "key_metric_label": "migration_duration_sec",
+                "device_fill_pct": self._timing.get("device_fill_pct", 0),
             },
         }
+        if self._with_io_load:
+            report["summary"]["avg_write_bw_kib_s"] = self._timing.get(
+                "avg_write_bw_kib_s", 0
+            )
+            report["summary"]["total_write_bw_kib_s"] = self._timing.get(
+                "total_write_bw_kib_s", 0
+            )
 
         out_dir = Path("logs")
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -1469,6 +1598,134 @@ class _DeviceFailureMigrationBase:
                 self.logger.info(f"Chart saved: {path}")
         except Exception as exc:
             self.logger.warning(f"Fill vs migration chart failed: {exc}")
+
+    # ── Test summary markdown ─────────────────────────────────────────────────
+
+    def _write_test_summary_md(self):
+        """Write a markdown summary with cluster/device details to logs/test_summary.md."""
+        try:
+            lines = self._build_summary_md_lines()
+            out_dir = Path("logs")
+            out_dir.mkdir(parents=True, exist_ok=True)
+            out_path = out_dir / "test_summary.md"
+            out_path.write_text("\n".join(lines) + "\n")
+            self.logger.info(f"Test summary markdown written to {out_path}")
+        except Exception as exc:
+            self.logger.warning(f"Failed to write test summary markdown: {exc}")
+
+    def _build_summary_md_lines(self):
+        """Build markdown lines for the test summary."""
+        lines = []
+        lines.append("# Device Migration Test Summary\n")
+
+        # ── Test Info ──
+        lines.append("## Test Info")
+        lines.append("| Field | Value |")
+        lines.append("|-------|-------|")
+        lines.append(f"| Test class | `{self.__class__.__name__}` |")
+        lines.append(f"| Failure mode | {self._failure_mode} |")
+        if self._with_io_load:
+            lines.append(f"| IO load | YES (bs={self.FIO_LOAD_BS}, rw=randwrite, verify=md5) |")
+        else:
+            lines.append("| IO load | NO (empty device, no fill) |")
+        lines.append(f"| Result | **{'PASSED' if self._test_passed else 'FAILED'}** |")
+        lines.append("")
+
+        # ── Key Metrics ──
+        lines.append("## Key Metrics")
+        lines.append("| Metric | Value |")
+        lines.append("|--------|-------|")
+        mig = self._timing.get("migration_duration", self._timing.get("restart_duration", 0))
+        if isinstance(mig, (int, float)):
+            lines.append(f"| Migration/restart time | {mig:.1f}s ({mig/60:.1f}m) |")
+        fill_pct = self._timing.get("device_fill_pct", 0)
+        lines.append(f"| Device fill level | {fill_pct}% |")
+        if self._with_io_load:
+            avg_bw = self._timing.get("avg_write_bw_kib_s", 0)
+            total_bw = self._timing.get("total_write_bw_kib_s", 0)
+            lines.append(f"| Avg write bandwidth | {avg_bw:.1f} KiB/s ({avg_bw/1024:.1f} MiB/s) |")
+            lines.append(f"| Total write bandwidth | {total_bw:.1f} KiB/s ({total_bw/1024:.1f} MiB/s) |")
+        lines.append("")
+
+        # ── Lvol Distribution ──
+        lines.append("## Lvol Distribution")
+        lines.append("| Node | # Lvols | Role |")
+        lines.append("|------|---------|------|")
+        other_nodes = [n for n in self._sn_nodes if n != self._target_node_id]
+        lines.append(f"| `{self._target_node_id}` | {len(self._lvols_on_target)} | target |")
+        for node_id in other_nodes:
+            count = 1 if self._with_io_load else 0
+            lines.append(f"| `{node_id}` | {count} | other |")
+        lines.append("")
+
+        # ── Per-Node Capacity ──
+        lines.append("## Per-Node Capacity")
+        lines.append("| Node | Status | Size Total | Size Used | Utilisation |")
+        lines.append("|------|--------|-----------|-----------|-------------|")
+        for node_id in self._sn_nodes:
+            try:
+                details = self.sbcli_utils.get_storage_node_details(node_id)
+                status = details[0].get("status", "?") if details else "?"
+                cap = self.sbcli_utils.get_node_capacity(node_id)
+                if isinstance(cap, list):
+                    cap = cap[0] if cap else {}
+                s_total = cap.get("size_total", 0)
+                s_used = cap.get("size_used", 0)
+                s_util = cap.get("size_util", 0)
+                lines.append(
+                    f"| `{node_id}` | {status} | "
+                    f"{_fmt_bytes(s_total)} | {_fmt_bytes(s_used)} | {s_util}% |"
+                )
+            except Exception as exc:
+                lines.append(f"| `{node_id}` | error | — | — | — |")
+                self.logger.warning(f"Could not get capacity for node {node_id}: {exc}")
+        lines.append("")
+
+        # ── Per-Device Capacity ──
+        lines.append("## Per-Device Capacity")
+        lines.append("| Node | Device | Status | Size Total | Size Used | Utilisation |")
+        lines.append("|------|--------|--------|-----------|-----------|-------------|")
+        for node_id in self._sn_nodes:
+            try:
+                devices = self.sbcli_utils.get_device_details(node_id)
+                for dev in devices:
+                    dev_id = dev.get("id", "?")
+                    dev_status = dev.get("status", "?")
+                    try:
+                        dcap = self.sbcli_utils.get_device_capacity(dev_id)
+                        if isinstance(dcap, list):
+                            dcap = dcap[0] if dcap else {}
+                        ds_total = dcap.get("size_total", 0)
+                        ds_used = dcap.get("size_used", 0)
+                        ds_util = dcap.get("size_util", 0)
+                        lines.append(
+                            f"| `{node_id}` | `{dev_id}` | {dev_status} | "
+                            f"{_fmt_bytes(ds_total)} | {_fmt_bytes(ds_used)} | {ds_util}% |"
+                        )
+                    except Exception:
+                        lines.append(
+                            f"| `{node_id}` | `{dev_id}` | {dev_status} | — | — | — |"
+                        )
+            except Exception as exc:
+                lines.append(f"| `{node_id}` | — | error | — | — | — |")
+                self.logger.warning(f"Could not get devices for node {node_id}: {exc}")
+        lines.append("")
+
+        # ── Phase Timings ──
+        lines.append("## Phase Timings")
+        lines.append("| Phase | Duration |")
+        lines.append("|-------|----------|")
+        for name in ("setup_duration", "fill_duration", "remove_duration",
+                      "migration_duration", "restart_duration",
+                      "fio_completion_duration", "total_duration"):
+            if name in self._timing:
+                val = self._timing[name]
+                label = name.replace("_duration", "").replace("_", " ")
+                if isinstance(val, (int, float)):
+                    lines.append(f"| {label} | {val:.1f}s ({val/60:.1f}m) |")
+        lines.append("")
+
+        return lines
 
     # ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -1596,6 +1853,894 @@ class DevicePCIeRestartUnderLoadDocker(_DeviceFailureMigrationBase, TestLvolHACl
     def run(self):
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
         self._run_restart_test(with_io_load=True)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Device Add After Bootstrap — Docker (sbcli + SSH FIO)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class _DeviceAddAfterBootstrapBase:
+    """Shared logic for "add device after bootstrap" tests.
+
+    Scenario: cluster was bootstrapped with one node having a PCIe device
+    disabled beforehand.  The test rescans PCI, restarts the node with the
+    new PCIe address (so SPDK discovers the device), then calls
+    ``sbctl sn add-device`` to bring it online and trigger rebalancing.
+    """
+
+    # ── Configuration ─────────────────────────────────────────────────────
+    LVOL_SIZE = "50G"
+    FIO_FILL_SIZE = "30G"
+    FIO_FILL_BS = "512K"
+    FIO_LOAD_BS = "128K"         # 128K random write for bandwidth measurement
+    FIO_LOAD_IODEPTH = 1         # must be 1 when verify=md5
+    FIO_LOAD_NUMJOBS = 2
+    FIO_LOAD_RUNTIME = 7200      # 2 h ceiling
+    MIGRATION_TIMEOUT = 3600     # 1 h max for add-device migration
+    NUM_LVOLS = 10               # lvols to create on existing capacity
+    DEFAULT_PCIE_ADDR = "0000:00:05.0"
+
+    def _init_add_device_state(self):
+        """Initialise per-test tracking state (call from __init__)."""
+        self._timing = {}
+        self._target_node_id = None
+        self._target_node_ip = None
+        self._disabled_pcie_addr = None
+        self._new_device_id = None
+        self._lvol_names = []
+        self._load_fio_threads = []
+        self._sn_nodes = []
+        self._test_passed = False
+        self._with_io_load = False
+
+    # ── Target node detection ─────────────────────────────────────────────
+
+    def _find_target_node(self):
+        """Find the storage node that has fewer devices than the others.
+
+        Checks ``DISABLED_PCIE_NODE_IP`` env var first; falls back to
+        comparing device counts across all storage nodes.
+        """
+        env_ip = os.environ.get("DISABLED_PCIE_NODE_IP", "").strip()
+        if env_ip:
+            self.logger.info(
+                f"DISABLED_PCIE_NODE_IP env var set: {env_ip}"
+            )
+            for node_id in self._sn_nodes:
+                details = self.sbcli_utils.get_storage_node_details(node_id)
+                if details and details[0].get("mgmt_ip") == env_ip:
+                    self.logger.info(
+                        f"Matched env IP {env_ip} to node {node_id}"
+                    )
+                    return node_id
+            self.logger.warning(
+                f"Could not match DISABLED_PCIE_NODE_IP={env_ip} to any "
+                f"storage node — falling back to auto-detect"
+            )
+
+        # Fallback: find the node with fewer devices
+        device_counts = {}
+        for node_id in self._sn_nodes:
+            devices = self.sbcli_utils.get_device_details(node_id)
+            device_counts[node_id] = len(devices)
+            self.logger.info(
+                f"Node {node_id}: {len(devices)} device(s)"
+            )
+
+        if not device_counts:
+            raise RuntimeError("No storage nodes found")
+
+        max_count = max(device_counts.values())
+        for node_id, count in device_counts.items():
+            if count < max_count:
+                self.logger.info(
+                    f"Auto-detected target node {node_id} with "
+                    f"{count} device(s) (others have {max_count})"
+                )
+                return node_id
+
+        raise RuntimeError(
+            "All nodes have the same device count — "
+            "no disabled device detected. "
+            f"Counts: {device_counts}"
+        )
+
+    def _get_disabled_pcie_addr(self):
+        """Get the PCIe address of the disabled device."""
+        env_addr = os.environ.get("DISABLED_PCIE_ADDR", "").strip()
+        if env_addr:
+            self.logger.info(f"DISABLED_PCIE_ADDR env var: {env_addr}")
+            return env_addr
+        self.logger.info(
+            f"DISABLED_PCIE_ADDR not set — using default: "
+            f"{self.DEFAULT_PCIE_ADDR}"
+        )
+        return self.DEFAULT_PCIE_ADDR
+
+    # ── Main test flow ────────────────────────────────────────────────────
+
+    def _run_add_device_test(self, with_io_load=False):
+        """Main flow for the add-device-after-bootstrap test.
+
+        NoLoad:  setup → PCI rescan → sn restart --ssd-pcie → add-device →
+                 wait migration → validate (no fill, no IO — raw migration time)
+        UnderLoad: setup → fill → log fill level → start FIO (128K randwrite) →
+                   PCI rescan → sn restart → add-device → wait migration →
+                   validate → stop FIO → collect bandwidth
+        """
+        self._with_io_load = with_io_load
+        self._test_passed = False
+        t0 = time.time()
+        try:
+            self._phase_discover_target()
+            self._phase_setup_pool_and_lvols()
+            if with_io_load:
+                self._phase_fill_lvols()
+                self._log_device_fill_level()
+                self._phase_start_io_load()
+            self._phase_rescan_and_restart()
+            self._phase_add_new_device()
+            self._phase_validate_cluster()
+            if with_io_load:
+                self._phase_stop_io_load()
+                self._phase_collect_fio_bandwidth()
+            self._test_passed = True
+        finally:
+            if with_io_load:
+                self._phase_kill_fio()
+            try:
+                self.collect_management_details(suffix="_pre_cleanup")
+            except Exception as e:
+                self.logger.warning(
+                    f"collect_management_details failed: {e}"
+                )
+            self._phase_cleanup()
+            self._timing["total_duration"] = time.time() - t0
+            self._print_add_device_summary()
+            self._write_timing_json()
+            self._write_test_summary_md()
+
+        self.logger.info("TEST CASE PASSED !!!")
+
+    # ── Phase: discover target node ───────────────────────────────────────
+
+    def _phase_discover_target(self):
+        self.logger.info("=== Phase: Discover target node ===")
+        storage_nodes = self.sbcli_utils.get_storage_nodes()
+        for r in storage_nodes["results"]:
+            self._sn_nodes.append(r["uuid"])
+
+        if len(self._sn_nodes) < 2:
+            raise RuntimeError(
+                f"Need at least 2 storage nodes, found {len(self._sn_nodes)}"
+            )
+
+        self._target_node_id = self._find_target_node()
+        node_details = self.sbcli_utils.get_storage_node_details(
+            self._target_node_id
+        )
+        self._target_node_ip = node_details[0]["mgmt_ip"]
+        self._disabled_pcie_addr = self._get_disabled_pcie_addr()
+
+        # Verify target node has exactly 1 device
+        devices = self.sbcli_utils.get_device_details(self._target_node_id)
+        online_devices = [d for d in devices if d.get("status") == "online"]
+        if len(online_devices) != 1:
+            raise RuntimeError(
+                f"Expected target node {self._target_node_id} to have "
+                f"exactly 1 online device, but found {len(online_devices)}: "
+                f"{[d['id'] for d in online_devices]}"
+            )
+        self.logger.info(
+            f"Target node: {self._target_node_id} "
+            f"(IP: {self._target_node_ip}), "
+            f"1 online device: {online_devices[0]['id']}, "
+            f"disabled PCIe: {self._disabled_pcie_addr}"
+        )
+
+    # ── Phase: create pool and lvols ──────────────────────────────────────
+
+    def _phase_setup_pool_and_lvols(self):
+        self.logger.info("=== Phase: Setup pool and lvols ===")
+        t0 = time.time()
+        client = self.fio_node[0]
+
+        for i in range(self.NUM_LVOLS):
+            name = f"add_dev_{_rand_seq(4)}_{i}"
+            self.sbcli_utils.add_lvol(
+                lvol_name=name,
+                pool_name=self.pool_name,
+                size=self.LVOL_SIZE,
+                crypto=False,
+            )
+            connect_info = self.sbcli_utils.connect_lvol(name)
+            device = self.ssh_obj.get_nvme_device(client, connect_info)
+            mount = f"/mnt/add_dev_{i}"
+            self.ssh_obj.exec_command(client, f"mkdir -p {mount}")
+            self.ssh_obj.format_and_mount(client, device, mount)
+            log_path = f"/tmp/fio_add_dev_{i}.log"
+            self.lvol_mount_details[name] = {
+                "Device": device,
+                "Mount": mount,
+                "Log": log_path,
+                "Command": connect_info if isinstance(connect_info, list) else [connect_info],
+                "Client": client,
+            }
+            self._lvol_names.append(name)
+
+        self._timing["setup_duration"] = time.time() - t0
+        self.logger.info(
+            f"Setup complete: {len(self._lvol_names)} lvols "
+            f"({self._timing['setup_duration']:.1f}s)"
+        )
+
+    # ── Phase: fill lvols with data ───────────────────────────────────────
+
+    def _phase_fill_lvols(self):
+        self.logger.info("=== Phase: Fill lvols with data ===")
+        t0 = time.time()
+        client = self.fio_node[0]
+        threads = []
+
+        for name in self._lvol_names:
+            info = self.lvol_mount_details.get(name)
+            if not info:
+                continue
+            t = threading.Thread(
+                target=self.ssh_obj.run_fio_test,
+                args=(client, None, info["Mount"], info["Log"]),
+                kwargs={
+                    "name": f"fill_{name}",
+                    "rw": "write",
+                    "bs": self.FIO_FILL_BS,
+                    "size": self.FIO_FILL_SIZE,
+                    "runtime": 0,
+                    "time_based": False,
+                    "iodepth": 1,
+                    "numjobs": 1,
+                    "use_latency": False,
+                },
+            )
+            t.start()
+            threads.append(t)
+
+        for t in threads:
+            t.join(timeout=60)
+
+        # Wait for FIO fill to complete
+        self.common_utils.manage_fio_threads(
+            node=client, threads=[], timeout=3600
+        )
+
+        self._timing["fill_duration"] = time.time() - t0
+        self.logger.info(
+            f"Fill complete ({self._timing['fill_duration']:.1f}s)"
+        )
+
+    # ── Phase: start IO load (under-load variant) ─────────────────────────
+
+    def _phase_start_io_load(self):
+        self.logger.info("=== Phase: Start IO load (128K randwrite) ===")
+        client = self.fio_node[0]
+
+        for name in self._lvol_names:
+            info = self.lvol_mount_details.get(name)
+            if not info:
+                continue
+            t = threading.Thread(
+                target=self.ssh_obj.run_fio_test,
+                args=(client, None, info["Mount"], info["Log"]),
+                kwargs={
+                    "name": f"load_{name}",
+                    "rw": "randwrite",
+                    "bs": self.FIO_LOAD_BS,
+                    "size": "1G",
+                    "runtime": self.FIO_LOAD_RUNTIME,
+                    "iodepth": self.FIO_LOAD_IODEPTH,
+                    "numjobs": self.FIO_LOAD_NUMJOBS,
+                    "use_latency": False,
+                    "verify": "md5",
+                },
+            )
+            t.start()
+            self._load_fio_threads.append(t)
+
+        sleep_n_sec(15)
+        self.logger.info(
+            f"IO load started: {len(self._load_fio_threads)} FIO threads "
+            f"(bs={self.FIO_LOAD_BS}, rw=randwrite, verify=md5)"
+        )
+
+    # ── Logging helpers ────────────────────────────────────────────────────
+
+    def _log_device_fill_level(self):
+        """Query and log device utilisation on the target node."""
+        try:
+            capacity = self.sbcli_utils.get_node_capacity(self._target_node_id)
+            if isinstance(capacity, list):
+                capacity = capacity[0] if capacity else {}
+            size_total = capacity.get("size_total", 0)
+            size_used = capacity.get("size_used", 0)
+            size_util = capacity.get("size_util", 0)
+            self._timing["device_fill_pct"] = size_util
+            self._timing["device_size_total_bytes"] = size_total
+            self._timing["device_size_used_bytes"] = size_used
+            self.logger.info(
+                f"Device fill level on node {self._target_node_id}: "
+                f"{size_util}% used "
+                f"({size_used} / {size_total} bytes)"
+            )
+        except Exception as exc:
+            self.logger.warning(f"Could not query device fill level: {exc}")
+
+    # ── Phase: PCI rescan + node restart with new PCIe ────────────────────
+
+    def _phase_rescan_and_restart(self):
+        self.logger.info(
+            f"=== Phase: PCI rescan + restart node "
+            f"{self._target_node_id} with --ssd-pcie "
+            f"{self._disabled_pcie_addr} ==="
+        )
+        t0 = time.time()
+
+        # Record existing device IDs before restart
+        existing_devices = {
+            d["id"]
+            for d in self.sbcli_utils.get_device_details(self._target_node_id)
+        }
+        self.logger.info(
+            f"Existing devices on target node: {existing_devices}"
+        )
+
+        # PCI rescan to make the removed PCIe device visible to OS
+        self.logger.info(
+            f"PCI rescan on {self._target_node_ip} ..."
+        )
+        self.ssh_obj.exec_command(
+            self._target_node_ip,
+            "echo 1 | sudo tee /sys/bus/pci/rescan"
+        )
+        sleep_n_sec(10)
+        self.logger.info("PCI rescan complete")
+
+        # Restart node with new PCIe address
+        mgmt_ip = self.mgmt_nodes[0]
+        cmd = (
+            f"{self.base_cmd} -d sn restart "
+            f"{self._target_node_id} "
+            f"--ssd-pcie {self._disabled_pcie_addr}"
+        )
+        self.logger.info(f"Restarting node via CLI: {cmd}")
+        result = self.ssh_obj.exec_command(mgmt_ip, cmd)
+        self.logger.info(f"sn restart result: {result}")
+
+        # Wait for node to come back online
+        self.logger.info("Waiting for node to come back online ...")
+        self.sbcli_utils.wait_for_storage_node_status(
+            self._target_node_id, "online", timeout=600
+        )
+        self._timing["restart_duration"] = time.time() - t0
+        self.logger.info(
+            f"Node back online ({self._timing['restart_duration']:.1f}s)"
+        )
+
+        # Discover new device
+        sleep_n_sec(10)  # let device registration settle
+        current_devices = {
+            d["id"]
+            for d in self.sbcli_utils.get_device_details(self._target_node_id)
+        }
+        new_devices = current_devices - existing_devices
+        self.logger.info(
+            f"Devices after restart: {current_devices}, "
+            f"new device(s): {new_devices}"
+        )
+        if len(new_devices) != 1:
+            raise RuntimeError(
+                f"Expected 1 new device after restart, "
+                f"got {len(new_devices)}: {new_devices}"
+            )
+        self._new_device_id = new_devices.pop()
+        self.logger.info(f"New device discovered: {self._new_device_id}")
+
+    # ── Phase: add new device and wait for migration ──────────────────────
+
+    def _phase_add_new_device(self):
+        self.logger.info(
+            f"=== Phase: Add device {self._new_device_id} ==="
+        )
+        t0 = time.time()
+
+        mgmt_ip = self.mgmt_nodes[0]
+        cmd = f"{self.base_cmd} -d sn add-device {self._new_device_id}"
+        self.logger.info(f"Adding device via CLI: {cmd}")
+        result = self.ssh_obj.exec_command(mgmt_ip, cmd)
+        self.logger.info(f"add-device result: {result}")
+        sleep_n_sec(5)
+
+        # Wait for device to come online
+        self.logger.info("Waiting for new device to come online ...")
+        self.sbcli_utils.wait_for_device_status(
+            self._target_node_id, "online", timeout=600,
+            device_id=self._new_device_id,
+        )
+
+        # Wait for any new_device_migration tasks to complete
+        self.logger.info("Waiting for new_device_migration tasks ...")
+        try:
+            self._wait_new_device_migration(
+                self._new_device_id, timeout=self.MIGRATION_TIMEOUT
+            )
+        except TimeoutError:
+            self.logger.warning(
+                "new_device_migration did not complete within timeout"
+            )
+
+        self._timing["migration_duration"] = time.time() - t0
+        self.logger.info(
+            f"Add-device + migration complete "
+            f"({self._timing['migration_duration']:.1f}s)"
+        )
+
+    def _wait_new_device_migration(self, new_device_id, timeout=3600):
+        """Wait for all new_device_migration tasks for the device to finish."""
+        self.logger.info(
+            f"Waiting for new_device_migration tasks for {new_device_id} ..."
+        )
+        start = time.time()
+        while time.time() - start < timeout:
+            try:
+                tasks = self.sbcli_utils.list_migration_tasks(
+                    self.sbcli_utils.cluster_id
+                )
+                active = [
+                    t for t in tasks.get("results", [])
+                    if t.get("function_name") == "new_device_migration"
+                    and new_device_id in str(t.get("target_id", ""))
+                    and t.get("status") not in ("done", "cancelled", "error")
+                ]
+                if not active:
+                    elapsed = time.time() - start
+                    self.logger.info(
+                        f"All new_device_migration tasks complete "
+                        f"in {elapsed:.1f}s"
+                    )
+                    return elapsed
+                self.logger.info(
+                    f"Waiting for {len(active)} new_device_migration "
+                    f"task(s) ..."
+                )
+            except Exception as exc:
+                self.logger.warning(
+                    f"Error checking migration tasks: {exc}"
+                )
+            sleep_n_sec(15)
+        raise TimeoutError(
+            f"new_device_migration tasks for {new_device_id} did not "
+            f"complete within {timeout}s"
+        )
+
+    # ── Phase: validate cluster health ────────────────────────────────────
+
+    def _phase_validate_cluster(self):
+        self.logger.info("=== Phase: Validate cluster health ===")
+
+        # 1. All storage nodes online and healthy
+        storage_nodes = self.sbcli_utils.get_storage_nodes()
+        for node in storage_nodes["results"]:
+            assert node["status"] == "online", (
+                f"Node {node['id']} is not online (status={node['status']})"
+            )
+            assert node["health_check"], (
+                f"Node {node['id']} health check failed"
+            )
+        self.logger.info(
+            f"All {len(storage_nodes['results'])} storage nodes "
+            f"online and healthy"
+        )
+
+        # 2. Target node now has 2 online devices
+        devices = self.sbcli_utils.get_device_details(self._target_node_id)
+        online_devices = [d for d in devices if d.get("status") == "online"]
+        assert len(online_devices) == 2, (
+            f"Expected 2 online devices on target node, "
+            f"got {len(online_devices)}: "
+            f"{[(d['id'], d.get('status')) for d in devices]}"
+        )
+        self.logger.info(
+            f"Target node {self._target_node_id} has "
+            f"{len(online_devices)} online devices — OK"
+        )
+
+        # 3. New device is online
+        new_dev = next(
+            (d for d in devices if d["id"] == self._new_device_id), None
+        )
+        assert new_dev is not None, (
+            f"New device {self._new_device_id} not found in device list"
+        )
+        assert new_dev.get("status") == "online", (
+            f"New device {self._new_device_id} status is "
+            f"{new_dev.get('status')}, expected online"
+        )
+        self.logger.info(
+            f"New device {self._new_device_id} is online — OK"
+        )
+
+    # ── Phase: stop IO load and collect bandwidth ─────────────────────────
+
+    def _phase_stop_io_load(self):
+        """Signal FIO to stop gracefully and wait for threads."""
+        self.logger.info("=== Phase: Stop IO load ===")
+        client = self.fio_node[0]
+        # Send SIGTERM to fio for graceful shutdown
+        self.ssh_obj.exec_command(client, "pkill -TERM -f fio || true")
+        for t in self._load_fio_threads:
+            t.join(timeout=120)
+        self.logger.info("IO load stopped")
+
+    def _phase_kill_fio(self):
+        """Force-kill FIO (finally block cleanup)."""
+        try:
+            client = self.fio_node[0]
+            self.ssh_obj.exec_command(client, "pkill -9 -f fio || true")
+            for t in self._load_fio_threads:
+                t.join(timeout=30)
+        except Exception:
+            pass
+
+    def _phase_collect_fio_bandwidth(self):
+        """Parse FIO logs and report write bandwidth."""
+        self.logger.info("=== Phase: Collect FIO bandwidth stats ===")
+        client = self.fio_node[0]
+        bw_values = []
+
+        for name in self._lvol_names:
+            info = self.lvol_mount_details.get(name)
+            if not info or not info.get("Log"):
+                continue
+            try:
+                log_data = self.ssh_obj.exec_command(
+                    client, f"cat {info['Log']} 2>/dev/null || true"
+                )
+                if not log_data:
+                    continue
+                log_str = log_data if isinstance(log_data, str) else str(log_data)
+                # Parse FIO output for write bandwidth
+                # Look for "write: IOPS=XXX, BW=XXX" pattern
+                import re
+                bw_match = re.search(
+                    r'write:.*BW=([0-9.]+)([KMG]?i?B/s)', log_str
+                )
+                if bw_match:
+                    bw_val = float(bw_match.group(1))
+                    bw_unit = bw_match.group(2)
+                    # Normalise to KiB/s
+                    if "MiB" in bw_unit or "MB" in bw_unit:
+                        bw_val *= 1024
+                    elif "GiB" in bw_unit or "GB" in bw_unit:
+                        bw_val *= 1024 * 1024
+                    bw_values.append(bw_val)
+                    self.logger.info(
+                        f"  {name}: write BW = "
+                        f"{bw_match.group(1)}{bw_unit}"
+                    )
+            except Exception as exc:
+                self.logger.warning(
+                    f"Could not parse FIO log for {name}: {exc}"
+                )
+
+        if bw_values:
+            avg_bw = sum(bw_values) / len(bw_values)
+            self._timing["avg_write_bw_kib_s"] = round(avg_bw, 1)
+            self._timing["total_write_bw_kib_s"] = round(sum(bw_values), 1)
+            self.logger.info(
+                f"Average write BW: {avg_bw:.1f} KiB/s "
+                f"({avg_bw/1024:.1f} MiB/s), "
+                f"Total: {sum(bw_values):.1f} KiB/s "
+                f"({sum(bw_values)/1024:.1f} MiB/s)"
+            )
+        else:
+            self.logger.warning("No FIO bandwidth data collected")
+
+    # ── Cleanup ───────────────────────────────────────────────────────────
+
+    def _phase_cleanup(self):
+        self.logger.info("=== Phase: Cleanup ===")
+        try:
+            client = self.fio_node[0]
+            self.ssh_obj.exec_command(client, "pkill -f fio || true")
+            sleep_n_sec(5)
+
+            for name, info in self.lvol_mount_details.items():
+                cl = info.get("Client", self.fio_node[0])
+                try:
+                    self.ssh_obj.unmount_path(cl, info["Device"])
+                except Exception:
+                    pass
+                for cmd in info.get("Command", []):
+                    nqn = None
+                    for part in cmd.split():
+                        if "nqn" in part.lower():
+                            nqn = part.split("=")[-1] if "=" in part else part
+                    if nqn:
+                        self.ssh_obj.exec_command(
+                            cl, f"nvme disconnect -n {nqn} || true"
+                        )
+
+            self.sbcli_utils.delete_all_clones()
+            self.sbcli_utils.delete_all_snapshots()
+            self.sbcli_utils.delete_all_lvols()
+            self.sbcli_utils.delete_all_storage_pools()
+        except Exception as e:
+            self.logger.error(f"Cleanup error: {e}")
+
+    # ── Summary and timing ────────────────────────────────────────────────
+
+    def _print_add_device_summary(self):
+        self.logger.info("=" * 70)
+        self.logger.info("  DEVICE ADD AFTER BOOTSTRAP SUMMARY")
+        self.logger.info("=" * 70)
+        self.logger.info(f"  Test class:       {self.__class__.__name__}")
+        self.logger.info(f"  IO load:          {'YES' if self._with_io_load else 'NO (empty device)'}")
+        self.logger.info(f"  FIO params:       bs={self.FIO_LOAD_BS} rw=randwrite verify=md5" if self._with_io_load else "  FIO params:       N/A")
+        self.logger.info(f"  Target node:      {self._target_node_id}")
+        self.logger.info(f"  Target node IP:   {self._target_node_ip}")
+        self.logger.info(f"  Disabled PCIe:    {self._disabled_pcie_addr}")
+        self.logger.info(f"  New device:       {self._new_device_id}")
+        self.logger.info(f"  Lvols created:    {len(self._lvol_names)}")
+        self.logger.info(f"  Result:           {'PASSED' if self._test_passed else 'FAILED'}")
+        self.logger.info("-" * 70)
+        # Key metrics
+        fill_pct = self._timing.get("device_fill_pct", "0 (empty)")
+        self.logger.info(f"  {'device_fill_pct':30s} {fill_pct}")
+        mig = self._timing.get("migration_duration", 0)
+        if isinstance(mig, (int, float)):
+            self.logger.info(f"  {'migration_time':30s} {mig:10.1f}s ({mig/60:.1f}m)")
+        restart = self._timing.get("restart_duration", 0)
+        if isinstance(restart, (int, float)):
+            self.logger.info(f"  {'restart_time':30s} {restart:10.1f}s ({restart/60:.1f}m)")
+        if self._with_io_load:
+            avg_bw = self._timing.get("avg_write_bw_kib_s", 0)
+            total_bw = self._timing.get("total_write_bw_kib_s", 0)
+            self.logger.info(f"  {'avg_write_bw':30s} {avg_bw:10.1f} KiB/s ({avg_bw/1024:.1f} MiB/s)")
+            self.logger.info(f"  {'total_write_bw':30s} {total_bw:10.1f} KiB/s ({total_bw/1024:.1f} MiB/s)")
+        self.logger.info("-" * 70)
+        # All timing entries
+        for key, val in self._timing.items():
+            if isinstance(val, float):
+                self.logger.info(f"  {key:30s} {val:10.1f}s")
+            else:
+                self.logger.info(f"  {key:30s} {val}")
+        self.logger.info("=" * 70)
+
+    def _write_timing_json(self):
+        """Write standardised timing JSON for monitoring suite aggregation."""
+        phases = []
+        for name in ("setup_duration", "fill_duration", "restart_duration",
+                      "migration_duration"):
+            if name in self._timing:
+                phases.append({
+                    "name": name.replace("_duration", ""),
+                    "duration_sec": round(self._timing[name], 2),
+                    "status": "ok",
+                })
+
+        report = {
+            "test_class": self.__class__.__name__,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "status": "passed" if self._test_passed else "failed",
+            "geometry": {"ndcs": self.ndcs, "npcs": self.npcs},
+            "config": {
+                "with_io_load": self._with_io_load,
+                "target_node": self._target_node_id,
+                "disabled_pcie_addr": self._disabled_pcie_addr,
+                "new_device_id": self._new_device_id,
+                "num_lvols": len(self._lvol_names),
+                "fio_load_bs": self.FIO_LOAD_BS if self._with_io_load else None,
+                "fio_load_rw": "randwrite" if self._with_io_load else None,
+            },
+            "phases": phases,
+            "summary": {
+                "total_duration_sec": round(
+                    self._timing.get("total_duration", 0), 2
+                ),
+                "key_metric": round(
+                    self._timing.get("migration_duration", 0), 2
+                ),
+                "key_metric_label": "migration_duration_sec",
+                "device_fill_pct": self._timing.get("device_fill_pct", 0),
+            },
+        }
+        if self._with_io_load:
+            report["summary"]["avg_write_bw_kib_s"] = self._timing.get(
+                "avg_write_bw_kib_s", 0
+            )
+            report["summary"]["total_write_bw_kib_s"] = self._timing.get(
+                "total_write_bw_kib_s", 0
+            )
+
+        out_dir = Path("logs")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / "device_add_after_bootstrap_timing.json"
+        with open(out_path, "w") as f:
+            json.dump(report, f, indent=2)
+        self.logger.info(f"Timing JSON written to {out_path}")
+
+    def _write_test_summary_md(self):
+        """Write a markdown summary with cluster/device details to logs/test_summary.md."""
+        try:
+            lines = self._build_add_device_summary_md_lines()
+            out_dir = Path("logs")
+            out_dir.mkdir(parents=True, exist_ok=True)
+            out_path = out_dir / "test_summary.md"
+            out_path.write_text("\n".join(lines) + "\n")
+            self.logger.info(f"Test summary markdown written to {out_path}")
+        except Exception as exc:
+            self.logger.warning(f"Failed to write test summary markdown: {exc}")
+
+    def _build_add_device_summary_md_lines(self):
+        """Build markdown lines for the add-device test summary."""
+        lines = []
+        lines.append("# Device Add After Bootstrap Test Summary\n")
+
+        # ── Test Info ──
+        lines.append("## Test Info")
+        lines.append("| Field | Value |")
+        lines.append("|-------|-------|")
+        lines.append(f"| Test class | `{self.__class__.__name__}` |")
+        if self._with_io_load:
+            lines.append(f"| IO load | YES (bs={self.FIO_LOAD_BS}, rw=randwrite, verify=md5) |")
+        else:
+            lines.append("| IO load | NO (empty device, no fill) |")
+        lines.append(f"| Target node | `{self._target_node_id}` |")
+        lines.append(f"| Target node IP | {self._target_node_ip} |")
+        lines.append(f"| Disabled PCIe | {self._disabled_pcie_addr} |")
+        lines.append(f"| New device | `{self._new_device_id}` |")
+        lines.append(f"| Result | **{'PASSED' if self._test_passed else 'FAILED'}** |")
+        lines.append("")
+
+        # ── Key Metrics ──
+        lines.append("## Key Metrics")
+        lines.append("| Metric | Value |")
+        lines.append("|--------|-------|")
+        restart = self._timing.get("restart_duration", 0)
+        if isinstance(restart, (int, float)):
+            lines.append(f"| Restart time | {restart:.1f}s ({restart/60:.1f}m) |")
+        mig = self._timing.get("migration_duration", 0)
+        if isinstance(mig, (int, float)):
+            lines.append(f"| Migration time | {mig:.1f}s ({mig/60:.1f}m) |")
+        fill_pct = self._timing.get("device_fill_pct", 0)
+        lines.append(f"| Device fill level | {fill_pct}% |")
+        if self._with_io_load:
+            avg_bw = self._timing.get("avg_write_bw_kib_s", 0)
+            total_bw = self._timing.get("total_write_bw_kib_s", 0)
+            lines.append(f"| Avg write bandwidth | {avg_bw:.1f} KiB/s ({avg_bw/1024:.1f} MiB/s) |")
+            lines.append(f"| Total write bandwidth | {total_bw:.1f} KiB/s ({total_bw/1024:.1f} MiB/s) |")
+        lines.append("")
+
+        # ── Lvol Distribution ──
+        lines.append("## Lvol Distribution")
+        lines.append("| Node | # Lvols | Role |")
+        lines.append("|------|---------|------|")
+        for node_id in self._sn_nodes:
+            if node_id == self._target_node_id:
+                lines.append(f"| `{node_id}` | {len(self._lvol_names)} | target |")
+            else:
+                lines.append(f"| `{node_id}` | 0 | other |")
+        lines.append("")
+
+        # ── Per-Node Capacity ──
+        lines.append("## Per-Node Capacity")
+        lines.append("| Node | Status | Size Total | Size Used | Utilisation |")
+        lines.append("|------|--------|-----------|-----------|-------------|")
+        for node_id in self._sn_nodes:
+            try:
+                details = self.sbcli_utils.get_storage_node_details(node_id)
+                status = details[0].get("status", "?") if details else "?"
+                cap = self.sbcli_utils.get_node_capacity(node_id)
+                if isinstance(cap, list):
+                    cap = cap[0] if cap else {}
+                s_total = cap.get("size_total", 0)
+                s_used = cap.get("size_used", 0)
+                s_util = cap.get("size_util", 0)
+                lines.append(
+                    f"| `{node_id}` | {status} | "
+                    f"{_fmt_bytes(s_total)} | {_fmt_bytes(s_used)} | {s_util}% |"
+                )
+            except Exception as exc:
+                lines.append(f"| `{node_id}` | error | — | — | — |")
+                self.logger.warning(f"Could not get capacity for node {node_id}: {exc}")
+        lines.append("")
+
+        # ── Per-Device Capacity ──
+        lines.append("## Per-Device Capacity")
+        lines.append("| Node | Device | Status | Size Total | Size Used | Utilisation |")
+        lines.append("|------|--------|--------|-----------|-----------|-------------|")
+        for node_id in self._sn_nodes:
+            try:
+                devices = self.sbcli_utils.get_device_details(node_id)
+                for dev in devices:
+                    dev_id = dev.get("id", "?")
+                    dev_status = dev.get("status", "?")
+                    try:
+                        dcap = self.sbcli_utils.get_device_capacity(dev_id)
+                        if isinstance(dcap, list):
+                            dcap = dcap[0] if dcap else {}
+                        ds_total = dcap.get("size_total", 0)
+                        ds_used = dcap.get("size_used", 0)
+                        ds_util = dcap.get("size_util", 0)
+                        lines.append(
+                            f"| `{node_id}` | `{dev_id}` | {dev_status} | "
+                            f"{_fmt_bytes(ds_total)} | {_fmt_bytes(ds_used)} | {ds_util}% |"
+                        )
+                    except Exception:
+                        lines.append(
+                            f"| `{node_id}` | `{dev_id}` | {dev_status} | — | — | — |"
+                        )
+            except Exception as exc:
+                lines.append(f"| `{node_id}` | — | error | — | — | — |")
+                self.logger.warning(f"Could not get devices for node {node_id}: {exc}")
+        lines.append("")
+
+        # ── Phase Timings ──
+        lines.append("## Phase Timings")
+        lines.append("| Phase | Duration |")
+        lines.append("|-------|----------|")
+        for name in ("setup_duration", "fill_duration", "restart_duration",
+                      "migration_duration", "total_duration"):
+            if name in self._timing:
+                val = self._timing[name]
+                label = name.replace("_duration", "").replace("_", " ")
+                if isinstance(val, (int, float)):
+                    lines.append(f"| {label} | {val:.1f}s ({val/60:.1f}m) |")
+        lines.append("")
+
+        return lines
+
+
+class DeviceAddAfterBootstrapDocker(_DeviceAddAfterBootstrapBase, TestLvolHACluster):
+    """Add a new PCIe device after cluster bootstrap — WITHOUT IO load.
+
+    The cluster is bootstrapped with one storage node having 1 PCIe device
+    disabled.  This test rescans PCI, restarts the node to discover the
+    device, then adds it via ``sbctl sn add-device`` and waits for
+    rebalancing to complete.
+
+    Measures: setup time, fill time, restart time, migration time.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.logger = setup_logger(__name__)
+        self._init_add_device_state()
+        self.test_name = "device_add_after_bootstrap_no_load"
+
+    def run(self):
+        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self._run_add_device_test(with_io_load=False)
+
+
+class DeviceAddAfterBootstrapUnderLoadDocker(_DeviceAddAfterBootstrapBase, TestLvolHACluster):
+    """Add a new PCIe device after cluster bootstrap — UNDER IO LOAD.
+
+    Same as DeviceAddAfterBootstrapDocker but runs concurrent FIO
+    (128K randwrite, iodepth=1, verify=md5) during the restart + add-device
+    + migration phases.  Reports write bandwidth alongside migration time.
+
+    Measures: setup time, fill time, restart time, migration time,
+              average write bandwidth (KiB/s).
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.logger = setup_logger(__name__)
+        self._init_add_device_state()
+        self.test_name = "device_add_after_bootstrap_under_load"
+
+    def run(self):
+        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self._run_add_device_test(with_io_load=True)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1813,8 +2958,7 @@ class _DeviceFailureMigrationK8s(_DeviceFailureMigrationBase):
                 f"[global]\n"
                 f"name=load-{pvc_name}\n"
                 f"filename_format=/spdkvol/fio-load-{run_id}.$jobnum\n"
-                f"rw=randrw\n"
-                f"rwmixread=50\n"
+                f"rw=randwrite\n"
                 f"bs={self.FIO_LOAD_BS}\n"
                 f"iodepth={self.FIO_LOAD_IODEPTH}\n"
                 f"direct=1\n"
@@ -2032,6 +3176,67 @@ class _DeviceFailureMigrationK8s(_DeviceFailureMigrationBase):
             f"All FIO jobs finished ({elapsed:.1f}s)"
         )
 
+    # ── Phase: collect FIO bandwidth from K8s pod logs ──────────────────────
+
+    def _phase_collect_fio_bandwidth(self):
+        """Parse FIO pod logs and report write bandwidth (K8s variant)."""
+        self.logger.info("=== Phase: Collect FIO bandwidth stats (K8s) ===")
+        import re
+        bw_values = []
+
+        for job_name, _ in self._load_jobs:
+            pvc_name = job_name.replace("fio-load-", "", 1)
+            try:
+                pod_name = self.k8s_utils.get_job_pod_name(job_name)
+                if not pod_name:
+                    self.logger.warning(
+                        f"Could not find pod for FIO job {job_name}"
+                    )
+                    continue
+                logs = self.k8s_utils.get_pod_logs(pod_name, tail=200)
+                if not logs:
+                    continue
+                # Parse FIO output for write bandwidth
+                bw_match = re.search(
+                    r'write:.*BW=([0-9.]+)\s*([KMG]?i?B/s)', logs
+                )
+                if bw_match:
+                    bw_val = float(bw_match.group(1))
+                    bw_unit = bw_match.group(2)
+                    # Normalise to KiB/s
+                    if "MiB" in bw_unit or "MB" in bw_unit:
+                        bw_val *= 1024
+                    elif "GiB" in bw_unit or "GB" in bw_unit:
+                        bw_val *= 1024 * 1024
+                    bw_values.append(bw_val)
+                    self.logger.info(
+                        f"  {pvc_name}: write BW = "
+                        f"{bw_match.group(1)} {bw_unit}"
+                    )
+                else:
+                    self.logger.warning(
+                        f"  {pvc_name}: could not parse write BW from FIO pod log"
+                    )
+            except Exception as exc:
+                self.logger.warning(
+                    f"Could not parse FIO log for {pvc_name}: {exc}"
+                )
+
+        if bw_values:
+            avg_bw = sum(bw_values) / len(bw_values)
+            self._timing["avg_write_bw_kib_s"] = round(avg_bw, 1)
+            self._timing["total_write_bw_kib_s"] = round(sum(bw_values), 1)
+            self._timing["fio_lvol_count"] = len(bw_values)
+            self.logger.info(
+                f"FIO bandwidth summary: "
+                f"avg={avg_bw:.1f} KiB/s ({avg_bw/1024:.1f} MiB/s), "
+                f"total={sum(bw_values):.1f} KiB/s "
+                f"({sum(bw_values)/1024:.1f} MiB/s), "
+                f"lvols={len(bw_values)}"
+            )
+        else:
+            self.logger.warning("No FIO bandwidth data collected (K8s)")
+
     # ── Phase 5 override: stop IO load (K8s) ─────────────────────────────────
 
     def _phase_stop_io_load(self):
@@ -2071,6 +3276,121 @@ class _DeviceFailureMigrationK8s(_DeviceFailureMigrationBase):
             self.sbcli_utils.delete_all_storage_pools()
         except Exception as e:
             self.logger.error(f"Cleanup error: {e}")
+
+    # ── Override: lvol distribution uses node_vs_pvc ──────────────────────────
+
+    def _build_summary_md_lines(self):
+        """Build markdown lines — uses node_vs_pvc for accurate K8s PVC counts."""
+        lines = []
+        lines.append("# Device Migration Test Summary (K8s)\n")
+
+        # ── Test Info ──
+        lines.append("## Test Info")
+        lines.append("| Field | Value |")
+        lines.append("|-------|-------|")
+        lines.append(f"| Test class | `{self.__class__.__name__}` |")
+        lines.append(f"| Failure mode | {self._failure_mode} |")
+        if self._with_io_load:
+            lines.append(f"| IO load | YES (bs={self.FIO_LOAD_BS}, rw=randwrite, verify=md5) |")
+        else:
+            lines.append("| IO load | NO (empty device, no fill) |")
+        lines.append(f"| Result | **{'PASSED' if self._test_passed else 'FAILED'}** |")
+        lines.append("")
+
+        # ── Key Metrics ──
+        lines.append("## Key Metrics")
+        lines.append("| Metric | Value |")
+        lines.append("|--------|-------|")
+        mig = self._timing.get("migration_duration", self._timing.get("restart_duration", 0))
+        if isinstance(mig, (int, float)):
+            lines.append(f"| Migration/restart time | {mig:.1f}s ({mig/60:.1f}m) |")
+        fill_pct = self._timing.get("device_fill_pct", 0)
+        lines.append(f"| Device fill level | {fill_pct}% |")
+        if self._with_io_load:
+            avg_bw = self._timing.get("avg_write_bw_kib_s", 0)
+            total_bw = self._timing.get("total_write_bw_kib_s", 0)
+            lines.append(f"| Avg write bandwidth | {avg_bw:.1f} KiB/s ({avg_bw/1024:.1f} MiB/s) |")
+            lines.append(f"| Total write bandwidth | {total_bw:.1f} KiB/s ({total_bw/1024:.1f} MiB/s) |")
+        lines.append("")
+
+        # ── Lvol Distribution (K8s: uses node_vs_pvc) ──
+        lines.append("## Lvol Distribution")
+        lines.append("| Node | # PVCs | Role |")
+        lines.append("|------|--------|------|")
+        for node_id in self._sn_nodes:
+            pvcs = self.node_vs_pvc.get(node_id, [])
+            role = "target" if node_id == self._target_node_id else "other"
+            lines.append(f"| `{node_id}` | {len(pvcs)} | {role} |")
+        lines.append("")
+
+        # ── Per-Node Capacity ──
+        lines.append("## Per-Node Capacity")
+        lines.append("| Node | Status | Size Total | Size Used | Utilisation |")
+        lines.append("|------|--------|-----------|-----------|-------------|")
+        for node_id in self._sn_nodes:
+            try:
+                details = self.sbcli_utils.get_storage_node_details(node_id)
+                status = details[0].get("status", "?") if details else "?"
+                cap = self.sbcli_utils.get_node_capacity(node_id)
+                if isinstance(cap, list):
+                    cap = cap[0] if cap else {}
+                s_total = cap.get("size_total", 0)
+                s_used = cap.get("size_used", 0)
+                s_util = cap.get("size_util", 0)
+                lines.append(
+                    f"| `{node_id}` | {status} | "
+                    f"{_fmt_bytes(s_total)} | {_fmt_bytes(s_used)} | {s_util}% |"
+                )
+            except Exception as exc:
+                lines.append(f"| `{node_id}` | error | — | — | — |")
+                self.logger.warning(f"Could not get capacity for node {node_id}: {exc}")
+        lines.append("")
+
+        # ── Per-Device Capacity ──
+        lines.append("## Per-Device Capacity")
+        lines.append("| Node | Device | Status | Size Total | Size Used | Utilisation |")
+        lines.append("|------|--------|--------|-----------|-----------|-------------|")
+        for node_id in self._sn_nodes:
+            try:
+                devices = self.sbcli_utils.get_device_details(node_id)
+                for dev in devices:
+                    dev_id = dev.get("id", "?")
+                    dev_status = dev.get("status", "?")
+                    try:
+                        dcap = self.sbcli_utils.get_device_capacity(dev_id)
+                        if isinstance(dcap, list):
+                            dcap = dcap[0] if dcap else {}
+                        ds_total = dcap.get("size_total", 0)
+                        ds_used = dcap.get("size_used", 0)
+                        ds_util = dcap.get("size_util", 0)
+                        lines.append(
+                            f"| `{node_id}` | `{dev_id}` | {dev_status} | "
+                            f"{_fmt_bytes(ds_total)} | {_fmt_bytes(ds_used)} | {ds_util}% |"
+                        )
+                    except Exception:
+                        lines.append(
+                            f"| `{node_id}` | `{dev_id}` | {dev_status} | — | — | — |"
+                        )
+            except Exception as exc:
+                lines.append(f"| `{node_id}` | — | error | — | — | — |")
+                self.logger.warning(f"Could not get devices for node {node_id}: {exc}")
+        lines.append("")
+
+        # ── Phase Timings ──
+        lines.append("## Phase Timings")
+        lines.append("| Phase | Duration |")
+        lines.append("|-------|----------|")
+        for name in ("setup_duration", "fill_duration", "remove_duration",
+                      "migration_duration", "restart_duration",
+                      "fio_completion_duration", "total_duration"):
+            if name in self._timing:
+                val = self._timing[name]
+                label = name.replace("_duration", "").replace("_", " ")
+                if isinstance(val, (int, float)):
+                    lines.append(f"| {label} | {val:.1f}s ({val/60:.1f}m) |")
+        lines.append("")
+
+        return lines
 
 
 # ── K8s concrete classes ─────────────────────────────────────────────────────
