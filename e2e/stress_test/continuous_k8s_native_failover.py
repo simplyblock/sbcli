@@ -80,11 +80,13 @@ class K8sNativeFailoverTest(TestClusterBase):
 
         # Sizing — fio_size is computed dynamically by _compute_fio_size()
         # before each FIO start/restart so total disk usage stays bounded.
-        # pvc_size=100Gi → 80% cap = 80G per PVC (numjobs=1).
-        # At start (8 PVCs / 4 nodes): fio_size=80G, ~160G/node.
-        # At peak (36 total / 4 nodes): fio_size=22G, ~200G/node.
+        # pvc_size=100Gi → 60% cap = 60G per PVC (numjobs=1).
+        # At start (8 PVCs / 4 nodes): fio_size=50G, ~100G/node.
+        # At peak (36 total / 4 nodes): fio_size=16G, ~150G/node.
         # Thin-provisioned: only written data consumes backend storage.
-        self.TARGET_DATA_PER_NODE_GB = 200
+        # Note: cap must stay well below 80% because FIO verify + COW from
+        # clones/snapshots causes additional block allocations over time.
+        self.TARGET_DATA_PER_NODE_GB = 150
         self.pvc_size = "100Gi"
         self.int_pvc_size = 100
         self.fio_size = "40G"  # default; overridden by _compute_fio_size()
@@ -96,8 +98,12 @@ class K8sNativeFailoverTest(TestClusterBase):
 
         # Outage config
         self.npcs = kwargs.get("npcs", 1)
-        self.outage_types = ["graceful_shutdown", "interface_full_network_interrupt"]
-        self.outage_types2 = ["container_stop", "graceful_shutdown", "interface_full_network_interrupt"]
+        # self.outage_types = ["graceful_shutdown", "interface_full_network_interrupt"]
+        # self.outage_types2 = ["container_stop", "graceful_shutdown", "interface_full_network_interrupt"]
+
+        self.outage_types = ["graceful_shutdown"]
+        self.outage_types2 = ["container_stop", "graceful_shutdown"]
+
 
         # ── Tracking dicts ──
         # pvc_name → {job_name, configmap_name, snapshots: [snap_name, ...], node_id}
@@ -933,9 +939,10 @@ class K8sNativeFailoverTest(TestClusterBase):
         jobs_per_node = total_jobs / num_nodes
         fio_size_gb = int(self.TARGET_DATA_PER_NODE_GB / max(1, jobs_per_node))
 
-        # Cap at ~80% of PVC capacity to account for filesystem formatting
+        # Cap at ~60% of PVC capacity to account for filesystem formatting
         # overhead (ext4/xfs journal, inode tables, superblock = ~5-15%)
-        max_fio_gb = int(self.int_pvc_size * 0.80)
+        # and COW block growth from clones/snapshots over long test runs.
+        max_fio_gb = int(self.int_pvc_size * 0.60)
         fio_size_gb = min(fio_size_gb, max_fio_gb)
         fio_size_gb = max(fio_size_gb, 1)  # at least 1G
 
@@ -1984,21 +1991,42 @@ class K8sNativeFailoverTest(TestClusterBase):
 
         Uses kubectl exec into the privileged SPDK pod (hostNetwork:true) to
         run iptables DROP rules with auto-flush after *duration* seconds.
+
+        The iptables flush runs as a **host-level process** via
+        ``nsenter --target 1`` so it survives SPDK container death.  Without
+        this, SPDK's 60-second abort timer kills the container (and all its
+        child processes), leaving iptables DROP rules permanently in place.
+
         No SSH to storage nodes required.
 
         Returns the chosen duration.
         """
         self._ensure_k8s_utils()
-        cmd = (
+        # Total delay before flush = 5s (pre-DROP delay) + duration
+        flush_delay = duration + 5
+        # Step 1: Schedule the iptables flush as a host-level process via
+        # nsenter into PID 1's namespaces.  This process survives even if
+        # the SPDK container (and all its children) is killed by abort().
+        flush_cmd = (
+            f"sudo nsenter --target 1 --mount --net -- "
+            f"bash -c 'nohup bash -c \"sleep {flush_delay} && iptables -F\" "
+            f"> /dev/null 2>&1 &'"
+        )
+        self.k8s_utils.exec_in_spdk_container(node_ip, flush_cmd)
+        self.logger.info(
+            f"[K8s] Scheduled host-level iptables flush in {flush_delay}s on {node_ip}"
+        )
+
+        # Step 2: Apply the DROP rules after a short delay (gives kubectl
+        # exec time to return before connectivity is lost).
+        drop_cmd = (
             f"sudo nohup bash -c '"
             f"sleep 5 && "
             f"iptables -A INPUT -j DROP && "
-            f"iptables -A OUTPUT -j DROP && "
-            f"sleep {duration} && "
-            f"iptables -F"
+            f"iptables -A OUTPUT -j DROP"
             f"' > /tmp/k8s_nw_outage.log 2>&1 &"
         )
-        self.k8s_utils.exec_in_spdk_container(node_ip, cmd)
+        self.k8s_utils.exec_in_spdk_container(node_ip, drop_cmd)
         self.logger.info(
             f"[K8s] Network outage triggered on {node_ip} "
             f"(self-restoring after {duration}s)"

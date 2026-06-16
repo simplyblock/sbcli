@@ -506,6 +506,12 @@ class RandomK8sMultiOutageFailoverTest(RandomMultiClientMultiFailoverTest):
 
         Uses kubectl exec into the privileged SPDK pod (hostNetwork:true) to
         run iptables DROP rules with auto-flush after *duration* seconds.
+
+        The iptables flush runs as a **host-level process** via
+        ``nsenter --target 1`` so it survives SPDK container death.  Without
+        this, SPDK's 60-second abort timer kills the container (and all its
+        child processes), leaving iptables DROP rules permanently in place.
+
         No SSH to storage nodes required.
 
         Returns the chosen duration.
@@ -514,16 +520,31 @@ class RandomK8sMultiOutageFailoverTest(RandomMultiClientMultiFailoverTest):
             raise RuntimeError(
                 "[K8s] k8s_utils not initialised — was setup() called with k8s_run=True?"
             )
-        cmd = (
+        # Total delay before flush = 5s (pre-DROP delay) + duration
+        flush_delay = duration + 5
+        # Step 1: Schedule the iptables flush as a host-level process via
+        # nsenter into PID 1's namespaces.  This process survives even if
+        # the SPDK container (and all its children) is killed by abort().
+        flush_cmd = (
+            f"sudo nsenter --target 1 --mount --net -- "
+            f"bash -c 'nohup bash -c \"sleep {flush_delay} && iptables -F\" "
+            f"> /dev/null 2>&1 &'"
+        )
+        self.k8s_utils.exec_in_spdk_container(node_ip, flush_cmd)
+        self.logger.info(
+            f"[K8s] Scheduled host-level iptables flush in {flush_delay}s on {node_ip}"
+        )
+
+        # Step 2: Apply the DROP rules after a short delay (gives kubectl
+        # exec time to return before connectivity is lost).
+        drop_cmd = (
             f"sudo nohup bash -c '"
             f"sleep 5 && "
             f"iptables -A INPUT -j DROP && "
-            f"iptables -A OUTPUT -j DROP && "
-            f"sleep {duration} && "
-            f"iptables -F"
+            f"iptables -A OUTPUT -j DROP"
             f"' > /tmp/k8s_nw_outage.log 2>&1 &"
         )
-        self.k8s_utils.exec_in_spdk_container(node_ip, cmd)
+        self.k8s_utils.exec_in_spdk_container(node_ip, drop_cmd)
         self.logger.info(
             f"[K8s] Network outage triggered on {node_ip} "
             f"(self-restoring after {duration}s)"
