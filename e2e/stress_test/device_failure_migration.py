@@ -133,6 +133,10 @@ class _DeviceFailureMigrationBase:
             if with_io_load:
                 self._phase_stop_io_load()  # kill FIO only if still running (failure path)
             self._phase_recover_device()
+            try:
+                self.collect_management_details(suffix="_pre_cleanup")
+            except Exception as e:
+                self.logger.warning(f"collect_management_details failed: {e}")
             self._phase_cleanup()
             self._timing["total_duration"] = time.time() - t0
             self._print_migration_summary()
@@ -174,6 +178,10 @@ class _DeviceFailureMigrationBase:
             if with_io_load:
                 self._phase_stop_io_load()
             # No device recovery needed — restart-device already brought it back
+            try:
+                self.collect_management_details(suffix="_pre_cleanup")
+            except Exception as e:
+                self.logger.warning(f"collect_management_details failed: {e}")
             self._phase_cleanup()
             self._timing["total_duration"] = time.time() - t0
             self._print_migration_summary()
