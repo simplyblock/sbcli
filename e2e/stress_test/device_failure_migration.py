@@ -75,10 +75,10 @@ class _DeviceFailureMigrationBase:
     # ── Configuration ────────────────────────────────────────────────────────
     FILL_PERCENT = 65          # target device utilisation before failure
     LVOL_SIZE = "50G"          # per-lvol size (large enough to fill device)
-    FIO_FILL_SIZE = "45G"      # < LVOL_SIZE to fit within filesystem overhead
+    FIO_FILL_SIZE = "30G"      # < LVOL_SIZE to fit within filesystem overhead
     FIO_FILL_BS = "512K"       # sequential write block size for fill
     FIO_LOAD_BS = "4K"         # random IO block size for load
-    FIO_LOAD_IODEPTH = 4
+    FIO_LOAD_IODEPTH = 1       # must be 1 when verify=md5 to avoid false errors
     FIO_LOAD_NUMJOBS = 2
     FIO_LOAD_RUNTIME = 7200    # 2 h (longer than expected migration)
     MIGRATION_TIMEOUT = 3600   # 1 h max for migration
