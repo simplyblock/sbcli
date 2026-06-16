@@ -1566,9 +1566,11 @@ class SshUtils:
     def get_mount_free_gb(self, node, path):
         """Return free space in GB for the filesystem containing *path*."""
         # df --output=avail gives available 1K-blocks; convert to GB
+        # Use max_retries=3 to handle transient SSH failures when many
+        # parallel FIO launches all run df at the same time.
         out, _ = self.exec_command(
             node, f"df --output=avail -B1G '{path}' | tail -1",
-            max_retries=1)
+            max_retries=3)
         try:
             return int(out.strip())
         except (ValueError, TypeError):
@@ -1603,10 +1605,16 @@ class SshUtils:
 
         avail_gb = self.get_mount_free_gb(node, mount_point)
         if avail_gb is None:
+            # df failed — cap FIO size at 70% of the requested size to
+            # avoid filling thin-provisioned lvols to 100%.  This is a
+            # conservative fallback; the normal path uses actual df data.
+            safe_gb = max(1, int(size_gb * 0.70))
+            safe_str = f"{safe_gb}G"
             self.logger.warning(
                 f"[space_check] Could not determine free space on "
-                f"{node}:{mount_point} — keeping size={fio_size_str}")
-            return fio_size_str
+                f"{node}:{mount_point} — capping size "
+                f"{fio_size_str} -> {safe_str} (70% safety cap)")
+            return safe_str
 
         self.logger.info(
             f"[space_check] {node}:{mount_point} — "
