@@ -641,6 +641,17 @@ def create_migration(lvol_id, target_node_id,
     if not tgt_node.lvstore:
         raise ValueError(f"Target node {target_node_id} has no lvstore")
 
+    existing_migration = get_active_migration_for_lvol(lvol_id, tgt_node.cluster_id)
+    if existing_migration:
+        if existing_migration.target_node_id != target_node_id:
+            raise ValueError(
+                f"An active migration for {lvol_id} already exists targeting a different node "
+                f"({existing_migration.target_node_id}). Cancel it first.")
+        if existing_migration.phase != LVolMigration.PHASE_PRE_CREATED:
+            raise ValueError(
+                f"Migration {existing_migration.uuid} for {lvol_id} is already past pre-create "
+                f"(phase={existing_migration.phase}). Use /continue or cancel it.")
+
     src_node_id = lvol.node_id
     try:
         src_node = db.get_storage_node_by_id(src_node_id)
@@ -864,6 +875,12 @@ def create_migration(lvol_id, target_node_id,
         out.extend(_build_connect_entries(sec_node, sec_port, lvol, nqn, ctrl_loss_tmo, cluster, host_entry, host_nqn))
 
     # ── 4. Create migration record so cancel can clean up ─────────────────────
+    if existing_migration:
+        logger.info(
+            f"create_migration: idempotent re-call for lvol={lvol_id} target={target_node_id} "
+            f"reusing migration_id={existing_migration.uuid} connect_strings={len(out)}")
+        return existing_migration.uuid, out
+
     migration = LVolMigration()
     migration.uuid = str(uuid.uuid4())
     migration.cluster_id = tgt_node.cluster_id
