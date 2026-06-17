@@ -141,6 +141,7 @@ class _DeviceFailureMigrationBase:
                 self._phase_fail_and_migrate()
             self._phase_validate()
             if with_io_load:
+                self._phase_restart_non_target_node()
                 # Wait for FIO to finish naturally — do NOT kill it
                 self._phase_wait_fio_completion()
                 self._phase_validate_fio()
@@ -208,6 +209,7 @@ class _DeviceFailureMigrationBase:
             self._phase_pcie_remove_and_restart()
             self._phase_validate_restart()
             if with_io_load:
+                self._phase_restart_non_target_node()
                 self._phase_wait_fio_completion()
                 self._phase_validate_fio()
             self._test_passed = True
@@ -1003,6 +1005,157 @@ class _DeviceFailureMigrationBase:
                 f"{check_duration}s"
             )
 
+    # ── Phase: restart non-target node under IO load ────────────────────────
+
+    def _phase_restart_non_target_node(self):
+        """Restart a non-target storage node while IO is active.
+
+        Validates that the cluster is truly healthy post-migration by
+        restarting a node that does NOT hold the faulty device and
+        verifying IO continues without interruption.
+        """
+        self.logger.info(
+            "=== Phase: Restart non-target node under IO load ==="
+        )
+        t0 = time.time()
+        restart_node_id = self._pick_non_target_restart_node()
+        if not restart_node_id:
+            self.logger.warning(
+                "No non-target node candidate found — skipping restart validation"
+            )
+            self._timing["non_target_restart_result"] = "skipped_no_candidate"
+            return
+
+        self._timing["non_target_restart_node"] = restart_node_id
+        self.logger.info(f"Selected non-target node for restart: {restart_node_id}")
+
+        try:
+            # Log pre-restart FIO state
+            pre_fio = self._count_active_fio()
+            self.logger.info(f"Active FIO processes before restart: {pre_fio}")
+
+            # Restart the node
+            self.logger.info(f"Restarting node {restart_node_id} ...")
+            self.sbcli_utils.restart_node(restart_node_id)
+
+            # Wait for node to come back online
+            self.logger.info(
+                f"Waiting for node {restart_node_id} to come back online ..."
+            )
+            self.sbcli_utils.wait_for_storage_node_status(
+                restart_node_id, "online", timeout=600
+            )
+            self.logger.info(f"Node {restart_node_id} is online")
+
+            # Wait for health check to pass
+            self.logger.info(
+                f"Waiting for node {restart_node_id} health check ..."
+            )
+            self.sbcli_utils.wait_for_health_status(
+                restart_node_id, True, timeout=300
+            )
+            self.logger.info(f"Node {restart_node_id} health check passed")
+
+            # Stabilization period
+            sleep_n_sec(30)
+
+            # Verify all nodes are online and healthy
+            storage_nodes = self.sbcli_utils.get_storage_nodes()
+            for node in storage_nodes.get("results", []):
+                nid = node.get("id", "?")
+                status = node.get("status", "?")
+                health = node.get("health_check", False)
+                self.logger.info(
+                    f"  Node {nid[:8]}: status={status} health={health}"
+                )
+                if status != "online":
+                    raise RuntimeError(
+                        f"Node {nid} has status '{status}' after "
+                        f"non-target restart (expected online)"
+                    )
+
+            # Verify FIO is still running
+            self._verify_fio_still_running()
+
+            self._timing["non_target_restart_duration"] = time.time() - t0
+            self._timing["non_target_restart_result"] = "passed"
+            self.logger.info(
+                f"Non-target node restart validation PASSED "
+                f"({self._timing['non_target_restart_duration']:.1f}s)"
+            )
+        except Exception as exc:
+            self._timing["non_target_restart_duration"] = time.time() - t0
+            self._timing["non_target_restart_result"] = f"failed: {exc}"
+            self.logger.error(
+                f"Non-target node restart validation FAILED: {exc}"
+            )
+            raise
+
+    def _pick_non_target_restart_node(self):
+        """Pick a non-target storage node to restart.
+
+        Prefers a node that has IO running on it (from ``_lvols_on_others``).
+        Returns the node UUID or None if no candidate found.
+        """
+        candidates = set()
+
+        # Docker: check lvol_mount_details for NodeID
+        if hasattr(self, "lvol_mount_details"):
+            for name in self._lvols_on_others:
+                info = self.lvol_mount_details.get(name, {})
+                nid = info.get("NodeID")
+                if nid and nid != self._target_node_id:
+                    candidates.add(nid)
+
+        # K8s: check _pvc_details for node_id
+        if hasattr(self, "_pvc_details"):
+            for name in self._lvols_on_others:
+                info = self._pvc_details.get(name, {})
+                nid = info.get("node_id")
+                if nid and nid != self._target_node_id:
+                    candidates.add(nid)
+
+        # Fallback: any non-target node
+        if not candidates:
+            candidates = {
+                n for n in self._sn_nodes if n != self._target_node_id
+            }
+
+        if not candidates:
+            return None
+
+        return sorted(candidates)[0]
+
+    def _count_active_fio(self):
+        """Count active FIO processes on the client node (Docker variant)."""
+        try:
+            client = self.fio_node[0]
+            process = self.ssh_obj.find_process_name(
+                node=client, process_name="fio --name"
+            )
+            process_fio = [
+                p for p in process
+                if "grep" not in p and not p.startswith("kworker")
+            ]
+            return len(process_fio)
+        except Exception as exc:
+            self.logger.warning(f"Could not count FIO processes: {exc}")
+            return -1
+
+    def _verify_fio_still_running(self):
+        """Verify FIO processes are still active after non-target node restart."""
+        fio_count = self._count_active_fio()
+        self.logger.info(f"Active FIO processes after restart: {fio_count}")
+        if fio_count == 0:
+            raise RuntimeError(
+                "FIO processes are no longer running after non-target node "
+                "restart — IO was interrupted during storage node restart"
+            )
+        if fio_count < 0:
+            self.logger.warning(
+                "Could not verify FIO process count — skipping check"
+            )
+
     # ── Phase 5: stop IO load ────────────────────────────────────────────────
 
     def _phase_validate(self):
@@ -1571,6 +1724,13 @@ class _DeviceFailureMigrationBase:
         restart = self._timing.get("restart_duration", 0)
         if isinstance(restart, (int, float)) and restart > 0:
             self.logger.info(f"  {'restart_time':30s} {restart:10.1f}s ({restart/60:.1f}m)")
+        nt_restart = self._timing.get("non_target_restart_duration", 0)
+        if isinstance(nt_restart, (int, float)) and nt_restart > 0:
+            self.logger.info(f"  {'non_target_restart':30s} {nt_restart:10.1f}s ({nt_restart/60:.1f}m)")
+            nt_node = self._timing.get("non_target_restart_node", "?")
+            nt_result = self._timing.get("non_target_restart_result", "?")
+            self.logger.info(f"  {'non_target_restart_node':30s} {nt_node}")
+            self.logger.info(f"  {'non_target_restart_result':30s} {nt_result}")
         if self._with_io_load:
             avg_w = self._timing.get("avg_write_bytes_ps", 0)
             avg_r = self._timing.get("avg_read_bytes_ps", 0)
@@ -1595,7 +1755,8 @@ class _DeviceFailureMigrationBase:
         for name in ("setup_duration", "fill_duration", "remove_duration",
                       "failed_device_migration_duration",
                       "new_device_migration_duration",
-                      "restart_duration"):
+                      "restart_duration",
+                      "non_target_restart_duration"):
             if name in self._timing:
                 phases.append({
                     "name": name.replace("_duration", ""),
@@ -1632,6 +1793,17 @@ class _DeviceFailureMigrationBase:
                 "device_fill_pct": self._timing.get("device_fill_pct", 0),
             },
         }
+        # Non-target restart details
+        if "non_target_restart_duration" in self._timing:
+            report["summary"]["non_target_restart_duration"] = round(
+                self._timing["non_target_restart_duration"], 2
+            )
+            report["summary"]["non_target_restart_node"] = self._timing.get(
+                "non_target_restart_node", ""
+            )
+            report["summary"]["non_target_restart_result"] = self._timing.get(
+                "non_target_restart_result", ""
+            )
         if self._with_io_load:
             report["summary"]["avg_write_bytes_ps"] = self._timing.get(
                 "avg_write_bytes_ps", 0
@@ -1678,14 +1850,15 @@ class _DeviceFailureMigrationBase:
             for name in ("setup_duration", "fill_duration", "remove_duration",
                           "failed_device_migration_duration",
                           "new_device_migration_duration",
-                          "restart_duration"):
+                          "restart_duration",
+                          "non_target_restart_duration"):
                 if name in self._timing:
                     phase_names.append(name.replace("_duration", ""))
                     phase_durations.append(self._timing[name])
 
             if phase_durations:
                 colors = ["#3498db", "#f39c12", "#e74c3c", "#9b59b6",
-                          "#2ecc71", "#1abc9c"]
+                          "#2ecc71", "#1abc9c", "#e67e22"]
                 colors = colors[:len(phase_names)]
 
                 fig, axes = plt.subplots(1, 2, figsize=(14, 5))
@@ -1920,6 +2093,19 @@ class _DeviceFailureMigrationBase:
                 lines.append(f"| Unhealthy events | {unhealthy} |")
             lines.append("")
 
+        # ── Non-Target Node Restart Validation ──
+        nt_dur = self._timing.get("non_target_restart_duration")
+        if nt_dur is not None:
+            lines.append("## Non-Target Node Restart Validation")
+            lines.append("| Field | Value |")
+            lines.append("|-------|-------|")
+            nt_node = self._timing.get("non_target_restart_node", "N/A")
+            nt_result = self._timing.get("non_target_restart_result", "N/A")
+            lines.append(f"| Restarted node | `{nt_node}` |")
+            lines.append(f"| Duration | {nt_dur:.1f}s ({nt_dur/60:.1f}m) |")
+            lines.append(f"| Result | **{nt_result}** |")
+            lines.append("")
+
         # ── Phase Timings ──
         lines.append("## Phase Timings")
         lines.append("| Phase | Duration |")
@@ -1927,7 +2113,8 @@ class _DeviceFailureMigrationBase:
         for name in ("setup_duration", "fill_duration", "remove_duration",
                       "failed_device_migration_duration",
                       "new_device_migration_duration",
-                      "restart_duration", "migration_duration",
+                      "restart_duration", "non_target_restart_duration",
+                      "migration_duration",
                       "fio_completion_duration", "total_duration"):
             if name in self._timing:
                 val = self._timing[name]
@@ -2193,6 +2380,7 @@ class _DeviceAddAfterBootstrapBase:
             self._phase_add_new_device()
             self._phase_validate_cluster()
             if with_io_load:
+                self._phase_restart_non_target_node()
                 self._phase_stop_io_load()
             self._test_passed = True
         finally:
@@ -2834,6 +3022,7 @@ class _DeviceAddAfterBootstrapBase:
         """Write standardised timing JSON for monitoring suite aggregation."""
         phases = []
         for name in ("setup_duration", "fill_duration", "restart_duration",
+                      "non_target_restart_duration",
                       "migration_duration"):
             if name in self._timing:
                 phases.append({
@@ -2868,6 +3057,17 @@ class _DeviceAddAfterBootstrapBase:
                 "device_fill_pct": self._timing.get("device_fill_pct", 0),
             },
         }
+        # Non-target restart details
+        if "non_target_restart_duration" in self._timing:
+            report["summary"]["non_target_restart_duration"] = round(
+                self._timing["non_target_restart_duration"], 2
+            )
+            report["summary"]["non_target_restart_node"] = self._timing.get(
+                "non_target_restart_node", ""
+            )
+            report["summary"]["non_target_restart_result"] = self._timing.get(
+                "non_target_restart_result", ""
+            )
         if self._with_io_load:
             report["summary"]["avg_write_bytes_ps"] = self._timing.get(
                 "avg_write_bytes_ps", 0
@@ -3042,11 +3242,25 @@ class _DeviceAddAfterBootstrapBase:
                 lines.append(f"| Unhealthy events | {unhealthy} |")
             lines.append("")
 
+        # ── Non-Target Node Restart Validation ──
+        nt_dur = self._timing.get("non_target_restart_duration")
+        if nt_dur is not None:
+            lines.append("## Non-Target Node Restart Validation")
+            lines.append("| Field | Value |")
+            lines.append("|-------|-------|")
+            nt_node = self._timing.get("non_target_restart_node", "N/A")
+            nt_result = self._timing.get("non_target_restart_result", "N/A")
+            lines.append(f"| Restarted node | `{nt_node}` |")
+            lines.append(f"| Duration | {nt_dur:.1f}s ({nt_dur/60:.1f}m) |")
+            lines.append(f"| Result | **{nt_result}** |")
+            lines.append("")
+
         # ── Phase Timings ──
         lines.append("## Phase Timings")
         lines.append("| Phase | Duration |")
         lines.append("|-------|----------|")
         for name in ("setup_duration", "fill_duration", "restart_duration",
+                      "non_target_restart_duration",
                       "migration_duration", "total_duration"):
             if name in self._timing:
                 val = self._timing[name]
@@ -3535,6 +3749,66 @@ class _DeviceFailureMigrationK8s(_DeviceFailureMigrationBase):
             f"All FIO jobs finished ({elapsed:.1f}s)"
         )
 
+    # ── K8s overrides for non-target restart FIO verification ───────────────
+
+    def _count_active_fio(self):
+        """Count active FIO K8s Jobs."""
+        active = 0
+        for job_name, _ in self._load_jobs:
+            try:
+                out = self.k8s_utils._exec_kubectl(
+                    f"get job {job_name} "
+                    f"-o jsonpath='{{.status.active}}'"
+                )
+                n = int(out.strip() or "0")
+                active += n
+            except Exception:
+                pass
+        return active
+
+    def _verify_fio_still_running(self):
+        """Verify FIO K8s Jobs are still active after non-target node restart.
+
+        Raises RuntimeError if any job failed.  Jobs that completed
+        naturally (succeeded) are acceptable — FIO may have finished
+        within its runtime window.
+        """
+        active = 0
+        succeeded = 0
+        failed = 0
+        for job_name, _ in self._load_jobs:
+            try:
+                out = self.k8s_utils._exec_kubectl(
+                    f"get job {job_name} "
+                    f"-o jsonpath='{{.status.active}} {{.status.succeeded}} {{.status.failed}}'"
+                )
+                parts = (out.strip() or "0 0 0").split()
+                a = int(parts[0]) if len(parts) > 0 and parts[0] else 0
+                s = int(parts[1]) if len(parts) > 1 and parts[1] else 0
+                f = int(parts[2]) if len(parts) > 2 and parts[2] else 0
+                active += a
+                succeeded += s
+                failed += f
+            except Exception as exc:
+                self.logger.warning(
+                    f"Could not check job {job_name}: {exc}"
+                )
+
+        self.logger.info(
+            f"FIO jobs after restart: active={active} "
+            f"succeeded={succeeded} failed={failed}"
+        )
+        if failed > 0:
+            raise RuntimeError(
+                f"{failed} FIO K8s Job(s) failed after non-target node "
+                f"restart — IO was interrupted during storage node restart"
+            )
+        if active == 0 and succeeded == 0:
+            raise RuntimeError(
+                "No active or succeeded FIO K8s Jobs found after "
+                "non-target node restart"
+            )
+
     # ── Phase 5 override: stop IO load (K8s) ─────────────────────────────────
 
     def _phase_stop_io_load(self):
@@ -3697,6 +3971,19 @@ class _DeviceFailureMigrationK8s(_DeviceFailureMigrationBase):
                 lines.append(f"| Unhealthy events | {unhealthy} |")
             lines.append("")
 
+        # ── Non-Target Node Restart Validation ──
+        nt_dur = self._timing.get("non_target_restart_duration")
+        if nt_dur is not None:
+            lines.append("## Non-Target Node Restart Validation")
+            lines.append("| Field | Value |")
+            lines.append("|-------|-------|")
+            nt_node = self._timing.get("non_target_restart_node", "N/A")
+            nt_result = self._timing.get("non_target_restart_result", "N/A")
+            lines.append(f"| Restarted node | `{nt_node}` |")
+            lines.append(f"| Duration | {nt_dur:.1f}s ({nt_dur/60:.1f}m) |")
+            lines.append(f"| Result | **{nt_result}** |")
+            lines.append("")
+
         # ── Phase Timings ──
         lines.append("## Phase Timings")
         lines.append("| Phase | Duration |")
@@ -3704,7 +3991,8 @@ class _DeviceFailureMigrationK8s(_DeviceFailureMigrationBase):
         for name in ("setup_duration", "fill_duration", "remove_duration",
                       "failed_device_migration_duration",
                       "new_device_migration_duration",
-                      "restart_duration", "migration_duration",
+                      "restart_duration", "non_target_restart_duration",
+                      "migration_duration",
                       "fio_completion_duration", "total_duration"):
             if name in self._timing:
                 val = self._timing[name]
