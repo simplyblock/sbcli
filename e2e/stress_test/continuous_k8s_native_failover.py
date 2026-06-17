@@ -796,6 +796,34 @@ class K8sNativeFailoverTest(TestClusterBase):
                     else:
                         all_done = False
 
+                    # Log subtask status breakdown for each non-done master task
+                    if task['status'] != 'done':
+                        try:
+                            subtasks = self.sbcli_utils.get_task_subtasks(task['id'])
+                            if subtasks:
+                                sub_status = {}
+                                for st in subtasks:
+                                    s = st.get("status", "unknown")
+                                    sub_status[s] = sub_status.get(s, 0) + 1
+                                self.logger.info(
+                                    f"  Task {task['id'][:8]}… subtask_status_map: {sub_status} "
+                                    f"(total={len(subtasks)})"
+                                )
+                                # Log suspended/running subtasks individually
+                                for st in subtasks:
+                                    if st.get("status") not in ("done", None):
+                                        self.logger.info(
+                                            f"    subtask {st['id'][:8]}… "
+                                            f"distrib={st.get('distrib', '?')} "
+                                            f"status={st.get('status', '?')} "
+                                            f"retry={st.get('retry', '?')} "
+                                            f"node={st.get('node_id', '?')[:8]}…"
+                                        )
+                        except Exception as e:
+                            self.logger.warning(
+                                f"  Failed to get subtasks for {task['id']}: {e}"
+                            )
+
                 total_tasks = len(filtered_tasks)
                 remaining_tasks = total_tasks - completed_count
                 self.logger.info(

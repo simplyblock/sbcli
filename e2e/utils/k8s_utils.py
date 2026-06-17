@@ -2576,10 +2576,13 @@ class K8sSbcliUtils:
         """
         Return list of subtask dicts for the given master task_id.
 
-        Parses the output of ``cluster get-subtasks <task_id>`` which uses the
-        same table format as ``cluster list-tasks``.
+        Parses the output of ``cluster get-subtasks <task_id>`` which has
+        8 data columns::
 
-        Each dict contains: id, function_name, status.
+            | Task ID | Node ID | Distrib | Function | Retry | Status | Result | Updated At |
+
+        Each dict contains: id, node_id, distrib, function_name, retry, status,
+        result, updated_at.
         """
         try:
             out = self._run(f"{self.sbcli_cmd} cluster get-subtasks {task_id}")
@@ -2593,16 +2596,22 @@ class K8sSbcliUtils:
             if not line or line.startswith("+") or "Task ID" in line:
                 continue
             parts = [p.strip() for p in line.split("|")]
-            # ['', sub_id, target_id, function, retry, status, result, updated_at, '']
-            if len(parts) < 6:
+            # get-subtasks table layout (8 data columns):
+            # ['', task_id, node_id, distrib, function, retry, status, result, updated_at, '']
+            if len(parts) < 9:
                 continue
             sub_id = parts[1]
             if not sub_id or len(sub_id) != 36 or sub_id.count("-") != 4:
                 continue
             subtasks.append({
                 "id": sub_id,
-                "function_name": parts[3] if len(parts) > 3 else "",
-                "status": parts[5] if len(parts) > 5 else "",
+                "node_id": parts[2],
+                "distrib": parts[3],
+                "function_name": parts[4],
+                "retry": parts[5],
+                "status": parts[6],
+                "result": parts[7],
+                "updated_at": parts[8] if len(parts) > 8 else "",
             })
         return subtasks
 
@@ -2644,11 +2653,30 @@ class K8sSbcliUtils:
                 time.sleep(15)
                 continue
 
-            done_count = sum(1 for st in subtasks if st["status"] == "done")
+            # Build status breakdown
+            status_counts = {}
+            for st in subtasks:
+                s = st.get("status", "unknown")
+                status_counts[s] = status_counts.get(s, 0) + 1
             total = len(subtasks)
+            done_count = status_counts.get("done", 0)
+
             self.logger.info(
-                f"[balancing] Task {task_id}: {done_count}/{total} subtasks done."
+                f"[balancing] Task {task_id}: {done_count}/{total} subtasks done. "
+                f"status_map: {status_counts}"
             )
+
+            # Log individual non-done subtasks for debugging
+            non_done = [st for st in subtasks if st.get("status") != "done"]
+            for st in non_done:
+                self.logger.info(
+                    f"[balancing]   subtask {st['id'][:8]}… "
+                    f"distrib={st.get('distrib', '?')} "
+                    f"status={st.get('status', '?')} "
+                    f"retry={st.get('retry', '?')} "
+                    f"node={st.get('node_id', '?')[:8]}…"
+                )
+
             if done_count == total:
                 self.logger.info(f"[balancing] All {total} subtasks done for task {task_id}.")
                 return

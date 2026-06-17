@@ -146,17 +146,34 @@ class _DeviceFailureMigrationBase:
                 self._phase_validate_fio()
             self._test_passed = True
         finally:
+            # Collect IO stats BEFORE stopping FIO so the cluster API
+            # still has active IO counters to report.
             if with_io_load:
-                self._phase_stop_io_load()  # kill FIO only if still running (failure path)
-            self._phase_recover_device()
-            self._phase_post_migration_health_check()
+                try:
+                    self._phase_collect_cluster_io_stats()
+                except Exception as e:
+                    self.logger.warning(f"IO stats collection failed: {e}")
             if with_io_load:
-                self._phase_collect_cluster_io_stats()
+                try:
+                    self._phase_stop_io_load()
+                except Exception as e:
+                    self.logger.warning(f"Stop IO load failed: {e}")
+            try:
+                self._phase_recover_device()
+            except Exception as e:
+                self.logger.warning(f"Device recovery failed: {e}")
+            try:
+                self._phase_post_migration_health_check()
+            except Exception as e:
+                self.logger.warning(f"Post-migration health check failed: {e}")
             try:
                 self.collect_management_details(suffix="_pre_cleanup")
             except Exception as e:
                 self.logger.warning(f"collect_management_details failed: {e}")
-            self._phase_cleanup()
+            try:
+                self._phase_cleanup()
+            except Exception as e:
+                self.logger.warning(f"Cleanup failed: {e}")
             self._timing["total_duration"] = time.time() - t0
             self._print_migration_summary()
             self._write_timing_json()
@@ -195,17 +212,31 @@ class _DeviceFailureMigrationBase:
                 self._phase_validate_fio()
             self._test_passed = True
         finally:
+            # Collect IO stats BEFORE stopping FIO so the cluster API
+            # still has active IO counters to report.
             if with_io_load:
-                self._phase_stop_io_load()
+                try:
+                    self._phase_collect_cluster_io_stats()
+                except Exception as e:
+                    self.logger.warning(f"IO stats collection failed: {e}")
+            if with_io_load:
+                try:
+                    self._phase_stop_io_load()
+                except Exception as e:
+                    self.logger.warning(f"Stop IO load failed: {e}")
             # No device recovery needed — restart-device already brought it back
-            self._phase_post_migration_health_check()
-            if with_io_load:
-                self._phase_collect_cluster_io_stats()
+            try:
+                self._phase_post_migration_health_check()
+            except Exception as e:
+                self.logger.warning(f"Post-migration health check failed: {e}")
             try:
                 self.collect_management_details(suffix="_pre_cleanup")
             except Exception as e:
                 self.logger.warning(f"collect_management_details failed: {e}")
-            self._phase_cleanup()
+            try:
+                self._phase_cleanup()
+            except Exception as e:
+                self.logger.warning(f"Cleanup failed: {e}")
             self._timing["total_duration"] = time.time() - t0
             self._print_migration_summary()
             self._write_timing_json()
@@ -1740,14 +1771,31 @@ class _DeviceFailureMigrationBase:
     # ── Test summary markdown ─────────────────────────────────────────────────
 
     def _write_test_summary_md(self):
-        """Write a markdown summary with cluster/device details to logs/test_summary.md."""
+        """Write a markdown summary with cluster/device details to logs/test_summary.md.
+
+        Also appends to GITHUB_STEP_SUMMARY so it appears in the GitHub
+        Actions run summary regardless of which workflow runs the test.
+        """
         try:
             lines = self._build_summary_md_lines()
+            summary_text = "\n".join(lines) + "\n"
             out_dir = Path("logs")
             out_dir.mkdir(parents=True, exist_ok=True)
             out_path = out_dir / "test_summary.md"
-            out_path.write_text("\n".join(lines) + "\n")
+            out_path.write_text(summary_text)
             self.logger.info(f"Test summary markdown written to {out_path}")
+
+            # Append to GitHub Actions step summary if available
+            gh_summary = os.environ.get("GITHUB_STEP_SUMMARY", "")
+            if gh_summary:
+                try:
+                    with open(gh_summary, "a") as f:
+                        f.write("\n" + summary_text)
+                    self.logger.info("Test summary appended to GITHUB_STEP_SUMMARY")
+                except Exception as gh_exc:
+                    self.logger.warning(
+                        f"Failed to write to GITHUB_STEP_SUMMARY: {gh_exc}"
+                    )
         except Exception as exc:
             self.logger.warning(f"Failed to write test summary markdown: {exc}")
 
@@ -2148,18 +2196,32 @@ class _DeviceAddAfterBootstrapBase:
                 self._phase_stop_io_load()
             self._test_passed = True
         finally:
+            # Collect IO stats BEFORE killing FIO so the cluster API
+            # still has active IO counters to report.
             if with_io_load:
-                self._phase_kill_fio()
-            self._phase_post_migration_health_check()
+                try:
+                    self._phase_collect_cluster_io_stats()
+                except Exception as e:
+                    self.logger.warning(f"IO stats collection failed: {e}")
             if with_io_load:
-                self._phase_collect_cluster_io_stats()
+                try:
+                    self._phase_kill_fio()
+                except Exception as e:
+                    self.logger.warning(f"Kill FIO failed: {e}")
+            try:
+                self._phase_post_migration_health_check()
+            except Exception as e:
+                self.logger.warning(f"Post-migration health check failed: {e}")
             try:
                 self.collect_management_details(suffix="_pre_cleanup")
             except Exception as e:
                 self.logger.warning(
                     f"collect_management_details failed: {e}"
                 )
-            self._phase_cleanup()
+            try:
+                self._phase_cleanup()
+            except Exception as e:
+                self.logger.warning(f"Cleanup failed: {e}")
             self._timing["total_duration"] = time.time() - t0
             self._print_add_device_summary()
             self._write_timing_json()
@@ -2831,14 +2893,31 @@ class _DeviceAddAfterBootstrapBase:
         self.logger.info(f"Timing JSON written to {out_path}")
 
     def _write_test_summary_md(self):
-        """Write a markdown summary with cluster/device details to logs/test_summary.md."""
+        """Write a markdown summary with cluster/device details to logs/test_summary.md.
+
+        Also appends to GITHUB_STEP_SUMMARY so it appears in the GitHub
+        Actions run summary regardless of which workflow runs the test.
+        """
         try:
             lines = self._build_add_device_summary_md_lines()
+            summary_text = "\n".join(lines) + "\n"
             out_dir = Path("logs")
             out_dir.mkdir(parents=True, exist_ok=True)
             out_path = out_dir / "test_summary.md"
-            out_path.write_text("\n".join(lines) + "\n")
+            out_path.write_text(summary_text)
             self.logger.info(f"Test summary markdown written to {out_path}")
+
+            # Append to GitHub Actions step summary if available
+            gh_summary = os.environ.get("GITHUB_STEP_SUMMARY", "")
+            if gh_summary:
+                try:
+                    with open(gh_summary, "a") as f:
+                        f.write("\n" + summary_text)
+                    self.logger.info("Test summary appended to GITHUB_STEP_SUMMARY")
+                except Exception as gh_exc:
+                    self.logger.warning(
+                        f"Failed to write to GITHUB_STEP_SUMMARY: {gh_exc}"
+                    )
         except Exception as exc:
             self.logger.warning(f"Failed to write test summary markdown: {exc}")
 
