@@ -756,14 +756,14 @@ class CLIWrapper(CLIWrapperBase):
 
     def init_volume__migrate(self, subparser):
         subcommand = self.add_sub_command(subparser, 'migrate', 'Pre-create the target NVMe-oF subsystem for a volume migration. Returns a migration ID and NVMe connect strings (inaccessible ANA state). Connect the client, then run migrate-continue.')
-        subcommand.add_argument('volume_id', help='The volume id.', type=str)
-        subcommand.add_argument('target_node_id', help='The target storage node id.', type=str)
+        subcommand.add_argument('volume_id', help='The volume ID to migrate.', type=str)
+        subcommand.add_argument('target_node_id', help='The target storage node ID.', type=str)
         argument = subcommand.add_argument('--ctrl-loss-tmo', help='NVMe ctrl-loss-tmo in seconds. Default: `3600`.', type=int, default=3600, dest='ctrl_loss_tmo')
         argument = subcommand.add_argument('--host-nqn', help='Host NQN for DH-HMAC-CHAP authentication (required when volume has allowed hosts).', type=str, dest='host_nqn')
 
     def init_volume__migrate_continue(self, subparser):
         subcommand = self.add_sub_command(subparser, 'migrate-continue', 'Advance a pre-created migration to the snapshot-copy phase and launch the task runner.')
-        subcommand.add_argument('migration_id', help='The migration id returned by migrate.', type=str)
+        subcommand.add_argument('migration_id', help='The migration ID returned by migrate.', type=str)
         argument = subcommand.add_argument('--max-retries', help='Maximum retry attempts before aborting. Default: `10`.', type=int, default=10, dest='max_retries')
         argument = subcommand.add_argument('--deadline', help='Migration deadline in seconds (0 = no deadline). Default: `14400`.', type=int, default=14400, dest='deadline_seconds')
 
