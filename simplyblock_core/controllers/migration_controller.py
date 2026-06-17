@@ -45,6 +45,7 @@ from datetime import datetime
 
 from simplyblock_core import constants, utils
 from simplyblock_core.controllers import migration_events, tasks_controller
+from simplyblock_core.exceptions import MigrationConflictError, PreconditionError
 from simplyblock_core.controllers.host_auth import _reapply_allowed_hosts
 from simplyblock_core.kms import create_kms_connection
 from simplyblock_core.db_controller import DBController
@@ -644,11 +645,11 @@ def create_migration(lvol_id, target_node_id,
     existing_migration = get_active_migration_for_lvol(lvol_id, tgt_node.cluster_id)
     if existing_migration:
         if existing_migration.target_node_id != target_node_id:
-            raise ValueError(
+            raise MigrationConflictError(
                 f"An active migration for {lvol_id} already exists targeting a different node "
                 f"({existing_migration.target_node_id}). Cancel it first.")
         if existing_migration.phase != LVolMigration.PHASE_PRE_CREATED:
-            raise ValueError(
+            raise PreconditionError(
                 f"Migration {existing_migration.uuid} for {lvol_id} is already past pre-create "
                 f"(phase={existing_migration.phase}). Use /continue or cancel it.")
 

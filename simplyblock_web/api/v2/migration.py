@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 
 from simplyblock_core.controllers import migration_controller
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.exceptions import MigrationConflictError, PreconditionError
 from simplyblock_core.models.lvol_migration import LVolMigration
 
 from simplyblock_core import constants
@@ -47,8 +48,8 @@ def create_migration(volume: Volume, parameters: _PreCreateParams) -> MigrationD
             ctrl_loss_tmo=parameters.ctrl_loss_tmo,
             host_nqn=parameters.host_nqn,
         )
-    except ValueError as e:
-        raise HTTPException(400, str(e))
+    except (MigrationConflictError, PreconditionError) as e:
+        raise HTTPException(409, str(e))
     db = DBController()
     migration = db.get_migration_by_id(migration_id)
     return MigrationDTO.from_model(migration, connect_strings=connect_strings)
