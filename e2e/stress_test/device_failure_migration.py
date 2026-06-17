@@ -144,12 +144,14 @@ class _DeviceFailureMigrationBase:
                 # Wait for FIO to finish naturally — do NOT kill it
                 self._phase_wait_fio_completion()
                 self._phase_validate_fio()
-                self._phase_collect_cluster_io_stats()
             self._test_passed = True
         finally:
             if with_io_load:
                 self._phase_stop_io_load()  # kill FIO only if still running (failure path)
             self._phase_recover_device()
+            self._phase_post_migration_health_check()
+            if with_io_load:
+                self._phase_collect_cluster_io_stats()
             try:
                 self.collect_management_details(suffix="_pre_cleanup")
             except Exception as e:
@@ -191,12 +193,14 @@ class _DeviceFailureMigrationBase:
             if with_io_load:
                 self._phase_wait_fio_completion()
                 self._phase_validate_fio()
-                self._phase_collect_cluster_io_stats()
             self._test_passed = True
         finally:
             if with_io_load:
                 self._phase_stop_io_load()
             # No device recovery needed — restart-device already brought it back
+            self._phase_post_migration_health_check()
+            if with_io_load:
+                self._phase_collect_cluster_io_stats()
             try:
                 self.collect_management_details(suffix="_pre_cleanup")
             except Exception as e:
@@ -886,7 +890,7 @@ class _DeviceFailureMigrationBase:
             )
             migration_elapsed = self._wait_migration_cli_fallback()
 
-        self._timing["migration_duration"] = time.time() - t_start
+        self._timing["failed_device_migration_duration"] = time.time() - t_start
         self._timing["migration_tasks_elapsed"] = migration_elapsed
 
         # Verify device status
@@ -900,9 +904,73 @@ class _DeviceFailureMigrationBase:
         final_status = target_dev["status"] if target_dev else "unknown"
         self.logger.info(
             f"Device final status: {final_status} "
-            f"(migration took {self._timing['migration_duration']:.1f}s)"
+            f"(failed device migration took {self._timing['failed_device_migration_duration']:.1f}s)"
         )
         self._timing["device_final_status"] = final_status
+
+    # ── Post-migration health check ─────────────────────────────────────────
+
+    def _phase_post_migration_health_check(self):
+        """Check all node statuses every 10s for 5 minutes after migration.
+
+        Logs status at each interval.  Runs in the finally block so it
+        always executes.  Does not assert — just records results.
+        """
+        self.logger.info("=== Phase: Post-migration health check (5m, 10s intervals) ===")
+        check_interval = 10
+        check_duration = 300  # 5 minutes
+        t0 = time.time()
+        all_healthy = True
+        unhealthy_records = []
+
+        while time.time() - t0 < check_duration:
+            try:
+                storage_nodes = self.sbcli_utils.get_storage_nodes()
+                statuses = {}
+                for node in storage_nodes.get("results", []):
+                    nid = node.get("id", "?")
+                    status = node.get("status", "?")
+                    health = node.get("health_check", "?")
+                    statuses[nid] = {"status": status, "health": health}
+                    if status != "online":
+                        all_healthy = False
+                        unhealthy_records.append({
+                            "time": round(time.time() - t0, 1),
+                            "node": nid,
+                            "status": status,
+                            "health": health,
+                        })
+
+                elapsed = time.time() - t0
+                status_str = "  ".join(
+                    f"{nid[:8]}={s['status']}(health={s['health']})"
+                    for nid, s in statuses.items()
+                )
+                self.logger.info(
+                    f"  [{elapsed:5.0f}s] {status_str}"
+                )
+            except Exception as exc:
+                self.logger.warning(f"  Health check poll error: {exc}")
+
+            sleep_n_sec(check_interval)
+
+        self._timing["post_migration_all_healthy"] = all_healthy
+        if unhealthy_records:
+            self._timing["post_migration_unhealthy_events"] = len(unhealthy_records)
+            self.logger.warning(
+                f"Post-migration health check: {len(unhealthy_records)} unhealthy "
+                f"event(s) in {check_duration}s"
+            )
+            for rec in unhealthy_records:
+                self.logger.warning(
+                    f"  t={rec['time']}s node={rec['node'][:8]} "
+                    f"status={rec['status']} health={rec['health']}"
+                )
+        else:
+            self.logger.info(
+                "Post-migration health check: all nodes healthy for "
+                f"{check_duration}s"
+            )
 
     # ── Phase 5: stop IO load ────────────────────────────────────────────────
 
@@ -1119,7 +1187,9 @@ class _DeviceFailureMigrationBase:
                 total_elapsed = sum(
                     self._timing.get(k, 0) for k in (
                         "setup_duration", "fill_duration", "remove_duration",
-                        "migration_duration", "restart_duration",
+                        "failed_device_migration_duration",
+                        "new_device_migration_duration",
+                        "restart_duration", "migration_duration",
                         "fio_completion_duration",
                     )
                 )
@@ -1354,14 +1424,18 @@ class _DeviceFailureMigrationBase:
             return
 
         # Step 3: wait for new_device_migration tasks to complete
+        t_new_mig = time.time()
         try:
             self._wait_new_device_migration(
                 new_device_id, timeout=self.MIGRATION_TIMEOUT
             )
+            self._timing["new_device_migration_duration"] = time.time() - t_new_mig
             self.logger.info(
-                f"Device recovery complete — new device {new_device_id} online"
+                f"Device recovery complete — new device {new_device_id} online "
+                f"({self._timing['new_device_migration_duration']:.1f}s)"
             )
         except Exception as exc:
+            self._timing["new_device_migration_duration"] = time.time() - t_new_mig
             self.logger.warning(
                 f"new_device_migration did not complete: {exc}"
             )
@@ -1457,9 +1531,15 @@ class _DeviceFailureMigrationBase:
         # Key metrics
         fill_pct = self._timing.get("device_fill_pct", "0 (empty)")
         self.logger.info(f"  {'device_fill_pct':30s} {fill_pct}")
-        mig = self._timing.get("migration_duration", self._timing.get("restart_duration", 0))
-        if isinstance(mig, (int, float)):
-            self.logger.info(f"  {'migration/restart_time':30s} {mig:10.1f}s ({mig/60:.1f}m)")
+        failed_mig = self._timing.get("failed_device_migration_duration", 0)
+        if isinstance(failed_mig, (int, float)) and failed_mig > 0:
+            self.logger.info(f"  {'failed_device_migration':30s} {failed_mig:10.1f}s ({failed_mig/60:.1f}m)")
+        new_mig = self._timing.get("new_device_migration_duration", 0)
+        if isinstance(new_mig, (int, float)) and new_mig > 0:
+            self.logger.info(f"  {'new_device_migration':30s} {new_mig:10.1f}s ({new_mig/60:.1f}m)")
+        restart = self._timing.get("restart_duration", 0)
+        if isinstance(restart, (int, float)) and restart > 0:
+            self.logger.info(f"  {'restart_time':30s} {restart:10.1f}s ({restart/60:.1f}m)")
         if self._with_io_load:
             avg_w = self._timing.get("avg_write_bytes_ps", 0)
             avg_r = self._timing.get("avg_read_bytes_ps", 0)
@@ -1482,7 +1562,9 @@ class _DeviceFailureMigrationBase:
         """Write standardised timing JSON for monitoring suite aggregation."""
         phases = []
         for name in ("setup_duration", "fill_duration", "remove_duration",
-                      "migration_duration", "restart_duration"):
+                      "failed_device_migration_duration",
+                      "new_device_migration_duration",
+                      "restart_duration"):
             if name in self._timing:
                 phases.append({
                     "name": name.replace("_duration", ""),
@@ -1512,7 +1594,7 @@ class _DeviceFailureMigrationBase:
                     self._timing.get("total_duration", 0), 2
                 ),
                 "key_metric": round(
-                    self._timing.get("migration_duration",
+                    self._timing.get("failed_device_migration_duration",
                                      self._timing.get("restart_duration", 0)), 2
                 ),
                 "key_metric_label": "migration_duration_sec",
@@ -1563,13 +1645,16 @@ class _DeviceFailureMigrationBase:
             phase_names = []
             phase_durations = []
             for name in ("setup_duration", "fill_duration", "remove_duration",
-                          "migration_duration"):
+                          "failed_device_migration_duration",
+                          "new_device_migration_duration",
+                          "restart_duration"):
                 if name in self._timing:
                     phase_names.append(name.replace("_duration", ""))
                     phase_durations.append(self._timing[name])
 
             if phase_durations:
-                colors = ["#3498db", "#f39c12", "#e74c3c", "#9b59b6"]
+                colors = ["#3498db", "#f39c12", "#e74c3c", "#9b59b6",
+                          "#2ecc71", "#1abc9c"]
                 colors = colors[:len(phase_names)]
 
                 fig, axes = plt.subplots(1, 2, figsize=(14, 5))
@@ -1612,15 +1697,31 @@ class _DeviceFailureMigrationBase:
         # Chart 2: Migration vs fill comparison
         try:
             fill = self._timing.get("fill_duration", 0)
-            migrate = self._timing.get("migration_duration", 0)
-            if fill > 0 or migrate > 0:
+            failed_mig = self._timing.get("failed_device_migration_duration", 0)
+            new_mig = self._timing.get("new_device_migration_duration", 0)
+            labels = []
+            values = []
+            colors = []
+            if fill > 0:
+                labels.append(f"Fill to {self.FILL_PERCENT}%")
+                values.append(fill)
+                colors.append("#f39c12")
+            if failed_mig > 0:
+                labels.append("Failed device migration")
+                values.append(failed_mig)
+                colors.append("#9b59b6")
+            if new_mig > 0:
+                labels.append("New device migration")
+                values.append(new_mig)
+                colors.append("#2ecc71")
+            if values:
                 fig, ax = plt.subplots(figsize=(8, 4))
-                bars = ax.barh(["Fill to 65%", "Migration"],
-                               [fill, migrate],
-                               color=["#f39c12", "#9b59b6"], alpha=0.8,
+                bars = ax.barh(labels, values,
+                               color=colors, alpha=0.8,
                                height=0.5)
-                for b, v in zip(bars, [fill, migrate]):
-                    ax.text(b.get_width() + max(fill, migrate) * 0.02,
+                max_val = max(values) if values else 1
+                for b, v in zip(bars, values):
+                    ax.text(b.get_width() + max_val * 0.02,
                             b.get_y() + b.get_height() / 2,
                             f"{v:.0f}s ({v/60:.1f}m)", va="center", fontsize=10)
                 ax.set_xlabel("Duration (seconds)")
@@ -1672,9 +1773,15 @@ class _DeviceFailureMigrationBase:
         lines.append("## Key Metrics")
         lines.append("| Metric | Value |")
         lines.append("|--------|-------|")
-        mig = self._timing.get("migration_duration", self._timing.get("restart_duration", 0))
-        if isinstance(mig, (int, float)):
-            lines.append(f"| Migration/restart time | {mig:.1f}s ({mig/60:.1f}m) |")
+        failed_mig = self._timing.get("failed_device_migration_duration", 0)
+        if isinstance(failed_mig, (int, float)) and failed_mig > 0:
+            lines.append(f"| Failed device migration | {failed_mig:.1f}s ({failed_mig/60:.1f}m) |")
+        new_mig = self._timing.get("new_device_migration_duration", 0)
+        if isinstance(new_mig, (int, float)) and new_mig > 0:
+            lines.append(f"| New device migration | {new_mig:.1f}s ({new_mig/60:.1f}m) |")
+        restart = self._timing.get("restart_duration", 0)
+        if isinstance(restart, (int, float)) and restart > 0:
+            lines.append(f"| Restart time | {restart:.1f}s ({restart/60:.1f}m) |")
         fill_pct = self._timing.get("device_fill_pct", 0)
         lines.append(f"| Device fill level | {fill_pct}% |")
         if self._with_io_load:
@@ -1754,12 +1861,25 @@ class _DeviceFailureMigrationBase:
                 self.logger.warning(f"Could not get devices for node {node_id}: {exc}")
         lines.append("")
 
+        # ── Post-Migration Health ──
+        health_ok = self._timing.get("post_migration_all_healthy", None)
+        if health_ok is not None:
+            lines.append("## Post-Migration Health (5m check)")
+            icon = "PASS" if health_ok else "FAIL"
+            lines.append(f"| Result | **{icon}** |")
+            unhealthy = self._timing.get("post_migration_unhealthy_events", 0)
+            if unhealthy:
+                lines.append(f"| Unhealthy events | {unhealthy} |")
+            lines.append("")
+
         # ── Phase Timings ──
         lines.append("## Phase Timings")
         lines.append("| Phase | Duration |")
         lines.append("|-------|----------|")
         for name in ("setup_duration", "fill_duration", "remove_duration",
-                      "migration_duration", "restart_duration",
+                      "failed_device_migration_duration",
+                      "new_device_migration_duration",
+                      "restart_duration", "migration_duration",
                       "fio_completion_duration", "total_duration"):
             if name in self._timing:
                 val = self._timing[name]
@@ -2026,11 +2146,13 @@ class _DeviceAddAfterBootstrapBase:
             self._phase_validate_cluster()
             if with_io_load:
                 self._phase_stop_io_load()
-                self._phase_collect_cluster_io_stats()
             self._test_passed = True
         finally:
             if with_io_load:
                 self._phase_kill_fio()
+            self._phase_post_migration_health_check()
+            if with_io_load:
+                self._phase_collect_cluster_io_stats()
             try:
                 self.collect_management_details(suffix="_pre_cleanup")
             except Exception as e:
@@ -2410,6 +2532,66 @@ class _DeviceAddAfterBootstrapBase:
             f"New device {self._new_device_id} is online — OK"
         )
 
+    # ── Post-migration health check ─────────────────────────────────────────
+
+    def _phase_post_migration_health_check(self):
+        """Check all node statuses every 10s for 5 minutes after migration."""
+        self.logger.info("=== Phase: Post-migration health check (5m, 10s intervals) ===")
+        check_interval = 10
+        check_duration = 300  # 5 minutes
+        t0 = time.time()
+        all_healthy = True
+        unhealthy_records = []
+
+        while time.time() - t0 < check_duration:
+            try:
+                storage_nodes = self.sbcli_utils.get_storage_nodes()
+                statuses = {}
+                for node in storage_nodes.get("results", []):
+                    nid = node.get("id", "?")
+                    status = node.get("status", "?")
+                    health = node.get("health_check", "?")
+                    statuses[nid] = {"status": status, "health": health}
+                    if status != "online":
+                        all_healthy = False
+                        unhealthy_records.append({
+                            "time": round(time.time() - t0, 1),
+                            "node": nid,
+                            "status": status,
+                            "health": health,
+                        })
+
+                elapsed = time.time() - t0
+                status_str = "  ".join(
+                    f"{nid[:8]}={s['status']}(health={s['health']})"
+                    for nid, s in statuses.items()
+                )
+                self.logger.info(
+                    f"  [{elapsed:5.0f}s] {status_str}"
+                )
+            except Exception as exc:
+                self.logger.warning(f"  Health check poll error: {exc}")
+
+            sleep_n_sec(check_interval)
+
+        self._timing["post_migration_all_healthy"] = all_healthy
+        if unhealthy_records:
+            self._timing["post_migration_unhealthy_events"] = len(unhealthy_records)
+            self.logger.warning(
+                f"Post-migration health check: {len(unhealthy_records)} unhealthy "
+                f"event(s) in {check_duration}s"
+            )
+            for rec in unhealthy_records:
+                self.logger.warning(
+                    f"  t={rec['time']}s node={rec['node'][:8]} "
+                    f"status={rec['status']} health={rec['health']}"
+                )
+        else:
+            self.logger.info(
+                "Post-migration health check: all nodes healthy for "
+                f"{check_duration}s"
+            )
+
     # ── Phase: stop IO load and collect bandwidth ─────────────────────────
 
     def _phase_stop_io_load(self):
@@ -2769,6 +2951,17 @@ class _DeviceAddAfterBootstrapBase:
                 lines.append(f"| `{node_id}` | — | error | — | — | — |")
                 self.logger.warning(f"Could not get devices for node {node_id}: {exc}")
         lines.append("")
+
+        # ── Post-Migration Health ──
+        health_ok = self._timing.get("post_migration_all_healthy", None)
+        if health_ok is not None:
+            lines.append("## Post-Migration Health (5m check)")
+            icon = "PASS" if health_ok else "FAIL"
+            lines.append(f"| Result | **{icon}** |")
+            unhealthy = self._timing.get("post_migration_unhealthy_events", 0)
+            if unhealthy:
+                lines.append(f"| Unhealthy events | {unhealthy} |")
+            lines.append("")
 
         # ── Phase Timings ──
         lines.append("## Phase Timings")
@@ -3327,9 +3520,15 @@ class _DeviceFailureMigrationK8s(_DeviceFailureMigrationBase):
         lines.append("## Key Metrics")
         lines.append("| Metric | Value |")
         lines.append("|--------|-------|")
-        mig = self._timing.get("migration_duration", self._timing.get("restart_duration", 0))
-        if isinstance(mig, (int, float)):
-            lines.append(f"| Migration/restart time | {mig:.1f}s ({mig/60:.1f}m) |")
+        failed_mig = self._timing.get("failed_device_migration_duration", 0)
+        if isinstance(failed_mig, (int, float)) and failed_mig > 0:
+            lines.append(f"| Failed device migration | {failed_mig:.1f}s ({failed_mig/60:.1f}m) |")
+        new_mig = self._timing.get("new_device_migration_duration", 0)
+        if isinstance(new_mig, (int, float)) and new_mig > 0:
+            lines.append(f"| New device migration | {new_mig:.1f}s ({new_mig/60:.1f}m) |")
+        restart = self._timing.get("restart_duration", 0)
+        if isinstance(restart, (int, float)) and restart > 0:
+            lines.append(f"| Restart time | {restart:.1f}s ({restart/60:.1f}m) |")
         fill_pct = self._timing.get("device_fill_pct", 0)
         lines.append(f"| Device fill level | {fill_pct}% |")
         if self._with_io_load:
@@ -3408,12 +3607,25 @@ class _DeviceFailureMigrationK8s(_DeviceFailureMigrationBase):
                 self.logger.warning(f"Could not get devices for node {node_id}: {exc}")
         lines.append("")
 
+        # ── Post-Migration Health ──
+        health_ok = self._timing.get("post_migration_all_healthy", None)
+        if health_ok is not None:
+            lines.append("## Post-Migration Health (5m check)")
+            icon = "PASS" if health_ok else "FAIL"
+            lines.append(f"| Result | **{icon}** |")
+            unhealthy = self._timing.get("post_migration_unhealthy_events", 0)
+            if unhealthy:
+                lines.append(f"| Unhealthy events | {unhealthy} |")
+            lines.append("")
+
         # ── Phase Timings ──
         lines.append("## Phase Timings")
         lines.append("| Phase | Duration |")
         lines.append("|-------|----------|")
         for name in ("setup_duration", "fill_duration", "remove_duration",
-                      "migration_duration", "restart_duration",
+                      "failed_device_migration_duration",
+                      "new_device_migration_duration",
+                      "restart_duration", "migration_duration",
                       "fio_completion_duration", "total_duration"):
             if name in self._timing:
                 val = self._timing[name]
