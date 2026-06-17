@@ -1494,24 +1494,76 @@ class SoakRunner:
         )
 
     def _unmount_one_volume(self, volume):
+        """Cleanly unmount the volume's filesystem before disconnect/delete.
+
+        fio (and its launcher shell, whose cwd is the mountpoint) was
+        already SIGKILLed by ``_stop_fio_for_job``, but a SIGKILLed fio
+        with an in-flight O_DIRECT I/O can linger in D-state and keep the
+        mount busy. Retry a *clean* umount (``sync`` + ``umount``, evicting
+        stragglers with ``fuser`` between tries) and verify with
+        ``mountpoint``.
+
+        We deliberately do NOT fall back to lazy umount on the happy path:
+        fio uses ``--direct=1`` so there is no bulk dirty data, but the XFS
+        journal and inode metadata are still buffered and flushed at
+        umount. A lazy detach returns instantly with that flush pending,
+        and the ``nvme disconnect`` that follows ~1s later then rips the
+        paths away mid-flush — producing the spurious "no available path /
+        XFS log I/O error / filesystem shut down" noise seen in client
+        dmesg even though the lvol was being deleted on purpose.
+
+        If the mount still will not release after the retries, that is a
+        real anomaly: the most likely cause is a STUCK I/O on the target
+        keeping the block device busy (note the client runs with
+        ``nvme_core.io_timeout`` effectively infinite, so such an I/O never
+        times out on its own). Emit a loud WARNING with holder / D-state
+        evidence before the last-resort lazy detach, so a human notices the
+        potential target-side bug.
+
+        Returns True if the filesystem was cleanly unmounted, False if it
+        had to be lazily detached (stuck).
+        """
         mount_point = volume.get("mount_point")
         if not mount_point:
-            return
-        # Try plain unmount first, then -f, then lazy as last resort. We've
-        # already SIGKILLed the fio holding the mount, so plain umount
-        # should succeed on the happy path; the fallbacks only matter if
-        # buffered IO is still draining.
+            return True
+        # $1 = mountpoint. Bounded retry: sync + umount, evicting any
+        # straggler holders (fio in D-state, launcher shell) between tries.
+        # Never lazy-umount here on success; only as a flagged last resort.
         umount_script = (
-            f"sudo umount {shlex.quote(mount_point)} 2>/dev/null || "
-            f"sudo umount -f {shlex.quote(mount_point)} 2>/dev/null || "
-            f"sudo umount -l {shlex.quote(mount_point)} 2>/dev/null || true"
+            "set +e\n"
+            'mp="$1"\n'
+            'mountpoint -q "$mp" || exit 0\n'
+            "for i in $(seq 1 6); do\n"
+            "  sync\n"
+            '  if sudo umount "$mp" 2>/dev/null; then exit 0; fi\n'
+            '  sudo fuser -km "$mp" 2>/dev/null\n'
+            "  sleep 2\n"
+            '  mountpoint -q "$mp" || exit 0\n'
+            "done\n"
+            'echo "---- holders of $mp ----"\n'
+            'sudo fuser -vMm "$mp" 2>&1\n'
+            'echo "---- D-state processes ----"\n'
+            "ps -eo pid,stat,wchan:32,comm | awk '$2 ~ /D/'\n"
+            'sudo umount -l "$mp" 2>/dev/null\n'
+            "exit 2\n"
         )
-        self.client.run(
-            f"bash -lc {shlex.quote(umount_script)}",
-            timeout=60,
+        rc, stdout_text, _ = self.client.run(
+            f"bash -lc {shlex.quote(umount_script)} _ {shlex.quote(mount_point)}",
+            timeout=120,
             check=False,
             label=f"umount {volume['volume_name']}",
         )
+        if rc == 0:
+            return True
+        self.logger.log(
+            f"WARNING: umount of {volume['volume_name']} ({mount_point}) did "
+            f"not complete after retries even though fio was already killed — "
+            f"possible STUCK I/O on the target keeping the device busy. Fell "
+            f"back to lazy detach; the following nvme disconnect may surface "
+            f"'no available path' / 'XFS log I/O error' in client dmesg. "
+            f"Holder / D-state evidence:\n{stdout_text}"
+        )
+        return False
 
     def _delete_one_lvol(self, volume):
         rc, stdout_text, stderr_text = self.sbctl_allow_failure(
@@ -1564,9 +1616,12 @@ class SoakRunner:
 
             # 1. stop fio for this volume only (others keep running)
             self._stop_fio_for_job(job)
-            # 2. unmount
+            # 2. unmount (clean; warns + lazy-detaches if a stuck target I/O
+            #    pins the mount). The return flag is informational — we still
+            #    proceed to disconnect/delete since the lvol is going away, but
+            #    a False has already been logged as a loud WARNING above.
             self._unmount_one_volume(old_volume)
-            # 3. nvme disconnect
+            # 3. nvme disconnect (paths torn down only after the umount above)
             self._disconnect_one_volume(old_volume)
             # 4. delete lvol
             self._delete_one_lvol(old_volume)
