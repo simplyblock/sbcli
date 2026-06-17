@@ -25,6 +25,9 @@ task.api.include_router(task.instance_api)
 
 cluster.instance_api.include_router(task.api)
 
+migration.api.include_router(migration.instance_api)
+volume.instance_api.include_router(migration.api)
+
 volume.api.include_router(volume.instance_api)
 pool.instance_api.include_router(volume.api)
 
@@ -38,9 +41,6 @@ cluster.instance_api.include_router(pool.api)
 
 backup.api.include_router(backup.policy_api)
 cluster.instance_api.include_router(backup.api)
-
-migration.api.include_router(migration.instance_api)
-volume.instance_api.include_router(migration.api)
 
 cluster.api.include_router(cluster.instance_api)
 management_node.api.include_router(management_node.instance_api)
