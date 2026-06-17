@@ -87,7 +87,7 @@ import time
 from typing import Optional
 
 from simplyblock_core import db_controller as db_mod, utils, constants
-from simplyblock_core.utils.size_utils import convert_size
+from simplyblock_core.utils import convert_size
 from simplyblock_core.controllers import (
     migration_controller, migration_events, snapshot_controller, tasks_controller, tasks_events
 )
@@ -1294,7 +1294,7 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         # --- Start the final migration ---
 
         # Step 1: create writable target lvol (size in MiB).
-        # Idempotent: pre_create_on_target() may have already created the bdev.
+        # Idempotent: create_migration() may have already created the bdev.
         # Note: SPDK's bdev_lvol_create 'uuid' param is for the lvol *store*, not
         # the new lvol.  Do not pass the lvol UUID here.
         lvol_size_in_mib = _bytes_to_mib(lvol.size)
@@ -1429,7 +1429,7 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
     src_paths, tgt_paths, overlap_ids = _build_paths(src_node, tgt_node, src_rpc, tgt_rpc)
 
     # For crypto lvols the namespace already points to the crypto bdev (set up
-    # during pre_create_on_target). tgt_ns_bdev is used by overlap step 4 to
+    # during create_migration). tgt_ns_bdev is used by overlap step 4 to
     # swap the SRC namespace to the correct bdev at cutover.
     tgt_ns_bdev = tgt_lvol_composite  # plain default
     if lvol.crypto_bdev:
@@ -1493,7 +1493,7 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
 
         # Step 4: namespace swap on overlap TGT paths (SRC bdev → tgt_ns_bdev).
         # For crypto, tgt_ns_bdev is crypto_LVOL_xxxxm which was created during
-        # pre_create_on_target; for plain it is the raw migration lvol.
+        # create_migration; for plain it is the raw migration lvol.
         for tgt in tgt_paths:
             if tgt['node_id'] in overlap_ids:
                 try:
@@ -1844,7 +1844,7 @@ def _handle_cleanup_target(migration, tgt_node, tgt_rpc, src_rpc=None):
 
     # --- Step 0: delete dangling target lvol/subsystems from a failed LVOL_MIGRATE ---
     # Also handles the pre-create case where bdev/subsystems were set up by
-    # pre_create_on_target() but migration was cancelled before LVOL_MIGRATE completed.
+    # create_migration() but migration was cancelled before LVOL_MIGRATE completed.
     if ctx.get('stage') != 'cleanup_tgt':
         tgt_lvol_composite = ctx.get('tgt_lvol_composite')
         nqn = ctx.get('nqn')
