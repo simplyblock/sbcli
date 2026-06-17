@@ -602,7 +602,15 @@ def delete(snapshot_uuid, force_delete=False):
 
         rpc_client = primary_node.rpc_client()
 
-        ret, _ = rpc_client.delete_lvol(snap.snap_bdev)
+        special_delete = False
+        try:
+            snap_bdev_info = rpc_client.rpc_client().get_bdev(snap.snap_bdev)
+            if snap_bdev_info[0]["driver_specific"]["lvol"]["open_ref"] > 1:
+                special_delete = True
+        except:
+            pass
+
+        ret, _ = rpc_client.delete_lvol(snap.snap_bdev, del_async=False, special_delete=special_delete)
         if not ret:
             logger.error(f"Failed to delete snap from node: {snode.get_id()}")
             if not force_delete:
