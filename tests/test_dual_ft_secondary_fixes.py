@@ -155,8 +155,8 @@ class TestConnectLvolPort(unittest.TestCase):
 
         # ALL three connections must use port 4420
         for entry in result:
-            self.assertEqual(entry["port"], 4420,
-                             f"Node at {entry['ip']} got port {entry['port']}, expected 4420")
+            self.assertEqual(entry.port, 4420,
+                             f"Node at {entry.ip} got port {entry.port}, expected 4420")
 
     @patch("simplyblock_core.controllers.lvol_controller.DBController")
     def test_connect_single_node_uses_primary_port(self, mock_db_cls):
@@ -176,7 +176,7 @@ class TestConnectLvolPort(unittest.TestCase):
 
         result, _err = connect_lvol("vol-1")
         self.assertTrue(result)
-        self.assertEqual(result[0]["port"], 4420)
+        self.assertEqual(result[0].port, 4420)
 
 
 # ---------------------------------------------------------------------------

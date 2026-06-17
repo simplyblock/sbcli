@@ -271,7 +271,7 @@ def connect_lvol(uuid):
     ret, err = lvol_controller.connect_lvol(uuid, host_nqn=host_nqn)
     if err:
         return utils.get_response_error(err, 400)
-    return utils.get_response(ret)
+    return utils.get_response([e.model_dump() for e in ret])
 
 
 @bp.route('/lvol/create_snapshot', methods=['POST'])

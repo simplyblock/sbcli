@@ -13,6 +13,7 @@ from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.mgmt_node import MgmtNode
+from simplyblock_core.models.nvme_connect import NvmeConnectEntry
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot
@@ -564,9 +565,10 @@ class MigrationDTO(BaseModel):
     error_message: str
     started_at: int
     completed_at: int
+    connect_strings: list[NvmeConnectEntry] = []
 
     @staticmethod
-    def from_model(model: LVolMigration):
+    def from_model(model: LVolMigration, connect_strings: list[NvmeConnectEntry] | None = None):
         return MigrationDTO(
             id=UUID(model.uuid),
             lvol_id=model.lvol_id,
@@ -583,4 +585,5 @@ class MigrationDTO(BaseModel):
             error_message=model.error_message or "",
             started_at=model.started_at,
             completed_at=model.completed_at,
+            connect_strings=connect_strings or [],
         )

@@ -444,7 +444,7 @@ class TestDHCHAPE2E(unittest.TestCase):
             result, _err = lvol_ctl.connect_lvol("lvol-1", host_nqn=host_nqn)
 
         self.assertTrue(len(result) > 0)
-        cmd = result[0]["connect"]
+        cmd = result[0].connect
         self.assertIn(f"--hostnqn={host_nqn}", cmd)
         self.assertIn(f"--dhchap-secret={dhchap_key}", cmd)
         self.assertIn(f"--dhchap-ctrl-secret={dhchap_ctrlr_key}", cmd)
@@ -497,10 +497,10 @@ class TestDHCHAPE2E(unittest.TestCase):
                     return_value=mock_db):
             result, _err = lvol_ctl.connect_lvol("lvol-1", host_nqn=host_nqn)
 
-        cmd = result[0]["connect"]
+        cmd = result[0].connect
         self.assertIn("--tls", cmd)
         self.assertIn(f"--hostnqn={host_nqn}", cmd)
-        self.assertTrue(result[0].get("tls"))
+        self.assertTrue(result[0].tls)
 
     def test_connect_lvol_without_host_nqn_is_rejected_when_acl_exists(self):
         """connect_lvol requires host_nqn when allowed_hosts are configured."""
