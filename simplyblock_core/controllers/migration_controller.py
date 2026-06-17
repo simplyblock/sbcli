@@ -45,6 +45,7 @@ from datetime import datetime
 
 from simplyblock_core import constants, utils
 from simplyblock_core.controllers import migration_events, tasks_controller
+from simplyblock_core.controllers.host_auth import _reapply_allowed_hosts
 from simplyblock_core.kms import create_kms_connection
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.lvol_migration import LVolMigration
@@ -52,7 +53,6 @@ from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.nvme_connect import NvmeConnectEntry
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.storage_node_ops import _reapply_allowed_hosts
 from simplyblock_core.utils.size_utils import convert_size
 
 # Note: JobSchedule is not imported directly here; task creation is delegated to
