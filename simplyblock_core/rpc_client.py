@@ -93,7 +93,16 @@ _response_validator = jsonschema.validators.validator_for(_response_schema)(_res
 class RPCClient:
 
     # ref: https://spdk.io/doc/jsonrpc.html
-    DEFAULT_ALLOWED_METHODS = ["HEAD", "GET", "PUT", "DELETE", "OPTIONS", "TRACE", "POST"]
+    # POST is deliberately EXCLUDED. SPDK JSON-RPC sends every call — including
+    # non-idempotent mutations (bdev/snapshot create, resize, add_ns, transfer)
+    # — as a POST. urllib3 gates *read*-error retries (e.g. a read timeout after
+    # the request was already delivered and is executing on the node) on this
+    # set, so retrying POST here silently re-applies a mutation that may already
+    # have taken effect — e.g. a second snapshot, a re-triggered async transfer.
+    # Connection-error retries (`connect=`) are independent of this set and
+    # still apply, since a failed *connect* means the request never reached the
+    # node and is safe to resend.
+    DEFAULT_ALLOWED_METHODS = ["HEAD", "GET", "PUT", "DELETE", "OPTIONS", "TRACE"]
     RPC_NO_PRINT_OUTPUT = ["bdev_get_bdevs", "nvmf_get_subsystems", "bdev_get_iostat"]
 
     def __init__(self, host, port, username, password, timeout=180, retry=3):
@@ -422,7 +431,7 @@ class RPCClient:
                             "nvmf_subsystem_add_ns: %s already has %s at nsid=%s, "
                             "skipping duplicate add",
                             nqn, dev_name, existing_nsid)
-                        return existing_nsid
+                        return existing_nsid, None
             except Exception as e:
                 # Don't let an idempotency probe block the legitimate add.
                 logger.debug(
@@ -508,7 +517,7 @@ class RPCClient:
         params = {"name": device_name}
         return self._request("bdev_nvme_reset_controller", params)
 
-    def create_lvstore(self, name, bdev_name, cluster_sz, clear_method, num_md_pages_per_cluster_ratio=50):
+    def create_lvstore(self, name, bdev_name, cluster_sz, clear_method, num_md_pages_per_cluster_ratio=1):
         params = {
             "bdev_name": bdev_name,
             "lvs_name": name,
@@ -536,9 +545,11 @@ class RPCClient:
             params["uuid"] = uuid
         return self._request("bdev_lvol_create", params)
 
-    def delete_lvol(self, name, del_async=False):
+    def delete_lvol(self, name, del_async=False, special_delete=False):
         params = {"name": name,
                   "sync": del_async}
+        if special_delete:
+            params["special_delete"] = True
         return self._request2("bdev_lvol_delete", params)
 
     def get_bdevs(self, name=None):
@@ -1068,7 +1079,8 @@ class RPCClient:
         }
         return self._request("ultra21_lvol_dismount", params)
 
-    def bdev_jm_create(self, name, name_storage1, block_size=4096, jm_cpu_mask="", shared_placement=False):
+    def bdev_jm_create(self, name, name_storage1, block_size=4096, jm_cpu_mask="", shared_placement=False,
+                       compression_thread=False, compression_cpu_mask=""):
         params = {
             "name": name,
             "name_storage1": name_storage1,
@@ -1084,6 +1096,14 @@ class RPCClient:
             params["shared_placement"] = True
         if jm_cpu_mask:
             params["bdb_lcpu_mask"] = int(jm_cpu_mask, 16)
+        # Compression thread: enabled per-branch (constants.JM_COMPRESSION_THREAD_ENABLED).
+        # compression_cpu_mask is a hex mask string co-located with jc-singleton on
+        # nodes <32 vCPU, or a dedicated core on >=32 vCPU; the data plane wants it as
+        # an int, matching bdb_lcpu_mask above.
+        if compression_thread:
+            params["compression_thread"] = True
+            if compression_cpu_mask:
+                params["compression_cpu_mask"] = int(compression_cpu_mask, 16)
         return self._request("bdev_jm_create", params)
 
     def bdev_jm_delete(self, name, safe_removal=False):
@@ -1452,6 +1472,20 @@ class RPCClient:
         }
         return self._request("jc_get_jm_status", params)
 
+    def jc_disable_replication(self, jm_vuid):
+        """Suspend journal replication on the target JM before a leadership flap.
+
+        Return value:
+            True  - no active replication; replication is now suspended for ~12s.
+            False - active replication present; management must unblock the LVS
+                    port, wait for replication to finish, and retry the full
+                    block sequence.
+        """
+        params = {
+            "jm_vuid": jm_vuid,
+        }
+        return self._request("jc_disable_replication", params)
+
     def bdev_distrib_check_inflight_io(self, jm_vuid):
         params = {
             "jm_vuid": jm_vuid,
@@ -1492,20 +1526,34 @@ class RPCClient:
         }
         return self._request2("jc_compression", params)
 
-    def nvmf_port_block_rdma(self, port):
+    def _request_raise(self, method, params=None):
+        """Like ``_request`` but surfaces the JSON-RPC ``error`` instead of
+        swallowing it. ``_request`` returns only the ``result`` half of the
+        tuple, so a method-not-found (-32601) collapses to a silent ``None``;
+        callers that branch on the error (e.g. ``port_block``'s RPC-then-
+        iptables fallback) need it raised. Transport failures still arrive as
+        ``RPCException("connection error")`` from ``_request2``.
+        """
+        result, error = self._request2(method, params)
+        if error is not None:
+            raise RPCException(**error)
+        return result
+
+    def nvmf_port_block(self, port, is_reject=False):
+        params = {
+            "port": port,
+            "reject": bool(is_reject),
+        }
+        return self._request_raise("nvmf_port_block", params)
+
+    def nvmf_port_unblock(self, port):
         params = {
             "port": port,
         }
-        return self._request("nvmf_port_block", params)
+        return self._request_raise("nvmf_port_unblock", params)
 
-    def nvmf_port_unblock_rdma(self, port):
-        params = {
-            "port": port,
-        }
-        return self._request("nvmf_port_unblock", params)
-
-    def nvmf_get_blocked_ports_rdma(self):
-        return self._request("nvmf_get_blocked_ports")
+    def nvmf_get_blocked_ports(self):
+        return self._request_raise("nvmf_get_blocked_ports")
 
     def bdev_raid_get_bdevs(self):
         params = {

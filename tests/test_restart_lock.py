@@ -465,6 +465,15 @@ class TestRestartingToOfflineGuard(unittest.TestCase):
         db = mock_db_cls.return_value
         db.get_storage_node_by_id.return_value = node
         db.kv_store = MagicMock()
+        # set_node_status now performs its guarded status change inside
+        # db.atomic_update (a transactional compare-and-set). The real helper
+        # re-reads the row and runs the mutator inside one FDB transaction; here
+        # we stand in with a faithful in-memory version that runs the mutator on
+        # the node and returns it, so the guard logic under test still executes.
+        def _fake_atomic_update(obj, mutate_fn):
+            mutate_fn(obj)
+            return obj
+        db.atomic_update = MagicMock(side_effect=_fake_atomic_update)
         return db
 
     @patch("simplyblock_core.storage_node_ops.distr_controller")

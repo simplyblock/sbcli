@@ -109,7 +109,11 @@ class TestCloneSecondaryCntlidIndex(unittest.TestCase):
         db.get_storage_node_by_id.side_effect = lambda i: nodes_by_id[i]
         db.get_cluster_by_id.return_value = cluster
         db.get_lvols.return_value = []
+        db.get_mini_lvols.return_value = []
         db.get_snapshots.return_value = []
+        # No capacity records -> skip the prov-cap-crit/warn gate (which would
+        # otherwise compare MagicMock attrs against ints).
+        db.get_cluster_capacity.return_value = []
         db.kv_store = MagicMock()
 
         calls = []

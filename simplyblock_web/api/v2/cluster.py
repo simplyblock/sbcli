@@ -54,8 +54,8 @@ class ClusterParams(BaseModel):
     page_size_in_blocks: int = Field(2097152, gt=0)
     cap_warn: util.Percent = 0
     cap_crit: util.Percent = 0
-    prov_cap_warn: util.Percent = 0
-    prov_cap_crit: util.Percent = 0
+    prov_cap_warn: util.Unsigned = 0
+    prov_cap_crit: util.Unsigned = 0
     distr_ndcs: int = 1
     distr_npcs: int = 1
     distr_bs: int = 4096

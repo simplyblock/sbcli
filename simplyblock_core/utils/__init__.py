@@ -476,27 +476,51 @@ def calculate_core_allocations(vcpu_list, alceml_count=2):
         return vcpus[:count]
 
     assigned = {}
+    # Compression-thread CPU layout (gated per-branch, off on main):
+    #  - <32 vCPU: the lvs thread (lvol_poller) co-locates with the app thread to
+    #    free a core, and the compression thread co-locates with jc-singleton.
+    #  - >=32 vCPU: the lvs thread keeps its own core and the compression thread
+    #    gets a dedicated core.
+    # When the gate is off the original layout is reproduced exactly.
+    comp_enabled = constants.JM_COMPRESSION_THREAD_ENABLED
+    colocate_lvs = comp_enabled and len(vcpu_list) < 32
+    dedicate_comp = comp_enabled and len(vcpu_list) >= 32
     if (len(vcpu_list) < 12):
-        vcpu = reserve_n(5)
+        vcpu = reserve_n(4 if colocate_lvs else 5)
         assigned["app_thread_core"] = vcpu[0:1]
         assigned["jm_cpu_core"] = vcpu[1:2]
         assigned["jc_singleton_core"] = vcpu[2:3]
         assigned["alceml_cpu_cores"] = vcpu[3:4]
-        assigned["lvol_poller_core"] = vcpu[4:5]
+        assigned["lvol_poller_core"] = vcpu[0:1] if colocate_lvs else vcpu[4:5]
     elif (len(vcpu_list) < 22):
-        vcpu = reserve_n(6)
+        vcpu = reserve_n(5 if colocate_lvs else 6)
         assigned["app_thread_core"] = vcpu[0:1]
         assigned["jm_cpu_core"] = vcpu[1:2]
         assigned["jc_singleton_core"] = vcpu[2:3]
         assigned["alceml_cpu_cores"] = vcpu[3:5]
-        assigned["lvol_poller_core"] = vcpu[5:6]
+        assigned["lvol_poller_core"] = vcpu[0:1] if colocate_lvs else vcpu[5:6]
     else:
-        vcpus = reserve_n(4+alceml_count)
+        # base threads: app, jm, jc (+ own lvol_poller unless co-located) (+ dedicated compression)
+        base = 3 if colocate_lvs else 4
+        if dedicate_comp:
+            base += 1
+        vcpus = reserve_n(base + alceml_count)
         assigned["app_thread_core"] = vcpus[0:1]
         assigned["jm_cpu_core"] = vcpus[1:2]
         assigned["jc_singleton_core"] = vcpus[2:3]
-        assigned["lvol_poller_core"] = vcpus[3:4]
-        assigned["alceml_cpu_cores"] = vcpus[4:4+alceml_count]
+        idx = 3
+        if colocate_lvs:
+            assigned["lvol_poller_core"] = vcpus[0:1]
+        else:
+            assigned["lvol_poller_core"] = vcpus[idx:idx + 1]
+            idx += 1
+        if dedicate_comp:
+            assigned["compression_core"] = vcpus[idx:idx + 1]
+            idx += 1
+        assigned["alceml_cpu_cores"] = vcpus[idx:idx + alceml_count]
+    # Compression thread co-locates with jc-singleton unless it got a dedicated core.
+    if comp_enabled and "compression_core" not in assigned:
+        assigned["compression_core"] = assigned.get("jc_singleton_core", [])
     dp = int(len(remaining) / 2)
     if 17 > dp >= 12:
         poller_n = len(remaining) - 12
@@ -530,6 +554,7 @@ def calculate_core_allocations(vcpu_list, alceml_count=2):
         assigned.get("distrib_cpu_cores", []),
         assigned.get("jc_singleton_core", []),
         assigned.get("lvol_poller_core", []),
+        assigned.get("compression_core", []),
     )
 
 
@@ -886,8 +911,9 @@ def get_next_fw_port(cluster_id, mgmt_ip=None):
     return next_port
 
 
-def _get_all_nvmf_ports(cluster_id):
-    """Collect all NVMe-oF ports in use across the cluster (lvol, hublvol, device)."""
+def get_node_nvmf_ports(cluster_id):
+    """NVMe-oF ports persisted on the cluster's node records (lvol, hublvol,
+    device, rpc, per-lvstore)."""
     from simplyblock_core.db_controller import DBController
     db_controller = DBController()
     used_ports = set()
@@ -907,6 +933,45 @@ def _get_all_nvmf_ports(cluster_id):
                     if isinstance(p, int) and p > 0:
                         used_ports.add(p)
     return used_ports
+
+
+def get_nvmf_base_port(cluster_id):
+    """Base of the unified NVMe-oF port pool for the cluster."""
+    nvmf_base, _, _ = _get_cluster_port_config(cluster_id)
+    return nvmf_base
+
+
+def _get_active_port_reservations(cluster_id):
+    """Ports reserved by in-flight node adds that have not yet persisted their
+    node record. Stale (abandoned) reservations are ignored by TTL.
+
+    Best-effort hardening: the durable record of a port in use is the node
+    record itself, so if the reservation read fails we fall back to node-only
+    ports rather than break allocation."""
+    import time as _time
+    from simplyblock_core.db_controller import DBController
+    from simplyblock_core.models.cluster import PortReservation
+    db_controller = DBController()
+    reserved = set()
+    now = int(_time.time())
+    try:
+        for res in PortReservation().read_from_db(db_controller.kv_store, id=cluster_id):
+            if res.cluster_id != cluster_id:
+                continue
+            if (now - res.created_at) > constants.PORT_RESERVATION_TTL_SEC:
+                continue
+            reserved.add(res.port)
+    except Exception:
+        return set()
+    return reserved
+
+
+def _get_all_nvmf_ports(cluster_id):
+    """Collect all NVMe-oF ports in use across the cluster (lvol, hublvol,
+    device), including ports reserved by in-flight node adds whose node record
+    isn't persisted yet — so neither a concurrent node add nor an lvstore/lvol
+    allocation reuses a port a node-add is mid-flight on."""
+    return get_node_nvmf_ports(cluster_id) | _get_active_port_reservations(cluster_id)
 
 
 def get_next_nvmf_port(cluster_id):
@@ -1244,7 +1309,12 @@ def addNvmeDevices(rpc_client, snode, devs):
         if pcie in ctr_map:
             nvme_controller = ctr_map[pcie]
             nvme_bdevs = []
-            for bdev in rpc_client.get_bdevs():
+            bdevs = rpc_client.get_bdevs()
+            if bdevs is None:
+                # None is an RPC failure (timeout / non-200), not an empty
+                # list; fail loudly instead of crashing on a None iteration.
+                raise Exception(f"get_bdevs failed on {rpc_client.host}")
+            for bdev in bdevs:
                 if bdev['name'].startswith(nvme_controller):
                     nvme_bdevs.append(bdev['name'])
         else:
@@ -1740,7 +1810,8 @@ def regenerate_config(new_config, old_config, force=False):
                 "alceml_worker_cpu_cores": get_core_indexes(core_to_index, distribution[4]),
                 "distrib_cpu_cores": get_core_indexes(core_to_index, distribution[5]),
                 "jc_singleton_core": get_core_indexes(core_to_index, distribution[6]),
-                "lvol_poller_core": get_core_indexes(core_to_index, distribution[7])}
+                "lvol_poller_core": get_core_indexes(core_to_index, distribution[7]),
+                "compression_core": get_core_indexes(core_to_index, distribution[8])}
 
         isolated_cores = old_config["nodes"][i]["isolated"]
         number_of_distribs = 2
@@ -1894,7 +1965,8 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
                     #                                            core_group["distribution"][4]),
                     "distrib_cpu_cores": get_core_indexes(core_group["core_to_index"], core_group["distribution"][5]),
                     "jc_singleton_core": get_core_indexes(core_group["core_to_index"], core_group["distribution"][6]),
-                    "lvol_poller_core": get_core_indexes(core_group["core_to_index"], core_group["distribution"][7])
+                    "lvol_poller_core": get_core_indexes(core_group["core_to_index"], core_group["distribution"][7]),
+                    "compression_core": get_core_indexes(core_group["core_to_index"], core_group["distribution"][8])
                 },
                 "ssd_pcis": [],
                 "nic_ports": system_info[nid]["nics"]
@@ -3339,7 +3411,8 @@ def recalculate_cores_distribution(cores, number_of_alcemls):
         "alceml_worker_cpu_cores": get_core_indexes(core_to_index, distribution[4]),
         "distrib_cpu_cores": get_core_indexes(core_to_index, distribution[5]),
         "jc_singleton_core": get_core_indexes(core_to_index, distribution[6]),
-        "lvol_poller_core": get_core_indexes(core_to_index, distribution[7])}
+        "lvol_poller_core": get_core_indexes(core_to_index, distribution[7]),
+        "compression_core": get_core_indexes(core_to_index, distribution[8])}
 
 
 def resolve_address(host_port: str) -> str:

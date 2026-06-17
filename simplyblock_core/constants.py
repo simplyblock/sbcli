@@ -98,6 +98,38 @@ RESTART_TASK_EXEC_INTERVAL_SEC = 3
 # transient peer-recovery waits without giving up prematurely.
 RESTART_TASK_EXEC_INTERVAL_MAX_SEC = 3600
 
+# A JobSchedule's lease is held by the runner host (by hostname) that last
+# touched it. Another host may only take over a task whose lease is older than
+# this — i.e. the owning runner is presumed dead. Must exceed the longest
+# single task_runner() invocation that does not write the task back (the
+# restart runner can block on RPCs for several minutes), so a live owner is
+# never falsely preempted. A runner restarting on the SAME host re-claims its
+# own tasks immediately regardless of this value (owner id is the hostname).
+TASK_LEASE_TTL_SEC = 1200
+
+# Node-add concurrency: the cross-node mesh section of add_node is serialized
+# per cluster behind a ClusterAddNodeLock. The holder refreshes the lock every
+# CLUSTER_ADD_LOCK_HEARTBEAT_SEC; a lock whose heartbeat is older than
+# CLUSTER_ADD_LOCK_TTL_SEC is treated as abandoned (holder crashed) and may be
+# reclaimed. TTL is kept well under TASK_LEASE_TTL_SEC so a dead holder's lock
+# is reclaimed before its task lease, and is several heartbeats wide so a live
+# (but momentarily slow) holder is never falsely preempted. The slow part of
+# add_node (SPDK boot) is OUTSIDE this lock, so the locked section is short.
+CLUSTER_ADD_LOCK_HEARTBEAT_SEC = 30
+CLUSTER_ADD_LOCK_TTL_SEC = 120
+
+# A node-add port reservation older than this is treated as abandoned and
+# ignored/reclaimed. Must exceed the worst-case time from port allocation to
+# persisting the node record (which spans the SPDK boot), so a live add never
+# loses its reserved port.
+PORT_RESERVATION_TTL_SEC = 600
+
+# An LVol left in STATUS_IN_CREATION longer than this is treated as an orphaned
+# create (the creating process died before reaching ONLINE) and is cleaned up
+# by lvol_monitor. Must be comfortably longer than the slowest legitimate
+# create (HA multi-node registration) so an in-progress create is never killed.
+LVOL_IN_CREATION_STALE_SEC = 600
+
 SIMPLY_BLOCK_SPDK_CORE_IMAGE = "simplyblock/spdk-core:v24.05-tag-latest"
 SIMPLY_BLOCK_DOCKER_IMAGE = get_config_var(
         "SIMPLY_BLOCK_DOCKER_IMAGE","simplyblock/simplyblock:main")
@@ -196,6 +228,23 @@ CTRL_LOSS_TO=1
 FAST_FAIL_TO=0
 RECONNECT_DELAY_CLUSTER=1
 LVOL_CLUSTER_RATIO=1
+
+# Per-branch feature gate for the SPDK compression-thread JM layout (see
+# calculate_core_allocations and device_controller.bdev_jm_create). OFF on
+# main: when False the CPU allocation and JM-create RPC are byte-for-byte
+# unchanged from the pre-compression-thread behaviour.
+JM_COMPRESSION_THREAD_ENABLED = False
+
+# Fixed size (in bytes) each distrib bdev reports up to the raid0/lvstore
+# layer, independent of cluster raw capacity or number_of_distribs. 250 TiB.
+#
+# BIRTH-TIME ONLY: this is the size used when an lvstore is first created
+# (create_lvstore). It must NEVER be read on the recreate/restart path --
+# recreate_lvstore replays the persisted lvstore_stack verbatim, preserving
+# each distrib's original num_blocks. Resizing a distrib under a live
+# raid0/lvstore would corrupt the geometry, so existing lvstores must keep
+# their persisted size across upgrades even if this constant changes.
+DISTRIB_SIZE_BYTES = 274877906944000
 
 
 SENTRY_SDK_DNS = "https://745047b017ac424b4173550e19910fb7@o4508953941311488.ingest.de.sentry.io/4508996361584720"

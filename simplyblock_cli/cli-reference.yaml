@@ -32,8 +32,8 @@ commands:
           Runs locally on to-be storage node hosts. Reads system information (CPUs topology, NVME devices) and prepares
           yaml config to be used when adding the storage node.
         arguments:
-          - name: "--max-lvol"
-            help: "The max logical volume per storage node."
+          - name: "--max-subsys"
+            help: "The max number of subsystems per storage node."
             dest: max_lvol
             type: int
             required: true
@@ -112,7 +112,7 @@ commands:
             type: bool
             action: store_true
           - name: "--calculate-hp-only"
-            help: "Calculate the minimum required huge pages, it depends on the following params: --cores-percentage, --sockets-to-use, --max-lvol, --nodes-per-socket, --number-of-devices."
+            help: "Calculate the minimum required huge pages, it depends on the following params: --cores-percentage, --sockets-to-use, --max-subsys, --nodes-per-socket, --number-of-devices."
             dest: calculate_hp_only
             type: bool
             action: store_true
@@ -338,8 +338,8 @@ commands:
             dest: node_id
             completer: _completer_get_sn_list
             type: str
-          - name: "--max-lvol"
-            help: "The max logical volume per storage node. Default: `0`."
+          - name: "--max-subsys"
+            help: "The max number of subsystems per storage node. Default: `0`."
             dest: max_lvol
             type: int
             default: 0

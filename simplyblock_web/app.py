@@ -9,14 +9,16 @@ import time
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.wsgi import WSGIMiddleware
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 import uvicorn
 from uvicorn.config import Config
 
-from simplyblock_web.api import public, v1
+from simplyblock_web.api import v1, v2
+from simplyblock_web.settings import Settings as WebSettings
 from simplyblock_core import constants, utils as core_utils
 from simplyblock_core.settings import Settings
+from simplyblock_core.exceptions import PreconditionError
 
 logger = core_utils.get_logger(__name__)
 logger.setLevel(constants.LOG_WEB_LEVEL)
@@ -68,33 +70,49 @@ class AccessLogMiddleware(BaseHTTPMiddleware):
 
 
 app: FastAPI = FastAPI()
+
+
+@app.exception_handler(PreconditionError)
+async def precondition_handler(request: Request, exc: PreconditionError):
+    logger.exception("Preciondition checks failed", exc_info=exc)
+    return JSONResponse(status_code=400, content={
+        "error": "Preconditions are not met",
+        "detail": str(exc),
+    })
+
+
+@app.exception_handler(RuntimeError)
+async def runtime_error_handler(request: Request, exc: RuntimeError):
+    logger.exception("Unexcpected error while processing request", exc_info=exc)
+    return JSONResponse(status_code=500, content={
+        "status": "An error occured while processing the request",
+        "detail": str(exc),
+    })
+
+
+_web_settings = WebSettings()
+
 app.add_middleware(AccessLogMiddleware)
-app.include_router(public, prefix='/api')
-app.mount('/api/v1', WSGIMiddleware(v1.api))  # For some reason this fails if done in `api/__init__.py`
 
+if 2 in _web_settings.api_versions:
+    app.include_router(v2.api, prefix='/api/v2')
 
-@app.api_route('/', methods=['GET'])
-@app.api_route('/cluster/{full_path:path}', methods=['GET', 'POST', 'PUT', 'DELETE'])
-@app.api_route('/mgmtnode/{full_path:path}', methods=['GET', 'POST', 'PUT', 'DELETE'])
-@app.api_route('/device/{full_path:path}', methods=['GET', 'POST', 'PUT', 'DELETE'])
-@app.api_route('/lvol/{full_path:path}', methods=['GET', 'POST', 'PUT', 'DELETE'])
-@app.api_route('/snapshot/{full_path:path}', methods=['GET', 'POST', 'PUT', 'DELETE'])
-@app.api_route('/storagenode/{full_path:path}', methods=['GET', 'POST', 'PUT', 'DELETE'])
-@app.api_route('/pool/{full_path:path}', methods=['GET', 'POST', 'PUT', 'DELETE'])
-def redirect_legacy(request: Request) -> RedirectResponse:
-    """
-    Redirect legacy API routes to their corresponding v1 endpoints.
-    
-    Args:
-        request: The incoming HTTP request
-        
-    Returns:
-        RedirectResponse: A 308 Permanent Redirect to the v1 API endpoint
-    """
-    redirect_url: str = f'/api/v1/{request.url.path}'
-    if (query_params := str(request.query_params)):
-        redirect_url += f'?{query_params}'
-    return RedirectResponse(url=redirect_url, status_code=308)
+if 1 in _web_settings.api_versions:
+    app.mount('/api/v1', WSGIMiddleware(v1.api))  # For some reason this fails if done in `api/__init__.py`
+
+    @app.api_route('/', methods=['GET'])
+    @app.api_route('/cluster/{full_path:path}', methods=['GET', 'POST', 'PUT', 'DELETE'])
+    @app.api_route('/mgmtnode/{full_path:path}', methods=['GET', 'POST', 'PUT', 'DELETE'])
+    @app.api_route('/device/{full_path:path}', methods=['GET', 'POST', 'PUT', 'DELETE'])
+    @app.api_route('/lvol/{full_path:path}', methods=['GET', 'POST', 'PUT', 'DELETE'])
+    @app.api_route('/snapshot/{full_path:path}', methods=['GET', 'POST', 'PUT', 'DELETE'])
+    @app.api_route('/storagenode/{full_path:path}', methods=['GET', 'POST', 'PUT', 'DELETE'])
+    @app.api_route('/pool/{full_path:path}', methods=['GET', 'POST', 'PUT', 'DELETE'])
+    def redirect_legacy(request: Request) -> RedirectResponse:
+        redirect_url: str = f'/api/v1/{request.url.path}'
+        if (query_params := str(request.query_params)):
+            redirect_url += f'?{query_params}'
+        return RedirectResponse(url=redirect_url, status_code=308)
 
 
 def main() -> None:

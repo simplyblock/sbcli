@@ -14,8 +14,8 @@ import requests
 
 from docker.errors import DockerException
 from simplyblock_core import utils, scripts, constants, mgmt_node_ops, storage_node_ops
+from simplyblock_core import port_block
 from simplyblock_core.controllers import backup_controller, cluster_events, device_controller, qos_controller, tasks_controller, tcp_ports_events
-from simplyblock_core.fw_api_client import FirewallClient
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.cluster import Cluster, HashicorpVaultSettings
 from simplyblock_core.models.job_schedule import JobSchedule
@@ -784,13 +784,10 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
             # lvstore/hublvol RPCs which presume the peer's full stack is up.
             leader_blocked = False
             leader_port = None
-            leader_ptype = "tcp"
             if not is_fresh_activation and primary_node.status == StorageNode.STATUS_ONLINE:
                 try:
                     leader_port = primary_node.get_lvol_subsys_port(primary_node.lvstore)
-                    leader_ptype = "udp" if primary_node.active_rdma else "tcp"
-                    FirewallClient(primary_node, timeout=3, retry=1).firewall_set_port(
-                        leader_port, leader_ptype, "block", primary_node.rpc_port)
+                    port_block.set_port(primary_node, leader_port, block=True, timeout=3, retry=1)
                     tcp_ports_events.port_deny(primary_node, leader_port)
                     leader_blocked = True
                     time.sleep(0.5)
@@ -814,8 +811,7 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
             finally:
                 if leader_blocked:
                     try:
-                        FirewallClient(primary_node, timeout=3, retry=1).firewall_set_port(
-                            leader_port, leader_ptype, "allow", primary_node.rpc_port)
+                        port_block.set_port(primary_node, leader_port, block=False, timeout=3, retry=1)
                         tcp_ports_events.port_allowed(primary_node, leader_port)
                     except Exception as ue:
                         logger.error(
@@ -924,6 +920,47 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
         cluster.cluster_max_devices = dev_count
         cluster.cluster_max_nodes = len(online_nodes)
         cluster.write_to_db(db_controller.kv_store)
+
+    # --- Pass 4: open client IO only now, with correct ANA ---
+    # Pass 1/2 created every client-facing listener INACCESSIBLE so no client IO
+    # could flow while lvstores were coming up and before Pass 3 wired the
+    # hublvol redirects. Now that redirects are connected and leadership is
+    # settled, flip each listener to its correct ANA state: optimized on the
+    # LVS's primary, non_optimized on its secondary/tertiary. Only after this do
+    # we set the cluster ACTIVE — so clients never resume IO against a primary
+    # whose redirect to its peers isn't established (which is what produced the
+    # mid-activation writer-conflict / EIO).
+    for snode in db_controller.get_storage_nodes_by_cluster_id(cl_id):
+        if snode.is_secondary_node:
+            continue
+        if snode.status != StorageNode.STATUS_ONLINE:
+            continue
+        snode = db_controller.get_storage_node_by_id(snode.get_id())
+        node_lvols = [lv for lv in db_controller.get_lvols_by_node_id(snode.get_id())
+                      if lv.status not in [LVol.STATUS_IN_DELETION, LVol.STATUS_IN_CREATION]]
+        if not node_lvols:
+            continue
+        # primary path -> optimized
+        for lv in node_lvols:
+            try:
+                storage_node_ops._set_lvol_ana_on_node(lv, snode, "optimized")
+            except Exception as e:
+                logger.error("Pass 4: set optimized ANA on primary %s for %s failed: %s",
+                             snode.get_id(), lv.nqn, e)
+        # secondary/tertiary paths -> non_optimized
+        for sec_id in [snode.secondary_node_id, snode.tertiary_node_id]:
+            if not sec_id:
+                continue
+            sec_node = db_controller.get_storage_node_by_id(sec_id)
+            if not sec_node or sec_node.status != StorageNode.STATUS_ONLINE:
+                continue
+            for lv in node_lvols:
+                try:
+                    storage_node_ops._set_lvol_ana_on_node(lv, sec_node, "non_optimized")
+                except Exception as e:
+                    logger.error("Pass 4: set non_optimized ANA on %s for %s failed: %s",
+                                 sec_node.get_id(), lv.nqn, e)
+
     set_cluster_status(cl_id, Cluster.STATUS_ACTIVE)
     logger.info("Cluster activated successfully")
 
@@ -1018,10 +1055,23 @@ def set_cluster_status(cl_id, status) -> None:
     if cluster.status == status:
         return
 
-    old_status = cluster.status
-    cluster.status = status
-    cluster.write_to_db(db_controller.kv_store)
-    cluster_events.cluster_status_change(cluster, cluster.status, old_status)
+    # Transactional compare-and-set: concurrent node-adds (now parallel) both
+    # call this, and a plain read+write_to_db would clobber any other cluster
+    # field a peer updated in between. atomic_update re-reads inside the tx and
+    # only writes the status field change.
+    captured = {}
+
+    def _mutate(fresh):
+        if fresh.status == status:
+            return False  # already at target (a peer won the race); don't write
+        captured['old'] = fresh.status
+        fresh.status = status
+        return True
+
+    updated = db_controller.atomic_update(cluster, _mutate)
+    if updated is None or 'old' not in captured:
+        return
+    cluster_events.cluster_status_change(updated, updated.status, captured['old'])
 
 
 def cluster_set_read_only(cl_id) -> None:
@@ -1598,24 +1648,25 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
     logger.info("Updating mgmt cluster")
     if cluster.mode == "docker":
         cluster_docker = utils.get_docker_client(cluster_id)
-        logger.info(f"Pulling image {constants.SIMPLY_BLOCK_DOCKER_IMAGE}")
-        pull_docker_image_with_retry(cluster_docker, constants.SIMPLY_BLOCK_DOCKER_IMAGE)
-        image_without_tag = constants.SIMPLY_BLOCK_DOCKER_IMAGE.split(":")[0]
-        image_without_tag = image_without_tag.split("/")
-        image_parts = "/".join(image_without_tag[-2:])
         service_image = constants.SIMPLY_BLOCK_DOCKER_IMAGE
         if mgmt_image:
             service_image = mgmt_image
+        logger.info(f"Pulling image {service_image}")
+        pull_docker_image_with_retry(cluster_docker, service_image)
         service_names = []
+        image_parts = ["simplyblock-io/simplyblock:", "simplyblock/simplyblock:", "simply-block/simplyblock:"]
         for service in cluster_docker.services.list():
-            if image_parts in service.attrs['Spec']['Labels']['com.docker.stack.image']:
-                if service.name in ["app_CachingNodeMonitor", "app_CachedLVolStatsCollector"]:
-                    logger.info(f"Removing service {service.name}")
-                    service.remove()
-                else:
-                    logger.info(f"Updating service {service.name}")
-                    service.update(image=service_image, force_update=True)
-                    service_names.append(service.attrs['Spec']['Name'])
+            service_image=service.attrs['Spec']['Labels']['com.docker.stack.image']
+            for part in image_parts:
+                if part in service_image:
+                    if service.name in ["app_CachingNodeMonitor", "app_CachedLVolStatsCollector"]:
+                        logger.info(f"Removing service {service.name}")
+                        service.remove()
+                    else:
+                        logger.info(f"Updating service {service.name}")
+                        service.update(image=service_image, force_update=True)
+                        service_names.append(service.attrs['Spec']['Name'])
+                    break
 
         if "app_SnapshotMonitor" not in service_names:
             utils.create_docker_service(
@@ -1644,8 +1695,7 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
         utils.load_kube_config_with_fallback()
         apps_v1 = k8s_client.AppsV1Api()
         namespace = constants.K8S_NAMESPACE
-        image_without_tag = constants.SIMPLY_BLOCK_DOCKER_IMAGE.split(":")[0]
-        image_parts = "/".join(image_without_tag.split("/")[-2:])
+        image_parts = ["simplyblock-io/simplyblock:", "simplyblock/simplyblock:", "simply-block/simplyblock:"]
         service_image = mgmt_image or constants.SIMPLY_BLOCK_DOCKER_IMAGE
         deployment_names = []
         # Update Deployments
@@ -1656,17 +1706,18 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                 continue
             deployment_names.append(deploy.metadata.name)
             for c in deploy.spec.template.spec.containers:
-                if image_parts in c.image:
-                    logger.info(f"Updating deployment {deploy.metadata.name} image to {service_image}")
-                    c.image = service_image
-                    annotations = deploy.spec.template.metadata.annotations or {}
-                    annotations["pod.kubernetes.io/restartedAt"] = datetime.datetime.utcnow().isoformat()
-                    deploy.spec.template.metadata.annotations = annotations
-                    apps_v1.patch_namespaced_deployment(
-                        name=deploy.metadata.name,
-                        namespace=namespace,
-                        body={"spec": {"template": deploy.spec.template}}
-                    )
+                for part in image_parts:
+                    if part in c.image:
+                        logger.info(f"Updating deployment {deploy.metadata.name} image to {service_image}")
+                        c.image = service_image
+                        annotations = deploy.spec.template.metadata.annotations or {}
+                        annotations["pod.kubernetes.io/restartedAt"] = datetime.datetime.utcnow().isoformat()
+                        deploy.spec.template.metadata.annotations = annotations
+                        apps_v1.patch_namespaced_deployment(
+                            name=deploy.metadata.name,
+                            namespace=namespace,
+                            body={"spec": {"template": deploy.spec.template}})
+                        break
 
         if "simplyblock-tasks-runner-sync-lvol-del" not in deployment_names:
             utils.create_k8s_service(
@@ -1688,17 +1739,18 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
         daemonsets = apps_v1.list_namespaced_daemon_set(namespace=namespace)
         for ds in daemonsets.items:
             for c in ds.spec.template.spec.containers:
-                if image_parts in c.image:
-                    logger.info(f"Updating daemonset {ds.metadata.name} image to {service_image}")
-                    c.image = service_image
-                    annotations = ds.spec.template.metadata.annotations or {}
-                    annotations["pod.kubernetes.io/restartedAt"] = datetime.datetime.utcnow().isoformat()
-                    ds.spec.template.metadata.annotations = annotations
-                    apps_v1.patch_namespaced_daemon_set(
-                        name=ds.metadata.name,
-                        namespace=namespace,
-                        body={"spec": {"template": ds.spec.template}}
-                        )
+                for part in image_parts:
+                    if part in c.image:
+                        logger.info(f"Updating daemonset {ds.metadata.name} image to {service_image}")
+                        c.image = service_image
+                        annotations = ds.spec.template.metadata.annotations or {}
+                        annotations["pod.kubernetes.io/restartedAt"] = datetime.datetime.utcnow().isoformat()
+                        ds.spec.template.metadata.annotations = annotations
+                        apps_v1.patch_namespaced_daemon_set(
+                            name=ds.metadata.name,
+                            namespace=namespace,
+                            body={"spec": {"template": ds.spec.template}})
+                        break
 
         logger.info("Done updating mgmt cluster")
 

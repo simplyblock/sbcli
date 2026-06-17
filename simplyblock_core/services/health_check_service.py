@@ -23,7 +23,11 @@ def set_node_health_check(snode, health_check_status):
     snode.health_check = health_check_status
     snode.updated_at = str(datetime.now())
     snode.write_to_db()
-    storage_events.snode_health_check_change(snode, snode.health_check, old_status, caused_by="monitor")
+    # health_check_status is None when health is not applicable (node not in
+    # ONLINE/DOWN). That is not a real health transition, so don't emit a
+    # health-change event for it — only fire for true/false results.
+    if health_check_status is not None:
+        storage_events.snode_health_check_change(snode, snode.health_check, old_status, caused_by="monitor")
 
 
 def set_device_health_check(cluster_id, device, health_check_status):
@@ -43,8 +47,11 @@ def set_device_health_check(cluster_id, device, health_check_status):
                             fresh_dev.health_check = health_check_status
                             break
                     fresh_node.write_to_db()
-                    device_events.device_health_check_change(
-                        dev, health_check_status, old_status, caused_by="monitor")
+                    # None => health not applicable (owning node not ONLINE/DOWN);
+                    # not a real health transition, so don't emit an event.
+                    if health_check_status is not None:
+                        device_events.device_health_check_change(
+                            dev, health_check_status, old_status, caused_by="monitor")
                     return
 
 
@@ -62,17 +69,24 @@ def check_node(snode):
 
     logger.info("Node: %s, status %s", snode.get_id(), snode.status)
 
-    if snode.status == StorageNode.STATUS_IN_CREATION:
-        logger.info(f"Node status is: {snode.status}, skipping")
-        return
-
+    # Nodes that are being torn down / rebuilt or removed (in_restart,
+    # in_shutdown, offline, schedulable, removed, in_creation) have transient
+    # data-plane state. Don't run the check at all and mark health (node + its
+    # devices) "not applicable" (None).
     if snode.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_UNREACHABLE,
                             StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
-        logger.info(f"Node status is: {snode.status}, skipping")
-        set_node_health_check(snode, False)
+        logger.info(f"Node status is: {snode.status}, health check not applicable")
+        set_node_health_check(snode, None)
         for device in snode.nvme_devices:
-            set_device_health_check(snode.cluster_id, device, False)
+            set_device_health_check(snode.cluster_id, device, None)
         return
+
+    # Health is *reported* (true/false) only for ONLINE/DOWN nodes. UNREACHABLE
+    # and SUSPENDED nodes still run the check pass below — it performs self-heal
+    # (reconnecting remote devices, repairing multipath, recreating hublvols) —
+    # but their node/device health is reported as "not applicable" (None),
+    # never true/false.
+    report_health = snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]
 
     # 1- check node ping
     ping_check = health_controller._check_node_ping(snode.mgmt_ip)
@@ -145,7 +159,7 @@ def check_node(snode):
 
             passed &= health_controller.check_subsystem(device.nvmf_nqn, nqns=subsystems)
 
-            set_device_health_check(snode.cluster_id, device, passed)
+            set_device_health_check(snode.cluster_id, device, passed if report_health else None)
             if device.status == NVMeDevice.STATUS_ONLINE:
                 node_devices_check &= passed
 
@@ -157,7 +171,10 @@ def check_node(snode):
         for remote_device in snode.remote_devices:
             org_dev = db.get_storage_device_by_id(remote_device.get_id())
             org_node = db.get_storage_node_by_id(remote_device.node_id)
-            if org_dev.status == NVMeDevice.STATUS_ONLINE and org_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
+            # Only treat a missing remote device as a fault when the owning node
+            # is ONLINE/DOWN/UNREACHABLE. If the owner is mid-transition (restart,
+            # shutdown, ...) the connection is expected to be gone — skip it.
+            if org_dev.status == NVMeDevice.STATUS_ONLINE and health_controller._peer_connections_relevant(org_node):
                 if health_controller.check_bdev(remote_device.remote_bdev, bdev_names=node_bdev_names):
                     # Bdev exists but multipath may be degraded — repair missing paths
                     if org_dev.nvmf_multipath:
@@ -222,14 +239,31 @@ def check_node(snode):
                                 logger.warning("Multipath repair failed for JM %s: %s", ctrl_name, e)
                         connected_jms.append(remote_device.get_id())
                     else:
-                        node_remote_devices_check = False
+                        # Only fail health when the JM's owning node is
+                        # ONLINE/DOWN/UNREACHABLE. If it's mid-transition the
+                        # remote JM bdev is expected to be missing.
+                        try:
+                            jm_owner = db.get_storage_node_by_id(remote_device.node_id)
+                        except KeyError:
+                            jm_owner = None
+                        if health_controller._peer_connections_relevant(jm_owner):
+                            node_remote_devices_check = False
+                        else:
+                            logger.info(
+                                "Remote JM %s missing, but owning node %s is %s — expected",
+                                remote_device.remote_bdev, remote_device.node_id,
+                                jm_owner.status if jm_owner else "not-found")
 
             for jm_id in snode.jm_ids:
                 if jm_id and jm_id not in connected_jms:
                     for nd in db.get_storage_nodes():
                         if nd.jm_device and nd.jm_device.get_id() == jm_id:
-                            if nd.status == StorageNode.STATUS_ONLINE:
+                            if health_controller._peer_connections_relevant(nd):
                                 node_remote_devices_check = False
+                            else:
+                                logger.info(
+                                    "JM device %s not connected, but owning node %s is %s — expected",
+                                    jm_id, nd.get_id(), nd.status)
                             break
 
             if not node_remote_devices_check and cluster is not None and cluster.status in [
@@ -302,7 +336,9 @@ def check_node(snode):
                     health_controller._log_port_check_failure(db, snode, port, e)
 
         health_check_status = is_node_online and node_devices_check and node_remote_devices_check and lvstore_check
-    set_node_health_check(snode, bool(health_check_status))
+    # Report true/false only for ONLINE/DOWN; UNREACHABLE/SUSPENDED ran the
+    # self-heal pass above but their health stays "not applicable" (None).
+    set_node_health_check(snode, bool(health_check_status) if report_health else None)
     time.sleep(constants.HEALTH_CHECK_INTERVAL_SEC)
 
 

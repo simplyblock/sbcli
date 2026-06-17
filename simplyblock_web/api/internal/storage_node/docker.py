@@ -189,7 +189,14 @@ def spdk_process_start(body: SPDKParams):
                 "%s still present after teardown budget; starting anyway", name)
 
     if body.cluster_ip is not None:
-        log_config = LogConfig(type=LogConfig.types.GELF, config={"gelf-address": f"tcp://{body.cluster_ip}:12202"})
+        log_config = LogConfig(
+            type=LogConfig.types.GELF,
+            config={
+                "gelf-address": f"tcp://{body.cluster_ip}:12202",
+                "mode": "non-blocking",
+                "max-buffer-size": "40m"
+            }
+        )
     else:
         log_config = LogConfig(type=LogConfig.types.JOURNALD)
 

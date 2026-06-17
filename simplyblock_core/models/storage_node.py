@@ -54,7 +54,9 @@ class StorageNode(BaseNodeObject):
     enable_ha_jm: bool = False
     ha_jm_count: int = 3
     enable_test_device: bool = False
-    health_check: bool = True
+    # None => health check is not applicable (node not in ONLINE/DOWN);
+    # health is only measured/shown for ONLINE or DOWN nodes.
+    health_check: Optional[bool] = True
     host_nqn: str = ""
     host_secret: str = ""
     hostname: str = ""
@@ -67,6 +69,7 @@ class StorageNode(BaseNodeObject):
     iobuf_small_pool_count: int = 0
     is_secondary_node: bool = False
     jc_singleton_mask: str = ""
+    compression_cpu_mask: str = ""
     jm_cpu_mask: str = ""
     jm_device: JMDevice = None # type: ignore[assignment]
     jm_percent: int = 3
@@ -91,6 +94,10 @@ class StorageNode(BaseNodeObject):
     number_of_alceml_devices: int = 0
     nvme_devices: List[NVMeDevice] = []
     online_since: str = ""
+    # ISO timestamp of when this node entered STATUS_DOWN (cleared on any other
+    # status). Used to apply a grace window before a DOWN node counts toward the
+    # cluster suspend threshold — a transient DOWN must not suspend the cluster.
+    down_since: str = ""
     partitions_count: int = 0  # Unused
     poller_cpu_cores: List[int] = []
     ssd_pcie: List = []

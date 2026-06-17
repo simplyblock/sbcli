@@ -37,7 +37,7 @@ class TestAddNsIdempotent(unittest.TestCase):
                     "nsid": 1, "bdev_name": bdev, "uuid": uuid,
                 }],
             }]) as mock_list, \
-             patch.object(c, "_request") as mock_req:
+             patch.object(c, "_request2") as mock_req:
             ret = c.nvmf_subsystem_add_ns(nqn, bdev, uuid=uuid, nsid=1)
 
         self.assertEqual(ret, 1)
@@ -55,7 +55,7 @@ class TestAddNsIdempotent(unittest.TestCase):
                 "nqn": nqn,
                 "namespaces": [],
             }]), \
-             patch.object(c, "_request", return_value=1) as mock_req:
+             patch.object(c, "_request2", return_value=(1, None)) as mock_req:
             ret = c.nvmf_subsystem_add_ns(nqn, bdev, uuid="u1", nsid=1)
 
         self.assertEqual(ret, 1)
@@ -67,7 +67,7 @@ class TestAddNsIdempotent(unittest.TestCase):
         """When the subsystem itself is missing from the list, the real RPC fires."""
         c = _client()
         with patch.object(c, "subsystem_list", return_value=[]), \
-             patch.object(c, "_request", return_value=1) as mock_req:
+             patch.object(c, "_request2", return_value=(1, None)) as mock_req:
             c.nvmf_subsystem_add_ns("nqn.test", "bdev0", uuid="u1")
         mock_req.assert_called_once()
 
@@ -85,7 +85,7 @@ class TestAddNsIdempotent(unittest.TestCase):
                     "nsid": 1, "bdev_name": bdev, "uuid": "old-uuid",
                 }],
             }]), \
-             patch.object(c, "_request", return_value=False) as mock_req:
+             patch.object(c, "_request2", return_value=(False, None)) as mock_req:
             c.nvmf_subsystem_add_ns(nqn, bdev, uuid="new-uuid", nsid=1)
 
         mock_req.assert_called_once()
@@ -100,7 +100,7 @@ class TestAddNsIdempotent(unittest.TestCase):
                 "nqn": nqn,
                 "namespaces": [{"nsid": 1, "bdev_name": bdev, "uuid": "u1"}],
             }]) as mock_list, \
-             patch.object(c, "_request", return_value=False) as mock_req:
+             patch.object(c, "_request2", return_value=(False, None)) as mock_req:
             c.nvmf_subsystem_add_ns(nqn, bdev, uuid="u1", nsid=1, idempotent=False)
 
         # No precheck, real RPC fires regardless.
@@ -111,7 +111,7 @@ class TestAddNsIdempotent(unittest.TestCase):
         """If the idempotency probe itself raises, fall back to the real RPC."""
         c = _client()
         with patch.object(c, "subsystem_list", side_effect=RuntimeError("rpc down")), \
-             patch.object(c, "_request", return_value=1) as mock_req:
+             patch.object(c, "_request2", return_value=(1, None)) as mock_req:
             ret = c.nvmf_subsystem_add_ns("nqn.test", "bdev0")
         self.assertEqual(ret, 1)
         mock_req.assert_called_once()
@@ -128,7 +128,7 @@ class TestAddNsIdempotent(unittest.TestCase):
                 "nqn": nqn,
                 "namespaces": [{"nsid": 2, "bdev_name": bdev, "uuid": "u1"}],
             }]), \
-             patch.object(c, "_request") as mock_req:
+             patch.object(c, "_request2") as mock_req:
             ret = c.nvmf_subsystem_add_ns(nqn, bdev, uuid="u1")  # no nsid pinned
 
         self.assertEqual(ret, 2)

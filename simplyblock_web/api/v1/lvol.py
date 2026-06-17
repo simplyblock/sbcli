@@ -8,6 +8,7 @@ from flask import Blueprint
 from flask import request
 
 from simplyblock_core.controllers import lvol_controller, snapshot_controller
+from simplyblock_core.exceptions import PreconditionError
 
 from simplyblock_web import utils
 
@@ -256,8 +257,13 @@ def resize_lvol(uuid):
 
     new_size = core_utils.parse_size(cl_data['size'])
 
-    ret, error = lvol_controller.resize_lvol(uuid, new_size)
-    return utils.get_response(ret, error)
+    try:
+        lvol_controller.resize_lvol(uuid, new_size)
+        return utils.get_response(True)
+    except PreconditionError as e:
+        return utils.get_response_error(str(e), 400)
+    except RuntimeError as e:
+        return utils.get_response_error(str(e), 500)
 
 
 @bp.route('/lvol/connect/<string:uuid>', methods=['GET'])
