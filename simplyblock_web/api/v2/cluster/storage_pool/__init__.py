@@ -1,7 +1,6 @@
-from typing import Annotated, List, Optional
-from uuid import UUID
+from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel
 
 from simplyblock_core.db_controller import DBController
@@ -9,12 +8,14 @@ from simplyblock_core.controllers import pool_controller
 from simplyblock_core import utils as core_utils
 from simplyblock_core.models.pool import Pool as PoolModel
 
-from . import util as util
-from .cluster import Cluster
-from .dtos import StoragePoolDTO
+from ... import util as util
+from ..._dependencies import Cluster, StoragePool
+from .volume import api as volume_api
+from .snapshot import api as snapshot_api
+from ..._dtos import StoragePoolDTO
 
 
-api = APIRouter(prefix='/storage-pools')
+api = APIRouter()
 db = DBController()
 
 
@@ -65,19 +66,6 @@ def add(request: Request, cluster: Cluster, parameters: StoragePoolParams) -> Re
 instance_api = APIRouter(prefix='/{pool_id}')
 
 
-def _lookup_storage_pool(pool_id: UUID, cluster: Cluster) -> PoolModel:
-    try:
-        pool = db.get_pool_by_id(str(pool_id))
-    except KeyError as e:
-        raise HTTPException(404, str(e))
-    if pool.cluster_id != cluster.get_id():
-        raise HTTPException(404, f'Pool {pool_id} not found')
-    return pool
-
-
-StoragePool = Annotated[PoolModel, Depends(_lookup_storage_pool)]
-
-
 @instance_api.get('/', name='clusters:storage-pools:detail')
 def get(cluster: Cluster, pool: StoragePool) -> StoragePoolDTO:
     stat_obj = None
@@ -86,7 +74,7 @@ def get(cluster: Cluster, pool: StoragePool) -> StoragePoolDTO:
 
 @instance_api.delete('/', name='clusters:storage-pools:delete', status_code=204, responses={204: {"content": None}})
 def delete(cluster: Cluster, pool: StoragePool) -> Response:
-    if pool.status == StoragePool.STATUS_INACTIVE:
+    if pool.status == PoolModel.STATUS_INACTIVE:
         raise HTTPException(400, 'Pool is inactive')
 
     if not pool_controller.delete_pool(pool.get_id()):
@@ -156,3 +144,8 @@ def remove_host(cluster: Cluster, pool: StoragePool, parameters: PoolHostParams)
     if not ok:
         raise HTTPException(400, err)
     return Response(status_code=204)
+
+
+instance_api.include_router(volume_api, prefix='/volumes')
+instance_api.include_router(snapshot_api, prefix='/snapshots')
+api.include_router(instance_api)

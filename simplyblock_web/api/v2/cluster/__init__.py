@@ -1,20 +1,24 @@
 from threading import Thread
 from typing import Annotated, List, Literal, Optional
-from uuid import UUID
-
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel, Field
 from pydantic.networks import AnyUrl, UrlConstraints
 
 from simplyblock_core.db_controller import DBController
-from simplyblock_core.models.cluster import Cluster as ClusterModel, HashicorpVaultSettings as ModelVaultSettings
+from simplyblock_core.models.cluster import HashicorpVaultSettings as ModelVaultSettings
 from simplyblock_core import cluster_ops
 
-from .dtos import ClusterDTO
-from . import util as util
+from .._dependencies import Cluster
+from .backup import api as backup_api
+from .migration import api as migration_api
+from .storage_pool import api as pool_api
+from .storage_node import api as storage_node_api
+from .task import api as task_api
+from .._dtos import ClusterDTO
+from .. import util as util
 
 
-api = APIRouter(prefix='/clusters')
+api = APIRouter()
 db = DBController()
 
 
@@ -113,16 +117,6 @@ def add(parameters: ClusterParams):
 
 
 instance_api = APIRouter(prefix='/{cluster_id}')
-
-
-def _lookup_cluster(cluster_id: UUID):
-    try:
-        return db.get_cluster_by_id(str(cluster_id))
-    except KeyError as e:
-        raise HTTPException(404, str(e))
-
-
-Cluster = Annotated[ClusterModel, Depends(_lookup_cluster)]
 
 
 @instance_api.get('/', name='clusters:detail')
@@ -239,3 +233,11 @@ def update_cluster( cluster: Cluster, parameters: _UpdateParams) -> Response:
         restart=parameters.restart
     )
     return Response(status_code=204)
+
+
+instance_api.include_router(storage_node_api, prefix='/storage-nodes')
+instance_api.include_router(task_api, prefix='/tasks')
+instance_api.include_router(pool_api, prefix='/storage-pools')
+instance_api.include_router(backup_api, prefix='/backups')
+instance_api.include_router(migration_api, prefix='/migrations')
+api.include_router(instance_api)

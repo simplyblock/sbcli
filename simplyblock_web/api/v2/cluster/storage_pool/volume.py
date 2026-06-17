@@ -1,7 +1,6 @@
 from typing import Annotated, List, Literal, Optional, Union
-from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field, RootModel
 
 from simplyblock_core.db_controller import DBController
@@ -9,13 +8,12 @@ from simplyblock_core import utils as core_utils
 from simplyblock_core.controllers import backup_controller, lvol_controller, snapshot_controller
 from simplyblock_core.models.lvol_model import LVol
 
-from .cluster import Cluster
-from .pool import StoragePool
-from .dtos import BackupDTO, VolumeDTO, SnapshotDTO, TaskDTO
-from . import util
+from ..._dependencies import Cluster, StoragePool, Volume
+from ..._dtos import BackupDTO, VolumeDTO, SnapshotDTO, TaskDTO
+from ... import util
 
 
-api = APIRouter(prefix='/volumes')
+api = APIRouter()
 db = DBController()
 
 
@@ -121,20 +119,16 @@ def add(
     return Response(status_code=201, headers={'Location': entity_url})
 
 
+class ReplicateLVolParams(BaseModel):
+    lvol_id: Optional[str] = None
+
+
+@api.post('/replicate_lvol_on_source_cluster', name='clusters:storage-pools:replicate_lvol_on_source_cluster')
+def replicate_lvol_on_source_cluster(cluster: Cluster, pool: StoragePool, body: ReplicateLVolParams):
+    return lvol_controller.replicate_lvol_on_source_cluster(body.lvol_id, cluster.get_id(), pool.get_id())
+
+
 instance_api = APIRouter(prefix='/{volume_id}')
-
-
-def _lookup_volume(volume_id: UUID, pool: StoragePool) -> LVol:
-    try:
-        volume = db.get_lvol_by_id(str(volume_id))
-    except KeyError as e:
-        raise HTTPException(404, str(e))
-    if volume.pool_uuid != pool.get_id():
-        raise HTTPException(404, f'LVol {volume_id} not found')
-    return volume
-
-
-Volume = Annotated[LVol, Depends(_lookup_volume)]
 
 
 @instance_api.get('/', name='clusters:storage-pools:volumes:detail')
@@ -308,15 +302,6 @@ def replicate_lvol_on_target_cluster(cluster: Cluster, pool: StoragePool, volume
     return lvol_controller.replicate_lvol_on_target_cluster(volume.get_id())
 
 
-class ReplicateLVolParams(BaseModel):
-    lvol_id: Optional[str] = None
-
-
-@api.post('/replicate_lvol_on_source_cluster', name='clusters:storage-pools:replicate_lvol_on_source_cluster')
-def replicate_lvol_on_source_cluster(cluster: Cluster, pool: StoragePool, body: ReplicateLVolParams):
-    return lvol_controller.replicate_lvol_on_source_cluster(body.lvol_id, cluster.get_id(), pool.get_id())
-
-
 @instance_api.get('/list_replication_tasks', name='clusters:storage-pools:volumes:list_replication_tasks')
 def list_replication_tasks(cluster: Cluster, pool: StoragePool, volume: Volume) -> List[TaskDTO]:
     tasks = lvol_controller.list_replication_tasks(volume.get_id())
@@ -374,3 +359,5 @@ def delete_backups(cluster: Cluster, pool: StoragePool, volume: Volume) -> Respo
         raise HTTPException(400, error)
     return Response(status_code=204)
 
+
+api.include_router(instance_api)
