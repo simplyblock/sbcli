@@ -738,21 +738,28 @@ class SoakRunner:
         relaxes this for inter-iteration sync points (no outage in flight):
         an unaffected node that is merely TRANSIENT_NODE_STATUSES (the CP is
         autonomously restarting / shutting it down) is waited out instead of
-        aborting the soak, mirroring wait_for_outage_ready. A genuinely
-        offline/unknown unaffected node still raises immediately.
+        aborting the soak, mirroring wait_for_outage_ready.
+
+        A 'down' status is treated as online here. Restarting one node can
+        knock a peer 'down' (NVMe reconnect / CP re-sync), which by itself is
+        not a reason to abort the soak — if it actually breaks I/O, fio will
+        surface the error anyway. So 'down' counts neither as unaffected_bad
+        nor as keeping the cluster from being "all online".
         """
         timeout = timeout or self.args.restart_timeout
         expected = self.args.expected_node_count
         target_nodes = set(target_nodes or [])
         started = time.time()
+        # Statuses that do not, on their own, fail the health check.
+        online_ok = ("online", "down")
         while time.time() - started < timeout:
             self.assert_cluster_not_suspended()
             nodes = self.ensure_expected_nodes()
             statuses = {node["uuid"]: node["status"] for node in nodes}
-            offline = [uuid for uuid, status in statuses.items() if status != "online"]
+            offline = [uuid for uuid, status in statuses.items() if status not in online_ok]
             unaffected_bad = [
                 uuid for uuid, status in statuses.items()
-                if uuid not in target_nodes and status != "online"
+                if uuid not in target_nodes and status not in online_ok
             ]
             if tolerate_transient:
                 unaffected_bad = [
