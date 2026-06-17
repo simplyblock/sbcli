@@ -2702,6 +2702,7 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
         )
         self.runner_k8s_log.start_logging()
         self.runner_k8s_log.monitor_pod_logs()
+        self.runner_k8s_log.start_resource_monitor()
 
     # ── K8s helpers ───────────────────────────────────────────────────────
 

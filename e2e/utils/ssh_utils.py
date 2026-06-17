@@ -3885,6 +3885,8 @@ class RunnerK8sLog:
         self._monitor_thread = None
         self._monitor_stop_flag = threading.Event()
         self._pod_container_map = {}
+        self._resource_monitor_thread = None
+        self._resource_monitor_stop = threading.Event()
         self.logger = setup_logger(__name__)
 
         # Ensure log directory exists
@@ -4113,6 +4115,85 @@ class RunnerK8sLog:
             self._monitor_stop_flag.set()
             self._monitor_thread.join(timeout=10)
             print("K8s log monitor thread stopped.")
+
+    def start_resource_monitor(self, poll_interval=60):
+        """Start a background thread that periodically runs kubectl top pod/node.
+
+        Appends timestamped output to ``kubectl_top_resources.log`` in the
+        test's log directory every *poll_interval* seconds.  Errors (e.g.
+        metrics-server not ready) are captured in the log — they never crash
+        the test.
+        """
+        log_file = os.path.join(self.log_dir, "kubectl_top_resources.log")
+
+        def _monitor():
+            while not self._resource_monitor_stop.is_set():
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+                # kubectl top node
+                try:
+                    node_result = subprocess.run(
+                        ["kubectl", "top", "node", "--no-headers"],
+                        capture_output=True, text=True, timeout=30,
+                    )
+                    node_out = node_result.stdout.strip()
+                    node_err = node_result.stderr.strip()
+                except subprocess.TimeoutExpired:
+                    node_out, node_err = "", "TIMEOUT"
+                except Exception as exc:
+                    node_out, node_err = "", str(exc)
+
+                # kubectl top pod -A
+                try:
+                    pod_result = subprocess.run(
+                        ["kubectl", "top", "pod", "-A", "--no-headers"],
+                        capture_output=True, text=True, timeout=30,
+                    )
+                    pod_out = pod_result.stdout.strip()
+                    pod_err = pod_result.stderr.strip()
+                except subprocess.TimeoutExpired:
+                    pod_out, pod_err = "", "TIMEOUT"
+                except Exception as exc:
+                    pod_out, pod_err = "", str(exc)
+
+                try:
+                    with open(log_file, "a") as fh:
+                        fh.write(f"\n{'=' * 80}\n")
+                        fh.write(f"[{timestamp}] kubectl top node\n")
+                        fh.write(f"{'=' * 80}\n")
+                        if node_out:
+                            fh.write(node_out + "\n")
+                        if node_err:
+                            fh.write(f"STDERR: {node_err}\n")
+
+                        fh.write(f"\n{'-' * 80}\n")
+                        fh.write(f"[{timestamp}] kubectl top pod -A\n")
+                        fh.write(f"{'-' * 80}\n")
+                        if pod_out:
+                            fh.write(pod_out + "\n")
+                        if pod_err:
+                            fh.write(f"STDERR: {pod_err}\n")
+                except Exception:
+                    pass  # never crash the monitor on write failure
+
+                self._resource_monitor_stop.wait(timeout=poll_interval)
+
+        self._resource_monitor_stop.clear()
+        self._resource_monitor_thread = threading.Thread(
+            target=_monitor, name="K8sResourceMonitor", daemon=True,
+        )
+        self._resource_monitor_thread.start()
+        self.logger.info(
+            f"Started K8s resource monitor (interval={poll_interval}s, "
+            f"log={log_file})"
+        )
+
+    def stop_resource_monitor(self):
+        """Stop the background kubectl-top resource monitor thread."""
+        if self._resource_monitor_thread and self._resource_monitor_thread.is_alive():
+            self._resource_monitor_stop.set()
+            self._resource_monitor_thread.join(timeout=10)
+            self.logger.info("K8s resource monitor thread stopped.")
 
 def _rid(n=6):
     import string

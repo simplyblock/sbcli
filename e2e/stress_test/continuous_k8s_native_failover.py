@@ -95,6 +95,7 @@ class K8sNativeFailoverTest(TestClusterBase):
         # Counts — total_pvcs is set dynamically to len(sn_nodes) in run()
         self.total_pvcs = 6
         self.fio_num_jobs = 1
+        self.MAX_TOTAL_LVOLS = int(os.environ.get("MAX_TOTAL_LVOLS", "60"))
 
         # Outage config
         self.npcs = kwargs.get("npcs", 1)
@@ -207,6 +208,7 @@ class K8sNativeFailoverTest(TestClusterBase):
         )
         self.runner_k8s_log.start_logging()
         self.runner_k8s_log.monitor_pod_logs()
+        self.runner_k8s_log.start_resource_monitor()
 
         # 5. Clean up old lvols/pools via sbcli (through kubectl exec)
         #    Order: clones → snapshots → lvols → pools
@@ -1669,6 +1671,128 @@ class K8sNativeFailoverTest(TestClusterBase):
 
         self.k8s_utils.log_fio_pvc_mapping(self.pvc_details, self.clone_details, snapshot_details=self.snapshot_details)
 
+    # ── Lvol cap enforcement ─────────────────────────────────────────────────
+
+    def _count_total_resources(self) -> int:
+        """Count total PVCs + clones (each backed by an lvol)."""
+        return len(self.pvc_details) + len(self.clone_details)
+
+    def _enforce_lvol_cap(self):
+        """Delete oldest dynamic clones/snapshots/PVCs if total exceeds MAX_TOTAL_LVOLS.
+
+        Deletion order: clones (+ their snapshots) first, then standalone PVCs.
+        Keeps at least 1 PVC per storage node.
+        """
+        total = self._count_total_resources()
+        if total <= self.MAX_TOTAL_LVOLS:
+            self.logger.info(
+                f"[cap] Total resources: {total} <= "
+                f"{self.MAX_TOTAL_LVOLS} (within cap)"
+            )
+            return
+
+        excess = total - self.MAX_TOTAL_LVOLS
+        self.logger.info(
+            f"[cap] Total resources: {total} exceeds cap "
+            f"{self.MAX_TOTAL_LVOLS} by {excess} — pruning"
+        )
+
+        # Phase 1: delete clones (+ their orphan snapshots)
+        clone_names = list(self.clone_details.keys())
+        for clone_name in clone_names:
+            if excess <= 0:
+                break
+            clone_info = self.clone_details[clone_name]
+            snap_name = clone_info.get("snap_name", "")
+            try:
+                if not self.use_client_fio:
+                    try:
+                        self.k8s_utils.delete_job(clone_info["job_name"])
+                        self.k8s_utils.delete_configmap(clone_info["configmap_name"])
+                    except Exception:
+                        pass
+                else:
+                    client = clone_info.get("client")
+                    if client:
+                        self._kill_fio_on_client(clone_name, client)
+                        sleep_n_sec(2)
+                        try:
+                            self.ssh_obj.unmount_path(client, clone_info["mount_path"])
+                        except Exception:
+                            pass
+                self.k8s_utils.delete_pvc(clone_name)
+                del self.clone_details[clone_name]
+                excess -= 1
+                self.logger.info(f"[cap] Deleted clone {clone_name}")
+            except Exception as exc:
+                self.logger.warning(f"[cap] Failed to delete clone {clone_name}: {exc}")
+
+            # Delete orphan snapshot if no more clones reference it
+            if snap_name and snap_name in self.snapshot_details:
+                remaining_clones = [
+                    c for c in self.clone_details.values()
+                    if c.get("snap_name") == snap_name
+                ]
+                if not remaining_clones:
+                    try:
+                        self.k8s_utils.delete_volume_snapshot(snap_name)
+                        del self.snapshot_details[snap_name]
+                        self.logger.info(f"[cap] Deleted orphan snapshot {snap_name}")
+                    except Exception as exc:
+                        self.logger.warning(f"[cap] Failed to delete snapshot {snap_name}: {exc}")
+
+        # Phase 2: delete standalone PVCs if still over cap
+        if excess > 0:
+            # Identify nodes with > 1 PVC (never remove the last PVC on a node)
+            node_pvc_count = {}
+            for pname, pinfo in self.pvc_details.items():
+                nid = pinfo.get("node_id", "unknown")
+                node_pvc_count.setdefault(nid, []).append(pname)
+            safe_to_delete = [
+                pname for nid, pnames in node_pvc_count.items()
+                if len(pnames) > 1
+                for pname in pnames[1:]  # keep first, rest are candidates
+            ]
+            for pvc_name in safe_to_delete:
+                if excess <= 0:
+                    break
+                pvc_info = self.pvc_details[pvc_name]
+                try:
+                    if not self.use_client_fio:
+                        try:
+                            self.k8s_utils.delete_job(pvc_info["job_name"])
+                            self.k8s_utils.delete_configmap(pvc_info["configmap_name"])
+                        except Exception:
+                            pass
+                    else:
+                        client = pvc_info.get("client")
+                        if client:
+                            self._kill_fio_on_client(pvc_name, client)
+                            sleep_n_sec(2)
+                            try:
+                                self.ssh_obj.unmount_path(client, pvc_info["mount_path"])
+                            except Exception:
+                                pass
+                    # Delete snapshots of this PVC
+                    for snap_name in list(pvc_info.get("snapshots", [])):
+                        try:
+                            self.k8s_utils.delete_volume_snapshot(snap_name)
+                            self.snapshot_details.pop(snap_name, None)
+                        except Exception:
+                            pass
+                    self.k8s_utils.delete_pvc(pvc_name)
+                    del self.pvc_details[pvc_name]
+                    excess -= 1
+                    self.logger.info(f"[cap] Deleted PVC {pvc_name}")
+                except Exception as exc:
+                    self.logger.warning(f"[cap] Failed to delete PVC {pvc_name}: {exc}")
+
+        final = self._count_total_resources()
+        self.logger.info(
+            f"[cap] After pruning: {final} "
+            f"total resources (cap={self.MAX_TOTAL_LVOLS})"
+        )
+
     # ── Delete PVCs ──────────────────────────────────────────────────────────
 
     def delete_random_pvcs(self, count: int):
@@ -3030,6 +3154,9 @@ class K8sNativeFailoverTest(TestClusterBase):
                 outage_events = self.perform_n_plus_k_outages()
 
                 # ── Operations during outage ──
+                # Enforce lvol cap before creating more resources
+                self._enforce_lvol_cap()
+
                 # Scale deletes: 1 in iter 1, 2 in iter 2, 3 in iter 3, ...
                 delete_count = min(iteration, len(self.pvc_details) - len(self.sn_nodes))
                 delete_count = max(delete_count, 1)
@@ -3038,9 +3165,20 @@ class K8sNativeFailoverTest(TestClusterBase):
                 self.create_snapshots_and_clones()
 
                 # Scale up: add 2 more PVCs each iteration (net growth = 2)
+                # If at cap, delete extra PVCs to make room first
                 create_count = delete_count + 2
+                current_total = self._count_total_resources()
+                headroom = max(0, self.MAX_TOTAL_LVOLS - current_total)
+                if create_count > headroom:
+                    extra_needed = create_count - headroom
+                    self.logger.info(
+                        f"[cap] At {current_total}/{self.MAX_TOTAL_LVOLS} — "
+                        f"deleting {extra_needed} more PVCs to make room for {create_count}"
+                    )
+                    self.delete_random_pvcs(extra_needed)
                 self._compute_fio_size(extra_jobs=create_count)
-                self.logger.info(f"[scale] Creating {create_count} PVCs (total will be ~{len(self.pvc_details) + create_count})")
+                current_total = self._count_total_resources()
+                self.logger.info(f"[scale] Creating {create_count} PVCs (total will be ~{current_total + create_count})")
                 self.create_pvcs_with_fio(create_count)
                 sleep_n_sec(280)
 
@@ -3506,7 +3644,7 @@ class K8sNativeResilientFailoverTest(K8sNativeFailoverTest):
       - FIO always runs on permanent resources, so IO never drops to zero.
       - Dynamic PVCs / snapshots / clones are created and deleted only
         after recovery when the cluster is fully online.
-      - Total lvol count is capped at MAX_TOTAL_LVOLS (default 36).
+      - Total lvol count is capped at MAX_TOTAL_LVOLS (default 60).
     """
 
     def __init__(self, **kwargs):
@@ -3517,7 +3655,7 @@ class K8sNativeResilientFailoverTest(K8sNativeFailoverTest):
         self.PERMANENT_PVCS_PER_NODE = 2
 
         # Cap on total lvols (PVCs + clones) to avoid resource exhaustion
-        self.MAX_TOTAL_LVOLS = int(os.environ.get("MAX_TOTAL_LVOLS", "36"))
+        # (inherits default 60 from parent; override via env var if needed)
 
         # Skip clone creation entirely (set SKIP_CLONES=1 to disable)
         self.skip_clones = os.environ.get("SKIP_CLONES", "0") == "1"

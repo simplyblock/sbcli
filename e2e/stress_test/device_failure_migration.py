@@ -1625,33 +1625,62 @@ class _DeviceFailureMigrationBase:
             )
 
     def _wait_new_device_migration(self, new_device_id, timeout=3600):
-        """Wait for all new_device_migration tasks for *new_device_id* to finish."""
+        """Wait for all new_device_migration tasks for the target node to finish.
+
+        The migration tasks use ``NodeID:<node-uuid>`` as ``target_id``,
+        not the device UUID, so we filter by ``self._target_node_id``.
+        We also wait up to 120 s for the first task to appear (the
+        control-plane may need a few seconds to create migration tasks
+        after ``add-device``).
+        """
+        node_id = self._target_node_id
         self.logger.info(
-            f"Waiting for new_device_migration tasks for {new_device_id} ..."
+            f"Waiting for new_device_migration tasks for device "
+            f"{new_device_id} (node {node_id}) ..."
         )
         start = time.time()
+        seen_any = False
+        grace_period = 120  # seconds to wait for tasks to appear
         while time.time() - start < timeout:
             try:
                 tasks = self.sbcli_utils.list_migration_tasks(
                     self.sbcli_utils.cluster_id
                 )
-                active = [
+                matching = [
                     t for t in tasks.get("results", [])
                     if t.get("function_name") == "new_device_migration"
-                    and new_device_id in str(t.get("target_id", ""))
-                    and t.get("status") not in ("done", "cancelled", "error")
+                    and node_id in str(t.get("target_id", ""))
                 ]
-                if not active:
+                active = [
+                    t for t in matching
+                    if t.get("status") not in ("done", "cancelled", "error")
+                ]
+                if matching:
+                    seen_any = True
+                if seen_any and not active:
                     elapsed = time.time() - start
                     self.logger.info(
                         f"All new_device_migration tasks complete "
-                        f"in {elapsed:.1f}s"
+                        f"({len(matching)} total) in {elapsed:.1f}s"
                     )
                     return elapsed
-                self.logger.info(
-                    f"Waiting for {len(active)} new_device_migration "
-                    f"task(s) ..."
-                )
+                if not seen_any and time.time() - start > grace_period:
+                    elapsed = time.time() - start
+                    self.logger.warning(
+                        f"No new_device_migration tasks appeared "
+                        f"after {grace_period}s — returning"
+                    )
+                    return elapsed
+                if active:
+                    self.logger.info(
+                        f"Waiting for {len(active)}/{len(matching)} "
+                        f"new_device_migration task(s) ..."
+                    )
+                else:
+                    self.logger.info(
+                        "Waiting for new_device_migration tasks to "
+                        "appear ..."
+                    )
             except Exception as exc:
                 self.logger.warning(
                     f"Error checking migration tasks: {exc}"
@@ -2698,33 +2727,62 @@ class _DeviceAddAfterBootstrapBase:
         )
 
     def _wait_new_device_migration(self, new_device_id, timeout=3600):
-        """Wait for all new_device_migration tasks for the device to finish."""
+        """Wait for all new_device_migration tasks for the target node to finish.
+
+        The migration tasks use ``NodeID:<node-uuid>`` as ``target_id``,
+        not the device UUID, so we filter by ``self._target_node_id``.
+        We also wait up to 120 s for the first task to appear (the
+        control-plane may need a few seconds to create migration tasks
+        after ``add-device``).
+        """
+        node_id = self._target_node_id
         self.logger.info(
-            f"Waiting for new_device_migration tasks for {new_device_id} ..."
+            f"Waiting for new_device_migration tasks for device "
+            f"{new_device_id} (node {node_id}) ..."
         )
         start = time.time()
+        seen_any = False
+        grace_period = 120  # seconds to wait for tasks to appear
         while time.time() - start < timeout:
             try:
                 tasks = self.sbcli_utils.list_migration_tasks(
                     self.sbcli_utils.cluster_id
                 )
-                active = [
+                matching = [
                     t for t in tasks.get("results", [])
                     if t.get("function_name") == "new_device_migration"
-                    and new_device_id in str(t.get("target_id", ""))
-                    and t.get("status") not in ("done", "cancelled", "error")
+                    and node_id in str(t.get("target_id", ""))
                 ]
-                if not active:
+                active = [
+                    t for t in matching
+                    if t.get("status") not in ("done", "cancelled", "error")
+                ]
+                if matching:
+                    seen_any = True
+                if seen_any and not active:
                     elapsed = time.time() - start
                     self.logger.info(
                         f"All new_device_migration tasks complete "
-                        f"in {elapsed:.1f}s"
+                        f"({len(matching)} total) in {elapsed:.1f}s"
                     )
                     return elapsed
-                self.logger.info(
-                    f"Waiting for {len(active)} new_device_migration "
-                    f"task(s) ..."
-                )
+                if not seen_any and time.time() - start > grace_period:
+                    elapsed = time.time() - start
+                    self.logger.warning(
+                        f"No new_device_migration tasks appeared "
+                        f"after {grace_period}s — returning"
+                    )
+                    return elapsed
+                if active:
+                    self.logger.info(
+                        f"Waiting for {len(active)}/{len(matching)} "
+                        f"new_device_migration task(s) ..."
+                    )
+                else:
+                    self.logger.info(
+                        "Waiting for new_device_migration tasks to "
+                        "appear ..."
+                    )
             except Exception as exc:
                 self.logger.warning(
                     f"Error checking migration tasks: {exc}"
