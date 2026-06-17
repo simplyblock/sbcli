@@ -1,18 +1,15 @@
-from typing import Annotated, List, Optional
-from uuid import UUID
+from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Response
 
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.controllers import device_controller
-from simplyblock_core.models.nvme_device import NVMeDevice
 
-from .cluster import Cluster
-from .storage_node import StorageNode
-from .dtos import DeviceDTO
+from ..._dependencies import Cluster, StorageNode, Device
+from ..._dtos import DeviceDTO
 
 
-api = APIRouter(prefix='/devices')
+api = APIRouter()
 db = DBController()
 
 
@@ -27,20 +24,8 @@ def list(cluster: Cluster, storage_node: StorageNode) -> List[DeviceDTO]:
         data.append(DeviceDTO.from_model(device, storage_node.get_id(), stat_obj))
     return data
 
+
 instance_api = APIRouter(prefix='/{device_id}')
-
-
-def _lookup_device(storage_node: StorageNode, device_id: UUID) -> NVMeDevice:
-    device = next(
-        (d for d in storage_node.nvme_devices if d.get_id() == str(device_id)),
-        None,
-    )
-    if device is None:
-        raise HTTPException(404, f'Device {device_id} not found')
-    return device
-
-
-Device = Annotated[NVMeDevice, Depends(_lookup_device)]
 
 
 @instance_api.get('/', name='clusters:storage_nodes:devices:detail')
@@ -95,3 +80,6 @@ def reset(cluster: Cluster, storage_node: StorageNode, device: Device) -> Respon
         raise ValueError('Failed to reset device')
 
     return Response(status_code=204)
+
+
+api.include_router(instance_api)
