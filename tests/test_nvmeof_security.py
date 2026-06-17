@@ -674,7 +674,7 @@ class TestConnectLvolTls(unittest.TestCase):
         result, _err = connect_lvol("lvol-1", host_nqn="nqn:host1")
         self.assertTrue(len(result) > 0)
         entry = result[0]
-        self.assertIn("--tls", entry["connect"])
+        self.assertIn("--tls", entry.connect)
 
     @patch("simplyblock_core.controllers.lvol_controller.DBController")
     def test_connect_without_tls_no_flag(self, MockDBCtrl):
@@ -699,8 +699,8 @@ class TestConnectLvolTls(unittest.TestCase):
         result, _err = connect_lvol("lvol-1")
         self.assertTrue(len(result) > 0)
         entry = result[0]
-        self.assertNotIn("tls", entry)
-        self.assertNotIn("--tls", entry["connect"])
+        self.assertFalse(entry.tls)
+        self.assertNotIn("--tls", entry.connect)
 
 
 # ---------------------------------------------------------------------------

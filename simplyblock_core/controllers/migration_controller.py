@@ -9,7 +9,7 @@ with # TODO(migration-rpc): replace with real RPC call.
 
 Workflow
 --------
-1. Caller invokes ``pre_create_on_target(lvol_id, target_node_id)`` to set up
+1. Caller invokes ``create_migration(lvol_id, target_node_id)`` to set up
    target infrastructure and receive the migration_id and connect strings.
 2. Caller invokes ``start_migration(migration_id)`` to promote the record to
    PHASE_SNAP_COPY and launch the task runner.
@@ -49,6 +49,7 @@ from simplyblock_core.kms import create_kms_connection
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.lvol_migration import LVolMigration
 from simplyblock_core.models.lvol_model import LVol
+from simplyblock_core.models.nvme_connect import NvmeConnectEntry
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.storage_node_ops import _reapply_allowed_hosts
@@ -70,7 +71,7 @@ def start_migration(migration_id,
                     deadline_seconds=constants.LVOL_MIG_DEADLINE_SEC):
     """
     Promote a PHASE_PRE_CREATED migration record to PHASE_SNAP_COPY and launch
-    the task runner.  Always call pre_create_on_target first to set up target
+    the task runner.  Always call create_migration first to set up target
     infrastructure and obtain the migration_id and connect strings.
 
     Returns migration_uuid on success; raises ValueError on failure.
@@ -179,7 +180,7 @@ def cancel_migration(migration_id):
         raise ValueError(f"Migration is not active (status={migration.status})")
 
     if migration.phase == LVolMigration.PHASE_PRE_CREATED:
-        _cleanup_pre_created(migration)
+        _cleanup_created(migration)
         migration.status = LVolMigration.STATUS_CANCELLED
         migration.write_to_db(db.kv_store)
         migration_events.migration_cancelled(migration)
@@ -192,10 +193,10 @@ def cancel_migration(migration_id):
     logger.info(f"Migration cancelled: id={migration_id} lvol={migration.lvol_id}")
 
 
-def _cleanup_pre_created(migration):
+def _cleanup_created(migration):
     """
     Delete the subsystem(s) and migration bdev that were created during
-    pre_create_on_target.  Called inline by cancel_migration when
+    create_migration.  Called inline by cancel_migration when
     phase == PHASE_PRE_CREATED (no task runner is involved yet).
 
     Best-effort: logs errors but does not raise.
@@ -203,13 +204,13 @@ def _cleanup_pre_created(migration):
     try:
         lvol = db.get_lvol_by_id(migration.lvol_id)
     except KeyError:
-        logger.warning(f"_cleanup_pre_created: lvol {migration.lvol_id} not found — skipping cleanup")
+        logger.warning(f"_cleanup_created: lvol {migration.lvol_id} not found — skipping cleanup")
         return
 
     try:
         tgt_node = db.get_storage_node_by_id(migration.target_node_id)
     except KeyError:
-        logger.warning(f"_cleanup_pre_created: target node {migration.target_node_id} not found — skipping cleanup")
+        logger.warning(f"_cleanup_created: target node {migration.target_node_id} not found — skipping cleanup")
         return
 
     nqn = lvol.nqn
@@ -250,15 +251,15 @@ def _cleanup_pre_created(migration):
                         except Exception:
                             pass
                 logger.info(
-                    f"_cleanup_pre_created: removed TGT-port listeners from "
+                    f"_cleanup_created: removed TGT-port listeners from "
                     f"overlap TGT-sec {sec_node.get_id()[:8]}")
             else:
                 sec_rpc.subsystem_delete(nqn)
                 logger.info(
-                    f"_cleanup_pre_created: deleted TGT-sec subsystem {nqn} "
+                    f"_cleanup_created: deleted TGT-sec subsystem {nqn} "
                     f"on {sec_node.get_id()}")
         except Exception as e:
-            logger.warning(f"_cleanup_pre_created: could not clean TGT-sec: {e}")
+            logger.warning(f"_cleanup_created: could not clean TGT-sec: {e}")
 
     # Primary cleanup
     if migration.target_node_id in overlap_ids:
@@ -270,23 +271,23 @@ def _cleanup_pre_created(migration):
                 except Exception:
                     pass
         logger.info(
-            f"_cleanup_pre_created: removed TGT-port listeners from "
+            f"_cleanup_created: removed TGT-port listeners from "
             f"overlap TGT-prim {tgt_node.get_id()[:8]}")
     else:
         try:
             tgt_rpc.subsystem_delete(nqn)
             logger.info(
-                f"_cleanup_pre_created: deleted TGT-prim subsystem {nqn} "
+                f"_cleanup_created: deleted TGT-prim subsystem {nqn} "
                 f"on {tgt_node.get_id()}")
         except Exception as e:
-            logger.warning(f"_cleanup_pre_created: could not clean TGT-prim subsystem: {e}")
+            logger.warning(f"_cleanup_created: could not clean TGT-prim subsystem: {e}")
 
     # Migration bdev (always delete — we always created it)
     try:
         tgt_rpc.delete_lvol(composite)
-        logger.info(f"_cleanup_pre_created: deleted migration bdev {composite} on {tgt_node.get_id()}")
+        logger.info(f"_cleanup_created: deleted migration bdev {composite} on {tgt_node.get_id()}")
     except Exception as e:
-        logger.warning(f"_cleanup_pre_created: could not clean migration bdev: {e}")
+        logger.warning(f"_cleanup_created: could not clean migration bdev: {e}")
 
 
 def get_active_migration_for_lvol(lvol_id, cluster_id=None):
@@ -588,26 +589,24 @@ def _build_connect_entries(node, port, lvol, nqn, ctrl_loss_tmo, cluster, host_e
             f" --transport={trtype} --traddr={ip} --trsvcid={port} --nqn={nqn}"
             f" {client_data_nic_str}{tls_str}{host_auth_str}"
         )
-        entry = {
-            "transport": trtype,
-            "ip": ip,
-            "port": port,
-            "nqn": nqn,
-            "reconnect-delay": constants.LVOL_NVME_CONNECT_RECONNECT_DELAY,
-            "ctrl-loss-tmo": ctrl_loss_tmo,
-            "fast_io_fail_tmo": constants.LVOL_NVME_CONNECT_FAST_IO_FAIL_TO,
-            "nr-io-queues": cluster.client_qpair_count,
-            "keep-alive-tmo": keep_alive_tmo,
-            "host-iface": cluster.client_data_nic,
-            "connect": connect_cmd,
-        }
-        if host_entry and host_entry.get("psk"):
-            entry["tls"] = True
-        entries.append(entry)
+        entries.append(NvmeConnectEntry(
+            transport=trtype,
+            ip=ip,
+            port=port,
+            nqn=nqn,
+            reconnect_delay=constants.LVOL_NVME_CONNECT_RECONNECT_DELAY,
+            ctrl_loss_tmo=ctrl_loss_tmo,
+            fast_io_fail_tmo=constants.LVOL_NVME_CONNECT_FAST_IO_FAIL_TO,
+            nr_io_queues=cluster.client_qpair_count,
+            keep_alive_tmo=keep_alive_tmo,
+            host_iface=cluster.client_data_nic or "",
+            connect=connect_cmd,
+            tls=bool(host_entry and host_entry.get("psk")),
+        ))
     return entries
 
 
-def pre_create_on_target(lvol_id, target_node_id,
+def create_migration(lvol_id, target_node_id,
                          ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO,
                          host_nqn=None):
     """
@@ -664,9 +663,9 @@ def pre_create_on_target(lvol_id, target_node_id,
             ndcs=lvol.ndcs, npcs=lvol.npcs)
         if not ret:
             raise ValueError(f"bdev_lvol_create failed for {composite} on {target_node_id}")
-        logger.info(f"pre_create_on_target: created bdev {composite}")
+        logger.info(f"create_migration: created bdev {composite}")
     else:
-        logger.info(f"pre_create_on_target: bdev {composite} already exists — skipping create")
+        logger.info(f"create_migration: bdev {composite} already exists — skipping create")
 
     # ── 1b. Get bdev info for secondary registration ──────────────────────────
     _bdev_info = tgt_rpc.get_bdevs(composite)
@@ -679,7 +678,7 @@ def pre_create_on_target(lvol_id, target_node_id,
 
     # ── 1c. Set migration flag on TGT-prim ────────────────────────────────────
     if not tgt_rpc.bdev_lvol_set_migration_flag(composite):
-        logger.warning(f"pre_create_on_target: bdev_lvol_set_migration_flag on primary "
+        logger.warning(f"create_migration: bdev_lvol_set_migration_flag on primary "
                        f"failed for {composite} (may already be flagged)")
 
     # ── 1d. Register migration bdev on TGT-sec ────────────────────────────────
@@ -693,7 +692,7 @@ def pre_create_on_target(lvol_id, target_node_id,
             _sec_rpc_reg  = _pre_sec_node.rpc_client()
             if _sec_rpc_reg.get_bdevs(composite):
                 logger.info(
-                    f"pre_create_on_target: {composite} already on secondary "
+                    f"create_migration: {composite} already on secondary "
                     f"{_pre_sec_node.get_id()} — skipping bdev_lvol_register")
             elif _tgt_blobid is not None and _tgt_uuid is not None:
                 ret_sec = _sec_rpc_reg.bdev_lvol_register(
@@ -702,18 +701,18 @@ def pre_create_on_target(lvol_id, target_node_id,
                 if ret_sec:
                     _sec_rpc_reg.bdev_lvol_set_migration_flag(composite)
                     logger.info(
-                        f"pre_create_on_target: registered {composite} on "
+                        f"create_migration: registered {composite} on "
                         f"secondary {_pre_sec_node.get_id()}")
                 else:
                     logger.warning(
-                        f"pre_create_on_target: bdev_lvol_register on secondary "
+                        f"create_migration: bdev_lvol_register on secondary "
                         f"{_pre_sec_node.get_id()} failed (continuing)")
             else:
                 logger.warning(
-                    f"pre_create_on_target: no bdev info for secondary registration of {composite}")
+                    f"create_migration: no bdev info for secondary registration of {composite}")
         except Exception as _e:
             logger.warning(
-                f"pre_create_on_target: secondary registration error (continuing): {_e}")
+                f"create_migration: secondary registration error (continuing): {_e}")
 
     # ── 2. Subsystem + listeners on all TGT nodes ────────────────────────────
     # Compute overlap: node IDs present in both SRC path and TGT path.
@@ -762,7 +761,7 @@ def pre_create_on_target(lvol_id, target_node_id,
         if lvol.crypto_bdev:
             _crypto_short = f"crypto_{bdev_short}"
             if _rpc.get_bdevs(_crypto_short):
-                logger.info(f"pre_create_on_target: crypto bdev {_crypto_short} "
+                logger.info(f"create_migration: crypto bdev {_crypto_short} "
                             f"already exists on {_node_id[:8]}")
                 _ns_bdev = _crypto_short
             else:
@@ -772,18 +771,18 @@ def pre_create_on_target(lvol_id, target_node_id,
                     _key_name = f"key_{_crypto_short}"
                     _ret = _rpc.lvol_crypto_key_create(_key_name, _key1, _key2)
                     if not _ret:
-                        logger.warning(f"pre_create_on_target: crypto key create for "
+                        logger.warning(f"create_migration: crypto key create for "
                                        f"{_key_name} on {_node_id[:8]} failed (key may exist)")
                     _ret = _rpc.lvol_crypto_create(_crypto_short, composite, _key_name)
                     if _ret:
-                        logger.info(f"pre_create_on_target: created crypto bdev "
+                        logger.info(f"create_migration: created crypto bdev "
                                     f"{_crypto_short} on {_node_id[:8]}")
                         _ns_bdev = _crypto_short
                     else:
-                        logger.error(f"pre_create_on_target: bdev_crypto_create failed "
+                        logger.error(f"create_migration: bdev_crypto_create failed "
                                      f"for {_crypto_short} on {_node_id[:8]}")
                 except Exception as _e:
-                    logger.error(f"pre_create_on_target: crypto bdev setup on "
+                    logger.error(f"create_migration: crypto bdev setup on "
                                  f"{_node_id[:8]} failed: {_e}")
 
         subsys_min_cntlid_used = set()
@@ -803,11 +802,11 @@ def pre_create_on_target(lvol_id, target_node_id,
                     _rpc.listeners_create(nqn, nic.trtype.lower(), nic.ip4_address,
                                           _port, ana_state="inaccessible")
                     logger.info(
-                        f"pre_create_on_target: inaccessible listener on overlap node "
+                        f"create_migration: inaccessible listener on overlap node "
                         f"{_node_id[:8]} {nic.ip4_address}:{_port}")
                 except Exception as _e:
                     logger.warning(
-                        f"pre_create_on_target: listener on overlap {_node_id[:8]} "
+                        f"create_migration: listener on overlap {_node_id[:8]} "
                         f"(non-fatal): {_e}")
         else:
             if not _rpc.subsystem_list(nqn):
@@ -822,7 +821,7 @@ def pre_create_on_target(lvol_id, target_node_id,
                     _reapply_allowed_hosts(lvol, _node, _rpc)
                 except Exception as _e:
                     logger.warning(
-                        f"pre_create_on_target: allowed_hosts reapply on "
+                        f"create_migration: allowed_hosts reapply on "
                         f"{_node_id[:8]} (non-fatal): {_e}")
 
             for nic in _node.data_nics:
@@ -833,21 +832,21 @@ def pre_create_on_target(lvol_id, target_node_id,
                                           _port, ana_state="inaccessible")
                 except Exception as _e:
                     logger.warning(
-                        f"pre_create_on_target: listener on {_node_id[:8]} "
+                        f"create_migration: listener on {_node_id[:8]} "
                         f"(non-fatal): {_e}")
 
             _ns = _rpc.nvmf_subsystem_add_ns(nqn, _ns_bdev, lvol.uuid, lvol.guid)
             if _ns:
                 logger.info(
-                    f"pre_create_on_target: namespace {_ns_bdev} added on "
+                    f"create_migration: namespace {_ns_bdev} added on "
                     f"{'TGT-prim' if _i == 0 else 'TGT-sec'} {_node_id[:8]} nsid={_ns}")
             else:
                 logger.warning(
-                    f"pre_create_on_target: nvmf_subsystem_add_ns failed on "
+                    f"create_migration: nvmf_subsystem_add_ns failed on "
                     f"{'TGT-prim' if _i == 0 else 'TGT-sec'} {_node_id[:8]}")
 
             logger.info(
-                f"pre_create_on_target: subsystem {nqn} ready on {_node_id[:8]}")
+                f"create_migration: subsystem {nqn} ready on {_node_id[:8]}")
 
     # ── 4. Build connect strings for the target node ──────────────────────────
     host_entry = None
@@ -881,7 +880,7 @@ def pre_create_on_target(lvol_id, target_node_id,
     migration.write_to_db(db.kv_store)
 
     logger.info(
-        f"pre_create_on_target: done for lvol={lvol_id} target={target_node_id} "
+        f"create_migration: done for lvol={lvol_id} target={target_node_id} "
         f"migration_id={migration.uuid} connect_strings={len(out)}")
     return migration.uuid, out
 

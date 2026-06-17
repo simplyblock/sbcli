@@ -16,6 +16,7 @@ from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.kms import KMSException, create_kms_connection
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
+from simplyblock_core.models.nvme_connect import NvmeConnectEntry
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.lvol_model import LVol, LVolReplication
 from simplyblock_core.models.storage_node import StorageNode
@@ -1956,27 +1957,22 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
                 f"{client_data_nic_str}{tls_str}{host_auth_str}"
             )
 
-            entry = {
-                "ns_id": lvol.ns_id,
-                "transport": transport,
-                "ip": ip,
-                "port": port,
-                "nqn": lvol.nqn,
-                "reconnect-delay": constants.LVOL_NVME_CONNECT_RECONNECT_DELAY,
-                "ctrl-loss-tmo": ctrl_loss_tmo,
-                "fast_io_fail_tmo": constants.LVOL_NVME_CONNECT_FAST_IO_FAIL_TO,
-                "nr-io-queues": cluster.client_qpair_count,
-                "keep-alive-tmo": keep_alive_to,
-                "host-iface": cluster.client_data_nic,
-                "connect": connect_cmd,
-            }
-
-            if host_entry and host_entry.get("psk"):
-                entry["tls"] = True
-            if lvol.allowed_hosts:
-                entry["allowed_hosts"] = [h["nqn"] for h in lvol.allowed_hosts]
-
-            out.append(entry)
+            out.append(NvmeConnectEntry(
+                ns_id=lvol.ns_id,
+                transport=transport,
+                ip=ip,
+                port=port,
+                nqn=lvol.nqn,
+                reconnect_delay=constants.LVOL_NVME_CONNECT_RECONNECT_DELAY,
+                ctrl_loss_tmo=ctrl_loss_tmo,
+                fast_io_fail_tmo=constants.LVOL_NVME_CONNECT_FAST_IO_FAIL_TO,
+                nr_io_queues=cluster.client_qpair_count,
+                keep_alive_tmo=keep_alive_to,
+                host_iface=cluster.client_data_nic or "",
+                connect=connect_cmd,
+                tls=bool(host_entry and host_entry.get("psk")),
+                allowed_hosts=[h["nqn"] for h in lvol.allowed_hosts] if lvol.allowed_hosts else [],
+            ))
     return out, None
 
 

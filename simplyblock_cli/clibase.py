@@ -608,7 +608,7 @@ class CLIWrapperBase:
         if err:
             return err
         if data:
-            return "\n".join(con['connect'] for con in data)
+            return "\n".join(con.connect for con in data)
 
     def volume__resize(self, sub_command, args):
         volume_id = args.volume_id
@@ -679,7 +679,7 @@ class CLIWrapperBase:
 
     def volume__migrate(self, sub_command, args):
         try:
-            migration_id, connect_strings = migration_controller.pre_create_on_target(
+            migration_id, connect_strings = migration_controller.create_migration(
                 args.volume_id,
                 args.target_node_id,
                 ctrl_loss_tmo=args.ctrl_loss_tmo,
@@ -690,7 +690,7 @@ class CLIWrapperBase:
             return False
         print(f"Migration ID: {migration_id}")
         if connect_strings:
-            return "\n".join(c['connect'] for c in connect_strings)
+            return "\n".join(c.connect for c in connect_strings)
         return True
 
     def volume__migrate_continue(self, sub_command, args):

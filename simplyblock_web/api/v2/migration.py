@@ -31,22 +31,17 @@ class _PreCreateParams(BaseModel):
     host_nqn: Annotated[str, Field(pattern=utils.NQN_PATTERN)] | None = None
 
 
-class _PreCreateResponse(BaseModel):
-    migration_id: UUID
-    connect_strings: list[dict]
-
-
 @api.post('/', name='clusters:storage-pools:volumes:migrations:create', status_code=201)
-def create_migration(volume: Volume, parameters: _PreCreateParams) -> _PreCreateResponse:
-    """Pre-create the target NVMe-oF subsystem and bdev for a future migration.
+def create_migration(volume: Volume, parameters: _PreCreateParams) -> MigrationDTO:
+    """Set up the target NVMe-oF subsystem and bdev for a future migration.
 
-    The client must nvme-connect to the returned connect strings (inaccessible
+    The client must nvme-connect to the returned connect_strings (inaccessible
     ANA state), then call /continue to begin the actual data transfer. This
-    two-step split exists so that the target paths are established on the client
-    before the cutover, eliminating the window where no active path exists.
+    two-step split ensures target paths are established before cutover,
+    eliminating the window where no active path exists.
     """
     try:
-        migration_id, connect_strings = migration_controller.pre_create_on_target(
+        migration_id, connect_strings = migration_controller.create_migration(
             volume.get_id(),
             str(parameters.target_node_id),
             ctrl_loss_tmo=parameters.ctrl_loss_tmo,
@@ -54,7 +49,9 @@ def create_migration(volume: Volume, parameters: _PreCreateParams) -> _PreCreate
         )
     except ValueError as e:
         raise HTTPException(400, str(e))
-    return _PreCreateResponse(migration_id=UUID(migration_id), connect_strings=connect_strings)
+    db = DBController()
+    migration = db.get_migration_by_id(migration_id)
+    return MigrationDTO.from_model(migration, connect_strings=connect_strings)
 
 
 instance_api = APIRouter(prefix='/{migration_id}')
