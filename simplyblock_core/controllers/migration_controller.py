@@ -53,7 +53,7 @@ from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.nvme_connect import NvmeConnectEntry
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.utils.size_utils import convert_size
+from simplyblock_core.utils import convert_size
 
 # Note: JobSchedule is not imported directly here; task creation is delegated to
 # tasks_controller.add_lvol_mig_task() which handles event logging consistently.
