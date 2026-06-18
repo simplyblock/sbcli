@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import datetime, timedelta
 from ipaddress import IPv4Address
 from typing import List, Literal, Tuple, Optional, cast
 from uuid import UUID
@@ -249,7 +249,8 @@ class SnapshotDTO(BaseModel):
     used_size: util.Unsigned
     migrating: bool
     lvol: Optional[util.UrlPath]
-    created_at: int
+    created_at: datetime
+
 
     @staticmethod
     def from_model(
