@@ -3666,7 +3666,8 @@ class K8sNativeResilientFailoverTest(K8sNativeFailoverTest):
         self.permanent_clones: set[str] = set()
 
         # PVCs created during outage (not yet bound, no FIO running)
-        self.deferred_pvcs: list[str] = []
+        # Maps pvc_name → storage_class used at creation time.
+        self.deferred_pvcs: dict[str, str] = {}
 
     # ── Helpers ───────────────────────────────────────────────────────────
 
@@ -3710,7 +3711,7 @@ class K8sNativeResilientFailoverTest(K8sNativeFailoverTest):
                     f"{pvc_name}: {exc}"
                 )
                 continue
-            self.deferred_pvcs.append(pvc_name)
+            self.deferred_pvcs[pvc_name] = sc_name
 
     def _bind_deferred_pvcs_and_start_fio(self):
         """Wait for deferred PVCs to bind, then start FIO on each.
@@ -3727,7 +3728,7 @@ class K8sNativeResilientFailoverTest(K8sNativeFailoverTest):
             f"deferred PVCs to bind"
         )
 
-        for pvc_name in list(self.deferred_pvcs):
+        for pvc_name, sc_name in list(self.deferred_pvcs.items()):
             try:
                 self.k8s_utils.wait_pvc_bound(pvc_name, timeout=300)
             except Exception as exc:
@@ -3739,10 +3740,11 @@ class K8sNativeResilientFailoverTest(K8sNativeFailoverTest):
                     self.k8s_utils.delete_pvc(pvc_name)
                 except Exception:
                     pass
-                self.deferred_pvcs.remove(pvc_name)
+                self.deferred_pvcs.pop(pvc_name, None)
                 continue
 
             sleep_n_sec(5)
+            fs_type = "xfs" if sc_name == self.XFS_STORAGE_CLASS_NAME else "ext4"
 
             if self.use_client_fio:
                 # Client FIO path
@@ -3759,8 +3761,10 @@ class K8sNativeResilientFailoverTest(K8sNativeFailoverTest):
                         "configmap_name": None,
                         "snapshots": [],
                         "node_id": None,
+                        "storage_class": sc_name,
+                        "fs_type": fs_type,
                     }
-                    self.deferred_pvcs.remove(pvc_name)
+                    self.deferred_pvcs.pop(pvc_name, None)
                     continue
 
                 lvol_name, lvol_id = lvol_info
@@ -3775,7 +3779,6 @@ class K8sNativeResilientFailoverTest(K8sNativeFailoverTest):
                 client = self.fio_node[
                     len(self.pvc_details) % len(self.fio_node)
                 ]
-                fs_type = random.choice(["ext4", "xfs"])
 
                 try:
                     device, failed_cmds = self._connect_lvol_on_client(
@@ -3806,8 +3809,10 @@ class K8sNativeResilientFailoverTest(K8sNativeFailoverTest):
                         "mount_path": None,
                         "client": client,
                         "log_file": None,
+                        "storage_class": sc_name,
+                        "fs_type": fs_type,
                     }
-                    self.deferred_pvcs.remove(pvc_name)
+                    self.deferred_pvcs.pop(pvc_name, None)
                     continue
 
                 mount_point = f"{self.mount_path}/{pvc_name}"
@@ -3841,6 +3846,8 @@ class K8sNativeResilientFailoverTest(K8sNativeFailoverTest):
                     "mount_path": mount_point,
                     "client": client,
                     "log_file": log_file,
+                    "storage_class": sc_name,
+                    "fs_type": fs_type,
                 }
                 self.lvol_mount_details[lvol_name] = {
                     "ID": lvol_id,
@@ -3884,16 +3891,18 @@ class K8sNativeResilientFailoverTest(K8sNativeFailoverTest):
                     "configmap_name": cm_name,
                     "snapshots": [],
                     "node_id": node_id,
+                    "storage_class": sc_name,
+                    "fs_type": fs_type,
                 }
 
             if node_id:
                 self.node_vs_pvc.setdefault(
                     node_id, []
                 ).append(pvc_name)
-            self.deferred_pvcs.remove(pvc_name)
+            self.deferred_pvcs.pop(pvc_name, None)
             self.logger.info(
                 f"[deferred_bind] PVC {pvc_name} bound, "
-                f"FIO started (node={node_id})"
+                f"FIO started (node={node_id} SC={sc_name})"
             )
             sleep_n_sec(5)
 

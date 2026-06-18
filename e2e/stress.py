@@ -56,10 +56,13 @@ def main():
     if args.testname is None or len(args.testname.strip()) == 0:
         test_class_run = tests
     else:
-        for cls in tests:
-            needle = args.testname.lower().replace("_", "")
-            if needle in cls.__name__.lower():
-                test_class_run.append(cls)
+        needles = [n.strip().lower().replace("_", "") for n in args.testname.split(",") if n.strip()]
+        seen = set()
+        for needle in needles:
+            for cls in tests:
+                if needle in cls.__name__.lower() and cls not in seen:
+                    test_class_run.append(cls)
+                    seen.add(cls)
 
     if not test_class_run:
         available_tests = ', '.join(cls.__name__ for cls in tests)
