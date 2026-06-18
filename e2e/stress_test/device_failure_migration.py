@@ -1034,6 +1034,38 @@ class _DeviceFailureMigrationBase:
             pre_fio = self._count_active_fio()
             self.logger.info(f"Active FIO processes before restart: {pre_fio}")
 
+            # Shutdown the node first
+            self.logger.info(f"Shutting down node {restart_node_id} ...")
+            deadline = time.time() + 300
+            while True:
+                try:
+                    self.sbcli_utils.shutdown_node(
+                        node_uuid=restart_node_id, force=False
+                    )
+                except Exception as e:
+                    self.logger.warning(
+                        f"shutdown_node raised (may already be shutting down): {e}"
+                    )
+                sleep_n_sec(20)
+
+                self.logger.info(
+                    f"Waiting for node {restart_node_id} to go offline ..."
+                )
+                self.sbcli_utils.wait_for_storage_node_status(
+                    restart_node_id, "offline", timeout=600
+                )
+                node_detail = self.sbcli_utils.get_storage_node_details(
+                    restart_node_id
+                )
+                if node_detail[0]["status"] == "offline":
+                    self.logger.info(f"Node {restart_node_id} is offline")
+                    break
+                if time.time() > deadline:
+                    raise RuntimeError(
+                        f"Node {restart_node_id} did not reach offline "
+                        f"within 300s"
+                    )
+
             # Restart the node
             self.logger.info(f"Restarting node {restart_node_id} ...")
             self.sbcli_utils.restart_node(restart_node_id)
