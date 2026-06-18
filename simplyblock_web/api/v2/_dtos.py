@@ -101,7 +101,7 @@ class ClusterDTO(BaseModel):
     distr_ndcs: int
     distr_npcs: int
     ha: bool
-    utliziation_critical: util.Percent
+    utilization_critical: util.Percent
     utilization_warning: util.Percent
     provisioned_capacity_critical: util.Unsigned
     provisioned_capacity_warning: util.Unsigned
@@ -126,7 +126,7 @@ class ClusterDTO(BaseModel):
             distr_npcs=model.distr_npcs,
             ha=model.ha_type == "ha",
             utilization_warning=model.cap_warn,
-            utliziation_critical=model.cap_crit,
+            utilization_critical=model.cap_crit,
             provisioned_capacity_warning=model.prov_cap_warn,
             provisioned_capacity_critical=model.prov_cap_crit,
             node_affinity=model.enable_node_affinity,
