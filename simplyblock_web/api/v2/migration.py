@@ -86,7 +86,7 @@ class _ContinueParams(BaseModel):
 def continue_migration(volume: Volume, migration: Migration, parameters: _ContinueParams):
     try:
         migration_id = migration_controller.start_migration(
-            migration_id=migration.get_id(),
+            migration_id=migration.uuid,
             max_retries=parameters.max_retries,
             deadline_seconds=parameters.deadline_seconds,
         )
@@ -98,7 +98,7 @@ def continue_migration(volume: Volume, migration: Migration, parameters: _Contin
 @instance_api.post('/cancel', name='clusters:storage-pools:volumes:migrations:cancel', status_code=200)
 def cancel_migration(volume: Volume, migration: Migration):
     try:
-        migration_controller.cancel_migration(migration.get_id())
+        migration_controller.cancel_migration(migration.uuid)
     except ValueError as e:
         raise HTTPException(400, str(e))
     return {"status": "cancelled"}
