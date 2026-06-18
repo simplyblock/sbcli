@@ -2029,6 +2029,18 @@ class SshUtils:
                     f"mv -f '{cont_dir}/docker_logs_{sc}_{ts}.log.tmp' '{cont_dir}/docker_logs_{sc}_{ts}.log' || true\""
                 )
 
+                # Extract delay-qpair entries from SPDK container logs for quick analysis
+                if re.match(r'^spdk_\d+$', c):
+                    self.exec_command(
+                        node,
+                        "bash -lc "
+                        f"\"grep -E 'nvmf_tcp_dump_delay_req_status|delay-qpair' "
+                        f"'{cont_dir}/docker_logs_{sc}_{ts}.log' "
+                        f"> '{cont_dir}/delay_qpair_{sc}_{ts}.log' 2>/dev/null; "
+                        f"[ -s '{cont_dir}/delay_qpair_{sc}_{ts}.log' ] || "
+                        f"rm -f '{cont_dir}/delay_qpair_{sc}_{ts}.log'\""
+                    )
+
                 # docker inspect (JSON)
                 self.exec_command(
                     node,

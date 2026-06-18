@@ -2379,10 +2379,59 @@ class TestClusterBase:
                 f"from {len(pairs)} (container, source) pairs"
             )
 
+            # Post-process: extract delay-qpair entries for quick analysis
+            try:
+                self._extract_delay_logs(graylog_dir)
+            except Exception as delay_exc:
+                self.logger.warning(
+                    f"[delay-extract] Failed: {delay_exc}"
+                )
+
         except Exception as exc:
             self.logger.warning(
                 f"[graylog-export] Unexpected error, skipping: {exc}"
             )
+
+    def _extract_delay_logs(self, graylog_dir):
+        """Extract delay-qpair entries from SPDK logs into separate files.
+
+        Scans each spdk_*.log (excluding spdk_proxy_*) in *graylog_dir* for
+        delay-qpair / nvmf_tcp_dump_delay_req_status lines and writes them
+        to ``delay_qpair/<stem>__delay_qpair.log``.  Empty files are removed.
+        """
+        import glob as _glob
+
+        delay_dir = os.path.join(graylog_dir, "delay_qpair")
+        os.makedirs(delay_dir, exist_ok=True)
+        extracted = 0
+
+        for spdk_log in sorted(_glob.glob(os.path.join(graylog_dir, "spdk_[0-9]*.log"))):
+            basename = os.path.basename(spdk_log)
+            if basename.startswith("spdk_proxy_"):
+                continue
+            stem = basename.rsplit(".", 1)[0]
+            out_path = os.path.join(delay_dir, f"{stem}__delay_qpair.log")
+            count = 0
+            with open(spdk_log, "r", errors="replace") as fin, \
+                 open(out_path, "w", errors="replace") as fout:
+                for line in fin:
+                    if "nvmf_tcp_dump_delay_req_status" in line or "delay-qpair" in line:
+                        fout.write(line)
+                        count += 1
+            if count == 0:
+                os.remove(out_path)
+            else:
+                self.logger.info(f"[delay-extract] {stem}: {count} delay entries")
+                extracted += 1
+
+        if extracted == 0:
+            # Clean up empty directory
+            try:
+                os.rmdir(delay_dir)
+            except OSError:
+                pass
+        else:
+            self.logger.info(f"[delay-extract] Extracted delay logs from {extracted} SPDK log(s)")
 
     def _get_all_nodes(self):
         """Return ordered, de-duplicated list of mgmt + storage nodes."""
