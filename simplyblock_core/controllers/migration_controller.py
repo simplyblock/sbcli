@@ -44,7 +44,7 @@ import uuid
 from datetime import datetime
 
 from simplyblock_core import constants, utils
-from simplyblock_core.controllers import migration_events, tasks_controller
+from simplyblock_core.controllers import migration_events, tasks_controller, snapshot_controller
 from simplyblock_core.exceptions import MigrationConflictError, PreconditionError
 from simplyblock_core.controllers.host_auth import _reapply_allowed_hosts
 from simplyblock_core.kms import create_kms_connection
@@ -121,6 +121,13 @@ def start_migration(migration_id,
         raise ValueError(f"Target node is not online (status={target_node.status})")
 
     snap_plan = get_snapshot_chain(lvol_id, source_node_id)
+    if not snap_plan:
+        snap_name = f"_mig_{migration.uuid[:8]}_lvol_{migration.lvol_id[:8]}"
+        snap_uuid, err = snapshot_controller.add(lvol_id, snap_name)
+        if err:
+            raise ValueError(f"Failed to create snapshot: {err}")
+        snap_plan = [snap_uuid]
+
     snaps_found_on_target = [s for s in snap_plan if _is_snap_on_node(s, target_node_id)]
     snap_migration_plan = [s for s in snap_plan if s not in snaps_found_on_target]
 
