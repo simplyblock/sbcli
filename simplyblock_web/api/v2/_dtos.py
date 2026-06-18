@@ -249,6 +249,7 @@ class SnapshotDTO(BaseModel):
     used_size: util.Unsigned
     migrating: bool
     lvol: Optional[util.UrlPath]
+    created_at: int
 
     @staticmethod
     def from_model(
@@ -271,6 +272,7 @@ class SnapshotDTO(BaseModel):
             size=model.size,
             used_size=model.used_size,
             migrating=is_migrating,
+            created_at=model.created_at,
             lvol=str(
                 request.url_for(
                     "clusters:pools:volumes:detail",
