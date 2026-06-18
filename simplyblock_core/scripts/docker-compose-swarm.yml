@@ -34,7 +34,7 @@ services:
 
   fdb-server1:
     <<: *service-base
-    image: foundationdb/foundationdb:7.3.63
+    image: quay.io/simplyblock-io/foundationdb:7.3.63
     networks:
       - hostnet
     environment:
@@ -51,7 +51,7 @@ services:
 
   fdb-server2:
     <<: *service-base
-    image: foundationdb/foundationdb:7.3.63
+    image: quay.io/simplyblock-io/foundationdb:7.3.63
     networks:
       - hostnet
     environment:
@@ -68,7 +68,7 @@ services:
 
   fdb-server3:
     <<: *service-base
-    image: foundationdb/foundationdb:7.3.63
+    image: quay.io/simplyblock-io/foundationdb:7.3.63
     networks:
       - hostnet
     environment:
@@ -85,7 +85,7 @@ services:
 
   fdb-server4:
     <<: *service-base
-    image: foundationdb/foundationdb:7.3.63
+    image: quay.io/simplyblock-io/foundationdb:7.3.63
     networks:
       - hostnet
     environment:
