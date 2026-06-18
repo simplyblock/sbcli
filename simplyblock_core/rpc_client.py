@@ -546,10 +546,11 @@ class RPCClient:
         return self._request("bdev_lvol_create", params)
 
     def delete_lvol(self, name, del_async=False, special_delete=False):
-        params = {"name": name,
-                  "sync": del_async}
-        if special_delete:
-            params["special_delete"] = True
+        params = {
+            "name": name,
+            "sync": del_async,
+            "special_delete": special_delete,
+        }
         return self._request2("bdev_lvol_delete", params)
 
     def get_bdevs(self, name=None):
@@ -1416,10 +1417,11 @@ class RPCClient:
         }
         return self._request("bdev_lvol_set_lvs_read_only", params)
 
-    def bdev_lvol_create_hublvol(self, lvs, name=None):
-        params = {"uuid" if utils.UUID_PATTERN.match(lvs) else "lvs_name": lvs}
-        if name:
-            params["name"] = name
+    def bdev_lvol_create_hublvol(self, lvs, name="hublvol"):
+        params = {
+            "uuid" if utils.UUID_PATTERN.match(lvs) else "lvs_name": lvs,
+            "name": name,
+        }
         return self._request('bdev_lvol_create_hublvol', params)
 
     def bdev_lvol_delete_hublvol(self, lvs):
