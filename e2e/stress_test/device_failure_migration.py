@@ -114,6 +114,7 @@ class _DeviceFailureMigrationBase:
         self._failure_mode = "api"
         self._pre_migration_checksums = {}  # {lvol_name: {filepath: md5}}
         self._pre_existing_failed_devices = set()  # device IDs already failed before test
+        self._cached_capacity = {}  # {node_id: {status, cap, devices}}
 
     # ── Main flow ────────────────────────────────────────────────────────────
 
@@ -159,10 +160,11 @@ class _DeviceFailureMigrationBase:
                     self._phase_stop_io_load()
                 except Exception as e:
                     self.logger.warning(f"Stop IO load failed: {e}")
-            try:
-                self._phase_recover_device()
-            except Exception as e:
-                self.logger.warning(f"Device recovery failed: {e}")
+            if not self._test_passed:
+                try:
+                    self._phase_recover_device()
+                except Exception as e:
+                    self.logger.warning(f"Device recovery failed: {e}")
             try:
                 self._phase_post_migration_health_check()
             except Exception as e:
@@ -171,6 +173,10 @@ class _DeviceFailureMigrationBase:
                 self.collect_management_details(suffix="_pre_cleanup")
             except Exception as e:
                 self.logger.warning(f"collect_management_details failed: {e}")
+            try:
+                self._capture_cluster_capacity()
+            except Exception as e:
+                self.logger.warning(f"Capacity capture failed: {e}")
             try:
                 self._phase_cleanup()
             except Exception as e:
@@ -235,6 +241,10 @@ class _DeviceFailureMigrationBase:
                 self.collect_management_details(suffix="_pre_cleanup")
             except Exception as e:
                 self.logger.warning(f"collect_management_details failed: {e}")
+            try:
+                self._capture_cluster_capacity()
+            except Exception as e:
+                self.logger.warning(f"Capacity capture failed: {e}")
             try:
                 self._phase_cleanup()
             except Exception as e:
@@ -1067,6 +1077,7 @@ class _DeviceFailureMigrationBase:
                     )
 
             # Restart the node
+            sleep_n_sec(60)
             self.logger.info(f"Restarting node {restart_node_id} ...")
             self.sbcli_utils.restart_node(restart_node_id)
 
@@ -1390,6 +1401,148 @@ class _DeviceFailureMigrationBase:
             )
         except Exception as exc:
             self.logger.warning(f"Could not query device fill level: {exc}")
+
+    def _capture_cluster_capacity(self):
+        """Snapshot node and device capacity for use in the summary.
+
+        Must be called BEFORE ``_phase_cleanup()`` deletes pools/lvols,
+        otherwise the capacity API may return errors or zeroes.
+        """
+        self.logger.info("Capturing cluster capacity snapshot for summary ...")
+        for node_id in self._sn_nodes:
+            entry = {"status": "?", "cap": {}, "devices": []}
+            try:
+                details = self.sbcli_utils.get_storage_node_details(node_id)
+                entry["status"] = details[0].get("status", "?") if details else "?"
+            except Exception as exc:
+                self.logger.warning(
+                    f"Could not get node details for {node_id}: {exc}"
+                )
+            try:
+                cap = self.sbcli_utils.get_node_capacity(node_id)
+                if isinstance(cap, list):
+                    cap = cap[0] if cap else {}
+                entry["cap"] = cap
+            except Exception as exc:
+                self.logger.warning(
+                    f"Could not get node capacity for {node_id}: {exc}"
+                )
+            try:
+                devices = self.sbcli_utils.get_device_details(node_id)
+                for dev in devices:
+                    dev_entry = {
+                        "id": dev.get("id", "?"),
+                        "status": dev.get("status", "?"),
+                        "cap": {},
+                    }
+                    try:
+                        dcap = self.sbcli_utils.get_device_capacity(dev_entry["id"])
+                        if isinstance(dcap, list):
+                            dcap = dcap[0] if dcap else {}
+                        dev_entry["cap"] = dcap
+                    except Exception:
+                        pass
+                    entry["devices"].append(dev_entry)
+            except Exception as exc:
+                self.logger.warning(
+                    f"Could not get device details for {node_id}: {exc}"
+                )
+            self._cached_capacity[node_id] = entry
+        self.logger.info(
+            f"Captured capacity for {len(self._cached_capacity)} nodes"
+        )
+
+    def _build_capacity_md_lines(self):
+        """Return markdown lines for Per-Node and Per-Device Capacity tables.
+
+        Uses data from ``_cached_capacity`` (populated by
+        ``_capture_cluster_capacity``).  Falls back to live API calls if
+        the cache is empty (e.g. capture was skipped).
+        """
+        lines = []
+
+        # ── Per-Node Capacity ──
+        lines.append("## Per-Node Capacity")
+        lines.append("| Node | Status | Size Total | Size Used | Utilisation |")
+        lines.append("|------|--------|-----------|-----------|-------------|")
+        for node_id in self._sn_nodes:
+            cached = self._cached_capacity.get(node_id)
+            if cached:
+                status = cached.get("status", "?")
+                cap = cached.get("cap", {})
+            else:
+                # Fallback: live query (may fail post-cleanup)
+                try:
+                    details = self.sbcli_utils.get_storage_node_details(node_id)
+                    status = details[0].get("status", "?") if details else "?"
+                    cap = self.sbcli_utils.get_node_capacity(node_id)
+                    if isinstance(cap, list):
+                        cap = cap[0] if cap else {}
+                except Exception as exc:
+                    lines.append(f"| `{node_id}` | error | — | — | — |")
+                    self.logger.warning(
+                        f"Could not get capacity for node {node_id}: {exc}"
+                    )
+                    continue
+            s_total = cap.get("size_total", 0)
+            s_used = cap.get("size_used", 0)
+            s_util = cap.get("size_util", 0)
+            lines.append(
+                f"| `{node_id}` | {status} | "
+                f"{_fmt_bytes(s_total)} | {_fmt_bytes(s_used)} | {s_util}% |"
+            )
+        lines.append("")
+
+        # ── Per-Device Capacity ──
+        lines.append("## Per-Device Capacity")
+        lines.append("| Node | Device | Status | Size Total | Size Used | Utilisation |")
+        lines.append("|------|--------|--------|-----------|-----------|-------------|")
+        for node_id in self._sn_nodes:
+            cached = self._cached_capacity.get(node_id)
+            if cached and cached.get("devices"):
+                for dev in cached["devices"]:
+                    dev_id = dev.get("id", "?")
+                    dev_status = dev.get("status", "?")
+                    dcap = dev.get("cap", {})
+                    ds_total = dcap.get("size_total", 0)
+                    ds_used = dcap.get("size_used", 0)
+                    ds_util = dcap.get("size_util", 0)
+                    lines.append(
+                        f"| `{node_id}` | `{dev_id}` | {dev_status} | "
+                        f"{_fmt_bytes(ds_total)} | {_fmt_bytes(ds_used)} | {ds_util}% |"
+                    )
+            else:
+                # Fallback: live query
+                try:
+                    devices = self.sbcli_utils.get_device_details(node_id)
+                    for dev in devices:
+                        dev_id = dev.get("id", "?")
+                        dev_status = dev.get("status", "?")
+                        try:
+                            dcap = self.sbcli_utils.get_device_capacity(dev_id)
+                            if isinstance(dcap, list):
+                                dcap = dcap[0] if dcap else {}
+                            ds_total = dcap.get("size_total", 0)
+                            ds_used = dcap.get("size_used", 0)
+                            ds_util = dcap.get("size_util", 0)
+                            lines.append(
+                                f"| `{node_id}` | `{dev_id}` | {dev_status} | "
+                                f"{_fmt_bytes(ds_total)} | {_fmt_bytes(ds_used)} | "
+                                f"{ds_util}% |"
+                            )
+                        except Exception:
+                            lines.append(
+                                f"| `{node_id}` | `{dev_id}` | {dev_status} "
+                                f"| — | — | — |"
+                            )
+                except Exception as exc:
+                    lines.append(f"| `{node_id}` | — | error | — | — | — |")
+                    self.logger.warning(
+                        f"Could not get devices for node {node_id}: {exc}"
+                    )
+        lines.append("")
+
+        return lines
 
     def _phase_collect_cluster_io_stats(self):
         """Collect cluster-wide IO stats from the API and compute averages."""
@@ -2090,58 +2243,7 @@ class _DeviceFailureMigrationBase:
             lines.append(f"| `{node_id}` | {others_per_node} | other |")
         lines.append("")
 
-        # ── Per-Node Capacity ──
-        lines.append("## Per-Node Capacity")
-        lines.append("| Node | Status | Size Total | Size Used | Utilisation |")
-        lines.append("|------|--------|-----------|-----------|-------------|")
-        for node_id in self._sn_nodes:
-            try:
-                details = self.sbcli_utils.get_storage_node_details(node_id)
-                status = details[0].get("status", "?") if details else "?"
-                cap = self.sbcli_utils.get_node_capacity(node_id)
-                if isinstance(cap, list):
-                    cap = cap[0] if cap else {}
-                s_total = cap.get("size_total", 0)
-                s_used = cap.get("size_used", 0)
-                s_util = cap.get("size_util", 0)
-                lines.append(
-                    f"| `{node_id}` | {status} | "
-                    f"{_fmt_bytes(s_total)} | {_fmt_bytes(s_used)} | {s_util}% |"
-                )
-            except Exception as exc:
-                lines.append(f"| `{node_id}` | error | — | — | — |")
-                self.logger.warning(f"Could not get capacity for node {node_id}: {exc}")
-        lines.append("")
-
-        # ── Per-Device Capacity ──
-        lines.append("## Per-Device Capacity")
-        lines.append("| Node | Device | Status | Size Total | Size Used | Utilisation |")
-        lines.append("|------|--------|--------|-----------|-----------|-------------|")
-        for node_id in self._sn_nodes:
-            try:
-                devices = self.sbcli_utils.get_device_details(node_id)
-                for dev in devices:
-                    dev_id = dev.get("id", "?")
-                    dev_status = dev.get("status", "?")
-                    try:
-                        dcap = self.sbcli_utils.get_device_capacity(dev_id)
-                        if isinstance(dcap, list):
-                            dcap = dcap[0] if dcap else {}
-                        ds_total = dcap.get("size_total", 0)
-                        ds_used = dcap.get("size_used", 0)
-                        ds_util = dcap.get("size_util", 0)
-                        lines.append(
-                            f"| `{node_id}` | `{dev_id}` | {dev_status} | "
-                            f"{_fmt_bytes(ds_total)} | {_fmt_bytes(ds_used)} | {ds_util}% |"
-                        )
-                    except Exception:
-                        lines.append(
-                            f"| `{node_id}` | `{dev_id}` | {dev_status} | — | — | — |"
-                        )
-            except Exception as exc:
-                lines.append(f"| `{node_id}` | — | error | — | — | — |")
-                self.logger.warning(f"Could not get devices for node {node_id}: {exc}")
-        lines.append("")
+        lines.extend(self._build_capacity_md_lines())
 
         # ── Post-Migration Health ──
         health_ok = self._timing.get("post_migration_all_healthy", None)
@@ -2467,6 +2569,10 @@ class _DeviceAddAfterBootstrapBase:
                 self.logger.warning(
                     f"collect_management_details failed: {e}"
                 )
+            try:
+                self._capture_cluster_capacity()
+            except Exception as e:
+                self.logger.warning(f"Capacity capture failed: {e}")
             try:
                 self._phase_cleanup()
             except Exception as e:
@@ -3268,58 +3374,7 @@ class _DeviceAddAfterBootstrapBase:
                 lines.append(f"| `{node_id}` | 0 | other |")
         lines.append("")
 
-        # ── Per-Node Capacity ──
-        lines.append("## Per-Node Capacity")
-        lines.append("| Node | Status | Size Total | Size Used | Utilisation |")
-        lines.append("|------|--------|-----------|-----------|-------------|")
-        for node_id in self._sn_nodes:
-            try:
-                details = self.sbcli_utils.get_storage_node_details(node_id)
-                status = details[0].get("status", "?") if details else "?"
-                cap = self.sbcli_utils.get_node_capacity(node_id)
-                if isinstance(cap, list):
-                    cap = cap[0] if cap else {}
-                s_total = cap.get("size_total", 0)
-                s_used = cap.get("size_used", 0)
-                s_util = cap.get("size_util", 0)
-                lines.append(
-                    f"| `{node_id}` | {status} | "
-                    f"{_fmt_bytes(s_total)} | {_fmt_bytes(s_used)} | {s_util}% |"
-                )
-            except Exception as exc:
-                lines.append(f"| `{node_id}` | error | — | — | — |")
-                self.logger.warning(f"Could not get capacity for node {node_id}: {exc}")
-        lines.append("")
-
-        # ── Per-Device Capacity ──
-        lines.append("## Per-Device Capacity")
-        lines.append("| Node | Device | Status | Size Total | Size Used | Utilisation |")
-        lines.append("|------|--------|--------|-----------|-----------|-------------|")
-        for node_id in self._sn_nodes:
-            try:
-                devices = self.sbcli_utils.get_device_details(node_id)
-                for dev in devices:
-                    dev_id = dev.get("id", "?")
-                    dev_status = dev.get("status", "?")
-                    try:
-                        dcap = self.sbcli_utils.get_device_capacity(dev_id)
-                        if isinstance(dcap, list):
-                            dcap = dcap[0] if dcap else {}
-                        ds_total = dcap.get("size_total", 0)
-                        ds_used = dcap.get("size_used", 0)
-                        ds_util = dcap.get("size_util", 0)
-                        lines.append(
-                            f"| `{node_id}` | `{dev_id}` | {dev_status} | "
-                            f"{_fmt_bytes(ds_total)} | {_fmt_bytes(ds_used)} | {ds_util}% |"
-                        )
-                    except Exception:
-                        lines.append(
-                            f"| `{node_id}` | `{dev_id}` | {dev_status} | — | — | — |"
-                        )
-            except Exception as exc:
-                lines.append(f"| `{node_id}` | — | error | — | — | — |")
-                self.logger.warning(f"Could not get devices for node {node_id}: {exc}")
-        lines.append("")
+        lines.extend(self._build_capacity_md_lines())
 
         # ── Post-Migration Health ──
         health_ok = self._timing.get("post_migration_all_healthy", None)
@@ -3997,58 +4052,7 @@ class _DeviceFailureMigrationK8s(_DeviceFailureMigrationBase):
             lines.append(f"| `{node_id}` | {len(pvcs)} | {role} |")
         lines.append("")
 
-        # ── Per-Node Capacity ──
-        lines.append("## Per-Node Capacity")
-        lines.append("| Node | Status | Size Total | Size Used | Utilisation |")
-        lines.append("|------|--------|-----------|-----------|-------------|")
-        for node_id in self._sn_nodes:
-            try:
-                details = self.sbcli_utils.get_storage_node_details(node_id)
-                status = details[0].get("status", "?") if details else "?"
-                cap = self.sbcli_utils.get_node_capacity(node_id)
-                if isinstance(cap, list):
-                    cap = cap[0] if cap else {}
-                s_total = cap.get("size_total", 0)
-                s_used = cap.get("size_used", 0)
-                s_util = cap.get("size_util", 0)
-                lines.append(
-                    f"| `{node_id}` | {status} | "
-                    f"{_fmt_bytes(s_total)} | {_fmt_bytes(s_used)} | {s_util}% |"
-                )
-            except Exception as exc:
-                lines.append(f"| `{node_id}` | error | — | — | — |")
-                self.logger.warning(f"Could not get capacity for node {node_id}: {exc}")
-        lines.append("")
-
-        # ── Per-Device Capacity ──
-        lines.append("## Per-Device Capacity")
-        lines.append("| Node | Device | Status | Size Total | Size Used | Utilisation |")
-        lines.append("|------|--------|--------|-----------|-----------|-------------|")
-        for node_id in self._sn_nodes:
-            try:
-                devices = self.sbcli_utils.get_device_details(node_id)
-                for dev in devices:
-                    dev_id = dev.get("id", "?")
-                    dev_status = dev.get("status", "?")
-                    try:
-                        dcap = self.sbcli_utils.get_device_capacity(dev_id)
-                        if isinstance(dcap, list):
-                            dcap = dcap[0] if dcap else {}
-                        ds_total = dcap.get("size_total", 0)
-                        ds_used = dcap.get("size_used", 0)
-                        ds_util = dcap.get("size_util", 0)
-                        lines.append(
-                            f"| `{node_id}` | `{dev_id}` | {dev_status} | "
-                            f"{_fmt_bytes(ds_total)} | {_fmt_bytes(ds_used)} | {ds_util}% |"
-                        )
-                    except Exception:
-                        lines.append(
-                            f"| `{node_id}` | `{dev_id}` | {dev_status} | — | — | — |"
-                        )
-            except Exception as exc:
-                lines.append(f"| `{node_id}` | — | error | — | — | — |")
-                self.logger.warning(f"Could not get devices for node {node_id}: {exc}")
-        lines.append("")
+        lines.extend(self._build_capacity_md_lines())
 
         # ── Post-Migration Health ──
         health_ok = self._timing.get("post_migration_all_healthy", None)

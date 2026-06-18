@@ -109,7 +109,7 @@ from stress_test.continuous_failover_ha_security import (
     RandomSecurityFailoverTest,
     RandomAllSecurityFailoverTest,
 )
-from stress_test.mgmt_node_network_outage import MgmtNodeNetworkOutageTest
+from stress_test.mgmt_node_network_outage import MgmtNodeNetworkOutageTest, MgmtNodeRebootTest
 from stress_test.k8s_native_namespace_failover import (
     K8sNativeNamespacedFailoverTest,
     K8sNativeRapidLifecycleTest,
@@ -319,6 +319,7 @@ ALL_TESTS = [
     TestMultiNodeOutageK8s,
     TestMultiNodeVMRebootDocker,
     MgmtNodeNetworkOutageTest,
+    MgmtNodeRebootTest,
 ]
 
 def get_all_tests(custom=True, ha_test=False):
@@ -418,6 +419,7 @@ def get_stress_tests():
         RandomRDMAMultiFailoverTest,
         RandomK8sMultiOutageFailoverTest,
         MgmtNodeNetworkOutageTest,
+        MgmtNodeRebootTest,
         RandomRapidFailoverNoGap,
         RandomRapidFailoverNoGapV2WithMigration,
         RandomRapidFailoverNoGapV2NoMigration,
