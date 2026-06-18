@@ -288,6 +288,8 @@ def create_snapshot(
         volume.get_id(), parameters.name, backup=parameters.backup
     )
     if err_or_false:
+        if 'unique' in str(err_or_false).lower():
+            raise HTTPException(409, f'Snapshot {parameters.name} already exists')
         raise ValueError(err_or_false)
 
     entity_url = request.app.url_path_for(
