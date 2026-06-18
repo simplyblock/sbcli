@@ -294,6 +294,8 @@ def create_snapshot(
         volume.get_id(), parameters.name, backup=parameters.backup
     )
     if err_or_false:
+        # FIXME: snapshot_controller.add() should raise a named exception directly
+        # instead of returning a string that we string-match here
         if 'unique' in str(err_or_false).lower():
             raise HTTPException(409, f'Snapshot {parameters.name} already exists')
         raise ValueError(err_or_false)
