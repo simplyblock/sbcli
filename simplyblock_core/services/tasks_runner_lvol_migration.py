@@ -1209,7 +1209,7 @@ def _take_intermediate_snapshot(migration):
     logger.info(
         f"[IO-FREEZE] {_now_ms()} intermediate snapshot starting: "
         f"lvol={migration.lvol_id} round={migration.intermediate_snap_rounds} name={snap_name}")
-    snap_uuid, err = snapshot_controller.add(migration.lvol_id, snap_name, pypass_lvol_migration_check=True)
+    snap_uuid, err = snapshot_controller.add(migration.lvol_id, snap_name, bypass_lvol_migration_check=True)
     if err:
         logger.warning(f"Intermediate snapshot failed (proceeding without): {err}")
         migration.intermediate_snap_rounds = migration.max_intermediate_snap_rounds
