@@ -240,10 +240,23 @@ class RPCClient:
             "model_number": model_number}
         return self._request("nvmf_create_subsystem", params)
 
-    def keyring_file_add_key(self, name, path):
-        """Register a file-based key in SPDK's keyring by path."""
-        params = {"name": name, "path": path}
-        return self._request("keyring_file_add_key", params)
+    def keyring_file_add_key(self, name: str, path: str, *, allow_existing: bool = False):
+        """Register a file-based key in SPDK's keyring by path.
+
+        Args:
+            name: Key name for the SPDK keyring.
+            path: Path to the key file on the storage node.
+            allow_existing: When True, silently succeed if the key is already
+                registered (SPDK errno -17). When False (default) an existing
+                key raises RPCException.
+        """
+        try:
+            return self._request3("keyring_file_add_key", name=name, path=path)
+        except RPCException as e:
+            if allow_existing and e.code == -17:
+                logger.debug("Key %s already in SPDK keyring, reusing", name)
+                return None
+            raise
 
     def keyring_file_remove_key(self, name):
         """Remove a key from SPDK's keyring."""
