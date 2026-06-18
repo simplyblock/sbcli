@@ -169,7 +169,7 @@ LVOL_NVME_CONNECT_FAST_IO_FAIL_TO=1
 LVOL_NVME_CONNECT_NR_IO_QUEUES=3
 LVOL_NVME_KEEP_ALIVE_TO=4
 LVOL_NVME_KEEP_ALIVE_TO_TCP=4
-QPAIR_COUNT=32
+QPAIR_COUNT=64
 CLIENT_QPAIR_COUNT=3
 # 8 s, not 4 s. 4 s false-positives during a peer-reset reactor stall:
 # when a peer dies, bdev_nvme's per-controller reset state machines run on
