@@ -604,7 +604,7 @@ def delete(snapshot_uuid, force_delete=False):
 
         special_delete = False
         try:
-            snap_bdev_info = rpc_client.rpc_client().get_bdev(snap.snap_bdev)
+            snap_bdev_info = rpc_client.get_bdevs(snap.snap_bdev)
             logger.debug(f"snap_bdev_info: {snap_bdev_info[0]}")
             if snap_bdev_info[0]["driver_specific"]["lvol"]["open_ref"] > 1:
                 special_delete = True
