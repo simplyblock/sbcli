@@ -138,11 +138,23 @@ def add_lvol_stats(cluster, lvol, stats_list, capacity_dict=None):
                     data['unmap_latency_ps'] = int(data['unmap_latency_ticks'] / time_diff)
 
                 if data['read_io_ps'] > 0 and data['write_io_ps'] > 0 and lvol.io_error:
-                    # set lvol io error to false
-                    lvol = db.get_lvol_by_id(lvol.get_id())
-                    lvol.io_error = False
-                    lvol.write_to_db()
-                    lvol_events.lvol_io_error_change(lvol, False, True, caused_by="monitor")
+                    # set lvol io error to false. Atomic compare-and-set: this
+                    # collector and lvol_monitor both write the same LVol row
+                    # concurrently (lvol_monitor sets io_error=True / status), so a
+                    # full write_to_db here would clobber its change — the same
+                    # lost-update class as incident 2026-06-18.
+                    changed = {"v": False}
+
+                    def _mut(x):
+                        if not x.io_error:
+                            return False
+                        x.io_error = False
+                        changed["v"] = True
+                        return True
+
+                    lvol = db.atomic_update(db.get_lvol_by_id(lvol.get_id()), _mut)
+                    if lvol is not None and changed["v"]:
+                        lvol_events.lvol_io_error_change(lvol, False, True, caused_by="monitor")
 
         else:
             logger.warning("last record not found")

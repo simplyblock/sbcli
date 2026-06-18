@@ -1234,28 +1234,37 @@ def set_shared_placement(cl_id, enable=True, force=False) -> bool:
     # step-3 of full_node_recreate_lvstore), so updating the primary's
     # stack here covers the peers automatically.
     for node in nodes:
-        changed = False
-        for entry in (node.lvstore_stack or []):
-            if not isinstance(entry, dict) or entry.get("type") != "bdev_distr":
-                continue
-            params = entry.setdefault("params", {})
-            if not isinstance(params, dict):
-                continue
-            current = params.get("shared_placement", False)
-            if enable and not current:
-                params["shared_placement"] = True
-                changed = True
-            elif not enable and current:
-                # remove rather than set False, so the param dict stays
-                # minimal and matches the default-construct case.
-                params.pop("shared_placement", None)
-                changed = True
-        if changed:
-            node.write_to_db(db_controller.kv_store)
+        # Atomic compare-and-set: mutate only lvstore_stack on the freshly-read
+        # node so the long per-node loop above can't clobber a concurrent
+        # node.status change (lost-update class — incident 2026-06-18). Returning
+        # False (no entry changed) aborts the write.
+        def _mut(n, en=enable):
+            changed = False
+            for entry in (n.lvstore_stack or []):
+                if not isinstance(entry, dict) or entry.get("type") != "bdev_distr":
+                    continue
+                params = entry.setdefault("params", {})
+                if not isinstance(params, dict):
+                    continue
+                current = params.get("shared_placement", False)
+                if en and not current:
+                    params["shared_placement"] = True
+                    changed = True
+                elif not en and current:
+                    # remove rather than set False, so the param dict stays
+                    # minimal and matches the default-construct case.
+                    params.pop("shared_placement", None)
+                    changed = True
+            return changed
 
-    # Step 4: persist on the cluster row.
-    cluster.shared_placement = enable
-    cluster.write_to_db(db_controller.kv_store)
+        db_controller.atomic_update(
+            db_controller.get_storage_node_by_id(node.get_id()), _mut)
+
+    # Step 4: persist on the cluster row (atomic, so it doesn't clobber a
+    # concurrent cluster.status change committed by set_cluster_status).
+    db_controller.atomic_update(
+        db_controller.get_cluster_by_id(cl_id),
+        lambda c, v=enable: setattr(c, "shared_placement", v))
     logger.info("Cluster %s shared_placement set to %s", cl_id, enable)
     return True
 
@@ -1903,17 +1912,26 @@ def add_replication(source_cl_id, target_cl_id, timeout=0, target_pool=None) -> 
         raise ValueError(f"Target cluster not found: {target_cl_id}")
 
     logger.info("Updating Cluster replication target")
-    cluster.snapshot_replication_target_cluster = target_cl_id
+    new_pool = None
     if target_pool:
         pool = db_controller.get_pool_by_id(target_pool)
         if not pool:
             raise ValueError(f"Pool not found: {target_pool}")
         if pool.status != Pool.STATUS_ACTIVE:
             raise ValueError(f"Pool not active: {target_pool}")
-        cluster.snapshot_replication_target_pool = target_pool
+        new_pool = target_pool
+    new_timeout = timeout if (timeout and timeout > 0) else None
 
-    if timeout and timeout > 0:
-        cluster.snapshot_replication_timeout = timeout
-    cluster.write_to_db()
+    # Atomic: mutate only the replication fields on the freshly-read cluster so
+    # a concurrent cluster.status change is not clobbered (incident 2026-06-18).
+    def _mut(c):
+        c.snapshot_replication_target_cluster = target_cl_id
+        if new_pool is not None:
+            c.snapshot_replication_target_pool = new_pool
+        if new_timeout is not None:
+            c.snapshot_replication_timeout = new_timeout
+        return True
+
+    db_controller.atomic_update(db_controller.get_cluster_by_id(source_cl_id), _mut)
     logger.info("Done")
     return True

@@ -4515,6 +4515,13 @@ def set_node_status(node_id, status, caused_by="monitor"):
             n.down_since = now
         else:
             n.down_since = ""
+        # Stamp/clear the IN_SHUTDOWN entry time so the monitor can reconcile a
+        # node stranded in in_shutdown (e.g. a lost-update reverting the offline
+        # flip, or a crashed shutdown) back to OFFLINE after a grace window.
+        if status == StorageNode.STATUS_IN_SHUTDOWN:
+            n.shutdown_since = now
+        else:
+            n.shutdown_since = ""
         return True
 
     # Atomic compare-and-set: the guard checks above are evaluated against the
