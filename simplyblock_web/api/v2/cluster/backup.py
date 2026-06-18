@@ -55,7 +55,7 @@ def restore_backup(cluster: Cluster, parameters: _RestoreParams):
 
 
 class _ImportParams(BaseModel):
-    metadata: list
+    metadata: list[dict]
 
 
 @api.post('/import', name='clusters:backups:import')
