@@ -155,7 +155,7 @@ def _ensure_hub_attached(src_rpc, tgt_rpc, tgt_node, trtype, target_ip):
     Returns (ctrl_name, hub_bdev, error_string|None).
     """
 
-    if tgt_node.transfer_hublvol is None or tgt_node.transfer_hublvol.uuid is None:
+    if tgt_node.transfer_hublvol is None or not tgt_node.transfer_hublvol.bdev_name:
         tgt_node.create_transfer_hublvol()
 
     # Already attached (prior iteration or crash recovery).

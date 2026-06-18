@@ -6358,6 +6358,10 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
                 except RPCException as e:
                     logger.error("Error creating hublvol: %s", e.message)
                     _abort_restart_and_unblock(f"recreate_hublvol raised: {e.message}")
+                try:
+                    snode.create_transfer_hublvol()
+                except RPCException as e:
+                    logger.error("Error creating transfer hublvol: %s", e.message)
 
         ### 8b- connect peers to hublvol WITHIN port-blocked window
         # The old leader must be set to secondary role (via set_lvs_opts + connect_hublvol)
@@ -6899,6 +6903,11 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
         except RPCException as e:
             logger.error("Error establishing hublvol: %s", e.message)
             # return False
+
+        try:
+            snode.create_transfer_hublvol()
+        except RPCException as e:
+            logger.error("Error creating transfer hublvol: %s", e.message)
 
         # Create secondary hublvol on sec_1 so tertiary can multipath
         sec1 = db_controller.get_storage_node_by_id(secondary_ids[0])

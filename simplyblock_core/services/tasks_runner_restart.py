@@ -490,9 +490,9 @@ while True:
                             # host already owns (prevents a second replica issuing a
                             # concurrent shutdown/restart). Re-checked every iteration
                             # so the lease stays fresh while we hold it.
-                            if not tasks_controller.claim_task(task):
-                                logger.info(f"Restart task {task.uuid} owned by another runner host; skipping")
-                                break
+                            # if not tasks_controller.claim_task(task):
+                            #     logger.info(f"Restart task {task.uuid} owned by another runner host; skipping")
+                            #     break
                             res = task_runner(task)
                             if res:
                                 if task.status == JobSchedule.STATUS_DONE:

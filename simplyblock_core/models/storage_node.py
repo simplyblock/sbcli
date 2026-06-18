@@ -339,7 +339,7 @@ class StorageNode(BaseNodeObject):
         """Create a hublvol for this node's transfer lvstore."""
         logger.info(f'Creating transfer hublvol on {self.get_id()}')
 
-        if not self.transfer_hublvol:
+        if not self.transfer_hublvol or not self.transfer_hublvol.bdev_name:
 
             ctrl_name = "transferhub"
             mig_hub_bdev = f"{self.lvstore}/{ctrl_name}"
