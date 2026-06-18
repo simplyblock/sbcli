@@ -1,6 +1,6 @@
 from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel
 
 from simplyblock_core.db_controller import DBController
@@ -44,7 +44,7 @@ class StoragePoolParams(BaseModel):
 
 
 @api.post('/', name='clusters:storage-pools:create', status_code=201, responses={201: {"content": None}})
-def add(request: Request, cluster: Cluster, parameters: StoragePoolParams) -> Response:
+def add(cluster: Cluster, parameters: StoragePoolParams) -> Response:
     for pool in db.get_pools(cluster.get_id()):
         if pool.pool_name == parameters.name:
             raise HTTPException(409, f'Pool {parameters.name} already exists')
