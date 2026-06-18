@@ -20,6 +20,7 @@ from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.lvol_model import LVol, LVolReplication
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.prom_client import PromClient
+from simplyblock_core.rpc_client import RPCException
 
 logger = utils.get_logger(__name__)
 
@@ -41,6 +42,41 @@ def _get_dhchap_group(cluster, pool=None):
     return "null"
 
 
+def _register_keys_on_node(snode, rpc_client, keys):
+    """Write key files to a storage node and register them in SPDK's keyring.
+
+    Args:
+        snode: Storage node instance.
+        rpc_client: RPC client for the node.
+        keys: Iterable of (key_type, key_name, key_value) triples.
+            key_type is used as the key in the returned dict.
+            key_name is the SPDK keyring name and on-disk filename.
+            key_value is the raw key material.
+
+    Returns a dict mapping key_type to SPDK keyring name for every
+    successfully registered key.
+    """
+    snode_api = snode.client()
+    key_names = {}
+
+    for key_type, key_name, key_value in keys:
+        result, error = snode_api.write_key_file(key_name, key_value)
+        if error:
+            logger.error("Failed to write key file %s on node %s: %s",
+                         key_name, snode.get_id(), error)
+            continue
+        key_path = result
+        try:
+            rpc_client.keyring_file_add_key(key_name, key_path, allow_existing=True)
+        except RPCException as e:
+            logger.error("Failed to register key %s in SPDK keyring on node %s: %s",
+                         key_name, snode.get_id(), e.message)
+            continue
+        key_names[key_type] = key_name
+
+    return key_names
+
+
 def _register_pool_dhchap_keys_on_node(pool, snode, rpc_client):
     """Write pool-level DHCHAP key files to a storage node and register in SPDK keyring.
 
@@ -50,36 +86,16 @@ def _register_pool_dhchap_keys_on_node(pool, snode, rpc_client):
     Returns a dict with 'dhchap_key' and 'dhchap_ctrlr_key' keyring names,
     or an empty dict on failure.
     """
-    snode_api = snode.client()
     safe_pool = pool.get_id().replace("-", "_")
-    key_names = {}
-
-    for key_type, key_value in (
-        ("dhchap_key", pool.dhchap_key),
-        ("dhchap_ctrlr_key", pool.dhchap_ctrlr_key),
-    ):
-        if not key_value:
-            continue
-        key_name = f"pool_{safe_pool}_{key_type}"
-        result, error = snode_api.write_key_file(key_name, key_value)
-        if error:
-            logger.error("Failed to write pool key %s on node %s: %s",
-                         key_name, snode.get_id(), error)
-            continue
-        key_path = result
-        ret, err = rpc_client._request2("keyring_file_add_key",
-                                        {"name": key_name, "path": key_path})
-        if not ret and err:
-            if err.get("code") == -17:
-                logger.info("Pool key %s already in SPDK keyring on node %s, reusing",
-                            key_name, snode.get_id())
-            else:
-                logger.error("Failed to register pool key %s in SPDK keyring on node %s: %s",
-                             key_name, snode.get_id(), err.get("message", err))
-                continue
-        key_names[key_type] = key_name
-
-    return key_names
+    keys = [
+        (key_type, f"pool_{safe_pool}_{key_type}", key_value)
+        for key_type, key_value in (
+            ("dhchap_key", pool.dhchap_key),
+            ("dhchap_ctrlr_key", pool.dhchap_ctrlr_key),
+        )
+        if key_value
+    ]
+    return _register_keys_on_node(snode, rpc_client, keys)
 
 
 def _register_dhchap_keys_on_node(snode, host_nqn, host_entry, rpc_client):
@@ -88,37 +104,13 @@ def _register_dhchap_keys_on_node(snode, host_nqn, host_entry, rpc_client):
     Returns a dict mapping key type ('dhchap_key', 'dhchap_ctrlr_key', 'psk')
     to the SPDK keyring name for use in subsystem_add_host.
     """
-    snode_api = snode.client()
-    # Sanitize host NQN for use as filename
     safe_host = host_nqn.replace(":", "_").replace(".", "_")
-    key_names = {}
-
-    for key_type in ("dhchap_key", "dhchap_ctrlr_key", "psk"):
-        key_value = host_entry.get(key_type)
-        if not key_value:
-            continue
-        key_name = f"{key_type}_{safe_host}"
-        # Write key file to storage node via SNodeAPI
-        result, error = snode_api.write_key_file(key_name, key_value)
-        if error:
-            logger.error("Failed to write key file %s on node %s: %s", key_name, snode.get_id(), error)
-            continue
-        key_path = result
-        # Register in SPDK keyring — "File exists" (code -17) means the key
-        # is already registered, which is fine (e.g. same host on another volume).
-        ret, err = rpc_client._request2("keyring_file_add_key",
-                                        {"name": key_name, "path": key_path})
-        if not ret and err:
-            if err.get("code") == -17:
-                logger.info("Key %s already in SPDK keyring on node %s, reusing",
-                            key_name, snode.get_id())
-            else:
-                logger.error("Failed to register key %s in SPDK keyring on node %s: %s",
-                             key_name, snode.get_id(), err.get("message", err))
-                continue
-        key_names[key_type] = key_name
-
-    return key_names
+    keys = [
+        (key_type, f"{key_type}_{safe_host}", key_value)
+        for key_type in ("dhchap_key", "dhchap_ctrlr_key", "psk")
+        if (key_value := host_entry.get(key_type))
+    ]
+    return _register_keys_on_node(snode, rpc_client, keys)
 
 
 def _create_crypto_lvol(rpc_client, lvol, cluster):
