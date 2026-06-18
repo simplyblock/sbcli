@@ -273,7 +273,7 @@ class SnapshotDTO(BaseModel):
             size=model.size,
             used_size=model.used_size,
             migrating=is_migrating,
-            created_at=model.created_at,
+            created_at=datetime.fromtimestamp(model.created_at),
             lvol=str(
                 request.url_for(
                     "clusters:pools:volumes:detail",
