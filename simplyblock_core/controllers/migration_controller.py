@@ -123,7 +123,7 @@ def start_migration(migration_id,
     snap_plan = get_snapshot_chain(lvol_id, source_node_id)
     if not snap_plan:
         snap_name = f"_mig_{migration.uuid[:8]}_lvol_{migration.lvol_id[:8]}"
-        snap_uuid, err = snapshot_controller.add(lvol_id, snap_name)
+        snap_uuid, err = snapshot_controller.add(lvol_id, snap_name, pypass_lvol_migration_check=True)
         if err:
             raise ValueError(f"Failed to create snapshot: {err}")
         snap_plan = [snap_uuid]

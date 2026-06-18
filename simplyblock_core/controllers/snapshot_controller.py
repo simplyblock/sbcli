@@ -47,7 +47,8 @@ def _rollback_lvol_creation(lvol, node_ids):
             logger.error(f"Failed to rollback lvol {lvol.get_id()} from node {node_id}: {e}")
 
 
-def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvols=None):
+def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvols=None,
+        pypass_lvol_migration_check=False):
     try:
         lvol = db_controller.get_lvol_by_id(lvol_id)
     except KeyError:
@@ -96,14 +97,15 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
     # documents but previously never checked (is_migration_active_on_node had
     # no callers). cluster_id is omitted because LVol has no cluster_id field;
     # the predicate matches on node_id, so an all-clusters scan is correct.
-    try:
-        if migration_controller.is_migration_active_on_node(lvol.node_id):
-            msg = (f"Cannot create snapshot: a live volume migration is active "
-                   f"on node {lvol.node_id}")
-            logger.error(msg)
-            return False, msg
-    except Exception as e:
-        logger.warning(f"Migration-active check failed for node {lvol.node_id}: {e}")
+    if not pypass_lvol_migration_check:
+        try:
+            if migration_controller.is_migration_active_on_node(lvol.node_id):
+                msg = (f"Cannot create snapshot: a live volume migration is active "
+                       f"on node {lvol.node_id}")
+                logger.error(msg)
+                return False, msg
+        except Exception as e:
+            logger.warning(f"Migration-active check failed for node {lvol.node_id}: {e}")
 
     pool = db_controller.get_pool_by_id(lvol.pool_uuid)
     if pool.status == Pool.STATUS_INACTIVE:
