@@ -1129,10 +1129,16 @@ class SoakRunner:
                 f"Continuing with {successful_connects}/{len(connect_commands)} connected paths "
                 f"for {volume['volume_id']}"
             )
-        volume["mount_point"] = posixpath.join(mount_root, f"vol{volume['index']}")
-        volume["fio_log"] = posixpath.join(mount_root, f"fio_vol{volume['index']}.log")
-        volume["fio_stderr"] = posixpath.join(mount_root, f"fio_vol{volume['index']}.stderr")
-        volume["rc_file"] = posixpath.join(mount_root, f"fio_vol{volume['index']}.rc")
+        # Key all per-volume paths on the unique volume_name (it carries the
+        # churn counter, e.g. ..._v2_c7), never on the index alone. A churn
+        # reuses the old volume's index, so an index-based mount point would
+        # remount the new volume onto the old one's directory — which may
+        # still be pinned by a lazily-detached, stuck-I/O umount. A fresh
+        # mount point per volume sidesteps that entirely.
+        volume["mount_point"] = posixpath.join(mount_root, volume["volume_name"])
+        volume["fio_log"] = posixpath.join(mount_root, f"fio_{volume['volume_name']}.log")
+        volume["fio_stderr"] = posixpath.join(mount_root, f"fio_{volume['volume_name']}.stderr")
+        volume["rc_file"] = posixpath.join(mount_root, f"fio_{volume['volume_name']}.rc")
         find_and_mount = (
             "set -euo pipefail\n"
             f"dev=$(readlink -f /dev/disk/by-id/*{volume['volume_id']}* | head -n 1)\n"
@@ -1506,9 +1512,12 @@ class SoakRunner:
         fio (and its launcher shell, whose cwd is the mountpoint) was
         already SIGKILLed by ``_stop_fio_for_job``, but a SIGKILLed fio
         with an in-flight O_DIRECT I/O can linger in D-state and keep the
-        mount busy. Retry a *clean* umount (``sync`` + ``umount``, evicting
-        stragglers with ``fuser`` between tries) and verify with
-        ``mountpoint``.
+        mount busy. Retry a plain ``umount`` (evicting stragglers with
+        ``fuser`` between tries) and verify with ``mountpoint``. We avoid a
+        pre-``sync``: a global ``sync`` can block on every dirty mount on the
+        host and may itself hang behind the very stuck target I/O we are
+        trying to work around; ``umount`` flushes this filesystem's own
+        metadata regardless.
 
         We deliberately do NOT fall back to lazy umount on the happy path:
         fio uses ``--direct=1`` so there is no bulk dirty data, but the XFS
@@ -1533,15 +1542,19 @@ class SoakRunner:
         mount_point = volume.get("mount_point")
         if not mount_point:
             return True
-        # $1 = mountpoint. Bounded retry: sync + umount, evicting any
-        # straggler holders (fio in D-state, launcher shell) between tries.
+        # $1 = mountpoint. Bounded retry: umount, evicting any straggler
+        # holders (fio in D-state, launcher shell) between tries. We do NOT
+        # sync first: a global `sync` blocks on every dirty mount on the box
+        # (including other soak volumes mid-fio) and, worse, can itself hang
+        # behind a stuck target I/O on this very volume — turning a localized
+        # umount problem into a stall of the whole churn cycle. umount already
+        # flushes this filesystem's own metadata, which is all we need here.
         # Never lazy-umount here on success; only as a flagged last resort.
         umount_script = (
             "set +e\n"
             'mp="$1"\n'
             'mountpoint -q "$mp" || exit 0\n'
             "for i in $(seq 1 6); do\n"
-            "  sync\n"
             '  if sudo umount "$mp" 2>/dev/null; then exit 0; fi\n'
             '  sudo fuser -km "$mp" 2>/dev/null\n'
             "  sleep 2\n"
