@@ -56,7 +56,7 @@ class CLIWrapper(CLIWrapperBase):
 {%- for parameter in subcommand.parameters %}
 {%- if parameter.private %}
         if self.developer_mode:
-            argument = subcommand.add_argument('{{ parameter.name }}'
+            subcommand.add_argument('{{ parameter.name }}'
 {%- if parameter.aliases -%}
 {%- for alias in parameter.aliases -%}
 , '{{ alias }}'
@@ -72,7 +72,7 @@ class CLIWrapper(CLIWrapperBase):
 {%- if parameter.action is defined %}, action='{{ parameter.action }}'{% endif %})
 {%- if parameter.completer is defined %}.completer = self.{{ parameter.completer }}{% endif %}
 {%- else %}
-        argument = subcommand.add_argument('{{ parameter.name }}'
+        subcommand.add_argument('{{ parameter.name }}'
 {%- if parameter.aliases -%}
 {%- for alias in parameter.aliases -%}
 , '{{ alias }}'

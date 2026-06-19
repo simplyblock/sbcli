@@ -738,21 +738,28 @@ class SoakRunner:
         relaxes this for inter-iteration sync points (no outage in flight):
         an unaffected node that is merely TRANSIENT_NODE_STATUSES (the CP is
         autonomously restarting / shutting it down) is waited out instead of
-        aborting the soak, mirroring wait_for_outage_ready. A genuinely
-        offline/unknown unaffected node still raises immediately.
+        aborting the soak, mirroring wait_for_outage_ready.
+
+        A 'down' status is treated as online here. Restarting one node can
+        knock a peer 'down' (NVMe reconnect / CP re-sync), which by itself is
+        not a reason to abort the soak — if it actually breaks I/O, fio will
+        surface the error anyway. So 'down' counts neither as unaffected_bad
+        nor as keeping the cluster from being "all online".
         """
         timeout = timeout or self.args.restart_timeout
         expected = self.args.expected_node_count
         target_nodes = set(target_nodes or [])
         started = time.time()
+        # Statuses that do not, on their own, fail the health check.
+        online_ok = ("online", "down")
         while time.time() - started < timeout:
             self.assert_cluster_not_suspended()
             nodes = self.ensure_expected_nodes()
             statuses = {node["uuid"]: node["status"] for node in nodes}
-            offline = [uuid for uuid, status in statuses.items() if status != "online"]
+            offline = [uuid for uuid, status in statuses.items() if status not in online_ok]
             unaffected_bad = [
                 uuid for uuid, status in statuses.items()
-                if uuid not in target_nodes and status != "online"
+                if uuid not in target_nodes and status not in online_ok
             ]
             if tolerate_transient:
                 unaffected_bad = [
@@ -1122,10 +1129,16 @@ class SoakRunner:
                 f"Continuing with {successful_connects}/{len(connect_commands)} connected paths "
                 f"for {volume['volume_id']}"
             )
-        volume["mount_point"] = posixpath.join(mount_root, f"vol{volume['index']}")
-        volume["fio_log"] = posixpath.join(mount_root, f"fio_vol{volume['index']}.log")
-        volume["fio_stderr"] = posixpath.join(mount_root, f"fio_vol{volume['index']}.stderr")
-        volume["rc_file"] = posixpath.join(mount_root, f"fio_vol{volume['index']}.rc")
+        # Key all per-volume paths on the unique volume_name (it carries the
+        # churn counter, e.g. ..._v2_c7), never on the index alone. A churn
+        # reuses the old volume's index, so an index-based mount point would
+        # remount the new volume onto the old one's directory — which may
+        # still be pinned by a lazily-detached, stuck-I/O umount. A fresh
+        # mount point per volume sidesteps that entirely.
+        volume["mount_point"] = posixpath.join(mount_root, volume["volume_name"])
+        volume["fio_log"] = posixpath.join(mount_root, f"fio_{volume['volume_name']}.log")
+        volume["fio_stderr"] = posixpath.join(mount_root, f"fio_{volume['volume_name']}.stderr")
+        volume["rc_file"] = posixpath.join(mount_root, f"fio_{volume['volume_name']}.rc")
         find_and_mount = (
             "set -euo pipefail\n"
             f"dev=$(readlink -f /dev/disk/by-id/*{volume['volume_id']}* | head -n 1)\n"
@@ -1494,24 +1507,83 @@ class SoakRunner:
         )
 
     def _unmount_one_volume(self, volume):
+        """Cleanly unmount the volume's filesystem before disconnect/delete.
+
+        fio (and its launcher shell, whose cwd is the mountpoint) was
+        already SIGKILLed by ``_stop_fio_for_job``, but a SIGKILLed fio
+        with an in-flight O_DIRECT I/O can linger in D-state and keep the
+        mount busy. Retry a plain ``umount`` (evicting stragglers with
+        ``fuser`` between tries) and verify with ``mountpoint``. We avoid a
+        pre-``sync``: a global ``sync`` can block on every dirty mount on the
+        host and may itself hang behind the very stuck target I/O we are
+        trying to work around; ``umount`` flushes this filesystem's own
+        metadata regardless.
+
+        We deliberately do NOT fall back to lazy umount on the happy path:
+        fio uses ``--direct=1`` so there is no bulk dirty data, but the XFS
+        journal and inode metadata are still buffered and flushed at
+        umount. A lazy detach returns instantly with that flush pending,
+        and the ``nvme disconnect`` that follows ~1s later then rips the
+        paths away mid-flush — producing the spurious "no available path /
+        XFS log I/O error / filesystem shut down" noise seen in client
+        dmesg even though the lvol was being deleted on purpose.
+
+        If the mount still will not release after the retries, that is a
+        real anomaly: the most likely cause is a STUCK I/O on the target
+        keeping the block device busy (note the client runs with
+        ``nvme_core.io_timeout`` effectively infinite, so such an I/O never
+        times out on its own). Emit a loud WARNING with holder / D-state
+        evidence before the last-resort lazy detach, so a human notices the
+        potential target-side bug.
+
+        Returns True if the filesystem was cleanly unmounted, False if it
+        had to be lazily detached (stuck).
+        """
         mount_point = volume.get("mount_point")
         if not mount_point:
-            return
-        # Try plain unmount first, then -f, then lazy as last resort. We've
-        # already SIGKILLed the fio holding the mount, so plain umount
-        # should succeed on the happy path; the fallbacks only matter if
-        # buffered IO is still draining.
+            return True
+        # $1 = mountpoint. Bounded retry: umount, evicting any straggler
+        # holders (fio in D-state, launcher shell) between tries. We do NOT
+        # sync first: a global `sync` blocks on every dirty mount on the box
+        # (including other soak volumes mid-fio) and, worse, can itself hang
+        # behind a stuck target I/O on this very volume — turning a localized
+        # umount problem into a stall of the whole churn cycle. umount already
+        # flushes this filesystem's own metadata, which is all we need here.
+        # Never lazy-umount here on success; only as a flagged last resort.
         umount_script = (
-            f"sudo umount {shlex.quote(mount_point)} 2>/dev/null || "
-            f"sudo umount -f {shlex.quote(mount_point)} 2>/dev/null || "
-            f"sudo umount -l {shlex.quote(mount_point)} 2>/dev/null || true"
+            "set +e\n"
+            'mp="$1"\n'
+            'mountpoint -q "$mp" || exit 0\n'
+            "for i in $(seq 1 6); do\n"
+            '  if sudo umount "$mp" 2>/dev/null; then exit 0; fi\n'
+            '  sudo fuser -km "$mp" 2>/dev/null\n'
+            "  sleep 2\n"
+            '  mountpoint -q "$mp" || exit 0\n'
+            "done\n"
+            'echo "---- holders of $mp ----"\n'
+            'sudo fuser -vMm "$mp" 2>&1\n'
+            'echo "---- D-state processes ----"\n'
+            "ps -eo pid,stat,wchan:32,comm | awk '$2 ~ /D/'\n"
+            'sudo umount -l "$mp" 2>/dev/null\n'
+            "exit 2\n"
         )
-        self.client.run(
-            f"bash -lc {shlex.quote(umount_script)}",
-            timeout=60,
+        rc, stdout_text, _ = self.client.run(
+            f"bash -lc {shlex.quote(umount_script)} _ {shlex.quote(mount_point)}",
+            timeout=120,
             check=False,
             label=f"umount {volume['volume_name']}",
         )
+        if rc == 0:
+            return True
+        self.logger.log(
+            f"WARNING: umount of {volume['volume_name']} ({mount_point}) did "
+            f"not complete after retries even though fio was already killed — "
+            f"possible STUCK I/O on the target keeping the device busy. Fell "
+            f"back to lazy detach; the following nvme disconnect may surface "
+            f"'no available path' / 'XFS log I/O error' in client dmesg. "
+            f"Holder / D-state evidence:\n{stdout_text}"
+        )
+        return False
 
     def _delete_one_lvol(self, volume):
         rc, stdout_text, stderr_text = self.sbctl_allow_failure(
@@ -1564,9 +1636,12 @@ class SoakRunner:
 
             # 1. stop fio for this volume only (others keep running)
             self._stop_fio_for_job(job)
-            # 2. unmount
+            # 2. unmount (clean; warns + lazy-detaches if a stuck target I/O
+            #    pins the mount). The return flag is informational — we still
+            #    proceed to disconnect/delete since the lvol is going away, but
+            #    a False has already been logged as a loud WARNING above.
             self._unmount_one_volume(old_volume)
-            # 3. nvme disconnect
+            # 3. nvme disconnect (paths torn down only after the umount above)
             self._disconnect_one_volume(old_volume)
             # 4. delete lvol
             self._delete_one_lvol(old_volume)

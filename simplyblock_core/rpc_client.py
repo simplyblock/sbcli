@@ -295,7 +295,7 @@ class RPCClient:
         params = {
             "trtype": trtype,
             "max_io_qpairs_per_ctrlr": constants.QPAIR_COUNT,
-            "max_queue_depth": 256,
+            "max_queue_depth": 128,
             "abort_timeout_sec": 5,
             "zcopy": True,
             "in_capsule_data_size": 8192,
@@ -546,10 +546,11 @@ class RPCClient:
         return self._request("bdev_lvol_create", params)
 
     def delete_lvol(self, name, del_async=False, special_delete=False):
-        params = {"name": name,
-                  "sync": del_async}
-        if special_delete:
-            params["special_delete"] = True
+        params = {
+            "name": name,
+            "sync": del_async,
+            "special_delete": special_delete,
+        }
         return self._request2("bdev_lvol_delete", params)
 
     def get_bdevs(self, name=None):
@@ -1417,8 +1418,17 @@ class RPCClient:
         return self._request("bdev_lvol_set_lvs_read_only", params)
 
     def bdev_lvol_create_hublvol(self, lvs, name=None):
-        params = {"uuid" if utils.UUID_PATTERN.match(lvs) else "lvs_name": lvs}
-        if name:
+        # Only send "name" when explicitly requested. Older data-plane SPDK
+        # images (pre 3fcea32f8, 2026-06-16) have no "name" decoder, and
+        # spdk_json_decode_object rejects unknown keys outright — sending it
+        # unconditionally fails bdev_lvol_create_hublvol on those images, so
+        # the hublvol bdev (and its NVMe-oF listener) never gets created on
+        # activate. SPDK itself defaults name to "hublvol" when omitted, so
+        # leaving it out is behaviour-identical on new images too.
+        params = {
+            "uuid" if utils.UUID_PATTERN.match(lvs) else "lvs_name": lvs,
+        }
+        if name is not None:
             params["name"] = name
         return self._request('bdev_lvol_create_hublvol', params)
 

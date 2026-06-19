@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import datetime, timedelta
 from ipaddress import IPv4Address
 from typing import List, Literal, Tuple, Optional, cast
 from uuid import UUID
@@ -104,7 +104,7 @@ class ClusterDTO(BaseModel):
     distr_ndcs: int
     distr_npcs: int
     ha: bool
-    utliziation_critical: util.Percent
+    utilization_critical: util.Percent
     utilization_warning: util.Percent
     provisioned_capacity_critical: util.Unsigned
     provisioned_capacity_warning: util.Unsigned
@@ -129,7 +129,7 @@ class ClusterDTO(BaseModel):
             distr_npcs=model.distr_npcs,
             ha=model.ha_type == "ha",
             utilization_warning=model.cap_warn,
-            utliziation_critical=model.cap_crit,
+            utilization_critical=model.cap_crit,
             provisioned_capacity_warning=model.prov_cap_warn,
             provisioned_capacity_critical=model.prov_cap_crit,
             node_affinity=model.enable_node_affinity,
@@ -252,6 +252,8 @@ class SnapshotDTO(BaseModel):
     used_size: util.Unsigned
     migrating: bool
     lvol: Optional[util.UrlPath]
+    created_at: datetime
+
 
     @staticmethod
     def from_model(
@@ -272,6 +274,7 @@ class SnapshotDTO(BaseModel):
             size=model.size,
             used_size=model.used_size,
             migrating=is_migrating,
+            created_at=datetime.fromtimestamp(model.created_at),
             lvol=str(
                 request.url_for(
                     "clusters:pools:volumes:detail",

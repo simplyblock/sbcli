@@ -18,16 +18,17 @@ import pytest
 _IMPORT_TARGETS = [
     # --- v2 API (imported by mgmt_webapp and indirectly by node_webapp) ---
     "simplyblock_web.api.v2",
-    "simplyblock_web.api.v2.backup",
     "simplyblock_web.api.v2.cluster",
-    "simplyblock_web.api.v2.device",
-    "simplyblock_web.api.v2.migration",
-    "simplyblock_web.api.v2.volume",
+    "simplyblock_web.api.v2.cluster.backup",
+    "simplyblock_web.api.v2.cluster.migration",
+    "simplyblock_web.api.v2.cluster.storage_node",
+    "simplyblock_web.api.v2.cluster.storage_node.device",
+    "simplyblock_web.api.v2.cluster.storage_pool",
+    "simplyblock_web.api.v2.cluster.storage_pool.snapshot",
+    "simplyblock_web.api.v2.cluster.storage_pool.volume",
+    "simplyblock_web.api.v2.cluster.task",
     "simplyblock_web.api.v2.management_node",
-    "simplyblock_web.api.v2.pool",
-    "simplyblock_web.api.v2.snapshot",
-    "simplyblock_web.api.v2.storage_node",
-    "simplyblock_web.api.v2.dtos",
+    "simplyblock_web.api.v2._dtos",
     # --- Top-level API package (triggers v1 + v2 loading) ---
     "simplyblock_web.api",
     # --- Controllers ---
@@ -83,7 +84,7 @@ def test_no_circular_import_in_subprocess():
     """
     import subprocess
     result = subprocess.run(
-        [sys.executable, "-c", "from simplyblock_web.api.v2 import migration"],
+        [sys.executable, "-c", "from simplyblock_web.api.v2.cluster import migration"],
         capture_output=True, text=True, timeout=30,
     )
     assert result.returncode == 0, (
