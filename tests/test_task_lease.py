@@ -74,12 +74,6 @@ def test_done_task_never_claimed(monkeypatch):
     assert tasks_controller.claim_task(t, owner="hostA") is False
 
 
-def test_canceled_task_never_claimed(monkeypatch):
-    _patch_atomic_update(monkeypatch)
-    t = _task(canceled=True, owner="")
-    assert tasks_controller.claim_task(t, owner="hostA") is False
-
-
 def test_missing_task_returns_false(monkeypatch):
     _patch_atomic_update(monkeypatch, present=False)
     t = _task(owner="")

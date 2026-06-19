@@ -63,7 +63,7 @@ def process_snap_delete_finish(snap, leader_node):
         snap_bdev_info = leader_node.rpc_client().get_bdevs(snap.snap_bdev)
         if snap_bdev_info[0]["driver_specific"]["lvol"]["open_ref"] > 1:
             special_delete = True
-    except:
+    except Exception:
         pass
     if snap.deletion_status != leader_node.get_id():
         ret, _ = leader_node.rpc_client().delete_lvol(snap.snap_bdev, del_async=False, special_delete=special_delete)
@@ -184,7 +184,7 @@ def process_snap_delete(snap, snode):
             snap_bdev_info = leader_node.rpc_client().get_bdevs(snap.snap_bdev)
             if snap_bdev_info[0]["driver_specific"]["lvol"]["open_ref"] > 1:
                 special_delete = True
-        except:
+        except Exception:
             pass
         ret, _ = leader_node.rpc_client().delete_lvol(snap.snap_bdev, del_async=False, special_delete=special_delete)
         if not ret:

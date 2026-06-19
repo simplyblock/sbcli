@@ -39,12 +39,13 @@ that node references it through its ``cloned_from_snap`` lineage.
 
 import json
 import logging
+import random
 import time
 import uuid
 from datetime import datetime
 
 from simplyblock_core import constants, utils
-from simplyblock_core.controllers import migration_events, tasks_controller
+from simplyblock_core.controllers import migration_events, tasks_controller, snapshot_controller
 from simplyblock_core.exceptions import MigrationConflictError, PreconditionError
 from simplyblock_core.controllers.host_auth import _reapply_allowed_hosts
 from simplyblock_core.kms import create_kms_connection
@@ -121,6 +122,13 @@ def start_migration(migration_id,
         raise ValueError(f"Target node is not online (status={target_node.status})")
 
     snap_plan = get_snapshot_chain(lvol_id, source_node_id)
+    if not snap_plan:
+        snap_name = f"_mig_{migration.uuid[:8]}_lvol_{migration.lvol_id[:8]}"
+        snap_uuid, err = snapshot_controller.add(lvol_id, snap_name, bypass_migration_check=True)
+        if err:
+            raise ValueError(f"Failed to create snapshot: {err}")
+        snap_plan = [snap_uuid]
+
     snaps_found_on_target = [s for s in snap_plan if _is_snap_on_node(s, target_node_id)]
     snap_migration_plan = [s for s in snap_plan if s not in snaps_found_on_target]
 
@@ -693,10 +701,8 @@ def create_migration(lvol_id, target_node_id,
         logger.warning(f"create_migration: bdev_lvol_set_migration_flag on primary "
                        f"failed for {composite} (may already be flagged)")
 
-    # ── 1d. Register migration bdev on TGT-sec ────────────────────────────────
-    # Always register if TGT has a secondary (including Case B where TGT-sec IS SRC-prim):
-    # the migration bdev lives on TGT-prim's lvstore and TGT-sec needs bdev_lvol_register
-    # to mirror writes during migration regardless of which node fills the secondary role.
+    # ── 1d. Register migration bdev on TGT-sec and TGT-ter ───────────────────
+    # All HA peers need bdev_lvol_register so they can mirror writes during migration.
     _pre_sec_node = None
     if lvol.ha_type in ("ha", "ha3") and tgt_node.secondary_node_id:
         try:
@@ -726,6 +732,35 @@ def create_migration(lvol_id, target_node_id,
             logger.warning(
                 f"create_migration: secondary registration error (continuing): {_e}")
 
+    _pre_ter_node = None
+    if lvol.ha_type == "ha3" and tgt_node.tertiary_node_id:
+        try:
+            _pre_ter_node = db.get_storage_node_by_id(tgt_node.tertiary_node_id)
+            _ter_rpc_reg  = _pre_ter_node.rpc_client()
+            if _ter_rpc_reg.get_bdevs(composite):
+                logger.info(
+                    f"create_migration: {composite} already on tertiary "
+                    f"{_pre_ter_node.get_id()} — skipping bdev_lvol_register")
+            elif _tgt_blobid is not None and _tgt_uuid is not None:
+                ret_ter = _ter_rpc_reg.bdev_lvol_register(
+                    bdev_short, tgt_node.lvstore, _tgt_uuid, _tgt_blobid,
+                    lvol.lvol_priority_class)
+                if ret_ter:
+                    _ter_rpc_reg.bdev_lvol_set_migration_flag(composite)
+                    logger.info(
+                        f"create_migration: registered {composite} on "
+                        f"tertiary {_pre_ter_node.get_id()}")
+                else:
+                    logger.warning(
+                        f"create_migration: bdev_lvol_register on tertiary "
+                        f"{_pre_ter_node.get_id()} failed (continuing)")
+            else:
+                logger.warning(
+                    f"create_migration: no bdev info for tertiary registration of {composite}")
+        except Exception as _e:
+            logger.warning(
+                f"create_migration: tertiary registration error (continuing): {_e}")
+
     # ── 2. Subsystem + listeners on all TGT nodes ────────────────────────────
     # Compute overlap: node IDs present in both SRC path and TGT path.
     # Overlap nodes already own a live subsystem from their SRC role — we add
@@ -735,6 +770,8 @@ def create_migration(lvol_id, target_node_id,
     src_node_ids = {src_node_id}
     if src_node.secondary_node_id:
         src_node_ids.add(src_node.secondary_node_id)
+    if src_node.tertiary_node_id:
+        src_node_ids.add(src_node.tertiary_node_id)
 
     tgt_sec_node = None
     if lvol.ha_type in ("ha", "ha3") and tgt_node.secondary_node_id:
@@ -745,26 +782,41 @@ def create_migration(lvol_id, target_node_id,
             except KeyError:
                 pass
 
+    tgt_ter_node = None
+    if tgt_node.tertiary_node_id:
+        tgt_ter_node = (_pre_ter_node if _pre_ter_node is not None else None)
+        if tgt_ter_node is None:
+            try:
+                tgt_ter_node = db.get_storage_node_by_id(tgt_node.tertiary_node_id)
+            except KeyError:
+                pass
+
     tgt_node_ids = {target_node_id}
     if tgt_sec_node is not None:
         tgt_node_ids.add(tgt_sec_node.get_id())
+    if tgt_ter_node is not None:
+        tgt_node_ids.add(tgt_ter_node.get_id())
     overlap_ids = src_node_ids & tgt_node_ids
 
     # Ordered TGT entries: (node, rpc, port, min_cntlid)
-    tgt_entries = [(tgt_node, tgt_rpc, tgt_port, 1)]
+    # TGT uses random cntlid values within non-overlapping ranges to avoid kernel-side
+    # duplicate-cntlid rejection across consecutive migrations.  SRC occupies 1/1000/2000;
+    # TGT uses 3-500 / 1003-1500 / 2003-2500 so ranges never collide.
+    tgt_entries = [(tgt_node, tgt_rpc, tgt_port, random.randint(3, 500))]
     if tgt_sec_node is not None:
         _sec_rpc2  = tgt_sec_node.rpc_client()
         _sec_port2 = tgt_sec_node.get_lvol_subsys_port(tgt_node.lvstore)
-        tgt_entries.append((tgt_sec_node, _sec_rpc2, _sec_port2, 1000))
+        tgt_entries.append((tgt_sec_node, _sec_rpc2, _sec_port2, random.randint(1003, 1500)))
+    if tgt_ter_node is not None:
+        _ter_rpc2  = tgt_ter_node.rpc_client()
+        _ter_port2 = tgt_ter_node.get_lvol_subsys_port(tgt_node.lvstore)
+        tgt_entries.append((tgt_ter_node, _ter_rpc2, _ter_port2, random.randint(2003, 2500)))
 
-    sec_node = None   # populated for the secondary (used by connect strings below)
-    sec_port = None
+    _TGT_LABELS = ['TGT-prim', 'TGT-sec', 'TGT-ter']
 
     for _i, (_node, _rpc, _port, _min_cntlid) in enumerate(tgt_entries):
         _node_id = _node.get_id()
-        if _i == 1:
-            sec_node = _node
-            sec_port = _port
+        _tgt_label = _TGT_LABELS[_i] if _i < len(_TGT_LABELS) else f'TGT-{_i}'
 
         # Crypto: create key + bdev on this TGT node before touching the subsystem.
         # The NVMe-oF Target holds an exclusive_write claim on any bdev used as a
@@ -851,11 +903,11 @@ def create_migration(lvol_id, target_node_id,
             if _ns:
                 logger.info(
                     f"create_migration: namespace {_ns_bdev} added on "
-                    f"{'TGT-prim' if _i == 0 else 'TGT-sec'} {_node_id[:8]} nsid={_ns}")
+                    f"{_tgt_label} {_node_id[:8]} nsid={_ns}")
             else:
                 logger.warning(
                     f"create_migration: nvmf_subsystem_add_ns failed on "
-                    f"{'TGT-prim' if _i == 0 else 'TGT-sec'} {_node_id[:8]}")
+                    f"{_tgt_label} {_node_id[:8]}")
 
             logger.info(
                 f"create_migration: subsystem {nqn} ready on {_node_id[:8]}")
@@ -871,9 +923,9 @@ def create_migration(lvol_id, target_node_id,
     if lvol.allowed_hosts and not host_nqn:
         raise ValueError(f"Volume {lvol_id} has allowed hosts configured; --host-nqn is required")
 
-    out = _build_connect_entries(tgt_node, tgt_port, lvol, nqn, ctrl_loss_tmo, cluster, host_entry, host_nqn)
-    if sec_node is not None and sec_port is not None:
-        out.extend(_build_connect_entries(sec_node, sec_port, lvol, nqn, ctrl_loss_tmo, cluster, host_entry, host_nqn))
+    out = []
+    for _n, _, _p, _ in tgt_entries:
+        out.extend(_build_connect_entries(_n, _p, lvol, nqn, ctrl_loss_tmo, cluster, host_entry, host_nqn))
 
     # ── 4. Create migration record so cancel can clean up ─────────────────────
     if existing_migration:

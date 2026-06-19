@@ -9,6 +9,7 @@ import time
 import argcomplete
 
 from simplyblock_core import cluster_ops, utils, db_controller, constants
+from simplyblock_core.exceptions import MigrationConflictError, PreconditionError
 from simplyblock_core import storage_node_ops as storage_ops
 from simplyblock_core import mgmt_node_ops as mgmt_ops
 from simplyblock_core.controllers import pool_controller, lvol_controller, snapshot_controller, device_controller, \
@@ -685,7 +686,7 @@ class CLIWrapperBase:
                 ctrl_loss_tmo=args.ctrl_loss_tmo,
                 host_nqn=getattr(args, 'host_nqn', None),
             )
-        except ValueError as e:
+        except (MigrationConflictError, PreconditionError, ValueError) as e:
             print(f"Error: {e}")
             return False
         print(f"Migration ID: {migration_id}")

@@ -690,7 +690,7 @@ class TestCheckSecNodeHublvolPrimaryResolution(unittest.TestCase):
 class TestClusterDTO(unittest.TestCase):
 
     def test_dto_includes_max_fault_tolerance(self):
-        from simplyblock_web.api.v2.dtos import ClusterDTO
+        from simplyblock_web.api.v2._dtos import ClusterDTO
         c = _cluster(max_fault_tolerance=2)
         c.status = Cluster.STATUS_ACTIVE
         c.nqn = "nqn:test"
@@ -710,7 +710,7 @@ class TestClusterDTO(unittest.TestCase):
         assert dto.max_fault_tolerance == 2
 
     def test_dto_default_max_fault_tolerance(self):
-        from simplyblock_web.api.v2.dtos import ClusterDTO
+        from simplyblock_web.api.v2._dtos import ClusterDTO
         c = _cluster(max_fault_tolerance=1)
         c.status = Cluster.STATUS_ACTIVE
         c.nqn = "nqn:test"

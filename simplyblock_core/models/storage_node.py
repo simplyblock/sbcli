@@ -98,6 +98,12 @@ class StorageNode(BaseNodeObject):
     # status). Used to apply a grace window before a DOWN node counts toward the
     # cluster suspend threshold — a transient DOWN must not suspend the cluster.
     down_since: str = ""
+    # ISO timestamp of when this node entered STATUS_IN_SHUTDOWN (cleared on any
+    # other status). The monitor uses it to reconcile a node stranded in
+    # in_shutdown back to OFFLINE if the shutdown never completed and its SPDK is
+    # dead — defense against a lost-update reverting the offline flip (incident
+    # 2026-06-18).
+    shutdown_since: str = ""
     partitions_count: int = 0  # Unused
     poller_cpu_cores: List[int] = []
     ssd_pcie: List = []

@@ -83,6 +83,18 @@ class _Patched(unittest.TestCase):
         db_mock.get_storage_nodes_by_cluster_id.return_value = nodes
         db_mock.kv_store = MagicMock()
 
+        # set_shared_placement now persists via atomic_update (compare-and-set),
+        # re-reading each row fresh first. Model that faithfully: resolve nodes
+        # by id and run the mutator in place so the test still observes the
+        # mutation on the same node/cluster objects it passed in.
+        _by_id = {n.get_id(): n for n in nodes}
+        db_mock.get_storage_node_by_id.side_effect = lambda nid: _by_id.get(nid)
+
+        def _fake_atomic_update(obj, mutate_fn):
+            mutate_fn(obj)
+            return obj
+        db_mock.atomic_update.side_effect = _fake_atomic_update
+
         cluster.write_to_db = MagicMock()
 
         self._patches = [
@@ -195,7 +207,7 @@ class TestDirectionGuards(_Patched):
         self.assertEqual(kwargs.get("enable"), False)
         # Param scrubbed off the stack entry.
         self.assertNotIn("shared_placement", n1.lvstore_stack[0]["params"])
-        n1.write_to_db.assert_called()
+        _db.atomic_update.assert_called()
 
     def test_idempotent_when_already_at_target_state(self):
         c = _make_cluster(shared_placement=True)
@@ -207,7 +219,7 @@ class TestDirectionGuards(_Patched):
         self.assertTrue(ok)
         # No RPC, no DB write — short-circuit.
         nodes[0].rpc_client_mock.distr_shared_placement.assert_not_called()
-        c.write_to_db.assert_not_called()
+        _db.atomic_update.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -261,7 +273,7 @@ class TestEnableHappyPath(_Patched):
 
         self.assertFalse(ok)
         self.assertFalse(c.shared_placement)
-        c.write_to_db.assert_not_called()
+        _db.atomic_update.assert_not_called()
 
     def test_persists_flag_on_cluster_and_every_node_stack(self):
         c = _make_cluster()
@@ -277,7 +289,7 @@ class TestEnableHappyPath(_Patched):
         mod.set_shared_placement(c.uuid, enable=True)
 
         self.assertTrue(c.shared_placement)
-        c.write_to_db.assert_called_once()
+        _db.atomic_update.assert_called()
 
         # Each distrib entry on each node got the flag; non-distrib entry
         # is unchanged.
@@ -289,8 +301,7 @@ class TestEnableHappyPath(_Patched):
         for entry in nodes[1].lvstore_stack:
             self.assertTrue(entry["params"]["shared_placement"])
 
-        for n in nodes:
-            n.write_to_db.assert_called()
+        _db.atomic_update.assert_called()
 
     def test_rpc_failure_without_force_aborts_persist(self):
         c = _make_cluster()
@@ -303,7 +314,7 @@ class TestEnableHappyPath(_Patched):
 
         self.assertFalse(ok)
         self.assertFalse(c.shared_placement)
-        c.write_to_db.assert_not_called()
+        _db.atomic_update.assert_not_called()
         # Stack entries left untouched.
         for n in (n1, n2):
             for entry in n.lvstore_stack:
@@ -320,7 +331,7 @@ class TestEnableHappyPath(_Patched):
 
         self.assertTrue(ok)
         self.assertTrue(c.shared_placement)
-        c.write_to_db.assert_called_once()
+        _db.atomic_update.assert_called()
 
 
 # ---------------------------------------------------------------------------

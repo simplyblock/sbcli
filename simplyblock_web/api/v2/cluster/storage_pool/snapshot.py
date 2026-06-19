@@ -1,17 +1,15 @@
-from typing import Annotated, List
-from uuid import UUID
+from typing import List
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Response, Request
 
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.controllers import snapshot_controller
-from simplyblock_core.models.snapshot import SnapShot as SnapshotModel
 
-from .cluster import Cluster
-from .pool import StoragePool
-from .dtos import SnapshotDTO
+from ..._dependencies import Cluster, StoragePool, Snapshot
+from ..._dtos import SnapshotDTO
 
-api = APIRouter(prefix='/snapshots')
+
+api = APIRouter()
 db = DBController()
 
 
@@ -28,19 +26,6 @@ def list(request: Request, cluster: Cluster, pool: StoragePool) -> List[Snapshot
 instance_api = APIRouter(prefix='/{snapshot_id}')
 
 
-def _lookup_snapshot(snapshot_id: UUID, pool: StoragePool) -> SnapshotModel:
-    try:
-        snapshot = db.get_snapshot_by_id(str(snapshot_id))
-    except KeyError as e:
-        raise HTTPException(404, str(e))
-    if snapshot.pool_uuid != pool.get_id():
-        raise HTTPException(404, f'Snapshot {snapshot_id} not found')
-    return snapshot
-
-
-Snapshot = Annotated[SnapshotModel, Depends(_lookup_snapshot)]
-
-
 @instance_api.get('/', name='clusters:storage-pools:snapshots:detail')
 def get(request: Request, cluster: Cluster, pool: StoragePool, snapshot: Snapshot) -> SnapshotDTO:
     return SnapshotDTO.from_model(snapshot, request, cluster_id=cluster.get_id(), pool_id=pool.get_id())
@@ -52,3 +37,6 @@ def delete(cluster: Cluster, pool: StoragePool, snapshot: Snapshot) -> Response:
         raise ValueError('Failed to delete snapshot')
 
     return Response(status_code=204)
+
+
+api.include_router(instance_api)

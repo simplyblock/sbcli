@@ -19,15 +19,28 @@ def set_node_health_check(snode, health_check_status):
     snode = db.get_storage_node_by_id(snode.get_id())
     if snode.health_check == health_check_status:
         return
-    old_status = snode.health_check
-    snode.health_check = health_check_status
-    snode.updated_at = str(datetime.now())
-    snode.write_to_db()
+    now = str(datetime.now())
+    # Atomic compare-and-set: a plain read-modify-write here serializes the WHOLE
+    # node row and clobbers a concurrent status flip (e.g. set_node_status's
+    # in_shutdown->offline) — the lost-update that wedged a node in in_shutdown
+    # (incident 2026-06-18). Mutate only health_check on the freshly-read row.
+    outcome = {"old": None, "changed": False}
+
+    def _mut(n):
+        if n.health_check == health_check_status:
+            return False
+        outcome["old"] = n.health_check
+        outcome["changed"] = True
+        n.health_check = health_check_status
+        n.updated_at = now
+        return True
+
+    snode = db.atomic_update(snode, _mut)
     # health_check_status is None when health is not applicable (node not in
     # ONLINE/DOWN). That is not a real health transition, so don't emit a
     # health-change event for it — only fire for true/false results.
-    if health_check_status is not None:
-        storage_events.snode_health_check_change(snode, snode.health_check, old_status, caused_by="monitor")
+    if snode is not None and outcome["changed"] and health_check_status is not None:
+        storage_events.snode_health_check_change(snode, snode.health_check, outcome["old"], caused_by="monitor")
 
 
 def set_device_health_check(cluster_id, device, health_check_status):
@@ -39,14 +52,17 @@ def set_device_health_check(cluster_id, device, health_check_status):
             for dev in node.nvme_devices:
                 if dev.get_id() == device.get_id():
                     old_status = dev.health_check
-                    # Re-read node fresh before writing to avoid overwriting
-                    # concurrent changes (e.g. lvstore_ports during activation)
-                    fresh_node = db.get_storage_node_by_id(node.get_id())
-                    for fresh_dev in fresh_node.nvme_devices:
-                        if fresh_dev.get_id() == device.get_id():
-                            fresh_dev.health_check = health_check_status
-                            break
-                    fresh_node.write_to_db()
+                    # Atomic compare-and-set: re-read the node fresh INSIDE the
+                    # FDB tx and mutate only this device's health_check, so a
+                    # concurrent node.status / lvstore_ports change is preserved
+                    # (a full write_to_db would clobber it — incident 2026-06-18).
+                    def _mut(n, did=device.get_id()):
+                        for fresh_dev in n.nvme_devices:
+                            if fresh_dev.get_id() == did:
+                                fresh_dev.health_check = health_check_status
+                                return True
+                        return False
+                    db.atomic_update(db.get_storage_node_by_id(node.get_id()), _mut)
                     # None => health not applicable (owning node not ONLINE/DOWN);
                     # not a real health transition, so don't emit an event.
                     if health_check_status is not None:
@@ -269,9 +285,9 @@ def check_node(snode):
             if not node_remote_devices_check and cluster is not None and cluster.status in [
                 Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
                 remote_jm_devices = storage_node_ops._connect_to_remote_jm_devs(snode)
-                snode = db.get_storage_node_by_id(snode.get_id())
-                snode.remote_jm_devices = remote_jm_devices
-                snode.write_to_db()
+                snode = db.atomic_update(
+                    db.get_storage_node_by_id(snode.get_id()),
+                    lambda n, rd=remote_jm_devices: setattr(n, "remote_jm_devices", rd))
 
         lvstore_check = True
         snode = db.get_storage_node_by_id(snode.get_id())

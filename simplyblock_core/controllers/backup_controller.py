@@ -757,9 +757,12 @@ def switch_backup_source(cluster_id, source_cluster_id):
     if errors:
         return False, "; ".join(errors)
 
-    # Persist the active source in the cluster record
-    cluster.backup_source = source_cluster_id
-    cluster.write_to_db()
+    # Persist the active source in the cluster record. Atomic: the long
+    # per-node RPC loop above means a concurrent cluster.status change could be
+    # clobbered by a full write here (lost-update class — incident 2026-06-18).
+    db_controller.atomic_update(
+        db_controller.get_cluster_by_id(cluster_id),
+        lambda c, v=source_cluster_id: setattr(c, "backup_source", v))
 
     return True, None
 
