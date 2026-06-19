@@ -5185,7 +5185,18 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
         logger.error(f"Failed to recreate non-leader lvstore on node {snode.get_id()}")
         logger.error(err)
         _set_restart_phase(snode, primary_node.lvstore, "", db_controller)
-        primary_node.lvstore_status = "ready"
+        # The replica stack (distribs + raid) did NOT come up — e.g. the raid
+        # build returns -EIO because a peer node's devices are unreachable
+        # (a concurrent/dual outage: the partner node is still offline). This
+        # node therefore does NOT hold a usable replica of this LVS. Marking
+        # it "ready" here is a phantom success: the node goes online without
+        # the replica, every later leader restart fails to wire this peer's
+        # hublvol (set_lvs_opts -> -19 "No such device") and the leader loops
+        # restart->offline->in_restart forever (soak 2026-06-19, LVS_7613 on
+        # tertiary after the partner dac5725c was force-shut-down). Mark it
+        # "failed" and propagate so the restart is retried instead — once the
+        # missing peer returns, the retry rebuilds the replica cleanly.
+        primary_node.lvstore_status = "failed"
         primary_node.write_to_db()
         return False
 
@@ -5751,6 +5762,13 @@ def recreate_all_lvstores(snode, force=False):
         _release_lvs_subsys_port_on_peers(snode, snode.get_id(), db_controller)
         return False
 
+    # Track non-leader (secondary/tertiary) recreate outcomes. A failed
+    # replica rebuild must fail the whole node restart so the restart task
+    # runner retries it — NOT be swallowed, which would bring the node online
+    # holding a phantom (absent) replica and wedge the LVS leader in a
+    # restart loop. See recreate_lvstore_on_non_leader's "failed" path.
+    non_leader_ok = True
+
     # --- Step 2: Secondary LVS ---
     if snode.lvstore_stack_secondary:
         logger.info("=== Phase: Secondary LVS recreation ===")
@@ -5774,8 +5792,10 @@ def recreate_all_lvstores(snode, force=False):
                             secondary_primary_node.lvstore, snode.get_id(), leader_node.get_id())
                 ret = recreate_lvstore_on_non_leader(snode, leader_node, secondary_primary_node, force=force)
             if not ret:
+                non_leader_ok = False
                 logger.error(f"Failed to recreate secondary LVS {secondary_primary_node.lvstore}")
         except Exception as e:
+            non_leader_ok = False
             logger.error("Secondary LVS recreation failed: %s", e)
             if secondary_primary_node is not None:
                 _release_lvs_subsys_port_on_peers(
@@ -5817,14 +5837,19 @@ def recreate_all_lvstores(snode, force=False):
                             tertiary_primary_node.lvstore, snode.get_id(), leader_node.get_id())
                 ret = recreate_lvstore_on_non_leader(snode, leader_node, tertiary_primary_node, force=force)
             if not ret:
+                non_leader_ok = False
                 logger.error(f"Failed to recreate tertiary LVS {tertiary_primary_node.lvstore}")
         except Exception as e:
+            non_leader_ok = False
             logger.error("Tertiary LVS recreation failed: %s", e)
             if tertiary_primary_node is not None:
                 _release_lvs_subsys_port_on_peers(
                     tertiary_primary_node, snode.get_id(), db_controller)
 
-    return True
+    # Fail the restart if any non-leader replica did not come up, so the
+    # restart task runner retries (the node must not go online advertising a
+    # replica it does not actually hold).
+    return non_leader_ok
 
 
 def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False):
