@@ -579,7 +579,7 @@ def generate_mask(cores):
     return f'0x{mask:X}'
 
 
-def calculate_pool_count(alceml_count, number_of_distribs, cpu_count, poller_count):
+def calculate_pool_count(alceml_count, number_of_distribs, cpu_count, poller_count, max_lvol=0):
     '''
     				        Small pool count				            Large pool count
     Create JM			    						                    32					                    For each JM
@@ -603,10 +603,14 @@ def calculate_pool_count(alceml_count, number_of_distribs, cpu_count, poller_cou
     '''
     poller_number = poller_count if poller_count else cpu_count
 
-    small_pool_count = 384 * (alceml_count + number_of_distribs + 3 + poller_count) + (
-            6 + alceml_count + number_of_distribs) * + poller_number * 127 + 384 + 128 * poller_number + constants.EXTRA_SMALL_POOL_COUNT
-    large_pool_count = 48 * (alceml_count + number_of_distribs + 3 + poller_count) + (
-            6 + alceml_count + number_of_distribs) * 32 + poller_number * 15 + 384 + 16 * poller_number + constants.EXTRA_LARGE_POOL_COUNT
+    # Small buffers are sized off the max number of subsystems (max_lvol /
+    # --max-subsys) on the node: a fixed base plus 16 small bufs per
+    # NS-add poll group (128) per subsystem.
+    small_pool_count = 100000 + max_lvol * 16 * 128
+    # Large buffers are effectively unused, so the computed count is reduced
+    # by 3x to reclaim huge-page memory.
+    large_pool_count = (48 * (alceml_count + number_of_distribs + 3 + poller_count) + (
+            6 + alceml_count + number_of_distribs) * 32 + poller_number * 15 + 384 + 16 * poller_number + constants.EXTRA_LARGE_POOL_COUNT) / 3
 
     return int(small_pool_count), int(large_pool_count)
 
@@ -1832,7 +1836,8 @@ def regenerate_config(new_config, old_config, force=False):
         small_pool_count, large_pool_count = calculate_pool_count(number_of_alcemls + 1, 2 * number_of_distribs,
                                                                   len(isolated_cores),
                                                                   number_of_poller_cores or len(
-                                                                      isolated_cores), )
+                                                                      isolated_cores),
+                                                                  old_config["nodes"][i]["max_lvol"])
         minimum_hp_memory = calculate_minimum_hp_memory(small_pool_count, large_pool_count,
                                                         old_config["nodes"][i]["max_lvol"],
                                                         old_config["nodes"][i]["max_size"], len(isolated_cores))
@@ -1989,7 +1994,8 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
             small_pool_count, large_pool_count = calculate_pool_count(number_of_alcemls, 2 * number_of_distribs,
                                                                       len(core_group["isolated"]),
                                                                       number_of_poller_cores or len(
-                                                                          core_group["isolated"]))
+                                                                          core_group["isolated"]),
+                                                                      max_lvol)
             minimum_hp_memory = calculate_minimum_hp_memory(small_pool_count, large_pool_count, max_lvol,
                                                             max_prov, len(core_group["isolated"]))
             node_info["small_pool_count"] = small_pool_count
@@ -3393,7 +3399,8 @@ def calculate_hp_only(max_lvol, number_of_devices, sockets_to_use, nodes_per_soc
             small_pool_count, large_pool_count = calculate_pool_count(number_of_alcemls +1, 2 * number_of_distribs,
                                                                       len(core_group["isolated"]),
                                                                       number_of_poller_cores or len(
-                                                                          core_group["isolated"]))
+                                                                          core_group["isolated"]),
+                                                                      max_lvol)
             minimum_hp_memory += calculate_minimum_hp_memory(small_pool_count, large_pool_count, max_lvol,
                                                             0, len(core_group["isolated"])) + 1000000000
 
