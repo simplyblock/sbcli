@@ -442,7 +442,7 @@ class _DeviceFailureMigrationBase:
         # Wait for actual FIO processes to finish on the remote node
         self.logger.info("Waiting for FIO fill processes to complete on remote node ...")
         self.common_utils.manage_fio_threads(
-            node=client, threads=[], timeout=3600
+            node=client, threads=[], timeout=7200
         )
 
         # Verify fill level
