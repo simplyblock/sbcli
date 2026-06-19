@@ -11,7 +11,6 @@ Run from your local machine (same place you ran setup_gcp_perf.py):
   python teardown_gcp_cluster.py
 """
 
-import json
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -86,7 +85,7 @@ def main():
                 errors.append(str(e))
 
     if errors:
-        print(f"\nWarnings during instance deletion:")
+        print("\nWarnings during instance deletion:")
         for e in errors:
             print(f"  {e}")
 
