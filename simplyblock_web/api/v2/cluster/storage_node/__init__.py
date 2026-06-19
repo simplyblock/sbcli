@@ -91,7 +91,7 @@ def add(request: Request, cluster: Cluster, parameters: StorageNodeParams, respo
         request, response_format,
         entity_id=UUID(task_id_or_false),
         route_name='clusters:tasks:detail',
-        route_kwargs={'cluster_id': UUID(cluster.get_id()), 'volume_id': UUID(task_id_or_false)},
+        route_kwargs={'cluster_id': UUID(cluster.get_id()), 'task_id': UUID(task_id_or_false)},
         get_full=lambda id: TaskDTO.from_model(db.get_task_by_id(str(id))),
     )
 
