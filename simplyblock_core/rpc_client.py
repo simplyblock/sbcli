@@ -295,7 +295,7 @@ class RPCClient:
         params = {
             "trtype": trtype,
             "max_io_qpairs_per_ctrlr": constants.QPAIR_COUNT,
-            "max_queue_depth": 256,
+            "max_queue_depth": 128,
             "abort_timeout_sec": 5,
             "zcopy": True,
             "in_capsule_data_size": 8192,
