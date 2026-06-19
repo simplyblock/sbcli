@@ -1071,12 +1071,19 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
     # Before each round check the current dirty delta.  If it is already below
     # the threshold the remaining freeze window will be short enough that no
     # additional shrink pass is worth the overhead.
+    # If no snapshots have been migrated at all (volume had no pre-existing snapshots
+    # and none were planned), we must take at least one intermediate snapshot so that
+    # _handle_lvol_migrate has a base to clone from. Skip the delta threshold check
+    # on the first pass in this case.
+    _must_snap = (not migration.snaps_migrated
+                  and not migration.snaps_preexisting_on_target)
+
     while migration.intermediate_snap_rounds < migration.max_intermediate_snap_rounds:
         _lvol = db.get_lvol_by_id(migration.lvol_id)
         _src_composite = f"{src_node.lvstore}/{_lvol.lvol_bdev}"
         _delta = _get_lvol_delta_bytes(src_rpc, _src_composite)
         _threshold = constants.LVOL_MIG_INTERMEDIATE_SNAP_THRESHOLD_BYTES
-        if _delta is not None and _delta <= _threshold:
+        if not _must_snap and _delta is not None and _delta <= _threshold:
             logger.info(
                 f"Intermediate snapshot skipped: delta {convert_size(_delta, 'MiB')} MiB "
                 f"<= {convert_size(_threshold, 'MiB')} MiB threshold "
@@ -1087,7 +1094,10 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             f"{'unknown' if _delta is None else str(convert_size(_delta, 'MiB')) + ' MiB'} "
             f"exceeds {convert_size(_threshold, 'MiB')} MiB threshold")
         _take_intermediate_snapshot(migration)
+        _must_snap = False
         plan = migration.snap_migration_plan
+        if not plan:
+            return False, True, "Intermediate snapshot failed and no snapshots available for migration"
         snap_uuid = plan[-1]
         snap_index = len(plan) - 1
 
@@ -1209,7 +1219,8 @@ def _take_intermediate_snapshot(migration):
     logger.info(
         f"[IO-FREEZE] {_now_ms()} intermediate snapshot starting: "
         f"lvol={migration.lvol_id} round={migration.intermediate_snap_rounds} name={snap_name}")
-    snap_uuid, err = snapshot_controller.add(migration.lvol_id, snap_name, bypass_lvol_migration_check=True)
+    snap_uuid, err = snapshot_controller.add(
+        migration.lvol_id, snap_name, bypass_migration_check=True)
     if err:
         logger.warning(f"Intermediate snapshot failed (proceeding without): {err}")
         migration.intermediate_snap_rounds = migration.max_intermediate_snap_rounds
