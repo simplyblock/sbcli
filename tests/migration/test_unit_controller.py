@@ -522,7 +522,7 @@ class TestApplyMigrationToDb(unittest.TestCase):
             runner._apply_migration_to_db(mig)
 
         assert snap.lvol.node_id == "node-tgt"
-        assert snap.snap_bdev == "lvs_tgt/s1"
+        assert snap.snap_bdev == "lvs_tgt/s1m"  # migration suffix 'm' is appended on target
 
     def test_missing_lvol_returns_false(self):
         mig = _migration(lvol_id="lvol-gone")
@@ -678,6 +678,10 @@ class TestStartMigrationPreconditions(unittest.TestCase):
 
         mock_db = self._base_db(mig, lvol, src, tgt)
         mock_db.kv_store = MagicMock()
+        # Return a non-empty snapshot list so start_migration doesn't try to
+        # create a snapshot (which would reach FDB directly via snapshot_controller).
+        snap = _snap("s1", "lvol-1", "node-src")
+        mock_db.get_snapshots_by_node_id.return_value = [snap]
 
         with patch.object(ctl, 'db', mock_db), \
              patch('simplyblock_core.controllers.migration_controller.tasks_controller') as tc, \

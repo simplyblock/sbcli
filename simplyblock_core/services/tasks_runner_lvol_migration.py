@@ -197,8 +197,8 @@ def _ensure_hub_attached(src_rpc, tgt_rpc, tgt_node, trtype, target_ip):
         # to a now-populated subsystem.
         if src_rpc.bdev_nvme_controller_list(ctrl_name):
             logger.info(
-                f"_ensure_hub_attached: zombie mighub controller found (no bdev); "
-                f"detaching and reattaching"
+                "_ensure_hub_attached: zombie mighub controller found (no bdev); "
+                "detaching and reattaching"
             )
             src_rpc.bdev_nvme_detach_controller(ctrl_name)
             ret = src_rpc.bdev_nvme_attach_controller(
@@ -533,6 +533,40 @@ def _get_target_tertiary_node(tgt_node):
     )
 
 
+
+
+def _get_target_secondary_nodes(tgt_node):
+    """
+    Return ``(nodes, error_string)`` for all secondary/tertiary nodes of tgt_node.
+
+    Rules (applied independently to each secondary and tertiary slot):
+      - Not configured          → skip
+      - STATUS_ONLINE           → include in result list
+      - STATUS_OFFLINE          → skip (administratively down, non-blocking)
+      - Any other status        → block: return ([], error_str) immediately
+
+    If any node blocks, the entire result is empty and the error describes
+    which node and what state it's in.
+    """
+    nodes = []
+    for attr in ("secondary_node_id", "tertiary_node_id"):
+        node_id = getattr(tgt_node, attr, None)
+        if not node_id:
+            continue
+        try:
+            n = db.get_storage_node_by_id(node_id)
+        except KeyError:
+            continue
+        if n.status == StorageNode.STATUS_ONLINE:
+            nodes.append(n)
+        elif n.status == StorageNode.STATUS_OFFLINE:
+            continue
+        else:
+            return [], (
+                f"Target node {node_id} is in state '{n.status}'; "
+                f"cannot proceed with migration"
+            )
+    return nodes, None
 
 
 def _build_paths(src_node, tgt_node, src_rpc, tgt_rpc):
