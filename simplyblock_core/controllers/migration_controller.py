@@ -39,6 +39,7 @@ that node references it through its ``cloned_from_snap`` lineage.
 
 import json
 import logging
+import random
 import time
 import uuid
 from datetime import datetime
@@ -123,7 +124,7 @@ def start_migration(migration_id,
     snap_plan = get_snapshot_chain(lvol_id, source_node_id)
     if not snap_plan:
         snap_name = f"_mig_{migration.uuid[:8]}_lvol_{migration.lvol_id[:8]}"
-        snap_uuid, err = snapshot_controller.add(lvol_id, snap_name, bypass_lvol_migration_check=True)
+        snap_uuid, err = snapshot_controller.add(lvol_id, snap_name, bypass_migration_check=True)
         if err:
             raise ValueError(f"Failed to create snapshot: {err}")
         snap_plan = [snap_uuid]
@@ -782,7 +783,7 @@ def create_migration(lvol_id, target_node_id,
                 pass
 
     tgt_ter_node = None
-    if lvol.ha_type == "ha3" and tgt_node.tertiary_node_id:
+    if tgt_node.tertiary_node_id:
         tgt_ter_node = (_pre_ter_node if _pre_ter_node is not None else None)
         if tgt_ter_node is None:
             try:
@@ -798,15 +799,18 @@ def create_migration(lvol_id, target_node_id,
     overlap_ids = src_node_ids & tgt_node_ids
 
     # Ordered TGT entries: (node, rpc, port, min_cntlid)
-    tgt_entries = [(tgt_node, tgt_rpc, tgt_port, 1)]
+    # TGT uses random cntlid values within non-overlapping ranges to avoid kernel-side
+    # duplicate-cntlid rejection across consecutive migrations.  SRC occupies 1/1000/2000;
+    # TGT uses 3-500 / 1003-1500 / 2003-2500 so ranges never collide.
+    tgt_entries = [(tgt_node, tgt_rpc, tgt_port, random.randint(3, 500))]
     if tgt_sec_node is not None:
         _sec_rpc2  = tgt_sec_node.rpc_client()
         _sec_port2 = tgt_sec_node.get_lvol_subsys_port(tgt_node.lvstore)
-        tgt_entries.append((tgt_sec_node, _sec_rpc2, _sec_port2, 1000))
+        tgt_entries.append((tgt_sec_node, _sec_rpc2, _sec_port2, random.randint(1003, 1500)))
     if tgt_ter_node is not None:
         _ter_rpc2  = tgt_ter_node.rpc_client()
         _ter_port2 = tgt_ter_node.get_lvol_subsys_port(tgt_node.lvstore)
-        tgt_entries.append((tgt_ter_node, _ter_rpc2, _ter_port2, 2000))
+        tgt_entries.append((tgt_ter_node, _ter_rpc2, _ter_port2, random.randint(2003, 2500)))
 
     _TGT_LABELS = ['TGT-prim', 'TGT-sec', 'TGT-ter']
 
