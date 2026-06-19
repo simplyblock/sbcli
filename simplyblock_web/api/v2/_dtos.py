@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from ipaddress import IPv4Address
 from typing import List, Literal, Tuple, Optional, cast
 from uuid import UUID
@@ -273,7 +273,7 @@ class SnapshotDTO(BaseModel):
             size=model.size,
             used_size=model.used_size,
             migrating=is_migrating,
-            created_at=datetime.fromtimestamp(model.created_at),
+            created_at=datetime.fromtimestamp(model.created_at, tz=timezone.utc),
             lvol=str(
                 request.url_for(
                     "clusters:pools:volumes:detail",
@@ -282,7 +282,7 @@ class SnapshotDTO(BaseModel):
                     volume_id=model.lvol.get_id(),
                 )
             )
-            if model.lvol is not None and (volume_id == model.lvol.get_id())
+            if model.lvol is not None and (volume_id is None or volume_id == model.lvol.get_id())
             else None,
         )
 
