@@ -140,6 +140,7 @@ def main():
             if not args.run_k8s:
                 test_obj.ssh_obj.collect_final_docker_logs_simple(all_nodes, test_obj.docker_logs_path)
             test_obj.export_graylog_logs()
+            test_obj.extract_delay_qpair_logs()
             _test_failed = f"{test.__name__}" in errors
             _skip_k8s = _test_failed and test_obj.preserve_resources_on_failure
             if _skip_k8s:
