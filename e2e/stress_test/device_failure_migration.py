@@ -1216,14 +1216,32 @@ class _DeviceFailureMigrationBase:
         )
 
         # 2. All storage nodes should still be online and healthy
-        storage_nodes = self.sbcli_utils.get_storage_nodes()
-        for node in storage_nodes["results"]:
-            assert node["status"] == "online", (
-                f"Node {node['id']} is not online (status={node['status']})"
+        #    Retry for up to 5 minutes — health_check can be transiently
+        #    False due to a race between HealthCheck and migration tasks
+        #    updating device statuses in the distrib cluster maps.
+        node_check_deadline = time.time() + 300
+        node_check_interval = 15
+        while True:
+            storage_nodes = self.sbcli_utils.get_storage_nodes()
+            unhealthy = []
+            for node in storage_nodes["results"]:
+                if node["status"] != "online" or not node["health_check"]:
+                    unhealthy.append(
+                        f"{node['id']} (status={node['status']}, "
+                        f"health_check={node['health_check']})"
+                    )
+            if not unhealthy:
+                break
+            if time.time() >= node_check_deadline:
+                assert False, (
+                    f"Nodes still not healthy after 5 minutes: "
+                    + "; ".join(unhealthy)
+                )
+            self.logger.warning(
+                f"Unhealthy nodes, retrying in {node_check_interval}s: "
+                + "; ".join(unhealthy)
             )
-            assert node["health_check"], (
-                f"Node {node['id']} health check failed"
-            )
+            time.sleep(node_check_interval)
         self.logger.info(
             f"All {len(storage_nodes['results'])} storage nodes online and healthy"
         )
