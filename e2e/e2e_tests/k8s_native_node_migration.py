@@ -361,9 +361,10 @@ class K8sNativeNodeMigrationTest(TestClusterBase):
 
         migrate_node = random.choice(online_nodes)
         migrate_node_uuid = migrate_node["id"]
+        migrate_node_ip = migrate_node["mgmt_ip"]
         self.logger.info(
-            f"Randomly selected node {migrate_node_uuid} for migration "
-            f"to worker '{self.migrate_to_worker}'"
+            f"Randomly selected node {migrate_node_uuid} (IP: {migrate_node_ip}) "
+            f"for migration to worker '{self.migrate_to_worker}'"
         )
 
         migration_timestamp = int(datetime.now().timestamp())
@@ -371,6 +372,22 @@ class K8sNativeNodeMigrationTest(TestClusterBase):
         self.k8s_utils.patch_storage_node_migrate(
             node_uuid=migrate_node_uuid,
             target_worker=self.migrate_to_worker,
+        )
+
+        # Verify the CRD patch was applied
+        verify_out, _ = self.k8s_utils._exec_kubectl(
+            f"kubectl get storagenodes.storage.simplyblock.io simplyblock-node "
+            f"-n {self.k8s_utils.namespace} "
+            f"-o jsonpath='{{.spec.action}} {{.spec.nodeUUID}} {{.spec.workerNode}}'"
+        )
+        self.logger.info(f"CRD spec after patch: {verify_out}")
+        assert migrate_node_uuid in verify_out, (
+            f"CRD patch verification failed: nodeUUID {migrate_node_uuid} "
+            f"not found in CRD spec: {verify_out}"
+        )
+        assert self.migrate_to_worker in verify_out, (
+            f"CRD patch verification failed: workerNode '{self.migrate_to_worker}' "
+            f"not found in CRD spec: {verify_out}"
         )
 
         # ── Step 5: Wait for migration to complete ────────────────────────
@@ -395,10 +412,27 @@ class K8sNativeNodeMigrationTest(TestClusterBase):
         # Wait for migration/balancing tasks
         sleep_n_sec(60)
         self.validate_migration_for_node(
-            migration_timestamp, 2000, None, 60, no_task_ok=True
+            migration_timestamp, 2000, None, 60, no_task_ok=False
         )
         sleep_n_sec(30)
 
+        # Verify node actually moved to the target worker
+        self.logger.info(
+            f"Verifying node {migrate_node_uuid} migrated to worker "
+            f"'{self.migrate_to_worker}'"
+        )
+        updated_node = self.sbcli_utils.get_storage_node_details(migrate_node_uuid)
+        new_ip = updated_node[0]["mgmt_ip"]
+        spdk_pod = self.k8s_utils.get_spdk_pod_name(new_ip)
+        actual_worker = self.k8s_utils.get_pod_node_name(spdk_pod)
+        self.logger.info(
+            f"Node {migrate_node_uuid}: old IP={migrate_node_ip}, "
+            f"new IP={new_ip}, SPDK pod={spdk_pod}, worker={actual_worker}"
+        )
+        assert actual_worker == self.migrate_to_worker, (
+            f"Migration verification failed: node {migrate_node_uuid} is on "
+            f"worker '{actual_worker}', expected '{self.migrate_to_worker}'"
+        )
         self.logger.info(
             f"Node {migrate_node_uuid} successfully migrated to "
             f"worker '{self.migrate_to_worker}'"

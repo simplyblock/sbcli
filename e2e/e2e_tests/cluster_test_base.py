@@ -2832,15 +2832,12 @@ class TestClusterBase:
         start_time = datetime.now(timezone.utc)
         end_time = start_time + timedelta(seconds=timeout)
 
-        output = None
-        while output is None:
-            output, _ = self.ssh_obj.exec_command(
-                node=self.mgmt_nodes[0],
-                command=f"{self.base_cmd} cluster list-tasks {self.cluster_id} --limit 0"
-            )
-            self.logger.info(f"Data migration output: {output}")
-            if no_task_ok:
-                return  # Skip checking altogether
+        # Log initial task list via API (works in both SSH and K8s-native modes)
+        try:
+            initial_tasks = self.sbcli_utils.get_cluster_tasks(self.cluster_id)
+            self.logger.info(f"Data migration tasks at start: {initial_tasks}")
+        except Exception as e:
+            self.logger.warning(f"Could not fetch initial task list: {e}")
 
         migration_tasks_found = False
 
@@ -2890,7 +2887,10 @@ class TestClusterBase:
             sleep_n_sec(check_interval)
 
         # If nothing was found at all even after timeout
-        if not migration_tasks_found and not no_task_ok:
+        if not migration_tasks_found:
+            if no_task_ok:
+                self.logger.info("No migration tasks found, but no_task_ok=True — skipping.")
+                return
             raise RuntimeError(
                 f"No migration tasks found for {'node ' + node_id if node_id else 'the cluster'} "
                 f"after the specified timestamp {timestamp} and function containing device migration!"
