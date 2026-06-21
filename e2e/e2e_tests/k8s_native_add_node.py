@@ -448,22 +448,23 @@ class K8sNativeAddNodeTest(TestClusterBase):
         self.logger.info("Step 8: Validating all FIO jobs and node health")
 
         # Wait for and validate FIO on existing PVCs
+        fio_timeout = self.FIO_RUNTIME + 300
         for pvc_name, detail in self.pvc_details.items():
             self.logger.info(f"Validating FIO job for existing PVC: {pvc_name}")
             self._save_fio_pod_logs(detail["job_name"], pvc_name)
-            self.k8s_utils.validate_fio_job(detail["job_name"])
+            self.k8s_utils.validate_fio_job(detail["job_name"], timeout=fio_timeout)
 
         # Wait for and validate FIO on clones
         for clone_name, detail in self.clone_details.items():
             self.logger.info(f"Validating FIO job for clone: {clone_name}")
             self._save_fio_pod_logs(detail["job_name"], clone_name)
-            self.k8s_utils.validate_fio_job(detail["job_name"])
+            self.k8s_utils.validate_fio_job(detail["job_name"], timeout=fio_timeout)
 
         # Wait for and validate FIO on new node PVCs
         for pvc_name, detail in new_pvc_details.items():
             self.logger.info(f"Validating FIO job for new node PVC: {pvc_name}")
             self._save_fio_pod_logs(detail["job_name"], pvc_name)
-            self.k8s_utils.validate_fio_job(detail["job_name"])
+            self.k8s_utils.validate_fio_job(detail["job_name"], timeout=fio_timeout)
 
         # Validate all nodes healthy
         final_nodes = self.sbcli_utils.get_storage_nodes()["results"]
