@@ -72,8 +72,8 @@ def main():
     elif args.testname is None or len(args.testname.strip()) == 0:
         for cls in tests:
             if cls.__name__ == "TestAddNodesDuringFioRun":
-                if len(new_nodes) == 0 or len(new_nodes) % 2 != 0:
-                    logger.warning("Skipping TestAddNodesDuringFioRun: requires --new-nodes with IPs in multiples of 2.")
+                if len(new_nodes) == 0:
+                    logger.warning("Skipping TestAddNodesDuringFioRun: requires --new-nodes with at least 1 IP.")
                     skipped_cases += 1
                     continue
             if cls.__name__ == "TestRestartNodeOnAnotherHost":
@@ -84,15 +84,15 @@ def main():
             if cls.__name__ == "TestAddK8sNodesDuringFioRun":
                 if not args.run_k8s:
                     continue
-                if len(new_nodes) == 0 or len(new_nodes) % 2 != 0:
-                    logger.warning("Skipping TestAddK8sNodesDuringFioRun: requires --new-nodes with IPs in multiples of 2.")
+                if len(new_nodes) == 0:
+                    logger.warning("Skipping TestAddK8sNodesDuringFioRun: requires --new-nodes with at least 1 IP.")
                     skipped_cases += 1
                     continue
             if cls.__name__ == "K8sNativeAddNodeTest":
                 if not args.run_k8s:
                     continue
-                if len(new_worker_nodes) == 0 or len(new_worker_nodes) % 2 != 0:
-                    logger.warning("Skipping K8sNativeAddNodeTest: requires --new_worker_nodes with node names in multiples of 2.")
+                if len(new_worker_nodes) == 0:
+                    logger.warning("Skipping K8sNativeAddNodeTest: requires --new_worker_nodes with at least 1 node name.")
                     skipped_cases += 1
                     continue
             if cls.__name__ == "K8sNativeNodeMigrationTest":
@@ -110,19 +110,19 @@ def main():
         for needle in needles:
             for cls in ALL_TESTS:
                 if needle in cls.__name__.lower() and cls not in seen:
-                    if cls.__name__ == "TestAddNodesDuringFioRun" and (len(new_nodes) == 0 or len(new_nodes) % 2 != 0):
-                        raise ValueError("TestAddNodesDuringFioRun requires --new-nodes with IPs in multiples of 2.")
+                    if cls.__name__ == "TestAddNodesDuringFioRun" and len(new_nodes) == 0:
+                        raise ValueError("TestAddNodesDuringFioRun requires --new-nodes with at least 1 IP.")
                     if cls.__name__ == "TestRestartNodeOnAnotherHost" and len(new_nodes) == 0:
                         raise ValueError("TestRestartNodeOnAnotherHost requires --new-nodes with atleast 1 new IP.")
-                    if cls.__name__ == "TestAddK8sNodesDuringFioRun" and (len(new_nodes) == 0 or len(new_nodes) % 2 != 0):
+                    if cls.__name__ == "TestAddK8sNodesDuringFioRun" and len(new_nodes) == 0:
                         if not args.run_k8s:
                             continue
-                        raise ValueError("TestAddK8sNodesDuringFioRun requires --new-nodes with IPs in multiples of 2.")
+                        raise ValueError("TestAddK8sNodesDuringFioRun requires --new-nodes with at least 1 IP.")
                     if cls.__name__ == "K8sNativeAddNodeTest":
                         if not args.run_k8s:
                             continue
-                        if len(new_worker_nodes) == 0 or len(new_worker_nodes) % 2 != 0:
-                            raise ValueError("K8sNativeAddNodeTest requires --new_worker_nodes with node names in multiples of 2.")
+                        if len(new_worker_nodes) == 0:
+                            raise ValueError("K8sNativeAddNodeTest requires --new_worker_nodes with at least 1 node name.")
                     if cls.__name__ == "K8sNativeNodeMigrationTest":
                         if not args.run_k8s:
                             continue

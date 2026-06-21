@@ -198,11 +198,8 @@ class K8sNativeAddNodeTest(TestClusterBase):
     def run(self):
         self.logger.info("Starting Test: K8s Native Add Node During FIO")
 
-        assert len(self.new_worker_nodes) >= 2, (
-            "At least 2 new worker nodes required (must be multiples of 2)"
-        )
-        assert len(self.new_worker_nodes) % 2 == 0, (
-            "New worker nodes must be in multiples of 2"
+        assert len(self.new_worker_nodes) >= 1, (
+            "At least 1 new worker node required"
         )
 
         # ── Step 1: Create StorageClass + VolumeSnapshotClass ─────────────
