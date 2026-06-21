@@ -1,6 +1,5 @@
 import os
 from datetime import datetime
-from pathlib import Path
 import threading
 from e2e_tests.cluster_test_base import TestClusterBase, generate_random_sequence
 from utils.common_utils import sleep_n_sec
@@ -12,7 +11,6 @@ class TestRestartNodeOnAnotherHost(TestClusterBase):
         self.new_node_ip = kwargs.get("new_nodes")
         self.test_name = "restart_node_on_another_host"
         self.mount_base = "/mnt/"
-        self.log_base = f"{Path.home()}/"
         assert self.new_node_ip, "Missing required input: new_node_ip"
 
         if isinstance(self.new_node_ip, list):
@@ -44,7 +42,7 @@ class TestRestartNodeOnAnotherHost(TestClusterBase):
         for i, _ in enumerate(self.storage_nodes):
             node_uuid = self.sbcli_utils.get_node_without_lvols()
             lvol_name = f"lvl_{generate_random_sequence(4)}_{i}"
-            self.sbcli_utils.add_lvol(lvol_name, self.pool_name, size="5G",
+            self.sbcli_utils.add_lvol(lvol_name, self.pool_name, size="10G",
                                        distr_ndcs=self.ndcs, distr_npcs=self.npcs,
                                        distr_bs=self.bs, distr_chunk_bs=self.chunk_bs,
                                        host_id=node_uuid)
@@ -56,7 +54,7 @@ class TestRestartNodeOnAnotherHost(TestClusterBase):
 
             device = self.ssh_obj.get_lvol_vs_device(self.mgmt_nodes[0], lvol_id)
             mount_path = f"{self.mount_base}/{lvol_name}"
-            log_path = f"{self.log_base}/{lvol_name}.log"
+            log_path = f"{self.log_path}/{lvol_name}.log"
             self.ssh_obj.format_disk(self.mgmt_nodes[0], device)
             self.ssh_obj.mount_path(self.mgmt_nodes[0], device, mount_path)
 
@@ -104,7 +102,7 @@ class TestRestartNodeOnAnotherHost(TestClusterBase):
 
             device = self.ssh_obj.get_lvol_vs_device(self.mgmt_nodes[0], clone_id)
             cl_mount = f"{self.mount_base}/{clone_name}"
-            cl_log = f"{self.log_base}/{clone_name}.log"
+            cl_log = f"{self.log_path}/{clone_name}.log"
             self.ssh_obj.format_disk(self.mgmt_nodes[0], device)
             self.ssh_obj.mount_path(self.mgmt_nodes[0], device, cl_mount)
 
