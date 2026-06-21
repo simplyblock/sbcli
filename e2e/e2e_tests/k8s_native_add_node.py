@@ -209,7 +209,10 @@ class K8sNativeAddNodeTest(TestClusterBase):
         pool_name = self.pool_name
 
         # Create storage pool via sbcli
-        self.sbcli_utils.add_storage_pool(pool_name)
+        actual_pool = self.sbcli_utils.add_storage_pool(pool_name)
+        if actual_pool and actual_pool != pool_name:
+            self.logger.info(f"Pool name resolved: {pool_name!r} -> {actual_pool!r}")
+            pool_name = actual_pool
         sleep_n_sec(10)
 
         self.k8s_utils.create_storage_class(

@@ -616,7 +616,10 @@ class K8sNativeNamespacedFailoverTest(K8sNativeFailoverTest):
         sleep_n_sec(10)
 
         # Create storage pool
-        self.sbcli_utils.add_storage_pool(self.pool_name)
+        actual_pool = self.sbcli_utils.add_storage_pool(self.pool_name)
+        if actual_pool and actual_pool != self.pool_name:
+            self.logger.info(f"Pool name resolved: {self.pool_name!r} -> {actual_pool!r}")
+            self.pool_name = actual_pool
         sleep_n_sec(10)
 
         # Create namespace-aware StorageClasses
@@ -967,7 +970,10 @@ class K8sNativeRapidLifecycleTest(K8sNativeFailoverTest):
             pass
         sleep_n_sec(10)
 
-        self.sbcli_utils.add_storage_pool(self.pool_name)
+        actual_pool = self.sbcli_utils.add_storage_pool(self.pool_name)
+        if actual_pool and actual_pool != self.pool_name:
+            self.logger.info(f"Pool name resolved: {self.pool_name!r} -> {actual_pool!r}")
+            self.pool_name = actual_pool
         sleep_n_sec(10)
 
         cluster_id = self.sbcli_utils.get_cluster_id()

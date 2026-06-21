@@ -3485,7 +3485,10 @@ class K8sNativeBasicFailoverTest(K8sNativeFailoverTest):
             self.sbcli_utils.delete_storage_pool(self.pool_name)
         except Exception:
             pass
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        actual_pool = self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        if actual_pool and actual_pool != self.pool_name:
+            self.logger.info(f"Pool name resolved: {self.pool_name!r} -> {actual_pool!r}")
+            self.pool_name = actual_pool
 
         cluster_id = self.cluster_id or ""
         self.k8s_utils.create_storage_class(
@@ -4833,7 +4836,10 @@ class K8sNativeQuickFailoverTest(K8sNativeBasicFailoverTest):
             self.sbcli_utils.delete_storage_pool(self.pool_name)
         except Exception:
             pass
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        actual_pool = self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        if actual_pool and actual_pool != self.pool_name:
+            self.logger.info(f"Pool name resolved: {self.pool_name!r} -> {actual_pool!r}")
+            self.pool_name = actual_pool
 
         cluster_id = self.cluster_id or ""
         self.k8s_utils.create_storage_class(
