@@ -71,7 +71,7 @@ class K8sNativeAddNodeTest(TestClusterBase):
         self.FIO_RUNTIME = 1200
 
         # Counts
-        self.fio_num_jobs = 2
+        self.fio_num_jobs = 1
 
         # Tracking
         self.pvc_details: dict[str, dict] = {}

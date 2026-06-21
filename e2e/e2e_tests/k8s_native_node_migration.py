@@ -62,11 +62,11 @@ class K8sNativeNodeMigrationTest(TestClusterBase):
 
         # Sizing
         self.pvc_size = "10Gi"
-        self.fio_size = "1G"
+        self.fio_size = "4G"
         self.FIO_RUNTIME = 2000
 
         # Counts
-        self.fio_num_jobs = 2
+        self.fio_num_jobs = 1
 
         # Tracking
         self.pvc_details: dict[str, dict] = {}

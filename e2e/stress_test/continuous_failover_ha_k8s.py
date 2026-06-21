@@ -72,7 +72,7 @@ class RandomK8sMultiOutageFailoverTest(RandomMultiClientMultiFailoverTest):
         self.total_lvols = 20
         self.test_name = "n_plus_k_k8s_failover_ha"
         self.k8s_utils: K8sUtils | None = None
-        self.fio_num_jobs = 2
+        self.fio_num_jobs = 1
         self.persistent_lvols: set[str] = set()
         self.outage_types = ["graceful_shutdown", "interface_full_network_interrupt"]
         self.outage_types2 = ["container_stop", "graceful_shutdown", "interface_full_network_interrupt"]

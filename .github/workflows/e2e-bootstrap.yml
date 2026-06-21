@@ -78,6 +78,10 @@ on:
         type: string
         default: "none"
         description: "Cluster setup mode. 'backup' writes s3-backup.json and passes --use-backup to cluster create."
+      NEW_NODE_IPS:
+        type: string
+        default: ""
+        description: "Space-separated IPs of spare nodes (cleaned but NOT added to cluster). Used for add-node/migration tests."
   workflow_dispatch:
     inputs:
       # =========================
@@ -214,6 +218,14 @@ on:
           - none
           - backup
 
+      # =========================
+      # Add-node / migration inputs
+      # =========================
+      NEW_NODE_IPS:
+        description: "Space-separated IPs of spare nodes (cleaned but NOT added to cluster). Used for add-node/migration tests."
+        required: false
+        type: string
+
 concurrency:
   group: simplyblock-lab-e2e-${{ inputs.MNODES }}
   cancel-in-progress: true
@@ -261,6 +273,7 @@ jobs:
       NPCS: ${{ inputs.BOOTSTRAP_PARITY_CHUNKS || '2' }}
       TEST_CLASS: ${{ inputs.TEST_CLASS || '' }}
       CLUSTER_SECURITY: ${{ inputs.CLUSTER_SECURITY || 'none' }}
+      NEW_NODE_IPS: ${{ inputs.NEW_NODE_IPS || '' }}
 
       # Secrets
       SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
@@ -410,7 +423,7 @@ jobs:
             return 0
           }
 
-          targets="$MNODES $STORAGE_PRIVATE_IPS $CLIENTNODES"
+          targets="$MNODES $STORAGE_PRIVATE_IPS $CLIENTNODES ${NEW_NODE_IPS:-}"
           uniq_targets="$(echo "$targets" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ')"
 
           for ip in $uniq_targets; do
@@ -438,7 +451,7 @@ jobs:
               "${SSH_USER}@${ip}" "bash -s" <<< "$script"
           }
 
-          targets="$MNODES $STORAGE_PRIVATE_IPS"
+          targets="$MNODES $STORAGE_PRIVATE_IPS ${NEW_NODE_IPS:-}"
           uniq_targets="$(echo "$targets" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ')"
 
           for ip in $uniq_targets; do
@@ -487,7 +500,7 @@ jobs:
           done
 
           # fail if NFS still mounted anywhere
-          targets="$MNODES $STORAGE_PRIVATE_IPS $CLIENTNODES"
+          targets="$MNODES $STORAGE_PRIVATE_IPS $CLIENTNODES ${NEW_NODE_IPS:-}"
           uniq_targets="$(echo "$targets" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ')"
 
           still=0
@@ -524,15 +537,16 @@ jobs:
               "${SSH_USER}@${ip}" "bash -s" <<< "$script"
           }
 
-          # reboot storage nodes
-          for ip in $STORAGE_PRIVATE_IPS; do
+          # reboot storage nodes (including spare nodes for add-node/migration tests)
+          ALL_STORAGE="$STORAGE_PRIVATE_IPS ${NEW_NODE_IPS:-}"
+          for ip in $ALL_STORAGE; do
             echo "---- reboot storage: $ip ----"
             sshpass -p "${SSH_PASSWORD}" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "${SSH_USER}@${ip}" \
               "nohup reboot >/dev/null 2>&1 &" || true
           done
 
           # wait storage online
-          for ip in $STORAGE_PRIVATE_IPS; do
+          for ip in $ALL_STORAGE; do
             echo "Waiting for $ip..."
             for i in {1..60}; do
               if sshpass -p "${SSH_PASSWORD}" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 "${SSH_USER}@${ip}" \
@@ -546,7 +560,7 @@ jobs:
           done
 
           # disk reset / PCI rebind / mklabel on storage nodes
-          for ip in $STORAGE_PRIVATE_IPS; do
+          for ip in $ALL_STORAGE; do
             echo "---- disk reset on $ip ----"
             run_remote "$ip" "set -euxo pipefail;
               for dev in /dev/nvme0n1 /dev/nvme1n1 /dev/nvme2n1 /dev/nvme3n1; do
@@ -641,7 +655,7 @@ jobs:
               "${SSH_USER}@${ip}" "bash -s" <<< "$script"
           }
 
-          targets="$MNODES $STORAGE_PRIVATE_IPS"
+          targets="$MNODES $STORAGE_PRIVATE_IPS ${NEW_NODE_IPS:-}"
           uniq_targets="$(echo "$targets" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ')"
 
           for ip in $uniq_targets; do
@@ -829,8 +843,13 @@ jobs:
           if [[ -n "${TEST_CLASS:-}" ]]; then
             TESTNAME_ARGS=(--testname "${TEST_CLASS}")
           fi
+          NEW_NODES_ARGS=()
+          if [[ -n "${NEW_NODE_IPS:-}" ]]; then
+            NEW_NODES_ARGS=(--new_nodes ${NEW_NODE_IPS})
+          fi
           python3 -u e2e.py \
             "${TESTNAME_ARGS[@]}" \
+            "${NEW_NODES_ARGS[@]}" \
             --ndcs "${NDCS}" \
             --npcs "${NPCS}" \
             --run_ha true \
@@ -864,7 +883,7 @@ jobs:
             return 0
           }
 
-          for ip in $MNODES $STORAGE_PRIVATE_IPS; do
+          for ip in $MNODES $STORAGE_PRIVATE_IPS ${NEW_NODE_IPS:-}; do
             echo "---- $ip: kill tmux ----"
             run_remote_with_retry "$ip" "pkill -9 tmux || true"
           done
@@ -979,7 +998,7 @@ jobs:
           TAG="containers-final-$(date +%Y%m%d_%H%M%S)"
           SSH_OPTS=(-i "${KEY_PATH}" -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -C)
 
-          NODES="$(echo "${MNODES} ${STORAGE_PRIVATE_IPS}" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ')"
+          NODES="$(echo "${MNODES} ${STORAGE_PRIVATE_IPS} ${NEW_NODE_IPS:-}" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ')"
 
           for NODE in ${NODES}; do
             echo ">>> Node: ${NODE}"

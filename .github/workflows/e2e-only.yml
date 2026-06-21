@@ -81,6 +81,10 @@ on:
         description: "E2E test class name (--testname); leave empty to run all tests"
         required: false
         type: string
+      NEW_NODE_IPS:
+        description: "Space-separated IPs of spare nodes for add-node/migration tests"
+        required: false
+        type: string
 
 concurrency:
   group: simplyblock-lab-e2e
@@ -116,6 +120,7 @@ jobs:
       NDCS: ${{ inputs.BOOTSTRAP_DATA_CHUNKS }}
       NPCS: ${{ inputs.BOOTSTRAP_PARITY_CHUNKS }}
       TEST_CLASS: ${{ inputs.TEST_CLASS }}
+      NEW_NODE_IPS: ${{ inputs.NEW_NODE_IPS || '' }}
 
       # Secrets
       SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
@@ -237,7 +242,7 @@ jobs:
             return 0
           }
 
-          targets="$MNODES $STORAGE_PRIVATE_IPS $CLIENTNODES"
+          targets="$MNODES $STORAGE_PRIVATE_IPS $CLIENTNODES ${NEW_NODE_IPS:-}"
           uniq_targets="$(echo "$targets" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ')"
 
           for ip in $uniq_targets; do
@@ -274,7 +279,7 @@ jobs:
           done
 
           # fail if NFS still mounted anywhere
-          targets="$MNODES $STORAGE_PRIVATE_IPS $CLIENTNODES"
+          targets="$MNODES $STORAGE_PRIVATE_IPS $CLIENTNODES ${NEW_NODE_IPS:-}"
           uniq_targets="$(echo "$targets" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ')"
 
           still=0
@@ -365,8 +370,13 @@ jobs:
           if [[ -n "${TEST_CLASS:-}" ]]; then
             TESTNAME_ARGS=(--testname "${TEST_CLASS}")
           fi
+          NEW_NODES_ARGS=()
+          if [[ -n "${NEW_NODE_IPS:-}" ]]; then
+            NEW_NODES_ARGS=(--new_nodes ${NEW_NODE_IPS})
+          fi
           python3 -u e2e.py \
             "${TESTNAME_ARGS[@]}" \
+            "${NEW_NODES_ARGS[@]}" \
             --ndcs "${NDCS}" \
             --npcs "${NPCS}" \
             2>&1 | tee output.log
@@ -399,7 +409,7 @@ jobs:
             return 0
           }
 
-          for ip in $MNODES $STORAGE_PRIVATE_IPS; do
+          for ip in $MNODES $STORAGE_PRIVATE_IPS ${NEW_NODE_IPS:-}; do
             echo "---- $ip: kill tmux ----"
             run_remote_with_retry "$ip" "pkill -9 tmux || true"
           done
@@ -514,7 +524,7 @@ jobs:
           TAG="containers-final-$(date +%Y%m%d_%H%M%S)"
           SSH_OPTS=(-i "${KEY_PATH}" -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -C)
 
-          NODES="$(echo "${MNODES} ${STORAGE_PRIVATE_IPS}" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ')"
+          NODES="$(echo "${MNODES} ${STORAGE_PRIVATE_IPS} ${NEW_NODE_IPS:-}" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ')"
 
           for NODE in ${NODES}; do
             echo ">>> Node: ${NODE}"

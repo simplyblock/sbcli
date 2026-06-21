@@ -44,6 +44,10 @@ on:
         description: 'Specific test case to run (leave empty to run all)'
         required: false
         type: string
+      new_node_ips:
+        description: 'Spare node IPs for add-node/migration tests (space-separated)'
+        required: false
+        type: string
 
 concurrency:
   group: ${{ github.workflow }}
@@ -128,7 +132,9 @@ jobs:
           export SSH_USER=root
           export SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY }}
           TEST_CASE=${{ inputs.test_case_to_run || '' }}
+          NEW_NODE_IPS="${{ github.event.inputs.new_node_ips || '' }}"
           python3 e2e.py ${TEST_CASE:+--testname} ${TEST_CASE} \
+                  ${NEW_NODE_IPS:+--new_nodes} ${NEW_NODE_IPS} \
                   --ndcs $NDCS --npcs $NPCS --bs $BS --chunk_bs $CHUNK_BS --run_ha ${{ github.event.inputs.run_ha_test || true }}
         env:
           NDCS: ${{ github.event.inputs.ndcs || 1 }}
