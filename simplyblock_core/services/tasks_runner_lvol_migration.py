@@ -154,58 +154,48 @@ def _ensure_hub_attached(src_rpc, tgt_rpc, tgt_node, trtype, target_ip):
 
     Returns (ctrl_name, hub_bdev, error_string|None).
     """
-    ctrl_name = "mighub"
-    hub_bdev = f"{ctrl_name}n1"
-    mig_hub_bdev = f"{tgt_node.lvstore}/{ctrl_name}"
-    mig_hub_nqn = f"nqn.2014-08.io.simplyblock:mighub:{tgt_node.lvstore}"
+
+    if tgt_node.transfer_hublvol is None or not tgt_node.transfer_hublvol.bdev_name:
+        tgt_node.create_transfer_hublvol()
 
     # Already attached (prior iteration or crash recovery).
-    if src_rpc.get_bdevs(hub_bdev):
-        return ctrl_name, hub_bdev, None
+    if src_rpc.get_bdevs(tgt_node.transfer_hublvol.get_remote_bdev_name()):
+        return tgt_node.transfer_hublvol.bdev_name, tgt_node.transfer_hublvol.get_remote_bdev_name(), None
 
-    # Create migration hublvol on target (idempotent — one per lvstore).
-    existing = tgt_rpc.get_bdevs(mig_hub_bdev)
-    if not existing:
-        mig_hub_uuid = tgt_rpc.bdev_lvol_create_hublvol(tgt_node.lvstore, name=ctrl_name)
-        if not mig_hub_uuid:
-            return None, None, f"Failed to create migration hublvol on {tgt_node.get_id()}"
-        logger.info(f"_ensure_hub_attached: created {mig_hub_bdev} uuid={mig_hub_uuid}")
-    else:
-        mig_hub_uuid = existing[0].get('uuid', '') if existing else ''
-        logger.info(f"_ensure_hub_attached: reusing existing {mig_hub_bdev}")
+    for iface in tgt_node.data_nics:
+        ip = iface.ip4_address
+        if tgt_node.active_rdma:
+            if iface.trtype != "RDMA":
+                logger.debug("Skipping non-RDMA iface %s (active_rdma=True)", ip)
+                continue
+            trtype = "RDMA"
+        else:
+            if iface.trtype != "TCP":
+                logger.debug("Skipping non-TCP iface %s (active_tcp=True)", ip)
+                continue
+            trtype = "TCP"
 
-    # Expose migration hublvol via its own NVMe-oF subsystem (idempotent).
-    # Reuse the node's hub port — different NQN means different TRID, no conflict.
-    hub_port = tgt_node.hublvol.nvmf_port
-    nguid = mig_hub_uuid.replace('-', '')
-    tgt_node.expose_bdev(
-        nqn=mig_hub_nqn,
-        bdev_name=mig_hub_bdev,
-        model_number="mighub",
-        uuid=mig_hub_uuid,
-        nguid=nguid,
-        port=hub_port,
-        ana_state="optimized",
-    )
-
-    # Attach NVMe controller on source to the migration subsystem.
-    ret = src_rpc.bdev_nvme_attach_controller(ctrl_name, mig_hub_nqn, target_ip, hub_port, trtype)
-    if not ret:
-        # Attach can fail with EEXIST if a prior crashed attempt attached the controller
-        # but the namespace wasn't in the subsystem yet (e.g. due to a bad nguid on the
-        # add_ns call).  Detach the zombie and retry once so the controller reconnects
-        # to a now-populated subsystem.
-        if src_rpc.bdev_nvme_controller_list(ctrl_name):
-            logger.info(
-                "_ensure_hub_attached: zombie mighub controller found (no bdev); "
-                "detaching and reattaching"
-            )
-            src_rpc.bdev_nvme_detach_controller(ctrl_name)
-            ret = src_rpc.bdev_nvme_attach_controller(
-                ctrl_name, mig_hub_nqn, target_ip, hub_port, trtype)
+        # Attach NVMe controller on source to the migration subsystem.
+        ret = src_rpc.bdev_nvme_attach_controller(
+            tgt_node.transfer_hublvol.bdev_name, tgt_node.transfer_hublvol.nqn,
+            ip,  tgt_node.transfer_hublvol.nvmf_port, trtype)
         if not ret:
-            return None, None, f"Failed to attach migration hub controller to {tgt_node.get_id()}"
-    return ctrl_name, hub_bdev, None
+            # Attach can fail with EEXIST if a prior crashed attempt attached the controller
+            # but the namespace wasn't in the subsystem yet (e.g. due to a bad nguid on the
+            # add_ns call).  Detach the zombie and retry once so the controller reconnects
+            # to a now-populated subsystem.
+            if src_rpc.bdev_nvme_controller_list(tgt_node.transfer_hublvol.bdev_name):
+                logger.info(
+                    "_ensure_hub_attached: zombie mighub controller found (no bdev); "
+                    "detaching and reattaching"
+                )
+                src_rpc.bdev_nvme_detach_controller(tgt_node.transfer_hublvol.bdev_name)
+                ret = src_rpc.bdev_nvme_attach_controller(
+                    tgt_node.transfer_hublvol.bdev_name, tgt_node.transfer_hublvol.nqn,
+                    ip, tgt_node.transfer_hublvol.nvmf_port, trtype)
+            if not ret:
+                return None, None, f"Failed to attach migration hub controller to {tgt_node.get_id()}"
+    return tgt_node.transfer_hublvol.bdev_name, tgt_node.transfer_hublvol.get_remote_bdev_name(), None
 
 
 _MIGRATION_BDEV_SUFFIX = constants.LVOL_MIG_BDEV_SUFFIX
@@ -1876,7 +1866,7 @@ def _handle_cleanup_target(migration, tgt_node, tgt_rpc, src_rpc=None):
     # The hub is attached once during SNAP_COPY and must be torn down on any
     # failure/cancel path; if the source is unreachable this is non-fatal.
     if src_rpc is not None:
-        hub_ctrl_name = "mighub"
+        hub_ctrl_name = tgt_node.transfer_hublvol.bdev_name
         try:
             if src_rpc.get_bdevs(f"{hub_ctrl_name}n1"):
                 src_rpc.bdev_nvme_detach_controller(hub_ctrl_name)
