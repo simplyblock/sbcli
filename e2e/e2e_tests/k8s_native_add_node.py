@@ -153,16 +153,19 @@ class K8sNativeAddNodeTest(TestClusterBase):
 
     # ── FIO config ────────────────────────────────────────────────────────────
 
-    def _build_fio_config(self, name: str) -> str:
+    def _build_fio_config(self, name: str) -> tuple[str, str]:
         bs = f"{2 ** random.randint(2, 7)}k"
-        return (
+        run_id = _rand_seq(6)
+        randseed = random.randint(1, 2**63)
+
+        main_config = (
             f"[global]\n"
             f"name={name}-fio\n"
-            f"filename_format=/spdkvol/fio-testfile.$jobnum\n"
+            f"filename_format=/spdkvol/fio-{run_id}.$jobnum\n"
             f"rw=randrw\n"
             f"rwmixread=50\n"
             f"bs={bs}\n"
-            f"iodepth=256\n"
+            f"iodepth=1\n"
             f"direct=1\n"
             f"ioengine=libaio\n"
             f"size={self.fio_size}\n"
@@ -173,10 +176,32 @@ class K8sNativeAddNodeTest(TestClusterBase):
             f"verify=md5\n"
             f"verify_dump=1\n"
             f"verify_fatal=1\n"
-            f"verify_backlog=128\n"
+            f"verify_backlog=4096\n"
+            f"verify_backlog_batch=32\n"
+            f"randseed={randseed}\n"
+            f"max_latency=20s\n"
             f"\n"
             f"[job1]\n"
         )
+
+        warmup_config = (
+            f"[global]\n"
+            f"name={name}-warmup\n"
+            f"filename_format=/spdkvol/fio-{run_id}.$jobnum\n"
+            f"rw=write\n"
+            f"bs=1m\n"
+            f"iodepth=32\n"
+            f"direct=1\n"
+            f"ioengine=libaio\n"
+            f"size={self.fio_size}\n"
+            f"numjobs={self.fio_num_jobs}\n"
+            f"group_reporting\n"
+            f"zero_buffers\n"
+            f"\n"
+            f"[job1]\n"
+        )
+
+        return main_config, warmup_config
 
     def _save_fio_pod_logs(self, job_name: str, resource_name: str):
         """Save FIO pod logs to log directory for post-mortem debugging."""
@@ -269,7 +294,7 @@ class K8sNativeAddNodeTest(TestClusterBase):
         self.logger.info("Step 3: Starting FIO Jobs on existing PVCs")
 
         for pvc_name, detail in self.pvc_details.items():
-            fio_config = self._build_fio_config(pvc_name)
+            fio_config, warmup_config = self._build_fio_config(pvc_name)
             avoid = self.k8s_utils.get_pvc_primary_k8s_node(pvc_name, self.sbcli_utils)
             self.k8s_utils.create_fio_job(
                 job_name=detail["job_name"],
@@ -278,6 +303,7 @@ class K8sNativeAddNodeTest(TestClusterBase):
                 fio_config=fio_config,
                 image=self.FIO_IMAGE,
                 avoid_node=avoid,
+                warmup_config=warmup_config,
             )
             sleep_n_sec(5)
 
@@ -312,7 +338,7 @@ class K8sNativeAddNodeTest(TestClusterBase):
             )
             self.k8s_utils.wait_pvc_bound(clone_name, timeout=300)
 
-            fio_config = self._build_fio_config(clone_name)
+            fio_config, warmup_config = self._build_fio_config(clone_name)
             avoid = self.k8s_utils.get_pvc_primary_k8s_node(clone_name, self.sbcli_utils)
             self.k8s_utils.create_fio_job(
                 job_name=clone_job,
@@ -321,6 +347,7 @@ class K8sNativeAddNodeTest(TestClusterBase):
                 fio_config=fio_config,
                 image=self.FIO_IMAGE,
                 avoid_node=avoid,
+                warmup_config=warmup_config,
             )
 
             self.clone_details[clone_name] = {
@@ -421,7 +448,7 @@ class K8sNativeAddNodeTest(TestClusterBase):
             )
             self.k8s_utils.wait_pvc_bound(pvc_name, timeout=300)
 
-            fio_config = self._build_fio_config(pvc_name)
+            fio_config, warmup_config = self._build_fio_config(pvc_name)
             avoid = self.k8s_utils.get_pvc_primary_k8s_node(pvc_name, self.sbcli_utils)
             self.k8s_utils.create_fio_job(
                 job_name=job_name,
@@ -430,6 +457,7 @@ class K8sNativeAddNodeTest(TestClusterBase):
                 fio_config=fio_config,
                 image=self.FIO_IMAGE,
                 avoid_node=avoid,
+                warmup_config=warmup_config,
             )
 
             new_pvc_details[pvc_name] = {
