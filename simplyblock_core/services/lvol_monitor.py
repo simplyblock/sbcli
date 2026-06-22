@@ -62,10 +62,10 @@ def set_snapshot_health_check(snap, health_check_status):
     if snap.health_check == health_check_status:
         return
     now = str(datetime.now())
-    db.atomic_update(
-        snap,
-        lambda s, v=health_check_status, t=now: (setattr(s, "health_check", v),
-                                                 setattr(s, "updated_at", t)))
+    def _apply_health_check(s, v=health_check_status, t=now):
+        s.health_check = v
+        s.updated_at = t
+    db.atomic_update(snap, _apply_health_check)
 
 
 lvol_del_start_time = 0.0

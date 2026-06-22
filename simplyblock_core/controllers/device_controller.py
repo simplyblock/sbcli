@@ -945,10 +945,10 @@ def add_device(device_id, add_migration_task=True):
     device_obj.cluster_device_order = dev_order
     logger.info("Setting device online")
     device_obj.status = NVMeDevice.STATUS_ONLINE
-    _atomic_device_set(
-        db_controller, snode.get_id(), device_id,
-        lambda d, o=dev_order: (setattr(d, "cluster_device_order", o),
-                                setattr(d, "status", NVMeDevice.STATUS_ONLINE)))
+    def _apply_online(d, o=dev_order):
+        d.cluster_device_order = o
+        d.status = NVMeDevice.STATUS_ONLINE
+    _atomic_device_set(db_controller, snode.get_id(), device_id, _apply_online)
     device_events.device_create(device_obj)
 
     logger.info("Make other nodes connect to the node devices")
