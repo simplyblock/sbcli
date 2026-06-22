@@ -31,7 +31,7 @@ class _MigrationParams(BaseModel):
 
 
 @api.post('/', name='cluster:storage-pools:volumes:migrations:create', status_code=201, responses={201: {"content": None}})
-def create_migration(request: Request, cluster: Cluster, volume: Volume, parameters: _MigrationParams, response_format: CreationResponseFormatParameter = "identifier") -> Response:
+def create_migration(request: Request, cluster: Cluster, volume: Volume, parameters: _MigrationParams, response_format: CreationResponseFormatParameter = "full") -> Response:
     try:
         migration_id, connect_strings = migration_controller.create_migration(
             str(volume.get_id()),
