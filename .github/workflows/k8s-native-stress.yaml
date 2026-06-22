@@ -105,6 +105,11 @@ on:
         required: false
         default: true
         type: boolean
+      preserve_resources_on_failure:
+        description: 'Preserve PVCs, FIO pods, snapshots on test failure for debugging'
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   stress-test:
@@ -121,6 +126,9 @@ jobs:
       SSH_USER: ${{ github.event.inputs.ssh_user || 'root' }}
       SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
     steps:
+      - name: Fix workspace permissions
+        run: sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" 2>/dev/null || true
+
       - name: Checkout code
         uses: actions/checkout@v4
 
@@ -426,56 +434,58 @@ jobs:
             PVC_TIMEOUT=$((PVC_TIMEOUT - 5))
           done
 
-          # If PVCs are still stuck, patch finalizers and force delete
-          for PVC in $(kubectl -n $NAMESPACE get pvc --no-headers -o custom-columns=:metadata.name 2>/dev/null); do
-            echo "Force-deleting stuck PVC: $PVC"
-            kubectl -n $NAMESPACE patch pvc "$PVC" \
-              --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
-            kubectl -n $NAMESPACE delete pvc "$PVC" --force --grace-period=0 2>/dev/null || true
-          done
+          STUCK_PVCS=$(kubectl -n $NAMESPACE get pvc --no-headers -o custom-columns=:metadata.name 2>/dev/null)
+          if [ -n "$STUCK_PVCS" ]; then
+            echo "Patching finalizers on stuck PVCs..."
+            echo "$STUCK_PVCS" | while read PVC; do
+              kubectl -n $NAMESPACE patch pvc "$PVC" \
+                --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null &
+            done
+            wait
+            kubectl -n $NAMESPACE delete pvc --all --force --grace-period=0 --wait=false 2>/dev/null || true
+            echo "PVC force-delete issued"
+          fi
 
           echo "=== Phase 3c: Delete PVs ==="
-          for PV in $(kubectl get pv --no-headers -o custom-columns=:metadata.name 2>/dev/null | grep -i simplyblock 2>/dev/null); do
-            kubectl patch pv "$PV" \
-              --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
-            kubectl delete pv "$PV" --force --grace-period=0 2>/dev/null || true
-          done
+          PV_LIST=$(kubectl get pv --no-headers -o custom-columns=NAME:.metadata.name,CLAIM:.spec.claimRef.namespace 2>/dev/null \
+            | grep -v -E '\bvault\b' 2>/dev/null | awk '{print $1}')
+          if [ -n "$PV_LIST" ]; then
+            echo "Patching finalizers on $(echo "$PV_LIST" | wc -l) PVs..."
+            echo "$PV_LIST" | while read PV; do
+              kubectl patch pv "$PV" \
+                --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null &
+            done
+            wait
+            echo "$PV_LIST" | while read PV; do
+              kubectl delete pv "$PV" --force --grace-period=0 --wait=false 2>/dev/null &
+            done
+            wait
+            echo "PV force-delete issued"
+          fi
 
           echo "=== Phase 3d: Force delete remaining namespaced resources ==="
           for RTYPE in pod jobs service ds statefulset deployment replicaset secret sa configmap; do
             kubectl -n $NAMESPACE delete $RTYPE --all --force --grace-period=0 2>/dev/null || true
           done
 
-          # echo "=== Phase 4: Cleanup cluster-scoped resources ==="
-          # Delete StorageClasses
-          # for SC in $(kubectl get sc --no-headers -o custom-columns=:metadata.name 2>/dev/null | grep -i simplyblock 2>/dev/null); do
-          #   kubectl delete sc "$SC" --ignore-not-found 2>/dev/null || true
-          # done
-          # kubectl delete clusterrole simplyblock-storage-node-role --ignore-not-found 2>/dev/null || true
-          # kubectl delete clusterrolebinding simplyblock-storage-node-binding --ignore-not-found 2>/dev/null || true
-
-          # echo "=== Phase 4b: Cleanup leftover secrets, SAs, and kube-system resources ==="
-          # kubectl -n $NAMESPACE delete secret simplyblock-csi-secret-v2 --ignore-not-found 2>/dev/null || true
-          # kubectl -n $NAMESPACE delete sa simplyblock-storage-node-sa --ignore-not-found 2>/dev/null || true
-
-          # # Clean up kube-system resources from previous helm installs
-          # for RES in sa clusterrole clusterrolebinding; do
-          #   for NAME in $(kubectl get $RES -A --no-headers 2>/dev/null | grep -i simplyblock | awk '{print $1 ":" $2}' 2>/dev/null); do
-          #     NS=$(echo "$NAME" | cut -d: -f1)
-          #     RNAME=$(echo "$NAME" | cut -d: -f2)
-          #     if [ "$RES" = "sa" ]; then
-          #       kubectl -n "$NS" delete sa "$RNAME" --ignore-not-found 2>/dev/null || true
-          #     else
-          #       kubectl delete "$RES" "$RNAME" --ignore-not-found 2>/dev/null || true
-          #     fi
-          #   done
-          # done
-          # # Specifically clean numa-resource-plugin resources in kube-system
-          # kubectl -n kube-system delete ds simplyblock-numa-resource-plugin --ignore-not-found 2>/dev/null || true
-          # kubectl -n kube-system delete sa simplyblock-numa-resource-plugin --ignore-not-found 2>/dev/null || true
-          # kubectl -n kube-system delete cm simplyblock-numa-resource-plugin-config --ignore-not-found 2>/dev/null || true
-          # kubectl delete clusterrole simplyblock-numa-resource-plugin --ignore-not-found 2>/dev/null || true
-          # kubectl delete clusterrolebinding simplyblock-numa-resource-plugin --ignore-not-found 2>/dev/null || true
+          echo "=== Phase 4: Cleanup cluster-scoped and kube-system resources ==="
+          for SC in $(kubectl get sc --no-headers -o custom-columns=:metadata.name 2>/dev/null | grep -i simplyblock 2>/dev/null); do
+            kubectl delete sc "$SC" --ignore-not-found 2>/dev/null || true
+          done
+          kubectl delete clusterrole simplyblock-storage-node-role --ignore-not-found 2>/dev/null || true
+          kubectl delete clusterrolebinding simplyblock-storage-node-binding --ignore-not-found 2>/dev/null || true
+          # Clean up simplyblock resources in kube-system (snapshot-controller, numa-plugin, etc.)
+          for RTYPE in deployment service ds sa configmap; do
+            for NAME in $(kubectl -n kube-system get $RTYPE --no-headers -o custom-columns=:metadata.name 2>/dev/null | grep -i simplyblock 2>/dev/null); do
+              kubectl -n kube-system delete $RTYPE "$NAME" --ignore-not-found 2>/dev/null || true
+            done
+          done
+          # Clean up simplyblock clusterroles and clusterrolebindings
+          for RES in clusterrole clusterrolebinding; do
+            for NAME in $(kubectl get $RES --no-headers -o custom-columns=:metadata.name 2>/dev/null | grep -i simplyblock 2>/dev/null); do
+              kubectl delete $RES "$NAME" --ignore-not-found 2>/dev/null || true
+            done
+          done
 
           echo "=== Phase 5: Verify nothing remains ==="
           echo "Namespaced resources:"
@@ -523,7 +533,42 @@ jobs:
           done
 
           echo "=== Phase 8: Delete CRDs ==="
-          kubectl delete -f $GITHUB_WORKSPACE/helm-charts/charts/simplyblock-operator/crds/ --ignore-not-found 2>/dev/null || true
+          # Clear finalizers on all remaining CR instances so CRD deletion doesn't hang
+          for crd in $(kubectl get crd -o name 2>/dev/null | grep simplyblock); do
+            crd_name="${crd#customresourcedefinition.apiextensions.k8s.io/}"
+            for cr in $(kubectl get "$crd_name" -A --no-headers -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name 2>/dev/null); do
+              IFS=' ' read -r ns name <<< "$cr"
+              kubectl patch "$crd_name" "$name" -n "$ns" --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
+            done
+            kubectl patch crd "$crd_name" --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
+          done
+          kubectl delete -f $GITHUB_WORKSPACE/helm-charts/charts/simplyblock-operator/crds/ --ignore-not-found --timeout=60s 2>/dev/null || true
+          # Force-delete any CRDs that survived the timeout
+          for crd in $(kubectl get crd -o name 2>/dev/null | grep simplyblock); do
+            crd_name="${crd#customresourcedefinition.apiextensions.k8s.io/}"
+            kubectl patch crd "$crd_name" --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
+            kubectl delete crd "$crd_name" --ignore-not-found --timeout=30s 2>/dev/null || true
+          done
+
+          echo "=== Phase 9: Reset hugepages and restart kubelet on worker nodes ==="
+          CLUSTER_ENV="${{ github.event.inputs.cluster_environment || 'local' }}"
+          IFS=',' read -ra NODES <<< "${{ github.event.inputs.worker_nodes }}"
+          for NODE in "${NODES[@]}"; do
+            echo "Resetting hugepages to 0 on $NODE..."
+            if [[ "$CLUSTER_ENV" == *"openshift"* ]]; then
+              oc debug node/"$NODE" -- chroot /host bash -c \
+                "echo 0 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages" 2>/dev/null || true
+              echo "Restarting kubelet on $NODE..."
+              oc debug node/"$NODE" -- chroot /host systemctl restart kubelet 2>/dev/null || true
+            else
+              kubectl debug node/"$NODE" -q --image=busybox:latest -- chroot /host sh -c \
+                "echo 0 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages" 2>/dev/null || true
+              echo "Restarting kubelet on $NODE..."
+              kubectl debug node/"$NODE" -q --image=busybox:latest -- chroot /host sh -c \
+                "systemctl restart kubelet" 2>/dev/null || true
+            fi
+            echo "Done with $NODE"
+          done
 
           echo "=== Cleanup complete ==="
 
@@ -544,6 +589,8 @@ jobs:
           set +e
           echo "=== Uninstalling KMS (openbao) ==="
           helm uninstall openbao -n vault 2>/dev/null || true
+          # Remove Helm release secrets in case uninstall left a broken/pending state
+          kubectl delete secret -n vault -l name=openbao,owner=helm 2>/dev/null || true
           kubectl delete namespace vault --wait=false 2>/dev/null || true
           echo "Waiting for vault namespace to be deleted..."
           kubectl wait --for=delete namespace/vault --timeout=120s 2>/dev/null || true
@@ -747,6 +794,32 @@ jobs:
       - name: Setup KMS (vault) for encryption
         if: ${{ github.event.inputs.use_existing_cluster != 'true' && github.event.inputs.tls_enabled == 'true' }}
         run: |
+          # Ensure vault namespace from previous run is fully terminated before installing.
+          echo "Checking if vault namespace is still terminating..."
+          for i in $(seq 1 60); do
+            NS_STATUS=$(kubectl get namespace vault -o jsonpath='{.status.phase}' 2>/dev/null || echo "gone")
+            if [ "$NS_STATUS" = "gone" ]; then
+              echo "vault namespace does not exist — ready to install."
+              break
+            fi
+            if [ "$NS_STATUS" = "Terminating" ]; then
+              echo "vault namespace still Terminating ($i/60), clearing stuck finalizers..."
+              kubectl get all -n vault --no-headers -o name 2>/dev/null | while read -r res; do
+                kubectl patch "$res" -n vault --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
+              done
+              kubectl patch namespace vault --type=merge -p '{"spec":{"finalizers":[]}}' 2>/dev/null || true
+            else
+              echo "vault namespace in phase '$NS_STATUS' ($i/60), waiting..."
+            fi
+            sleep 5
+          done
+          if kubectl get namespace vault &>/dev/null; then
+            echo "WARNING: vault namespace still exists after 300s, force-deleting resources..."
+            kubectl delete all --all -n vault --force --grace-period=0 2>/dev/null || true
+            kubectl delete namespace vault --force --grace-period=0 2>/dev/null || true
+            sleep 10
+          fi
+
           # Auto-detect default StorageClass for vault PVCs
           STORAGE_CLASS=$(kubectl get sc -o jsonpath='{.items[?(@.metadata.annotations.storageclass\.kubernetes\.io/is-default-class=="true")].metadata.name}' | awk '{print $1}')
           if [ -z "$STORAGE_CLASS" ]; then
@@ -760,6 +833,23 @@ jobs:
           echo "Waiting for vault pods to be ready..."
           kubectl wait --for=condition=Ready pods -l app.kubernetes.io/name=openbao -n vault --timeout=300s || true
           echo "KMS setup complete."
+
+      - name: Cleanup stale CSI hostpath data on worker nodes
+        if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
+        run: |
+          CLUSTER_ENV="${{ github.event.inputs.cluster_environment || 'local' }}"
+          IFS=',' read -ra NODES <<< "${{ github.event.inputs.worker_nodes }}"
+          for NODE in "${NODES[@]}"; do
+            echo "Cleaning stale CSI hostpath data on $NODE..."
+            if [[ "$CLUSTER_ENV" == *"openshift"* ]]; then
+              oc debug node/"$NODE" -- chroot /host bash -c \
+                "find /var/lib/csi-hostpath-data -mindepth 1 -maxdepth 1 -type d -mtime +2 -exec rm -rf {} \;" 2>/dev/null || true
+            else
+              kubectl debug node/"$NODE" -q --image=busybox:latest -- chroot /host sh -c \
+                "find /var/lib/csi-hostpath-data -mindepth 1 -maxdepth 1 -type d -mtime +2 -exec rm -rf {} \;" 2>/dev/null || true
+            fi
+          done
+          echo "CSI hostpath data cleanup complete."
 
       - name: Apply operator custom resources
         if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
@@ -1162,7 +1252,7 @@ jobs:
             cid=$(echo "$output" | awk 'NR==4{print $2}')
             csecret=$(echo "$output" | awk 'NR==4{print $NF}')
             if [ -z "$cid" ] || [ "$cid" = "+" ]; then
-              echo "Table parsing failed, trying JSON..."
+              echo "Table parsing failed, trying JSON..." >&2
               local json_out
               json_out=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
                 sbctl cluster list --json 2>&1) || true
@@ -1172,7 +1262,7 @@ jobs:
             if [ -n "$cid" ] && [ "$cid" != "+" ]; then
               echo "CLUSTER_ID=${cid}" >> $GITHUB_ENV
               echo "CLUSTER_SECRET=${csecret}" >> $GITHUB_ENV
-              echo "Extracted CLUSTER_ID=${cid}"
+              echo "Extracted CLUSTER_ID=${cid}" >&2
             fi
             echo "$cid"
           }
@@ -1265,9 +1355,14 @@ jobs:
             TESTNAME="--testname ${{ github.event.inputs.testname }}"
           fi
 
+          PRESERVE_ARG=""
+          if [ "${{ github.event.inputs.preserve_resources_on_failure }}" = "true" ]; then
+            PRESERVE_ARG="--preserve_resources_on_failure True"
+          fi
+
           python3 -u stress.py $TESTNAME \
             --ndcs $NDCS --npcs $NPCS --bs $BS --chunk_bs $CHUNK_BS \
-            --run_k8s True --tls_enabled ${{ github.event.inputs.tls_enabled }} 2>&1 | tee output.log
+            --run_k8s True --tls_enabled ${{ github.event.inputs.tls_enabled }} $PRESERVE_ARG 2>&1 | tee output.log
         env:
           NDCS: ${{ env.NDCS }}
           NPCS: ${{ env.NPCS }}
@@ -1303,9 +1398,14 @@ jobs:
           echo "TEST_TIME_MINS=$TEST_TIME_MINS" >> $GITHUB_ENV
           echo "TEST_TIME_SECS=$TEST_TIME_SECS" >> $GITHUB_ENV
 
+          # Log collection timeout: half the test runtime, minimum 30 minutes
+          LOG_COLLECT_TIMEOUT_MINS=$(( (TEST_TIME + 119) / 120 ))
+          [ "$LOG_COLLECT_TIMEOUT_MINS" -lt 30 ] && LOG_COLLECT_TIMEOUT_MINS=30
+          echo "LOG_COLLECT_TIMEOUT_MINS=$LOG_COLLECT_TIMEOUT_MINS" >> $GITHUB_ENV
+
       - name: Collect Graylog/OpenSearch logs
-        if: always()
-        timeout-minutes: 240
+        if: '!cancelled()'
+        timeout-minutes: ${{ fromJSON(env.LOG_COLLECT_TIMEOUT_MINS || '240') }}
         run: |
           set +e
           echo "=== Collecting Graylog/OpenSearch logs (per-hour chunks) ==="

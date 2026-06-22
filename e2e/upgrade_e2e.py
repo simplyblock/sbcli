@@ -64,6 +64,11 @@ def main():
             test_obj.fetch_all_nodes_distrib_log()
             if i == (len(test_class_run) - 1) or check_for_dumps():
                 test_obj.collect_management_details()
+            if not args.run_k8s:
+                all_nodes = test_obj._get_all_nodes()
+                test_obj.ssh_obj.collect_final_docker_logs_simple(all_nodes, test_obj.docker_logs_path)
+            test_obj.export_graylog_logs()
+            test_obj.extract_delay_qpair_logs()
             test_obj.teardown()
             # pass
         except Exception as _:

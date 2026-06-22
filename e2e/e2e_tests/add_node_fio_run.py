@@ -1,6 +1,5 @@
 import os
 from datetime import datetime
-from pathlib import Path
 import threading
 from e2e_tests.cluster_test_base import TestClusterBase, generate_random_sequence
 from utils.common_utils import sleep_n_sec
@@ -12,7 +11,6 @@ class TestAddNodesDuringFioRun(TestClusterBase):
         self.new_nodes = kwargs.get("new_nodes")
         self.test_name = "add_nodes_during_fio"
         self.mount_base = "/mnt/"
-        self.log_base = f"{Path.home()}/"
         self.logger.info(f"New Nodes to Add: {self.new_nodes}")
 
     def run(self):
@@ -26,7 +24,7 @@ class TestAddNodesDuringFioRun(TestClusterBase):
         for i, _ in enumerate(self.storage_nodes):
             lvol_name = f"lvl_{generate_random_sequence(4)}{i}"
             mount_path = f"{self.mount_base}/{lvol_name}"
-            log_path = f"{self.log_base}/{lvol_name}.log"
+            log_path = f"{self.log_path}/{lvol_name}.log"
 
             node_uuid = self.sbcli_utils.get_node_without_lvols()
 
@@ -91,7 +89,7 @@ class TestAddNodesDuringFioRun(TestClusterBase):
                 self.ssh_obj.exec_command(self.mgmt_nodes[0], connect_str)
 
             cl_mount_path = f"{self.mount_base}/{clone_name}"
-            cl_log_path = f"{self.log_base}/{clone_name}.log"
+            cl_log_path = f"{self.log_path}/{clone_name}.log"
 
             lvol_details[lvol_name]["Clone"]["ID"] = clone_id
             lvol_details[lvol_name]["Clone"]["Snapshot"] = snapshot_name
@@ -199,7 +197,7 @@ class TestAddNodesDuringFioRun(TestClusterBase):
         for node in new_nodes_id:
             lvol_name = f"lvl_{generate_random_sequence(4)}_nn"
             mount_path = f"{self.mount_base}/{lvol_name}"
-            log_path = f"{self.log_base}/{lvol_name}.log"
+            log_path = f"{self.log_path}/{lvol_name}.log"
 
             self.sbcli_utils.add_lvol(lvol_name, self.pool_name, size="10G",
                                       distr_ndcs=self.ndcs, distr_npcs=self.npcs,
@@ -262,7 +260,7 @@ class TestAddNodesDuringFioRun(TestClusterBase):
                 self.ssh_obj.exec_command(self.mgmt_nodes[0], connect_str)
 
             cl_mount_path = f"{self.mount_base}/{clone_name}"
-            cl_log_path = f"{self.log_base}/{clone_name}.log"
+            cl_log_path = f"{self.log_path}/{clone_name}.log"
 
             lvol_details[lvol_name]["Clone"]["ID"] = clone_id
             lvol_details[lvol_name]["Clone"]["Snapshot"] = snapshot_name
@@ -317,7 +315,6 @@ class TestAddK8sNodesDuringFioRun(TestClusterBase):
         self.k3s_mnode = kwargs.get("k3s_mnode")
         self.storage_pool_name = self.pool_name # Taking from base class
         self.mount_base = "/mnt/"
-        self.log_base = f"{Path.home()}/"
         self.namespace = kwargs.get("namespace", None)
         self.test_name = "add_nodes_during_fio_k8s"
         self.logger.info(f"New Nodes to Add: {self.new_nodes}")
@@ -426,7 +423,7 @@ class TestAddK8sNodesDuringFioRun(TestClusterBase):
         for i, _ in enumerate(self.storage_nodes):
             lvol_name = f"lvl_{generate_random_sequence(4)}{i}"
             mount_path = f"{self.mount_base}/{lvol_name}"
-            log_path = f"{self.log_base}/{lvol_name}.log"
+            log_path = f"{self.log_path}/{lvol_name}.log"
 
             node_uuid = self.sbcli_utils.get_node_without_lvols()
 
@@ -491,7 +488,7 @@ class TestAddK8sNodesDuringFioRun(TestClusterBase):
                 self.ssh_obj.exec_command(self.mgmt_nodes[0], connect_str)
 
             cl_mount_path = f"{self.mount_base}/{clone_name}"
-            cl_log_path = f"{self.log_base}/{clone_name}.log"
+            cl_log_path = f"{self.log_path}/{clone_name}.log"
 
             lvol_details[lvol_name]["Clone"]["ID"] = clone_id
             lvol_details[lvol_name]["Clone"]["Snapshot"] = snapshot_name
@@ -588,7 +585,7 @@ class TestAddK8sNodesDuringFioRun(TestClusterBase):
         for node in new_nodes_id:
             lvol_name = f"lvl_{generate_random_sequence(4)}_nn"
             mount_path = f"{self.mount_base}/{lvol_name}"
-            log_path = f"{self.log_base}/{lvol_name}.log"
+            log_path = f"{self.log_path}/{lvol_name}.log"
 
             self.sbcli_utils.add_lvol(lvol_name, self.pool_name, size="10G",
                                       distr_ndcs=self.ndcs, distr_npcs=self.npcs,
@@ -651,7 +648,7 @@ class TestAddK8sNodesDuringFioRun(TestClusterBase):
                 self.ssh_obj.exec_command(self.mgmt_nodes[0], connect_str)
 
             cl_mount_path = f"{self.mount_base}/{clone_name}"
-            cl_log_path = f"{self.log_base}/{clone_name}.log"
+            cl_log_path = f"{self.log_path}/{clone_name}.log"
 
             lvol_details[lvol_name]["Clone"]["ID"] = clone_id
             lvol_details[lvol_name]["Clone"]["Snapshot"] = snapshot_name

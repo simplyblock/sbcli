@@ -30,9 +30,9 @@ class TestStressLvolCloneClusterFioRun(TestLvolHACluster):
         self.lvol_name = f"lvl{random_char(3)}"
         self.clone_name = f"cln{random_char(3)}"
         self.snapshot_name = f"snap{random_char(3)}"
-        self.lvol_size = "10G"
-        self.int_lvol_size = 10
-        self.fio_size = "1G"
+        self.lvol_size = "100G"
+        self.int_lvol_size = 100
+        self.fio_numjobs = 5
         self.fio_threads = []
         self.clone_mount_details = {}
         self.lvol_mount_details = {}
@@ -60,8 +60,6 @@ class TestStressLvolCloneClusterFioRun(TestLvolHACluster):
                 pool_name=self.pool_name,
                 size=self.lvol_size,
                 crypto=is_crypto,
-                key1=self.lvol_crypt_keys[0],
-                key2=self.lvol_crypt_keys[1],
             )
             self.lvol_mount_details[lvol_name] = {
                    "ID": self.sbcli_utils.get_lvol_id(lvol_name),
@@ -205,7 +203,9 @@ class TestStressLvolCloneClusterFioRun(TestLvolHACluster):
             
             sleep_n_sec(10)
 
-            self.ssh_obj.delete_files(client, [f"{mount_point}/*fio*"])
+            # Delete ALL inherited data from parent so the clone has enough
+            # free space for its own FIO run (not just *fio* — catches all files).
+            self.ssh_obj.exec_command(client, f"sudo rm -rf {mount_point}/*")
             self.ssh_obj.delete_files(client, [f"{self.log_path}/local-{clone_name}_fio*"])
             self.ssh_obj.delete_files(client, [f"{self.log_path}/{clone_name}_fio_iolog"])
 
@@ -375,6 +375,7 @@ class TestStressLvolCloneClusterFioRun(TestLvolHACluster):
 
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
 
+        self._compute_fio_size(extra_lvols=self.total_lvols)
         self.create_lvols_with_fio(self.total_lvols)
         storage_nodes = self.sbcli_utils.get_storage_nodes()
 
@@ -390,6 +391,7 @@ class TestStressLvolCloneClusterFioRun(TestLvolHACluster):
             validation_thread.start()
             sleep_n_sec(600)
             self.delete_random_lvols(3)
+            self._compute_fio_size(extra_lvols=2)
             self.create_lvols_with_fio(2)
             self.create_snapshots_and_clones()
 

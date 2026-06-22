@@ -240,8 +240,6 @@ class RandomMultiClientFailoverNamespaceTest(RandomMultiClientFailoverTest):
                         pool_name=self.pool_name,
                         size=self.lvol_size,
                         crypto=is_crypto,
-                        key1=self.lvol_crypt_keys[0],
-                        key2=self.lvol_crypt_keys[1],
                         host_id=parent_host_id_used,
                         max_namespace_per_subsys=self.max_namespace_per_subsys,
                     )
@@ -262,8 +260,6 @@ class RandomMultiClientFailoverNamespaceTest(RandomMultiClientFailoverTest):
                         pool_name=self.pool_name,
                         size=self.lvol_size,
                         crypto=is_crypto,
-                        key1=self.lvol_crypt_keys[0],
-                        key2=self.lvol_crypt_keys[1],
                         host_id=parent_host_id_used,
                         max_namespace_per_subsys=self.max_namespace_per_subsys,
                     )
@@ -274,8 +270,6 @@ class RandomMultiClientFailoverNamespaceTest(RandomMultiClientFailoverTest):
                         pool_name=self.pool_name,
                         size=self.lvol_size,
                         crypto=is_crypto,
-                        key1=self.lvol_crypt_keys[0],
-                        key2=self.lvol_crypt_keys[1],
                         max_namespace_per_subsys=self.max_namespace_per_subsys,
                     )
             except Exception as e:
@@ -379,8 +373,6 @@ class RandomMultiClientFailoverNamespaceTest(RandomMultiClientFailoverTest):
                         pool_name=self.pool_name,
                         size=self.lvol_size,
                         crypto=is_crypto,
-                        key1=self.lvol_crypt_keys[0],
-                        key2=self.lvol_crypt_keys[1],
                         host_id=parent_host_id_used,
                         namespace=parent_id,
                     )
