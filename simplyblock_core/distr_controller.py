@@ -229,7 +229,11 @@ def get_distr_cluster_map(snodes, target_node, distr_name=""):
                 dev_w_map[dev.cluster_device_order] = {"weight": dev_w_gib, "id": -1}
             else:
                 dev_w_map[dev.cluster_device_order] = {"weight": dev_w_gib, "id": dev.cluster_device_order}
-                node_w += dev_w_gib
+            # Keep the failed device's weight in the node total so the parent (node) weight
+            # stays constant across full-map regens. id=-1 already marks the slot dead to the
+            # data plane; dropping its weight here would shrink the node's share of the
+            # placement tree and trigger a full-cluster rebalance on the next distr_send_cluster_map.
+            node_w += dev_w_gib
 
         node_status = snode.status
         if node_status == StorageNode.STATUS_SCHEDULABLE:

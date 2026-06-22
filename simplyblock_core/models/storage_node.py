@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 from uuid import uuid4
 
-from simplyblock_core import utils
+from simplyblock_core import utils, constants
 from simplyblock_core.models.base_model import BaseNodeObject, BaseModel
 from simplyblock_core.models.hublvol import HubLVol
 from simplyblock_core.models.iface import IFace
@@ -98,6 +98,12 @@ class StorageNode(BaseNodeObject):
     # status). Used to apply a grace window before a DOWN node counts toward the
     # cluster suspend threshold — a transient DOWN must not suspend the cluster.
     down_since: str = ""
+    # ISO timestamp of when this node entered STATUS_IN_SHUTDOWN (cleared on any
+    # other status). The monitor uses it to reconcile a node stranded in
+    # in_shutdown back to OFFLINE if the shutdown never completed and its SPDK is
+    # dead — defense against a lost-update reverting the offline flip (incident
+    # 2026-06-18).
+    shutdown_since: str = ""
     partitions_count: int = 0  # Unused
     poller_cpu_cores: List[int] = []
     ssd_pcie: List = []
@@ -139,6 +145,7 @@ class StorageNode(BaseNodeObject):
     firewall_port: int = 5001
     lvol_poller_mask: str = ""
     spdk_proxy_image: str = ""
+    transfer_hublvol: HubLVol = None  # type: ignore[assignment]
 
     def get_lvol_subsys_port(self, lvs_name=None):
         """Get the client-facing NVMeoF port for a specific lvstore.
@@ -333,6 +340,65 @@ class StorageNode(BaseNodeObject):
 
         self.write_to_db()
         return self.hublvol
+
+    def create_transfer_hublvol(self):
+        """Create a hublvol for this node's transfer lvstore."""
+        logger.info(f'Creating transfer hublvol on {self.get_id()}')
+
+        if not self.transfer_hublvol or not self.transfer_hublvol.bdev_name:
+
+            ctrl_name = "transferhub"
+            mig_hub_bdev = f"{self.lvstore}/{ctrl_name}"
+            mig_hub_nqn = f"{constants.CLUSTER_NQN}:{self.cluster_id}:{ctrl_name}:{self.lvstore}"
+
+            self.transfer_hublvol = HubLVol({
+                'nqn': mig_hub_nqn,
+                'bdev_name': mig_hub_bdev,
+                'model_number': str(uuid4()),
+                'nguid': utils.generate_hex_string(16),
+                'nvmf_port': self.hublvol.nvmf_port,
+                'hublvol_name': ctrl_name,
+            })
+
+        rpc_client = self.rpc_client()
+        transfer_hub_uuid = None
+        try:
+            existing = rpc_client.get_bdevs(self.transfer_hublvol.bdev_name)
+            if not existing:
+                transfer_hub_uuid = rpc_client.bdev_lvol_create_hublvol(
+                    self.lvstore, name=self.transfer_hublvol.hublvol_name)
+                if not transfer_hub_uuid:
+                    return None, None, f"Failed to create migration hublvol on {self.get_id()}"
+                logger.info(
+                    f"_ensure_hub_attached: created  name={self.transfer_hublvol.bdev_name} uuid={transfer_hub_uuid}")
+            else:
+                transfer_hub_uuid = existing[0].get('uuid', '') if existing else ''
+                logger.info(f"_ensure_hub_attached: reusing existing {self.transfer_hublvol.bdev_name}")
+
+            self.transfer_hublvol.uuid = transfer_hub_uuid
+
+            self.expose_bdev(
+                    nqn=self.transfer_hublvol.nqn,
+                    bdev_name=self.transfer_hublvol.bdev_name,
+                    model_number=self.transfer_hublvol.model_number,
+                    uuid=self.transfer_hublvol.uuid,
+                    nguid=self.transfer_hublvol.nguid,
+                    port=self.transfer_hublvol.nvmf_port,
+                    ana_state="optimized",
+            )
+        except RPCException:
+            if transfer_hub_uuid is not None and rpc_client.get_bdevs(transfer_hub_uuid):
+                rpc_client.bdev_lvol_delete_hublvol(transfer_hub_uuid)
+
+            if self.transfer_hublvol and rpc_client.subsystem_list(self.transfer_hublvol.nqn):
+                rpc_client.subsystem_delete(self.transfer_hublvol.nqn)
+                self.transfer_hublvol = None  # type: ignore[assignment]
+
+            raise
+
+        self.write_to_db()
+        return self.transfer_hublvol
+
 
     def create_secondary_hublvol(self, primary_node, cluster_nqn):
         """Create and expose a hublvol on this node for a LVStore where this node is sec_1.

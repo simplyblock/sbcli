@@ -56,7 +56,7 @@ def claim_task(task, owner=None):
     now = str(datetime.datetime.now(datetime.timezone.utc))
 
     def _mutate(t):
-        if t.status == JobSchedule.STATUS_DONE or t.canceled:
+        if t.status == JobSchedule.STATUS_DONE:
             return False  # not claimable; decision stays False
         if t.owner and t.owner != owner and not _task_lease_is_stale(t):
             return False  # owned by another live host
@@ -139,6 +139,15 @@ def _add_task(function_name, cluster_id, node_id, device_id,
     elif function_name == JobSchedule.FN_SNAPSHOT_REPLICATION:
         task_id = get_snapshot_replication_task(
             cluster_id, function_params['snapshot_id'], function_params['replicate_to_source'])
+        if task_id:
+            logger.info(f"Task found, skip adding new task: {task_id}")
+            return False
+
+    elif function_name == JobSchedule.FN_CLUSTER_EXPAND:
+        # One expansion per cluster at a time: the orchestrator freezes the
+        # role rotation while it runs, so a second concurrent expansion would
+        # plan against a moving target.
+        task_id = get_active_cluster_expand_task(cluster_id)
         if task_id:
             logger.info(f"Task found, skip adding new task: {task_id}")
             return False
@@ -484,6 +493,26 @@ def get_active_node_removal_task(cluster_id, node_id):
         if task.function_name == JobSchedule.FN_NODE_REMOVAL and task.node_id == node_id:
             if task.status != JobSchedule.STATUS_DONE and task.canceled is False:
                 return task.uuid
+    return False
+
+
+def add_cluster_expand_task(cluster_id, new_node_id):
+    """Queue a single-node cluster-expansion task. The runner drives the
+    planner/orchestrator/executor to integrate ``new_node_id`` into the
+    role rotation, resuming from a persisted cursor across retries."""
+    return _add_task(
+        JobSchedule.FN_CLUSTER_EXPAND, cluster_id, new_node_id, "",
+        function_params={"new_node_id": new_node_id}, max_retry=3)
+
+
+def get_active_cluster_expand_task(cluster_id):
+    """Return the UUID of an active (non-done, non-cancelled) cluster
+    expansion task for the cluster, or False if none."""
+    for task in db.get_job_tasks(cluster_id):
+        if task.function_name == JobSchedule.FN_CLUSTER_EXPAND \
+                and task.canceled is False \
+                and task.status != JobSchedule.STATUS_DONE:
+            return task.uuid
     return False
 
 

@@ -1,19 +1,20 @@
-from typing import Annotated, List, Optional
+from typing import List, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel
 
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.controllers import backup_controller
-from simplyblock_core.models.backup import BackupPolicy
 from simplyblock_core.models.cluster import Cluster as ClusterModel
 from simplyblock_core.models.lvol_model import LVol
 
-from .cluster import Cluster
-from .dtos import BackupDTO, BackupPolicyDTO
+from .._dependencies import BackupResource, Cluster, Policy
+from .._dtos import BackupDTO, BackupPolicyDTO
+from ..util import CreationResponseFormatParameter, creation_response
 
-api = APIRouter(prefix='/backups')
+
+api = APIRouter()
 db = DBController()
 
 
@@ -29,12 +30,20 @@ class _BackupSnapshotParams(BaseModel):
 
 
 @api.post('/', name='clusters:backups:create', status_code=201, responses={201: {"content": None}})
-def create_backup(cluster: Cluster, parameters: _BackupSnapshotParams) -> Response:
+def create_backup(request: Request, cluster: Cluster, parameters: _BackupSnapshotParams, response_format: CreationResponseFormatParameter = "empty") -> Response:
     backup_id, error = backup_controller.backup_snapshot(
         parameters.snapshot_id, cluster_id=cluster.get_id())
     if error:
         raise HTTPException(400, error)
-    return Response(status_code=201, headers={'X-Backup-Id': backup_id})
+
+    return creation_response(
+        request, response_format,
+        entity_id=UUID(backup_id),
+        route_name='clusters:backups:detail',
+        route_kwargs={'cluster_id': UUID(cluster.get_id()), 'backup_id': UUID(backup_id)},
+        get_full=lambda id: BackupDTO.from_model(db.get_backup_by_id(str(id))),
+        extra_headers={'X-Backup-Id': backup_id},  # For backwards compatibility
+    )
 
 
 class _RestoreParams(BaseModel):
@@ -55,7 +64,7 @@ def restore_backup(cluster: Cluster, parameters: _RestoreParams):
 
 
 class _ImportParams(BaseModel):
-    metadata: list
+    metadata: list[dict]
 
 
 @api.post('/import', name='clusters:backups:import')
@@ -135,7 +144,7 @@ def delete_backups(cluster: Cluster, volume_id: UUID) -> Response:
 
 # Backup policies
 
-policy_api = APIRouter(prefix='/backup-policies')
+policy_api = APIRouter()
 
 
 @policy_api.get('/', name='clusters:backup-policies:list')
@@ -161,19 +170,6 @@ def create_policy(cluster: Cluster, parameters: _PolicyCreateParams) -> Response
     if error:
         raise HTTPException(400, error)
     return Response(status_code=201, headers={'X-Policy-Id': policy_id})
-
-
-def _lookup_backup_policy(policy_id: UUID, cluster: Cluster) -> BackupPolicy:
-    try:
-        policy = db.get_backup_policy_by_id(str(policy_id))
-    except KeyError as e:
-        raise HTTPException(404, str(e))
-    if policy.cluster_id != cluster.get_id():
-        raise HTTPException(404, f'BackupPolicy {policy_id} not found')
-    return policy
-
-
-Policy = Annotated[BackupPolicy, Depends(_lookup_backup_policy)]
 
 
 def _validate_attachment_target(target_type: str, target_id: str, cluster: ClusterModel) -> None:
@@ -219,3 +215,17 @@ def detach_policy(cluster: Cluster, policy: Policy, parameters: _AttachParams) -
     if error:
         raise HTTPException(400, error)
     return Response(status_code=204)
+
+
+api.include_router(policy_api, prefix='/backup-policies')
+
+
+instance_api = APIRouter(prefix='/{backup_id}')
+
+
+@instance_api.get('/', name='clusters:backups:detail')
+def get_backup(cluster: Cluster, backup: BackupResource) -> BackupDTO:
+    return BackupDTO.from_model(backup)
+
+
+api.include_router(instance_api)

@@ -555,13 +555,6 @@ def _check_node_lvstore(
                                                     f"remote_{dev.alceml_bdev}", dev, node,
                                                     bdev_names=node_bdev_names, reattach=False)
                                                 if remote_bdev:
-                                                    new_remote_devices = []
-                                                    n = db_controller.get_storage_node_by_id(node.get_id())
-                                                    for rem_dev in n.remote_devices:
-                                                        if dev.get_id() == rem_dev.get_id():
-                                                            continue
-                                                        new_remote_devices.append(rem_dev)
-
                                                     remote_device = RemoteDevice()
                                                     remote_device.uuid = dev.uuid
                                                     remote_device.alceml_name = dev.alceml_name
@@ -570,9 +563,18 @@ def _check_node_lvstore(
                                                     remote_device.status = NVMeDevice.STATUS_ONLINE
                                                     remote_device.nvmf_multipath = dev.nvmf_multipath
                                                     remote_device.remote_bdev = remote_bdev
-                                                    new_remote_devices.append(remote_device)
-                                                    n.remote_devices = new_remote_devices
-                                                    n.write_to_db()
+
+                                                    # Atomic: rebuild remote_devices on the freshly-read node
+                                                    # inside the FDB tx so a concurrent node.status change is
+                                                    # not clobbered (incident 2026-06-18).
+                                                    def _mut(nn, did=dev.get_id(), rd=remote_device):
+                                                        nn.remote_devices = [
+                                                            r for r in nn.remote_devices if r.get_id() != did]
+                                                        nn.remote_devices.append(rd)
+                                                        return True
+
+                                                    db_controller.atomic_update(
+                                                        db_controller.get_storage_node_by_id(node.get_id()), _mut)
                                                     distr_controller.send_dev_status_event(dev, dev.status, node)
                                             except Exception as e:
                                                 logger.error(f"Failed to connect to {dev.get_id()}: {e}")
@@ -969,6 +971,10 @@ def check_lvol_on_node(lvol_id, node_id, node_bdev_names=None, node_lvols_nqns=N
             if ret:
                 for bdev in ret:
                     node_bdev_names[bdev['name']] = bdev
+                    if "aliases" in bdev and bdev["aliases"]:
+                        alias = bdev["aliases"][0]
+                        node_bdev_names[alias] = bdev
+
         except Exception as e:
             logger.error(f"Failed to connect to node's SPDK: {e}")
 
@@ -988,8 +994,10 @@ def check_lvol_on_node(lvol_id, node_id, node_bdev_names=None, node_lvols_nqns=N
             bdev_name = bdev_info['name']
             if bdev_info['type'] in ["bdev_lvol", "bdev_lvol_clone"]:
                 bdev_name = lvol.lvol_uuid
-
-            passed &= check_bdev(bdev_name, bdev_names=node_bdev_names)
+            bdev_check = check_bdev(bdev_name, bdev_names=node_bdev_names)
+            if not bdev_check:
+                bdev_check = check_bdev(lvol.top_bdev, bdev_names=node_bdev_names)
+            passed &= bdev_check
 
         passed &= check_subsystem(lvol.nqn, nqns=node_lvols_nqns, ns_uuid=lvol.uuid)
 

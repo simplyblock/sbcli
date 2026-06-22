@@ -1058,6 +1058,14 @@ class SshUtils:
             verify_backlog_batch = 32
         vbatch_opt = f" --verify_backlog_batch={verify_backlog_batch}" if verify_backlog_batch else ""
 
+        # Pre-flight: check free space and auto-adjust FIO size if needed
+        target_path = directory or device
+        if target_path and not kwargs.get("skip_space_check"):
+            try:
+                size = self.check_fio_space(node, target_path, size, numjobs)
+            except Exception as exc:
+                self.logger.warning(f"[space_check] Non-fatal error: {exc}")
+
         # raw fio command
         fio_cmd = (
             f"fio --name={name} {location} --ioengine={ioengine} --direct=1 --iodepth={iodepth} "
@@ -1555,6 +1563,77 @@ class SshUtils:
                 else:
                     self.logger.info(f"Checksum match for file: {file}")
 
+    def get_mount_free_gb(self, node, path):
+        """Return free space in GB for the filesystem containing *path*."""
+        # df --output=avail gives available 1K-blocks; convert to GB
+        # Use max_retries=3 to handle transient SSH failures when many
+        # parallel FIO launches all run df at the same time.
+        out, _ = self.exec_command(
+            node, f"df --output=avail -B1G '{path}' | tail -1",
+            max_retries=3)
+        try:
+            return int(out.strip())
+        except (ValueError, TypeError):
+            return None
+
+    @staticmethod
+    def _parse_size_to_gb(size_str):
+        """Convert a FIO size string (e.g. ``"5G"``, ``"500M"``) to float GB."""
+        s = str(size_str).strip().upper()
+        if s.endswith("G"):
+            return float(s[:-1])
+        if s.endswith("M"):
+            return float(s[:-1]) / 1024
+        if s.endswith("T"):
+            return float(s[:-1]) * 1024
+        return float(s) / (1024 ** 3)  # assume bytes
+
+    def check_fio_space(self, node, mount_point, fio_size_str, numjobs):
+        """Check free space and return an adjusted FIO size if needed.
+
+        If the mount has enough room for ``fio_size_str * numjobs``, the
+        original size string is returned unchanged.  Otherwise the size is
+        reduced so that ``new_size * numjobs`` fits within 80 % of the
+        available space (leaving headroom for FS metadata).
+
+        Returns:
+            The (possibly reduced) FIO ``--size`` value as a string, e.g.
+            ``"5G"`` or ``"2G"``.
+        """
+        size_gb = self._parse_size_to_gb(fio_size_str)
+        needed_gb = size_gb * numjobs
+
+        avail_gb = self.get_mount_free_gb(node, mount_point)
+        if avail_gb is None:
+            # df failed — cap FIO size at 70% of the requested size to
+            # avoid filling thin-provisioned lvols to 100%.  This is a
+            # conservative fallback; the normal path uses actual df data.
+            safe_gb = max(1, int(size_gb * 0.70))
+            safe_str = f"{safe_gb}G"
+            self.logger.warning(
+                f"[space_check] Could not determine free space on "
+                f"{node}:{mount_point} — capping size "
+                f"{fio_size_str} -> {safe_str} (70% safety cap)")
+            return safe_str
+
+        self.logger.info(
+            f"[space_check] {node}:{mount_point} — "
+            f"available={avail_gb}G, needed={needed_gb:.1f}G "
+            f"(size={fio_size_str} x {numjobs} jobs)")
+
+        if avail_gb >= needed_gb:
+            return fio_size_str
+
+        # Reduce: use 80% of available space divided across jobs (min 1G)
+        usable_gb = avail_gb * 0.80
+        new_size_gb = max(1, int(usable_gb / max(1, numjobs)))
+        new_size_str = f"{new_size_gb}G"
+        self.logger.warning(
+            f"[space_check] Adjusting FIO size: {fio_size_str} -> "
+            f"{new_size_str} on {node}:{mount_point} "
+            f"(available={avail_gb}G, jobs={numjobs})")
+        return new_size_str
+
     def delete_files(self, node, files):
         for file in files:
             command = f"sudo rm -f {file}"
@@ -1634,12 +1713,12 @@ class SshUtils:
             max_prov_gb (int): Maximum provision size in GB.
             ifname (str): Mgmt Interface (Default: eth0)
         """
-        cmd = f"pip install git+https://github.com/simplyblock-io/sbcli.git@{branch}"
+        cmd = f"pip install --force-reinstall --no-deps git+https://github.com/simplyblock-io/sbcli.git@{branch}"
         self.exec_command(node=node, command=cmd)
 
         time.sleep(10)
 
-        configure_cmd = f"{self.base_cmd} -d sn configure --max-lvol {max_lvol} --max-size {max_prov_gb}G"
+        configure_cmd = f"{self.base_cmd} -d sn configure --max-subsys {max_lvol}"
         deploy_cmd = f"{self.base_cmd} sn deploy --ifname {ifname}"
         
         self.logger.info(f"Deploying storage node: {node}")
@@ -1949,6 +2028,18 @@ class SshUtils:
                     f"\"sudo docker logs --timestamps {c} > '{cont_dir}/docker_logs_{sc}_{ts}.log.tmp' 2>&1 || true; "
                     f"mv -f '{cont_dir}/docker_logs_{sc}_{ts}.log.tmp' '{cont_dir}/docker_logs_{sc}_{ts}.log' || true\""
                 )
+
+                # Extract delay-qpair entries from SPDK container logs for quick analysis
+                if re.match(r'^spdk_\d+$', c):
+                    self.exec_command(
+                        node,
+                        "bash -lc "
+                        f"\"grep -E 'nvmf_tcp_dump_delay_req_status|delay-qpair' "
+                        f"'{cont_dir}/docker_logs_{sc}_{ts}.log' "
+                        f"> '{cont_dir}/delay_qpair_{sc}_{ts}.log' 2>/dev/null; "
+                        f"[ -s '{cont_dir}/delay_qpair_{sc}_{ts}.log' ] || "
+                        f"rm -f '{cont_dir}/delay_qpair_{sc}_{ts}.log'\""
+                    )
 
                 # docker inspect (JSON)
                 self.exec_command(
@@ -2640,52 +2731,73 @@ class SshUtils:
 
     def fetch_distrib_logs(self, storage_node_ip, storage_node_id, logs_path,
                            validate_async=False, error_sink=None):
-        self.logger.info(f"Fetching distrib logs for Storage Node ID: {storage_node_id} on {storage_node_ip}")
+        # Skipping distrib dump fetch — distr_debug_placement_map_dump RPC
+        # times out on degraded distribs (non-leader / blocked JMs), blocking
+        # the diagnostics thread and delaying recovery.
+        self.logger.warning(
+            f"Skipping fetch_distrib_logs for node {storage_node_id} on "
+            f"{storage_node_ip} (disabled — causes RPC timeout on degraded distribs)"
+        )
+        return True
 
-        # 0) Find SPDK container name
+        # 0) Find ALL SPDK containers on this host (dual-node hosts have 2)
         find_container_cmd = "sudo docker ps --format '{{.Names}}' | grep -E '^spdk_[0-9]+$' || true"
         container_name_out, _ = self.exec_command(storage_node_ip, find_container_cmd)
-        container_name = (container_name_out or "").strip()
-        if not container_name:
+        containers = [c.strip() for c in (container_name_out or "").strip().splitlines() if c.strip()]
+        if not containers:
             self.logger.warning(f"No SPDK container found on {storage_node_ip}")
             return True
 
-        # 1) Get bdevs via correct sock 
+        self.logger.info(f"[{storage_node_ip}] Found SPDK containers: {containers}")
+
         timestamp = datetime.now().strftime("%Y%m%d_%H-%M-%S")
-        base_path = f"{logs_path}/{storage_node_ip}/distrib_bdev_logs"
-        self.exec_command(storage_node_ip, f"sudo mkdir -p '{base_path}' && sudo chmod -R 777 '{base_path}'")
-        bdev_cmd = (
-            f"sudo docker exec {container_name} bash -lc "
-            f"\"python spdk/scripts/rpc.py -s /mnt/ramdisk/{container_name}/spdk.sock bdev_get_bdevs\""
-        )
-        bdev_output, bdev_err = self.exec_command(storage_node_ip, bdev_cmd)
-        if (bdev_err and bdev_err.strip()) and not bdev_output:
-            self.logger.error(f"bdev_get_bdevs error on {storage_node_ip}: {bdev_err.strip()}")
-            return True
+        # Include node_id in path so dual-node hosts get separate directories
+        node_id_short = storage_node_id[:8] if len(storage_node_id) > 8 else storage_node_id
+        node_base_path = f"{logs_path}/{storage_node_ip}_{node_id_short}/distrib_bdev_logs"
 
-        # Parse distrib names
-        try:
-            bdevs = json.loads(bdev_output)
-            distribs = sorted({
-                b.get("name", "")
-                for b in bdevs
-                if isinstance(b, dict) and str(b.get("name","")).startswith("distrib_")
-            })
-        except json.JSONDecodeError as e:
-            self.logger.error(f"JSON parsing failed on {storage_node_ip}: {e}")
-            return True
-        if not distribs:
-            self.logger.warning(f"No distrib_* bdevs found on {storage_node_ip}.")
-            return True
-        self.logger.info(f"[{storage_node_ip}] Distributions: {distribs}")
+        all_distribs = {}  # container_name -> list of distribs
+        all_base_paths = {}  # container_name -> base_path
 
-        # 2) Run multiple docker exec in parallel from ONE SSH exec
-        distrib_list_str = " ".join(shlex.quote(d) for d in distribs)
-        remote_tar = f"/tmp/distrib_logs_{timestamp}.tar.gz"
+        for container_name in containers:
+            # Per-container subdirectory
+            base_path = f"{node_base_path}/{container_name}"
+            all_base_paths[container_name] = base_path
+            self.exec_command(storage_node_ip, f"sudo mkdir -p '{base_path}' && sudo chmod -R 777 '{base_path}'")
 
-        # IMPORTANT: This script runs on the HOST and spawns many `docker exec ... &` in parallel.
-        # It throttles with MAXJ, waits, then tars outputs from /tmp inside the container into one tarball on the host.
-        remote_script = f"""\
+            # 1) Get bdevs via correct sock
+            bdev_cmd = (
+                f"sudo docker exec {container_name} bash -lc "
+                f"\"sudo python spdk/scripts/rpc.py -s /mnt/ramdisk/{container_name}/spdk.sock bdev_get_bdevs\""
+            )
+            bdev_output, bdev_err = self.exec_command(storage_node_ip, bdev_cmd)
+            if (bdev_err and bdev_err.strip()) and not bdev_output:
+                self.logger.error(f"bdev_get_bdevs error on {storage_node_ip} ({container_name}): {bdev_err.strip()}")
+                continue
+
+            # Parse distrib names
+            try:
+                bdevs = json.loads(bdev_output)
+                distribs = sorted({
+                    b.get("name", "")
+                    for b in bdevs
+                    if isinstance(b, dict) and str(b.get("name","")).startswith("distrib_")
+                })
+            except json.JSONDecodeError as e:
+                self.logger.error(f"JSON parsing failed on {storage_node_ip} ({container_name}): {e}")
+                continue
+            if not distribs:
+                self.logger.warning(f"No distrib_* bdevs found on {storage_node_ip} ({container_name}).")
+                continue
+            self.logger.info(f"[{storage_node_ip}/{container_name}] Distributions: {distribs}")
+            all_distribs[container_name] = distribs
+
+            # 2) Run multiple docker exec in parallel from ONE SSH exec
+            distrib_list_str = " ".join(shlex.quote(d) for d in distribs)
+            remote_tar = f"/tmp/distrib_logs_{container_name}_{timestamp}.tar.gz"
+
+            # IMPORTANT: This script runs on the HOST and spawns many `docker exec ... &` in parallel.
+            # It throttles with MAXJ, waits, then tars outputs from /tmp inside the container into one tarball on the host.
+            remote_script = f"""\
 set -euo pipefail
 CN={shlex.quote(container_name)}
 SOCK="/mnt/ramdisk/$CN/spdk.sock"
@@ -2695,7 +2807,7 @@ WORKDIR_HOST="{base_path}"
 mkdir -p "$WORKDIR_HOST"
 
 # Make a temporary host folder to collect per-distrib files copied out of the container
-HOST_STAGING="/tmp/distrib_host_collect_$TS"
+HOST_STAGING="/tmp/distrib_host_collect_{container_name}_$TS"
 mkdir -p "$HOST_STAGING"
 
 pids=()
@@ -2726,17 +2838,17 @@ EOF_JSON
     sudo docker cp "$JF" "$CN:/tmp/stack_${{d}}.json"
 
     # Run rpc inside container (socket path respected)
-    sudo docker exec "$CN" bash -lc "python scripts/rpc_sock.py /tmp/stack_${{d}}.json {shlex.quote('/mnt/ramdisk/'+container_name+'/spdk.sock')} > /tmp/rpc_${{d}}.log 2>&1 || true"
+    sudo docker exec "$CN" bash -lc "sudo python scripts/rpc_sock.py /tmp/stack_${{d}}.json {shlex.quote('/mnt/ramdisk/'+container_name+'/spdk.sock')} > /tmp/rpc_${{d}}.log 2>&1 || true"
 
     # Copy any files for this distrib out to host staging (rpc log + any matching /tmp/*d*)
     sudo docker cp "$CN:/tmp/rpc_${{d}}.log" "$HOST_STAGING/rpc_${{d}}.log" 2>/dev/null || true
     # try to pull any distrib-related artifacts
-    for f in $(sudo docker exec "$CN" bash -lc "ls /tmp/ 2>/dev/null | grep -F \"$d\" || true"); do
+    for f in $(sudo docker exec "$CN" bash -lc "sudo ls /tmp/ 2>/dev/null | grep -F \"$d\" || true"); do
       sudo docker cp "$CN:/tmp/$f" "$HOST_STAGING/$f" 2>/dev/null || true
     done
 
     # cleanup container temp for this distrib
-    sudo docker exec "$CN" bash -lc "rm -f /tmp/stack_${{d}}.json /tmp/rpc_${{d}}.log" || true
+    sudo docker exec "$CN" bash -lc "sudo rm -f /tmp/stack_${{d}}.json /tmp/rpc_${{d}}.log" || true
     rm -f "$JF" || true
   ) &
 
@@ -2760,57 +2872,65 @@ rm -rf "$HOST_STAGING" || true
 echo "$WORKDIR_HOST/{os.path.basename(remote_tar)}"
 """
 
-        run_many_cmd = "bash -lc " + shlex.quote(remote_script)
-        tar_out, tar_err = self.exec_command(storage_node_ip, run_many_cmd)
-        if (tar_err and tar_err.strip()) and not tar_out:
-            self.logger.error(f"[{storage_node_ip}] Parallel docker-exec script error: {tar_err.strip()}")
+            run_many_cmd = "bash -lc " + shlex.quote(remote_script)
+            tar_out, tar_err = self.exec_command(storage_node_ip, run_many_cmd)
+            if (tar_err and tar_err.strip()) and not tar_out:
+                self.logger.error(f"[{storage_node_ip}/{container_name}] Parallel docker-exec script error: {tar_err.strip()}")
+                continue
+
+            final_tar = (tar_out or "").strip().splitlines()[-1] if tar_out else f"{base_path}/{os.path.basename(remote_tar)}"
+            self.logger.info(f"[{storage_node_ip}/{container_name}] Distrib logs saved: {base_path} (tar: {final_tar})")
+
+        if not all_distribs:
+            self.logger.warning(f"No distribs found across any container on {storage_node_ip}")
             return True
 
-        final_tar = (tar_out or "").strip().splitlines()[-1] if tar_out else f"{base_path}/{os.path.basename(remote_tar)}"
-        self.logger.info(f"[{storage_node_ip}] Distrib logs saved: {base_path} (tar: {final_tar})")
-
         # ------------------------------
-        # Validate placement dump files
+        # Validate placement dump files (per container)
         # ------------------------------
         if validate_async:
-            # Run validation in background — each file gets up to 1 hour to appear.
-            # Raises ValueError immediately if a file exists but has no lpgi data.
-            # Any failure is appended to error_sink for the caller to check later.
             _sink = error_sink if error_sink is not None else []
             _node_ip = storage_node_ip
+            _all_distribs = dict(all_distribs)
+            _all_base_paths = dict(all_base_paths)
 
             def _bg_validate():
-                try:
-                    ok = self._validate_distrib_dumps(base_path, distribs, timeout=3600)
-                    if not ok:
-                        msg = (
-                            f"[PLACEMENT_DUMP] Validation FAILED for {_node_ip} "
-                            f"(file missing after 1 hour): {base_path}"
-                        )
+                for cn, distribs in _all_distribs.items():
+                    bp = _all_base_paths[cn]
+                    try:
+                        ok = self._validate_distrib_dumps(bp, distribs, timeout=3600)
+                        if not ok:
+                            msg = (
+                                f"[PLACEMENT_DUMP] Validation FAILED for {_node_ip}/{cn} "
+                                f"(file missing after 1 hour): {bp}"
+                            )
+                            self.logger.error(msg)
+                            _sink.append(msg)
+                        else:
+                            self.logger.info(f"[{_node_ip}/{cn}] Placement dump validation passed (async).")
+                    except ValueError as e:
+                        self.logger.error(str(e))
+                        _sink.append(str(e))
+                    except Exception as e:
+                        msg = f"[PLACEMENT_DUMP] Unexpected error for {_node_ip}/{cn}: {e}"
                         self.logger.error(msg)
                         _sink.append(msg)
-                    else:
-                        self.logger.info(f"[{_node_ip}] Placement dump validation passed (async).")
-                except ValueError as e:
-                    # Corrupt data — fail immediately
-                    self.logger.error(str(e))
-                    _sink.append(str(e))
-                except Exception as e:
-                    msg = f"[PLACEMENT_DUMP] Unexpected error for {_node_ip}: {e}"
-                    self.logger.error(msg)
-                    _sink.append(msg)
 
             t = threading.Thread(target=_bg_validate, daemon=True)
             t.start()
             return t
 
-        ok = self._validate_distrib_dumps(base_path, distribs)
-        if not ok:
-            self.logger.error(f"[{storage_node_ip}] Placement dump validation FAILED.")
-            return False
+        overall_ok = True
+        for cn, distribs in all_distribs.items():
+            bp = all_base_paths[cn]
+            ok = self._validate_distrib_dumps(bp, distribs)
+            if not ok:
+                self.logger.error(f"[{storage_node_ip}/{cn}] Placement dump validation FAILED.")
+                overall_ok = False
+            else:
+                self.logger.info(f"[{storage_node_ip}/{cn}] Placement dump validation passed.")
 
-        self.logger.info(f"[{storage_node_ip}] Placement dump validation passed.")
-        return True
+        return overall_ok
 
     def clone_mount_gen_uuid(self, node, device):
         """Repair the XFS filesystem and generate a new UUID.
@@ -2939,6 +3059,43 @@ echo "$WORKDIR_HOST/{os.path.basename(remote_tar)}"
         self.exec_command(node_ip, stop_command)
         self.logger.info(f"Stopped all tshark processes on {node_ip}")
 
+    def start_full_pcap_capture(self, node_ip, log_dir, interface="any",
+                                max_size_mb=500, max_files=3):
+        """Start full packet capture in pcap format with file rotation.
+
+        Captures all packets on the given interface.  Files rotate at
+        *max_size_mb* MB, keeping at most *max_files* rotated files
+        (total max disk = max_size_mb * max_files per node).
+
+        Args:
+            node_ip: Target node IP.
+            log_dir: Directory to write pcap files into.
+            interface: Network interface (default ``any``).
+            max_size_mb: Rotate file after this many MB.
+            max_files: Maximum number of rotated files to keep.
+        """
+        self.check_and_install_tcpdump(node_ip)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        pcap_file = f"{log_dir}/full_capture_{node_ip}_{timestamp}.pcap"
+        cmd = (
+            f"sudo tmux new-session -d -s full_pcap_session "
+            f"\"tcpdump -i {interface} -w {pcap_file} "
+            f"-C {max_size_mb} -W {max_files} 2>&1\""
+        )
+        self.exec_command(node_ip, cmd)
+        self.logger.info(
+            f"Started full pcap capture on {node_ip} -> {pcap_file} "
+            f"(rotate={max_size_mb}MB x{max_files})"
+        )
+
+    def stop_full_pcap_capture(self, node_ip):
+        """Stop the full pcap capture tmux session on a node."""
+        self.exec_command(
+            node_ip,
+            "sudo tmux kill-session -t full_pcap_session 2>/dev/null || true",
+        )
+        self.logger.info(f"Stopped full pcap capture on {node_ip}")
+
     def get_dmesg_logs_within_iso_window(self, node_ip, start_iso, end_iso):
         """
         Fetch dmesg logs with ISO timestamps on a remote node within a time window.
@@ -3027,22 +3184,24 @@ echo "$WORKDIR_HOST/{os.path.basename(remote_tar)}"
             container_name_output, _ = self.exec_command(node_ip, find_container_cmd)
 
             if container_name_output:
-                container_name = container_name_output.strip()
-                # Commands to run inside the SPDK container
-                iptables_reset_cmds = [
-                    f"sudo docker exec {container_name} iptables -L -v -n",
-                    f"sudo docker exec {container_name} iptables -P INPUT ACCEPT",
-                    f"sudo docker exec {container_name} iptables -P OUTPUT ACCEPT",
-                    f"sudo docker exec {container_name} iptables -P FORWARD ACCEPT",
-                    f"sudo docker exec {container_name} iptables -F",
-                    f"sudo docker exec {container_name} iptables -L -v -n"
-                ]
+                containers = [c.strip() for c in container_name_output.strip().splitlines() if c.strip()]
+                for container_name in containers:
+                    self.logger.info(f"Resetting iptables in container {container_name} on {node_ip}.")
+                    # Commands to run inside the SPDK container
+                    iptables_reset_cmds = [
+                        f"sudo docker exec {container_name} sudo iptables -L -v -n",
+                        f"sudo docker exec {container_name} sudo iptables -P INPUT ACCEPT",
+                        f"sudo docker exec {container_name} sudo iptables -P OUTPUT ACCEPT",
+                        f"sudo docker exec {container_name} sudo iptables -P FORWARD ACCEPT",
+                        f"sudo docker exec {container_name} sudo iptables -F",
+                        f"sudo docker exec {container_name} sudo iptables -L -v -n"
+                    ]
 
-                # Execute each command
-                for cmd in iptables_reset_cmds:
-                    self.exec_command(node_ip, cmd)
+                    # Execute each command
+                    for cmd in iptables_reset_cmds:
+                        self.exec_command(node_ip, cmd)
 
-                self.logger.info(f"Successfully reset iptables inside SPDK container on {node_ip}.")
+                self.logger.info(f"Successfully reset iptables inside {len(containers)} SPDK container(s) on {node_ip}.")
             else:
                 self.logger.warning(f"No SPDK container found on {node_ip}")
         except Exception as e:
@@ -3599,7 +3758,7 @@ echo "$WORKDIR_HOST/{os.path.basename(remote_tar)}"
     #     return out, err
 
     def create_sec_lvol(self, node, lvol_name, size, pool,
-                        encrypt=False, key1=None, key2=None,
+                        encrypt=False,
                         distr_ndcs=0, distr_npcs=0, fabric="tcp",
                         allowed_hosts=None, sec_options=None):
         """
@@ -3613,8 +3772,8 @@ echo "$WORKDIR_HOST/{os.path.basename(remote_tar)}"
         Returns (stdout, stderr).
         """
         cmd = f"{self.base_cmd} -d volume add {lvol_name} {size} {pool}"
-        if encrypt and key1 and key2:
-            cmd += f" --encrypt --crypto-key1 {key1} --crypto-key2 {key2}"
+        if encrypt:
+            cmd += " --encrypt"
         if fabric and fabric != "tcp":
             cmd += f" --fabric {fabric}"
         if distr_ndcs and distr_npcs:
@@ -3738,6 +3897,8 @@ class RunnerK8sLog:
         self._monitor_thread = None
         self._monitor_stop_flag = threading.Event()
         self._pod_container_map = {}
+        self._resource_monitor_thread = None
+        self._resource_monitor_stop = threading.Event()
         self.logger = setup_logger(__name__)
 
         # Ensure log directory exists
@@ -3811,6 +3972,7 @@ class RunnerK8sLog:
             "simplyblock-manager",
             "simplyblock-mgmt-api-job",
             "simplyblock-monitoring",
+            "simplyblock-operator",
             "simplyblock-prometheus",
             "simplyblock-storage-node-controller",
             "simplyblock-storage-node-ds",
@@ -3908,6 +4070,7 @@ class RunnerK8sLog:
             "simplyblock-manager",
             "simplyblock-mgmt-api-job",
             "simplyblock-monitoring",
+            "simplyblock-operator",
             "simplyblock-prometheus",
             "simplyblock-storage-node-controller",
             "simplyblock-storage-node-ds",
@@ -3966,6 +4129,85 @@ class RunnerK8sLog:
             self._monitor_stop_flag.set()
             self._monitor_thread.join(timeout=10)
             print("K8s log monitor thread stopped.")
+
+    def start_resource_monitor(self, poll_interval=60):
+        """Start a background thread that periodically runs kubectl top pod/node.
+
+        Appends timestamped output to ``kubectl_top_resources.log`` in the
+        test's log directory every *poll_interval* seconds.  Errors (e.g.
+        metrics-server not ready) are captured in the log — they never crash
+        the test.
+        """
+        log_file = os.path.join(self.log_dir, "kubectl_top_resources.log")
+
+        def _monitor():
+            while not self._resource_monitor_stop.is_set():
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+                # kubectl top node
+                try:
+                    node_result = subprocess.run(
+                        ["kubectl", "top", "node", "--no-headers"],
+                        capture_output=True, text=True, timeout=30,
+                    )
+                    node_out = node_result.stdout.strip()
+                    node_err = node_result.stderr.strip()
+                except subprocess.TimeoutExpired:
+                    node_out, node_err = "", "TIMEOUT"
+                except Exception as exc:
+                    node_out, node_err = "", str(exc)
+
+                # kubectl top pod -A
+                try:
+                    pod_result = subprocess.run(
+                        ["kubectl", "top", "pod", "-A", "--no-headers"],
+                        capture_output=True, text=True, timeout=30,
+                    )
+                    pod_out = pod_result.stdout.strip()
+                    pod_err = pod_result.stderr.strip()
+                except subprocess.TimeoutExpired:
+                    pod_out, pod_err = "", "TIMEOUT"
+                except Exception as exc:
+                    pod_out, pod_err = "", str(exc)
+
+                try:
+                    with open(log_file, "a") as fh:
+                        fh.write(f"\n{'=' * 80}\n")
+                        fh.write(f"[{timestamp}] kubectl top node\n")
+                        fh.write(f"{'=' * 80}\n")
+                        if node_out:
+                            fh.write(node_out + "\n")
+                        if node_err:
+                            fh.write(f"STDERR: {node_err}\n")
+
+                        fh.write(f"\n{'-' * 80}\n")
+                        fh.write(f"[{timestamp}] kubectl top pod -A\n")
+                        fh.write(f"{'-' * 80}\n")
+                        if pod_out:
+                            fh.write(pod_out + "\n")
+                        if pod_err:
+                            fh.write(f"STDERR: {pod_err}\n")
+                except Exception:
+                    pass  # never crash the monitor on write failure
+
+                self._resource_monitor_stop.wait(timeout=poll_interval)
+
+        self._resource_monitor_stop.clear()
+        self._resource_monitor_thread = threading.Thread(
+            target=_monitor, name="K8sResourceMonitor", daemon=True,
+        )
+        self._resource_monitor_thread.start()
+        self.logger.info(
+            f"Started K8s resource monitor (interval={poll_interval}s, "
+            f"log={log_file})"
+        )
+
+    def stop_resource_monitor(self):
+        """Stop the background kubectl-top resource monitor thread."""
+        if self._resource_monitor_thread and self._resource_monitor_thread.is_alive():
+            self._resource_monitor_stop.set()
+            self._resource_monitor_thread.join(timeout=10)
+            self.logger.info("K8s resource monitor thread stopped.")
 
 def _rid(n=6):
     import string

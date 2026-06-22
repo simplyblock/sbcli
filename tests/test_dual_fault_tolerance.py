@@ -368,7 +368,7 @@ class TestApplyMigrationToDbDualSecondary(unittest.TestCase):
         return mock_db
 
     def test_nodes_includes_both_secondaries(self):
-        import simplyblock_core.controllers.migration_controller as ctl
+        import simplyblock_core.services.tasks_runner_lvol_migration as runner
 
         lvol = _lvol("lvol-1", "node-src")
         tgt = _node("node-tgt", hostname="host-tgt", lvstore="lvs_tgt",
@@ -378,14 +378,14 @@ class TestApplyMigrationToDbDualSecondary(unittest.TestCase):
                          target_node="node-tgt", snaps_migrated=[])
 
         mock_db = self._mock_db(lvol, tgt_node=tgt)
-        with patch.object(ctl, 'db', mock_db):
-            result = ctl.apply_migration_to_db(mig)
+        with patch.object(runner, 'db', mock_db):
+            result = runner._apply_migration_to_db(mig)
 
         assert result is True
         assert lvol.nodes == ["node-tgt", "sec-1", "sec-2"]
 
     def test_nodes_with_only_first_secondary(self):
-        import simplyblock_core.controllers.migration_controller as ctl
+        import simplyblock_core.services.tasks_runner_lvol_migration as runner
 
         lvol = _lvol("lvol-1", "node-src")
         tgt = _node("node-tgt", hostname="host-tgt", lvstore="lvs_tgt",
@@ -395,14 +395,14 @@ class TestApplyMigrationToDbDualSecondary(unittest.TestCase):
                          target_node="node-tgt", snaps_migrated=[])
 
         mock_db = self._mock_db(lvol, tgt_node=tgt)
-        with patch.object(ctl, 'db', mock_db):
-            result = ctl.apply_migration_to_db(mig)
+        with patch.object(runner, 'db', mock_db):
+            result = runner._apply_migration_to_db(mig)
 
         assert result is True
         assert lvol.nodes == ["node-tgt", "sec-1"]
 
     def test_nodes_with_no_secondary(self):
-        import simplyblock_core.controllers.migration_controller as ctl
+        import simplyblock_core.services.tasks_runner_lvol_migration as runner
 
         lvol = _lvol("lvol-1", "node-src")
         tgt = _node("node-tgt", hostname="host-tgt", lvstore="lvs_tgt")
@@ -411,8 +411,8 @@ class TestApplyMigrationToDbDualSecondary(unittest.TestCase):
                          target_node="node-tgt", snaps_migrated=[])
 
         mock_db = self._mock_db(lvol, tgt_node=tgt)
-        with patch.object(ctl, 'db', mock_db):
-            result = ctl.apply_migration_to_db(mig)
+        with patch.object(runner, 'db', mock_db):
+            result = runner._apply_migration_to_db(mig)
 
         assert result is True
         assert lvol.nodes == ["node-tgt"]
@@ -690,7 +690,7 @@ class TestCheckSecNodeHublvolPrimaryResolution(unittest.TestCase):
 class TestClusterDTO(unittest.TestCase):
 
     def test_dto_includes_max_fault_tolerance(self):
-        from simplyblock_web.api.v2.dtos import ClusterDTO
+        from simplyblock_web.api.v2._dtos import ClusterDTO
         c = _cluster(max_fault_tolerance=2)
         c.status = Cluster.STATUS_ACTIVE
         c.nqn = "nqn:test"
@@ -710,7 +710,7 @@ class TestClusterDTO(unittest.TestCase):
         assert dto.max_fault_tolerance == 2
 
     def test_dto_default_max_fault_tolerance(self):
-        from simplyblock_web.api.v2.dtos import ClusterDTO
+        from simplyblock_web.api.v2._dtos import ClusterDTO
         c = _cluster(max_fault_tolerance=1)
         c.status = Cluster.STATUS_ACTIVE
         c.nqn = "nqn:test"

@@ -1,8 +1,11 @@
+import json as _json
 import os
 import time
 import threading
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
+from pathlib import Path
 
 from e2e_tests.cluster_test_base import TestClusterBase, generate_random_sequence
 from utils.common_utils import sleep_n_sec
@@ -94,6 +97,11 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
         # clone_registry[clone_name] = { id, client, mount_path, snap_name, delete_state }
         self._clone_registry = {}
 
+        # Per-operation timing: list of (wall_ts, op_type, duration_sec, ok)
+        self._op_events: list[tuple] = []
+        # Inventory timeline: list of (wall_ts, lvols, snapshots, clones)
+        self._inventory_timeline: list[tuple] = []
+
         # Metrics
         self._metrics = {
             "start_ts": None,
@@ -157,6 +165,33 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
     def _inc(self, bucket: str, key: str, n: int = 1):
         with self._lock:
             self._metrics[bucket][key] += n
+
+    def _record_op(self, op: str, duration: float, ok: bool):
+        """Append a timing event (thread-safe)."""
+        with self._lock:
+            self._op_events.append((time.time(), op, duration, ok))
+
+    def _snapshot_inventory(self):
+        """Record current inventory counts (thread-safe)."""
+        with self._lock:
+            self._inventory_timeline.append((
+                time.time(),
+                len(self._lvol_registry),
+                len(self._snap_registry),
+                len(self._clone_registry),
+            ))
+
+    def _timed(self, op: str, fn, *args, **kwargs):
+        """Wrap a task function with timing collection."""
+        t0 = time.time()
+        ok = True
+        try:
+            return fn(*args, **kwargs)
+        except Exception:
+            ok = False
+            raise
+        finally:
+            self._record_op(op, time.time() - t0, ok)
 
     def _set_failure(self, op: str, exc: Exception, details: str = "", ctx: dict = None, api_err: dict = None):
         with self._lock:
@@ -1028,7 +1063,7 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
             idx = idx_counter["idx"]
             idx_counter["idx"] += 1
             lvol_name = f"lvl{generate_random_sequence(15)}_{idx}_{int(time.time())}"
-            f = ex.submit(lambda i=idx, n=lvol_name: self._task_create_lvol(i, n))
+            f = ex.submit(lambda i=idx, n=lvol_name: self._timed("create_lvol", self._task_create_lvol, i, n))
             create_f[f] = time.time()
 
     def _submit_snapshots(self, ex, snap_f: dict):
@@ -1053,7 +1088,7 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
 
             lvol_name, lvol_id = candidate
             snap_name = f"snap{generate_random_sequence(15)}_{int(time.time())}"
-            f = ex.submit(lambda ln=lvol_name, lid=lvol_id, sn=snap_name: self._task_create_snapshot(ln, lid, sn))
+            f = ex.submit(lambda ln=lvol_name, lid=lvol_id, sn=snap_name: self._timed("create_snapshot", self._task_create_snapshot, ln, lid, sn))
             snap_f[f] = time.time()
 
     def _submit_clones(self, ex, clone_f: dict):
@@ -1079,7 +1114,7 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
             snap_name, snap_id = candidate
             idx = int(time.time())
             clone_name = f"cln{generate_random_sequence(15)}_{idx}_{int(time.time())}"
-            f = ex.submit(lambda s=snap_name, sid=snap_id, i=idx, cn=clone_name: self._task_create_clone(s, sid, i, cn))
+            f = ex.submit(lambda s=snap_name, sid=snap_id, i=idx, cn=clone_name: self._timed("create_clone", self._task_create_clone, s, sid, i, cn))
             clone_f[f] = time.time()
 
     def _submit_snapshot_delete_trees(self, ex, snap_del_f: dict):
@@ -1088,7 +1123,7 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
                 if not self._snapshot_delete_tree_q:
                     return
                 sn = self._snapshot_delete_tree_q.popleft()
-            f = ex.submit(lambda sn=sn: self._task_delete_snapshot_tree(sn))
+            f = ex.submit(lambda sn=sn: self._timed("delete_snapshot_tree", self._task_delete_snapshot_tree, sn))
             snap_del_f[f] = time.time()
 
     def _submit_lvol_delete_trees(self, ex, lvol_del_f: dict):
@@ -1097,7 +1132,7 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
                 if not self._lvol_delete_tree_q:
                     return
                 ln = self._lvol_delete_tree_q.popleft()
-            f = ex.submit(lambda ln=ln: self._task_delete_lvol_tree(ln))
+            f = ex.submit(lambda ln=ln: self._timed("delete_lvol_tree", self._task_delete_lvol_tree, ln))
             lvol_del_f[f] = time.time()
 
     def _update_peaks(self, create_f, snap_f, clone_f, snap_del_f, lvol_del_f):
@@ -1195,6 +1230,269 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
             self.logger.info("===========================================================")
 
     # ----------------------------
+    # Monitoring JSON + Charts
+    # ----------------------------
+    def _write_monitoring_json(self):
+        """Persist metrics, per-op timing, and inventory timeline to JSON."""
+        out_dir = Path("logs")
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        with self._lock:
+            start_ts = self._metrics["start_ts"] or time.time()
+            end_ts = self._metrics["end_ts"] or time.time()
+            dur = end_ts - start_ts
+
+            # Build per-operation latency summaries
+            op_latencies: dict[str, list[float]] = {}
+            for _, op, duration, ok in self._op_events:
+                if ok:
+                    op_latencies.setdefault(op, []).append(duration)
+
+            op_summary = {}
+            for op, lats in op_latencies.items():
+                lats_sorted = sorted(lats)
+                n = len(lats_sorted)
+                op_summary[op] = {
+                    "count": n,
+                    "min": round(lats_sorted[0], 2) if n else 0,
+                    "max": round(lats_sorted[-1], 2) if n else 0,
+                    "avg": round(sum(lats_sorted) / n, 2) if n else 0,
+                    "p50": round(lats_sorted[n // 2], 2) if n else 0,
+                    "p90": round(lats_sorted[int(n * 0.9)], 2) if n else 0,
+                    "p99": round(lats_sorted[int(n * 0.99)], 2) if n else 0,
+                }
+
+            # Throughput: ops/min buckets
+            if self._op_events:
+                bucket_size = 60  # 1-minute buckets
+                throughput_buckets: dict[int, dict[str, int]] = {}
+                for ts, op, _, ok in self._op_events:
+                    if ok:
+                        bucket = int((ts - start_ts) // bucket_size)
+                        throughput_buckets.setdefault(bucket, {})
+                        throughput_buckets[bucket][op] = throughput_buckets[bucket].get(op, 0) + 1
+                throughput_timeline = [
+                    {"minute": b, **counts}
+                    for b, counts in sorted(throughput_buckets.items())
+                ]
+            else:
+                throughput_timeline = []
+
+            report = {
+                "test_class": self.__class__.__name__,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "status": "passed" if not self._metrics["failure_info"] else "failed",
+                "duration_sec": round(dur, 2),
+                "geometry": {"ndcs": self.ndcs, "npcs": self.npcs},
+                "config": {
+                    "create_inflight": self.CREATE_INFLIGHT,
+                    "snapshot_inflight": self.SNAPSHOT_INFLIGHT,
+                    "clone_inflight": self.CLONE_INFLIGHT,
+                    "total_inventory_max": self.TOTAL_INVENTORY_MAX,
+                    "total_delete_threshold": self.TOTAL_DELETE_THRESHOLD,
+                    "lvol_size": self.LVOL_SIZE,
+                },
+                "counts": dict(self._metrics["counts"]),
+                "attempts": dict(self._metrics["attempts"]),
+                "success": dict(self._metrics["success"]),
+                "failures": dict(self._metrics["failures"]),
+                "peak_inflight": dict(self._metrics["peak_inflight"]),
+                "op_latency_summary": op_summary,
+                "throughput_per_minute": throughput_timeline,
+                "op_events": [
+                    {"ts": round(ts - start_ts, 2), "op": op,
+                     "duration": round(d, 2), "ok": ok}
+                    for ts, op, d, ok in self._op_events
+                ],
+                "inventory_timeline": [
+                    {"ts": round(ts - start_ts, 2), "lvols": lv,
+                     "snapshots": sn, "clones": cl}
+                    for ts, lv, sn, cl in self._inventory_timeline
+                ],
+            }
+
+        out_path = out_dir / "parallel_lvol_snapshot_clone_timing.json"
+        with open(out_path, "w") as f:
+            _json.dump(report, f, indent=2)
+        self.logger.info(f"Monitoring JSON written to {out_path}")
+
+    def _generate_charts(self):
+        """Generate performance charts from collected timing data."""
+        out_dir = Path("logs")
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+        except ImportError:
+            self.logger.warning("matplotlib not available — skipping charts")
+            return
+
+        with self._lock:
+            start_ts = self._metrics["start_ts"] or 0
+            op_events = list(self._op_events)
+            inv_timeline = list(self._inventory_timeline)
+            counts = dict(self._metrics["counts"])
+
+        class_name = self.__class__.__name__
+
+        # --- Chart 1: Operation latency scatter ---
+        try:
+            if op_events:
+                fig, ax = plt.subplots(figsize=(14, 6))
+                op_colors = {
+                    "create_lvol": "#3498db",
+                    "create_snapshot": "#2ecc71",
+                    "create_clone": "#f39c12",
+                    "delete_snapshot_tree": "#e74c3c",
+                    "delete_lvol_tree": "#9b59b6",
+                }
+                for op, color in op_colors.items():
+                    pts = [(ts - start_ts, d) for ts, o, d, ok in op_events if o == op and ok]
+                    if pts:
+                        xs, ys = zip(*pts)
+                        ax.scatter(xs, ys, c=color, alpha=0.5, s=12, label=op)
+                ax.set_xlabel("Time (seconds since start)")
+                ax.set_ylabel("Duration (seconds)")
+                ax.set_title(f"{class_name} — Operation Latency Over Time")
+                ax.legend(fontsize=8, loc="upper right")
+                ax.grid(True, alpha=0.3)
+                plt.tight_layout()
+                fig.savefig(str(out_dir / "op_latency_scatter.png"), dpi=150)
+                plt.close(fig)
+                self.logger.info("Chart saved: op_latency_scatter.png")
+        except Exception as exc:
+            self.logger.warning(f"Latency scatter chart failed: {exc}")
+
+        # --- Chart 2: Inventory timeline (stacked area) ---
+        try:
+            if inv_timeline:
+                ts_vals = [t - start_ts for t, _, _, _ in inv_timeline]
+                lvols = [lv for _, lv, _, _ in inv_timeline]
+                snaps = [sn for _, _, sn, _ in inv_timeline]
+                clones = [cl for _, _, _, cl in inv_timeline]
+
+                fig, ax = plt.subplots(figsize=(14, 5))
+                ax.stackplot(ts_vals, lvols, snaps, clones,
+                             labels=["LVols", "Snapshots", "Clones"],
+                             colors=["#3498db", "#2ecc71", "#f39c12"], alpha=0.7)
+                ax.axhline(y=self.TOTAL_INVENTORY_MAX, color="red",
+                           linestyle="--", alpha=0.6, label=f"Max ({self.TOTAL_INVENTORY_MAX})")
+                ax.axhline(y=self.TOTAL_DELETE_THRESHOLD, color="orange",
+                           linestyle="--", alpha=0.6, label=f"Delete threshold ({self.TOTAL_DELETE_THRESHOLD})")
+                ax.set_xlabel("Time (seconds since start)")
+                ax.set_ylabel("Count")
+                ax.set_title(f"{class_name} — Inventory Over Time")
+                ax.legend(fontsize=8, loc="upper left")
+                ax.grid(True, alpha=0.3)
+                plt.tight_layout()
+                fig.savefig(str(out_dir / "inventory_timeline.png"), dpi=150)
+                plt.close(fig)
+                self.logger.info("Chart saved: inventory_timeline.png")
+        except Exception as exc:
+            self.logger.warning(f"Inventory timeline chart failed: {exc}")
+
+        # --- Chart 3: Throughput (ops/min bar chart) ---
+        try:
+            if op_events:
+                bucket_size = 60
+                buckets: dict[int, dict[str, int]] = {}
+                for ts, op, _, ok in op_events:
+                    if ok:
+                        b = int((ts - start_ts) // bucket_size)
+                        buckets.setdefault(b, {})
+                        buckets[b][op] = buckets[b].get(op, 0) + 1
+
+                if buckets:
+                    max_bucket = max(buckets.keys())
+                    minutes = list(range(max_bucket + 1))
+                    op_types = sorted({op for c in buckets.values() for op in c})
+                    op_colors_list = ["#3498db", "#2ecc71", "#f39c12", "#e74c3c", "#9b59b6"]
+
+                    fig, ax = plt.subplots(figsize=(14, 5))
+                    bottom = [0] * len(minutes)
+                    for i, op in enumerate(op_types):
+                        vals = [buckets.get(m, {}).get(op, 0) for m in minutes]
+                        color = op_colors_list[i % len(op_colors_list)]
+                        ax.bar(minutes, vals, bottom=bottom, label=op,
+                               color=color, alpha=0.8, width=0.8)
+                        bottom = [b + v for b, v in zip(bottom, vals)]
+                    ax.set_xlabel("Minute")
+                    ax.set_ylabel("Completed Operations")
+                    ax.set_title(f"{class_name} — Throughput (ops/min)")
+                    ax.legend(fontsize=8, loc="upper right")
+                    ax.grid(True, axis="y", alpha=0.3)
+                    plt.tight_layout()
+                    fig.savefig(str(out_dir / "throughput_per_minute.png"), dpi=150)
+                    plt.close(fig)
+                    self.logger.info("Chart saved: throughput_per_minute.png")
+        except Exception as exc:
+            self.logger.warning(f"Throughput chart failed: {exc}")
+
+        # --- Chart 4: Operations summary (total counts bar) ---
+        try:
+            creates = [
+                ("LVols created", counts.get("lvols_created", 0)),
+                ("Snapshots created", counts.get("snapshots_created", 0)),
+                ("Clones created", counts.get("clones_created", 0)),
+            ]
+            deletes = [
+                ("LVols deleted", counts.get("lvols_deleted", 0)),
+                ("Snapshots deleted", counts.get("snapshots_deleted", 0)),
+                ("Clones deleted", counts.get("clones_deleted", 0)),
+            ]
+            labels = [c[0] for c in creates] + [d[0] for d in deletes]
+            values = [c[1] for c in creates] + [d[1] for d in deletes]
+            colors = ["#3498db", "#2ecc71", "#f39c12", "#e74c3c", "#c0392b", "#d35400"]
+
+            fig, ax = plt.subplots(figsize=(10, 5))
+            bars = ax.bar(range(len(labels)), values, color=colors, alpha=0.8)
+            ax.set_xticks(range(len(labels)))
+            ax.set_xticklabels(labels, rotation=30, ha="right", fontsize=9)
+            ax.set_ylabel("Count")
+            ax.set_title(f"{class_name} — Total Operations")
+            for b, v in zip(bars, values):
+                if v > 0:
+                    ax.text(b.get_x() + b.get_width() / 2,
+                            b.get_height() + max(values) * 0.02,
+                            str(v), ha="center", va="bottom", fontsize=9)
+            ax.grid(True, axis="y", alpha=0.3)
+            plt.tight_layout()
+            fig.savefig(str(out_dir / "operations_summary.png"), dpi=150)
+            plt.close(fig)
+            self.logger.info("Chart saved: operations_summary.png")
+        except Exception as exc:
+            self.logger.warning(f"Operations summary chart failed: {exc}")
+
+        # --- Chart 5: Latency box plot per operation ---
+        try:
+            op_latencies: dict[str, list[float]] = {}
+            for _, op, d, ok in op_events:
+                if ok:
+                    op_latencies.setdefault(op, []).append(d)
+
+            if op_latencies:
+                fig, ax = plt.subplots(figsize=(10, 5))
+                ops = sorted(op_latencies.keys())
+                data = [op_latencies[op] for op in ops]
+                bp = ax.boxplot(data, tick_labels=ops, patch_artist=True)
+                box_colors = ["#3498db", "#2ecc71", "#f39c12", "#e74c3c", "#9b59b6"]
+                for i, patch in enumerate(bp["boxes"]):
+                    patch.set_facecolor(box_colors[i % len(box_colors)])
+                    patch.set_alpha(0.7)
+                ax.set_ylabel("Duration (seconds)")
+                ax.set_title(f"{class_name} — Latency Distribution Per Operation")
+                ax.tick_params(axis="x", rotation=30)
+                ax.grid(True, axis="y", alpha=0.3)
+                plt.tight_layout()
+                fig.savefig(str(out_dir / "latency_boxplot.png"), dpi=150)
+                plt.close(fig)
+                self.logger.info("Chart saved: latency_boxplot.png")
+        except Exception as exc:
+            self.logger.warning(f"Latency box plot failed: {exc}")
+
+    # ----------------------------
     # Main
     # ----------------------------
     def run(self):
@@ -1248,6 +1546,9 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
                         self._submit_snapshot_delete_trees(ex, snap_del_f)
                         self._submit_lvol_delete_trees(ex, lvol_del_f)
 
+                    # Record inventory snapshot every loop iteration
+                    self._snapshot_inventory()
+
                     # Update peaks and harvest
                     self._update_peaks(create_f, snap_f, clone_f, snap_del_f, lvol_del_f)
                     self._harvest_fail_fast(create_f)
@@ -1270,6 +1571,8 @@ class TestParallelLvolSnapshotCloneAPI(TestClusterBase):
 
         finally:
             self._print_summary()
+            self._write_monitoring_json()
+            self._generate_charts()
 
         with self._lock:
             failure_info = self._metrics["failure_info"]

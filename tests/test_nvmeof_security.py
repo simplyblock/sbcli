@@ -674,7 +674,7 @@ class TestConnectLvolTls(unittest.TestCase):
         result, _err = connect_lvol("lvol-1", host_nqn="nqn:host1")
         self.assertTrue(len(result) > 0)
         entry = result[0]
-        self.assertIn("--tls", entry["connect"])
+        self.assertIn("--tls", entry.connect)
 
     @patch("simplyblock_core.controllers.lvol_controller.DBController")
     def test_connect_without_tls_no_flag(self, MockDBCtrl):
@@ -699,8 +699,8 @@ class TestConnectLvolTls(unittest.TestCase):
         result, _err = connect_lvol("lvol-1")
         self.assertTrue(len(result) > 0)
         entry = result[0]
-        self.assertNotIn("tls", entry)
-        self.assertNotIn("--tls", entry["connect"])
+        self.assertFalse(entry.tls)
+        self.assertNotIn("--tls", entry.connect)
 
 
 # ---------------------------------------------------------------------------
@@ -895,8 +895,8 @@ class TestReapplyAllowedHosts(unittest.TestCase):
         mock_db.get_cluster_by_id.return_value = cl
         return mock_db
 
-    @patch("simplyblock_core.storage_node_ops.DBController")
-    @patch("simplyblock_core.controllers.lvol_controller._register_dhchap_keys_on_node")
+    @patch("simplyblock_core.controllers.host_auth.DBController")
+    @patch("simplyblock_core.controllers.host_auth._register_dhchap_keys_on_node")
     def test_reapply_hosts_with_dhchap_keys(self, mock_register, MockDB):
         """Hosts with DHCHAP keys get registered via keyring + subsystem_add_host."""
         MockDB.return_value = self._mock_db(tls=True,
@@ -927,11 +927,8 @@ class TestReapplyAllowedHosts(unittest.TestCase):
             dhchap_group="ffdhe2048",
         )
 
-    @patch("simplyblock_core.storage_node_ops._check_peer_disconnected", return_value=False)
-    @patch("simplyblock_core.storage_node_ops._set_restart_phase")
-    @patch("simplyblock_core.storage_node_ops._handle_rpc_failure_on_peer", return_value="skip")
-    @patch("simplyblock_core.storage_node_ops.DBController")
-    def test_reapply_hosts_without_keys(self, MockDB, _mock_disc, _mock_phase, _mock_handle):
+    @patch("simplyblock_core.controllers.host_auth.DBController")
+    def test_reapply_hosts_without_keys(self, MockDB):
         """Hosts without security keys get added with just the NQN."""
         MockDB.return_value = self._mock_db()
         mock_rpc = MagicMock()
@@ -945,12 +942,9 @@ class TestReapplyAllowedHosts(unittest.TestCase):
         mock_rpc.subsystem_add_host.assert_called_once_with(
             lvol.nqn, "nqn:plain-host")
 
-    @patch("simplyblock_core.storage_node_ops._check_peer_disconnected", return_value=False)
-    @patch("simplyblock_core.storage_node_ops._set_restart_phase")
-    @patch("simplyblock_core.storage_node_ops._handle_rpc_failure_on_peer", return_value="skip")
-    @patch("simplyblock_core.storage_node_ops.DBController")
-    @patch("simplyblock_core.controllers.lvol_controller._register_dhchap_keys_on_node")
-    def test_reapply_multiple_hosts(self, mock_register, MockDB, _mock_disc, _mock_phase, _mock_handle):
+    @patch("simplyblock_core.controllers.host_auth.DBController")
+    @patch("simplyblock_core.controllers.host_auth._register_dhchap_keys_on_node")
+    def test_reapply_multiple_hosts(self, mock_register, MockDB):
         """All hosts are re-registered, not just the first one."""
         MockDB.return_value = self._mock_db()
         mock_register.return_value = {"dhchap_key": "kn"}
@@ -969,12 +963,9 @@ class TestReapplyAllowedHosts(unittest.TestCase):
         self.assertEqual(mock_rpc.subsystem_add_host.call_count, 3)
         self.assertEqual(mock_register.call_count, 2)  # h1 and h3 have keys
 
-    @patch("simplyblock_core.storage_node_ops._check_peer_disconnected", return_value=False)
-    @patch("simplyblock_core.storage_node_ops._set_restart_phase")
-    @patch("simplyblock_core.storage_node_ops._handle_rpc_failure_on_peer", return_value="skip")
-    @patch("simplyblock_core.storage_node_ops.DBController")
-    @patch("simplyblock_core.controllers.lvol_controller._register_dhchap_keys_on_node")
-    def test_reapply_with_psk(self, mock_register, MockDB, _mock_disc, _mock_phase, _mock_handle):
+    @patch("simplyblock_core.controllers.host_auth.DBController")
+    @patch("simplyblock_core.controllers.host_auth._register_dhchap_keys_on_node")
+    def test_reapply_with_psk(self, mock_register, MockDB):
         """PSK-only host entry gets keyring registration."""
         MockDB.return_value = self._mock_db()
         mock_register.return_value = {"psk": "psk_key_name"}
@@ -1072,7 +1063,7 @@ class TestRecreateSubsystemSecurity(unittest.TestCase):
         MockRPC.return_value = mock_rpc_inst
 
         with patch.object(sec_node, 'connect_to_hublvol'):
-            with patch.object(primary_node, 'write_to_db'):
+            with patch.object(primary_node, 'write_to_db'), patch.object(sec_node, 'write_to_db'):
                 mock_bdev_stack.return_value = (True, None)
                 mock_fw_inst = MagicMock()
                 MockFW.return_value = mock_fw_inst

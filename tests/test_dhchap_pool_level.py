@@ -727,13 +727,13 @@ class TestConnectLvolDhchap(unittest.TestCase):
 
         self.assertIsInstance(result, list)
         self.assertEqual(len(result), 1)
-        cmd = result[0]["connect"]
+        cmd = result[0].connect
         self.assertIn("--hostnqn=nqn:host-a", cmd)
         self.assertIn(f"--dhchap-secret={pool_key}", cmd)
         self.assertIn(f"--dhchap-ctrl-secret={pool_ctrlr_key}", cmd)
         # No PSK/TLS was configured
         self.assertNotIn(" --tls", cmd)
-        self.assertNotIn("tls", result[0])
+        self.assertFalse(result[0].tls)
 
     def test_host_with_psk_sets_tls_flag(self):
         """A host_entry with a psk must add --tls to the connect command and
@@ -751,10 +751,10 @@ class TestConnectLvolDhchap(unittest.TestCase):
             patcher.stop()
 
         self.assertIsInstance(result, list)
-        cmd = result[0]["connect"]
+        cmd = result[0].connect
         self.assertIn(" --tls", cmd)
         self.assertIn("--hostnqn=nqn:host-a", cmd)
-        self.assertTrue(result[0].get("tls"))
+        self.assertTrue(result[0].tls)
         # No DHCHAP keys on the entry
         self.assertNotIn("--dhchap-secret", cmd)
         self.assertNotIn("--dhchap-ctrl-secret", cmd)
@@ -793,13 +793,13 @@ class TestConnectLvolDhchap(unittest.TestCase):
             patcher.stop()
 
         self.assertIsInstance(result, list)
-        cmd = result[0]["connect"]
+        cmd = result[0].connect
         self.assertIn("--hostnqn=nqn:whoever", cmd)
         self.assertNotIn("--dhchap-secret", cmd)
         self.assertNotIn("--dhchap-ctrl-secret", cmd)
         self.assertNotIn(" --tls", cmd)
-        # No allowed_hosts → no allowed_hosts key in returned entry
-        self.assertNotIn("allowed_hosts", result[0])
+        # No allowed_hosts → empty list on returned entry
+        self.assertEqual(result[0].allowed_hosts, [])
 
     def test_pool_level_dhchap_lvol_injects_pool_secret_in_connect_cmd(self):
         """Lvols inheriting from a pool-level DHCHAP pool have nqn-only entries
@@ -824,11 +824,11 @@ class TestConnectLvolDhchap(unittest.TestCase):
             patcher.stop()
 
         self.assertIsInstance(result, list)
-        cmd = result[0]["connect"]
+        cmd = result[0].connect
         self.assertIn("--hostnqn=nqn:host-a", cmd)
         self.assertIn(f"--dhchap-secret={pool_key}", cmd)
         self.assertIn(f"--dhchap-ctrl-secret={pool_ctrlr_key}", cmd)
-        self.assertEqual(result[0]["allowed_hosts"], ["nqn:host-a"])
+        self.assertEqual(result[0].allowed_hosts, ["nqn:host-a"])
 
 
 if __name__ == "__main__":

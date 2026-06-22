@@ -220,12 +220,13 @@ class SecurityTestBase(TestClusterBase):
     # ── FIO helpers ──────────────────────────────────────────────────────────
 
     def _run_fio_and_validate(self, lvol_name, mount_point, log_file,
-                               rw="randrw", bs="4K", numjobs=2, runtime=120):
+                               rw="randrw", bs="4K", numjobs=2, runtime=120,
+                               fio_size=None):
         """Start FIO in a detached tmux session, wait for it to finish, then validate."""
         job_name = f"{lvol_name}_fio"
         self.ssh_obj.run_fio_test(
             self.fio_node, None, mount_point, log_file,
-            size=self.fio_size,
+            size=fio_size or self.fio_size,
             name=job_name,
             rw=rw, bs=bs, nrfiles=4, iodepth=1,
             numjobs=numjobs, time_based=True, runtime=runtime,
@@ -2813,26 +2814,20 @@ class TestLvolSecurityCombinations(SecurityTestBase):
         self.logger.info("TC-NEW-001: Pool created + host registered PASSED")
 
         combos = [
-            ("plain",       False, None, None),
-            ("crypto",      True,  None, None),
-            ("auth",        False, None, None),
-            ("crypto_auth", True,  None, None),
+            ("plain",       False),
+            ("crypto",      True),
+            ("auth",        False),
+            ("crypto_auth", True),
         ]
 
-        for tag, encrypt, key1, key2 in combos:
-            tc = f"TC-NEW-00{combos.index((tag, encrypt, key1, key2)) + 2}"
+        for tag, encrypt in combos:
+            tc = f"TC-NEW-00{combos.index((tag, encrypt)) + 2}"
             lvol_name = f"sec{tag}{_rand_suffix()}"
             self.logger.info(f"{tc}: Creating {tag} lvol …")
 
-            kw = {}
-            if encrypt:
-                kw["encrypt"] = True
-                kw["key1"] = self.lvol_crypt_keys[0]
-                kw["key2"] = self.lvol_crypt_keys[1]
-
             out, err = self.ssh_obj.create_sec_lvol(
                 self.mgmt_nodes[0], lvol_name, self.lvol_size, self.pool_name,
-                **kw,
+                encrypt=encrypt,
             )
             assert not err or "error" not in err.lower(), f"{tag} lvol creation failed: {err}"
             sleep_n_sec(3)
@@ -2976,7 +2971,7 @@ class TestLvolCryptoWithDhchap(SecurityTestBase):
         lvol_name = f"seccryp{_rand_suffix()}"
         out, err = self.ssh_obj.create_sec_lvol(
             self.mgmt_nodes[0], lvol_name, self.lvol_size, self.pool_name,
-            encrypt=True, key1=self.lvol_crypt_keys[0], key2=self.lvol_crypt_keys[1])
+            encrypt=True)
         assert not err or "error" not in err.lower(), f"crypto lvol creation failed: {err}"
         sleep_n_sec(3)
         lvol_id = self.sbcli_utils.get_lvol_id(lvol_name)
@@ -3541,7 +3536,7 @@ class TestLvolSecurityHAFailover(SecurityTestBase):
         lvol_name = f"secha{_rand_suffix()}"
         out, err = self.ssh_obj.create_sec_lvol(
             self.mgmt_nodes[0], lvol_name, self.lvol_size, self.pool_name,
-            encrypt=True, key1=self.lvol_crypt_keys[0], key2=self.lvol_crypt_keys[1],
+            encrypt=True,
             distr_ndcs=1, distr_npcs=1,
         )
         assert not err or "error" not in err.lower(), f"lvol creation failed: {err}"
@@ -3918,7 +3913,11 @@ class TestLvolSecurityNegativeConnect(SecurityTestBase):
             tampered = connect_auth[0]
             if "dhchap-secret" in tampered:
                 tampered = re.sub(
-                    r'(--dhchap-secret\s+)\S+',
+                    r'(--dhchap-secret[=\s])\S+',
+                    r'\1DHHC-1:00:DEADBEEFDEADBEEFDEADBEEFDEADBEEF',
+                    tampered)
+                tampered = re.sub(
+                    r'(--dhchap-ctrl-secret[=\s])\S+',
                     r'\1DHHC-1:00:DEADBEEFDEADBEEFDEADBEEFDEADBEEF',
                     tampered)
                 initial_devices = self.ssh_obj.get_devices(node=self.fio_node)
@@ -4194,7 +4193,8 @@ class TestLvolSecurityScaleAndRapidOps(SecurityTestBase):
         self.ssh_obj.mount_path(node=self.fio_node, device=lvol_device, mount_path=mount_point)
         self.lvol_mount_details[first_name]["Mount"] = mount_point
         log_file = f"{self.log_path}/{first_name}_out.log"
-        self._run_fio_and_validate(first_name, mount_point, log_file, rw="randrw", runtime=30)
+        self._run_fio_and_validate(first_name, mount_point, log_file, rw="randrw", runtime=30,
+                                   fio_size="400M")
         self.logger.info("TC-SEC-133: Scale FIO PASSED")
 
         self.logger.info("=== TestLvolSecurityScaleAndRapidOps PASSED ===")
@@ -4235,7 +4235,7 @@ class TestLvolSecurityResize(SecurityTestBase):
         self.logger.info("TC-SEC-140: Creating DHCHAP+crypto 5G lvol …")
         out, err = self.ssh_obj.create_sec_lvol(
             self.mgmt_nodes[0], lvol_name, "5G", self.pool_name,
-            encrypt=True, key1=self.lvol_crypt_keys[0], key2=self.lvol_crypt_keys[1])
+            encrypt=True)
         assert not err or "error" not in err.lower(), f"lvol creation failed: {err}"
         sleep_n_sec(3)
         lvol_id = self.sbcli_utils.get_lvol_id(lvol_name)
@@ -4324,7 +4324,7 @@ class TestLvolSecurityWithBackup(SecurityTestBase):
         self.logger.info("TC-SEC-150: Creating DHCHAP+crypto lvol …")
         out, err = self.ssh_obj.create_sec_lvol(
             self.mgmt_nodes[0], lvol_name, self.lvol_size, self.pool_name,
-            encrypt=True, key1=self.lvol_crypt_keys[0], key2=self.lvol_crypt_keys[1])
+            encrypt=True)
         assert not err or "error" not in err.lower(), f"lvol creation failed: {err}"
         sleep_n_sec(3)
         lvol_id = self.sbcli_utils.get_lvol_id(lvol_name)

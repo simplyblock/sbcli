@@ -154,8 +154,8 @@ class StressRunner:
                 elif op == "delete" and created_lvols:
                     from simplyblock_core.controllers import lvol_controller
                     lvol = created_lvols.pop(random.randrange(len(created_lvols)))
-                    result = lvol_controller.delete_lvol(lvol.uuid, force_delete=True)
-                    self._record("delete", bool(result), t0, time.time(), lvol.uuid)
+                    lvol_controller.delete_lvol(lvol, force_delete=True)
+                    self._record("delete", True, t0, time.time(), lvol.uuid)
 
                 elif op == "resize" and created_lvols:
                     from simplyblock_core.controllers import lvol_controller

@@ -66,6 +66,7 @@ class TestClusterBase:
         self.npcs = kwargs.get("npcs", 1)
         self.bs = kwargs.get("bs", 4096)
         self.chunk_bs = kwargs.get("chunk_bs", 4096)
+        self.preserve_resources_on_failure = kwargs.get("preserve_resources_on_failure", False)
         self.pool_name = "testpool"
         self.lvol_name = f"test_lvl_{generate_random_sequence(4)}"
         self.mount_path = "/mnt/test_location"
@@ -84,6 +85,16 @@ class TestClusterBase:
         self.docker_logs_path = ""
         self.runner_k8s_log = ""
         self.test_start_time_utc = None
+
+        # K8s-native resource tracking (only used when k8s_test=True)
+        self._k8s_pvcs = []
+        self._k8s_fio_jobs = []
+        self._k8s_configmaps = []
+        self._k8s_volume_snapshots = []
+        self._k8s_utility_pods = []
+        self._k8s_storage_class_name = "simplyblock-csi-sc"
+        self._k8s_snapshot_class_name = "simplyblock-csi-snapshotclass"
+        self._volume_registry = {}  # lvol_name -> {pvc_name, lvol_id, device, mount}
 
     def setup(self):
         """Contains setup required to run the test case
@@ -122,16 +133,26 @@ class TestClusterBase:
                 sleep_n_sec(2)
                 self.ssh_obj.set_aio_max_nr(node)
         if not self.client_machines:
-            self.client_machines = f"{self.mgmt_nodes[0]}"
+            if self.mgmt_nodes:
+                self.client_machines = f"{self.mgmt_nodes[0]}"
+            elif self.k8s_test:
+                self.logger.warning(
+                    "No CLIENT_IP and no management nodes available. "
+                    "SSH-based FIO tests will not work without client IPs."
+                )
+                self.client_machines = ""
+            else:
+                raise RuntimeError("No client machines and no management nodes available.")
 
-        self.client_machines = self.client_machines.strip().split(" ")
-        for client in self.client_machines:
-            self.logger.info(f"**Connecting to client machine** - {client}")
-            self.ssh_obj.connect(
-                address=client,
-                bastion_server_address=self.bastion_server,
-            )
-            sleep_n_sec(2)
+        self.client_machines = self.client_machines.strip().split(" ") if self.client_machines else []
+        if not self.k8s_test or self.client_machines:
+            for client in self.client_machines:
+                self.logger.info(f"**Connecting to client machine** - {client}")
+                self.ssh_obj.connect(
+                    address=client,
+                    bastion_server_address=self.bastion_server,
+                )
+                sleep_n_sec(2)
 
         # Mount NFS for shared log access (skip for cloud clusters)
         if os.environ.get("SKIP_NFS", "").strip() not in ("1", "true"):
@@ -148,7 +169,12 @@ class TestClusterBase:
         else:
             self.logger.info("SKIP_NFS set — skipping NFS mount (cloud cluster or no NFS available)")
 
-        self.fio_node = self.client_machines if self.client_machines else [self.mgmt_nodes[0]]
+        if self.client_machines:
+            self.fio_node = self.client_machines
+        elif self.mgmt_nodes:
+            self.fio_node = [self.mgmt_nodes[0]]
+        else:
+            self.fio_node = []
 
         # Record UTC start time for Graylog log export at teardown
         self.test_start_time_utc = datetime.now(timezone.utc)
@@ -159,9 +185,10 @@ class TestClusterBase:
         self.docker_logs_path = os.path.join(self.nfs_log_base, f"{self.test_name}-{timestamp}")
         self.log_path = os.path.join(self.docker_logs_path, "ClientLogs")
         os.makedirs(self.log_path, exist_ok=True)
-        for node in self.fio_node:
-            self.ssh_obj.make_directory(node=node, dir_name=self.log_path)
-        
+        if not self.k8s_test:
+            for node in self.fio_node:
+                self.ssh_obj.make_directory(node=node, dir_name=self.log_path)
+
         run_file = os.getenv("RUN_DIR_FILE", None)
         if run_file:
             with open(run_file, "w") as f:
@@ -176,22 +203,34 @@ class TestClusterBase:
         # self.ssh_obj.exec_command(
         #     self.mgmt_nodes[0], command=command
         # )
-        self.disconnect_lvols()
-        sleep_n_sec(2)
-        self.unmount_all(base_path=self.mount_path)
-        sleep_n_sec(2)
-        for node in self.fio_node:
-            self.ssh_obj.unmount_path(node=node,
-                                      device=self.mount_path)
+        if not self.k8s_test:
+            self.disconnect_lvols()
             sleep_n_sec(2)
-        self.disconnect_lvols()
-        sleep_n_sec(2)
-        self.sbcli_utils.delete_all_snapshots() if self.k8s_test else \
+            self.unmount_all(base_path=self.mount_path)
+            sleep_n_sec(2)
+            for node in self.fio_node:
+                self.ssh_obj.unmount_path(node=node,
+                                          device=self.mount_path)
+                sleep_n_sec(2)
+            self.disconnect_lvols()
+            sleep_n_sec(2)
+        if self.k8s_test:
+            self.sbcli_utils.delete_all_snapshots()
+        elif self.mgmt_nodes:
             self.ssh_obj.delete_all_snapshots(node=self.mgmt_nodes[0])
         sleep_n_sec(2)
         self.sbcli_utils.delete_all_lvols()
         sleep_n_sec(2)
-        self.sbcli_utils.delete_all_storage_pools()
+        if not self.k8s_test:
+            self.sbcli_utils.delete_all_storage_pools()
+        else:
+            # In K8s mode, avoid deleting pools during setup — the Pool CRD
+            # reconciliation is async and deleting+recreating pools between
+            # tests causes long waits or failures.  Tests create pools via
+            # _add_pool_dual() which reuses existing pools.
+            self.logger.info(
+                "[setup] K8s mode: skipping pool deletion (will reuse existing pool)"
+            )
         aws_access_key = os.environ.get("AWS_ACCESS_KEY_ID", None)
         aws_secret_key = os.environ.get("AWS_SECRET_ACCESS_KEY", None)
         if aws_access_key and aws_secret_key:
@@ -206,6 +245,7 @@ class TestClusterBase:
         if self.k8s_test:
             self.runner_k8s_log.start_logging()
             self.runner_k8s_log.monitor_pod_logs()
+            self.runner_k8s_log.start_resource_monitor()
         else:
             self.ssh_obj.make_directory(node=node, dir_name=self.docker_logs_path)
             self.ssh_obj.make_directory(node=node, dir_name=self.log_path)
@@ -238,14 +278,15 @@ class TestClusterBase:
 
             self.fetch_all_nodes_distrib_log()
 
-        for node in self.fio_node:
-            node_log_dir = os.path.join(self.docker_logs_path, node)
-            self.ssh_obj.make_directory(node=node, dir_name=node_log_dir)
-            self.ssh_obj.check_tmux_installed(node_ip=node)
-            self.ssh_obj.exec_command(node=node, command="sudo tmux kill-server")
-            self.ssh_obj.start_tcpdump_logging(node_ip=node, log_dir=node_log_dir)
-            self.ssh_obj.start_netstat_dmesg_logging(node_ip=node, log_dir=node_log_dir)
-            self.ssh_obj.start_full_journal_dmesg_logging(node_ip=node, log_dir=node_log_dir)
+        if not self.k8s_test:
+            for node in self.fio_node:
+                node_log_dir = os.path.join(self.docker_logs_path, node)
+                self.ssh_obj.make_directory(node=node, dir_name=node_log_dir)
+                self.ssh_obj.check_tmux_installed(node_ip=node)
+                self.ssh_obj.exec_command(node=node, command="sudo tmux kill-server")
+                self.ssh_obj.start_tcpdump_logging(node_ip=node, log_dir=node_log_dir)
+                self.ssh_obj.start_netstat_dmesg_logging(node_ip=node, log_dir=node_log_dir)
+                self.ssh_obj.start_full_journal_dmesg_logging(node_ip=node, log_dir=node_log_dir)
 
         self.logger.info("Started log monitoring for all storage nodes.")
 
@@ -270,13 +311,473 @@ class TestClusterBase:
             for node in self.storage_nodes:
                 for cmd in sysctl_commands:
                     self.ssh_obj.exec_command(node, cmd)
-        for cmd in sysctl_commands:
+        if not self.k8s_test:
+            for cmd in sysctl_commands:
+                for node in self.fio_node:
+                    self.ssh_obj.exec_command(node, cmd)
             for node in self.fio_node:
-                self.ssh_obj.exec_command(node, cmd)
-        for node in self.fio_node:
-            self.ssh_obj.set_aio_max_nr(node)
-    
+                self.ssh_obj.set_aio_max_nr(node)
+
         self.logger.info("Configured TCP sysctl settings on all the nodes!!")
+
+    # ── Dual-mode helpers (Docker SSH / K8s-native) ───────────────────────────
+
+    def _ensure_k8s_utils(self):
+        """Return the K8sUtils instance (available only in k8s mode)."""
+        k8s = getattr(self.sbcli_utils, "k8s", None)
+        if not k8s:
+            raise RuntimeError("K8sUtils not available -- was k8s_run=True passed?")
+        return k8s
+
+    def _k8s_normalize_name(self, name):
+        """Normalize a name for K8s resource naming (lowercase, hyphens)."""
+        import re
+        return re.sub(r"[^a-z0-9-]", "-", name.lower()).strip("-")[:63]
+
+    def _add_pool_dual(self, pool_name=None, **kwargs):
+        """Create a storage pool, updating self.pool_name to the actual name.
+
+        In K8s mode, the operator may assign a pool name that differs from
+        the requested name. This method captures the return value and updates
+        self.pool_name so that StorageClass creation and assertions use the
+        correct name.
+
+        Returns the actual pool name.
+        """
+        pool_name = pool_name or self.pool_name
+        result = self.sbcli_utils.add_storage_pool(pool_name=pool_name, **kwargs)
+        if self.k8s_test and result:
+            if result != self.pool_name:
+                self.logger.info(
+                    f"[dual] Pool name adjusted: '{self.pool_name}' -> '{result}'"
+                )
+            self.pool_name = result
+        return self.pool_name
+
+    def _verify_pool_exists_dual(self, pool_name=None):
+        """Assert that a pool exists. In K8s mode checks the Pool CRD;
+        in Docker mode checks sbcli pool list."""
+        pool_name = pool_name or self.pool_name
+        if self.k8s_test:
+            exists = self.sbcli_utils.pool_crd_exists(pool_name)
+            assert exists, (
+                f"Pool CRD for '{pool_name}' not found in K8s"
+            )
+        else:
+            pools = self.sbcli_utils.list_storage_pools()
+            assert pool_name in list(pools.keys()), \
+                f"Pool {pool_name} not present in list of pools: {pools}"
+
+    def _delete_pool_dual(self, pool_name=None):
+        """Delete a storage pool. In K8s mode, deletes the Pool CRD.
+
+        Skipped entirely when pool_name doesn't match any existing pool
+        (avoids errors from trying to delete a pool that was already
+        cleaned up or renamed by the operator).
+        """
+        pool_name = pool_name or self.pool_name
+        if self.k8s_test:
+            pools = self.sbcli_utils.list_storage_pools()
+            if pool_name not in pools:
+                # Try to find the pool by CRD name pattern
+                k8s_name = f"simplyblock-{pool_name.lower().replace('_', '-')}"
+                ns = self._ensure_k8s_utils().namespace
+                self._ensure_k8s_utils()._exec_kubectl(
+                    f"kubectl delete pools {k8s_name} -n {ns} "
+                    f"--timeout=60s 2>/dev/null || true"
+                )
+                return
+        self.sbcli_utils.delete_storage_pool(pool_name=pool_name)
+
+    def _k8s_ensure_storage_class(self):
+        """Create StorageClass + VolumeSnapshotClass if in K8s mode.
+
+        If the operator already created a simplyblock StorageClass (from the
+        Pool CRD), reuse it instead of creating a new one.
+        """
+        if not self.k8s_test:
+            return
+        k8s = self._ensure_k8s_utils()
+
+        # Check if a simplyblock StorageClass already exists
+        out, _ = k8s._exec_kubectl(
+            "kubectl get storageclass -o jsonpath="
+            "'{range .items[?(@.provisioner==\"csi.simplyblock.io\")]}"
+            "{.metadata.name}{\"\\n\"}{end}' 2>/dev/null || true"
+        )
+        existing_sc = [s.strip() for s in out.strip().splitlines() if s.strip()]
+        if existing_sc:
+            self.logger.info(
+                f"[k8s] Found existing simplyblock StorageClass(es): {existing_sc}"
+            )
+            # Prefer our name if it exists, otherwise use the first available
+            if self._k8s_storage_class_name in existing_sc:
+                self.logger.info(
+                    f"[k8s] Using existing SC '{self._k8s_storage_class_name}'"
+                )
+            else:
+                self._k8s_storage_class_name = existing_sc[0]
+                self.logger.info(
+                    f"[k8s] Using operator-created SC '{self._k8s_storage_class_name}'"
+                )
+        else:
+            # No simplyblock SC exists — create one
+            k8s.create_storage_class(
+                name=self._k8s_storage_class_name,
+                cluster_id=self.cluster_id,
+                pool_name=self.pool_name,
+                ndcs=self.ndcs,
+                npcs=self.npcs,
+            )
+        k8s.create_volume_snapshot_class(name=self._k8s_snapshot_class_name)
+
+    def _create_lvol_dual(self, lvol_name, size, pool_name=None,
+                          host_id=None, ndcs=None, npcs=None, crypto=False):
+        """Create an lvol (Docker) or PVC (K8s). Returns (name, lvol_id)."""
+        pool_name = pool_name or self.pool_name
+
+        if self.k8s_test:
+            k8s = self._ensure_k8s_utils()
+            pvc_name = self._k8s_normalize_name(lvol_name)
+            pvc_size = size
+            if "G" in pvc_size and "Gi" not in pvc_size:
+                pvc_size = pvc_size.replace("G", "Gi")
+            if "M" in pvc_size and "Mi" not in pvc_size:
+                pvc_size = pvc_size.replace("M", "Mi")
+
+            k8s.create_pvc(
+                name=pvc_name,
+                size=pvc_size,
+                storage_class=self._k8s_storage_class_name,
+                node_id=host_id,
+            )
+            k8s.wait_pvc_bound(pvc_name)
+            lvol_id = k8s.get_pvc_volume_handle(pvc_name)
+            self._k8s_pvcs.append(pvc_name)
+            self._volume_registry[lvol_name] = {
+                "pvc_name": pvc_name, "lvol_id": lvol_id,
+                "device": pvc_name, "mount": pvc_name, "size": pvc_size,
+            }
+            return lvol_name, lvol_id
+        else:
+            kwargs = dict(lvol_name=lvol_name, pool_name=pool_name, size=size)
+            if host_id:
+                kwargs["host_id"] = host_id
+            if ndcs is not None:
+                kwargs["distr_ndcs"] = ndcs
+            if npcs is not None:
+                kwargs["distr_npcs"] = npcs
+            if crypto:
+                kwargs["crypto"] = True
+            self.sbcli_utils.add_lvol(**kwargs)
+            lvol_id = self.sbcli_utils.get_lvol_id(lvol_name=lvol_name)
+            self._volume_registry[lvol_name] = {"lvol_id": lvol_id}
+            return lvol_name, lvol_id
+
+    def _connect_and_mount_dual(self, lvol_name, mount_path=None,
+                                format_disk=True, fs_type="ext4"):
+        """NVMe connect + mount (Docker) or no-op (K8s). Returns (device, mount)."""
+        if self.k8s_test:
+            reg = self._volume_registry.get(lvol_name, {})
+            pvc_name = reg.get("pvc_name", self._k8s_normalize_name(lvol_name))
+            self.logger.info(f"[k8s] _connect_and_mount_dual no-op for PVC '{pvc_name}'")
+            return pvc_name, pvc_name
+
+        node = self.client_machines[0]
+        initial_devices = self.ssh_obj.get_devices(node=node)
+        connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)
+        for connect_str in connect_ls:
+            self.ssh_obj.exec_command(node=node, command=connect_str)
+        sleep_n_sec(10)
+        final_devices = self.ssh_obj.get_devices(node=node)
+        disk_use = None
+        for device in final_devices:
+            if device not in initial_devices:
+                disk_use = f"/dev/{device.strip()}"
+                break
+        assert disk_use, f"No new block device after connecting {lvol_name}"
+        self.logger.info(f"Using disk: {disk_use}")
+        self.ssh_obj.unmount_path(node=node, device=disk_use)
+        if format_disk:
+            self.ssh_obj.format_disk(node=node, device=disk_use, fs_type=fs_type)
+        if mount_path:
+            self.ssh_obj.mount_path(node=node, device=disk_use, mount_path=mount_path)
+        reg = self._volume_registry.get(lvol_name, {})
+        reg["device"] = disk_use
+        reg["mount"] = mount_path
+        self._volume_registry[lvol_name] = reg
+        return disk_use, mount_path
+
+    def _run_fio_dual(self, lvol_name, mount_path=None, log_path=None,
+                      runtime=300, name=None, rw="randrw", size="1G",
+                      bs="4K", iodepth=1, numjobs=2, nrfiles=8,
+                      time_based=True, **kwargs):
+        """Start FIO. Returns thread (Docker) or job_name str (K8s)."""
+        fio_name = name or f"fio_{lvol_name}"
+
+        if self.k8s_test:
+            k8s = self._ensure_k8s_utils()
+            reg = self._volume_registry.get(lvol_name, {})
+            pvc_name = reg.get("pvc_name", self._k8s_normalize_name(lvol_name))
+
+            job_name = f"fio-{self._k8s_normalize_name(fio_name)}"[:50]
+            cm_name = f"fiocfg-{job_name}"
+
+            time_cfg = f"time_based\nruntime={runtime}" if time_based else ""
+            fio_config = (
+                f"[global]\n"
+                f"ioengine=libaio\n"
+                f"direct=1\n"
+                f"bs={bs}\n"
+                f"iodepth={iodepth}\n"
+                f"numjobs={numjobs}\n"
+                f"{time_cfg}\n"
+                f"\n"
+                f"[{self._k8s_normalize_name(fio_name)[:20]}]\n"
+                f"rw={rw}\n"
+                f"size={size}\n"
+                f"directory=/spdkvol\n"
+                f"nrfiles={nrfiles}\n"
+            )
+            k8s.create_fio_job(job_name, pvc_name, cm_name, fio_config)
+            self._k8s_fio_jobs.append(job_name)
+            self._k8s_configmaps.append(cm_name)
+            return job_name
+        else:
+            node = self.client_machines[0]
+            reg = self._volume_registry.get(lvol_name, {})
+            device = reg.get("device")
+            mount = mount_path or reg.get("mount")
+            fio_thread = threading.Thread(
+                target=self.ssh_obj.run_fio_test,
+                args=(node, device if not mount else None, mount, log_path),
+                kwargs=dict(
+                    name=fio_name, runtime=runtime, rw=rw, bs=bs,
+                    size=size, iodepth=iodepth, numjobs=numjobs,
+                    nrfiles=nrfiles, time_based=time_based,
+                    debug=self.fio_debug, **kwargs,
+                ),
+            )
+            fio_thread.start()
+            return fio_thread
+
+    def _wait_fio_dual(self, handles, timeout=1000):
+        """Wait for all FIO handles (threads or job_names) to complete."""
+        if not handles:
+            return
+        if self.k8s_test:
+            k8s = self._ensure_k8s_utils()
+            for job_name in handles:
+                if isinstance(job_name, str):
+                    status = k8s.wait_job_complete(job_name, timeout=timeout)
+                    if status != "succeeded":
+                        self.logger.warning(f"FIO Job '{job_name}' ended: {status}")
+        else:
+            threads = [h for h in handles if isinstance(h, threading.Thread)]
+            if threads:
+                self.common_utils.manage_fio_threads(
+                    node=self.client_machines[0], threads=threads, timeout=timeout
+                )
+
+    def _validate_fio_dual(self, handle, log_path=None):
+        """Validate FIO output. Docker: reads log file. K8s: checks job/pod."""
+        if self.k8s_test:
+            if isinstance(handle, str):
+                k8s = self._ensure_k8s_utils()
+                pod_name = k8s.get_job_pod_name(handle)
+                if pod_name:
+                    logs = k8s.get_pod_logs(pod_name, tail=200)
+                    for keyword in ("error", "fail"):
+                        if keyword in logs.lower():
+                            self.logger.warning(f"FIO pod '{pod_name}' logs contain '{keyword}'")
+            self.logger.info(f"[k8s] FIO validation passed for {handle}")
+        else:
+            if log_path:
+                self.common_utils.validate_fio_test(
+                    node=self.client_machines[0], log_file=log_path
+                )
+
+    def _create_snapshot_dual(self, lvol_name, snapshot_name):
+        """Create a snapshot. Returns snapshot_id (Docker) or snap_name (K8s)."""
+        if self.k8s_test:
+            k8s = self._ensure_k8s_utils()
+            reg = self._volume_registry.get(lvol_name, {})
+            pvc_name = reg.get("pvc_name", self._k8s_normalize_name(lvol_name))
+            snap_name = self._k8s_normalize_name(snapshot_name)
+            k8s.create_volume_snapshot(snap_name, pvc_name,
+                                       snapshot_class=self._k8s_snapshot_class_name)
+            k8s.wait_volume_snapshot_ready(snap_name)
+            self._k8s_volume_snapshots.append(snap_name)
+            return snap_name
+        else:
+            lvol_id = self.sbcli_utils.get_lvol_id(lvol_name)
+            self.sbcli_utils.add_snapshot(lvol_id=lvol_id, snapshot_name=snapshot_name)
+            return self.sbcli_utils.get_snapshot_id(snap_name=snapshot_name)
+
+    def _create_clone_dual(self, snapshot_id, clone_name, size="10Gi",
+                           mount_path=None, format_disk=False):
+        """Create clone from snapshot, connect and mount. Returns (device, mount)."""
+        if self.k8s_test:
+            k8s = self._ensure_k8s_utils()
+            pvc_name = self._k8s_normalize_name(clone_name)
+            k8s.create_clone_pvc(
+                name=pvc_name, size=size,
+                storage_class=self._k8s_storage_class_name,
+                snapshot_name=snapshot_id,
+            )
+            k8s.wait_pvc_bound(pvc_name)
+            lvol_id = k8s.get_pvc_volume_handle(pvc_name)
+            self._k8s_pvcs.append(pvc_name)
+            self._volume_registry[clone_name] = {
+                "pvc_name": pvc_name, "lvol_id": lvol_id,
+                "device": pvc_name, "mount": pvc_name, "size": size,
+            }
+            return pvc_name, pvc_name
+        else:
+            self.sbcli_utils.add_clone(snapshot_id=snapshot_id, clone_name=clone_name)
+            return self._connect_and_mount_dual(
+                clone_name, mount_path=mount_path, format_disk=format_disk
+            )
+
+    def _resize_lvol_dual(self, lvol_name, new_size):
+        """Resize an lvol or PVC."""
+        if self.k8s_test:
+            k8s = self._ensure_k8s_utils()
+            reg = self._volume_registry.get(lvol_name, {})
+            pvc_name = reg.get("pvc_name", self._k8s_normalize_name(lvol_name))
+            pvc_size = new_size
+            if "G" in pvc_size and "Gi" not in pvc_size:
+                pvc_size = pvc_size.replace("G", "Gi")
+            if "M" in pvc_size and "Mi" not in pvc_size:
+                pvc_size = pvc_size.replace("M", "Mi")
+            k8s.resize_pvc(pvc_name, pvc_size)
+        else:
+            lvol_id = self.sbcli_utils.get_lvol_id(lvol_name)
+            self.sbcli_utils.resize_lvol(lvol_id=lvol_id, new_size=new_size)
+
+    def _find_files_dual(self, lvol_name, directory=None):
+        """Find files in a volume. Docker: SSH. K8s: utility pod."""
+        if self.k8s_test:
+            k8s = self._ensure_k8s_utils()
+            reg = self._volume_registry.get(lvol_name, {})
+            pvc_name = reg.get("pvc_name", self._k8s_normalize_name(lvol_name))
+            pod_name = f"find-{pvc_name}"[:63]
+            k8s.create_utility_pod(pod_name, pvc_name)
+            self._k8s_utility_pods.append(pod_name)
+            try:
+                k8s.wait_pod_running(pod_name)
+                return k8s.find_files_in_pvc(pod_name)
+            finally:
+                k8s.delete_pod(pod_name)
+                if pod_name in self._k8s_utility_pods:
+                    self._k8s_utility_pods.remove(pod_name)
+        else:
+            node = self.client_machines[0]
+            mount = directory or self._volume_registry.get(lvol_name, {}).get("mount")
+            return self.ssh_obj.find_files(node, directory=mount)
+
+    def _generate_checksums_dual(self, lvol_name, files=None, directory=None):
+        """Generate checksums for files in a volume. Returns {file: checksum}."""
+        if self.k8s_test:
+            k8s = self._ensure_k8s_utils()
+            reg = self._volume_registry.get(lvol_name, {})
+            pvc_name = reg.get("pvc_name", self._k8s_normalize_name(lvol_name))
+            pod_name = f"cksum-{pvc_name}"[:63]
+            k8s.create_utility_pod(pod_name, pvc_name)
+            self._k8s_utility_pods.append(pod_name)
+            try:
+                k8s.wait_pod_running(pod_name)
+                if files is None:
+                    files = k8s.find_files_in_pvc(pod_name)
+                return k8s.generate_checksums_in_pvc(pod_name, files)
+            finally:
+                k8s.delete_pod(pod_name)
+                if pod_name in self._k8s_utility_pods:
+                    self._k8s_utility_pods.remove(pod_name)
+        else:
+            node = self.client_machines[0]
+            mount = directory or self._volume_registry.get(lvol_name, {}).get("mount")
+            if files is None:
+                files = self.ssh_obj.find_files(node, directory=mount)
+            return self.ssh_obj.generate_checksums(node, files)
+
+    def _cleanup_fio_k8s(self, handle):
+        """Clean up a K8s FIO Job and its ConfigMap to release the PVC."""
+        if not self.k8s_test or not isinstance(handle, str):
+            return
+        k8s = self._ensure_k8s_utils()
+        job_name = handle
+        cm_name = f"fiocfg-{job_name}"
+        try:
+            k8s.delete_job(job_name)
+        except Exception as e:
+            self.logger.warning(f"FIO job delete error {job_name}: {e}")
+        try:
+            k8s.delete_configmap(cm_name)
+        except Exception as e:
+            self.logger.warning(f"ConfigMap delete error {cm_name}: {e}")
+        if job_name in self._k8s_fio_jobs:
+            self._k8s_fio_jobs.remove(job_name)
+        if cm_name in self._k8s_configmaps:
+            self._k8s_configmaps.remove(cm_name)
+
+    def _disconnect_and_cleanup_dual(self, lvol_name):
+        """Unmount + NVMe disconnect (Docker) or no-op (K8s)."""
+        if self.k8s_test:
+            return
+        node = self.client_machines[0]
+        reg = self._volume_registry.get(lvol_name, {})
+        mount = reg.get("mount")
+        device = reg.get("device")
+        if mount:
+            self.ssh_obj.unmount_path(node=node, device=mount)
+        if device:
+            self.ssh_obj.unmount_path(node=node, device=device)
+        lvol_id = reg.get("lvol_id") or self.sbcli_utils.get_lvol_id(lvol_name)
+        if lvol_id:
+            try:
+                subsystems = self.ssh_obj.get_nvme_subsystems(node=node, nqn_filter=lvol_id)
+                for subsys in subsystems:
+                    self.ssh_obj.disconnect_nvme(node=node, nqn_grep=subsys)
+            except Exception as e:
+                self.logger.warning(f"NVMe disconnect error for {lvol_name}: {e}")
+
+    def _k8s_default_teardown(self):
+        """Clean up K8s resources created by dual-mode helpers."""
+        if not self.k8s_test:
+            return
+        k8s = self._ensure_k8s_utils()
+        for pod_name in list(self._k8s_utility_pods):
+            try:
+                k8s.delete_pod(pod_name)
+            except Exception as e:
+                self.logger.warning(f"[k8s-teardown] utility pod error {pod_name}: {e}")
+        self._k8s_utility_pods.clear()
+        for job_name in list(self._k8s_fio_jobs):
+            try:
+                k8s.delete_job(job_name)
+            except Exception as e:
+                self.logger.warning(f"[k8s-teardown] FIO job error {job_name}: {e}")
+        self._k8s_fio_jobs.clear()
+        for cm_name in list(self._k8s_configmaps):
+            try:
+                k8s.delete_configmap(cm_name)
+            except Exception as e:
+                self.logger.warning(f"[k8s-teardown] ConfigMap error {cm_name}: {e}")
+        self._k8s_configmaps.clear()
+        for snap_name in list(self._k8s_volume_snapshots):
+            try:
+                k8s.delete_volume_snapshot(snap_name)
+            except Exception as e:
+                self.logger.warning(f"[k8s-teardown] VolumeSnapshot error {snap_name}: {e}")
+        self._k8s_volume_snapshots.clear()
+        for pvc_name in list(self._k8s_pvcs):
+            try:
+                k8s.delete_pvc(pvc_name)
+            except Exception as e:
+                self.logger.warning(f"[k8s-teardown] PVC error {pvc_name}: {e}")
+        self._k8s_pvcs.clear()
+        self._volume_registry.clear()
 
     def cleanup_logs(self):
         """Cleans logs
@@ -319,6 +820,10 @@ class TestClusterBase:
         self.logger.info("All log monitoring threads stopped.")
     
     def stop_k8s_log_collect(self):
+        if not self.runner_k8s_log or isinstance(self.runner_k8s_log, str):
+            self.logger.warning("[stop_k8s_log_collect] runner_k8s_log not initialized — skipping")
+            return
+        self.runner_k8s_log.stop_resource_monitor()
         self.runner_k8s_log.stop_log_monitor()
         self.runner_k8s_log.stop_logging()
 
@@ -539,6 +1044,30 @@ class TestClusterBase:
         except Exception as e:
             self.logger.warning(f"[k8s collect_mgmt] storage node loop: {e}")
 
+        # Collect kubectl describe pods + events for the simplyblock namespace
+        ns = getattr(k8s, "namespace", "simplyblock")
+        kubectl_diag = [
+            (f"pod_describe{suffix}.txt",
+             f"kubectl describe pods -n {ns}"),
+            (f"events{suffix}.txt",
+             f"kubectl get events -n {ns} --sort-by=.lastTimestamp"),
+            (f"pod_status{suffix}.txt",
+             f"kubectl get pods -n {ns} -o wide"),
+            (f"storagebackup_list{suffix}.txt",
+             f"kubectl get storagebackup -n {ns} -o yaml 2>/dev/null || true"),
+            (f"volumesnapshot_list{suffix}.txt",
+             f"kubectl get volumesnapshot -n {ns} -o yaml 2>/dev/null || true"),
+            (f"pvc_list{suffix}.txt",
+             f"kubectl get pvc -n {ns} -o wide 2>/dev/null || true"),
+        ]
+        for filename, cmd in kubectl_diag:
+            try:
+                out, _ = k8s._exec_kubectl(cmd, supress_logs=True)
+                with open(os.path.join(base_path, filename), "w") as fh:
+                    fh.write(out or "")
+            except Exception as e:
+                self.logger.warning(f"[k8s collect_mgmt] {filename}: {e}")
+
         # Collect journalctl + dmesg final snapshot from client/fio nodes (accessible via SSH)
         for node in self.client_machines:
             try:
@@ -672,7 +1201,10 @@ class TestClusterBase:
         """
         Fetch SPDK memory stats via env_dpdk_get_mem_stats.
 
-        Behavior:
+        Handles dual-node hosts: discovers ALL spdk_* containers and collects
+        stats from each one into a per-container subdirectory.
+
+        Behavior per container:
         - Runs RPC inside SPDK container
         - Reads JSON response written on host
         - Extracts dump filename OR defaults to /tmp/spdk_mem_dump.txt
@@ -688,45 +1220,30 @@ class TestClusterBase:
 
         try:
             # ---------------------------------------------------------------
-            # 1. Prepare paths
+            # 1. Prepare base paths (include node_id for dual-node separation)
             # ---------------------------------------------------------------
             timestamp = time.strftime("%d-%m-%y-%H-%M-%S")
+            node_id_short = storage_node_id[:8] if len(storage_node_id) > 8 else storage_node_id
 
-            host_json = f"/tmp/spdk_mem_stats_{storage_node_ip}_{timestamp}.json"
-            host_txt = f"/tmp/spdk_mem_dump_{storage_node_ip}_{timestamp}.txt"
-
-            final_dir = f"{self.docker_logs_path}/{storage_node_ip}/spdk_mem_stats"
-            final_json = f"{final_dir}/spdk_mem_stats_{timestamp}.json"
-            final_txt = f"{final_dir}/spdk_mem_dump_{timestamp}.txt"
-            final_huge = f"{final_dir}/host_hugepages_{timestamp}.txt"
-
-            self.logger.info(
-                f"[DEBUG][SPDK-MEM] Creating final directory: {final_dir}"
-            )
+            base_dir = f"{self.docker_logs_path}/{storage_node_ip}_{node_id_short}/spdk_mem_stats"
 
             self.ssh_obj.exec_command(
                 storage_node_ip,
-                f"sudo mkdir -p '{final_dir}'"
+                f"sudo mkdir -p '{base_dir}'"
             )
 
-            self.logger.info(
-                f"[DEBUG][SPDK-MEM] Writing host hugepage stats → {final_huge}"
-            )
-
+            # Host hugepage stats (shared across containers on same host)
+            final_huge = f"{base_dir}/host_hugepages_{timestamp}.txt"
             self.ssh_obj.exec_command(
                 storage_node_ip,
                 f"cat /proc/meminfo | grep -i hug > '{final_huge}' || true"
             )
 
             # ---------------------------------------------------------------
-            # 2. Find SPDK container
+            # 2. Find ALL SPDK containers (dual-node hosts have 2)
             # ---------------------------------------------------------------
             find_container_cmd = (
                 "sudo docker ps --format '{{.Names}}' | grep -E '^spdk_[0-9]+$' || true"
-            )
-
-            self.logger.info(
-                f"[DEBUG][SPDK-MEM] Finding SPDK container on {storage_node_ip}"
             )
 
             container_out, _ = self.ssh_obj.exec_command(
@@ -734,138 +1251,91 @@ class TestClusterBase:
                 command=find_container_cmd
             )
 
-            container_name = container_out.strip()
+            containers = [c.strip() for c in (container_out or "").strip().splitlines() if c.strip()]
 
-            self.logger.info(
-                f"[DEBUG][SPDK-MEM] Container discovery result: '{container_name}'"
-            )
-
-            if not container_name:
+            if not containers:
                 self.logger.info(
                     "[DEBUG][SPDK-MEM] No SPDK container found, skipping node"
                 )
                 return
 
             self.logger.info(
-                f"[DEBUG][SPDK-MEM] Paths prepared | host_json={host_json}, host_txt={host_txt}"
+                f"[DEBUG][SPDK-MEM] Found containers on {storage_node_ip}: {containers}"
             )
 
             # ---------------------------------------------------------------
-            # 3. Run SPDK RPC (JSON redirected on HOST)
+            # 3. Collect mem stats from EACH container
             # ---------------------------------------------------------------
-            rpc_cmd = (
-                f"sudo docker exec {container_name} "
-                f"python spdk/scripts/rpc.py "
-                f"-s /mnt/ramdisk/{container_name}/spdk.sock "
-                f"env_dpdk_get_mem_stats > {host_json}"
-            )
-
-            self.logger.info(
-                f"[DEBUG][SPDK-MEM] Executing RPC: {rpc_cmd}"
-            )
-
-            self.ssh_obj.exec_command(storage_node_ip, rpc_cmd)
-
-            # ---------------------------------------------------------------
-            # 4. Parse JSON (fallback if needed)
-            # ---------------------------------------------------------------
-            container_txt = "/tmp/spdk_mem_dump.txt"  # DEFAULT
-
-            self.logger.info(
-                "[DEBUG][SPDK-MEM] Reading RPC JSON file"
-            )
-
-            json_out, _ = self.ssh_obj.exec_command(
-                storage_node_ip,
-                f"cat {host_json} || true"
-            )
-
-            self.logger.info(
-                f"[DEBUG][SPDK-MEM] RPC JSON content: {json_out.strip()}"
-            )
-
-            try:
-                data = json.loads(json_out)
-                if isinstance(data, dict) and data.get("filename"):
-                    container_txt = data["filename"]
-                    self.logger.info(
-                        f"[DEBUG][SPDK-MEM] Using filename from RPC: {container_txt}"
+            for container_name in containers:
+                try:
+                    final_dir = f"{base_dir}/{container_name}"
+                    self.ssh_obj.exec_command(
+                        storage_node_ip,
+                        f"sudo mkdir -p '{final_dir}'"
                     )
-                else:
-                    self.logger.info(
-                        f"[DEBUG][SPDK-MEM] No filename in RPC, defaulting to {container_txt}"
+
+                    host_json = f"/tmp/spdk_mem_stats_{container_name}_{timestamp}.json"
+                    host_txt = f"/tmp/spdk_mem_dump_{container_name}_{timestamp}.txt"
+                    final_json = f"{final_dir}/spdk_mem_stats_{timestamp}.json"
+                    final_txt = f"{final_dir}/spdk_mem_dump_{timestamp}.txt"
+
+                    # Run SPDK RPC
+                    rpc_cmd = (
+                        f"sudo docker exec {container_name} "
+                        f"sudo python spdk/scripts/rpc.py "
+                        f"-s /mnt/ramdisk/{container_name}/spdk.sock "
+                        f"env_dpdk_get_mem_stats > {host_json}"
                     )
-            except Exception:
-                self.logger.info(
-                    f"[DEBUG][SPDK-MEM] JSON parse failed, defaulting to {container_txt}"
-                )
+                    self.ssh_obj.exec_command(storage_node_ip, rpc_cmd)
 
-            # ---------------------------------------------------------------
-            # 5. Create stable copy INSIDE container
-            # ---------------------------------------------------------------
-            container_txt_tmp = f"{container_txt}.{timestamp}.copy"
+                    # Parse JSON for dump filename
+                    container_txt = "/tmp/spdk_mem_dump.txt"
+                    json_out, _ = self.ssh_obj.exec_command(
+                        storage_node_ip,
+                        f"cat {host_json} || true"
+                    )
+                    try:
+                        data = json.loads(json_out)
+                        if isinstance(data, dict) and data.get("filename"):
+                            container_txt = data["filename"]
+                    except Exception:
+                        pass
 
-            self.logger.info(
-                f"[DEBUG][SPDK-MEM] Creating stable container copy: {container_txt_tmp}"
-            )
+                    # Create stable copy inside container + docker cp to host
+                    container_txt_tmp = f"{container_txt}.{timestamp}.copy"
+                    self.ssh_obj.exec_command(
+                        storage_node_ip,
+                        f"sudo docker exec {container_name} "
+                        f"sudo cp {container_txt} {container_txt_tmp}"
+                    )
+                    self.ssh_obj.exec_command(
+                        storage_node_ip,
+                        f"sudo timeout 30 docker cp "
+                        f"{container_name}:{container_txt_tmp} {host_txt}"
+                    )
 
-            self.ssh_obj.exec_command(
-                storage_node_ip,
-                f"sudo docker exec {container_name} "
-                f"cp {container_txt} {container_txt_tmp}"
-            )
+                    # Move to final log path
+                    self.ssh_obj.exec_command(
+                        storage_node_ip, f"sudo mv '{host_json}' '{final_json}'"
+                    )
+                    self.ssh_obj.exec_command(
+                        storage_node_ip, f"sudo mv '{host_txt}' '{final_txt}'"
+                    )
 
-            # ---------------------------------------------------------------
-            # 6. docker cp stable file → host (timeout protected)
-            # ---------------------------------------------------------------
-            self.logger.info(
-                f"[DEBUG][SPDK-MEM] Copying dump to host: {host_txt}"
-            )
+                    # Cleanup container temp
+                    self.ssh_obj.exec_command(
+                        storage_node_ip,
+                        f"sudo docker exec {container_name} "
+                        f"sudo rm -f {container_txt_tmp}"
+                    )
 
-            self.ssh_obj.exec_command(
-                storage_node_ip,
-                f"sudo timeout 30 docker cp "
-                f"{container_name}:{container_txt_tmp} {host_txt}"
-            )
-
-            # ---------------------------------------------------------------
-            # 7. Move files to mounted log path
-            # ---------------------------------------------------------------
-
-            self.logger.info(
-                f"[DEBUG][SPDK-MEM] Moving JSON → {final_json}"
-            )
-
-            self.ssh_obj.exec_command(
-                storage_node_ip,
-                f"sudo mv '{host_json}' '{final_json}'"
-            )
-
-            self.logger.info(
-                f"[DEBUG][SPDK-MEM] Moving TXT → {final_txt}"
-            )
-
-            self.ssh_obj.exec_command(
-                storage_node_ip,
-                f"sudo mv '{host_txt}' '{final_txt}'"
-            )
-
-            # ---------------------------------------------------------------
-            # 8. Cleanup container temp files
-            # ---------------------------------------------------------------
-            self.logger.info(
-                "[DEBUG][SPDK-MEM] Cleaning container temp files"
-            )
-
-            self.ssh_obj.exec_command(
-                storage_node_ip,
-                f"sudo docker exec {container_name} "
-                f"rm -f {container_txt_tmp}"
-            )
-
-            self.logger.info(
-                f"[DEBUG][SPDK-MEM] SUCCESS node={storage_node_ip}"
-            )
+                    self.logger.info(
+                        f"[DEBUG][SPDK-MEM] SUCCESS {container_name} on {storage_node_ip}"
+                    )
+                except Exception as e:
+                    self.logger.info(
+                        f"[DEBUG][SPDK-MEM] FAILURE {container_name} on {storage_node_ip}: {e}"
+                    )
 
         except Exception as e:
             self.logger.info(
@@ -878,7 +1348,8 @@ class TestClusterBase:
         try:
             k8s = self.sbcli_utils.k8s
             timestamp = time.strftime("%d-%m-%y-%H-%M-%S")
-            final_dir = f"{self.docker_logs_path}/{storage_node_ip}/spdk_mem_stats"
+            node_id_short = storage_node_id[:8] if len(storage_node_id) > 8 else storage_node_id
+            final_dir = f"{self.docker_logs_path}/{storage_node_ip}_{node_id_short}/spdk_mem_stats"
             os.makedirs(final_dir, exist_ok=True)
 
             pod_name = k8s.get_spdk_pod_name(storage_node_ip)
@@ -947,63 +1418,72 @@ class TestClusterBase:
         self.logger.info("[SPDK-MEM] SPDK mem stats thread stopped")
 
             
-    def teardown(self, delete_lvols=True, close_ssh=True):
+    def teardown(self, delete_lvols=True, close_ssh=True, skip_k8s_cleanup=False):
         """Contains teradown required post test case execution
         """
         self.logger.info("Inside teardown function")
 
         fio_nodes = self.fio_node if isinstance(self.fio_node, list) else [self.fio_node]
-        for node in fio_nodes:
-            self.ssh_obj.exec_command(node=node,
-                                      command="sudo tmux kill-server")
-            self.ssh_obj.kill_processes(node=node,
-                                        process_name="fio")
+
+        if not self.k8s_test:
+            for node in fio_nodes:
+                self.ssh_obj.exec_command(node=node,
+                                          command="sudo tmux kill-server")
+                self.ssh_obj.kill_processes(node=node,
+                                            process_name="fio")
 
         self.stop_root_monitor()
 
-        retry_check = 100
-        while retry_check:
-            exit_while = True
-            for node in fio_nodes:
-                fio_process = self.ssh_obj.find_process_name(
-                    node=node,
-                    process_name="fio --name"
-                )
-                exit_while = exit_while and len(fio_process) <= 2
-            if exit_while:
-                break
-            else:
-                self.logger.info(f"Fio process should exit after kill. Still waiting: {fio_process}")
-                retry_check -= 1
-                sleep_n_sec(10)
+        if not self.k8s_test:
+            retry_check = 100
+            while retry_check:
+                exit_while = True
+                for node in fio_nodes:
+                    fio_process = self.ssh_obj.find_process_name(
+                        node=node,
+                        process_name="fio --name"
+                    )
+                    exit_while = exit_while and len(fio_process) <= 2
+                if exit_while:
+                    break
+                else:
+                    self.logger.info(f"Fio process should exit after kill. Still waiting: {fio_process}")
+                    retry_check -= 1
+                    sleep_n_sec(10)
 
-        if retry_check <= 0:
-            self.logger.info("FIO did not exit completely after kill and wait. "
-                             "Some hanging mount points could be present. "
-                             "Needs manual cleanup.")
+            if retry_check <= 0:
+                self.logger.info("FIO did not exit completely after kill and wait. "
+                                 "Some hanging mount points could be present. "
+                                 "Needs manual cleanup.")
+
+        # K8s resource cleanup (FIO jobs, PVCs, snapshots, etc.)
+        if self.k8s_test and delete_lvols and not skip_k8s_cleanup:
+            self._k8s_default_teardown()
+
         if delete_lvols:
             try:
                 lvols = self.sbcli_utils.list_lvols()
-                self.unmount_all(base_path=self.mount_path)
-                self.unmount_all(base_path="/mnt/")
-                sleep_n_sec(2)
-                for node in fio_nodes:
-                    self.ssh_obj.unmount_path(node=node,
-                                            device=self.mount_path)
-                sleep_n_sec(2)
-                if lvols is not None:
-                    for _, lvol_id in lvols.items():
-                        lvol_details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
-                        nqn = lvol_details[0]["nqn"]
-                        for node in fio_nodes:
-                            self.ssh_obj.unmount_path(node=node,
-                                                    device=self.mount_path)
-                            sleep_n_sec(2)
-                            self.ssh_obj.exec_command(node=node,
-                                                    command=f"sudo nvme disconnect -n {nqn}")
-                            sleep_n_sec(2)
-                    self.disconnect_lvols()
+                if not self.k8s_test:
+                    self.unmount_all(base_path=self.mount_path)
+                    self.unmount_all(base_path="/mnt/")
                     sleep_n_sec(2)
+                    for node in fio_nodes:
+                        self.ssh_obj.unmount_path(node=node,
+                                                device=self.mount_path)
+                    sleep_n_sec(2)
+                    if lvols is not None:
+                        for _, lvol_id in lvols.items():
+                            lvol_details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
+                            nqn = lvol_details[0]["nqn"]
+                            for node in fio_nodes:
+                                self.ssh_obj.unmount_path(node=node,
+                                                        device=self.mount_path)
+                                sleep_n_sec(2)
+                                self.ssh_obj.exec_command(node=node,
+                                                        command=f"sudo nvme disconnect -n {nqn}")
+                                sleep_n_sec(2)
+                        self.disconnect_lvols()
+                        sleep_n_sec(2)
                 self.sbcli_utils.delete_all_lvols()
                 sleep_n_sec(2)
                 if not self.k8s_test:
@@ -1899,10 +2379,130 @@ class TestClusterBase:
                 f"from {len(pairs)} (container, source) pairs"
             )
 
+            # Post-process: extract delay-qpair entries for quick analysis
+            try:
+                self._extract_delay_logs(graylog_dir)
+            except Exception as delay_exc:
+                self.logger.warning(
+                    f"[delay-extract] Failed: {delay_exc}"
+                )
+
         except Exception as exc:
             self.logger.warning(
                 f"[graylog-export] Unexpected error, skipping: {exc}"
             )
+
+    def _extract_delay_logs(self, graylog_dir):
+        """Extract delay-qpair entries from SPDK logs into separate files.
+
+        Scans each spdk_*.log (excluding spdk_proxy_*) in *graylog_dir* for
+        delay-qpair / nvmf_tcp_dump_delay_req_status lines and writes them
+        to ``delay_qpair/<stem>__delay_qpair.log``.  Empty files are removed.
+        """
+        import glob as _glob
+
+        delay_dir = os.path.join(graylog_dir, "delay_qpair")
+        os.makedirs(delay_dir, exist_ok=True)
+        extracted = 0
+
+        for spdk_log in sorted(_glob.glob(os.path.join(graylog_dir, "spdk_[0-9]*.log"))):
+            basename = os.path.basename(spdk_log)
+            if basename.startswith("spdk_proxy_"):
+                continue
+            stem = basename.rsplit(".", 1)[0]
+            out_path = os.path.join(delay_dir, f"{stem}__delay_qpair.log")
+            count = 0
+            with open(spdk_log, "r", errors="replace") as fin, \
+                 open(out_path, "w", errors="replace") as fout:
+                for line in fin:
+                    if "nvmf_tcp_dump_delay_req_status" in line or "delay-qpair" in line:
+                        fout.write(line)
+                        count += 1
+            if count == 0:
+                os.remove(out_path)
+            else:
+                self.logger.info(f"[delay-extract] {stem}: {count} delay entries")
+                extracted += 1
+
+        if extracted == 0:
+            # Clean up empty directory
+            try:
+                os.rmdir(delay_dir)
+            except OSError:
+                pass
+        else:
+            self.logger.info(f"[delay-extract] Extracted delay logs from {extracted} SPDK log(s)")
+
+    def extract_delay_qpair_logs(self):
+        """Scan entire test output dir for SPDK logs and extract delay-qpair entries.
+
+        Runs after ALL log collection (tmux, final docker, graylog) so it
+        catches every SPDK log regardless of collection method.  Writes
+        extracted entries to ``<docker_logs_path>/delay_qpair/`` with
+        source-identifying filenames.
+        """
+        if not self.docker_logs_path or not os.path.isdir(self.docker_logs_path):
+            return
+        try:
+            import re as _re
+
+            delay_dir = os.path.join(self.docker_logs_path, "delay_qpair")
+            os.makedirs(delay_dir, exist_ok=True)
+            extracted = 0
+            base = self.docker_logs_path
+
+            for dirpath, _dirnames, filenames in os.walk(base):
+                for fname in filenames:
+                    # Match spdk_NNNN*.log / spdk_NNNN*.txt but skip proxy
+                    if not _re.match(r"spdk_\d+", fname):
+                        continue
+                    if fname.startswith("spdk_proxy_"):
+                        continue
+                    # Skip files already in delay_qpair dir
+                    if "delay_qpair" in dirpath:
+                        continue
+
+                    src_path = os.path.join(dirpath, fname)
+                    # Build output name: parent_dir__filename.log
+                    rel = os.path.relpath(dirpath, base)
+                    safe_rel = rel.replace(os.sep, "__").replace("/", "__")
+                    stem = os.path.splitext(fname)[0]
+                    out_name = f"{safe_rel}__{stem}__delay_qpair.log"
+                    out_path = os.path.join(delay_dir, out_name)
+
+                    count = 0
+                    try:
+                        with open(src_path, "r", errors="replace") as fin, \
+                             open(out_path, "w", errors="replace") as fout:
+                            for line in fin:
+                                if "nvmf_tcp_dump_delay_req_status" in line or "delay-qpair" in line:
+                                    fout.write(line)
+                                    count += 1
+                    except Exception as exc:
+                        self.logger.warning(f"[delay-extract] Error reading {src_path}: {exc}")
+                        continue
+
+                    if count == 0:
+                        try:
+                            os.remove(out_path)
+                        except OSError:
+                            pass
+                    else:
+                        self.logger.info(f"[delay-extract] {rel}/{fname}: {count} entries")
+                        extracted += 1
+
+            if extracted == 0:
+                try:
+                    os.rmdir(delay_dir)
+                except OSError:
+                    pass
+            else:
+                self.logger.info(
+                    f"[delay-extract] Total: {extracted} SPDK log(s) with delay entries "
+                    f"-> {delay_dir}"
+                )
+        except Exception as exc:
+            self.logger.warning(f"[delay-extract] Failed: {exc}")
 
     def _get_all_nodes(self):
         """Return ordered, de-duplicated list of mgmt + storage nodes."""
@@ -2232,15 +2832,12 @@ class TestClusterBase:
         start_time = datetime.now(timezone.utc)
         end_time = start_time + timedelta(seconds=timeout)
 
-        output = None
-        while output is None:
-            output, _ = self.ssh_obj.exec_command(
-                node=self.mgmt_nodes[0],
-                command=f"{self.base_cmd} cluster list-tasks {self.cluster_id} --limit 0"
-            )
-            self.logger.info(f"Data migration output: {output}")
-            if no_task_ok:
-                return  # Skip checking altogether
+        # Log initial task list via API (works in both SSH and K8s-native modes)
+        try:
+            initial_tasks = self.sbcli_utils.get_cluster_tasks(self.cluster_id)
+            self.logger.info(f"Data migration tasks at start: {initial_tasks}")
+        except Exception as e:
+            self.logger.warning(f"Could not fetch initial task list: {e}")
 
         migration_tasks_found = False
 
@@ -2290,7 +2887,10 @@ class TestClusterBase:
             sleep_n_sec(check_interval)
 
         # If nothing was found at all even after timeout
-        if not migration_tasks_found and not no_task_ok:
+        if not migration_tasks_found:
+            if no_task_ok:
+                self.logger.info("No migration tasks found, but no_task_ok=True — skipping.")
+                return
             raise RuntimeError(
                 f"No migration tasks found for {'node ' + node_id if node_id else 'the cluster'} "
                 f"after the specified timestamp {timestamp} and function containing device migration!"

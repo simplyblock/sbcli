@@ -112,6 +112,12 @@ class Cluster(BaseModel):
     container_image_prefix: str = ""
     hashicorp_vault_settings: Optional[HashicorpVaultSettings] = None
 
+    # Single-node-expansion resumability cursor. Empty dict means no expansion
+    # is in flight. Populated/advanced/cleared via the helpers in
+    # ``simplyblock_core.controllers.cluster_expansion.planner``. See the feature plan
+    # ``single_node_expansion_plan.md`` for the schema.
+    expand_state: dict = {}
+
     def get_status_code(self):
         if self.status in self.STATUS_CODE_MAP:
             return self.STATUS_CODE_MAP[self.status]
@@ -132,3 +138,47 @@ class Cluster(BaseModel):
             return True
         return False
 
+
+
+class ClusterAddNodeLock(BaseModel):
+    """Cluster-scoped mutex held while a node-add performs its cross-node mesh
+    wiring (connect to remote devices, go ONLINE, make peers reverse-connect,
+    push the cluster map). Only this section needs serializing; the slow,
+    node-local part of add_node (SPDK boot, local device prep) runs in parallel
+    across concurrent node-add tasks.
+
+    Keyed by ``cluster_id`` so there is at most one in-flight mesh section per
+    cluster. ``heartbeat_at`` is refreshed by the holder while the section runs;
+    a lock whose heartbeat is older than ``CLUSTER_ADD_LOCK_TTL_SEC`` is
+    considered abandoned (holder crashed) and may be reclaimed.
+    """
+
+    cluster_id: str = ""
+    owner: str = ""
+    acquired_at: int = 0
+    heartbeat_at: int = 0
+
+    def get_id(self):
+        return self.cluster_id or self.uuid
+
+
+class PortReservation(BaseModel):
+    """Short-lived reservation of an NVMe-oF port during node add.
+
+    ``add_node`` allocates a node's rpc/nvmf ports long before the node record
+    is persisted (SPDK boots in between), so two concurrent adds would otherwise
+    read the same "next free" port. A reservation makes the chosen port visible
+    to other allocators immediately and transactionally. Once the node record is
+    persisted its own port fields keep the port reserved; the reservation is
+    redundant after that and is reclaimed by ``created_at`` TTL
+    (``PORT_RESERVATION_TTL_SEC``) — no explicit release is required, and a
+    crashed add self-heals when the reservation goes stale.
+    """
+
+    cluster_id: str = ""
+    port: int = 0
+    owner: str = ""
+    created_at: int = 0
+
+    def get_id(self):
+        return "%s/%s" % (self.cluster_id, self.port)

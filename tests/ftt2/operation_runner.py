@@ -183,8 +183,10 @@ class OperationRunner:
         """Delete a volume via lvol_controller.delete_lvol()."""
         def _do():
             from simplyblock_core.controllers import lvol_controller
-            result = lvol_controller.delete_lvol(lvol_id)
-            self._result.success = bool(result)
+            from simplyblock_core.db_controller import DBController
+            lvol = DBController().get_lvol_by_id(lvol_id)
+            lvol_controller.delete_lvol(lvol)
+            self._result.success = True
 
         self.start(_do)
         return self

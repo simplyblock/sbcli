@@ -27,6 +27,11 @@ from e2e_tests.cloning_and_snapshot.multi_lvol_snapshot_fio import TestMultiLvol
 from e2e_tests.ha_journal.lvol_journal_device_node_restart import TestDeviceNodeRestart
 from e2e_tests.data_migration.data_migration_ha_fio import FioWorkloadTest
 from e2e_tests.multi_node_crash_fio_clone import TestMultiFioSnapshotDowntime
+from e2e_tests.test_multi_node_outage import (
+    TestMultiNodeOutageDocker,
+    TestMultiNodeOutageK8s,
+    TestMultiNodeVMRebootDocker
+)
 
 
 from e2e_tests.add_node_fio_run import (
@@ -60,7 +65,7 @@ from stress_test.continuous_failover_ha_2node import RandomMultiClient2NodeFailo
 from stress_test.continuous_failover_ha_rdma import RandomRDMAFailoverTest
 from stress_test.continuous_failover_ha_rdma_multi_outage import RandomRDMAMultiFailoverTest
 from stress_test.continuous_failover_ha_k8s import RandomK8sMultiOutageFailoverTest
-from stress_test.continuous_k8s_native_failover import K8sNativeFailoverTest, K8sNativeBasicFailoverTest, K8sNativeResilientFailoverTest
+from stress_test.continuous_k8s_native_failover import K8sNativeFailoverTest, K8sNativeBasicFailoverTest, K8sNativeResilientFailoverTest, K8sNativeQuickFailoverTest
 from stress_test.continuous_failover_ha_multi_client_quick_outage import (
     RandomRapidFailoverNoGap,
     RandomRapidFailoverNoGapV2WithMigration,
@@ -85,12 +90,30 @@ from stress_test.large_scale_lvol_stress import (
     LargeScaleLvolK8s,
 )
 from stress_test.device_failure_migration import (
-    DeviceFailureMigrationNoLoad,
-    DeviceFailureMigrationUnderLoad,
+    DeviceFailureMigrationNoLoadDocker,
+    DeviceFailureMigrationUnderLoadDocker,
+    DeviceFailureMigrationPCIeNoLoadDocker,
+    DeviceFailureMigrationPCIeUnderLoadDocker,
+    DeviceFailureMigrationNoLoadK8s,
+    DeviceFailureMigrationUnderLoadK8s,
+    DeviceFailureMigrationPCIeNoLoadK8s,
+    DeviceFailureMigrationPCIeUnderLoadK8s,
+    DevicePCIeRestartNoLoadDocker,
+    DevicePCIeRestartUnderLoadDocker,
+    DevicePCIeRestartNoLoadK8s,
+    DevicePCIeRestartUnderLoadK8s,
+    DeviceAddAfterBootstrapDocker,
+    DeviceAddAfterBootstrapUnderLoadDocker,
 )
 from stress_test.continuous_failover_ha_security import (
     RandomSecurityFailoverTest,
     RandomAllSecurityFailoverTest,
+)
+from stress_test.mgmt_node_network_outage import MgmtNodeNetworkOutageTest, MgmtNodeRebootTest
+from stress_test.k8s_native_namespace_failover import (
+    K8sNativeNamespacedFailoverTest,
+    K8sNativeRapidLifecycleTest,
+    K8sNativeMountVerifiedFailoverTest,
 )
 
 from e2e_tests.security.test_lvol_security import (
@@ -115,6 +138,7 @@ from e2e_tests.security.test_lvol_security import (
 )
 
 from e2e_tests.upgrade_tests.major_upgrade import TestMajorUpgrade, TestMajorUpgradeSingleNode
+from e2e_tests.upgrade_tests.k8s_major_upgrade import K8sNativeMajorUpgrade
 
 from e2e_tests.backup.test_backup_restore import (
     TestBackupBasicPositive,
@@ -193,6 +217,7 @@ ALL_TESTS = [
     TestAddK8sNodesDuringFioRun,
     K8sNativeAddNodeTest,
     K8sNativeNodeMigrationTest,
+    K8sNativeMajorUpgrade,
     # Security E2E tests
     TestLvolSecurityCombinations,
     TestLvolDynamicHostManagement,
@@ -266,6 +291,10 @@ ALL_TESTS = [
     K8sNativeFailoverTest,
     K8sNativeBasicFailoverTest,
     K8sNativeResilientFailoverTest,
+    K8sNativeQuickFailoverTest,
+    K8sNativeNamespacedFailoverTest,
+    K8sNativeRapidLifecycleTest,
+    K8sNativeMountVerifiedFailoverTest,
     TestParallelNamespaceLvolDocker,
     TestParallelNamespaceLvolK8s,
     BulkLvolDeleteDocker,
@@ -274,16 +303,33 @@ ALL_TESTS = [
     BulkLvolHotDeleteK8s,
     LargeScaleLvolDocker,
     LargeScaleLvolK8s,
-    DeviceFailureMigrationNoLoad,
-    DeviceFailureMigrationUnderLoad,
+    DeviceFailureMigrationNoLoadDocker,
+    DeviceFailureMigrationUnderLoadDocker,
+    DeviceFailureMigrationPCIeNoLoadDocker,
+    DeviceFailureMigrationPCIeUnderLoadDocker,
+    DeviceFailureMigrationNoLoadK8s,
+    DeviceFailureMigrationUnderLoadK8s,
+    DeviceFailureMigrationPCIeNoLoadK8s,
+    DeviceFailureMigrationPCIeUnderLoadK8s,
+    DevicePCIeRestartNoLoadDocker,
+    DevicePCIeRestartUnderLoadDocker,
+    DevicePCIeRestartNoLoadK8s,
+    DevicePCIeRestartUnderLoadK8s,
+    DeviceAddAfterBootstrapDocker,
+    DeviceAddAfterBootstrapUnderLoadDocker,
+    TestMultiNodeOutageDocker,
+    TestMultiNodeOutageK8s,
+    TestMultiNodeVMRebootDocker,
+    MgmtNodeNetworkOutageTest,
+    MgmtNodeRebootTest,
 ]
 
 def get_all_tests(custom=True, ha_test=False):
     tests = [
-        TestLvolFioNpcsCustom,
-        TestLvolFioNpcs0,
-        TestLvolFioNpcs1,
-        TestLvolFioNpcs2,
+        # TestLvolFioNpcsCustom,
+        # TestLvolFioNpcs0,
+        # TestLvolFioNpcs1,
+        # TestLvolFioNpcs2,
         # TestLvolFioQOSBW,
         # TestLvolFioQOSIOPS,
         TestSingleNodeOutage,
@@ -318,12 +364,12 @@ def get_all_tests(custom=True, ha_test=False):
     #     TestLvolSecuritySnapshotClone,
     #     TestLvolSecurityRDMAv2,
     # ]
-    if not custom:
-        tests.remove(TestLvolFioNpcsCustom)
-    else:
-        tests.remove(TestLvolFioNpcs0)
-        tests.remove(TestLvolFioNpcs1)
-        tests.remove(TestLvolFioNpcs2)
+    # if not custom:
+    #     tests.remove(TestLvolFioNpcsCustom)
+    # else:
+    #     tests.remove(TestLvolFioNpcs0)
+    #     tests.remove(TestLvolFioNpcs1)
+    #     tests.remove(TestLvolFioNpcs2)
     if not ha_test:
         tests.remove(TestHASingleNodeFailure)
         # tests.remove(TestHASingleNodeReboot)
@@ -374,6 +420,8 @@ def get_stress_tests():
         RandomRDMAFailoverTest,
         RandomRDMAMultiFailoverTest,
         RandomK8sMultiOutageFailoverTest,
+        MgmtNodeNetworkOutageTest,
+        MgmtNodeRebootTest,
         RandomRapidFailoverNoGap,
         RandomRapidFailoverNoGapV2WithMigration,
         RandomRapidFailoverNoGapV2NoMigration,
@@ -384,6 +432,10 @@ def get_stress_tests():
         K8sNativeFailoverTest,
         K8sNativeBasicFailoverTest,
         K8sNativeResilientFailoverTest,
+        K8sNativeQuickFailoverTest,
+        K8sNativeNamespacedFailoverTest,
+        K8sNativeRapidLifecycleTest,
+        K8sNativeMountVerifiedFailoverTest,
         TestParallelNamespaceLvolDocker,
         TestParallelNamespaceLvolK8s,
         BulkLvolDeleteDocker,
@@ -392,8 +444,20 @@ def get_stress_tests():
         BulkLvolHotDeleteK8s,
         LargeScaleLvolDocker,
         LargeScaleLvolK8s,
-        DeviceFailureMigrationNoLoad,
-        DeviceFailureMigrationUnderLoad,
+        DeviceFailureMigrationNoLoadDocker,
+        DeviceFailureMigrationUnderLoadDocker,
+        DeviceFailureMigrationPCIeNoLoadDocker,
+        DeviceFailureMigrationPCIeUnderLoadDocker,
+        DeviceFailureMigrationNoLoadK8s,
+        DeviceFailureMigrationUnderLoadK8s,
+        DeviceFailureMigrationPCIeNoLoadK8s,
+        DeviceFailureMigrationPCIeUnderLoadK8s,
+        DevicePCIeRestartNoLoadDocker,
+        DevicePCIeRestartUnderLoadDocker,
+        DevicePCIeRestartNoLoadK8s,
+        DevicePCIeRestartUnderLoadK8s,
+        DeviceAddAfterBootstrapDocker,
+        DeviceAddAfterBootstrapUnderLoadDocker,
     ]
     return tests
 
@@ -409,9 +473,22 @@ def get_monitoring_tests():
         BulkLvolHotDeleteK8s,
         LargeScaleLvolDocker,
         LargeScaleLvolK8s,
-        DeviceFailureMigrationNoLoad,
-        DeviceFailureMigrationUnderLoad,
+        DeviceFailureMigrationNoLoadDocker,
+        DeviceFailureMigrationUnderLoadDocker,
+        DeviceFailureMigrationPCIeNoLoadDocker,
+        DeviceFailureMigrationPCIeUnderLoadDocker,
+        DeviceFailureMigrationNoLoadK8s,
+        DeviceFailureMigrationUnderLoadK8s,
+        DeviceFailureMigrationPCIeNoLoadK8s,
+        DeviceFailureMigrationPCIeUnderLoadK8s,
+        DevicePCIeRestartNoLoadDocker,
+        DevicePCIeRestartUnderLoadDocker,
+        DevicePCIeRestartNoLoadK8s,
+        DevicePCIeRestartUnderLoadK8s,
+        DeviceAddAfterBootstrapDocker,
+        DeviceAddAfterBootstrapUnderLoadDocker,
         TestLvolOutageLoadTest,
+        TestParallelLvolSnapshotCloneAPI,
     ]
 
 def get_backup_tests():
@@ -467,7 +544,8 @@ def get_backup_stress_tests():
 def get_upgrade_tests():
     tests = [
         TestMajorUpgrade,
-        TestMajorUpgradeSingleNode
+        TestMajorUpgradeSingleNode,
+        K8sNativeMajorUpgrade,
     ]
     return tests
 

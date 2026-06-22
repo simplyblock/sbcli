@@ -333,6 +333,7 @@ def spdk_process_start(body: SPDKParams):
     if isinstance(skip_kubelet_configuration, str):
        skip_kubelet_configuration = skip_kubelet_configuration.strip().lower() in ("true")
     reserved_system_cpus = os.environ.get("RESERVED_SYSTEM_CPUS", "0,1")
+    openshift_mcp = os.environ.get("OPENSHIFT_MCP")
 
     node_prepration_core_name = "snode-spdk-core-isolate-"
     if cpu_topology_enabled:
@@ -374,6 +375,7 @@ def spdk_process_start(body: SPDKParams):
             'FW_PORT': body.firewall_port,
             'CPU_TOPOLOGY_ENABLED': cpu_topology_enabled,
             'RESERVED_SYSTEM_CPUS': reserved_system_cpus,
+            'OPENSHIFT_MCP': openshift_mcp,
             'TLS_SERVE': settings.tls_serve,
             'TLS_CONNECT': settings.tls_connect,
             'TLS_CLIENT_AUTH': settings.model_dump()["tls_client_auth"],

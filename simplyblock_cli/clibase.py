@@ -9,6 +9,7 @@ import time
 import argcomplete
 
 from simplyblock_core import cluster_ops, utils, db_controller, constants
+from simplyblock_core.exceptions import MigrationConflictError, PreconditionError
 from simplyblock_core import storage_node_ops as storage_ops
 from simplyblock_core import mgmt_node_ops as mgmt_ops
 from simplyblock_core.controllers import pool_controller, lvol_controller, snapshot_controller, device_controller, \
@@ -171,6 +172,20 @@ class CLIWrapperBase:
         num_partitions_per_dev = 0 if args.enable_journal_device else 1
         spdk_sys_mem = getattr(args, 'spdk_sys_mem', None)
 
+        expansion = getattr(args, 'expansion', False)
+
+        # Snapshot the existing storage-node IDs in the cluster *before*
+        # add_node so we can identify which one is the newcomer afterwards.
+        # Only needed when --expansion is requested.
+        before_ids = set()
+        if expansion:
+            from simplyblock_core.db_controller import DBController
+            db_for_diff = DBController()
+            before_ids = {
+                n.get_id()
+                for n in db_for_diff.get_storage_nodes_by_cluster_id(cluster_id)
+            }
+
         try:
             out = storage_ops.add_node(
                 cluster_id=cluster_id,
@@ -193,10 +208,39 @@ class CLIWrapperBase:
                 format_4k=format_4k,
                 spdk_proxy_image=getattr(args, 'spdk_proxy_image', None),
                 spdk_sys_mem=spdk_sys_mem,
+                expansion=expansion,
             )
         except Exception as e:
             print(e)
             return False
+
+        if expansion and out:
+            # Find the newcomer by diffing the post-add node list against
+            # the pre-add snapshot. The CLI returns "Success" (truthy) on
+            # successful add_node, so `out` being truthy is the success
+            # signal we condition on.
+            db = DBController()
+            after = db.get_storage_nodes_by_cluster_id(cluster_id)
+            new_snodes = [n for n in after if n.get_id() not in before_ids]
+            if len(new_snodes) != 1:
+                print(
+                    f"--expansion: expected exactly 1 new storage node after "
+                    f"add_node, found {len(new_snodes)}; cannot integrate")
+                return False
+            # Queue the integration as a background task rather than driving
+            # it inline: the rebalance runs the heavy SPDK recreate/teardown
+            # path (minutes), and the orchestrator persists a resume cursor
+            # so the runner survives a mgmt-node restart mid-expansion. The
+            # post-integration new-device-migration trigger now lives in the
+            # runner's success path (it must run after the rotation lands).
+            task_id = tasks_controller.add_cluster_expand_task(
+                cluster_id, new_snodes[0].get_id())
+            if not task_id:
+                print("--expansion: an expansion task already exists for "
+                      "this cluster")
+                return False
+            print(f"--expansion: queued integration task {task_id} for "
+                  f"{new_snodes[0].get_id()}; monitor with `sbctl task list`")
 
         return out
 
@@ -373,7 +417,7 @@ class CLIWrapperBase:
         return device_controller.new_device_from_failed(args.device_id)
 
     def storage_node__list_snapshots(self, sub_command, args):
-        return snapshot_controller.list_by_node(args.node_id, args.json)
+        return snapshot_controller.list_snapshots(node_id=args.node_id, is_json=args.json)
 
     def storage_node__list_lvols(self, sub_command, args):
         return lvol_controller.list_by_node(args.node_id, args.json)
@@ -593,9 +637,14 @@ class CLIWrapperBase:
         return lvol_controller.get_lvol(args.volume_id, args.json)
 
     def volume__delete(self, sub_command, args):
-        for id in args.volume_id:
-            force = args.force
-            return lvol_controller.delete_lvol(id, force)
+        db = db_controller.DBController()
+        try:
+            lvol = db.get_lvol_by_id(args.volume_id)
+        except KeyError:
+            return False
+
+        lvol_controller.delete_lvol(lvol, force_delete=args.force)
+        return True
 
     def volume__connect(self, sub_command, args):
         kwargs = {}
@@ -608,7 +657,7 @@ class CLIWrapperBase:
         if err:
             return err
         if data:
-            return "\n".join(con['connect'] for con in data)
+            return "\n".join(con.connect for con in data)
 
     def volume__resize(self, sub_command, args):
         volume_id = args.volume_id
@@ -678,14 +727,30 @@ class CLIWrapperBase:
         return lvol_controller.clone_lvol(args.volume_id, args.clone_name)
 
     def volume__migrate(self, sub_command, args):
-        migration_id, error = migration_controller.start_migration(
-            args.volume_id,
-            args.target_node_id,
-            max_retries=args.max_retries,
-            deadline_seconds=args.deadline_seconds,
-        )
-        if error:
-            print(f"Error: {error}")
+        try:
+            migration_id, connect_strings = migration_controller.create_migration(
+                args.volume_id,
+                args.target_node_id,
+                ctrl_loss_tmo=args.ctrl_loss_tmo,
+                host_nqn=getattr(args, 'host_nqn', None),
+            )
+        except (MigrationConflictError, PreconditionError, ValueError) as e:
+            print(f"Error: {e}")
+            return False
+        print(f"Migration ID: {migration_id}")
+        if connect_strings:
+            return "\n".join(c.connect for c in connect_strings)
+        return True
+
+    def volume__migrate_continue(self, sub_command, args):
+        try:
+            migration_id = migration_controller.start_migration(
+                migration_id=args.migration_id,
+                max_retries=args.max_retries,
+                deadline_seconds=args.deadline_seconds,
+            )
+        except ValueError as e:
+            print(f"Error: {e}")
             return False
         print(f"Migration started: {migration_id}")
         return True
@@ -694,9 +759,10 @@ class CLIWrapperBase:
         return migration_controller.list_migrations(cluster_id=args.cluster_id, is_json=args.json)
 
     def volume__migrate_cancel(self, sub_command, args):
-        ok, error = migration_controller.cancel_migration(args.migration_id)
-        if not ok:
-            print(f"Error: {error}")
+        try:
+            migration_controller.cancel_migration(args.migration_id)
+        except ValueError as e:
+            print(f"Error: {e}")
             return False
         print(f"Migration {args.migration_id} cancelled")
         return True
@@ -793,7 +859,7 @@ class CLIWrapperBase:
         return True
 
     def snapshot__list(self, sub_command, args):
-        return snapshot_controller.list(args.all, args.cluster_id, args.with_details, args.pool)
+        return snapshot_controller.list_snapshots(args.cluster_id, args.node_id, args.lvol_id, args.pool, args.with_details, args.json)
 
     def snapshot__delete(self, sub_command, args):
         return snapshot_controller.delete(args.snapshot_id, args.force)

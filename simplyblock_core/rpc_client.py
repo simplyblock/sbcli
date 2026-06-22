@@ -240,10 +240,23 @@ class RPCClient:
             "model_number": model_number}
         return self._request("nvmf_create_subsystem", params)
 
-    def keyring_file_add_key(self, name, path):
-        """Register a file-based key in SPDK's keyring by path."""
-        params = {"name": name, "path": path}
-        return self._request("keyring_file_add_key", params)
+    def keyring_file_add_key(self, name: str, path: str, *, allow_existing: bool = False):
+        """Register a file-based key in SPDK's keyring by path.
+
+        Args:
+            name: Key name for the SPDK keyring.
+            path: Path to the key file on the storage node.
+            allow_existing: When True, silently succeed if the key is already
+                registered (SPDK errno -17). When False (default) an existing
+                key raises RPCException.
+        """
+        try:
+            return self._request3("keyring_file_add_key", name=name, path=path)
+        except RPCException as e:
+            if allow_existing and e.code == -17:
+                logger.debug("Key %s already in SPDK keyring, reusing", name)
+                return None
+            raise
 
     def keyring_file_remove_key(self, name):
         """Remove a key from SPDK's keyring."""
@@ -295,7 +308,7 @@ class RPCClient:
         params = {
             "trtype": trtype,
             "max_io_qpairs_per_ctrlr": constants.QPAIR_COUNT,
-            "max_queue_depth": 256,
+            "max_queue_depth": 128,
             "abort_timeout_sec": 5,
             "zcopy": True,
             "in_capsule_data_size": 8192,
@@ -378,6 +391,19 @@ class RPCClient:
     def bdev_nvme_detach_controller(self, name):
         params = {"name": name}
         return self._request2("bdev_nvme_detach_controller", params)
+
+    def bdev_nvme_remove_trid(self, name, traddr, trsvcid, trtype="TCP"):
+        """Remove a single transport path from an NVMe controller without
+        detaching the whole controller. Used during single-node cluster
+        expansion to prune the dead failover path on a sibling sec_2 node
+        after its sec_1 was re-homed to a different node."""
+        return self._request3(
+            "bdev_nvme_remove_trid",
+            name=name,
+            traddr=traddr,
+            trsvcid=str(trsvcid),
+            trtype=trtype,
+        )
 
     def ultra21_alloc_ns_init(self, pci_addr):
         params = {
@@ -467,6 +493,27 @@ class RPCClient:
             "nsid": nsid}
         return self._request("nvmf_subsystem_remove_ns", params)
 
+    def nvmf_subsystem_ns_update(self, nqn, nsid, bdev_name):
+        """Atomically swap the bdev backing *nsid* in *nqn* for *bdev_name*.
+
+        Keeps the same nsid, UUID, NGUID, and ANA group — the client sees the
+        namespace as unchanged (no AER namespace-change event, no rediscovery
+        delay).  Available in SPDK ≥ 24.01.
+
+        Returns the SPDK result on success, or None if the RPC is unavailable
+        or the call fails (caller should fall back to remove + add_ns).
+        """
+        params = {
+            "nqn": nqn,
+            "nsid": nsid,
+            "bdev_name": bdev_name,
+        }
+        try:
+            return self._request("nvmf_subsystem_ns_update", params)
+        except Exception as e:
+            logger.debug("nvmf_subsystem_ns_update not available or failed: %s", e)
+            return None
+
     def nvmf_subsystem_listener_set_ana_state(self, nqn, ip, port, trtype="TCP", is_optimized=True, ana=None):
         params = {
             "nqn": nqn,
@@ -524,9 +571,12 @@ class RPCClient:
             params["uuid"] = uuid
         return self._request("bdev_lvol_create", params)
 
-    def delete_lvol(self, name, del_async=False):
-        params = {"name": name,
-                  "sync": del_async}
+    def delete_lvol(self, name, del_async=False, special_delete=False):
+        params = {
+            "name": name,
+            "sync": del_async,
+            "special_delete": special_delete,
+        }
         return self._request2("bdev_lvol_delete", params)
 
     def get_bdevs(self, name=None):
@@ -1393,10 +1443,20 @@ class RPCClient:
         }
         return self._request("bdev_lvol_set_lvs_read_only", params)
 
-    def bdev_lvol_create_hublvol(self, lvs):
-        return self._request('bdev_lvol_create_hublvol', {
+    def bdev_lvol_create_hublvol(self, lvs, name=None):
+        # Only send "name" when explicitly requested. Older data-plane SPDK
+        # images (pre 3fcea32f8, 2026-06-16) have no "name" decoder, and
+        # spdk_json_decode_object rejects unknown keys outright — sending it
+        # unconditionally fails bdev_lvol_create_hublvol on those images, so
+        # the hublvol bdev (and its NVMe-oF listener) never gets created on
+        # activate. SPDK itself defaults name to "hublvol" when omitted, so
+        # leaving it out is behaviour-identical on new images too.
+        params = {
             "uuid" if utils.UUID_PATTERN.match(lvs) else "lvs_name": lvs,
-        })
+        }
+        if name is not None:
+            params["name"] = name
+        return self._request('bdev_lvol_create_hublvol', params)
 
     def bdev_lvol_delete_hublvol(self, lvs):
         return self._request('bdev_lvol_delete_hublvol', {
@@ -1551,7 +1611,7 @@ class RPCClient:
         """Mark *name* (composite lvol bdev) as a migration-target lvol."""
         return self._request("bdev_lvol_set_migration_flag", {"lvol_name": name})
 
-    def bdev_lvol_transfer(self, name, offset, batch_size, bdev_name, operation="migrate"):
+    def bdev_lvol_transfer(self, name, offset, batch_size, bdev_name, operation="migrate", lvol_id=0):
         """
         Start an async blob transfer from *name* (source composite bdev) to the
         NVMe-oF bdev *bdev_name* attached on the caller's node.
@@ -1561,6 +1621,7 @@ class RPCClient:
         """
         return self._request("bdev_lvol_transfer", {
             "lvol_name": name,
+            "lvol_id": lvol_id,
             "offset": offset,
             "cluster_batch": batch_size,
             "gateway": bdev_name,
@@ -1606,7 +1667,7 @@ class RPCClient:
         """
         return self._request("bdev_lvol_get_lvols", {"lvs_name": lvs_name})
 
-    def bdev_lvol_final_migration(self, lvol_name, lvol_id, snapshot_name, batch_size, bdev_name):
+    def bdev_lvol_final_migration(self, lvol_name, lvol_id, snapshot_name, batch_size, bdev_name, operation="migrate"):
         """
         Start the final (live) migration of a writable lvol from source to target.
         The source I/O is frozen for the brief delta transfer.
@@ -1617,15 +1678,17 @@ class RPCClient:
             snapshot_name: composite name of the last transferred snapshot on source
             block_size:    constant – pass ``2``
             bdev_name:     bdev exposed by connecting to the target hub lvol
+            operation: (migrate or replicate)
 
         Poll progress with :meth:`bdev_lvol_transfer_stat` using *lvol_name*.
         """
-        return self._request("bdev_lvol_final_migration", {
+        return self._request("bdev_lvol_transfer_final_step", {
             "lvol_name": lvol_name,
             "lvol_id": lvol_id,
             "snapshot_name": snapshot_name,
             "cluster_batch": batch_size,
             "gateway": bdev_name,
+            "operation": operation,
         })
 
     # ---- S3 Backup RPCs ----

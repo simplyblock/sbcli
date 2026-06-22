@@ -1,7 +1,7 @@
 from typing import Annotated, List, Literal, Optional, Union
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field, RootModel
 
 from simplyblock_core.db_controller import DBController
@@ -9,13 +9,13 @@ from simplyblock_core import utils as core_utils
 from simplyblock_core.controllers import backup_controller, lvol_controller, snapshot_controller
 from simplyblock_core.models.lvol_model import LVol
 
-from .cluster import Cluster
-from .pool import StoragePool
-from .dtos import BackupDTO, VolumeDTO, SnapshotDTO, TaskDTO
-from . import util
+from ...._dependencies import Cluster, StoragePool, Volume
+from ...._dtos import BackupDTO, VolumeDTO, SnapshotDTO, TaskDTO
+from .... import util
+from .migration import api as migration_api
 
 
-api = APIRouter(prefix='/volumes')
+api = APIRouter()
 db = DBController()
 
 
@@ -62,7 +62,8 @@ class _CloneParams(BaseModel):
 @api.post('/', name='clusters:storage-pools:volumes:create', status_code=201, responses={201: {"content": None}})
 def add(
         request: Request, cluster: Cluster, pool: StoragePool,
-        parameters: RootModel[Union[_CreateParams, _CloneParams]]
+        parameters: RootModel[Union[_CreateParams, _CloneParams]],
+        response_format: util.CreationResponseFormatParameter = "empty",
 ) -> Response:
     data = parameters.root
     try:
@@ -112,29 +113,29 @@ def add(
     if volume_id_or_false == False:  # noqa
         raise ValueError(error)
 
-    entity_url = request.app.url_path_for(
-            'clusters:storage-pools:volumes:detail',
-            cluster_id=cluster.get_id(),
-            pool_id=pool.get_id(),
-            volume_id=volume_id_or_false,
+    return util.creation_response(
+        request, response_format,
+        entity_id=UUID(volume_id_or_false),
+        route_name='clusters:storage-pools:volumes:detail',
+        route_kwargs={
+            'cluster_id': UUID(cluster.get_id()),
+            'pool_id': UUID(pool.get_id()),
+            'volume_id': UUID(volume_id_or_false),
+        },
+        get_full=lambda id: VolumeDTO.from_model(db.get_lvol_by_id(str(id)), request, cluster.get_id()),
     )
-    return Response(status_code=201, headers={'Location': entity_url})
+
+
+class ReplicateLVolParams(BaseModel):
+    lvol_id: Optional[str] = None
+
+
+@api.post('/replicate_lvol_on_source_cluster', name='clusters:storage-pools:replicate_lvol_on_source_cluster')
+def replicate_lvol_on_source_cluster(cluster: Cluster, pool: StoragePool, body: ReplicateLVolParams):
+    return lvol_controller.replicate_lvol_on_source_cluster(body.lvol_id, cluster.get_id(), pool.get_id())
 
 
 instance_api = APIRouter(prefix='/{volume_id}')
-
-
-def _lookup_volume(volume_id: UUID, pool: StoragePool) -> LVol:
-    try:
-        volume = db.get_lvol_by_id(str(volume_id))
-    except KeyError as e:
-        raise HTTPException(404, str(e))
-    if volume.pool_uuid != pool.get_id():
-        raise HTTPException(404, f'LVol {volume_id} not found')
-    return volume
-
-
-Volume = Annotated[LVol, Depends(_lookup_volume)]
 
 
 @instance_api.get('/', name='clusters:storage-pools:volumes:detail')
@@ -174,11 +175,9 @@ def update(cluster: Cluster, pool: StoragePool, volume: Volume, body: UpdatableL
 @instance_api.delete('/', name='clusters:storage-pools:volumes:delete', status_code=204, responses={204: {"content": None}})
 def delete(cluster: Cluster, pool: StoragePool, volume: Volume) -> Response:
     if volume.status == LVol.STATUS_DELETED:
-        return Response(status_code=404)
+        raise HTTPException(404, "Volume deleted")
 
-    if not lvol_controller.delete_lvol(volume.get_id()):
-        raise ValueError('Failed to delete volume')
-
+    lvol_controller.delete_lvol(volume)
     return Response(status_code=204)
 
 
@@ -272,7 +271,7 @@ def iostats(cluster: Cluster, pool: StoragePool, volume: Volume, history: Option
 @instance_api.get('/snapshots', name='clusters:storage-pools:volumes:snapshots:list')
 def snapshot(request: Request, cluster: Cluster, pool: StoragePool, volume: Volume) -> List[SnapshotDTO]:
     return [
-        SnapshotDTO.from_model(snapshot, request, cluster_id=cluster.get_id(), pool_id=pool.get_id(), volume_id=volume.get_id())
+        SnapshotDTO.from_model(snapshot, request, cluster_id=cluster.get_id(), pool_id=pool.get_id())
         for snapshot
         in db.get_snapshots()
         if snapshot.lvol is not None and snapshot.lvol.get_id() == volume.get_id()
@@ -294,6 +293,10 @@ def create_snapshot(
         volume.get_id(), parameters.name, backup=parameters.backup
     )
     if err_or_false:
+        # FIXME: snapshot_controller.add() should raise a named exception directly
+        # instead of returning a string that we string-match here
+        if 'unique' in str(err_or_false).lower():
+            raise HTTPException(409, f'Snapshot {parameters.name} already exists')
         raise ValueError(err_or_false)
 
     entity_url = request.app.url_path_for(
@@ -306,15 +309,6 @@ def create_snapshot(
 @instance_api.post('/replicate_lvol', name='clusters:storage-pools:volumes:replicate_lvol')
 def replicate_lvol_on_target_cluster(cluster: Cluster, pool: StoragePool, volume: Volume):
     return lvol_controller.replicate_lvol_on_target_cluster(volume.get_id())
-
-
-class ReplicateLVolParams(BaseModel):
-    lvol_id: Optional[str] = None
-
-
-@api.post('/replicate_lvol_on_source_cluster', name='clusters:storage-pools:replicate_lvol_on_source_cluster')
-def replicate_lvol_on_source_cluster(cluster: Cluster, pool: StoragePool, body: ReplicateLVolParams):
-    return lvol_controller.replicate_lvol_on_source_cluster(body.lvol_id, cluster.get_id(), pool.get_id())
 
 
 @instance_api.get('/list_replication_tasks', name='clusters:storage-pools:volumes:list_replication_tasks')
@@ -374,3 +368,6 @@ def delete_backups(cluster: Cluster, pool: StoragePool, volume: Volume) -> Respo
         raise HTTPException(400, error)
     return Response(status_code=204)
 
+
+instance_api.include_router(migration_api, prefix="/migrations")
+api.include_router(instance_api)
