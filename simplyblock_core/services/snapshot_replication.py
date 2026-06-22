@@ -154,11 +154,12 @@ def process_snap_replicate_finish(task, snapshot):
         replicate_as_snap_instance = task.function_params["replicate_as_snap_instance"]
     else:
         replicate_as_snap_instance = False
-    target_prev_snap = None
+    target_prev_snap: dict | None = None
     if replicate_to_source:
         org_snap = db.get_snapshot_by_id(snapshot.snap_ref_id)
         try:
-            target_prev_snap = db.get_snapshot_by_id(org_snap.source_replicated_snap_uuid)
+            _snap_obj = db.get_snapshot_by_id(org_snap.source_replicated_snap_uuid)
+            target_prev_snap = {"snap_bdev": _snap_obj.snap_bdev}
         except KeyError as e:
             logger.error(e)
     else:
