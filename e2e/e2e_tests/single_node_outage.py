@@ -84,8 +84,6 @@ class TestSingleNodeOutage(TestClusterBase):
             self.lvol_name, mount_path=self.mount_path
         )
 
-        log_path = f"{os.path.dirname(self.mount_path)}"
-
         fio_handle = self._run_fio_dual(
             lvol_name=self.lvol_name,
             mount_path=mount if not self.k8s_test else None,

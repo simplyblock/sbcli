@@ -22,10 +22,6 @@ on:
         description: 'Base SPDK container image (for initial deployment)'
         required: true
         default: 'simplyblock/spdk:main-latest'
-      base_helm_charts_branch:
-        description: 'Branch for helm-charts (base version deployment)'
-        required: true
-        default: 'main'
 
       # ── Target version (upgrade destination) ──
       target_simplyblock_image:
@@ -38,14 +34,16 @@ on:
         description: 'Target SPDK proxy image (defaults to target simplyblock image if empty)'
         required: false
         default: ''
-      target_helm_charts_branch:
-        description: 'Branch for helm-charts (target version for helm upgrade)'
-        required: true
-        default: 'main'
       operator_tag:
         description: 'Target operator image tag (defaults to target simplyblock image)'
         required: false
         default: ''
+
+      # ── Helm chart branches (base,target — e.g. "main,main" or "release-25,main") ──
+      helm_charts_branches:
+        description: 'Helm chart branches: base_branch,target_branch (e.g. main,main)'
+        required: true
+        default: 'main,main'
 
       # ── Image repositories ──
       simplyblock_repository:
@@ -56,30 +54,15 @@ on:
         description: 'Operator image repository'
         required: false
         default: 'simplyblock/simplyblock-operator'
-      csi_repository:
-        description: 'CSI driver image repository (leave empty for chart default)'
-        required: false
-      csi_tag:
-        description: 'CSI driver image tag (leave empty for chart default)'
+      csi_image:
+        description: 'CSI driver image (repo,tag — leave empty for chart default)'
         required: false
 
-      # ── R25-to-R2x specific (only used when upgrade_type = r25-to-r2x) ──
-      base_sbcli_charts_branch:
-        description: 'Branch of sbcli repo with R25 control plane helm chart (r25-to-r2x only)'
+      # ── R25-to-R2x config (only used when upgrade_type = r25-to-r2x) ──
+      r25_base_config:
+        description: 'R25 base config: sbcli_branch=p2p-migration,csi_ref=v0.2.4,csi_tag=v0.2.4,sn_tag=v0.1.8'
         required: false
-        default: 'p2p-migration'
-      base_csi_repo_ref:
-        description: 'Tag/branch of simplyblock-csi repo for R25 CSI helm chart (r25-to-r2x only)'
-        required: false
-        default: 'v0.2.4'
-      base_csi_driver_tag:
-        description: 'R25 CSI driver image tag (r25-to-r2x only)'
-        required: false
-        default: 'v0.2.4'
-      base_storagenode_image_tag:
-        description: 'R25 storage node DaemonSet image tag (r25-to-r2x only)'
-        required: false
-        default: 'v0.1.8'
+        default: 'sbcli_branch=p2p-migration,csi_ref=v0.2.4,csi_tag=v0.2.4,sn_tag=v0.1.8'
 
       # ── Cluster config ──
       worker_nodes:
@@ -89,14 +72,10 @@ on:
         description: 'Network interfaces (mgmt_ifc:data_nics)'
         required: false
         default: 'ens18:enp1s0'
-      max_lvol:
-        description: 'Max logical volume count per storage node'
-        required: false
-        default: '30'
       cluster_params:
-        description: 'Cluster config: ndcs=2,npcs=2,bs=4096,chunk_bs=4096,partitions=1,jm_count=4'
+        description: 'Cluster config: ndcs=2,npcs=2,bs=4096,chunk_bs=4096,partitions=1,jm_count=4,max_lvol=30'
         required: false
-        default: 'ndcs=2,npcs=2,bs=4096,chunk_bs=4096,partitions=1,jm_count=4'
+        default: 'ndcs=2,npcs=2,bs=4096,chunk_bs=4096,partitions=1,jm_count=4,max_lvol=30'
       cluster_environment:
         description: 'Target cluster environment'
         required: true
@@ -172,12 +151,46 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # Parse combined inputs into individual env vars
+      - name: Parse combined inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Parse helm_charts_branches (format: "base_branch,target_branch")
+          IFS=',' read -r BASE_HELM TARGET_HELM <<< "${{ github.event.inputs.helm_charts_branches || 'main,main' }}"
+          TARGET_HELM="${TARGET_HELM:-$BASE_HELM}"
+          echo "BASE_HELM_BRANCH=${BASE_HELM}" >> "$GITHUB_ENV"
+          echo "TARGET_HELM_BRANCH=${TARGET_HELM}" >> "$GITHUB_ENV"
+
+          # Parse r25_base_config (format: "sbcli_branch=X,csi_ref=Y,csi_tag=Z,sn_tag=W")
+          R25_CFG="${{ github.event.inputs.r25_base_config || 'sbcli_branch=p2p-migration,csi_ref=v0.2.4,csi_tag=v0.2.4,sn_tag=v0.1.8' }}"
+          R25_SBCLI_BRANCH=$(echo "$R25_CFG" | grep -oP 'sbcli_branch=\K[^,]+' || echo 'p2p-migration')
+          R25_CSI_REF=$(echo "$R25_CFG" | grep -oP 'csi_ref=\K[^,]+' || echo 'v0.2.4')
+          R25_CSI_TAG=$(echo "$R25_CFG" | grep -oP 'csi_tag=\K[^,]+' || echo 'v0.2.4')
+          R25_SN_TAG=$(echo "$R25_CFG" | grep -oP 'sn_tag=\K[^,]+' || echo 'v0.1.8')
+          echo "R25_SBCLI_BRANCH=${R25_SBCLI_BRANCH}" >> "$GITHUB_ENV"
+          echo "R25_CSI_REF=${R25_CSI_REF}" >> "$GITHUB_ENV"
+          echo "R25_CSI_TAG=${R25_CSI_TAG}" >> "$GITHUB_ENV"
+          echo "R25_SN_TAG=${R25_SN_TAG}" >> "$GITHUB_ENV"
+
+          # Parse csi_image (format: "repo,tag" — either or both may be empty)
+          CSI_IMG="${{ github.event.inputs.csi_image }}"
+          if [ -n "${CSI_IMG}" ]; then
+            IFS=',' read -r CSI_REPO CSI_TAG_PARSED <<< "${CSI_IMG}"
+            echo "CSI_REPOSITORY=${CSI_REPO}" >> "$GITHUB_ENV"
+            echo "CSI_TAG=${CSI_TAG_PARSED}" >> "$GITHUB_ENV"
+          else
+            echo "CSI_REPOSITORY=" >> "$GITHUB_ENV"
+            echo "CSI_TAG=" >> "$GITHUB_ENV"
+          fi
+
       # Checkout helm charts for BASE version (initial deployment)
       - uses: actions/checkout@master
         name: Checkout helm-charts (base version)
         with:
           repository: simplyblock/helm-charts
-          ref: ${{ github.event.inputs.base_helm_charts_branch || 'main' }}
+          ref: ${{ env.BASE_HELM_BRANCH }}
           path: 'helm-charts'
 
       # Checkout helm charts for TARGET version (for helm upgrade)
@@ -185,15 +198,15 @@ jobs:
         name: Checkout helm-charts (target version)
         with:
           repository: simplyblock/helm-charts
-          ref: ${{ github.event.inputs.target_helm_charts_branch || 'main' }}
+          ref: ${{ env.TARGET_HELM_BRANCH }}
           path: 'helm-charts-target'
 
       # Checkout sbcli R25 charts (r25-to-r2x only)
       - uses: actions/checkout@v4
-        name: Checkout sbcli R25 charts (p2p-migration branch)
+        name: Checkout sbcli R25 charts
         if: ${{ github.event.inputs.upgrade_type == 'r25-to-r2x' }}
         with:
-          ref: ${{ github.event.inputs.base_sbcli_charts_branch || 'p2p-migration' }}
+          ref: ${{ env.R25_SBCLI_BRANCH }}
           path: 'sbcli-r25'
 
       # Checkout simplyblock-csi repo for R25 CSI helm chart (r25-to-r2x only)
@@ -202,7 +215,7 @@ jobs:
         if: ${{ github.event.inputs.upgrade_type == 'r25-to-r2x' }}
         with:
           repository: simplyblock/simplyblock-csi
-          ref: ${{ github.event.inputs.base_csi_repo_ref || 'v0.2.4' }}
+          ref: ${{ env.R25_CSI_REF }}
           path: 'simplyblock-csi'
 
       - name: Resolve KEY_PATH and validate key exists
@@ -294,11 +307,11 @@ jobs:
           fi
 
           CSI_FLAGS=""
-          if [ -n "${{ github.event.inputs.csi_repository }}" ]; then
-            CSI_FLAGS="$CSI_FLAGS --set image.csi.repository=${{ github.event.inputs.csi_repository }}"
+          if [ -n "${CSI_REPOSITORY}" ]; then
+            CSI_FLAGS="$CSI_FLAGS --set image.csi.repository=${CSI_REPOSITORY}"
           fi
-          if [ -n "${{ github.event.inputs.csi_tag }}" ]; then
-            CSI_FLAGS="$CSI_FLAGS --set image.csi.tag=${{ github.event.inputs.csi_tag }}"
+          if [ -n "${CSI_TAG}" ]; then
+            CSI_FLAGS="$CSI_FLAGS --set image.csi.tag=${CSI_TAG}"
           fi
 
           helm upgrade --install spdk-csi ./ \
@@ -356,7 +369,7 @@ jobs:
           SB_REPO="${{ github.event.inputs.simplyblock_repository || 'public.ecr.aws/simply-block/simplyblock' }}"
           SB_TAG="${{ github.event.inputs.base_simplyblock_image }}"
           SPDK_IMAGE="${{ github.event.inputs.base_spdk_image }}"
-          MAX_LVOL="${{ github.event.inputs.max_lvol || '30' }}"
+          MAX_LVOL="${MAX_LVOL:-30}"
 
           # Build worker YAML
           IFS=',' read -ra NODES <<< "${{ github.event.inputs.worker_nodes }}"
@@ -672,8 +685,8 @@ jobs:
           CLUSTER_ID: ${{ env.CLUSTER_ID }}
           CLUSTER_SECRET: ${{ env.CLUSTER_SECRET }}
           BASE_SB_IMAGE: ${{ github.event.inputs.base_simplyblock_image }}
-          CSI_DRIVER_TAG: ${{ github.event.inputs.base_csi_driver_tag || 'v0.2.4' }}
-          STORAGENODE_TAG: ${{ github.event.inputs.base_storagenode_image_tag || 'v0.1.8' }}
+          CSI_DRIVER_TAG: ${{ env.R25_CSI_TAG }}
+          STORAGENODE_TAG: ${{ env.R25_SN_TAG }}
           NDCS: ${{ env.NDCS }}
           NPCS: ${{ env.NPCS }}
           PARTITIONS: ${{ env.PARTITIONS }}
@@ -926,8 +939,8 @@ jobs:
           SIMPLYBLOCK_REPO: ${{ github.event.inputs.simplyblock_repository || 'public.ecr.aws/simply-block/simplyblock' }}
           OPERATOR_REPO: ${{ github.event.inputs.operator_repository || 'simplyblock/simplyblock-operator' }}
           TLS_ENABLED: ${{ github.event.inputs.tls_enabled }}
-          CSI_REPOSITORY: ${{ github.event.inputs.csi_repository }}
-          CSI_TAG: ${{ github.event.inputs.csi_tag }}
+          CSI_REPOSITORY: ${{ env.CSI_REPOSITORY }}
+          CSI_TAG: ${{ env.CSI_TAG }}
           WORKER_NODES: ${{ github.event.inputs.worker_nodes }}
           TESTNAME: ${{ github.event.inputs.testname || 'K8sNativeMajorUpgrade' }}
           NDCS: ${{ env.NDCS }}

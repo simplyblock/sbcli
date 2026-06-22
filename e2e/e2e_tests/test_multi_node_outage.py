@@ -23,7 +23,7 @@ import random
 import threading
 import time
 
-from e2e_tests.cluster_test_base import TestClusterBase, generate_random_sequence
+from e2e_tests.cluster_test_base import TestClusterBase
 from logger_config import setup_logger
 from utils.common_utils import sleep_n_sec
 
@@ -88,7 +88,7 @@ class _TestMultiNodeOutageBase(TestClusterBase):
                 k8s.stop_spdk_pod(node_ip)
             else:
                 self.logger.warning(
-                    f"k8s_utils not available — falling back to SSH spdk_process_kill"
+                    "k8s_utils not available — falling back to SSH spdk_process_kill"
                 )
                 self.ssh_obj.stop_spdk_process(node_ip, rpc_port, self.cluster_id)
         else:

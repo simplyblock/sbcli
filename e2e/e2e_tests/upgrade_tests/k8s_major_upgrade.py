@@ -28,7 +28,6 @@ No SSH to worker nodes required (Talos-compatible).
 
 from __future__ import annotations
 
-import json
 import os
 import random
 import string
@@ -1075,12 +1074,12 @@ spec:
         # Branch based on upgrade type
         if self._is_maintenance_window_upgrade():
             self.logger.info(
-                f"Detected R25->R26 upgrade — using MAINTENANCE WINDOW path"
+                "Detected R25->R26 upgrade — using MAINTENANCE WINDOW path"
             )
             self._run_maintenance_upgrade(storage_node_list)
         else:
             self.logger.info(
-                f"Detected standard upgrade — using ROLLING UPGRADE path (no downtime)"
+                "Detected standard upgrade — using ROLLING UPGRADE path (no downtime)"
             )
             self._run_rolling_upgrade(storage_node_list)
 

@@ -4,7 +4,6 @@ from pathlib import Path
 from e2e_tests.cluster_test_base import TestClusterBase
 import threading
 import json
-from utils.common_utils import sleep_n_sec
 
 class TestLvolFioBase(TestClusterBase):
     """
