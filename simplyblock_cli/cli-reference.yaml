@@ -1724,10 +1724,9 @@ commands:
           is released.
         arguments:
           - name: "volume_id"
-            help: "The logical volumes id or ids."
+            help: "The logical volumes id."
             dest: volume_id
             type: str
-            nargs: "+"
           - name: "--force"
             help: "Force delete logical volume from the cluster."
             dest: force

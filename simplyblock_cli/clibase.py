@@ -594,9 +594,7 @@ class CLIWrapperBase:
         return lvol_controller.get_lvol(args.volume_id, args.json)
 
     def volume__delete(self, sub_command, args):
-        for id in args.volume_id:
-            force = args.force
-            return lvol_controller.delete_lvol(id, force)
+        return lvol_controller.delete_lvol(args.volume_id, args.force)
 
     def volume__connect(self, sub_command, args):
         kwargs = {}
