@@ -9,6 +9,7 @@ import time
 import argcomplete
 
 from simplyblock_core import cluster_ops, utils, db_controller, constants
+from simplyblock_core.exceptions import MigrationConflictError, PreconditionError
 from simplyblock_core import storage_node_ops as storage_ops
 from simplyblock_core import mgmt_node_ops as mgmt_ops
 from simplyblock_core.controllers import pool_controller, lvol_controller, snapshot_controller, device_controller, \
@@ -373,7 +374,7 @@ class CLIWrapperBase:
         return device_controller.new_device_from_failed(args.device_id)
 
     def storage_node__list_snapshots(self, sub_command, args):
-        return snapshot_controller.list_by_node(args.node_id, args.json)
+        return snapshot_controller.list_snapshots(node_id=args.node_id, is_json=args.json)
 
     def storage_node__list_lvols(self, sub_command, args):
         return lvol_controller.list_by_node(args.node_id, args.json)
@@ -608,7 +609,7 @@ class CLIWrapperBase:
         if err:
             return err
         if data:
-            return "\n".join(con['connect'] for con in data)
+            return "\n".join(con.connect for con in data)
 
     def volume__resize(self, sub_command, args):
         volume_id = args.volume_id
@@ -678,14 +679,30 @@ class CLIWrapperBase:
         return lvol_controller.clone_lvol(args.volume_id, args.clone_name)
 
     def volume__migrate(self, sub_command, args):
-        migration_id, error = migration_controller.start_migration(
-            args.volume_id,
-            args.target_node_id,
-            max_retries=args.max_retries,
-            deadline_seconds=args.deadline_seconds,
-        )
-        if error:
-            print(f"Error: {error}")
+        try:
+            migration_id, connect_strings = migration_controller.create_migration(
+                args.volume_id,
+                args.target_node_id,
+                ctrl_loss_tmo=args.ctrl_loss_tmo,
+                host_nqn=getattr(args, 'host_nqn', None),
+            )
+        except (MigrationConflictError, PreconditionError, ValueError) as e:
+            print(f"Error: {e}")
+            return False
+        print(f"Migration ID: {migration_id}")
+        if connect_strings:
+            return "\n".join(c.connect for c in connect_strings)
+        return True
+
+    def volume__migrate_continue(self, sub_command, args):
+        try:
+            migration_id = migration_controller.start_migration(
+                migration_id=args.migration_id,
+                max_retries=args.max_retries,
+                deadline_seconds=args.deadline_seconds,
+            )
+        except ValueError as e:
+            print(f"Error: {e}")
             return False
         print(f"Migration started: {migration_id}")
         return True
@@ -694,9 +711,10 @@ class CLIWrapperBase:
         return migration_controller.list_migrations(cluster_id=args.cluster_id, is_json=args.json)
 
     def volume__migrate_cancel(self, sub_command, args):
-        ok, error = migration_controller.cancel_migration(args.migration_id)
-        if not ok:
-            print(f"Error: {error}")
+        try:
+            migration_controller.cancel_migration(args.migration_id)
+        except ValueError as e:
+            print(f"Error: {e}")
             return False
         print(f"Migration {args.migration_id} cancelled")
         return True
@@ -793,7 +811,7 @@ class CLIWrapperBase:
         return True
 
     def snapshot__list(self, sub_command, args):
-        return snapshot_controller.list(args.all, args.cluster_id, args.with_details, args.pool)
+        return snapshot_controller.list_snapshots(args.cluster_id, args.node_id, args.lvol_id, args.pool, args.with_details, args.json)
 
     def snapshot__delete(self, sub_command, args):
         return snapshot_controller.delete(args.snapshot_id, args.force)

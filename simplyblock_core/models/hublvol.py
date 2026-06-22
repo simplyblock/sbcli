@@ -12,6 +12,7 @@ class HubLVol(BaseModel):
     nvmf_port: int = 0
     model_number: str = ""
     nguid: str = ""
+    hublvol_name: str = "hublvol"
 
     def get_remote_bdev_name(self):
         return f"{self.bdev_name}n1"

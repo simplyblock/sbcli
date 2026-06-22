@@ -58,8 +58,15 @@ def process_snap_delete_finish(snap, leader_node):
     if not leader_node:
         raise Exception("Failed to get leader node")
 
+    special_delete = False
+    try:
+        snap_bdev_info = leader_node.rpc_client().get_bdevs(snap.snap_bdev)
+        if snap_bdev_info[0]["driver_specific"]["lvol"]["open_ref"] > 1:
+            special_delete = True
+    except Exception:
+        pass
     if snap.deletion_status != leader_node.get_id():
-        ret, _ = leader_node.rpc_client().delete_lvol(snap.snap_bdev)
+        ret, _ = leader_node.rpc_client().delete_lvol(snap.snap_bdev, del_async=False, special_delete=special_delete)
         if not ret:
             logger.error(f"Failed to delete snap from node: {snode.get_id()}")
         snap = db.get_snapshot_by_id(snap.get_id())
@@ -90,7 +97,7 @@ def process_snap_delete_finish(snap, leader_node):
             for nl in non_leaders)
         if any_sec_down:
             primary_node.lvol_del_sync_lock()
-        ret, _ = primary_node.rpc_client().delete_lvol(snap.snap_bdev, del_async=True)
+        ret, _ = primary_node.rpc_client().delete_lvol(snap.snap_bdev, del_async=True, special_delete=special_delete)
         if not ret:
             logger.error(f"Failed to delete snap from node: {snode.get_id()}")
 
@@ -98,7 +105,7 @@ def process_snap_delete_finish(snap, leader_node):
     for non_leader in non_leaders:
         if non_leader.status in [StorageNode.STATUS_ONLINE]:
             logger.info(f"Sync delete bdev: {lvol_bdev_name} from node: {non_leader.get_id()}")
-            ret, err = non_leader.rpc_client().delete_lvol(lvol_bdev_name, del_async=True)
+            ret, err = non_leader.rpc_client().delete_lvol(lvol_bdev_name, del_async=True, special_delete=special_delete)
             if not ret:
                 if "code" in err and err["code"] == -19:
                     logger.error(f"Sync delete completed with error: {err}")
@@ -109,8 +116,24 @@ def process_snap_delete_finish(snap, leader_node):
 
         elif non_leader.status in [StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN, StorageNode.STATUS_UNREACHABLE]:
             tasks_controller.add_lvol_sync_del_task(non_leader.cluster_id, non_leader.get_id(), lvol_bdev_name, primary_node.get_id())
-    snapshot_events.snapshot_delete(snap)
-    snap.remove(db.kv_store)
+
+    if snap.instances:
+        logger.info("Snapshot has instances, processing them...")
+        new_main_instance = SnapShot(snap.instances[0])
+        if len(snap.instances) > 1:
+            new_main_instance.instances = snap.instances[1:]
+        else:
+            new_main_instance.instances = []
+        logger.info(f"Remaining instances: {len(new_main_instance.instances)}")
+        new_main_instance.status = SnapShot.STATUS_IN_DELETION
+        new_main_instance.deletion_status = ""
+        new_main_instance.write_to_db()
+        snode = db.get_storage_node_by_id(new_main_instance.lvol.node_id)
+        logger.info(f"Process Snapshot delete on node {snode.get_id()}")
+        process_snap_delete(new_main_instance, snode)
+    else:
+        snapshot_events.snapshot_delete(snap)
+        snap.remove(db.kv_store)
 
 
 def process_snap_delete_try_again(snap):
@@ -156,8 +179,14 @@ def process_snap_delete(snap, snode):
                 return False
 
     if snap.deletion_status == "" or snap.deletion_status != leader_node.get_id():
-
-        ret, _ = leader_node.rpc_client().delete_lvol(snap.snap_bdev)
+        special_delete = False
+        try:
+            snap_bdev_info = leader_node.rpc_client().get_bdevs(snap.snap_bdev)
+            if snap_bdev_info[0]["driver_specific"]["lvol"]["open_ref"] > 1:
+                special_delete = True
+        except Exception:
+            pass
+        ret, _ = leader_node.rpc_client().delete_lvol(snap.snap_bdev, del_async=False, special_delete=special_delete)
         if not ret:
             logger.error(f"Failed to delete snap from node: {snode.get_id()}")
             return False

@@ -322,8 +322,11 @@ def ssh_exec_stream(ip, cmd, check=False):
         key_filename=os.path.expanduser(SSH_KEY_PATH),
         allow_agent=False, look_for_keys=False,
     )
+    transport = ssh.get_transport()
+    if transport:
+        transport.set_keepalive(30)
     print(f"  [{ip}] $ {cmd}")
-    _, stdout, stderr = ssh.exec_command(cmd, timeout=600)
+    _, stdout, stderr = ssh.exec_command(cmd, timeout=1800)
     channel = stdout.channel
     out_chunks, err_chunks = [], []
 
@@ -440,16 +443,26 @@ def main():
             f.result()
     print("Phase 1: DONE — sbcli installed on all nodes.")
 
+    # Fix env_var on mgmt node to pull the correct branch image before cluster create
+    print("Patching SIMPLY_BLOCK_DOCKER_IMAGE in env_var on mgmt node...")
+    ssh_exec(mgmt_pub_ip, [
+        "sudo sed -i 's|SIMPLY_BLOCK_DOCKER_IMAGE=.*"
+        "|SIMPLY_BLOCK_DOCKER_IMAGE=public.ecr.aws/simply-block/simplyblock:lvol-migration-fresh|' "
+        "$(find /usr/local/lib -name env_var -path '*/simplyblock_core/*' 2>/dev/null | head -1)",
+    ], check=True)
+
     # --- 6. Phase 2: Cluster setup ---
     # 6a. Create cluster on mgmt node
     # 3 nodes → ndcs=2 npcs=1 FTT=1 (need ndcs+npcs+1 ≤ SN_COUNT)
     print("\n[6/7] Phase 2a: Creating cluster on management node...")
-    ssh_exec(mgmt_pub_ip, [
+    ssh_exec_stream(
+        mgmt_pub_ip,
         "sudo /usr/local/bin/sbctl -d cluster create"
         " --enable-node-affinity"
         " --data-chunks-per-stripe 1"
-        " --parity-chunks-per-stripe 1"
-    ], check=True)
+        " --parity-chunks-per-stripe 1",
+        check=True,
+    )
     print("Phase 2a: DONE — cluster created.")
 
     # 6b. Configure storage nodes in parallel

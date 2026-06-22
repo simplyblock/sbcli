@@ -14,8 +14,11 @@ from simplyblock_core.controllers import snapshot_controller, pool_controller, l
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.kms import KMSException, create_kms_connection
+from simplyblock_core.controllers.host_auth import (
+    _get_dhchap_group, _register_dhchap_keys_on_node, _register_pool_dhchap_keys_on_node)
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
+from simplyblock_core.models.nvme_connect import NvmeConnectEntry
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.lvol_model import LVol, LVolReplication
 from simplyblock_core.models.storage_node import StorageNode
@@ -23,94 +26,6 @@ from simplyblock_core.prom_client import PromClient
 from simplyblock_core.rpc_client import RPCException
 
 logger = utils.get_logger(__name__)
-
-
-def _get_dhchap_group(cluster, pool=None):
-    """Return the DH group to set on the target subsystem for DH-HMAC-CHAP.
-
-    For pool-level DHCHAP the fixed DHCHAP_DHGROUP constant is used.
-    Falls back to cluster.tls_config for legacy cluster-level config,
-    otherwise returns 'null' (HMAC-CHAP only, no DH key exchange).
-    """
-    if pool and getattr(pool, 'dhchap', False):
-        return constants.DHCHAP_DHGROUP
-    if cluster and cluster.tls and cluster.tls_config:
-        params = cluster.tls_config.get("params", cluster.tls_config)
-        groups = params.get("dhchap_dhgroups") or []
-        if groups:
-            return groups[0]
-    return "null"
-
-
-def _register_keys_on_node(snode, rpc_client, keys):
-    """Write key files to a storage node and register them in SPDK's keyring.
-
-    Args:
-        snode: Storage node instance.
-        rpc_client: RPC client for the node.
-        keys: Iterable of (key_type, key_name, key_value) triples.
-            key_type is used as the key in the returned dict.
-            key_name is the SPDK keyring name and on-disk filename.
-            key_value is the raw key material.
-
-    Returns a dict mapping key_type to SPDK keyring name for every
-    successfully registered key.
-    """
-    snode_api = snode.client()
-    key_names = {}
-
-    for key_type, key_name, key_value in keys:
-        result, error = snode_api.write_key_file(key_name, key_value)
-        if error:
-            logger.error("Failed to write key file %s on node %s: %s",
-                         key_name, snode.get_id(), error)
-            continue
-        key_path = result
-        try:
-            rpc_client.keyring_file_add_key(key_name, key_path, allow_existing=True)
-        except RPCException as e:
-            logger.error("Failed to register key %s in SPDK keyring on node %s: %s",
-                         key_name, snode.get_id(), e.message)
-            continue
-        key_names[key_type] = key_name
-
-    return key_names
-
-
-def _register_pool_dhchap_keys_on_node(pool, snode, rpc_client):
-    """Write pool-level DHCHAP key files to a storage node and register in SPDK keyring.
-
-    All LVols in a DHCHAP pool share one key pair stored on the pool.
-    Key names are pool-scoped so a single registration serves all LVols.
-
-    Returns a dict with 'dhchap_key' and 'dhchap_ctrlr_key' keyring names,
-    or an empty dict on failure.
-    """
-    safe_pool = pool.get_id().replace("-", "_")
-    keys = [
-        (key_type, f"pool_{safe_pool}_{key_type}", key_value)
-        for key_type, key_value in (
-            ("dhchap_key", pool.dhchap_key),
-            ("dhchap_ctrlr_key", pool.dhchap_ctrlr_key),
-        )
-        if key_value
-    ]
-    return _register_keys_on_node(snode, rpc_client, keys)
-
-
-def _register_dhchap_keys_on_node(snode, host_nqn, host_entry, rpc_client):
-    """Write DHCHAP key files to a storage node and register them in SPDK's keyring.
-
-    Returns a dict mapping key type ('dhchap_key', 'dhchap_ctrlr_key', 'psk')
-    to the SPDK keyring name for use in subsystem_add_host.
-    """
-    safe_host = host_nqn.replace(":", "_").replace(".", "_")
-    keys = [
-        (key_type, f"{key_type}_{safe_host}", key_value)
-        for key_type in ("dhchap_key", "dhchap_ctrlr_key", "psk")
-        if (key_value := host_entry.get(key_type))
-    ]
-    return _register_keys_on_node(snode, rpc_client, keys)
 
 
 def _create_crypto_lvol(rpc_client, lvol, cluster):
@@ -1315,9 +1230,9 @@ def _remove_lvol_subsys_from_node(lvol, rpc_client):
     for ns in subsystem[0]["namespaces"]:
         if ns["uuid"] == lvol.uuid:
             logger.info("Removing namespace %s from subsystem %s", ns["uuid"], lvol.nqn)
-            ret = bool(rpc_client.nvmf_subsystem_remove_ns(lvol.nqn, lvol.ns_id))
+            ret = bool(rpc_client.nvmf_subsystem_remove_ns(lvol.nqn, ns['nsid']))
             if not ret:
-                logger.error(f"Failed to remove namespace {lvol.ns_id} from subsystem {lvol.nqn}")
+                logger.error(f"Failed to remove namespace {ns['nsid']} from subsystem {lvol.nqn}")
             subsystem = rpc_client.subsystem_list(lvol.nqn)
             break
 
@@ -1948,27 +1863,22 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
                 f"{client_data_nic_str}{tls_str}{host_auth_str}"
             )
 
-            entry = {
-                "ns_id": lvol.ns_id,
-                "transport": transport,
-                "ip": ip,
-                "port": port,
-                "nqn": lvol.nqn,
-                "reconnect-delay": constants.LVOL_NVME_CONNECT_RECONNECT_DELAY,
-                "ctrl-loss-tmo": ctrl_loss_tmo,
-                "fast_io_fail_tmo": constants.LVOL_NVME_CONNECT_FAST_IO_FAIL_TO,
-                "nr-io-queues": cluster.client_qpair_count,
-                "keep-alive-tmo": keep_alive_to,
-                "host-iface": cluster.client_data_nic,
-                "connect": connect_cmd,
-            }
-
-            if host_entry and host_entry.get("psk"):
-                entry["tls"] = True
-            if lvol.allowed_hosts:
-                entry["allowed_hosts"] = [h["nqn"] for h in lvol.allowed_hosts]
-
-            out.append(entry)
+            out.append(NvmeConnectEntry(
+                ns_id=lvol.ns_id,
+                transport=transport,
+                ip=ip,
+                port=port,
+                nqn=lvol.nqn,
+                reconnect_delay=constants.LVOL_NVME_CONNECT_RECONNECT_DELAY,
+                ctrl_loss_tmo=ctrl_loss_tmo,
+                fast_io_fail_tmo=constants.LVOL_NVME_CONNECT_FAST_IO_FAIL_TO,
+                nr_io_queues=cluster.client_qpair_count,
+                keep_alive_tmo=keep_alive_to,
+                host_iface=cluster.client_data_nic or "",
+                connect=connect_cmd,
+                tls=bool(host_entry and host_entry.get("psk")),
+                allowed_hosts=[h["nqn"] for h in lvol.allowed_hosts] if lvol.allowed_hosts else [],
+            ))
     return out, None
 
 
@@ -2415,12 +2325,23 @@ def replication_start(lvol_id, replication_cluster_id=None):
             return False
     logger.info("Setting LVol do_replicate: True")
 
-    for snap in db_controller.get_snapshots():
+    all_snaps = db_controller.get_snapshots()
+    for snap in all_snaps:
         if snap.lvol.uuid == lvol.uuid:
             if not snap.target_replicated_snap_uuid:
-                task = tasks_controller.add_snapshot_replication_task(snap.cluster_id, snap.lvol.node_id, snap.get_id())
-                if task:
-                    snapshot_events.replication_task_created(snap)
+                matched = False
+                for sn in all_snaps:
+                    if sn.lvol.node_id == lvol.replication_node_id and sn.data_uuid == snap.data_uuid:
+                        snap = db_controller.get_snapshot_by_id(snap.get_id())
+                        snap.target_replicated_snap_uuid = sn.get_id()
+                        snap.write_to_db()
+                        matched = True
+                        break
+                if not matched:
+                    task = tasks_controller.add_snapshot_replication_task(snap.cluster_id, snap.lvol.node_id, snap.get_id())
+                    # task may be None if the scheduler is at capacity; the next poll cycle will retry
+                    if task:
+                        snapshot_events.replication_task_created(snap)
     return True
 
 

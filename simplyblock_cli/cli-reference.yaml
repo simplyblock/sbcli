@@ -1919,16 +1919,33 @@ commands:
             dest: clone_name
             type: str
       - name: migrate
-        help: "Migrate a logical volume to a different storage node."
+        help: "Pre-create the target NVMe-oF subsystem for a volume migration. Returns a migration ID and NVMe connect strings (inaccessible ANA state). Connect the client, then run migrate-continue."
         private: true
         arguments:
           - name: "volume_id"
-            help: "The logical volume id."
+            help: "The volume ID to migrate."
             dest: volume_id
             type: str
           - name: "target_node_id"
-            help: "The target storage node id."
+            help: "The target storage node ID."
             dest: target_node_id
+            type: str
+          - name: "--ctrl-loss-tmo"
+            help: "NVMe ctrl-loss-tmo in seconds. Default: `3600`."
+            dest: ctrl_loss_tmo
+            type: int
+            default: 3600
+          - name: "--host-nqn"
+            help: "Host NQN for DH-HMAC-CHAP authentication (required when volume has allowed hosts)."
+            dest: host_nqn
+            type: str
+      - name: migrate-continue
+        help: "Advance a pre-created migration to the snapshot-copy phase and launch the task runner."
+        private: true
+        arguments:
+          - name: "migration_id"
+            help: "The migration ID returned by migrate."
+            dest: migration_id
             type: str
           - name: "--max-retries"
             help: "Maximum retry attempts before aborting. Default: `10`."
@@ -1936,7 +1953,7 @@ commands:
             type: int
             default: 10
           - name: "--deadline"
-            help: "Migration deadline in seconds (0 = no deadline. Default: `14400`."
+            help: "Migration deadline in seconds (0 = no deadline). Default: `14400`."
             dest: deadline_seconds
             type: int
             default: 14400
@@ -2213,25 +2230,47 @@ commands:
       - name: list
         help: "Lists all snapshots."
         arguments:
-          - name: "--all"
-            help: "List soft deleted snapshots."
-            dest: all
-            type: bool
-            action: store_true
+          - name: "--lvol-id"
+            aliases:
+              - "-l"
+            help: "List snapshots for a specific logical volume."
+            dest: lvol_id
+            type: str
+            required: false
+          - name: "--node-id"
+            aliases:
+              - "-n"
+            help: "List snapshots for a specific node uuid"
+            dest: node_id
+            type: str
+            required: false
+          - name: "--pool"
+            aliases:
+              - "-p"
+            help: "List snapshots in particular pool id or name."
+            dest: pool
+            type: str
           - name: "--cluster-id"
+            aliases:
+              - "-c"
             help: "Filter snapshots by cluster UUID"
             dest: cluster_id
             type: str
             required: false
           - name: "--with-details"
+            aliases:
+              - "-w"
             help: "List snapshots with replicate and chaining details"
             dest: with_details
             type: bool
             action: store_true
-          - name: "--pool"
-            help: "List snapshots in particular pool id or name."
-            dest: pool
-            type: str
+          - name: "--json"
+            aliases:
+              - "-j"
+            help: "List snapshots in JSON format"
+            dest: json
+            type: bool
+            action: store_true
       - name: delete
         help: "Deletes a snapshot."
         arguments:

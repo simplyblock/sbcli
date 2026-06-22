@@ -23,6 +23,7 @@ from simplyblock_core import jm_raid
 from simplyblock_core.constants import LINUX_DRV_MASS_STORAGE_NVME_TYPE_ID, LINUX_DRV_MASS_STORAGE_ID
 from simplyblock_core.controllers import lvol_controller, storage_events, snapshot_controller, device_events, \
     device_controller, tasks_controller, health_controller, tcp_ports_events, qos_controller
+from simplyblock_core.controllers.host_auth import _reapply_allowed_hosts
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.job_schedule import JobSchedule
@@ -32,7 +33,6 @@ from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.prom_client import PromClient
-from simplyblock_core.rpc_client import RPCException
 from simplyblock_core.snode_client import SNodeClient, SNodeClientException
 from simplyblock_web import node_utils
 from simplyblock_core.utils import addNvmeDevices
@@ -181,26 +181,6 @@ def _kill_spdk_until_dead(snode, max_attempts=3, poll_per_attempt_sec=5,
     return False
 
 
-def _reapply_allowed_hosts(lvol, snode, rpc_client):
-    """Re-register allowed hosts (with DHCHAP keys) on a subsystem after recreation."""
-    from simplyblock_core.controllers.lvol_controller import _register_dhchap_keys_on_node, _get_dhchap_group
-    db_ctrl = DBController()
-    cluster = db_ctrl.get_cluster_by_id(snode.cluster_id)
-    dhchap_group = _get_dhchap_group(cluster)
-    for host_entry in lvol.allowed_hosts:
-        logger.info("adding allowed host %s to subsystem %s", host_entry["nqn"], lvol.nqn)
-        has_keys = any(host_entry.get(k) for k in ("dhchap_key", "dhchap_ctrlr_key", "psk"))
-        if has_keys:
-            key_names = _register_dhchap_keys_on_node(snode, host_entry["nqn"], host_entry, rpc_client)
-            rpc_client.subsystem_add_host(
-                lvol.nqn, host_entry["nqn"],
-                psk=key_names.get("psk"),
-                dhchap_key=key_names.get("dhchap_key"),
-                dhchap_ctrlr_key=key_names.get("dhchap_ctrlr_key"),
-                dhchap_group=dhchap_group,
-            )
-        else:
-            rpc_client.subsystem_add_host(lvol.nqn, host_entry["nqn"])
 
 
 def _set_lvol_ana_on_node(lvol, node, ana_state):
@@ -6443,6 +6423,10 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
                 except RPCException as e:
                     logger.error("Error creating hublvol: %s", e.message)
                     _abort_restart_and_unblock(f"recreate_hublvol raised: {e.message}")
+                try:
+                    snode.create_transfer_hublvol()
+                except RPCException as e:
+                    logger.error("Error creating transfer hublvol: %s", e.message)
 
         ### 8b- connect peers to hublvol WITHIN port-blocked window
         # The old leader must be set to secondary role (via set_lvs_opts + connect_hublvol)
@@ -6985,6 +6969,11 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
             logger.error("Error establishing hublvol: %s", e.message)
             # return False
 
+        try:
+            snode.create_transfer_hublvol()
+        except RPCException as e:
+            logger.error("Error creating transfer hublvol: %s", e.message)
+
         # Create secondary hublvol on sec_1 so tertiary can multipath
         sec1 = db_controller.get_storage_node_by_id(secondary_ids[0])
         if sec1 and sec1.status == StorageNode.STATUS_ONLINE:
@@ -7340,7 +7329,7 @@ def auto_repair(node_id, validate_only=False, force_remove_inconsistent=False, f
     # #sbctl sn list-snapshots d4577fa7-545f-4506-b127-7e81fc3a6e34 --json > snaps_8080.json
     # with open('snaps_8082.json', 'r') as file:
     #     snaps = json.load(file)
-    snaps = snapshot_controller.list_by_node(node_id, is_json=True)
+    snaps = snapshot_controller.list_snapshots(node_id=node_id, is_json=True)
     if snaps:
         snaps = json.loads(snaps)
 

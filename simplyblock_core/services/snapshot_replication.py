@@ -206,6 +206,7 @@ def process_snap_replicate_finish(task, snapshot):
 
     new_snapshot = SnapShot()
     new_snapshot.uuid = new_snapshot_uuid
+    new_snapshot.data_uuid = snapshot.data_uuid
     new_snapshot.cluster_id = remote_snode.cluster_id
     new_snapshot.lvol = remote_lv
     new_snapshot.pool_uuid = remote_lv.pool_uuid

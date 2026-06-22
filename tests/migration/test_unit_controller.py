@@ -9,6 +9,8 @@ import time
 import unittest
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from simplyblock_core.models.lvol_migration import LVolMigration
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.snapshot import SnapShot
@@ -17,6 +19,7 @@ from simplyblock_core.models.storage_node import StorageNode
 # Module under test (import after patching, but top-level import is fine since
 # we patch the db attribute before each individual call).
 import simplyblock_core.controllers.migration_controller as ctl
+import simplyblock_core.services.tasks_runner_lvol_migration as runner
 
 
 # ---------------------------------------------------------------------------
@@ -483,8 +486,8 @@ class TestApplyMigrationToDb(unittest.TestCase):
                          target_node="node-tgt", snaps_migrated=["s1"])
 
         mock_db = self._mock_db(lvol, snap)
-        with patch.object(ctl, 'db', mock_db):
-            result = ctl.apply_migration_to_db(mig)
+        with patch.object(runner, 'db', mock_db):
+            result = runner._apply_migration_to_db(mig)
 
         assert result is True
         assert lvol.node_id == "node-tgt"
@@ -501,8 +504,8 @@ class TestApplyMigrationToDb(unittest.TestCase):
                          target_node="node-tgt", snaps_migrated=[])
 
         mock_db = self._mock_db(lvol, tgt_node=tgt)
-        with patch.object(ctl, 'db', mock_db):
-            result = ctl.apply_migration_to_db(mig)
+        with patch.object(runner, 'db', mock_db):
+            result = runner._apply_migration_to_db(mig)
 
         assert result is True
         assert lvol.nodes == ["node-tgt", "node-tgt-sec"]
@@ -515,11 +518,11 @@ class TestApplyMigrationToDb(unittest.TestCase):
                          target_node="node-tgt", snaps_migrated=["s1"])
 
         mock_db = self._mock_db(lvol, snap)
-        with patch.object(ctl, 'db', mock_db):
-            ctl.apply_migration_to_db(mig)
+        with patch.object(runner, 'db', mock_db):
+            runner._apply_migration_to_db(mig)
 
         assert snap.lvol.node_id == "node-tgt"
-        assert snap.snap_bdev == "lvs_tgt/s1"
+        assert snap.snap_bdev == "lvs_tgt/s1m"  # migration suffix 'm' is appended on target
 
     def test_missing_lvol_returns_false(self):
         mig = _migration(lvol_id="lvol-gone")
@@ -527,8 +530,8 @@ class TestApplyMigrationToDb(unittest.TestCase):
         mock_db = MagicMock()
         mock_db.get_lvol_by_id.side_effect = KeyError("lvol-gone")
 
-        with patch.object(ctl, 'db', mock_db):
-            result = ctl.apply_migration_to_db(mig)
+        with patch.object(runner, 'db', mock_db):
+            result = runner._apply_migration_to_db(mig)
 
         assert result is False
 
@@ -537,8 +540,8 @@ class TestApplyMigrationToDb(unittest.TestCase):
         mig = _migration(lvol_id="lvol-1", snaps_migrated=["s_gone"])
 
         mock_db = self._mock_db(lvol, KeyError("s_gone"))
-        with patch.object(ctl, 'db', mock_db):
-            result = ctl.apply_migration_to_db(mig)
+        with patch.object(runner, 'db', mock_db):
+            result = runner._apply_migration_to_db(mig)
 
         assert result is True  # still succeeds; missing snaps are warned
 
@@ -557,32 +560,27 @@ class TestCancelMigration(unittest.TestCase):
 
         with patch.object(ctl, 'db', mock_db), \
              patch('simplyblock_core.controllers.migration_controller.migration_events'):
-            ok, err = ctl.cancel_migration("mig-uuid")
+            ctl.cancel_migration("mig-uuid")
 
-        assert ok is True
-        assert err is None
         assert mig.canceled is True
 
-    def test_cancel_inactive_migration_fails(self):
+    def test_cancel_inactive_migration_raises(self):
         mig = _migration(status=LVolMigration.STATUS_DONE)
 
         mock_db = MagicMock()
         mock_db.get_migration_by_id.return_value = mig
 
         with patch.object(ctl, 'db', mock_db):
-            ok, err = ctl.cancel_migration("mig-uuid")
+            with pytest.raises(ValueError, match="not active"):
+                ctl.cancel_migration("mig-uuid")
 
-        assert ok is False
-        assert "not active" in err
-
-    def test_cancel_nonexistent_migration_fails(self):
+    def test_cancel_nonexistent_migration_raises(self):
         mock_db = MagicMock()
         mock_db.get_migration_by_id.side_effect = KeyError("mig-missing")
 
         with patch.object(ctl, 'db', mock_db):
-            ok, err = ctl.cancel_migration("mig-missing")
-
-        assert ok is False
+            with pytest.raises(ValueError):
+                ctl.cancel_migration("mig-missing")
 
 
 # ---------------------------------------------------------------------------
@@ -591,103 +589,105 @@ class TestCancelMigration(unittest.TestCase):
 
 class TestStartMigrationPreconditions(unittest.TestCase):
     """
-    Test only the precondition guard-clauses in start_migration.
-    Each case patches db to exercise one rejection path.
+    Test the precondition guard-clauses in start_migration.
+    start_migration takes a migration_id of an existing PHASE_PRE_CREATED record
+    and raises ValueError on any validation failure.
     """
 
-    def _base_db(self, lvol, src_node, tgt_node, migrations=None):
+    def _pre_created(self, lvol_id="lvol-1", target_node="node-tgt"):
+        m = _migration(lvol_id=lvol_id, target_node=target_node,
+                       status=LVolMigration.STATUS_NEW)
+        m.phase = LVolMigration.PHASE_PRE_CREATED
+        return m
+
+    def _base_db(self, mig, lvol, src_node, tgt_node):
         mock_db = MagicMock()
+        mock_db.get_migration_by_id.return_value = mig
         mock_db.get_lvol_by_id.return_value = lvol
         mock_db.get_storage_node_by_id.side_effect = lambda nid: (
             src_node if nid == src_node.uuid else tgt_node
         )
-        mock_db.get_migrations.return_value = migrations or []
         mock_db.get_snapshots_by_node_id.return_value = []
         return mock_db
 
-    def test_reject_lvol_not_found(self):
+    def test_reject_migration_not_found(self):
         mock_db = MagicMock()
+        mock_db.get_migration_by_id.side_effect = KeyError("mig-missing")
+        with patch.object(ctl, 'db', mock_db):
+            with pytest.raises(ValueError, match="not found"):
+                ctl.start_migration("mig-missing")
+
+    def test_reject_wrong_phase(self):
+        mig = _migration(status=LVolMigration.STATUS_RUNNING)
+        mig.phase = LVolMigration.PHASE_SNAP_COPY
+        mock_db = MagicMock()
+        mock_db.get_migration_by_id.return_value = mig
+        with patch.object(ctl, 'db', mock_db):
+            with pytest.raises(ValueError, match="PHASE_PRE_CREATED"):
+                ctl.start_migration("mig-uuid")
+
+    def test_reject_lvol_not_found(self):
+        mig = self._pre_created()
+        mock_db = MagicMock()
+        mock_db.get_migration_by_id.return_value = mig
         mock_db.get_lvol_by_id.side_effect = KeyError("not found")
         with patch.object(ctl, 'db', mock_db):
-            ok, err = ctl.start_migration("bad-lvol", "node-tgt")
-        assert ok is False
+            with pytest.raises(ValueError):
+                ctl.start_migration("mig-uuid")
 
     def test_reject_lvol_not_online(self):
+        mig = self._pre_created()
         lvol = _lvol("lvol-1", "node-src", status=LVol.STATUS_OFFLINE)
         src = _node("node-src")
         tgt = _node("node-tgt")
-        with patch.object(ctl, 'db', self._base_db(lvol, src, tgt)):
-            ok, err = ctl.start_migration("lvol-1", "node-tgt")
-        assert ok is False
-        assert "not online" in err
+        with patch.object(ctl, 'db', self._base_db(mig, lvol, src, tgt)):
+            with pytest.raises(ValueError, match="not online"):
+                ctl.start_migration("mig-uuid")
 
     def test_reject_same_source_and_target(self):
+        mig = self._pre_created(target_node="node-src")
         lvol = _lvol("lvol-1", "node-src")
         src = _node("node-src")
-        with patch.object(ctl, 'db', self._base_db(lvol, src, src)):
-            ok, err = ctl.start_migration("lvol-1", "node-src")
-        assert ok is False
-        assert "different" in err
+        with patch.object(ctl, 'db', self._base_db(mig, lvol, src, src)):
+            with pytest.raises(ValueError, match="different"):
+                ctl.start_migration("mig-uuid")
 
     def test_reject_source_node_offline(self):
+        mig = self._pre_created()
         lvol = _lvol("lvol-1", "node-src")
         src = _node("node-src", status=StorageNode.STATUS_OFFLINE)
         tgt = _node("node-tgt")
-        with patch.object(ctl, 'db', self._base_db(lvol, src, tgt)):
-            ok, err = ctl.start_migration("lvol-1", "node-tgt")
-        assert ok is False
-        assert "Source node is not online" in err
+        with patch.object(ctl, 'db', self._base_db(mig, lvol, src, tgt)):
+            with pytest.raises(ValueError, match="Source node is not online"):
+                ctl.start_migration("mig-uuid")
 
     def test_reject_target_node_offline(self):
+        mig = self._pre_created()
         lvol = _lvol("lvol-1", "node-src")
         src = _node("node-src")
         tgt = _node("node-tgt", status=StorageNode.STATUS_OFFLINE)
-        with patch.object(ctl, 'db', self._base_db(lvol, src, tgt)):
-            ok, err = ctl.start_migration("lvol-1", "node-tgt")
-        assert ok is False
-        assert "Target node is not online" in err
+        with patch.object(ctl, 'db', self._base_db(mig, lvol, src, tgt)):
+            with pytest.raises(ValueError, match="Target node is not online"):
+                ctl.start_migration("mig-uuid")
 
-    def test_reject_active_migration_on_source(self):
-        lvol = _lvol("lvol-1", "node-src")
-        src = _node("node-src")
-        tgt = _node("node-tgt")
-        existing = _migration(lvol_id="lvol-other", source_node="node-src",
-                              status=LVolMigration.STATUS_RUNNING)
-        with patch.object(ctl, 'db', self._base_db(lvol, src, tgt, [existing])):
-            ok, err = ctl.start_migration("lvol-1", "node-tgt")
-        assert ok is False
-        assert "active on source node" in err
-
-    def test_reject_volume_already_migrating(self):
-        lvol = _lvol("lvol-1", "node-src")
-        src = _node("node-src")
-        tgt = _node("node-tgt")
-        # A migration for lvol-1 on a different source node
-        existing_vol_mig = _migration(lvol_id="lvol-1", source_node="node-other",
-                                      status=LVolMigration.STATUS_RUNNING)
-        # node-src has no active migration → passes node check
-        existing_vol_mig.source_node_id = "node-other"
-
-        mock_db = self._base_db(lvol, src, tgt, [existing_vol_mig])
-        with patch.object(ctl, 'db', mock_db):
-            ok, err = ctl.start_migration("lvol-1", "node-tgt")
-        assert ok is False
-        assert "active migration" in err
-
-    def test_success_creates_migration_and_task(self):
+    def test_success_creates_task(self):
+        mig = self._pre_created()
         lvol = _lvol("lvol-1", "node-src")
         src = _node("node-src")
         tgt = _node("node-tgt")
 
-        mock_db = self._base_db(lvol, src, tgt)
+        mock_db = self._base_db(mig, lvol, src, tgt)
         mock_db.kv_store = MagicMock()
+        # Return a non-empty snapshot list so start_migration doesn't try to
+        # create a snapshot (which would reach FDB directly via snapshot_controller).
+        snap = _snap("s1", "lvol-1", "node-src")
+        mock_db.get_snapshots_by_node_id.return_value = [snap]
 
         with patch.object(ctl, 'db', mock_db), \
              patch('simplyblock_core.controllers.migration_controller.tasks_controller') as tc, \
              patch('simplyblock_core.controllers.migration_controller.migration_events'):
             tc.add_lvol_mig_task.return_value = "task-uuid"
-            ok, err = ctl.start_migration("lvol-1", "node-tgt")
+            result = ctl.start_migration("mig-uuid")
 
-        assert ok is not False
-        assert err is None
+        assert result == "mig-uuid"
         tc.add_lvol_mig_task.assert_called_once()
