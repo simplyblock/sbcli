@@ -168,11 +168,11 @@ class TestDeleteLvolIntentPersisted(unittest.TestCase):
         lvol = _make_lvol(status=LVol.STATUS_ONLINE, ha_type="ha")
         mod, _db, _exec, _writes = self._patch(lvol, leader_op_fails=True)
 
-        result = mod.delete_lvol("lvol-uuid-1", force_delete=False)
+        with self.assertRaises(RuntimeError):
+            mod.delete_lvol(lvol, force_delete=False)
 
-        # API contract is unchanged (False on internal failure); the
-        # important invariant is the persisted state.
-        self.assertFalse(result)
+        # Exception signals failure to caller; the important invariant is
+        # the persisted state — the reconciler path relies on IN_DELETION.
         self.assertEqual(lvol.status, LVol.STATUS_IN_DELETION,
                          "lvol must stay in_deletion when leader op fails — "
                          "this is what enables the reconciler path")
@@ -182,9 +182,8 @@ class TestDeleteLvolIntentPersisted(unittest.TestCase):
         lvol = _make_lvol(status=LVol.STATUS_ONLINE, ha_type="ha")
         mod, _db, _exec, _writes = self._patch(lvol, leader_op_fails=False)
 
-        result = mod.delete_lvol("lvol-uuid-1", force_delete=False)
+        mod.delete_lvol(lvol, force_delete=False)  # must not raise
 
-        self.assertTrue(result)
         self.assertEqual(lvol.status, LVol.STATUS_IN_DELETION)
 
     def test_status_set_before_leader_op_call(self):
@@ -206,7 +205,8 @@ class TestDeleteLvolIntentPersisted(unittest.TestCase):
             return (False, _make_node(), "fail")
 
         exec_mock.side_effect = _exec_capture
-        mod.delete_lvol("lvol-uuid-1", force_delete=False)
+        with self.assertRaises(RuntimeError):
+            mod.delete_lvol(lvol, force_delete=False)
 
         self.assertEqual(seen_status.get("status_at_call_time"),
                          LVol.STATUS_IN_DELETION,
@@ -229,9 +229,8 @@ class TestDeleteLvolIntentPersisted(unittest.TestCase):
         lvol = _make_lvol(status=LVol.STATUS_IN_DELETION, ha_type="ha")
         mod, _db, exec_mock, _writes = self._patch(lvol, leader_op_fails=False)
 
-        result = mod.delete_lvol("lvol-uuid-1", force_delete=False)
+        mod.delete_lvol(lvol, force_delete=False)  # must not raise
 
-        self.assertTrue(result)
         exec_mock.assert_not_called()  # short-circuit before leader op
 
     def test_status_set_for_single_ha_type_too(self):
@@ -244,9 +243,8 @@ class TestDeleteLvolIntentPersisted(unittest.TestCase):
 
         # delete_lvol_from_node is patched to return True in our setup,
         # so the single-path completes successfully.
-        result = mod.delete_lvol("lvol-uuid-1", force_delete=False)
+        mod.delete_lvol(lvol, force_delete=False)  # must not raise
 
-        self.assertTrue(result)
         self.assertEqual(lvol.status, LVol.STATUS_IN_DELETION)
 
 

@@ -239,9 +239,14 @@ def delete_lvol(uuid):
     if pool.status == pool.STATUS_INACTIVE:
         return utils.get_response_error("Pool is disabled", 400)
 
-    ret = lvol_controller.delete_lvol(uuid)
+    try:
+        lvol_controller.delete_lvol(lvol)
+        return utils.get_response(True)
+    except PreconditionError as e:
+        return utils.get_response_error(str(e), 400)
+    except RuntimeError as e:
+        return utils.get_response_error(str(e), 500)
 
-    return utils.get_response(ret)
 
 
 @bp.route('/lvol/resize/<string:uuid>', methods=['PUT'])
@@ -277,7 +282,7 @@ def connect_lvol(uuid):
     ret, err = lvol_controller.connect_lvol(uuid, host_nqn=host_nqn)
     if err:
         return utils.get_response_error(err, 400)
-    return utils.get_response(ret)
+    return utils.get_response([e.model_dump() for e in ret])
 
 
 @bp.route('/lvol/create_snapshot', methods=['POST'])

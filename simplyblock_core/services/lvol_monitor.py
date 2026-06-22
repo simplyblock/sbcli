@@ -274,7 +274,7 @@ def check_node(snode, all_lvols):
                     f"LVol {lvol.get_id()} stuck in {LVol.STATUS_IN_CREATION} "
                     f"since {lvol.create_dt}; cleaning up orphaned create")
                 try:
-                    lvol_controller.delete_lvol(lvol.get_id(), force_delete=True)
+                    lvol_controller.delete_lvol(lvol, force_delete=True)
                 except Exception as e:
                     logger.error(f"Failed to clean up orphaned in_creation lvol {lvol.get_id()}: {e}")
             continue

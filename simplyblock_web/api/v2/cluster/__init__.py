@@ -12,7 +12,6 @@ from simplyblock_core import cluster_ops
 
 from .._dependencies import Cluster
 from .backup import api as backup_api
-from .migration import api as migration_api
 from .storage_pool import api as pool_api
 from .storage_node import api as storage_node_api
 from .task import api as task_api
@@ -248,5 +247,4 @@ instance_api.include_router(storage_node_api, prefix='/storage-nodes')
 instance_api.include_router(task_api, prefix='/tasks')
 instance_api.include_router(pool_api, prefix='/storage-pools')
 instance_api.include_router(backup_api, prefix='/backups')
-instance_api.include_router(migration_api, prefix='/migrations')
 api.include_router(instance_api)

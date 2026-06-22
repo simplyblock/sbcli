@@ -3,6 +3,7 @@ from urllib.parse import urlparse
 from uuid import UUID
 
 from fastapi import Query, Request, Response
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, BeforeValidator, Field
 
@@ -51,4 +52,4 @@ def creation_response(
         case "identifier":
             return JSONResponse(content=str(entity_id), status_code=201, headers=headers)
         case "full":
-            return JSONResponse(content=get_full(entity_id), status_code=201, headers=headers)
+            return JSONResponse(content=jsonable_encoder(get_full(entity_id)), status_code=201, headers=headers)

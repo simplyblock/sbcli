@@ -152,6 +152,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--spdk-sys-mem', help='System memory reserved for non-SPDK use (e.g. 2G, 4096M). Overrides the auto-calculated minimum_sys_memory. If not set, the value is derived from the node configuration.', type=str, dest='spdk_sys_mem')
         if self.developer_mode:
             subcommand.add_argument('--spdk-proxy-image', help='The SPDK proxy image URI.', type=str, dest='spdk_proxy_image')
+        subcommand.add_argument('--expansion', help='After adding the node, integrate it into the cluster by re-homing existing secondary/tertiary roles. Use this to add a single node to an FTT2 cluster instead of staging FTT+1 nodes at once.', default=False, dest='expansion', action='store_true')
 
     def init_storage_node__delete(self, subparser):
         subcommand = self.add_sub_command(subparser, 'delete', 'Deletes a storage node object from the state database.')
@@ -614,6 +615,8 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             self.init_volume__migrate(subparser)
         if self.developer_mode:
+            self.init_volume__migrate_continue(subparser)
+        if self.developer_mode:
             self.init_volume__migrate_list(subparser)
         if self.developer_mode:
             self.init_volume__migrate_cancel(subparser)
@@ -670,7 +673,7 @@ class CLIWrapper(CLIWrapperBase):
 
     def init_volume__delete(self, subparser):
         subcommand = self.add_sub_command(subparser, 'delete', 'Deletes a logical volume.')
-        subcommand.add_argument('volume_id', help='The logical volumes id or ids.', type=str, nargs='+')
+        subcommand.add_argument('volume_id', help='The logical volumes id.', type=str)
         subcommand.add_argument('--force', help='Force delete logical volume from the cluster.', dest='force', action='store_true')
 
     def init_volume__connect(self, subparser):
@@ -753,11 +756,17 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('clone_name', help='The new logical volume clone name.', type=str)
 
     def init_volume__migrate(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'migrate', 'Migrate a logical volume to a different storage node.')
-        subcommand.add_argument('volume_id', help='The logical volume id.', type=str)
-        subcommand.add_argument('target_node_id', help='The target storage node id.', type=str)
+        subcommand = self.add_sub_command(subparser, 'migrate', 'Pre-create the target NVMe-oF subsystem for a volume migration. Returns a migration ID and NVMe connect strings (inaccessible ANA state). Connect the client, then run migrate-continue.')
+        subcommand.add_argument('volume_id', help='The volume ID to migrate.', type=str)
+        subcommand.add_argument('target_node_id', help='The target storage node ID.', type=str)
+        subcommand.add_argument('--ctrl-loss-tmo', help='NVMe ctrl-loss-tmo in seconds. Default: `3600`.', type=int, default=3600, dest='ctrl_loss_tmo')
+        subcommand.add_argument('--host-nqn', help='Host NQN for DH-HMAC-CHAP authentication (required when volume has allowed hosts).', type=str, dest='host_nqn')
+
+    def init_volume__migrate_continue(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'migrate-continue', 'Advance a pre-created migration to the snapshot-copy phase and launch the task runner.')
+        subcommand.add_argument('migration_id', help='The migration ID returned by migrate.', type=str)
         subcommand.add_argument('--max-retries', help='Maximum retry attempts before aborting. Default: `10`.', type=int, default=10, dest='max_retries')
-        subcommand.add_argument('--deadline', help='Migration deadline in seconds (0 = no deadline. Default: `14400`.', type=int, default=14400, dest='deadline_seconds')
+        subcommand.add_argument('--deadline', help='Migration deadline in seconds (0 = no deadline). Default: `14400`.', type=int, default=14400, dest='deadline_seconds')
 
     def init_volume__migrate_list(self, subparser):
         subcommand = self.add_sub_command(subparser, 'migrate-list', 'List volume migrations.')
@@ -898,10 +907,12 @@ class CLIWrapper(CLIWrapperBase):
 
     def init_snapshot__list(self, subparser):
         subcommand = self.add_sub_command(subparser, 'list', 'Lists all snapshots.')
-        subcommand.add_argument('--all', help='List soft deleted snapshots.', dest='all', action='store_true')
-        subcommand.add_argument('--cluster-id', help='Filter snapshots by cluster UUID', type=str, dest='cluster_id', required=False)
-        subcommand.add_argument('--with-details', help='List snapshots with replicate and chaining details', dest='with_details', action='store_true')
-        subcommand.add_argument('--pool', help='List snapshots in particular pool id or name.', type=str, dest='pool')
+        subcommand.add_argument('--lvol-id', '-l', help='List snapshots for a specific logical volume.', type=str, dest='lvol_id', required=False)
+        subcommand.add_argument('--node-id', '-n', help='List snapshots for a specific node uuid', type=str, dest='node_id', required=False)
+        subcommand.add_argument('--pool', '-p', help='List snapshots in particular pool id or name.', type=str, dest='pool')
+        subcommand.add_argument('--cluster-id', '-c', help='Filter snapshots by cluster UUID', type=str, dest='cluster_id', required=False)
+        subcommand.add_argument('--with-details', '-w', help='List snapshots with replicate and chaining details', dest='with_details', action='store_true')
+        subcommand.add_argument('--json', '-j', help='List snapshots in JSON format', dest='json', action='store_true')
 
     def init_snapshot__delete(self, subparser):
         subcommand = self.add_sub_command(subparser, 'delete', 'Deletes a snapshot.')
@@ -1352,6 +1363,12 @@ class CLIWrapper(CLIWrapperBase):
                         ret = False
                     else:
                         ret = self.volume__migrate(sub_command, args)
+                elif sub_command in ['migrate-continue']:
+                    if not self.developer_mode:
+                        print("This command is private.")
+                        ret = False
+                    else:
+                        ret = self.volume__migrate_continue(sub_command, args)
                 elif sub_command in ['migrate-list']:
                     if not self.developer_mode:
                         print("This command is private.")

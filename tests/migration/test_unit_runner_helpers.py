@@ -126,9 +126,10 @@ class TestBytesToMib(unittest.TestCase):
         assert runner._bytes_to_mib(1024 * 1024) == 1
         assert runner._bytes_to_mib(2 * 1024 * 1024) == 2
 
-    def test_rounds_up(self):
-        # 1 byte over 1 MiB → 2 MiB
-        assert runner._bytes_to_mib(1024 * 1024 + 1) == 2
+    def test_rounds_down(self):
+        # 1 byte over 1 MiB → still 1 MiB (floor, not ceil)
+        # Must match lvol creation code; SPDK applies its own ceiling at cluster boundary.
+        assert runner._bytes_to_mib(1024 * 1024 + 1) == 1
 
     def test_1_byte_returns_one(self):
         assert runner._bytes_to_mib(1) == 1

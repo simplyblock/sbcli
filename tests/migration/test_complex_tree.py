@@ -32,7 +32,10 @@ Tests:
 
 import time
 
+import pytest
+
 from simplyblock_core.controllers import migration_controller, lvol_controller, snapshot_controller
+from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.models.lvol_migration import LVolMigration
 from simplyblock_core.models.storage_node import StorageNode
 
@@ -390,7 +393,7 @@ class TestConcurrentIndependentOperations:
         _seed_lvol(mock_src_server, new_lvol, ctx.node("src"))
 
         # Delete the independent lvol l_ind (not involved in any migration)
-        lvol_controller.delete_lvol(ctx.lvol_uuid("l_ind"))
+        lvol_controller.delete_lvol(ctx.lvol("l_ind"))
         # Must not be blocked by the l3 migration
         # (may fail for RPC reasons but not for migration protection)
 
@@ -471,9 +474,8 @@ class TestMigrationProtection:
         assert m.is_active()
 
         # Try to delete l2 — must be blocked
-        result = lvol_controller.delete_lvol(ctx.lvol_uuid("l2"))
-        assert result is False, \
-            "Deleting a volume with an active migration should be blocked"
+        with pytest.raises(PreconditionError, match="active migration"):
+            lvol_controller.delete_lvol(ctx.lvol("l2"))
 
         run_migration_task(mig_id, max_steps=2000, step_sleep=0.02)
 

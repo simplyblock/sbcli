@@ -90,6 +90,7 @@ CONTROL_PLANE_SERVICES = [
     "TasksRunnerClusterStatus",
     "TasksRunnerNewDeviceMigration",
     "TasksNodeAddRunner",
+    "TasksRunnerClusterExpand",
     "TasksRunnerPortAllow",
     "TasksRunnerJCCompResume",
     "TasksRunnerLVolSyncDelete",

@@ -392,6 +392,19 @@ class RPCClient:
         params = {"name": name}
         return self._request2("bdev_nvme_detach_controller", params)
 
+    def bdev_nvme_remove_trid(self, name, traddr, trsvcid, trtype="TCP"):
+        """Remove a single transport path from an NVMe controller without
+        detaching the whole controller. Used during single-node cluster
+        expansion to prune the dead failover path on a sibling sec_2 node
+        after its sec_1 was re-homed to a different node."""
+        return self._request3(
+            "bdev_nvme_remove_trid",
+            name=name,
+            traddr=traddr,
+            trsvcid=str(trsvcid),
+            trtype=trtype,
+        )
+
     def ultra21_alloc_ns_init(self, pci_addr):
         params = {
             "traddr": pci_addr,
@@ -479,6 +492,27 @@ class RPCClient:
             "nqn": nqn,
             "nsid": nsid}
         return self._request("nvmf_subsystem_remove_ns", params)
+
+    def nvmf_subsystem_ns_update(self, nqn, nsid, bdev_name):
+        """Atomically swap the bdev backing *nsid* in *nqn* for *bdev_name*.
+
+        Keeps the same nsid, UUID, NGUID, and ANA group — the client sees the
+        namespace as unchanged (no AER namespace-change event, no rediscovery
+        delay).  Available in SPDK ≥ 24.01.
+
+        Returns the SPDK result on success, or None if the RPC is unavailable
+        or the call fails (caller should fall back to remove + add_ns).
+        """
+        params = {
+            "nqn": nqn,
+            "nsid": nsid,
+            "bdev_name": bdev_name,
+        }
+        try:
+            return self._request("nvmf_subsystem_ns_update", params)
+        except Exception as e:
+            logger.debug("nvmf_subsystem_ns_update not available or failed: %s", e)
+            return None
 
     def nvmf_subsystem_listener_set_ana_state(self, nqn, ip, port, trtype="TCP", is_optimized=True, ana=None):
         params = {
@@ -1577,7 +1611,7 @@ class RPCClient:
         """Mark *name* (composite lvol bdev) as a migration-target lvol."""
         return self._request("bdev_lvol_set_migration_flag", {"lvol_name": name})
 
-    def bdev_lvol_transfer(self, name, offset, batch_size, bdev_name, operation="migrate"):
+    def bdev_lvol_transfer(self, name, offset, batch_size, bdev_name, operation="migrate", lvol_id=0):
         """
         Start an async blob transfer from *name* (source composite bdev) to the
         NVMe-oF bdev *bdev_name* attached on the caller's node.
@@ -1587,6 +1621,7 @@ class RPCClient:
         """
         return self._request("bdev_lvol_transfer", {
             "lvol_name": name,
+            "lvol_id": lvol_id,
             "offset": offset,
             "cluster_batch": batch_size,
             "gateway": bdev_name,
@@ -1632,7 +1667,7 @@ class RPCClient:
         """
         return self._request("bdev_lvol_get_lvols", {"lvs_name": lvs_name})
 
-    def bdev_lvol_final_migration(self, lvol_name, lvol_id, snapshot_name, batch_size, bdev_name):
+    def bdev_lvol_final_migration(self, lvol_name, lvol_id, snapshot_name, batch_size, bdev_name, operation="migrate"):
         """
         Start the final (live) migration of a writable lvol from source to target.
         The source I/O is frozen for the brief delta transfer.
@@ -1643,15 +1678,17 @@ class RPCClient:
             snapshot_name: composite name of the last transferred snapshot on source
             block_size:    constant – pass ``2``
             bdev_name:     bdev exposed by connecting to the target hub lvol
+            operation: (migrate or replicate)
 
         Poll progress with :meth:`bdev_lvol_transfer_stat` using *lvol_name*.
         """
-        return self._request("bdev_lvol_final_migration", {
+        return self._request("bdev_lvol_transfer_final_step", {
             "lvol_name": lvol_name,
             "lvol_id": lvol_id,
             "snapshot_name": snapshot_name,
             "cluster_batch": batch_size,
             "gateway": bdev_name,
+            "operation": operation,
         })
 
     # ---- S3 Backup RPCs ----

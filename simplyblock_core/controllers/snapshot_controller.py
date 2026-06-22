@@ -11,6 +11,7 @@ from simplyblock_core.controllers import lvol_controller, snapshot_events, pool_
     migration_controller
 
 from simplyblock_core import utils
+from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.kms import create_kms_connection
 from simplyblock_core.kms._exceptions import KMSException
 from simplyblock_core.db_controller import DBController
@@ -47,12 +48,25 @@ def _rollback_lvol_creation(lvol, node_ids):
             logger.error(f"Failed to rollback lvol {lvol.get_id()} from node {node_id}: {e}")
 
 
-def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvols=None):
+def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvols=None,
+        bypass_migration_check=False):
     try:
         lvol = db_controller.get_lvol_by_id(lvol_id)
     except KeyError:
         logger.exception("Volume lookup failed for snapshot request: %s", lvol_id)
         return False, "Volume not found"
+
+    # Reject snapshot creation on an lvol that is being deleted. SPDK's
+    # blobstore reuses the lvol's metadata for the snapshot's parent
+    # pointer; if the lvol is mid-delete (async or sync), creating a
+    # snapshot from it can leave the resulting snapshot's parent_id
+    # dangling and produce the open_ref/clone-entries inconsistency
+    # that makes the snapshot undeletable until node restart.
+    if lvol.status == LVol.STATUS_IN_DELETION:
+        msg = (f"Cannot create snapshot from lvol {lvol_id}: "
+               f"lvol is in deletion")
+        logger.error(msg)
+        return False, msg
 
     # Reject snapshot creation on an lvol that is being deleted. SPDK's
     # blobstore reuses the lvol's metadata for the snapshot's parent
@@ -84,14 +98,15 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
     # documents but previously never checked (is_migration_active_on_node had
     # no callers). cluster_id is omitted because LVol has no cluster_id field;
     # the predicate matches on node_id, so an all-clusters scan is correct.
-    try:
-        if migration_controller.is_migration_active_on_node(lvol.node_id):
-            msg = (f"Cannot create snapshot: a live volume migration is active "
-                   f"on node {lvol.node_id}")
-            logger.error(msg)
-            return False, msg
-    except Exception as e:
-        logger.warning(f"Migration-active check failed for node {lvol.node_id}: {e}")
+    if not bypass_migration_check:
+        try:
+            if migration_controller.is_migration_active_on_node(lvol.node_id):
+                msg = (f"Cannot create snapshot: a live volume migration is active "
+                       f"on node {lvol.node_id}")
+                logger.error(msg)
+                return False, msg
+        except Exception as e:
+            logger.warning(f"Migration-active check failed for node {lvol.node_id}: {e}")
 
     pool = db_controller.get_pool_by_id(lvol.pool_uuid)
     if pool.status == Pool.STATUS_INACTIVE:
@@ -277,6 +292,7 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
 
     snap = SnapShot()
     snap.uuid = str(uuid.uuid4())
+    snap.data_uuid = str(uuid.uuid4())
     snap.snap_uuid = snap_uuid
     snap.size = size
     snap.used_size = used_size
@@ -351,20 +367,39 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
     return snap.uuid, False
 
 
-def list(all=False, cluster_id=None, with_details=False, pool_id_or_name=None):
-    if pool_id_or_name:
+def list_snapshots(cluster_id=None, node_id=None, lvol_id=None,pool_id_or_name=None, with_details=False, is_json=False):
+    all_snaps = db_controller.get_snapshots()
+    if lvol_id:
         try:
-            pool = (
-                    db_controller.get_pool_by_id(pool_id_or_name)
+            lvol = (db_controller.get_lvol_by_id(lvol_id) if utils.UUID_PATTERN.match(lvol_id) is not None
+                    else db_controller.get_lvol_by_name(lvol_id))
+            snaps = [sn for sn in all_snaps if sn.lvol.get_id() == lvol.get_id()]
+        except KeyError:
+            logger.error("Can not find lvol with provided lvol_id_or_name: %s", lvol_id)
+            return False
+    elif pool_id_or_name:
+        try:
+            pool = (db_controller.get_pool_by_id(pool_id_or_name)
                     if utils.UUID_PATTERN.match(pool_id_or_name) is not None
-                    else db_controller.get_pool_by_name(pool_id_or_name)
-            )
+                    else db_controller.get_pool_by_name(pool_id_or_name))
             snaps = db_controller.get_snapshots_by_pool_id(pool.get_id())
         except KeyError:
             logger.error("Can not find pool with provided pool_id_or_name: %s", pool_id_or_name)
             return False
+    elif node_id:
+        try:
+            node = (db_controller.get_storage_node_by_id(node_id)
+                    if utils.UUID_PATTERN.match(node_id) is not None
+                    else db_controller.get_storage_nodes_by_hostname(node_id)[0])
+            snaps = [sn for sn in all_snaps if sn.lvol.node_id == node.get_id()]
+        except KeyError:
+            logger.error("Can not find node with provided value: %s", node_id)
+            return False
+
+    elif cluster_id:
+        snaps = [sn for sn in all_snaps if sn.cluster_id == cluster_id]
     else:
-        snaps = db_controller.get_snapshots(cluster_id)
+        snaps = all_snaps
 
     snaps = sorted(snaps, key=lambda snap: snap.created_at)
 
@@ -400,11 +435,19 @@ def list(all=False, cluster_id=None, with_details=False, pool_id_or_name=None):
             "Status": snap.status,
         }
         if with_details:
+            instances = []
+            if snap.instances:
+                instances.extend([SnapShot(i).lvol.node_id for i in snap.instances])
             d["Replication target snap"] = snap.target_replicated_snap_uuid
             d["Replication source snap"] = snap.source_replicated_snap_uuid
-            d["Rrev snap"] = snap.prev_snap_uuid
+            d["Prev snap"] = snap.prev_snap_uuid
             d["Next snap"] = snap.next_snap_uuid
+            d["Instance on other nodes"] = instances
         data.append(d)
+
+    if is_json and data:
+        return json.dumps(data, indent=2)
+
     return utils.print_table(data)
 
 
@@ -562,7 +605,16 @@ def delete(snapshot_uuid, force_delete=False):
 
         rpc_client = primary_node.rpc_client()
 
-        ret, _ = rpc_client.delete_lvol(snap.snap_bdev)
+        special_delete = False
+        try:
+            snap_bdev_info = rpc_client.get_bdevs(snap.snap_bdev)
+            logger.debug(f"snap_bdev_info: {snap_bdev_info[0]}")
+            if snap_bdev_info[0]["driver_specific"]["lvol"]["open_ref"] > 1:
+                special_delete = True
+        except Exception:
+            pass
+
+        ret, _ = rpc_client.delete_lvol(snap.snap_bdev, del_async=False, special_delete=special_delete)
         if not ret:
             logger.error(f"Failed to delete snap from node: {snode.get_id()}")
             if not force_delete:
@@ -575,7 +627,10 @@ def delete(snapshot_uuid, force_delete=False):
     try:
         base_lvol = db_controller.get_lvol_by_id(snap.lvol.get_id())
         if base_lvol and base_lvol.deleted is True:
-            lvol_controller.delete_lvol(base_lvol.get_id())
+            try:
+                lvol_controller.delete_lvol(base_lvol)
+            except (PreconditionError, RuntimeError):
+                logger.warning("Failed to delete volume", exc_info=True)
     except KeyError:
         pass
 
@@ -593,6 +648,22 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     except KeyError:
         logger.exception("Snapshot lookup failed for clone request: %s", snapshot_id)
         return False, "Snapshot not found"
+
+    # Reject cloning a snapshot that is in pending deletion. If a prior
+    # clone-create failed (e.g. an SPDK duplicate-name collision on the
+    # CLN_xxxx bdev) the mgmt layer issues an async snapshot delete; if
+    # we let a fresh clone slip through that window, SPDK ends up with
+    # the snapshot's parent metadata partially overwritten by the new
+    # clone's lineage. The later sync delete then leaves the original
+    # snapshot with non-zero open_ref but no clone entries, producing
+    # the "Cannot remove snapshot because it is open" / EBUSY (-16)
+    # state that requires a node restart to clear.
+    if snap.deleted or snap.status == SnapShot.STATUS_IN_DELETION:
+        msg = (f"Cannot clone snapshot {snapshot_id}: "
+               f"snapshot is in deletion (deleted={snap.deleted}, "
+               f"status={snap.status})")
+        logger.error(msg)
+        return False, msg
 
     # Reject cloning a snapshot that is in pending deletion. If a prior
     # clone-create failed (e.g. an SPDK duplicate-name collision on the
@@ -1018,39 +1089,3 @@ def set_value(snapshot_uuid, attr, value) -> bool:
     setattr(snap, attr, value)
     snap.write_to_db()
     return True
-
-def list_by_node(node_id=None, is_json=False):
-    snaps = db_controller.get_snapshots()
-    snaps = sorted(snaps, key=lambda snap: snap.created_at)
-
-    # Build snap_id → clone list once instead of a full DB read per snapshot
-    # (was O(M×N) DB reads).
-    clones_by_snap: dict[str, builtins.list[str]] = {}
-    for lv in db_controller.get_mini_lvols():
-        if lv.cloned_from_snap:
-            clones_by_snap.setdefault(lv.cloned_from_snap, []).append(lv.get_id())
-
-    data = []
-    for snap in snaps:
-        if node_id:
-            if snap.lvol.node_id != node_id:
-                continue
-        logger.debug(snap)
-        clones = clones_by_snap.get(snap.get_id(), [])
-        data.append({
-            "UUID": snap.uuid,
-            "BDdev UUID": snap.snap_uuid,
-            "BlobID": snap.blobid,
-            "Name": snap.snap_name,
-            "Size": utils.humanbytes(snap.used_size),
-            "BDev": snap.snap_bdev.split("/")[1],
-            "Node ID": snap.lvol.node_id,
-            "LVol ID": snap.lvol.get_id(),
-            "Created At": time.strftime("%H:%M:%S, %d/%m/%Y", time.gmtime(snap.created_at)),
-            "Base Snapshot": snap.snap_ref_id,
-            "Clones": clones,
-            "Status": snap.status,
-        })
-    if is_json:
-        return json.dumps(data, indent=2)
-    return utils.print_table(data)

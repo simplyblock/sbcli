@@ -22,12 +22,7 @@ db = DBController()
 
 @api.get('/', name='clusters:storage-pools:list')
 def list(cluster: Cluster) -> List[StoragePoolDTO]:
-    data = []
-    for pool in db.get_pools():
-        if pool.cluster_id == cluster.get_id():
-            stat_obj = None
-            data.append(StoragePoolDTO.from_model(pool, stat_obj))
-    return data
+    return [StoragePoolDTO.from_model(pool, None) for pool in db.get_pools(cluster.get_id())]
 
 
 class StoragePoolParams(BaseModel):
@@ -63,7 +58,7 @@ def add(request: Request, cluster: Cluster, parameters: StoragePoolParams, respo
     return util.creation_response(
         request, response_format,
         entity_id=UUID(id_or_false),
-        route_name='clusters:storage-pools:volumes:detail',
+        route_name='clusters:storage-pools:detail',
         route_kwargs={'cluster_id': UUID(cluster.get_id()), 'pool_id': UUID(id_or_false)},
         get_full=lambda id: StoragePoolDTO.from_model(db.get_pool_by_id(str(id))),
     )

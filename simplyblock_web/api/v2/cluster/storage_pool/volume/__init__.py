@@ -9,9 +9,10 @@ from simplyblock_core import utils as core_utils
 from simplyblock_core.controllers import backup_controller, lvol_controller, snapshot_controller
 from simplyblock_core.models.lvol_model import LVol
 
-from ..._dependencies import Cluster, StoragePool, Volume
-from ..._dtos import BackupDTO, VolumeDTO, SnapshotDTO, TaskDTO
-from ... import util
+from ...._dependencies import Cluster, StoragePool, Volume
+from ...._dtos import BackupDTO, VolumeDTO, SnapshotDTO, TaskDTO
+from .... import util
+from .migration import api as migration_api
 
 
 api = APIRouter()
@@ -174,11 +175,9 @@ def update(cluster: Cluster, pool: StoragePool, volume: Volume, body: UpdatableL
 @instance_api.delete('/', name='clusters:storage-pools:volumes:delete', status_code=204, responses={204: {"content": None}})
 def delete(cluster: Cluster, pool: StoragePool, volume: Volume) -> Response:
     if volume.status == LVol.STATUS_DELETED:
-        return Response(status_code=404)
+        raise HTTPException(404, "Volume deleted")
 
-    if not lvol_controller.delete_lvol(volume.get_id()):
-        raise ValueError('Failed to delete volume')
-
+    lvol_controller.delete_lvol(volume)
     return Response(status_code=204)
 
 
@@ -370,4 +369,5 @@ def delete_backups(cluster: Cluster, pool: StoragePool, volume: Volume) -> Respo
     return Response(status_code=204)
 
 
+instance_api.include_router(migration_api, prefix="/migrations")
 api.include_router(instance_api)
