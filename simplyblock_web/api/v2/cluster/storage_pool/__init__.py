@@ -22,12 +22,7 @@ db = DBController()
 
 @api.get('/', name='clusters:storage-pools:list')
 def list(cluster: Cluster) -> List[StoragePoolDTO]:
-    data = []
-    for pool in db.get_pools():
-        if pool.cluster_id == cluster.get_id():
-            stat_obj = None
-            data.append(StoragePoolDTO.from_model(pool, stat_obj))
-    return data
+    return [StoragePoolDTO.from_model(pool, None) for pool in db.get_pools(cluster.get_id())]
 
 
 class StoragePoolParams(BaseModel):
