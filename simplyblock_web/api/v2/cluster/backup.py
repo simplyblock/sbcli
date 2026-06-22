@@ -9,7 +9,7 @@ from simplyblock_core.controllers import backup_controller
 from simplyblock_core.models.cluster import Cluster as ClusterModel
 from simplyblock_core.models.lvol_model import LVol
 
-from .._dependencies import Cluster, Policy
+from .._dependencies import BackupResource, Cluster, Policy
 from .._dtos import BackupDTO, BackupPolicyDTO
 from ..util import CreationResponseFormatParameter, creation_response
 
@@ -40,7 +40,7 @@ def create_backup(request: Request, cluster: Cluster, parameters: _BackupSnapsho
         request, response_format,
         entity_id=UUID(backup_id),
         route_name='clusters:backups:detail',
-        route_kwargs={'cluster_id': UUID(cluster.get_id())},
+        route_kwargs={'cluster_id': UUID(cluster.get_id()), 'backup_id': UUID(backup_id)},
         get_full=lambda id: BackupDTO.from_model(db.get_backup_by_id(str(id))),
         extra_headers={'X-Backup-Id': backup_id},  # For backwards compatibility
     )
@@ -218,3 +218,14 @@ def detach_policy(cluster: Cluster, policy: Policy, parameters: _AttachParams) -
 
 
 api.include_router(policy_api, prefix='/backup-policies')
+
+
+instance_api = APIRouter(prefix='/{backup_id}')
+
+
+@instance_api.get('/', name='clusters:backups:detail')
+def get_backup(cluster: Cluster, backup: BackupResource) -> BackupDTO:
+    return BackupDTO.from_model(backup)
+
+
+api.include_router(instance_api)

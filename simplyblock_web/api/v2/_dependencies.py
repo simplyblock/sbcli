@@ -4,7 +4,7 @@ from uuid import UUID
 from fastapi import Depends, HTTPException
 
 from simplyblock_core.db_controller import DBController
-from simplyblock_core.models.backup import BackupPolicy
+from simplyblock_core.models.backup import Backup as BackupModel, BackupPolicy
 from simplyblock_core.models.cluster import Cluster as ClusterModel
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_migration import LVolMigration
@@ -113,6 +113,19 @@ def _lookup_management_node(management_node_id: UUID) -> MgmtNode:
 
 
 ManagementNode = Annotated[MgmtNode, Depends(_lookup_management_node)]
+
+
+def _lookup_backup(backup_id: UUID, cluster: Cluster) -> BackupModel:
+    try:
+        backup = _db.get_backup_by_id(str(backup_id))
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    if backup.cluster_id != cluster.get_id():
+        raise HTTPException(404, f'Backup {backup_id} not found')
+    return backup
+
+
+BackupResource = Annotated[BackupModel, Depends(_lookup_backup)]
 
 
 def _lookup_backup_policy(policy_id: UUID, cluster: Cluster) -> BackupPolicy:
