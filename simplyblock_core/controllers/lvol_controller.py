@@ -1243,17 +1243,8 @@ def _remove_lvol_subsys_from_node(lvol, rpc_client):
     return True
 
 
-def delete_lvol(id_or_name, force_delete=False):
+def delete_lvol(lvol: LVol, force_delete: bool = False) -> bool:
     db_controller = DBController()
-    try:
-        lvol = (
-                db_controller.get_lvol_by_id(id_or_name)
-                if utils.UUID_PATTERN.match(id_or_name) is not None
-                else db_controller.get_lvol_by_name(id_or_name)
-        )
-    except KeyError as e:
-        logger.error(e)
-        return False
 
     # Block during restart Phase 5
     try:
