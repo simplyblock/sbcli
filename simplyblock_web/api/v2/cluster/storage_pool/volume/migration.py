@@ -46,7 +46,12 @@ def create_migration(request: Request, cluster: Cluster, volume: Volume, paramet
         request, response_format,
         entity_id=UUID(migration_id),
         route_name='cluster:storage-pools:volumes:migrations:detail',
-        route_kwargs={'cluster_id': UUID(cluster.get_id()), 'migration_id': UUID(migration_id)},
+        route_kwargs={
+            'cluster_id': UUID(cluster.uuid),
+            'pool_id': UUID(volume.pool_uuid),
+            'volume_id': UUID(volume.uuid),
+            'migration_id': UUID(migration_id),
+        },
         get_full=lambda id: MigrationDTO.from_model(
             db.get_migration_by_id(str(id)), connect_strings=connect_strings),
     )
