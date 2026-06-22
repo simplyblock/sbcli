@@ -164,7 +164,10 @@ def get_data():
                     elif v == "status_code":
                         ng[g].labels(cluster=cl.get_id(), cluster_name=cl.cluster_name, snode=node.get_id(), hostname=node.hostname).set(node.get_status_code())
                     elif v == "health_check":
-                        ng[g].labels(cluster=cl.get_id(), cluster_name=cl.cluster_name, snode=node.get_id(), hostname=node.hostname).set(node.health_check)
+                        # health_check is None when not applicable (node not
+                        # ONLINE/DOWN); report NaN so it isn't read as unhealthy.
+                        hc = float('nan') if node.health_check is None else float(node.health_check)
+                        ng[g].labels(cluster=cl.get_id(), cluster_name=cl.cluster_name, snode=node.get_id(), hostname=node.hostname).set(hc)
                     if reactor_data and "reactors" in reactor_data:
                         for reactor in reactor_data.get("reactors", []):
                             lcore = reactor.get("lcore")
@@ -212,8 +215,9 @@ def get_data():
                             ng[g].labels(cluster=cl.get_id(), cluster_name=cl.cluster_name, snode=node.get_id(), device=device.get_id()).set(
                                 device.get_status_code())
                         elif v == "health_check":
+                            hc = float('nan') if device.health_check is None else float(device.health_check)
                             ng[g].labels(cluster=cl.get_id(), cluster_name=cl.cluster_name, snode=node.get_id(), device=device.get_id()).set(
-                                device.health_check)
+                                hc)
 
 
         for pool in db.get_pools():

@@ -32,8 +32,8 @@ commands:
           Runs locally on to-be storage node hosts. Reads system information (CPUs topology, NVME devices) and prepares
           yaml config to be used when adding the storage node.
         arguments:
-          - name: "--max-lvol"
-            help: "The max logical volume per storage node."
+          - name: "--max-subsys"
+            help: "The max number of subsystems per storage node."
             dest: max_lvol
             type: int
             required: true
@@ -112,7 +112,7 @@ commands:
             type: bool
             action: store_true
           - name: "--calculate-hp-only"
-            help: "Calculate the minimum required huge pages, it depends on the following params: --cores-percentage, --sockets-to-use, --max-lvol, --nodes-per-socket, --number-of-devices."
+            help: "Calculate the minimum required huge pages, it depends on the following params: --cores-percentage, --sockets-to-use, --max-subsys, --nodes-per-socket, --number-of-devices."
             dest: calculate_hp_only
             type: bool
             action: store_true
@@ -261,6 +261,10 @@ commands:
             type: int
             default: 5000
             private: true
+          - name: "--spdk-sys-mem"
+            help: "System memory reserved for non-SPDK use (e.g. 2G, 4096M). Overrides the auto-calculated minimum_sys_memory. If not set, the value is derived from the node configuration."
+            dest: spdk_sys_mem
+            type: str
           - name: "--spdk-proxy-image"
             help: "The SPDK proxy image URI."
             dest: spdk_proxy_image
@@ -334,8 +338,8 @@ commands:
             dest: node_id
             completer: _completer_get_sn_list
             type: str
-          - name: "--max-lvol"
-            help: "The max logical volume per storage node. Default: `0`."
+          - name: "--max-subsys"
+            help: "The max number of subsystems per storage node. Default: `0`."
             dest: max_lvol
             type: int
             default: 0
@@ -1462,6 +1466,25 @@ commands:
             help: "The new attribute value."
             dest: attr_value
             type: str
+      - name: set-shared-placement
+        help: "Enable cluster-wide per-chunk data placement-binding for distrib bdevs (forward-only upgrade; --disable is reserved for debug)."
+        usage: "Preflight: every storage node must be ONLINE; the cluster must be ACTIVE and not rebalancing. The runtime distr_shared_placement RPC is dispatched to every online node, then the flag is persisted on the cluster row and on every node's lvstore_stack distrib entries so subsequent restarts re-create with the new mode."
+        arguments:
+          - name: "cluster_id"
+            help: "The cluster id."
+            dest: cluster_id
+            type: str
+            completer: _completer_get_cluster_list
+          - name: "--disable"
+            help: "Reverse transition (per-chunk -> per-page). Debug only; only safe on a balanced or empty bdev. Requires --force."
+            dest: disable
+            type: bool
+            action: store_true
+          - name: "--force"
+            help: "Bypass the rebalancing / non-online-node guards. Required when --disable is passed."
+            dest: force
+            type: bool
+            action: store_true
       - name: change-name
         help: Assigns or changes a name to a cluster
         arguments:
@@ -1679,20 +1702,6 @@ commands:
           - name: "--all"
             help: "List soft deleted logical volumes."
             dest: all
-            type: bool
-            action: store_true
-      - name: list-mem
-        help: "Gets the size and max_size of a logical volume."
-        private: true
-        arguments:
-          - name: "--json"
-            help: "Print outputs in json format."
-            dest: json
-            type: bool
-            action: store_true
-          - name: "--csv"
-            help: "Print outputs in csv format."
-            dest: csv
             type: bool
             action: store_true
       - name: get
@@ -2181,13 +2190,6 @@ commands:
             help: "The host NQN to remove."
             dest: host_nqn
             type: str
-      - name: get-master-lvols
-        help: "Return a list of master lvols (not namespaced lvol) from a storage pool."
-        arguments:
-          - name: "pool_id"
-            help: "The storage pool id."
-            dest: pool_id
-            type: str
   - name: "snapshot"
     help: "Snapshot Commands"
     weight: 600
@@ -2226,6 +2228,10 @@ commands:
             dest: with_details
             type: bool
             action: store_true
+          - name: "--pool"
+            help: "List snapshots in particular pool id or name."
+            dest: pool
+            type: str
       - name: delete
         help: "Deletes a snapshot."
         arguments:

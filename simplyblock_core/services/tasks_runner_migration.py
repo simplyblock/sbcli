@@ -254,6 +254,12 @@ def update_master_task(task):
 
 
 while True:
+    try:
+        db.get_clusters()
+    except Exception as e:
+        logger.error(f"Failed to get clusters: {e}")
+        time.sleep(3)
+        continue
     clusters = db.get_clusters()
     if not clusters:
         logger.error("No clusters found!")
@@ -283,6 +289,10 @@ while True:
                     elif task.status == JobSchedule.STATUS_RUNNING:
                         pass
 
+                    # Lease gate: skip a task another live runner host owns.
+                    if not tasks_controller.claim_task(task):
+                        logger.info(f"Migration task {task.uuid} owned by another runner host; skipping")
+                        continue
                     res = task_runner(task)
                     update_master_task(task)
                     if res:

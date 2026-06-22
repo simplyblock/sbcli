@@ -23,8 +23,11 @@ class TestLvolHACluster(FioWorkloadTest):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.logger = setup_logger(__name__)
-        self.lvol_size = "25G"
-        self.fio_size = "18G"
+        self.lvol_size = "100G"
+        self.int_lvol_size = 100
+        self.fio_size = "8G"  # default; overridden by _compute_fio_size()
+        self.fio_numjobs = 1
+        self.TARGET_DATA_PER_NODE_GB = 200
         self.total_lvols = 10
         self.snapshot_per_lvol = 2
         self.lvol_name = "lvl"
@@ -33,8 +36,49 @@ class TestLvolHACluster(FioWorkloadTest):
         self.lvol_node = None
         self.mount_path = "/mnt/"
         self.lvol_mount_details = {}
+        self.clone_mount_details = {}
+        self.sn_nodes = []
         self.log_path = Path.home()
         self.dump_validation_errors = []
+
+    def _compute_fio_size(self, extra_lvols: int = 0) -> str:
+        """Compute fio_size dynamically to target ~TARGET_DATA_PER_NODE_GB per node.
+
+        As lvol + clone count varies across iterations, fio_size adjusts
+        so total disk usage per node stays approximately constant.
+
+        Args:
+            extra_lvols: Number of lvols about to be created (not yet tracked).
+
+        Returns:
+            The computed fio_size string (e.g. ``"6G"``).  Also updates
+            ``self.fio_size`` in place.
+        """
+        num_nodes = len(self.sn_nodes) or 4
+        current_lvols = len(self.lvol_mount_details) + len(self.clone_mount_details)
+        total_lvols = current_lvols + extra_lvols
+        if total_lvols < 1:
+            total_lvols = self.total_lvols
+
+        lvols_per_node = total_lvols / num_nodes
+        # Each lvol runs fio_numjobs parallel FIO jobs, each writing fio_size
+        jobs_per_node = lvols_per_node * self.fio_numjobs
+        fio_size_gb = int(self.TARGET_DATA_PER_NODE_GB / max(1, jobs_per_node))
+
+        # Cap: all numjobs × fio_size must fit in the formatted filesystem.
+        # Usable capacity ≈ 80% of lvol_size (ext4/xfs overhead ~5-15%).
+        max_fio_gb = int(self.int_lvol_size * 0.80) // max(1, self.fio_numjobs)
+        fio_size_gb = min(fio_size_gb, max_fio_gb)
+        fio_size_gb = max(fio_size_gb, 1)
+
+        self.fio_size = f"{fio_size_gb}G"
+        self.logger.info(
+            f"[fio_size] Computed fio_size={self.fio_size} "
+            f"(target={self.TARGET_DATA_PER_NODE_GB}G/node, "
+            f"total_lvols={total_lvols}, nodes={num_nodes}, "
+            f"jobs/node={jobs_per_node:.1f})"
+        )
+        return self.fio_size
     
     def create_lvols(self):
         """Create 500 lvols with mixed crypto and non-crypto."""
@@ -50,8 +94,6 @@ class TestLvolHACluster(FioWorkloadTest):
                 pool_name=self.pool_name,
                 size=self.lvol_size,
                 crypto=is_crypto,
-                key1=self.lvol_crypt_keys[0],
-                key2=self.lvol_crypt_keys[1],
                 host_id=self.lvol_node
             )
             lvol_id = self.sbcli_utils.get_lvol_id(lvol_name)

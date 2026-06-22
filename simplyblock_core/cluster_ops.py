@@ -14,8 +14,8 @@ import requests
 
 from docker.errors import DockerException
 from simplyblock_core import utils, scripts, constants, mgmt_node_ops, storage_node_ops
+from simplyblock_core import port_block
 from simplyblock_core.controllers import backup_controller, cluster_events, device_controller, qos_controller, tasks_controller, tcp_ports_events
-from simplyblock_core.fw_api_client import FirewallClient
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.cluster import Cluster, HashicorpVaultSettings
 from simplyblock_core.models.job_schedule import JobSchedule
@@ -27,6 +27,7 @@ from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.prom_client import PromClient
 from simplyblock_core.utils import pull_docker_image_with_retry
+from simplyblock_core.settings import Settings
 
 logger = utils.get_logger(__name__)
 
@@ -238,6 +239,9 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         if distr_npcs < 2:
             raise ValueError("max_fault_tolerance > 1 requires distr_npcs >= 2")
 
+    if (hashicorp_vault_settings is not None) and (Settings().tls_connect != "authenticated"):
+        raise ValueError("External KMS requires mTLS authentication to be used")
+
     if ingress_host_source == "dns" or ingress_host_source == "loadbalancer":
         if not dns_name:
             raise ValueError("--dns-name is required when --ingress-host-source is dns or loadbalancer")
@@ -307,6 +311,14 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster = Cluster()
     cluster.uuid = str(uuid.uuid4())
     cluster.cluster_name = name
+    # New clusters use per-chunk (shared) placement from the start: every
+    # distrib and JM created at add-node / activation / restart picks up the
+    # flag via cluster.shared_placement (see create_lvstore and
+    # bdev_jm_create). No legacy-then-migrate phase. The deferred migration
+    # path (shared_placement_migration_pending) is only for clusters UPGRADED
+    # from a legacy release, whose pre-existing bdevs need the one-shot
+    # runtime flip via set_shared_placement.
+    cluster.shared_placement = True
     cluster.blk_size = blk_size
     cluster.page_size_in_blocks = page_size_in_blocks
     cluster.nqn = f"{constants.CLUSTER_NQN}:{cluster.uuid}"
@@ -481,12 +493,23 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
         if distr_npcs < 2:
             raise ValueError("max_fault_tolerance > 1 requires distr_npcs >= 2")
 
+    if (hashicorp_vault_settings is not None) and (Settings().tls_connect != "authenticated"):
+        raise ValueError("External KMS requires mTLS authentication to be used")
+
     monitoring_secret = os.environ.get("MONITORING_SECRET", "")
 
     logger.info("Adding new cluster")
     cluster = Cluster()
     cluster.uuid = str(uuid.uuid4())
     cluster.cluster_name = name
+    # New clusters use per-chunk (shared) placement from the start: every
+    # distrib and JM created at add-node / activation / restart picks up the
+    # flag via cluster.shared_placement (see create_lvstore and
+    # bdev_jm_create). No legacy-then-migrate phase. The deferred migration
+    # path (shared_placement_migration_pending) is only for clusters UPGRADED
+    # from a legacy release, whose pre-existing bdevs need the one-shot
+    # runtime flip via set_shared_placement.
+    cluster.shared_placement = True
     cluster.blk_size = blk_size
     cluster.page_size_in_blocks = page_size_in_blocks
     cluster.nqn = f"{constants.CLUSTER_NQN}:{cluster.uuid}"
@@ -761,13 +784,10 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
             # lvstore/hublvol RPCs which presume the peer's full stack is up.
             leader_blocked = False
             leader_port = None
-            leader_ptype = "tcp"
             if not is_fresh_activation and primary_node.status == StorageNode.STATUS_ONLINE:
                 try:
                     leader_port = primary_node.get_lvol_subsys_port(primary_node.lvstore)
-                    leader_ptype = "udp" if primary_node.active_rdma else "tcp"
-                    FirewallClient(primary_node, timeout=3, retry=1).firewall_set_port(
-                        leader_port, leader_ptype, "block", primary_node.rpc_port)
+                    port_block.set_port(primary_node, leader_port, block=True, timeout=3, retry=1)
                     tcp_ports_events.port_deny(primary_node, leader_port)
                     leader_blocked = True
                     time.sleep(0.5)
@@ -791,8 +811,7 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
             finally:
                 if leader_blocked:
                     try:
-                        FirewallClient(primary_node, timeout=3, retry=1).firewall_set_port(
-                            leader_port, leader_ptype, "allow", primary_node.rpc_port)
+                        port_block.set_port(primary_node, leader_port, block=False, timeout=3, retry=1)
                         tcp_ports_events.port_allowed(primary_node, leader_port)
                     except Exception as ue:
                         logger.error(
@@ -901,6 +920,47 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
         cluster.cluster_max_devices = dev_count
         cluster.cluster_max_nodes = len(online_nodes)
         cluster.write_to_db(db_controller.kv_store)
+
+    # --- Pass 4: open client IO only now, with correct ANA ---
+    # Pass 1/2 created every client-facing listener INACCESSIBLE so no client IO
+    # could flow while lvstores were coming up and before Pass 3 wired the
+    # hublvol redirects. Now that redirects are connected and leadership is
+    # settled, flip each listener to its correct ANA state: optimized on the
+    # LVS's primary, non_optimized on its secondary/tertiary. Only after this do
+    # we set the cluster ACTIVE — so clients never resume IO against a primary
+    # whose redirect to its peers isn't established (which is what produced the
+    # mid-activation writer-conflict / EIO).
+    for snode in db_controller.get_storage_nodes_by_cluster_id(cl_id):
+        if snode.is_secondary_node:
+            continue
+        if snode.status != StorageNode.STATUS_ONLINE:
+            continue
+        snode = db_controller.get_storage_node_by_id(snode.get_id())
+        node_lvols = [lv for lv in db_controller.get_lvols_by_node_id(snode.get_id())
+                      if lv.status not in [LVol.STATUS_IN_DELETION, LVol.STATUS_IN_CREATION]]
+        if not node_lvols:
+            continue
+        # primary path -> optimized
+        for lv in node_lvols:
+            try:
+                storage_node_ops._set_lvol_ana_on_node(lv, snode, "optimized")
+            except Exception as e:
+                logger.error("Pass 4: set optimized ANA on primary %s for %s failed: %s",
+                             snode.get_id(), lv.nqn, e)
+        # secondary/tertiary paths -> non_optimized
+        for sec_id in [snode.secondary_node_id, snode.tertiary_node_id]:
+            if not sec_id:
+                continue
+            sec_node = db_controller.get_storage_node_by_id(sec_id)
+            if not sec_node or sec_node.status != StorageNode.STATUS_ONLINE:
+                continue
+            for lv in node_lvols:
+                try:
+                    storage_node_ops._set_lvol_ana_on_node(lv, sec_node, "non_optimized")
+                except Exception as e:
+                    logger.error("Pass 4: set non_optimized ANA on %s for %s failed: %s",
+                                 sec_node.get_id(), lv.nqn, e)
+
     set_cluster_status(cl_id, Cluster.STATUS_ACTIVE)
     logger.info("Cluster activated successfully")
 
@@ -995,10 +1055,23 @@ def set_cluster_status(cl_id, status) -> None:
     if cluster.status == status:
         return
 
-    old_status = cluster.status
-    cluster.status = status
-    cluster.write_to_db(db_controller.kv_store)
-    cluster_events.cluster_status_change(cluster, cluster.status, old_status)
+    # Transactional compare-and-set: concurrent node-adds (now parallel) both
+    # call this, and a plain read+write_to_db would clobber any other cluster
+    # field a peer updated in between. atomic_update re-reads inside the tx and
+    # only writes the status field change.
+    captured = {}
+
+    def _mutate(fresh):
+        if fresh.status == status:
+            return False  # already at target (a peer won the race); don't write
+        captured['old'] = fresh.status
+        fresh.status = status
+        return True
+
+    updated = db_controller.atomic_update(cluster, _mutate)
+    if updated is None or 'old' not in captured:
+        return
+    cluster_events.cluster_status_change(updated, updated.status, captured['old'])
 
 
 def cluster_set_read_only(cl_id) -> None:
@@ -1036,6 +1109,164 @@ def cluster_set_active(cl_id) -> None:
                 dev_stat = db_controller.get_device_stats(dev, 1)
                 if dev_stat and dev_stat[0].size_util < cluster.cap_crit:
                     device_controller.device_set_online(dev.get_id())
+
+
+def set_shared_placement(cl_id, enable=True, force=False) -> bool:
+    """Flip the cluster-wide shared_placement flag for distrib bdevs.
+
+    Sequence (per upgrade procedure):
+      1. Preflight: every storage node must be ONLINE; cluster status must
+         be ACTIVE and not rebalancing. With force=True the rebalancing
+         and node-status gates are bypassed (only valid for the off->on
+         transition; off->on is always safe per the data-plane spec).
+      2. For every online storage node, submit the runtime RPC
+         ``distr_shared_placement`` with ``enable`` and no ``name`` so it
+         applies to all distrib bdevs on that node.
+      3. Persist the flag on the lvstore_stack[/_secondary/_tertiary]
+         distrib entries of every node so that restarts re-create with
+         the new mode.
+      4. Persist cluster.shared_placement so future bdev_distrib_create
+         calls (new nodes, new distribs) get the flag automatically.
+
+    The off->on direction is always safe. The on->off direction is left
+    for debug only and requires force=True; the spec calls out that a
+    bdev created with shared_placement=True may host two layers sharing
+    a storage_ID across columns on a page, so disabling it on such a
+    bdev causes undefined behavior. Callers are expected to ensure the
+    bdev is balanced or empty before flipping back.
+    """
+    cluster = db_controller.get_cluster_by_id(cl_id)
+    enable = bool(enable)
+
+    if cluster.shared_placement == enable:
+        logger.info(
+            "Cluster %s shared_placement already %s; nothing to do",
+            cl_id, enable)
+        return True
+
+    # Direction-specific guards.
+    if not enable and not force:
+        logger.error(
+            "Disabling shared_placement is a debug-only operation; pass "
+            "force=True after verifying every distrib bdev is balanced or "
+            "empty")
+        return False
+
+    # Preflight (skippable only via force; cluster-status gate is hard).
+    if cluster.status != Cluster.STATUS_ACTIVE:
+        logger.error(
+            "Cluster %s is %s; shared_placement can only be toggled while "
+            "the cluster is %s",
+            cl_id, cluster.status, Cluster.STATUS_ACTIVE)
+        return False
+    if cluster.is_re_balancing and not force:
+        logger.error(
+            "Cluster %s is rebalancing; wait for rebalance to finish "
+            "(or pass force=True for the off->on direction)", cl_id)
+        return False
+
+    nodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
+    if not force:
+        non_online = [
+            n for n in nodes if n.status != StorageNode.STATUS_ONLINE
+        ]
+        if non_online:
+            ids = ", ".join(f"{n.get_id()[:8]}={n.status}" for n in non_online)
+            logger.error(
+                "Cluster %s has non-online storage nodes; refusing to toggle "
+                "shared_placement: %s", cl_id, ids)
+            return False
+
+    # Step 2: dispatch the runtime RPC to every online node. We do this
+    # before persisting so that if SPDK rejects the flip we don't end up
+    # with a divergent DB state. Failures on individual nodes are logged
+    # but do not abort the operation — the per-node lvstore_stack update
+    # below also gates the restart-time behavior.
+    failures = []
+    for node in nodes:
+        if node.status != StorageNode.STATUS_ONLINE:
+            logger.info(
+                "Skipping runtime shared_placement RPC on %s (status=%s)",
+                node.get_id()[:8], node.status)
+            continue
+        try:
+            rpc = node.rpc_client(timeout=10, retry=2)
+            ok = rpc.distr_shared_placement(enable=enable)
+            if not ok:
+                failures.append(node.get_id())
+                logger.warning(
+                    "Node %s rejected distr_shared_placement(enable=%s)",
+                    node.get_id()[:8], enable)
+            # JM shares the same shared-placement migration as distrib: flip
+            # this node's JM bdev too. Unlike distr_shared_placement, the JM
+            # RPC requires an explicit bdev name (there is exactly one JM per
+            # node, named jm_<node_id>). New JMs created after this point pick
+            # up the mode from cluster.shared_placement at (re)create time.
+            jm_name = f"jm_{node.get_id()}"
+            ok_jm = rpc.jm_set_shared_placement(name=jm_name, enable=enable)
+            if not ok_jm:
+                failures.append(node.get_id())
+                logger.warning(
+                    "Node %s rejected jm_set_shared_placement(enable=%s)",
+                    node.get_id()[:8], enable)
+        except Exception:
+            failures.append(node.get_id())
+            logger.exception(
+                "Node %s raised on distr/jm shared_placement(enable=%s)",
+                node.get_id()[:8], enable)
+
+    if failures and not force:
+        logger.error(
+            "Aborting shared_placement toggle: %d node(s) rejected the "
+            "runtime RPC: %s", len(failures), failures)
+        return False
+
+    # Step 3: persist the flag in every stored distrib stack entry on
+    # every node, so restarts re-create with the new mode without needing
+    # to consult the cluster row.
+    #
+    # NB: only `lvstore_stack` is a List[dict] of bdev stack entries.
+    # Despite the model's type annotation, `lvstore_stack_secondary` and
+    # `_tertiary` hold a single UUID string — the id of the upstream
+    # primary whose LVS this node serves as a peer for. The peer's bdev
+    # params come from that primary's lvstore_stack at recreate time
+    # (see storage_node_ops._create_bdev_stack callers in step-2 /
+    # step-3 of full_node_recreate_lvstore), so updating the primary's
+    # stack here covers the peers automatically.
+    for node in nodes:
+        # Atomic compare-and-set: mutate only lvstore_stack on the freshly-read
+        # node so the long per-node loop above can't clobber a concurrent
+        # node.status change (lost-update class — incident 2026-06-18). Returning
+        # False (no entry changed) aborts the write.
+        def _mut(n, en=enable):
+            changed = False
+            for entry in (n.lvstore_stack or []):
+                if not isinstance(entry, dict) or entry.get("type") != "bdev_distr":
+                    continue
+                params = entry.setdefault("params", {})
+                if not isinstance(params, dict):
+                    continue
+                current = params.get("shared_placement", False)
+                if en and not current:
+                    params["shared_placement"] = True
+                    changed = True
+                elif not en and current:
+                    # remove rather than set False, so the param dict stays
+                    # minimal and matches the default-construct case.
+                    params.pop("shared_placement", None)
+                    changed = True
+            return changed
+
+        db_controller.atomic_update(
+            db_controller.get_storage_node_by_id(node.get_id()), _mut)
+
+    # Step 4: persist on the cluster row (atomic, so it doesn't clobber a
+    # concurrent cluster.status change committed by set_cluster_status).
+    db_controller.atomic_update(
+        db_controller.get_cluster_by_id(cl_id),
+        lambda c, v=enable: setattr(c, "shared_placement", v))
+    logger.info("Cluster %s shared_placement set to %s", cl_id, enable)
+    return True
 
 
 def list() -> t.List[dict]:
@@ -1238,7 +1469,7 @@ def list_all_info(cluster_id) -> str:
         out += "\n"
 
     lvol_data = []
-    for lvol in db_controller.get_lvols(cluster_id):
+    for lvol in lvols:
         lvolstatsrecs = db_controller.get_lvol_stats(lvol, 1)
         if lvolstatsrecs:
             lvolstatsrec = lvolstatsrecs[0]
@@ -1426,25 +1657,25 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
     logger.info("Updating mgmt cluster")
     if cluster.mode == "docker":
         cluster_docker = utils.get_docker_client(cluster_id)
-        logger.info(f"Pulling image {constants.SIMPLY_BLOCK_DOCKER_IMAGE}")
-        pull_docker_image_with_retry(cluster_docker, constants.SIMPLY_BLOCK_DOCKER_IMAGE)
-        image_without_tag = constants.SIMPLY_BLOCK_DOCKER_IMAGE.split(":")[0]
-        image_without_tag = image_without_tag.split("/")
-        image_parts = "/".join(image_without_tag[-2:])
         service_image = constants.SIMPLY_BLOCK_DOCKER_IMAGE
         if mgmt_image:
             service_image = mgmt_image
+        logger.info(f"Pulling image {service_image}")
+        pull_docker_image_with_retry(cluster_docker, service_image)
         service_names = []
+        image_parts = ["simplyblock-io/simplyblock:", "simplyblock/simplyblock:", "simply-block/simplyblock:"]
         for service in cluster_docker.services.list():
-            if image_parts in service.attrs['Spec']['Labels']['com.docker.stack.image'] or \
-            "simplyblock" in service.attrs['Spec']['Labels']['com.docker.stack.image']:
-                if service.name in ["app_CachingNodeMonitor", "app_CachedLVolStatsCollector"]:
-                    logger.info(f"Removing service {service.name}")
-                    service.remove()
-                else:
-                    logger.info(f"Updating service {service.name}")
-                    service.update(image=service_image, force_update=True)
-                    service_names.append(service.attrs['Spec']['Name'])
+            service_image=service.attrs['Spec']['Labels']['com.docker.stack.image']
+            for part in image_parts:
+                if part in service_image:
+                    if service.name in ["app_CachingNodeMonitor", "app_CachedLVolStatsCollector"]:
+                        logger.info(f"Removing service {service.name}")
+                        service.remove()
+                    else:
+                        logger.info(f"Updating service {service.name}")
+                        service.update(image=service_image, force_update=True)
+                        service_names.append(service.attrs['Spec']['Name'])
+                    break
 
         if "app_SnapshotMonitor" not in service_names:
             utils.create_docker_service(
@@ -1473,8 +1704,7 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
         utils.load_kube_config_with_fallback()
         apps_v1 = k8s_client.AppsV1Api()
         namespace = constants.K8S_NAMESPACE
-        image_without_tag = constants.SIMPLY_BLOCK_DOCKER_IMAGE.split(":")[0]
-        image_parts = "/".join(image_without_tag.split("/")[-2:])
+        image_parts = ["simplyblock-io/simplyblock:", "simplyblock/simplyblock:", "simply-block/simplyblock:"]
         service_image = mgmt_image or constants.SIMPLY_BLOCK_DOCKER_IMAGE
         deployment_names = []
         # Update Deployments
@@ -1485,17 +1715,18 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                 continue
             deployment_names.append(deploy.metadata.name)
             for c in deploy.spec.template.spec.containers:
-                if image_parts in c.image:
-                    logger.info(f"Updating deployment {deploy.metadata.name} image to {service_image}")
-                    c.image = service_image
-                    annotations = deploy.spec.template.metadata.annotations or {}
-                    annotations["pod.kubernetes.io/restartedAt"] = datetime.datetime.utcnow().isoformat()
-                    deploy.spec.template.metadata.annotations = annotations
-                    apps_v1.patch_namespaced_deployment(
-                        name=deploy.metadata.name,
-                        namespace=namespace,
-                        body={"spec": {"template": deploy.spec.template}}
-                    )
+                for part in image_parts:
+                    if part in c.image:
+                        logger.info(f"Updating deployment {deploy.metadata.name} image to {service_image}")
+                        c.image = service_image
+                        annotations = deploy.spec.template.metadata.annotations or {}
+                        annotations["pod.kubernetes.io/restartedAt"] = datetime.datetime.utcnow().isoformat()
+                        deploy.spec.template.metadata.annotations = annotations
+                        apps_v1.patch_namespaced_deployment(
+                            name=deploy.metadata.name,
+                            namespace=namespace,
+                            body={"spec": {"template": deploy.spec.template}})
+                        break
 
         if "simplyblock-tasks-runner-sync-lvol-del" not in deployment_names:
             utils.create_k8s_service(
@@ -1517,17 +1748,18 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
         daemonsets = apps_v1.list_namespaced_daemon_set(namespace=namespace)
         for ds in daemonsets.items:
             for c in ds.spec.template.spec.containers:
-                if image_parts in c.image:
-                    logger.info(f"Updating daemonset {ds.metadata.name} image to {service_image}")
-                    c.image = service_image
-                    annotations = ds.spec.template.metadata.annotations or {}
-                    annotations["pod.kubernetes.io/restartedAt"] = datetime.datetime.utcnow().isoformat()
-                    ds.spec.template.metadata.annotations = annotations
-                    apps_v1.patch_namespaced_daemon_set(
-                        name=ds.metadata.name,
-                        namespace=namespace,
-                        body={"spec": {"template": ds.spec.template}}
-                        )
+                for part in image_parts:
+                    if part in c.image:
+                        logger.info(f"Updating daemonset {ds.metadata.name} image to {service_image}")
+                        c.image = service_image
+                        annotations = ds.spec.template.metadata.annotations or {}
+                        annotations["pod.kubernetes.io/restartedAt"] = datetime.datetime.utcnow().isoformat()
+                        ds.spec.template.metadata.annotations = annotations
+                        apps_v1.patch_namespaced_daemon_set(
+                            name=ds.metadata.name,
+                            namespace=namespace,
+                            body={"spec": {"template": ds.spec.template}})
+                        break
 
         logger.info("Done updating mgmt cluster")
 
@@ -1569,6 +1801,18 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                 logger.debug(e)
                 logger.error(f"Failed to restart node: {node.get_id()}")
                 return
+
+    # All storage nodes have been restarted onto the upgraded SPDK image.
+    # Arm the one-shot per-chunk placement migration now — and only now,
+    # after the full rolling restart — so storage_node_monitor switches the
+    # cluster once it settles (ACTIVE, not rebalancing, all nodes online).
+    # Skipped on the early-return failure path above, so a partial/failed
+    # upgrade never arms it. No-op if the cluster is already on per-chunk.
+    upgraded = db_controller.get_cluster_by_id(cluster_id)
+    if not upgraded.shared_placement and not upgraded.shared_placement_migration_pending:
+        upgraded.shared_placement_migration_pending = True
+        upgraded.write_to_db(db_controller.kv_store)
+        logger.info("Armed shared_placement migration for cluster %s post-upgrade", cluster_id)
 
     logger.info("Done")
 
@@ -1668,17 +1912,26 @@ def add_replication(source_cl_id, target_cl_id, timeout=0, target_pool=None) -> 
         raise ValueError(f"Target cluster not found: {target_cl_id}")
 
     logger.info("Updating Cluster replication target")
-    cluster.snapshot_replication_target_cluster = target_cl_id
+    new_pool = None
     if target_pool:
         pool = db_controller.get_pool_by_id(target_pool)
         if not pool:
             raise ValueError(f"Pool not found: {target_pool}")
         if pool.status != Pool.STATUS_ACTIVE:
             raise ValueError(f"Pool not active: {target_pool}")
-        cluster.snapshot_replication_target_pool = target_pool
+        new_pool = target_pool
+    new_timeout = timeout if (timeout and timeout > 0) else None
 
-    if timeout and timeout > 0:
-        cluster.snapshot_replication_timeout = timeout
-    cluster.write_to_db()
+    # Atomic: mutate only the replication fields on the freshly-read cluster so
+    # a concurrent cluster.status change is not clobbered (incident 2026-06-18).
+    def _mut(c):
+        c.snapshot_replication_target_cluster = target_cl_id
+        if new_pool is not None:
+            c.snapshot_replication_target_pool = new_pool
+        if new_timeout is not None:
+            c.snapshot_replication_timeout = new_timeout
+        return True
+
+    db_controller.atomic_update(db_controller.get_cluster_by_id(source_cl_id), _mut)
     logger.info("Done")
     return True

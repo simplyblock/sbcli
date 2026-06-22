@@ -15,32 +15,57 @@ logger = utils.get_logger(__name__)
 utils.init_sentry_sdk(__name__)
 
 def set_lvol_status(lvol, status):
-    if lvol.status != status:
-        lvol = db.get_lvol_by_id(lvol.get_id())
-        old_status = lvol.status
-        lvol.status = status
-        lvol.write_to_db()
-        lvol_events.lvol_status_change(lvol, lvol.status, old_status, caused_by="monitor")
+    # Atomic compare-and-set: a full read-modify-write would clobber a concurrent
+    # change to another LVol field (e.g. lvol_stat_collector clearing io_error,
+    # or a deletion_status update) — the same lost-update class as incident
+    # 2026-06-18. Mutate only status on the freshly-read row.
+    if lvol.status == status:
+        return
+    outcome = {"old": None, "changed": False}
+
+    def _mut(x):
+        if x.status == status:
+            return False
+        outcome["old"] = x.status
+        outcome["changed"] = True
+        x.status = status
+        return True
+
+    lvol = db.atomic_update(db.get_lvol_by_id(lvol.get_id()), _mut)
+    if lvol is not None and outcome["changed"]:
+        lvol_events.lvol_status_change(lvol, lvol.status, outcome["old"], caused_by="monitor")
 
 
 def set_lvol_health_check(lvol, health_check_status):
     lvol = db.get_lvol_by_id(lvol.get_id())
     if lvol.health_check == health_check_status:
         return
-    old_status = lvol.health_check
-    lvol.health_check = health_check_status
-    lvol.updated_at = str(datetime.now())
-    lvol.write_to_db()
-    lvol_events.lvol_health_check_change(lvol, lvol.health_check, old_status, caused_by="monitor")
+    now = str(datetime.now())
+    outcome = {"old": None, "changed": False}
+
+    def _mut(x):
+        if x.health_check == health_check_status:
+            return False
+        outcome["old"] = x.health_check
+        outcome["changed"] = True
+        x.health_check = health_check_status
+        x.updated_at = now
+        return True
+
+    lvol = db.atomic_update(lvol, _mut)
+    if lvol is not None and outcome["changed"]:
+        lvol_events.lvol_health_check_change(lvol, lvol.health_check, outcome["old"], caused_by="monitor")
 
 
 def set_snapshot_health_check(snap, health_check_status):
     snap = db.get_snapshot_by_id(snap.get_id())
     if snap.health_check == health_check_status:
         return
-    snap.health_check = health_check_status
-    snap.updated_at = str(datetime.now())
-    snap.write_to_db()
+    now = str(datetime.now())
+    def _apply_health_check(s, v=health_check_status, t=now):
+        s.health_check = v
+        s.updated_at = t
+    db.atomic_update(snap, _apply_health_check)
 
 
 lvol_del_start_time = 0.0
@@ -159,9 +184,8 @@ def process_lvol_delete_finish(lvol):
             tasks_controller.add_lvol_sync_del_task(sec_node.cluster_id, sec_node.get_id(), lvol_bdev_name, primary_node.get_id())
 
     lvol_events.lvol_delete(lvol)
-    lvol = db.get_lvol_by_id(lvol.get_id())
-    lvol.status = LVol.STATUS_DELETED
-    lvol.write_to_db()
+    lvol.remove(db.kv_store)
+
     # check for full devices
     full_devs_ids = []
     all_devs_ids = []
@@ -180,12 +204,11 @@ def process_lvol_delete_finish(lvol):
 
 
 def process_lvol_delete_try_again(lvol):
-    lvol = db.get_lvol_by_id(lvol.get_id())
-    lvol.deletion_status = ""
-    lvol.write_to_db()
+    db.atomic_update(db.get_lvol_by_id(lvol.get_id()),
+                     lambda x: setattr(x, "deletion_status", ""))
 
 
-def check_node(snode):
+def check_node(snode, all_lvols):
     node_bdev_names = []
     node_lvols_nqns = {}
     sec_node_bdev_names = {}
@@ -215,7 +238,7 @@ def check_node(snode):
         if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
             if first_sec_node is None:
                 first_sec_node = sec_node
-            sec_rpc_client = sec_node.rpc_client(timeout=3, retry=2)
+            sec_rpc_client = sec_node.rpc_client()
             ret = sec_rpc_client.get_bdevs()
             if ret:
                 for bdev in ret:
@@ -226,9 +249,34 @@ def check_node(snode):
                 for sub in ret:
                     sec_node_lvols_nqns[sub['nqn']] = sub
 
-    for lvol in db.get_lvols_by_node_id(snode.get_id()):
+    for lvol in all_lvols:
+        if lvol.node_id != snode.get_id():
+            continue
 
         if lvol.status == LVol.STATUS_IN_CREATION:
+            # A create that died (process killed) between writing the
+            # IN_CREATION record and the final ONLINE transition leaves a
+            # permanent zombie: nothing advances it, yet it keeps counting
+            # against pool capacity and max_lvol. Detect a stale IN_CREATION —
+            # far older than any real create — and route it through the normal
+            # force-delete so partial data-plane state is torn down and the DB
+            # record (and its reserved capacity) is freed. An in-progress
+            # create is younger than the threshold and is left untouched.
+            stale = True
+            if lvol.create_dt:
+                try:
+                    age = (datetime.now() - datetime.fromisoformat(lvol.create_dt)).total_seconds()
+                    stale = age > constants.LVOL_IN_CREATION_STALE_SEC
+                except (ValueError, TypeError):
+                    stale = True
+            if stale:
+                logger.error(
+                    f"LVol {lvol.get_id()} stuck in {LVol.STATUS_IN_CREATION} "
+                    f"since {lvol.create_dt}; cleaning up orphaned create")
+                try:
+                    lvol_controller.delete_lvol(lvol.get_id(), force_delete=True)
+                except Exception as e:
+                    logger.error(f"Failed to clean up orphaned in_creation lvol {lvol.get_id()}: {e}")
             continue
 
         if lvol.status == lvol.STATUS_IN_DELETION:
@@ -286,17 +334,15 @@ def check_node(snode):
             elif ret == 4:  # No async delete request exists for this lvol
                 logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
                 logger.error("No async delete request exists for this lvol")
-                lvol = db.get_lvol_by_id(lvol.get_id())
-                lvol.io_error = True
-                lvol.write_to_db()
+                lvol = db.atomic_update(db.get_lvol_by_id(lvol.get_id()),
+                                        lambda x: setattr(x, "io_error", True))
                 set_lvol_status(lvol, LVol.STATUS_OFFLINE)
 
             elif ret == -1:  # Operation not permitted
                 logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
                 logger.error("Operation not permitted")
-                lvol = db.get_lvol_by_id(lvol.get_id())
-                lvol.io_error = True
-                lvol.write_to_db()
+                lvol = db.atomic_update(db.get_lvol_by_id(lvol.get_id()),
+                                        lambda x: setattr(x, "io_error", True))
                 set_lvol_status(lvol, LVol.STATUS_OFFLINE)
 
             elif ret == -2:  # No such file or directory
@@ -380,12 +426,6 @@ def check_node(snode):
             if passed:
                 set_lvol_status(lvol, LVol.STATUS_ONLINE)
 
-    if snode.lvstore_status == "ready":
-
-        for snap in db.get_snapshots_by_node_id(snode.get_id()):
-            present = health_controller.check_bdev(snap.snap_bdev, bdev_names=node_bdev_names)
-            set_snapshot_health_check(snap, present)
-
 
 
 # get DB controller
@@ -393,16 +433,21 @@ db = db_controller.DBController()
 
 logger.info("Starting LVol monitor...")
 while True:
-
+    try:
+        db.get_clusters()
+    except Exception as e:
+        logger.error(f"Failed to get clusters: {e}")
+        time.sleep(3)
+        continue
     for cluster in db.get_clusters():
 
         if cluster.status in [Cluster.STATUS_INACTIVE, Cluster.STATUS_UNREADY, Cluster.STATUS_IN_ACTIVATION]:
             logger.warning(f"Cluster {cluster.get_id()} is in {cluster.status} state, skipping")
             continue
-
+        all_lvols = db.get_all_lvols()
         for snode in db.get_storage_nodes_by_cluster_id(cluster.get_id()):
             try:
-                check_node(snode)
+                check_node(snode, all_lvols)
             except Exception as e:
                 logger.error(e)
 

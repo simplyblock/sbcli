@@ -268,6 +268,7 @@ def storage_node_add():
             format_4k = param == "true"
 
     spdk_proxy_image = req_data.get('spdk_proxy_image', None)
+    spdk_sys_mem = req_data.get('spdk_sys_mem', None)
     tasks_controller.add_node_add_task(cluster_id, {
         "cluster_id": cluster_id,
         "node_addr": node_addr,
@@ -286,6 +287,7 @@ def storage_node_add():
         "ha_jm_count": ha_jm_count,
         "format_4k": format_4k,
         "spdk_proxy_image": spdk_proxy_image,
+        "spdk_sys_mem": spdk_sys_mem,
     })
 
     return utils.get_response(True)

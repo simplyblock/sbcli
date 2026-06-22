@@ -77,68 +77,6 @@ def add_cluster():
     ))
 
 
-@bp.route('/cluster/create_first', methods=['POST'])
-def create_first_cluster():
-    cl_data = request.get_json()
-
-    if db.get_clusters():
-        return utils.get_response_error("Cluster found!", 400)
-
-    blk_size = 512
-    if 'blk_size' in cl_data:
-        if cl_data['blk_size'] not in [512, 4096]:
-            return utils.get_response_error("blk_size can be 512 or 4096", 400)
-        else:
-            blk_size = cl_data['blk_size']
-    page_size_in_blocks = cl_data.get('page_size_in_blocks', 2097152)
-    distr_ndcs = cl_data.get('distr_ndcs', 1)
-    distr_npcs = cl_data.get('distr_npcs', 1)
-    distr_bs = cl_data.get('distr_bs', 4096)
-    distr_chunk_bs = cl_data.get('distr_chunk_bs', 4096)
-    ha_type = cl_data.get('ha_type', 'ha')
-    enable_node_affinity = cl_data.get('enable_node_affinity', False)
-    qpair_count = cl_data.get('qpair_count', 256)
-    name = cl_data.get('name', None)
-    fabric = cl_data.get('fabric', "tcp")
-    cap_warn = cl_data.get('cap_warn', 0)
-    cap_crit = cl_data.get('cap_crit', 0)
-    prov_cap_warn = cl_data.get('prov_cap_warn', 0)
-    prov_cap_crit = cl_data.get('prov_cap_crit', 0)
-    max_queue_size = cl_data.get('max_queue_size', 128)
-    inflight_io_threshold = cl_data.get('inflight_io_threshold', 4)
-    strict_node_anti_affinity = cl_data.get('strict_node_anti_affinity', False)
-    is_single_node = cl_data.get('is_single_node', False)
-    cr_name = cl_data.get('cr_name', None)
-    cr_namespace = cl_data.get('cr_namespace', None)
-    cr_plural = cl_data.get('cr_plural', None)
-    cluster_ip = cl_data.get('cluster_ip', None)
-    grafana_secret = cl_data.get('grafana_secret', None)
-    client_data_nic = cl_data.get('client_data_nic', "")
-    max_fault_tolerance = min(distr_npcs, 2) if distr_npcs >= 1 else 1
-    nvmf_base_port = cl_data.get('nvmf_base_port', 4420)
-    rpc_base_port = cl_data.get('rpc_base_port', 8080)
-    snode_api_port = cl_data.get('snode_api_port', 50001)
-    backup_config = cl_data.get('backup_config')
-    raw_vault = cl_data.get('hashicorp_vault_settings')
-    hashicorp_vault_settings = HashicorpVaultSettings(raw_vault) if raw_vault else None
-
-    try:
-        cluster_id = cluster_ops.add_cluster(
-            blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
-            distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity,
-            qpair_count, max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name,
-            cr_name, cr_namespace, cr_plural, fabric, cluster_ip=cluster_ip, grafana_secret=grafana_secret,
-            client_data_nic=client_data_nic, max_fault_tolerance=max_fault_tolerance, backup_config=backup_config,
-            nvmf_base_port=nvmf_base_port, rpc_base_port=rpc_base_port, snode_api_port=snode_api_port,
-            hashicorp_vault_settings=hashicorp_vault_settings)
-        if cluster_id:
-            return utils.get_response(db.get_cluster_by_id(cluster_id).to_dict())
-        else:
-            return utils.get_response(False, "Failed to create cluster", 400)
-    except Exception as e:
-        return utils.get_response(False, str(e), 404)
-
-
 @bp.route('/cluster', methods=['GET'], defaults={'uuid': None})
 @bp.route('/cluster/<string:uuid>', methods=['GET'])
 def list_clusters(uuid):
@@ -305,6 +243,36 @@ def cluster_activate(uuid):
     t.start()
     # FIXME: Any failure within the thread are not handled
     return utils.get_response(True), 202
+
+@bp.route('/cluster/shared-placement/<string:uuid>', methods=['PUT'])
+def cluster_set_shared_placement(uuid):
+    """Flip cluster.shared_placement at runtime + persist for restarts.
+
+    Request body (all optional):
+        enable: bool, default True. Pass False to run the debug-only
+                reverse transition (then force is required).
+        force:  bool, default False. Bypasses the rebalancing / not-all-
+                nodes-online preflight; required for enable=False.
+
+    Returns 404 if the cluster does not exist, 400 if the controller
+    refuses the request, 200 with True on success.
+    """
+    try:
+        db.get_cluster_by_id(uuid)
+    except KeyError:
+        return utils.get_response_error(f"Cluster not found: {uuid}", 404)
+
+    req = request.get_json(silent=True) or {}
+    enable = bool(req.get("enable", True))
+    force = bool(req.get("force", False))
+
+    ok = cluster_ops.set_shared_placement(uuid, enable=enable, force=force)
+    if not ok:
+        return utils.get_response_error(
+            "Refused to toggle shared_placement; see management logs for "
+            "the failing precondition", 400)
+    return utils.get_response(True)
+
 
 @bp.route('/cluster/addreplication/<string:uuid>', methods=['PUT'])
 def cluster_add_replication(uuid):

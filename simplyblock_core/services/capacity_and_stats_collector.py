@@ -90,7 +90,7 @@ def add_device_stats(cl, device, capacity_dict, stats_dict):
     return stat_obj
 
 
-def add_node_stats(node, records):
+def add_node_stats(node, records, all_lvols):
     size_used = 0
     size_total = 0
     data = {}
@@ -101,8 +101,9 @@ def add_node_stats(node, records):
         data.update(records_sum.get_clean_dict())
 
     size_prov = 0
-    for lvol in db.get_lvols_by_node_id(node.get_id()):
-        size_prov += lvol.size
+    for lvol in all_lvols:
+        if lvol.node_id == node.get_id():
+            size_prov += lvol.size
 
     size_util = 0
     size_prov_util = 0
@@ -169,13 +170,19 @@ db = db_controller.DBController()
 
 logger.info("Starting capacity and stats collector...")
 while True:
-
+    try:
+        db.get_clusters()
+    except Exception as e:
+        logger.error(f"Failed to get clusters: {e}")
+        time.sleep(3)
+        continue
     clusters = db.get_clusters()
     for cl in clusters:
         snodes = db.get_storage_nodes_by_cluster_id(cl.get_id())
         if not snodes:
             logger.error(f"Cluster has no storage nodes: {cl.get_id()}")
 
+        all_lvols =  db.get_mini_lvols()
         node_records = []
         for node in snodes:
             logger.info("Node: %s", node.get_id())
@@ -214,7 +221,7 @@ while True:
                     if record:
                         devices_records.append(record)
 
-            node_record = add_node_stats(node, devices_records)
+            node_record = add_node_stats(node, devices_records, all_lvols)
             node_records.append(node_record)
 
         add_cluster_stats(cl, node_records)

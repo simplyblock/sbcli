@@ -2,6 +2,7 @@
 # encoding: utf-8
 
 import base64
+import hmac
 import logging
 from functools import wraps
 from typing import Any, Callable, Dict, Tuple, TypeVar, Union, cast
@@ -33,8 +34,6 @@ def token_required(f: F) -> Callable[..., ResponseType]:
     def decorated(*args: Any, **kwargs: Any) -> ResponseType:
         # Skip authentication for Swagger UI
         if request.method == "GET" and request.path.startswith("/swagger"):
-            return cast(ResponseType, f(*args, **kwargs))
-        if request.method == "POST" and request.path.startswith("/cluster/create_first"):
             return cast(ResponseType, f(*args, **kwargs))
         if request.method == "GET" and request.path.startswith("/health/fdb"):
             return cast(ResponseType, f(*args, **kwargs))
@@ -84,7 +83,7 @@ def token_required(f: F) -> Callable[..., ResponseType]:
                 cluster = db_controller.get_cluster_by_id(cluster_id)
                 
                 # Validate cluster secret
-                if cluster.secret != cluster_secret:
+                if not hmac.compare_digest(cluster.secret, cluster_secret):
                     return (
                         {
                             "message": "Invalid Cluster secret",

@@ -69,8 +69,8 @@ on:
       # Bootstrap params (all inputs)
       # ndcs/npcs for stress are derived from DATA/PARITY chunks
       # =========================
-      BOOTSTRAP_MAX_LVOL:
-        description: "bootstrap: --max-lvol"
+      BOOTSTRAP_MAX_SUBSYS:
+        description: "bootstrap: --max-subsys"
         required: true
         default: "300"
       BOOTSTRAP_DATA_CHUNKS:
@@ -172,7 +172,7 @@ jobs:
       NFS_MOUNTPOINT: ${{ inputs.NFS_MOUNTPOINT }}
 
       # Bootstrap params
-      BOOTSTRAP_MAX_LVOL: ${{ inputs.BOOTSTRAP_MAX_LVOL }}
+      BOOTSTRAP_MAX_SUBSYS: ${{ inputs.BOOTSTRAP_MAX_SUBSYS }}
       BOOTSTRAP_DATA_CHUNKS: ${{ inputs.BOOTSTRAP_DATA_CHUNKS }}
       BOOTSTRAP_PARITY_CHUNKS: ${{ inputs.BOOTSTRAP_PARITY_CHUNKS }}
       BOOTSTRAP_JOURNAL_PARTITION: ${{ inputs.BOOTSTRAP_JOURNAL_PARTITION }}
@@ -632,7 +632,7 @@ jobs:
           set +e
           ./bootstrap-cluster.sh \
             --sbcli-cmd "${SBCLI_CMD}" \
-            --max-lvol "${BOOTSTRAP_MAX_LVOL}" \
+            --max-subsys "${BOOTSTRAP_MAX_SUBSYS}" \
             --data-chunks-per-stripe "${BOOTSTRAP_DATA_CHUNKS}" \
             --parity-chunks-per-stripe "${BOOTSTRAP_PARITY_CHUNKS}" \
             --journal-partition "${BOOTSTRAP_JOURNAL_PARTITION}" \
@@ -736,6 +736,15 @@ jobs:
           echo "TEST_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           echo "TEST_START_HUMAN=$(date -u +'%Y-%m-%d %H:%M:%S UTC')" >> "$GITHUB_ENV"
 
+      - name: Enable shared placement
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ssh_opts="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ${KEY_PATH}"
+          mgmt_ip="$(echo "${MNODES}" | awk '{print $1}')"
+          ssh ${ssh_opts} "${SSH_USER}@${mgmt_ip}" \
+            "${SBCLI_CMD} cluster set-shared-placement ${CLUSTER_ID} --force" || true
+
       - name: Run stress (foreground; runs until failure)
         shell: bash
         working-directory: sbcli/e2e
@@ -748,7 +757,9 @@ jobs:
             2>&1 | tee output.log
 
       - name: Post-test cleanup (kill tmux on mgmt/storage; kill fio on clients)
+        id: post-cleanup
         if: always()
+        continue-on-error: true
         shell: bash
         run: |
           set -euxo pipefail
@@ -806,7 +817,9 @@ jobs:
           echo "TEST_END_HUMAN=$(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> "$GITHUB_ENV"
 
       - name: Collect Graylog/OpenSearch logs
-        if: always()
+        id: collect-graylog
+        if: '!cancelled()'
+        continue-on-error: true
         timeout-minutes: 240
         shell: bash
         run: |
@@ -873,7 +886,9 @@ jobs:
           echo "=== Graylog collection complete (${CHUNK} chunks): ${OUTPUT_DIR} ==="
 
       - name: Collect mgmt snapshots into RUN_BASE_DIR (on failure)
+        id: collect-mgmt
         if: always()
+        continue-on-error: true
         shell: bash
         run: |
           set -euxo pipefail
@@ -974,7 +989,9 @@ jobs:
           PY
 
       - name: Collect docker logs into RUN_BASE_DIR (on failure)
+        id: collect-docker
         if: always()
+        continue-on-error: true
         shell: bash
         run: |
           set -euxo pipefail
@@ -1014,7 +1031,9 @@ jobs:
 
 
       - name: Collect distrib debug dumps into RUN_BASE_DIR (on failure)
+        id: collect-distrib
         if: always()
+        continue-on-error: true
         timeout-minutes: 35
         shell: bash
         run: |
@@ -1061,7 +1080,7 @@ jobs:
           if [[ -z "$CN" ]]; then echo "NO_SPDK_CONTAINER"; exit 0; fi
           SOCK="/mnt/ramdisk/${CN}/spdk.sock"
 
-          BDEV_JSON="$(sudo docker exec "$CN" bash -lc "python spdk/scripts/rpc.py -s '$SOCK' bdev_get_bdevs" 2>/dev/null || true)"
+          BDEV_JSON="$(sudo docker exec "$CN" bash -lc "sudo python spdk/scripts/rpc.py -s '$SOCK' bdev_get_bdevs" 2>/dev/null || true)"
           if [[ -z "$BDEV_JSON" ]]; then echo "BDEV_EMPTY"; exit 0; fi
 
           if command -v jq >/dev/null 2>&1; then
@@ -1085,14 +1104,14 @@ jobs:
           PYIN
 
             sudo docker cp "$JF" "$CN:$JF" || true
-            sudo docker exec "$CN" bash -lc "python scripts/rpc_sock.py '$JF' '$SOCK' > /tmp/rpc_${d}.log 2>&1 || true" || true
+            sudo docker exec "$CN" bash -lc "sudo python scripts/rpc_sock.py '$JF' '$SOCK' > /tmp/rpc_${d}.log 2>&1 || true" || true
             sudo docker cp "$CN:/tmp/rpc_${d}.log" "$STAGING/rpc_${d}.log" 2>/dev/null || true
 
-            for f in $(sudo docker exec "$CN" bash -lc "ls /tmp 2>/dev/null | grep -F \\"$d\\" || true"); do
+            for f in $(sudo docker exec "$CN" bash -lc "sudo ls /tmp 2>/dev/null | grep -F \\"$d\\" || true"); do
               sudo docker cp "$CN:/tmp/$f" "$STAGING/${CN}__$f" 2>/dev/null || true
             done
 
-            sudo docker exec "$CN" bash -lc "rm -f '$JF' '/tmp/rpc_${d}.log'" || true
+            sudo docker exec "$CN" bash -lc "sudo rm -f '$JF' '/tmp/rpc_${d}.log'" || true
             rm -f "$JF" || true
           done
 
@@ -1129,6 +1148,25 @@ jobs:
               print(f"[{ip}] ✓ Saved → {dest_dir}/{os.path.basename(last)}", flush=True)
           PY
         
+      - name: Check post-test step warnings
+        if: always()
+        shell: bash
+        run: |
+          warnings=""
+          [[ "${{ steps.post-cleanup.outcome }}" == "failure" ]] && warnings="${warnings}Post-test cleanup, "
+          [[ "${{ steps.collect-graylog.outcome }}" == "failure" ]] && warnings="${warnings}Graylog collection, "
+          [[ "${{ steps.collect-mgmt.outcome }}" == "failure" ]] && warnings="${warnings}Mgmt snapshots, "
+          [[ "${{ steps.collect-docker.outcome }}" == "failure" ]] && warnings="${warnings}Docker logs, "
+          [[ "${{ steps.collect-distrib.outcome }}" == "failure" ]] && warnings="${warnings}Distrib dumps, "
+
+          if [[ -n "$warnings" ]]; then
+            warnings="${warnings%, }"
+            echo "POST_TEST_WARNINGS=${warnings}" >> "$GITHUB_ENV"
+            echo "::warning::Post-test steps had issues: ${warnings}"
+          else
+            echo "All post-test collection steps succeeded."
+          fi
+
       # =========================
       # SUMMARY (always): test run, outages, failure reason, mgmt files, duration
       # Assumes outages are in sbcli/e2e/logs/outage*
@@ -1256,6 +1294,12 @@ jobs:
               echo '```'
               echo "</details>"
             fi
+            if [[ -n "${POST_TEST_WARNINGS:-}" ]]; then
+              echo ""
+              echo "### :warning: Post-Test Warnings"
+              echo "The following post-test steps failed (did NOT affect test result):"
+              echo "- ${POST_TEST_WARNINGS}"
+            fi
             echo ""
             echo "### Mgmt Artifacts (mgmt_details/mgmt)"
             echo "- Path: \`${mgmt_dir}\`"
@@ -1312,10 +1356,20 @@ jobs:
           test_cls = os.environ.get("TEST_CLASS",      "") or "all"
           branch   = os.environ.get("GITHUB_REF_NAME", "?")
           wf_name  = os.environ.get("SLACK_WF_NAME",   "Run")
+          warnings = os.environ.get("POST_TEST_WARNINGS", "")
           ok       = os.environ.get("JOB_STATUS",      "") == "success"
-          icon    = ":white_check_mark:" if ok else ":x:"
-          status  = "SUCCESS" if ok else "FAILURE"
-          mention = "" if ok else " <!channel>"
+          if ok and warnings:
+              icon    = ":white_check_mark:"
+              status  = "SUCCESS (with warnings)"
+              mention = ""
+          elif ok:
+              icon    = ":white_check_mark:"
+              status  = "SUCCESS"
+              mention = ""
+          else:
+              icon    = ":x:"
+              status  = "FAILURE"
+              mention = " <!channel>"
           lines = [
               f"{icon} *SimplyBlock {wf_name}*{mention}",
               f"*Status:* {status}  |  *Duration:* {dur}",
@@ -1330,6 +1384,8 @@ jobs:
               ]
           else:
               lines.append("_(test counts not found in log)_")
+          if warnings:
+              lines += ["", f":warning: *Post-test warnings:* {warnings}"]
           lines += [
               "",
               f":link: *Run:* <{run_url}|View on GitHub>",

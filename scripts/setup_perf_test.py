@@ -338,7 +338,7 @@ def main():
     print("Phase 2b: Configuring storage nodes...")
     with ThreadPoolExecutor(max_workers=len(sn_ips)) as executor:
         tasks = [executor.submit(ssh_exec, ip, [
-            f"sudo /usr/local/bin/sbctl -d sn configure --max-lvol {MAX_LVOL}"
+            f"sudo /usr/local/bin/sbctl -d sn configure --max-subsys {MAX_LVOL}"
         ], check=True) for ip in sn_ips]
         for t in tasks:
             t.result()

@@ -78,6 +78,24 @@ class Cluster(BaseModel):
     tls: bool = False
     tls_config: dict = {}
     is_re_balancing: bool = False
+    # Cluster-wide data placement-binding mode for distrib bdevs.
+    #   False = legacy per-page placement binding (default, safe everywhere)
+    #   True  = new per-chunk placement binding (opt-in, propagated to every
+    #           bdev_distrib_create at restart and flipped at runtime via the
+    #           distr_shared_placement RPC)
+    # Set by cluster_ops.set_shared_placement after a preflight check
+    # (status=active, not rebalancing, all nodes online). Persisted here so
+    # subsequent restarts re-create distrib bdevs with the same flag.
+    shared_placement: bool = False
+    # Armed when the cluster should be auto-switched to per-chunk placement
+    # once it is fully settled (ACTIVE, not rebalancing, all nodes online):
+    #   * set at cluster creation (new clusters migrate after first rebalance)
+    #   * set by cluster_ops.update_cluster ONLY after every node restart of an
+    #     upgrade has completed — never mid rolling-restart, so the monitor
+    #     cannot fire on a transiently-quiet cluster
+    # storage_node_monitor consumes this flag, calls set_shared_placement once,
+    # and clears it. shared_placement (above) is the durable "done" marker.
+    shared_placement_migration_pending: bool = False
     full_page_unmap: bool = True
     is_single_node: bool = False
     snapshot_replication_target_cluster: str = ""
@@ -114,3 +132,47 @@ class Cluster(BaseModel):
             return True
         return False
 
+
+
+class ClusterAddNodeLock(BaseModel):
+    """Cluster-scoped mutex held while a node-add performs its cross-node mesh
+    wiring (connect to remote devices, go ONLINE, make peers reverse-connect,
+    push the cluster map). Only this section needs serializing; the slow,
+    node-local part of add_node (SPDK boot, local device prep) runs in parallel
+    across concurrent node-add tasks.
+
+    Keyed by ``cluster_id`` so there is at most one in-flight mesh section per
+    cluster. ``heartbeat_at`` is refreshed by the holder while the section runs;
+    a lock whose heartbeat is older than ``CLUSTER_ADD_LOCK_TTL_SEC`` is
+    considered abandoned (holder crashed) and may be reclaimed.
+    """
+
+    cluster_id: str = ""
+    owner: str = ""
+    acquired_at: int = 0
+    heartbeat_at: int = 0
+
+    def get_id(self):
+        return self.cluster_id or self.uuid
+
+
+class PortReservation(BaseModel):
+    """Short-lived reservation of an NVMe-oF port during node add.
+
+    ``add_node`` allocates a node's rpc/nvmf ports long before the node record
+    is persisted (SPDK boots in between), so two concurrent adds would otherwise
+    read the same "next free" port. A reservation makes the chosen port visible
+    to other allocators immediately and transactionally. Once the node record is
+    persisted its own port fields keep the port reserved; the reservation is
+    redundant after that and is reclaimed by ``created_at`` TTL
+    (``PORT_RESERVATION_TTL_SEC``) — no explicit release is required, and a
+    crashed add self-heals when the reservation goes stale.
+    """
+
+    cluster_id: str = ""
+    port: int = 0
+    owner: str = ""
+    created_at: int = 0
+
+    def get_id(self):
+        return "%s/%s" % (self.cluster_id, self.port)

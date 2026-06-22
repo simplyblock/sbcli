@@ -1,4 +1,3 @@
-from pathlib import Path
 import threading
 import random
 from e2e_tests.cluster_test_base import TestClusterBase, generate_random_sequence
@@ -11,7 +10,6 @@ class TestMgmtNodeReboot(TestClusterBase):
         super().__init__(**kwargs)
         self.test_name = "restart_mgmt_node"
         self.mount_base = "/mnt/"
-        self.log_base = f"{Path.home()}/"
 
     def run(self):
         fio_threads = []
@@ -33,7 +31,7 @@ class TestMgmtNodeReboot(TestClusterBase):
 
             device = self.ssh_obj.get_lvol_vs_device(node, lvol_id)
             mount_path = f"{self.mount_base}/{lvol_name}"
-            log_path = f"{self.log_base}/{lvol_name}.log"
+            log_path = f"{self.log_path}/{lvol_name}.log"
             self.ssh_obj.format_disk(node, device)
             self.ssh_obj.mount_path(node, device, mount_path)
 
@@ -81,7 +79,7 @@ class TestMgmtNodeReboot(TestClusterBase):
 
             device = self.ssh_obj.get_lvol_vs_device(node, clone_id)
             cl_mount = f"{self.mount_base}/{clone_name}"
-            cl_log = f"{self.log_base}/{clone_name}.log"
+            cl_log = f"{self.log_path}/{clone_name}.log"
             self.ssh_obj.format_disk(node, device)
             self.ssh_obj.mount_path(node, device, cl_mount)
 

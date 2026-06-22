@@ -243,9 +243,21 @@ class TestHealthCheckNodeGuard(unittest.TestCase):
         self.assertTrue(ret)
         ping.assert_not_called()
 
+    def test_skips_when_schedulable(self):
+        # Regression: schedulable nodes used to fall through and report a
+        # true/false health. Health is only meaningful for ONLINE/DOWN.
+        ret, ping, api, rpc = self._run(StorageNode.STATUS_SCHEDULABLE)
+        self.assertTrue(ret)
+        ping.assert_not_called()
+
     def test_runs_when_online(self):
         ret, ping, api, rpc = self._run(StorageNode.STATUS_ONLINE)
         # Online node — pings/checks should have been invoked.
+        ping.assert_called()
+
+    def test_runs_when_down(self):
+        ret, ping, api, rpc = self._run(StorageNode.STATUS_DOWN)
+        # Down node — health is still meaningful, so checks run.
         ping.assert_called()
 
 

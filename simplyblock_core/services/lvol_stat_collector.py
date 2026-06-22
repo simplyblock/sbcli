@@ -138,11 +138,23 @@ def add_lvol_stats(cluster, lvol, stats_list, capacity_dict=None):
                     data['unmap_latency_ps'] = int(data['unmap_latency_ticks'] / time_diff)
 
                 if data['read_io_ps'] > 0 and data['write_io_ps'] > 0 and lvol.io_error:
-                    # set lvol io error to false
-                    lvol = db.get_lvol_by_id(lvol.get_id())
-                    lvol.io_error = False
-                    lvol.write_to_db()
-                    lvol_events.lvol_io_error_change(lvol, False, True, caused_by="monitor")
+                    # set lvol io error to false. Atomic compare-and-set: this
+                    # collector and lvol_monitor both write the same LVol row
+                    # concurrently (lvol_monitor sets io_error=True / status), so a
+                    # full write_to_db here would clobber its change — the same
+                    # lost-update class as incident 2026-06-18.
+                    changed = {"v": False}
+
+                    def _mut(x):
+                        if not x.io_error:
+                            return False
+                        x.io_error = False
+                        changed["v"] = True
+                        return True
+
+                    lvol = db.atomic_update(db.get_lvol_by_id(lvol.get_id()), _mut)
+                    if lvol is not None and changed["v"]:
+                        lvol_events.lvol_io_error_change(lvol, False, True, caused_by="monitor")
 
         else:
             logger.warning("last record not found")
@@ -191,24 +203,28 @@ db = db_controller.DBController()
 
 logger.info("Starting stats collector...")
 while True:
-
+    try:
+        db.get_clusters()
+    except Exception as e:
+        logger.error(f"Failed to get clusters: {e}")
+        time.sleep(3)
+        continue
     for cluster in db.get_clusters():
 
         if cluster.status in [Cluster.STATUS_INACTIVE, Cluster.STATUS_UNREADY, Cluster.STATUS_IN_ACTIVATION]:
             logger.warning(f"Cluster {cluster.get_id()} is in {cluster.status} state, skipping")
             continue
 
+        lvol_list = db.get_lvols(cluster.get_id())
+
+        if not lvol_list:
+            continue
         all_node_bdev_names: dict[str, dict[str, dict]] = {}
         all_node_lvols_nqns: dict[str, dict[str, str]] = {}
         all_node_lvols_stats: dict[str, dict] = {}
 
         pools_lvols_stats: dict[str, list[LVolStatObject]] = {}
         for snode in db.get_storage_nodes_by_cluster_id(cluster.get_id()):
-
-            lvol_list = db.get_lvols_by_node_id(snode.get_id())
-
-            if not lvol_list:
-                continue
 
             if snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
                 try:
@@ -278,6 +294,8 @@ while True:
 
             for lvol in lvol_list:
                 if lvol.status in [LVol.STATUS_IN_CREATION, LVol.STATUS_IN_DELETION]:
+                    continue
+                if lvol.node_id != snode.get_id():
                     continue
 
                 capacity_dict = {}

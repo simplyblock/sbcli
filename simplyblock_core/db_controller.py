@@ -2,15 +2,16 @@
 import json
 import logging
 import os.path
+import time
 
 import fdb
 from typing import List, Optional
 
 from simplyblock_core import constants
-from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.models.cluster import Cluster, ClusterAddNodeLock, PortReservation
 from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.job_schedule import JobSchedule
-from simplyblock_core.models.lvol_model import LVol
+from simplyblock_core.models.lvol_model import LVol, LVolReplication, LVolMini
 from simplyblock_core.models.mgmt_node import MgmtNode
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
 from simplyblock_core.models.pool import Pool
@@ -18,7 +19,7 @@ from simplyblock_core.models.port_stat import PortStat
 from simplyblock_core.models.backup import Backup, BackupChainLock, BackupPolicy, BackupPolicyAttachment
 from simplyblock_core.models.lvol_migration import LVolMigration
 from simplyblock_core.models.qos import QOSClass
-from simplyblock_core.models.snapshot import SnapShot
+from simplyblock_core.models.snapshot import SnapShot, SnapShotMini
 from simplyblock_core.models.stats import DeviceStatObject, NodeStatObject, ClusterStatObject, LVolStatObject, \
     PoolStatObject, CachedLVolStatObject
 from simplyblock_core.models.storage_node import StorageNode, NodeLVolDelLock
@@ -140,8 +141,12 @@ class DBController(metaclass=Singleton):
         return cluster_lvols
 
     def get_all_lvols(self) -> List[LVol]:
+        start_time = time.time()
         lvols = LVol().read_from_db(self.kv_store)
-        return sorted(lvols, key=lambda x: x.create_dt)
+        ret = sorted(lvols, key=lambda x: x.create_dt)
+        end_time = time.time()
+        logger.debug(f"time taken to read all LVols: {round(end_time - start_time, 2)}s")
+        return ret
 
     def get_lvols_by_node_id(self, node_id) -> List[LVol]:
         lvols = []
@@ -157,13 +162,6 @@ class DBController(metaclass=Singleton):
                 lvols.append(lvol)
         return sorted(lvols, key=lambda x: x.create_dt)
 
-    def get_lvols_by_namespace(self, namespace) -> List[LVol]:
-        lvols = []
-        for lvol in self.get_lvols():
-            if lvol.namespace and lvol.namespace == namespace:
-                lvols.append(lvol)
-        return sorted(lvols, key=lambda x: x.create_dt)
-
     def get_hostnames_by_pool_id(self, pool_id) -> List[str]:
         lvols = self.get_lvols_by_pool_id(pool_id)
         hostnames = []
@@ -173,10 +171,30 @@ class DBController(metaclass=Singleton):
         return hostnames
 
     def get_snapshots(self, cluster_id=None) -> List[SnapShot]:
+        start_time = time.time()
         snaps = SnapShot().read_from_db(self.kv_store)
         if cluster_id:
             snaps = [n for n in snaps if n.cluster_id == cluster_id]
-        return sorted(snaps, key=lambda x: x.created_at)
+        ret = sorted(snaps, key=lambda x: x.created_at)
+        end_time = time.time()
+        logger.debug(f"time taken to read all SnapShots: {round(end_time - start_time, 2)}s")
+        return ret
+
+    def get_mini_lvols(self) -> List[LVolMini]:
+        start_time = time.time()
+        lvols = LVolMini().read_from_db(self.kv_store)
+        ret = sorted(lvols, key=lambda x: x.create_dt)
+        end_time = time.time()
+        logger.debug(f"time taken to read all mini lvols: {round(end_time - start_time, 2)}s")
+        return ret
+
+    def get_mini_snapshots(self) -> List[SnapShotMini]:
+        start_time = time.time()
+        snaps = SnapShotMini().read_from_db(self.kv_store)
+        ret = sorted(snaps, key=lambda x: x.created_at)
+        end_time = time.time()
+        logger.debug(f"time taken to read all mini snapshots: {round(end_time - start_time, 2)}s")
+        return ret
 
     def get_snapshot_by_id(self, id) -> SnapShot:
         ret = SnapShot().read_from_db(self.kv_store, id)
@@ -189,6 +207,10 @@ class DBController(metaclass=Singleton):
         if not lvols:
             raise KeyError(f'LVol {id} not found')
         return lvols[0]
+
+    def get_lvol_replication_objects(self) -> List[LVolReplication]:
+        ret = LVolReplication().read_from_db(self.kv_store)
+        return sorted(ret, key=lambda x: x.create_dt)
 
     def get_lvol_by_name(self, lvol_name) -> LVol:
         for lvol in self.get_lvols():
@@ -293,9 +315,17 @@ class DBController(metaclass=Singleton):
 
     def get_snapshots_by_node_id(self, node_id) -> List[SnapShot]:
         ret = []
-        snaps = SnapShot().read_from_db(self.kv_store)
+        snaps = self.get_snapshots()
         for snap in snaps:
             if snap.lvol.node_id == node_id:
+                ret.append(snap)
+        return sorted(ret, key=lambda x: x.create_dt)
+
+    def get_snapshots_by_pool_id(self, pool_id) -> List[SnapShot]:
+        ret = []
+        snaps = self.get_snapshots()
+        for snap in snaps:
+            if snap.pool_uuid == pool_id:
                 ret.append(snap)
         return sorted(ret, key=lambda x: x.create_dt)
 
@@ -418,6 +448,168 @@ class DBController(metaclass=Singleton):
         ordered_snapshot_ids = sorted(set(snapshot_ids))
         transactional = fdb.transactional(DBController._release_backup_chain_locks_tx)
         transactional(self, self.kv_store, ordered_snapshot_ids)
+
+    # ---- Cluster node-add mesh lock (Single FDB Transaction) ----
+
+    def get_cluster_add_lock(self, cluster_id) -> Optional[ClusterAddNodeLock]:
+        ret = ClusterAddNodeLock().read_from_db(self.kv_store, id=cluster_id)
+        if ret:
+            return ret[0]
+        return None
+
+    def _try_acquire_cluster_add_lock_tx(self, tr, cluster_id, owner, now):
+        lock = ClusterAddNodeLock()
+        lock.cluster_id = cluster_id
+        key = lock.get_db_id().encode()
+        raw = tr.get(key).wait()
+        if raw.present():
+            existing = ClusterAddNodeLock().from_dict(json.loads(raw))
+            fresh = (now - existing.heartbeat_at) <= constants.CLUSTER_ADD_LOCK_TTL_SEC
+            if existing.owner and existing.owner != owner and fresh:
+                return False, existing.owner
+            # Stale (holder presumed dead) or already ours: (re)take it.
+            lock.acquired_at = existing.acquired_at if existing.owner == owner else now
+        else:
+            lock.acquired_at = now
+        lock.owner = owner
+        lock.heartbeat_at = now
+        tr[key] = json.dumps(lock.to_dict()).encode()
+        return True, None
+
+    def acquire_cluster_add_lock(self, cluster_id, owner):
+        """Atomically acquire the per-cluster node-add mesh lock.
+
+        Returns (True, None) if ``owner`` now holds the lock (newly acquired,
+        reclaimed from a dead holder whose heartbeat went stale, or already
+        held by this owner), or (False, current_owner) if a live holder owns it.
+        """
+        if not self.kv_store:
+            return False, "No DB connection"
+        now = int(time.time())
+        transactional = fdb.transactional(DBController._try_acquire_cluster_add_lock_tx)
+        return transactional(self, self.kv_store, cluster_id, owner, now)
+
+    def _refresh_cluster_add_lock_tx(self, tr, cluster_id, owner, now):
+        lock = ClusterAddNodeLock()
+        lock.cluster_id = cluster_id
+        key = lock.get_db_id().encode()
+        raw = tr.get(key).wait()
+        if not raw.present():
+            return False
+        existing = ClusterAddNodeLock().from_dict(json.loads(raw))
+        if existing.owner != owner:
+            return False  # lost the lock (reclaimed by someone else)
+        existing.heartbeat_at = now
+        tr[key] = json.dumps(existing.to_dict()).encode()
+        return True
+
+    def refresh_cluster_add_lock(self, cluster_id, owner):
+        """Heartbeat the lock so a long mesh section isn't reclaimed. Returns
+        True if still held by ``owner``, False if it was lost/reclaimed."""
+        if not self.kv_store:
+            return False
+        now = int(time.time())
+        transactional = fdb.transactional(DBController._refresh_cluster_add_lock_tx)
+        return transactional(self, self.kv_store, cluster_id, owner, now)
+
+    def _release_cluster_add_lock_tx(self, tr, cluster_id, owner):
+        lock = ClusterAddNodeLock()
+        lock.cluster_id = cluster_id
+        key = lock.get_db_id().encode()
+        raw = tr.get(key).wait()
+        if not raw.present():
+            return
+        existing = ClusterAddNodeLock().from_dict(json.loads(raw))
+        if existing.owner == owner:
+            del tr[key]
+
+    def release_cluster_add_lock(self, cluster_id, owner):
+        """Release the lock only if still owned by ``owner`` (owner-scoped, so a
+        late release never deletes a lock another host has since reclaimed)."""
+        if not self.kv_store:
+            return
+        transactional = fdb.transactional(DBController._release_cluster_add_lock_tx)
+        transactional(self, self.kv_store, cluster_id, owner)
+
+    # ---- Node-add port reservation (Single FDB Transaction) ----
+
+    def _reserve_next_nvmf_port_tx(self, tr, cluster_id, base_port, node_used, owner, now):
+        used = set(node_used)
+        # Read this cluster's reservations transactionally so concurrent
+        # reservers conflict-retry instead of picking the same port. Drop
+        # stale ones (abandoned by a crashed add) in the same transaction.
+        for res in PortReservation().read_from_db(tr, id=cluster_id):
+            if res.cluster_id != cluster_id:
+                continue
+            if (now - res.created_at) > constants.PORT_RESERVATION_TTL_SEC:
+                del tr[res.get_db_id().encode()]
+                continue
+            used.add(res.port)
+        port = base_port
+        while port in used:
+            port += 1
+        res = PortReservation()
+        res.cluster_id = cluster_id
+        res.port = port
+        res.owner = owner
+        res.created_at = now
+        tr[res.get_db_id().encode()] = json.dumps(res.to_dict()).encode()
+        return port
+
+    def reserve_cluster_nvmf_port(self, cluster_id, owner):
+        """Atomically allocate and reserve the next free NVMe-oF port for a
+        node being added. The reservation makes the chosen port visible to
+        concurrent allocators until the node record itself is persisted (after
+        which the node's own port fields keep it reserved and the reservation
+        ages out by TTL)."""
+        from simplyblock_core import utils
+        base_port = utils.get_nvmf_base_port(cluster_id)
+        node_used = utils.get_node_nvmf_ports(cluster_id)
+        now = int(time.time())
+        transactional = fdb.transactional(DBController._reserve_next_nvmf_port_tx)
+        return transactional(self, self.kv_store, cluster_id, base_port, node_used, owner, now)
+
+    # ---- Generic atomic read-modify-write (Single FDB Transaction) ----
+
+    def _atomic_update_tx(self, tr, key, model_cls, mutate_fn):
+        raw = tr.get(key).wait()
+        if not raw.present():
+            return None
+        obj = model_cls().from_dict(json.loads(raw))
+        if mutate_fn(obj) is False:
+            return obj
+        tr[key] = json.dumps(obj.to_dict()).encode()
+        return obj
+
+    def atomic_update(self, obj, mutate_fn):
+        """Transactional read-modify-write of a single object.
+
+        Re-reads ``obj`` fresh from FDB inside a transaction, applies
+        ``mutate_fn(fresh)`` (which must mutate the object in place), and writes
+        it back atomically. FoundationDB's serializable isolation plus the
+        automatic conflict-retry of ``fdb.transactional`` make this a true
+        compare-and-set: if another writer commits between this read and the
+        write, the whole transaction (including ``mutate_fn``) is replayed on
+        the new value. This avoids the lost-update that plain
+        ``read(); obj.x = y; obj.write_to_db()`` suffers — the latter writes the
+        entire serialized object and silently clobbers concurrent updates to
+        other fields.
+
+        IMPORTANT: ``mutate_fn`` may be invoked more than once (on conflict
+        retry), so it MUST be free of side effects other than mutating the
+        object passed to it — no RPCs, no DB writes, no event emission. Do that
+        work after this returns. Return ``False`` from ``mutate_fn`` to abort
+        the write (e.g. when a guard condition no longer holds on the fresh
+        object).
+
+        Returns the fresh, post-mutation object, or ``None`` if the object no
+        longer exists in the DB.
+        """
+        if not self.kv_store:
+            return None
+        key = obj.get_db_id().encode()
+        transactional = fdb.transactional(DBController._atomic_update_tx)
+        return transactional(self, self.kv_store, key, type(obj), mutate_fn)
 
     # ---- Pre-Restart Guard (Single FDB Transaction) ----
 

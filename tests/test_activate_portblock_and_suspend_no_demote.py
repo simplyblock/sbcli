@@ -127,19 +127,17 @@ class TestActivatePortBlockWrapper(unittest.TestCase):
             return [primary] if node_id == secondary.get_id() else []
         db.get_primary_storage_nodes_by_secondary_node_id.side_effect = _primary_for
 
-        # FirewallClient: record block/allow calls.
+        # port_block.set_port: record block/allow calls. (Port blocking moved
+        # off the directly-imported FirewallClient onto port_block.set_port.)
         fw_calls = []
 
-        class FakeFW:
-            def __init__(self, node, timeout=3, retry=1):
-                self._node = node
-
-            def firewall_set_port(self, port, ptype, action, rpc_port, **kw):
-                fw_calls.append((self._node.get_id(), port, action))
-                if action == "block" and firewall_block_exc:
-                    raise firewall_block_exc
-                if action == "allow" and firewall_allow_exc:
-                    raise firewall_allow_exc
+        def _fake_set_port(node, port, block, is_reject=False, timeout=5, retry=2):
+            action = "block" if block else "allow"
+            fw_calls.append((node.get_id(), port, action))
+            if action == "block" and firewall_block_exc:
+                raise firewall_block_exc
+            if action == "allow" and firewall_allow_exc:
+                raise firewall_allow_exc
 
         # storage_node_ops.recreate_lvstore* are heavy — replace with stubs.
         recreate_calls = []
@@ -175,7 +173,7 @@ class TestActivatePortBlockWrapper(unittest.TestCase):
         patches = [
             patch.object(cluster_ops, "db_controller", db),
             patch.object(cluster_ops, "DBController", return_value=db),
-            patch.object(cluster_ops, "FirewallClient", FakeFW),
+            patch("simplyblock_core.port_block.set_port", _fake_set_port),
             patch.object(cluster_ops.tcp_ports_events, "port_deny", _port_deny),
             patch.object(cluster_ops.tcp_ports_events, "port_allowed", _port_allowed),
             patch.object(cluster_ops.tasks_controller, "add_port_allow_task",
@@ -343,22 +341,22 @@ class TestSuspendIsDeprecatedNoop(unittest.TestCase):
 
         snode = _node("node-A", lvstore="LVS_A")
 
-        with patch.object(storage_node_ops, "FirewallClient") as fw_cls, \
+        with patch.object(storage_node_ops, "port_block") as pb, \
                 patch.object(storage_node_ops, "DBController") as _db:
             self.assertTrue(
                 storage_node_ops.suspend_storage_node(snode.get_id()))
-            fw_cls.assert_not_called()
+            pb.set_port.assert_not_called()
 
     def test_resume_is_noop_and_does_not_touch_firewall(self):
         from simplyblock_core import storage_node_ops
 
         snode = _node("node-A", lvstore="LVS_A")
 
-        with patch.object(storage_node_ops, "FirewallClient") as fw_cls, \
+        with patch.object(storage_node_ops, "port_block") as pb, \
                 patch.object(storage_node_ops, "DBController") as _db:
             self.assertTrue(
                 storage_node_ops.resume_storage_node(snode.get_id()))
-            fw_cls.assert_not_called()
+            pb.set_port.assert_not_called()
 
 
 if __name__ == "__main__":

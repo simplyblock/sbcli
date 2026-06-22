@@ -93,6 +93,7 @@ def _run_backup(task):
         backup.write_to_db()
         # Give the data plane time to start the transfer before polling
         task.status = JobSchedule.STATUS_SUSPENDED
+        task.function_result = "Backup in progress"
         task.write_to_db(db.kv_store)
         return
 
@@ -123,11 +124,15 @@ def _run_backup(task):
             # Keep polling — the backup completes on the data plane independently.
             # When max_retry is reached the task runner marks it completed
             # (the data plane returns "Failed" on actual failures).
+            backup.status = Backup.STATUS_PENDING
+            backup.write_to_db()
+            task.function_result = "No process, retrying backup start"
             task.status = JobSchedule.STATUS_SUSPENDED
             task.write_to_db(db.kv_store)
         else:
             # "In progress" — still running, retry later
             task.status = JobSchedule.STATUS_SUSPENDED
+            task.function_result = "Backup in progress"
             task.write_to_db(db.kv_store)
     else:
         # Unexpected response — retry
@@ -348,7 +353,8 @@ def _run_merge(task):
     keep_backup.status = Backup.STATUS_COMPLETED
     keep_backup.write_to_db()
 
-    old_backup.remove(db.kv_store)
+    old_backup.status = Backup.STATUS_MERGED
+    old_backup.write_to_db()
 
     task.function_result = "Merge completed"
     task.status = JobSchedule.STATUS_DONE
@@ -358,6 +364,12 @@ def _run_merge(task):
 
 logger.info("Starting backup tasks runner...")
 while True:
+    try:
+        db.get_clusters()
+    except Exception as e:
+        logger.error(f"Failed to get clusters: {e}")
+        time.sleep(3)
+        continue
     clusters = db.get_clusters()
     for cl in clusters:
         if cl.status == Cluster.STATUS_IN_ACTIVATION:

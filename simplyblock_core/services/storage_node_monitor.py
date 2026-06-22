@@ -45,6 +45,52 @@ def is_new_migrated_node(cluster_id, node):
     return False
 
 
+# A DOWN node only counts toward the cluster suspend threshold once it has been
+# DOWN at least this long. Below it, a DOWN node is treated as a transient blip
+# (it commonly self-heals in seconds) and does not contribute to the FTT bucket.
+DOWN_SUSPEND_GRACE_SEC = 60
+
+# How long a node may sit in IN_SHUTDOWN before the monitor treats it as a
+# stranded shutdown and reconciles it to OFFLINE. A graceful shutdown (device
+# events + SPDK kill + ANA failover) completes well within this; anything longer
+# means the shutdown crashed or its offline flip was lost (incident 2026-06-18).
+IN_SHUTDOWN_RECONCILE_GRACE_SEC = 120
+
+
+def _in_shutdown_longer_than(node, seconds):
+    """True if a node has been IN_SHUTDOWN for at least ``seconds``.
+
+    Keyed off ``node.shutdown_since`` (stamped by set_node_status on the
+    ->IN_SHUTDOWN transition). A missing/blank/unparseable timestamp is treated
+    as NOT long enough — be conservative and never reconcile a node whose entry
+    time we can't establish (e.g. a still-running shutdown on an old row).
+    """
+    ss = getattr(node, "shutdown_since", "") or ""
+    if not ss:
+        return False
+    try:
+        return (datetime.now(timezone.utc) - datetime.fromisoformat(ss)).total_seconds() >= seconds
+    except Exception:
+        return False
+
+
+def _down_longer_than(node, seconds):
+    """True if a DOWN node has been DOWN for at least ``seconds``.
+
+    Keyed off ``node.down_since`` (stamped by set_node_status on the ->DOWN
+    transition). A missing/blank/unparseable timestamp is treated as
+    "long enough" so we stay conservative: an old row without the field still
+    suspends + auto-restarts rather than being silently ignored forever.
+    """
+    ds = getattr(node, "down_since", "") or ""
+    if not ds:
+        return True
+    try:
+        return (datetime.now(timezone.utc) - datetime.fromisoformat(ds)).total_seconds() >= seconds
+    except Exception:
+        return True
+
+
 def get_next_cluster_status(cluster_id):
     logger.info(f"get_next_cluster_status for cluster_id: {cluster_id}")
     cluster = db.get_cluster_by_id(cluster_id)
@@ -101,6 +147,30 @@ def get_next_cluster_status(cluster_id):
             affected_nodes += 1
             if node.mgmt_ip not in affected_physical_nodes:
                 affected_physical_nodes.append(node.mgmt_ip)
+        elif node.status == StorageNode.STATUS_DOWN:
+            # DOWN is a temporary, self-recovering state: SPDK and its devices
+            # are alive, only the client-facing LVS port is firewall-blocked
+            # (set_node_down flips node status only). A brief DOWN — e.g. a
+            # transient writer conflict the data plane unfreezes in seconds —
+            # must NOT tip an otherwise-survivable outage into a full cluster
+            # suspend + reactivation (incident 2026-06-08: cbc62adc DOWN for
+            # ~6.5s pushed affected_nodes 2->3 and suspended the cluster).
+            #
+            # But a SUSTAINED DOWN must still count: the cluster has to reach
+            # SUSPENDED for add_node_to_auto_restart's peer-count guard to accept
+            # the recovery queue. So apply a grace window — only count the node
+            # once it has been DOWN at least DOWN_SUSPEND_GRACE_SEC.
+            if _down_longer_than(node, DOWN_SUSPEND_GRACE_SEC):
+                if node.mgmt_ip not in affected_physical_nodes:
+                    affected_physical_nodes.append(node.mgmt_ip)
+        elif node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_REMOVED]:
+            # Non-ONLINE (UNREACHABLE / SCHEDULABLE / IN_SHUTDOWN / RESTARTING)
+            # with devices still flagged online in the DB (e.g. UNREACHABLE
+            # before _check_data_plane_and_escalate fires). From a client's
+            # perspective the node is unavailable, so it contributes to the FTT
+            # bucket.
+            if node.mgmt_ip not in affected_physical_nodes:
+                affected_physical_nodes.append(node.mgmt_ip)
 
         online_devices += node_online_devices
         offline_devices += node_offline_devices
@@ -128,7 +198,54 @@ def get_next_cluster_status(cluster_id):
         return Cluster.STATUS_ACTIVE
 
 
+def _requeue_stuck_auto_restarts(cluster_id):
+    """Re-queue auto-restart for any OFFLINE / SCHEDULABLE node that does
+    not currently have an active FN_NODE_RESTART task.
+
+    Why this exists: ``set_node_offline`` only queues once (it guards on
+    the OFFLINE -> OFFLINE no-op), so if ``add_node_to_auto_restart`` was
+    refused at that moment — typically because too many peers were
+    non-online while the cluster was still DEGRADED — nothing else
+    retries it, and the cluster stays in SUSPENDED / DEGRADED forever
+    with no path back. Running this scan every monitor tick closes the
+    loop: once the cluster transitions to SUSPENDED (via the non-ONLINE
+    counting in ``get_next_cluster_status``), the queue lands on the
+    next tick. Also handles SCHEDULABLE recoveries that bypassed the
+    queue for the same reason.
+    """
+    try:
+        for node in db.get_storage_nodes_by_cluster_id(cluster_id):
+            if node.status not in (StorageNode.STATUS_OFFLINE,
+                                   StorageNode.STATUS_SCHEDULABLE):
+                continue
+            # Nodes stopped on purpose (`sn shutdown`) land in OFFLINE just
+            # like a failure-detected node, but must NOT be auto-restarted.
+            # add_node_to_auto_restart enforces this too, but skip them here
+            # so the scan does not log a misleading "re-queuing" line every
+            # tick for a node that is intentionally down.
+            if node.auto_restart_disabled:
+                continue
+            if tasks_controller.get_active_node_restart_task(cluster_id, node.get_id()):
+                continue
+            logger.info(
+                "Node %s is %s with no active restart task; re-queuing auto-restart",
+                node.get_id(), node.status,
+            )
+            try:
+                tasks_controller.add_node_to_auto_restart(node)
+            except Exception as e:
+                logger.error("Failed to re-queue auto-restart for %s: %s", node.get_id(), e)
+    except Exception as e:
+        logger.error("Auto-restart re-queue scan failed for cluster %s: %s", cluster_id, e)
+
+
 def update_cluster_status(cluster_id):
+    # Run the re-queue scan FIRST, before any of the transition branches
+    # that may early-return. Otherwise OFFLINE/SCHEDULABLE nodes can stay
+    # stranded whenever the cluster takes a recovery path (e.g.
+    # DEGRADED -> ACTIVE).
+    _requeue_stuck_auto_restarts(cluster_id)
+
     next_current_status = get_next_cluster_status(cluster_id)
     logger.info("cluster_new_status: %s", next_current_status)
 
@@ -151,11 +268,53 @@ def update_cluster_status(cluster_id):
             active_rebalancing_tasks += 1
 
     cluster = db.get_cluster_by_id(cluster_id)
-    cluster.is_re_balancing = active_rebalancing_tasks > 0
-    cluster.write_to_db()
+    # Atomic: a full write here would clobber a concurrent cluster.status change
+    # committed by set_cluster_status (same lost-update class as incident
+    # 2026-06-18). Mutate only is_re_balancing on the freshly-read row.
+    is_re_balancing = active_rebalancing_tasks > 0
+    cluster = db.atomic_update(
+        cluster, lambda c, v=is_re_balancing: setattr(c, "is_re_balancing", v))
 
     current_cluster_status = cluster.status
     logger.info("cluster_status: %s", current_cluster_status)
+
+    # One-shot auto-migration to shared (per-chunk) data placement.
+    # Armed (shared_placement_migration_pending) by exactly two events:
+    #   * cluster creation — for brand-new clusters
+    #   * cluster_ops.update_cluster, only AFTER every node's upgrade restart
+    #     has completed — never mid rolling-restart
+    # We require that explicit flag rather than firing on a bare
+    # shared_placement==False, because during a rolling upgrade the cluster
+    # passes through transient ACTIVE / not-rebalancing / all-online windows
+    # between node restarts; switching then would race the still-restarting
+    # nodes. With the flag set only at upgrade completion, switching here is
+    # safe once the cluster has settled.
+    if (cluster.shared_placement_migration_pending
+            and not cluster.shared_placement
+            and current_cluster_status == Cluster.STATUS_ACTIVE
+            and not cluster.is_re_balancing):
+        sp_nodes = db.get_storage_nodes_by_cluster_id(cluster_id)
+        if sp_nodes and all(n.status == StorageNode.STATUS_ONLINE for n in sp_nodes):
+            logger.info(
+                "Auto-enabling shared (per-chunk) placement on cluster %s: "
+                "armed, ACTIVE, all nodes online, not rebalancing", cluster_id)
+            try:
+                if cluster_ops.set_shared_placement(cluster_id, enable=True):
+                    # set_shared_placement persisted shared_placement=True;
+                    # disarm the request so it runs exactly once. Atomic so it
+                    # doesn't clobber a concurrent cluster.status change.
+                    db.atomic_update(
+                        db.get_cluster_by_id(cluster_id),
+                        lambda c: setattr(c, "shared_placement_migration_pending", False))
+                    logger.info("shared_placement enabled on cluster %s", cluster_id)
+                else:
+                    logger.warning(
+                        "set_shared_placement returned False for cluster %s; "
+                        "will retry next monitor cycle", cluster_id)
+            except Exception:
+                logger.exception(
+                    "Auto shared_placement enable raised for cluster %s", cluster_id)
+
     if current_cluster_status in [Cluster.STATUS_UNREADY, Cluster.STATUS_IN_ACTIVATION, Cluster.STATUS_IN_EXPANSION]:
         return
 
@@ -243,21 +402,39 @@ def set_node_offline(node):
                     # Default cause is correct: node going offline cascades
                     # to all its devices, that does not count as a flap.
                     device_controller.device_set_unavailable(dev.get_id())
-            update_cluster_status(cluster_id)
-
-            # ANA failover: update subsystem states on surviving nodes
-            try:
-                logger.info(f"Triggering ANA failover for node {node.get_id()}")
-                storage_node_ops.trigger_ana_failover_for_node(node)
-            except Exception as ana_e:
-                logger.error("ANA failover for node %s failed: %s", node.get_id(), ana_e)
-
-            # initiate restart
-            logger.info(f"Node {node.get_id()} set to OFFLINE, adding to auto-restart")
-            tasks_controller.add_node_to_auto_restart(node)
         except Exception as e:
             logger.debug("Setting node to OFFLINE state failed")
             logger.error(e)
+            return
+
+        # Cluster-status refresh and ANA failover are best-effort. They must
+        # not gate the auto-restart queue: if either throws (e.g., a peer
+        # node's RPC times out inside cluster_activate's reach), we would
+        # leave the node OFFLINE with no restart queued and the cluster
+        # stuck. Isolate each step.
+        #
+        # node.cluster_id (not the module-level free variable cluster_id):
+        # the original code relied on a name set by the main loop in
+        # __main__, which makes the function only correct when called
+        # transitively from that loop. Bind to the node's own field so
+        # the function is callable from any context (and unit-testable).
+        try:
+            update_cluster_status(node.cluster_id)
+        except Exception as cs_e:
+            logger.error("update_cluster_status after %s went offline failed: %s",
+                         node.get_id(), cs_e)
+
+        try:
+            logger.info(f"Triggering ANA failover for node {node.get_id()}")
+            storage_node_ops.trigger_ana_failover_for_node(node)
+        except Exception as ana_e:
+            logger.error("ANA failover for node %s failed: %s", node.get_id(), ana_e)
+
+        try:
+            logger.info(f"Node {node.get_id()} set to OFFLINE, adding to auto-restart")
+            tasks_controller.add_node_to_auto_restart(node)
+        except Exception as ar_e:
+            logger.error("add_node_to_auto_restart for %s failed: %s", node.get_id(), ar_e)
 
 
 def set_node_unreachable(node):
@@ -402,10 +579,36 @@ def _check_data_plane_and_escalate(unreachable_node):
     if node.status == StorageNode.STATUS_RESTARTING:
         logger.debug("Node %s is restarting, skipping data-plane escalation", node.get_id())
         return
-    if is_node_data_plane_disconnected(node):
+
+    disconnected, total = _count_data_plane_votes(node)
+    if total > 0 and disconnected == total:
         logger.info("Data-plane check: all peers report %s JM disconnected, escalating to offline",
                     node.get_id())
         set_node_offline(node)
+        return
+
+    if total > 0:
+        # Some peers still see the controller — don't escalate yet.
+        return
+
+    # No online peers available to vote. Cluster has lost so many nodes that
+    # the peer-quorum check can't decide. Fall back to probing the node's
+    # own SnodeAPI for SPDK liveness: if SPDK is confirmed gone, we have
+    # enough signal to escalate to OFFLINE and unblock auto-restart. Without
+    # this fallback, a node whose SPDK died during a multi-node outage stays
+    # UNREACHABLE forever (and the cluster stays SUSPENDED with no recovery
+    # path), because every peer is also non-online.
+    try:
+        snode_api = node.client(timeout=10, retry=1)
+        is_up, _ = snode_api.spdk_process_is_up(node.rpc_port, node.cluster_id)
+        if not is_up:
+            logger.info(
+                "Data-plane check: no peers to vote, but SnodeAPI confirms SPDK gone on %s; escalating to offline",
+                node.get_id(),
+            )
+            set_node_offline(node)
+    except Exception as e:
+        logger.debug("Fallback SnodeAPI SPDK probe for %s failed: %s", node.get_id(), e)
 
 
 def set_node_schedulable(node):
@@ -500,8 +703,41 @@ def decrement():
 def value():
     return State.counter
 
+def _spdk_is_dead(snode):
+    """True if the node's SPDK is confirmed NOT running (or the node API can't
+    be reached, which for our purposes means it isn't serving)."""
+    try:
+        snode_api = snode.client(timeout=20, retry=1)
+        is_up, _ = snode_api.spdk_process_is_up(snode.rpc_port, snode.cluster_id)
+        return not is_up
+    except Exception as e:
+        logger.debug("spdk_process_is_up probe failed for %s: %s", snode.get_id(), e)
+        return True
+
+
 def check_node(snode):
     snode = db.get_storage_node_by_id(snode.get_id())
+
+    # Self-heal a node stranded in IN_SHUTDOWN. A completed shutdown flips the
+    # node to OFFLINE; if it is still IN_SHUTDOWN well past the grace window the
+    # shutdown crashed or its offline flip was lost (incident 2026-06-18: a
+    # concurrent full-object write reverted offline->in_shutdown, after which the
+    # monitor skipped the node forever and both re-shutdown and the peer's
+    # concurrent shutdown were rejected — a permanent deadlock). Reconcile to
+    # OFFLINE once SPDK is confirmed dead so the node is restartable again.
+    # auto_restart_disabled (set at shutdown) stays set, so this does NOT trigger
+    # an unwanted auto-restart of an intentionally-stopped node.
+    if snode.status == StorageNode.STATUS_IN_SHUTDOWN:
+        if _in_shutdown_longer_than(snode, IN_SHUTDOWN_RECONCILE_GRACE_SEC) and _spdk_is_dead(snode):
+            logger.warning(
+                "Node %s stuck in in_shutdown for >%ss with SPDK down; "
+                "reconciling to OFFLINE",
+                snode.get_id(), IN_SHUTDOWN_RECONCILE_GRACE_SEC)
+            storage_node_ops.set_node_status(
+                snode.get_id(), StorageNode.STATUS_OFFLINE, caused_by="monitor_reconcile")
+        else:
+            logger.info(f"Node status is: {snode.status}, skipping")
+        return False
 
     if snode.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_UNREACHABLE,
                             StorageNode.STATUS_SCHEDULABLE, StorageNode.STATUS_DOWN,
@@ -634,6 +870,12 @@ if __name__ == "__main__":
     threads_maps: dict[str, threading.Thread] = {}
 
     while True:
+        try:
+            db.get_clusters()
+        except Exception as e:
+            logger.error(f"Failed to get clusters: {e}")
+            time.sleep(3)
+            continue
         clusters = db.get_clusters()
         for cluster in clusters:
             cluster_id = cluster.get_id()

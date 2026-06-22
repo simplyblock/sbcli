@@ -27,6 +27,12 @@ class SNodeClient:
         if settings.tls_connect != "disabled":
             self.session.verify = str(settings.tls_certificate_authority)
         self.session.headers['Content-Type'] = "application/json"
+        # NOTE: do NOT pass backoff_max= here — the deployed image ships
+        # urllib3 1.26.x whose Retry.__init__ rejects it ("unexpected keyword
+        # argument 'backoff_max'"), which breaks every SNodeClient call
+        # (add-node, restart, …). Bounding per-attempt backoff for an
+        # unreachable node agent is handled at the call layer instead (the
+        # restart pre-flight reachability check in _restart_storage_node_impl).
         retries = Retry(total=retry, backoff_factor=1, connect=retry, read=retry)
         self.session.mount("http://", HTTPAdapter(max_retries=retries))
         self.session.mount("https://", HTTPAdapter(max_retries=retries))
@@ -190,9 +196,6 @@ class SNodeClient:
     def spdk_process_is_up(self, rpc_port, cluster_id):
         params = {"rpc_port": rpc_port, "cluster_id": cluster_id}
         return self._request("GET", "spdk_process_is_up", params)
-
-    def get_file_content(self, file_name):
-        return self._request("GET", f"get_file_content/{file_name}")
 
     def spdk_proxy_restart(self,rpc_port=None):
         params = {"rpc_port": rpc_port}

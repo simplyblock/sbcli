@@ -327,15 +327,15 @@ class TestSuspendAndResumeAreNoops(unittest.TestCase):
 
     def test_suspend_is_noop(self):
         from simplyblock_core import storage_node_ops as sno
-        with patch.object(sno, "FirewallClient") as fw_cls:
+        with patch.object(sno, "port_block") as pb:
             self.assertTrue(sno.suspend_storage_node("any-node-id"))
-            fw_cls.assert_not_called()
+            pb.set_port.assert_not_called()
 
     def test_resume_is_noop(self):
         from simplyblock_core import storage_node_ops as sno
-        with patch.object(sno, "FirewallClient") as fw_cls:
+        with patch.object(sno, "port_block") as pb:
             self.assertTrue(sno.resume_storage_node("any-node-id"))
-            fw_cls.assert_not_called()
+            pb.set_port.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -348,7 +348,7 @@ class TestShutdownStorageNodeGraceful(unittest.TestCase):
     Loop 2 (detach), does NOT call FirewallClient, and finishes with
     a SPDK kill + offline transition."""
 
-    def _patch(self, force=False, allow_ftt=True):
+    def _patch(self, force=False):
         from simplyblock_core import storage_node_ops as sno
 
         snode = _make_node("dying", status=StorageNode.STATUS_ONLINE,
@@ -402,8 +402,9 @@ class TestShutdownStorageNodeGraceful(unittest.TestCase):
 
         patches = [
             patch.object(sno, "DBController", return_value=db),
-            patch.object(sno, "_check_ftt_allows_node_removal",
-                         return_value=(allow_ftt, "" if allow_ftt else "ftt")),
+            # _check_ftt_allows_node_removal is no longer called from
+            # shutdown_storage_node — shutdown does not consult the
+            # removal-budget guard. The web API layer still calls it.
             patch.object(sno.tasks_controller, "get_active_node_restart_task",
                          return_value=None),
             patch.object(sno.tasks_controller, "get_active_node_tasks",
@@ -418,7 +419,7 @@ class TestShutdownStorageNodeGraceful(unittest.TestCase):
         for p in patches:
             p.start()
             self.addCleanup(p.stop)
-        fw_patch = patch.object(sno, "FirewallClient")  # MUST NOT be used
+        fw_patch = patch.object(sno, "port_block")  # MUST NOT be used
         fw_mock = fw_patch.start()
         self.addCleanup(fw_patch.stop)
 
@@ -461,7 +462,7 @@ class TestShutdownStorageNodeGraceful(unittest.TestCase):
         from simplyblock_core import storage_node_ops as sno
         env = self._patch()
         sno.shutdown_storage_node(env["snode"].get_id(), force=False)
-        env["fw_mock"].assert_not_called()
+        env["fw_mock"].set_port.assert_not_called()
 
     def test_force_skips_loops(self):
         """--force keeps the legacy "go straight to kill" semantics:
@@ -476,14 +477,18 @@ class TestShutdownStorageNodeGraceful(unittest.TestCase):
         # Kill still happens.
         self.assertEqual(len(env["kill_calls"]), 1)
 
-    def test_ftt_block_aborts(self):
+    def test_shutdown_does_not_consult_ftt_removal_guard(self):
+        # Regression guard: shutdown_storage_node must not call
+        # _check_ftt_allows_node_removal. Removal and shutdown are
+        # different operations; shutdown is supposed to proceed under
+        # the FTT contract, not be blocked by a removal-budget check.
+        # See commit removing the fbdffea3 guard from this path.
         from simplyblock_core import storage_node_ops as sno
-        env = self._patch(allow_ftt=False)
-        ret = sno.shutdown_storage_node(env["snode"].get_id(), force=False)
-        # Returns (False, reason) on FTT block; no kill, no detach.
-        self.assertEqual(ret, (False, "ftt"))
-        self.assertEqual(env["kill_calls"], [])
-        self.assertEqual(env["detach_calls"], [])
+        env = self._patch()
+        with patch.object(sno, "_check_ftt_allows_node_removal") as guard:
+            self.assertTrue(
+                sno.shutdown_storage_node(env["snode"].get_id(), force=False))
+            guard.assert_not_called()
 
 
 if __name__ == '__main__':

@@ -92,6 +92,9 @@ spec:
                       operator: In
                       values:
                         - worker
+                        {% if OPENSHIFT_MCP and OPENSHIFT_MCP != 'worker' %}
+                        - {{ OPENSHIFT_MCP }}
+                        {% endif %}
                         - $MCP_NAME
                 nodeSelector:
                   matchExpressions:

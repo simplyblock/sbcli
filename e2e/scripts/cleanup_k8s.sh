@@ -80,7 +80,11 @@ for CR_TYPE in \
   "devices.storage.simplyblock.io" \
   "storagenodes.storage.simplyblock.io" \
   "storageclusters.storage.simplyblock.io" \
-  "snapshotreplications.storage.simplyblock.io"; do
+  "snapshotreplications.storage.simplyblock.io" \
+  "storagebackups.storage.simplyblock.io" \
+  "backuprestores.storage.simplyblock.io" \
+  "backuppolicies.storage.simplyblock.io" \
+  "backupimports.storage.simplyblock.io"; do
   for CR_NAME in $(kubectl -n $NAMESPACE get "$CR_TYPE" --no-headers -o custom-columns=:metadata.name 2>/dev/null); do
     kubectl -n $NAMESPACE patch "$CR_TYPE" "$CR_NAME" \
       --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
@@ -126,20 +130,39 @@ while [ $PVC_TIMEOUT -gt 0 ]; do
   PVC_TIMEOUT=$((PVC_TIMEOUT - 5))
 done
 
-# If PVCs are still stuck, patch finalizers and force delete
-for PVC in $(kubectl -n $NAMESPACE get pvc --no-headers -o custom-columns=:metadata.name 2>/dev/null); do
-  echo "Force-deleting stuck PVC: $PVC"
-  kubectl -n $NAMESPACE patch pvc "$PVC" \
-    --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
-  kubectl -n $NAMESPACE delete pvc "$PVC" --force --grace-period=0 2>/dev/null || true
-done
+# If PVCs are still stuck, patch all finalizers in parallel then bulk delete
+STUCK_PVCS=$(kubectl -n $NAMESPACE get pvc --no-headers -o custom-columns=:metadata.name 2>/dev/null)
+if [ -n "$STUCK_PVCS" ]; then
+  echo "Patching finalizers on stuck PVCs..."
+  echo "$STUCK_PVCS" | while read PVC; do
+    kubectl -n $NAMESPACE patch pvc "$PVC" \
+      --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null &
+  done
+  wait
+  kubectl -n $NAMESPACE delete pvc --all --force --grace-period=0 --wait=false 2>/dev/null || true
+  echo "PVC force-delete issued"
+fi
 
 echo "=== Phase 3c: Delete PVs ==="
-for PV in $(kubectl get pv --no-headers -o custom-columns=:metadata.name 2>/dev/null | grep -i simplyblock 2>/dev/null); do
-  kubectl patch pv "$PV" \
-    --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
-  kubectl delete pv "$PV" --force --grace-period=0 2>/dev/null || true
-done
+# Clean all PVs except vault ones.  Filter by CLAIM column (namespace/name)
+# since PV names are pvc-<uuid> and don't contain "vault".
+# Also exclude local-hostpath storageclass PVs used by vault.
+PV_LIST=$(kubectl get pv --no-headers -o custom-columns=NAME:.metadata.name,CLAIM:.spec.claimRef.namespace 2>/dev/null \
+  | grep -v -E '\bvault\b' 2>/dev/null | awk '{print $1}')
+if [ -n "$PV_LIST" ]; then
+  echo "Patching finalizers on $(echo "$PV_LIST" | wc -l) PVs..."
+  echo "$PV_LIST" | while read PV; do
+    kubectl patch pv "$PV" \
+      --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null &
+  done
+  wait
+  echo "Deleting PVs..."
+  echo "$PV_LIST" | while read PV; do
+    kubectl delete pv "$PV" --force --grace-period=0 --wait=false 2>/dev/null &
+  done
+  wait
+  echo "PV force-delete issued"
+fi
 
 echo "=== Phase 3d: Force delete remaining namespaced resources ==="
 for RTYPE in pod jobs service ds statefulset deployment replicaset secret sa configmap; do
@@ -177,6 +200,13 @@ kubectl -n kube-system delete cm simplyblock-numa-resource-plugin-config --ignor
 kubectl delete clusterrole simplyblock-numa-resource-plugin --ignore-not-found 2>/dev/null || true
 kubectl delete clusterrolebinding simplyblock-numa-resource-plugin --ignore-not-found 2>/dev/null || true
 
+# Clean up snapshot-controller and any other simplyblock deployments/services in kube-system
+for RTYPE in deployment service sa configmap; do
+  for NAME in $(kubectl -n kube-system get $RTYPE --no-headers -o custom-columns=:metadata.name 2>/dev/null | grep -i simplyblock 2>/dev/null); do
+    kubectl -n kube-system delete $RTYPE "$NAME" --ignore-not-found 2>/dev/null || true
+  done
+done
+
 echo "=== Phase 5: Verify nothing remains ==="
 echo "Namespaced resources:"
 kubectl -n $NAMESPACE get all 2>/dev/null || echo "No resources found"
@@ -190,7 +220,11 @@ for CR_TYPE in \
   "pool.storage.simplyblock.io" \
   "lvol.storage.simplyblock.io" \
   "storagenodes.storage.simplyblock.io" \
-  "storageclusters.storage.simplyblock.io"; do
+  "storageclusters.storage.simplyblock.io" \
+  "storagebackups.storage.simplyblock.io" \
+  "backuprestores.storage.simplyblock.io" \
+  "backuppolicies.storage.simplyblock.io" \
+  "backupimports.storage.simplyblock.io"; do
   kubectl -n $NAMESPACE get "$CR_TYPE" 2>/dev/null || true
 done
 

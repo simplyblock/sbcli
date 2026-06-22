@@ -1,6 +1,5 @@
 import os
 from datetime import datetime
-from pathlib import Path
 import threading
 from e2e_tests.cluster_test_base import TestClusterBase, generate_random_sequence
 from utils.common_utils import sleep_n_sec
@@ -12,7 +11,6 @@ class TestRebootNodeHost(TestClusterBase):
         super().__init__(**kwargs)
         self.test_name = "reboot_node_host"
         self.mount_base = "/mnt/"
-        self.log_base = f"{Path.home()}/"
 
     def run(self):
         fio_threads = []
@@ -38,7 +36,7 @@ class TestRebootNodeHost(TestClusterBase):
 
             device = self.ssh_obj.get_lvol_vs_device(self.mgmt_nodes[0], lvol_id)
             mount_path = f"{self.mount_base}/{lvol_name}"
-            log_path = f"{self.log_base}/{lvol_name}.log"
+            log_path = f"{self.log_path}/{lvol_name}.log"
             self.ssh_obj.format_disk(self.mgmt_nodes[0], device)
             self.ssh_obj.mount_path(self.mgmt_nodes[0], device, mount_path)
 
@@ -86,7 +84,7 @@ class TestRebootNodeHost(TestClusterBase):
 
             device = self.ssh_obj.get_lvol_vs_device(self.mgmt_nodes[0], clone_id)
             cl_mount = f"{self.mount_base}/{clone_name}"
-            cl_log = f"{self.log_base}/{clone_name}.log"
+            cl_log = f"{self.log_path}/{clone_name}.log"
             self.ssh_obj.format_disk(self.mgmt_nodes[0], device)
             self.ssh_obj.mount_path(self.mgmt_nodes[0], device, cl_mount)
 

@@ -1,20 +1,88 @@
+import itertools
+import os
 import random
 import threading
 import time
 from datetime import datetime
 
+from exceptions.custom_exception import LvolNotConnectException
+from logger_config import setup_logger
+from stress_test.continuous_failover_ha import generate_random_sequence
 from stress_test.continuous_failover_ha_multi_outage import RandomMultiClientMultiFailoverTest
+from utils.common_utils import sleep_n_sec
+
+
+# Volume security types cycled in equal thirds
+_SEC_TYPES = ["plain", "crypto", "dhchap"]
 
 
 class RandomMultiClientMultiFailoverAllNodesTest(RandomMultiClientMultiFailoverTest):
     """
     Same as RandomMultiClientMultiFailoverTest but outage nodes are selected from ALL
     nodes (primary and secondary alike).  Requires max_fault_tolerance > 1.
+
+    Enhancements over the parent:
+      - Expanded outage types: container_stop, graceful_shutdown, forced_shutdown,
+        storage_node_reboot, interface_full/partial_network_interrupt
+      - Volume mix: plain, crypto, and DHCHAP (secure pool) lvols in equal thirds
+      - 32 lvols (8 per node), numjobs=8, iodepth=1 => 64 parallel IO per node
     """
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        self.logger = setup_logger(__name__)
         self.test_name = "n_plus_k_failover_multi_client_ha_all_nodes"
+
+        # FIO configuration: 64 parallel IO streams per node
+        self.total_lvols = 40           # 8 lvols per node x 5 nodes
+        self.lvol_size = "20G"
+        self.int_lvol_size = 20
+        self.fio_num_jobs = 8           # 8 numjobs x 8 lvols/node = 64 per node
+        self.fio_numjobs = 8            # must match — _compute_fio_size() uses this attr
+
+        # Expanded outage types with varied timing to catch races
+        self.outage_types = [
+            "graceful_shutdown",
+            "forced_shutdown",
+            "interface_full_network_interrupt",
+        ]
+        self.outage_types2 = [
+            "container_stop",
+            "graceful_shutdown",
+            "forced_shutdown",
+            "storage_node_reboot",
+            "interface_full_network_interrupt",
+        ]
+        self.multipath_outage_types = [
+            "container_stop",
+            "graceful_shutdown",
+            "forced_shutdown",
+            "storage_node_reboot",
+        ]
+
+        # DHCHAP pool
+        self.dhchap_pool_name = None
+        self._sec_cycle = itertools.cycle(_SEC_TYPES)
+        self._cached_host_nqns: dict[str, str] = {}  # fio_node -> nqn
+
+    # ------------------------------------------------------------------
+    # Helper: forced shutdown
+    # ------------------------------------------------------------------
+    def _forced_shutdown_node(self, node_uuid):
+        """Shutdown node with force=True (immediate, no drain)."""
+        self.logger.info(f"Performing forced shutdown on node {node_uuid}")
+        self.sbcli_utils.shutdown_node(node_uuid, force=True)
+
+    # ------------------------------------------------------------------
+    # Helper: get (cached) client host NQN for DHCHAP
+    # ------------------------------------------------------------------
+    def _get_client_host_nqn(self, fio_node):
+        if fio_node in self._cached_host_nqns:
+            return self._cached_host_nqns[fio_node]
+        nqn = self.ssh_obj.get_client_host_nqn(fio_node)
+        self.logger.info(f"Client host NQN for {fio_node}: {nqn}")
+        self._cached_host_nqns[fio_node] = nqn
+        return nqn
 
     # ------------------------------------------------------------------
     # Override: pick outage nodes from every node, not just primaries
@@ -103,6 +171,10 @@ class RandomMultiClientMultiFailoverAllNodesTest(RandomMultiClientMultiFailoverT
                 self.ssh_obj.stop_spdk_process(node_ip, node_rpc_port, self.cluster_id)
             elif outage_type == "graceful_shutdown":
                 self._graceful_shutdown_node(node)
+            elif outage_type == "forced_shutdown":
+                self._forced_shutdown_node(node)
+            elif outage_type == "storage_node_reboot":
+                self.ssh_obj.reboot_node(node_ip, wait_time=300)
             elif outage_type == "interface_partial_network_interrupt":
                 self._disconnect_partial_interface(node, node_ip)
                 node_outage_dur = 300
@@ -131,7 +203,195 @@ class RandomMultiClientMultiFailoverAllNodesTest(RandomMultiClientMultiFailoverT
         return outage_combinations
 
     # ------------------------------------------------------------------
-    # Override run() to validate fault-tolerance requirement first
+    # Override create_lvols_with_fio: cycle plain / crypto / dhchap
+    # ------------------------------------------------------------------
+    def create_lvols_with_fio(self, count):
+        """Create *count* lvols cycling through plain, crypto, dhchap types."""
+        for i in range(count):
+            sec_type = next(self._sec_cycle)
+            self._create_one_lvol(i, sec_type)
+
+    def _create_one_lvol(self, index, sec_type):
+        """Create a single lvol of given security type and start FIO."""
+        fs_type = random.choice(["ext4", "xfs"])
+        is_dhchap = sec_type == "dhchap"
+        is_crypto = sec_type in ("crypto", "dhchap")
+        pool = self.dhchap_pool_name if is_dhchap else self.pool_name
+
+        prefix = {"plain": "pl", "crypto": "cr", "dhchap": "dh"}[sec_type]
+        lvol_name = f"{prefix}{self.lvol_name}_{index}"
+
+        # Ensure unique name
+        attempt = 0
+        while lvol_name in self.lvol_mount_details:
+            self.lvol_name = f"lvl{generate_random_sequence(15)}"
+            lvol_name = f"{prefix}{self.lvol_name}_{index}"
+            attempt += 1
+            if attempt > 20:
+                break
+
+        # Determine host placement (avoid outage nodes)
+        host_id = None
+        if self.current_outage_nodes:
+            skip_nodes = [
+                n for n in self.sn_primary_secondary_map
+                if self.sn_primary_secondary_map[n] in self.current_outage_nodes
+            ]
+            for n in self.current_outage_nodes:
+                skip_nodes.append(n)
+            candidates = [n for n in self.sn_nodes_with_sec if n not in skip_nodes]
+            host_id = candidates[0] if candidates else None
+
+        client_node = random.choice(self.fio_node) if isinstance(self.fio_node, list) else self.fio_node
+
+        self.logger.info(
+            f"Creating {sec_type} lvol {lvol_name!r} "
+            f"(crypto={is_crypto}, dhchap={is_dhchap}, pool={pool}, "
+            f"client={client_node})")
+
+        # Create lvol
+        try:
+            if is_dhchap:
+                _, err = self.ssh_obj.create_sec_lvol(
+                    self.mgmt_nodes[0], lvol_name, self.lvol_size, pool,
+                    encrypt=True,
+                )
+                if err and "error" in err.lower():
+                    self.logger.warning(f"CLI lvol creation error for {lvol_name}: {err}")
+                    return
+            else:
+                self.sbcli_utils.add_lvol(
+                    lvol_name=lvol_name,
+                    pool_name=pool,
+                    size=self.lvol_size,
+                    crypto=is_crypto,
+                    host_id=host_id,
+                )
+        except Exception as exc:
+            self.logger.warning(f"lvol creation failed for {lvol_name}: {exc}. Retrying...")
+            self.lvol_name = f"lvl{generate_random_sequence(15)}"
+            lvol_name = f"{prefix}{self.lvol_name}_{index}"
+            try:
+                if is_dhchap:
+                    self.ssh_obj.create_sec_lvol(
+                        self.mgmt_nodes[0], lvol_name, self.lvol_size, pool,
+                        encrypt=True,
+                    )
+                else:
+                    self.sbcli_utils.add_lvol(
+                        lvol_name=lvol_name, pool_name=pool,
+                        size=self.lvol_size, crypto=is_crypto, host_id=host_id,
+                    )
+            except Exception as exc2:
+                self.logger.warning(f"Retry lvol creation also failed: {exc2}")
+                return
+
+        sleep_n_sec(3)
+        lvol_id = self.sbcli_utils.get_lvol_id(lvol_name)
+        if not lvol_id:
+            self.logger.warning(f"Could not find lvol ID for {lvol_name}, skipping")
+            return
+
+        # Track node placement
+        try:
+            lvol_node_id = self.sbcli_utils.get_lvol_details(
+                lvol_id=lvol_id)[0]["node_id"]
+        except Exception:
+            lvol_node_id = None
+        if lvol_node_id:
+            self.node_vs_lvol.setdefault(lvol_node_id, []).append(lvol_name)
+
+        # Get connect string (DHCHAP needs host_nqn)
+        host_nqn = self._get_client_host_nqn(client_node) if is_dhchap else None
+        try:
+            if host_nqn:
+                connect_ls, err = self.ssh_obj.get_lvol_connect_str_with_host_nqn(
+                    self.mgmt_nodes[0], lvol_id, host_nqn)
+                if err or not connect_ls:
+                    self.logger.warning(f"No connect string for dhchap lvol {lvol_name}: {err}")
+                    self.sbcli_utils.delete_lvol(lvol_name=lvol_name, skip_error=True)
+                    return
+            else:
+                connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)
+        except Exception as exc:
+            self.logger.warning(f"get_connect_str failed for {lvol_name}: {exc}")
+            return
+
+        if not self.k8s_test:
+            self.ssh_obj.exec_command(
+                node=self.mgmt_nodes[0], command=f"{self.base_cmd} lvol list")
+
+        log_file = f"{self.log_path}/{lvol_name}.log"
+        iolog_base = f"{self.log_path}/{lvol_name}_fio_iolog"
+        self.lvol_mount_details[lvol_name] = {
+            "ID": lvol_id, "Command": connect_ls, "Mount": None,
+            "Device": None, "MD5": None, "FS": fs_type, "Log": log_file,
+            "snapshots": [], "sec_type": sec_type, "host_nqn": host_nqn,
+            "Client": client_node, "iolog_base_path": iolog_base,
+        }
+
+        # Connect NVMe
+        initial_devices = self.ssh_obj.get_devices(node=client_node)
+        for cmd in connect_ls:
+            _, err = self.ssh_obj.exec_command(node=client_node, command=cmd)
+            if err:
+                self.logger.warning(f"nvme connect error for {lvol_name}: {err}")
+                try:
+                    nqn = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)[0]["nqn"]
+                    self.ssh_obj.disconnect_nvme(node=client_node, nqn_grep=nqn)
+                except Exception:
+                    pass
+                self.sbcli_utils.delete_lvol(lvol_name=lvol_name, skip_error=True)
+                del self.lvol_mount_details[lvol_name]
+                if lvol_node_id and lvol_name in self.node_vs_lvol.get(lvol_node_id, []):
+                    self.node_vs_lvol[lvol_node_id].remove(lvol_name)
+                return
+
+        sleep_n_sec(3)
+        final_devices = self.ssh_obj.get_devices(node=client_node)
+        lvol_device = next(
+            (f"/dev/{d.strip()}" for d in final_devices if d not in initial_devices),
+            None,
+        )
+        if not lvol_device:
+            raise LvolNotConnectException(
+                f"LVOL {lvol_name} ({sec_type}) did not connect")
+
+        self.lvol_mount_details[lvol_name]["Device"] = lvol_device
+        self.ssh_obj.format_disk(node=client_node, device=lvol_device, fs_type=fs_type)
+        mount_point = f"{self.mount_path}/{lvol_name}"
+        self.ssh_obj.mount_path(node=client_node, device=lvol_device, mount_path=mount_point)
+        self.lvol_mount_details[lvol_name]["Mount"] = mount_point
+
+        sleep_n_sec(10)
+        self.ssh_obj.delete_files(client_node, [f"{mount_point}/*fio*"])
+        self.ssh_obj.delete_files(client_node, [f"{self.log_path}/local-{lvol_name}_fio*"])
+        self.ssh_obj.delete_files(client_node, [f"{iolog_base}*"])
+        sleep_n_sec(5)
+
+        fio_thread = threading.Thread(
+            target=self.ssh_obj.run_fio_test,
+            args=(client_node, None, mount_point, log_file),
+            kwargs={
+                "size": self.fio_size,
+                "name": f"{lvol_name}_fio",
+                "rw": "randrw",
+                "bs": f"{2 ** random.randint(2, 7)}K",
+                "nrfiles": 16,
+                "iodepth": 1,
+                "numjobs": self.fio_num_jobs,
+                "time_based": True,
+                "runtime": 2000,
+                "log_avg_msec": 1000,
+                "iolog_file": iolog_base,
+            },
+        )
+        fio_thread.start()
+        self.fio_threads.append(fio_thread)
+        sleep_n_sec(10)
+
+    # ------------------------------------------------------------------
+    # Override run() to set up DHCHAP pool + fault tolerance check
     # ------------------------------------------------------------------
     def run(self):
         self.logger.info("Checking cluster fault tolerance before starting test.")
@@ -147,6 +407,62 @@ class RandomMultiClientMultiFailoverAllNodesTest(RandomMultiClientMultiFailoverT
             )
 
         self.logger.info(
-            f"max_fault_tolerance={max_fault_tolerance} — proceeding with all-nodes outage test."
+            f"max_fault_tolerance={max_fault_tolerance} — proceeding "
+            f"with all-nodes outage test."
         )
-        super().run()
+
+        # Create DHCHAP pool via CLI (API doesn't support --dhchap)
+        self.dhchap_pool_name = f"dhchap_{self.pool_name}"
+        self.logger.info(f"Creating DHCHAP pool: {self.dhchap_pool_name}")
+        self.ssh_obj.add_storage_pool(
+            self.mgmt_nodes[0], self.dhchap_pool_name,
+            self.cluster_id, dhchap=True,
+        )
+
+        # Register client host NQN at pool level for DHCHAP volumes
+        fio_nodes = self.fio_node if isinstance(self.fio_node, list) else [self.fio_node]
+        pool_id = self.sbcli_utils.get_storage_pool_id(self.dhchap_pool_name)
+        if pool_id:
+            for fio_node in fio_nodes:
+                host_nqn = self._get_client_host_nqn(fio_node)
+                if host_nqn:
+                    self.logger.info(
+                        f"Registering client NQN at pool level: "
+                        f"pool={pool_id} nqn={host_nqn}")
+                    self.ssh_obj.add_host_to_pool(
+                        self.mgmt_nodes[0], pool_id, host_nqn)
+
+        # Start full pcap capture on all nodes for network diagnostics
+        all_node_ips = set(
+            self.storage_nodes + self.mgmt_nodes + self.fio_node
+        )
+        self.logger.info(
+            f"Starting full pcap capture on {len(all_node_ips)} nodes"
+        )
+        for node_ip in all_node_ips:
+            try:
+                node_log_dir = os.path.join(
+                    self.docker_logs_path, node_ip,
+                )
+                self.ssh_obj.make_directory(
+                    node=node_ip, dir_name=node_log_dir,
+                )
+                self.ssh_obj.start_full_pcap_capture(
+                    node_ip, node_log_dir,
+                )
+            except Exception as exc:
+                self.logger.warning(
+                    f"Failed to start pcap on {node_ip}: {exc}"
+                )
+
+        try:
+            # Call the grandparent's run() via super() — this creates the
+            # standard pool, computes FIO size, and runs the main test loop.
+            super(RandomMultiClientMultiFailoverAllNodesTest, self).run()
+        finally:
+            # Stop pcap capture on all nodes
+            for node_ip in all_node_ips:
+                try:
+                    self.ssh_obj.stop_full_pcap_capture(node_ip)
+                except Exception:
+                    pass

@@ -8,7 +8,7 @@ py-cpuinfo
 pytest
 mock
 flask
-kubernetes
+kubernetes==35.0.0
 PyYAML
 urllib3
 graypy==2.1.0
@@ -28,3 +28,4 @@ uvicorn
 prometheus_api_client
 paramiko
 pydantic-settings
+botocore

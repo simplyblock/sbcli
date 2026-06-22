@@ -502,10 +502,11 @@ class TestMigrationProtection:
 
         # Try to resize l3 — must be blocked
         new_size = 4 * 1024 * 1024 * 1024  # 4G
-        result, msg = lvol_controller.resize_lvol(ctx.lvol_uuid("l3"), new_size)
-        assert result is False, \
-            "Resizing a volume with an active migration should be blocked"
-        assert "migration" in msg.lower()
+        try:
+            lvol_controller.resize_lvol(ctx.lvol_uuid("l3"), new_size)
+            assert False, "Resizing a volume with an active migration should be blocked"
+        except Exception as e:
+            assert "migration" in str(e).lower()
 
         run_migration_task(mig_id, max_steps=2000, step_sleep=0.02)
 

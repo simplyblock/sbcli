@@ -1,6 +1,30 @@
 #!/usr/bin/env bash
 
 if [[ "$1" == "docker" ]]; then
+
+  # AWS RHUI (rhui.<region>.aws.ce.redhat.com) intermittently throttles us-east-1
+  # egress, stalling RHUI metadata downloads so every yum/dnf call hangs (not a
+  # clean "no package" error -- a multi-minute hang). If the RHUI repos are
+  # unreachable, disable them and install from Rocky Linux 9's public mirrors
+  # instead (RHEL9-ABI-compatible). The probe is a no-op when RHUI is healthy.
+  if ! sudo timeout 25 dnf -q --disablerepo='*' --enablerepo='*rhui*' makecache >/dev/null 2>&1; then
+    echo "install_deps: RHUI repos unreachable, falling back to Rocky 9 mirrors"
+    sudo sh -c 'grep -rIl rhui /etc/yum.repos.d/ 2>/dev/null | xargs -r sed -i "s/^enabled[[:space:]]*=[[:space:]]*1/enabled=0/g"'
+    sudo tee /etc/yum.repos.d/rocky-fallback.repo >/dev/null <<'ROCKYEOF'
+[rocky-baseos]
+name=Rocky Linux 9 BaseOS (RHUI fallback)
+baseurl=https://dl.rockylinux.org/pub/rocky/9/BaseOS/x86_64/os/
+gpgcheck=0
+enabled=1
+
+[rocky-appstream]
+name=Rocky Linux 9 AppStream (RHUI fallback)
+baseurl=https://dl.rockylinux.org/pub/rocky/9/AppStream/x86_64/os/
+gpgcheck=0
+enabled=1
+ROCKYEOF
+  fi
+
   sudo yum install -y yum-utils
   sudo yum install -y https://repo.almalinux.org/almalinux/9/devel/aarch64/os/Packages/tuned-profiles-realtime-2.26.0-1.el9.noarch.rpm
   sudo yum install -y yum-utils xorg-x11-xauth nvme-cli fio tuned

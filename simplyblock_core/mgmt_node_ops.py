@@ -53,14 +53,13 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret, mo
         db_connection = cluster_data['db_connection']
         scripts.set_db_config(db_connection)
         time.sleep(1)
-        hostname = utils.get_hostname()
         db_controller = DBController()
         nodes = db_controller.get_mgmt_nodes()
         if not nodes:
             logger.error("No mgmt nodes was found in the cluster!")
             return False
         for node in nodes:
-            if node.hostname == hostname:
+            if node.mgmt_ip == dev_ip:
                 logger.error("Node already exists in the cluster")
                 return False
 
@@ -223,13 +222,11 @@ def add_mgmt_node(mgmt_ip, mode, cluster_id=None):
     hostname = ""
     if mode == "docker":
         hostname = utils.get_hostname()
-    try:
-        node = db_controller.get_mgmt_node_by_hostname(hostname)
-        if node:
+
+    for node in db_controller.get_mgmt_nodes():
+        if node.mgmt_ip == mgmt_ip:
             logger.error("Node already exists in the cluster")
             return False
-    except KeyError:
-        pass
 
     node = MgmtNode()
     node.uuid = str(uuid.uuid4())

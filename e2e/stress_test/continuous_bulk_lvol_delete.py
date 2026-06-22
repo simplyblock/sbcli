@@ -21,6 +21,7 @@ Invocation:
 
 from __future__ import annotations
 
+import os
 import random
 import string
 import threading
@@ -175,6 +176,13 @@ class _BulkDeleteMixin:
         )
         return False
 
+    def _validate_fio_batch(self, iteration, names):
+        """Validate FIO liveness + collect logs before deletion.
+
+        Override in Docker/K8s subclasses.  Returns failure count.
+        """
+        return 0
+
     def _run_bulk_iterations(self):
         results = []
         for iteration in range(1, self.NUM_ITERATIONS + 1):
@@ -189,14 +197,19 @@ class _BulkDeleteMixin:
             )
             sleep_n_sec(self.WAIT_AFTER_CREATE)
 
+            # Validate FIO before deletion
+            fio_failures = self._validate_fio_batch(iteration, names)
+
             t_del = time.time()
             result = self._bulk_delete_sequential(iteration, names)
             result["delete_duration"] = time.time() - t_del
+            result["fio_validation_failures"] = fio_failures
             results.append(result)
             self.logger.info(
                 f"Iteration {iteration} done: "
                 f"created={result['created']} deleted={result['deleted']} "
                 f"failed={result['failed']} stale={result['stale']} "
+                f"fio_failures={fio_failures} "
                 f"delete_time={result['delete_duration']:.1f}s"
             )
 
@@ -209,11 +222,20 @@ class _BulkDeleteMixin:
         total_core_dumps = sum(
             r.get("core_dumps_detected", 0) for r in results
         )
+        total_fio_failures = sum(
+            r.get("fio_validation_failures", 0) for r in results
+        )
 
         if total_core_dumps > 0:
             raise RuntimeError(
                 f"Bulk delete test detected {total_core_dumps} core dumps "
                 f"on storage nodes across {self.NUM_ITERATIONS} iterations"
+            )
+
+        if total_fio_failures > 0:
+            raise RuntimeError(
+                f"Bulk delete test detected {total_fio_failures} FIO "
+                f"validation failures across {self.NUM_ITERATIONS} iterations"
             )
 
         if total_failed > 0:
@@ -231,16 +253,21 @@ class _BulkDeleteMixin:
         self.logger.info("=== Bulk Lvol Delete Test Summary ===")
         self.logger.info(
             f"{'Iter':>4} | {'Created':>7} | {'Deleted':>7} | "
-            f"{'Failed':>6} | {'Stale':>5}"
+            f"{'Failed':>6} | {'Stale':>5} | {'FIO Err':>7}"
         )
         for r in results:
+            fio_f = r.get("fio_validation_failures", 0)
             self.logger.info(
                 f"{r['iteration']:>4} | {r['created']:>7} | {r['deleted']:>7} | "
-                f"{r['failed']:>6} | {r['stale']:>5}"
+                f"{r['failed']:>6} | {r['stale']:>5} | {fio_f:>7}"
             )
         total_f = sum(r["failed"] for r in results)
         total_s = sum(r["stale"] for r in results)
-        self.logger.info(f"Total failures: {total_f}  Total stale: {total_s}")
+        total_fio = sum(r.get("fio_validation_failures", 0) for r in results)
+        self.logger.info(
+            f"Total failures: {total_f}  Total stale: {total_s}  "
+            f"Total FIO errors: {total_fio}"
+        )
 
     def _write_monitoring_json(self, results):
         """Write standardised timing JSON for monitoring suite aggregation."""
@@ -259,16 +286,18 @@ class _BulkDeleteMixin:
                 avg_delete = round(
                     sum(t["delete_sec"] for t in per_lvol) / len(per_lvol), 3
                 )
+            fio_f = r.get("fio_validation_failures", 0)
             phases.append({
                 "name": f"iteration_{r['iteration']}",
                 "duration_sec": round(r.get("delete_duration", 0), 2),
-                "status": "ok" if r["failed"] + r["stale"] == 0 else "degraded",
+                "status": "ok" if r["failed"] + r["stale"] + fio_f == 0 else "degraded",
                 "details": {
                     "created": r["created"],
                     "deleted": r["deleted"],
                     "failed": r["failed"],
                     "stale": r["stale"],
                     "core_dumps_detected": cd,
+                    "fio_validation_failures": fio_f,
                     "avg_delete_sec": avg_delete,
                     "per_lvol_times": per_lvol,
                 },
@@ -466,7 +495,12 @@ class BulkLvolDeleteDocker(_BulkDeleteMixin, TestLvolHACluster):
         self._run_id = _rand_seq(8)
 
     def run(self):
-        self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        actual_pool = self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        if actual_pool and actual_pool != self.pool_name:
+            self.logger.info(
+                f"[run] Pool name changed: {self.pool_name} -> {actual_pool}"
+            )
+            self.pool_name = actual_pool
 
         storage_nodes = self.sbcli_utils.get_storage_nodes()
         for result in storage_nodes["results"]:
@@ -614,6 +648,112 @@ class BulkLvolDeleteDocker(_BulkDeleteMixin, TestLvolHACluster):
             )
 
         return names
+
+    # ── FIO validation ────────────────────────────────────────────────────
+
+    def _validate_fio_batch(self, iteration, names):
+        """Check FIO thread liveness + collect and validate FIO logs."""
+        self.logger.info(
+            f"[validate {iteration}] Checking FIO status for "
+            f"{len(names)} lvols"
+        )
+        failures = 0
+
+        # 1. Check thread liveness
+        alive = sum(1 for t in self.fio_threads if t.is_alive())
+        dead = len(self.fio_threads) - alive
+        self.logger.info(
+            f"[validate {iteration}] FIO threads: {alive} alive, "
+            f"{dead} dead"
+        )
+        if dead > 0:
+            failures += dead
+            self.logger.error(
+                f"[validate {iteration}] {dead} FIO threads died "
+                f"during wait"
+            )
+
+        # 2. Collect FIO logs from remote clients + validate
+        log_dir = os.path.join("logs", "ClientLogs")
+        os.makedirs(log_dir, exist_ok=True)
+        saved = 0
+        for lvol_name in names:
+            details = self.lvol_mount_details.get(lvol_name, {})
+            log_file = details.get("Log")
+            client = details.get("Client")
+            if not log_file or not client:
+                continue
+            # Save FIO stdout log locally
+            try:
+                file_data = self.ssh_obj.read_file(client, log_file)
+                if file_data:
+                    local_path = os.path.join(
+                        log_dir, f"{lvol_name}_fio.log"
+                    )
+                    with open(local_path, "w") as f:
+                        f.write(file_data)
+                    saved += 1
+            except Exception as e:
+                self.logger.warning(
+                    f"[collect {iteration}] Failed to save FIO log for "
+                    f"{lvol_name} on {client} (remote: {log_file}): {e}"
+                )
+            # Validate log contents for error keywords
+            try:
+                self.common_utils.validate_fio_test(client, log_file)
+            except RuntimeError as e:
+                failures += 1
+                self.logger.error(
+                    f"[validate {iteration}] FIO error in "
+                    f"{lvol_name} on {client}: {e}"
+                )
+            except Exception:
+                pass
+
+        # 3. Collect FIO perf logs (iolog, bw, lat, iops files)
+        for lvol_name in names:
+            details = self.lvol_mount_details.get(lvol_name, {})
+            client = details.get("Client")
+            iolog_base = details.get("iolog_base_path")
+            if not client or not iolog_base:
+                continue
+            perf_dir = os.path.join(log_dir, f"{lvol_name}_perf")
+            try:
+                out, _ = self.ssh_obj.exec_command(
+                    node=client,
+                    command=(
+                        f"bash -lc 'ls {iolog_base}* "
+                        f"2>/dev/null || true'"
+                    ),
+                )
+                perf_files = [
+                    f.strip() for f in (out or "").splitlines()
+                    if f.strip()
+                ]
+                if perf_files:
+                    os.makedirs(perf_dir, exist_ok=True)
+                    for src in perf_files:
+                        fname = os.path.basename(src)
+                        dest = os.path.join(perf_dir, fname)
+                        try:
+                            data = self.ssh_obj.read_file(client, src)
+                            if data:
+                                with open(dest, "w") as f:
+                                    f.write(data)
+                        except Exception as e:
+                            self.logger.warning(
+                                f"[validate {iteration}] Failed to collect "
+                                f"perf file for {lvol_name} on {client}: "
+                                f"{src} -> {dest}: {e}"
+                            )
+            except Exception:
+                pass
+
+        self.logger.info(
+            f"[validate {iteration}] Collected {saved} FIO logs, "
+            f"{failures} failures"
+        )
+        return failures
 
     # ── Delete (sequential, one-by-one) ──────────────────────────────────
 
@@ -820,6 +960,14 @@ class BulkLvolDeleteK8s(_BulkDeleteMixin, K8sNativeFailoverTest):
             ndcs=self.ndcs,
             npcs=self.npcs,
         )
+        self.k8s_utils.create_storage_class(
+            name=self.XFS_STORAGE_CLASS_NAME,
+            cluster_id=cluster_id,
+            pool_name=self.pool_name,
+            ndcs=self.ndcs,
+            npcs=self.npcs,
+            fs_type="xfs",
+        )
 
         self._run_bulk_iterations()
 
@@ -836,13 +984,16 @@ class BulkLvolDeleteK8s(_BulkDeleteMixin, K8sNativeFailoverTest):
                 f"({i+1}/{self.NUM_LVOLS})"
             )
 
+            sc_name = random.choice([self.STORAGE_CLASS_NAME, self.XFS_STORAGE_CLASS_NAME])
+            pvc_fs_type = "xfs" if sc_name == self.XFS_STORAGE_CLASS_NAME else "ext4"
+
             # Snapshot lvol IDs before PVC creation (for client mode mapping)
             if self.use_client_fio:
                 old_lvol_ids = self._snapshot_lvol_ids()
 
             try:
                 self.k8s_utils.create_pvc(
-                    pvc_name, self.PVC_SIZE, self.STORAGE_CLASS_NAME,
+                    pvc_name, self.PVC_SIZE, sc_name,
                 )
                 self.k8s_utils.wait_pvc_bound(pvc_name, timeout=300)
             except Exception as exc:
@@ -920,7 +1071,7 @@ class BulkLvolDeleteK8s(_BulkDeleteMixin, K8sNativeFailoverTest):
                     "client": client,
                     "log_file": log_file,
                     "fs_type": fs_type,
-                    "storage_class": self.STORAGE_CLASS_NAME,
+                    "storage_class": sc_name,
                 }
                 self.lvol_mount_details[lvol_name] = {
                     "ID": lvol_id,
@@ -968,7 +1119,8 @@ class BulkLvolDeleteK8s(_BulkDeleteMixin, K8sNativeFailoverTest):
                     "configmap_name": cm_name,
                     "snapshots": [],
                     "node_id": node_id,
-                    "storage_class": self.STORAGE_CLASS_NAME,
+                    "storage_class": sc_name,
+                    "fs_type": pvc_fs_type,
                 }
 
                 self.logger.info(
@@ -982,6 +1134,125 @@ class BulkLvolDeleteK8s(_BulkDeleteMixin, K8sNativeFailoverTest):
             sleep_n_sec(3)
 
         return names
+
+    # ── FIO validation ────────────────────────────────────────────────────
+
+    def _validate_fio_batch(self, iteration, names):
+        """Check FIO liveness + collect and validate FIO logs."""
+        self.logger.info(
+            f"[validate {iteration}] Checking FIO status for "
+            f"{len(names)} PVCs"
+        )
+        failures = 0
+        log_dir = os.path.join("logs", "ClientLogs")
+        os.makedirs(log_dir, exist_ok=True)
+        saved = 0
+
+        if self.use_client_fio:
+            # ── Client SSH FIO path ──
+            for pvc_name in names:
+                pvc_info = self.pvc_details.get(pvc_name, {})
+                log_file = pvc_info.get("log_file")
+                client = pvc_info.get("client")
+                if not log_file or not client:
+                    continue
+                # Save FIO stdout log locally
+                try:
+                    file_data = self.ssh_obj.read_file(client, log_file)
+                    if file_data:
+                        local_path = os.path.join(
+                            log_dir, f"{pvc_name}_fio.log"
+                        )
+                        with open(local_path, "w") as f:
+                            f.write(file_data)
+                        saved += 1
+                except Exception as e:
+                    self.logger.warning(
+                        f"[validate {iteration}] Unable to save FIO log for "
+                        f"{pvc_name} on {client} ({log_file}): {e}"
+                    )
+                # Validate log contents
+                try:
+                    self.common_utils.validate_fio_test(client, log_file)
+                except RuntimeError as e:
+                    failures += 1
+                    self.logger.error(
+                        f"[validate {iteration}] FIO error in "
+                        f"{pvc_name} on {client}: {e}"
+                    )
+                except Exception:
+                    pass
+        else:
+            # ── K8s Job FIO path ──
+            fail_words = ["error", "fail", "interrupt", "terminate"]
+            for pvc_name in names:
+                pvc_info = self.pvc_details.get(pvc_name, {})
+                job_name = pvc_info.get("job_name")
+                if not job_name:
+                    continue
+                try:
+                    # Save pod logs
+                    pod_name = self.k8s_utils.get_job_pod_name(job_name)
+                    if not pod_name:
+                        continue
+                    logs = self.k8s_utils.get_pod_logs(
+                        pod_name, tail=2000
+                    )
+                    if logs:
+                        local_path = os.path.join(
+                            log_dir, f"{pvc_name}_fio.log"
+                        )
+                        with open(local_path, "w") as f:
+                            f.write(logs)
+                        saved += 1
+
+                    # Copy FIO perf logs from pod
+                    try:
+                        self._save_fio_pod_logs(
+                            job_name, pvc_name, pvc_name=pvc_name
+                        )
+                    except Exception:
+                        pass
+
+                    # Check pod status — Failed/Error means FIO crashed
+                    status_out, _ = self.k8s_utils._exec_kubectl(
+                        f"get pod {pod_name} "
+                        f"-o jsonpath='{{.status.phase}}'",
+                        supress_logs=True,
+                    )
+                    pod_phase = (status_out or "").strip()
+                    if pod_phase in ("Failed", "Error"):
+                        failures += 1
+                        self.logger.error(
+                            f"[validate {iteration}] FIO pod "
+                            f"{pod_name} phase={pod_phase} for "
+                            f"{pvc_name}"
+                        )
+                        continue
+
+                    # Check pod logs for error keywords
+                    if logs:
+                        logs_lower = logs.lower()
+                        for word in fail_words:
+                            if word in logs_lower:
+                                failures += 1
+                                self.logger.error(
+                                    f"[validate {iteration}] FIO "
+                                    f"pod logs for {pvc_name} "
+                                    f"contain '{word}'"
+                                )
+                                break
+                except Exception as exc:
+                    self.logger.warning(
+                        f"[validate {iteration}] Could not check "
+                        f"FIO for {pvc_name}: {exc}"
+                    )
+
+        self.logger.info(
+            f"[validate {iteration}] Collected {saved} FIO logs, "
+            f"{failures} failures"
+        )
+        return failures
 
     # ── Delete (sequential, one-by-one) ──────────────────────────────────
 

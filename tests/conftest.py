@@ -24,7 +24,9 @@ def _stub(name, **attrs):
 
 
 if 'fdb' not in sys.modules:
-    _fdb = _stub('fdb', open=lambda *a, **kw: None)
+    class _FDBError(Exception):
+        pass
+    _stub('fdb', open=lambda *a, **kw: None, FDBError=_FDBError)
     _stub('fdb.tuple')
 
 
