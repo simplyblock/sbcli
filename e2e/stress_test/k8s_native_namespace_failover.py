@@ -19,17 +19,12 @@ from __future__ import annotations
 
 import os
 import random
-import string
 import threading
 import time
 import traceback
-from collections import defaultdict
-
 from logger_config import setup_logger
 from utils.common_utils import sleep_n_sec
-from utils.k8s_utils import K8sUtils
 from utils.ssh_utils import get_parent_device
-from exceptions.custom_exception import LvolNotConnectException
 
 from stress_test.continuous_k8s_native_failover import (
     K8sNativeFailoverTest,
@@ -429,7 +424,6 @@ class K8sNativeNamespacedFailoverTest(K8sNativeFailoverTest):
             client = pvc_info.get("client")
             device = pvc_info.get("device")
             lvol_name = pvc_info.get("lvol_name")
-            lvol_id = pvc_info.get("lvol_id")
             ns_info = self.ns_pvc_info.get(pvc_name, {})
             nqn = ns_info.get("nqn")
             ctrl_dev = ns_info.get("ctrl_dev") or (
@@ -502,7 +496,7 @@ class K8sNativeNamespacedFailoverTest(K8sNativeFailoverTest):
                 )
                 if not ok:
                     self.logger.info(
-                        f"[ns_delete] Device still present; sysfs fallback"
+                        "[ns_delete] Device still present; sysfs fallback"
                     )
                     sleep_n_sec(30)
                     ctrl_name = ctrl_dev.split("/")[-1]

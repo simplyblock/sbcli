@@ -4184,7 +4184,6 @@ class TestParallelNamespaceLvolK8s(_ParallelNamespaceLvolBase):
         )
 
         ns = self.k8s_utils.namespace
-        fio_timeout = self.FIO_VALIDATION_RUNTIME + 300
         fio_items = [{"pvc_name": pvc} for pvc in all_targets]
 
         fio_t0 = time.time()

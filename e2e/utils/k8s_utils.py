@@ -1344,6 +1344,51 @@ class K8sUtils:
         out, err = self._exec_kubectl(cmd)
         return out, err
 
+    def patch_storage_node_restart(self, node_uuid: str,
+                                    spdk_image: str = None,
+                                    spdk_proxy_image: str = None,
+                                    name: str = "simplyblock-node",
+                                    namespace: str = None):
+        """Patch StorageNode CRD to restart a node, optionally with new images.
+
+        Sets ``spec.action`` to ``restart`` along with the ``nodeUUID``.
+        When *spdk_image* or *spdk_proxy_image* are provided, the CRD
+        spec fields ``spdkImage`` / ``spdkProxyImage`` are updated too,
+        which causes the operator to deploy the new images on restart.
+
+        Parameters
+        ----------
+        node_uuid : str
+            UUID of the storage node to restart.
+        spdk_image : str | None
+            New SPDK container image (e.g. ``registry/spdk:tag``).
+        spdk_proxy_image : str | None
+            New SPDK proxy container image.
+        name : str
+            StorageNode CR name (default ``simplyblock-node``).
+        namespace : str | None
+            Override namespace (default ``self.namespace``).
+        """
+        ns = namespace or self.namespace
+        patch_dict = {"spec": {"action": "restart", "nodeUUID": node_uuid}}
+        if spdk_image:
+            patch_dict["spec"]["spdkImage"] = spdk_image
+        if spdk_proxy_image:
+            patch_dict["spec"]["spdkProxyImage"] = spdk_proxy_image
+
+        patch_json = json.dumps(patch_dict)
+        cmd = (
+            f"kubectl patch storagenodes.storage.simplyblock.io {name} "
+            f"-n {ns} --type=merge -p '{patch_json}'"
+        )
+        self.logger.info(
+            f"[K8sUtils] Restarting storage node {node_uuid}"
+            + (f" with spdkImage={spdk_image}" if spdk_image else "")
+            + (f", spdkProxyImage={spdk_proxy_image}" if spdk_proxy_image else "")
+        )
+        out, err = self._exec_kubectl(cmd)
+        return out, err
+
     def validate_fio_job(self, job_name: str, namespace: str = None,
                          timeout: int = 600) -> bool:
         """Check Job succeeded and ALL pod logs have no FIO error keywords.

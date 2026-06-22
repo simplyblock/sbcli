@@ -261,7 +261,7 @@ class MgmtNodeNetworkOutageTest(TestClusterBase):
 
         if spdk_failures:
             self.logger.error(
-                f"SPDK health check failures during outage:\n"
+                "SPDK health check failures during outage:\n"
                 + "\n".join(spdk_failures))
             raise RuntimeError(
                 f"{len(spdk_failures)} SPDK health check failure(s) "
@@ -595,7 +595,7 @@ class MgmtNodeRebootTest(TestClusterBase):
 
         if spdk_failures:
             self.logger.error(
-                f"SPDK health check failures during reboot:\n"
+                "SPDK health check failures during reboot:\n"
                 + "\n".join(spdk_failures))
             raise RuntimeError(
                 f"{len(spdk_failures)} SPDK health check failure(s) "

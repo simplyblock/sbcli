@@ -2172,11 +2172,11 @@ class K8sNativeFailoverTest(TestClusterBase):
         # Step 2: Apply the DROP rules after a short delay (gives kubectl
         # exec time to return before connectivity is lost).
         drop_cmd = (
-            f"sudo nohup bash -c '"
-            f"sleep 5 && "
-            f"iptables -A INPUT -j DROP && "
-            f"iptables -A OUTPUT -j DROP"
-            f"' > /tmp/k8s_nw_outage.log 2>&1 &"
+            "sudo nohup bash -c '"
+            "sleep 5 && "
+            "iptables -A INPUT -j DROP && "
+            "iptables -A OUTPUT -j DROP"
+            "' > /tmp/k8s_nw_outage.log 2>&1 &"
         )
         self.k8s_utils.exec_in_spdk_container(node_ip, drop_cmd)
         self.logger.info(

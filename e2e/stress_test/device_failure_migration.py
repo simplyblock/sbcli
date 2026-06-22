@@ -1234,7 +1234,7 @@ class _DeviceFailureMigrationBase:
                 break
             if time.time() >= node_check_deadline:
                 assert False, (
-                    f"Nodes still not healthy after 5 minutes: "
+                    "Nodes still not healthy after 5 minutes: "
                     + "; ".join(unhealthy)
                 )
             self.logger.warning(

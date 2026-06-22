@@ -138,6 +138,7 @@ from e2e_tests.security.test_lvol_security import (
 )
 
 from e2e_tests.upgrade_tests.major_upgrade import TestMajorUpgrade, TestMajorUpgradeSingleNode
+from e2e_tests.upgrade_tests.k8s_major_upgrade import K8sNativeMajorUpgrade
 
 from e2e_tests.backup.test_backup_restore import (
     TestBackupBasicPositive,
@@ -190,10 +191,10 @@ from load_tests.lvol_outage_load import TestLvolOutageLoadTest
 
 
 ALL_TESTS = [
-    # TestLvolFioNpcsCustom,
-    # TestLvolFioNpcs0,
-    # TestLvolFioNpcs1,
-    # TestLvolFioNpcs2,
+    TestLvolFioNpcsCustom,
+    TestLvolFioNpcs0,
+    TestLvolFioNpcs1,
+    TestLvolFioNpcs2,
     TestSingleNodeOutage,
     TestSingleNodeFailure,
     TestAddNodesDuringFioRun,
@@ -216,6 +217,7 @@ ALL_TESTS = [
     TestAddK8sNodesDuringFioRun,
     K8sNativeAddNodeTest,
     K8sNativeNodeMigrationTest,
+    K8sNativeMajorUpgrade,
     # Security E2E tests
     TestLvolSecurityCombinations,
     TestLvolDynamicHostManagement,
@@ -542,7 +544,8 @@ def get_backup_stress_tests():
 def get_upgrade_tests():
     tests = [
         TestMajorUpgrade,
-        TestMajorUpgradeSingleNode
+        TestMajorUpgradeSingleNode,
+        K8sNativeMajorUpgrade,
     ]
     return tests
 

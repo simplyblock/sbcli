@@ -730,6 +730,23 @@ jobs:
           UNSEAL_KEYS_FILE=./openbao-init.txt bash $GITHUB_WORKSPACE/helm-charts/scripts/setup-kms.sh
           kubectl wait --for=condition=Ready pods -l app.kubernetes.io/name=openbao -n vault --timeout=300s || true
 
+      - name: Cleanup stale CSI hostpath data on worker nodes
+        if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
+        run: |
+          CLUSTER_ENV="${{ github.event.inputs.cluster_environment || 'local' }}"
+          IFS=',' read -ra NODES <<< "${{ github.event.inputs.worker_nodes }}"
+          for NODE in "${NODES[@]}"; do
+            echo "Cleaning stale CSI hostpath data on $NODE..."
+            if [[ "$CLUSTER_ENV" == *"openshift"* ]]; then
+              oc debug node/"$NODE" -- chroot /host bash -c \
+                "find /var/lib/csi-hostpath-data -mindepth 1 -maxdepth 1 -type d -mtime +2 -exec rm -rf {} \;" 2>/dev/null || true
+            else
+              kubectl debug node/"$NODE" -q --image=busybox:latest -- chroot /host sh -c \
+                "find /var/lib/csi-hostpath-data -mindepth 1 -maxdepth 1 -type d -mtime +2 -exec rm -rf {} \;" 2>/dev/null || true
+            fi
+          done
+          echo "CSI hostpath data cleanup complete."
+
       - name: Apply operator custom resources
         if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
         run: |
