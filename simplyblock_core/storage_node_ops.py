@@ -2313,7 +2313,7 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
                 # lvol_controller.migrate(lvol_id)
         elif force_remove:
             for lvol in lvols:
-                lvol_controller.delete_lvol(lvol.get_id(), True)
+                lvol_controller.delete_lvol(lvol, True)
         else:
             logger.warning("LVols found on the storage node, use --force-remove or --force-migrate")
             return False
