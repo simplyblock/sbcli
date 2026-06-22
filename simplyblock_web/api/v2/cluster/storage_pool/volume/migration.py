@@ -73,14 +73,14 @@ class _ContinueParams(BaseModel):
 @instance_api.post('/continue', name='cluster:storage-pools:volumes:migrations:continue', status_code=200)
 def continue_migration(cluster: Cluster, migration: Migration, parameters: _ContinueParams):
     try:
-        migration_id = migration_controller.start_migration(
+        migration_controller.start_migration(
             migration_id=migration.uuid,
             max_retries=parameters.max_retries,
             deadline_seconds=parameters.deadline_seconds,
         )
     except ValueError as e:
         raise HTTPException(400, str(e))
-    return {"migration_id": migration_id}
+    return Response(204)
 
 
 @instance_api.delete('/', name='cluster:storage-pools:volumes:migrations:cancel', status_code=200)
@@ -88,7 +88,7 @@ def cancel_migration(cluster: Cluster, migration: Migration):
     ok, error = migration_controller.cancel_migration(migration.get_id())
     if not ok:
         raise HTTPException(400, error)
-    return {"status": "cancelled"}
+    return Response(204)
 
 
 api.include_router(instance_api)
