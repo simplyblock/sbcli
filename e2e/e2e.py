@@ -1,5 +1,7 @@
 ### simplyblock e2e tests
 import argparse
+import os
+import shutil
 import traceback
 from __init__ import get_all_tests, get_security_tests, get_backup_tests, get_backup_stress_tests, ALL_TESTS
 from logger_config import setup_logger
@@ -44,7 +46,9 @@ def main():
     parser.add_argument('--namespace', type=str, help="Kubernetes namespace", default="")
     parser.add_argument('--new_worker_nodes', type=str, help="New K8s worker node names to add (comma-separated)", default="")
     parser.add_argument('--migrate_to_worker', type=str, help="K8s worker node name to migrate a storage node onto", default="")
-    
+    parser.add_argument('--preserve_resources_on_failure', type=bool,
+                        help="Skip K8s resource cleanup when test fails (preserve PVCs/pods for debugging)",
+                        default=False)
 
     args = parser.parse_args()
 
@@ -68,8 +72,8 @@ def main():
     elif args.testname is None or len(args.testname.strip()) == 0:
         for cls in tests:
             if cls.__name__ == "TestAddNodesDuringFioRun":
-                if len(new_nodes) == 0 or len(new_nodes) % 2 != 0:
-                    logger.warning("Skipping TestAddNodesDuringFioRun: requires --new-nodes with IPs in multiples of 2.")
+                if len(new_nodes) == 0:
+                    logger.warning("Skipping TestAddNodesDuringFioRun: requires --new-nodes with at least 1 IP.")
                     skipped_cases += 1
                     continue
             if cls.__name__ == "TestRestartNodeOnAnotherHost":
@@ -80,15 +84,15 @@ def main():
             if cls.__name__ == "TestAddK8sNodesDuringFioRun":
                 if not args.run_k8s:
                     continue
-                if len(new_nodes) == 0 or len(new_nodes) % 2 != 0:
-                    logger.warning("Skipping TestAddK8sNodesDuringFioRun: requires --new-nodes with IPs in multiples of 2.")
+                if len(new_nodes) == 0:
+                    logger.warning("Skipping TestAddK8sNodesDuringFioRun: requires --new-nodes with at least 1 IP.")
                     skipped_cases += 1
                     continue
             if cls.__name__ == "K8sNativeAddNodeTest":
                 if not args.run_k8s:
                     continue
-                if len(new_worker_nodes) == 0 or len(new_worker_nodes) % 2 != 0:
-                    logger.warning("Skipping K8sNativeAddNodeTest: requires --new_worker_nodes with node names in multiples of 2.")
+                if len(new_worker_nodes) == 0:
+                    logger.warning("Skipping K8sNativeAddNodeTest: requires --new_worker_nodes with at least 1 node name.")
                     skipped_cases += 1
                     continue
             if cls.__name__ == "K8sNativeNodeMigrationTest":
@@ -101,28 +105,31 @@ def main():
 
             test_class_run.append(cls)
     else:
-        for cls in ALL_TESTS:
-            needle = args.testname.lower().replace("_", "")
-            if needle in cls.__name__.lower():
-                if cls.__name__ == "TestAddNodesDuringFioRun" and (len(new_nodes) == 0 or len(new_nodes) % 2 != 0):
-                    raise ValueError("TestAddNodesDuringFioRun requires --new-nodes with IPs in multiples of 2.")
-                if cls.__name__ == "TestRestartNodeOnAnotherHost" and len(new_nodes) == 0:
-                    raise ValueError("TestRestartNodeOnAnotherHost requires --new-nodes with atleast 1 new IP.")
-                if cls.__name__ == "TestAddK8sNodesDuringFioRun" and (len(new_nodes) == 0 or len(new_nodes) % 2 != 0):
-                    if not args.run_k8s:
-                        continue
-                    raise ValueError("TestAddK8sNodesDuringFioRun requires --new-nodes with IPs in multiples of 2.")
-                if cls.__name__ == "K8sNativeAddNodeTest":
-                    if not args.run_k8s:
-                        continue
-                    if len(new_worker_nodes) == 0 or len(new_worker_nodes) % 2 != 0:
-                        raise ValueError("K8sNativeAddNodeTest requires --new_worker_nodes with node names in multiples of 2.")
-                if cls.__name__ == "K8sNativeNodeMigrationTest":
-                    if not args.run_k8s:
-                        continue
-                    if not args.migrate_to_worker.strip():
-                        raise ValueError("K8sNativeNodeMigrationTest requires --migrate_to_worker with a K8s worker node name.")
-                test_class_run.append(cls)
+        needles = [n.strip().lower().replace("_", "") for n in args.testname.split(",") if n.strip()]
+        seen = set()
+        for needle in needles:
+            for cls in ALL_TESTS:
+                if needle in cls.__name__.lower() and cls not in seen:
+                    if cls.__name__ == "TestAddNodesDuringFioRun" and len(new_nodes) == 0:
+                        raise ValueError("TestAddNodesDuringFioRun requires --new-nodes with at least 1 IP.")
+                    if cls.__name__ == "TestRestartNodeOnAnotherHost" and len(new_nodes) == 0:
+                        raise ValueError("TestRestartNodeOnAnotherHost requires --new-nodes with atleast 1 new IP.")
+                    if cls.__name__ == "TestAddK8sNodesDuringFioRun" and len(new_nodes) == 0:
+                        if not args.run_k8s:
+                            continue
+                        raise ValueError("TestAddK8sNodesDuringFioRun requires --new-nodes with at least 1 IP.")
+                    if cls.__name__ == "K8sNativeAddNodeTest":
+                        if not args.run_k8s:
+                            continue
+                        if len(new_worker_nodes) == 0:
+                            raise ValueError("K8sNativeAddNodeTest requires --new_worker_nodes with at least 1 node name.")
+                    if cls.__name__ == "K8sNativeNodeMigrationTest":
+                        if not args.run_k8s:
+                            continue
+                        if not args.migrate_to_worker.strip():
+                            raise ValueError("K8sNativeNodeMigrationTest requires --migrate_to_worker with a K8s worker node name.")
+                    test_class_run.append(cls)
+                    seen.add(cls)
 
     if not test_class_run:
         available_tests = ', '.join(cls.__name__ for cls in tests)
@@ -183,6 +190,7 @@ def main():
                         namespace=args.namespace,
                         new_worker_nodes=new_worker_nodes,
                         migrate_to_worker=args.migrate_to_worker,
+                        preserve_resources_on_failure=args.preserve_resources_on_failure,
                         )
         try:
             test_obj.setup()
@@ -195,26 +203,43 @@ def main():
             tb = traceback.format_exc()
             logger.error(tb)
             errors[f"{test.__name__}"] = [exp, tb]
+        _test_failed = f"{test.__name__}" in errors
+        _skip_k8s = _test_failed and test_obj.preserve_resources_on_failure
+        if _skip_k8s:
+            logger.info(f"[cleanup] Test {test.__name__} failed — preserving K8s resources for debugging (--preserve_resources_on_failure)")
         try:
             test_obj.collect_management_details(post_teardown=False)
-            test_obj.teardown(delete_lvols=False, close_ssh=False)
+            test_obj.teardown(delete_lvols=False, close_ssh=False, skip_k8s_cleanup=_skip_k8s)
             if not args.run_k8s:
                 test_obj.stop_docker_logs_collect()
             else:
                 test_obj.stop_k8s_log_collect()
             test_obj.fetch_all_nodes_distrib_log()
             test_obj.collect_management_details(post_teardown=True)
-            test_obj.teardown(delete_lvols=True, close_ssh=False)
-            all_nodes = test_obj._get_all_nodes()
-            test_obj.ssh_obj.collect_final_docker_logs_simple(all_nodes, test_obj.docker_logs_path)
+            test_obj.teardown(delete_lvols=not _skip_k8s, close_ssh=False, skip_k8s_cleanup=_skip_k8s)
+            if not args.run_k8s:
+                all_nodes = test_obj._get_all_nodes()
+                test_obj.ssh_obj.collect_final_docker_logs_simple(all_nodes, test_obj.docker_logs_path)
             test_obj.export_graylog_logs()
+            test_obj.extract_delay_qpair_logs()
             test_obj.teardown(delete_lvols=False, close_ssh=True)
             # pass
         except Exception as _:
             logger.error(f"Error During Teardown for test: {test.__name__}")
             logger.error(traceback.format_exc())
         finally:
-            if check_for_dumps():
+            # Copy e2e/logs/ folder to NFS so automation logs are accessible post-run
+            log_path = getattr(test_obj, "docker_logs_path", "")
+            if log_path:
+                logs_src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+                if os.path.isdir(logs_src):
+                    logs_dest = os.path.join(log_path, "automation_logs")
+                    try:
+                        shutil.copytree(logs_src, logs_dest, dirs_exist_ok=True)
+                        logger.info(f"Automation logs copied to: {logs_dest}")
+                    except Exception as _copy_err:
+                        logger.warning(f"Failed to copy automation logs to NFS: {_copy_err}")
+            if not args.run_k8s and check_for_dumps():
                 logger.info("Found a core dump during test execution. "
                             "Cannot execute more tests as cluster is not stable. Exiting")
                 break

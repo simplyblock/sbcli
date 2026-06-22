@@ -204,6 +204,18 @@ class K8sUtils:
         )
         return pod_name
 
+    def exec_in_spdk_container(self, node_ip: str, command: str) -> tuple:
+        """Execute a command inside the spdk-container of the SPDK pod
+        for the given storage node IP.
+
+        Returns (stdout, stderr).
+        """
+        pod_name = self.get_spdk_pod_name(node_ip)
+        return self._exec_kubectl(
+            f"kubectl exec {pod_name} -c spdk-container -n {self.namespace} -- "
+            f"bash -c {shlex.quote(command)}"
+        )
+
     def _find_spdk_sock(self, pod_name: str) -> str:
         """Return the spdk.sock path inside spdk-container (searches /mnt/ramdisk)."""
         out, _ = self._exec_kubectl(
@@ -277,6 +289,14 @@ class K8sUtils:
           4. kubectl cp result files from /tmp inside container → logs_path/<pod_name>/distrib_logs/.
         Returns True (non-fatal failures are logged and skipped).
         """
+        # Skipping distrib dump fetch — distr_debug_placement_map_dump RPC
+        # times out on degraded distribs (non-leader / blocked JMs), blocking
+        # the diagnostics thread and delaying recovery.
+        self.logger.warning(
+            f"Skipping fetch_distrib_logs_k8s for node {storage_node_id} on "
+            f"{storage_node_ip} (disabled — causes RPC timeout on degraded distribs)"
+        )
+        return True
         try:
             pod_name = self.get_spdk_pod_name(storage_node_ip)
             sock = self._find_spdk_sock(pod_name)
@@ -810,6 +830,8 @@ class K8sUtils:
                     except Exception:
                         pass
 
+                fs_type = info.get("fs_type", "N/A") or "N/A"
+
                 all_entries.append({
                     "type": label,
                     "name": name or "N/A",
@@ -817,6 +839,7 @@ class K8sUtils:
                     "lvol_id": vol_handle or "N/A",
                     "storage_node": storage_node,
                     "storage_class": sc,
+                    "fs_type": fs_type,
                     "snap_name": snap,
                     "parent_pvc": parent_pvc,
                     "fio_k8s_node": fio_node,
@@ -825,22 +848,22 @@ class K8sUtils:
         if not all_entries:
             return
 
-        self.logger.info("=" * 180)
+        self.logger.info("=" * 190)
         self.logger.info("FIO Job → PVC/Clone → Lvol → Worker Mapping")
-        self.logger.info("-" * 180)
+        self.logger.info("-" * 190)
         self.logger.info(
             f"{'FIO Job':<30} {'PVC/Clone':<25} {'Lvol ID':<40} "
             f"{'Storage Node':<40} {'FIO K8s Node':<20} {'SC':<28} "
-            f"{'Snapshot':<20} {'Parent PVC':<25} {'Type':<6}"
+            f"{'FS':<6} {'Snapshot':<20} {'Parent PVC':<25} {'Type':<6}"
         )
-        self.logger.info("-" * 180)
+        self.logger.info("-" * 190)
         for e in all_entries:
             self.logger.info(
                 f"{e['job']:<30} {e['name']:<25} {e['lvol_id']:<40} "
                 f"{e['storage_node']:<40} {e['fio_k8s_node']:<20} {e['storage_class']:<28} "
-                f"{e['snap_name']:<20} {e['parent_pvc']:<25} {e['type']:<6}"
+                f"{e['fs_type']:<6} {e['snap_name']:<20} {e['parent_pvc']:<25} {e['type']:<6}"
             )
-        self.logger.info("=" * 180)
+        self.logger.info("=" * 190)
         return all_entries
 
     # ── VolumeSnapshot operations ────────────────────────────────────────────
@@ -1028,7 +1051,7 @@ class K8sUtils:
             f"  name: {job_name}\n"
             f"  namespace: {ns}\n"
             f"spec:\n"
-            f"  backoffLimit: 4\n"
+            f"  backoffLimit: 0\n"
             f"  template:\n"
             f"    metadata:\n"
             f"      labels:\n"
@@ -1098,15 +1121,20 @@ class K8sUtils:
         self.logger.warning(f"[K8sUtils] Job '{job_name}' timed out after {timeout}s")
         return "timeout"
 
-    def get_job_pod_name(self, job_name: str, namespace: str = None) -> str:
-        """Get the pod name created by a Job."""
+    def get_job_pod_names(self, job_name: str, namespace: str = None) -> list:
+        """Get all pod names created by a Job."""
         ns = namespace or self.namespace
         out, _ = self._exec_kubectl(
             f"kubectl get pods -n {ns} --selector=job-name={job_name} "
-            f"--no-headers -o custom-columns=:metadata.name | head -1",
+            f"--no-headers -o custom-columns=:metadata.name",
             supress_logs=True,
         )
-        return out.strip()
+        return [p.strip() for p in out.strip().splitlines() if p.strip()]
+
+    def get_job_pod_name(self, job_name: str, namespace: str = None) -> str:
+        """Get the first pod name created by a Job."""
+        pods = self.get_job_pod_names(job_name, namespace=namespace)
+        return pods[0] if pods else ""
 
     def get_pod_node_name(self, pod_name: str, namespace: str = None) -> str:
         """Return the K8s node hostname where a pod is/was scheduled."""
@@ -1316,9 +1344,58 @@ class K8sUtils:
         out, err = self._exec_kubectl(cmd)
         return out, err
 
+    def patch_storage_node_restart(self, node_uuid: str,
+                                    spdk_image: str = None,
+                                    spdk_proxy_image: str = None,
+                                    name: str = "simplyblock-node",
+                                    namespace: str = None):
+        """Patch StorageNode CRD to restart a node, optionally with new images.
+
+        Sets ``spec.action`` to ``restart`` along with the ``nodeUUID``.
+        When *spdk_image* or *spdk_proxy_image* are provided, the CRD
+        spec fields ``spdkImage`` / ``spdkProxyImage`` are updated too,
+        which causes the operator to deploy the new images on restart.
+
+        Parameters
+        ----------
+        node_uuid : str
+            UUID of the storage node to restart.
+        spdk_image : str | None
+            New SPDK container image (e.g. ``registry/spdk:tag``).
+        spdk_proxy_image : str | None
+            New SPDK proxy container image.
+        name : str
+            StorageNode CR name (default ``simplyblock-node``).
+        namespace : str | None
+            Override namespace (default ``self.namespace``).
+        """
+        ns = namespace or self.namespace
+        patch_dict = {"spec": {"action": "restart", "nodeUUID": node_uuid}}
+        if spdk_image:
+            patch_dict["spec"]["spdkImage"] = spdk_image
+        if spdk_proxy_image:
+            patch_dict["spec"]["spdkProxyImage"] = spdk_proxy_image
+
+        patch_json = json.dumps(patch_dict)
+        cmd = (
+            f"kubectl patch storagenodes.storage.simplyblock.io {name} "
+            f"-n {ns} --type=merge -p '{patch_json}'"
+        )
+        self.logger.info(
+            f"[K8sUtils] Restarting storage node {node_uuid}"
+            + (f" with spdkImage={spdk_image}" if spdk_image else "")
+            + (f", spdkProxyImage={spdk_proxy_image}" if spdk_proxy_image else "")
+        )
+        out, err = self._exec_kubectl(cmd)
+        return out, err
+
     def validate_fio_job(self, job_name: str, namespace: str = None,
                          timeout: int = 600) -> bool:
-        """Check Job succeeded and pod logs have no FIO error keywords.
+        """Check Job succeeded and ALL pod logs have no FIO error keywords.
+
+        Checks every pod created by the Job (not just the latest) so that
+        failures from earlier attempts that were retried via backoffLimit
+        are not silently masked.
 
         Returns True if valid.  Raises RuntimeError on failure.
         """
@@ -1328,20 +1405,31 @@ class K8sUtils:
             raise RuntimeError(
                 f"FIO Job '{job_name}' did not succeed (status={status})"
             )
-        pod_name = self.get_job_pod_name(job_name, namespace=ns)
-        if not pod_name:
+        pod_names = self.get_job_pod_names(job_name, namespace=ns)
+        if not pod_names:
             self.logger.warning(
                 f"[K8sUtils] Could not find pod for Job '{job_name}'; skipping log check"
             )
             return True
-        logs = self.get_pod_logs(pod_name, namespace=ns, tail=500)
-        fail_words = ["error", "fail", "interrupt", "terminate"]
-        logs_lower = logs.lower()
-        for word in fail_words:
-            if word in logs_lower:
+        for pod_name in pod_names:
+            logs = self.get_pod_logs(pod_name, namespace=ns, tail=500)
+            if not logs:
+                continue
+            logs_lower = logs.lower()
+            # Check for FIO numeric error codes (e.g. err=110, err=5)
+            err_match = re.search(r'\berr=([1-9]\d*)\b', logs)
+            if err_match:
                 raise RuntimeError(
-                    f"FIO Job '{job_name}' pod logs contain '{word}'"
+                    f"FIO Job '{job_name}' pod '{pod_name}' reported "
+                    f"err={err_match.group(1)}"
                 )
+            fail_words = ["error", "fail", "interrupt", "terminate"]
+            for word in fail_words:
+                if word in logs_lower:
+                    raise RuntimeError(
+                        f"FIO Job '{job_name}' pod '{pod_name}' logs "
+                        f"contain '{word}'"
+                    )
         return True
 
     # ── StorageBackup CRD operations ─────────────────────────────────────────
@@ -1380,6 +1468,7 @@ class K8sUtils:
                 self.logger.info(f"[K8sUtils] StorageBackup '{name}' is Done")
                 return res
             if phase == "failed":
+                self._dump_backup_diagnostics(name, ns)
                 raise AssertionError(
                     f"StorageBackup '{name}' failed: {status}")
             self.logger.info(
@@ -1387,9 +1476,70 @@ class K8sUtils:
                 f"(phase={status.get('phase', 'unknown')})"
             )
             time.sleep(10)
+        self._dump_backup_diagnostics(name, ns)
         raise TimeoutError(
             f"StorageBackup '{name}' not Done within {timeout}s"
         )
+
+    def _dump_backup_diagnostics(self, backup_name: str,
+                                  namespace: str) -> None:
+        """Log diagnostic info when a StorageBackup times out or fails."""
+        self.logger.error(
+            f"[backup-diag] StorageBackup '{backup_name}' did not reach Done. "
+            f"Dumping diagnostics..."
+        )
+        # 1. kubectl describe the StorageBackup CRD
+        try:
+            out, _ = self._exec_kubectl(
+                f"kubectl describe storagebackup {backup_name} -n {namespace}",
+                supress_logs=True,
+            )
+            self.logger.error(f"[backup-diag] describe storagebackup:\n{out}")
+        except Exception as e:
+            self.logger.warning(f"[backup-diag] describe failed: {e}")
+
+        # 2. Recent events in the namespace related to backup
+        try:
+            out, _ = self._exec_kubectl(
+                f"kubectl get events -n {namespace} --sort-by=.lastTimestamp "
+                f"--field-selector involvedObject.name={backup_name} "
+                f"2>/dev/null || true",
+                supress_logs=True,
+            )
+            if out and out.strip():
+                self.logger.error(f"[backup-diag] events:\n{out}")
+            else:
+                self.logger.error("[backup-diag] No events found for StorageBackup")
+        except Exception as e:
+            self.logger.warning(f"[backup-diag] events query failed: {e}")
+
+        # 3. admin-control pod logs (last 50 lines) — the operator that should reconcile
+        try:
+            out, _ = self._exec_kubectl(
+                f"kubectl logs -n {namespace} -l app=simplyblock-admin-control "
+                f"--tail=50 --all-containers 2>/dev/null || true",
+                supress_logs=True,
+            )
+            if out and out.strip():
+                self.logger.error(
+                    f"[backup-diag] admin-control logs (tail 50):\n{out}"
+                )
+        except Exception as e:
+            self.logger.warning(f"[backup-diag] admin-control logs failed: {e}")
+
+        # 4. tasks pod backup runner logs (last 50 lines)
+        try:
+            out, _ = self._exec_kubectl(
+                f"kubectl logs -n {namespace} -l app=simplyblock-tasks "
+                f"--tail=50 --all-containers 2>/dev/null || true",
+                supress_logs=True,
+            )
+            if out and out.strip():
+                self.logger.error(
+                    f"[backup-diag] tasks pod logs (tail 50):\n{out}"
+                )
+        except Exception as e:
+            self.logger.warning(f"[backup-diag] tasks pod logs failed: {e}")
 
     def get_storage_backup_id(self, name: str,
                                namespace: str = None) -> str:
@@ -1684,6 +1834,40 @@ class K8sUtils:
         self.logger.info(f"[K8sUtils] Deleting pod '{pod_name}'")
         self.delete_resource("pod", pod_name, namespace=ns)
 
+    def verify_pvc_mount(self, pvc_name: str, namespace: str = None,
+                         timeout: int = 120) -> tuple:
+        """Create a temporary pod to verify a PVC is mountable.
+
+        Returns ``(success: bool, message: str)``.
+        The temporary utility pod is always cleaned up after verification.
+        """
+        import random
+        import string
+        suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=6))
+        pod_name_safe = pvc_name[:40].lower().replace("_", "-")
+        pod_name_v = f"mount-verify-{pod_name_safe}-{suffix}"
+        ns = namespace or self.namespace
+        try:
+            self.create_utility_pod(pod_name_v, pvc_name, namespace=ns)
+            self.wait_pod_running(pod_name_v, timeout=timeout, namespace=ns)
+            out, _ = self.exec_in_pod(
+                pod_name_v,
+                "df -h /spdkvol && ls -la /spdkvol",
+                namespace=ns,
+            )
+            return True, f"Mount OK: {out.strip()[:200]}"
+        except TimeoutError as e:
+            return False, f"Mount timeout: {e}"
+        except RuntimeError as e:
+            return False, f"Pod failed: {e}"
+        except Exception as e:
+            return False, f"Mount error: {e}"
+        finally:
+            try:
+                self.delete_resource("pod", pod_name_v, namespace=ns)
+            except Exception:
+                pass
+
 
 # ── K8s-native sbcli_utils replacement ──────────────────────────────────────
 
@@ -1722,7 +1906,14 @@ class K8sSbcliUtils:
     def _run_json(self, cmd: str):
         """Execute *cmd* in the admin pod and parse stdout as JSON."""
         raw = self._run(cmd)
-        return json.loads(raw)
+        if not raw:
+            self.logger.warning(f"[_run_json] Empty output from: {cmd}")
+            return []
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError as e:
+            self.logger.warning(f"[_run_json] JSON parse error from: {cmd}\n  raw={raw[:200]}\n  error={e}")
+            return []
 
     # ── lvol methods ──────────────────────────────────────────────────────────
 
@@ -1767,7 +1958,7 @@ class K8sSbcliUtils:
     def add_lvol(self, lvol_name, pool_name, size="256M", distr_ndcs=0, distr_npcs=0,
                  distr_bs=4096, distr_chunk_bs=4096, max_rw_iops=0, max_rw_mbytes=0,
                  max_r_mbytes=0, max_w_mbytes=0, host_id=None, retry=10,
-                 crypto=False, key1=None, key2=None, fabric="tcp", cluster_id=None,
+                 crypto=False, fabric="tcp", cluster_id=None,
                  max_namespace_per_subsys=None, namespace=None):
         """Create an lvol via the CLI."""
         if self.lvol_exists(lvol_name):
@@ -1784,8 +1975,8 @@ class K8sSbcliUtils:
             cmd += f" --data-chunks-per-stripe {distr_ndcs} --parity-chunks-per-stripe {distr_npcs}"
         if fabric:
             cmd += f" --fabric {shlex.quote(fabric)}"
-        if crypto and key1 and key2:
-            cmd += f" --encrypt --crypto-key1 {shlex.quote(key1)} --crypto-key2 {shlex.quote(key2)}"
+        if crypto:
+            cmd += " --encrypt"
 
         self.k8s.exec_sbcli(cmd)
 
@@ -1855,10 +2046,17 @@ class K8sSbcliUtils:
         return data if isinstance(data, list) else [data]
 
     def get_management_nodes(self):
-        """Return ``{'results': [{'mgmt_ip': ip, ...}]}`` from MNODES env var."""
-        mnodes_env = os.environ.get("MNODES", os.environ.get("K3S_MNODES", ""))
-        mgmt_ips = [ip.strip() for ip in mnodes_env.split() if ip.strip()]
-        return {"results": [{"mgmt_ip": ip, "uuid": ip} for ip in mgmt_ips]}
+        """Return ``{'results': [{'mgmt_ip': ip, ...}]}`` via sbctl cp list."""
+        items = self._run_json(f"{self.sbcli_cmd} cp list --json")
+        results = []
+        for item in items:
+            results.append({
+                "mgmt_ip": item.get("IP", ""),
+                "uuid": item.get("UUID", ""),
+                "hostname": item.get("Hostname", ""),
+                "status": item.get("Status", ""),
+            })
+        return {"results": results}
 
     def get_all_nodes_ip(self):
         """Return ``(mgmt_node_ips, storage_node_ips)`` as lists of strings."""
@@ -1951,48 +2149,108 @@ class K8sSbcliUtils:
 
         Returns the actual pool name to use (may differ from *pool_name* if an
         existing pool with a different name was found).
+
+        The operator creates pools from Pool CRDs. The pool name in the
+        backend (visible via ``sbcli pool list``) is set by the operator and
+        may differ from the CRD metadata.name.  This method waits for the
+        operator to reconcile the pool so that the real pool name can be
+        returned.
         """
+        # 1. Check if sbcli already sees a pool
         existing = self.list_storage_pools()
-        self.logger.info(f"[pool] existing pools: {list(existing.keys())}")
+        self.logger.info(f"[pool] existing pools (sbcli): {list(existing.keys())}")
         if existing:
             actual = next(iter(existing))
-            self.logger.info(f"[pool] Using existing pool '{actual}' (K8s: no new pool created)")
+            self.logger.info(f"[pool] Using existing pool '{actual}'")
             return actual
 
-        # No pools at all — create one via kubectl apply
-        cid = cluster_id or self.cluster_id
-        cluster_details = self.get_cluster_details(cluster_id=cid)
-        cluster_name = cluster_details.get("name") or cluster_details.get("Name", cid)
-
-        k8s_resource_name = f"simplyblock-{pool_name.lower().replace('_', '-')}"
+        # 2. Check if Pool CRDs exist (operator may still be reconciling)
         ns = self.k8s.namespace
-
-        yaml_content = (
-            f"apiVersion: storage.simplyblock.io/v1alpha1\n"
-            f"kind: Pool\n"
-            f"metadata:\n"
-            f"  name: {k8s_resource_name}\n"
-            f"  namespace: {ns}\n"
-            f"spec:\n"
-            f"  clusterName: {cluster_name}\n"
+        out, _ = self.k8s._exec_kubectl(
+            f"kubectl get pools -n {ns} --no-headers "
+            f"-o custom-columns=NAME:.metadata.name 2>/dev/null || true"
         )
+        existing_crds = [r.strip() for r in out.strip().splitlines() if r.strip()]
 
-        self.logger.info(
-            f"[pool] No pools found — creating '{pool_name}' (cluster={cluster_name}) via kubectl apply"
-        )
-        yaml_escaped = yaml_content.replace("'", "'\\''")
-        self.k8s._exec_kubectl(f"echo '{yaml_escaped}' | kubectl apply -f -")
+        if not existing_crds:
+            # 3. No pools at all — create one via kubectl apply
+            cid = cluster_id or self.cluster_id
+            cluster_details = self.get_cluster_details(cluster_id=cid)
+            cluster_name = cluster_details.get("name") or cluster_details.get("Name", cid)
 
-        # Wait up to 90s for the pool to become visible in sbcli
-        for _ in range(18):
+            k8s_resource_name = f"simplyblock-{pool_name.lower().replace('_', '-')}"
+
+            yaml_content = (
+                f"apiVersion: storage.simplyblock.io/v1alpha1\n"
+                f"kind: Pool\n"
+                f"metadata:\n"
+                f"  name: {k8s_resource_name}\n"
+                f"  namespace: {ns}\n"
+                f"spec:\n"
+                f"  clusterName: {cluster_name}\n"
+            )
+
+            self.logger.info(
+                f"[pool] No pools found — creating '{pool_name}' "
+                f"(CRD={k8s_resource_name}, cluster={cluster_name}) via kubectl apply"
+            )
+            yaml_escaped = yaml_content.replace("'", "'\\''")
+            self.k8s._exec_kubectl(f"echo '{yaml_escaped}' | kubectl apply -f -")
+            existing_crds = [k8s_resource_name]
+        else:
+            self.logger.info(
+                f"[pool] Found existing Pool CRD(s): {existing_crds} — "
+                f"waiting for operator to reconcile"
+            )
+
+        # 4. Wait for operator to reconcile the Pool CRD into an actual pool
+        #    visible via sbcli pool list.  The stress tests show this works
+        #    once the operator has had time to reconcile.
+        for attempt in range(24):  # up to 120s
             pools = self.list_storage_pools()
             if pools:
                 actual = next(iter(pools))
-                self.logger.info(f"[pool] Pool '{actual}' is ready")
+                self.logger.info(
+                    f"[pool] Operator reconciled pool '{actual}' "
+                    f"(attempt {attempt})"
+                )
                 return actual
+            if attempt % 5 == 4:
+                self.logger.info(
+                    f"[pool] Still waiting for operator to reconcile "
+                    f"Pool CRD(s) {existing_crds} (attempt {attempt})"
+                )
             sleep_n_sec(5)
-        self.logger.warning("[pool] Pool not confirmed after kubectl apply")
+
+        # 5. Fallback: pool not in sbcli but CRD exists.
+        #    Use the CRD name directly — the CSI driver may accept it.
+        self.logger.warning(
+            f"[pool] Pool not visible in sbcli after 120s. "
+            f"Pool CRD(s): {existing_crds}. "
+            f"Falling back to pool_name='{pool_name}'"
+        )
         return pool_name
+
+    def pool_crd_exists(self, pool_name):
+        """Check if a Pool CRD exists in K8s (with or without simplyblock- prefix).
+
+        Returns True if the Pool CRD is found, False otherwise.
+        """
+        ns = self.k8s.namespace
+        # Try with simplyblock- prefix first (add_storage_pool creates these)
+        k8s_name = f"simplyblock-{pool_name.lower().replace('_', '-')}"
+        out, _ = self.k8s._exec_kubectl(
+            f"kubectl get pools {k8s_name} -n {ns} "
+            f"-o jsonpath='{{.metadata.name}}' 2>/dev/null || true"
+        )
+        if out.strip():
+            return True
+        # Try with exact pool_name (ensure_pool_exists creates these)
+        out, _ = self.k8s._exec_kubectl(
+            f"kubectl get pools {pool_name} -n {ns} "
+            f"-o jsonpath='{{.metadata.name}}' 2>/dev/null || true"
+        )
+        return bool(out.strip())
 
     def ensure_pool_exists(self, pool_name, cluster_id=None, encryption=False):
         """Verify a specific pool exists; create it via kubectl if missing.
@@ -2363,10 +2621,13 @@ class K8sSbcliUtils:
         """
         Return list of subtask dicts for the given master task_id.
 
-        Parses the output of ``cluster get-subtasks <task_id>`` which uses the
-        same table format as ``cluster list-tasks``.
+        Parses the output of ``cluster get-subtasks <task_id>`` which has
+        8 data columns::
 
-        Each dict contains: id, function_name, status.
+            | Task ID | Node ID | Distrib | Function | Retry | Status | Result | Updated At |
+
+        Each dict contains: id, node_id, distrib, function_name, retry, status,
+        result, updated_at.
         """
         try:
             out = self._run(f"{self.sbcli_cmd} cluster get-subtasks {task_id}")
@@ -2380,16 +2641,22 @@ class K8sSbcliUtils:
             if not line or line.startswith("+") or "Task ID" in line:
                 continue
             parts = [p.strip() for p in line.split("|")]
-            # ['', sub_id, target_id, function, retry, status, result, updated_at, '']
-            if len(parts) < 6:
+            # get-subtasks table layout (8 data columns):
+            # ['', task_id, node_id, distrib, function, retry, status, result, updated_at, '']
+            if len(parts) < 9:
                 continue
             sub_id = parts[1]
             if not sub_id or len(sub_id) != 36 or sub_id.count("-") != 4:
                 continue
             subtasks.append({
                 "id": sub_id,
-                "function_name": parts[3] if len(parts) > 3 else "",
-                "status": parts[5] if len(parts) > 5 else "",
+                "node_id": parts[2],
+                "distrib": parts[3],
+                "function_name": parts[4],
+                "retry": parts[5],
+                "status": parts[6],
+                "result": parts[7],
+                "updated_at": parts[8] if len(parts) > 8 else "",
             })
         return subtasks
 
@@ -2431,11 +2698,30 @@ class K8sSbcliUtils:
                 time.sleep(15)
                 continue
 
-            done_count = sum(1 for st in subtasks if st["status"] == "done")
+            # Build status breakdown
+            status_counts = {}
+            for st in subtasks:
+                s = st.get("status", "unknown")
+                status_counts[s] = status_counts.get(s, 0) + 1
             total = len(subtasks)
+            done_count = status_counts.get("done", 0)
+
             self.logger.info(
-                f"[balancing] Task {task_id}: {done_count}/{total} subtasks done."
+                f"[balancing] Task {task_id}: {done_count}/{total} subtasks done. "
+                f"status_map: {status_counts}"
             )
+
+            # Log individual non-done subtasks for debugging
+            non_done = [st for st in subtasks if st.get("status") != "done"]
+            for st in non_done:
+                self.logger.info(
+                    f"[balancing]   subtask {st['id'][:8]}… "
+                    f"distrib={st.get('distrib', '?')} "
+                    f"status={st.get('status', '?')} "
+                    f"retry={st.get('retry', '?')} "
+                    f"node={st.get('node_id', '?')[:8]}…"
+                )
+
             if done_count == total:
                 self.logger.info(f"[balancing] All {total} subtasks done for task {task_id}.")
                 return

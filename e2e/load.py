@@ -136,6 +136,11 @@ except Exception as e:
         logger.error("Test failed. Logs and notification may still proceed.")
     raise MultipleExceptions({selected_test.__name__: [e]})
 finally:
+    try:
+        test_obj.export_graylog_logs()
+        test_obj.extract_delay_qpair_logs()
+    except Exception as _exc:
+        logger.warning(f"Log extraction failed: {_exc}")
     test_obj.teardown()
     if check_for_dumps():
         logger.info("Found a core dump during test execution. Cluster is unstable.")

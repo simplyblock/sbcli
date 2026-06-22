@@ -374,12 +374,12 @@ class TestMajorUpgrade(TestClusterBase):
 
     def _pip_install_target(self, node: str):
         """
-        pip install git+https://github.com/simplyblock-io/sbcli.git@<target> --upgrade --force-reinstall
+        pip install git+https://github.com/simplyblock-io/sbcli.git@<target> --upgrade --force-reinstall --no-deps
         """
         if not self.target_version:
             raise ValueError("target_version is required (e.g., R25.10-Hotfix)")
         pkg = f"git+https://github.com/simplyblock-io/sbcli.git@{self.target_version}"
-        cmd = f"pip install '{pkg}' --upgrade --force-reinstall"
+        cmd = f"pip install '{pkg}' --upgrade --force-reinstall --no-deps"
         self.logger.info(f"[{node}] Installing sbcli: {cmd}")
         self.ssh_obj.exec_command(node, cmd)
 
@@ -463,6 +463,64 @@ class TestMajorUpgrade(TestClusterBase):
             raise RuntimeError(f"[{node}] Could not locate simplyblock_core/env_var")
         self.logger.info(f"[{node}] Found env_var at: {path}")
         return path
+
+    _R25_R26_MIGRATION_SCRIPT = r"""
+from simplyblock_core import utils
+from simplyblock_core.db_controller import DBController
+
+db_controller = DBController()
+
+for snode in db_controller.get_storage_nodes():
+    print(f"updating storage node object: {snode.get_id()}")
+    for node in db_controller.get_storage_nodes():
+        if snode.get_id() == node.secondary_node_id:
+            snode.lvstore_stack_secondary = node.get_id()
+            break
+    snode.lvstore_ports = {
+        snode.lvstore: {
+            "lvol_subsys_port": snode.lvol_subsys_port,
+            "hublvol_port": snode.hublvol.nvmf_port
+        }
+    }
+    if snode.lvstore_stack_secondary:
+        sec = db_controller.get_storage_node_by_id(snode.lvstore_stack_secondary)
+        snode.lvstore_ports[sec.lvstore] = {
+            "lvol_subsys_port": sec.lvol_subsys_port,
+            "hublvol_port": sec.hublvol.nvmf_port,
+        }
+    if snode.poller_cpu_cores:
+        snode.lvol_poller_mask = utils.generate_mask([snode.poller_cpu_cores[-1]])
+        if len(snode.poller_cpu_cores) > 1:
+            snode.poller_cpu_cores = snode.poller_cpu_cores[:-1]
+            snode.pollers_mask = utils.generate_mask(snode.poller_cpu_cores)
+
+    snode.write_to_db()
+"""
+
+    def _run_r25_to_r26_migration(self, node: str):
+        """
+        Run the R25 -> R26 DB migration script on the management node.
+        Updates storage node objects with new fields required by R26:
+        lvstore_ports, lvstore_stack_secondary, lvol_poller_mask, pollers_mask.
+        """
+        remote_path = "/tmp/update_r25_r26.py"
+        # Write script to remote node
+        self.ssh_obj.exec_command(
+            node,
+            f"cat > {remote_path} << 'MIGRATION_EOF'\n{self._R25_R26_MIGRATION_SCRIPT}MIGRATION_EOF",
+        )
+        self.logger.info(f"[{node}] Running R25->R26 DB migration script")
+        self.ssh_obj.exec_command(node, f"python3 {remote_path}", raise_on_error=True)
+        self.ssh_obj.exec_command(node, f"rm -f {remote_path}")
+        self.logger.info(f"[{node}] R25->R26 DB migration complete")
+
+    def _is_r25_to_r26_upgrade(self) -> bool:
+        """Check if this is an R25.x -> R26.x upgrade based on version strings."""
+        if not self.base_version or not self.target_version:
+            return False
+        base_lower = self.base_version.lower()
+        target_lower = self.target_version.lower()
+        return base_lower.startswith("r25") and target_lower.startswith("r26")
 
     def _update_node_env(self, node: str):
         """
@@ -813,6 +871,19 @@ class TestMajorUpgrade(TestClusterBase):
             raise_on_error=True,
         )
         sleep_n_sec(60)
+
+        # ----------------------------------------------------------------
+        # Step 9b: Run R25 -> R26 DB migration (if applicable)
+        # ----------------------------------------------------------------
+        if self._is_r25_to_r26_upgrade():
+            self.logger.info("Step 9b: Running R25->R26 DB migration script on mgmt node")
+            self._run_r25_to_r26_migration(self.mgmt_nodes[0])
+            sleep_n_sec(self.step_sleep)
+        else:
+            self.logger.info(
+                f"Step 9b: Skipping R25->R26 migration "
+                f"(base={self.base_version}, target={self.target_version})"
+            )
 
         # ----------------------------------------------------------------
         # Step 10: Rolling upgrade — suspend -> shutdown -> env update ->

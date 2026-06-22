@@ -38,9 +38,8 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
         self.lvol_name = f"lvl{generate_random_sequence(15)}"
         self.clone_name = f"cln{generate_random_sequence(15)}"
         self.snapshot_name = f"snap{generate_random_sequence(15)}"
-        self.lvol_size = "10G"
-        self.int_lvol_size = 10
-        self.fio_size = "1G"
+        self.lvol_size = "30G"
+        self.int_lvol_size = 30
         self.fio_num_jobs = 5
         self.fio_threads = []
         self.clone_mount_details = {}
@@ -640,6 +639,7 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                 )
             fs_type = self.lvol_mount_details[lvol]["FS"]
             client = self.lvol_mount_details[lvol]["Client"]
+            parent_host_nqn = self.lvol_mount_details[lvol].get("host_nqn")
             self.clone_mount_details[clone_name] = {
                    "ID": self.sbcli_utils.get_lvol_id(clone_name),
                    "Command": None,
@@ -652,6 +652,8 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                    "Client": client,
                    "iolog_base_path": f"{self.log_path}/{clone_name}_fio_iolog",
                    "pending_connect": False,
+                   "host_nqn": parent_host_nqn,
+                   "sec_type": self.lvol_mount_details[lvol].get("sec_type", "plain"),
             }
 
             self.logger.info(f"Created clone {clone_name}.")
@@ -672,7 +674,17 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                 self.ssh_obj.exec_command(node=self.mgmt_nodes[0],
                                           command=f"{self.base_cmd} lvol list")
 
-            connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=clone_name)
+            if parent_host_nqn:
+                clone_id = self.clone_mount_details[clone_name]["ID"]
+                connect_ls, _err = self.ssh_obj.get_lvol_connect_str_with_host_nqn(
+                    self.mgmt_nodes[0], clone_id, parent_host_nqn)
+                if _err or not connect_ls:
+                    self.logger.warning(
+                        f"get_lvol_connect_str_with_host_nqn failed for "
+                        f"clone {clone_name}: {_err}")
+                    continue
+            else:
+                connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=clone_name)
             self.clone_mount_details[clone_name]["Command"] = connect_ls
 
             # if self.secondary_outage:
@@ -736,7 +748,9 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
 
             sleep_n_sec(10)
 
-            self.ssh_obj.delete_files(client, [f"{mount_point}/*fio*"])
+            # Delete ALL inherited data from parent so the clone has enough
+            # free space for its own FIO run (not just *fio* — catches all files).
+            self.ssh_obj.exec_command(client, f"sudo rm -rf {mount_point}/*")
             self.ssh_obj.delete_files(client, [f"{self.log_path}/local-{clone_name}_fio*"])
             self.ssh_obj.delete_files(client, [f"{self.log_path}/{clone_name}_fio_iolog*"])
 
@@ -886,6 +900,7 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
             self.spdk_mem_thread.start()
 
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
+        self._compute_fio_size(extra_lvols=self.total_lvols)
         self.create_lvols_with_fio(self.total_lvols)
 
         sleep_n_sec(30)
@@ -900,11 +915,13 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                 )
 
             if iteration > 1:
+                self._compute_fio_size()
                 self.restart_fio(iteration=iteration)
 
             outage_events = self.perform_n_plus_k_outages()
 
             self.delete_random_lvols(5)
+            self._compute_fio_size(extra_lvols=5)
             self.create_lvols_with_fio(5)
             self.create_snapshots_and_clones()
             sleep_n_sec(280)

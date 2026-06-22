@@ -444,6 +444,30 @@ jobs:
               done"
           done
 
+      - name: Disable one PCIe device on a random storage node
+        if: matrix.test == 'DeviceAddAfterBootstrapDocker' || matrix.test == 'DeviceAddAfterBootstrapUnderLoadDocker'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          # Pick a random storage node
+          IFS=' ' read -ra NODES <<< "$STORAGE_PRIVATE_IPS"
+          RAND_IDX=$(( RANDOM % ${#NODES[@]} ))
+          TARGET_NODE="${NODES[$RAND_IDX]}"
+
+          # Pick the LAST PCIe address (0000:00:05.0) to avoid the first
+          # device which may hold the JM partition
+          TARGET_PCIE="0000:00:05.0"
+
+          echo "Disabling PCIe $TARGET_PCIE on node $TARGET_NODE"
+          sshpass -p "${SSH_PASSWORD}" ssh \
+            -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            "${SSH_USER}@${TARGET_NODE}" \
+            "echo 1 | sudo tee /sys/bus/pci/devices/${TARGET_PCIE}/remove"
+
+          # Export for the test to consume
+          echo "DISABLED_PCIE_NODE_IP=${TARGET_NODE}" >> "$GITHUB_ENV"
+          echo "DISABLED_PCIE_ADDR=${TARGET_PCIE}" >> "$GITHUB_ENV"
+
       - name: Write cluster security config
         shell: bash
         run: |
@@ -605,6 +629,14 @@ jobs:
           echo "TEST_END_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           echo "TEST_END_HUMAN=$(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> "$GITHUB_ENV"
 
+          # Log collection timeout: half the test runtime, minimum 30 minutes
+          if [ -n "${TEST_START_EPOCH:-}" ]; then
+            _elapsed=$(( $(date +%s) - TEST_START_EPOCH ))
+            LOG_COLLECT_TIMEOUT_MINS=$(( (_elapsed + 119) / 120 ))
+            [ "$LOG_COLLECT_TIMEOUT_MINS" -lt 30 ] && LOG_COLLECT_TIMEOUT_MINS=30
+            echo "LOG_COLLECT_TIMEOUT_MINS=$LOG_COLLECT_TIMEOUT_MINS" >> "$GITHUB_ENV"
+          fi
+
       # ============================================================
       # POST-TEST CLEANUP + LOG COLLECTION
       # ============================================================
@@ -687,8 +719,8 @@ jobs:
           done
 
       - name: Collect Graylog/OpenSearch logs
-        if: always()
-        timeout-minutes: 240
+        if: '!cancelled()'
+        timeout-minutes: ${{ fromJSON(env.LOG_COLLECT_TIMEOUT_MINS || '240') }}
         shell: bash
         run: |
           set +e
@@ -768,6 +800,7 @@ jobs:
           find sbcli/e2e/logs -name '*timing*.json' -exec cp {} "${artifact_dir}/" \; 2>/dev/null || true
           find sbcli/e2e/logs -name '*report*.json' -exec cp {} "${artifact_dir}/" \; 2>/dev/null || true
           find sbcli/e2e/logs -name '*.png' -exec cp {} "${artifact_dir}/" \; 2>/dev/null || true
+          cp sbcli/e2e/logs/test_summary.md "${artifact_dir}/test_summary.md" 2>/dev/null || true
           cp sbcli/e2e/output.log "${artifact_dir}/output.log" 2>/dev/null || true
           cat > "${artifact_dir}/meta.json" <<METAEOF
           {
@@ -965,6 +998,16 @@ jobs:
 
               if not pngs and not t.get("phases"):
                   lines.append(f"\n*No graphs or detailed timing data for {t['name']}.*\n")
+
+          # Include per-test detailed summary markdown (test_summary.md)
+          for t in tests:
+              td = test_dirs.get(t["name"])
+              if not td:
+                  continue
+              summary_md = td / "test_summary.md"
+              if summary_md.exists():
+                  lines.append(f"\n---\n")
+                  lines.append(summary_md.read_text())
 
           # Generate comparison bar chart (saved to file in artifacts + NFS)
           if len(tests) > 1:
