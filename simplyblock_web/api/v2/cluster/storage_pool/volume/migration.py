@@ -70,24 +70,19 @@ class _ContinueParams(BaseModel):
     deadline_seconds: int = 14400
 
 
-@instance_api.post('/continue', name='cluster:storage-pools:volumes:migrations:continue', status_code=200)
+@instance_api.post('/continue', name='cluster:storage-pools:volumes:migrations:continue', status_code=204)
 def continue_migration(cluster: Cluster, migration: Migration, parameters: _ContinueParams):
-    try:
-        migration_controller.start_migration(
-            migration_id=migration.uuid,
-            max_retries=parameters.max_retries,
-            deadline_seconds=parameters.deadline_seconds,
-        )
-    except ValueError as e:
-        raise HTTPException(400, str(e))
+    migration_controller.start_migration(
+        migration_id=migration.uuid,
+        max_retries=parameters.max_retries,
+        deadline_seconds=parameters.deadline_seconds,
+    )
     return Response(204)
 
 
-@instance_api.delete('/', name='cluster:storage-pools:volumes:migrations:cancel', status_code=200)
+@instance_api.delete('/', name='cluster:storage-pools:volumes:migrations:cancel', status_code=204)
 def cancel_migration(cluster: Cluster, migration: Migration):
-    ok, error = migration_controller.cancel_migration(migration.get_id())
-    if not ok:
-        raise HTTPException(400, error)
+    migration_controller.cancel_migration(migration.get_id())
     return Response(204)
 
 
