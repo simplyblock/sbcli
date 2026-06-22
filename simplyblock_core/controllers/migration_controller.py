@@ -308,10 +308,7 @@ def get_active_migration_on_node(cluster_id, node_id):
 
 def is_migration_active_on_node(node_id, cluster_id=None):
     """Convenience predicate used by snapshot_controller to block new snapshots."""
-    for m in db.get_migrations(cluster_id):
-        if m.source_node_id == node_id and m.is_active():
-            return True
-    return False
+    return get_active_migration_on_node(cluster_id, node_id) is not None
 
 
 def list_migrations(cluster_id=None, is_json=False):
