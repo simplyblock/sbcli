@@ -600,7 +600,7 @@ class CLIWrapperBase:
         except KeyError:
             return False
 
-        lvol_controller.delete_lvol(lvol, args.force)
+        lvol_controller.delete_lvol(lvol, force_delete=args.force)
         return True
 
     def volume__connect(self, sub_command, args):
