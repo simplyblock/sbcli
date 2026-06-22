@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from ipaddress import IPv4Address
 from typing import List, Literal, Tuple, Optional, cast
 from uuid import UUID
@@ -101,7 +101,7 @@ class ClusterDTO(BaseModel):
     distr_ndcs: int
     distr_npcs: int
     ha: bool
-    utliziation_critical: util.Percent
+    utilization_critical: util.Percent
     utilization_warning: util.Percent
     provisioned_capacity_critical: util.Unsigned
     provisioned_capacity_warning: util.Unsigned
@@ -126,7 +126,7 @@ class ClusterDTO(BaseModel):
             distr_npcs=model.distr_npcs,
             ha=model.ha_type == "ha",
             utilization_warning=model.cap_warn,
-            utliziation_critical=model.cap_crit,
+            utilization_critical=model.cap_crit,
             provisioned_capacity_warning=model.prov_cap_warn,
             provisioned_capacity_critical=model.prov_cap_crit,
             node_affinity=model.enable_node_affinity,
@@ -249,10 +249,12 @@ class SnapshotDTO(BaseModel):
     used_size: util.Unsigned
     migrating: bool
     lvol: Optional[util.UrlPath]
+    created_at: datetime
+
 
     @staticmethod
     def from_model(
-        model: SnapShot, request: Request, cluster_id, pool_id, volume_id=None
+        model: SnapShot, request: Request, cluster_id, pool_id
     ):
         from simplyblock_core.controllers import migration_controller
 
@@ -271,6 +273,7 @@ class SnapshotDTO(BaseModel):
             size=model.size,
             used_size=model.used_size,
             migrating=is_migrating,
+            created_at=datetime.fromtimestamp(model.created_at, tz=timezone.utc),
             lvol=str(
                 request.url_for(
                     "clusters:pools:volumes:detail",
@@ -279,7 +282,7 @@ class SnapshotDTO(BaseModel):
                     volume_id=model.lvol.get_id(),
                 )
             )
-            if model.lvol is not None and (volume_id == model.lvol.get_id())
+            if model.lvol is not None
             else None,
         )
 

@@ -1,20 +1,20 @@
-from typing import Annotated, List
+from typing import List
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel
 
-from simplyblock_core.models.lvol_migration import LVolMigration
+from simplyblock_core.controllers import migration_controller
+from simplyblock_core.db_controller import DBController
+from .._dependencies import Cluster, Migration
+from .._dtos import MigrationDTO
+from ..util import CreationResponseFormatParameter, creation_response
 
-from .cluster import Cluster
-from .dtos import MigrationDTO
-
-api = APIRouter(prefix='/migrations')
+api = APIRouter()
 
 
 @api.get('/', name='clusters:migrations:list')
 def list_migrations(cluster: Cluster) -> List[MigrationDTO]:
-    from simplyblock_core.db_controller import DBController
     db = DBController()
     migrations = db.get_migrations(cluster.get_id())
     return [MigrationDTO.from_model(m) for m in reversed(migrations)]
@@ -27,9 +27,8 @@ class _MigrateParams(BaseModel):
     deadline_seconds: int = 14400
 
 
-@api.post('/', name='clusters:migrations:create', status_code=201)
-def start_migration(cluster: Cluster, parameters: _MigrateParams):
-    from simplyblock_core.controllers import migration_controller
+@api.post('/', name='clusters:migrations:create', status_code=201, responses={201: {"content": None}})
+def start_migration(request: Request, cluster: Cluster, parameters: _MigrateParams, response_format: CreationResponseFormatParameter = "identifier") -> Response:
     migration_id, error = migration_controller.start_migration(
         parameters.volume_id,
         parameters.target_node_id,
@@ -38,25 +37,16 @@ def start_migration(cluster: Cluster, parameters: _MigrateParams):
     )
     if error:
         raise HTTPException(400, error)
-    return {"migration_id": migration_id}
+    return creation_response(
+        request, response_format,
+        entity_id=UUID(migration_id),
+        route_name='clusters:migrations:detail',
+        route_kwargs={'cluster_id': UUID(cluster.get_id()), 'migration_id': UUID(migration_id)},
+        get_full=lambda id: MigrationDTO.from_model(DBController().get_migration_by_id(str(id))),
+    )
 
 
 instance_api = APIRouter(prefix='/{migration_id}')
-
-
-def _lookup_migration(migration_id: UUID, cluster: Cluster) -> LVolMigration:
-    from simplyblock_core.db_controller import DBController
-    db = DBController()
-    try:
-        migration = db.get_migration_by_id(str(migration_id))
-    except KeyError as e:
-        raise HTTPException(404, str(e))
-    if migration.cluster_id != cluster.get_id():
-        raise HTTPException(404, f'Migration {migration_id} not found')
-    return migration
-
-
-Migration = Annotated[LVolMigration, Depends(_lookup_migration)]
 
 
 @instance_api.get('/', name='clusters:migrations:detail')
@@ -66,8 +56,10 @@ def get_migration(cluster: Cluster, migration: Migration) -> MigrationDTO:
 
 @instance_api.post('/cancel', name='clusters:migrations:cancel', status_code=200)
 def cancel_migration(cluster: Cluster, migration: Migration):
-    from simplyblock_core.controllers import migration_controller
     ok, error = migration_controller.cancel_migration(migration.get_id())
     if not ok:
         raise HTTPException(400, error)
     return {"status": "cancelled"}
+
+
+api.include_router(instance_api)

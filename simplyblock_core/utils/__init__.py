@@ -579,7 +579,7 @@ def generate_mask(cores):
     return f'0x{mask:X}'
 
 
-def calculate_pool_count(alceml_count, number_of_distribs, cpu_count, poller_count):
+def calculate_pool_count(alceml_count, number_of_distribs, cpu_count, poller_count, max_lvol=0):
     '''
     				        Small pool count				            Large pool count
     Create JM			    						                    32					                    For each JM
@@ -603,10 +603,14 @@ def calculate_pool_count(alceml_count, number_of_distribs, cpu_count, poller_cou
     '''
     poller_number = poller_count if poller_count else cpu_count
 
-    small_pool_count = 384 * (alceml_count + number_of_distribs + 3 + poller_count) + (
-            6 + alceml_count + number_of_distribs) * + poller_number * 127 + 384 + 128 * poller_number + constants.EXTRA_SMALL_POOL_COUNT
-    large_pool_count = 48 * (alceml_count + number_of_distribs + 3 + poller_count) + (
-            6 + alceml_count + number_of_distribs) * 32 + poller_number * 15 + 384 + 16 * poller_number + constants.EXTRA_LARGE_POOL_COUNT
+    # Small buffers are sized off the max number of subsystems (max_lvol /
+    # --max-subsys) on the node: a fixed base plus 16 small bufs per
+    # NS-add poll group (128) per subsystem.
+    small_pool_count = 100000 + max_lvol * 16 * 128
+    # Large buffers are effectively unused, so the computed count is reduced
+    # by 3x to reclaim huge-page memory.
+    large_pool_count = (48 * (alceml_count + number_of_distribs + 3 + poller_count) + (
+            6 + alceml_count + number_of_distribs) * 32 + poller_number * 15 + 384 + 16 * poller_number + constants.EXTRA_LARGE_POOL_COUNT) / 3
 
     return int(small_pool_count), int(large_pool_count)
 
@@ -911,8 +915,9 @@ def get_next_fw_port(cluster_id, mgmt_ip=None):
     return next_port
 
 
-def _get_all_nvmf_ports(cluster_id):
-    """Collect all NVMe-oF ports in use across the cluster (lvol, hublvol, device)."""
+def get_node_nvmf_ports(cluster_id):
+    """NVMe-oF ports persisted on the cluster's node records (lvol, hublvol,
+    device, rpc, per-lvstore)."""
     from simplyblock_core.db_controller import DBController
     db_controller = DBController()
     used_ports = set()
@@ -932,6 +937,45 @@ def _get_all_nvmf_ports(cluster_id):
                     if isinstance(p, int) and p > 0:
                         used_ports.add(p)
     return used_ports
+
+
+def get_nvmf_base_port(cluster_id):
+    """Base of the unified NVMe-oF port pool for the cluster."""
+    nvmf_base, _, _ = _get_cluster_port_config(cluster_id)
+    return nvmf_base
+
+
+def _get_active_port_reservations(cluster_id):
+    """Ports reserved by in-flight node adds that have not yet persisted their
+    node record. Stale (abandoned) reservations are ignored by TTL.
+
+    Best-effort hardening: the durable record of a port in use is the node
+    record itself, so if the reservation read fails we fall back to node-only
+    ports rather than break allocation."""
+    import time as _time
+    from simplyblock_core.db_controller import DBController
+    from simplyblock_core.models.cluster import PortReservation
+    db_controller = DBController()
+    reserved = set()
+    now = int(_time.time())
+    try:
+        for res in PortReservation().read_from_db(db_controller.kv_store, id=cluster_id):
+            if res.cluster_id != cluster_id:
+                continue
+            if (now - res.created_at) > constants.PORT_RESERVATION_TTL_SEC:
+                continue
+            reserved.add(res.port)
+    except Exception:
+        return set()
+    return reserved
+
+
+def _get_all_nvmf_ports(cluster_id):
+    """Collect all NVMe-oF ports in use across the cluster (lvol, hublvol,
+    device), including ports reserved by in-flight node adds whose node record
+    isn't persisted yet — so neither a concurrent node add nor an lvstore/lvol
+    allocation reuses a port a node-add is mid-flight on."""
+    return get_node_nvmf_ports(cluster_id) | _get_active_port_reservations(cluster_id)
 
 
 def get_next_nvmf_port(cluster_id):
@@ -1792,7 +1836,8 @@ def regenerate_config(new_config, old_config, force=False):
         small_pool_count, large_pool_count = calculate_pool_count(number_of_alcemls + 1, 2 * number_of_distribs,
                                                                   len(isolated_cores),
                                                                   number_of_poller_cores or len(
-                                                                      isolated_cores), )
+                                                                      isolated_cores),
+                                                                  old_config["nodes"][i]["max_lvol"])
         minimum_hp_memory = calculate_minimum_hp_memory(small_pool_count, large_pool_count,
                                                         old_config["nodes"][i]["max_lvol"],
                                                         old_config["nodes"][i]["max_size"], len(isolated_cores))
@@ -1949,7 +1994,8 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
             small_pool_count, large_pool_count = calculate_pool_count(number_of_alcemls, 2 * number_of_distribs,
                                                                       len(core_group["isolated"]),
                                                                       number_of_poller_cores or len(
-                                                                          core_group["isolated"]))
+                                                                          core_group["isolated"]),
+                                                                      max_lvol)
             minimum_hp_memory = calculate_minimum_hp_memory(small_pool_count, large_pool_count, max_lvol,
                                                             max_prov, len(core_group["isolated"]))
             node_info["small_pool_count"] = small_pool_count
@@ -3353,7 +3399,8 @@ def calculate_hp_only(max_lvol, number_of_devices, sockets_to_use, nodes_per_soc
             small_pool_count, large_pool_count = calculate_pool_count(number_of_alcemls +1, 2 * number_of_distribs,
                                                                       len(core_group["isolated"]),
                                                                       number_of_poller_cores or len(
-                                                                          core_group["isolated"]))
+                                                                          core_group["isolated"]),
+                                                                      max_lvol)
             minimum_hp_memory += calculate_minimum_hp_memory(small_pool_count, large_pool_count, max_lvol,
                                                             0, len(core_group["isolated"])) + 1000000000
 

@@ -1,21 +1,21 @@
 from threading import Thread
-from typing import Annotated, List, Optional
+from typing import List, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.controllers import tasks_controller
 from simplyblock_core import storage_node_ops
-from simplyblock_core.models.storage_node import StorageNode as StorageNodeModel
 
-from . import util as util
-from .cluster import Cluster
-from .dtos import StorageNodeDTO
+from ... import util as util
+from ..._dependencies import Cluster, StorageNode
+from .device import api as device_api
+from ..._dtos import StorageNodeDTO, TaskDTO
 
 
-api = APIRouter(prefix='/storage-nodes')
+api = APIRouter()
 db = DBController()
 
 
@@ -56,7 +56,7 @@ class StorageNodeParams(BaseModel):
 
 
 @api.post('/', name='clusters:storage-nodes:create', status_code=201, responses={201: {"content": None}})
-def add(cluster: Cluster, parameters: StorageNodeParams):
+def add(request: Request, cluster: Cluster, parameters: StorageNodeParams, response_format: util.CreationResponseFormatParameter = "identifier"):
     task_id_or_false = tasks_controller.add_node_add_task(
         cluster.get_id(),
         {
@@ -86,23 +86,17 @@ def add(cluster: Cluster, parameters: StorageNodeParams):
     )
     if not task_id_or_false:
         raise ValueError('Failed to create add-node task')
-    return task_id_or_false
+
+    return util.creation_response(
+        request, response_format,
+        entity_id=UUID(task_id_or_false),
+        route_name='clusters:tasks:detail',
+        route_kwargs={'cluster_id': UUID(cluster.get_id()), 'task_id': UUID(task_id_or_false)},
+        get_full=lambda id: TaskDTO.from_model(db.get_task_by_id(str(id))),
+    )
 
 
 instance_api = APIRouter(prefix='/{storage_node_id}')
-
-
-def _lookup_storage_node(storage_node_id: UUID, cluster: Cluster) -> StorageNodeModel:
-    try:
-        storage_node = db.get_storage_node_by_id(str(storage_node_id))
-    except KeyError as e:
-        raise HTTPException(404, str(e))
-    if storage_node.cluster_id != cluster.get_id():
-        raise HTTPException(404, f'StorageNode {storage_node_id} not found')
-    return storage_node
-
-
-StorageNode = Annotated[StorageNodeModel, Depends(_lookup_storage_node)]
 
 
 @instance_api.get('/', name='clusters:storage-nodes:detail')
@@ -135,7 +129,6 @@ def delete(
 
 @instance_api.get('/capacity', name='clusters:storage-nodes:capacity')
 def capacity(cluster: Cluster, storage_node: StorageNode, history: Optional[str] = None):
-    storage_node = storage_node
     records_or_false = storage_node_ops.get_node_iostats_history(
         storage_node.get_id(),
         history,
@@ -149,7 +142,6 @@ def capacity(cluster: Cluster, storage_node: StorageNode, history: Optional[str]
 
 @instance_api.get('/iostats', name='clusters:storage-nodes:iostats')
 def iostats(cluster: Cluster, storage_node: StorageNode, history: Optional[str] = None):
-    storage_node = storage_node
     records_or_false = storage_node_ops.get_node_iostats_history(
             storage_node.get_id(),
             history,
@@ -163,7 +155,6 @@ def iostats(cluster: Cluster, storage_node: StorageNode, history: Optional[str] 
 
 @instance_api.get('/nics', name='clusters:storage-nodes:nics:list')
 def nics(cluster: Cluster, storage_node: StorageNode):
-    storage_node = storage_node
     return [
         {
             "ID": nic.get_id(),
@@ -178,7 +169,6 @@ def nics(cluster: Cluster, storage_node: StorageNode):
 
 @instance_api.get('/nics/{nic_id}/iostats', name='clusters:storage-nodes:nics:iostats')
 def nic_iostats(cluster: Cluster, storage_node: StorageNode, nic_id: str):
-    storage_node = storage_node
     nic = next((
         nic
         for nic
@@ -209,7 +199,6 @@ def suspend(cluster: Cluster, storage_node: StorageNode, force: bool = False) ->
 
 @instance_api.post('/resume', name='clusters:storage-nodes:resume', status_code=204, responses={204: {"content": None}})
 def resume(cluster: Cluster, storage_node: StorageNode) -> Response:
-    storage_node = storage_node
     if not storage_node_ops.resume_storage_node(storage_node.get_id()):
         raise ValueError('Failed to resume storage node')
 
@@ -242,7 +231,6 @@ class _RestartParams(BaseModel):
 @instance_api.post('/start', name='clusters:storage-nodes:start', status_code=202, responses={202: {"content": None}})  # Same as restart for now
 @instance_api.post('/restart', name='clusters:storage-nodes:restart', status_code=202, responses={202: {"content": None}})
 def restart(cluster: Cluster, storage_node: StorageNode, parameters: _RestartParams) -> Response:
-    storage_node = storage_node
     Thread(
         target=storage_node_ops.restart_storage_node,
         kwargs={
@@ -254,3 +242,7 @@ def restart(cluster: Cluster, storage_node: StorageNode, parameters: _RestartPar
     ).start()
 
     return Response(status_code=202)  # FIXME: Provide URL for checking task status
+
+
+instance_api.include_router(device_api, prefix='/devices')
+api.include_router(instance_api)

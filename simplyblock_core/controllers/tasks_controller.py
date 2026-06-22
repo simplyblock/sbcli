@@ -56,7 +56,7 @@ def claim_task(task, owner=None):
     now = str(datetime.datetime.now(datetime.timezone.utc))
 
     def _mutate(t):
-        if t.status == JobSchedule.STATUS_DONE or t.canceled:
+        if t.status == JobSchedule.STATUS_DONE:
             return False  # not claimable; decision stays False
         if t.owner and t.owner != owner and not _task_lease_is_stale(t):
             return False  # owned by another live host

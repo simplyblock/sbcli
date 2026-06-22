@@ -15,32 +15,57 @@ logger = utils.get_logger(__name__)
 utils.init_sentry_sdk(__name__)
 
 def set_lvol_status(lvol, status):
-    if lvol.status != status:
-        lvol = db.get_lvol_by_id(lvol.get_id())
-        old_status = lvol.status
-        lvol.status = status
-        lvol.write_to_db()
-        lvol_events.lvol_status_change(lvol, lvol.status, old_status, caused_by="monitor")
+    # Atomic compare-and-set: a full read-modify-write would clobber a concurrent
+    # change to another LVol field (e.g. lvol_stat_collector clearing io_error,
+    # or a deletion_status update) — the same lost-update class as incident
+    # 2026-06-18. Mutate only status on the freshly-read row.
+    if lvol.status == status:
+        return
+    outcome = {"old": None, "changed": False}
+
+    def _mut(x):
+        if x.status == status:
+            return False
+        outcome["old"] = x.status
+        outcome["changed"] = True
+        x.status = status
+        return True
+
+    lvol = db.atomic_update(db.get_lvol_by_id(lvol.get_id()), _mut)
+    if lvol is not None and outcome["changed"]:
+        lvol_events.lvol_status_change(lvol, lvol.status, outcome["old"], caused_by="monitor")
 
 
 def set_lvol_health_check(lvol, health_check_status):
     lvol = db.get_lvol_by_id(lvol.get_id())
     if lvol.health_check == health_check_status:
         return
-    old_status = lvol.health_check
-    lvol.health_check = health_check_status
-    lvol.updated_at = str(datetime.now())
-    lvol.write_to_db()
-    lvol_events.lvol_health_check_change(lvol, lvol.health_check, old_status, caused_by="monitor")
+    now = str(datetime.now())
+    outcome = {"old": None, "changed": False}
+
+    def _mut(x):
+        if x.health_check == health_check_status:
+            return False
+        outcome["old"] = x.health_check
+        outcome["changed"] = True
+        x.health_check = health_check_status
+        x.updated_at = now
+        return True
+
+    lvol = db.atomic_update(lvol, _mut)
+    if lvol is not None and outcome["changed"]:
+        lvol_events.lvol_health_check_change(lvol, lvol.health_check, outcome["old"], caused_by="monitor")
 
 
 def set_snapshot_health_check(snap, health_check_status):
     snap = db.get_snapshot_by_id(snap.get_id())
     if snap.health_check == health_check_status:
         return
-    snap.health_check = health_check_status
-    snap.updated_at = str(datetime.now())
-    snap.write_to_db()
+    now = str(datetime.now())
+    def _apply_health_check(s, v=health_check_status, t=now):
+        s.health_check = v
+        s.updated_at = t
+    db.atomic_update(snap, _apply_health_check)
 
 
 lvol_del_start_time = 0.0
@@ -179,9 +204,8 @@ def process_lvol_delete_finish(lvol):
 
 
 def process_lvol_delete_try_again(lvol):
-    lvol = db.get_lvol_by_id(lvol.get_id())
-    lvol.deletion_status = ""
-    lvol.write_to_db()
+    db.atomic_update(db.get_lvol_by_id(lvol.get_id()),
+                     lambda x: setattr(x, "deletion_status", ""))
 
 
 def check_node(snode, all_lvols):
@@ -310,17 +334,15 @@ def check_node(snode, all_lvols):
             elif ret == 4:  # No async delete request exists for this lvol
                 logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
                 logger.error("No async delete request exists for this lvol")
-                lvol = db.get_lvol_by_id(lvol.get_id())
-                lvol.io_error = True
-                lvol.write_to_db()
+                lvol = db.atomic_update(db.get_lvol_by_id(lvol.get_id()),
+                                        lambda x: setattr(x, "io_error", True))
                 set_lvol_status(lvol, LVol.STATUS_OFFLINE)
 
             elif ret == -1:  # Operation not permitted
                 logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
                 logger.error("Operation not permitted")
-                lvol = db.get_lvol_by_id(lvol.get_id())
-                lvol.io_error = True
-                lvol.write_to_db()
+                lvol = db.atomic_update(db.get_lvol_by_id(lvol.get_id()),
+                                        lambda x: setattr(x, "io_error", True))
                 set_lvol_status(lvol, LVol.STATUS_OFFLINE)
 
             elif ret == -2:  # No such file or directory

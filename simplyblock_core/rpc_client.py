@@ -240,10 +240,23 @@ class RPCClient:
             "model_number": model_number}
         return self._request("nvmf_create_subsystem", params)
 
-    def keyring_file_add_key(self, name, path):
-        """Register a file-based key in SPDK's keyring by path."""
-        params = {"name": name, "path": path}
-        return self._request("keyring_file_add_key", params)
+    def keyring_file_add_key(self, name: str, path: str, *, allow_existing: bool = False):
+        """Register a file-based key in SPDK's keyring by path.
+
+        Args:
+            name: Key name for the SPDK keyring.
+            path: Path to the key file on the storage node.
+            allow_existing: When True, silently succeed if the key is already
+                registered (SPDK errno -17). When False (default) an existing
+                key raises RPCException.
+        """
+        try:
+            return self._request3("keyring_file_add_key", name=name, path=path)
+        except RPCException as e:
+            if allow_existing and e.code == -17:
+                logger.debug("Key %s already in SPDK keyring, reusing", name)
+                return None
+            raise
 
     def keyring_file_remove_key(self, name):
         """Remove a key from SPDK's keyring."""
@@ -295,7 +308,7 @@ class RPCClient:
         params = {
             "trtype": trtype,
             "max_io_qpairs_per_ctrlr": constants.QPAIR_COUNT,
-            "max_queue_depth": 256,
+            "max_queue_depth": 128,
             "abort_timeout_sec": 5,
             "zcopy": True,
             "in_capsule_data_size": 8192,
@@ -496,7 +509,7 @@ class RPCClient:
         params = {"name": device_name}
         return self._request("bdev_nvme_reset_controller", params)
 
-    def create_lvstore(self, name, bdev_name, cluster_sz, clear_method, num_md_pages_per_cluster_ratio=50):
+    def create_lvstore(self, name, bdev_name, cluster_sz, clear_method, num_md_pages_per_cluster_ratio=1):
         params = {
             "bdev_name": bdev_name,
             "lvs_name": name,
@@ -524,9 +537,12 @@ class RPCClient:
             params["uuid"] = uuid
         return self._request("bdev_lvol_create", params)
 
-    def delete_lvol(self, name, del_async=False):
-        params = {"name": name,
-                  "sync": del_async}
+    def delete_lvol(self, name, del_async=False, special_delete=False):
+        params = {
+            "name": name,
+            "sync": del_async,
+            "special_delete": special_delete,
+        }
         return self._request2("bdev_lvol_delete", params)
 
     def get_bdevs(self, name=None):
@@ -1393,10 +1409,20 @@ class RPCClient:
         }
         return self._request("bdev_lvol_set_lvs_read_only", params)
 
-    def bdev_lvol_create_hublvol(self, lvs):
-        return self._request('bdev_lvol_create_hublvol', {
+    def bdev_lvol_create_hublvol(self, lvs, name=None):
+        # Only send "name" when explicitly requested. Older data-plane SPDK
+        # images (pre 3fcea32f8, 2026-06-16) have no "name" decoder, and
+        # spdk_json_decode_object rejects unknown keys outright — sending it
+        # unconditionally fails bdev_lvol_create_hublvol on those images, so
+        # the hublvol bdev (and its NVMe-oF listener) never gets created on
+        # activate. SPDK itself defaults name to "hublvol" when omitted, so
+        # leaving it out is behaviour-identical on new images too.
+        params = {
             "uuid" if utils.UUID_PATTERN.match(lvs) else "lvs_name": lvs,
-        })
+        }
+        if name is not None:
+            params["name"] = name
+        return self._request('bdev_lvol_create_hublvol', params)
 
     def bdev_lvol_delete_hublvol(self, lvs):
         return self._request('bdev_lvol_delete_hublvol', {

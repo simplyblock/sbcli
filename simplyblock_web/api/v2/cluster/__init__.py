@@ -2,19 +2,25 @@ from threading import Thread
 from typing import Annotated, List, Literal, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 from pydantic.networks import AnyUrl, UrlConstraints
 
 from simplyblock_core.db_controller import DBController
-from simplyblock_core.models.cluster import Cluster as ClusterModel, HashicorpVaultSettings as ModelVaultSettings
+from simplyblock_core.models.cluster import HashicorpVaultSettings as ModelVaultSettings
 from simplyblock_core import cluster_ops
 
-from .dtos import ClusterDTO
-from . import util as util
+from .._dependencies import Cluster
+from .backup import api as backup_api
+from .migration import api as migration_api
+from .storage_pool import api as pool_api
+from .storage_node import api as storage_node_api
+from .task import api as task_api
+from .._dtos import ClusterDTO
+from .. import util as util
 
 
-api = APIRouter(prefix='/clusters')
+api = APIRouter()
 db = DBController()
 
 
@@ -54,8 +60,8 @@ class ClusterParams(BaseModel):
     page_size_in_blocks: int = Field(2097152, gt=0)
     cap_warn: util.Percent = 0
     cap_crit: util.Percent = 0
-    prov_cap_warn: util.Percent = 0
-    prov_cap_crit: util.Percent = 0
+    prov_cap_warn: util.Unsigned = 0
+    prov_cap_crit: util.Unsigned = 0
     distr_ndcs: int = 1
     distr_npcs: int = 1
     distr_bs: int = 4096
@@ -95,7 +101,7 @@ def list() -> List[ClusterDTO]:
 
 
 @api.post('/', name='clusters:create', status_code=201, responses={201: {"content": None}})
-def add(parameters: ClusterParams):
+def add(request: Request, parameters: ClusterParams, response_format: util.CreationResponseFormatParameter = "full"):
     try:
         params = parameters.model_dump(exclude_none=True)
         npcs = params.get('distr_npcs', 1)
@@ -109,20 +115,17 @@ def add(parameters: ClusterParams):
         raise ValueError('Failed to create cluster')
 
     cluster = db.get_cluster_by_id(cluster_id_or_false)
-    return ClusterDTO.from_model(cluster)
+
+    return util.creation_response(
+        request, response_format,
+        entity_id=UUID(cluster.get_id()),
+        route_name='clusters:detail',
+        route_kwargs={'cluster_id': UUID(cluster.get_id())},
+        get_full=lambda _: ClusterDTO.from_model(cluster),
+    )
 
 
 instance_api = APIRouter(prefix='/{cluster_id}')
-
-
-def _lookup_cluster(cluster_id: UUID):
-    try:
-        return db.get_cluster_by_id(str(cluster_id))
-    except KeyError as e:
-        raise HTTPException(404, str(e))
-
-
-Cluster = Annotated[ClusterModel, Depends(_lookup_cluster)]
 
 
 @instance_api.get('/', name='clusters:detail')
@@ -239,3 +242,11 @@ def update_cluster( cluster: Cluster, parameters: _UpdateParams) -> Response:
         restart=parameters.restart
     )
     return Response(status_code=204)
+
+
+instance_api.include_router(storage_node_api, prefix='/storage-nodes')
+instance_api.include_router(task_api, prefix='/tasks')
+instance_api.include_router(pool_api, prefix='/storage-pools')
+instance_api.include_router(backup_api, prefix='/backups')
+instance_api.include_router(migration_api, prefix='/migrations')
+api.include_router(instance_api)

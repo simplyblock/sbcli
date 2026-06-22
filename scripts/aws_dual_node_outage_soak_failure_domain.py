@@ -86,17 +86,19 @@ ROLE_CATEGORIES = ("unrelated", "primary_tertiary", "primary_secondary")
 
 
 def parse_args():
-    default_metadata = Path(__file__).with_name("cluster_metadata.json")
+    default_metadata = Path(__file__).with_name("cluster_metadata_failure_domain.json")
     default_log_dir = Path(__file__).parent
 
     parser = argparse.ArgumentParser(
         description=(
-            "Run a long fio soak against an AWS cluster while cycling random "
-            "two-node outages with mixed outage methods. Unlike the base mixed "
-            "soak, fio is kept running across outage cycles; in parallel, a "
-            "background thread randomly churns one volume at a time (stop fio "
-            "-> unmount -> disconnect -> delete -> recreate -> connect -> format "
-            "-> mount -> restart fio) every 3-20 minutes."
+            "Run a long fio soak against a FAILURE-DOMAIN AWS cluster while "
+            "cycling failure-domain-aware host-reboot outages. Two scenario "
+            "types only: (a) reboot every host in one failure domain, then wait "
+            "for cluster rebalancing to complete; (b) reboot one random node in "
+            "each failure domain, then settle 60s. fio is kept running across "
+            "outages; in parallel, a background thread randomly churns one "
+            "volume at a time (stop fio -> unmount -> disconnect -> delete -> "
+            "recreate -> connect -> format -> mount -> restart fio)."
         )
     )
     parser.add_argument("--metadata", default=str(default_metadata), help="Path to cluster metadata JSON.")
@@ -558,6 +560,9 @@ class SoakRunner:
             self.methods = filtered
         self.node_hosts = {}  # uuid -> RemoteHost (private_ip of storage node)
         self.node_ip_map = self._build_node_ip_map()
+        # {failure_domain_id: [node_uuid, ...]} — populated in run() from the
+        # mgmt DB; drives the failure-domain outage scenarios.
+        self.failure_domains = {}
         # Serializes outage iterations and churn cycles. Both mutate cluster
         # state (outage takes nodes down; churn deletes/recreates volumes), so
         # they must not overlap. Held during run_outage_pair / check_fio /
@@ -738,28 +743,21 @@ class SoakRunner:
         relaxes this for inter-iteration sync points (no outage in flight):
         an unaffected node that is merely TRANSIENT_NODE_STATUSES (the CP is
         autonomously restarting / shutting it down) is waited out instead of
-        aborting the soak, mirroring wait_for_outage_ready.
-
-        A 'down' status is treated as online here. Restarting one node can
-        knock a peer 'down' (NVMe reconnect / CP re-sync), which by itself is
-        not a reason to abort the soak — if it actually breaks I/O, fio will
-        surface the error anyway. So 'down' counts neither as unaffected_bad
-        nor as keeping the cluster from being "all online".
+        aborting the soak, mirroring wait_for_outage_ready. A genuinely
+        offline/unknown unaffected node still raises immediately.
         """
         timeout = timeout or self.args.restart_timeout
         expected = self.args.expected_node_count
         target_nodes = set(target_nodes or [])
         started = time.time()
-        # Statuses that do not, on their own, fail the health check.
-        online_ok = ("online", "down")
         while time.time() - started < timeout:
             self.assert_cluster_not_suspended()
             nodes = self.ensure_expected_nodes()
             statuses = {node["uuid"]: node["status"] for node in nodes}
-            offline = [uuid for uuid, status in statuses.items() if status not in online_ok]
+            offline = [uuid for uuid, status in statuses.items() if status != "online"]
             unaffected_bad = [
                 uuid for uuid, status in statuses.items()
-                if uuid not in target_nodes and status not in online_ok
+                if uuid not in target_nodes and status != "online"
             ]
             if tolerate_transient:
                 unaffected_bad = [
@@ -1129,16 +1127,10 @@ class SoakRunner:
                 f"Continuing with {successful_connects}/{len(connect_commands)} connected paths "
                 f"for {volume['volume_id']}"
             )
-        # Key all per-volume paths on the unique volume_name (it carries the
-        # churn counter, e.g. ..._v2_c7), never on the index alone. A churn
-        # reuses the old volume's index, so an index-based mount point would
-        # remount the new volume onto the old one's directory — which may
-        # still be pinned by a lazily-detached, stuck-I/O umount. A fresh
-        # mount point per volume sidesteps that entirely.
-        volume["mount_point"] = posixpath.join(mount_root, volume["volume_name"])
-        volume["fio_log"] = posixpath.join(mount_root, f"fio_{volume['volume_name']}.log")
-        volume["fio_stderr"] = posixpath.join(mount_root, f"fio_{volume['volume_name']}.stderr")
-        volume["rc_file"] = posixpath.join(mount_root, f"fio_{volume['volume_name']}.rc")
+        volume["mount_point"] = posixpath.join(mount_root, f"vol{volume['index']}")
+        volume["fio_log"] = posixpath.join(mount_root, f"fio_vol{volume['index']}.log")
+        volume["fio_stderr"] = posixpath.join(mount_root, f"fio_vol{volume['index']}.stderr")
+        volume["rc_file"] = posixpath.join(mount_root, f"fio_vol{volume['index']}.rc")
         find_and_mount = (
             "set -euo pipefail\n"
             f"dev=$(readlink -f /dev/disk/by-id/*{volume['volume_id']}* | head -n 1)\n"
@@ -1512,12 +1504,9 @@ class SoakRunner:
         fio (and its launcher shell, whose cwd is the mountpoint) was
         already SIGKILLed by ``_stop_fio_for_job``, but a SIGKILLed fio
         with an in-flight O_DIRECT I/O can linger in D-state and keep the
-        mount busy. Retry a plain ``umount`` (evicting stragglers with
-        ``fuser`` between tries) and verify with ``mountpoint``. We avoid a
-        pre-``sync``: a global ``sync`` can block on every dirty mount on the
-        host and may itself hang behind the very stuck target I/O we are
-        trying to work around; ``umount`` flushes this filesystem's own
-        metadata regardless.
+        mount busy. Retry a *clean* umount (``sync`` + ``umount``, evicting
+        stragglers with ``fuser`` between tries) and verify with
+        ``mountpoint``.
 
         We deliberately do NOT fall back to lazy umount on the happy path:
         fio uses ``--direct=1`` so there is no bulk dirty data, but the XFS
@@ -1542,19 +1531,15 @@ class SoakRunner:
         mount_point = volume.get("mount_point")
         if not mount_point:
             return True
-        # $1 = mountpoint. Bounded retry: umount, evicting any straggler
-        # holders (fio in D-state, launcher shell) between tries. We do NOT
-        # sync first: a global `sync` blocks on every dirty mount on the box
-        # (including other soak volumes mid-fio) and, worse, can itself hang
-        # behind a stuck target I/O on this very volume — turning a localized
-        # umount problem into a stall of the whole churn cycle. umount already
-        # flushes this filesystem's own metadata, which is all we need here.
+        # $1 = mountpoint. Bounded retry: sync + umount, evicting any
+        # straggler holders (fio in D-state, launcher shell) between tries.
         # Never lazy-umount here on success; only as a flagged last resort.
         umount_script = (
             "set +e\n"
             'mp="$1"\n'
             'mountpoint -q "$mp" || exit 0\n'
             "for i in $(seq 1 6); do\n"
+            "  sync\n"
             '  if sudo umount "$mp" 2>/dev/null; then exit 0; fi\n'
             '  sudo fuser -km "$mp" 2>/dev/null\n'
             "  sleep 2\n"
@@ -2300,33 +2285,130 @@ class SoakRunner:
             )
         return random.choice(candidates)
 
-    def build_scenarios(self, nodes):
-        """Enumerate role categories × P(M,2) ordered method pairs.
+    # ----- failure-domain discovery & outage ------------------------------
 
-        Returns a list of dicts with keys: method_a, method_b, category.
-        The actual (a, b) node pair is rolled at iteration time via
-        ``pick_pair_for_category`` so the soak hits many concrete pairs per
-        group while keeping the relative ring-distance fixed per category.
-        Same-method method pairs are NOT included — ordered distinct pairs
-        only, per itertools.permutations(methods, 2).
+    def discover_failure_domains(self):
+        """Return {failure_domain_id: [node_uuid, ...]} from the mgmt DB.
+
+        Only physical storage nodes tagged with a failure domain (>= 0) are
+        included — i.e. the nodes added with ``--failure-domain`` against a
+        cluster created with ``--enable-failure-domain``. Queried once at
+        startup; node UUIDs are stable across the soak.
         """
-        _ = nodes  # unused: pair picking happens at iteration time
-        scenarios = []
-        for category in ROLE_CATEGORIES:
-            for m_a, m_b in itertools.permutations(self.methods, 2):
-                scenarios.append({
-                    "method_a": m_a,
-                    "method_b": m_b,
-                    "category": category,
-                })
-        method_pair_count = len(self.methods) * (len(self.methods) - 1)
+        script = (
+            "import json; "
+            "from simplyblock_core import db_controller; "
+            "db = db_controller.DBController(); "
+            "nodes = db.get_storage_nodes(); "
+            "out = {}; "
+            "[out.setdefault(getattr(n, 'failure_domain', -1), []).append(n.get_id()) "
+            "for n in nodes "
+            "if getattr(n, 'failure_domain', -1) >= 0 "
+            "and not getattr(n, 'is_secondary_node', False)]; "
+            "print(json.dumps(out))"
+        )
+        _, stdout_text, _ = self.mgmt.run(
+            f"sudo python3 -c {shlex.quote(script)}",
+            timeout=60,
+            label="discover failure domains",
+        )
+        for line in reversed((stdout_text or "").strip().splitlines()):
+            line = line.strip()
+            if line.startswith("{"):
+                try:
+                    raw = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                # JSON object keys are strings; coerce failure-domain ids to int.
+                return {int(k): v for k, v in raw.items()}
+        raise TestRunError(
+            f"Failed to parse failure-domain JSON from mgmt; stdout was:\n{stdout_text}"
+        )
+
+    def _validate_failure_domains(self):
+        """The two scenario types need >= 2 non-empty failure domains."""
+        if not self.failure_domains:
+            raise TestRunError(
+                "No failure domains discovered. The cluster must be created with "
+                "--enable-failure-domain and each node added with --failure-domain "
+                "<id> (see setup_perf_test_failure_domain.py)."
+            )
+        if len(self.failure_domains) < 2:
+            raise TestRunError(
+                "Need >= 2 failure domains for the one-per-FD scenario; found "
+                f"{sorted(self.failure_domains)}"
+            )
+        for fd, uuids in self.failure_domains.items():
+            if not uuids:
+                raise TestRunError(f"Failure domain {fd} has no nodes")
+
+    def build_scenarios(self, nodes):
+        """Build the failure-domain outage scenario list.
+
+        Exactly two scenario *types*, per the test design:
+          (a) ``same_fd``    — reboot every host in one failure domain. One
+              such scenario per failure domain (so both domains get exercised).
+              Followed by a full rebalance-completion wait.
+          (b) ``one_per_fd`` — reboot one random node in each failure domain.
+              Followed by a fixed 60s settle (no rebalance wait needed).
+
+        The concrete node(s) for ``one_per_fd`` are rolled randomly at
+        iteration time in ``_select_outage_targets``.
+        """
+        _ = nodes  # node set comes from the discovered failure-domain map
+        fds = sorted(self.failure_domains)
+        scenarios = [{"type": "same_fd", "fd": fd} for fd in fds]
+        scenarios.append({"type": "one_per_fd"})
         self.logger.log(
-            f"Built {len(scenarios)} scenarios: "
-            f"{len(ROLE_CATEGORIES)} role categories × "
-            f"P({len(self.methods)},2)={method_pair_count} ordered method pairs "
-            f"(node pair rolled randomly per scenario)"
+            f"Built {len(scenarios)} failure-domain scenarios: "
+            f"{len(fds)} same-FD whole-domain reboots (domains {fds}) "
+            f"+ 1 one-per-FD reboot"
         )
         return scenarios
+
+    def _select_outage_targets(self, scenario):
+        """Resolve a scenario to the concrete list of node UUIDs to reboot."""
+        fd_map = self.failure_domains
+        if scenario["type"] == "same_fd":
+            return list(fd_map.get(scenario["fd"], []))
+        if scenario["type"] == "one_per_fd":
+            targets = []
+            for _fd, uuids in sorted(fd_map.items()):
+                if uuids:
+                    targets.append(random.choice(uuids))
+            return targets
+        raise TestRunError(f"Unknown scenario type: {scenario.get('type')}")
+
+    def run_fd_outage(self, scenario, targets):
+        """Reboot every target host (host_reboot = auto-recover, no sbctl
+        restart), confirm the CP observes them leaving 'online', then wait for
+        all targets to come back online.
+
+        The post-outage stabilization (rebalance-wait vs 60s settle) is the
+        caller's responsibility — it differs per scenario type."""
+        stype = scenario["type"]
+        self.logger.log(
+            f"FD outage [{stype}]: rebooting {len(targets)} host(s): "
+            f"{[t[:8] for t in targets]}"
+        )
+        # Fire the reboots back-to-back; each _host_reboot backgrounds a
+        # `reboot -f` and returns immediately, so the hosts go down together.
+        for node_id in targets:
+            self._host_reboot(node_id)
+
+        # Make sure the CP actually observed each rebooted node leaving
+        # 'online' before we wait for it to come back — otherwise a stale
+        # sn-list poll can report it still online and we return too early.
+        for node_id in targets:
+            observed = self.wait_node_leaves_online(node_id, timeout=90)
+            if not observed:
+                self.logger.log(
+                    f"WARN: CP never observed {node_id[:8]} offline after "
+                    f"host_reboot within 90s; sn-list may be stale"
+                )
+
+        wait_timeout = max(self.args.restart_timeout, self.args.auto_recover_wait)
+        self.wait_for_all_online(target_nodes=set(targets), timeout=wait_timeout)
 
     def run(self):
         self.ensure_prerequisites()
@@ -2357,16 +2439,23 @@ class SoakRunner:
         # tearing down the rest.
         self.start_fio(self.volumes)
 
-        # Pin the topology once, before any outages. Leader takeover during
-        # the soak can permanently shift role assignments, but the 4
-        # representative pairs are fixed at startup so each cycle targets
-        # the same pairs for the same role categories.
+        # Pin the topology once (informational logging) and discover the
+        # failure-domain layout, which drives the outage scenarios. Node UUIDs
+        # are stable across the soak even if leader takeover shifts roles.
         self.topology = self.discover_topology()
         self.logger.log(f"Pinned topology: {json.dumps(self.topology, sort_keys=True)}")
-        self._validate_topology_for_categories()
+        self.failure_domains = self.discover_failure_domains()
+        self.logger.log(
+            "Failure domains: "
+            + json.dumps(
+                {fd: [u[:8] for u in us] for fd, us in sorted(self.failure_domains.items())},
+                sort_keys=True,
+            )
+        )
+        self._validate_failure_domains()
         self.scenarios = self.build_scenarios(nodes)
         if not self.scenarios:
-            raise TestRunError("No outage scenarios built; method/node list empty")
+            raise TestRunError("No outage scenarios built; failure-domain map empty")
 
         start_at = max(1, self.args.start_at)
         if start_at > len(self.scenarios):
@@ -2427,24 +2516,31 @@ class SoakRunner:
                 # NIC chaos runs only in the quiet window between iterations.
                 self._ensure_all_data_nics_up()
 
-                node1, node2 = self.pick_pair_for_category(scenario["category"])
-                method1 = scenario["method_a"]
-                method2 = scenario["method_b"]
+                targets = self._select_outage_targets(scenario)
+                if scenario["type"] == "same_fd":
+                    scen_desc = f"same_fd(fd={scenario['fd']})"
+                else:
+                    scen_desc = "one_per_fd"
 
                 self.logger.log(
                     f"Starting outage iteration {iteration} "
                     f"(cycle {cycle} scenario {scenario_idx}/{len(cycle_scenarios)}): "
-                    f"category={scenario['category']} "
-                    f"pair=({node1[:8]},{node2[:8]}) "
-                    f"methods=({method1},{method2})"
+                    f"type={scen_desc} "
+                    f"reboot_targets={[t[:8] for t in targets]}"
                 )
+
+                if not targets:
+                    self.logger.log(
+                        f"Scenario {iteration} skipped: no targets resolved for {scen_desc}"
+                    )
+                    continue
 
                 # Skip scenarios whose nodes are not currently in the
                 # expected-node set (e.g. one has been removed from the
                 # cluster mid-soak). Better to log-and-skip than to try to
-                # restart a ghost.
+                # reboot a ghost.
                 current_uuids = {n["uuid"] for n in self.ensure_expected_nodes()}
-                missing = [uid for uid in (node1, node2) if uid not in current_uuids]
+                missing = [uid for uid in targets if uid not in current_uuids]
                 if missing:
                     self.logger.log(
                         f"Scenario {iteration} skipped: nodes {missing} not in "
@@ -2461,32 +2557,21 @@ class SoakRunner:
                 # masks failures, races the kernel's path-failover, and
                 # can leave the client in a partially-attached state.
                 with self.serial_lock:
-                    # Final readiness gate: the inter-iteration settle confirms
-                    # all-online only once and then sleeps blindly, during
-                    # which the CP can autonomously restart a node, and an
-                    # auto-recover peer from the previous pair may still be
-                    # settling. The count-only ensure_expected_nodes check
-                    # above does not catch a node in in_restart/in_shutdown.
-                    # Wait it out here so the first `sn shutdown` doesn't trip
-                    # the CP's concurrent-shutdown guard and abort the soak
-                    # (observed 2026-06-04).
+                    # Final readiness gate: the previous iteration's settle may
+                    # have ended while the CP was autonomously restarting a
+                    # node. The count-only ensure_expected_nodes check above
+                    # does not catch a node in in_restart/in_shutdown; wait it
+                    # out so we start from a fully-online cluster.
                     self.wait_for_outage_ready()
-                    self.run_outage_pair(node1, node2, method1, method2)
+                    self.run_fd_outage(scenario, targets)
                     # Post-outage fio check: any fio that exited during this
-                    # iteration is a fault. Same contract as the base mixed
-                    # soak's pre-stop check, but WITHOUT the subsequent
-                    # SIGTERM/SIGKILL — fio keeps running into the next
-                    # iteration and across the upcoming churn cycles.
+                    # iteration is a fault. fio is NOT stopped — it keeps
+                    # running into the next iteration and across churn cycles.
                     self.check_fio()
-                    # Bring nodes back online, then run NIC chaos. NIC chaos
-                    # must stay under the lock (its nvme-path perturbation must
-                    # not overlap a churn disconnect/connect). The inter-
-                    # iteration settle is deliberately NOT done here: it runs
-                    # once, unlocked, below — a single quiet window per
-                    # iteration that lets churn proceed instead of two blind
-                    # sleeps that both starve the churn thread. Tolerate a peer
-                    # the CP is autonomously restarting (no deliberate outage in
-                    # flight) rather than aborting.
+                    # Confirm all rebooted hosts are back online, then run NIC
+                    # chaos under the same lock (its nvme-path perturbation must
+                    # not overlap a churn disconnect/connect). Tolerate a peer
+                    # the CP is autonomously restarting rather than aborting.
                     self.wait_for_all_online(timeout=self.args.restart_timeout,
                                              tolerate_transient=True)
                     self._inter_iteration_nic_chaos()
@@ -2494,11 +2579,30 @@ class SoakRunner:
                 # Re-check for any churn fault that may have fired
                 # before we acquired the lock; exit at the next sync point.
                 self.reraise_churn_error()
-                # The one inter-iteration settle, run unlocked so churn keeps
-                # going during it: with --wait-for-rebalance, gate on rebalance /
-                # data-migration completion (device-migration runners active,
-                # `is_re_balancing`); otherwise a fixed window.
-                self.settle_between_iterations("next iteration")
+
+                # Scenario-specific stabilization:
+                #   (a) same_fd    — a whole failure domain was rebooted, so the
+                #       cluster must re-replicate/rebalance the data that lived
+                #       there. Gate on cluster ACTIVE + rebalance / data-migration
+                #       completion before the next iteration (bounded by
+                #       --rebalance-timeout), regardless of --wait-for-rebalance.
+                #   (b) one_per_fd — only one node per domain bounced; the other
+                #       copy in each domain stayed up, so no full rebalance is
+                #       expected. A fixed 60s settle is enough.
+                if scenario["type"] == "same_fd":
+                    self.logger.log(
+                        f"same_fd outage: waiting for cluster rebalance to complete "
+                        f"(iteration {iteration}, fd={scenario['fd']})"
+                    )
+                    self.wait_for_cluster_stable(require_no_rebalance=True)
+                    self.wait_for_data_migration_complete(
+                        f"iteration {iteration} same-fd rebalance"
+                    )
+                else:
+                    self.logger.log(
+                        f"one_per_fd outage: settling 60s (iteration {iteration})"
+                    )
+                    time.sleep(60)
 
 
 def main():

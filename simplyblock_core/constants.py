@@ -107,6 +107,23 @@ RESTART_TASK_EXEC_INTERVAL_MAX_SEC = 3600
 # own tasks immediately regardless of this value (owner id is the hostname).
 TASK_LEASE_TTL_SEC = 1200
 
+# Node-add concurrency: the cross-node mesh section of add_node is serialized
+# per cluster behind a ClusterAddNodeLock. The holder refreshes the lock every
+# CLUSTER_ADD_LOCK_HEARTBEAT_SEC; a lock whose heartbeat is older than
+# CLUSTER_ADD_LOCK_TTL_SEC is treated as abandoned (holder crashed) and may be
+# reclaimed. TTL is kept well under TASK_LEASE_TTL_SEC so a dead holder's lock
+# is reclaimed before its task lease, and is several heartbeats wide so a live
+# (but momentarily slow) holder is never falsely preempted. The slow part of
+# add_node (SPDK boot) is OUTSIDE this lock, so the locked section is short.
+CLUSTER_ADD_LOCK_HEARTBEAT_SEC = 30
+CLUSTER_ADD_LOCK_TTL_SEC = 120
+
+# A node-add port reservation older than this is treated as abandoned and
+# ignored/reclaimed. Must exceed the worst-case time from port allocation to
+# persisting the node record (which spans the SPDK boot), so a live add never
+# loses its reserved port.
+PORT_RESERVATION_TTL_SEC = 600
+
 # An LVol left in STATUS_IN_CREATION longer than this is treated as an orphaned
 # create (the creating process died before reaching ONLINE) and is cleaned up
 # by lvol_monitor. Must be comfortably longer than the slowest legitimate
@@ -169,7 +186,7 @@ LVOL_NVME_CONNECT_FAST_IO_FAIL_TO=1
 LVOL_NVME_CONNECT_NR_IO_QUEUES=3
 LVOL_NVME_KEEP_ALIVE_TO=4
 LVOL_NVME_KEEP_ALIVE_TO_TCP=4
-QPAIR_COUNT=32
+QPAIR_COUNT=64
 CLIENT_QPAIR_COUNT=3
 # 8 s, not 4 s. 4 s false-positives during a peer-reset reactor stall:
 # when a peer dies, bdev_nvme's per-controller reset state machines run on
@@ -219,7 +236,7 @@ LVOL_CLUSTER_RATIO=1
 JM_COMPRESSION_THREAD_ENABLED = False
 
 # Fixed size (in bytes) each distrib bdev reports up to the raid0/lvstore
-# layer, independent of cluster raw capacity or number_of_distribs. 1 PiB.
+# layer, independent of cluster raw capacity or number_of_distribs. 250 TiB.
 #
 # BIRTH-TIME ONLY: this is the size used when an lvstore is first created
 # (create_lvstore). It must NEVER be read on the recreate/restart path --
@@ -227,7 +244,7 @@ JM_COMPRESSION_THREAD_ENABLED = False
 # each distrib's original num_blocks. Resizing a distrib under a live
 # raid0/lvstore would corrupt the geometry, so existing lvstores must keep
 # their persisted size across upgrades even if this constant changes.
-DISTRIB_SIZE_BYTES = 1125899906842624
+DISTRIB_SIZE_BYTES = 274877906944000
 
 
 SENTRY_SDK_DNS = "https://745047b017ac424b4173550e19910fb7@o4508953941311488.ingest.de.sentry.io/4508996361584720"

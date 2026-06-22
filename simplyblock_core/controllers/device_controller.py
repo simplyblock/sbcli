@@ -64,6 +64,34 @@ CAUSE_DEVICE_RESTART = "device_restart"
 CAUSE_FAILURE_MIGRATION = "failure_migration"
 
 
+def _atomic_device_set(db_controller, node_id, device_id, apply_fields):
+    """Atomically apply field changes to the NVMeDevice ``device_id`` inside
+    StorageNode ``node_id``.
+
+    NVMeDevice has no own DB key — it is persisted as part of the StorageNode
+    row. A plain ``snode.write_to_db()`` therefore re-serializes the WHOLE node
+    (including ``node.status``) and silently clobbers any concurrent change to
+    another field — the lost-update that wedged a node in ``in_shutdown`` after
+    ``set_node_status`` had already committed ``offline`` (incident
+    2026-06-18). Routing the write through ``atomic_update`` re-reads the node
+    fresh inside the FDB transaction and mutates only the matching device, so
+    a concurrent status flip is preserved.
+
+    ``apply_fields(dev)`` must be side-effect-free (it may be replayed on write
+    conflict) and may return ``False`` to abort. Returns the fresh node, or
+    ``None`` if the node no longer exists.
+    """
+    node = db_controller.get_storage_node_by_id(node_id)
+
+    def _mut(n):
+        for d in n.nvme_devices:
+            if d.get_id() == device_id:
+                return apply_fields(d)
+        return False
+
+    return db_controller.atomic_update(node, _mut)
+
+
 def device_set_state(device_id, state, cause=CAUSE_OTHER):
     db_controller = DBController()
     try:
@@ -189,7 +217,23 @@ def device_set_state(device_id, state, cause=CAUSE_OTHER):
     if device.status != state:
         device.previous_status = device.status
         device.status = state
-        snode.write_to_db(db_controller.kv_store)
+        # Persist only the fields this call mutated, on a freshly-read node, so
+        # a concurrent node.status change is not clobbered (see _atomic_device_set).
+        new_fields = {
+            "status": device.status,
+            "previous_status": device.previous_status,
+            "flap_count": device.flap_count,
+            "last_flap_tsc": device.last_flap_tsc,
+            "retries_exhausted": device.retries_exhausted,
+            "deleted": device.deleted,
+        }
+
+        def _apply(d, _f=new_fields):
+            for _k, _v in _f.items():
+                setattr(d, _k, _v)
+            return True
+
+        _atomic_device_set(db_controller, snode.get_id(), device_id, _apply)
         device_events.device_status_change(device, device.status, device.previous_status)
 
     if state == NVMeDevice.STATUS_ONLINE:
@@ -199,9 +243,9 @@ def device_set_state(device_id, state, cause=CAUSE_OTHER):
             if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
                 continue
             remote_devices = storage_node_ops._connect_to_remote_devs(node)
-            node = db_controller.get_storage_node_by_id(node.get_id())
-            node.remote_devices = remote_devices
-            node.write_to_db()
+            db_controller.atomic_update(
+                db_controller.get_storage_node_by_id(node.get_id()),
+                lambda n, rd=remote_devices: setattr(n, "remote_devices", rd))
 
     distr_controller.send_dev_status_event(device, device.status)
 
@@ -241,7 +285,8 @@ def device_set_io_error(device_id, is_error):
         return True
 
     device.io_error = is_error
-    snode.write_to_db(db_controller.kv_store)
+    _atomic_device_set(db_controller, snode.get_id(), device_id,
+                       lambda d, v=is_error: setattr(d, "io_error", v))
     return True
 
 
@@ -833,7 +878,8 @@ def device_set_retries_exhausted(device_id, retries_exhausted):
         return True
 
     dev.retries_exhausted = retries_exhausted
-    snode.write_to_db(db_controller.kv_store)
+    _atomic_device_set(db_controller, snode.get_id(), device_id,
+                       lambda d, v=retries_exhausted: setattr(d, "retries_exhausted", v))
     return True
 
 
@@ -899,7 +945,10 @@ def add_device(device_id, add_migration_task=True):
     device_obj.cluster_device_order = dev_order
     logger.info("Setting device online")
     device_obj.status = NVMeDevice.STATUS_ONLINE
-    snode.write_to_db(db_controller.kv_store)
+    def _apply_online(d, o=dev_order):
+        d.cluster_device_order = o
+        d.status = NVMeDevice.STATUS_ONLINE
+    _atomic_device_set(db_controller, snode.get_id(), device_id, _apply_online)
     device_events.device_create(device_obj)
 
     logger.info("Make other nodes connect to the node devices")
@@ -907,8 +956,10 @@ def add_device(device_id, add_migration_task=True):
     for node in snodes:
         if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
             continue
-        node.remote_devices = storage_node_ops._connect_to_remote_devs(node, force_connect_restarting_nodes=True)
-        node.write_to_db()
+        remote_devices = storage_node_ops._connect_to_remote_devs(node, force_connect_restarting_nodes=True)
+        db_controller.atomic_update(
+            db_controller.get_storage_node_by_id(node.get_id()),
+            lambda n, rd=remote_devices: setattr(n, "remote_devices", rd))
 
     snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
     for node in snodes:
@@ -946,7 +997,11 @@ def set_jm_device_state(device_id, state):
 
     if jm_device.status != state:
         jm_device.status = state
-        snode.write_to_db(db_controller.kv_store)
+        # Atomic: the JM device lives in the node row; a full write would
+        # clobber a concurrent node.status change (see _atomic_device_set).
+        db_controller.atomic_update(
+            db_controller.get_storage_node_by_id(snode.get_id()),
+            lambda n, v=state: setattr(n.jm_device, "status", v) if n.jm_device else False)
 
     if snode.enable_ha_jm and state == NVMeDevice.STATUS_ONLINE:
         # rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password, timeout=5)
@@ -965,9 +1020,11 @@ def set_jm_device_state(device_id, state):
             if node.status != StorageNode.STATUS_ONLINE:
                 continue
             logger.info(f"Connecting to node: {node.get_id()}")
-            node.remote_jm_devices = storage_node_ops._connect_to_remote_jm_devs(node)
-            node.write_to_db(db_controller.kv_store)
-            logger.info(f"connected to devices count: {len(node.remote_jm_devices)}")
+            remote_jm_devices = storage_node_ops._connect_to_remote_jm_devs(node)
+            db_controller.atomic_update(
+                db_controller.get_storage_node_by_id(node.get_id()),
+                lambda n, rd=remote_jm_devices: setattr(n, "remote_jm_devices", rd))
+            logger.info(f"connected to devices count: {len(remote_jm_devices)}")
 
     return True
 
@@ -1052,9 +1109,9 @@ def restart_jm_device(device_id, force=False, format_alceml=False):
                     return False
 
                 else:
-                    snode = db_controller.get_storage_node_by_id(snode.get_id())
-                    snode.jm_device = new_jm
-                    snode.write_to_db(db_controller.kv_store)
+                    snode = db_controller.atomic_update(
+                        db_controller.get_storage_node_by_id(snode.get_id()),
+                        lambda n, jm=new_jm: setattr(n, "jm_device", jm))
                     set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
         else:
             nvme_bdev = jm_device.nvme_bdev
@@ -1167,9 +1224,18 @@ def new_device_from_failed(device_id):
     new_device.deleted = False
     new_device.io_error = False
     new_device.retries_exhausted = False
-    device_node.nvme_devices.append(new_device)
 
-    device.serial_number = f"{device.serial_number}_failed"
-    device_node.write_to_db(db_controller.kv_store)
+    # Atomic: append the new device and rename the failed one on a freshly-read
+    # node so a concurrent node.status / device change is not clobbered.
+    def _mut(n, nd=new_device, old_id=device_id):
+        for d in n.nvme_devices:
+            if d.get_id() == old_id:
+                d.serial_number = f"{d.serial_number}_failed"
+                break
+        n.nvme_devices.append(nd)
+        return True
+
+    db_controller.atomic_update(
+        db_controller.get_storage_node_by_id(device_node.get_id()), _mut)
     logger.info(f"New device created from failed device: {device_id}, new device id: {new_device.get_id()}")
     return new_device.get_id()

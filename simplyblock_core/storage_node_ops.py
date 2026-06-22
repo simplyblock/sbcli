@@ -599,10 +599,16 @@ def get_next_cluster_device_order(db_controller, cluster_id):
     return 0
 
 
-def get_next_physical_device_order(snode):
+def get_next_physical_device_order(snode, exclude_node_id=None):
+    # exclude_node_id: skip this node when scanning. Needed when recomputing the
+    # label for a node that is already persisted with a provisional value —
+    # otherwise the same-mgmt_ip early-return below would just hand back that
+    # node's own stale label instead of a fresh cluster-unique one.
     db_controller = DBController()
     used_labels = []
     for node in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
+        if exclude_node_id and node.get_id() == exclude_node_id:
+            continue
         if node.physical_label > 0:
             if node.mgmt_ip == snode.mgmt_ip:
                 return node.physical_label
@@ -1576,6 +1582,40 @@ def resolve_ha_jm_count(cluster, ha_jm_count) -> int:
     return ha_jm_count
 
 
+def _acquire_cluster_add_lock_blocking(db_controller, cluster_id, owner, timeout=300, poll=2):
+    """Block until the per-cluster node-add mesh lock is held by ``owner``.
+
+    Returns True once acquired, or False if ``timeout`` seconds elapse without
+    acquiring (caller should fail the task so it is retried — failing here is
+    cheaper than re-running the whole node-local setup). A lock abandoned by a
+    crashed holder is reclaimed automatically once its heartbeat goes stale
+    (constants.CLUSTER_ADD_LOCK_TTL_SEC), so the effective wait is bounded even
+    if a holder died."""
+    deadline = time.time() + timeout
+    while True:
+        won, current_owner = db_controller.acquire_cluster_add_lock(cluster_id, owner)
+        if won:
+            return True
+        if time.time() >= deadline:
+            logger.error(
+                f"Timed out waiting for cluster node-add lock (held by {current_owner})")
+            return False
+        logger.info(f"Cluster node-add lock held by {current_owner}; waiting")
+        time.sleep(poll)
+
+
+def _cluster_add_lock_heartbeat(db_controller, cluster_id, owner, stop_event):
+    """Refresh the node-add lock until ``stop_event`` is set, so a long mesh
+    section on a large cluster isn't reclaimed out from under a live holder."""
+    while not stop_event.wait(constants.CLUSTER_ADD_LOCK_HEARTBEAT_SEC):
+        if not db_controller.refresh_cluster_add_lock(cluster_id, owner):
+            # Lost the lock (reclaimed after a stall). Stop heartbeating; the
+            # critical section will finish and its owner-scoped release is a
+            # no-op against whoever holds it now.
+            logger.warning("Lost cluster node-add lock heartbeat (reclaimed)")
+            return
+
+
 def add_node(cluster_id, node_addr, iface_name, data_nics_list,
              max_snap, spdk_image=None, spdk_debug=False,
              small_bufsize=0, large_bufsize=0,
@@ -1728,7 +1768,14 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             return False
 
         mgmt_ip, mgmt_iface = mgmt_info
-        rpc_port = utils.get_next_nvmf_port(cluster_id)
+        # Generate the node uuid up front so it can own the port reservations
+        # made before the node record itself is persisted (the new node isn't
+        # written to the DB until after SPDK boots, so two concurrent adds would
+        # otherwise read the same "next free" port). reserve_cluster_nvmf_port
+        # allocates and reserves the port atomically against other concurrent
+        # node adds.
+        node_uuid = str(uuid.uuid4())
+        rpc_port = db_controller.reserve_cluster_nvmf_port(cluster_id, node_uuid)
         logger.info(f"mgmt interface is {mgmt_iface}")
 
         if not spdk_image:
@@ -1859,7 +1906,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         subsystem_nqn = f"{BASE_NQN}:{hostname}"
         # creating storage node object
         snode = StorageNode()
-        snode.uuid = str(uuid.uuid4())
+        snode.uuid = node_uuid
         snode.status = StorageNode.STATUS_IN_CREATION
         snode.baseboard_sn = node_info['system_id']
         snode.system_uuid = node_info['system_id']
@@ -1927,7 +1974,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         snode.distrib_cpu_cores = distrib_cpu_cores
         snode.jc_singleton_mask = jc_singleton_mask or ""
         snode.compression_cpu_mask = compression_cpu_mask or ""
-        snode.nvmf_port = utils.get_next_dev_port(cluster_id)
+        snode.nvmf_port = db_controller.reserve_cluster_nvmf_port(cluster_id, node_uuid)
         snode.poller_cpu_cores = poller_cpu_cores or []
         snode.socket = node_socket
         snode.iobuf_small_pool_count = small_pool_count or 0
@@ -2094,70 +2141,120 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 logger.error("Failed to set Alcemls QOS")
                 return False
 
-        logger.info("Connecting to remote devices")
-        remote_devices = _connect_to_remote_devs(snode)
-        snode.remote_devices = remote_devices
+        # --- Cluster-wide mesh critical section -------------------------
+        # Everything below wires this node into the cluster mesh: it connects
+        # to peers' remote devices, goes ONLINE, makes every peer reverse-
+        # connect to *this* node's devices (writing the peers' records), and
+        # pushes the cluster map. Two concurrent adds must not interleave here:
+        # the reverse-connect loop does full-object writes of *other* nodes,
+        # and a correct A<->B mesh requires whoever runs second to observe the
+        # first as ONLINE. So this whole block is serialized per cluster while
+        # the slow node-local setup above ran in parallel. A heartbeat keeps a
+        # long section on a large cluster from being reclaimed; the lock is
+        # always released (finally), including on the early `continue` and the
+        # reverse-connect failure path.
+        lock_owner = f"{socket.gethostname()}:{os.getpid()}:{node_uuid}"
+        if not _acquire_cluster_add_lock_blocking(db_controller, cluster_id, lock_owner):
+            logger.error("Could not acquire cluster node-add lock; failing for retry")
+            return False
+        stop_heartbeat = threading.Event()
+        hb_thread = threading.Thread(
+            target=_cluster_add_lock_heartbeat,
+            args=(db_controller, cluster_id, lock_owner, stop_heartbeat),
+            daemon=True)
+        hb_thread.start()
+        try:
+            # Assign the cluster-wide device ordering under the lock. Both
+            # physical_label and cluster_device_order are sequential cluster-
+            # wide counters (get_next_physical_device_order /
+            # get_next_cluster_device_order are read-max-then-+1 over all
+            # nodes). Computed in the parallel node-local section — as they were
+            # via addNvmeDevices() and _prepare_cluster_devices_*() — concurrent
+            # adds read the same "next free" value and collide, producing
+            # DUPLICATE ids / physical labels in the distr cluster map, which
+            # makes bdev_lvol_create_lvstore fail with "Input/output error" at
+            # activation. Recompute them here: the lock serializes adds and this
+            # node's devices are persisted (snode.write_to_db below) before the
+            # lock is released, so the next add sees them and picks the next
+            # free values. The provisional values assigned earlier are
+            # overwritten here before they are ever persisted.
+            snode.physical_label = 0 if cluster.is_single_node else get_next_physical_device_order(
+                snode, exclude_node_id=snode.get_id())
+            dev_order = get_next_cluster_device_order(db_controller, snode.cluster_id)
+            for dev in snode.nvme_devices:
+                dev.physical_label = snode.physical_label
+                if dev.status == NVMeDevice.STATUS_ONLINE:
+                    dev.cluster_device_order = dev_order
+                    dev_order += 1
 
-        if snode.enable_ha_jm:
-            logger.info("Connecting to remote JMs")
-            snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
+            logger.info("Connecting to remote devices")
+            remote_devices = _connect_to_remote_devs(snode)
+            snode.remote_devices = remote_devices
 
-        snode.write_to_db(kv_store)
+            if snode.enable_ha_jm:
+                logger.info("Connecting to remote JMs")
+                snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
 
-        snode = db_controller.get_storage_node_by_id(snode.get_id())
-        old_status = snode.status
-        snode.status = StorageNode.STATUS_ONLINE
-        snode.updated_at = str(datetime.datetime.now(datetime.timezone.utc))
-        snode.online_since = str(datetime.datetime.now(datetime.timezone.utc))
-        snode.write_to_db(db_controller.kv_store)
+            snode.write_to_db(kv_store)
 
-        storage_events.snode_status_change(snode, snode.status, old_status, caused_by="monitor")
-        # distr_controller.send_node_status_event(snode, status)
+            snode = db_controller.get_storage_node_by_id(snode.get_id())
+            old_status = snode.status
+            snode.status = StorageNode.STATUS_ONLINE
+            snode.updated_at = str(datetime.datetime.now(datetime.timezone.utc))
+            snode.online_since = str(datetime.datetime.now(datetime.timezone.utc))
+            snode.write_to_db(db_controller.kv_store)
 
-        logger.info("Make other nodes connect to the node devices")
-        snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
-        for node in snodes:
-            if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
+            storage_events.snode_status_change(snode, snode.status, old_status, caused_by="monitor")
+            # distr_controller.send_node_status_event(snode, status)
+
+            logger.info("Make other nodes connect to the node devices")
+            snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
+            for node in snodes:
+                if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
+                    continue
+                try:
+                    node.remote_devices = _connect_to_remote_devs(node)
+                except RuntimeError:
+                    logger.error('Failed to connect to remote devices')
+                    return False
+                node.write_to_db(kv_store)
+
+            if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY,
+                                      Cluster.STATUS_IN_EXPANSION]:
+                logger.warning(
+                    f"The cluster status is not active ({cluster.status}), adding the node without distribs and lvstore")
                 continue
-            try:
-                node.remote_devices = _connect_to_remote_devs(node)
-            except RuntimeError:
-                logger.error('Failed to connect to remote devices')
-                return False
-            node.write_to_db(kv_store)
 
-        if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY,
-                                  Cluster.STATUS_IN_EXPANSION]:
-            logger.warning(
-                f"The cluster status is not active ({cluster.status}), adding the node without distribs and lvstore")
-            continue
+            logger.info("Sending cluster map add node")
+            snode = db_controller.get_storage_node_by_id(snode.get_id())
+            snodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
+            for node_index, node in enumerate(snodes):
+                if node.status != StorageNode.STATUS_ONLINE or node.get_id() == snode.get_id():
+                    continue
+                ret = distr_controller.send_cluster_map_add_node(snode, node)
 
-        logger.info("Sending cluster map add node")
-        snode = db_controller.get_storage_node_by_id(snode.get_id())
-        snodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
-        for node_index, node in enumerate(snodes):
-            if node.status != StorageNode.STATUS_ONLINE or node.get_id() == snode.get_id():
-                continue
-            ret = distr_controller.send_cluster_map_add_node(snode, node)
+            # for dev in snode.nvme_devices:
+            #     if dev.status == NVMeDevice.STATUS_ONLINE:
+            #         device_controller.device_set_unavailable(dev.get_id())
 
-        # for dev in snode.nvme_devices:
-        #     if dev.status == NVMeDevice.STATUS_ONLINE:
-        #         device_controller.device_set_unavailable(dev.get_id())
+            # logger.info("Setting node status to suspended")
+            # set_node_status(snode.get_id(), StorageNode.STATUS_SUSPENDED)
+            # logger.info("Done")
 
-        # logger.info("Setting node status to suspended")
-        # set_node_status(snode.get_id(), StorageNode.STATUS_SUSPENDED)
-        # logger.info("Done")
+            logger.info("Setting node status to Active")
+            set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE, caused_by="add_node")
 
-        logger.info("Setting node status to Active")
-        set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE, caused_by="add_node")
+            for dev in snode.nvme_devices:
+                if dev.status == NVMeDevice.STATUS_ONLINE:
+                    tasks_controller.add_new_device_mig_task(dev.get_id())
 
-        for dev in snode.nvme_devices:
-            if dev.status == NVMeDevice.STATUS_ONLINE:
-                tasks_controller.add_new_device_mig_task(dev.get_id())
+            storage_events.snode_add(snode)
 
-        storage_events.snode_add(snode)
-
-        cluster_ops.set_cluster_status(cluster.get_id(), Cluster.STATUS_IN_EXPANSION)
+            cluster_ops.set_cluster_status(cluster.get_id(), Cluster.STATUS_IN_EXPANSION)
+        finally:
+            stop_heartbeat.set()
+            db_controller.release_cluster_add_lock(cluster_id, lock_owner)
+        # --- End cluster-wide mesh critical section ---------------------
     logger.info("Done")
     return "Success"
 
@@ -4418,6 +4515,13 @@ def set_node_status(node_id, status, caused_by="monitor"):
             n.down_since = now
         else:
             n.down_since = ""
+        # Stamp/clear the IN_SHUTDOWN entry time so the monitor can reconcile a
+        # node stranded in in_shutdown (e.g. a lost-update reverting the offline
+        # flip, or a crashed shutdown) back to OFFLINE after a grace window.
+        if status == StorageNode.STATUS_IN_SHUTDOWN:
+            n.shutdown_since = now
+        else:
+            n.shutdown_since = ""
         return True
 
     # Atomic compare-and-set: the guard checks above are evaluated against the
@@ -5059,6 +5163,14 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
         if lv.status not in [LVol.STATUS_IN_DELETION, LVol.STATUS_IN_CREATION]:
             lvol_list.append(lv)
 
+    # Probe whether the raid already exists BEFORE step 1 (re)builds the stack.
+    # On a real restart SPDK has just started and the raid (superblock=False)
+    # cannot persist, so this is False and step 1 freshly builds it. It is only
+    # True on an activation retry where a prior pass already created AND examined
+    # the raid (SPDK then rejects re-examine). This distinguishes the normal
+    # restart path (just examine) from the convergence trap (drop + re-create).
+    raid_preexisted = _rpc_bdev_exists(snode_rpc_client, primary_node.raid)
+
     ### 1- create distribs and raid
     # Set restart phase: pre_block — sync deletes and registrations can still complete.
     # IMPORTANT: every exit path after this point MUST clear the phase (either by
@@ -5073,7 +5185,18 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
         logger.error(f"Failed to recreate non-leader lvstore on node {snode.get_id()}")
         logger.error(err)
         _set_restart_phase(snode, primary_node.lvstore, "", db_controller)
-        primary_node.lvstore_status = "ready"
+        # The replica stack (distribs + raid) did NOT come up — e.g. the raid
+        # build returns -EIO because a peer node's devices are unreachable
+        # (a concurrent/dual outage: the partner node is still offline). This
+        # node therefore does NOT hold a usable replica of this LVS. Marking
+        # it "ready" here is a phantom success: the node goes online without
+        # the replica, every later leader restart fails to wire this peer's
+        # hublvol (set_lvs_opts -> -19 "No such device") and the leader loops
+        # restart->offline->in_restart forever (soak 2026-06-19, LVS_7613 on
+        # tertiary after the partner dac5725c was force-shut-down). Mark it
+        # "failed" and propagate so the restart is retried instead — once the
+        # missing peer returns, the retry rebuilds the replica cleanly.
+        primary_node.lvstore_status = "failed"
         primary_node.write_to_db()
         return False
 
@@ -5210,9 +5333,9 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
             "Raid %s and lvstore %s already present on %s; skipping examine",
             primary_node.raid, primary_node.lvstore, snode.get_id())
     else:
-        if raid_already and not lvstore_already:
-            # Same convergence trap as in recreate_lvstore: the raid was
-            # examined on a prior pass and the lvstore module did not
+        if raid_already and not lvstore_already and raid_preexisted:
+            # Convergence trap (activation retry only): the raid was created
+            # AND examined on a prior pass and the lvstore module did not
             # surface it. SPDK rejects re-examine of an already-examined
             # bdev with "Duplicate bdev name for manual examine", so a
             # plain bdev_examine here is a silent no-op that loops the
@@ -5236,6 +5359,15 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
                 logger.error(
                     "Failed to rebuild bdev stack on %s after raid drop: %s",
                     snode.get_id(), err)
+        elif raid_already and not lvstore_already:
+            # Normal restart: the raid was freshly built this pass in step 1
+            # and has never been examined, so the first-time bdev_examine below
+            # surfaces the lvstore. Dropping+recreating it here would be pure
+            # churn inside the (minimized) port-block window — the duplicate
+            # bdev_raid_create observed 2026-06-12 (LVS_5199).
+            logger.info(
+                "Raid %s freshly built this pass on %s; examining without drop",
+                primary_node.raid, snode.get_id())
 
         # Examine is required whenever the lvstore isn't surfaced — whether
         # the raid was freshly created by _create_bdev_stack (normal restart
@@ -5630,6 +5762,13 @@ def recreate_all_lvstores(snode, force=False):
         _release_lvs_subsys_port_on_peers(snode, snode.get_id(), db_controller)
         return False
 
+    # Track non-leader (secondary/tertiary) recreate outcomes. A failed
+    # replica rebuild must fail the whole node restart so the restart task
+    # runner retries it — NOT be swallowed, which would bring the node online
+    # holding a phantom (absent) replica and wedge the LVS leader in a
+    # restart loop. See recreate_lvstore_on_non_leader's "failed" path.
+    non_leader_ok = True
+
     # --- Step 2: Secondary LVS ---
     if snode.lvstore_stack_secondary:
         logger.info("=== Phase: Secondary LVS recreation ===")
@@ -5653,8 +5792,10 @@ def recreate_all_lvstores(snode, force=False):
                             secondary_primary_node.lvstore, snode.get_id(), leader_node.get_id())
                 ret = recreate_lvstore_on_non_leader(snode, leader_node, secondary_primary_node, force=force)
             if not ret:
+                non_leader_ok = False
                 logger.error(f"Failed to recreate secondary LVS {secondary_primary_node.lvstore}")
         except Exception as e:
+            non_leader_ok = False
             logger.error("Secondary LVS recreation failed: %s", e)
             if secondary_primary_node is not None:
                 _release_lvs_subsys_port_on_peers(
@@ -5696,14 +5837,19 @@ def recreate_all_lvstores(snode, force=False):
                             tertiary_primary_node.lvstore, snode.get_id(), leader_node.get_id())
                 ret = recreate_lvstore_on_non_leader(snode, leader_node, tertiary_primary_node, force=force)
             if not ret:
+                non_leader_ok = False
                 logger.error(f"Failed to recreate tertiary LVS {tertiary_primary_node.lvstore}")
         except Exception as e:
+            non_leader_ok = False
             logger.error("Tertiary LVS recreation failed: %s", e)
             if tertiary_primary_node is not None:
                 _release_lvs_subsys_port_on_peers(
                     tertiary_primary_node, snode.get_id(), db_controller)
 
-    return True
+    # Fail the restart if any non-leader replica did not come up, so the
+    # restart task runner retries (the node must not go online advertising a
+    # replica it does not actually hold).
+    return non_leader_ok
 
 
 def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False):
@@ -5830,6 +5976,14 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
             except Exception as e:
                 raise Exception(
                     f"Abort restart: jc_compression check on leader {current_leader.get_id()} failed: {e}")
+
+    # Probe whether the raid already exists BEFORE step 1 (re)builds the stack.
+    # On a real restart SPDK has just started and the raid (superblock=False)
+    # cannot persist, so this is False and step 1 freshly builds it. It is only
+    # True on an activation retry where a prior pass already created AND examined
+    # the raid (SPDK then rejects re-examine). This distinguishes the normal
+    # restart path (just examine) from the convergence trap (drop + re-create).
+    raid_preexisted = _rpc_bdev_exists(snode.rpc_client(), lvs_raid)
 
     ### 1- create distribs and raid
     _set_restart_phase(snode, lvs_name, StorageNode.RESTART_PHASE_PRE_BLOCK, db_controller)
@@ -6141,9 +6295,9 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
             "Raid %s and lvstore %s already present on %s; skipping examine",
             lvs_raid, lvs_name, snode.get_id())
     else:
-        if raid_already and not lvstore_already:
-            # Raid is present but the lvstore module never surfaced it on
-            # this SPDK process (e.g. a prior activation pass examined the
+        if raid_already and not lvstore_already and raid_preexisted:
+            # Raid pre-existed this pass and the lvstore module never surfaced
+            # it on this SPDK process (a prior activation pass examined the
             # raid and the lvstore-side examine failed/was incomplete).
             # SPDK rejects re-examine of an already-examined bdev with
             # "Duplicate bdev name for manual examine: <raid>", so calling
@@ -6176,6 +6330,15 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
                     "Failed to rebuild bdev stack on %s after raid drop: %s",
                     snode.get_id(), err)
                 # Fall through; bdev_examine below will surface what we have.
+        elif raid_already and not lvstore_already:
+            # Normal restart: the raid was freshly built this pass in step 1
+            # and has never been examined, so the first-time bdev_examine below
+            # surfaces the lvstore. Dropping+recreating it here would be pure
+            # churn inside the (minimized) port-block window — the duplicate
+            # bdev_raid_create observed 2026-06-12 (LVS_5199).
+            logger.info(
+                "Raid %s freshly built this pass on %s; examining without drop",
+                lvs_raid, snode.get_id())
 
         # Examine is required whenever the lvstore isn't surfaced — whether
         # the raid was freshly created by _create_bdev_stack (normal restart
@@ -6742,7 +6905,7 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
                 "bdev_name": raid_device,
                 "cluster_sz": cluster_sz,
                 "clear_method": "none",
-                "num_md_pages_per_cluster_ratio": 50,
+                "num_md_pages_per_cluster_ratio": 1,
             }
         }
     )
