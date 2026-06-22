@@ -1606,7 +1606,8 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
         service_names = []
         for service in cluster_docker.services.list():
             if "simplyblock-io/simplyblock" in service.attrs['Spec']['Labels']['com.docker.stack.image'] or \
-                "simplyblock/simplyblock" in service.attrs['Spec']['Labels']['com.docker.stack.image']:
+                "simplyblock/simplyblock" in service.attrs['Spec']['Labels']['com.docker.stack.image'] or \
+                "simply-block/simplyblock" in service.attrs['Spec']['Labels']['com.docker.stack.image']:
                 if service.name in ["app_CachingNodeMonitor", "app_CachedLVolStatsCollector"]:
                     logger.info(f"Removing service {service.name}")
                     service.remove()
