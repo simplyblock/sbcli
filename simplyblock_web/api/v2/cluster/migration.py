@@ -4,6 +4,8 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel
 
+from simplyblock_core.controllers import migration_controller
+from simplyblock_core.db_controller import DBController
 from .._dependencies import Cluster, Migration
 from .._dtos import MigrationDTO
 from ..util import CreationResponseFormatParameter, creation_response
@@ -13,7 +15,6 @@ api = APIRouter()
 
 @api.get('/', name='clusters:migrations:list')
 def list_migrations(cluster: Cluster) -> List[MigrationDTO]:
-    from simplyblock_core.db_controller import DBController
     db = DBController()
     migrations = db.get_migrations(cluster.get_id())
     return [MigrationDTO.from_model(m) for m in reversed(migrations)]
@@ -28,8 +29,6 @@ class _MigrateParams(BaseModel):
 
 @api.post('/', name='clusters:migrations:create', status_code=201, responses={201: {"content": None}})
 def start_migration(request: Request, cluster: Cluster, parameters: _MigrateParams, response_format: CreationResponseFormatParameter = "identifier") -> Response:
-    from simplyblock_core.controllers import migration_controller
-    from simplyblock_core.db_controller import DBController
     migration_id, error = migration_controller.start_migration(
         parameters.volume_id,
         parameters.target_node_id,
@@ -57,7 +56,6 @@ def get_migration(cluster: Cluster, migration: Migration) -> MigrationDTO:
 
 @instance_api.post('/cancel', name='clusters:migrations:cancel', status_code=200)
 def cancel_migration(cluster: Cluster, migration: Migration):
-    from simplyblock_core.controllers import migration_controller
     ok, error = migration_controller.cancel_migration(migration.get_id())
     if not ok:
         raise HTTPException(400, error)
