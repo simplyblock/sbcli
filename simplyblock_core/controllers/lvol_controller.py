@@ -1243,43 +1243,38 @@ def _remove_lvol_subsys_from_node(lvol, rpc_client):
     return True
 
 
-def delete_lvol(lvol: LVol, force_delete: bool = False) -> bool:
+def delete_lvol(lvol: LVol, force_delete: bool = False) -> None:
     db_controller = DBController()
 
     # Block during restart Phase 5
+    snode = None
     try:
         snode = db_controller.get_storage_node_by_id(lvol.node_id)
         if snode.lvstore_status == "in_creation" and not force_delete:
-            logger.error(f"Cannot delete lvol {lvol.uuid}: node LVStore restart in progress")
-            return False
+            raise PreconditionError(f"Cannot delete lvol {lvol.uuid}: node LVStore restart in progress")
     except KeyError:
-        pass
+        if not force_delete:
+            raise PreconditionError(f"lvol node id not found: {lvol.node_id}")
 
     from simplyblock_core.controllers import migration_controller
     active_mig = migration_controller.get_active_migration_for_lvol(lvol.uuid)
-    if active_mig and not force_delete:
-        logger.error(f"Cannot delete lvol {lvol.uuid}: active migration {active_mig.uuid}")
-        return False
+    if active_mig:
+        raise PreconditionError(f"Cannot delete lvol {lvol.uuid}: active migration {active_mig.uuid}")
 
     if lvol.status == LVol.STATUS_RESTORING and not force_delete:
-        logger.error(f"Cannot delete lvol {lvol.uuid}: backup restore in progress")
-        return False
+        raise PreconditionError(f"Cannot delete lvol {lvol.uuid}: backup restore in progress")
+
     if lvol.status == LVol.STATUS_DELETED:
-        logger.error(f"lvol {lvol.uuid}: deleted already")
-        return False
+        raise PreconditionError(f"lvol {lvol.uuid}: deleted already")
 
     if lvol.status == LVol.STATUS_IN_DELETION:
         logger.info(f"lvol:{lvol.get_id()} status is in deletion")
         if not force_delete:
-            return True
+            return
 
     logger.debug(lvol)
-    try:
-        snode = db_controller.get_storage_node_by_id(lvol.node_id)
-    except KeyError:
+    if snode is None:
         logger.error(f"lvol node id not found: {lvol.node_id}")
-        if not force_delete:
-            return False
 
         lvol.remove(db_controller.kv_store)
 
@@ -1298,12 +1293,11 @@ def delete_lvol(lvol: LVol, force_delete: bool = False) -> bool:
                 pass # already removed
 
         logger.info("Done")
-        return True
+        return
 
     pool = db_controller.get_pool_by_id(lvol.pool_uuid)
     if pool.status == Pool.STATUS_INACTIVE:
-        logger.error("Pool is disabled")
-        return False
+        raise PreconditionError("Pool is disabled")
 
     # Persist deletion intent BEFORE any data-plane RPC. If the leader-side
     # delete then times out or errors (for example: SPDK back-pressure on
@@ -1325,9 +1319,8 @@ def delete_lvol(lvol: LVol, force_delete: bool = False) -> bool:
 
     if lvol.ha_type == 'single':
         ret = delete_lvol_from_node(lvol.get_id(), lvol.node_id, force=force_delete)
-        if not ret:
-            if not force_delete:
-                return False
+        if not ret and not force_delete:
+            raise RuntimeError("Failed to delete lvol from node")
 
     elif lvol.ha_type == "ha":
         from simplyblock_core.storage_node_ops import (
@@ -1400,9 +1393,11 @@ def delete_lvol(lvol: LVol, force_delete: bool = False) -> bool:
         success, actual_leader, result = execute_on_leader_with_failover(
             all_nodes, lvol.lvs_name, _delete_on_leader)
         if not success:
-            logger.error(f"Failed to delete lvol from leader: {result}")
+            msg = f"Failed to delete lvol from leader: {result}"
             if not force_delete:
-                return False
+                raise RuntimeError(msg)
+            else:
+                logger.warning(msg)
 
         # Step 2: Sync delete on non-leaders (leader op already completed)
         non_leaders = [n for n in all_nodes if actual_leader and n.get_id() != actual_leader.get_id()]
@@ -1470,7 +1465,6 @@ def delete_lvol(lvol: LVol, force_delete: bool = False) -> bool:
                 logger.exception("Failed to delete lvol key")
 
     logger.info("Done")
-    return True
 
 def connect_lvol_to_pool(lvol_id, node_id):
     db_controller = DBController()

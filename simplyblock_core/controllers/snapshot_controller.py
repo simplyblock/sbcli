@@ -11,6 +11,7 @@ from simplyblock_core.controllers import lvol_controller, snapshot_events, pool_
     migration_controller
 
 from simplyblock_core import utils
+from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.kms import create_kms_connection
 from simplyblock_core.kms._exceptions import KMSException
 from simplyblock_core.db_controller import DBController
@@ -626,7 +627,10 @@ def delete(snapshot_uuid, force_delete=False):
     try:
         base_lvol = db_controller.get_lvol_by_id(snap.lvol.get_id())
         if base_lvol and base_lvol.deleted is True:
-            lvol_controller.delete_lvol(base_lvol)
+            try:
+                lvol_controller.delete_lvol(base_lvol)
+            except (PreconditionError, RuntimeError):
+                logger.warning("Failed to delete volume", exc_info=True)
     except KeyError:
         pass
 

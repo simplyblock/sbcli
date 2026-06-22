@@ -176,9 +176,7 @@ def delete(cluster: Cluster, pool: StoragePool, volume: Volume) -> Response:
     if volume.status == LVol.STATUS_DELETED:
         raise HTTPException(404, "Volume deleted")
 
-    if not lvol_controller.delete_lvol(volume):
-        raise ValueError('Failed to delete volume')
-
+    lvol_controller.delete_lvol(volume)
     return Response(status_code=204)
 
 

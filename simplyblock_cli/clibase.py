@@ -596,9 +596,12 @@ class CLIWrapperBase:
     def volume__delete(self, sub_command, args):
         db = db_controller.DBController()
         try:
-            return lvol_controller.delete_lvol(db.get_lvol_by_id(args.volume_id), args.force)
+            lvol = db.get_lvol_by_id(args.volume_id)
         except KeyError:
             return False
+
+        lvol_controller.delete_lvol(lvol, args.force)
+        return True
 
     def volume__connect(self, sub_command, args):
         kwargs = {}
