@@ -143,6 +143,15 @@ def _add_task(function_name, cluster_id, node_id, device_id,
             logger.info(f"Task found, skip adding new task: {task_id}")
             return False
 
+    elif function_name == JobSchedule.FN_CLUSTER_EXPAND:
+        # One expansion per cluster at a time: the orchestrator freezes the
+        # role rotation while it runs, so a second concurrent expansion would
+        # plan against a moving target.
+        task_id = get_active_cluster_expand_task(cluster_id)
+        if task_id:
+            logger.info(f"Task found, skip adding new task: {task_id}")
+            return False
+
     task_obj = JobSchedule()
     task_obj.uuid = str(uuid.uuid4())
     task_obj.cluster_id = cluster_id
@@ -458,6 +467,26 @@ def add_new_device_mig_task(device_id):
 def add_node_add_task(cluster_id, function_params):
     return _add_task(JobSchedule.FN_NODE_ADD, cluster_id, "", "",
                      function_params=function_params, max_retry=11)
+
+
+def add_cluster_expand_task(cluster_id, new_node_id):
+    """Queue a single-node cluster-expansion task. The runner drives the
+    planner/orchestrator/executor to integrate ``new_node_id`` into the
+    role rotation, resuming from a persisted cursor across retries."""
+    return _add_task(
+        JobSchedule.FN_CLUSTER_EXPAND, cluster_id, new_node_id, "",
+        function_params={"new_node_id": new_node_id}, max_retry=3)
+
+
+def get_active_cluster_expand_task(cluster_id):
+    """Return the UUID of an active (non-done, non-cancelled) cluster
+    expansion task for the cluster, or False if none."""
+    for task in db.get_job_tasks(cluster_id):
+        if task.function_name == JobSchedule.FN_CLUSTER_EXPAND \
+                and task.canceled is False \
+                and task.status != JobSchedule.STATUS_DONE:
+            return task.uuid
+    return False
 
 
 def get_active_node_tasks(cluster_id, node_id):
