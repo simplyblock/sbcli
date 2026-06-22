@@ -1243,7 +1243,7 @@ def _remove_lvol_subsys_from_node(lvol, rpc_client):
     return True
 
 
-def delete_lvol(lvol: LVol, force_delete: bool = False) -> None:
+def delete_lvol(lvol: LVol, *, force_delete: bool = False) -> None:
     db_controller = DBController()
 
     # Block during restart Phase 5

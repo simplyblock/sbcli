@@ -249,7 +249,7 @@ def process_snap_replicate_finish(task, snapshot):
     # delete lvol object
     remote_lv.bdev_stack = []
     remote_lv.write_to_db()
-    lvol_controller.delete_lvol(remote_lv.get_id(), True)
+    lvol_controller.delete_lvol(remote_lv, force_delete=True)
     remote_lv.remove(db.kv_store)
     snapshot_events.replication_task_finished(snapshot)
     delete_last_snapshot_if_needed(task, snapshot.lvol)
@@ -293,7 +293,7 @@ def task_runner(task: JobSchedule):
 
         remote_lv = db.get_lvol_by_id(task.function_params["remote_lvol_id"])
         snode.rpc_client().bdev_nvme_detach_controller(remote_lv.top_bdev)
-        lvol_controller.delete_lvol(remote_lv.get_id(), True)
+        lvol_controller.delete_lvol(remote_lv, force_delete=True)
 
         return True
 

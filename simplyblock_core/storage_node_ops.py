@@ -2316,7 +2316,7 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
         elif force_remove:
             for lvol in lvols:
                 try:
-                    lvol_controller.delete_lvol(lvol, True)
+                    lvol_controller.delete_lvol(lvol, force_delete=True)
                 except (PreconditionError, RuntimeError):
                     logger.warning("Failed to delete volume", exc_info=True)
         else:
