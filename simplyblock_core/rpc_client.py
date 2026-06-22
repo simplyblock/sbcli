@@ -1654,7 +1654,7 @@ class RPCClient:
         """
         return self._request("bdev_lvol_get_lvols", {"lvs_name": lvs_name})
 
-    def bdev_lvol_final_migration(self, lvol_name, lvol_id, snapshot_name, batch_size, bdev_name):
+    def bdev_lvol_final_migration(self, lvol_name, lvol_id, snapshot_name, batch_size, bdev_name, operation="migrate"):
         """
         Start the final (live) migration of a writable lvol from source to target.
         The source I/O is frozen for the brief delta transfer.
@@ -1665,15 +1665,17 @@ class RPCClient:
             snapshot_name: composite name of the last transferred snapshot on source
             block_size:    constant – pass ``2``
             bdev_name:     bdev exposed by connecting to the target hub lvol
+            operation: (migrate or replicate)
 
         Poll progress with :meth:`bdev_lvol_transfer_stat` using *lvol_name*.
         """
-        return self._request("bdev_lvol_final_migration", {
+        return self._request("bdev_lvol_transfer_final_step", {
             "lvol_name": lvol_name,
             "lvol_id": lvol_id,
             "snapshot_name": snapshot_name,
             "cluster_batch": batch_size,
             "gateway": bdev_name,
+            "operation": operation,
         })
 
     # ---- S3 Backup RPCs ----
