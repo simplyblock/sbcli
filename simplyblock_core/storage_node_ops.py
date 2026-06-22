@@ -33,6 +33,7 @@ from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.prom_client import PromClient
+from simplyblock_core.rpc_client import RPCException
 from simplyblock_core.snode_client import SNodeClient, SNodeClientException
 from simplyblock_web import node_utils
 from simplyblock_core.utils import addNvmeDevices
