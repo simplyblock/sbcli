@@ -10,6 +10,8 @@ from simplyblock_core.db_controller import DBController
 from simplyblock_core.exceptions import MigrationConflictError, PreconditionError
 from simplyblock_web import utils
 
+from simplyblock_core.controllers import migration_controller
+from simplyblock_core.db_controller import DBController
 from .._dependencies import Cluster, Migration
 from .._dtos import MigrationDTO
 from ..util import CreationResponseFormatParameter, creation_response
@@ -32,22 +34,15 @@ class _PreCreateParams(BaseModel):
 
 
 @api.post('/', name='clusters:migrations:create', status_code=201, responses={201: {"content": None}})
-def create_migration(
-    request: Request,
-    cluster: Cluster,
-    parameters: _PreCreateParams,
-    response_format: CreationResponseFormatParameter = "full",
-) -> Response:
-    try:
-        migration_id, connect_strings = migration_controller.create_migration(
-            str(parameters.volume_id),
-            str(parameters.target_node_id),
-            ctrl_loss_tmo=parameters.ctrl_loss_tmo,
-            host_nqn=parameters.host_nqn,
-        )
-    except (MigrationConflictError, PreconditionError) as e:
-        raise HTTPException(409, str(e))
-    db = DBController()
+def start_migration(request: Request, cluster: Cluster, parameters: _MigrateParams, response_format: CreationResponseFormatParameter = "identifier") -> Response:
+    migration_id, error = migration_controller.start_migration(
+        parameters.volume_id,
+        parameters.target_node_id,
+        max_retries=parameters.max_retries,
+        deadline_seconds=parameters.deadline_seconds,
+    )
+    if error:
+        raise HTTPException(400, error)
     return creation_response(
         request, response_format,
         entity_id=UUID(migration_id),
@@ -86,10 +81,9 @@ def continue_migration(cluster: Cluster, migration: Migration, parameters: _Cont
 
 @instance_api.delete('/', name='clusters:migrations:cancel', status_code=200)
 def cancel_migration(cluster: Cluster, migration: Migration):
-    try:
-        migration_controller.cancel_migration(migration.uuid)
-    except ValueError as e:
-        raise HTTPException(400, str(e))
+    ok, error = migration_controller.cancel_migration(migration.get_id())
+    if not ok:
+        raise HTTPException(400, error)
     return {"status": "cancelled"}
 
 
