@@ -141,12 +141,12 @@ def _lookup_backup_policy(policy_id: UUID, cluster: Cluster) -> BackupPolicy:
 Policy = Annotated[BackupPolicy, Depends(_lookup_backup_policy)]
 
 
-def _lookup_migration(migration_id: UUID, cluster: Cluster) -> LVolMigration:
+def _lookup_migration(migration_id: UUID, volume: Volume) -> LVolMigration:
     try:
         migration = _db.get_migration_by_id(str(migration_id))
     except KeyError as e:
         raise HTTPException(404, str(e))
-    if migration.cluster_id != cluster.get_id():
+    if migration.lvol_id != volume.get_id():
         raise HTTPException(404, f'Migration {migration_id} not found')
     return migration
 
