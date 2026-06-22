@@ -1913,13 +1913,14 @@ def _handle_cleanup_target(migration, tgt_node, tgt_rpc, src_rpc=None):
 
         # Derive the migration bdev name in case it was pre-created but not yet
         # recorded in transfer_context (i.e. failure before LVOL_MIGRATE saved ctx).
+        _pre_nqn: str | None = None
         try:
             _lvol = db.get_lvol_by_id(migration.lvol_id)
             _pre_bdev = f"{tgt_node.lvstore}/{_lvol.lvol_bdev}{_MIGRATION_BDEV_SUFFIX}"
             _pre_nqn  = _lvol.nqn
         except Exception:
             _pre_bdev = None
-            _pre_nqn  = nqn  # fall back to whatever is in ctx
+            _pre_nqn  = str(nqn) if nqn else None
 
         # Clean up NVMe-oF subsystem — from ctx (LVOL_MIGRATE failure) or from pre-create.
         _nqn_to_clean = nqn or _pre_nqn
