@@ -2778,6 +2778,8 @@ def _restart_storage_node_impl(
         jm_cpu_core = new_distribution.get("jm_cpu_core")
         snode.pollers_mask = utils.generate_mask(poller_cpu_cores)
         snode.app_thread_mask = utils.generate_mask(app_thread_core)
+        lvol_poller_core = new_distribution.get("lvol_poller_core")
+        snode.lvol_poller_mask = utils.generate_mask(lvol_poller_core)
 
         if jc_singleton_core:
             snode.jc_singleton_mask = utils.decimal_to_hex_power_of_2(jc_singleton_core[0])
