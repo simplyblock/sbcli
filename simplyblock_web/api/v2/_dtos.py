@@ -254,7 +254,7 @@ class SnapshotDTO(BaseModel):
 
     @staticmethod
     def from_model(
-        model: SnapShot, request: Request, cluster_id, pool_id, volume_id=None
+        model: SnapShot, request: Request, cluster_id, pool_id
     ):
         from simplyblock_core.controllers import migration_controller
 
@@ -282,7 +282,7 @@ class SnapshotDTO(BaseModel):
                     volume_id=model.lvol.get_id(),
                 )
             )
-            if model.lvol is not None and (volume_id is None or volume_id == model.lvol.get_id())
+            if model.lvol is not None
             else None,
         )
 
