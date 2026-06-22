@@ -197,7 +197,7 @@ class TestSubsystemDeleteOrder(unittest.TestCase):
         for p in self._patches:
             p.start()
 
-        return mod, events, primary, secondary, tertiary
+        return mod, events, lvol, primary, secondary, tertiary
 
     def tearDown(self):
         for p in getattr(self, "_patches", []):
@@ -205,10 +205,9 @@ class TestSubsystemDeleteOrder(unittest.TestCase):
 
     def test_all_online_order_tertiary_secondary_primary_sleep_leader(self):
         """All three peers online: order must be T -> S -> P -> sleep(2) -> leader_op."""
-        mod, events, _p, _s, _t = self._patch()
+        mod, events, lvol, _p, _s, _t = self._patch()
 
-        ok = mod.delete_lvol("lvol-uuid-1", force_delete=False)
-        self.assertTrue(ok)
+        mod.delete_lvol(lvol, force_delete=False)
 
         # Filter out anything other than the four signal events. (The
         # leader_op stub doesn't run delete_lvol_from_node, so there are
@@ -224,11 +223,10 @@ class TestSubsystemDeleteOrder(unittest.TestCase):
     def test_tertiary_offline_skipped(self):
         """If tertiary is not ONLINE its subsystem delete is skipped, but
         secondary + primary still run, sleep still fires after primary."""
-        mod, events, _p, _s, _t = self._patch(
+        mod, events, lvol, _p, _s, _t = self._patch(
             tertiary_status=StorageNode.STATUS_DOWN)
 
-        ok = mod.delete_lvol("lvol-uuid-1", force_delete=False)
-        self.assertTrue(ok)
+        mod.delete_lvol(lvol, force_delete=False)
 
         self.assertEqual(events, [
             ("subsystem_delete", "node-secondary"),
@@ -239,11 +237,10 @@ class TestSubsystemDeleteOrder(unittest.TestCase):
 
     def test_secondary_in_restart_skipped(self):
         """in_restart status is a skip case per the spec."""
-        mod, events, _p, _s, _t = self._patch(
+        mod, events, lvol, _p, _s, _t = self._patch(
             secondary_status=StorageNode.STATUS_RESTARTING)
 
-        ok = mod.delete_lvol("lvol-uuid-1", force_delete=False)
-        self.assertTrue(ok)
+        mod.delete_lvol(lvol, force_delete=False)
 
         self.assertEqual(events, [
             ("subsystem_delete", "node-tertiary"),
@@ -256,11 +253,10 @@ class TestSubsystemDeleteOrder(unittest.TestCase):
         """If the primary is not ONLINE we skip its subsystem delete AND
         the sleep — there is nothing to drain on a node that's already
         gone."""
-        mod, events, _p, _s, _t = self._patch(
+        mod, events, lvol, _p, _s, _t = self._patch(
             primary_status=StorageNode.STATUS_UNREACHABLE)
 
-        ok = mod.delete_lvol("lvol-uuid-1", force_delete=False)
-        self.assertTrue(ok)
+        mod.delete_lvol(lvol, force_delete=False)
 
         # No sleep event, no primary subsystem delete.
         self.assertEqual(events, [
@@ -272,8 +268,8 @@ class TestSubsystemDeleteOrder(unittest.TestCase):
     def test_only_one_sleep_total(self):
         """Even with all three peers online, there must be exactly one
         drain sleep and it must land immediately before the leader op."""
-        mod, events, _p, _s, _t = self._patch()
-        mod.delete_lvol("lvol-uuid-1", force_delete=False)
+        mod, events, lvol, _p, _s, _t = self._patch()
+        mod.delete_lvol(lvol, force_delete=False)
 
         sleeps = [e for e in events if e[0] == "sleep"]
         self.assertEqual(len(sleeps), 1)
@@ -287,8 +283,8 @@ class TestSubsystemDeleteOrder(unittest.TestCase):
     def test_rpc_called_with_short_timeout_and_retry(self):
         """The pre-leader rpc_client must be built with (timeout=5, retry=2)
         so a hung peer doesn't block the user-facing delete request."""
-        mod, _events, primary, secondary, tertiary = self._patch()
-        mod.delete_lvol("lvol-uuid-1", force_delete=False)
+        mod, _events, lvol, primary, secondary, tertiary = self._patch()
+        mod.delete_lvol(lvol, force_delete=False)
 
         for n in (primary, secondary, tertiary):
             n.rpc_client.assert_called_with(timeout=5, retry=2)

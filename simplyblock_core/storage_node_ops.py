@@ -25,6 +25,7 @@ from simplyblock_core.controllers import lvol_controller, storage_events, snapsh
     device_controller, tasks_controller, health_controller, tcp_ports_events, qos_controller
 from simplyblock_core.controllers.host_auth import _reapply_allowed_hosts
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
@@ -2313,7 +2314,10 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
                 # lvol_controller.migrate(lvol_id)
         elif force_remove:
             for lvol in lvols:
-                lvol_controller.delete_lvol(lvol, True)
+                try:
+                    lvol_controller.delete_lvol(lvol, True)
+                except (PreconditionError, RuntimeError):
+                    logger.warning("Failed to delete volume", exc_info=True)
         else:
             logger.warning("LVols found on the storage node, use --force-remove or --force-migrate")
             return False
