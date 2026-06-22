@@ -10,8 +10,6 @@ from simplyblock_core.db_controller import DBController
 from simplyblock_core.exceptions import MigrationConflictError, PreconditionError
 from simplyblock_web import utils
 
-from simplyblock_core.controllers import migration_controller
-from simplyblock_core.db_controller import DBController
 from .._dependencies import Cluster, Migration
 from .._dtos import MigrationDTO
 from ..util import CreationResponseFormatParameter, creation_response
@@ -34,15 +32,17 @@ class _PreCreateParams(BaseModel):
 
 
 @api.post('/', name='clusters:migrations:create', status_code=201, responses={201: {"content": None}})
-def start_migration(request: Request, cluster: Cluster, parameters: _MigrateParams, response_format: CreationResponseFormatParameter = "identifier") -> Response:
-    migration_id, error = migration_controller.start_migration(
-        parameters.volume_id,
-        parameters.target_node_id,
-        max_retries=parameters.max_retries,
-        deadline_seconds=parameters.deadline_seconds,
-    )
-    if error:
-        raise HTTPException(400, error)
+def create_migration(request: Request, cluster: Cluster, parameters: _PreCreateParams, response_format: CreationResponseFormatParameter = "identifier") -> Response:
+    try:
+        migration_id, connect_strings = migration_controller.create_migration(
+            str(parameters.volume_id),
+            str(parameters.target_node_id),
+            ctrl_loss_tmo=parameters.ctrl_loss_tmo,
+            host_nqn=parameters.host_nqn,
+        )
+    except (ValueError, MigrationConflictError, PreconditionError) as e:
+        raise HTTPException(400, str(e))
+    db = DBController()
     return creation_response(
         request, response_format,
         entity_id=UUID(migration_id),

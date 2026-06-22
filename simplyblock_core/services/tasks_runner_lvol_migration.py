@@ -338,7 +338,16 @@ def _apply_migration_to_db(migration, tgt_lvol_uuid=None, tgt_lvol_bdev=None):
             original_snap = db.get_snapshot_by_id(snap_uuid)
             if not any(s.get('lvol', {}).get('node_id') == snap.lvol.node_id
                        for s in original_snap.instances):
-                original_snap.instances.append(snap)
+                original_snap.instances.append({
+                    "lvol": {
+                        "node_id": snap.lvol.node_id,
+                        "hostname": snap.lvol.hostname,
+                        "lvol_bdev": snap.lvol.lvol_bdev,
+                        "uuid": snap.lvol.uuid,
+                    },
+                    "snap_bdev": snap.snap_bdev,
+                    "uuid": snap.uuid,
+                })
                 original_snap.write_to_db(db.kv_store)
         else:
             referenced = False
@@ -352,7 +361,16 @@ def _apply_migration_to_db(migration, tgt_lvol_uuid=None, tgt_lvol_bdev=None):
                     original_snap = db.get_snapshot_by_id(snap_uuid)
                     if not any(s.get('lvol', {}).get('node_id') == snap.lvol.node_id
                                for s in original_snap.instances):
-                        original_snap.instances.append(snap)
+                        original_snap.instances.append({
+                            "lvol": {
+                                "node_id": snap.lvol.node_id,
+                                "hostname": snap.lvol.hostname,
+                                "lvol_bdev": snap.lvol.lvol_bdev,
+                                "uuid": snap.lvol.uuid,
+                            },
+                            "snap_bdev": snap.snap_bdev,
+                            "uuid": snap.uuid,
+                        })
                         original_snap.write_to_db(db.kv_store)
                     referenced = True
                     break
@@ -1394,9 +1412,15 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             if last_snap.lvol.node_id == tgt_node.get_id():
                 tgt_snap_composite = last_snap.snap_bdev
             else:
-                for instance in last_snap.instances:
-                    if instance.get("lvol").get("node_id") == tgt_node.get_id():
-                        tgt_snap_composite = instance.get("snap_bdev")
+                for instance in (last_snap.instances or []):
+                    if not instance:
+                        continue
+                    lvol_info = instance.get("lvol") or {}
+                    if lvol_info.get("node_id") == tgt_node.get_id():
+                        snap_bdev = instance.get("snap_bdev")
+                        if isinstance(snap_bdev, str):
+                            tgt_snap_composite = snap_bdev
+                        break
 
         if not tgt_snap_composite:
             src_rpc.bdev_nvme_detach_controller(ctrl_name)
@@ -1817,7 +1841,8 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
         try:
             # Use the saved pre-apply bdev name; apply_migration_to_db already
             # renamed lvol.lvol_bdev to the target 'm'-suffix name in DB.
-            src_bdev_short = ctx.get('source_lvol_bdev') or lvol.lvol_bdev
+            _raw_src_bdev = ctx.get('source_lvol_bdev')
+            src_bdev_short = _raw_src_bdev if isinstance(_raw_src_bdev, str) and _raw_src_bdev else lvol.lvol_bdev
             src_lvol_composite = f"{src_node.lvstore}/{src_bdev_short}"
             # Set migration flag so SPDK drops only the blob reference without
             # freeing the physical clusters — data now lives on the target.
@@ -1888,13 +1913,14 @@ def _handle_cleanup_target(migration, tgt_node, tgt_rpc, src_rpc=None):
 
         # Derive the migration bdev name in case it was pre-created but not yet
         # recorded in transfer_context (i.e. failure before LVOL_MIGRATE saved ctx).
+        _pre_nqn: str | None = None
         try:
             _lvol = db.get_lvol_by_id(migration.lvol_id)
             _pre_bdev = f"{tgt_node.lvstore}/{_lvol.lvol_bdev}{_MIGRATION_BDEV_SUFFIX}"
             _pre_nqn  = _lvol.nqn
         except Exception:
             _pre_bdev = None
-            _pre_nqn  = nqn  # fall back to whatever is in ctx
+            _pre_nqn  = str(nqn) if nqn else None
 
         # Clean up NVMe-oF subsystem — from ctx (LVOL_MIGRATE failure) or from pre-create.
         _nqn_to_clean = nqn or _pre_nqn

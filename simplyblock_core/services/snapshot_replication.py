@@ -154,11 +154,14 @@ def process_snap_replicate_finish(task, snapshot):
         replicate_as_snap_instance = task.function_params["replicate_as_snap_instance"]
     else:
         replicate_as_snap_instance = False
-    target_prev_snap = None
+    target_prev_snap: dict | None = None
+    _prev_snap_for_db: SnapShot | None = None
     if replicate_to_source:
         org_snap = db.get_snapshot_by_id(snapshot.snap_ref_id)
         try:
-            target_prev_snap = db.get_snapshot_by_id(org_snap.source_replicated_snap_uuid)
+            _snap_obj = db.get_snapshot_by_id(org_snap.source_replicated_snap_uuid)
+            target_prev_snap = {"snap_bdev": _snap_obj.snap_bdev}
+            _prev_snap_for_db = _snap_obj
         except KeyError as e:
             logger.error(e)
     else:
@@ -168,6 +171,7 @@ def process_snap_replicate_finish(task, snapshot):
                 for sn_inst in prev_snap.instances:
                     if sn_inst["lvol"]["node_id"] == remote_snode.get_id():
                         target_prev_snap = sn_inst
+                        _prev_snap_for_db = prev_snap
                         break
             except KeyError as e:
                 logger.error(e)
@@ -228,10 +232,10 @@ def process_snap_replicate_finish(task, snapshot):
             new_snapshot.source_replicated_snap_uuid = snapshot.uuid
 
         try:
-            if target_prev_snap:
-                new_snapshot.prev_snap_uuid = target_prev_snap.get_id()
-                target_prev_snap.next_snap_uuid = new_snapshot_uuid
-                target_prev_snap.write_to_db()
+            if _prev_snap_for_db:
+                new_snapshot.prev_snap_uuid = _prev_snap_for_db.get_id()
+                _prev_snap_for_db.next_snap_uuid = new_snapshot_uuid
+                _prev_snap_for_db.write_to_db()
         except Exception as e:
             logger.error(e)
 
