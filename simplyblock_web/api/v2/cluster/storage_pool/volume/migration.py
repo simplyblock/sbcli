@@ -10,7 +10,7 @@ from simplyblock_core.db_controller import DBController
 from simplyblock_core.exceptions import MigrationConflictError, PreconditionError
 from simplyblock_web import utils
 
-from ...._dependencies import Cluster, Migration
+from ...._dependencies import Cluster, Migration, Volume
 from ...._dtos import MigrationDTO
 from ....util import CreationResponseFormatParameter, creation_response
 
@@ -24,18 +24,17 @@ def list_migrations(cluster: Cluster) -> List[MigrationDTO]:
     return [MigrationDTO.from_model(m) for m in reversed(migrations)]
 
 
-class _PreCreateParams(BaseModel):
-    volume_id: UUID
+class _MigrationParams(BaseModel):
     target_node_id: UUID
     ctrl_loss_tmo: int = constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO
     host_nqn: Annotated[str, Field(pattern=utils.NQN_PATTERN)] | None = None
 
 
 @api.post('/', name='cluster:storage-pools:volumes:migrations:create', status_code=201, responses={201: {"content": None}})
-def create_migration(request: Request, cluster: Cluster, parameters: _PreCreateParams, response_format: CreationResponseFormatParameter = "identifier") -> Response:
+def create_migration(request: Request, cluster: Cluster, volume: Volume, parameters: _MigrationParams, response_format: CreationResponseFormatParameter = "identifier") -> Response:
     try:
         migration_id, connect_strings = migration_controller.create_migration(
-            str(parameters.volume_id),
+            str(volume.get_id()),
             str(parameters.target_node_id),
             ctrl_loss_tmo=parameters.ctrl_loss_tmo,
             host_nqn=parameters.host_nqn,
