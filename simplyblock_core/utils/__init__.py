@@ -2105,6 +2105,17 @@ def _save_sb_hugepages_allocation(node, hugepages_needed):
         logger.warning(f"Node {node}: could not save sb allocation to {sb_file}: {e}")
 
 
+def _save_user_hugepages_baseline(node, baseline):
+    baseline_file = os.path.join(_HUGEPAGES_BASELINE_DIR, f"hugepages_baseline_node{node}")
+    try:
+        os.makedirs(_HUGEPAGES_BASELINE_DIR, exist_ok=True)
+        with open(baseline_file, "w") as f:
+            f.write(str(baseline))
+        logger.debug(f"Node {node}: saved updated hugepage baseline: {baseline} -> {baseline_file}")
+    except Exception as e:
+        logger.warning(f"Node {node}: could not save hugepage baseline to {baseline_file}: {e}")
+
+
 def set_hugepages_if_needed(node, hugepages_needed, page_size_kb=2048):
     """Set hugepages for a specific NUMA node, adjusting up or down based on previous allocation."""
     hugepage_path = f"/sys/devices/system/node/node{node}/hugepages/hugepages-{page_size_kb}kB/nr_hugepages"
@@ -2122,6 +2133,12 @@ def set_hugepages_if_needed(node, hugepages_needed, page_size_kb=2048):
             # last deploy (rounding overhead is not mistaken for user additions).
             user_delta = current_hugepages - prev_sb
             current_user = user_baseline + user_delta
+            if user_delta != 0:
+                # User added or removed hugepages since the last deploy — absorb
+                # the delta into the baseline so it persists across every future
+                # restart, not just the next one.
+                _save_user_hugepages_baseline(node, current_user)
+                logger.info(f"Node {node}: user hugepage baseline updated {user_baseline} -> {current_user} (delta={user_delta:+d})")
         else:
             # First deploy: use the captured pre-deploy baseline
             current_user = user_baseline
