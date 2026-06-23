@@ -1745,7 +1745,7 @@ class SshUtils:
         """
 
         
-        cmd = (f"{self.base_cmd} --dev -d storage-node add-node "
+        cmd = (f"{self.base_cmd} --dev -d storage-node add-node --expansion "
                f"--journal-partition {partitions} ")
         
         if disable_ha_jm:

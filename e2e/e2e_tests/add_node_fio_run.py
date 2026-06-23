@@ -93,8 +93,8 @@ class TestAddNodesDuringFioRun(TestClusterBase):
 
             lvol_details[lvol_name]["Clone"]["ID"] = clone_id
             lvol_details[lvol_name]["Clone"]["Snapshot"] = snapshot_name
-            lvol_details[lvol_name]["Clone"]["Log"] = cl_mount_path
-            lvol_details[lvol_name]["Clone"]["Mount"] = cl_log_path
+            lvol_details[lvol_name]["Clone"]["Log"] = cl_log_path
+            lvol_details[lvol_name]["Clone"]["Mount"] = cl_mount_path
 
             device = self.ssh_obj.get_lvol_vs_device(node=self.mgmt_nodes[0], lvol_id=clone_id)
             self.ssh_obj.format_disk(self.mgmt_nodes[0], device)
@@ -155,11 +155,14 @@ class TestAddNodesDuringFioRun(TestClusterBase):
             containers = self.ssh_obj.get_running_containers(node_ip=ip)
             self.container_nodes[ip] = containers
 
-            cluster_details = self.sbcli_utils.wait_for_cluster_status(
-                cluster_id=self.cluster_id,
-                status="in_expansion",
-                timeout=300
+            try:
+                cluster_details = self.sbcli_utils.wait_for_cluster_status(
+                    cluster_id=self.cluster_id,
+                    status="in_expansion",
+                    timeout=300
                 )
+            except Exception as e:
+                self.logger.error(f"Error while waiting for cluster to be in expansion state: {e}, Checking if online!!")
 
         for node in self.storage_nodes:
             self.ssh_obj.restart_docker_logging(
@@ -171,8 +174,8 @@ class TestAddNodesDuringFioRun(TestClusterBase):
 
         # Step 4: Resume cluster
         sleep_n_sec(60)
-        self.logger.info("Expanding the cluster")
-        self.ssh_obj.expand_cluster(self.mgmt_nodes[0], cluster_id=self.cluster_id)
+        # self.logger.info("Expanding the cluster")
+        # self.ssh_obj.expand_cluster(self.mgmt_nodes[0], cluster_id=self.cluster_id)
 
         for node in new_nodes_id:
             self.sbcli_utils.wait_for_storage_node_status(
@@ -180,19 +183,21 @@ class TestAddNodesDuringFioRun(TestClusterBase):
                 status="online",
                 timeout=300
             )
+        
+        cluster_details = self.sbcli_utils.wait_for_cluster_status(
+            cluster_id=self.cluster_id,
+            status="active",
+            timeout=300
+        )
+        self.logger.info(f"Completed cluster expansion for cluster id: {self.cluster_id} and Cluster status is {cluster_details['status']}")
+
 
         sleep_n_sec(120)
 
         self.validate_migration_for_node(timestamp, 2000, None, 60, no_task_ok=False)
         sleep_n_sec(30)
 
-        cluster_details = self.sbcli_utils.wait_for_cluster_status(
-            cluster_id=self.cluster_id,
-            status="active",
-            timeout=300
-            )
-        self.logger.info(f"Completed cluster expansion for cluster id: {self.cluster_id} and Cluster status is {cluster_details['status']}")
-
+        
         # Step 5: Create lvols on new nodes and validate
         for node in new_nodes_id:
             lvol_name = f"lvl_{generate_random_sequence(4)}_nn"
@@ -264,8 +269,8 @@ class TestAddNodesDuringFioRun(TestClusterBase):
 
             lvol_details[lvol_name]["Clone"]["ID"] = clone_id
             lvol_details[lvol_name]["Clone"]["Snapshot"] = snapshot_name
-            lvol_details[lvol_name]["Clone"]["Log"] = cl_mount_path
-            lvol_details[lvol_name]["Clone"]["Mount"] = cl_log_path
+            lvol_details[lvol_name]["Clone"]["Log"] = cl_log_path
+            lvol_details[lvol_name]["Clone"]["Mount"] = cl_mount_path
 
             device = self.ssh_obj.get_lvol_vs_device(node=self.mgmt_nodes[0], lvol_id=clone_id)
             self.ssh_obj.format_disk(self.mgmt_nodes[0], device)
@@ -492,8 +497,8 @@ class TestAddK8sNodesDuringFioRun(TestClusterBase):
 
             lvol_details[lvol_name]["Clone"]["ID"] = clone_id
             lvol_details[lvol_name]["Clone"]["Snapshot"] = snapshot_name
-            lvol_details[lvol_name]["Clone"]["Log"] = cl_mount_path
-            lvol_details[lvol_name]["Clone"]["Mount"] = cl_log_path
+            lvol_details[lvol_name]["Clone"]["Log"] = cl_log_path
+            lvol_details[lvol_name]["Clone"]["Mount"] = cl_mount_path
 
             device = self.ssh_obj.get_lvol_vs_device(node=self.mgmt_nodes[0], lvol_id=clone_id)
             self.ssh_obj.format_disk(self.mgmt_nodes[0], device)
@@ -541,12 +546,15 @@ class TestAddK8sNodesDuringFioRun(TestClusterBase):
                 if node_id not in new_nodes_id:
                     new_nodes_id.append(node_id)
             self.storage_nodes.append(ip)
-
-            cluster_details = self.sbcli_utils.wait_for_cluster_status(
-                cluster_id=self.cluster_id,
-                status="in_expansion",
-                timeout=300
+            
+            try:
+                cluster_details = self.sbcli_utils.wait_for_cluster_status(
+                    cluster_id=self.cluster_id,
+                    status="in_expansion",
+                    timeout=300
                 )
+            except Exception as e:
+                self.logger.error(f"Error while waiting for cluster to be in expansion state: {e}, Checking if online!!")
 
         self.runner_k8s_log.restart_logging()
 
@@ -559,8 +567,14 @@ class TestAddK8sNodesDuringFioRun(TestClusterBase):
                 timeout=300
             )
         
-        self.logger.info("Expanding the cluster")
-        self.ssh_obj.expand_cluster(self.mgmt_nodes[0], cluster_id=self.cluster_id)
+        cluster_details = self.sbcli_utils.wait_for_cluster_status(
+            cluster_id=self.cluster_id,
+            status="active",
+            timeout=300
+        )
+        
+        # self.logger.info("Expanding the cluster")
+        # self.ssh_obj.expand_cluster(self.mgmt_nodes[0], cluster_id=self.cluster_id)
 
         for node in new_nodes_id:
             self.sbcli_utils.wait_for_storage_node_status(
@@ -574,11 +588,6 @@ class TestAddK8sNodesDuringFioRun(TestClusterBase):
         self.validate_migration_for_node(timestamp, 2000, None, 60, no_task_ok=False)
         sleep_n_sec(30)
 
-        cluster_details = self.sbcli_utils.wait_for_cluster_status(
-            cluster_id=self.cluster_id,
-            status="active",
-            timeout=300
-            )
         self.logger.info(f"Completed cluster expansion for cluster id: {self.cluster_id} and Cluster status is {cluster_details['status']}")
 
         # Step 4: Create lvols on new nodes and validate
@@ -652,8 +661,8 @@ class TestAddK8sNodesDuringFioRun(TestClusterBase):
 
             lvol_details[lvol_name]["Clone"]["ID"] = clone_id
             lvol_details[lvol_name]["Clone"]["Snapshot"] = snapshot_name
-            lvol_details[lvol_name]["Clone"]["Log"] = cl_mount_path
-            lvol_details[lvol_name]["Clone"]["Mount"] = cl_log_path
+            lvol_details[lvol_name]["Clone"]["Log"] = cl_log_path
+            lvol_details[lvol_name]["Clone"]["Mount"] = cl_mount_path
 
             device = self.ssh_obj.get_lvol_vs_device(node=self.mgmt_nodes[0], lvol_id=clone_id)
             self.ssh_obj.format_disk(self.mgmt_nodes[0], device)

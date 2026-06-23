@@ -1566,9 +1566,14 @@ class TestBackupBasicPositive(BackupTestBase):
         if parsed_8:
             self.logger.info(
                 "TC-BCK-008: validating --cluster-id filter entry references correct lvol_id")
-            # CLI output uses volume handle (lvol_id) in LVol column,
-            # not PVC name.  In K8s mode these differ.
-            search_key = lvol_id if self.k8s_test else lvol_name
+            # CLI backup list shows the lvol display name (PV name in K8s)
+            # in the LVol column — not the PVC name or volumeHandle.
+            if self.k8s_test:
+                k8s = self._ensure_k8s_utils()
+                pvc_name = self._k8s_normalize_name(lvol_name)
+                search_key = k8s.get_pvc_pv_name(pvc_name) or lvol_name
+            else:
+                search_key = lvol_name
             entry_8 = next(
                 (b for b in parsed_8 if search_key in (b.get("LVol") or b.get("lvol") or "")),
                 None

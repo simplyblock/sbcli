@@ -759,6 +759,16 @@ class K8sUtils:
         )
         return handle.strip()
 
+    def get_pvc_pv_name(self, name: str, namespace: str = None) -> str:
+        """Return the PersistentVolume name backing a bound PVC, or ''."""
+        ns = namespace or self.namespace
+        pv, _ = self._exec_kubectl(
+            f"kubectl get pvc {name} -n {ns} "
+            f"-o jsonpath='{{.spec.volumeName}}' 2>/dev/null || true",
+            supress_logs=True,
+        )
+        return pv.strip()
+
     def get_pvc_primary_k8s_node(self, pvc_name: str, sbcli_utils,
                                 namespace: str = None) -> str | None:
         """Return the K8s node hostname where the primary storage node of a PVC lives.
