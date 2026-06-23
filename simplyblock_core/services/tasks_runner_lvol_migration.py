@@ -181,15 +181,20 @@ def _ensure_hub_attached(src_rpc, tgt_rpc, tgt_node, trtype, target_ip):
             ip,  tgt_node.transfer_hublvol.nvmf_port, trtype)
         if not ret:
             # Attach can fail with EEXIST if a prior crashed attempt attached the controller
-            # but the namespace wasn't in the subsystem yet (e.g. due to a bad nguid on the
-            # add_ns call).  Detach the zombie and retry once so the controller reconnects
-            # to a now-populated subsystem.
+            # but the namespace wasn't in the subsystem yet, or if the target SPDK restarted
+            # between migrations dropping the subsystem while the source controller persisted.
+            # Detach the zombie, re-ensure the hub subsystem is healthy on the target (idempotent),
+            # then retry once so the controller reconnects to a populated subsystem.
             if src_rpc.bdev_nvme_controller_list(tgt_node.transfer_hublvol.bdev_name):
                 logger.info(
                     "_ensure_hub_attached: zombie mighub controller found (no bdev); "
                     "detaching and reattaching"
                 )
                 src_rpc.bdev_nvme_detach_controller(tgt_node.transfer_hublvol.bdev_name)
+                try:
+                    tgt_node.create_transfer_hublvol()
+                except Exception as e:
+                    logger.warning(f"_ensure_hub_attached: hub subsystem re-create (non-fatal): {e}")
                 ret = src_rpc.bdev_nvme_attach_controller(
                     tgt_node.transfer_hublvol.bdev_name, tgt_node.transfer_hublvol.nqn,
                     ip, tgt_node.transfer_hublvol.nvmf_port, trtype)
