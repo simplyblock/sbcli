@@ -11,7 +11,7 @@ from simplyblock_core.controllers import backup_events, tasks_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.backup import Backup, BackupPolicy, BackupPolicyAttachment
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.kms import KMSException, create_kms_connection
+from simplyblock_core.kms import KMSException, create_kms_connection, dek_name, kek_name
 from simplyblock_core.utils.secrets import unwrap_secret as _unwrap_secret
 
 logger = logging.getLogger()
@@ -453,7 +453,9 @@ def restore_backup(backup_id, lvol_name, pool_id_or_name, cluster_id=None,
 
     with create_kms_connection(db_controller.get_cluster_by_id(backup.cluster_id)) as kms:
         try:
-            key1, key2 = kms.get_data_encryption_keys(original_lvol.crypto_bdev, original_lvol.pool_uuid)
+            key1, key2 = kms.get_data_encryption_keys(
+                dek_name(backup.cluster_id, original_lvol), kek_name(original_lvol.pool_uuid),
+            )
         except KMSException:
             return None, "Failed to retrieve original crypto keys"
 

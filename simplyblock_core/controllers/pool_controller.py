@@ -12,7 +12,7 @@ from pydantic import SecretStr
 from simplyblock_core import utils
 from simplyblock_core.controllers import pool_events, lvol_controller
 from simplyblock_core.db_controller import DBController
-from simplyblock_core.kms import KMSException, create_kms_connection
+from simplyblock_core.kms import KMSException, create_kms_connection, kek_name
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.prom_client import PromClient
 
@@ -105,7 +105,7 @@ def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes,
 
     try:
         with create_kms_connection(cluster) as kms:
-            kms.create_key_encryption_key(pool.get_id())
+            kms.create_key_encryption_key(kek_name(pool.get_id()))
             logger.info("Created pool key")
     except KMSException:
         logger.exception("Failed to create pool key")
@@ -360,7 +360,7 @@ def delete_pool(uuid):
 
     with create_kms_connection(cluster) as kms:
         try:
-            kms.delete_key_encryption_key(pool.get_id())
+            kms.delete_key_encryption_key(kek_name(pool.get_id()))
             logger.info("Deleted pool key")
         except KMSException:
             logger.exception("Failed to delete pool key")

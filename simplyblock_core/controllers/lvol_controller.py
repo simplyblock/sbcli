@@ -12,7 +12,7 @@ from simplyblock_core.controllers import snapshot_controller, pool_controller, l
     snapshot_events
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.exceptions import PreconditionError
-from simplyblock_core.kms import KMSException, create_kms_connection
+from simplyblock_core.kms import KMSException, create_kms_connection, dek_name, kek_name
 from simplyblock_core.controllers.host_auth import (
     _get_dhchap_group, _register_dhchap_keys_on_node, _register_pool_dhchap_keys_on_node)
 from simplyblock_core.models.cluster import Cluster
@@ -45,7 +45,9 @@ def _create_crypto_lvol(rpc_client, lvol, cluster):
 
     with create_kms_connection(cluster) as kms:
         try:
-            original_key1, original_key2 = kms.get_data_encryption_keys(lvol.bdev_lvol, lvol.pool_uuid)
+            original_key1, original_key2 = kms.get_data_encryption_keys(
+                dek_name(cluster.get_id(), lvol), kek_name(lvol.pool_uuid),
+            )
         except KMSException:
             logger.exception(f"Failed to get keys for lvol: {name} from KMS")
             return False
@@ -580,9 +582,11 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
         with create_kms_connection(cl) as kms:
             try:
                 if crypto_key is None:
-                    kms.create_data_encryption_keys(lvol.crypto_bdev, lvol.pool_uuid)
+                    kms.create_data_encryption_keys(dek_name(cl.get_id(), lvol), kek_name(pool.get_id()))
                 else:
-                    kms.import_data_encryption_keys(lvol.crypto_bdev, lvol.pool_uuid, crypto_key)
+                    kms.import_data_encryption_keys(
+                        dek_name(cl.get_id(), lvol), kek_name(pool.get_id()), crypto_key,
+                    )
                 logger.info("Created lvol keys")
             except KMSException:
                 msg = "Failed to create lvol keys"
@@ -1458,7 +1462,7 @@ def delete_lvol(lvol: LVol, *, force_delete: bool = False) -> None:
     if lvol.crypto_bdev:
         with create_kms_connection(cl) as kms:
             try:
-                kms.delete_data_encryption_keys(lvol.crypto_bdev)
+                kms.delete_data_encryption_keys(dek_name(cl.get_id(), lvol))
                 logger.info("Deleted lvol key")
             except KMSException:
                 logger.exception("Failed to delete lvol key")
