@@ -9,13 +9,15 @@ import threading
 import unittest
 from unittest.mock import patch
 
+from pydantic import SecretStr
+
 from simplyblock_core.rpc_client import RPCClient, _rpc_cache, _rpc_cache_lock
 
 
 def _make_client(**kwargs):
     """Create an RPCClient without hitting the network."""
     with patch("requests.session"):
-        return RPCClient("127.0.0.1", 8081, "user", "pass", timeout=1, retry=0, **kwargs)
+        return RPCClient("127.0.0.1", 8081, "user", SecretStr("pass"), timeout=1, retry=0, **kwargs)
 
 
 class TestRequestCached(unittest.TestCase):
@@ -80,8 +82,8 @@ class TestRequestCached(unittest.TestCase):
         mock_req.return_value = ["data"]
 
         with patch("requests.session"):
-            client_a = RPCClient("10.0.0.1", 8081, "u", "p", timeout=1, retry=0)
-            client_b = RPCClient("10.0.0.2", 8081, "u", "p", timeout=1, retry=0)
+            client_a = RPCClient("10.0.0.1", 8081, "u", SecretStr("p"), timeout=1, retry=0)
+            client_b = RPCClient("10.0.0.2", 8081, "u", SecretStr("p"), timeout=1, retry=0)
 
         client_a._request_cached("bdev_get_bdevs")
         client_b._request_cached("bdev_get_bdevs")

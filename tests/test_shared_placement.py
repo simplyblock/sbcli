@@ -19,6 +19,8 @@ These tests pin those invariants without touching FDB.
 import unittest
 from unittest.mock import MagicMock, patch
 
+from pydantic import SecretStr
+
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.storage_node import StorageNode
 
@@ -345,7 +347,7 @@ class TestRpcMethodShape(unittest.TestCase):
         from simplyblock_core.rpc_client import RPCClient
 
         with patch("requests.session"):
-            c = RPCClient("127.0.0.1", 8081, "u", "p", timeout=1, retry=0)
+            c = RPCClient("127.0.0.1", 8081, "u", SecretStr("p"), timeout=1, retry=0)
         with patch.object(c, "get_bdevs", return_value=None), \
              patch.object(c, "_request", return_value=True) as mock_req:
             c.bdev_distrib_create(
@@ -362,7 +364,7 @@ class TestRpcMethodShape(unittest.TestCase):
         from simplyblock_core.rpc_client import RPCClient
 
         with patch("requests.session"):
-            c = RPCClient("127.0.0.1", 8081, "u", "p", timeout=1, retry=0)
+            c = RPCClient("127.0.0.1", 8081, "u", SecretStr("p"), timeout=1, retry=0)
         with patch.object(c, "get_bdevs", return_value=None), \
              patch.object(c, "_request", return_value=True) as mock_req:
             c.bdev_distrib_create(
@@ -378,7 +380,7 @@ class TestRpcMethodShape(unittest.TestCase):
         from simplyblock_core.rpc_client import RPCClient
 
         with patch("requests.session"):
-            c = RPCClient("127.0.0.1", 8081, "u", "p", timeout=1, retry=0)
+            c = RPCClient("127.0.0.1", 8081, "u", SecretStr("p"), timeout=1, retry=0)
         with patch.object(c, "_request", return_value=True) as mock_req:
             c.distr_shared_placement(name="distrib_1", enable=True)
 
@@ -390,7 +392,7 @@ class TestRpcMethodShape(unittest.TestCase):
         from simplyblock_core.rpc_client import RPCClient
 
         with patch("requests.session"):
-            c = RPCClient("127.0.0.1", 8081, "u", "p", timeout=1, retry=0)
+            c = RPCClient("127.0.0.1", 8081, "u", SecretStr("p"), timeout=1, retry=0)
         with patch.object(c, "_request", return_value=True) as mock_req:
             c.distr_shared_placement(enable=True)
 
@@ -404,7 +406,7 @@ class TestRpcMethodShape(unittest.TestCase):
         from simplyblock_core.rpc_client import RPCClient
 
         with patch("requests.session"):
-            c = RPCClient("127.0.0.1", 8081, "u", "p", timeout=1, retry=0)
+            c = RPCClient("127.0.0.1", 8081, "u", SecretStr("p"), timeout=1, retry=0)
         with patch.object(c, "_request", return_value=True) as mock_req:
             c.bdev_jm_create(name="jm_1", name_storage1="alceml_1",
                              shared_placement=True)
@@ -417,7 +419,7 @@ class TestRpcMethodShape(unittest.TestCase):
         from simplyblock_core.rpc_client import RPCClient
 
         with patch("requests.session"):
-            c = RPCClient("127.0.0.1", 8081, "u", "p", timeout=1, retry=0)
+            c = RPCClient("127.0.0.1", 8081, "u", SecretStr("p"), timeout=1, retry=0)
         with patch.object(c, "_request", return_value=True) as mock_req:
             c.bdev_jm_create(name="jm_1", name_storage1="alceml_1")
 
@@ -430,7 +432,7 @@ class TestRpcMethodShape(unittest.TestCase):
         from simplyblock_core.rpc_client import RPCClient
 
         with patch("requests.session"):
-            c = RPCClient("127.0.0.1", 8081, "u", "p", timeout=1, retry=0)
+            c = RPCClient("127.0.0.1", 8081, "u", SecretStr("p"), timeout=1, retry=0)
         with patch.object(c, "_request", return_value=True) as mock_req:
             c.jm_set_shared_placement(name="jm_1", enable=True)
 
@@ -445,7 +447,7 @@ class TestRpcMethodShape(unittest.TestCase):
         from simplyblock_core.rpc_client import RPCClient
 
         with patch("requests.session"):
-            c = RPCClient("127.0.0.1", 8081, "u", "p", timeout=1, retry=0)
+            c = RPCClient("127.0.0.1", 8081, "u", SecretStr("p"), timeout=1, retry=0)
         with self.assertRaises(TypeError):
             c.jm_set_shared_placement(enable=True)
 
@@ -453,7 +455,7 @@ class TestRpcMethodShape(unittest.TestCase):
         from simplyblock_core.rpc_client import RPCClient
 
         with patch("requests.session"):
-            c = RPCClient("127.0.0.1", 8081, "u", "p", timeout=1, retry=0)
+            c = RPCClient("127.0.0.1", 8081, "u", SecretStr("p"), timeout=1, retry=0)
         with patch.object(c, "_request", return_value=True) as mock_req:
             c.jm_set_shared_placement(name="jm_1", enable=False)
 
