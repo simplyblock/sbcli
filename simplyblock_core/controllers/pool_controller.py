@@ -505,8 +505,7 @@ def get_pool_total_capacity(pool_id, all_lvols=None, all_snaps=None):
         all_lvols = db_controller.get_lvols_by_pool_id(pool_id)
     for lvol in all_lvols:
         if lvol.pool_uuid == pool_id:
-            continue
-        total += lvol.size
+            total += lvol.size
 
     if not all_snaps:
         all_snaps = db_controller.get_mini_snapshots()
