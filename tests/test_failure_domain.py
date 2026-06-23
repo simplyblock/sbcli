@@ -49,7 +49,7 @@ def _cluster(enable_failure_domain=False, distr_npcs=2, cluster_id="cluster-1"):
 def _node(uuid, mgmt_ip, failure_domain=-1, status=StorageNode.STATUS_ONLINE,
           cluster_id="cluster-1", is_secondary_node=False,
           lvstore_stack_secondary="", lvstore_stack_tertiary="",
-          jm_device=None, jm_ids=None, ha_jm_count=3):
+          jm_device=None, jm_ids=None, ha_jm_count=3, physical_label=0):
     n = StorageNode()
     n.uuid = uuid
     n.status = status
@@ -62,6 +62,7 @@ def _node(uuid, mgmt_ip, failure_domain=-1, status=StorageNode.STATUS_ONLINE,
     n.jm_device = jm_device
     n.jm_ids = jm_ids or []
     n.ha_jm_count = ha_jm_count
+    n.physical_label = physical_label
     return n
 
 
@@ -421,6 +422,156 @@ class TestFDAwareClusterStatus(unittest.TestCase):
         nodes += [self._on(f"b{i}", f"10.0.1.{i}", 0) for i in range(3)]
         status = self._status(cluster, nodes)
         assert status == Cluster.STATUS_SUSPENDED
+
+
+# ===========================================================================
+# 6. HA-JM count requirement (req #4: FTT=1 + failure domains needs 4 JMs)
+# ===========================================================================
+class TestRequiredHaJmCount(unittest.TestCase):
+
+    def setUp(self):
+        import simplyblock_core.storage_node_ops as ops
+        self.ops = ops
+
+    def _cl(self, ftt, fd):
+        c = Cluster()
+        c.max_fault_tolerance = ftt
+        c.enable_failure_domain = fd
+        return c
+
+    def test_ftt2_always_four(self):
+        assert self.ops.get_required_ha_jm_count(self._cl(2, False)) == 4
+        assert self.ops.get_required_ha_jm_count(self._cl(2, True)) == 4
+
+    def test_ftt1_no_fd_three(self):
+        assert self.ops.get_required_ha_jm_count(self._cl(1, False)) == 3
+
+    def test_ftt1_with_fd_four(self):
+        # The reverse-quorum fix: 3 journals across 2 domains can lose 2-of-3.
+        assert self.ops.get_required_ha_jm_count(self._cl(1, True)) == 4
+
+
+# ===========================================================================
+# 7. HA-JM domain balance (req #2: <=2 JMs per domain for 2 domains; spread)
+# ===========================================================================
+class TestJmDomainBalance(unittest.TestCase):
+
+    def _mock_db(self, cluster, nodes):
+        mock_db = MagicMock()
+        mock_db.get_cluster_by_id.return_value = cluster
+        mock_db.get_storage_nodes_by_cluster_id.return_value = nodes
+        return mock_db
+
+    def _fd_of(self, nodes):
+        return {n.jm_device.get_id(): n.failure_domain for n in nodes if n.jm_device}
+
+    @patch("simplyblock_core.storage_node_ops.DBController")
+    def test_two_domains_four_jms_split_2_2(self, MockDBCtrl):
+        import simplyblock_core.storage_node_ops as ops
+        # current is in fd0 (its local JM occupies fd0). 4-JM set => at most 2
+        # per domain, so exactly one more in fd0 and two in fd1.
+        current = _node("current", "10.0.0.1", failure_domain=0, ha_jm_count=4)
+        nodes = [current,
+                 _node("a", "10.0.0.2", failure_domain=0, jm_device=_jm("ja")),
+                 _node("b", "10.0.0.3", failure_domain=0, jm_device=_jm("jb")),
+                 _node("c", "10.0.0.4", failure_domain=1, jm_device=_jm("jc")),
+                 _node("d", "10.0.0.5", failure_domain=1, jm_device=_jm("jd"))]
+        MockDBCtrl.return_value = self._mock_db(_cluster(True), nodes)
+        result = ops.get_sorted_ha_jms(current)
+        fd_of = self._fd_of(nodes)
+        # full journal set = local (fd0) + selected remotes
+        fd_tally = {0: 1}  # local
+        for jm in result:
+            fd_tally[fd_of[jm]] = fd_tally.get(fd_of[jm], 0) + 1
+        assert len(result) == 3
+        assert max(fd_tally.values()) <= 2, fd_tally
+        assert fd_tally == {0: 2, 1: 2}, fd_tally
+
+    @patch("simplyblock_core.storage_node_ops.DBController")
+    def test_four_domains_one_per_domain(self, MockDBCtrl):
+        import simplyblock_core.storage_node_ops as ops
+        current = _node("current", "10.0.0.1", failure_domain=0, ha_jm_count=4)
+        nodes = [current,
+                 _node("a", "10.0.0.2", failure_domain=1, jm_device=_jm("ja")),
+                 _node("b", "10.0.0.3", failure_domain=2, jm_device=_jm("jb")),
+                 _node("c", "10.0.0.4", failure_domain=3, jm_device=_jm("jc")),
+                 _node("d", "10.0.0.5", failure_domain=1, jm_device=_jm("jd"))]
+        MockDBCtrl.return_value = self._mock_db(_cluster(True), nodes)
+        result = ops.get_sorted_ha_jms(current)
+        fd_of = self._fd_of(nodes)
+        chosen_fds = sorted(fd_of[jm] for jm in result)
+        # spread across the three other domains, one each
+        assert chosen_fds == [1, 2, 3], chosen_fds
+
+    @patch("simplyblock_core.storage_node_ops.DBController")
+    def test_no_domain_exceeds_quorum_cap(self, MockDBCtrl):
+        import simplyblock_core.storage_node_ops as ops
+        # 3 in fd0, 3 in fd1; the OLD code produced 3-1 splits. Verify the new
+        # code never lets the lost-domain side exceed 2 (so >=2 JMs survive).
+        current = _node("current", "10.0.0.1", failure_domain=1, ha_jm_count=4)
+        nodes = [current,
+                 _node("a", "10.0.0.2", failure_domain=0, jm_device=_jm("ja")),
+                 _node("b", "10.0.0.3", failure_domain=0, jm_device=_jm("jb")),
+                 _node("e", "10.0.0.6", failure_domain=0, jm_device=_jm("je")),
+                 _node("c", "10.0.0.4", failure_domain=1, jm_device=_jm("jc")),
+                 _node("d", "10.0.0.5", failure_domain=1, jm_device=_jm("jd"))]
+        MockDBCtrl.return_value = self._mock_db(_cluster(True), nodes)
+        result = ops.get_sorted_ha_jms(current)
+        fd_of = self._fd_of(nodes)
+        fd_tally = {1: 1}  # local in fd1
+        for jm in result:
+            fd_tally[fd_of[jm]] = fd_tally.get(fd_of[jm], 0) + 1
+        assert max(fd_tally.values()) <= 2, fd_tally
+
+
+# ===========================================================================
+# 8. Secondary/tertiary physical-label anti-affinity (req #1)
+# ===========================================================================
+class TestPlacementPhysicalLabel(unittest.TestCase):
+
+    def _mock_db(self, cluster, nodes):
+        mock_db = MagicMock()
+        mock_db.get_cluster_by_id.return_value = cluster
+        mock_db.get_storage_nodes_by_cluster_id.return_value = nodes
+        return mock_db
+
+    @patch("simplyblock_core.storage_node_ops.DBController")
+    def test_secondary_prefers_distinct_label(self, MockDBCtrl):
+        import simplyblock_core.storage_node_ops as ops
+        # FD disabled so only the physical label distinguishes candidates.
+        primary = _node("primary", "10.0.0.1", physical_label=5)
+        same = _node("same", "10.0.0.2", physical_label=5)        # same label
+        other = _node("other", "10.0.0.3", physical_label=7)      # distinct
+        MockDBCtrl.return_value = self._mock_db(_cluster(False), [primary, same, other])
+        result = ops.get_secondary_nodes(primary)
+        assert "other" in result
+        assert "same" not in result
+
+    @patch("simplyblock_core.storage_node_ops.DBController")
+    def test_secondary_falls_back_when_only_same_label(self, MockDBCtrl):
+        import simplyblock_core.storage_node_ops as ops
+        primary = _node("primary", "10.0.0.1", physical_label=5)
+        c1 = _node("c1", "10.0.0.2", physical_label=5)
+        c2 = _node("c2", "10.0.0.3", physical_label=5)
+        MockDBCtrl.return_value = self._mock_db(_cluster(False), [primary, c1, c2])
+        result = ops.get_secondary_nodes(primary)
+        assert result  # best-effort: returns same-label host-disjoint candidates
+
+    @patch("simplyblock_core.storage_node_ops.DBController")
+    def test_tertiary_excludes_secondary_label(self, MockDBCtrl):
+        import simplyblock_core.storage_node_ops as ops
+        primary = _node("primary", "10.0.0.1", physical_label=1)
+        # secondary has label 2 (passed via exclude_physical_labels)
+        in_sec_label = _node("c1", "10.0.0.3", physical_label=2)
+        in_prim_label = _node("c2", "10.0.0.4", physical_label=1)
+        fresh = _node("c3", "10.0.0.5", physical_label=3)
+        MockDBCtrl.return_value = self._mock_db(
+            _cluster(False), [primary, in_sec_label, in_prim_label, fresh])
+        result = ops.get_secondary_nodes_2(
+            primary, exclude_mgmt_ips=["10.0.0.2"], exclude_physical_labels=[2])
+        assert "c3" in result
+        assert "c1" not in result  # secondary's label
+        assert "c2" not in result  # primary's label
 
 
 if __name__ == "__main__":

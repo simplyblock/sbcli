@@ -716,6 +716,7 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                     exclude_ids=[snode.secondary_node_id] + used_nodes_as_tertiary,
                     exclude_mgmt_ips=[sec_node.mgmt_ip],
                     exclude_failure_domains=[sec_node.failure_domain],
+                    exclude_physical_labels=[sec_node.physical_label],
                 )
                 if not secondary_nodes_2:
                     set_cluster_status(cl_id, ols_status)
@@ -1020,8 +1021,20 @@ def cluster_expand(cl_id) -> None:
 
         if cluster.ha_type == "ha" and cluster.max_fault_tolerance >= 2 and not snode.tertiary_node_id:
             snode = db_controller.get_storage_node_by_id(snode.get_id())
-            secondary_nodes_2 = storage_node_ops.get_secondary_nodes(
-                snode, exclude_ids=[snode.secondary_node_id])
+            sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+            # Expansion must honor the same host / failure-domain / physical-label
+            # anti-affinity as initial activation: the tertiary has to be
+            # disjoint from BOTH the primary and the already-picked secondary.
+            # (Previously this used get_secondary_nodes with only the secondary
+            # excluded by id, so an expanded cluster could land the tertiary on
+            # the secondary's host or domain.)
+            secondary_nodes_2 = storage_node_ops.get_secondary_nodes_2(
+                snode,
+                exclude_ids=[snode.secondary_node_id],
+                exclude_mgmt_ips=[sec_node.mgmt_ip],
+                exclude_failure_domains=[sec_node.failure_domain],
+                exclude_physical_labels=[sec_node.physical_label],
+            )
             if not secondary_nodes_2:
                 set_cluster_status(cl_id, ols_status)
                 raise ValueError("A minimum of 3 new nodes are required to expand cluster with dual fault tolerance")
