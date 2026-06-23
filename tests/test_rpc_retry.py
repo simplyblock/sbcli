@@ -8,12 +8,14 @@ governed separately (the `connect` count) and are safe, so they must remain.
 """
 from unittest.mock import patch
 
+from pydantic import SecretStr
+
 from simplyblock_core.rpc_client import RPCClient
 
 
 def _make_client(retry=3, **kwargs):
     with patch("requests.session"):
-        return RPCClient("127.0.0.1", 8081, "user", "pass", timeout=1, retry=retry, **kwargs)
+        return RPCClient("127.0.0.1", 8081, "user", SecretStr("pass"), timeout=1, retry=retry, **kwargs)
 
 
 def _mounted_retries(client):

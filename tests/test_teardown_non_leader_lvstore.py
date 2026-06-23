@@ -10,6 +10,8 @@ actually a sec/tert for the given primary.
 import unittest
 from unittest.mock import MagicMock, patch
 
+from pydantic import SecretStr
+
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.hublvol import HubLVol
@@ -34,7 +36,7 @@ def _node(uuid, lvstore="", secondary_node_id="", tertiary_node_id="",
     n.mgmt_ip = mgmt_ip or f"10.0.0.{abs(hash(uuid)) % 254 + 1}"
     n.rpc_port = 8080
     n.rpc_username = "user"
-    n.rpc_password = "pass"
+    n.rpc_password = SecretStr("pass")
     n.hublvol = HubLVol({"nvmf_port": 5000, "uuid": f"hub-{uuid}",
                           "nqn": f"nqn.hub.{uuid}",
                           "bdev_name": f"lvs/{uuid}/hublvol",

@@ -30,6 +30,7 @@ from typing import List
 from unittest.mock import patch
 
 import pytest
+from pydantic import SecretStr
 
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.iface import IFace
@@ -180,7 +181,7 @@ def ftt2_env(ensure_db, mock_rpc_servers):
         n.api_endpoint = f"127.0.0.1:{5000 + i}"
         n.rpc_port = port
         n.rpc_username = "spdkuser"
-        n.rpc_password = "spdkpass"
+        n.rpc_password = SecretStr("spdkpass")
         n.is_secondary_node = False
         n.number_of_distribs = 1
         n.active_tcp = True
