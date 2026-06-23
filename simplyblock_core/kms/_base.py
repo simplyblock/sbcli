@@ -3,10 +3,6 @@ from __future__ import annotations
 from abc import abstractmethod
 from contextlib import AbstractContextManager
 from types import TracebackType
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from simplyblock_core.models.lvol_model import LVol
 
 
 class KMS(AbstractContextManager):
@@ -19,15 +15,15 @@ class KMS(AbstractContextManager):
         return None
 
     @abstractmethod
-    def create_data_encryption_keys(self, lvol: "LVol") -> None:
+    def create_data_encryption_keys(self, name: str, kek_name: str) -> None:
         raise NotImplementedError
 
     @abstractmethod
-    def import_data_encryption_keys(self, lvol: "LVol", keys: tuple[str, str]) -> None:
+    def import_data_encryption_keys(self, name: str, kek_name: str, keys: tuple[str, str]) -> None:
         pass
 
     @abstractmethod
-    def get_data_encryption_keys(self, lvol: "LVol") -> tuple[str, str]:
+    def get_data_encryption_keys(self, name: str, kek_name: str) -> tuple[str, str]:
         pass
 
     @abstractmethod

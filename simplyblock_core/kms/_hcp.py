@@ -71,8 +71,7 @@ class HCPClient(KMS):
             raise KMSException("Request failed") from e
         return base64.b64decode(plaintext_b64).hex()
 
-    def create_data_encryption_keys(self, lvol) -> None:
-        kek_name, name = str(lvol.pool_uuid), lvol.crypto_bdev
+    def create_data_encryption_keys(self, name: str, kek_name: str) -> None:
         try:
             self.client.secrets.kv.v2.create_or_update_secret(
                 path=f"{self.cluster_id}/{name}",
@@ -85,8 +84,7 @@ class HCPClient(KMS):
         except hvac.exceptions.VaultError as e:
             raise KMSException("Request failed") from e
 
-    def import_data_encryption_keys(self, lvol, keys: tuple[str, str]) -> None:
-        kek_name, name = str(lvol.pool_uuid), lvol.crypto_bdev
+    def import_data_encryption_keys(self, name: str, kek_name: str, keys: tuple[str, str]) -> None:
         try:
             self.client.secrets.kv.v2.create_or_update_secret(
                 path=f"{self.cluster_id}/{name}",
@@ -99,8 +97,7 @@ class HCPClient(KMS):
         except hvac.exceptions.VaultError as e:
             raise KMSException("Request failed") from e
 
-    def get_data_encryption_keys(self, lvol) -> tuple[str, str]:
-        kek_name, name = str(lvol.pool_uuid), lvol.crypto_bdev
+    def get_data_encryption_keys(self, name: str, kek_name: str) -> tuple[str, str]:
         try:
             encrypted_key1, encrypted_key2 = self.client.secrets.kv.v2.read_secret_version(
                 path=f"{self.cluster_id}/{name}",
