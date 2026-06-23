@@ -15,22 +15,22 @@ class KMS(AbstractContextManager):
         return None
 
     @abstractmethod
-    def create_data_encryption_keys(self, name: str, kek_name: str) -> None:
+    def create_data_encryption_keys(self, path: str, kek_path: str) -> None:
         raise NotImplementedError
 
     @abstractmethod
-    def import_data_encryption_keys(self, name: str, kek_name: str, keys: tuple[str, str]) -> None:
+    def import_data_encryption_keys(self, path: str, kek_path: str, keys: tuple[str, str]) -> None:
         pass
 
     @abstractmethod
-    def get_data_encryption_keys(self, name: str, kek_name: str) -> tuple[str, str]:
+    def get_data_encryption_keys(self, path: str, kek_path: str) -> tuple[str, str]:
         pass
 
     @abstractmethod
-    def delete_data_encryption_keys(self, name: str) -> None: ...
+    def delete_data_encryption_keys(self, path: str) -> None: ...
 
     @abstractmethod
-    def create_key_encryption_key(self, name: str) -> None: ...
+    def create_key_encryption_key(self, path: str) -> None: ...
 
     @abstractmethod
-    def delete_key_encryption_key(self, name: str) -> None: ...
+    def delete_key_encryption_key(self, path: str) -> None: ...
