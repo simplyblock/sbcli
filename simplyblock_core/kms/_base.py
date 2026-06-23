@@ -29,6 +29,16 @@ class KMS(AbstractContextManager):
     @abstractmethod
     def delete_data_encryption_keys(self, path: str) -> None: ...
 
+    def rekey_data_encryption_keys(
+        self,
+        src_path: str, src_kek_path: str,
+        dst_path: str, dst_kek_path: str,
+    ) -> None:
+        # TODO: Implementing this as a combined operation via a plugin for HCP enables
+        # us to prevent the controller from seeing the plaintext altogether.
+        keys = self.get_data_encryption_keys(src_path, src_kek_path)
+        self.import_data_encryption_keys(dst_path, dst_kek_path, keys)
+
     @abstractmethod
     def create_key_encryption_key(self, path: str) -> None: ...
 

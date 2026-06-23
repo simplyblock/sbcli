@@ -11,7 +11,9 @@ from simplyblock_core.controllers import backup_events, tasks_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.backup import Backup, BackupPolicy, BackupPolicyAttachment
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.kms import KMSException, create_kms_connection, dek_path, kek_path
+from simplyblock_core.kms import (
+    KMSException, backup_path, create_kms_connection, dek_path, kek_path,
+)
 from simplyblock_core.utils.secrets import unwrap_secret as _unwrap_secret
 
 logger = logging.getLogger()
@@ -285,6 +287,19 @@ def _create_single_backup(snapshot, lvol, node_id, cluster_id, prev_backup):
     backup.allowed_hosts = lvol.allowed_hosts
     backup.created_at = int(time.time())
     backup.status = Backup.STATUS_PENDING
+    backup.encrypted = bool(lvol.crypto_bdev)
+
+    if backup.encrypted:
+        cluster = db_controller.get_cluster_by_id(cluster_id)
+        with create_kms_connection(cluster) as kms:
+            kms.create_key_encryption_key(backup_path(cluster_id, backup.uuid))
+            kms.rekey_data_encryption_keys(
+                dek_path(cluster_id, lvol.get_id()),
+                kek_path(cluster_id, lvol.pool_uuid),
+                backup_path(cluster_id, backup.uuid),
+                backup_path(cluster_id, backup.uuid),
+            )
+
     backup.write_to_db()
 
     _write_s3_metadata(None, backup)
@@ -382,7 +397,7 @@ def backup_snapshot(snapshot_id, cluster_id=None):
     return final_backup_id, None
 
 
-def restore_backup(backup_id, lvol_name, pool_id_or_name, cluster_id=None,
+def restore_backup(backup_id, lvol_name, pool_id_or_name, cluster_id,
                    target_node_id=None):
     """Restore a backup chain into a new fully-accessible lvol.
 
@@ -405,24 +420,21 @@ def restore_backup(backup_id, lvol_name, pool_id_or_name, cluster_id=None,
 
     try:
         backup = db_controller.get_backup_by_id(backup_id)
+        cluster = db_controller.get_cluster_by_id(cluster_id)
     except KeyError as e:
         return None, str(e)
 
     # Verify the backup's source matches the active S3 source.
     # If the backup came from an external cluster, the S3 bdev must be
     # switched to that cluster's bucket before restoring.
-    if cluster_id:
-        backup_src = backup.source_cluster_id or backup.cluster_id
-        try:
-            cl = db_controller.get_cluster_by_id(cluster_id)
-            active_src = cl.backup_source or cluster_id
-            if backup_src != active_src:
-                return None, (
-                    f"Backup source is {backup_src[:8]} but active S3 source "
-                    f"is {active_src[:8]}. Use 'sbctl backup source-switch "
-                    f"{backup_src}' first.")
-        except KeyError:
-            pass
+    backup_src = backup.source_cluster_id or backup.cluster_id
+    cl = db_controller.get_cluster_by_id(cluster_id)
+    active_src = cl.backup_source or cluster_id
+    if backup_src != active_src:
+        return None, (
+            f"Backup source is {backup_src[:8]} but active S3 source "
+            f"is {active_src[:8]}. Use 'sbctl backup source-switch "
+            f"{backup_src}' first.")
 
     # Build the backup chain
     chain = db_controller.get_backup_chain(backup_id)
@@ -449,23 +461,24 @@ def restore_backup(backup_id, lvol_name, pool_id_or_name, cluster_id=None,
     if not target_node.lvstore:
         return None, f"Target node {restore_node_id} has no lvstore (S3 bdev requires lvstore)"
 
-    original_lvol = db_controller.get_lvol_by_id(backup.lvol_id)
-
-    with create_kms_connection(db_controller.get_cluster_by_id(backup.cluster_id)) as kms:
-        try:
-            key1, key2 = kms.get_data_encryption_keys(
-                dek_path(backup.cluster_id, original_lvol.get_id()),
-                kek_path(backup.cluster_id, original_lvol.pool_uuid),
-            )
-        except KMSException:
-            return None, "Failed to retrieve original crypto keys"
+    if backup.encrypted:
+        with create_kms_connection(cluster) as kms:
+            try:
+                crypto_key = kms.get_data_encryption_keys(
+                    backup_path(cluster_id, backup.uuid),
+                    backup_path(cluster_id, backup.uuid),
+                )
+            except KMSException:
+                return None, "Failed to retrieve backup crypto keys"
+    else:
+        crypto_key = None
 
     logger.info(f"Backup allowed hosts: {backup.allowed_hosts}")
     lvol_id, error = lvol_controller.add_lvol_ha(
         name=lvol_name,
         size=size,
         pool_id_or_name=pool_id_or_name,
-        use_crypto=bool(original_lvol.crypto_bdev),
+        use_crypto=backup.encrypted,
         max_size=0,
         max_rw_iops=0,
         max_rw_mbytes=0,
@@ -473,7 +486,7 @@ def restore_backup(backup_id, lvol_name, pool_id_or_name, cluster_id=None,
         max_w_mbytes=0,
         host_id_or_name=restore_node_id,
         ha_type="default",
-        crypto_key=(key1, key2),
+        crypto_key=crypto_key,
         use_comp=False,
         distr_vuid=0,
         lvol_priority_class=0,
@@ -492,14 +505,6 @@ def restore_backup(backup_id, lvol_name, pool_id_or_name, cluster_id=None,
 
     lvol.status = LVol.STATUS_RESTORING
     lvol.write_to_db()
-
-    if not cluster_id:
-        cluster_id = lvol.node_id
-        try:
-            snode = db_controller.get_storage_node_by_id(lvol.node_id)
-            cluster_id = snode.cluster_id
-        except KeyError:
-            pass
 
     # The bdev name the data plane expects (e.g. LVS_7744/LVOL_12345)
     bdev_name = f"{lvol.lvs_name}/{lvol.lvol_bdev}"
@@ -522,12 +527,31 @@ def restore_backup(backup_id, lvol_name, pool_id_or_name, cluster_id=None,
     return None, "Failed to create restore task"
 
 
+def _cleanup_backup_kms_keys(backups):
+    encrypted = [b for b in backups if b.encrypted]
+    if not encrypted:
+        return
+    try:
+        cluster = db_controller.get_cluster_by_id(encrypted[0].cluster_id)
+        with create_kms_connection(cluster) as kms:
+            for b in encrypted:
+                try:
+                    kms.delete_data_encryption_keys(backup_path(b.cluster_id, b.uuid))
+                    kms.delete_key_encryption_key(backup_path(b.cluster_id, b.uuid))
+                except KMSException:
+                    logger.exception(f"Failed to delete keys for backup {b.uuid}")
+    except (KMSException, KeyError):
+        logger.exception("Failed to clean up backup KMS keys")
+
+
 def delete_backups(lvol_id):
     """Delete all backups for a given lvol.
     Returns (success, error_message)."""
     backups = db_controller.get_backups_by_lvol_id(lvol_id)
     if not backups:
         return False, f"No backups found for lvol {lvol_id}"
+
+    _cleanup_backup_kms_keys(backups)
 
     # Find node to run delete RPC on
     completed = [b for b in backups if b.status == Backup.STATUS_COMPLETED]
