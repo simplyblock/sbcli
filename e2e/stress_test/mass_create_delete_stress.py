@@ -2,7 +2,8 @@
 Mass-creation/deletion stress test for lvols, snapshots, and clones.
 
 Tests system behavior under high object counts across different
-subsystem-to-namespace ratios. Exercises the full lifecycle:
+namespace-to-subsystem ratios. All lvols are pinned to a single
+storage node. Exercises the full lifecycle:
   1. Mass-create lvols (parallel, 20 threads, until limit)
   2. FIO on 10% of lvols (connect, format, run)
   3. Create 50 snapshots per lvol
@@ -14,8 +15,12 @@ subsystem-to-namespace ratios. Exercises the full lifecycle:
 
 Deletion order respects SPDK dependency constraints: clones → snapshots → lvols.
 
-Four ratio configurations (subsystems × lvols_per_subsystem):
-  1:500, 30:100, 300:10, 3000:1
+Four ratio configurations (NxM = N namespaces per subsystem × M subsystems):
+  3000x1  — 3000 ns in 1 subsystem  = 3000 lvols
+  300x10  — 300 ns in 10 subsystems = 3000 lvols
+  30x100  — 30 ns in 100 subsystems = 3000 lvols
+  1x500   — 1 ns in 500 subsystems  = 500 standalone lvols
+            (if 500 subsystems doesn't fit, use 300x10 as largest test)
 
 Docker and K8s variants for each ratio.
 
@@ -61,8 +66,9 @@ class _MassCreateDeleteMixin:
     """Shared orchestration for mass-creation/deletion stress test."""
 
     # ── Scale (overridden per ratio class) ─────────────────────────────────
+    # NxM = N namespaces per subsystem × M subsystems
     NUM_SUBSYSTEMS = 1
-    NS_PER_SUBSYSTEM = 500
+    NS_PER_SUBSYSTEM = 3000
     LVOL_SIZE = "1G"
     PVC_SIZE = "1Gi"
 
@@ -481,7 +487,7 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
     def _create_single_lvol(self, params: dict):
         name = params["name"]
         idx = params["idx"]
-        host_id = self.sn_nodes[idx % len(self.sn_nodes)] if self.sn_nodes else None
+        host_id = self.sn_nodes[0] if self.sn_nodes else None
         bdev_retries = 0
         sync_retries = 0
 
@@ -585,6 +591,7 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
 
     def _create_parent(self, params: dict):
         name = params["name"]
+        host_id = self.sn_nodes[0] if self.sn_nodes else None
         self.sbcli_utils.add_lvol(
             lvol_name=name,
             pool_name=self.pool_name,
@@ -594,6 +601,7 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
             distr_bs=self.bs,
             distr_chunk_bs=self.chunk_bs,
             max_namespace_per_subsys=self.NS_PER_SUBSYSTEM,
+            host_id=host_id,
             retry=3,
         )
         sleep_n_sec(1)
@@ -767,7 +775,7 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
         if lvol_name in self._connected_lvols:
             cl = self._connected_lvols[lvol_name]
             client, device = cl["client"], cl["device"]
-        elif info.get("parent_name") and info["parent_name"] in self._child_registry:
+        elif info.get("parent_name") and lvol_name in self._child_registry:
             # It's a child — device already detected
             cinfo = self._child_registry.get(lvol_name, {})
             device = cinfo.get("device")
@@ -1636,52 +1644,56 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Docker variants
+#
+# Naming: NxM = N namespaces per subsystem × M subsystems.
+# All lvols pinned to a single storage node.
+# If 500 subsystems doesn't fit, use 300x10 as the largest test.
 
 class MassCreateDelete_1x500_Docker(_MassCreateDeleteDocker):
-    """1 subsystem × 500 namespaces = 500 lvols."""
-    NUM_SUBSYSTEMS = 1
-    NS_PER_SUBSYSTEM = 500
+    """1 ns/sub × 500 subsystems = 500 standalone lvols."""
+    NUM_SUBSYSTEMS = 500
+    NS_PER_SUBSYSTEM = 1
 
 
 class MassCreateDelete_30x100_Docker(_MassCreateDeleteDocker):
-    """30 subsystems × 100 namespaces = 3000 lvols."""
-    NUM_SUBSYSTEMS = 30
-    NS_PER_SUBSYSTEM = 100
+    """30 ns/sub × 100 subsystems = 3000 lvols."""
+    NUM_SUBSYSTEMS = 100
+    NS_PER_SUBSYSTEM = 30
 
 
 class MassCreateDelete_300x10_Docker(_MassCreateDeleteDocker):
-    """300 subsystems × 10 namespaces = 3000 lvols."""
-    NUM_SUBSYSTEMS = 300
-    NS_PER_SUBSYSTEM = 10
+    """300 ns/sub × 10 subsystems = 3000 lvols."""
+    NUM_SUBSYSTEMS = 10
+    NS_PER_SUBSYSTEM = 300
 
 
 class MassCreateDelete_3000x1_Docker(_MassCreateDeleteDocker):
-    """3000 subsystems × 1 namespace = 3000 standalone lvols."""
-    NUM_SUBSYSTEMS = 3000
-    NS_PER_SUBSYSTEM = 1
+    """3000 ns/sub × 1 subsystem = 3000 lvols."""
+    NUM_SUBSYSTEMS = 1
+    NS_PER_SUBSYSTEM = 3000
 
 
 # K8s variants
 
 class MassCreateDelete_1x500_K8s(_MassCreateDeleteK8s):
-    """1 subsystem × 500 namespaces = 500 PVCs."""
-    NUM_SUBSYSTEMS = 1
-    NS_PER_SUBSYSTEM = 500
+    """1 ns/sub × 500 subsystems = 500 PVCs."""
+    NUM_SUBSYSTEMS = 500
+    NS_PER_SUBSYSTEM = 1
 
 
 class MassCreateDelete_30x100_K8s(_MassCreateDeleteK8s):
-    """30 subsystems × 100 namespaces = 3000 PVCs."""
-    NUM_SUBSYSTEMS = 30
-    NS_PER_SUBSYSTEM = 100
+    """30 ns/sub × 100 subsystems = 3000 PVCs."""
+    NUM_SUBSYSTEMS = 100
+    NS_PER_SUBSYSTEM = 30
 
 
 class MassCreateDelete_300x10_K8s(_MassCreateDeleteK8s):
-    """300 subsystems × 10 namespaces = 3000 PVCs."""
-    NUM_SUBSYSTEMS = 300
-    NS_PER_SUBSYSTEM = 10
+    """300 ns/sub × 10 subsystems = 3000 PVCs."""
+    NUM_SUBSYSTEMS = 10
+    NS_PER_SUBSYSTEM = 300
 
 
 class MassCreateDelete_3000x1_K8s(_MassCreateDeleteK8s):
-    """3000 subsystems × 1 namespace = 3000 PVCs."""
-    NUM_SUBSYSTEMS = 3000
-    NS_PER_SUBSYSTEM = 1
+    """3000 ns/sub × 1 subsystem = 3000 PVCs."""
+    NUM_SUBSYSTEMS = 1
+    NS_PER_SUBSYSTEM = 3000
