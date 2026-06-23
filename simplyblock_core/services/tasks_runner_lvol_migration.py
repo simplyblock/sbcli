@@ -1382,6 +1382,7 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         if tgt_map_id is None:
             return False, True, f"Could not find map_id for {lvol.lvol_bdev} on target"
 
+        logger.info(f"[MAP_ID] {tgt_lvol_bdev} map_id={tgt_map_id} uuid={tgt_uuid} on {tgt_node.get_id()[:8]}")
         sec_setup_rpc = None
 
         # NVMe-oF subsystem setup is deferred to the Done handler — the subsystem
@@ -1392,7 +1393,9 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         ctrl_name, hub_bdev, hub_err = _ensure_hub_attached(
             src_rpc, tgt_rpc, tgt_node, trtype, target_ip)
         if hub_err:
-            _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc, secondary_rpc=sec_setup_rpc)
+            # Do NOT delete the target bdev on hub error — it is unrelated to
+            # the hub connection and deleting it forces a recreate on retry,
+            # which changes its map_id and breaks concurrent migration tracking.
             return False, True, hub_err
 
         # Step 4: locate the last migrated snapshot's composite name on the target
@@ -1441,7 +1444,10 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             src_lvol_composite, tgt_map_id, tgt_snap_composite, 2, hub_bdev)
         if ret is None:
             src_rpc.bdev_nvme_detach_controller(ctrl_name)
-            _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc, secondary_rpc=sec_setup_rpc)
+            # Do NOT delete the target bdev on transfer failure — the bdev is
+            # still valid and retaining it keeps the map_id stable across retries.
+            # Deleting it would force a recreate at a higher map_id (due to
+            # concurrent migrations creating bdevs in the interim).
             return False, True, "bdev_lvol_final_migration failed"
 
         logger.info(
