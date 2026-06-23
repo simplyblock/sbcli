@@ -2451,7 +2451,7 @@ def _pick_replica_relocation_node(primary, removed_node, role, db_controller):
     if role == "secondary":
         if primary.tertiary_node_id and primary.tertiary_node_id != removed_node.get_id():
             exclude_ids.append(primary.tertiary_node_id)
-        cands = get_secondary_nodes(primary, exclude_ids=exclude_ids)
+        cands = get_secondary_nodes(primary, exclude_ids=exclude_ids, removed_node=removed_node)
     else:
         exclude_mgmt_ips = []
         if primary.secondary_node_id and primary.secondary_node_id != removed_node.get_id():
@@ -7117,7 +7117,7 @@ def get_node_jm_names(current_node, remote_node=None):
     return jm_list[:current_node.ha_jm_count]
 
 
-def get_secondary_nodes(current_node, exclude_ids=None):
+def get_secondary_nodes(current_node, exclude_ids=None, removed_node=None):
     if exclude_ids is None:
         exclude_ids = []
     db_controller = DBController()
@@ -7143,6 +7143,9 @@ def get_secondary_nodes(current_node, exclude_ids=None):
                 nodes.append(node.get_id())
                 if nod_found:
                     return [node.get_id()]
+
+            elif removed_node and node.get_id() == removed_node.secondary_node_id:
+                nodes.append(node.get_id())
 
     return nodes
 
