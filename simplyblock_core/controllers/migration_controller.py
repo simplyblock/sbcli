@@ -78,7 +78,6 @@ def start_migration(migration_id,
 
     Returns migration_uuid on success; raises ValueError on failure.
     """
-    print(f"hi sadegh — start_migration called: migration_id={migration_id}", flush=True)
     try:
         migration = db.get_migration_by_id(migration_id)
     except KeyError:
@@ -663,6 +662,9 @@ def create_migration(lvol_id, target_node_id,
                 f"(phase={existing_migration.phase}). Use /continue or cancel it.")
 
     src_node_id = lvol.node_id
+    if src_node_id == target_node_id:
+        raise ValueError(f"LVol {lvol_id} is already on node {target_node_id}; cannot migrate to the same node")
+
     try:
         src_node = db.get_storage_node_by_id(src_node_id)
     except KeyError:
@@ -874,7 +876,6 @@ def create_migration(lvol_id, target_node_id,
                         f"create_migration: listener on overlap {_node_id[:8]} "
                         f"(non-fatal): {_e}")
         else:
-            print(f"hi sadegh — tgt_entries loop: node={_node_id[:8]} _min_cntlid={_min_cntlid} subsys_exists={bool(_rpc.subsystem_list(nqn))}", flush=True)
             if not _rpc.subsystem_list(nqn):
                 if _min_cntlid in subsys_min_cntlid_used:
                     _min_cntlid = _min_cntlid + 10000
