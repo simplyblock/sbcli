@@ -7039,15 +7039,52 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
 
 
 
+# Seconds to wait before the single retry of a failed distrib (re)creation,
+# giving the control plane time to reconcile a peer that went offline mid-restart
+# so the rebuilt cluster map no longer references its devices as online.
+_DISTR_RECREATE_RETRY_DELAY_SEC = 5
+
+
 def _create_bdev_stack(snode, lvstore_stack=None, primary_node=None):
+    # Per-distrib creation outcome, keyed by bdev name. Threads write their own
+    # key (distinct keys -> GIL-safe), the main loop reads after join.
+    distr_results: dict = {}
+
     def _create_distr(snode, name, params):
-        try:
-            rpc_client.bdev_distrib_create(**params)
-        except Exception:
-            logger.error("Failed to create bdev distrib")
-        ret = distr_controller.send_cluster_map_to_distr(snode, name)
-        if not ret:
-            logger.error("Failed to send cluster map")
+        # If a peer node goes offline at the exact moment a distrib is
+        # (re)created, the cluster map can be briefly stale -- it still flags
+        # that peer's devices as online -- and bdev_distrib_create (or the
+        # subsequent map push) fails. That is transient: once the control plane
+        # marks the departed devices offline, a freshly built map succeeds. So
+        # try once more (send_cluster_map_to_distr rebuilds the map from the
+        # current DB view each call) before giving up. A failure that survives
+        # the retry is recorded so the caller aborts the restart -- the standard
+        # unrecoverable-error path -- instead of completing on a broken distrib.
+        for attempt in range(2):
+            if attempt > 0:
+                # Give the control plane a moment to reconcile the departed
+                # node, then clear any half-created distrib before retrying.
+                time.sleep(_DISTR_RECREATE_RETRY_DELAY_SEC)
+                try:
+                    rpc_client.bdev_distrib_delete(name)
+                except Exception:
+                    pass
+            try:
+                rpc_client.bdev_distrib_create(**params)
+                if distr_controller.send_cluster_map_to_distr(snode, name):
+                    distr_results[name] = True
+                    return
+                logger.error(
+                    "Failed to send cluster map to distrib %s (attempt %d/2)",
+                    name, attempt + 1)
+            except Exception as e:
+                logger.error(
+                    "Failed to create bdev distrib %s (attempt %d/2): %s",
+                    name, attempt + 1, e)
+        distr_results[name] = False
+
+    def _distr_failures():
+        return [n for n, ok in distr_results.items() if not ok]
 
     rpc_client = snode.rpc_client()
     db_controller = DBController()
@@ -7100,6 +7137,14 @@ def _create_bdev_stack(snode, lvstore_stack=None, primary_node=None):
             if thread_list:
                 for t in thread_list:
                     t.join()
+            # Never assemble the raid on top of distribs that failed to
+            # (re)create after the retry -- that is the unrecoverable case the
+            # restart must abort on.
+            failed = _distr_failures()
+            if failed:
+                if created_bdevs:
+                    _remove_bdev_stack(created_bdevs[::-1], rpc_client)
+                return False, f"Failed to (re)create distrib(s) after retry: {failed}"
             distribs_list = bdev["distribs_list"]
             strip_size_kb = params["strip_size_kb"]
             ret = rpc_client.bdev_raid_create(name, distribs_list, strip_size_kb=strip_size_kb)
@@ -7120,6 +7165,13 @@ def _create_bdev_stack(snode, lvstore_stack=None, primary_node=None):
     if thread_list:
         for t in thread_list:
             t.join()
+    # Catch distrib failures for stacks without a trailing raid (the raid
+    # branch checks before assembling its raid; this covers everything else).
+    failed = _distr_failures()
+    if failed:
+        if created_bdevs:
+            _remove_bdev_stack(created_bdevs[::-1], rpc_client)
+        return False, f"Failed to (re)create distrib(s) after retry: {failed}"
     return True, None
 
 
