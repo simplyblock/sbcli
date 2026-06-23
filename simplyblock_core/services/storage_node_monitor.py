@@ -84,6 +84,86 @@ def _in_shutdown_longer_than(node, seconds):
         return False
 
 
+def _down_longer_than(node, seconds):
+    """True if a DOWN node has been DOWN for at least ``seconds``.
+
+    Keyed off ``node.down_since`` (stamped by set_node_status on the ->DOWN
+    transition). A missing/blank/unparseable timestamp is treated as
+    "long enough" so we stay conservative: an old row without the field still
+    suspends + auto-restarts rather than being silently ignored forever.
+    """
+    ds = getattr(node, "down_since", "") or ""
+    if not ds:
+        return True
+    try:
+        return (datetime.now(timezone.utc) - datetime.fromisoformat(ds)).total_seconds() >= seconds
+    except Exception:
+        return True
+
+
+def _fd_aware_cluster_status(cluster, snodes, affected_ips, n, k, jm_replication_tasks):
+    """Failure-domain-aware cluster status.
+
+    Implements the operator-agreed availability contract for clusters created
+    with ``--enable-failure-domain`` (where data/parity chunks are spread
+    across distinct domains):
+
+      (A) Losing ALL nodes and/or any combination of devices within a SINGLE
+          failure domain is tolerated — the cluster stays serving (DEGRADED),
+          never SUSPENDED.
+      (B) Losing a whole failure domain AND one additional node/device outage
+          (>=1 devices on a SINGLE node) on ONE other domain is also tolerated,
+          but ONLY when FTT == 2 (``distr_npcs`` == 2) AND the cluster spans at
+          least ndcs (``distr_ndcs``) independent failure domains.
+
+    Anything broader than (A)/(B) -> SUSPENDED.
+
+    ``affected_ips`` is the list of distinct physical-host mgmt IPs that have a
+    device/node outage (the same set the flat per-node logic counts).
+
+    Failure-domain ids are 32-bit ints: ``-1`` means "unset", ``>= 0`` is a
+    real domain (0 is a valid domain — never test truthiness here).
+
+    Returns a ``Cluster.STATUS_*`` string, or ``None`` to signal "this is not a
+    usable failure-domain layout — fall back to the flat per-node suspend
+    logic": fewer than 2 tagged domains, or an affected host carrying no domain
+    tag (mixed/partially-tagged cluster — be safe, don't reason FD-wise).
+    """
+    all_fds = {nd.failure_domain for nd in snodes if nd.failure_domain >= 0}
+    if len(all_fds) < 2:
+        return None
+
+    fd_by_ip = {nd.mgmt_ip: nd.failure_domain for nd in snodes}
+    # Group the affected physical hosts by their failure domain.
+    damaged = {}
+    for ip in affected_ips:
+        fd = fd_by_ip.get(ip, -1)
+        if fd < 0:
+            return None
+        damaged.setdefault(fd, set()).add(ip)
+
+    num_damaged_fds = len(damaged)
+    if num_damaged_fds == 0:
+        # No FTT-affecting damage; an in-flight JM replication still degrades.
+        return Cluster.STATUS_DEGRADED if jm_replication_tasks else Cluster.STATUS_ACTIVE
+
+    # Any surviving damage means reduced redundancy -> at best DEGRADED.
+    # (A) Damage confined to one domain is always tolerated.
+    if num_damaged_fds == 1:
+        return Cluster.STATUS_DEGRADED
+
+    # (B) One whole domain + at most one extra affected node on exactly one
+    # other domain, gated on FTT==2 and >=ndcs independent domains.
+    if num_damaged_fds == 2 and k == 2 and len(all_fds) >= n:
+        nodes_in_smaller_domain = min(len(ips) for ips in damaged.values())
+        if nodes_in_smaller_domain <= 1:
+            return Cluster.STATUS_DEGRADED
+
+    # Damage spans more domains (or more than one extra node on the second
+    # domain) than the contract permits.
+    return Cluster.STATUS_SUSPENDED
+
+
 def get_next_cluster_status(cluster_id):
     logger.info(f"get_next_cluster_status for cluster_id: {cluster_id}")
     cluster = db.get_cluster_by_id(cluster_id)
@@ -170,6 +250,19 @@ def get_next_cluster_status(cluster_id):
     # npcs k = 1
     n = cluster.distr_ndcs
     k = cluster.distr_npcs
+
+    # Failure-domain-aware suspend criteria. When the cluster was created with
+    # --enable-failure-domain, chunks are spread across distinct domains, so it
+    # can survive losing whole domains that the flat per-node count below would
+    # treat as a fatal FTT breach (affected_nodes > k). The helper returns None
+    # when the layout isn't a usable FD layout (<2 tagged domains, or an
+    # affected host without a domain tag), in which case we fall through to the
+    # legacy node-count logic unchanged.
+    if cluster.enable_failure_domain:
+        fd_status = _fd_aware_cluster_status(
+            cluster, snodes, affected_physical_nodes, n, k, jm_replication_tasks)
+        if fd_status is not None:
+            return fd_status
 
     # if number of devices in the cluster unavailable on DIFFERENT nodes > k --> I cannot read and in some cases cannot write (suspended)
     if affected_nodes == k and (not cluster.strict_node_anti_affinity or online_nodes >= (n + k)):

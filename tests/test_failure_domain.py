@@ -73,6 +73,12 @@ def _jm(uuid):
     return j
 
 
+def _dev(status=NVMeDevice.STATUS_ONLINE):
+    d = NVMeDevice()
+    d.status = status
+    return d
+
+
 # ===========================================================================
 # 1. Model defaults
 # ===========================================================================
@@ -290,6 +296,131 @@ class TestDistrClusterMap(unittest.TestCase):
 
         cl_map = dc.get_distr_cluster_map([node], node)
         assert "failure_domain" not in cl_map["map_cluster"]["tnode"]
+
+
+# ===========================================================================
+# 5. FD-aware cluster suspend criteria (storage_node_monitor)
+#
+# Contract for clusters created with --enable-failure-domain:
+#   (A) losing a whole failure domain (any nodes/devices) -> DEGRADED, never
+#       SUSPENDED;
+#   (B) a whole domain + one extra node on one other domain -> DEGRADED, but
+#       only when FTT (distr_npcs) == 2 AND there are >= ndcs domains;
+#   anything broader -> SUSPENDED.
+# With --enable-failure-domain off, the flat per-node logic is unchanged.
+# Failure-domain ids are 32-bit ints (-1 = unset, >= 0 a real domain; 0 valid).
+# ===========================================================================
+class TestFDAwareClusterStatus(unittest.TestCase):
+
+    def setUp(self):
+        with patch("simplyblock_core.db_controller.DBController"):
+            from simplyblock_core.services import storage_node_monitor as snm
+        self.snm = snm
+        self._patches = [
+            patch.object(snm, "is_new_migrated_node", return_value=False),
+        ]
+        for p in self._patches:
+            p.start()
+
+    def tearDown(self):
+        for p in self._patches:
+            p.stop()
+
+    def _fd_cluster(self, enable=True, npcs=2, ndcs=2):
+        c = _cluster(enable_failure_domain=enable, distr_npcs=npcs)
+        c.distr_ndcs = ndcs
+        return c
+
+    def _on(self, uuid, ip, fd):
+        n = _node(uuid, ip, failure_domain=fd, status=StorageNode.STATUS_ONLINE)
+        n.nvme_devices = [_dev(NVMeDevice.STATUS_ONLINE)]
+        # online nodes hit rpc_client for the JM-replication probe; stub it to
+        # report "no lvstore" so the probe is skipped (no jm_replication_tasks).
+        n.rpc_client = MagicMock()
+        n.rpc_client.return_value.bdev_lvol_get_lvstores.return_value = []
+        return n
+
+    def _off(self, uuid, ip, fd):
+        # An abrupt host loss (host_reboot): node flips OFFLINE while its
+        # devices are still flagged ONLINE in the DB.
+        n = _node(uuid, ip, failure_domain=fd, status=StorageNode.STATUS_OFFLINE)
+        n.nvme_devices = [_dev(NVMeDevice.STATUS_ONLINE)]
+        return n
+
+    def _status(self, cluster, nodes):
+        mock_db = MagicMock()
+        mock_db.get_cluster_by_id.return_value = cluster
+        mock_db.get_primary_storage_nodes_by_cluster_id.return_value = nodes
+        self.snm.db = mock_db
+        return self.snm.get_next_cluster_status(cluster.get_id())
+
+    def _two_domain_nodes(self, off_a=0, off_b=0):
+        """3 nodes in domain 0, 3 in domain 1; first off_a / off_b offline."""
+        nodes = []
+        for i in range(3):
+            mk = self._off if i < off_a else self._on
+            nodes.append(mk(f"a{i}", f"10.0.0.{i}", 0))
+        for i in range(3):
+            mk = self._off if i < off_b else self._on
+            nodes.append(mk(f"b{i}", f"10.0.1.{i}", 1))
+        return nodes
+
+    # --- (A) whole-domain loss is tolerated ---------------------------------
+    def test_whole_domain_reboot_degraded_not_suspended(self):
+        # The exact soak scenario: reboot all 3 nodes of domain 0.
+        cluster = self._fd_cluster(npcs=2, ndcs=2)
+        status = self._status(cluster, self._two_domain_nodes(off_a=3))
+        assert status == Cluster.STATUS_DEGRADED
+
+    def test_whole_domain_tolerated_even_with_npcs1(self):
+        # Case (A) is unconditional — single-domain loss never suspends.
+        cluster = self._fd_cluster(npcs=1, ndcs=2)
+        status = self._status(cluster, self._two_domain_nodes(off_a=3))
+        assert status == Cluster.STATUS_DEGRADED
+
+    # --- (B) whole domain + one extra node ----------------------------------
+    def test_whole_domain_plus_one_node_degraded(self):
+        cluster = self._fd_cluster(npcs=2, ndcs=2)
+        status = self._status(cluster, self._two_domain_nodes(off_a=3, off_b=1))
+        assert status == Cluster.STATUS_DEGRADED
+
+    def test_one_per_domain_degraded(self):
+        cluster = self._fd_cluster(npcs=2, ndcs=2)
+        status = self._status(cluster, self._two_domain_nodes(off_a=1, off_b=1))
+        assert status == Cluster.STATUS_DEGRADED
+
+    # --- beyond the contract -> SUSPENDED -----------------------------------
+    def test_whole_domain_plus_two_nodes_suspended(self):
+        cluster = self._fd_cluster(npcs=2, ndcs=2)
+        status = self._status(cluster, self._two_domain_nodes(off_a=3, off_b=2))
+        assert status == Cluster.STATUS_SUSPENDED
+
+    def test_case_b_blocked_when_npcs_not_two(self):
+        # FTT != 2: the "+1 node on another domain" allowance does not apply.
+        cluster = self._fd_cluster(npcs=1, ndcs=2)
+        status = self._status(cluster, self._two_domain_nodes(off_a=3, off_b=1))
+        assert status == Cluster.STATUS_SUSPENDED
+
+    # --- no damage / disabled / single-domain layouts -----------------------
+    def test_all_online_active(self):
+        cluster = self._fd_cluster(npcs=2, ndcs=2)
+        status = self._status(cluster, self._two_domain_nodes())
+        assert status == Cluster.STATUS_ACTIVE
+
+    def test_disabled_falls_back_to_legacy_suspend(self):
+        # enable_failure_domain off: 3 offline nodes (> npcs) -> legacy SUSPEND.
+        cluster = self._fd_cluster(enable=False, npcs=2, ndcs=2)
+        status = self._status(cluster, self._two_domain_nodes(off_a=3))
+        assert status == Cluster.STATUS_SUSPENDED
+
+    def test_single_domain_layout_falls_back_to_legacy(self):
+        # FD enabled but every node tagged the same domain: not a usable FD
+        # layout, so the helper defers and the legacy logic suspends.
+        cluster = self._fd_cluster(npcs=2, ndcs=2)
+        nodes = [self._off(f"a{i}", f"10.0.0.{i}", 0) for i in range(3)]
+        nodes += [self._on(f"b{i}", f"10.0.1.{i}", 0) for i in range(3)]
+        status = self._status(cluster, nodes)
+        assert status == Cluster.STATUS_SUSPENDED
 
 
 if __name__ == "__main__":
