@@ -1547,7 +1547,18 @@ def ifc_is_roce(nic):
 
 
 def get_required_ha_jm_count(cluster) -> int:
-    return 4 if cluster.max_fault_tolerance >= 2 else 3
+    # FTT>=2 always needs 4 HA journals (can lose 2, keep >=2 quorum).
+    if cluster.max_fault_tolerance >= 2:
+        return 4
+    # FTT=1 normally needs only 3 journals. BUT with failure domains and just
+    # two domains, 3 journals must split 2-1 across the domains; losing the
+    # whole domain that holds 2 drops the journal below the 2-JM quorum (you
+    # "lose two out of three"). Require 4 so a 2-2 split survives a full-domain
+    # loss. With >=3 domains a 1-1-1 spread of 3 would also be safe, but we keep
+    # the rule simple and safe by requiring 4 whenever failure domains are on.
+    if getattr(cluster, "enable_failure_domain", False):
+        return 4
+    return 3
 
 
 def resolve_ha_jm_count(cluster, ha_jm_count) -> int:
@@ -6796,11 +6807,31 @@ def add_lvol_thread(lvol, snode, lvol_ana_state="optimized"):
 
 
 def get_sorted_ha_jms(current_node):
+    """Select the remote HA journal members for ``current_node``.
+
+    The full HA journal set is ``ha_jm_count`` members: the node's own local JM
+    plus ``ha_jm_count - 1`` remote JMs returned here. Selection honors three
+    anti-affinity dimensions, in priority order:
+
+      1. Host-disjoint (hard) — never two journal copies on one physical host.
+      2. Failure-domain balance (best-effort) — spread copies across as many
+         domains as possible and never let one domain hold more than a
+         quorum-safe cap, so losing a whole domain still leaves >= 2 journals
+         (the JC quorum). With 2 domains and 4 journals the result is 2-2; with
+         N>=4 domains it is one per domain. The local JM counts toward its own
+         domain's tally.
+      3. Physical-label distinct (best-effort) — prefer journals on distinct
+         physical labels (a coarser grouping than host).
+
+    Best-effort means each constraint is relaxed in turn only when it cannot be
+    satisfied, rather than failing placement.
+    """
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(current_node.cluster_id)
     jm_count = {}
     jm_dev_to_mgmt_ip = {}
     jm_dev_to_fd = {}
+    jm_dev_to_label = {}
 
     for node in db_controller.get_storage_nodes_by_cluster_id(current_node.cluster_id):
         if node.get_id() == current_node.get_id():  # pass
@@ -6810,6 +6841,7 @@ def get_sorted_ha_jms(current_node):
             jm_count[node.jm_device.get_id()] = 0
             jm_dev_to_mgmt_ip[node.jm_device.get_id()] = node.mgmt_ip
             jm_dev_to_fd[node.jm_device.get_id()] = node.failure_domain  # int, -1 if unset
+            jm_dev_to_label[node.jm_device.get_id()] = node.physical_label
 
     for node in db_controller.get_storage_nodes_by_cluster_id(current_node.cluster_id):
         if node.get_id() == current_node.get_id():  # pass
@@ -6820,47 +6852,76 @@ def get_sorted_ha_jms(current_node):
             if rem_jm_id in jm_count:
                 jm_count[rem_jm_id] += 1
 
+    # Least-used JMs first (load balancing); ties broken in the greedy pick.
     jm_count = dict(sorted(jm_count.items(), key=lambda x: x[1]))
-    target = current_node.ha_jm_count - 1
+    total_jms = current_node.ha_jm_count
+    target = total_jms - 1
     fd_enabled = cluster.enable_failure_domain
-    mgmt_ips = []
-    fds = []
-    out = []
 
-    def _select(enforce_fd):
-        for jm_id in jm_count.keys():
-            if not jm_id or jm_id in out:
-                continue
-            if len(out) >= target:
-                break
-            # Host-disjointness is a hard invariant in both passes: never place
-            # two HA journal copies on the same physical host.
-            if jm_dev_to_mgmt_ip[jm_id] in mgmt_ips:
-                continue
-            if jm_dev_to_mgmt_ip[jm_id] == current_node.mgmt_ip:
-                continue
-            # Failure-domain disjointness is enforced on the first pass and
-            # relaxed on the fallback pass (best-effort placement). Domain 0 is
-            # a valid id, so guard on >= 0 rather than truthiness.
-            if enforce_fd:
-                fd = jm_dev_to_fd.get(jm_id, -1)
-                if fd >= 0 and (fd in fds or fd == current_node.failure_domain):
+    # Per-domain cap so that losing any single domain keeps >= 2 journals.
+    # Distinct domains across the candidate JMs plus the current node's own.
+    all_fds = {fd for fd in jm_dev_to_fd.values() if fd >= 0}
+    if current_node.failure_domain >= 0:
+        all_fds.add(current_node.failure_domain)
+    num_fds = len(all_fds)
+    if fd_enabled and num_fds > 1:
+        even_cap = math.ceil(total_jms / num_fds)   # spread as evenly as possible
+        quorum_cap = total_jms - 2                   # keep >= 2 after losing one domain
+        per_fd_cap = max(1, min(even_cap, quorum_cap))
+    else:
+        per_fd_cap = total_jms  # no domain constraint
+
+    selected = []
+    used_ips = {current_node.mgmt_ip}
+    used_labels = {current_node.physical_label} if current_node.physical_label > 0 else set()
+    fd_count = {}
+    if current_node.failure_domain >= 0:
+        fd_count[current_node.failure_domain] = 1  # the local JM occupies its domain
+
+    def _pick(enforce_fd_cap, enforce_label):
+        # Greedy: repeatedly take the eligible JM that lands in the currently
+        # emptiest domain (maximizes spread), breaking ties by least usage.
+        while len(selected) < target:
+            best = None
+            for jm_id, cnt in jm_count.items():
+                if not jm_id or jm_id in selected:
                     continue
-            mgmt_ips.append(jm_dev_to_mgmt_ip[jm_id])
-            fds.append(jm_dev_to_fd.get(jm_id, -1))
-            out.append(jm_id)
+                ip = jm_dev_to_mgmt_ip[jm_id]
+                if ip in used_ips:                       # host-disjoint (hard)
+                    continue
+                fd = jm_dev_to_fd.get(jm_id, -1)
+                label = jm_dev_to_label.get(jm_id, 0)
+                if fd_enabled and enforce_fd_cap and fd >= 0 and fd_count.get(fd, 0) >= per_fd_cap:
+                    continue
+                if enforce_label and label > 0 and label in used_labels:
+                    continue
+                score = (fd_count.get(fd, 0) if fd >= 0 else 0, cnt)
+                if best is None or score < best[0]:
+                    best = (score, jm_id, ip, fd, label)
+            if best is None:
+                return
+            _, jm_id, ip, fd, label = best
+            selected.append(jm_id)
+            used_ips.add(ip)
+            if fd >= 0:
+                fd_count[fd] = fd_count.get(fd, 0) + 1
+            if label > 0:
+                used_labels.add(label)
 
     if fd_enabled:
-        _select(enforce_fd=True)
-        if len(out) < target:
+        _pick(enforce_fd_cap=True, enforce_label=True)
+        _pick(enforce_fd_cap=True, enforce_label=False)   # relax label, keep domain cap
+        if len(selected) < target:
             logger.warning(
-                "Could only place %d/%d HA journal copies on distinct failure "
-                "domains for node %s; relaxing to host-disjoint placement for "
-                "the remaining copies.", len(out), target, current_node.get_id())
-            _select(enforce_fd=False)
+                "Could only place %d/%d HA journal copies within the failure-"
+                "domain quorum cap for node %s; relaxing to host-disjoint "
+                "placement for the remaining copies.", len(selected), target,
+                current_node.get_id())
+            _pick(enforce_fd_cap=False, enforce_label=False)  # last resort
     else:
-        _select(enforce_fd=False)
-    return out[:target]
+        _pick(enforce_fd_cap=False, enforce_label=True)       # still honor labels
+        _pick(enforce_fd_cap=False, enforce_label=False)
+    return selected[:target]
 
 
 def get_node_jm_names(current_node, remote_node=None):
@@ -6900,7 +6961,7 @@ def get_secondary_nodes(current_node, exclude_ids=None):
             if node.get_id() != current_node.get_id() and node.get_id() not in exclude_ids:
                 return [node.get_id()]
 
-    def _candidates(forbidden_fds):
+    def _candidates(forbidden_fds, forbidden_labels):
         nodes = []
         nod_found = False
         for node in all_nodes:
@@ -6913,6 +6974,9 @@ def get_secondary_nodes(current_node, exclude_ids=None):
                 # Domain 0 is a valid id, so guard on >= 0 rather than truthiness.
                 if forbidden_fds and node.failure_domain >= 0 and node.failure_domain in forbidden_fds:
                     continue
+                # Physical-label anti-affinity (best-effort): label 0 == unset.
+                if forbidden_labels and node.physical_label > 0 and node.physical_label in forbidden_labels:
+                    continue
                 if node.is_secondary_node:
                     nodes.append(node.get_id())
 
@@ -6923,21 +6987,30 @@ def get_secondary_nodes(current_node, exclude_ids=None):
 
         return nodes
 
-    # Failure-domain anti-affinity (best-effort): prefer a secondary in a
-    # different failure domain than the primary; fall back to host-disjoint
-    # only when no domain-disjoint candidate exists.
-    if cluster.enable_failure_domain and current_node.failure_domain >= 0:
-        result = _candidates({current_node.failure_domain})
+    # Anti-affinity is best-effort and honored on BOTH failure domain and
+    # physical label, in that priority order: prefer a secondary that differs
+    # in domain AND label from the primary; then relax the label; then relax
+    # the domain; finally host-disjoint only.
+    fd_on = cluster.enable_failure_domain and current_node.failure_domain >= 0
+    forbidden_fds = {current_node.failure_domain} if fd_on else None
+    forbidden_labels = {current_node.physical_label} if current_node.physical_label > 0 else None
+
+    for f_fds, f_labels in ((forbidden_fds, forbidden_labels),
+                            (forbidden_fds, None),
+                            (None, forbidden_labels),
+                            (None, None)):
+        result = _candidates(f_fds, f_labels)
         if result:
+            if fd_on and f_fds is None:
+                logger.warning(
+                    "No failure-domain-disjoint secondary available for node %s; "
+                    "falling back to host-disjoint placement.", current_node.get_id())
             return result
-        logger.warning(
-            "No failure-domain-disjoint secondary available for node %s; "
-            "falling back to host-disjoint placement.", current_node.get_id())
-    return _candidates(None)
+    return []
 
 
 def get_secondary_nodes_2(current_node, exclude_ids=None, exclude_mgmt_ips=None,
-                          exclude_failure_domains=None):
+                          exclude_failure_domains=None, exclude_physical_labels=None):
     """Get candidate nodes for second secondary assignment (dual fault tolerance).
     Unlike get_secondary_nodes, this checks lvstore_stack_tertiary instead of
     lvstore_stack_secondary, since nodes that already serve as first secondary
@@ -6968,7 +7041,7 @@ def get_secondary_nodes_2(current_node, exclude_ids=None, exclude_mgmt_ips=None,
             if node.get_id() != current_node.get_id() and node.get_id() not in exclude_ids:
                 return [node.get_id()]
 
-    def _candidates(forbidden_fds):
+    def _candidates(forbidden_fds, forbidden_labels):
         nodes = []
         nod_found = False
         for node in all_nodes:
@@ -6980,6 +7053,9 @@ def get_secondary_nodes_2(current_node, exclude_ids=None, exclude_mgmt_ips=None,
                 # Domain 0 is a valid id, so guard on >= 0 rather than truthiness.
                 if forbidden_fds and node.failure_domain >= 0 and node.failure_domain in forbidden_fds:
                     continue
+                # Physical-label anti-affinity (best-effort): label 0 == unset.
+                if forbidden_labels and node.physical_label > 0 and node.physical_label in forbidden_labels:
+                    continue
                 if node.is_secondary_node:
                     nodes.append(node.get_id())
 
@@ -6990,17 +7066,37 @@ def get_secondary_nodes_2(current_node, exclude_ids=None, exclude_mgmt_ips=None,
 
         return nodes
 
-    if cluster.enable_failure_domain and current_node.failure_domain >= 0:
+    # Best-effort anti-affinity on BOTH failure domain and physical label,
+    # relative to the primary AND the already-picked first secondary (passed by
+    # the caller via exclude_failure_domains / exclude_physical_labels). Domain
+    # takes priority over label; both are relaxed in turn before falling back to
+    # host-disjoint only.
+    fd_on = cluster.enable_failure_domain and current_node.failure_domain >= 0
+    forbidden_fds = None
+    if fd_on:
         forbidden_fds = {current_node.failure_domain}
         if exclude_failure_domains:
             forbidden_fds.update(fd for fd in exclude_failure_domains if fd is not None and fd >= 0)
-        result = _candidates(forbidden_fds)
+    forbidden_labels = None
+    if current_node.physical_label > 0 or exclude_physical_labels:
+        forbidden_labels = set()
+        if current_node.physical_label > 0:
+            forbidden_labels.add(current_node.physical_label)
+        if exclude_physical_labels:
+            forbidden_labels.update(l for l in exclude_physical_labels if l and l > 0)
+
+    for f_fds, f_labels in ((forbidden_fds, forbidden_labels),
+                            (forbidden_fds, None),
+                            (None, forbidden_labels),
+                            (None, None)):
+        result = _candidates(f_fds, f_labels)
         if result:
+            if fd_on and f_fds is None:
+                logger.warning(
+                    "No failure-domain-disjoint tertiary available for node %s; "
+                    "falling back to host-disjoint placement.", current_node.get_id())
             return result
-        logger.warning(
-            "No failure-domain-disjoint tertiary available for node %s; "
-            "falling back to host-disjoint placement.", current_node.get_id())
-    return _candidates(None)
+    return []
 
 
 def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blocks, max_size):
