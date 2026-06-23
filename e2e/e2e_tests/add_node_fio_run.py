@@ -326,17 +326,18 @@ class TestAddK8sNodesDuringFioRun(TestClusterBase):
 
     def get_namespace(self):
         """Retrieves the namespace using the specified logic."""
-        namespace = None
         node_ip = self.storage_nodes[0]  # Use the first storage node
 
         # 1. Namespace provided as input
         if self.namespace and len(self.namespace) > 0:
-            self.logger.info(f"Namespace provided as input: {namespace}")
+            self.logger.info(f"Namespace provided as input: {self.namespace}")
+            return self.namespace
 
-        # 2. Check /etc/simplyblock/namespace on an existing node
+        # 2. Check /var/simplyblock/namespace on an existing node
         command = "cat /var/simplyblock/namespace 2>/dev/null"  # Suppress errors if file doesn't exist
         try:
-            namespace = self.ssh_obj.exec_command(node_ip, command).strip()
+            out, _err = self.ssh_obj.exec_command(node_ip, command)
+            namespace = out.strip()
             if namespace:
                 self.logger.info(f"Namespace found in /var/simplyblock/namespace: {namespace}")
                 return namespace
