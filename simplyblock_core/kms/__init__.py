@@ -21,6 +21,10 @@ def kek_path(cluster_id: str, pool_id: str) -> str:
     return f"cluster/{cluster_id}/pool/{pool_id}"
 
 
+def backup_path(cluster_id: str, backup_id: str) -> str:
+    return f"cluster/{cluster_id}/backup/{backup_id}"
+
+
 def create_kms_connection(cluster: Cluster) -> KMS:
     if not cluster.hashicorp_vault_settings:
         return LocalKMS(cluster)
