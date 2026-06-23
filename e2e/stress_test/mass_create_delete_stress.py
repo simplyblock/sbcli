@@ -7,13 +7,15 @@ storage node. Exercises the full lifecycle:
   1. Mass-create lvols (parallel, 20 threads, until limit)
   2. FIO on 10% of lvols (connect, format, run)
   3. Create 50 snapshots per lvol
-  4. Mass-create clones randomly from snapshots (until limit)
-  5. FIO on 10% of clones (connect, format, run)
-  6. Mass-delete all clones
-  7. Mass-delete all snapshots
-  8. Mass-delete all lvols
+  4. Delete all lvols (free subsystem slots for clones)
+  5. Mass-create clones from snapshots (until limit)
+  6. FIO on 10% of clones (connect, format, run)
+  7. Mass-delete all clones
+  8. Mass-delete all snapshots
 
-Deletion order respects SPDK dependency constraints: clones → snapshots → lvols.
+Lvols are deleted before clones are created to free subsystem slots,
+since both lvols and clones occupy subsystem slots. Snapshots remain
+valid for cloning even after the parent lvol is deleted.
 
 Four ratio configurations (NxM = N namespaces per subsystem × M subsystems):
   3000x1  — 3000 ns in 1 subsystem  = 3000 lvols
@@ -131,7 +133,12 @@ class _MassCreateDeleteMixin:
 
     def _is_max_lvols_error(self, exc):
         text = str(exc).lower()
-        return "max lvols reached" in text or "max_lvols" in text
+        return (
+            "max lvols reached" in text
+            or "max_lvols" in text
+            or "too many subsystems" in text
+            or "max subsystems reached" in text
+        )
 
     def _is_bdev_error(self, exc):
         return "failed to create bdev" in str(exc).lower()
@@ -245,62 +252,63 @@ class _MassCreateDeleteMixin:
                 f"in {self._phase_durations['3_create_snapshots']}s"
             )
 
-            # Phase 4: Mass-create clones
+            # Phase 4: Delete lvols (free subsystem slots so clones
+            # can be created — clones need their own subsystem slots)
             t0 = time.time()
-            self._phase_4_create_clones()
-            self._phase_durations["4_create_clones"] = round(
+            self._phase_4_delete_lvols()
+            self._phase_durations["4_delete_lvols"] = round(
+                time.time() - t0, 1
+            )
+            self.logger.info(
+                f"[Phase 4] Lvols deleted "
+                f"in {self._phase_durations['4_delete_lvols']}s"
+            )
+
+            # Phase 5: Mass-create clones from snapshots
+            # (lvols deleted above freed subsystem slots)
+            t0 = time.time()
+            self._phase_5_create_clones()
+            self._phase_durations["5_create_clones"] = round(
                 time.time() - t0, 1
             )
             self._metrics["clones_created"] = len(self._clone_registry)
             self.logger.info(
-                f"[Phase 4] Done: {len(self._clone_registry)} clones "
-                f"in {self._phase_durations['4_create_clones']}s"
+                f"[Phase 5] Done: {len(self._clone_registry)} clones "
+                f"in {self._phase_durations['5_create_clones']}s"
             )
 
-            # Phase 5: FIO on 10% of clones
+            # Phase 6: FIO on 10% of clones
             t0 = time.time()
-            self._phase_5_fio_on_clones()
-            self._phase_durations["5_fio_clones"] = round(
+            self._phase_6_fio_on_clones()
+            self._phase_durations["6_fio_clones"] = round(
                 time.time() - t0, 1
             )
             self.logger.info(
-                f"[Phase 5] FIO started on "
+                f"[Phase 6] FIO started on "
                 f"{self._metrics['fio_clone_started']} clones"
             )
 
-            # Phase 6: Mass-delete all clones (first — snapshots need
-            # clones gone before they can be deleted)
+            # Phase 7: Mass-delete all clones (clones must go
+            # before snapshots can be deleted)
             t0 = time.time()
-            self._phase_6_delete_clones()
-            self._phase_durations["6_delete_clones"] = round(
+            self._phase_7_delete_clones()
+            self._phase_durations["7_delete_clones"] = round(
                 time.time() - t0, 1
             )
             self.logger.info(
-                f"[Phase 6] Clones deleted "
-                f"in {self._phase_durations['6_delete_clones']}s"
+                f"[Phase 7] Clones deleted "
+                f"in {self._phase_durations['7_delete_clones']}s"
             )
 
-            # Phase 7: Mass-delete all snapshots (second — lvols need
-            # snapshots gone before they can be deleted)
+            # Phase 8: Mass-delete all snapshots (last)
             t0 = time.time()
-            self._phase_7_delete_snapshots()
-            self._phase_durations["7_delete_snapshots"] = round(
+            self._phase_8_delete_snapshots()
+            self._phase_durations["8_delete_snapshots"] = round(
                 time.time() - t0, 1
             )
             self.logger.info(
-                f"[Phase 7] Snapshots deleted "
-                f"in {self._phase_durations['7_delete_snapshots']}s"
-            )
-
-            # Phase 8: Mass-delete all lvols (last)
-            t0 = time.time()
-            self._phase_8_delete_lvols()
-            self._phase_durations["8_delete_lvols"] = round(
-                time.time() - t0, 1
-            )
-            self.logger.info(
-                f"[Phase 8] Lvols deleted "
-                f"in {self._phase_durations['8_delete_lvols']}s"
+                f"[Phase 8] Snapshots deleted "
+                f"in {self._phase_durations['8_delete_snapshots']}s"
             )
 
         finally:
@@ -321,19 +329,19 @@ class _MassCreateDeleteMixin:
     def _phase_3_create_snapshots(self):
         raise NotImplementedError
 
-    def _phase_4_create_clones(self):
+    def _phase_4_delete_lvols(self):
         raise NotImplementedError
 
-    def _phase_5_fio_on_clones(self):
+    def _phase_5_create_clones(self):
         raise NotImplementedError
 
-    def _phase_6_delete_clones(self):
+    def _phase_6_fio_on_clones(self):
         raise NotImplementedError
 
-    def _phase_7_delete_snapshots(self):
+    def _phase_7_delete_clones(self):
         raise NotImplementedError
 
-    def _phase_8_delete_lvols(self):
+    def _phase_8_delete_snapshots(self):
         raise NotImplementedError
 
     def _phase_cleanup(self):
@@ -889,11 +897,44 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
             "parent_lvol": lvol_name,
         }
 
-    # ── Phase 4: Mass-create clones ────────────────────────────────────────
+    # ── Phase 4: Delete lvols (free subsystem slots for clones) ────────────
 
-    def _phase_4_create_clones(self):
+    def _phase_4_delete_lvols(self):
+        self.logger.info(
+            f"=== Phase 4: Delete {len(self._lvol_registry)} lvols "
+            f"(freeing subsystem slots for clones) ==="
+        )
+
+        # Kill lvol FIO (started in Phase 2, left running)
+        for client in set(
+            c.get("client") for c in self._connected_lvols.values()
+            if c.get("client")
+        ):
+            try:
+                self.ssh_obj.exec_command(
+                    node=client,
+                    command="sudo pkill -9 -f 'fio.*mcd_' 2>/dev/null || true",
+                )
+            except Exception:
+                pass
+        for t in self._fio_lvol_threads:
+            t.join(timeout=30)
+
+        lvol_names = list(self._lvol_registry.keys())
+        ok, fail = self._batch_exec(
+            lvol_names,
+            self._delete_single_lvol,
+            "delete_lvols",
+            max_workers=self.DELETE_MAX_WORKERS,
+            max_failures=len(lvol_names),
+        )
+        self._metrics["lvols_deleted"] = ok
+
+    # ── Phase 5: Mass-create clones ────────────────────────────────────────
+
+    def _phase_5_create_clones(self):
         if not self._snapshot_registry:
-            self.logger.info("[Phase 4] No snapshots — skipping clone phase")
+            self.logger.info("[Phase 5] No snapshots — skipping clone phase")
             return
 
         # Resolve any missing snapshot IDs via bulk list
@@ -903,7 +944,7 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
         ]
         if missing:
             self.logger.info(
-                f"[Phase 4] Resolving {len(missing)} missing snap IDs"
+                f"[Phase 5] Resolving {len(missing)} missing snap IDs"
             )
             try:
                 all_snaps = self.sbcli_utils.list_snapshots()
@@ -912,7 +953,7 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
                         self._snapshot_registry[sn]["snap_id"] = all_snaps[sn]
             except Exception as exc:
                 self.logger.warning(
-                    f"[Phase 4] Could not list snapshots: {exc}"
+                    f"[Phase 5] Could not list snapshots: {exc}"
                 )
 
         snap_list = [
@@ -921,11 +962,11 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
             if si.get("snap_id")
         ]
         if not snap_list:
-            self.logger.info("[Phase 4] No valid snapshot IDs — skipping")
+            self.logger.info("[Phase 5] No valid snapshot IDs — skipping")
             return
 
         self.logger.info(
-            f"=== Phase 4: Create clones from {len(snap_list)} snapshots "
+            f"=== Phase 5: Create clones from {len(snap_list)} snapshots "
             f"(until limit) ==="
         )
 
@@ -953,7 +994,7 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
                 if self._is_max_lvols_error(e):
                     hit_limit[0] = True
                     self.logger.info(
-                        f"[Phase 4] Max lvols reached at clone #{idx}"
+                        f"[Phase 5] Max lvols reached at clone #{idx}"
                     )
                     return
                 raise
@@ -975,14 +1016,14 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
             if fail >= self.BATCH_SIZE:
                 break
             self.logger.info(
-                f"[Phase 4] {len(self._clone_registry)} clones so far"
+                f"[Phase 5] {len(self._clone_registry)} clones so far"
             )
 
-    # ── Phase 5: FIO on 10% of clones ─────────────────────────────────────
+    # ── Phase 6: FIO on 10% of clones ─────────────────────────────────────
 
-    def _phase_5_fio_on_clones(self):
+    def _phase_6_fio_on_clones(self):
         if not self._clone_registry:
-            self.logger.info("[Phase 5] No clones — skipping")
+            self.logger.info("[Phase 6] No clones — skipping")
             return
 
         sample_size = max(1, math.ceil(
@@ -994,7 +1035,7 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
         )
         self._fio_clone_sample = set(sample)
         self.logger.info(
-            f"=== Phase 5: FIO on {len(sample)} clones ==="
+            f"=== Phase 6: FIO on {len(sample)} clones ==="
         )
 
         for clone_name in sample:
@@ -1003,13 +1044,13 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
                 self._metrics["fio_clone_started"] += 1
             except Exception as exc:
                 self.logger.error(
-                    f"[Phase 5] FIO setup failed for {clone_name}: {exc}"
+                    f"[Phase 6] FIO setup failed for {clone_name}: {exc}"
                 )
                 self._metrics["fio_clone_failures"] += 1
 
         # Wait for FIO to finish
         self.logger.info(
-            f"[Phase 5] Waiting for {len(self._fio_clone_threads)} "
+            f"[Phase 6] Waiting for {len(self._fio_clone_threads)} "
             f"FIO threads to finish (timeout={self.FIO_RUNTIME + 120}s)"
         )
         for t in self._fio_clone_threads:
@@ -1068,15 +1109,15 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
         fio_thread.start()
         self._fio_clone_threads.append(fio_thread)
 
-    # ── Phase 6: Mass-delete clones ────────────────────────────────────────
+    # ── Phase 7: Mass-delete clones ────────────────────────────────────────
 
-    def _phase_6_delete_clones(self):
+    def _phase_7_delete_clones(self):
         if not self._clone_registry:
-            self.logger.info("[Phase 6] No clones — skipping")
+            self.logger.info("[Phase 7] No clones — skipping")
             return
 
         self.logger.info(
-            f"=== Phase 6: Delete {len(self._clone_registry)} clones ==="
+            f"=== Phase 7: Delete {len(self._clone_registry)} clones ==="
         )
 
         # Kill clone FIO
@@ -1113,11 +1154,11 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
         except Exception as exc:
             self.logger.warning(f"[delete_lvol] {lvol_name}: {exc}")
 
-    # ── Phase 7: Mass-delete snapshots ─────────────────────────────────────
+    # ── Phase 8: Mass-delete snapshots ─────────────────────────────────────
 
-    def _phase_7_delete_snapshots(self):
+    def _phase_8_delete_snapshots(self):
         if not self._snapshot_registry:
-            self.logger.info("[Phase 7] No snapshots — skipping")
+            self.logger.info("[Phase 8] No snapshots — skipping")
             return
 
         self.logger.info(
@@ -1143,38 +1184,6 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
             )
         except Exception as exc:
             self.logger.warning(f"[delete_snap] {snap_name}: {exc}")
-
-    # ── Phase 8: Mass-delete lvols (last — after clones & snapshots) ──────
-
-    def _phase_8_delete_lvols(self):
-        self.logger.info(
-            f"=== Phase 8: Delete {len(self._lvol_registry)} lvols ==="
-        )
-
-        # Kill remaining lvol FIO (started in Phase 2, left running)
-        for client in set(
-            c.get("client") for c in self._connected_lvols.values()
-            if c.get("client")
-        ):
-            try:
-                self.ssh_obj.exec_command(
-                    node=client,
-                    command="sudo pkill -9 -f 'fio.*mcd_' 2>/dev/null || true",
-                )
-            except Exception:
-                pass
-        for t in self._fio_lvol_threads:
-            t.join(timeout=30)
-
-        lvol_names = list(self._lvol_registry.keys())
-        ok, fail = self._batch_exec(
-            lvol_names,
-            self._delete_single_lvol,
-            "delete_lvols",
-            max_workers=self.DELETE_MAX_WORKERS,
-            max_failures=len(lvol_names),
-        )
-        self._metrics["lvols_deleted"] = ok
 
     # ── Cleanup safety net ─────────────────────────────────────────────────
 
@@ -1395,16 +1404,46 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
         }
         self._snap_pvc_map[vs_name] = pvc_name
 
-    # ── Phase 4: Create clone PVCs from VolumeSnapshots ───────────────────
+    # ── Phase 4: Delete all PVCs (free subsystem slots for clones) ────────
 
-    def _phase_4_create_clones(self):
+    def _phase_4_delete_lvols(self):
+        self.logger.info(
+            f"=== Phase 4: Delete {len(self._pvc_registry)} PVCs "
+            f"(freeing subsystem slots for clones) ==="
+        )
+
+        # Kill FIO jobs (started in Phase 2, left running)
+        for job_name in list(self._fio_jobs.keys()):
+            try:
+                self.k8s_utils._exec_kubectl(
+                    f"kubectl delete job {job_name} "
+                    f"-n {self.k8s_utils.namespace} "
+                    f"--force --grace-period=0 2>/dev/null || true"
+                )
+            except Exception:
+                pass
+        sleep_n_sec(10)
+
+        pvc_names = list(self._pvc_registry.keys())
+        ok, fail = self._batch_exec(
+            pvc_names,
+            self._delete_single_pvc,
+            "delete_pvcs",
+            max_workers=self.DELETE_MAX_WORKERS,
+            max_failures=len(pvc_names),
+        )
+        self._metrics["lvols_deleted"] = ok
+
+    # ── Phase 5: Create clone PVCs from VolumeSnapshots ───────────────────
+
+    def _phase_5_create_clones(self):
         if not self._snapshot_registry:
-            self.logger.info("[Phase 4] No snapshots — skipping")
+            self.logger.info("[Phase 5] No snapshots — skipping")
             return
 
         snap_list = list(self._snapshot_registry.keys())
         self.logger.info(
-            f"=== Phase 4: Create clones from {len(snap_list)} "
+            f"=== Phase 5: Create clones from {len(snap_list)} "
             f"snapshots (until limit) ==="
         )
 
@@ -1449,14 +1488,14 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
             if fail >= self.BATCH_SIZE:
                 break
             self.logger.info(
-                f"[Phase 4] {len(self._clone_registry)} clones so far"
+                f"[Phase 5] {len(self._clone_registry)} clones so far"
             )
 
-    # ── Phase 5: FIO on 10% of clone PVCs ─────────────────────────────────
+    # ── Phase 6: FIO on 10% of clone PVCs ─────────────────────────────────
 
-    def _phase_5_fio_on_clones(self):
+    def _phase_6_fio_on_clones(self):
         if not self._clone_registry:
-            self.logger.info("[Phase 5] No clones — skipping")
+            self.logger.info("[Phase 6] No clones — skipping")
             return
 
         sample_size = max(1, math.ceil(
@@ -1468,7 +1507,7 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
         )
         self._fio_clone_sample = set(sample)
         self.logger.info(
-            f"=== Phase 5: FIO on {len(sample)} clone PVCs ==="
+            f"=== Phase 6: FIO on {len(sample)} clone PVCs ==="
         )
 
         clone_fio_jobs = {}
@@ -1487,13 +1526,13 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
                 self._metrics["fio_clone_started"] += 1
             except Exception as exc:
                 self.logger.error(
-                    f"[Phase 5] FIO Job failed for {clone_pvc}: {exc}"
+                    f"[Phase 6] FIO Job failed for {clone_pvc}: {exc}"
                 )
                 self._metrics["fio_clone_failures"] += 1
 
         # Wait for FIO jobs
         self.logger.info(
-            f"[Phase 5] Waiting for {len(clone_fio_jobs)} FIO jobs"
+            f"[Phase 6] Waiting for {len(clone_fio_jobs)} FIO jobs"
         )
         timeout = self.FIO_RUNTIME + 300
         for job_name in clone_fio_jobs:
@@ -1501,18 +1540,18 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
                 self.k8s_utils.wait_job_complete(job_name, timeout=timeout)
             except Exception as exc:
                 self.logger.warning(
-                    f"[Phase 5] FIO job {job_name} wait failed: {exc}"
+                    f"[Phase 6] FIO job {job_name} wait failed: {exc}"
                 )
 
-    # ── Phase 6: Delete clone PVCs ────────────────────────────────────────
+    # ── Phase 7: Delete clone PVCs ────────────────────────────────────────
 
-    def _phase_6_delete_clones(self):
+    def _phase_7_delete_clones(self):
         if not self._clone_registry:
-            self.logger.info("[Phase 6] No clones — skipping")
+            self.logger.info("[Phase 7] No clones — skipping")
             return
 
         self.logger.info(
-            f"=== Phase 6: Delete {len(self._clone_registry)} "
+            f"=== Phase 7: Delete {len(self._clone_registry)} "
             f"clone PVCs ==="
         )
 
@@ -1526,15 +1565,15 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
         )
         self._metrics["clones_deleted"] = ok
 
-    # ── Phase 7: Delete VolumeSnapshots ───────────────────────────────────
+    # ── Phase 8: Delete VolumeSnapshots ───────────────────────────────────
 
-    def _phase_7_delete_snapshots(self):
+    def _phase_8_delete_snapshots(self):
         if not self._snapshot_registry:
-            self.logger.info("[Phase 7] No snapshots — skipping")
+            self.logger.info("[Phase 8] No snapshots — skipping")
             return
 
         self.logger.info(
-            f"=== Phase 7: Delete {len(self._snapshot_registry)} "
+            f"=== Phase 8: Delete {len(self._snapshot_registry)} "
             f"VolumeSnapshots ==="
         )
 
@@ -1558,35 +1597,6 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
             )
         except Exception as exc:
             self.logger.warning(f"[delete_vs] {vs_name}: {exc}")
-
-    # ── Phase 8: Delete all PVCs (last — after clones & snapshots) ────────
-
-    def _phase_8_delete_lvols(self):
-        self.logger.info(
-            f"=== Phase 8: Delete {len(self._pvc_registry)} PVCs ==="
-        )
-
-        # Kill FIO jobs (started in Phase 2, left running)
-        for job_name in list(self._fio_jobs.keys()):
-            try:
-                self.k8s_utils._exec_kubectl(
-                    f"kubectl delete job {job_name} "
-                    f"-n {self.k8s_utils.namespace} "
-                    f"--force --grace-period=0 2>/dev/null || true"
-                )
-            except Exception:
-                pass
-        sleep_n_sec(10)
-
-        pvc_names = list(self._pvc_registry.keys())
-        ok, fail = self._batch_exec(
-            pvc_names,
-            self._delete_single_pvc,
-            "delete_pvcs",
-            max_workers=self.DELETE_MAX_WORKERS,
-            max_failures=len(pvc_names),
-        )
-        self._metrics["lvols_deleted"] = ok
 
     def _delete_single_pvc(self, pvc_name: str):
         try:

@@ -2311,16 +2311,40 @@ class K8sNativeFailoverTest(TestClusterBase):
             max_retries = 4
             for attempt in range(max_retries):
                 try:
-                    force = attempt == max_retries - 1
-                    self.sbcli_utils.restart_node(node_uuid=node, force=force)
-                    self.sbcli_utils.wait_for_storage_node_status(node, "online", timeout=300)
+                    # Check current status — skip restart if already in_restart
+                    try:
+                        nd = self.sbcli_utils.get_storage_node_details(node)
+                        cur_status = nd[0].get("status") if nd else None
+                    except Exception:
+                        cur_status = None
+
+                    if cur_status != "in_restart":
+                        force = attempt == max_retries - 1
+                        self.sbcli_utils.restart_node(node_uuid=node, force=force)
+                    else:
+                        self.logger.info(
+                            f"Node {node} already in_restart — "
+                            f"skipping restart command, waiting for recovery"
+                        )
+
+                    # Wait 2 min for SPDK pod to initialize and DNS to register
+                    self.logger.info(
+                        f"Restart attempt {attempt+1}: waiting 120s for "
+                        f"SPDK to initialize on {node}..."
+                    )
+                    sleep_n_sec(120)
+
+                    self.sbcli_utils.wait_for_storage_node_status(
+                        node, "online", timeout=300
+                    )
                     break
                 except Exception:
                     if attempt < max_retries - 1:
                         self.logger.info(
-                            f"Restart attempt {attempt+1} failed; retrying in 10s..."
+                            f"Restart attempt {attempt+1} failed; "
+                            f"retrying in 30s..."
                         )
-                        sleep_n_sec(10)
+                        sleep_n_sec(30)
                     else:
                         raise
             self.log_outage_event(node, outage_type, "Node restarted")
@@ -2335,15 +2359,41 @@ class K8sNativeFailoverTest(TestClusterBase):
                     max_retries = 4
                     for attempt in range(max_retries):
                         try:
-                            force = attempt == max_retries - 1
-                            self.sbcli_utils.restart_node(node_uuid=node, force=force)
+                            try:
+                                nd = self.sbcli_utils.get_storage_node_details(node)
+                                cur_status = nd[0].get("status") if nd else None
+                            except Exception:
+                                cur_status = None
+
+                            if cur_status != "in_restart":
+                                force = attempt == max_retries - 1
+                                self.sbcli_utils.restart_node(
+                                    node_uuid=node, force=force
+                                )
+                            else:
+                                self.logger.info(
+                                    f"Node {node} already in_restart — "
+                                    f"skipping restart command, waiting "
+                                    f"for recovery"
+                                )
+
+                            self.logger.info(
+                                f"Restart attempt {attempt+1}: waiting "
+                                f"120s for SPDK to initialize on {node}..."
+                            )
+                            sleep_n_sec(120)
+
                             self.sbcli_utils.wait_for_storage_node_status(
                                 node, "online", timeout=300
                             )
                             break
                         except Exception:
                             if attempt < max_retries - 1:
-                                sleep_n_sec(10)
+                                self.logger.info(
+                                    f"Restart attempt {attempt+1} failed; "
+                                    f"retrying in 30s..."
+                                )
+                                sleep_n_sec(30)
                             else:
                                 raise
                     self.log_outage_event(node, outage_type, "Node restarted")
