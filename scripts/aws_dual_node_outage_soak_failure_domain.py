@@ -1127,7 +1127,12 @@ class SoakRunner:
                 f"Continuing with {successful_connects}/{len(connect_commands)} connected paths "
                 f"for {volume['volume_id']}"
             )
-        volume["mount_point"] = posixpath.join(mount_root, f"vol{volume['index']}")
+        # Unique mount point per (re)build — never reuse a path. ``volume_name``
+        # carries the churn counter (``..._v{index}_c{churn}``), so a churn
+        # rebuild always mounts at a FRESH directory. A previous mount that
+        # could not be cleanly unmounted (stuck target I/O) therefore can never
+        # collide with or block the new mount.
+        volume["mount_point"] = posixpath.join(mount_root, f"mnt_{volume['volume_name']}")
         volume["fio_log"] = posixpath.join(mount_root, f"fio_vol{volume['index']}.log")
         volume["fio_stderr"] = posixpath.join(mount_root, f"fio_vol{volume['index']}.stderr")
         volume["rc_file"] = posixpath.join(mount_root, f"fio_vol{volume['index']}.rc")
@@ -1499,76 +1504,55 @@ class SoakRunner:
         )
 
     def _unmount_one_volume(self, volume):
-        """Cleanly unmount the volume's filesystem before disconnect/delete.
+        """Best-effort unmount before disconnect/delete. NEVER blocks the churn
+        and NEVER raises.
 
-        fio (and its launcher shell, whose cwd is the mountpoint) was
-        already SIGKILLed by ``_stop_fio_for_job``, but a SIGKILLed fio
-        with an in-flight O_DIRECT I/O can linger in D-state and keep the
-        mount busy. Retry a *clean* umount (``sync`` + ``umount``, evicting
-        stragglers with ``fuser`` between tries) and verify with
-        ``mountpoint``.
+        A stuck target I/O can wedge a plain ``umount``/``sync``/``fuser`` in
+        uninterruptible D-state (the client runs with ``nvme_core.io_timeout``
+        effectively infinite, so such an I/O never times out on its own). That
+        previously hung the SSH command for the full timeout and then aborted
+        the entire churn cycle with a transport/timeout error — which surfaced
+        much later as a bogus "fio missing" fault and killed the soak (run
+        20260623_125401: vol5, 13:07 stop → umount hang → 13:11 churn timeout →
+        13:14 missing-fio abort).
 
-        We deliberately do NOT fall back to lazy umount on the happy path:
-        fio uses ``--direct=1`` so there is no bulk dirty data, but the XFS
-        journal and inode metadata are still buffered and flushed at
-        umount. A lazy detach returns instantly with that flush pending,
-        and the ``nvme disconnect`` that follows ~1s later then rips the
-        paths away mid-flush — producing the spurious "no available path /
-        XFS log I/O error / filesystem shut down" noise seen in client
-        dmesg even though the lvol was being deleted on purpose.
-
-        If the mount still will not release after the retries, that is a
-        real anomaly: the most likely cause is a STUCK I/O on the target
-        keeping the block device busy (note the client runs with
-        ``nvme_core.io_timeout`` effectively infinite, so such an I/O never
-        times out on its own). Emit a loud WARNING with holder / D-state
-        evidence before the last-resort lazy detach, so a human notices the
-        potential target-side bug.
-
-        Returns True if the filesystem was cleanly unmounted, False if it
-        had to be lazily detached (stuck).
+        We no longer care about a stuck unmount. Every (re)build mounts at a
+        FRESH path (see ``_connect_and_mount_one``), so a lingering old mount
+        cannot collide with or block the rebuild. Try one quick clean umount
+        (flushes the XFS journal on the happy path, avoiding dmesg noise), then
+        a lazy detach (``umount -l`` returns immediately even with I/O stuck in
+        D-state), bound the whole thing hard, and swallow any hang/error so the
+        churn proceeds.
         """
         mount_point = volume.get("mount_point")
         if not mount_point:
-            return True
-        # $1 = mountpoint. Bounded retry: sync + umount, evicting any
-        # straggler holders (fio in D-state, launcher shell) between tries.
-        # Never lazy-umount here on success; only as a flagged last resort.
+            return
         umount_script = (
             "set +e\n"
             'mp="$1"\n'
             'mountpoint -q "$mp" || exit 0\n'
-            "for i in $(seq 1 6); do\n"
-            "  sync\n"
-            '  if sudo umount "$mp" 2>/dev/null; then exit 0; fi\n'
-            '  sudo fuser -km "$mp" 2>/dev/null\n'
-            "  sleep 2\n"
-            '  mountpoint -q "$mp" || exit 0\n'
-            "done\n"
-            'echo "---- holders of $mp ----"\n'
-            'sudo fuser -vMm "$mp" 2>&1\n'
-            'echo "---- D-state processes ----"\n'
-            "ps -eo pid,stat,wchan:32,comm | awk '$2 ~ /D/'\n"
+            # one quick clean attempt (XFS journal flush on the happy path)
+            'sudo umount "$mp" 2>/dev/null && exit 0\n'
+            # stuck: evict holders and lazy-detach. `umount -l` removes the
+            # mount from the namespace immediately and reaps it if/when the
+            # stuck I/O ever completes — it does not block on D-state I/O.
+            'sudo fuser -km "$mp" 2>/dev/null\n'
             'sudo umount -l "$mp" 2>/dev/null\n'
-            "exit 2\n"
+            "exit 0\n"
         )
-        rc, stdout_text, _ = self.client.run(
-            f"bash -lc {shlex.quote(umount_script)} _ {shlex.quote(mount_point)}",
-            timeout=120,
-            check=False,
-            label=f"umount {volume['volume_name']}",
-        )
-        if rc == 0:
-            return True
-        self.logger.log(
-            f"WARNING: umount of {volume['volume_name']} ({mount_point}) did "
-            f"not complete after retries even though fio was already killed — "
-            f"possible STUCK I/O on the target keeping the device busy. Fell "
-            f"back to lazy detach; the following nvme disconnect may surface "
-            f"'no available path' / 'XFS log I/O error' in client dmesg. "
-            f"Holder / D-state evidence:\n{stdout_text}"
-        )
-        return False
+        try:
+            self.client.run(
+                f"bash -lc {shlex.quote(umount_script)} _ {shlex.quote(mount_point)}",
+                timeout=30,
+                check=False,
+                label=f"umount {volume['volume_name']}",
+            )
+        except Exception as exc:  # noqa: BLE001 — a stuck umount must never abort churn
+            self.logger.log(
+                f"WARNING: umount of {volume['volume_name']} ({mount_point}) hung "
+                f"or failed ({exc!r}); ignoring and continuing. The rebuild uses a "
+                f"fresh mount point, so the stuck mount is harmless."
+            )
 
     def _delete_one_lvol(self, volume):
         rc, stdout_text, stderr_text = self.sbctl_allow_failure(
