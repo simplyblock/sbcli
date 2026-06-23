@@ -91,7 +91,7 @@ class _MassCreateDeleteMixin:
     CLONE_MAX_WORKERS = 20
     DELETE_MAX_WORKERS = 20
     PARALLEL_PARENTS = 10       # concurrent parent subsystem child creation
-    MAX_FAILURES = 50
+    MAX_FAILURES = 500
 
     # ── Phase timeouts (seconds) ───────────────────────────────────────────
     SNAPSHOT_PHASE_TIMEOUT = 14400   # 4 hours
@@ -158,6 +158,7 @@ class _MassCreateDeleteMixin:
 
         Returns (success_count, failure_count).
         If stop_on_max_lvols is True, stops on "max lvols reached" error.
+        Applies exponential backoff between batches when failure rate > 50%.
         """
         total = len(items)
         success = 0
@@ -166,6 +167,7 @@ class _MassCreateDeleteMixin:
         bs = batch_size or self.BATCH_SIZE
         max_fail = max_failures if max_failures is not None else self.MAX_FAILURES
         hit_limit = False
+        consecutive_high_fail = 0
 
         with ThreadPoolExecutor(max_workers=workers) as executor:
             for batch_start in range(0, total, bs):
@@ -178,10 +180,13 @@ class _MassCreateDeleteMixin:
                     f = executor.submit(task_fn, item)
                     futures[f] = item
 
+                batch_ok = 0
+                batch_fail = 0
                 for f in as_completed(futures):
                     try:
                         f.result(timeout=per_item_timeout)
                         success += 1
+                        batch_ok += 1
                     except Exception as exc:
                         if stop_on_max_lvols and self._is_max_lvols_error(exc):
                             hit_limit = True
@@ -191,6 +196,7 @@ class _MassCreateDeleteMixin:
                             )
                             break
                         failures += 1
+                        batch_fail += 1
                         self.logger.error(
                             f"[{op_name}] Failed ({failures}/"
                             f"{max_fail} max): {exc}"
@@ -201,6 +207,21 @@ class _MassCreateDeleteMixin:
                     f"[{op_name}] progress: {done}/{total} "
                     f"(ok={success} fail={failures})"
                 )
+
+                # Backoff: if >50% of this batch failed, wait before
+                # next batch to let SPDK recover from transient errors
+                batch_total = batch_ok + batch_fail
+                if batch_total > 0 and batch_fail > batch_total * 0.5:
+                    consecutive_high_fail += 1
+                    backoff = min(10 * consecutive_high_fail, 60)
+                    self.logger.info(
+                        f"[{op_name}] High failure rate in batch "
+                        f"({batch_fail}/{batch_total}) — backing off "
+                        f"{backoff}s before next batch"
+                    )
+                    sleep_n_sec(backoff)
+                else:
+                    consecutive_high_fail = 0
 
         return success, failures
 
