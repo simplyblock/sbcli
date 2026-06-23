@@ -1,7 +1,6 @@
 import logging
 
 from simplyblock_core.models.cluster import Cluster
-from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.settings import Settings
 
 from ._base import KMS
@@ -14,12 +13,12 @@ logger = logging.getLogger()
 logger.setLevel(logging.DEBUG)
 
 
-def dek_name(cluster_id: str, lvol: LVol) -> str:
-    return f"{cluster_id}/{lvol.crypto_bdev}"
+def dek_path(cluster_id: str, lvol_id: str) -> str:
+    return f"cluster/{cluster_id}/lvol/{lvol_id}"
 
 
-def kek_name(pool_id: str) -> str:
-    return pool_id
+def kek_path(cluster_id: str, pool_id: str) -> str:
+    return f"cluster/{cluster_id}/pool/{pool_id}"
 
 
 def create_kms_connection(cluster: Cluster) -> KMS:

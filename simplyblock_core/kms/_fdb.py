@@ -16,29 +16,29 @@ class LocalKMS(KMS):
         self._kv_store = kv_store
 
     @staticmethod
-    def _key(name: str) -> bytes:
-        return f"keys/{name}".encode()
+    def _key(path: str) -> bytes:
+        return f"keys/{path}".encode()
 
-    def create_data_encryption_keys(self, name: str, kek_name: str) -> None:
+    def create_data_encryption_keys(self, path: str, kek_path: str) -> None:
         self.import_data_encryption_keys(
-            name, kek_name, (generate_hex_string(32), generate_hex_string(32)),
+            path, kek_path, (generate_hex_string(32), generate_hex_string(32)),
         )
 
-    def import_data_encryption_keys(self, name: str, kek_name: str, keys: tuple[str, str]) -> None:
-        self._kv_store.set(self._key(name), json.dumps(list(keys)).encode())
+    def import_data_encryption_keys(self, path: str, kek_path: str, keys: tuple[str, str]) -> None:
+        self._kv_store.set(self._key(path), json.dumps(list(keys)).encode())
 
-    def get_data_encryption_keys(self, name: str, kek_name: str) -> tuple[str, str]:
-        raw = self._kv_store.get(self._key(name)).wait()
+    def get_data_encryption_keys(self, path: str, kek_path: str) -> tuple[str, str]:
+        raw = self._kv_store.get(self._key(path)).wait()
         if not raw.present():
-            raise KMSException(f"No keys found for {name}")
+            raise KMSException(f"No keys found at {path}")
         key1, key2 = json.loads(bytes(raw))
         return key1, key2
 
-    def delete_data_encryption_keys(self, name: str) -> None:
-        self._kv_store.clear(self._key(name))
+    def delete_data_encryption_keys(self, path: str) -> None:
+        self._kv_store.clear(self._key(path))
 
-    def create_key_encryption_key(self, name: str) -> None:
+    def create_key_encryption_key(self, path: str) -> None:
         pass
 
-    def delete_key_encryption_key(self, name: str) -> None:
+    def delete_key_encryption_key(self, path: str) -> None:
         pass
