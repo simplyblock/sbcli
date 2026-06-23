@@ -1,6 +1,7 @@
 import logging
 
 from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.settings import Settings
 
 from ._base import KMS
@@ -11,6 +12,14 @@ from ._fdb import LocalKMS
 logger = logging.getLogger()
 
 logger.setLevel(logging.DEBUG)
+
+
+def dek_name(cluster_id: str, lvol: LVol) -> str:
+    return f"{cluster_id}/{lvol.crypto_bdev}"
+
+
+def kek_name(pool_id: str) -> str:
+    return pool_id
 
 
 def create_kms_connection(cluster: Cluster) -> KMS:
@@ -35,7 +44,6 @@ def create_kms_connection(cluster: Cluster) -> KMS:
         settings.tls_certificate_authority,
         settings.tls_certificate,
         settings.tls_key,
-        cluster.get_id(),
         transit_mount=vault.transit_mount,
         kv_mount=vault.kv_mount,
         cert_role=vault.cert_role,
