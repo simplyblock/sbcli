@@ -2329,24 +2329,34 @@ class SoakRunner:
     def build_scenarios(self, nodes):
         """Build the failure-domain outage scenario list.
 
-        Exactly two scenario *types*, per the test design:
-          (a) ``same_fd``    — reboot every host in one failure domain. One
-              such scenario per failure domain (so both domains get exercised).
+        Scenario *types*, per the test design:
+          (a) ``same_fd``     — reboot every host in one failure domain. One
+              such scenario per failure domain (so each domain gets exercised).
               Followed by a full rebalance-completion wait.
-          (b) ``one_per_fd`` — reboot one random node in each failure domain.
+          (b) ``one_per_fd``  — reboot one random node in each failure domain.
               Followed by a fixed 60s settle (no rebalance wait needed).
+          (c) ``fd_plus_one`` — ONLY when there are >= 4 failure domains:
+              reboot a whole (random) failure domain AND one extra node in one
+              of the remaining domains. With >= 4 domains the data/parity
+              chunks are spread widely enough that this combined loss stays
+              within the fault-tolerance budget, so it must survive and is
+              followed by a full rebalance-completion wait (like same_fd).
 
-        The concrete node(s) for ``one_per_fd`` are rolled randomly at
-        iteration time in ``_select_outage_targets``.
+        The concrete node(s) for ``one_per_fd`` and ``fd_plus_one`` are rolled
+        randomly at iteration time in ``_select_outage_targets``.
         """
         _ = nodes  # node set comes from the discovered failure-domain map
         fds = sorted(self.failure_domains)
         scenarios = [{"type": "same_fd", "fd": fd} for fd in fds]
         scenarios.append({"type": "one_per_fd"})
+        extra = ""
+        if len(fds) >= 4:
+            scenarios.append({"type": "fd_plus_one"})
+            extra = " + 1 whole-FD-plus-one-extra-node reboot"
         self.logger.log(
             f"Built {len(scenarios)} failure-domain scenarios: "
             f"{len(fds)} same-FD whole-domain reboots (domains {fds}) "
-            f"+ 1 one-per-FD reboot"
+            f"+ 1 one-per-FD reboot{extra}"
         )
         return scenarios
 
@@ -2360,6 +2370,24 @@ class SoakRunner:
             for _fd, uuids in sorted(fd_map.items()):
                 if uuids:
                     targets.append(random.choice(uuids))
+            return targets
+        if scenario["type"] == "fd_plus_one":
+            # Take down a whole (random) failure domain PLUS one extra node in
+            # one of the remaining domains. Only built with >= 4 domains, but
+            # guard defensively: need at least 2 populated domains.
+            populated = [fd for fd, uuids in fd_map.items() if uuids]
+            if len(populated) < 2:
+                return []
+            down_fd = random.choice(populated)
+            targets = list(fd_map[down_fd])
+            other_fds = [fd for fd in populated if fd != down_fd]
+            extra_fd = random.choice(other_fds)
+            targets.append(random.choice(fd_map[extra_fd]))
+            self.logger.log(
+                f"fd_plus_one: whole domain {down_fd} "
+                f"({[u[:8] for u in fd_map[down_fd]]}) + one node from domain "
+                f"{extra_fd} ({targets[-1][:8]})"
+            )
             return targets
         raise TestRunError(f"Unknown scenario type: {scenario.get('type')}")
 
@@ -2504,7 +2532,7 @@ class SoakRunner:
                 if scenario["type"] == "same_fd":
                     scen_desc = f"same_fd(fd={scenario['fd']})"
                 else:
-                    scen_desc = "one_per_fd"
+                    scen_desc = scenario["type"]  # one_per_fd / fd_plus_one
 
                 self.logger.log(
                     f"Starting outage iteration {iteration} "
@@ -2565,22 +2593,23 @@ class SoakRunner:
                 self.reraise_churn_error()
 
                 # Scenario-specific stabilization:
-                #   (a) same_fd    — a whole failure domain was rebooted, so the
-                #       cluster must re-replicate/rebalance the data that lived
-                #       there. Gate on cluster ACTIVE + rebalance / data-migration
+                #   (a) same_fd / fd_plus_one — a whole failure domain (plus, for
+                #       fd_plus_one, one extra node) was rebooted, so the cluster
+                #       must re-replicate/rebalance the data that lived there.
+                #       Gate on cluster ACTIVE + rebalance / data-migration
                 #       completion before the next iteration (bounded by
                 #       --rebalance-timeout), regardless of --wait-for-rebalance.
                 #   (b) one_per_fd — only one node per domain bounced; the other
                 #       copy in each domain stayed up, so no full rebalance is
                 #       expected. A fixed 60s settle is enough.
-                if scenario["type"] == "same_fd":
+                if scenario["type"] in ("same_fd", "fd_plus_one"):
                     self.logger.log(
-                        f"same_fd outage: waiting for cluster rebalance to complete "
-                        f"(iteration {iteration}, fd={scenario['fd']})"
+                        f"{scen_desc} outage: waiting for cluster rebalance to "
+                        f"complete (iteration {iteration})"
                     )
                     self.wait_for_cluster_stable(require_no_rebalance=True)
                     self.wait_for_data_migration_complete(
-                        f"iteration {iteration} same-fd rebalance"
+                        f"iteration {iteration} {scenario['type']} rebalance"
                     )
                 else:
                     self.logger.log(
