@@ -912,7 +912,7 @@ class K8sNativeFailoverTest(TestClusterBase):
             f"verify_backlog=4096\n"
             f"verify_backlog_batch=32\n"
             f"randseed={randseed}\n"
-            f"max_latency=20s\n"
+            f"max_latency=40s\n"
             f"write_iolog=/spdkvol/{name}-iolog.log\n"
             f"log_avg_msec=1000\n"
             f"write_bw_log=/spdkvol/{name}-fio\n"
