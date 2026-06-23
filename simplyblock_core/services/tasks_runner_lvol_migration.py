@@ -1819,14 +1819,15 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
     #           bdev_nvme_detach_controller can still reach the hub bdev.
     #   Step 8: delete source primary NVMe-oF subsystem.
     #   Then:   delete source lvol bdev.
-    hub_ctrl_name = ctx.get('hub_ctrl_name')
-    if hub_ctrl_name:
-        try:
-            src_rpc.bdev_nvme_detach_controller(hub_ctrl_name)
-            logger.info(f"Step 7: deferred hub controller detach: {hub_ctrl_name}")
-        except Exception as e:
-            logger.warning(f"Deferred hub detach {hub_ctrl_name} (non-fatal): {e}")
-
+    # TODO: reenable hub detach after migration — currently disabled to keep hub controller attached for debugging.
+    # TEMP: keep hub controller attached after migration
+    # hub_ctrl_name = ctx.get('hub_ctrl_name')
+    # if hub_ctrl_name:
+    #     try:
+    #         src_rpc.bdev_nvme_detach_controller(hub_ctrl_name)
+    #         logger.info(f"Step 7: deferred hub controller detach: {hub_ctrl_name}")
+    #     except Exception as e:
+    #         logger.warning(f"Deferred hub detach {hub_ctrl_name} (non-fatal): {e}")
     lvol = None
     try:
         lvol = db.get_lvol_by_id(migration.lvol_id)
