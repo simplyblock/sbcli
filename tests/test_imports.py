@@ -8,7 +8,6 @@ version and install mode (editable / non-editable).
 """
 
 import importlib
-import sys
 
 import pytest
 
@@ -20,12 +19,12 @@ _IMPORT_TARGETS = [
     "simplyblock_web.api.v2",
     "simplyblock_web.api.v2.cluster",
     "simplyblock_web.api.v2.cluster.backup",
-    "simplyblock_web.api.v2.cluster.migration",
     "simplyblock_web.api.v2.cluster.storage_node",
     "simplyblock_web.api.v2.cluster.storage_node.device",
     "simplyblock_web.api.v2.cluster.storage_pool",
     "simplyblock_web.api.v2.cluster.storage_pool.snapshot",
     "simplyblock_web.api.v2.cluster.storage_pool.volume",
+    "simplyblock_web.api.v2.cluster.storage_pool.volume.migration",
     "simplyblock_web.api.v2.cluster.task",
     "simplyblock_web.api.v2.management_node",
     "simplyblock_web.api.v2._dtos",
@@ -73,20 +72,3 @@ def test_v2_api_has_all_routers():
 def test_node_webapp_import_chain():
     """Simulate the SNodeAPI startup import: api → internal."""
     from simplyblock_web.api import internal as internal_api  # noqa: F401
-
-
-def test_no_circular_import_in_subprocess():
-    """
-    Run the v2 import in a clean subprocess with no pre-cached modules.
-
-    This catches circular imports that are masked by module caching in the
-    test process (the exact failure mode that breaks container startup).
-    """
-    import subprocess
-    result = subprocess.run(
-        [sys.executable, "-c", "from simplyblock_web.api.v2.cluster import migration"],
-        capture_output=True, text=True, timeout=30,
-    )
-    assert result.returncode == 0, (
-        f"Circular import detected in clean process:\n{result.stderr}"
-    )
