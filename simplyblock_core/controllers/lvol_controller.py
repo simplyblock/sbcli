@@ -45,7 +45,7 @@ def _create_crypto_lvol(rpc_client, lvol, cluster):
 
     with create_kms_connection(cluster) as kms:
         try:
-            original_key1, original_key2 = kms.get_data_encryption_keys(lvol)
+            original_key1, original_key2 = kms.get_data_encryption_keys(lvol.bdev_lvol, lvol.pool_uuid)
         except KMSException:
             logger.exception(f"Failed to get keys for lvol: {name} from KMS")
             return False
@@ -580,9 +580,9 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
         with create_kms_connection(cl) as kms:
             try:
                 if crypto_key is None:
-                    kms.create_data_encryption_keys(lvol)
+                    kms.create_data_encryption_keys(lvol.crypto_bdev, lvol.pool_uuid)
                 else:
-                    kms.import_data_encryption_keys(lvol, crypto_key)
+                    kms.import_data_encryption_keys(lvol.crypto_bdev, lvol.pool_uuid, crypto_key)
                 logger.info("Created lvol keys")
             except KMSException:
                 msg = "Failed to create lvol keys"
@@ -2527,16 +2527,7 @@ def replicate_lvol_on_target_cluster(lvol_id):
     ]
 
     if new_lvol.crypto_bdev:
-        new_lvol.bdev_stack.append({
-            "type": "crypto",
-            "name": new_lvol.crypto_bdev,
-            "params": {
-                "name": new_lvol.crypto_bdev,
-                "base_name": new_lvol.top_bdev,
-                "key1": new_lvol.crypto_key1,
-                "key2": new_lvol.crypto_key2,
-            }
-        })
+        new_lvol.bdev_stack.append({"type": "crypto"})
 
     new_lvol.write_to_db(db_controller.kv_store)
 
@@ -2793,16 +2784,7 @@ def replicate_lvol_on_source_cluster(lvol_id, cluster_id=None, pool_uuid=None):
     ]
 
     if new_lvol.crypto_bdev:
-        new_lvol.bdev_stack.append({
-            "type": "crypto",
-            "name": new_lvol.crypto_bdev,
-            "params": {
-                "name": new_lvol.crypto_bdev,
-                "base_name": new_lvol.top_bdev,
-                "key1": new_lvol.crypto_key1,
-                "key2": new_lvol.crypto_key2,
-            }
-        })
+        new_lvol.bdev_stack.append({"type": "crypto"})
 
     new_lvol.write_to_db(db_controller.kv_store)
 

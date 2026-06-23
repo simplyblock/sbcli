@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from ipaddress import IPv4Address
-from typing import List, Literal, Tuple, Optional, cast
+from typing import List, Literal, Optional, cast
 from uuid import UUID
 
 from fastapi import Request
@@ -411,7 +411,6 @@ class VolumeDTO(BaseModel):
     blobid: int
     ns_id: int
     cloned_from: Optional[util.UrlPath]
-    crypto_key: Optional[Tuple[str, str]]
     high_availability: bool
     do_replicate: bool = False
     max_namespace_per_subsys: int
@@ -472,11 +471,6 @@ class VolumeDTO(BaseModel):
             )
             if model.cloned_from_snap
             else None,
-            crypto_key=(
-                (model.crypto_key1, model.crypto_key2)
-                if model.crypto_key1 and model.crypto_key2
-                else None
-            ),
             high_availability=model.ha_type == "ha",
             pool_uuid=model.pool_uuid,
             pool_name=model.pool_name,
