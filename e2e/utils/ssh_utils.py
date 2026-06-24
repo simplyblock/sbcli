@@ -1294,17 +1294,21 @@ class SshUtils:
             return lines[0]
 
         # Fallback: scan sysfs — subsystem may be connected but not in nvme list
+        # Extract just the block device name (e.g. nvme0n1) and return as /dev/ path
         sysfs_cmd = (
             f"for f in /sys/class/nvme-subsystem/*/subsysnqn; do "
             f"  if [ \"$(cat $f 2>/dev/null)\" = \"{nqn}\" ]; then "
-            f"    ls $(dirname $f)/nvme*/nvme*n* 2>/dev/null | head -1; "
+            f"    ls -d $(dirname $f)/nvme*/nvme*n* 2>/dev/null | head -1 | xargs -I{{}} basename {{}}; "
             f"    break; "
             f"  fi; "
             f"done"
         )
         out2, _ = self.exec_command(node=node, command=sysfs_cmd)
         lines2 = [ln.strip() for ln in out2.strip().split('\n') if ln.strip()]
-        return lines2[0] if lines2 else None
+        if lines2:
+            dev_name = lines2[0].rstrip(':')
+            return f"/dev/{dev_name}"
+        return None
 
     def disconnect_nvme(self, node, nqn_grep):
         """Disconnect NVMe device on the node."""

@@ -171,35 +171,62 @@ class TestMultiLvolFio(TestClusterBase):
                         clone_name = f"{snapshot_name}_cl"
                         snapshot_id = self.ssh_obj.get_snapshot_id(node=self.mgmt_nodes[0],
                                                                 snapshot_name=snapshot_name)
+                        node = self.mgmt_nodes[0]
 
-                        self.ssh_obj.add_clone(node=self.mgmt_nodes[0],
+                        # Capture devices BEFORE clone creation — namespaced
+                        # clones may auto-appear on already-connected subsystem.
+                        initial_devices_clone = set(self.ssh_obj.get_devices(node=node))
+
+                        self.ssh_obj.add_clone(node=node,
                                             snapshot_id=snapshot_id,
                                             clone_name=clone_name)
 
                         self.logger.info(f"Fetching clone logical volume ID for: {clone_name}")
 
                         clone_id = self.sbcli_utils.get_lvol_id(lvol_name=clone_name)
-                        
-                        initial_devices_clone = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
 
                         connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=clone_name)
+                        already_connected = False
                         for connect_str in connect_ls:
-                            self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command=connect_str)
+                            _, error = self.ssh_obj.exec_command(node=node, command=connect_str)
+                            if error and "already connected" in error.lower():
+                                already_connected = True
 
-                        final_devices_clone = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
+                        sleep_n_sec(3)
+                        final_devices_clone = set(self.ssh_obj.get_devices(node=node))
+                        new_devices = list(final_devices_clone - initial_devices_clone)
                         disk_use_clone = None
                         self.logger.info(f"Initial: {initial_devices_clone}")
                         self.logger.info(f"Final: {final_devices_clone}")
-                        for device in final_devices_clone:
-                            if device not in initial_devices_clone:
-                                self.logger.info(f"Using disk: /dev/{device.strip()}")
-                                disk_use_clone = f"/dev/{device.strip()}"
-                                break
+                        if new_devices:
+                            self.logger.info(f"Using disk: /dev/{new_devices[0].strip()}")
+                            disk_use_clone = f"/dev/{new_devices[0].strip()}"
 
-                        self.ssh_obj.unmount_path(node=self.mgmt_nodes[0], device=disk_use_clone)
-                        self.ssh_obj.format_disk(node=self.mgmt_nodes[0], device=disk_use_clone, fs_type=fs_type)
+                        if not disk_use_clone and already_connected:
+                            # Namespaced clone shares parent's NQN — ns-rescan
+                            out, _ = self.ssh_obj.exec_command(
+                                node,
+                                "ls /dev/nvme[0-9]* 2>/dev/null | grep -oP 'nvme\\d+$' "
+                                "| sort -u",
+                                supress_logs=True,
+                            )
+                            for ctrl in (out or "").strip().splitlines():
+                                ctrl = ctrl.strip()
+                                if ctrl:
+                                    self.ssh_obj.exec_command(
+                                        node, f"sudo nvme ns-rescan /dev/{ctrl}",
+                                        supress_logs=True,
+                                    )
+                            sleep_n_sec(3)
+                            rescan_devices = set(self.ssh_obj.get_devices(node=node))
+                            new_after_rescan = list(rescan_devices - initial_devices_clone)
+                            if new_after_rescan:
+                                disk_use_clone = f"/dev/{new_after_rescan[0].strip()}"
+
+                        self.ssh_obj.unmount_path(node=node, device=disk_use_clone)
+                        self.ssh_obj.format_disk(node=node, device=disk_use_clone, fs_type=fs_type)
                         mount_point_clone = f"{self.mount_path}/{clone_name}"
-                        self.ssh_obj.mount_path(node=self.mgmt_nodes[0],
+                        self.ssh_obj.mount_path(node=node,
                                                 device=disk_use_clone,
                                                 mount_path=mount_point_clone)
                         clone_fio_dir = os.path.join(mount_point_clone, "clone_test")
