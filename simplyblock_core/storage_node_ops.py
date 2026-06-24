@@ -2500,11 +2500,11 @@ def node_removal_orchestrate(node_id, force_remove=False):
             return False
         snode = db_controller.get_storage_node_by_id(node_id)
 
-    # Phase 2 — mark in_removal. set_node_status is a no-op if already set.
-    if snode.status != StorageNode.STATUS_IN_REMOVAL:
-        logger.info(f"[REMOVAL] {node_id}: phase 2 — set in_removal")
-        set_node_status(node_id, StorageNode.STATUS_IN_REMOVAL, caused_by="remove")
-        snode = db_controller.get_storage_node_by_id(node_id)
+    # # Phase 2 — mark in_removal. set_node_status is a no-op if already set.
+    # if snode.status != StorageNode.STATUS_IN_REMOVAL:
+    #     logger.info(f"[REMOVAL] {node_id}: phase 2 — set in_removal")
+    #     set_node_status(node_id, StorageNode.STATUS_IN_REMOVAL, caused_by="remove")
+    #     snode = db_controller.get_storage_node_by_id(node_id)
 
     # Phase 3a — tear down the (empty) secondary/tertiary replicas of THIS
     # node's own primary LVS, on the peers that host them (Case A).
