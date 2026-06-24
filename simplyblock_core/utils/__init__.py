@@ -2045,7 +2045,7 @@ def format_device_with_4k(pci_device):
         logger.error(f"Failed to format device with 4K {e}")
 
 
-_HUGEPAGES_BASELINE_DIR = "/tmp/simplyblock"
+_HUGEPAGES_BASELINE_DIR = "/var/run/simplyblock"
 
 
 def _get_user_hugepages_baseline(node, current_hugepages):
@@ -2053,8 +2053,8 @@ def _get_user_hugepages_baseline(node, current_hugepages):
 
     On first call for a given NUMA node (no baseline file), the current allocatable
     hugepage count is the user's reservation — simplyblock hasn't touched it yet.
-    That value is written to /tmp/simplyblock/hugepages_baseline_node{N}.
-    On subsequent calls the file is read directly; /tmp/simplyblock is cleared on
+    That value is written to /var/run/simplyblock/hugepages_baseline_node{N}.
+    On subsequent calls the file is read directly; /var/run/simplyblock is cleared on
     reboot (host tmpfs / Docker/K8s hostPath volume) so the baseline is always
     fresh after a reboot.
     """

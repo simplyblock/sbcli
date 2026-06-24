@@ -24,7 +24,7 @@ spec:
             path: /proc
         - name: tmp-simplyblock
           hostPath:
-            path: /tmp/simplyblock
+            path: /var/run/simplyblock
             type: DirectoryOrCreate
         {% if TLS_CONNECT == "authenticated" %}
         - name: tls
@@ -49,7 +49,7 @@ spec:
             - name: host-proc
               mountPath: /proc
             - name: tmp-simplyblock
-              mountPath: /tmp/simplyblock
+              mountPath: /var/run/simplyblock
             {% if TLS_CONNECT == "authenticated" %}
             - name: tls
               mountPath: /etc/simplyblock/tls
@@ -77,7 +77,7 @@ spec:
                 hp_path="${numa_dir}hugepages/hugepages-2048kB/nr_hugepages"
                 if [ -f "$hp_path" ]; then
                   hp_count=$(cat "$hp_path")
-                  baseline_file="/tmp/simplyblock/hugepages_baseline_node${node_id}"
+                  baseline_file="/var/run/simplyblock/hugepages_baseline_node${node_id}"
                   if [ ! -f "$baseline_file" ]; then
                     echo "$hp_count" > "$baseline_file"
                     echo "[INFO] NUMA ${node_id}: wrote hugepage baseline ${hp_count}"

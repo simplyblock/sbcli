@@ -4326,7 +4326,7 @@ def start_storage_node_api_container(node_ip, cluster_ip=None):
             # has to fall through to dockerd, which can stall for 60-80s
             # during post-outage Swarm reconciliation (incident 2026-04-24).
             '/mnt/ramdisk:/mnt/ramdisk',
-            '/tmp/simplyblock:/tmp/simplyblock'],
+            '/var/run/simplyblock:/var/run/simplyblock'],
         restart_policy={"Name": "always"},
         environment=[
             f"DOCKER_IP={node_ip}",
