@@ -97,6 +97,7 @@ from simplyblock_core.models.lvol_migration import LVolMigration
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.rpc_client import RPCException, RPCClient
+from simplyblock_core.services.hub_controller_manager import hub_manager
 
 logger = utils.get_logger(__name__)
 db = db_mod.DBController()
@@ -133,74 +134,6 @@ def _get_migration_nic(node):
             return trtype, nic.ip4_address
     return trtype, node.mgmt_ip
 
-
-def _ensure_hub_attached(src_rpc, tgt_rpc, tgt_node, trtype, target_ip):
-    """
-    Ensure a migration-specific hub NVMe-oF controller is attached on source.
-
-    Creates a dedicated hublvol (named "mighub") on the target lvstore
-    and exposes it via its own NVMe-oF subsystem.  Using a separate bdev and NQN
-    avoids two Case B (src-is-tgt-secondary) problems:
-      • TRID conflict: the migration NQN differs from the node's regular hub NQN,
-        so SPDK does not reject a second controller to the same (addr, NQN).
-      • Exclusive claim: the new hublvol is unclaimed at creation, so
-        bdev_lvol_transfer can open it without hitting the NVMe-oF Target's
-        exclusive_write claim on the permanent hublvol.
-
-    The hub controller is shared across all snapshot transfers and the final
-    migration — created once during SNAP_COPY, reused by PHASE_LVOL_MIGRATE,
-    detached in CLEANUP_SOURCE.  All names/NQNs are deterministic so crash
-    recovery works without additional FDB state.
-
-    Returns (ctrl_name, hub_bdev, error_string|None).
-    """
-
-    if tgt_node.transfer_hublvol is None or not tgt_node.transfer_hublvol.bdev_name:
-        tgt_node.create_transfer_hublvol()
-
-    # Already attached (prior iteration or crash recovery).
-    if src_rpc.get_bdevs(tgt_node.transfer_hublvol.get_remote_bdev_name()):
-        return tgt_node.transfer_hublvol.bdev_name, tgt_node.transfer_hublvol.get_remote_bdev_name(), None
-
-    for iface in tgt_node.data_nics:
-        ip = iface.ip4_address
-        if tgt_node.active_rdma:
-            if iface.trtype != "RDMA":
-                logger.debug("Skipping non-RDMA iface %s (active_rdma=True)", ip)
-                continue
-            trtype = "RDMA"
-        else:
-            if iface.trtype != "TCP":
-                logger.debug("Skipping non-TCP iface %s (active_tcp=True)", ip)
-                continue
-            trtype = "TCP"
-
-        # Attach NVMe controller on source to the migration subsystem.
-        ret = src_rpc.bdev_nvme_attach_controller(
-            tgt_node.transfer_hublvol.bdev_name, tgt_node.transfer_hublvol.nqn,
-            ip,  tgt_node.transfer_hublvol.nvmf_port, trtype)
-        if not ret:
-            # Attach can fail with EEXIST if a prior crashed attempt attached the controller
-            # but the namespace wasn't in the subsystem yet, or if the target SPDK restarted
-            # between migrations dropping the subsystem while the source controller persisted.
-            # Detach the zombie, re-ensure the hub subsystem is healthy on the target (idempotent),
-            # then retry once so the controller reconnects to a populated subsystem.
-            if src_rpc.bdev_nvme_controller_list(tgt_node.transfer_hublvol.bdev_name):
-                logger.info(
-                    "_ensure_hub_attached: zombie mighub controller found (no bdev); "
-                    "detaching and reattaching"
-                )
-                src_rpc.bdev_nvme_detach_controller(tgt_node.transfer_hublvol.bdev_name)
-                try:
-                    tgt_node.create_transfer_hublvol()
-                except Exception as e:
-                    logger.warning(f"_ensure_hub_attached: hub subsystem re-create (non-fatal): {e}")
-                ret = src_rpc.bdev_nvme_attach_controller(
-                    tgt_node.transfer_hublvol.bdev_name, tgt_node.transfer_hublvol.nqn,
-                    ip, tgt_node.transfer_hublvol.nvmf_port, trtype)
-            if not ret:
-                return None, None, f"Failed to attach migration hub controller to {tgt_node.get_id()}"
-    return tgt_node.transfer_hublvol.bdev_name, tgt_node.transfer_hublvol.get_remote_bdev_name(), None
 
 
 _MIGRATION_BDEV_SUFFIX = constants.LVOL_MIG_BDEV_SUFFIX
@@ -461,39 +394,22 @@ def _log_spdk_bdev_size(rpc, composite_name, label):
         return None
 
 
-def _delete_bdev_blocking(bdev_name, primary_rpc, secondary_rpc=None, max_polls=120):
+def _delete_bdev_blocking(bdev_name, primary_rpc, secondary_rpc=None):
     """
-    Full 3-step async-delete sequence for use in synchronous error-recovery paths.
-    Mirrors the control-plane pattern in storage_node_ops.safe_delete_bdev():
+    Delete a bdev cleanly in a single RPC call.
 
-      1. delete_lvol(sync=False) on primary  – start async background deletion
-      2. poll bdev_lvol_get_lvol_delete_status until complete (0) or not-found (2)
-      3. delete_lvol(sync=True)  on primary  – sync finalize / confirm removal
-         delete_lvol(sync=True)  on secondary – sync finalize (best-effort)
-
-    Blocks for up to max_polls × 0.25 s.  Use only in error-recovery paths where
-    a bdev was just created and must be cleaned up before returning.
+    special_delete=True handles blob reference cleanup atomically — no
+    async-start/poll/finalize sequence needed.  secondary_rpc deletion is
+    best-effort (non-fatal if the secondary is unreachable).
     """
-    # Step 1: start async deletion
-    ret, _ = primary_rpc.delete_lvol(bdev_name)
+    ret, _ = primary_rpc.delete_lvol(bdev_name, special_delete=True)
     if not ret:
-        logger.warning(f"delete bdev {bdev_name}: async start failed (continuing)")
-
-    # Step 2: poll
-    for _ in range(max_polls):
-        status = primary_rpc.bdev_lvol_get_lvol_delete_status(bdev_name)
-        if status in (0, 2):
-            break
-        if status == 1:
-            time.sleep(0.25)
-        else:
-            logger.warning(f"delete bdev {bdev_name}: unexpected status {status}")
-            break
-
-    # Step 3: sync finalize
-    primary_rpc.delete_lvol(bdev_name, del_async=True)
+        logger.warning(f"delete bdev {bdev_name}: special_delete failed (continuing)")
     if secondary_rpc:
-        secondary_rpc.delete_lvol(bdev_name, del_async=True)
+        try:
+            secondary_rpc.delete_lvol(bdev_name, special_delete=True)
+        except Exception as e:
+            logger.warning(f"delete bdev {bdev_name} on secondary (non-fatal): {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -699,7 +615,7 @@ def _cleanup_final_migration(src_rpc, ctx, tgt_rpc=None, rollback_target=False):
 
 
 def _setup_snap_transfer(snap, snap_index, migration, src_node, tgt_node,
-                         src_rpc, tgt_rpc, trtype, target_ip,
+                         src_rpc, tgt_rpc, trtype,
                          tgt_sec=None, sec_rpc=None, lvol_size_mib=None):
     """
     Prepare a single snapshot for async transfer:
@@ -778,10 +694,10 @@ def _setup_snap_transfer(snap, snap_index, migration, src_node, tgt_node,
         return None, f"Could not get map_id for snap {snap_uuid} on target"
 
     # Step 5: ensure hub controller is attached on source (shared across all
-    # snapshot transfers; created once, reused by PHASE_LVOL_MIGRATE, detached
-    # in CLEANUP_SOURCE).
-    _, hub_bdev, hub_err = _ensure_hub_attached(
-        src_rpc, tgt_rpc, tgt_node, trtype, target_ip)
+    # snapshot transfers; created once, reused by PHASE_LVOL_MIGRATE, released
+    # in CLEANUP_SOURCE and detached lazily by HubControllerManager).
+    _, hub_bdev, hub_err = hub_manager.acquire(
+        src_node.get_id(), src_rpc, tgt_node, trtype)
     if hub_err:
         _cleanup()
         return None, hub_err
@@ -913,7 +829,7 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
     Returns (done: bool, suspend: bool, error: str|None).
     """
     plan = migration.snap_migration_plan
-    trtype, target_ip = _get_migration_nic(tgt_node)
+    trtype, _ = _get_migration_nic(tgt_node)
     ctx = migration.transfer_context or {}
 
     # Snap bdevs on TGT must cover the full logical address range of the lvol,
@@ -1001,7 +917,7 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
 
                 t, err = _setup_snap_transfer(
                     snap, snap_index, migration, src_node, tgt_node,
-                    src_rpc, tgt_rpc, trtype, target_ip,
+                    src_rpc, tgt_rpc, trtype,
                     tgt_sec=tgt_sec, sec_rpc=sec_rpc,
                     lvol_size_mib=_snap_lvol_size_mib)
                 if t is None:
@@ -1187,7 +1103,7 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
 
         t, err = _setup_snap_transfer(
             snap, snap_index, migration, src_node, tgt_node,
-            src_rpc, tgt_rpc, trtype, target_ip,
+            src_rpc, tgt_rpc, trtype,
             tgt_sec=tgt_sec, sec_rpc=sec_rpc,
             lvol_size_mib=_snap_lvol_size_mib)
         if t is None:
@@ -1313,7 +1229,7 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
     except KeyError as e:
         return False, True, str(e)
 
-    trtype, target_ip = _get_migration_nic(tgt_node)
+    trtype, _ = _get_migration_nic(tgt_node)
     src_lvol_composite = f"{src_node.lvstore}/{lvol.lvol_bdev}"
     tgt_lvol_bdev = lvol.lvol_bdev + _MIGRATION_BDEV_SUFFIX
     tgt_lvol_composite = f"{tgt_node.lvstore}/{tgt_lvol_bdev}"
@@ -1397,8 +1313,8 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         # a clean primary-port subsystem (min_cntlid=2000).
 
         # Step 3: connect source to target migration hub lvol
-        ctrl_name, hub_bdev, hub_err = _ensure_hub_attached(
-            src_rpc, tgt_rpc, tgt_node, trtype, target_ip)
+        ctrl_name, hub_bdev, hub_err = hub_manager.acquire(
+            src_node.get_id(), src_rpc, tgt_node, trtype)
         if hub_err:
             # Do NOT delete the target bdev on hub error — it is unrelated to
             # the hub connection and deleting it forces a recreate on retry,
@@ -1826,17 +1742,12 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
     #           bdev_nvme_detach_controller can still reach the hub bdev.
     #   Step 8: delete source primary NVMe-oF subsystem.
     #   Then:   delete source lvol bdev.
-    hub_ctrl_name = ctx.get('hub_ctrl_name')
-    if hub_ctrl_name:
-        try:
-            src_rpc.bdev_nvme_detach_controller(hub_ctrl_name)
-            logger.info(f"Step 7: deferred hub controller detach: {hub_ctrl_name}")
-            # Give SPDK time to complete the NVMe disconnect handshake before the
-            # next migration attempts to reattach.  Without this the controller
-            # stays in 'deleting' state and the attach fails.
-            time.sleep(10)
-        except Exception as e:
-            logger.warning(f"Deferred hub detach {hub_ctrl_name} (non-fatal): {e}")
+    # Step 7: release the hub controller back to the manager.
+    # HubControllerManager keeps it alive for IDLE_TIMEOUT seconds so that a
+    # back-to-back migration to the same target can reuse it without hitting
+    # the 'deleting' state race that an immediate detach would cause.
+    hub_manager.release(src_node.get_id(), tgt_node.get_id())
+    logger.info(f"Step 7: hub controller released to idle manager (src={src_node.get_id()[:8]} tgt={tgt_node.get_id()[:8]})")
     lvol = None
     try:
         lvol = db.get_lvol_by_id(migration.lvol_id)
@@ -1908,17 +1819,9 @@ def _handle_cleanup_target(migration, tgt_node, tgt_rpc, src_rpc=None):
 
     Returns (done: bool, suspend: bool, error: str|None).
     """
-    # Detach the shared hub controller on the source (best-effort).
-    # The hub is attached once during SNAP_COPY and must be torn down on any
-    # failure/cancel path; if the source is unreachable this is non-fatal.
-    if src_rpc is not None:
-        hub_ctrl_name = tgt_node.transfer_hublvol.bdev_name
-        try:
-            if src_rpc.get_bdevs(f"{hub_ctrl_name}n1"):
-                src_rpc.bdev_nvme_detach_controller(hub_ctrl_name)
-                logger.info(f"cleanup_target: detached hub controller {hub_ctrl_name}")
-        except Exception as e:
-            logger.warning(f"cleanup_target: hub detach {hub_ctrl_name} (non-fatal): {e}")
+    # Immediately detach the hub controller on failure/cancel — don't leave it
+    # connected to a target whose snapshots we're about to roll back.
+    hub_manager.detach_now(migration.source_node_id, tgt_node.get_id(), src_rpc=src_rpc)
 
     ctx = migration.transfer_context or {}
     tgt_sec_rpc = _get_secondary_rpc(tgt_node)
