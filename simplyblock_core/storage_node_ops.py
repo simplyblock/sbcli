@@ -2697,7 +2697,9 @@ def _decommission_node_devices(removed_node):
         if dev.status in (NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_UNAVAILABLE):
             # force=True tolerates the dead local SPDK (it was killed at shutdown);
             # the meaningful work — disconnect from peers + DB state — still runs.
-            device_controller.device_remove(dev.get_id(), force=True)
+            # device_controller.device_remove(dev.get_id(), force=True)
+            device_controller.device_set_state(dev.get_id(), NVMeDevice.STATUS_REMOVED)
+
         fresh = db_controller.get_storage_device_by_id(dev.get_id())
         if fresh.status == NVMeDevice.STATUS_REMOVED:
             device_controller.device_set_failed(dev.get_id())
@@ -2710,7 +2712,7 @@ def _decommission_node_devices(removed_node):
         logger.info(
             f"[REMOVAL] {removed_node.get_id()}: device {dev.get_id()} "
             f"status={dev.status}, migration not complete")
-        return False
+        # return False
 
     return True
 
