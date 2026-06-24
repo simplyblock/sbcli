@@ -680,7 +680,11 @@ def decimal_to_hex_power_of_2(decimal_number):
 
 def get_logger(name=""):
     # first configure a root logger
-    logging.getLogger("urllib3.connectionpool").setLevel(logging.WARNING)
+    # Silence external libraries that log secrets (tokens, full HTTP response
+    # bodies) at DEBUG level.  Keep them at WARNING so our own DEBUG logging
+    # is unaffected.
+    for _ext in ("urllib3", "kubernetes.client.rest"):
+        logging.getLogger(_ext).setLevel(logging.WARNING)
     logg = logging.getLogger()
 
     log_level = os.getenv("SIMPLYBLOCK_LOG_LEVEL")
