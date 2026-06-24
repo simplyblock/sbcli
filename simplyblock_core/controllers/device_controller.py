@@ -421,6 +421,47 @@ def restart_device(device_id, force=False):
     device_set_retries_exhausted(device_id, True)
     device_set_unavailable(device_id, cause=CAUSE_DEVICE_RESTART)
 
+    # Best-effort teardown of the existing fabric/bdev stack before the recreate
+    # below. _def_create_device_stack() is additive -- it reuses any subsystem /
+    # PT / alceml it still finds -- so without this, restart_device re-admits the
+    # device onto the SAME stack and cannot clear a wedged subsystem (e.g.
+    # stuck/duplicate qpairs left by a connect/disconnect race). Deleting the
+    # subsystem forces consumers to disconnect cleanly (dropping the zombie
+    # qpairs); the recreate then rebuilds a fresh subsystem/listener/namespace
+    # and consumers reconnect with new cntlids. Kept idempotent: each step is
+    # isolated so an already-gone (or failing) layer does not abort the rebuild
+    # -- the idempotent recreate fills back in whatever the teardown removed.
+    teardown_client = snode.rpc_client()
+    teardown_errors = []
+    if device_obj.nvmf_nqn:
+        try:
+            if teardown_client.subsystem_list(device_obj.nvmf_nqn):
+                logger.info(f"Tearing down subsystem {device_obj.nvmf_nqn}")
+                teardown_client.subsystem_delete(device_obj.nvmf_nqn)
+        except Exception as e:
+            teardown_errors.append(f"subsystem {device_obj.nvmf_nqn}: {e}")
+    if device_obj.alceml_bdev:
+        try:
+            teardown_client.bdev_PT_NoExcl_delete(f"{device_obj.alceml_bdev}_PT")
+        except Exception as e:
+            teardown_errors.append(f"pt {device_obj.alceml_bdev}_PT: {e}")
+        try:
+            teardown_client.bdev_alceml_delete(device_obj.alceml_bdev)
+        except Exception as e:
+            teardown_errors.append(f"alceml {device_obj.alceml_bdev}: {e}")
+    if teardown_errors:
+        # The recreate below is idempotent, so we proceed -- but a failed
+        # teardown means the device may be re-admitted onto part of the old
+        # (possibly wedged) stack, so surface it: a WARNING log plus a WARNING
+        # cluster-log event for operator visibility.
+        msg = (f"Device {device_id} restart: {len(teardown_errors)} teardown step(s) "
+               f"failed, recreating anyway: " + "; ".join(teardown_errors))
+        logger.warning(msg)
+        try:
+            device_events.device_restart_teardown_warning(device_obj, msg)
+        except Exception as e:
+            logger.error(f"Failed to log teardown-warning event for {device_id}: {e}")
+
     if not snode.rpc_client().bdev_nvme_controller_list(device_obj.nvme_controller):
         try:
             ret = snode.client(timeout=30, retry=1).bind_device_to_spdk(device_obj.pcie_address)
