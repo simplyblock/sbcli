@@ -24,6 +24,14 @@ logger = core_utils.get_logger(__name__)
 logger.setLevel(constants.LOG_WEB_LEVEL)
 logging.getLogger().setLevel(constants.LOG_WEB_LEVEL)
 
+# Prevent external libraries from logging secrets (tokens, response bodies)
+# at DEBUG level while keeping our own loggers at DEBUG.
+for _ext_logger_name in (
+    "kubernetes.client.rest",
+    "urllib3",
+):
+    logging.getLogger(_ext_logger_name).setLevel(logging.WARNING)
+
 access_logger = logging.getLogger('simplyblock_web.access')
 _access_handler = logging.StreamHandler(stream=sys.stdout)
 _access_handler.setFormatter(logging.Formatter(
