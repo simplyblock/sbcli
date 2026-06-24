@@ -1738,7 +1738,7 @@ class RPCClient:
             params["s3_lcpu_mask"] = s3_lcpu_mask
         if s3_thread_pool_size:
             params["s3_thread_pool_size"] = s3_thread_pool_size
-        return self._request("bdev_s3_create", params)
+        return self._request3("bdev_s3_create", **params)
 
     def bdev_lvol_create_poller_group(self, cpu_mask):
         """Create helper poll group threads for S3 backup transfers.
@@ -1746,9 +1746,7 @@ class RPCClient:
         Args:
             cpu_mask: hex CPU mask for helper threads (e.g. '0x1')
         """
-        return self._request("bdev_lvol_create_poller_group", {
-            "cpu_mask": cpu_mask,
-        })
+        return self._request3("bdev_lvol_create_poller_group", cpu_mask=cpu_mask)
 
     def bdev_lvol_s3_bdev(self, lvs_name, bdev_name):
         """Attach an S3 bdev to the given lvstore.
@@ -1759,7 +1757,7 @@ class RPCClient:
             "s3_bdev": bdev_name,
         })
 
-    def bdev_s3_add_bucket_name(self, name, bucket_name):
+    def bdev_s3_add_bucket_name(self, name, bucket_name, allow_existing: bool = False):
         """Register a bucket name with the S3 bdev.
         Must be called after bdev_s3_create and before any backup/recovery operations.
         Args:
@@ -1767,10 +1765,17 @@ class RPCClient:
             bucket_name: S3/MinIO bucket name to use for data storage
         Returns (result, error) tuple.
         """
-        return self._request2("bdev_s3_add_bucket_name", {
-            "name": name,
-            "bucket_name": bucket_name,
-        })
+        try:
+            return self._request3(
+                "bdev_s3_add_bucket_name",
+                name=name,
+                bucket_name=bucket_name,
+            )
+        except RPCException as e:
+            if allow_existing and e.code == -17:
+                logger.debug("Bucket %s already registered with %s", name, bucket_name)
+                return None
+            raise
 
     def bdev_lvol_s3_backup(self, s3_id, snapshot_names, cluster_batch=1):
         """Start an async backup of snapshots to S3.

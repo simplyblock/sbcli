@@ -110,6 +110,7 @@ class TestAddPoolDhchap(unittest.TestCase):
 
         with patch("simplyblock_core.controllers.pool_controller.DBController") as MockDB, \
              patch("simplyblock_core.controllers.pool_controller.Pool") as MockPool, \
+             patch("simplyblock_core.controllers.pool_controller.create_kms_connection"), \
              patch("simplyblock_core.controllers.pool_controller.pool_events"):
 
             mock_db = MockDB.return_value

@@ -22,6 +22,8 @@ import unittest
 from unittest.mock import MagicMock, patch
 import time
 
+import pytest
+
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.backup import Backup, BackupPolicy, BackupPolicyAttachment
 from simplyblock_core.models.cluster import Cluster
@@ -290,16 +292,15 @@ class TestCreateS3Bdev(unittest.TestCase):
         node = _node()
         config = {"secondary_target": 0, "with_compression": False,
                   "snapshot_backups": True}
-        result = create_s3_bdev(node, config)
+        create_s3_bdev(node, config)
 
-        self.assertTrue(result)
         mock_rpc.bdev_s3_create.assert_called_once()
         # Verify CPU masks: bdb_lcpu_mask=app_thread(0x8=8), s3_lcpu_mask=all 8 vCPUs(0xFF=255)
         _, kwargs = mock_rpc.bdev_s3_create.call_args
         self.assertEqual(kwargs["bdb_lcpu_mask"], 0x8)
         self.assertEqual(kwargs["s3_lcpu_mask"], 0xFF)
         mock_rpc.bdev_s3_add_bucket_name.assert_called_once_with(
-            "s3_lvs_test", "simplyblock-backup-cluster-1")
+            "s3_lvs_test", "simplyblock-backup-cluster-1", allow_existing=True)
         mock_rpc.bdev_lvol_s3_bdev.assert_called_once_with("lvs_test", "s3_lvs_test")
 
     @patch("simplyblock_core.controllers.backup_controller.boto3.client")
@@ -307,8 +308,9 @@ class TestCreateS3Bdev(unittest.TestCase):
     def test_no_lvstore(self, MockRPC, _mock_boto3_client):
         from simplyblock_core.controllers.backup_controller import create_s3_bdev
         node = _node(lvstore="")
-        result = create_s3_bdev(node, {})
-        self.assertFalse(result)
+        with pytest.raises(Exception):
+            create_s3_bdev(node, {})
+
         MockRPC.assert_not_called()
 
     @patch("simplyblock_core.models.storage_node.RPCClient")
@@ -318,40 +320,42 @@ class TestCreateS3Bdev(unittest.TestCase):
 
         from simplyblock_core.controllers.backup_controller import create_s3_bdev
         node = _node()
-        result = create_s3_bdev(node, {})
-        self.assertFalse(result)
+        with pytest.raises(Exception):
+            create_s3_bdev(node, {})
         mock_rpc.bdev_s3_add_bucket_name.assert_not_called()
         mock_rpc.bdev_lvol_s3_bdev.assert_not_called()
 
     @patch("simplyblock_core.controllers.backup_controller.boto3.client")
     @patch("simplyblock_core.models.storage_node.RPCClient")
     def test_bucket_name_fails(self, MockRPC, mock_boto3_client):
+        from simplyblock_core.rpc_client import RPCException
         mock_rpc = MockRPC.return_value
         mock_rpc.bdev_s3_create.return_value = True
-        mock_rpc.bdev_s3_add_bucket_name.return_value = (None, {"code": -1, "message": "error"})
+        mock_rpc.bdev_s3_add_bucket_name.side_effect = RPCException("error", code=-1)
         mock_s3 = mock_boto3_client.return_value
         mock_s3.head_bucket.return_value = {}
 
         from simplyblock_core.controllers.backup_controller import create_s3_bdev
         node = _node()
-        result = create_s3_bdev(node, {})
-        self.assertFalse(result)
+        with pytest.raises(Exception):
+            create_s3_bdev(node, {})
         mock_rpc.bdev_lvol_s3_bdev.assert_not_called()
 
     @patch("simplyblock_core.controllers.backup_controller.boto3.client")
     @patch("simplyblock_core.models.storage_node.RPCClient")
     def test_attach_fails(self, MockRPC, mock_boto3_client):
+        from simplyblock_core.rpc_client import RPCException
         mock_rpc = MockRPC.return_value
         mock_rpc.bdev_s3_create.return_value = True
         mock_rpc.bdev_s3_add_bucket_name.return_value = (True, None)
-        mock_rpc.bdev_lvol_s3_bdev.return_value = None
+        mock_rpc.bdev_lvol_s3_bdev.side_effect = RPCException("attach failed")
         mock_s3 = mock_boto3_client.return_value
         mock_s3.head_bucket.return_value = {}
 
         from simplyblock_core.controllers.backup_controller import create_s3_bdev
         node = _node()
-        result = create_s3_bdev(node, {})
-        self.assertFalse(result)
+        with pytest.raises(Exception):
+            create_s3_bdev(node, {})
 
     @patch("simplyblock_core.controllers.backup_controller.boto3.client")
     @patch("simplyblock_core.models.storage_node.RPCClient")
@@ -393,8 +397,8 @@ class TestCreateS3Bdev(unittest.TestCase):
 
         from simplyblock_core.controllers.backup_controller import create_s3_bdev
         node = _node()
-        result = create_s3_bdev(node, {})
-        self.assertFalse(result)
+        with pytest.raises(Exception):
+            create_s3_bdev(node, {})
 
 
 # ===========================================================================
@@ -589,6 +593,10 @@ class TestRestoreBackup(unittest.TestCase):
         mock_db.get_backup_chain.return_value = [backup]
         mock_tasks.add_backup_restore_task.return_value = True
 
+        mock_cluster = MagicMock()
+        mock_cluster.backup_source = ""
+        mock_db.get_cluster_by_id.return_value = mock_cluster
+
         # Mock the lvol created by add_lvol_ha
         mock_lvol = MagicMock()
         mock_lvol.node_id = "node-1"
@@ -602,7 +610,7 @@ class TestRestoreBackup(unittest.TestCase):
             mock_add_ha.return_value = ("lvol-new", None)
 
             from simplyblock_core.controllers.backup_controller import restore_backup
-            result, error = restore_backup("backup-1", "restored_lvol", "pool-1")
+            result, error = restore_backup("backup-1", "restored_lvol", "pool-1", "cluster-1")
 
         self.assertEqual(result, "lvol-new")
         self.assertIsNone(error)
@@ -615,7 +623,7 @@ class TestRestoreBackup(unittest.TestCase):
         mock_db.get_backup_by_id.side_effect = KeyError("not found")
 
         from simplyblock_core.controllers.backup_controller import restore_backup
-        result, error = restore_backup("missing", "lvol", "pool-1")
+        result, error = restore_backup("missing", "lvol", "pool-1", "cluster-1")
 
         self.assertIsNone(result)
         self.assertIsNotNone(error)
@@ -626,11 +634,15 @@ class TestRestoreBackup(unittest.TestCase):
         mock_db.get_backup_chain.return_value = [_backup()]
         mock_db.get_storage_node_by_id.return_value = _node()
 
+        mock_cluster = MagicMock()
+        mock_cluster.backup_source = ""
+        mock_db.get_cluster_by_id.return_value = mock_cluster
+
         with patch("simplyblock_core.controllers.lvol_controller.add_lvol_ha") as mock_add_ha:
             mock_add_ha.return_value = (None, "Pool not found")
 
             from simplyblock_core.controllers.backup_controller import restore_backup
-            result, error = restore_backup("backup-1", "lvol", "bad-pool")
+            result, error = restore_backup("backup-1", "lvol", "bad-pool", "cluster-1")
 
         self.assertIsNone(result)
         self.assertIn("Failed to create restore volume", error)
