@@ -11,7 +11,7 @@ from simplyblock_core.controllers import lvol_controller, snapshot_events, pool_
 
 from simplyblock_core import utils
 from simplyblock_core.exceptions import PreconditionError
-from simplyblock_core.kms import create_kms_connection, dek_path, kek_path
+from simplyblock_core.kms import create_kms_connection, lvol_dek_path, pool_kek_name
 from simplyblock_core.kms._exceptions import KMSException
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.job_schedule import JobSchedule
@@ -853,10 +853,10 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
         with create_kms_connection(cluster) as kms:
             try:
                 kms.rekey_data_encryption_keys(
-                    dek_path(cluster.get_id(), snap.lvol.get_id()),
-                    kek_path(cluster.get_id(), pool.get_id()),
-                    dek_path(cluster.get_id(), lvol.get_id()),
-                    kek_path(cluster.get_id(), pool.get_id()),
+                    lvol_dek_path(cluster.get_id(), snap.lvol.get_id()),
+                    pool_kek_name(pool.get_id()),
+                    lvol_dek_path(cluster.get_id(), lvol.get_id()),
+                    pool_kek_name(pool.get_id()),
                 )
             except KMSException:
                 msg = f"Failed to copy encryption keys for clone {lvol.crypto_bdev}"

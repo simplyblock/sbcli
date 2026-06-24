@@ -19,15 +19,15 @@ class LocalKMS(KMS):
     def _key(path: str) -> bytes:
         return f"keys/{path}".encode()
 
-    def create_data_encryption_keys(self, path: str, kek_path: str) -> None:
+    def create_data_encryption_keys(self, path: str, kek_name: str) -> None:
         self.import_data_encryption_keys(
-            path, kek_path, (generate_hex_string(32), generate_hex_string(32)),
+            path, kek_name, (generate_hex_string(32), generate_hex_string(32)),
         )
 
-    def import_data_encryption_keys(self, path: str, kek_path: str, keys: tuple[str, str]) -> None:
+    def import_data_encryption_keys(self, path: str, kek_name: str, keys: tuple[str, str]) -> None:
         self._kv_store.set(self._key(path), json.dumps(list(keys)).encode())
 
-    def get_data_encryption_keys(self, path: str, kek_path: str) -> tuple[str, str]:
+    def get_data_encryption_keys(self, path: str, kek_name: str) -> tuple[str, str]:
         raw = self._kv_store.get(self._key(path)).wait()
         if not raw.present():
             raise KMSException(f"No keys found at {path}")
@@ -37,8 +37,8 @@ class LocalKMS(KMS):
     def delete_data_encryption_keys(self, path: str) -> None:
         self._kv_store.clear(self._key(path))
 
-    def create_key_encryption_key(self, path: str) -> None:
+    def create_key_encryption_key(self, name: str) -> None:
         pass
 
-    def delete_key_encryption_key(self, path: str) -> None:
+    def delete_key_encryption_key(self, name: str) -> None:
         pass
