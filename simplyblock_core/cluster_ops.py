@@ -260,7 +260,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     scripts.install_deps(mode)
     logger.info("Installing dependencies > Done")
 
-    db_connection = None
+    db_connection: SecretStr | None = None
     if mode == "docker":
         if not ifname:
             ifname = "eth0"
@@ -269,8 +269,8 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         if not dev_ip:
             raise ValueError(f"Error getting interface ip: {ifname}")
 
-        db_connection = f"{utils.generate_string(8)}:{utils.generate_string(32)}@{dev_ip}:4500"
-        scripts.set_db_config(db_connection)
+        db_connection = SecretStr(f"{utils.generate_string(8)}:{utils.generate_string(32)}@{dev_ip}:4500")
+        scripts.set_db_config(db_connection.get_secret_value())
         logger.info(f"Node IP: {dev_ip}")
         scripts.configure_docker(dev_ip)
         logger.info("Configuring docker swarm...")

@@ -46,7 +46,7 @@ class Cluster(BaseModel):
     cluster_max_devices: int = 0
     cluster_max_nodes: int = 0
     cluster_max_size: int = 0
-    db_connection: str = ""
+    db_connection: SecretStr = SecretStr("")
     dhchap: str = ""
     distr_bs: int = 0
     distr_chunk_bs: int = 0

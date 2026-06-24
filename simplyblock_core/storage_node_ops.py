@@ -1913,7 +1913,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         snode.primary_ip = mgmt_ip
         snode.rpc_port = rpc_port
         snode.rpc_username = rpc_user
-        snode.rpc_password = SecretStr(rpc_pass)
+        snode.rpc_password = rpc_pass
         snode.cluster_id = cluster_id
         snode.api_endpoint = node_addr
         snode.host_secret = SecretStr(utils.generate_string(20))
