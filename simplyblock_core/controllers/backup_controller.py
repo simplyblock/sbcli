@@ -12,7 +12,8 @@ from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.backup import Backup, BackupPolicy, BackupPolicyAttachment
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.kms import (
-    KMSException, backup_path, create_kms_connection, dek_path, kek_path,
+    KMSException, backup_dek_path, backup_kek_name, create_kms_connection,
+    lvol_dek_path, pool_kek_name,
 )
 from simplyblock_core.utils.secrets import unwrap_secret as _unwrap_secret
 
@@ -292,12 +293,12 @@ def _create_single_backup(snapshot, lvol, node_id, cluster_id, prev_backup):
     if backup.encrypted:
         cluster = db_controller.get_cluster_by_id(cluster_id)
         with create_kms_connection(cluster) as kms:
-            kms.create_key_encryption_key(backup_path(cluster_id, backup.uuid))
+            kms.create_key_encryption_key(backup_kek_name(backup.uuid))
             kms.rekey_data_encryption_keys(
-                dek_path(cluster_id, lvol.get_id()),
-                kek_path(cluster_id, lvol.pool_uuid),
-                backup_path(cluster_id, backup.uuid),
-                backup_path(cluster_id, backup.uuid),
+                lvol_dek_path(cluster_id, lvol.get_id()),
+                pool_kek_name(lvol.pool_uuid),
+                backup_dek_path(cluster_id, backup.uuid),
+                backup_kek_name(backup.uuid),
             )
 
     backup.write_to_db()
@@ -465,8 +466,8 @@ def restore_backup(backup_id, lvol_name, pool_id_or_name, cluster_id,
         with create_kms_connection(cluster) as kms:
             try:
                 crypto_key = kms.get_data_encryption_keys(
-                    backup_path(cluster_id, backup.uuid),
-                    backup_path(cluster_id, backup.uuid),
+                    backup_dek_path(cluster_id, backup.uuid),
+                    backup_kek_name(backup.uuid),
                 )
             except KMSException:
                 return None, "Failed to retrieve backup crypto keys"
@@ -536,8 +537,8 @@ def _cleanup_backup_kms_keys(backups):
         with create_kms_connection(cluster) as kms:
             for b in encrypted:
                 try:
-                    kms.delete_data_encryption_keys(backup_path(b.cluster_id, b.uuid))
-                    kms.delete_key_encryption_key(backup_path(b.cluster_id, b.uuid))
+                    kms.delete_data_encryption_keys(backup_dek_path(b.cluster_id, b.uuid))
+                    kms.delete_key_encryption_key(backup_kek_name(b.uuid))
                 except KMSException:
                     logger.exception(f"Failed to delete keys for backup {b.uuid}")
     except (KMSException, KeyError):

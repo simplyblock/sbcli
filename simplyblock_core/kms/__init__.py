@@ -13,16 +13,20 @@ logger = logging.getLogger()
 logger.setLevel(logging.DEBUG)
 
 
-def dek_path(cluster_id: str, lvol_id: str) -> str:
+def lvol_dek_path(cluster_id: str, lvol_id: str) -> str:
     return f"cluster/{cluster_id}/lvol/{lvol_id}"
 
 
-def kek_path(cluster_id: str, pool_id: str) -> str:
-    return f"cluster/{cluster_id}/pool/{pool_id}"
-
-
-def backup_path(cluster_id: str, backup_id: str) -> str:
+def backup_dek_path(cluster_id: str, backup_id: str) -> str:
     return f"cluster/{cluster_id}/backup/{backup_id}"
+
+
+def pool_kek_name(pool_id: str) -> str:
+    return f"pool-{pool_id}"
+
+
+def backup_kek_name(backup_id: str) -> str:
+    return f"backup-{backup_id}"
 
 
 def create_kms_connection(cluster: Cluster) -> KMS:
