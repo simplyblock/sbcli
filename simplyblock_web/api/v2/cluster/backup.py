@@ -97,10 +97,7 @@ class _BackupSourceSwitchParams(BaseModel):
 
 @api.post('/source-switch', name='clusters:backups:source-switch')
 def source_switch(cluster: Cluster, parameters: _BackupSourceSwitchParams):
-    success, error = backup_controller.switch_backup_source(
-        cluster.get_id(), parameters.source_cluster_id)
-    if error:
-        raise HTTPException(400, error)
+    backup_controller.switch_backup_source(cluster.get_id(), parameters.source_cluster_id)
     return {"source_cluster_id": parameters.source_cluster_id}
 
 

@@ -5,7 +5,7 @@ import time
 import uuid
 
 import boto3
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 
 from simplyblock_core.controllers import backup_events, tasks_controller
 from simplyblock_core.db_controller import DBController
@@ -15,7 +15,9 @@ from simplyblock_core.kms import (
     KMSException, backup_dek_path, backup_kek_name, create_kms_connection,
     lvol_dek_path, pool_kek_name,
 )
-from simplyblock_core.utils.secrets import unwrap_secret as _unwrap_secret
+from simplyblock_core.utils.secrets import unwrap_secret
+from simplyblock_core.exceptions import PreconditionError
+from simplyblock_core.rpc_client import RPCException
 
 logger = logging.getLogger()
 
@@ -130,7 +132,42 @@ def _compute_s3_cpu_masks(node):
     return bdb_lcpu_mask, s3_lcpu_mask
 
 
-def create_s3_bdev(node, backup_config):
+def _s3_client(backup_config):
+    return boto3.client("s3",
+        aws_access_key_id=unwrap_secret(backup_config.get("access_key_id")),
+        aws_secret_access_key=unwrap_secret(backup_config.get("secret_access_key")),
+        endpoint_url=backup_config.get("local_endpoint"),
+    )
+
+def _s3_bucket_exists(backup_config, bucket_name) -> bool:
+    try:
+        _s3_client(backup_config).head_bucket(Bucket=bucket_name)
+        return True
+    except ClientError as e:
+        error_code = int(e.response["Error"]["Code"])
+        if error_code == 404:
+            return False
+        raise
+
+
+def _ensure_s3_bucket(backup_config, bucket_name):
+    try:
+        s3_client = _s3_client(backup_config)
+        try:
+            s3_client.head_bucket(Bucket=bucket_name)
+            logger.info(f"S3 bucket already exists: {bucket_name}")
+        except ClientError as e:
+            error_code = int(e.response["Error"]["Code"])
+            if error_code == 404:
+                s3_client.create_bucket(Bucket=bucket_name)
+                logger.info(f"S3 bucket created: {bucket_name}")
+            else:
+                raise
+    except BotoCoreError as e:
+        raise RuntimeError(f"Error ensuring S3 bucket {bucket_name} exists") from e
+
+
+def create_s3_bdev(node, backup_config) -> None:
     """Create the S3 bdev and attach it to a node's lvstore.
     Called during cluster activate / node restart.
     Args:
@@ -138,27 +175,23 @@ def create_s3_bdev(node, backup_config):
         backup_config: dict from cluster.backup_config with S3/MinIO connection params
     """
     if not node.lvstore:
-        return False
+        raise PreconditionError("Node does not have an lvstore")
+
     rpc_client = node.rpc_client()
     s3_bdev_name = f"s3_{node.lvstore}"
 
     bdb_lcpu_mask, s3_lcpu_mask = _compute_s3_cpu_masks(node)
 
-    # Step 0: Create helper poll group threads for S3 transfers
     cpu_mask = node.app_thread_mask if node.app_thread_mask else "0x1"
     try:
-        ret = rpc_client.bdev_lvol_create_poller_group(cpu_mask)
-        if not ret:
-            logger.warning(f"Failed to create poller group on node {node.get_id()}")
-        else:
-            logger.info(f"S3 poller group created with mask {cpu_mask} on node {node.get_id()}")
-    except Exception as e:
+        rpc_client.bdev_lvol_create_poller_group(cpu_mask)
+        logger.info(f"S3 poller group created with mask {cpu_mask} on node {node.get_id()}")
+    except RPCException as e:
         # May fail if already created — not fatal
         logger.warning(f"Poller group creation returned error (may already exist): {e}")
 
-    # Step 1: Create the S3 bdev
     try:
-        ret = rpc_client.bdev_s3_create(
+        rpc_client.bdev_s3_create(
             name=s3_bdev_name,
             secondary_target=backup_config.get("secondary_target", 0),
             with_compression=backup_config.get("with_compression", False),
@@ -171,60 +204,17 @@ def create_s3_bdev(node, backup_config):
             s3_lcpu_mask=s3_lcpu_mask,
             s3_thread_pool_size=backup_config.get("s3_thread_pool_size", 0),
         )
-        if not ret:
-            logger.warning(f"Failed to create S3 bdev on node {node.get_id()}")
-            return False
-    except Exception as e:
-        logger.error(f"Error creating S3 bdev on node {node.get_id()}: {e}")
-        return False
 
-    # Step 2: Ensure the S3 bucket exists, then register it with the S3 bdev
-    bucket_name = backup_config.get("bucket_name", f"simplyblock-backup-{node.cluster_id}")
-    try:
-        s3_kwargs: dict = {
-            "aws_access_key_id": _unwrap_secret(backup_config.get("access_key_id")) or "",
-            "aws_secret_access_key": _unwrap_secret(backup_config.get("secret_access_key")) or "",
-        }
-        endpoint_url = backup_config.get("local_endpoint", "")
-        if endpoint_url:
-            s3_kwargs["endpoint_url"] = endpoint_url
-        s3_client = boto3.client("s3", **s3_kwargs)
-        try:
-            s3_client.head_bucket(Bucket=bucket_name)
-            logger.info(f"S3 bucket already exists: {bucket_name}")
-        except ClientError as e:
-            error_code = int(e.response["Error"]["Code"])
-            if error_code == 404:
-                s3_client.create_bucket(Bucket=bucket_name)
-                logger.info(f"S3 bucket created: {bucket_name}")
-            else:
-                raise
-    except Exception as e:
-        logger.error(f"Error ensuring S3 bucket {bucket_name} exists: {e}")
-        return False
+        bucket_name = backup_config.get("bucket_name", f"simplyblock-backup-{node.cluster_id}")
+        _ensure_s3_bucket(backup_config, bucket_name)
 
-    try:
-        ret, err = rpc_client.bdev_s3_add_bucket_name(s3_bdev_name, bucket_name)
-        if not ret and not (err and err.get("code") == -17):
-            logger.warning(f"Failed to set bucket name on S3 bdev {s3_bdev_name}")
-            return False
+        rpc_client.bdev_s3_add_bucket_name(s3_bdev_name, bucket_name, allow_existing=True)
         logger.info(f"S3 bdev bucket set: {bucket_name} on {s3_bdev_name}")
-    except Exception as e:
-        logger.error(f"Error setting bucket name on S3 bdev {s3_bdev_name}: {e}")
-        return False
 
-    # Step 3: Attach the S3 bdev to the lvstore
-    try:
-        ret = rpc_client.bdev_lvol_s3_bdev(node.lvstore, s3_bdev_name)
-        if ret:
-            logger.info(f"S3 bdev created and attached: {s3_bdev_name} on node {node.get_id()}")
-            return True
-        else:
-            logger.warning(f"Failed to attach S3 bdev to lvstore on node {node.get_id()}")
-            return False
-    except Exception as e:
-        logger.error(f"Error attaching S3 bdev on node {node.get_id()}: {e}")
-        return False
+        rpc_client.bdev_lvol_s3_bdev(node.lvstore, s3_bdev_name)
+        logger.info(f"S3 bdev created and attached: {s3_bdev_name} on node {node.get_id()}")
+    except (RPCException, RuntimeError) as e:
+        raise RuntimeError(f"Error S3 bdev on node {node.get_id()}") from e
 
 
 def _get_snapshot_chain(snapshot):
@@ -730,7 +720,7 @@ def get_backup_sources(cluster_id):
     return result
 
 
-def switch_backup_source(cluster_id, source_cluster_id):
+def switch_backup_source(cluster_id, source_cluster_id) -> None:
     """Switch the active backup source for all nodes in the cluster.
 
     Reconfigures the S3 bdev on every node to read from the bucket
@@ -746,8 +736,8 @@ def switch_backup_source(cluster_id, source_cluster_id):
     """
     try:
         cluster = db_controller.get_cluster_by_id(cluster_id)
-    except KeyError:
-        return False, f"Cluster {cluster_id} not found"
+    except KeyError as e:
+        raise PreconditionError("Precondition not met") from e
 
     if source_cluster_id == "local":
         source_cluster_id = cluster_id
@@ -762,37 +752,21 @@ def switch_backup_source(cluster_id, source_cluster_id):
 
     # Verify the bucket exists
     try:
-        s3_kwargs: dict = {
-            "aws_access_key_id": _unwrap_secret(backup_config.get("access_key_id")) or "",
-            "aws_secret_access_key": _unwrap_secret(backup_config.get("secret_access_key")) or "",
-        }
-        endpoint_url = backup_config.get("local_endpoint", "")
-        if endpoint_url:
-            s3_kwargs["endpoint_url"] = endpoint_url
-        s3_client = boto3.client("s3", **s3_kwargs)
-        s3_client.head_bucket(Bucket=bucket_name)
-    except Exception as e:
-        return False, f"S3 bucket {bucket_name} not accessible: {e}"
+        if not _s3_bucket_exists(backup_config, bucket_name):
+            raise PreconditionError(f"S3 bucket {bucket_name} does not exist")
+    except BotoCoreError as e:
+        raise RuntimeError(f"S3 bucket {bucket_name} not accessible: {e}")
 
     # Reconfigure S3 bdev bucket on all online nodes
     nodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
-    errors = []
     for node in nodes:
         if node.status != StorageNode.STATUS_ONLINE or not node.lvstore:
             continue
-        try:
-            rpc_client = node.rpc_client()
-            s3_bdev_name = f"s3_{node.lvstore}"
-            ret, err = rpc_client.bdev_s3_add_bucket_name(s3_bdev_name, bucket_name)
-            if not ret and not (err and err.get("code") == -17):
-                errors.append(f"Node {node.get_id()}: failed to set bucket")
-            else:
-                logger.info(f"Switched S3 bucket to {bucket_name} on node {node.get_id()}")
-        except Exception as e:
-            errors.append(f"Node {node.get_id()}: {e}")
 
-    if errors:
-        return False, "; ".join(errors)
+        rpc_client = node.rpc_client()
+        s3_bdev_name = f"s3_{node.lvstore}"
+        rpc_client.bdev_s3_add_bucket_name(s3_bdev_name, bucket_name, allow_existing=True)
+        logger.info(f"Switched S3 bucket to {bucket_name} on node {node.get_id()}")
 
     # Persist the active source in the cluster record. Atomic: the long
     # per-node RPC loop above means a concurrent cluster.status change could be
@@ -800,8 +774,6 @@ def switch_backup_source(cluster_id, source_cluster_id):
     db_controller.atomic_update(
         db_controller.get_cluster_by_id(cluster_id),
         lambda c, v=source_cluster_id: setattr(c, "backup_source", v))
-
-    return True, None
 
 
 def is_local_backup_source(cluster_id):
