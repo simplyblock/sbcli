@@ -2517,18 +2517,19 @@ def node_removal_orchestrate(node_id, force_remove=False):
     if not _relocate_replicas_hosted_on(snode):
         return False
 
-    # Phase 4 — remove + fail devices, then wait for failure-migration to finish.
-    logger.info(f"[REMOVAL] {node_id}: phase 4 — devices remove/fail/migrate")
-    if not _decommission_node_devices(snode):
-        return False
-
     # Phase 5 — finalize (swarm leave, gpt cleanup) and flip to removed.
-    logger.info(f"[REMOVAL] {node_id}: phase 5 — finalize")
+    logger.info(f"[REMOVAL] {node_id}: phase 4 — finalize")
     _finalize_node_removal(snode)
     set_node_status(node_id, StorageNode.STATUS_REMOVED, caused_by="remove")
     snode = db_controller.get_storage_node_by_id(node_id)
-    storage_events.snode_status_change(
-        snode, StorageNode.STATUS_REMOVED, StorageNode.STATUS_IN_REMOVAL, caused_by="remove")
+    # storage_events.snode_status_change(
+    #     snode, StorageNode.STATUS_REMOVED, StorageNode.STATUS_IN_REMOVAL, caused_by="remove")
+
+    # Phase 4 — remove + fail devices, then wait for failure-migration to finish.
+    logger.info(f"[REMOVAL] {node_id}: phase 5 — devices remove/fail/migrate")
+    if not _decommission_node_devices(snode):
+        return False
+
     logger.info(f"[REMOVAL] {node_id}: done")
     return True
 
