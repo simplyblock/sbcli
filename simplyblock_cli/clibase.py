@@ -5,6 +5,7 @@ import json
 import re
 import sys
 import time
+import uuid
 from pathlib import Path
 
 from simplyblock_cli.alerting_config_parser import parse_alerting_config
@@ -76,6 +77,7 @@ def _format_result(data, *, json: bool) -> str:
 class CLIWrapperBase:
 
     def __init__(self):
+        utils.request_id_var.set(uuid.uuid4().hex[:8])
         self.parser.add_argument("--cmd", help='cmd', nargs='+')
 
     def init_parser(self):
