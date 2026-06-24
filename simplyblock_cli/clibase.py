@@ -6,6 +6,7 @@ import json
 import re
 import sys
 import time
+import uuid
 import argcomplete
 
 from simplyblock_core import cluster_ops, utils, db_controller, constants
@@ -67,6 +68,7 @@ def regex_type(regex):
 class CLIWrapperBase:
 
     def __init__(self):
+        utils.request_id_var.set(uuid.uuid4().hex[:8])
         self.parser.add_argument("--cmd", help='cmd', nargs='+')
         argcomplete.autocomplete(self.parser)
 
