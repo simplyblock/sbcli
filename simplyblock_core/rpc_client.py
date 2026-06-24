@@ -1351,13 +1351,23 @@ class RPCClient:
         (per-LVS, distinct from `subsystem_port` which serves lvols).
         """
 
-        return self._request('bdev_lvol_set_lvs_opts', {
+        ret = self._request('bdev_lvol_set_lvs_opts', {
             "uuid" if utils.UUID_PATTERN.match(lvs) else "lvs_name": lvs,
             "groupid": groupid,
             "subsystem_port": subsystem_port,
             "hublvol_port": hublvol_port,
             "role": role,
         })
+        if not ret:
+            ret = self._request('bdev_lvol_set_lvs_opts', {
+                "uuid" if utils.UUID_PATTERN.match(lvs) else "lvs_name": lvs,
+                "groupid": groupid,
+                "subsystem_port": subsystem_port,
+                "primary": role=="primary",
+                "secondary": role=="secondary",
+            })
+        return ret
+
 
     def bdev_lvol_get_lvol_delete_status(self, name):
         """
