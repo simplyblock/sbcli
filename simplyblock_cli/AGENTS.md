@@ -23,6 +23,7 @@ The generator (`scripts/cli-wrapper-gen.py`) reads the YAML and writes `cli.py`.
 - **Positional arguments** (no `--`/`-` prefix) are always required.
 - **Optional arguments** (`--`/`-` prefix) are optional unless marked `required: true`.
 - **Function naming**: The generator maps commands to handler functions in `clibase.py` as `<command>__<subcommand>`. Hyphens in command names become underscores (e.g., `storage-node list` → `storage_node__list`).
+- **Secret arguments**: Use `type: secret` in `cli-reference.yaml` for any argument that carries a password, token, or key. The generator maps this to `SecretStr` (from `pydantic`) as the argparse type converter, so the value is wrapped at parse time and masked in `repr(vars(args))`. Handler code in `clibase.py` receives a `SecretStr` and should pass it through to the API without unwrapping.
 
 ## Adding a CLI Command
 

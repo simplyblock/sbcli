@@ -49,6 +49,20 @@ Data flows: **CLI → Web API → Core controllers → FoundationDB**. Storage n
 - **Ruff** and **mypy** are enforced in CI. `simplyblock_cli/cli.py` is excluded from ruff (auto-generated). `simplyblock_web/test` is excluded from mypy.
 - `tests/perf/` is excluded from pytest discovery.
 
+### Secret Handling
+
+Secrets (passwords, tokens, keys, connection strings) are wrapped in Pydantic's `SecretStr` / `SecretBytes` throughout the codebase. The core principle is **wrap early, unwrap late**: secrets enter the system wrapped at the boundary (CLI parse, API ingress, DB read) and are only unwrapped to plaintext at the final wire-send moment. Every layer in between sees only masked values in `repr`/`str`/logging.
+
+Key rules:
+
+- **Model fields**: Declare secret fields as `SecretStr` with a `SecretStr("")` default. `BaseModel.from_dict()` auto-wraps inbound plaintext for backward compatibility with existing FDB records. `to_dict()` keeps wrappers by default (safe for logging); `to_dict(unwrap_secrets=True)` produces plaintext for persistence — only `write_to_db()` should call this.
+- **Clients (RPC, SNode, Firewall API)**: Accept `SecretStr` parameters. Log the payload dict *before* unwrapping (wrappers mask in log output), then call `unwrap_secrets_for_send(payload)` from `simplyblock_core/utils/secrets.py` right before `requests.post(json=...)`.
+- **v2 DTOs**: Use `@field_serializer('field', when_used='json')` to unwrap for JSON wire responses while keeping wrappers in Python-mode `model_dump()`.
+- **CLI arguments**: Declare the argument type as `secret` in `cli-reference.yaml`. The generator produces `SecretStr` as the argparse type converter, so the value is wrapped at parse time.
+- **Logging**: Never log unwrapped secret values. Response-body logging is gated by `Settings().log_response_bodies` (env `SB_LOG_RESPONSE_BODIES`, default `False`). External libraries that log HTTP bodies (`urllib3`, `kubernetes.client.rest`) are silenced to WARNING. The web access log records only `request.url.path`, never the query string.
+- **Comparison**: Use `hmac.compare_digest(secret.get_secret_value(), other)` for timing-safe comparison.
+- **Testing**: New secret-bearing code needs tests verifying (1) plaintext never appears in `repr`/`str`/log output, (2) plaintext is delivered on the wire, and (3) FDB round-trip preserves the value. See `tests/test_secret_redaction.py` and `tests/test_client_secret_logging.py` for patterns.
+
 ## Verification
 
 After any code change, run the `tox-verify` skill (`.agents/skills/tox-verify.md`). The short version:
