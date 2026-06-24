@@ -1,7 +1,9 @@
 # coding=utf-8
+import statistics
 import time
 
 from simplyblock_core import constants, db_controller, utils
+from simplyblock_core.controllers import device_events
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.stats import DeviceStatObject, NodeStatObject, ClusterStatObject
@@ -10,6 +12,73 @@ logger = utils.get_logger(__name__)
 
 
 last_object_record: dict[str, DeviceStatObject] = {}
+
+# --- Per-device latency-deviation detection -----------------------------------
+# Sliding-window gray-failure early-warning: if a device's mean IO latency
+# (ticks/op) over LATENCY_WINDOW_SEC exceeds LATENCY_OUTLIER_FACTOR x the average
+# of the cluster's other active devices, log a WARNING cluster event. Catches a
+# slow-but-not-dead device that the hard exclusion path can miss because its NVMe
+# controller still reports "connected" (incident 2026-06-24: device 31 was 2x+
+# slower / timing out while looking healthy).
+LATENCY_WINDOW_SEC = 300          # ~5 min sliding window
+LATENCY_OUTLIER_FACTOR = 2.0      # > 2x the cluster average => warn
+LATENCY_MIN_IO_PS = 50            # ignore near-idle devices (no meaningful latency)
+LATENCY_MIN_SAMPLES = 3           # need a few in-window samples before judging
+LATENCY_MIN_DEVICES = 3           # need a meaningful cluster baseline
+LATENCY_WARN_COOLDOWN_SEC = 300   # warn at most once per device per cooldown
+# device_id -> list[(timestamp, latency_ticks_per_op)]
+_latency_window: dict = {}
+# device_id -> last-warned timestamp
+_latency_last_warn: dict = {}
+
+
+def detect_latency_outliers(device_records):
+    """Sliding-window latency-deviation warning.
+
+    device_records: list of (device, DeviceStatObject) collected this cycle for
+    one cluster. Appends each active device's per-op latency to its window,
+    prunes to LATENCY_WINDOW_SEC, then flags devices whose windowed mean exceeds
+    LATENCY_OUTLIER_FACTOR x the average of all active devices.
+    """
+    now = int(time.time())
+    cutoff = now - LATENCY_WINDOW_SEC
+    device_means = {}
+    for device, rec in device_records:
+        try:
+            total_io = int(rec['read_io_ps']) + int(rec['write_io_ps'])
+            total_lat = int(rec['read_latency_ps']) + int(rec['write_latency_ps'])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if total_io < LATENCY_MIN_IO_PS:
+            continue  # near-idle: no meaningful latency this cycle
+        lat_per_op = total_lat / total_io  # latency ticks per op (load-independent)
+        win = _latency_window.setdefault(device.get_id(), [])
+        win.append((now, lat_per_op))
+        win[:] = [(t, v) for (t, v) in win if t >= cutoff]
+        if len(win) >= LATENCY_MIN_SAMPLES:
+            device_means[device.get_id()] = (device, statistics.fmean(v for _, v in win))
+
+    if len(device_means) < LATENCY_MIN_DEVICES:
+        return
+    baseline = statistics.fmean(m for (_, m) in device_means.values())
+    if baseline <= 0:
+        return
+    for dev_id, (device, dmean) in device_means.items():
+        if dmean <= LATENCY_OUTLIER_FACTOR * baseline:
+            continue
+        if now - _latency_last_warn.get(dev_id, 0) < LATENCY_WARN_COOLDOWN_SEC:
+            continue
+        _latency_last_warn[dev_id] = now
+        ratio = dmean / baseline
+        msg = (f"Device {device.get_id()} (storage_id {device.cluster_device_order}) "
+               f"IO latency {ratio:.1f}x the cluster average over "
+               f"{LATENCY_WINDOW_SEC // 60}m ({int(dmean)} vs {int(baseline)} ticks/op) "
+               f"- possible degraded device")
+        logger.warning(msg)
+        try:
+            device_events.device_latency_outlier(device, msg)
+        except Exception as e:
+            logger.error(f"Failed to log latency-outlier event for {dev_id}: {e}")
 
 
 def add_device_stats(cl, device, capacity_dict, stats_dict):
@@ -184,6 +253,7 @@ while True:
 
         all_lvols =  db.get_mini_lvols()
         node_records = []
+        cluster_device_records = []
         for node in snodes:
             logger.info("Node: %s", node.get_id())
             if node.status != StorageNode.STATUS_ONLINE:
@@ -220,10 +290,16 @@ while True:
                     record = add_device_stats(cl, device, capacity_dict, stats_dict)
                     if record:
                         devices_records.append(record)
+                        cluster_device_records.append((device, record))
 
             node_record = add_node_stats(node, devices_records, all_lvols)
             node_records.append(node_record)
 
         add_cluster_stats(cl, node_records)
+
+        try:
+            detect_latency_outliers(cluster_device_records)
+        except Exception as e:
+            logger.error(f"latency-outlier detection failed for cluster {cl.get_id()}: {e}")
 
     time.sleep(constants.DEV_STAT_COLLECTOR_INTERVAL_SEC)

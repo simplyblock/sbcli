@@ -18,6 +18,86 @@ db = db_controller.DBController()
 EVENTS_LIST = ['SPDK_BDEV_EVENT_REMOVE', "error_open", 'error_read', "error_write", "error_unmap",
                "error_write_cannot_allocate"]
 
+# A nominally "healthy" remote NVMe controller normally earns its device a pass
+# on an IO-timeout error event (the error is assumed transient). A controller can
+# however stay "connected" while its IO keeps timing out (wedged/slow device,
+# stuck or duplicate qpair), producing an endless timeout/reset loop with the
+# device never excluded (incident 2026-06-24: storage_id 31 skipped 38x while the
+# distrib kept using it). To escalate without over-reacting to a single node's
+# bad path, we require a QUORUM: a majority of the online consumer nodes must
+# EACH have timed out to the device >= REMOTE_IO_TIMEOUT_LIMIT times (recently)
+# before the device is forced globally UNAVAILABLE.
+REMOTE_IO_TIMEOUT_LIMIT = 1          # per-node IO-error reports before that node "votes" the device bad
+# One ~8s IO-timeout cycle reports a batch (read/write/unmap within ~200ms);
+# debounce so a single batch advances a node's count once.
+REMOTE_IO_TIMEOUT_DEBOUNCE_SEC = 6.0
+# Reset/validity window: a node's vote only counts toward quorum if it reported
+# an IO error this recently. If a quorum is not reached while votes are live they
+# expire and the accumulation resets — so sporadic, non-concurrent errors spread
+# over a long period never add up to an exclusion.
+REMOTE_IO_VOTE_VALIDITY_SEC = 300.0  # 5 min
+_REMOTE_IO_TIMEOUT_MESSAGES = ('error_read', 'error_write', 'error_unmap')
+
+# Shared across the per-node collector threads (one process). Keyed by
+# (event_node_id, device_id) -> (count, last_io_error_ts).
+_remote_timeout_lock = threading.Lock()
+_remote_timeout_votes: dict = {}
+
+
+def _record_remote_timeout(event_node_id, device_id):
+    """Debounced per-(reporting-node, device) IO-error vote counter. Also purges
+    votes older than the validity window so the quorum accumulation resets once a
+    device stops erroring."""
+    now = time.time()
+    with _remote_timeout_lock:
+        cnt, tsc = _remote_timeout_votes.get((event_node_id, device_id), (0, 0.0))
+        if now - tsc > REMOTE_IO_TIMEOUT_DEBOUNCE_SEC:
+            cnt += 1
+        _remote_timeout_votes[(event_node_id, device_id)] = (cnt, now)
+        stale = [k for k, (_, t) in _remote_timeout_votes.items()
+                 if now - t > REMOTE_IO_VOTE_VALIDITY_SEC]
+        for k in stale:
+            del _remote_timeout_votes[k]
+
+
+def _remote_timeout_quorum_reached(device_id, other_nodes):
+    """Quorum check over the cluster's nodes other than the device's home node.
+
+    other_nodes: list of (node_id, is_online) for every cluster node except the
+    device's home node (removed nodes already filtered out by the caller).
+
+    A node is a VOTER if it has recently timed out to this device
+    >= REMOTE_IO_TIMEOUT_LIMIT times -- even if it has since gone offline: a node
+    that already decided the device is bad keeps its vote (and stays in the
+    denominator). A node counts toward the quorum DENOMINATOR if it is either
+    currently online or already a voter; an offline node that never reached the
+    limit counts toward neither. Quorum = N // 2 + 1 over that denominator
+    (always >= 1; if the denominator is 0 -- e.g. only the home node is online and
+    nobody has voted -- no quorum is possible and the device is not excluded).
+    """
+    now = time.time()
+    denom = 0
+    voters = 0
+    with _remote_timeout_lock:
+        for node_id, is_online in other_nodes:
+            cnt, tsc = _remote_timeout_votes.get((node_id, device_id), (0, 0.0))
+            has_vote = cnt >= REMOTE_IO_TIMEOUT_LIMIT and now - tsc <= REMOTE_IO_VOTE_VALIDITY_SEC
+            if has_vote:
+                voters += 1
+                denom += 1
+            elif is_online:
+                denom += 1
+    if denom <= 0:
+        return False
+    quorum = denom // 2 + 1
+    return voters >= quorum
+
+
+def _clear_remote_timeout_votes(device_id):
+    with _remote_timeout_lock:
+        for key in [k for k in _remote_timeout_votes if k[1] == device_id]:
+            del _remote_timeout_votes[key]
+
 
 def _get_target_remote_device(node_obj, device_id):
     fresh = db.get_storage_node_by_id(node_obj.get_id())
@@ -111,11 +191,51 @@ def process_device_event(event, logger):
             time.sleep(5)
 
         device_obj.lock_device_connection(event_node_obj.get_id())
-        if device_node_obj.get_id() != event_node_obj.get_id() and _is_target_remote_controller_healthy(device_obj, event_node_obj):
-            logger.info("Remote controller is still healthy on target node, skipping unavailable event")
-            event.status = 'skipped:remote_controller_healthy'
-            device_obj.release_device_connection()
-            return
+        is_remote = device_node_obj.get_id() != event_node_obj.get_id()
+
+        if is_remote:
+            # Record a per-(reporting node, device) IO-error vote, but only while
+            # the device's HOME node is ONLINE: an IO error against a device whose
+            # node is offline/down is an expected node-outage effect (handled by
+            # the node-status paths below), not evidence the device itself is bad.
+            if (event.message in _REMOTE_IO_TIMEOUT_MESSAGES
+                    and device_node_obj.status == StorageNode.STATUS_ONLINE):
+                _record_remote_timeout(event_node_obj.get_id(), device_obj.get_id())
+
+            # Quorum over all cluster nodes except the device's home node. Each
+            # node carries its online flag; the helper counts a node toward the
+            # denominator if it is online OR already voted, and as a voter once it
+            # has reached REMOTE_IO_TIMEOUT_LIMIT recent IO errors (a vote survives
+            # the voter going offline). Quorum = N//2+1.
+            other_nodes = [
+                (n.get_id(), n.status == StorageNode.STATUS_ONLINE)
+                for n in db.get_storage_nodes_by_cluster_id(device_obj.cluster_id)
+                if n.get_id() != device_node_obj.get_id() and n.status != StorageNode.STATUS_REMOVED
+            ]
+            if _remote_timeout_quorum_reached(device_obj.get_id(), other_nodes):
+                # A quorum of nodes report this device failing => the device itself
+                # is bad: set it GLOBALLY unavailable, independent of what the
+                # remote NVMe controller's state reports. Erasure coding
+                # compensates; re-admitted on device/node restart.
+                logger.warning(
+                    f"IO-error quorum reached for storage_id {storage_id}; "
+                    f"forcing device globally UNAVAILABLE")
+                device_controller.device_set_unavailable(device_obj.get_id())
+                _clear_remote_timeout_votes(device_obj.get_id())
+                event.status = 'forced_unavailable:remote_io_quorum'
+                device_obj.release_device_connection()
+                return
+
+            if _is_target_remote_controller_healthy(device_obj, event_node_obj):
+                # No quorum and the remote controller still reports healthy => treat
+                # the error as transient and skip (do not exclude).
+                event.status = 'skipped:remote_controller_healthy'
+                device_obj.release_device_connection()
+                return
+            # No quorum but the controller is NOT healthy => exclude the device
+            # only in the context of THIS initiator node (per-node); the remote
+            # branch below sends the UNAVAILABLE status event to this node and
+            # drops it from this node's remote_devices.
 
         if device_obj.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY,
                                      NVMeDevice.STATUS_CANNOT_ALLOCATE]:
