@@ -1762,11 +1762,12 @@ class SshUtils:
             cmd = f"{cmd} --spdk-debug"
         if namespace:
             cmd = f"{cmd} --namespace {namespace}"
-    
+
         add_node_cmd = f"{cmd} {cluster_id} {node_ip}:5000 {ifname}"
 
         if data_nic:
-            cmd  = f"{cmd} --data-nics {data_nic}"
+            cmd = f"{cmd} --data-nics {data_nic}"
+            
         self.exec_command(node=node, command=add_node_cmd)
 
     def create_random_files(self, node, mount_path, file_size, file_prefix="random_file", file_count=1):
@@ -2735,15 +2736,6 @@ class SshUtils:
 
     def fetch_distrib_logs(self, storage_node_ip, storage_node_id, logs_path,
                            validate_async=False, error_sink=None):
-        # Skipping distrib dump fetch — distr_debug_placement_map_dump RPC
-        # times out on degraded distribs (non-leader / blocked JMs), blocking
-        # the diagnostics thread and delaying recovery.
-        self.logger.warning(
-            f"Skipping fetch_distrib_logs for node {storage_node_id} on "
-            f"{storage_node_ip} (disabled — causes RPC timeout on degraded distribs)"
-        )
-        return True
-
         # 0) Find ALL SPDK containers on this host (dual-node hosts have 2)
         find_container_cmd = "sudo docker ps --format '{{.Names}}' | grep -E '^spdk_[0-9]+$' || true"
         container_name_out, _ = self.exec_command(storage_node_ip, find_container_cmd)
@@ -2795,95 +2787,113 @@ class SshUtils:
             self.logger.info(f"[{storage_node_ip}/{container_name}] Distributions: {distribs}")
             all_distribs[container_name] = distribs
 
-            # 2) Run multiple docker exec in parallel from ONE SSH exec
-            distrib_list_str = " ".join(shlex.quote(d) for d in distribs)
-            remote_tar = f"/tmp/distrib_logs_{container_name}_{timestamp}.tar.gz"
+            # 2) Run placement dump for each distrib with timeout + retry
+            sock_path = shlex.quote(f"/mnt/ramdisk/{container_name}/spdk.sock")
+            host_staging = f"/tmp/distrib_host_collect_{container_name}_{timestamp}"
+            self.exec_command(storage_node_ip, f"mkdir -p '{host_staging}'")
 
-            # IMPORTANT: This script runs on the HOST and spawns many `docker exec ... &` in parallel.
-            # It throttles with MAXJ, waits, then tars outputs from /tmp inside the container into one tarball on the host.
-            remote_script = f"""\
-set -euo pipefail
-CN={shlex.quote(container_name)}
-SOCK="/mnt/ramdisk/$CN/spdk.sock"
-TS="{timestamp}"
-MAXJ=8
-WORKDIR_HOST="{base_path}"
-mkdir -p "$WORKDIR_HOST"
+            for distrib in distribs:
+                try:
+                    stack_file = f"/tmp/stack_{distrib}.json"
+                    rpc_log = f"/tmp/rpc_{distrib}.log"
+                    json_cfg = json.dumps({
+                        "subsystems": [{
+                            "subsystem": "distr",
+                            "config": [{
+                                "method": "distr_debug_placement_map_dump",
+                                "params": {"name": distrib}
+                            }]
+                        }]
+                    })
 
-# Make a temporary host folder to collect per-distrib files copied out of the container
-HOST_STAGING="/tmp/distrib_host_collect_{container_name}_$TS"
-mkdir -p "$HOST_STAGING"
+                    # Write JSON config into the container
+                    write_cmd = (
+                        f"echo {shlex.quote(json_cfg)} | "
+                        f"sudo docker exec -i {container_name} tee {stack_file} > /dev/null"
+                    )
+                    self.exec_command(storage_node_ip, write_cmd)
 
-pids=()
+                    # Try with 120s timeout first, then retry with 600s
+                    rpc_succeeded = False
+                    for attempt, tmo in enumerate([120, 600], 1):
+                        rpc_cmd = (
+                            f"sudo timeout {tmo} docker exec {container_name} bash -lc "
+                            f"\"sudo python scripts/rpc_sock.py {stack_file} {sock_path} "
+                            f"> {rpc_log} 2>&1\" 2>&1; echo EXIT_CODE=$?"
+                        )
+                        self.logger.info(
+                            f"[{storage_node_ip}/{container_name}] "
+                            f"Dumping {distrib} (attempt {attempt}, timeout={tmo}s)"
+                        )
+                        rpc_out, rpc_err = self.exec_command(
+                            storage_node_ip, rpc_cmd, timeout=tmo + 30
+                        )
+                        combined = (rpc_out or "") + (rpc_err or "")
+                        # timeout command returns exit code 124 on timeout
+                        if "EXIT_CODE=124" in combined or "EXIT_CODE=137" in combined:
+                            self.logger.warning(
+                                f"[{storage_node_ip}/{container_name}] "
+                                f"{distrib} RPC timed out after {tmo}s (attempt {attempt})"
+                            )
+                            continue
+                        rpc_succeeded = True
+                        break
 
-for d in {distrib_list_str}; do
-  (
-    # Build JSON on host then copy into container (avoids many ssh execs)
-    JF="/tmp/stack_${{d}}.json"
-    cat > "$JF" <<'EOF_JSON'
-{{
-  "subsystems": [
-    {{
-      "subsystem": "distr",
-      "config": [
-        {{
-          "method": "distr_debug_placement_map_dump",
-          "params": {{"name": "__DIST__"}}
-        }}
-      ]
-    }}
-  ]
-}}
-EOF_JSON
-    # substitute distrib name
-    sed -i "s/__DIST__/$d/g" "$JF"
+                    if not rpc_succeeded:
+                        self.logger.warning(
+                            f"[{storage_node_ip}/{container_name}] "
+                            f"{distrib} RPC timed out on all attempts — skipping"
+                        )
+                        # Cleanup container temp for this distrib
+                        self.exec_command(
+                            storage_node_ip,
+                            f"sudo docker exec {container_name} bash -lc "
+                            f"\"rm -f {stack_file} {rpc_log}\" || true"
+                        )
+                        continue
 
-    # Copy JSON into container
-    sudo docker cp "$JF" "$CN:/tmp/stack_${{d}}.json"
+                    # Copy rpc log + any output files for this distrib
+                    self.exec_command(
+                        storage_node_ip,
+                        f"sudo docker cp {container_name}:{rpc_log} "
+                        f"'{host_staging}/rpc_{distrib}.log' 2>/dev/null || true"
+                    )
+                    ls_cmd = (
+                        f"sudo docker exec {container_name} bash -lc "
+                        f"\"ls /tmp/ 2>/dev/null | grep -F '{distrib}' || true\""
+                    )
+                    ls_out, _ = self.exec_command(storage_node_ip, ls_cmd)
+                    for fname in (ls_out or "").splitlines():
+                        fname = fname.strip()
+                        if not fname:
+                            continue
+                        self.exec_command(
+                            storage_node_ip,
+                            f"sudo docker cp {container_name}:/tmp/{fname} "
+                            f"'{host_staging}/{fname}' 2>/dev/null || true"
+                        )
 
-    # Run rpc inside container (socket path respected)
-    sudo docker exec "$CN" bash -lc "sudo python scripts/rpc_sock.py /tmp/stack_${{d}}.json {shlex.quote('/mnt/ramdisk/'+container_name+'/spdk.sock')} > /tmp/rpc_${{d}}.log 2>&1 || true"
+                    # Cleanup container temp for this distrib
+                    self.exec_command(
+                        storage_node_ip,
+                        f"sudo docker exec {container_name} bash -lc "
+                        f"\"rm -f {stack_file} {rpc_log}\" || true"
+                    )
+                except Exception as e:
+                    self.logger.warning(
+                        f"[{storage_node_ip}/{container_name}] "
+                        f"Error dumping {distrib}: {e}"
+                    )
 
-    # Copy any files for this distrib out to host staging (rpc log + any matching /tmp/*d*)
-    sudo docker cp "$CN:/tmp/rpc_${{d}}.log" "$HOST_STAGING/rpc_${{d}}.log" 2>/dev/null || true
-    # try to pull any distrib-related artifacts
-    for f in $(sudo docker exec "$CN" bash -lc "sudo ls /tmp/ 2>/dev/null | grep -F \"$d\" || true"); do
-      sudo docker cp "$CN:/tmp/$f" "$HOST_STAGING/$f" 2>/dev/null || true
-    done
-
-    # cleanup container temp for this distrib
-    sudo docker exec "$CN" bash -lc "sudo rm -f /tmp/stack_${{d}}.json /tmp/rpc_${{d}}.log" || true
-    rm -f "$JF" || true
-  ) &
-
-  # throttle parallel jobs
-  while [ "$(jobs -rp | wc -l)" -ge "$MAXJ" ]; do sleep 0.2; done
-done
-
-# Wait for all background jobs
-wait
-
-# Tar once on host
-tar -C "$HOST_STAGING" -czf {shlex.quote(remote_tar)} . 2>/dev/null || true
-
-# Move artifacts to final location
-mv -f {shlex.quote(remote_tar)} "$WORKDIR_HOST/" || true
-
-# Also copy loose files (for convenience) then clean staging
-cp -rf "$HOST_STAGING"/. "$WORKDIR_HOST"/ 2>/dev/null || true
-rm -rf "$HOST_STAGING" || true
-
-echo "$WORKDIR_HOST/{os.path.basename(remote_tar)}"
-"""
-
-            run_many_cmd = "bash -lc " + shlex.quote(remote_script)
-            tar_out, tar_err = self.exec_command(storage_node_ip, run_many_cmd)
-            if (tar_err and tar_err.strip()) and not tar_out:
-                self.logger.error(f"[{storage_node_ip}/{container_name}] Parallel docker-exec script error: {tar_err.strip()}")
-                continue
-
-            final_tar = (tar_out or "").strip().splitlines()[-1] if tar_out else f"{base_path}/{os.path.basename(remote_tar)}"
-            self.logger.info(f"[{storage_node_ip}/{container_name}] Distrib logs saved: {base_path} (tar: {final_tar})")
+            # Move staged files to final base_path
+            self.exec_command(
+                storage_node_ip,
+                f"cp -rf '{host_staging}'/. '{base_path}'/ 2>/dev/null || true; "
+                f"rm -rf '{host_staging}' || true"
+            )
+            self.logger.info(
+                f"[{storage_node_ip}/{container_name}] Distrib logs saved to {base_path}"
+            )
 
         if not all_distribs:
             self.logger.warning(f"No distribs found across any container on {storage_node_ip}")

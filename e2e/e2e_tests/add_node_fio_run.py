@@ -133,6 +133,10 @@ class TestAddNodesDuringFioRun(TestClusterBase):
         max_lvol = node_sample["max_lvol"]
         max_prov = int(node_sample["max_prov"] / (1024**3))  # Convert bytes to GB
 
+        # Extract data NIC interface name from existing node
+        data_nics = node_sample.get("data_nics", [])
+        data_nic = data_nics[0]["if_name"] if data_nics else None
+        self.logger.info(f"Data NIC from existing node: {data_nic}")
 
         new_nodes_id = []
         timestamp = int(datetime.now().timestamp())
@@ -145,7 +149,8 @@ class TestAddNodesDuringFioRun(TestClusterBase):
                                           partitions=node_sample["num_partitions_per_dev"],
                                           disable_ha_jm= not node_sample["enable_ha_jm"],
                                           enable_test_device=node_sample["enable_test_device"],
-                                          spdk_debug=node_sample["spdk_debug"])
+                                          spdk_debug=node_sample["spdk_debug"],
+                                          data_nic=data_nic)
             sleep_n_sec(60)
             new_nodes_ids_temp = self.sbcli_utils.get_all_node_without_lvols()
             for node_id in new_nodes_ids_temp:
@@ -406,6 +411,8 @@ class TestAddK8sNodesDuringFioRun(TestClusterBase):
     def _add_node_sbcli(self, node_ip):
           """Adds the node to the SimplyBlock cluster using sbcli."""
           node_sample = self.sbcli_utils.get_storage_nodes()["results"][0]
+          data_nics = node_sample.get("data_nics", [])
+          data_nic = data_nics[0]["if_name"] if data_nics else None
           self.ssh_obj.add_storage_node(self.mgmt_nodes[0], self.cluster_id, node_ip,
                                         spdk_image=node_sample["spdk_image"],
                                         partitions=node_sample["num_partitions_per_dev"],
@@ -413,7 +420,7 @@ class TestAddK8sNodesDuringFioRun(TestClusterBase):
                                         enable_test_device=node_sample["enable_test_device"],
                                         spdk_debug=node_sample["spdk_debug"],
                                         namespace=self.namespace,
-                                        data_nic=None)
+                                        data_nic=data_nic)
           sleep_n_sec(180)
 
     def run(self):

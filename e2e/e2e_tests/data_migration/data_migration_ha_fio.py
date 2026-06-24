@@ -256,6 +256,8 @@ class FioWorkloadTest(TestClusterBase):
 
 )
 
+        data_nics = affected_node_details[0].get("data_nics", [])
+        data_nic = data_nics[0]["if_name"] if data_nics else None
         self.ssh_obj.add_storage_node(
             node=self.mgmt_nodes[0],
             cluster_id=self.cluster_id,
@@ -268,7 +270,8 @@ class FioWorkloadTest(TestClusterBase):
             # iobuf_large_pool_count=affected_node_details[0]["iobuf_large_pool_count"],
             spdk_debug=affected_node_details[0]["spdk_debug"],
             spdk_image=affected_node_details[0]["spdk_image"],
-            spdk_cpu_mask=affected_node_details[0]["spdk_cpu_mask"]
+            spdk_cpu_mask=affected_node_details[0]["spdk_cpu_mask"],
+            data_nic=data_nic,
         )
         sleep_n_sec(200)
         new_node = self.sbcli_utils.get_node_without_lvols()

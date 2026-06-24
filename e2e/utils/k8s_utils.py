@@ -285,18 +285,12 @@ class K8sUtils:
         K8s equivalent of ssh_utils.fetch_distrib_logs:
           1. Find spdk.sock inside spdk-container.
           2. Get bdevs via RPC, collect distrib_* names.
-          3. For each distrib: create JSON config and run rpc_sock.py (same as SSH path).
-          4. kubectl cp result files from /tmp inside container → logs_path/<pod_name>/distrib_logs/.
+          3. For each distrib: create JSON config and run rpc_sock.py
+             with timeout + retry (120s first, then 600s).
+          4. kubectl cp result files from /tmp inside container →
+             logs_path/<pod_name>/distrib_logs/.
         Returns True (non-fatal failures are logged and skipped).
         """
-        # Skipping distrib dump fetch — distr_debug_placement_map_dump RPC
-        # times out on degraded distribs (non-leader / blocked JMs), blocking
-        # the diagnostics thread and delaying recovery.
-        self.logger.warning(
-            f"Skipping fetch_distrib_logs_k8s for node {storage_node_id} on "
-            f"{storage_node_ip} (disabled — causes RPC timeout on degraded distribs)"
-        )
-        return True
         try:
             pod_name = self.get_spdk_pod_name(storage_node_ip)
             sock = self._find_spdk_sock(pod_name)
@@ -327,37 +321,76 @@ class K8sUtils:
 
             self.logger.info(f"[fetch_distrib_logs_k8s] distribs={distribs} pod={pod_name}")
 
-            # 2. Dump each distrib using rpc_sock.py (matches SSH approach)
+            # 2. Dump each distrib with timeout + retry
             for distrib in distribs:
                 try:
-                    # Create JSON config inside the container
-                    json_cfg = (
-                        '{"subsystems":[{"subsystem":"distr","config":'
-                        '[{"method":"distr_debug_placement_map_dump",'
-                        f'"params":{{"name":"{distrib}"}}'
-                        '}]}]}'
-                    )
+                    json_cfg = json.dumps({
+                        "subsystems": [{
+                            "subsystem": "distr",
+                            "config": [{
+                                "method": "distr_debug_placement_map_dump",
+                                "params": {"name": distrib}
+                            }]
+                        }]
+                    })
                     stack_file = f"/tmp/stack_{distrib}.json"
                     rpc_log = f"/tmp/rpc_{distrib}.log"
 
-                    # Write JSON config, run rpc_sock.py, capture output
+                    # Write JSON config into the container
                     self._exec_kubectl(
                         f"{kexec} bash -c "
-                        + shlex.quote(
-                            f"echo '{json_cfg}' > {stack_file} && "
-                            f"python scripts/rpc_sock.py {stack_file} {sock} "
-                            f"> {rpc_log} 2>&1 || true"
-                        ),
+                        + shlex.quote(f"echo '{json_cfg}' > {stack_file}"),
                         supress_logs=True,
                     )
 
-                    # Read the RPC log to see what happened
+                    # Try with 120s timeout first, then retry with 600s
+                    rpc_succeeded = False
+                    for attempt, tmo in enumerate([120, 600], 1):
+                        self.logger.info(
+                            f"[fetch_distrib_logs_k8s] Dumping {distrib} "
+                            f"(attempt {attempt}, timeout={tmo}s)"
+                        )
+                        rpc_cmd = (
+                            f"timeout {tmo} kubectl exec {pod_name} "
+                            f"-c spdk-container -n {self.namespace} -- "
+                            f"bash -c "
+                            + shlex.quote(
+                                f"python scripts/rpc_sock.py {stack_file} {sock} "
+                                f"> {rpc_log} 2>&1"
+                            )
+                            + f"; echo EXIT_CODE=$?"
+                        )
+                        rpc_out, rpc_err = self._exec_kubectl(rpc_cmd, supress_logs=True)
+                        combined = (rpc_out or "") + (rpc_err or "")
+                        if "EXIT_CODE=124" in combined or "EXIT_CODE=137" in combined:
+                            self.logger.warning(
+                                f"[fetch_distrib_logs_k8s] {distrib} RPC timed out "
+                                f"after {tmo}s (attempt {attempt})"
+                            )
+                            continue
+                        rpc_succeeded = True
+                        break
+
+                    if not rpc_succeeded:
+                        self.logger.warning(
+                            f"[fetch_distrib_logs_k8s] {distrib} RPC timed out on "
+                            f"all attempts — skipping"
+                        )
+                        self._exec_kubectl(
+                            f"{kexec} bash -c "
+                            + shlex.quote(f"rm -f {stack_file} {rpc_log} || true"),
+                            supress_logs=True,
+                        )
+                        continue
+
+                    # Read the RPC log
                     log_out, _ = self._exec_kubectl(
                         f"{kexec} bash -c 'cat {rpc_log} 2>/dev/null || true'",
                         supress_logs=True,
                     )
                     self.logger.info(
-                        f"[fetch_distrib_logs_k8s] {distrib} rpc_log: {log_out.strip()[:500]}"
+                        f"[fetch_distrib_logs_k8s] {distrib} rpc_log: "
+                        f"{(log_out or '').strip()[:500]}"
                     )
 
                     # Copy the RPC log file out
@@ -373,7 +406,7 @@ class K8sUtils:
                         + shlex.quote(f"ls /tmp/ 2>/dev/null | grep -F '{distrib}' || true"),
                         supress_logs=True,
                     )
-                    for fname in ls_out.splitlines():
+                    for fname in (ls_out or "").splitlines():
                         fname = fname.strip()
                         if not fname:
                             continue
