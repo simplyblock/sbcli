@@ -116,6 +116,25 @@ def device_set_state(device_id, state, cause=CAUSE_OTHER):
         logger.error("device not found")
         return False
 
+    # Stale re-online guard: a device may only go ONLINE while its parent node
+    # is itself ONLINE. During a node OFFLINE / UNREACHABLE / restart window the
+    # node's own bring-up path re-onlines its devices directly (raw write in the
+    # restart impl, which does not route through here), so routing a device
+    # ONLINE through this function while the node is not ONLINE can only come
+    # from a stale observation (health service, distrib event, or device_monitor
+    # acting on a cached snapshot). Honouring it resurrects a device the monitor
+    # just marked unavailable and undoes a node-down cascade (incident
+    # 2026-06-24). The explicit device-restart path runs only on an already
+    # ONLINE node, so it is unaffected.
+    if (state == NVMeDevice.STATUS_ONLINE
+            and snode.status != StorageNode.STATUS_ONLINE
+            and cause != CAUSE_DEVICE_RESTART):
+        logger.warning(
+            f"Refusing to set device {device_id} ONLINE while node "
+            f"{snode.get_id()} is {snode.status} (cause={cause}); "
+            f"node bring-up owns device re-online")
+        return False
+
     # Failed is a terminal state. The only allowed exits are:
     #   STATUS_FAILED → STATUS_FAILED_AND_MIGRATED  (failure data migration)
     #   STATUS_FAILED → STATUS_ONLINE               (explicit device restart)

@@ -749,6 +749,23 @@ def check_node(snode):
         logger.info(f"Node lvstore is in creation: {snode.get_id()}, skipping")
         return False
 
+    # A restart task already owns this node's full lifecycle (shutdown ->
+    # IN_RESTART -> recreate_lvstore -> ONLINE). The monitor must not run its
+    # own liveness probes against a node in that window: while the restart
+    # impl brings SPDK back up (notably during recreate_lvstore) the JSON-RPC
+    # unix socket has not begun accept()ing yet, so spdk_process_is_up /
+    # check_node_rpc transiently fail and the monitor would flip the node
+    # OFFLINE and queue a SECOND restart that fights the one already in flight
+    # (incident 2026-06-24: device-25 JC abort, then ~90s of monitor-vs-restart
+    # kill/restart churn). Defer until the task reaches DONE/canceled; the
+    # restart runner owns recovery and has its own max_retry + transient-reset,
+    # so this cannot defer forever.
+    if tasks_controller.get_active_node_restart_task(snode.cluster_id, snode.get_id()):
+        logger.info(
+            "Node %s has an active restart task; monitor deferring liveness "
+            "checks until it completes", snode.get_id())
+        return True
+
     logger.info(f"Checking node {snode.hostname}")
 
     # If the node is offline, ensure ANA failover was processed.

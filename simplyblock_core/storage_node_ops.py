@@ -2180,15 +2180,22 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
 
             snode.write_to_db(kv_store)
 
+            # Route the IN_CREATION -> ONLINE transition through set_node_status
+            # rather than a raw status write. set_node_status enforces the
+            # _ALLOWED_PRE_STATUSES_FOR_ONLINE guard (OFFLINE -> ONLINE is rejected),
+            # so a concurrent/stale path can no longer clobber a freshly-detected
+            # OFFLINE back to ONLINE through this code -- the raw write here was the
+            # node-side stale re-online hole (incident 2026-06-24: node re-marked
+            # online seconds after the monitor downed it, undoing the OFFLINE and
+            # forcing a duplicate offline/auto-restart cycle). set_node_status also
+            # emits the status event, broadcasts to peers, and cancels stale
+            # auto-restart tasks -- all previously done by hand here.
             snode = db_controller.get_storage_node_by_id(snode.get_id())
-            old_status = snode.status
-            snode.status = StorageNode.STATUS_ONLINE
-            snode.updated_at = str(datetime.datetime.now(datetime.timezone.utc))
-            snode.online_since = str(datetime.datetime.now(datetime.timezone.utc))
-            snode.write_to_db(db_controller.kv_store)
-
-            storage_events.snode_status_change(snode, snode.status, old_status, caused_by="monitor")
-            # distr_controller.send_node_status_event(snode, status)
+            if not set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE, caused_by="monitor"):
+                logger.error(
+                    f"Failed to bring node {snode.get_id()} ONLINE "
+                    f"(illegal transition from {snode.status})")
+                return False
 
             logger.info("Make other nodes connect to the node devices")
             snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
