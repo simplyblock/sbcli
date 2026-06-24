@@ -145,9 +145,8 @@ def _assert_failed(mig_id):
 def _migrate_one(lvol_uuid, tgt_uuid, max_steps=1500, step_sleep=0.02,
                   max_retries=20):
     """Start and run a migration to completion. Returns migration_id."""
-    mig_id, err = migration_controller.start_migration(
+    mig_id = migration_controller.start_migration(
         lvol_uuid, tgt_uuid, max_retries=max_retries)
-    assert err is None, f"start_migration failed: {err}"
     run_migration_task(mig_id, max_steps=max_steps, step_sleep=step_sleep)
     return mig_id
 
@@ -240,9 +239,8 @@ class TestComplexTreeFailures:
         tgt = ctx.node("tgt")
         _seed_all(mock_src_server, ctx, "src")
 
-        mig_id, err = migration_controller.start_migration(
+        mig_id = migration_controller.start_migration(
             ctx.lvol_uuid("l4"), tgt.uuid, max_retries=3)
-        assert err is None
 
         # 100% failure on target, fast timeout
         mock_tgt_server.set_failure_rate(1.0, timeout_seconds=0.1)
@@ -261,9 +259,8 @@ class TestComplexTreeFailures:
         _seed_all(mock_src_server, ctx, "src")
 
         # Very short deadline: 2 seconds
-        mig_id, err = migration_controller.start_migration(
+        mig_id = migration_controller.start_migration(
             ctx.lvol_uuid("l5"), tgt.uuid, deadline_seconds=2)
-        assert err is None
 
         # Make target node offline so migration suspends (burns time)
         set_node_status(tgt.uuid, StorageNode.STATUS_OFFLINE)

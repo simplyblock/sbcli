@@ -743,15 +743,11 @@ class CLIWrapperBase:
         return True
 
     def volume__migrate_continue(self, sub_command, args):
-        try:
-            migration_id = migration_controller.start_migration(
-                migration_id=args.migration_id,
-                max_retries=args.max_retries,
-                deadline_seconds=args.deadline_seconds,
-            )
-        except ValueError as e:
-            print(f"Error: {e}")
-            return False
+        migration_id = migration_controller.start_migration(
+            migration_id=args.migration_id,
+            max_retries=args.max_retries,
+            deadline_seconds=args.deadline_seconds,
+        )
         print(f"Migration started: {migration_id}")
         return True
 
@@ -759,11 +755,7 @@ class CLIWrapperBase:
         return migration_controller.list_migrations(cluster_id=args.cluster_id, is_json=args.json)
 
     def volume__migrate_cancel(self, sub_command, args):
-        try:
-            migration_controller.cancel_migration(args.migration_id)
-        except ValueError as e:
-            print(f"Error: {e}")
-            return False
+        migration_controller.cancel_migration(args.migration_id)
         print(f"Migration {args.migration_id} cancelled")
         return True
 

@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.models.lvol_migration import LVolMigration
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.snapshot import SnapShot
@@ -571,7 +572,7 @@ class TestCancelMigration(unittest.TestCase):
         mock_db.get_migration_by_id.return_value = mig
 
         with patch.object(ctl, 'db', mock_db):
-            with pytest.raises(ValueError, match="not active"):
+            with pytest.raises(PreconditionError, match="not active"):
                 ctl.cancel_migration("mig-uuid")
 
     def test_cancel_nonexistent_migration_raises(self):
@@ -579,7 +580,7 @@ class TestCancelMigration(unittest.TestCase):
         mock_db.get_migration_by_id.side_effect = KeyError("mig-missing")
 
         with patch.object(ctl, 'db', mock_db):
-            with pytest.raises(ValueError):
+            with pytest.raises(PreconditionError):
                 ctl.cancel_migration("mig-missing")
 
 

@@ -76,63 +76,49 @@ def start_migration(migration_id,
     the task runner.  Always call create_migration first to set up target
     infrastructure and obtain the migration_id and connect strings.
 
-    Returns migration_uuid on success; raises ValueError on failure.
+    Returns migration_uuid on success.
+
+    Raises:
+    - PreconditonError on if required conditions are not met
+    - RuntimeError errors during the operation
     """
     try:
         migration = db.get_migration_by_id(migration_id)
-    except KeyError:
-        raise ValueError(f"Migration {migration_id} not found")
+        if migration.phase != LVolMigration.PHASE_PRE_CREATED:
+            raise PreconditionError(
+                f"Migration {migration_id} is not in PHASE_PRE_CREATED "
+                f"(phase={migration.phase})"
+            )
 
-    if migration.phase != LVolMigration.PHASE_PRE_CREATED:
-        raise ValueError(
-            f"Migration {migration_id} is not in PHASE_PRE_CREATED "
-            f"(phase={migration.phase})"
-        )
+        lvol = db.get_lvol_by_id(migration.lvol_id)
+        if lvol.status != LVol.STATUS_ONLINE:
+            raise PreconditionError(f"Volume is not online (status={lvol.status})")
 
-    lvol_id = migration.lvol_id
-    target_node_id = migration.target_node_id
+        source_node = db.get_storage_node_by_id(lvol.node_id)
+        if source_node.status != StorageNode.STATUS_ONLINE:
+            raise PreconditionError(f"Source node is not online (status={source_node.status})")
 
-    try:
-        lvol = db.get_lvol_by_id(lvol_id)
+        target_node = db.get_storage_node_by_id(migration.target_node_id)
+        if target_node.status != StorageNode.STATUS_ONLINE:
+            raise PreconditionError(f"Target node is not online (status={target_node.status})")
+
+        if source_node.get_id() == target_node.get_id():
+            raise PreconditionError("Source and target nodes must be different")
     except KeyError as e:
-        raise ValueError(str(e))
+        raise PreconditionError("PreconditionError not met") from e
 
-    if lvol.status != LVol.STATUS_ONLINE:
-        raise ValueError(f"Volume is not online (status={lvol.status})")
-
-    source_node_id = lvol.node_id
-
-    try:
-        source_node = db.get_storage_node_by_id(source_node_id)
-    except KeyError as e:
-        raise ValueError(str(e))
-
-    try:
-        target_node = db.get_storage_node_by_id(target_node_id)
-    except KeyError as e:
-        raise ValueError(str(e))
-
-    if source_node_id == target_node_id:
-        raise ValueError("Source and target nodes must be different")
-
-    if source_node.status != StorageNode.STATUS_ONLINE:
-        raise ValueError(f"Source node is not online (status={source_node.status})")
-
-    if target_node.status != StorageNode.STATUS_ONLINE:
-        raise ValueError(f"Target node is not online (status={target_node.status})")
-
-    snap_plan = get_snapshot_chain(lvol_id, source_node_id)
+    snap_plan = get_snapshot_chain(lvol.get_id(), source_node.get_id())
     if not snap_plan:
         snap_name = f"_mig_{migration.uuid[:8]}_lvol_{migration.lvol_id[:8]}"
-        snap_uuid, err = snapshot_controller.add(lvol_id, snap_name, bypass_migration_check=True)
+        snap_uuid, err = snapshot_controller.add(lvol.get_id(), snap_name, bypass_migration_check=True)
         if err:
             raise ValueError(f"Failed to create snapshot: {err}")
         snap_plan = [snap_uuid]
 
-    snaps_found_on_target = [s for s in snap_plan if _is_snap_on_node(s, target_node_id)]
+    snaps_found_on_target = [s for s in snap_plan if _is_snap_on_node(s, target_node.get_id())]
     snap_migration_plan = [s for s in snap_plan if s not in snaps_found_on_target]
 
-    migration.source_node_id = source_node_id
+    migration.source_node_id = source_node.get_id()
     migration.phase = LVolMigration.PHASE_SNAP_COPY
     migration.snap_migration_plan = snap_migration_plan
     migration.snaps_migrated = []
@@ -147,7 +133,7 @@ def start_migration(migration_id,
     migration.write_to_db(db.kv_store)
     logger.info(
         f"Promoting pre-created migration {migration.uuid} → PHASE_SNAP_COPY "
-        f"lvol={lvol_id} src={source_node_id} dst={target_node_id}"
+        f"lvol={lvol.get_id()} src={source_node.get_id()} dst={target_node.get_id()}"
     )
 
     # --- Create backing JobSchedule task ---
@@ -156,18 +142,18 @@ def start_migration(migration_id,
         migration.status = LVolMigration.STATUS_FAILED
         migration.error_message = "Failed to create backing task"
         migration.write_to_db(db.kv_store)
-        raise ValueError(migration.error_message)
+        raise RuntimeError(migration.error_message)
 
     migration_events.migration_created(migration)
     logger.info(
-        f"Migration created: id={migration.uuid} lvol={lvol_id} "
-        f"src={source_node_id} dst={target_node_id} "
+        f"Migration created: id={migration.uuid} lvol={lvol.get_id()} "
+        f"src={source_node.get_id()} dst={target_node.get_id()} "
         f"snaps_to_copy={len(snap_plan)}"
     )
     return migration.uuid
 
 
-def cancel_migration(migration_id):
+def cancel_migration(migration_id) -> None:
     """
     Cancel an active migration.
 
@@ -178,15 +164,15 @@ def cancel_migration(migration_id):
     For all other active phases, sets migration.canceled = True so the task
     runner picks it up and transitions to CLEANUP_TARGET.
 
-    Raises ValueError on failure.
+    Raises:
+    - PreconditonError on if required conditions are not met.
     """
     try:
         migration = db.get_migration_by_id(migration_id)
+        if not migration.is_active():
+            raise PreconditionError(f"Migration is not active (status={migration.status})")
     except KeyError as e:
-        raise ValueError(str(e))
-
-    if not migration.is_active():
-        raise ValueError(f"Migration is not active (status={migration.status})")
+        raise PreconditionError("Precondition not met") from e
 
     if migration.phase == LVolMigration.PHASE_PRE_CREATED:
         _cleanup_created(migration)
@@ -322,10 +308,7 @@ def get_active_migration_on_node(cluster_id, node_id):
 
 def is_migration_active_on_node(node_id, cluster_id=None):
     """Convenience predicate used by snapshot_controller to block new snapshots."""
-    for m in db.get_migrations(cluster_id):
-        if m.source_node_id == node_id and m.is_active():
-            return True
-    return False
+    return get_active_migration_on_node(cluster_id, node_id) is not None
 
 
 def list_migrations(cluster_id=None, is_json=False):
