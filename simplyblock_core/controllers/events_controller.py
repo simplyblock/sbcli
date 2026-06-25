@@ -1,6 +1,5 @@
 import time
 import uuid
-import json
 
 from simplyblock_core.models.events import EventObj
 from simplyblock_core.db_controller import DBController
@@ -96,7 +95,7 @@ def log_event_cluster(cluster_id, domain, event, db_object, caused_by, message,
 
 
 def log_event_based_on_level(cluster_id, event, db_object, message, caused_by, event_level):
-    json_str = json.dumps({
+    json_str = utils.dump_json({
         "cluster_id": cluster_id,
         "event": event,
         "object_name": db_object,

@@ -2,7 +2,6 @@
 # PYTHON_ARGCOMPLETE_OK
 
 import argparse
-import json
 import re
 import sys
 import time
@@ -450,9 +449,9 @@ class CLIWrapperBase:
         data = cluster_ops.list()
 
         if args.json:
-            return json.dumps(data, indent=2)
+            return utils.dump_json(data, indent=2, unwrap_secrets=True)
         else:
-            return utils.print_table(data)
+            return utils.print_table(data, unwrap_secrets=True)
 
     def cluster__status(self, sub_command, args):
         return utils.print_table(cluster_ops.get_cluster_status(args.cluster_id))
@@ -461,14 +460,14 @@ class CLIWrapperBase:
         return cluster_ops.list_all_info(args.cluster_id)
 
     def cluster__get(self, sub_command, args):
-        return json.dumps(cluster_ops.get_cluster(args.cluster_id), indent=2, sort_keys=True)
+        return utils.dump_json(cluster_ops.get_cluster(args.cluster_id), indent=2, sort_keys=True, unwrap_secrets=True)
 
     def cluster__get_capacity(self, sub_command, args):
         is_json = args.json
         data = cluster_ops.get_capacity(args.cluster_id, args.history)
 
         if is_json:
-            return json.dumps(data, indent=2)
+            return utils.dump_json(data, indent=2, unwrap_secrets=True)
         else:
             return utils.print_table([
                 {
@@ -501,9 +500,9 @@ class CLIWrapperBase:
         cluster_logs = cluster_ops.get_logs(**args.__dict__)
 
         if args.json:
-            return json.dumps(cluster_logs, indent=2)
+            return utils.dump_json(cluster_logs, indent=2, unwrap_secrets=True)
         else:
-            return utils.print_table(cluster_logs)
+            return utils.print_table(cluster_logs, unwrap_secrets=True)
 
     def cluster__get_secret(self, sub_command, args):
         cluster_id = args.cluster_id

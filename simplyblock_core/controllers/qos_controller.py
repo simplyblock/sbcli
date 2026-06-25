@@ -1,5 +1,4 @@
 # coding=utf-8
-import json
 import logging
 import uuid
 
@@ -77,9 +76,9 @@ def list_classes(cluster_id=None, is_json=False):
         })
 
     if is_json:
-        return json.dumps(data, indent=2)
+        return utils.dump_json(data, indent=2, unwrap_secrets=True)
     else:
-        return utils.print_table(data)
+        return utils.print_table(data, unwrap_secrets=True)
 
 
 def delete_class(name, cluster_id):

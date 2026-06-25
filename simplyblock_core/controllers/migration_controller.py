@@ -37,7 +37,6 @@ or rolling back from the target we verify that no other volume still on
 that node references it through its ``cloned_from_snap`` lineage.
 """
 
-import json
 import logging
 import random
 import time
@@ -348,8 +347,8 @@ def list_migrations(cluster_id=None, is_json=False):
             "Error": m.error_message or "",
         })
     if is_json:
-        return json.dumps(data, indent=2)
-    return utils.print_table(data)
+        return utils.dump_json(data, indent=2, unwrap_secrets=True)
+    return utils.print_table(data, unwrap_secrets=True)
 
 
 def get_migration(migration_id, is_json=False):
@@ -360,9 +359,9 @@ def get_migration(migration_id, is_json=False):
         logger.error(e)
         return False
     if is_json:
-        return json.dumps(m.get_clean_dict(), indent=2)
+        return utils.dump_json(m.get_clean_dict(), indent=2, unwrap_secrets=True)
     data = [m.get_clean_dict()]
-    return utils.print_table(data)
+    return utils.print_table(data, unwrap_secrets=True)
 
 
 # ---------------------------------------------------------------------------

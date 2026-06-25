@@ -2,7 +2,6 @@
 
 import logging as lg
 
-import json
 import random
 import string
 import time
@@ -395,9 +394,9 @@ def list_pools(is_json, cluster_id=None):
         })
 
     if is_json:
-        return json.dumps(data, indent=2)
+        return utils.dump_json(data, indent=2, unwrap_secrets=True)
     else:
-        return utils.print_table(data)
+        return utils.print_table(data, unwrap_secrets=True)
 
 
 def set_status(pool_id, status):
@@ -425,10 +424,10 @@ def get_pool(pool_id, is_json):
 
     data = pool.get_clean_dict()
     if is_json:
-        return json.dumps(data, indent=2)
+        return utils.dump_json(data, indent=2, unwrap_secrets=True)
     else:
         data2 = [{"key": key, "value": data[key]} for key in data]
-        return utils.print_table(data2)
+        return utils.print_table(data2, unwrap_secrets=True)
 
 
 def get_capacity(pool_id):

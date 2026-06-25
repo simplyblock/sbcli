@@ -1,6 +1,5 @@
 # coding=utf-8
 import datetime
-import json
 import logging
 import socket
 import time
@@ -313,8 +312,8 @@ def list_tasks(cluster_id, is_json=False, limit=50, **kwargs):
                 continue
             data.append(t.get_clean_dict())
             if len(data)+1 > limit > 0:
-                return json.dumps(data, indent=2)
-        return json.dumps(data, indent=2)
+                return utils.dump_json(data, indent=2, unwrap_secrets=True)
+        return utils.dump_json(data, indent=2, unwrap_secrets=True)
 
     for task in tasks:
         if task.function_name == JobSchedule.FN_DEV_MIG:
@@ -351,8 +350,8 @@ def list_tasks(cluster_id, is_json=False, limit=50, **kwargs):
             "Updated At": upd or "",
         })
         if len(data)+1 > limit > 0:
-            return utils.print_table(data)
-    return utils.print_table(data)
+            return utils.print_table(data, unwrap_secrets=True)
+    return utils.print_table(data, unwrap_secrets=True)
 
 
 def cancel_task(task_id):

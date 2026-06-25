@@ -1657,7 +1657,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
               "public_ip": "20.20.20.20",
         }
         """""
-        logger.debug(json.dumps(cloud_instance, indent=2))
+        logger.debug(utils.dump_json(cloud_instance, indent=2))
         logger.info(f"Instance id: {cloud_instance['id']}")
         logger.info(f"Instance cloud: {cloud_instance['cloud']}")
         logger.info(f"Instance type: {cloud_instance['type']}")
@@ -3293,9 +3293,9 @@ def list_storage_nodes(is_json, cluster_id=None):
         return output
 
     if is_json:
-        output = json.dumps(data, indent=2)
+        output = utils.dump_json(data, indent=2, unwrap_secrets=True)
     else:
-        output = utils.print_table(data)
+        output = utils.print_table(data, unwrap_secrets=True)
     return output
 
 
@@ -3390,10 +3390,10 @@ def list_storage_devices(node_id, is_json):
         data["Distrib Block Devices"] = bdev_devices
 
     if is_json:
-        return json.dumps(data, indent=2)
+        return utils.dump_json(data, indent=2, unwrap_secrets=True)
     else:
         out = "\n\n".join(
-            f'{key}\n{utils.print_table(value)}\n\n'
+            f'{key}\n{utils.print_table(value, unwrap_secrets=True)}\n\n'
             for key, value in data.items()
         )
         return out
@@ -4373,7 +4373,7 @@ def get_info(node_id):
         return False
 
     node_info, _ = snode.client().info()
-    return json.dumps(node_info, indent=2)
+    return utils.dump_json(node_info, indent=2, unwrap_secrets=True)
 
 
 def get_spdk_info(node_id):
@@ -4410,7 +4410,7 @@ def get(node_id):
         return False
 
     data = snode.get_clean_dict()
-    return json.dumps(data, indent=2, sort_keys=True)
+    return utils.dump_json(data, indent=2, sort_keys=True, unwrap_secrets=True)
 
 
 # States from which a node may legally transition INTO STATUS_ONLINE.
@@ -7862,4 +7862,4 @@ def lvs_dump_tree(node_id):
         logger.error("Failed to dump lvstore tree")
         return False
 
-    return json.dumps(ret, indent=2)
+    return utils.dump_json(ret, indent=2, unwrap_secrets=True)

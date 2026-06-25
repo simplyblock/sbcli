@@ -1,6 +1,5 @@
 # coding=utf-8
 import datetime
-import json
 import os
 import logging
 import uuid
@@ -266,9 +265,9 @@ def list_mgmt_nodes(is_json):
         return output
 
     if is_json:
-        output = json.dumps(data, indent=2)
+        output = utils.dump_json(data, indent=2, unwrap_secrets=True)
     else:
-        output = utils.print_table(data)
+        output = utils.print_table(data, unwrap_secrets=True)
     return output
 
 

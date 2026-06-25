@@ -1,6 +1,5 @@
 # coding=utf-8
 import copy
-import json
 import random
 import sys
 import time
@@ -1659,9 +1658,9 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
         data.append(lvol_data)
 
     if is_json:
-        return json.dumps(data, indent=2)
+        return utils.dump_json(data, indent=2, unwrap_secrets=True)
     else:
-        return utils.print_table(data)
+        return utils.print_table(data, unwrap_secrets=True)
 
 
 def get_replication_info(lvol_id_or_name):
@@ -1746,10 +1745,10 @@ def get_lvol(lvol_id_or_name, is_json):
     data['policy'] = policy.policy_name if policy else ""
 
     if is_json:
-        return json.dumps(data, indent=2)
+        return utils.dump_json(data, indent=2, unwrap_secrets=True)
     else:
         data2 = [{"key": key, "value": data[key]} for key in data]
-        return utils.print_table(data2)
+        return utils.print_table(data2, unwrap_secrets=True)
 
 
 def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, host_nqn=None):
@@ -2358,8 +2357,8 @@ def list_by_node(node_id=None, is_json=False):
             "Status": lvol.status,
         })
     if is_json:
-        return json.dumps(data, indent=2)
-    return utils.print_table(data)
+        return utils.dump_json(data, indent=2, unwrap_secrets=True)
+    return utils.print_table(data, unwrap_secrets=True)
 
 
 def clone_lvol(lvol_id, clone_name, new_size=None, pvc_name=None):
@@ -3075,9 +3074,9 @@ def get_master_lvols_by_pool_uuid(pool_id, is_json=False):
         data.append(lvol_data)
 
     if is_json:
-        return json.dumps(data, indent=2)
+        return utils.dump_json(data, indent=2, unwrap_secrets=True)
     else:
-        return utils.print_table(data)
+        return utils.print_table(data, unwrap_secrets=True)
 
 
 def get_namespaces_per_lvol(lvol):
