@@ -36,6 +36,9 @@ Flask Blueprints registered in `api/v1/__init__.py`. Each resource module (`clus
 
 ## Tests
 
+Web-API tests live alongside the rest of the suite. Run via tox:
+
 ```bash
-pytest simplyblock_web/test/
+tox run -e unit -- tests/unit/web/         # unit tests for v2 auth / settings
+tox run -e integration                     # FDB-backed flow tests
 ```
