@@ -1,3 +1,4 @@
+import argparse
 import os
 from concurrent.futures import ThreadPoolExecutor
 
@@ -24,12 +25,20 @@ MAX_LVOL = "100"
 SUBNET_ID = "subnet-0593459d6b931ee4c"
 STORAGE_SG_ID = "sg-02e89a1372e9f39e9"
 SN_TYPE = "i3en.2xlarge"
-# Failure-domain layout selector (env parameter). Default: 2 failure domains of
-# 3 nodes each (6 nodes). Set FD_4X2=1 to deploy 4 failure domains of 2 nodes
-# each (8 nodes) instead — needed to exercise the >=4-domain soak scenarios
-# (whole failure domain + one extra node).
-FD_4X2 = os.environ.get("FD_4X2", "").strip().lower() in ("1", "true", "yes", "on")
-SN_COUNT = 8 if FD_4X2 else 6
+# Failure-domain layout selector (--fd). 2 => 2 failure domains of 3 nodes each
+# (6 nodes, default). 4 => 4 failure domains of 2 nodes each (8 nodes) — needed
+# to exercise the >=4-domain soak scenarios (whole failure domain + one extra
+# node).
+_parser = argparse.ArgumentParser(
+    description="Deploy a perf-test cluster with failure domains.",
+)
+_parser.add_argument(
+    "--fd", type=int, choices=(2, 4), default=2,
+    help="Number of failure domains: 2 (3 nodes each, 6 total) or "
+         "4 (2 nodes each, 8 total). Default: 2.",
+)
+_args = _parser.parse_args()
+NUM_FAILURE_DOMAINS = _args.fd
 MGMT_TYPE = "m6i.2xlarge"
 # --- Selectable Client Specification ---
 CLIENT_COUNT = 1            # How many separate EC2 instances to launch
@@ -37,11 +46,13 @@ CLIENT_TYPE = "m6in.8xlarge"
 
 # --- Failure-domain layout ---
 # One failure-domain id per storage node, indexed by launch order.
-#   default : 3 nodes in domain 0, 3 in domain 1    (2 domains x 3 nodes)
-#   FD_4X2  : 2 nodes in each of domains 0..3        (4 domains x 2 nodes)
-FAILURE_DOMAINS = [0, 0, 1, 1, 2, 2, 3, 3] if FD_4X2 else [0, 0, 0, 1, 1, 1]
-assert len(FAILURE_DOMAINS) == SN_COUNT, \
-    "FAILURE_DOMAINS must have exactly SN_COUNT entries"
+#   --fd 2 : 3 nodes in domain 0, 3 in domain 1    (2 domains x 3 nodes)
+#   --fd 4 : 2 nodes in each of domains 0..3        (4 domains x 2 nodes)
+if NUM_FAILURE_DOMAINS == 4:
+    FAILURE_DOMAINS = [0, 0, 1, 1, 2, 2, 3, 3]
+else:
+    FAILURE_DOMAINS = [0, 0, 0, 1, 1, 1]
+SN_COUNT = len(FAILURE_DOMAINS)
 
 ec2 = boto3.resource('ec2', region_name='us-east-1')
 
@@ -503,7 +514,7 @@ def main():
                     time.sleep(30)
                 else:
                     raise
-    print("Phase 3: DONE - all nodes added across 2 failure domains (3 + 3).")
+    print(f"Phase 3: DONE - {SN_COUNT} nodes added across {NUM_FAILURE_DOMAINS} failure domains.")
 
     # Verify all nodes are visible
     print("Verifying node status...")
@@ -591,7 +602,8 @@ def main():
         json.dump(final_metadata, f, indent=4)
 
     print("\n--- Setup Complete ---")
-    print(f"Cluster {cluster_uuid} is active with failure domains (3 nodes in FD 0, 3 in FD 1). Metadata saved.")
+    print(f"Cluster {cluster_uuid} is active with {NUM_FAILURE_DOMAINS} failure domains "
+          f"({SN_COUNT} nodes, layout {FAILURE_DOMAINS}). Metadata saved.")
 
 
 
