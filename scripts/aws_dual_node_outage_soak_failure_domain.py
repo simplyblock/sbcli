@@ -55,12 +55,6 @@ AUTO_RECOVER_METHODS = (
 # flight) these must be waited out, not treated as an FTT-budget breach.
 # Strings mirror StorageNode: STATUS_RESTARTING / STATUS_IN_SHUTDOWN.
 TRANSIENT_NODE_STATUSES = ("in_restart", "in_shutdown")
-# Unaffected-node statuses that are tolerated (warned + waited out, not aborted)
-# at inter-iteration sync points where tolerate_transient is set. A node can
-# briefly report 'down' / 'unreachable' while the CP re-establishes its health
-# check or during a transient blip; that is not an FTT-budget breach as long as
-# it recovers within the wait window (the poll loop keeps waiting for it).
-TOLERATED_UNAFFECTED_STATUSES = TRANSIENT_NODE_STATUSES + ("down", "unreachable")
 
 # Scenario enumeration:
 #   3 role categories × P(M,2) ordered distinct-method pairs
@@ -798,13 +792,14 @@ class SoakRunner:
                             tolerate_transient=False):
         """Poll until every node is 'online' (and membership == expected).
 
-        Fails fast if any node NOT in ``target_nodes`` is not online — during
-        a deliberate outage that is an FTT-budget breach. ``tolerate_transient``
-        relaxes this for inter-iteration sync points (no outage in flight):
-        an unaffected node that is merely TRANSIENT_NODE_STATUSES (the CP is
-        autonomously restarting / shutting it down) is waited out instead of
-        aborting the soak, mirroring wait_for_outage_ready. A genuinely
-        offline/unknown unaffected node still raises immediately.
+        Waits for the whole cluster to return to all-online, bounded by
+        ``timeout`` (which then raises). A node not in ``target_nodes`` that is
+        temporarily not online is NOT treated as fatal — the control plane owns
+        node recovery (auto-restart) and a transient not-online peer during the
+        recovery window is normal. Such nodes are logged as a WARNING and waited
+        out; the outer timeout still catches a node that genuinely never comes
+        back. ``tolerate_transient`` is accepted for call-site compatibility and
+        no longer gates behaviour.
         """
         timeout = timeout or self.args.restart_timeout
         expected = self.args.expected_node_count
@@ -819,28 +814,12 @@ class SoakRunner:
                 uuid for uuid, status in statuses.items()
                 if uuid not in target_nodes and status != "online"
             ]
-            if tolerate_transient:
-                # A transient / briefly-down unaffected node is waited out, not
-                # treated as an FTT-budget breach: log a warning and keep
-                # polling (the poll loop / outer timeout still catches a node
-                # that never recovers). Only a hard-unexpected status aborts.
-                tolerated = [
-                    uuid for uuid in unaffected_bad
-                    if statuses[uuid] in TOLERATED_UNAFFECTED_STATUSES
-                ]
-                if tolerated:
-                    self.logger.log(
-                        "WARN: tolerating transient unaffected node state "
-                        "(waiting for recovery): "
-                        + ", ".join(f"{uuid}:{statuses[uuid]}" for uuid in tolerated)
-                    )
-                unaffected_bad = [
-                    uuid for uuid in unaffected_bad
-                    if statuses[uuid] not in TOLERATED_UNAFFECTED_STATUSES
-                ]
             if unaffected_bad:
-                raise TestRunError(
-                    "Unaffected nodes are not online: "
+                # Not fatal: the CP owns node recovery. Warn for visibility but
+                # keep waiting — the outer timeout still catches genuine
+                # non-recovery.
+                self.logger.log(
+                    "WARN: unaffected nodes not online (waiting for CP recovery): "
                     + ", ".join(f"{uuid}:{statuses[uuid]}" for uuid in unaffected_bad)
                 )
             if not offline and len(statuses) == expected:

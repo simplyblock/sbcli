@@ -3155,16 +3155,34 @@ def _restart_storage_node_impl(
             if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
                 continue
 
-            try:
-                # Re-read node from DB to avoid overwriting concurrent changes
-                node = db_controller.get_storage_node_by_id(node.get_id())
-                node.remote_devices = _connect_to_remote_devs(node, force_connect_restarting_nodes=True)
-                if node.enable_ha_jm:
-                    node.remote_jm_devices = _connect_to_remote_jm_devs(node)
-            except RuntimeError:
-                logger.error('Failed to connect to remote devices')
-                return False
-            node.write_to_db()
+            # Reconnecting an online PEER's remote devices is best-effort and
+            # must NOT be a hard precondition for THIS node's restart: the peer
+            # may be topologically unrelated, and a transient RPC timeout to it
+            # (e.g. a busy-but-healthy peer during a degraded-window reconnect
+            # storm) previously raised an uncaught RPCException — not a
+            # RuntimeError — which aborted the whole restart and left the node
+            # looping OFFLINE forever (incident 2026-06-25). Retry a few times,
+            # then skip the peer and keep going.
+            for attempt in range(1, 4):
+                try:
+                    # Re-read node from DB to avoid overwriting concurrent changes
+                    node = db_controller.get_storage_node_by_id(node.get_id())
+                    node.remote_devices = _connect_to_remote_devs(node, force_connect_restarting_nodes=True)
+                    if node.enable_ha_jm:
+                        node.remote_jm_devices = _connect_to_remote_jm_devs(node)
+                    node.write_to_db()
+                    break
+                except (RPCException, RuntimeError) as e:
+                    logger.warning(
+                        f"Reconnect of peer {node.get_id()} failed "
+                        f"(attempt {attempt}/3): {e}")
+                    if attempt < 3:
+                        time.sleep(2)
+                    else:
+                        logger.error(
+                            f"Skipping peer {node.get_id()} after 3 failed "
+                            f"reconnect attempts; continuing restart "
+                            f"(peer reconnect is best-effort)")
 
         # === LVS Recreation: clear sequential structure per design ===
         # No recursion. Process primary, secondary, tertiary LVS in order.
@@ -3225,16 +3243,34 @@ def _restart_storage_node_impl(
             if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
                 continue
 
-            try:
-                # Re-read node from DB to avoid overwriting concurrent changes
-                node = db_controller.get_storage_node_by_id(node.get_id())
-                node.remote_devices = _connect_to_remote_devs(node, force_connect_restarting_nodes=True)
-                if node.enable_ha_jm:
-                    node.remote_jm_devices = _connect_to_remote_jm_devs(node)
-            except RuntimeError:
-                logger.error('Failed to connect to remote devices')
-                return False
-            node.write_to_db()
+            # Reconnecting an online PEER's remote devices is best-effort and
+            # must NOT be a hard precondition for THIS node's restart: the peer
+            # may be topologically unrelated, and a transient RPC timeout to it
+            # (e.g. a busy-but-healthy peer during a degraded-window reconnect
+            # storm) previously raised an uncaught RPCException — not a
+            # RuntimeError — which aborted the whole restart and left the node
+            # looping OFFLINE forever (incident 2026-06-25). Retry a few times,
+            # then skip the peer and keep going.
+            for attempt in range(1, 4):
+                try:
+                    # Re-read node from DB to avoid overwriting concurrent changes
+                    node = db_controller.get_storage_node_by_id(node.get_id())
+                    node.remote_devices = _connect_to_remote_devs(node, force_connect_restarting_nodes=True)
+                    if node.enable_ha_jm:
+                        node.remote_jm_devices = _connect_to_remote_jm_devs(node)
+                    node.write_to_db()
+                    break
+                except (RPCException, RuntimeError) as e:
+                    logger.warning(
+                        f"Reconnect of peer {node.get_id()} failed "
+                        f"(attempt {attempt}/3): {e}")
+                    if attempt < 3:
+                        time.sleep(2)
+                    else:
+                        logger.error(
+                            f"Skipping peer {node.get_id()} after 3 failed "
+                            f"reconnect attempts; continuing restart "
+                            f"(peer reconnect is best-effort)")
 
         if snode.jm_device and snode.jm_device.status in [JMDevice.STATUS_UNAVAILABLE, JMDevice.STATUS_ONLINE]:
             device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
