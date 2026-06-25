@@ -17,8 +17,9 @@ detached naively:
 
 This module solves both:
 
-  • Reference counting — controller is only detached when ALL migrations using it
-    have finished (refcount == 0) AND it has been idle for IDLE_TIMEOUT seconds.
+  • Activity-based lifetime — the controller stays alive as long as any migration
+    calls acquire() within IDLE_TIMEOUT seconds.  No reference counting needed;
+    each acquire() simply refreshes the last-used timestamp.
 
   • Cooldown enforcement — a minimum DETACH_COOLDOWN gap is maintained between
     the moment a detach RPC is issued and any subsequent re-attach attempt.  If
@@ -28,11 +29,11 @@ This module solves both:
 Public API (called by tasks_runner_lvol_migration)
 --------------------------------------------------
   hub_manager.acquire(src_node_id, src_rpc, tgt_node, trtype)
-      → attach (or reuse) the controller, increment refcount
+      → attach (or reuse) the controller, refresh the idle timer
       → returns (ctrl_name, hub_bdev, error)
 
   hub_manager.release(src_node_id, tgt_node_id)
-      → decrement refcount, start idle timer — does NOT detach
+      → no-op kept for call-site compatibility; idle timer is driven by acquire()
 
   hub_manager.detach_now(src_node_id, tgt_node_id, src_rpc=None)
       → immediate detach (failure / cancel path), records detach timestamp
@@ -47,16 +48,14 @@ logger = utils.get_logger(__name__)
 
 
 class _HubEntry:
-    __slots__ = ('ctrl_name', 'hub_bdev', 'src_rpc', 'tgt_node',
-                 'refcount', 'last_release')
+    __slots__ = ('ctrl_name', 'hub_bdev', 'src_rpc', 'tgt_node', 'last_used')
 
     def __init__(self, ctrl_name: str, hub_bdev: str, src_rpc, tgt_node):
-        self.ctrl_name    = ctrl_name
-        self.hub_bdev     = hub_bdev    # e.g. "mighubXXXXXXXXn1"
-        self.src_rpc      = src_rpc     # refreshed on every acquire — used by GC
-        self.tgt_node     = tgt_node
-        self.refcount     = 1
-        self.last_release = 0.0         # monotonic ts when refcount last hit 0
+        self.ctrl_name = ctrl_name
+        self.hub_bdev  = hub_bdev    # e.g. "mighubXXXXXXXXn1"
+        self.src_rpc   = src_rpc     # refreshed on every acquire — used by GC
+        self.tgt_node  = tgt_node
+        self.last_used = time.monotonic()
 
 
 class HubControllerManager:
@@ -71,13 +70,13 @@ class HubControllerManager:
     # Must be long enough for the NVMe TCP disconnect handshake to complete.
     DETACH_COOLDOWN = 10
 
-    # Seconds with refcount == 0 before the GC triggers a detach.
-    # Setting this well above DETACH_COOLDOWN means back-to-back migrations
-    # typically reuse the existing controller without going through detach+reattach.
-    IDLE_TIMEOUT = 60
+    # Seconds since the last acquire() before the GC triggers a detach.
+    # Refreshed on every acquire() so concurrent migrations naturally keep
+    # the controller alive without any reference counting.
+    IDLE_TIMEOUT = 300  # 5 minutes
 
     # GC sweep period.
-    GC_INTERVAL = 15
+    GC_INTERVAL = 30
 
     def __init__(self):
         self._lock = threading.Lock()
@@ -93,6 +92,9 @@ class HubControllerManager:
         """
         Ensure the hub controller from *src_node_id* to *tgt_node* is attached.
 
+        Refreshes the idle timer so the controller stays alive as long as
+        migrations are actively using it.
+
         Returns (ctrl_name, hub_bdev, error).  On transient cooldown the error
         string starts with "HUB_COOLDOWN:" so callers can log it distinctly.
         """
@@ -103,12 +105,11 @@ class HubControllerManager:
             if entry is not None:
                 try:
                     if src_rpc.get_bdevs(entry.hub_bdev):
-                        entry.refcount += 1
+                        entry.last_used = time.monotonic()
                         entry.src_rpc = src_rpc
                         logger.info(
                             f"[HubMgr] reusing {entry.ctrl_name} "
-                            f"src={src_node_id[:8]} tgt={tgt_node.get_id()[:8]} "
-                            f"refcount={entry.refcount}"
+                            f"src={src_node_id[:8]} tgt={tgt_node.get_id()[:8]}"
                         )
                         return entry.ctrl_name, entry.hub_bdev, None
                 except Exception:
@@ -137,7 +138,7 @@ class HubControllerManager:
             if existing is not None:
                 try:
                     if src_rpc.get_bdevs(existing.hub_bdev):
-                        existing.refcount += 1
+                        existing.last_used = time.monotonic()
                         existing.src_rpc = src_rpc
                         try:
                             src_rpc.bdev_nvme_detach_controller(ctrl_name)
@@ -157,26 +158,13 @@ class HubControllerManager:
         )
         return ctrl_name, hub_bdev, None
 
-    def release(self, src_node_id: str, tgt_node_id: str):
+    def release(self, src_node_id: str, tgt_node_id: str):  # noqa: ARG002
         """
-        Signal that one migration using this hub has finished.
+        No-op — kept for call-site compatibility.
 
-        Decrements refcount and starts the idle timer.  Does NOT detach —
-        the GC thread handles detach after IDLE_TIMEOUT seconds.
+        The idle timer is driven entirely by acquire(); explicit release calls
+        are not needed and were a source of refcount imbalance bugs.
         """
-        key = (src_node_id, tgt_node_id)
-        with self._lock:
-            entry = self._entries.get(key)
-            if entry is None:
-                return
-            entry.refcount = max(0, entry.refcount - 1)
-            if entry.refcount == 0:
-                entry.last_release = time.monotonic()
-                logger.info(
-                    f"[HubMgr] released {entry.ctrl_name} "
-                    f"src={src_node_id[:8]} tgt={tgt_node_id[:8]} — "
-                    f"idle timer started (detach in ~{self.IDLE_TIMEOUT}s if not reused)"
-                )
 
     def detach_now(self, src_node_id: str, tgt_node_id: str, src_rpc=None):
         """
@@ -309,28 +297,30 @@ class HubControllerManager:
                 to_evict = [
                     key
                     for key, e in self._entries.items()
-                    if e.refcount == 0 and (now - e.last_release) >= self.IDLE_TIMEOUT
+                    if (now - e.last_used) >= self.IDLE_TIMEOUT
                 ]
                 evicted = [(key, self._entries.pop(key)) for key in to_evict]
 
-                # Prune stale detach timestamps older than DETACH_COOLDOWN — no
-                # longer needed once the cooldown window has passed.
+                # Prune stale detach timestamps older than DETACH_COOLDOWN.
                 stale = [k for k, ts in self._detach_ts.items()
                          if (now - ts) > self.DETACH_COOLDOWN * 2]
                 for k in stale:
                     del self._detach_ts[k]
 
-                if not self._entries:
-                    logger.info("[HubMgr] GC thread exiting (no active entries)")
-                    self._gc_thread = None
-                    break   # restarted on next acquire()
+                should_exit = not self._entries
 
             for key, entry in evicted:
                 logger.info(
                     f"[HubMgr] GC evicting {entry.ctrl_name} "
-                    f"(idle {now - entry.last_release:.0f}s >= {self.IDLE_TIMEOUT}s)"
+                    f"(idle {now - entry.last_used:.0f}s >= {self.IDLE_TIMEOUT}s)"
                 )
                 self._do_detach(key, entry, entry.src_rpc, "gc-idle")
+
+            if should_exit:
+                with self._lock:
+                    self._gc_thread = None
+                logger.info("[HubMgr] GC thread exiting (no active entries)")
+                break   # restarted on next acquire()
 
 
 # Module-level singleton — imported and used by tasks_runner_lvol_migration
