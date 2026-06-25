@@ -3911,6 +3911,8 @@ class RunnerK8sLog:
         self._monitor_thread = None
         self._monitor_stop_flag = threading.Event()
         self._pod_container_map = {}
+        # Track active log files and their tmux sessions for health checking
+        self._active_log_streams = {}  # key -> {"file": path, "session": name, "last_size": int}
         self._resource_monitor_thread = None
         self._resource_monitor_stop = threading.Event()
         self.logger = setup_logger(__name__)
@@ -4028,6 +4030,11 @@ class RunnerK8sLog:
                 self.logger.info(" ".join(command_logs))
 
                 subprocess.Popen(command_logs)
+                self._active_log_streams[key] = {
+                    "file": log_file,
+                    "session": session_name,
+                    "last_size": 0,
+                }
                 self.logger.info(f"Started logging for pod '{pod}', container '{container}' ({outage_type}), logs stored at {log_file}.")
 
 
@@ -4070,10 +4077,81 @@ class RunnerK8sLog:
         except subprocess.CalledProcessError:
             return None
 
+    def _start_log_stream(self, pod, container, suffix, key=None):
+        """Start a ``kubectl logs --follow`` tmux session for a container.
+
+        Returns the (log_file, session_name) pair and registers the stream
+        in ``_active_log_streams`` for health-checking.
+        """
+        if key is None:
+            key = f"{pod}:{container}"
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        pod_log_dir = os.path.join(self.log_dir, pod)
+        os.makedirs(pod_log_dir, exist_ok=True)
+        log_file = f"{pod_log_dir}/{container}_{self.test_name}_{timestamp}_{suffix}.log"
+        session_name = f"{pod}_{container}_{suffix}_{self.generate_random_string()}"
+
+        cmd = [
+            "tmux", "new-session", "-d", "-s", session_name,
+            "bash", "-c",
+            f"kubectl logs --follow {pod} -c {container} -n {self.namespace} > {log_file} 2>&1"
+        ]
+        subprocess.Popen(cmd)
+        self._active_log_streams[key] = {
+            "file": log_file,
+            "session": session_name,
+            "last_size": 0,
+            "stale_checks": 0,
+        }
+        return log_file, session_name
+
+    def _capture_previous_logs(self, pod, container):
+        """Save ``kubectl logs --previous`` for a container that just restarted.
+
+        This captures logs from the terminated container instance that would
+        otherwise be lost once the kubelet evicts them.
+        """
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        pod_log_dir = os.path.join(self.log_dir, pod)
+        os.makedirs(pod_log_dir, exist_ok=True)
+        prev_log = f"{pod_log_dir}/{container}_{self.test_name}_{timestamp}_previous.log"
+        cmd = (
+            f"kubectl logs --previous {pod} -c {container}"
+            f" -n {self.namespace} > {prev_log} 2>&1"
+        )
+        try:
+            subprocess.run(cmd, shell=True, timeout=120)
+            fsize = os.path.getsize(prev_log) if os.path.exists(prev_log) else 0
+            if fsize > 0:
+                print(f"[K8s] Saved previous-container logs for {pod}:{container} ({fsize} bytes)")
+            else:
+                # Empty file — previous logs not available; clean up
+                os.remove(prev_log)
+        except Exception as exc:
+            print(f"[K8s] Could not capture --previous logs for {pod}:{container}: {exc}")
+
+    def _is_tmux_session_alive(self, session_name):
+        """Return True if a tmux session with *session_name* exists."""
+        try:
+            result = subprocess.run(
+                ["tmux", "has-session", "-t", session_name],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            return result.returncode == 0
+        except Exception:
+            return False
+
     def monitor_pod_logs(self, poll_interval=60):
         """
-        Continuously monitor running pods and their containers for restarts.
-        Starts new kubectl log sessions if containers change.
+        Continuously monitor running pods and their containers for restarts
+        **and** stale follow-streams.
+
+        Detects two failure modes:
+          1. Container restart (container ID changed) → capture ``--previous``
+             logs from the old instance, then start a new follow stream.
+          2. Stale follow-stream (tmux session died or log file stopped
+             growing while the container is still running) → restart the
+             ``kubectl logs --follow`` stream.
         """
 
         _LOG_PREFIXES = (
@@ -4093,6 +4171,10 @@ class RunnerK8sLog:
             "snode-spdk-pod",
             "fio-",
         )
+
+        # Number of consecutive stale checks before restarting a stream.
+        # With poll_interval=60s, 3 means the file hasn't grown for ~3 min.
+        STALE_THRESHOLD = 3
 
         def _monitor():
             while not self._monitor_stop_flag.is_set():
@@ -4116,21 +4198,53 @@ class RunnerK8sLog:
                         if not current_id:
                             continue
 
+                        # --- Case 1: container restarted (new ID) ---
                         if current_id != prev_id:
                             self._pod_container_map[key] = current_id
-                            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                            pod_log_dir = os.path.join(self.log_dir, pod)
-                            os.makedirs(pod_log_dir, exist_ok=True)
-                            log_file = f"{pod_log_dir}/{container}_{self.test_name}_{timestamp}_restart.log"
-                            session_name = f"{pod}_{container}_restart_{self.generate_random_string()}"
 
-                            cmd = [
-                                "tmux", "new-session", "-d", "-s", session_name,
-                                "bash", "-c",
-                                f"kubectl logs --follow {pod} -c {container} -n {self.namespace} > {log_file} 2>&1"
-                            ]
-                            subprocess.Popen(cmd)
-                            print(f"[K8s] Restarted log collection for {pod}:{container} due to new container instance.")
+                            # Capture previous container's logs before they're lost
+                            if prev_id is not None:
+                                self._capture_previous_logs(pod, container)
+
+                            log_file, session_name = self._start_log_stream(
+                                pod, container, "restart", key=key,
+                            )
+                            print(f"[K8s] Restarted log collection for {pod}:{container} "
+                                  f"due to new container instance.")
+                            continue
+
+                        # --- Case 2: follow-stream health check ---
+                        stream_info = self._active_log_streams.get(key)
+                        if stream_info is None:
+                            continue
+
+                        # Check if the tmux session is alive and the file is growing
+                        session_alive = self._is_tmux_session_alive(stream_info["session"])
+                        try:
+                            current_size = os.path.getsize(stream_info["file"]) if os.path.exists(stream_info["file"]) else 0
+                        except OSError:
+                            current_size = 0
+
+                        if session_alive and current_size > stream_info["last_size"]:
+                            # Stream is healthy
+                            stream_info["last_size"] = current_size
+                            stream_info["stale_checks"] = 0
+                        else:
+                            stream_info["stale_checks"] = stream_info.get("stale_checks", 0) + 1
+                            if stream_info["stale_checks"] >= STALE_THRESHOLD:
+                                reason = "tmux session dead" if not session_alive else "log file not growing"
+                                print(f"[K8s] Stale follow-stream for {key} ({reason}), restarting...")
+
+                                # Kill old tmux session if still lingering
+                                try:
+                                    subprocess.run(
+                                        ["tmux", "kill-session", "-t", stream_info["session"]],
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    )
+                                except Exception:
+                                    pass
+
+                                self._start_log_stream(pod, container, "restart", key=key)
 
                 time.sleep(poll_interval)
 

@@ -995,14 +995,21 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
             f"{self.SNAPSHOTS_PER_LVOL}) ==="
         )
 
-        # Fire all snapshot creation calls
+        # Fire all snapshot creation calls.
+        # Scale max_failures to item count — with 50 snaps/lvol, the
+        # default MAX_FAILURES=500 is exhausted by just 10 bad lvols.
+        # Allow up to 10% of total items to fail before aborting.
+        snap_max_failures = max(self.MAX_FAILURES, expected_snaps // 10)
+        self.logger.info(
+            f"[Phase 3] max_failures for snapshots: {snap_max_failures}"
+        )
         ok, fail = self._batch_exec(
             snap_items,
             self._fire_create_snapshot,
             "create_snapshots",
             batch_size=self.SNAPSHOT_BATCH_SIZE,
             stop_on_max_lvols=True,
-            max_failures=self.MAX_FAILURES,
+            max_failures=snap_max_failures,
         )
 
         # Bulk-verify snapshots + populate IDs
@@ -1025,12 +1032,30 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
         self._check_count(verified, expected_snaps, "Phase 3 snapshots")
 
     def _fire_create_snapshot(self, params: dict):
-        """Fire add_snapshot only. No ID fetch — bulk verify resolves IDs."""
+        """Fire add_snapshot only. No ID fetch — bulk verify resolves IDs.
+
+        Retries on sync-deletion errors (lvol temporarily in cleanup state)
+        with backoff, similar to _fire_create_standalone.
+        """
         lvol_id = params["lvol_id"]
         snap_name = params["snap_name"]
-        self.sbcli_utils.add_snapshot(
-            lvol_id=lvol_id, snapshot_name=snap_name, retry=3
-        )
+        sync_retries = 0
+
+        for attempt in range(6):
+            try:
+                self.sbcli_utils.add_snapshot(
+                    lvol_id=lvol_id, snapshot_name=snap_name, retry=3
+                )
+                return
+            except Exception as e:
+                if self._is_sync_deletion_error(e) and sync_retries < 5:
+                    sync_retries += 1
+                    sleep_n_sec(15)
+                    continue
+                if attempt < 5:
+                    sleep_n_sec(5)
+                    continue
+                raise
 
     # ── Phase 4: Delete lvols (free subsystem slots for clones) ──────────
 
@@ -1657,16 +1682,19 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
                     "pvc_name": pvc_name,
                 })
 
+        expected_snaps = len(snap_items)
         self.logger.info(
-            f"=== Phase 3: Create {len(snap_items)} VolumeSnapshots ==="
+            f"=== Phase 3: Create {expected_snaps} VolumeSnapshots ==="
         )
 
+        snap_max_failures = max(self.MAX_FAILURES, expected_snaps // 10)
         ok, fail = self._batch_exec(
             snap_items,
             self._create_single_vs,
             "create_snapshots",
             batch_size=self.SNAPSHOT_BATCH_SIZE,
             stop_on_max_lvols=True,
+            max_failures=snap_max_failures,
         )
 
     def _create_single_vs(self, params: dict):
