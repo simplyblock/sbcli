@@ -41,6 +41,11 @@ class Cluster(BaseModel):
     auth_hosts_only: bool = False
     blk_size: int = 0
     cap_crit: int = 90
+    # ISO-8601 UTC timestamp of when the cluster last entered IN_ACTIVATION.
+    # Stamped/cleared by cluster_ops.set_cluster_status and consumed by the
+    # storage_node_monitor watchdog to detect and revert a wedged activation
+    # (incident 2026-06-25). Empty string means "not currently activating".
+    in_activation_since: str = ""
     cap_warn: int = 80
     cli_pass: SecretStr = SecretStr("")
     cluster_max_devices: int = 0

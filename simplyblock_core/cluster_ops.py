@@ -1067,6 +1067,17 @@ def set_cluster_status(cl_id, status) -> None:
             return False  # already at target (a peer won the race); don't write
         captured['old'] = fresh.status
         fresh.status = status
+        # Track when the cluster enters / leaves IN_ACTIVATION so the
+        # storage_node_monitor watchdog can detect a wedged activation and
+        # revert it. A half-finished cluster_activate otherwise leaves the
+        # cluster stuck in IN_ACTIVATION forever — auto-restart refuses to queue
+        # while the cluster is not SUSPENDED, so it can never recover on its own
+        # (incident 2026-06-25). Stamped inside the CAS so it is written
+        # atomically with the status flip.
+        if status == Cluster.STATUS_IN_ACTIVATION:
+            fresh.in_activation_since = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        elif captured['old'] == Cluster.STATUS_IN_ACTIVATION:
+            fresh.in_activation_since = ""
         return True
 
     updated = db_controller.atomic_update(cluster, _mutate)
