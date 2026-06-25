@@ -997,6 +997,7 @@ class RPCClient:
             "reconnect_delay_sec": constants.RECONNECT_DELAY_CLUSTER,
             "keep_alive_timeout_ms": constants.KATO,
             "timeout_us": constants.NVME_TIMEOUT_US,
+            "pci_timeout_us": constants.PCIE_TIMEOUT_US,
             "transport_ack_timeout": constants.ACK_TO,
             # action_on_timeout=abort caused multi-minute IO hangs when a
             # remote target wedged: the timeout_cb sent an NVMe abort that
