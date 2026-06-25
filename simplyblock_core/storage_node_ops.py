@@ -2484,7 +2484,11 @@ def restart_storage_node(
             clear_data=clear_data, new_ssd_pcie=new_ssd_pcie,
             force_lvol_recreate=force_lvol_recreate, spdk_proxy_image=spdk_proxy_image)
     except Exception:
-        logger.error("restart_storage_node raised unexpectedly")
+        # exc_info so the traceback is captured: without it a failing restart
+        # only logs this one line, leaving the actual raise point (e.g. a
+        # remote-JM/device connect timing out when a same-failure-domain peer
+        # is also down) undiagnosable from the logs.
+        logger.error("restart_storage_node raised unexpectedly", exc_info=True)
     finally:
         # Trust the DB. If the impl raised after the ONLINE write was
         # already committed, the node IS factually online — peers see
