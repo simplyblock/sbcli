@@ -458,6 +458,36 @@ def task_runner_node(task):
             logger.error(f"Post-task status reset check failed: {exc}")
 
 
+# Per-task restart scheduling (in-memory; this runner is a single long-lived
+# process). Maps task uuid -> epoch time when the task is next eligible to run.
+# This lets the runner round-robin all restart tasks instead of pinning the
+# thread on one task's blocking retry loop: a task that is waiting — deferred on
+# a concurrent peer restart, or in failure backoff — no longer blocks the other
+# pending restart tasks behind it (incident 2026-06-25: a single task deferring
+# on a peer that was briefly in_restart sat in a growing backoff and starved a
+# second node's brand-new restart task indefinitely).
+_restart_next_attempt: dict = {}
+
+# A genuine restart FAILURE first retries at a steady 1-minute cadence for a few
+# attempts (so a node that just needs a moment to come back recovers quickly),
+# then falls back to the existing exponential backoff capped at
+# RESTART_TASK_EXEC_INTERVAL_MAX_SEC. A DEFER (peer-restart mutual exclusion) is
+# NOT a failure and does not back off at all — see the loop below.
+RESTART_LEAD_IN_RETRIES = 3
+RESTART_LEAD_IN_INTERVAL_SEC = 60
+
+
+def _restart_backoff_seconds(retry):
+    """Delay before the next attempt of a FAILED restart (one that consumed a
+    retry). First RESTART_LEAD_IN_RETRIES attempts use a constant 1-minute
+    cadence; after that the existing exponential backoff applies, continuing
+    upward from the lead-in interval and capped at the configured maximum."""
+    if retry <= RESTART_LEAD_IN_RETRIES:
+        return RESTART_LEAD_IN_INTERVAL_SEC
+    exp = RESTART_LEAD_IN_INTERVAL_SEC * (2 ** (retry - RESTART_LEAD_IN_RETRIES))
+    return min(exp, constants.RESTART_TASK_EXEC_INTERVAL_MAX_SEC)
+
+
 logger.info("Starting Tasks runner...")
 while True:
     try:
@@ -473,38 +503,52 @@ while True:
         for cl in clusters:
             tasks = db.get_job_tasks(cl.get_id(), reverse=False)
             for task in tasks:
-                if task.function_name in [JobSchedule.FN_DEV_RESTART, JobSchedule.FN_NODE_RESTART]:
-                    # Restart tasks start at a short cadence and cap the
-                    # exponential backoff at RESTART_TASK_EXEC_INTERVAL_MAX_SEC
-                    # so recovery time is bounded even after several retries.
-                    delay_seconds = constants.RESTART_TASK_EXEC_INTERVAL_SEC
-                    # Per-task isolation: an unhandled exception in task_runner
-                    # must not escape to the outer `while True`, which would kill
-                    # the whole restart service and block recovery of every other
-                    # node. Log it and move on to the next task.
-                    try:
-                        while task.status != JobSchedule.STATUS_DONE:
-                            # get new task object because it could be changed from cancel task
-                            task = db.get_task_by_id(task.uuid)
-                            # Lease gate: refuse to drive a task another live runner
-                            # host already owns (prevents a second replica issuing a
-                            # concurrent shutdown/restart). Re-checked every iteration
-                            # so the lease stays fresh while we hold it.
-                            if not tasks_controller.claim_task(task):
-                                logger.info(f"Restart task {task.uuid} owned by another runner host; skipping")
-                                break
-                            res = task_runner(task)
-                            if res:
-                                if task.status == JobSchedule.STATUS_DONE:
-                                    break
-                            else:
-                                delay_seconds = min(
-                                    delay_seconds * 2,
-                                    constants.RESTART_TASK_EXEC_INTERVAL_MAX_SEC,
-                                )
-                            time.sleep(delay_seconds)
-                    except Exception as e:
-                        logger.error(f"Restart task {task.uuid} processing crashed: {e}")
-                        logger.exception(e)
+                if task.function_name not in [JobSchedule.FN_DEV_RESTART, JobSchedule.FN_NODE_RESTART]:
+                    continue
+                if task.status == JobSchedule.STATUS_DONE:
+                    _restart_next_attempt.pop(task.uuid, None)
+                    continue
+                # Round-robin: skip a task that is not yet due so a waiting task
+                # (deferred on a concurrent peer restart, or in failure backoff)
+                # does NOT block the other pending restart tasks behind it. The
+                # outer loop revisits every task each pass (TASK_EXEC_INTERVAL_SEC).
+                if time.time() < _restart_next_attempt.get(task.uuid, 0):
+                    continue
+                # Per-task isolation: a crash in task_runner must not escape to
+                # the outer `while True` and kill recovery of every other node.
+                try:
+                    # Re-read (it may have been canceled / changed concurrently).
+                    task = db.get_task_by_id(task.uuid)
+                    if task.status == JobSchedule.STATUS_DONE:
+                        _restart_next_attempt.pop(task.uuid, None)
+                        continue
+                    # Lease gate: do not drive a task another live runner host
+                    # already owns (prevents a second replica issuing a
+                    # concurrent shutdown/restart).
+                    if not tasks_controller.claim_task(task):
+                        logger.info(f"Restart task {task.uuid} owned by another runner host; skipping")
+                        continue
+                    retry_before = task.retry
+                    res = task_runner(task)
+                    task = db.get_task_by_id(task.uuid)
+                    if res or task.status == JobSchedule.STATUS_DONE:
+                        _restart_next_attempt.pop(task.uuid, None)
+                    elif task.retry > retry_before:
+                        # Genuine failure (retry consumed): 1-min lead-in, then
+                        # exponential backoff.
+                        _restart_next_attempt[task.uuid] = (
+                            time.time() + _restart_backoff_seconds(task.retry))
+                    else:
+                        # Defer (peer-restart mutual exclusion; retry NOT
+                        # consumed): not a failure — do not back off. Re-poll on
+                        # the next short pass so this picks up immediately once
+                        # the blocking restart finishes.
+                        _restart_next_attempt[task.uuid] = (
+                            time.time() + constants.RESTART_TASK_EXEC_INTERVAL_SEC)
+                except Exception as e:
+                    logger.error(f"Restart task {task.uuid} processing crashed: {e}")
+                    logger.exception(e)
+                    _restart_next_attempt[task.uuid] = (
+                        time.time() + _restart_backoff_seconds(task.retry))
 
     time.sleep(constants.TASK_EXEC_INTERVAL_SEC)
