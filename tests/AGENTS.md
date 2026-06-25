@@ -80,12 +80,14 @@ New code that carries secrets (passwords, tokens, keys, connection strings — w
 1. **Plaintext never appears in `repr` / `str` / log output.** Use `caplog` or capture the rendered `repr` and assert the masked form (`**********`) is present and the raw value is not.
 2. **Plaintext is delivered on the wire.** Call `unwrap_secrets_for_send` (or the client's send path) and assert the outgoing payload contains the unwrapped value.
 3. **FDB round-trip preserves the value.** Construct the model, `to_dict(unwrap_secrets=True)`, `from_dict(...)`, and assert the secret is still a `SecretStr` with the right plaintext.
+4. **Display-JSON survives serialization.** When adding a new secret field to a model that's already serialized to JSON in some CLI/controller path, add a regression assertion that `utils.dump_json(model.get_clean_dict())` succeeds and masks, and that `unwrap_secrets=True` recovers the plaintext. Raw `json.dumps(get_clean_dict())` will crash on a `SecretStr` — that's the failure mode this catches.
 
 Canonical patterns:
 
 - `tests/unit/test_secret_redaction.py` — `repr`/`str`/`pprint`/log formatter masking.
 - `tests/unit/test_client_secret_logging.py` — log-then-unwrap pattern for RPC + SNode clients.
 - `tests/unit/test_basemodel_secrets.py` — FDB round-trip.
+- `tests/unit/test_display_helpers.py` — `utils.dump_json` / `utils.print_table` masking + unwrap.
 
 ## Verification
 

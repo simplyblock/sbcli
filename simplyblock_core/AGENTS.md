@@ -21,6 +21,20 @@ All models extend `BaseModel` (`models/base_model.py`). Key conventions:
 - `BaseNodeObject` extends `BaseModel` with standard node status constants (`STATUS_ONLINE`, `STATUS_OFFLINE`, etc.) and a status code map.
 - **Secret fields** use `SecretStr` (from `pydantic`) as the type annotation with `SecretStr("")` default. `from_dict()` auto-wraps plain strings from FDB into `SecretStr`. `to_dict()` keeps wrappers (safe for logging); only `write_to_db()` calls `to_dict(unwrap_secrets=True)` to persist plaintext. When adding a new secret field, follow existing examples in `cluster.py`, `storage_node.py`, or `pool.py`.
 
+## Display & Logging JSON
+
+`json.dumps()` raises `TypeError` on a dict containing `SecretStr`/`SecretBytes`. Use the helpers in `utils/__init__.py` for every controller / CLI / logging path that serializes a model dict (`get_clean_dict()`, `to_dict()`):
+
+- `utils.dump_json(data, ..., unwrap_secrets=...)` — JSON output.
+- `utils.print_table(rows, ..., unwrap_secrets=...)` — pretty-table output.
+
+Choose the flag by destination:
+
+- **Operator display** (`sbctl X get`, `--json` CLI output): pass `unwrap_secrets=True`. The user is authorized to see plaintext; without the flag they see `**********` and can't recover the value.
+- **Logging, debug dumps, error paths, event payloads**: omit the flag (defaults to `False`). Secrets render as `**********`. Use this for anything that may end up in a log file, stderr, or a captured exception.
+
+When adding a new `SecretStr` field to an existing model, grep for `json.dumps`, `dump_json(`, and `print_table(` callsites that touch that model and audit each one. The display-vs-log distinction is per-callsite, not per-model.
+
 ## Client Pattern (RPC, SNode, Firewall API)
 
 Clients in `rpc_client.py`, `snode_client.py`, and `fw_api_client.py` accept `SecretStr` parameters and follow the **log-then-unwrap** pattern:

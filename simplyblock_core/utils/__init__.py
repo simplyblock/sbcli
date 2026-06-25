@@ -142,16 +142,21 @@ def get_iface_ip(ifname):
     return False
 
 
-def print_table(data: list, title=None):
-    if data:
-        x = PrettyTable(field_names=data[0].keys(), max_width=70, title=title)
-        x.align = 'l'
-        for node_data in data:
-            row = []
-            for key in node_data:
-                row.append(node_data[key])
-            x.add_row(row)
-        return x.__str__()
+def print_table(data: list, title=None, unwrap_secrets: bool = False):
+    if data is None:
+        return None  # For compatibility with the previous implementation. This should raise.
+
+    x = PrettyTable(field_names=data[0].keys(), max_width=70, title=title)
+    x.align = 'l'
+    for node_data in data:
+        row = []
+        for key in node_data:
+            value = node_data[key]
+            if isinstance(value, SecretStr):
+                value = value.get_secret_value() if unwrap_secrets else str(value)
+            row.append(value)
+        x.add_row(row)
+    return x.__str__()
 
 
 _humanbytes_parameter = {
@@ -3454,3 +3459,18 @@ def resolve_address(host_port: str) -> str:
     if not isinstance(ip, str):
         raise ValueError(f"Invalid return value {ip}")
     return ip
+
+
+class _SecretAwareEncoder(json.JSONEncoder):
+    def __init__(self, *args, unwrap_secrets: bool = False, **kwargs):
+        self.unwrap_secrets = unwrap_secrets
+        super().__init__(*args, **kwargs)
+
+    def default(self, obj):
+        if isinstance(obj, SecretStr):
+            return obj.get_secret_value() if self.unwrap_secrets else str(obj)
+        return super().default(obj)
+
+
+def dump_json(data, unwrap_secrets: bool = False, **kwargs):
+    return json.dumps(data, cls=_SecretAwareEncoder, unwrap_secrets=unwrap_secrets, **kwargs)

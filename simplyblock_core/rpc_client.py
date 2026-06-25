@@ -173,7 +173,7 @@ class RPCClient:
             try:
                 data = response.json()
                 if method not in self.RPC_NO_PRINT_OUTPUT and Settings().log_response_bodies:
-                    logger.debug("Response json: %s", json.dumps(data))
+                    logger.debug("Response json: %s", utils.dump_json(data))
             except Exception:
                 if Settings().log_response_bodies:
                     logger.debug("Response ret_content: %s", ret_content)
