@@ -242,16 +242,18 @@ def _apply_migration_to_db(migration, tgt_lvol_uuid=None, tgt_lvol_bdev=None):
             logger.warning(f"_apply_migration_to_db: snapshot not found: {snap_uuid}")
             continue
 
-        # snap_bdev: update lvstore prefix and add migration suffix.
-        # Guard is idempotent: if called twice after crash+retry, src_short
-        # already carries the suffix — do not append it again.
+        # snap_bdev: update lvstore prefix and normalise the migration suffix.
+        # Use the lvstore to detect a retry (snap already updated) rather than
+        # endswith(suffix), which gives a false-positive on back-to-back migrations
+        # where the source bdev legitimately ends with the suffix from the prior run.
         tgt_short = None
         if snap.snap_bdev and '/' in snap.snap_bdev:
-            src_short = snap.snap_bdev.split('/', 1)[1]
-            if src_short.endswith(_MIGRATION_BDEV_SUFFIX):
-                tgt_short = src_short
+            src_lvstore, src_short = snap.snap_bdev.split('/', 1)
+            if src_lvstore == tgt_node.lvstore:
+                tgt_short = src_short  # already updated by a previous call — idempotent
             else:
-                tgt_short = src_short + _MIGRATION_BDEV_SUFFIX
+                base = src_short[:-len(_MIGRATION_BDEV_SUFFIX)] if src_short.endswith(_MIGRATION_BDEV_SUFFIX) else src_short
+                tgt_short = base + _MIGRATION_BDEV_SUFFIX
             snap.snap_bdev = f"{tgt_node.lvstore}/{tgt_short}"
 
         if tgt_short and tgt_short in spdk_info:
@@ -331,15 +333,13 @@ def _snap_short_name(snap):
 def _snap_tgt_short_name(snap):
     """Return the migration-target bdev short name for a snapshot.
 
-    Normally the target bdev is named <src_short> + _MIGRATION_BDEV_SUFFIX.
-    However, when apply_migration_to_db() is called early (at cutover time),
-    snap.snap_bdev is already updated to the target name which already carries the
-    suffix.  In that case return it as-is to avoid producing a double suffix (e.g.
-    'SNAP_16745mm' instead of 'SNAP_16745m').
+    Always strips any existing migration suffix before adding one so that
+    back-to-back migrations (where the source bdev already carries the suffix
+    from the previous migration) do not produce a double suffix like 'SNAP_16745mm'.
     """
     short = _snap_short_name(snap)
     if short.endswith(_MIGRATION_BDEV_SUFFIX):
-        return short   # apply_migration_to_db already updated this snap
+        short = short[:-len(_MIGRATION_BDEV_SUFFIX)]
     return short + _MIGRATION_BDEV_SUFFIX
 
 
@@ -630,7 +630,7 @@ def _setup_snap_transfer(snap, snap_index, migration, src_node, tgt_node,
     Callers are responsible for rolling back any previously launched transfers.
     """
     snap_uuid = snap.uuid
-    snap_short = _snap_short_name(snap) + _MIGRATION_BDEV_SUFFIX
+    snap_short = _snap_tgt_short_name(snap)
     src_composite = _snap_composite(src_node.lvstore, snap)
     tgt_composite = f"{tgt_node.lvstore}/{snap_short}"
 
@@ -748,7 +748,7 @@ def _post_process_snap(snap: SnapShot, tgt_node: StorageNode, tgt_rpc: RPCClient
             # Predecessor was created on target with the migration suffix — build
             # composite from the source short name + suffix, not from snap_bdev
             # (which still holds the source path until apply_migration_to_db runs).
-            pred_composite = f"{tgt_node.lvstore}/{_snap_short_name(pred_snap) + _MIGRATION_BDEV_SUFFIX}"
+            pred_composite = f"{tgt_node.lvstore}/{_snap_tgt_short_name(pred_snap)}"
             ret = tgt_rpc.bdev_lvol_add_clone(tgt_composite, pred_composite)
             if not ret:
                 return False, f"bdev_lvol_add_clone failed for {snap_uuid}"
@@ -875,8 +875,7 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                 except KeyError:
                     return False, True, f"Snapshot {snap_uuid} not found in DB"
 
-                snap_short_src = _snap_short_name(snap)
-                snap_short_tgt = snap_short_src + _MIGRATION_BDEV_SUFFIX
+                snap_short_tgt = _snap_tgt_short_name(snap)
                 src_composite = _snap_composite(src_node.lvstore, snap)
                 tgt_composite = f"{tgt_node.lvstore}/{snap_short_tgt}"
 
@@ -1087,8 +1086,7 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             if tgt_sec:
                 sec_rpc = _make_rpc(tgt_sec)
 
-        snap_short_src = _snap_short_name(snap)
-        snap_short_tgt = snap_short_src + _MIGRATION_BDEV_SUFFIX
+        snap_short_tgt = _snap_tgt_short_name(snap)
         src_composite  = _snap_composite(src_node.lvstore, snap)
         tgt_composite  = f"{tgt_node.lvstore}/{snap_short_tgt}"
 
@@ -1336,7 +1334,7 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                 src_rpc.bdev_nvme_detach_controller(ctrl_name)
                 _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc, secondary_rpc=sec_setup_rpc)
                 return False, True, f"Last snapshot {last_snap_uuid} not found"
-            tgt_snap_composite = f"{tgt_node.lvstore}/{_snap_short_name(last_snap) + _MIGRATION_BDEV_SUFFIX}"
+            tgt_snap_composite = f"{tgt_node.lvstore}/{_snap_tgt_short_name(last_snap)}"
         else:
             last_snap_uuid = migration.snaps_preexisting_on_target[-1]
             last_snap = db.get_snapshot_by_id(last_snap_uuid)
@@ -1742,12 +1740,6 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
     #           bdev_nvme_detach_controller can still reach the hub bdev.
     #   Step 8: delete source primary NVMe-oF subsystem.
     #   Then:   delete source lvol bdev.
-    # Step 7: release the hub controller back to the manager.
-    # HubControllerManager keeps it alive for IDLE_TIMEOUT seconds so that a
-    # back-to-back migration to the same target can reuse it without hitting
-    # the 'deleting' state race that an immediate detach would cause.
-    hub_manager.release(src_node.get_id(), tgt_node.get_id())
-    logger.info(f"Step 7: hub controller released to idle manager (src={src_node.get_id()[:8]} tgt={tgt_node.get_id()[:8]})")
     lvol = None
     try:
         lvol = db.get_lvol_by_id(migration.lvol_id)
