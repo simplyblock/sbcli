@@ -179,7 +179,7 @@ INSTANCE_STORAGE_DATA = {
 MAX_SNAP_COUNT = 100
 
 SPDK_PROXY_MULTI_THREADING_ENABLED=True
-SPDK_PROXY_TIMEOUT=60*5
+SPDK_PROXY_=60*5
 LVOL_NVME_CONNECT_RECONNECT_DELAY=2
 LVOL_NVME_CONNECT_CTRL_LOSS_TMO=60*60
 LVOL_NVME_CONNECT_FAST_IO_FAIL_TO=1
@@ -192,17 +192,19 @@ CLIENT_QPAIR_COUNT=3
 # when a peer dies, bdev_nvme's per-controller reset state machines run on
 # the same SPDK reactor thread that polls JM/heartbeat qpairs to other
 # peers, and the reactor can spend ~4 s in that bookkeeping. With a 4 s
-# timeout, in-flight heartbeats to *healthy* peers age past the threshold
-# during that stall, timeout_cb fires on every controller in lock-step,
+# , in-flight heartbeats to *healthy* peers age past the threshold
+# during that stall, _cb fires on every controller in lock-step,
 # and the JC marks N JM slots blocked simultaneously — dropping
 # n_safe_jms below the FT threshold and triggering a JCERR / DISTRIBD
 # write fail (observed 2026-04-30 14:14:22 on a dual-outage soak step,
 # stall measured at 4.144 s). 8 s absorbs the worst observed stall and
 # still fast-fails wedged targets ~10× faster than the previous abort-
 # hang path (multi-minute, the 2026-04-27 incident that motivated the
-# action_on_timeout=reset switch — that switch stays; only the threshold
+# action_on_=reset switch — that switch stays; only the threshold
 # reverts).
 NVME_TIMEOUT_US=8000000
+PCIE_TIMEOUT_US=2000000
+
 NVMF_MAX_SUBSYSTEMS=50000
 KATO=5000
 # transport_ack_timeout exponent: server tears down a client qpair if it

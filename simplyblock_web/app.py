@@ -24,11 +24,19 @@ logger = core_utils.get_logger(__name__)
 logger.setLevel(constants.LOG_WEB_LEVEL)
 logging.getLogger().setLevel(constants.LOG_WEB_LEVEL)
 
+# Prevent external libraries from logging secrets (tokens, response bodies)
+# at DEBUG level while keeping our own loggers at DEBUG.
+for _ext_logger_name in (
+    "kubernetes.client.rest",
+    "urllib3",
+):
+    logging.getLogger(_ext_logger_name).setLevel(logging.WARNING)
+
 access_logger = logging.getLogger('simplyblock_web.access')
 _access_handler = logging.StreamHandler(stream=sys.stdout)
 _access_handler.setFormatter(logging.Formatter(
     '%(asctime)s %(levelname)s %(client_ip)s'
-    ' "%(message)s" %(status_code)s %(request_size)s %(response_size)s %(duration_ms).2fms "%(user_agent)s"'
+    ' "%(message)s" %(status_code)s %(request_size)s %(response_size)s %(duration_ms).2fms'
 ))
 access_logger.addHandler(_access_handler)
 access_logger.propagate = False
@@ -40,12 +48,11 @@ core_utils.init_sentry_sdk()
 class AccessLogMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         client_ip = request.client.host if request.client else '-'
-        user_agent = request.headers.get('user-agent', '-')
         request_size = request.headers.get('content-length', '-')
 
+        # Query strings can carry credentials (?secret=…, ?token=…) and have
+        # no type info to mask by, so log the path only.
         path = request.url.path
-        if request.url.query:
-            path = f'{path}?{request.url.query}'
 
         start = time.monotonic()
         response = await call_next(request)
@@ -59,7 +66,6 @@ class AccessLogMiddleware(BaseHTTPMiddleware):
             path,
             extra={
                 'client_ip': client_ip,
-                'user_agent': user_agent,
                 'request_size': request_size,
                 'status_code': response.status_code,
                 'response_size': response_size,

@@ -7,6 +7,8 @@ import sys
 from typing import Mapping, Type, Union
 from collections import ChainMap
 
+from pydantic import SecretBytes, SecretStr
+
 
 class BaseModel(object):
 
@@ -75,6 +77,16 @@ class BaseModel(object):
                         if type(value) is list and dtype is int:
                             value = len(value)
 
+                elif dtype is SecretStr:
+                    value = value if isinstance(value, SecretStr) else SecretStr(value or "")
+                elif dtype is SecretBytes:
+                    if isinstance(value, SecretBytes):
+                        pass
+                    elif isinstance(value, (bytes, bytearray)):
+                        value = SecretBytes(bytes(value))
+                    else:
+                        value = SecretBytes((value or "").encode())
+
                 elif hasattr(dtype, '__origin__'):
                     if dtype.__origin__ is list:
                         if hasattr(dtype, "__args__") and hasattr(dtype.__args__[0], "from_dict"):
@@ -94,6 +106,16 @@ class BaseModel(object):
                             inner = inner_types[0] if inner_types else None
                             if inner is not None and hasattr(inner, "from_dict"):
                                 value = inner().from_dict(data[attr])
+                            elif inner is SecretStr:
+                                value = data[attr] if isinstance(data[attr], SecretStr) else SecretStr(data[attr] or "")
+                            elif inner is SecretBytes:
+                                raw = data[attr]
+                                if isinstance(raw, SecretBytes):
+                                    value = raw
+                                elif isinstance(raw, (bytes, bytearray)):
+                                    value = SecretBytes(bytes(raw))
+                                else:
+                                    value = SecretBytes((raw or "").encode())
                             elif inner is not None:
                                 value = inner(data[attr])
                 else:
@@ -102,27 +124,48 @@ class BaseModel(object):
         self.id = self.uuid
         return self
 
-    def to_dict(self):
+    def to_dict(self, unwrap_secrets: bool = False):
+        """Serialize to a plain dict.
+
+        With ``unwrap_secrets=False`` (default), ``SecretStr``/``SecretBytes``
+        instances stay wrapped — safe for logging, ``repr``, and ``pprint``. With
+        ``unwrap_secrets=True``, wrappers are replaced by their plaintext value,
+        producing a JSON-serializable structure for FoundationDB persistence.
+
+        ``unwrap_secrets`` propagates into nested ``BaseModel`` children so a
+        single ``write_to_db`` call unwraps end-to-end.
+        """
+        def _maybe_to_dict(value):
+            if isinstance(value, BaseModel):
+                return value.to_dict(unwrap_secrets=unwrap_secrets)
+            if isinstance(value, (SecretStr, SecretBytes)):
+                return value.get_secret_value() if unwrap_secrets else value
+            if isinstance(value, dict):
+                return {k: _maybe_to_dict(v) for k, v in value.items()}
+            if hasattr(value, "to_dict"):
+                return value.to_dict()
+            return value
+
         result: dict = {}
         for attr in self.get_attrs_map():
             value = getattr(self, attr)
             if isinstance(value, list):
-                result[attr] = list(map(lambda x: x.to_dict() if hasattr(x, "to_dict") else x, value))
+                result[attr] = [_maybe_to_dict(x) for x in value]
+            elif isinstance(value, BaseModel):
+                result[attr] = value.to_dict(unwrap_secrets=unwrap_secrets)
             elif hasattr(value, "to_dict"):
                 result[attr] = value.to_dict()
             elif isinstance(value, dict):
-                result[attr] = dict(map(
-                    lambda item: (item[0], item[1].to_dict())
-                    if hasattr(item[1], "to_dict") else item,
-                    value.items()
-                ))
+                result[attr] = {k: _maybe_to_dict(v) for k, v in value.items()}
+            elif isinstance(value, (SecretStr, SecretBytes)):
+                result[attr] = value.get_secret_value() if unwrap_secrets else value
             else:
                 result[attr] = value
 
         return result
 
-    def get_clean_dict(self):
-        data = self.to_dict()
+    def get_clean_dict(self, unwrap_secrets: bool = False):
+        data = self.to_dict(unwrap_secrets=unwrap_secrets)
         for key in ['name', 'object_type']:
             del data[key]
         data['status_code'] = self.get_status_code()
@@ -160,11 +203,12 @@ class BaseModel(object):
             kv_store = DBController().kv_store
         try:
             prefix = self.get_db_id()
-            st = json.dumps(self.to_dict())
+            st = json.dumps(self.to_dict(unwrap_secrets=True))
             kv_store.set(prefix.encode(), st.encode())
             return True
-        except Exception as e:
-            print(f"Error Writing to FDB! {e}")
+        except Exception:
+            from simplyblock_core import utils
+            utils.get_logger(__name__).exception("Error writing to FDB")
             exit(1)
 
     def remove(self, kv_store):

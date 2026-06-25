@@ -181,15 +181,20 @@ def _ensure_hub_attached(src_rpc, tgt_rpc, tgt_node, trtype, target_ip):
             ip,  tgt_node.transfer_hublvol.nvmf_port, trtype)
         if not ret:
             # Attach can fail with EEXIST if a prior crashed attempt attached the controller
-            # but the namespace wasn't in the subsystem yet (e.g. due to a bad nguid on the
-            # add_ns call).  Detach the zombie and retry once so the controller reconnects
-            # to a now-populated subsystem.
+            # but the namespace wasn't in the subsystem yet, or if the target SPDK restarted
+            # between migrations dropping the subsystem while the source controller persisted.
+            # Detach the zombie, re-ensure the hub subsystem is healthy on the target (idempotent),
+            # then retry once so the controller reconnects to a populated subsystem.
             if src_rpc.bdev_nvme_controller_list(tgt_node.transfer_hublvol.bdev_name):
                 logger.info(
                     "_ensure_hub_attached: zombie mighub controller found (no bdev); "
                     "detaching and reattaching"
                 )
                 src_rpc.bdev_nvme_detach_controller(tgt_node.transfer_hublvol.bdev_name)
+                try:
+                    tgt_node.create_transfer_hublvol()
+                except Exception as e:
+                    logger.warning(f"_ensure_hub_attached: hub subsystem re-create (non-fatal): {e}")
                 ret = src_rpc.bdev_nvme_attach_controller(
                     tgt_node.transfer_hublvol.bdev_name, tgt_node.transfer_hublvol.nqn,
                     ip, tgt_node.transfer_hublvol.nvmf_port, trtype)
@@ -1377,6 +1382,7 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         if tgt_map_id is None:
             return False, True, f"Could not find map_id for {lvol.lvol_bdev} on target"
 
+        logger.info(f"[MAP_ID] {tgt_lvol_bdev} map_id={tgt_map_id} uuid={tgt_uuid} on {tgt_node.get_id()[:8]}")
         sec_setup_rpc = None
 
         # NVMe-oF subsystem setup is deferred to the Done handler — the subsystem
@@ -1387,7 +1393,9 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         ctrl_name, hub_bdev, hub_err = _ensure_hub_attached(
             src_rpc, tgt_rpc, tgt_node, trtype, target_ip)
         if hub_err:
-            _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc, secondary_rpc=sec_setup_rpc)
+            # Do NOT delete the target bdev on hub error — it is unrelated to
+            # the hub connection and deleting it forces a recreate on retry,
+            # which changes its map_id and breaks concurrent migration tracking.
             return False, True, hub_err
 
         # Step 4: locate the last migrated snapshot's composite name on the target
@@ -1436,7 +1444,10 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             src_lvol_composite, tgt_map_id, tgt_snap_composite, 2, hub_bdev)
         if ret is None:
             src_rpc.bdev_nvme_detach_controller(ctrl_name)
-            _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc, secondary_rpc=sec_setup_rpc)
+            # Do NOT delete the target bdev on transfer failure — the bdev is
+            # still valid and retaining it keeps the map_id stable across retries.
+            # Deleting it would force a recreate at a higher map_id (due to
+            # concurrent migrations creating bdevs in the interim).
             return False, True, "bdev_lvol_final_migration failed"
 
         logger.info(
@@ -1808,14 +1819,15 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
     #           bdev_nvme_detach_controller can still reach the hub bdev.
     #   Step 8: delete source primary NVMe-oF subsystem.
     #   Then:   delete source lvol bdev.
-    hub_ctrl_name = ctx.get('hub_ctrl_name')
-    if hub_ctrl_name:
-        try:
-            src_rpc.bdev_nvme_detach_controller(hub_ctrl_name)
-            logger.info(f"Step 7: deferred hub controller detach: {hub_ctrl_name}")
-        except Exception as e:
-            logger.warning(f"Deferred hub detach {hub_ctrl_name} (non-fatal): {e}")
-
+    # TODO: reenable hub detach after migration — currently disabled to keep hub controller attached for debugging.
+    # TEMP: keep hub controller attached after migration
+    # hub_ctrl_name = ctx.get('hub_ctrl_name')
+    # if hub_ctrl_name:
+    #     try:
+    #         src_rpc.bdev_nvme_detach_controller(hub_ctrl_name)
+    #         logger.info(f"Step 7: deferred hub controller detach: {hub_ctrl_name}")
+    #     except Exception as e:
+    #         logger.warning(f"Deferred hub detach {hub_ctrl_name} (non-fatal): {e}")
     lvol = None
     try:
         lvol = db.get_lvol_by_id(migration.lvol_id)

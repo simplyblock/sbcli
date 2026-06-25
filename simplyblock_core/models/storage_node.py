@@ -4,6 +4,8 @@ from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 from uuid import uuid4
 
+from pydantic import SecretStr
+
 from simplyblock_core import utils, constants
 from simplyblock_core.models.base_model import BaseNodeObject, BaseModel
 from simplyblock_core.models.hublvol import HubLVol
@@ -46,7 +48,7 @@ class StorageNode(BaseNodeObject):
     cluster_id: str = ""
     cpu: int = 0
     cpu_hz: int = 0
-    ctrl_secret: str = ""
+    ctrl_secret: SecretStr = SecretStr("")
     data_nics: List[IFace] = []
     distrib_cpu_cores: List[int] = []
     distrib_cpu_index: int = 0
@@ -58,7 +60,7 @@ class StorageNode(BaseNodeObject):
     # health is only measured/shown for ONLINE or DOWN nodes.
     health_check: Optional[bool] = True
     host_nqn: str = ""
-    host_secret: str = ""
+    host_secret: SecretStr = SecretStr("")
     hostname: str = ""
     hugepages: int = 0
     ib_devices: List[IFace] = []
@@ -112,7 +114,7 @@ class StorageNode(BaseNodeObject):
     raid: str = ""
     remote_devices: List[RemoteDevice] = []
     remote_jm_devices: List[RemoteJMDevice] = []
-    rpc_password: str = ""
+    rpc_password: SecretStr = SecretStr("")
     rpc_port: int = -1
     rpc_username: str = ""
     secondary_node_id: str = ""

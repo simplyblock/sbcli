@@ -49,6 +49,9 @@ def argument_type(spec):
     if spec == 'list':
         return "list_type()"
 
+    if spec == 'secret':
+        return "SecretStr"
+
     return spec
 
 

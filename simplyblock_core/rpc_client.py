@@ -5,12 +5,14 @@ from json import JSONDecodeError
 from typing import Any, Optional
 
 import requests
+from pydantic import SecretStr
 from requests.exceptions import ConnectionError, HTTPError, Timeout, TooManyRedirects
 import jsonschema
 from jsonschema.exceptions import ValidationError
 
 from simplyblock_core import utils, constants
 from simplyblock_core.settings import Settings
+from simplyblock_core.utils.secrets import unwrap_secrets_for_send
 from requests.adapters import HTTPAdapter
 from urllib3 import Retry
 
@@ -105,7 +107,7 @@ class RPCClient:
     DEFAULT_ALLOWED_METHODS = ["HEAD", "GET", "PUT", "DELETE", "OPTIONS", "TRACE"]
     RPC_NO_PRINT_OUTPUT = ["bdev_get_bdevs", "nvmf_get_subsystems", "bdev_get_iostat"]
 
-    def __init__(self, host, port, username, password, timeout=180, retry=3):
+    def __init__(self, host, port, username, password: SecretStr, timeout=180, retry=3):
         self.host = host
         self.port = port
         settings = Settings()
@@ -117,7 +119,7 @@ class RPCClient:
         self.session = requests.session()
         if settings.tls_connect != "disabled":
             self.session.verify = str(settings.tls_certificate_authority)
-        self.session.auth = (self.username, self.password)
+        self.session.auth = (self.username, self.password.get_secret_value())
         retries = Retry(total=retry, backoff_factor=1, connect=retry, read=retry,
                         allowed_methods=self.DEFAULT_ALLOWED_METHODS)
         self.session.mount("http://", HTTPAdapter(max_retries=retries))
@@ -146,7 +148,7 @@ class RPCClient:
         return ret
 
     def _request2(self, method, params=None, request_timeout=None):
-        payload = {'id': 1, 'method': method}
+        payload: dict = {'id': 1, 'method': method}
         if params:
             payload['params'] = params
         # Per-call override of the client-level HTTP timeout. Used by callers
@@ -156,7 +158,8 @@ class RPCClient:
         effective_timeout = request_timeout if request_timeout is not None else self.timeout
         try:
             logger.debug("From: %s, Requesting method: %s, params: %s", self.host, method, params)
-            response = self.session.post(self.url, data=json.dumps(payload), timeout=effective_timeout)
+            wire_payload = unwrap_secrets_for_send(payload)
+            response = self.session.post(self.url, data=json.dumps(wire_payload), timeout=effective_timeout)
         except Exception:
             raise RPCException("connection error")
 
@@ -169,10 +172,11 @@ class RPCClient:
         if ret_code == 200:
             try:
                 data = response.json()
-                if method not in self.RPC_NO_PRINT_OUTPUT:
+                if method not in self.RPC_NO_PRINT_OUTPUT and Settings().log_response_bodies:
                     logger.debug("Response json: %s", json.dumps(data))
             except Exception:
-                logger.debug("Response ret_content: %s", ret_content)
+                if Settings().log_response_bodies:
+                    logger.debug("Response ret_content: %s", ret_content)
                 return ret_content, None
 
             if 'result' in data:
@@ -192,11 +196,12 @@ class RPCClient:
     def _request3(self, method: str, **kwargs):
         logger.debug("Requesting method: %s, params: %s", method, kwargs)
         try:
-            response = self.session.post(self.url, data=json.dumps({
+            wire_payload = unwrap_secrets_for_send({
                 'id': 1,
                 'method': method,
                 'params': kwargs,
-            }), timeout=self.timeout)
+            })
+            response = self.session.post(self.url, data=json.dumps(wire_payload), timeout=self.timeout)
             response.raise_for_status()
             data = response.json()
             _response_validator.validate(data)
@@ -992,6 +997,7 @@ class RPCClient:
             "reconnect_delay_sec": constants.RECONNECT_DELAY_CLUSTER,
             "keep_alive_timeout_ms": constants.KATO,
             "timeout_us": constants.NVME_TIMEOUT_US,
+            "pci_timeout_us": constants.PCIE_TIMEOUT_US,
             "transport_ack_timeout": constants.ACK_TO,
             # action_on_timeout=abort caused multi-minute IO hangs when a
             # remote target wedged: the timeout_cb sent an NVMe abort that

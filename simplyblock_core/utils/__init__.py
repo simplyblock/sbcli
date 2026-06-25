@@ -14,6 +14,8 @@ import uuid
 import time
 from datetime import datetime, timezone
 from typing import Union, Any, Optional, Tuple, List, Dict, Iterable
+
+from pydantic import SecretStr
 from docker import DockerClient
 from kubernetes import client, config
 from kubernetes.client import ApiException, V1Deployment, V1DeploymentSpec, V1ObjectMeta, \
@@ -287,12 +289,12 @@ def print_table_dict(node_stats):
     print(print_table(d))
 
 
-def generate_rpc_user_and_pass():
+def generate_rpc_user_and_pass() -> Tuple[str, SecretStr]:
     def _generate_string(length):
         return ''.join(random.SystemRandom().choice(
             string.ascii_letters + string.digits) for _ in range(length))
 
-    return _generate_string(8), _generate_string(16)
+    return _generate_string(8), SecretStr(_generate_string(16))
 
 
 def parse_history_param(history_string):
@@ -678,7 +680,11 @@ def decimal_to_hex_power_of_2(decimal_number):
 
 def get_logger(name=""):
     # first configure a root logger
-    logging.getLogger("urllib3.connectionpool").setLevel(logging.WARNING)
+    # Silence external libraries that log secrets (tokens, full HTTP response
+    # bodies) at DEBUG level.  Keep them at WARNING so our own DEBUG logging
+    # is unaffected.
+    for _ext in ("urllib3", "kubernetes.client.rest"):
+        logging.getLogger(_ext).setLevel(logging.WARNING)
     logg = logging.getLogger()
 
     log_level = os.getenv("SIMPLYBLOCK_LOG_LEVEL")
@@ -2741,7 +2747,7 @@ def get_mgmt_ip(node_info: Any, iface_names: Union[str, list[str]]) -> Optional[
     return None
 
 
-def get_fdb_cluster_string(configmap_name: str, namespace: str) -> str:
+def get_fdb_cluster_string(configmap_name: str, namespace: str) -> SecretStr:
     load_kube_config_with_fallback()
     v1 = client.CoreV1Api()
 
@@ -2749,8 +2755,8 @@ def get_fdb_cluster_string(configmap_name: str, namespace: str) -> str:
         cm = v1.read_namespaced_config_map(configmap_name, namespace)
         cluster_file = cm.data.get("cluster-file") if cm.data else None
         if cluster_file:
-            logger.info(f"fdb cluster connection string: {cluster_file}")
-            return cluster_file
+            logger.info("fdb cluster connection string retrieved")
+            return SecretStr(cluster_file)
         else:
             raise ValueError("cluster-file not found in ConfigMap")
     except client.exceptions.ApiException as e:

@@ -20,6 +20,8 @@ import inspect
 import unittest
 from unittest.mock import MagicMock, patch
 
+from pydantic import SecretStr
+
 from tests._mocks import make_mock_cluster
 
 
@@ -254,10 +256,10 @@ class TestPoolModelDhchapFields(unittest.TestCase):
         return Pool()
 
     def test_dhchap_key_default_empty(self):
-        self.assertEqual(self._pool().dhchap_key, "")
+        self.assertEqual(self._pool().dhchap_key.get_secret_value(), "")
 
     def test_dhchap_ctrlr_key_default_empty(self):
-        self.assertEqual(self._pool().dhchap_ctrlr_key, "")
+        self.assertEqual(self._pool().dhchap_ctrlr_key.get_secret_value(), "")
 
     def test_allowed_hosts_default_empty_list(self):
         self.assertEqual(self._pool().allowed_hosts, [])
@@ -304,8 +306,9 @@ class TestAddPoolKeyGeneration(unittest.TestCase):
 
     def test_key_is_dhhc1_format(self):
         pool_obj = self._run_add(dhchap=True)
-        self.assertTrue(str(pool_obj.dhchap_key).startswith("DHHC-1:"),
-                        f"Expected DHHC-1 prefix, got: {pool_obj.dhchap_key}")
+        key_value = pool_obj.dhchap_key.get_secret_value()
+        self.assertTrue(key_value.startswith("DHHC-1:"),
+                        f"Expected DHHC-1 prefix, got: {key_value}")
 
     def test_two_distinct_keys_generated(self):
         pool_obj = self._run_add(dhchap=True)
@@ -330,8 +333,8 @@ def _make_dhchap_pool(pool_id="pool-1", hosts=None):
     p = Pool()
     p.uuid = pool_id
     p.dhchap = True
-    p.dhchap_key = "DHHC-1:01:aGVsbG8=:"
-    p.dhchap_ctrlr_key = "DHHC-1:01:d29ybGQ=:"
+    p.dhchap_key = SecretStr("DHHC-1:01:aGVsbG8=:")
+    p.dhchap_ctrlr_key = SecretStr("DHHC-1:01:d29ybGQ=:")
     p.allowed_hosts = list(hosts or [])
     return p
 
@@ -687,8 +690,8 @@ def _make_connect_ctx(lvol_allowed_hosts, pool_dhchap_key="", pool_dhchap_ctrlr_
 
     pool = Pool()
     pool.uuid = "pool-1"
-    pool.dhchap_key = pool_dhchap_key
-    pool.dhchap_ctrlr_key = pool_dhchap_ctrlr_key
+    pool.dhchap_key = SecretStr(pool_dhchap_key)
+    pool.dhchap_ctrlr_key = SecretStr(pool_dhchap_ctrlr_key)
 
     db_patch = patch(
         "simplyblock_core.controllers.lvol_controller.DBController")

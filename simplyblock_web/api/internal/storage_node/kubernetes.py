@@ -8,7 +8,6 @@ import traceback
 from typing import List, Optional, Union
 
 import cpuinfo
-import requests
 from flask_openapi3 import APIBlueprint
 from kubernetes.client import ApiException, V1DeleteOptions
 from jinja2 import Environment, PackageLoader
@@ -21,6 +20,7 @@ from simplyblock_web import utils, node_utils, node_utils_k8s
 from simplyblock_web.node_utils_k8s import namespace_id_file
 
 from . import docker as snode_ops
+from ._cloud_info import get_cloud_info
 
 
 logger = logging.getLogger(__name__)
@@ -40,45 +40,6 @@ def set_namespace(namespace):
     with open(namespace_id_file, "w+") as f:
         f.write(namespace)
     return True
-
-
-def get_google_cloud_info():
-    try:
-        headers = {'Metadata-Flavor': 'Google'}
-        response = requests.get("http://169.254.169.254/computeMetadata/v1/instance/?recursive=true", headers=headers, timeout=2)
-        data = response.json()
-        return {
-            "id": str(data["id"]),
-            "type": data["machineType"].split("/")[-1],
-            "cloud": "google",
-            "ip": data["networkInterfaces"][0]["ip"],
-            "public_ip": data["networkInterfaces"][0]["accessConfigs"][0]["externalIp"],
-        }
-    except Exception:
-        pass
-
-
-def get_equinix_cloud_info():
-    try:
-        response = requests.get("https://metadata.platformequinix.com/metadata", timeout=2)
-        data = response.json()
-        public_ip = ""
-        ip = ""
-        for interface in data["network"]["addresses"]:
-            if interface["address_family"] == 4:
-                if interface["enabled"] and interface["public"]:
-                    public_ip = interface["address"]
-                elif interface["enabled"] and not interface["public"]:
-                    public_ip = interface["address"]
-        return {
-            "id": str(data["id"]),
-            "type": data["class"],
-            "cloud": "equinix",
-            "ip": public_ip,
-            "public_ip": ip
-        }
-    except Exception:
-        pass
 
 
 @api.get('/scan_devices', responses={
@@ -241,13 +202,7 @@ api.post('/delete_dev_gpt_partitions')(snode_ops.delete_gpt_partitions_for_dev)
 CPU_INFO = cpuinfo.get_cpu_info()
 HOSTNAME, _, _ = shell_utils.run_command("hostname -s")
 SYSTEM_ID = ""
-CLOUD_INFO = snode_ops.get_amazon_cloud_info()
-if not CLOUD_INFO:
-    CLOUD_INFO = get_google_cloud_info()
-
-if not CLOUD_INFO:
-    CLOUD_INFO = get_equinix_cloud_info()
-
+CLOUD_INFO = get_cloud_info() or {}
 if CLOUD_INFO:
     SYSTEM_ID = CLOUD_INFO["id"]
 else:

@@ -9,6 +9,7 @@ import requests
 
 import docker
 from kubernetes import client as k8s_client
+from pydantic import SecretStr
 
 
 from simplyblock_core import utils, scripts, constants
@@ -20,10 +21,10 @@ logger = logging.getLogger()
 
 
 
-def deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret, mode):
+def deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret: SecretStr, mode):
 
     try:
-        headers = {'Authorization': f'{cluster_id} {cluster_secret}'}
+        headers = {'Authorization': f'{cluster_id} {cluster_secret.get_secret_value()}'}
         resp = requests.get(f"http://{cluster_ip}/api/v1/cluster/{cluster_id}", headers=headers)
         resp_json = resp.json()
         cluster_data = resp_json['results'][0]

@@ -11,6 +11,7 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi import HTTPException
 from fastapi.security import HTTPAuthorizationCredentials
+from pydantic import SecretStr
 
 
 def _make_credentials(token: str) -> HTTPAuthorizationCredentials:
@@ -96,7 +97,7 @@ class TestAuthorizedCluster:
     def _cluster(self, id: str, secret: str) -> MagicMock:
         c = MagicMock()
         c.id = id
-        c.secret = secret
+        c.secret = SecretStr(secret)
         return c
 
     def test_returns_uuid_for_matching_secret(self):

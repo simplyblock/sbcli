@@ -25,6 +25,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from threading import Thread
 
 import requests
+from pydantic import SecretStr
 
 # ---------------------------------------------------------------------------
 # Mock SPDK JSON-RPC server
@@ -310,7 +311,7 @@ class TestDHCHAPE2E(unittest.TestCase):
         from simplyblock_core.rpc_client import RPCClient
 
         snode_client = SNodeClient(f"127.0.0.1:{SNODE_API_PORT}")
-        rpc_client = RPCClient("127.0.0.1", MOCK_SPDK_PORT, "", "")
+        rpc_client = RPCClient("127.0.0.1", MOCK_SPDK_PORT, "", SecretStr(""))
 
         # Write key file
         key_content = "DHHC-1:01:dGVzdGtleQ==:"
@@ -331,7 +332,7 @@ class TestDHCHAPE2E(unittest.TestCase):
         from simplyblock_core.utils import generate_dhchap_key
 
         snode_client = SNodeClient(f"127.0.0.1:{SNODE_API_PORT}")
-        rpc_client = RPCClient("127.0.0.1", MOCK_SPDK_PORT, "", "")
+        rpc_client = RPCClient("127.0.0.1", MOCK_SPDK_PORT, "", SecretStr(""))
 
         host_nqn = "nqn.2014-08.org.nvmexpress:uuid:test-host-1"
         subsys_nqn = "nqn.2023-02.io.simplyblock:test:subsys1"
@@ -378,7 +379,7 @@ class TestDHCHAPE2E(unittest.TestCase):
     def test_subsystem_add_host_fails_without_keyring_registration(self):
         """SPDK rejects add_host when dhchap_key name is not in the keyring."""
         from simplyblock_core.rpc_client import RPCClient
-        rpc_client = RPCClient("127.0.0.1", MOCK_SPDK_PORT, "", "")
+        rpc_client = RPCClient("127.0.0.1", MOCK_SPDK_PORT, "", SecretStr(""))
 
         subsys_nqn = "nqn:test:subsys2"
         rpc_client._request("nvmf_create_subsystem", {"nqn": subsys_nqn})
@@ -404,9 +405,9 @@ class TestDHCHAPE2E(unittest.TestCase):
         snode.mgmt_ip = "127.0.0.1"
         snode.rpc_port = MOCK_SPDK_PORT
         snode.rpc_username = ""
-        snode.rpc_password = ""
+        snode.rpc_password = SecretStr("")
 
-        rpc_client = RPCClient("127.0.0.1", MOCK_SPDK_PORT, "", "")
+        rpc_client = RPCClient("127.0.0.1", MOCK_SPDK_PORT, "", SecretStr(""))
 
         host_nqn = "nqn.2014-08.org.nvmexpress:uuid:e2e-host"
         host_entry = {
@@ -465,8 +466,8 @@ class TestDHCHAPE2E(unittest.TestCase):
         from simplyblock_core.models.pool import Pool
         pool = Pool()
         pool.uuid = "pool-1"
-        pool.dhchap_key = dhchap_key
-        pool.dhchap_ctrlr_key = dhchap_ctrlr_key
+        pool.dhchap_key = SecretStr(dhchap_key)
+        pool.dhchap_ctrlr_key = SecretStr(dhchap_ctrlr_key)
 
         lvol = LVol()
         lvol.uuid = "lvol-1"

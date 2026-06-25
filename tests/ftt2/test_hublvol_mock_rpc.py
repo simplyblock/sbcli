@@ -21,6 +21,7 @@ import uuid as _uuid_mod
 from unittest.mock import patch
 
 import pytest
+from pydantic import SecretStr
 
 from simplyblock_core.models.hublvol import HubLVol
 from simplyblock_core.models.iface import IFace
@@ -59,7 +60,7 @@ def _make_node(ip: str, lvstore: str, port: int, jm_vuid: int) -> StorageNode:
     n.mgmt_ip = "127.0.0.1"
     n.rpc_port = port
     n.rpc_username = "spdkuser"
-    n.rpc_password = "spdkpass"
+    n.rpc_password = SecretStr("spdkpass")
     n.active_tcp = True
     n.active_rdma = False
     n.data_nics = [_make_nic(ip)]

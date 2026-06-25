@@ -8,6 +8,8 @@ import string
 import time
 import uuid
 
+from pydantic import SecretStr
+
 from simplyblock_core import utils
 from simplyblock_core.controllers import pool_events, lvol_controller
 from simplyblock_core.db_controller import DBController
@@ -98,8 +100,8 @@ def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes,
 
     pool.dhchap = bool(dhchap)
     if pool.dhchap:
-        pool.dhchap_key = utils.generate_dhchap_key(length=32)
-        pool.dhchap_ctrlr_key = utils.generate_dhchap_key(length=32)
+        pool.dhchap_key = SecretStr(utils.generate_dhchap_key(length=32))
+        pool.dhchap_ctrlr_key = SecretStr(utils.generate_dhchap_key(length=32))
 
 
     try:
@@ -504,7 +506,8 @@ def get_pool_total_capacity(pool_id, all_lvols=None, all_snaps=None):
     if not all_lvols:
         all_lvols = db_controller.get_lvols_by_pool_id(pool_id)
     for lvol in all_lvols:
-        total += lvol.size
+        if lvol.pool_uuid == pool_id:
+            total += lvol.size
 
     if not all_snaps:
         all_snaps = db_controller.get_mini_snapshots()
