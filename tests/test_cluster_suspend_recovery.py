@@ -94,6 +94,7 @@ def _cluster(status=Cluster.STATUS_ACTIVE, distr_ndcs=1, distr_npcs=2,
     c.distr_ndcs = distr_ndcs
     c.distr_npcs = distr_npcs
     c.strict_node_anti_affinity = strict_anti_affinity
+    c.max_fault_tolerance = distr_npcs
     return c
 
 

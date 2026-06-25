@@ -1020,6 +1020,16 @@ def set_cluster_status(cl_id, status) -> None:
 
     old_status = cluster.status
     cluster.status = status
+    # Track when the cluster enters / leaves IN_ACTIVATION so the
+    # storage_node_monitor watchdog can detect a wedged activation and revert
+    # it. A half-finished cluster_activate otherwise leaves the cluster stuck
+    # in IN_ACTIVATION forever — auto-restart refuses to queue while the
+    # cluster is not SUSPENDED, so the cluster can never recover on its own
+    # (incident 2026-06-25).
+    if status == Cluster.STATUS_IN_ACTIVATION:
+        cluster.in_activation_since = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    elif old_status == Cluster.STATUS_IN_ACTIVATION:
+        cluster.in_activation_since = ""
     cluster.write_to_db(db_controller.kv_store)
     cluster_events.cluster_status_change(cluster, cluster.status, old_status)
 

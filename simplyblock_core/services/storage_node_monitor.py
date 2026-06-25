@@ -21,6 +21,16 @@ utils.init_sentry_sdk()
 
 node_rpc_timeout_threads: dict[str, threading.Thread] = {}
 
+# A cluster_activate() that wedges — started before all nodes were back, or
+# blocked/aborted partway through its per-node recreate RPCs — leaves the
+# cluster stuck in IN_ACTIVATION. The monitor early-returns on IN_ACTIVATION
+# and add_node_to_auto_restart refuses to queue restarts while the cluster is
+# not SUSPENDED, so the cluster can never recover on its own (incident
+# 2026-06-25: ~2h11m hang). If the cluster has been IN_ACTIVATION longer than
+# this, revert it to SUSPENDED so the gated activation + auto-restart re-queue
+# paths run again. A healthy activation completes in well under a minute.
+CLUSTER_ACTIVATION_WATCHDOG_SEC = 600
+
 
 def is_new_migrated_node(cluster_id, node):
     dev_lst = []
@@ -181,6 +191,88 @@ def _requeue_stuck_auto_restarts(cluster_id):
         logger.error("Auto-restart re-queue scan failed for cluster %s: %s", cluster_id, e)
 
 
+def _activation_node_gate(cluster_id, nodes, max_fault_tolerance):
+    """Decide whether the storage nodes are settled enough to (re)activate.
+
+    Returns ``(can_activate: bool, reason: str)``.
+
+    Auto-reactivation must NOT start until the outage has fully recovered —
+    all nodes brought back ONLINE one-by-one — otherwise it either fires
+    uselessly while nodes are still UNREACHABLE (race #1) or wedges the
+    cluster in IN_ACTIVATION when it runs against a not-yet-online node
+    (race #2). Both were observed in incident 2026-06-25. Rules:
+
+      * No node may be mid-transition (IN_SHUTDOWN / IN_CREATION / RESTARTING)
+        or UNREACHABLE — recovery is still in flight; activating now races the
+        still-restarting nodes.
+      * Every node must be ONLINE, EXCEPT up to ``max_fault_tolerance`` nodes
+        that an operator *deliberately* shut down (``auto_restart_disabled``):
+        those are not coming back on their own and the cluster is designed to
+        run without up-to-FTT of them.
+      * A node that is OFFLINE / DOWN / SCHEDULABLE but was NOT a deliberate
+        shutdown is still recovering (auto-restart will bring it back) — wait.
+      * Prior guards preserved: a node with an active restart task, or one
+        ONLINE for < 30s (not yet settled), block activation.
+    """
+    ftt = max_fault_tolerance if isinstance(max_fault_tolerance, int) and max_fault_tolerance >= 1 else 1
+    deliberate_down = 0
+    for node in nodes:
+        if node.status == StorageNode.STATUS_REMOVED:
+            continue
+        if node.status in (StorageNode.STATUS_IN_SHUTDOWN, StorageNode.STATUS_IN_CREATION,
+                            StorageNode.STATUS_RESTARTING, StorageNode.STATUS_UNREACHABLE):
+            return False, f"node {node.get_id()} is still transitioning ({node.status})"
+        if node.status != StorageNode.STATUS_ONLINE:
+            # OFFLINE / DOWN / SCHEDULABLE.
+            if getattr(node, "auto_restart_disabled", False):
+                deliberate_down += 1
+                continue
+            return False, (f"node {node.get_id()} is {node.status} and was not deliberately "
+                           f"shut down; waiting for it to restart and come back online")
+        # ONLINE from here on.
+        if tasks_controller.get_active_node_restart_task(cluster_id, node.get_id()):
+            return False, f"node {node.get_id()} has an active restart task"
+        if node.online_since:
+            try:
+                diff = datetime.now(timezone.utc) - datetime.fromisoformat(node.online_since)
+                if diff.total_seconds() < 30:
+                    return False, f"node {node.get_id()} has been online less than 30 seconds"
+            except (ValueError, TypeError):
+                pass
+    if deliberate_down > ftt:
+        return False, (f"{deliberate_down} deliberately-shut-down node(s) exceed the cluster "
+                       f"fault tolerance ({ftt}); not enough nodes to activate safely")
+    return True, ""
+
+
+def _watchdog_stuck_activation(cluster):
+    """Revert a cluster wedged in IN_ACTIVATION back to SUSPENDED.
+
+    ``cluster_activate`` runs in the monitor's own status thread; if a tick's
+    activation died or returned without completing the transition, the status
+    stays IN_ACTIVATION, every later tick early-returns, and
+    ``add_node_to_auto_restart`` refuses to queue restarts while the cluster
+    is not SUSPENDED — a deadlock that never clears on its own (incident
+    2026-06-25). After ``CLUSTER_ACTIVATION_WATCHDOG_SEC`` with no completion,
+    flip back to SUSPENDED so the gated activation and the auto-restart
+    re-queue scan run again.
+    """
+    since = getattr(cluster, "in_activation_since", "")
+    if not since:
+        return
+    try:
+        elapsed = (datetime.now(timezone.utc) - datetime.fromisoformat(since)).total_seconds()
+    except (ValueError, TypeError):
+        return
+    if elapsed < CLUSTER_ACTIVATION_WATCHDOG_SEC:
+        return
+    logger.error(
+        "Cluster %s stuck in IN_ACTIVATION for %.0fs (> %ds); reverting to SUSPENDED so "
+        "activation re-gates and auto-restart can re-queue",
+        cluster.get_id(), elapsed, CLUSTER_ACTIVATION_WATCHDOG_SEC)
+    cluster_ops.set_cluster_status(cluster.get_id(), Cluster.STATUS_SUSPENDED)
+
+
 def update_cluster_status(cluster_id):
     # Run the re-queue scan FIRST, before any of the transition branches
     # that may early-return. Otherwise OFFLINE/SCHEDULABLE nodes can stay
@@ -252,7 +344,13 @@ def update_cluster_status(cluster_id):
                 logger.exception(
                     "Auto shared_placement enable raised for cluster %s", cluster_id)
 
-    if current_cluster_status in [Cluster.STATUS_UNREADY, Cluster.STATUS_IN_ACTIVATION, Cluster.STATUS_IN_EXPANSION]:
+    if current_cluster_status == Cluster.STATUS_IN_ACTIVATION:
+        # Don't drive transitions while an activation is in flight, but check
+        # whether it has wedged (incident 2026-06-25) and revert if so.
+        _watchdog_stuck_activation(cluster)
+        return
+
+    if current_cluster_status in [Cluster.STATUS_UNREADY, Cluster.STATUS_IN_EXPANSION]:
         return
 
     if current_cluster_status == Cluster.STATUS_DEGRADED and next_current_status == Cluster.STATUS_ACTIVE:
@@ -265,33 +363,20 @@ def update_cluster_status(cluster_id):
         return
     elif current_cluster_status == Cluster.STATUS_SUSPENDED and next_current_status \
             in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED]:
-        # needs activation
-        # check node status, check auto restart for nodes
-        can_activate = True
-        for node in db.get_storage_nodes_by_cluster_id(cluster_id):
-            if node.status in [StorageNode.STATUS_IN_SHUTDOWN, StorageNode.STATUS_IN_CREATION,
-                               StorageNode.STATUS_RESTARTING]:
-                logger.error(f"can not activate cluster: node is not in correct status {node.get_id()}: {node.status}")
-                can_activate = False
-                break
-
-            # if node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_REMOVED]:
-            #     logger.error(f"can not activate cluster: node in not online {node.get_id()}: {node.status}")
-            #     can_activate = False
-            #     break
-            if tasks_controller.get_active_node_restart_task(cluster_id, node.get_id()):
-                logger.error("can not activate cluster: restart tasks found")
-                can_activate = False
-                break
-
-            if node.online_since:
-                diff = datetime.now(timezone.utc) - datetime.fromisoformat(node.online_since)
-                if diff.total_seconds() < 30:
-                    logger.error(f"can not activate cluster: node is online less than 30 seconds: {node.get_id()}")
-                    can_activate = False
-                    break
-
-        if can_activate:
+        # needs activation — but only once the outage has fully recovered.
+        # Auto-reactivation must NOT start while nodes are still UNREACHABLE
+        # or mid-restart: it either fires uselessly (race #1) or wedges the
+        # cluster in IN_ACTIVATION against a not-yet-online node (race #2).
+        # Wait until every node is back ONLINE one-by-one, allowing up to FTT
+        # deliberately shut-down nodes to stay down (incident 2026-06-25).
+        can_activate, reason = _activation_node_gate(
+            cluster_id,
+            db.get_storage_nodes_by_cluster_id(cluster_id),
+            cluster.max_fault_tolerance,
+        )
+        if not can_activate:
+            logger.warning("can not activate cluster: %s", reason)
+        else:
             cluster_ops.cluster_activate(cluster_id, force=True)
     else:
         cluster_ops.set_cluster_status(cluster_id, next_current_status)
