@@ -845,20 +845,26 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
     ter_rpc = None
 
     # ── PRE-SCAN: mark snapshots already on target as pre-existing ────────────
-    # Query the target lvstore once and cross-reference the full migration plan.
-    # Any planned snap whose target bdev already exists AND whose DB snap_bdev
-    # already points to the target was fully migrated by a prior migration —
-    # mark it pre-existing so we never attempt to delete+recreate it.
-    # Writable leftovers (DB snap_bdev still points to source) are NOT marked
-    # here; they fall through to the per-snap pre-cleanup to be deleted and
-    # retransferred as before.
+    # Query the target lvstore once. Any planned snap whose target bdev already
+    # exists AND is immutable (is_snapshot=true in SPDK) was fully converted by
+    # a prior migration — mark pre-existing so we skip the transfer entirely.
+    # We use the SPDK is_snapshot flag rather than the DB snap_bdev field because
+    # snap_bdev is not updated until apply_migration_to_db() runs at the very end
+    # of CLEANUP_SOURCE; a migration that succeeded at SNAP_COPY but failed later
+    # would leave immutable snapshots on the target with stale DB records.
+    # Writable bdevs (is_snapshot=false) are leftovers from a crashed transfer —
+    # they fall through to the per-snap pre-cleanup to be deleted and retried.
     if ctx.get('stage') != 'parallel_transfer' and plan:
         try:
             _tgt_lvols = tgt_rpc.bdev_lvol_get_lvols(tgt_node.lvstore) or []
-            _tgt_short_set = {e.get('name', '').split('/')[-1] for e in _tgt_lvols}
+            _tgt_immutable = {
+                e.get('name', '').split('/')[-1]
+                for e in _tgt_lvols
+                if e.get('is_snapshot', False)
+            }
         except Exception as _pre_e:
             logger.warning(f"Pre-scan: bdev_lvol_get_lvols failed ({_pre_e}); skipping")
-            _tgt_short_set = set()
+            _tgt_immutable = set()
 
         _pre_scan_updated = False
         for _snap_uuid in plan:
@@ -870,13 +876,10 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             except KeyError:
                 continue
             _short_tgt = _snap_tgt_short_name(_s)
-            if _short_tgt not in _tgt_short_set:
-                continue
-            _tgt_comp = f"{tgt_node.lvstore}/{_short_tgt}"
-            if _s.snap_bdev == _tgt_comp:
+            if _short_tgt in _tgt_immutable:
                 logger.info(
-                    f"Pre-scan: {_snap_uuid} ({_short_tgt}) already on target "
-                    f"(DB snap_bdev match); marking pre-existing")
+                    f"Pre-scan: {_snap_uuid} ({_short_tgt}) is already an immutable "
+                    f"snapshot on target; marking pre-existing")
                 migration.snaps_preexisting_on_target.append(_snap_uuid)
                 _pre_scan_updated = True
         if _pre_scan_updated:
