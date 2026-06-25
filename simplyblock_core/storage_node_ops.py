@@ -1482,9 +1482,14 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=None):
         remote_device.status = NVMeDevice.STATUS_ONLINE
         remote_device.nvmf_multipath = org_dev.nvmf_multipath
         expected_bdev = f"remote_{org_dev.jm_bdev}n1"
+        controller_name = f"remote_{org_dev.jm_bdev}"
+        if org_dev.override_name_on_node and this_node.get_id() in org_dev.override_name_on_node:
+            new_name = org_dev.override_name_on_node[this_node.get_id()]
+            expected_bdev = f"remote_{new_name}n1"
+            controller_name = f"remote_{new_name}"
         try:
             remote_device.remote_bdev = connect_device(
-                f"remote_{org_dev.jm_bdev}", org_dev, this_node,
+                controller_name, org_dev, this_node,
                 bdev_names=node_bdev_names, reattach=True,
                 attach_timeout=1,
             )
@@ -2500,12 +2505,6 @@ def node_removal_orchestrate(node_id, force_remove=False):
             return False
         snode = db_controller.get_storage_node_by_id(node_id)
 
-    # # Phase 2 — mark in_removal. set_node_status is a no-op if already set.
-    # if snode.status != StorageNode.STATUS_IN_REMOVAL:
-    #     logger.info(f"[REMOVAL] {node_id}: phase 2 — set in_removal")
-    #     set_node_status(node_id, StorageNode.STATUS_IN_REMOVAL, caused_by="remove")
-    #     snode = db_controller.get_storage_node_by_id(node_id)
-
     # Phase 3a — tear down the (empty) secondary/tertiary replicas of THIS
     # node's own primary LVS, on the peers that host them (Case A).
     logger.info(f"[REMOVAL] {node_id}: phase 3a — tear down own replicas")
@@ -2690,6 +2689,27 @@ def _decommission_node_devices(removed_node):
             and removed_node.jm_device.status in (JMDevice.STATUS_ONLINE, JMDevice.STATUS_UNAVAILABLE)):
         logger.info(f"[REMOVAL] {removed_node.get_id()}: removing JM device")
         device_controller.remove_jm_device(removed_node.jm_device.get_id(), force=True)
+        # look for other nodes who use this JM and replace it
+        for node in db_controller.get_storage_nodes_by_cluster_id(removed_node.cluster_id):
+            if node.jm_ids and removed_node.jm_device.get_id() in node.jm_ids:
+                node.jm_ids.remove(removed_node.jm_device.get_id())
+                jm_ids = get_sorted_ha_jms(node)
+                logger.debug(f"online_jms: {str(jm_ids)}")
+                new_jm_dev = ""
+                for jm_id in jm_ids:
+                    if jm_id not in node.jm_ids:
+                        new_jm_dev = jm_id
+                        break
+                if new_jm_dev:
+                    d = db_controller.get_jm_device_by_id(new_jm_dev)
+                    jm_node = db_controller.get_storage_node_by_id(d.node_id)
+                    jm_node.jm_device.override_name_on_node[node.get_id()]=removed_node.jm_device.jm_bdev
+                    jm_node.write_to_db()
+                    node.jm_ids.append(new_jm_dev)
+                    node.remote_jm_devices = _connect_to_remote_jm_devs(node, node.jm_ids)
+                    node.write_to_db()
+                else:
+                    logger.error(f"no jm_id found for {node.get_id()}")
 
     removed_node = db_controller.get_storage_node_by_id(removed_node.get_id())
     for dev in removed_node.nvme_devices:
