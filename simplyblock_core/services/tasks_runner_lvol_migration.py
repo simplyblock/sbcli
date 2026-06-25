@@ -343,6 +343,18 @@ def _snap_tgt_short_name(snap):
     return short + _MIGRATION_BDEV_SUFFIX
 
 
+def _lvol_tgt_bdev_name(lvol_bdev: str) -> str:
+    """Return the migration-target bdev short name for a writable lvol.
+
+    Same strip-then-add logic as _snap_tgt_short_name: prevents 'LVOL_Xmm'
+    accumulation on back-to-back migrations where lvol_bdev already ends in
+    the suffix from the previous run.
+    """
+    if lvol_bdev.endswith(_MIGRATION_BDEV_SUFFIX):
+        lvol_bdev = lvol_bdev[:-len(_MIGRATION_BDEV_SUFFIX)]
+    return lvol_bdev + _MIGRATION_BDEV_SUFFIX
+
+
 def _snap_composite(lvstore, snap):
     """SPDK composite bdev name for a snapshot on a given node: ``<lvstore>/<bdev>``."""
     return f"{lvstore}/{_snap_short_name(snap)}"
@@ -916,6 +928,12 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                         f"Removing leftover target bdev {tgt_composite} from failed attempt")
                     try:
                         _delete_bdev_blocking(tgt_composite, tgt_rpc, sec_rpc)
+                        # SPDK delete is async — poll until the bdev is actually gone
+                        # before letting the caller attempt a create on the same name.
+                        for _ in range(10):
+                            if not tgt_rpc.get_bdevs(tgt_composite):
+                                break
+                            time.sleep(0.2)
                     except Exception as e:
                         logger.warning(f"Pre-cleanup of {tgt_composite} failed (continuing): {e}")
 
@@ -1113,6 +1131,12 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             logger.info(f"Pre-cleanup: removing stale intermediate bdev {tgt_composite}")
             try:
                 _delete_bdev_blocking(tgt_composite, tgt_rpc)
+                # SPDK delete is async — poll until the bdev is actually gone
+                # before letting the caller attempt a create on the same name.
+                for _ in range(10):
+                    if not tgt_rpc.get_bdevs(tgt_composite):
+                        break
+                    time.sleep(0.2)
             except Exception as e:
                 logger.warning(f"Pre-cleanup of {tgt_composite} failed (continuing): {e}")
 
@@ -1248,7 +1272,7 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
 
     trtype, _ = _get_migration_nic(tgt_node)
     src_lvol_composite = f"{src_node.lvstore}/{lvol.lvol_bdev}"
-    tgt_lvol_bdev = lvol.lvol_bdev + _MIGRATION_BDEV_SUFFIX
+    tgt_lvol_bdev = _lvol_tgt_bdev_name(lvol.lvol_bdev)
     tgt_lvol_composite = f"{tgt_node.lvstore}/{tgt_lvol_bdev}"
     ctx = migration.transfer_context or {}
 
@@ -1382,16 +1406,25 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         ret = src_rpc.bdev_lvol_final_migration(
             src_lvol_composite, tgt_map_id, tgt_snap_composite, 2, hub_bdev)
         if ret is None:
-            src_rpc.bdev_nvme_detach_controller(ctrl_name)
-            # Do NOT delete the target bdev on transfer failure — the bdev is
-            # still valid and retaining it keeps the map_id stable across retries.
-            # Deleting it would force a recreate at a higher map_id (due to
-            # concurrent migrations creating bdevs in the interim).
-            return False, True, "bdev_lvol_final_migration failed"
-
-        logger.info(
-            f"[IO-RESUME] {_now_ms()} final migration Done: "
-            f"lvol={migration.lvol_id} io now live on target")
+            # Connection timeout or SPDK error (e.g. "File exists" = already in progress).
+            # SPDK may have completed the migration while the RPC connection dropped.
+            # Check transfer_stat before treating this as a hard failure.
+            stat = src_rpc.bdev_lvol_transfer_stat(src_lvol_composite)
+            state = (stat or {}).get('transfer_state') if stat is not None else None
+            if state not in ('Done', 'No process'):
+                src_rpc.bdev_nvme_detach_controller(ctrl_name)
+                # Do NOT delete the target bdev on transfer failure — the bdev is
+                # still valid and retaining it keeps the map_id stable across retries.
+                # Deleting it would force a recreate at a higher map_id (due to
+                # concurrent migrations creating bdevs in the interim).
+                return False, True, "bdev_lvol_final_migration failed"
+            logger.info(
+                f"[IO-RESUME] {_now_ms()} final migration complete (recovered from RPC error, "
+                f"transfer_state={state}): lvol={migration.lvol_id} io now live on target")
+        else:
+            logger.info(
+                f"[IO-RESUME] {_now_ms()} final migration Done: "
+                f"lvol={migration.lvol_id} io now live on target")
 
         # add_clone on secondary and tertiary to link the final migrated lvol to
         # its predecessor snapshot in their ancestry chain.
