@@ -298,6 +298,37 @@ class TestDistrClusterMap(unittest.TestCase):
         cl_map = dc.get_distr_cluster_map([node], node)
         assert "failure_domain" not in cl_map["map_cluster"]["tnode"]
 
+    @patch("simplyblock_core.distr_controller.DBController")
+    def test_parse_node_line_ignores_failure_domain_suffix(self, MockDBCtrl):
+        """Regression: the data plane appends a trailing 'failure_domain=N' to
+        node lines in the distr cluster map. The node-status regex must capture
+        ONLY the status token, not greedily swallow the suffix — otherwise the
+        parsed status ('online  failure_domain=0') never equals the DB's
+        'online' and Health flips False cluster-wide (incident 2026-06-25)."""
+        import simplyblock_core.distr_controller as dc
+
+        snode = _node("n1", "10.0.0.1", failure_domain=0)
+        snode.status = StorageNode.STATUS_ONLINE
+        nodes = {"n1": snode}
+        # Non-empty so parse_distr_cluster_map does not fall back to a DB
+        # rebuild (it does that only when nodes OR devices is empty).
+        devices = {"ignored": MagicMock()}
+        # New data-plane format carries the failure_domain suffix.
+        map_string = "uuid_node=n1  status=online  failure_domain=0"
+        results, passed = dc.parse_distr_cluster_map(map_string, nodes, devices)
+        assert passed is True, results
+        assert results[0]["Found Status"] == "online"
+
+        # Legacy format (no suffix) must still parse.
+        results, passed = dc.parse_distr_cluster_map(
+            "uuid_node=n1  status=online", nodes, devices)
+        assert passed is True, results
+
+        # A genuine status mismatch must still be detected.
+        snode.status = StorageNode.STATUS_OFFLINE
+        _, passed = dc.parse_distr_cluster_map(map_string, nodes, devices)
+        assert passed is False
+
 
 # ===========================================================================
 # 5. FD-aware cluster suspend criteria (storage_node_monitor)

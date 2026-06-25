@@ -270,7 +270,12 @@ def get_distr_cluster_map(snodes, target_node, distr_name=""):
 
 def parse_distr_cluster_map(map_string, nodes=None, devices=None):
     db_controller = DBController()
-    node_pattern = re.compile(r".*uuid_node=(.*)  status=(.*)$", re.IGNORECASE)
+    # status is a single token; do NOT greedily swallow trailing fields such as
+    # the failure-domain suffix the data plane now appends to node lines
+    # (e.g. "uuid_node=<uuid>  status=online  failure_domain=0"). A greedy
+    # ".*$" here captured "online  failure_domain=0" and mismatched the DB's
+    # desired "online", flipping Health=False cluster-wide (2026-06-25).
+    node_pattern = re.compile(r".*uuid_node=(.*?)  status=(\S+)", re.IGNORECASE)
     device_pattern = re.compile(
         r".*storage_ID=(.*)  status=(.*)  uuid_device=(.*)  storage_bdev_name=(.*)$", re.IGNORECASE)
 
