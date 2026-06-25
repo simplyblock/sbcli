@@ -185,8 +185,8 @@ def _apply_migration_to_db(migration, tgt_lvol_uuid=None, tgt_lvol_bdev=None):
             f"_apply_migration_to_db: queried {len(spdk_info)} bdevs "
             f"from target lvstore {tgt_node.lvstore}")
         subsys = tgt_rpc.subsystem_list(lvol.nqn)
-        if subsys:
-            for ns in subsys[0].get('namespaces'):
+        if subsys and isinstance(subsys[0], dict):
+            for ns in subsys[0].get('namespaces') or []:
                 if ns['uuid'] == lvol.uuid:
                     lvol.ns_id = ns['nsid']
                     break
@@ -844,12 +844,52 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
     tgt_ter = None
     ter_rpc = None
 
+    # ── PRE-SCAN: mark snapshots already on target as pre-existing ────────────
+    # Query the target lvstore once and cross-reference the full migration plan.
+    # Any planned snap whose target bdev already exists AND whose DB snap_bdev
+    # already points to the target was fully migrated by a prior migration —
+    # mark it pre-existing so we never attempt to delete+recreate it.
+    # Writable leftovers (DB snap_bdev still points to source) are NOT marked
+    # here; they fall through to the per-snap pre-cleanup to be deleted and
+    # retransferred as before.
+    if ctx.get('stage') != 'parallel_transfer' and plan:
+        try:
+            _tgt_lvols = tgt_rpc.bdev_lvol_get_lvols(tgt_node.lvstore) or []
+            _tgt_short_set = {e.get('name', '').split('/')[-1] for e in _tgt_lvols}
+        except Exception as _pre_e:
+            logger.warning(f"Pre-scan: bdev_lvol_get_lvols failed ({_pre_e}); skipping")
+            _tgt_short_set = set()
+
+        _pre_scan_updated = False
+        for _snap_uuid in plan:
+            if (_snap_uuid in migration.snaps_migrated
+                    or _snap_uuid in migration.snaps_preexisting_on_target):
+                continue
+            try:
+                _s = db.get_snapshot_by_id(_snap_uuid)
+            except KeyError:
+                continue
+            _short_tgt = _snap_tgt_short_name(_s)
+            if _short_tgt not in _tgt_short_set:
+                continue
+            _tgt_comp = f"{tgt_node.lvstore}/{_short_tgt}"
+            if _s.snap_bdev == _tgt_comp:
+                logger.info(
+                    f"Pre-scan: {_snap_uuid} ({_short_tgt}) already on target "
+                    f"(DB snap_bdev match); marking pre-existing")
+                migration.snaps_preexisting_on_target.append(_snap_uuid)
+                _pre_scan_updated = True
+        if _pre_scan_updated:
+            migration.write_to_db(db.kv_store)
+
     # ── A. Launch / resume planned snapshots one at a time ───────────────────
     # SPDK only supports one bdev_lvol_transfer per poller group at a time;
     # launching multiple causes "poller already exists" and stuck transfers.
     _PARALLEL_BATCH = 1
     if ctx.get('stage') != 'parallel_transfer':
-        all_unprocessed = [u for u in plan if u not in migration.snaps_migrated]
+        all_unprocessed = [u for u in plan
+                           if u not in migration.snaps_migrated
+                           and u not in migration.snaps_preexisting_on_target]
         unprocessed = all_unprocessed[:_PARALLEL_BATCH]
 
         if unprocessed:
@@ -911,25 +951,14 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                     })
                     continue
 
-                # Check for a bdev already present on the target.
-                # Two distinct cases must be handled:
-                #   1. Genuinely pre-existing (placed by a sibling migration that
-                #      already ran) — snap is already in snaps_migrated → skip.
-                #   2. Leftover from a previous failed attempt of THIS migration —
-                #      snap is NOT yet in snaps_migrated → delete and retry, so we
-                #      do not resume from a partially-written bdev.
+                # Pre-existing (immutable) bdevs were caught by the pre-scan above and
+                # excluded from unprocessed. Anything still found here is a writable
+                # leftover from a previous failed attempt — delete and retry.
                 if tgt_rpc.get_bdevs(tgt_composite):
-                    if snap_uuid in migration.snaps_migrated:
-                        logger.info(
-                            f"Snapshot {snap_uuid} already on target; skipping transfer")
-                        migration.snaps_preexisting_on_target.append(snap_uuid)
-                        continue
                     logger.info(
-                        f"Removing leftover target bdev {tgt_composite} from failed attempt")
+                        f"Removing writable leftover target bdev {tgt_composite}")
                     try:
                         _delete_bdev_blocking(tgt_composite, tgt_rpc, sec_rpc)
-                        # SPDK delete is async — poll until the bdev is actually gone
-                        # before letting the caller attempt a create on the same name.
                         for _ in range(10):
                             if not tgt_rpc.get_bdevs(tgt_composite):
                                 break
@@ -1053,7 +1082,9 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
 
         # If there are more unprocessed snaps, return now so the next tick
         # launches the next batch.
-        remaining = [u for u in plan if u not in migration.snaps_migrated]
+        remaining = [u for u in plan
+                     if u not in migration.snaps_migrated
+                     and u not in migration.snaps_preexisting_on_target]
         if remaining:
             return False, False, None
 
@@ -1125,14 +1156,13 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         src_composite  = _snap_composite(src_node.lvstore, snap)
         tgt_composite  = f"{tgt_node.lvstore}/{snap_short_tgt}"
 
-        # Pre-cleanup: only delete if the bdev actually exists on the target
-        # (stale from a previous crashed run). Deleting blindly masks real errors.
+        # Pre-cleanup: if a bdev exists on the target it is a writable leftover
+        # from a previous crashed run — intermediate snaps are always freshly
+        # created by this migration so they can never be pre-existing.
         if tgt_rpc.get_bdevs(tgt_composite):
             logger.info(f"Pre-cleanup: removing stale intermediate bdev {tgt_composite}")
             try:
                 _delete_bdev_blocking(tgt_composite, tgt_rpc)
-                # SPDK delete is async — poll until the bdev is actually gone
-                # before letting the caller attempt a create on the same name.
                 for _ in range(10):
                     if not tgt_rpc.get_bdevs(tgt_composite):
                         break
