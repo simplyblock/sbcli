@@ -158,14 +158,6 @@ class HubControllerManager:
         )
         return ctrl_name, hub_bdev, None
 
-    def release(self, src_node_id: str, tgt_node_id: str):  # noqa: ARG002
-        """
-        No-op — kept for call-site compatibility.
-
-        The idle timer is driven entirely by acquire(); explicit release calls
-        are not needed and were a source of refcount imbalance bugs.
-        """
-
     def detach_now(self, src_node_id: str, tgt_node_id: str, src_rpc=None):
         """
         Immediately detach the hub controller (failure / cancel path).
