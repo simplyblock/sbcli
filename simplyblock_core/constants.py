@@ -203,7 +203,7 @@ CLIENT_QPAIR_COUNT=3
 # action_on_=reset switch — that switch stays; only the threshold
 # reverts).
 NVME_TIMEOUT_US=8000000
-PCI_TIMEOUT_US=2000000
+PCIE_TIMEOUT_US=2000000
 
 NVMF_MAX_SUBSYSTEMS=50000
 KATO=5000
