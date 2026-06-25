@@ -80,6 +80,8 @@ class TestClusterBase:
         self.lvol_crypt_keys = ["7b3695268e2a6611a25ac4b1ee15f27f9bf6ea9783dada66a4a730ebf0492bfd",
                                 "78505636c8133d9be42e347f82785b81a879cd8133046f8fc0b36f17b078ad0c"]
         self.log_threads = []
+        self._nvme_iostat_thread = None
+        self._nvme_iostat_stop = None
         self.test_name = ""
         self.container_nodes = {}
         self.docker_logs_path = ""
@@ -292,6 +294,8 @@ class TestClusterBase:
 
         if not self.k8s_test:
             self.start_root_monitor()
+
+        self.start_nvme_iostat_monitor()
 
         sleep_n_sec(120)
 
@@ -1433,6 +1437,7 @@ class TestClusterBase:
                                             process_name="fio")
 
         self.stop_root_monitor()
+        self.stop_nvme_iostat_monitor()
 
         if not self.k8s_test:
             retry_check = 100
@@ -2610,6 +2615,204 @@ class TestClusterBase:
             self._root_monitor_thread.join(timeout=5)
         self.logger.info("Stopped background root monitor.")
 
+    # ── NVMe iostat background monitor ──────────────────────────────────
+
+    def _rpc_call(self, host, port, username, password, method, params=None):
+        """Make a JSON-RPC 2.0 call to an SPDK node.
+
+        Returns the 'result' field on success, or None on any error.
+        Errors are logged but never raised — monitoring must not crash the test.
+        """
+        import requests as _requests
+
+        url = f"http://{host}:{port}/"
+        payload = {"id": 1, "method": method}
+        if params:
+            payload["params"] = params
+        try:
+            resp = _requests.post(
+                url,
+                json=payload,
+                auth=(username, password),
+                timeout=30,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                if "result" in data:
+                    return data["result"]
+                if "error" in data:
+                    self.logger.warning(
+                        f"[NVMeIostat] RPC {method} on {host}:{port} "
+                        f"returned error: {data['error']}"
+                    )
+            else:
+                self.logger.warning(
+                    f"[NVMeIostat] RPC {method} on {host}:{port} "
+                    f"HTTP {resp.status_code}"
+                )
+        except Exception as e:
+            self.logger.warning(
+                f"[NVMeIostat] RPC {method} on {host}:{port} failed: {e}"
+            )
+        return None
+
+    def _discover_nvme_partition_devices(self, host, port, username, password):
+        """Discover NVMe partition bdev names (e.g. nvme1n1p1) on one node.
+
+        Returns a list of device name strings, or an empty list on failure.
+        """
+        import re
+
+        result = self._rpc_call(host, port, username, password, "bdev_get_bdevs")
+        if not result:
+            return []
+        pattern = re.compile(r"^nvme\d+n\d+p\d+$")
+        return [b.get("name", "") for b in result if pattern.match(b.get("name", ""))]
+
+    def start_nvme_iostat_monitor(self, interval_sec=60):
+        """Start background NVMe iostat collection on all storage nodes.
+
+        Every *interval_sec* seconds, calls ``bdev_get_iostat`` (with
+        ``reset_mode=all``) on each storage node, filters results to NVMe
+        partition devices, and appends timestamp + JSON to a per-node log
+        file under ``docker_logs_path``.
+        """
+        if self.k8s_test:
+            self.logger.info("[NVMeIostat] Skipping in K8s mode")
+            return
+
+        if (
+            hasattr(self, "_nvme_iostat_thread")
+            and self._nvme_iostat_thread
+            and self._nvme_iostat_thread.is_alive()
+        ):
+            self.logger.info("[NVMeIostat] Already running; skipping start.")
+            return
+
+        # Gather storage node RPC connection details
+        try:
+            storage_nodes_resp = self.sbcli_utils.get_storage_nodes()
+            node_list = storage_nodes_resp.get("results", [])
+        except Exception as e:
+            self.logger.warning(f"[NVMeIostat] Cannot get storage nodes: {e}")
+            return
+
+        # Build per-node info dict
+        node_info = {}
+        for node in node_list:
+            ip = node.get("mgmt_ip", "")
+            port = node.get("rpc_port", -1)
+            user = node.get("rpc_username", "")
+            pw = node.get("rpc_password", "")
+            node_uuid = node.get("uuid", ip)
+
+            if not ip or port < 0:
+                self.logger.warning(
+                    f"[NVMeIostat] Skipping node {node_uuid}: "
+                    f"missing mgmt_ip or rpc_port"
+                )
+                continue
+
+            devices = self._discover_nvme_partition_devices(ip, port, user, pw)
+            self.logger.info(
+                f"[NVMeIostat] Node {ip}: discovered {len(devices)} "
+                f"NVMe partitions: {devices}"
+            )
+
+            file_path = os.path.join(
+                self.docker_logs_path,
+                f"nvme_iostat_{ip}.log",
+            )
+            node_info[ip] = {
+                "port": port,
+                "username": user,
+                "password": pw,
+                "devices": set(devices),
+                "file_path": file_path,
+                "uuid": node_uuid,
+            }
+
+        if not node_info:
+            self.logger.warning(
+                "[NVMeIostat] No valid storage nodes found. Not starting monitor."
+            )
+            return
+
+        self.logger.info(
+            f"[NVMeIostat] Starting monitor for {len(node_info)} node(s), "
+            f"interval={interval_sec}s"
+        )
+
+        self._nvme_iostat_stop = threading.Event()
+
+        def _iostat_loop():
+            import re
+            nvme_part_re = re.compile(r"^nvme\d+n\d+p\d+$")
+
+            while not self._nvme_iostat_stop.is_set():
+                for ip, info in node_info.items():
+                    try:
+                        result = self._rpc_call(
+                            ip, info["port"],
+                            info["username"], info["password"],
+                            "bdev_get_iostat",
+                            {"reset_mode": "all"},
+                        )
+                        if result is None:
+                            continue
+
+                        # Filter to NVMe partition bdevs only
+                        bdevs = result.get("bdevs", [])
+                        filtered = [
+                            b for b in bdevs
+                            if nvme_part_re.match(b.get("name", ""))
+                        ]
+
+                        if not filtered:
+                            continue
+
+                        timestamp = datetime.now().strftime("%H:%M:%S")
+                        output = {
+                            "tick_rate": result.get("tick_rate", 0),
+                            "ticks": result.get("ticks", 0),
+                            "bdevs": filtered,
+                        }
+                        try:
+                            with open(info["file_path"], "a") as f:
+                                f.write(f"{timestamp}\n")
+                                f.write(json.dumps(output))
+                                f.write("\n")
+                        except OSError as e:
+                            self.logger.warning(
+                                f"[NVMeIostat] Cannot write to "
+                                f"{info['file_path']}: {e}"
+                            )
+                    except Exception as e:
+                        self.logger.warning(
+                            f"[NVMeIostat] Error polling {ip}: {e}"
+                        )
+
+                # Sleep in 10s slices for prompt shutdown
+                waited = 0
+                while waited < interval_sec and not self._nvme_iostat_stop.is_set():
+                    time.sleep(10)
+                    waited += 10
+
+            self.logger.info("[NVMeIostat] Monitor loop exiting.")
+
+        t = threading.Thread(
+            target=_iostat_loop, name="NVMeIostatMonitor", daemon=True
+        )
+        t.start()
+        self._nvme_iostat_thread = t
+
+    def stop_nvme_iostat_monitor(self):
+        """Gracefully stop the background NVMe iostat monitor."""
+        if hasattr(self, "_nvme_iostat_stop") and self._nvme_iostat_stop:
+            self._nvme_iostat_stop.set()
+        if hasattr(self, "_nvme_iostat_thread") and self._nvme_iostat_thread:
+            self._nvme_iostat_thread.join(timeout=15)
+        self.logger.info("[NVMeIostat] Stopped NVMe iostat monitor.")
 
     def validations(self, node_uuid, node_status, device_status, lvol_status,
                     health_check_status, device_health_check):
