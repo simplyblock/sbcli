@@ -869,25 +869,29 @@ jobs:
           STAGING="/tmp/distrib_host_collect_${TS}"
           mkdir -p "$STAGING"
 
-          CN="$(sudo docker ps --format '{{.Names}}' | grep -E '^spdk_[0-9]+$' | head -n1 || true)"
-          if [[ -z "$CN" ]]; then echo "NO_SPDK_CONTAINER"; exit 0; fi
-          SOCK="/mnt/ramdisk/${CN}/spdk.sock"
+          mapfile -t CONTAINERS < <(sudo docker ps --format '{{.Names}}' | grep -E '^spdk_[0-9]+$' || true)
+          if [[ ${#CONTAINERS[@]} -eq 0 ]]; then echo "NO_SPDK_CONTAINER"; exit 0; fi
 
-          BDEV_JSON="$(sudo docker exec "$CN" bash -lc "sudo python spdk/scripts/rpc.py -s '$SOCK' bdev_get_bdevs" 2>/dev/null || true)"
-          if [[ -z "$BDEV_JSON" ]]; then echo "BDEV_EMPTY"; exit 0; fi
+          ANY_DISTRIB=0
+          for CN in "${CONTAINERS[@]}"; do
+            SOCK="/mnt/ramdisk/${CN}/spdk.sock"
 
-          if command -v jq >/dev/null 2>&1; then
-            mapfile -t DISTRIBS < <(printf '%s' "$BDEV_JSON" | jq -r '.[] | select(.name|startswith("distrib_")) | .name' | sort -u)
-          else
-            mapfile -t DISTRIBS < <(printf '%s\\n' "$BDEV_JSON" | grep -oE '"name"\\s*:\\s*"distrib_[^"]+"' | sed -E 's/.*"name"\\s*:\\s*"([^"]+)".*/\\1/' | sort -u)
-          fi
+            BDEV_JSON="$(sudo docker exec "$CN" bash -lc "sudo python spdk/scripts/rpc.py -s '$SOCK' bdev_get_bdevs" 2>/dev/null || true)"
+            if [[ -z "$BDEV_JSON" ]]; then continue; fi
 
-          if [[ ${#DISTRIBS[@]} -eq 0 ]]; then echo "NO_DISTRIBS"; exit 0; fi
+            if command -v jq >/dev/null 2>&1; then
+              mapfile -t DISTRIBS < <(printf '%s' "$BDEV_JSON" | jq -r '.[] | select(.name|startswith("distrib_")) | .name' | sort -u)
+            else
+              mapfile -t DISTRIBS < <(printf '%s\\n' "$BDEV_JSON" | grep -oE '"name"\\s*:\\s*"distrib_[^"]+"' | sed -E 's/.*"name"\\s*:\\s*"([^"]+)".*/\\1/' | sort -u)
+            fi
 
-          for d in "${DISTRIBS[@]}"; do
-            JF="/tmp/stack_${d}.json"
+            if [[ ${#DISTRIBS[@]} -eq 0 ]]; then continue; fi
+            ANY_DISTRIB=1
 
-            python3 - "$d" "$JF" <<'PYIN'
+            for d in "${DISTRIBS[@]}"; do
+              JF="/tmp/stack_${d}.json"
+
+              python3 - "$d" "$JF" <<'PYIN'
           import json, sys
           d = sys.argv[1]
           jf = sys.argv[2]
@@ -896,17 +900,41 @@ jobs:
               f.write(json.dumps(obj))
           PYIN
 
-            sudo docker cp "$JF" "$CN:$JF" || true
-            sudo docker exec "$CN" bash -lc "sudo python scripts/rpc_sock.py '$JF' '$SOCK' > /tmp/rpc_${d}.log 2>&1 || true" || true
-            sudo docker cp "$CN:/tmp/rpc_${d}.log" "$STAGING/rpc_${d}.log" 2>/dev/null || true
+              sudo docker cp "$JF" "$CN:$JF" || true
 
-            for f in $(sudo docker exec "$CN" bash -lc "sudo ls /tmp 2>/dev/null | grep -F \\\"$d\\\" || true"); do
-              sudo docker cp "$CN:/tmp/$f" "$STAGING/${CN}__$f" 2>/dev/null || true
+              # Try with 120s timeout, retry with 600s on timeout
+              RPC_OK=0
+              for TMO in 120 600; do
+                if sudo timeout "$TMO" docker exec "$CN" bash -lc "sudo python scripts/rpc_sock.py '$JF' '$SOCK' > /tmp/rpc_${d}.log 2>&1"; then
+                  RPC_OK=1; break
+                fi
+                EC=$?
+                if [[ $EC -eq 124 || $EC -eq 137 ]]; then
+                  echo "[${CN}] ${d} RPC timed out after ${TMO}s, retrying..." >&2
+                else
+                  RPC_OK=1; break  # non-timeout failure, still collect what we can
+                fi
+              done
+
+              if [[ $RPC_OK -eq 0 ]]; then
+                echo "[${CN}] ${d} RPC timed out on all attempts — skipping" >&2
+                sudo docker exec "$CN" bash -lc "sudo rm -f '$JF' '/tmp/rpc_${d}.log'" || true
+                rm -f "$JF" || true
+                continue
+              fi
+
+              sudo docker cp "$CN:/tmp/rpc_${d}.log" "$STAGING/${CN}__rpc_${d}.log" 2>/dev/null || true
+
+              for f in $(sudo docker exec "$CN" bash -lc "sudo ls /tmp 2>/dev/null | grep -F \\\"$d\\\" || true"); do
+                sudo docker cp "$CN:/tmp/$f" "$STAGING/${CN}__$f" 2>/dev/null || true
+              done
+
+              sudo docker exec "$CN" bash -lc "sudo rm -f '$JF' '/tmp/rpc_${d}.log'" || true
+              rm -f "$JF" || true
             done
-
-            sudo docker exec "$CN" bash -lc "sudo rm -f '$JF' '/tmp/rpc_${d}.log'" || true
-            rm -f "$JF" || true
           done
+
+          if [[ $ANY_DISTRIB -eq 0 ]]; then echo "NO_DISTRIBS"; exit 0; fi
 
           cat /proc/meminfo | grep -i huge > "$STAGING/hugepage_meminfo.txt" 2>/dev/null || true
 

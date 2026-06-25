@@ -51,6 +51,11 @@ class TestLvolHAClusterWithClones(TestLvolHACluster):
             self.lvol_mount_details[lvol_id]["clones"] = []
             for clone_idx in range(1, self.total_clones_per_lvol + 1):
                 clone_name = f"{self.clone_name}_{idx + 1}_{clone_idx}"
+
+                # Snapshot device list BEFORE clone creation — namespaced
+                # clones may auto-appear once parent subsystem is connected.
+                initial_devices = set(self.ssh_obj.get_devices(node=self.node))
+
                 self.ssh_obj.add_clone(
                     node=self.node, snapshot_id=snapshot_id, clone_name=clone_name
                 )
@@ -68,23 +73,53 @@ class TestLvolHAClusterWithClones(TestLvolHACluster):
                    "Log": f"{self.log_path}/{clone_name}.log",
                    "snapshots": snapshot_name
                 }
-
-                initial_devices = self.ssh_obj.get_devices(node=self.node)
+                already_connected = False
                 for connect_str in connect_ls:
-                    self.ssh_obj.exec_command(node=self.node, command=connect_str)
+                    _, error = self.ssh_obj.exec_command(
+                        node=self.node, command=connect_str)
+                    if error and "already connected" in error.lower():
+                        already_connected = True
 
                 sleep_n_sec(3)
-                final_devices = self.ssh_obj.get_devices(node=self.node)
+                final_devices = set(self.ssh_obj.get_devices(node=self.node))
+                new_devices = list(final_devices - initial_devices)
                 clone_device = None
-                for device in final_devices:
-                    if device not in initial_devices:
-                        clone_device = f"/dev/{device.strip()}"
-                        break
+                if new_devices:
+                    clone_device = f"/dev/{new_devices[0].strip()}"
+
+                if not clone_device and already_connected:
+                    # Namespaced clone shares parent's NQN — ns-rescan needed
+                    out, _ = self.ssh_obj.exec_command(
+                        self.node,
+                        "ls /dev/nvme[0-9]* 2>/dev/null | grep -oP 'nvme\\d+$' "
+                        "| sort -u",
+                        supress_logs=True,
+                    )
+                    for ctrl in (out or "").strip().splitlines():
+                        ctrl = ctrl.strip()
+                        if ctrl:
+                            self.ssh_obj.exec_command(
+                                self.node,
+                                f"sudo nvme ns-rescan /dev/{ctrl}",
+                                supress_logs=True,
+                            )
+                    sleep_n_sec(3)
+                    rescan_devices = set(self.ssh_obj.get_devices(node=self.node))
+                    new_after_rescan = list(rescan_devices - initial_devices)
+                    if new_after_rescan:
+                        clone_device = f"/dev/{new_after_rescan[0].strip()}"
+                        self.logger.info(
+                            f"[clone_connect] Located {clone_name} device "
+                            f"after ns-rescan: {clone_device}")
+
                 if not clone_device:
                     raise LvolNotConnectException("Clone did not connect")
                 self.clone_mount_details[clone_id]["Device"] = clone_device
 
                 # Mount and Run FIO
+                fs_type = self.clone_mount_details[clone_id]["FS"]
+                if fs_type == "xfs":
+                    self.ssh_obj.clone_mount_gen_uuid(self.node, clone_device)
                 mount_point = f"{self.mount_path}/{clone_name}"
                 self.ssh_obj.mount_path(node=self.node, device=clone_device, mount_path=mount_point)
                 self.clone_mount_details[clone_id]["Mount"] = mount_point

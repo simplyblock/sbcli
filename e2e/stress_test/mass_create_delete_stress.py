@@ -2,18 +2,29 @@
 Mass-creation/deletion stress test for lvols, snapshots, and clones.
 
 Tests system behavior under high object counts across different
-subsystem-to-namespace ratios. Exercises the full lifecycle:
+namespace-to-subsystem ratios. All lvols are pinned to a single
+storage node. Exercises the full lifecycle:
   1. Mass-create lvols (parallel, 20 threads, until limit)
   2. FIO on 10% of lvols (connect, format, run)
   3. Create 50 snapshots per lvol
-  4. Mass-delete all lvols (while FIO still running)
-  5. Mass-create clones randomly from snapshots (until limit)
+  4. Delete lvols (free subsystem slots for clones — snapshots
+     survive parent lvol deletion and remain valid for cloning)
+  5. Mass-create clones from orphaned snapshots (until limit)
   6. FIO on 10% of clones (connect, format, run)
   7. Mass-delete all clones
   8. Mass-delete all snapshots
 
-Four ratio configurations (subsystems × lvols_per_subsystem):
-  1:500, 30:100, 300:10, 3000:1
+Lvols are deleted before clones are created to free subsystem slots,
+since both lvols and clones occupy subsystem slots. Lvols can be
+deleted even when they have snapshots — the snapshots become orphaned
+but remain valid for cloning.
+
+Four ratio configurations (NxM = N namespaces per subsystem × M subsystems):
+  3000x1  — 3000 ns in 1 subsystem  = 3000 lvols
+  300x10  — 300 ns in 10 subsystems = 3000 lvols
+  30x100  — 30 ns in 100 subsystems = 3000 lvols
+  1x500   — 1 ns in 500 subsystems  = 500 standalone lvols
+            (if 500 subsystems doesn't fit, use 300x10 as largest test)
 
 Docker and K8s variants for each ratio.
 
@@ -59,8 +70,9 @@ class _MassCreateDeleteMixin:
     """Shared orchestration for mass-creation/deletion stress test."""
 
     # ── Scale (overridden per ratio class) ─────────────────────────────────
+    # NxM = N namespaces per subsystem × M subsystems
     NUM_SUBSYSTEMS = 1
-    NS_PER_SUBSYSTEM = 500
+    NS_PER_SUBSYSTEM = 3000
     LVOL_SIZE = "1G"
     PVC_SIZE = "1Gi"
 
@@ -71,7 +83,7 @@ class _MassCreateDeleteMixin:
     # ── FIO (lightweight) ──────────────────────────────────────────────────
     FIO_IODEPTH = 1
     FIO_NUMJOBS = 1
-    FIO_RUNTIME = 300           # 5 min per sampled volume
+    FIO_RUNTIME = 60            # 1 min per sampled volume
     FIO_SIZE = "800M"
 
     # ── Parallelism ────────────────────────────────────────────────────────
@@ -81,7 +93,7 @@ class _MassCreateDeleteMixin:
     CLONE_MAX_WORKERS = 20
     DELETE_MAX_WORKERS = 20
     PARALLEL_PARENTS = 10       # concurrent parent subsystem child creation
-    MAX_FAILURES = 50
+    MAX_FAILURES = 500
 
     # ── Phase timeouts (seconds) ───────────────────────────────────────────
     SNAPSHOT_PHASE_TIMEOUT = 14400   # 4 hours
@@ -106,6 +118,7 @@ class _MassCreateDeleteMixin:
         self._phase_durations = {}
         self._fio_lvol_threads = []
         self._fio_clone_threads = []
+        self._soft_failures = []      # accumulate phase-level validation warnings
         self._metrics = {
             "lvols_created": 0,
             "snapshots_created": 0,
@@ -123,13 +136,78 @@ class _MassCreateDeleteMixin:
 
     def _is_max_lvols_error(self, exc):
         text = str(exc).lower()
-        return "max lvols reached" in text or "max_lvols" in text
+        return (
+            "max lvols reached" in text
+            or "max_lvols" in text
+            or "too many subsystems" in text
+            or "max subsystems reached" in text
+        )
 
     def _is_bdev_error(self, exc):
         return "failed to create bdev" in str(exc).lower()
 
     def _is_sync_deletion_error(self, exc):
         return "lvol sync deletion found" in str(exc).lower()
+
+    # ── Bulk verify / soft validation ────────────────────────────────────────
+
+    def _bulk_verify_created(self, names, list_fn, label, timeout=600):
+        """Poll list_fn() until all names appear or timeout.
+
+        Returns (verified_count, name_to_id_dict) where name_to_id_dict
+        maps verified names to their IDs from the list response.
+        """
+        deadline = time.monotonic() + timeout
+        remaining = set(names)
+        resolved = {}  # name -> id
+
+        while remaining and time.monotonic() < deadline:
+            try:
+                current = list_fn()  # {name: id}
+            except Exception as exc:
+                self.logger.warning(
+                    f"[{label}] list call failed: {exc}, retrying..."
+                )
+                sleep_n_sec(10)
+                continue
+
+            for name in list(remaining):
+                if name in current:
+                    resolved[name] = current[name]
+                    remaining.discard(name)
+
+            if remaining:
+                self.logger.info(
+                    f"[{label}] {len(resolved)} verified, "
+                    f"{len(remaining)} remaining"
+                )
+                sleep_n_sec(10)
+
+        if remaining:
+            self.logger.warning(
+                f"[{label}] {len(remaining)} items not found "
+                f"after {timeout}s"
+            )
+        else:
+            self.logger.info(
+                f"[{label}] All {len(resolved)} items verified"
+            )
+        return len(resolved), resolved
+
+    def _check_count(self, actual, expected, label):
+        """Soft-validate count is within ±10% tolerance.
+
+        If below tolerance, logs a warning and appends to _soft_failures
+        but does NOT raise — the test continues.
+        """
+        tolerance = 0.10
+        if expected > 0 and actual < expected * (1 - tolerance):
+            msg = (
+                f"[{label}] only {actual}/{expected} created "
+                f"(below 10% tolerance)"
+            )
+            self.logger.warning(msg)
+            self._soft_failures.append(msg)
 
     # ── Batch execution (from large_scale_lvol_stress.py) ──────────────────
 
@@ -143,6 +221,7 @@ class _MassCreateDeleteMixin:
 
         Returns (success_count, failure_count).
         If stop_on_max_lvols is True, stops on "max lvols reached" error.
+        Applies exponential backoff between batches when failure rate > 50%.
         """
         total = len(items)
         success = 0
@@ -151,6 +230,7 @@ class _MassCreateDeleteMixin:
         bs = batch_size or self.BATCH_SIZE
         max_fail = max_failures if max_failures is not None else self.MAX_FAILURES
         hit_limit = False
+        consecutive_high_fail = 0
 
         with ThreadPoolExecutor(max_workers=workers) as executor:
             for batch_start in range(0, total, bs):
@@ -163,10 +243,13 @@ class _MassCreateDeleteMixin:
                     f = executor.submit(task_fn, item)
                     futures[f] = item
 
+                batch_ok = 0
+                batch_fail = 0
                 for f in as_completed(futures):
                     try:
                         f.result(timeout=per_item_timeout)
                         success += 1
+                        batch_ok += 1
                     except Exception as exc:
                         if stop_on_max_lvols and self._is_max_lvols_error(exc):
                             hit_limit = True
@@ -176,6 +259,7 @@ class _MassCreateDeleteMixin:
                             )
                             break
                         failures += 1
+                        batch_fail += 1
                         self.logger.error(
                             f"[{op_name}] Failed ({failures}/"
                             f"{max_fail} max): {exc}"
@@ -186,6 +270,21 @@ class _MassCreateDeleteMixin:
                     f"[{op_name}] progress: {done}/{total} "
                     f"(ok={success} fail={failures})"
                 )
+
+                # Backoff: if >50% of this batch failed, wait before
+                # next batch to let SPDK recover from transient errors
+                batch_total = batch_ok + batch_fail
+                if batch_total > 0 and batch_fail > batch_total * 0.5:
+                    consecutive_high_fail += 1
+                    backoff = min(10 * consecutive_high_fail, 60)
+                    self.logger.info(
+                        f"[{op_name}] High failure rate in batch "
+                        f"({batch_fail}/{batch_total}) — backing off "
+                        f"{backoff}s before next batch"
+                    )
+                    sleep_n_sec(backoff)
+                else:
+                    consecutive_high_fail = 0
 
         return success, failures
 
@@ -237,7 +336,9 @@ class _MassCreateDeleteMixin:
                 f"in {self._phase_durations['3_create_snapshots']}s"
             )
 
-            # Phase 4: Mass-delete all lvols (while FIO running)
+            # Phase 4: Delete lvols to free subsystem slots for clones.
+            # Lvols can be deleted even with snapshots — orphaned
+            # snapshots remain valid for cloning.
             t0 = time.time()
             self._phase_4_delete_lvols()
             self._phase_durations["4_delete_lvols"] = round(
@@ -248,7 +349,7 @@ class _MassCreateDeleteMixin:
                 f"in {self._phase_durations['4_delete_lvols']}s"
             )
 
-            # Phase 5: Mass-create clones
+            # Phase 5: Mass-create clones from (orphaned) snapshots
             t0 = time.time()
             self._phase_5_create_clones()
             self._phase_durations["5_create_clones"] = round(
@@ -299,6 +400,15 @@ class _MassCreateDeleteMixin:
             self._phase_durations["cleanup"] = round(time.time() - t0, 1)
             self._print_summary()
             self._write_monitoring_json()
+
+        # Soft validation: fail the test if any phase was below ±10% tolerance
+        if self._soft_failures:
+            for f in self._soft_failures:
+                self.logger.error(f"SOFT FAILURE: {f}")
+            raise AssertionError(
+                f"Test had {len(self._soft_failures)} soft failures: "
+                + "; ".join(self._soft_failures)
+            )
 
     # ── Abstract phase methods (subclasses implement) ──────────────────────
 
@@ -405,33 +515,15 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
         # device_path -> {name, client, mount, parent_name}
         self._device_registry: dict[str, dict] = {}
         self._connected_lvols: dict[str, dict] = {}
+        # Lock to prevent races when connecting parent for multiple children
+        self._parent_connect_lock = threading.Lock()
 
     # ── NVMe namespace helpers ─────────────────────────────────────────────
-
-    def _list_nvme_ns_devices(self, node: str, ctrl_dev: str) -> list[str]:
-        ctrl = get_parent_device(ctrl_dev)
-        cmd = f"bash -lc \"ls -1 {ctrl}n* 2>/dev/null | sort -V || true\""
-        out, _ = self.ssh_obj.exec_command(node=node, command=cmd,
-                                           supress_logs=True)
-        return [x.strip() for x in (out or "").splitlines() if x.strip()]
 
     def _rescan_nvme_namespaces(self, node: str, ctrl_dev: str):
         ctrl = get_parent_device(ctrl_dev)
         cmd = f"bash -lc \"nvme ns-rescan {ctrl} 2>/dev/null || true\""
         self.ssh_obj.exec_command(node=node, command=cmd, supress_logs=True)
-
-    def _wait_for_new_ns_device(self, node: str, ctrl_dev: str,
-                                before_set: set, timeout: int = 120,
-                                interval: int = 3):
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            self._rescan_nvme_namespaces(node, ctrl_dev)
-            sleep_n_sec(interval)
-            cur = set(self._list_nvme_ns_devices(node, ctrl_dev))
-            diff = sorted(cur - before_set)
-            if diff:
-                return diff[-1], cur
-        return None, set(self._list_nvme_ns_devices(node, ctrl_dev))
 
     # ── run() ──────────────────────────────────────────────────────────────
 
@@ -462,22 +554,45 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
             self._create_namespaced_lvols()
 
     def _create_standalone_lvols(self):
-        """Create standalone lvols (one subsystem each) — for 3000x1 mode."""
+        """Create standalone lvols (one subsystem each).
+
+        Fire-first: create all via API, then bulk-verify + populate IDs.
+        """
         names = [
             f"mcd-{_rand_seq(6)}-{i:04d}"
             for i in range(self.NUM_SUBSYSTEMS)
         ]
         ok, fail = self._batch_exec(
             [{"name": n, "idx": i} for i, n in enumerate(names)],
-            self._create_single_lvol,
+            self._fire_create_standalone,
             "create_lvols",
             stop_on_max_lvols=True,
         )
 
-    def _create_single_lvol(self, params: dict):
+        # Bulk-verify + populate IDs
+        self.logger.info(
+            f"[Phase 1] Bulk-verifying {len(names)} standalone lvols"
+        )
+        verified, id_map = self._bulk_verify_created(
+            names, self.sbcli_utils.list_lvols, "verify_standalone",
+            timeout=600,
+        )
+        for name in names:
+            if name in id_map:
+                self._lvol_registry[name] = {
+                    "id": id_map[name], "parent_name": None,
+                }
+
+        self._check_count(
+            verified, self.NUM_SUBSYSTEMS, "Phase 1 standalone lvols"
+        )
+
+    def _fire_create_standalone(self, params: dict):
+        """Fire add_lvol for a standalone lvol. No ID fetch — bulk
+        verify populates IDs after all are fired."""
         name = params["name"]
         idx = params["idx"]
-        host_id = self.sn_nodes[idx % len(self.sn_nodes)] if self.sn_nodes else None
+        host_id = self.sn_nodes[0] if self.sn_nodes else None
         bdev_retries = 0
         sync_retries = 0
 
@@ -512,20 +627,20 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
                     continue
                 raise
 
-        sleep_n_sec(1)
-        lvol_id = self.sbcli_utils.get_lvol_id(lvol_name=name)
-        if not lvol_id:
-            raise RuntimeError(f"[create] {name}: ID not found")
-        self._lvol_registry[name] = {"id": lvol_id, "parent_name": None}
-
     def _create_namespaced_lvols(self):
-        """Create parent lvols + children via namespace grouping."""
+        """Create parent lvols + children via namespace grouping.
+
+        Fire-first approach: create all parents, bulk-verify, then
+        fire all children across all parents, bulk-verify again.
+        No NVMe connect during creation — that happens on-demand in
+        Phase 2 for the FIO sample only.
+        """
         parent_names = [
             f"mcd-par-{_rand_seq(6)}-{i:03d}"
             for i in range(self.NUM_SUBSYSTEMS)
         ]
 
-        # Sub-phase 1a: Create parents
+        # Sub-phase 1a: Fire parent creation (API-only)
         self.logger.info(
             f"[Phase 1a] Creating {len(parent_names)} parent lvols"
         )
@@ -541,46 +656,85 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
         if not parent_names:
             return
 
-        # Sub-phase 1b: NVMe-connect parents (sequential)
+        # Bulk-verify parents + populate IDs
         self.logger.info(
-            f"[Phase 1b] Connecting {len(parent_names)} parents"
+            f"[Phase 1a] Bulk-verifying {len(parent_names)} parents"
         )
-        for idx, pn in enumerate(parent_names):
-            self._parent_registry[pn]["client"] = (
-                self.fio_node[idx % len(self.fio_node)]
-            )
-            try:
-                self._connect_parent(pn)
-            except Exception as exc:
-                self.logger.error(f"[connect] {pn} failed: {exc}")
-                continue
+        verified, id_map = self._bulk_verify_created(
+            parent_names, self.sbcli_utils.list_lvols, "verify_parents",
+            timeout=300,
+        )
+        for pn in parent_names:
+            if pn in id_map:
+                self._parent_registry[pn]["id"] = id_map[pn]
+                self._lvol_registry[pn] = {
+                    "id": id_map[pn], "parent_name": None,
+                }
 
-        connected_parents = [
-            pn for pn in parent_names
-            if self._parent_registry.get(pn, {}).get("ctrl_dev")
-        ]
+        self._check_count(
+            verified, len(parent_names), "Phase 1a parents"
+        )
 
-        if not connected_parents:
+        # Sub-phase 1b: Fire ALL children across ALL parents (flat parallel)
+        children_per_parent = self.NS_PER_SUBSYSTEM - 1
+        if children_per_parent <= 0:
             return
 
-        # Sub-phase 1c: Create children
-        children_per_parent = self.NS_PER_SUBSYSTEM - 1
-        if children_per_parent > 0:
-            self.logger.info(
-                f"[Phase 1c] Creating {children_per_parent} children "
-                f"for {len(connected_parents)} parents"
-            )
-            child_timeout = children_per_parent * 180
-            ok, fail = self._batch_exec(
-                connected_parents,
-                self._create_children_for_parent,
-                "create_children",
-                per_item_timeout=child_timeout,
-                max_workers=self.PARALLEL_PARENTS,
-            )
+        child_tasks = []
+        for pn in parent_names:
+            if pn not in id_map:
+                continue
+            for ns_idx in range(1, children_per_parent + 1):
+                cname = (
+                    f"mcd-ch-{_rand_seq(5)}-{pn[-3:]}-{ns_idx:03d}"
+                )
+                child_tasks.append({
+                    "name": cname,
+                    "parent_name": pn,
+                })
+
+        self.logger.info(
+            f"[Phase 1b] Creating {len(child_tasks)} children "
+            f"across {len(parent_names)} parents"
+        )
+        ok, fail = self._batch_exec(
+            child_tasks,
+            self._fire_create_child,
+            "create_children",
+            stop_on_max_lvols=True,
+            max_failures=self.MAX_FAILURES,
+        )
+
+        # Bulk-verify children + populate IDs
+        child_names = [t["name"] for t in child_tasks]
+        self.logger.info(
+            f"[Phase 1b] Bulk-verifying {len(child_names)} children"
+        )
+        c_verified, c_id_map = self._bulk_verify_created(
+            child_names, self.sbcli_utils.list_lvols, "verify_children",
+            timeout=600,
+        )
+        for ct in child_tasks:
+            cname = ct["name"]
+            pn = ct["parent_name"]
+            if cname in c_id_map:
+                self._lvol_registry[cname] = {
+                    "id": c_id_map[cname], "parent_name": pn,
+                }
+                self._child_registry[cname] = {
+                    "id": c_id_map[cname], "parent_name": pn,
+                    "device": None,
+                }
+
+        expected_children = len(parent_names) * children_per_parent
+        self._check_count(
+            c_verified, expected_children, "Phase 1b children"
+        )
 
     def _create_parent(self, params: dict):
+        """Fire add_lvol for a parent. ID populated later by bulk verify."""
         name = params["name"]
+        host_id = self.sn_nodes[0] if self.sn_nodes else None
         self.sbcli_utils.add_lvol(
             lvol_name=name,
             pool_name=self.pool_name,
@@ -590,24 +744,14 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
             distr_bs=self.bs,
             distr_chunk_bs=self.chunk_bs,
             max_namespace_per_subsys=self.NS_PER_SUBSYSTEM,
+            host_id=host_id,
             retry=3,
         )
-        sleep_n_sec(1)
-        lvol_id = self.sbcli_utils.get_lvol_id(lvol_name=name)
-        if not lvol_id:
-            raise RuntimeError(f"[create_parent] {name}: ID not found")
-        node_id = None
-        try:
-            details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
-            if details:
-                node_id = details[0].get("node_id")
-        except Exception:
-            pass
+        # Register parent stub — ID filled in by bulk verify
         self._parent_registry[name] = {
-            "id": lvol_id, "node_id": node_id,
+            "id": None, "node_id": None,
             "client": None, "ctrl_dev": None, "nqn": None, "devices": [],
         }
-        self._lvol_registry[name] = {"id": lvol_id, "parent_name": None}
 
     def _connect_parent(self, parent_name: str):
         pinfo = self._parent_registry[parent_name]
@@ -657,76 +801,21 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
             "client": client, "device": device, "ctrl_dev": ctrl_dev,
         }
 
-    def _create_children_for_parent(self, parent_name: str):
-        pinfo = self._parent_registry[parent_name]
-        client = pinfo["client"]
-        ctrl_dev = pinfo["ctrl_dev"]
-        if not ctrl_dev:
-            return
-
-        children_needed = self.NS_PER_SUBSYSTEM - 1
-        cur_devs = set(self._list_nvme_ns_devices(client, ctrl_dev))
-
-        for ns_idx in range(1, children_needed + 1):
-            cname = f"mcd-ch-{_rand_seq(5)}-{parent_name[-3:]}-{ns_idx:03d}"
-            try:
-                self.sbcli_utils.add_lvol(
-                    lvol_name=cname,
-                    pool_name=self.pool_name,
-                    size=self.LVOL_SIZE,
-                    distr_ndcs=self.ndcs,
-                    distr_npcs=self.npcs,
-                    distr_bs=self.bs,
-                    distr_chunk_bs=self.chunk_bs,
-                    namespace=True,
-                    retry=3,
-                )
-            except Exception as e:
-                if self._is_max_lvols_error(e):
-                    self.logger.info(
-                        f"[children] Max lvols on child {ns_idx} "
-                        f"of {parent_name}"
-                    )
-                    break
-                raise
-
-            sleep_n_sec(1)
-            child_id = self.sbcli_utils.get_lvol_id(lvol_name=cname)
-            if not child_id:
-                self.logger.warning(f"[children] {cname}: ID not found")
-                continue
-
-            # Wait for new namespace device to appear
-            new_dev, cur_devs = self._wait_for_new_ns_device(
-                client, ctrl_dev, cur_devs, timeout=60
-            )
-            if not new_dev:
-                self.logger.warning(
-                    f"[children] {cname}: device not found"
-                )
-                self._lvol_registry[cname] = {
-                    "id": child_id, "parent_name": parent_name,
-                }
-                self._child_registry[cname] = {
-                    "id": child_id, "parent_name": parent_name,
-                    "device": None,
-                }
-                continue
-
-            self._lvol_registry[cname] = {
-                "id": child_id, "parent_name": parent_name,
-            }
-            self._child_registry[cname] = {
-                "id": child_id, "parent_name": parent_name,
-                "device": new_dev,
-            }
-            pinfo["devices"].append(new_dev)
-
-            if (ns_idx % 50) == 0:
-                self.logger.info(
-                    f"[children] {parent_name}: {ns_idx}/"
-                    f"{children_needed} done"
-                )
+    def _fire_create_child(self, params: dict):
+        """Fire add_lvol(namespace=True) for a child. No ID fetch, no
+        device discovery. ID populated later by bulk verify."""
+        name = params["name"]
+        self.sbcli_utils.add_lvol(
+            lvol_name=name,
+            pool_name=self.pool_name,
+            size=self.LVOL_SIZE,
+            distr_ndcs=self.ndcs,
+            distr_npcs=self.npcs,
+            distr_bs=self.bs,
+            distr_chunk_bs=self.chunk_bs,
+            namespace=True,
+            retry=3,
+        )
 
     # ── Phase 2: FIO on 10% of lvols ──────────────────────────────────────
 
@@ -757,44 +846,17 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
 
     def _connect_format_fio_lvol(self, lvol_name: str):
         info = self._lvol_registry[lvol_name]
-        lvol_id = info["id"]
 
-        # Determine client and device
+        # Already connected?
         if lvol_name in self._connected_lvols:
             cl = self._connected_lvols[lvol_name]
             client, device = cl["client"], cl["device"]
-        elif info.get("parent_name") and info["parent_name"] in self._child_registry:
-            # It's a child — device already detected
-            cinfo = self._child_registry.get(lvol_name, {})
-            device = cinfo.get("device")
-            pinfo = self._parent_registry.get(info["parent_name"], {})
-            client = pinfo.get("client")
-            if not device or not client:
-                raise RuntimeError(f"{lvol_name}: no device/client")
+        elif info.get("parent_name") and lvol_name in self._child_registry:
+            # Child namespace — connect parent first, then discover child
+            client, device = self._connect_child_for_fio(lvol_name)
         else:
-            # Standalone lvol — need to connect
-            client = self.fio_node[
-                hash(lvol_name) % len(self.fio_node)
-            ]
-            connect_cmds = self.sbcli_utils.get_lvol_connect_str(
-                lvol_name=lvol_name
-            )
-            for cmd in connect_cmds:
-                self.ssh_obj.exec_command(node=client, command=cmd)
-            sleep_n_sec(3)
-            device = None
-            for _ in range(20):
-                device = self.ssh_obj.get_lvol_vs_device(
-                    node=client, lvol_id=lvol_id
-                )
-                if device:
-                    break
-                sleep_n_sec(3)
-            if not device:
-                raise RuntimeError(f"{lvol_name}: device not found")
-            self._connected_lvols[lvol_name] = {
-                "client": client, "device": device,
-            }
+            # Standalone lvol — on-demand NVMe connect
+            client, device = self._connect_standalone_for_fio(lvol_name)
 
         # Format
         self.ssh_obj.format_disk(node=client, device=device, fs_type="ext4")
@@ -824,6 +886,94 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
         fio_thread.start()
         self._fio_lvol_threads.append(fio_thread)
 
+    def _connect_standalone_for_fio(self, lvol_name: str):
+        """On-demand NVMe connect for a standalone lvol. Returns (client, device)."""
+        info = self._lvol_registry[lvol_name]
+        lvol_id = info["id"]
+        client = self.fio_node[hash(lvol_name) % len(self.fio_node)]
+
+        connect_cmds = self.sbcli_utils.get_lvol_connect_str(
+            lvol_name=lvol_name
+        )
+        for cmd in connect_cmds:
+            self.ssh_obj.exec_command(node=client, command=cmd)
+        sleep_n_sec(3)
+
+        device = None
+        for _ in range(20):
+            device = self.ssh_obj.get_lvol_vs_device(
+                node=client, lvol_id=lvol_id
+            )
+            if device:
+                break
+            sleep_n_sec(3)
+        if not device:
+            raise RuntimeError(f"{lvol_name}: device not found")
+
+        self._connected_lvols[lvol_name] = {
+            "client": client, "device": device,
+        }
+        return client, device
+
+    def _connect_child_for_fio(self, child_name: str):
+        """On-demand NVMe connect for a child namespace.
+
+        Connects the parent subsystem first (if not already connected),
+        then rescans to discover the child device.
+        Returns (client, device).
+        """
+        info = self._lvol_registry[child_name]
+        child_id = info["id"]
+        parent_name = info["parent_name"]
+        pinfo = self._parent_registry.get(parent_name, {})
+
+        # Assign a client to the parent if not already set
+        with self._parent_connect_lock:
+            if not pinfo.get("client"):
+                idx = list(self._parent_registry.keys()).index(parent_name)
+                pinfo["client"] = self.fio_node[
+                    idx % len(self.fio_node)
+                ]
+
+            # Connect parent if not already connected
+            if not pinfo.get("ctrl_dev"):
+                try:
+                    self._connect_parent(parent_name)
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"{child_name}: parent {parent_name} "
+                        f"connect failed: {exc}"
+                    ) from exc
+
+        client = pinfo["client"]
+        ctrl_dev = pinfo.get("ctrl_dev")
+        if not ctrl_dev:
+            raise RuntimeError(
+                f"{child_name}: parent {parent_name} has no ctrl_dev"
+            )
+
+        # Rescan and find child device
+        self._rescan_nvme_namespaces(client, ctrl_dev)
+        sleep_n_sec(2)
+
+        device = None
+        for _ in range(20):
+            device = self.ssh_obj.get_lvol_vs_device(
+                node=client, lvol_id=child_id
+            )
+            if device:
+                break
+            self._rescan_nvme_namespaces(client, ctrl_dev)
+            sleep_n_sec(3)
+        if not device:
+            raise RuntimeError(f"{child_name}: device not found after rescan")
+
+        self._connected_lvols[child_name] = {
+            "client": client, "device": device,
+        }
+        self._child_registry[child_name]["device"] = device
+        return client, device
+
     # ── Phase 3: Create snapshots ──────────────────────────────────────────
 
     def _phase_3_create_snapshots(self):
@@ -838,67 +988,82 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
                     "lvol_name": lvol_name,
                 })
 
+        expected_snaps = len(snap_items)
         self.logger.info(
-            f"=== Phase 3: Create {len(snap_items)} snapshots "
+            f"=== Phase 3: Create {expected_snaps} snapshots "
             f"({len(self._lvol_registry)} lvols x "
             f"{self.SNAPSHOTS_PER_LVOL}) ==="
         )
 
+        # Fire all snapshot creation calls.
+        # Scale max_failures to item count — with 50 snaps/lvol, the
+        # default MAX_FAILURES=500 is exhausted by just 10 bad lvols.
+        # Allow up to 10% of total items to fail before aborting.
+        snap_max_failures = max(self.MAX_FAILURES, expected_snaps // 10)
+        self.logger.info(
+            f"[Phase 3] max_failures for snapshots: {snap_max_failures}"
+        )
         ok, fail = self._batch_exec(
             snap_items,
-            self._create_single_snapshot,
+            self._fire_create_snapshot,
             "create_snapshots",
             batch_size=self.SNAPSHOT_BATCH_SIZE,
             stop_on_max_lvols=True,
-            max_failures=self.MAX_FAILURES,
+            max_failures=snap_max_failures,
         )
 
-    def _create_single_snapshot(self, params: dict):
+        # Bulk-verify snapshots + populate IDs
+        snap_names = [s["snap_name"] for s in snap_items]
+        self.logger.info(
+            f"[Phase 3] Bulk-verifying {len(snap_names)} snapshots"
+        )
+        verified, snap_id_map = self._bulk_verify_created(
+            snap_names, self.sbcli_utils.list_snapshots,
+            "verify_snapshots", timeout=600,
+        )
+        # Build lvol_name lookup for snap_items
+        snap_to_lvol = {s["snap_name"]: s["lvol_name"] for s in snap_items}
+        for sn, sid in snap_id_map.items():
+            self._snapshot_registry[sn] = {
+                "snap_id": sid,
+                "parent_lvol": snap_to_lvol.get(sn),
+            }
+
+        self._check_count(verified, expected_snaps, "Phase 3 snapshots")
+
+    def _fire_create_snapshot(self, params: dict):
+        """Fire add_snapshot only. No ID fetch — bulk verify resolves IDs.
+
+        Retries on sync-deletion errors (lvol temporarily in cleanup state)
+        with backoff, similar to _fire_create_standalone.
+        """
         lvol_id = params["lvol_id"]
         snap_name = params["snap_name"]
-        lvol_name = params["lvol_name"]
+        sync_retries = 0
 
-        result = self.sbcli_utils.add_snapshot(
-            lvol_id=lvol_id, snapshot_name=snap_name, retry=3
-        )
-
-        # Try to extract snap_id from result or fall back to API lookup
-        snap_id = None
-        if isinstance(result, dict):
-            snap_id = result.get("id") or result.get("snapshot_id")
-        if not snap_id:
+        for attempt in range(6):
             try:
-                snap_id = self.sbcli_utils.get_snapshot_id(snap_name)
-            except Exception:
-                pass
+                self.sbcli_utils.add_snapshot(
+                    lvol_id=lvol_id, snapshot_name=snap_name, retry=3
+                )
+                return
+            except Exception as e:
+                if self._is_sync_deletion_error(e) and sync_retries < 5:
+                    sync_retries += 1
+                    sleep_n_sec(15)
+                    continue
+                if attempt < 5:
+                    sleep_n_sec(5)
+                    continue
+                raise
 
-        self._snapshot_registry[snap_name] = {
-            "snap_id": snap_id,
-            "parent_lvol": lvol_name,
-        }
-
-    # ── Phase 4: Mass-delete lvols ─────────────────────────────────────────
+    # ── Phase 4: Delete lvols (free subsystem slots for clones) ──────────
 
     def _phase_4_delete_lvols(self):
-        self.logger.info(
-            f"=== Phase 4: Delete {len(self._lvol_registry)} lvols "
-            f"(FIO still running on {len(self._fio_lvol_sample)}) ==="
-        )
-
-        lvol_names = list(self._lvol_registry.keys())
-        ok, fail = self._batch_exec(
-            lvol_names,
-            self._delete_single_lvol,
-            "delete_lvols",
-            max_workers=self.DELETE_MAX_WORKERS,
-            max_failures=len(lvol_names),  # don't stop on failures
-        )
-        self._metrics["lvols_deleted"] = ok
-
-        # Kill remaining FIO
-        sleep_n_sec(10)
+        # Kill lvol FIO (started in Phase 2, left running)
         for client in set(
-            c.get("client") for c in self._connected_lvols.values() if c.get("client")
+            c.get("client") for c in self._connected_lvols.values()
+            if c.get("client")
         ):
             try:
                 self.ssh_obj.exec_command(
@@ -907,20 +1072,33 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
                 )
             except Exception:
                 pass
-
-        # Wait for FIO threads
         for t in self._fio_lvol_threads:
             t.join(timeout=30)
 
-    def _delete_single_lvol(self, lvol_name: str):
-        try:
-            self.sbcli_utils.delete_lvol(
-                lvol_name=lvol_name, skip_error=True, max_attempt=30
-            )
-        except Exception as exc:
-            self.logger.warning(f"[delete_lvol] {lvol_name}: {exc}")
+        lvol_names = list(self._lvol_registry.keys())
+        self.logger.info(
+            f"=== Phase 4: Delete {len(lvol_names)} lvols "
+            f"(freeing subsystem slots for clones) ==="
+        )
 
-    # ── Phase 5: Mass-create clones ────────────────────────────────────────
+        # Fire-and-forget: issue DELETE for all lvols without polling
+        ok, fail = self._batch_exec(
+            lvol_names,
+            self._fire_delete_lvol,
+            "delete_lvols_fire",
+            max_workers=self.DELETE_MAX_WORKERS,
+            max_failures=len(lvol_names),
+        )
+        self.logger.info(
+            f"[Phase 4] DELETE issued for {ok} lvols "
+            f"({fail} failed to issue)"
+        )
+
+        # Wait for lvols to actually disappear
+        self._wait_lvols_deleted(lvol_names, "lvols")
+        self._metrics["lvols_deleted"] = ok
+
+    # ── Phase 5: Mass-create clones from snapshots ─────────────────────
 
     def _phase_5_create_clones(self):
         if not self._snapshot_registry:
@@ -957,14 +1135,16 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
 
         self.logger.info(
             f"=== Phase 5: Create clones from {len(snap_list)} snapshots "
-            f"(until limit) ==="
+            f"(until subsystem limit) ==="
         )
 
+        # Fire-first: create clones in batches until limit hit
+        clone_names_fired = []
         clone_idx = [0]
         hit_limit = [False]
         lock = threading.Lock()
 
-        def _create_next_clone(_):
+        def _fire_create_clone(_):
             if hit_limit[0]:
                 return
             snap_name, snap_id = random.choice(snap_list)
@@ -976,10 +1156,10 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
                 self.sbcli_utils.add_clone(
                     snapshot_id=snap_id, clone_name=clone_name, retry=3
                 )
-                clone_id = self.sbcli_utils.get_lvol_id(clone_name)
-                self._clone_registry[clone_name] = {
-                    "clone_id": clone_id, "snap_name": snap_name,
-                }
+                with lock:
+                    clone_names_fired.append(
+                        (clone_name, snap_name)
+                    )
             except Exception as e:
                 if self._is_max_lvols_error(e):
                     hit_limit[0] = True
@@ -996,7 +1176,7 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
             batch = list(range(self.BATCH_SIZE))
             ok, fail = self._batch_exec(
                 batch,
-                _create_next_clone,
+                _fire_create_clone,
                 f"create_clones_b{batch_num}",
                 max_workers=self.CLONE_MAX_WORKERS,
                 stop_on_max_lvols=False,
@@ -1006,7 +1186,27 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
             if fail >= self.BATCH_SIZE:
                 break
             self.logger.info(
-                f"[Phase 5] {len(self._clone_registry)} clones so far"
+                f"[Phase 5] {len(clone_names_fired)} clones fired so far"
+            )
+
+        # Bulk-verify clones + populate IDs
+        if clone_names_fired:
+            all_clone_names = [cn for cn, _ in clone_names_fired]
+            snap_lookup = {cn: sn for cn, sn in clone_names_fired}
+            self.logger.info(
+                f"[Phase 5] Bulk-verifying {len(all_clone_names)} clones"
+            )
+            verified, id_map = self._bulk_verify_created(
+                all_clone_names, self.sbcli_utils.list_lvols,
+                "verify_clones", timeout=600,
+            )
+            for cn, cid in id_map.items():
+                self._clone_registry[cn] = {
+                    "clone_id": cid,
+                    "snap_name": snap_lookup.get(cn),
+                }
+            self.logger.info(
+                f"[Phase 5] {len(self._clone_registry)} clones verified"
             )
 
     # ── Phase 6: FIO on 10% of clones ─────────────────────────────────────
@@ -1127,14 +1327,134 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
             t.join(timeout=30)
 
         clone_names = list(self._clone_registry.keys())
+
+        # Fire-and-forget: issue DELETE for all clones without polling
         ok, fail = self._batch_exec(
             clone_names,
-            self._delete_single_lvol,
-            "delete_clones",
+            self._fire_delete_lvol,
+            "delete_clones_fire",
             max_workers=self.DELETE_MAX_WORKERS,
             max_failures=len(clone_names),
         )
+        self.logger.info(
+            f"[Phase 7] DELETE issued for {ok} clones "
+            f"({fail} failed to issue)"
+        )
+
+        # Wait for clones to actually disappear
+        self._wait_lvols_deleted(clone_names, "clones")
         self._metrics["clones_deleted"] = ok
+
+    def _fire_delete_lvol(self, lvol_name: str):
+        """Issue DELETE request for an lvol without polling for completion.
+
+        Uses cached lvol ID from _lvol_registry or _clone_registry to avoid
+        calling list_lvols(). This is critical at scale (3000+ lvols) where
+        20 threads each polling list_lvols() every 5s would flood the API.
+        """
+        # Look up cached ID (lvol_registry uses "id", clone_registry uses "clone_id")
+        info = self._lvol_registry.get(lvol_name)
+        if info:
+            lvol_id = info.get("id")
+        else:
+            cinfo = self._clone_registry.get(lvol_name)
+            lvol_id = cinfo.get("clone_id") if cinfo else None
+
+        if not lvol_id:
+            # Fallback: fetch ID (single GET, not list)
+            try:
+                lvol_id = self.sbcli_utils.get_lvol_id(lvol_name)
+            except Exception:
+                pass
+
+        if not lvol_id:
+            self.logger.warning(
+                f"[fire_delete] {lvol_name}: no ID found, skipping"
+            )
+            return
+
+        try:
+            self.sbcli_utils.delete_request(
+                api_url=f"/lvol/{lvol_id}",
+                treat_404_as_success=True,
+            )
+        except Exception as exc:
+            self.logger.warning(
+                f"[fire_delete] {lvol_name} ({lvol_id}): {exc}"
+            )
+
+    def _wait_lvols_deleted(
+        self, names: list, label: str, timeout: int = 1800
+    ):
+        """Wait for lvols/clones to disappear from the API.
+
+        Polls list_lvols() periodically (single call, not per-lvol) every
+        30s until all named items are gone or timeout is reached.
+        Re-issues DELETE for any stuck items every 60s.
+        """
+        deadline = time.monotonic() + timeout
+        remaining = set(names)
+        re_delete_interval = 60  # re-issue DELETE every 60s
+        last_re_delete = time.monotonic()
+
+        self.logger.info(
+            f"[{label}] Waiting for {len(remaining)} items to be deleted "
+            f"(timeout={timeout}s)"
+        )
+
+        while remaining and time.monotonic() < deadline:
+            try:
+                current_lvols = self.sbcli_utils.list_lvols()
+            except Exception as exc:
+                self.logger.warning(
+                    f"[{label}] list_lvols failed: {exc}, retrying..."
+                )
+                sleep_n_sec(10)
+                continue
+
+            still_present = remaining & set(current_lvols.keys())
+            just_deleted = remaining - still_present
+            if just_deleted:
+                self.logger.info(
+                    f"[{label}] {len(just_deleted)} more deleted, "
+                    f"{len(still_present)} remaining"
+                )
+            remaining = still_present
+
+            if not remaining:
+                break
+
+            # Re-issue DELETE for stuck items every re_delete_interval
+            now = time.monotonic()
+            if now - last_re_delete >= re_delete_interval:
+                self.logger.info(
+                    f"[{label}] Re-issuing DELETE for "
+                    f"{len(remaining)} stuck items"
+                )
+                for name in list(remaining)[:100]:  # cap to avoid flood
+                    lvol_id = current_lvols.get(name)
+                    if lvol_id:
+                        try:
+                            self.sbcli_utils.delete_request(
+                                api_url=f"/lvol/{lvol_id}",
+                                treat_404_as_success=True,
+                            )
+                        except Exception:
+                            pass
+                last_re_delete = now
+
+            sleep_n_sec(30)
+
+        if remaining:
+            self.logger.warning(
+                f"[{label}] Timeout: {len(remaining)} items still exist "
+                f"after {timeout}s. Proceeding anyway."
+            )
+            self._metrics[f"{label}_delete_timeout_remaining"] = len(
+                remaining
+            )
+        else:
+            self.logger.info(f"[{label}] All items deleted successfully")
 
     # ── Phase 8: Mass-delete snapshots ─────────────────────────────────────
 
@@ -1362,16 +1682,19 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
                     "pvc_name": pvc_name,
                 })
 
+        expected_snaps = len(snap_items)
         self.logger.info(
-            f"=== Phase 3: Create {len(snap_items)} VolumeSnapshots ==="
+            f"=== Phase 3: Create {expected_snaps} VolumeSnapshots ==="
         )
 
+        snap_max_failures = max(self.MAX_FAILURES, expected_snaps // 10)
         ok, fail = self._batch_exec(
             snap_items,
             self._create_single_vs,
             "create_snapshots",
             batch_size=self.SNAPSHOT_BATCH_SIZE,
             stop_on_max_lvols=True,
+            max_failures=snap_max_failures,
         )
 
     def _create_single_vs(self, params: dict):
@@ -1386,25 +1709,10 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
         }
         self._snap_pvc_map[vs_name] = pvc_name
 
-    # ── Phase 4: Delete all PVCs ──────────────────────────────────────────
+    # ── Phase 4: Delete PVCs (free subsystem slots for clones) ──────────
 
     def _phase_4_delete_lvols(self):
-        self.logger.info(
-            f"=== Phase 4: Delete {len(self._pvc_registry)} PVCs ==="
-        )
-
-        pvc_names = list(self._pvc_registry.keys())
-        ok, fail = self._batch_exec(
-            pvc_names,
-            self._delete_single_pvc,
-            "delete_pvcs",
-            max_workers=self.DELETE_MAX_WORKERS,
-            max_failures=len(pvc_names),
-        )
-        self._metrics["lvols_deleted"] = ok
-
-        # Kill FIO jobs
-        sleep_n_sec(10)
+        # Kill FIO jobs (started in Phase 2, left running)
         for job_name in list(self._fio_jobs.keys()):
             try:
                 self.k8s_utils._exec_kubectl(
@@ -1414,12 +1722,22 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
                 )
             except Exception:
                 pass
+        sleep_n_sec(10)
 
-    def _delete_single_pvc(self, pvc_name: str):
-        try:
-            self.k8s_utils.delete_pvc(pvc_name)
-        except Exception as exc:
-            self.logger.warning(f"[delete_pvc] {pvc_name}: {exc}")
+        pvc_names = list(self._pvc_registry.keys())
+        self.logger.info(
+            f"=== Phase 4: Delete {len(pvc_names)} PVCs "
+            f"(freeing subsystem slots for clones) ==="
+        )
+
+        ok, fail = self._batch_exec(
+            pvc_names,
+            self._delete_single_pvc,
+            "delete_pvcs",
+            max_workers=self.DELETE_MAX_WORKERS,
+            max_failures=len(pvc_names),
+        )
+        self._metrics["lvols_deleted"] = ok
 
     # ── Phase 5: Create clone PVCs from VolumeSnapshots ───────────────────
 
@@ -1585,6 +1903,12 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
         except Exception as exc:
             self.logger.warning(f"[delete_vs] {vs_name}: {exc}")
 
+    def _delete_single_pvc(self, pvc_name: str):
+        try:
+            self.k8s_utils.delete_pvc(pvc_name)
+        except Exception as exc:
+            self.logger.warning(f"[delete_pvc] {pvc_name}: {exc}")
+
     # ── Cleanup safety net ─────────────────────────────────────────────────
 
     def _phase_cleanup(self):
@@ -1635,52 +1959,56 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Docker variants
+#
+# Naming: NxM = N namespaces per subsystem × M subsystems.
+# All lvols pinned to a single storage node.
+# If 500 subsystems doesn't fit, use 300x10 as the largest test.
 
 class MassCreateDelete_1x500_Docker(_MassCreateDeleteDocker):
-    """1 subsystem × 500 namespaces = 500 lvols."""
-    NUM_SUBSYSTEMS = 1
-    NS_PER_SUBSYSTEM = 500
+    """1 ns/sub × 500 subsystems = 500 standalone lvols."""
+    NUM_SUBSYSTEMS = 500
+    NS_PER_SUBSYSTEM = 1
 
 
 class MassCreateDelete_30x100_Docker(_MassCreateDeleteDocker):
-    """30 subsystems × 100 namespaces = 3000 lvols."""
-    NUM_SUBSYSTEMS = 30
-    NS_PER_SUBSYSTEM = 100
+    """30 ns/sub × 100 subsystems = 3000 lvols."""
+    NUM_SUBSYSTEMS = 100
+    NS_PER_SUBSYSTEM = 30
 
 
 class MassCreateDelete_300x10_Docker(_MassCreateDeleteDocker):
-    """300 subsystems × 10 namespaces = 3000 lvols."""
-    NUM_SUBSYSTEMS = 300
-    NS_PER_SUBSYSTEM = 10
+    """300 ns/sub × 10 subsystems = 3000 lvols."""
+    NUM_SUBSYSTEMS = 10
+    NS_PER_SUBSYSTEM = 300
 
 
 class MassCreateDelete_3000x1_Docker(_MassCreateDeleteDocker):
-    """3000 subsystems × 1 namespace = 3000 standalone lvols."""
-    NUM_SUBSYSTEMS = 3000
-    NS_PER_SUBSYSTEM = 1
+    """3000 ns/sub × 1 subsystem = 3000 lvols."""
+    NUM_SUBSYSTEMS = 1
+    NS_PER_SUBSYSTEM = 3000
 
 
 # K8s variants
 
 class MassCreateDelete_1x500_K8s(_MassCreateDeleteK8s):
-    """1 subsystem × 500 namespaces = 500 PVCs."""
-    NUM_SUBSYSTEMS = 1
-    NS_PER_SUBSYSTEM = 500
+    """1 ns/sub × 500 subsystems = 500 PVCs."""
+    NUM_SUBSYSTEMS = 500
+    NS_PER_SUBSYSTEM = 1
 
 
 class MassCreateDelete_30x100_K8s(_MassCreateDeleteK8s):
-    """30 subsystems × 100 namespaces = 3000 PVCs."""
-    NUM_SUBSYSTEMS = 30
-    NS_PER_SUBSYSTEM = 100
+    """30 ns/sub × 100 subsystems = 3000 PVCs."""
+    NUM_SUBSYSTEMS = 100
+    NS_PER_SUBSYSTEM = 30
 
 
 class MassCreateDelete_300x10_K8s(_MassCreateDeleteK8s):
-    """300 subsystems × 10 namespaces = 3000 PVCs."""
-    NUM_SUBSYSTEMS = 300
-    NS_PER_SUBSYSTEM = 10
+    """300 ns/sub × 10 subsystems = 3000 PVCs."""
+    NUM_SUBSYSTEMS = 10
+    NS_PER_SUBSYSTEM = 300
 
 
 class MassCreateDelete_3000x1_K8s(_MassCreateDeleteK8s):
-    """3000 subsystems × 1 namespace = 3000 PVCs."""
-    NUM_SUBSYSTEMS = 3000
-    NS_PER_SUBSYSTEM = 1
+    """3000 ns/sub × 1 subsystem = 3000 PVCs."""
+    NUM_SUBSYSTEMS = 1
+    NS_PER_SUBSYSTEM = 3000

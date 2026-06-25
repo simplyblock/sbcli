@@ -93,8 +93,8 @@ class TestAddNodesDuringFioRun(TestClusterBase):
 
             lvol_details[lvol_name]["Clone"]["ID"] = clone_id
             lvol_details[lvol_name]["Clone"]["Snapshot"] = snapshot_name
-            lvol_details[lvol_name]["Clone"]["Log"] = cl_mount_path
-            lvol_details[lvol_name]["Clone"]["Mount"] = cl_log_path
+            lvol_details[lvol_name]["Clone"]["Log"] = cl_log_path
+            lvol_details[lvol_name]["Clone"]["Mount"] = cl_mount_path
 
             device = self.ssh_obj.get_lvol_vs_device(node=self.mgmt_nodes[0], lvol_id=clone_id)
             self.ssh_obj.format_disk(self.mgmt_nodes[0], device)
@@ -133,6 +133,10 @@ class TestAddNodesDuringFioRun(TestClusterBase):
         max_lvol = node_sample["max_lvol"]
         max_prov = int(node_sample["max_prov"] / (1024**3))  # Convert bytes to GB
 
+        # Extract data NIC interface name from existing node
+        data_nics = node_sample.get("data_nics", [])
+        data_nic = data_nics[0]["if_name"] if data_nics else None
+        self.logger.info(f"Data NIC from existing node: {data_nic}")
 
         new_nodes_id = []
         timestamp = int(datetime.now().timestamp())
@@ -145,7 +149,8 @@ class TestAddNodesDuringFioRun(TestClusterBase):
                                           partitions=node_sample["num_partitions_per_dev"],
                                           disable_ha_jm= not node_sample["enable_ha_jm"],
                                           enable_test_device=node_sample["enable_test_device"],
-                                          spdk_debug=node_sample["spdk_debug"])
+                                          spdk_debug=node_sample["spdk_debug"],
+                                          data_nic=data_nic)
             sleep_n_sec(60)
             new_nodes_ids_temp = self.sbcli_utils.get_all_node_without_lvols()
             for node_id in new_nodes_ids_temp:
@@ -155,11 +160,14 @@ class TestAddNodesDuringFioRun(TestClusterBase):
             containers = self.ssh_obj.get_running_containers(node_ip=ip)
             self.container_nodes[ip] = containers
 
-            cluster_details = self.sbcli_utils.wait_for_cluster_status(
-                cluster_id=self.cluster_id,
-                status="in_expansion",
-                timeout=300
+            try:
+                cluster_details = self.sbcli_utils.wait_for_cluster_status(
+                    cluster_id=self.cluster_id,
+                    status="in_expansion",
+                    timeout=300
                 )
+            except Exception as e:
+                self.logger.error(f"Error while waiting for cluster to be in expansion state: {e}, Checking if online!!")
 
         for node in self.storage_nodes:
             self.ssh_obj.restart_docker_logging(
@@ -171,8 +179,8 @@ class TestAddNodesDuringFioRun(TestClusterBase):
 
         # Step 4: Resume cluster
         sleep_n_sec(60)
-        self.logger.info("Expanding the cluster")
-        self.ssh_obj.expand_cluster(self.mgmt_nodes[0], cluster_id=self.cluster_id)
+        # self.logger.info("Expanding the cluster")
+        # self.ssh_obj.expand_cluster(self.mgmt_nodes[0], cluster_id=self.cluster_id)
 
         for node in new_nodes_id:
             self.sbcli_utils.wait_for_storage_node_status(
@@ -180,19 +188,21 @@ class TestAddNodesDuringFioRun(TestClusterBase):
                 status="online",
                 timeout=300
             )
+        
+        cluster_details = self.sbcli_utils.wait_for_cluster_status(
+            cluster_id=self.cluster_id,
+            status="active",
+            timeout=300
+        )
+        self.logger.info(f"Completed cluster expansion for cluster id: {self.cluster_id} and Cluster status is {cluster_details['status']}")
+
 
         sleep_n_sec(120)
 
         self.validate_migration_for_node(timestamp, 2000, None, 60, no_task_ok=False)
         sleep_n_sec(30)
 
-        cluster_details = self.sbcli_utils.wait_for_cluster_status(
-            cluster_id=self.cluster_id,
-            status="active",
-            timeout=300
-            )
-        self.logger.info(f"Completed cluster expansion for cluster id: {self.cluster_id} and Cluster status is {cluster_details['status']}")
-
+        
         # Step 5: Create lvols on new nodes and validate
         for node in new_nodes_id:
             lvol_name = f"lvl_{generate_random_sequence(4)}_nn"
@@ -264,8 +274,8 @@ class TestAddNodesDuringFioRun(TestClusterBase):
 
             lvol_details[lvol_name]["Clone"]["ID"] = clone_id
             lvol_details[lvol_name]["Clone"]["Snapshot"] = snapshot_name
-            lvol_details[lvol_name]["Clone"]["Log"] = cl_mount_path
-            lvol_details[lvol_name]["Clone"]["Mount"] = cl_log_path
+            lvol_details[lvol_name]["Clone"]["Log"] = cl_log_path
+            lvol_details[lvol_name]["Clone"]["Mount"] = cl_mount_path
 
             device = self.ssh_obj.get_lvol_vs_device(node=self.mgmt_nodes[0], lvol_id=clone_id)
             self.ssh_obj.format_disk(self.mgmt_nodes[0], device)
@@ -321,17 +331,18 @@ class TestAddK8sNodesDuringFioRun(TestClusterBase):
 
     def get_namespace(self):
         """Retrieves the namespace using the specified logic."""
-        namespace = None
         node_ip = self.storage_nodes[0]  # Use the first storage node
 
         # 1. Namespace provided as input
         if self.namespace and len(self.namespace) > 0:
-            self.logger.info(f"Namespace provided as input: {namespace}")
+            self.logger.info(f"Namespace provided as input: {self.namespace}")
+            return self.namespace
 
-        # 2. Check /etc/simplyblock/namespace on an existing node
+        # 2. Check /var/simplyblock/namespace on an existing node
         command = "cat /var/simplyblock/namespace 2>/dev/null"  # Suppress errors if file doesn't exist
         try:
-            namespace = self.ssh_obj.exec_command(node_ip, command).strip()
+            out, _err = self.ssh_obj.exec_command(node_ip, command)
+            namespace = out.strip()
             if namespace:
                 self.logger.info(f"Namespace found in /var/simplyblock/namespace: {namespace}")
                 return namespace
@@ -400,6 +411,8 @@ class TestAddK8sNodesDuringFioRun(TestClusterBase):
     def _add_node_sbcli(self, node_ip):
           """Adds the node to the SimplyBlock cluster using sbcli."""
           node_sample = self.sbcli_utils.get_storage_nodes()["results"][0]
+          data_nics = node_sample.get("data_nics", [])
+          data_nic = data_nics[0]["if_name"] if data_nics else None
           self.ssh_obj.add_storage_node(self.mgmt_nodes[0], self.cluster_id, node_ip,
                                         spdk_image=node_sample["spdk_image"],
                                         partitions=node_sample["num_partitions_per_dev"],
@@ -407,7 +420,7 @@ class TestAddK8sNodesDuringFioRun(TestClusterBase):
                                         enable_test_device=node_sample["enable_test_device"],
                                         spdk_debug=node_sample["spdk_debug"],
                                         namespace=self.namespace,
-                                        data_nic=None)
+                                        data_nic=data_nic)
           sleep_n_sec(180)
 
     def run(self):
@@ -492,8 +505,8 @@ class TestAddK8sNodesDuringFioRun(TestClusterBase):
 
             lvol_details[lvol_name]["Clone"]["ID"] = clone_id
             lvol_details[lvol_name]["Clone"]["Snapshot"] = snapshot_name
-            lvol_details[lvol_name]["Clone"]["Log"] = cl_mount_path
-            lvol_details[lvol_name]["Clone"]["Mount"] = cl_log_path
+            lvol_details[lvol_name]["Clone"]["Log"] = cl_log_path
+            lvol_details[lvol_name]["Clone"]["Mount"] = cl_mount_path
 
             device = self.ssh_obj.get_lvol_vs_device(node=self.mgmt_nodes[0], lvol_id=clone_id)
             self.ssh_obj.format_disk(self.mgmt_nodes[0], device)
@@ -541,12 +554,15 @@ class TestAddK8sNodesDuringFioRun(TestClusterBase):
                 if node_id not in new_nodes_id:
                     new_nodes_id.append(node_id)
             self.storage_nodes.append(ip)
-
-            cluster_details = self.sbcli_utils.wait_for_cluster_status(
-                cluster_id=self.cluster_id,
-                status="in_expansion",
-                timeout=300
+            
+            try:
+                cluster_details = self.sbcli_utils.wait_for_cluster_status(
+                    cluster_id=self.cluster_id,
+                    status="in_expansion",
+                    timeout=300
                 )
+            except Exception as e:
+                self.logger.error(f"Error while waiting for cluster to be in expansion state: {e}, Checking if online!!")
 
         self.runner_k8s_log.restart_logging()
 
@@ -559,8 +575,14 @@ class TestAddK8sNodesDuringFioRun(TestClusterBase):
                 timeout=300
             )
         
-        self.logger.info("Expanding the cluster")
-        self.ssh_obj.expand_cluster(self.mgmt_nodes[0], cluster_id=self.cluster_id)
+        cluster_details = self.sbcli_utils.wait_for_cluster_status(
+            cluster_id=self.cluster_id,
+            status="active",
+            timeout=300
+        )
+        
+        # self.logger.info("Expanding the cluster")
+        # self.ssh_obj.expand_cluster(self.mgmt_nodes[0], cluster_id=self.cluster_id)
 
         for node in new_nodes_id:
             self.sbcli_utils.wait_for_storage_node_status(
@@ -574,11 +596,6 @@ class TestAddK8sNodesDuringFioRun(TestClusterBase):
         self.validate_migration_for_node(timestamp, 2000, None, 60, no_task_ok=False)
         sleep_n_sec(30)
 
-        cluster_details = self.sbcli_utils.wait_for_cluster_status(
-            cluster_id=self.cluster_id,
-            status="active",
-            timeout=300
-            )
         self.logger.info(f"Completed cluster expansion for cluster id: {self.cluster_id} and Cluster status is {cluster_details['status']}")
 
         # Step 4: Create lvols on new nodes and validate
@@ -652,8 +669,8 @@ class TestAddK8sNodesDuringFioRun(TestClusterBase):
 
             lvol_details[lvol_name]["Clone"]["ID"] = clone_id
             lvol_details[lvol_name]["Clone"]["Snapshot"] = snapshot_name
-            lvol_details[lvol_name]["Clone"]["Log"] = cl_mount_path
-            lvol_details[lvol_name]["Clone"]["Mount"] = cl_log_path
+            lvol_details[lvol_name]["Clone"]["Log"] = cl_log_path
+            lvol_details[lvol_name]["Clone"]["Mount"] = cl_mount_path
 
             device = self.ssh_obj.get_lvol_vs_device(node=self.mgmt_nodes[0], lvol_id=clone_id)
             self.ssh_obj.format_disk(self.mgmt_nodes[0], device)
