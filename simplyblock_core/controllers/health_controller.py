@@ -151,7 +151,10 @@ def check_node_rpc(node, timeout=5, retry=2):
 
 def _check_node_api(node):
     try:
-        snode_api = node.client(timeout=90, retry=2)
+        # Liveness probe: short timeout, fail fast on connect errors (a
+        # rebooting host refuses connections; retrying with backoff only delays
+        # detection). 90s was wildly oversized for an is_live() ping.
+        snode_api = node.client(timeout=5, retry=1, connect_retry=0)
         logger.debug(f"Node API={node.api_endpoint}")
         ret, _ = snode_api.is_live()
         logger.debug(f"snode is alive: {ret}")
@@ -191,7 +194,12 @@ def _check_node_ping(ip):
 
 
 def _check_ping_from_node(ip, ifname, node):
-    snodeapi = node.client(timeout=3, retry=3)
+    # Fail fast on connect errors and don't stack retries: this SnodeAPI call
+    # ran in the monitor's per-node check cycle, and against a rebooting host
+    # its retries (read timeout=3 x3 + connect timeouts) burned ~13s, blocking
+    # that node's cycle from completing and re-evaluating (incident 2026-06-25).
+    # On any failure it already falls back to a direct ICMP ping below.
+    snodeapi = node.client(timeout=3, retry=1, connect_retry=0)
     try:
         ret, _ = snodeapi.ping_ip(ip, ifname)
         return bool(ret)

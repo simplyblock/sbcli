@@ -260,11 +260,13 @@ class TestCheckNodeTail(unittest.TestCase):
 
     def test_tail_does_not_queue_auto_restart(self):
         body = self._check_node_body()
-        # The check_node tail (after node_port_check_fun) must not call
-        # add_node_to_auto_restart for any state. Auto-restart is paired
+        # The check_node tail (after the port/data-nic check is collected) must
+        # not call add_node_to_auto_restart for any state. Auto-restart is paired
         # at its own state-flip site (set_node_offline / set_node_schedulable).
-        self.assertIn("node_port_check_fun", body)
-        tail = body[body.index("node_port_check_fun"):]
+        # The port check now runs in a parallel thread; its result is read into
+        # `node_port_check`, so anchor the tail there.
+        self.assertIn("node_port_check", body)
+        tail = body[body.index("node_port_check"):]
         self.assertNotIn(
             "add_node_to_auto_restart", tail,
             "auto-restart must not be queued from the check_node tail; "
