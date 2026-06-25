@@ -8,9 +8,9 @@ Two-tier test suite for the Simplyblock control plane. Unit tests run as pure lo
 tests/
 ├── conftest.py          # Stubs `fdb` module + clears DBController/RPC caches; applies to both tiers.
 ├── _mocks.py            # Shared mock factories (e.g. `make_mock_cluster`).
+├── conftest_proxy.py    # `import_proxy_module()` helper that neutralizes spdk_http_proxy_server's module-level run_server side-effect; used by both proxy unit + e2e tests.
 ├── unit/                # Pure-logic tests; single module under test, no model state, no flows.
-│   ├── web/             # Unit tests for simplyblock_web (settings, v2 auth).
-│   └── conftest_proxy.py
+│   └── web/             # Unit tests for simplyblock_web (settings, v2 auth).
 ├── integration/         # Flow/controller tests + FDB-required subdirs.
 │   ├── conftest.py      # Session-scoped testcontainers fixture that provisions FDB.
 │   ├── ftt2/            # FTT=2 restart scenarios; requires real FDB.

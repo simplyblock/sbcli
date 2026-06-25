@@ -24,6 +24,8 @@ import requests
 if sys.platform == "win32":
     raise unittest.SkipTest("AF_UNIX not available on Windows")
 
+from tests.conftest_proxy import import_proxy_module
+
 # ---------------------------------------------------------------------------
 # Mock SPDK unix socket server
 # ---------------------------------------------------------------------------
@@ -104,9 +106,13 @@ def _start_proxy(sock_path, http_port, max_concurrent=4, timeout=5):
     We import and configure the module, then run the server.
     Returns a thread + a stop event.
     """
-    import simplyblock_core.services.spdk_http_proxy_server as mod
+    # The proxy module starts a real server at import time, so we use the
+    # shared helper that neutralizes that side-effect during import. The
+    # helper also pre-sets required env vars (SERVER_IP, RPC_PORT, ...).
+    mod = import_proxy_module()
 
-    # Reconfigure module globals
+    # Reconfigure module globals — the helper sets defaults; override with
+    # the values this test needs.
     mod.rpc_sock = sock_path
     mod.TIMEOUT = timeout
     mod.MAX_CONCURRENT_SPDK = max_concurrent
