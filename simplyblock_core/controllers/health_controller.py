@@ -151,7 +151,10 @@ def check_node_rpc(node, timeout=8, retry=2):
 
 def _check_node_api(node):
     try:
-        snode_api = node.client(timeout=90, retry=2)
+        # Liveness probe: short timeout, fail fast on connect errors (a
+        # rebooting host refuses connections; retrying with backoff only delays
+        # detection). 90s was wildly oversized for an is_live() ping.
+        snode_api = node.client(timeout=5, retry=1, connect_retry=0)
         logger.debug(f"Node API={node.api_endpoint}")
         ret, _ = snode_api.is_live()
         logger.debug(f"snode is alive: {ret}")
@@ -191,15 +194,20 @@ def _check_node_ping(ip):
 
 
 def _check_ping_from_node(ip, ifname, node):
-    # Tri-state: True/False is the node agent's own ping_ip result; None means
-    # the SnodeAPI call itself timed out / errored and the result is
+    # Fail fast on connect errors and don't stack retries: this SnodeAPI call
+    # runs in the monitor's per-node check cycle, and against a rebooting host
+    # stacked retries (read timeout x3 + connect timeouts) burned ~13s, blocking
+    # that node's cycle from completing and re-evaluating (incident 2026-06-25).
+    #
+    # Tri-state result: True/False is the node agent's own ping_ip result; None
+    # means this SnodeAPI call itself timed out / errored and the result is
     # INCONCLUSIVE. A timeout here is not evidence the data NIC is down -- node
     # liveness is already confirmed by is_live() earlier in the check cycle, so
     # the agent is alive, just slow to answer this probe. We must NOT flip the
     # node DOWN on that; the caller ignores None and re-evaluates next cycle.
     # (The previous mgmt-side ICMP fallback pinged the data IP from mgmt, which
     # is typically off the data VLAN -> always False -> spurious node-down.)
-    snodeapi = node.client(timeout=8, retry=3)
+    snodeapi = node.client(timeout=3, retry=1, connect_retry=0)
     try:
         ret, _ = snodeapi.ping_ip(ip, ifname)
         return bool(ret)

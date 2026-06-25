@@ -968,6 +968,32 @@ def node_port_check_fun(snode):
     return node_port_check
 
 
+# Bounded wait (s) for the parallel port/data-nic check to finish before we
+# read its result. The probe started in parallel with the liveness checks, so
+# by the time we collect it it has usually completed; if not, we treat it as
+# inconclusive for this cycle rather than blocking node-status evaluation.
+PORT_CHECK_JOIN_TIMEOUT_SEC = 5
+
+
+def _spawn_port_check(snode):
+    """Run node_port_check_fun in a background daemon thread so the LVS-port /
+    data-nic probes — which matter ONLY for an otherwise-online node and can
+    hang on a rebooting host's SnodeAPI — run in PARALLEL with the liveness
+    checks instead of serializing after them. Returns (thread, holder); read
+    holder['result'] after a bounded join (None = errored/never-finished)."""
+    holder = {"result": None}
+
+    def _run():
+        try:
+            holder["result"] = node_port_check_fun(snode)
+        except Exception as e:
+            logger.debug(f"Port check thread failed for {snode.get_id()}: {e}")
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    return t, holder
+
+
 class State:
     counter = 0
 def increment():
@@ -1062,9 +1088,19 @@ def check_node(snode):
         set_node_unreachable(snode)
         return False
 
+    # Kick off the LVS-port / data-nic check NOW so it runs in parallel with
+    # the liveness checks below (its result is only consumed at the end, and
+    # only matters for an otherwise-online node). If a liveness check fails
+    # first we return early and this daemon thread is simply abandoned.
+    port_check_thread, port_check_holder = _spawn_port_check(snode)
+
     # 2- check node API
     try:
-        snode_api = snode.client(timeout=10, retry=2)
+        # Liveness probe: short timeout, no connect retries — a host that is
+        # rebooting stops accepting connections, and retrying with backoff only
+        # delays flipping it not-online (incident 2026-06-25: ~21s of detection
+        # latency on a host_reboot came from stacked SnodeAPI retries/timeouts).
+        snode_api = snode.client(timeout=5, retry=1, connect_retry=0)
         ret, _ = snode_api.is_live()
         logger.info(f"Check: node API {snode.mgmt_ip}:5000 ... {ret}")
         if not ret:
@@ -1078,7 +1114,7 @@ def check_node(snode):
 
     # 3- check spdk process through node API
     try:
-        snode_api = snode.client(timeout=40, retry=2)
+        snode_api = snode.client(timeout=10, retry=1, connect_retry=0)
         is_up, _ = snode_api.spdk_process_is_up(snode.rpc_port, snode.cluster_id)
         logger.info(f"Check: spdk process {snode.mgmt_ip}:5000 ... {bool(is_up)}")
         if not is_up:
@@ -1112,9 +1148,21 @@ def check_node(snode):
     #    t.start()
     #    node_rpc_timeout_threads[snode.get_id()] = t
 
-    node_port_check = node_port_check_fun(snode)
+    # Collect the port/data-nic check that ran in parallel with the liveness
+    # checks. Bounded wait: if it hasn't finished (e.g. a slow/hung SnodeAPI on
+    # a rebooting host) treat it as inconclusive and let the next cycle decide,
+    # rather than pinning this node's cycle. Only a definitive False escalates.
+    port_check_thread.join(PORT_CHECK_JOIN_TIMEOUT_SEC)
+    if port_check_thread.is_alive():
+        logger.info(
+            f"Check: port/data-nic for {snode.mgmt_ip} inconclusive "
+            f"(still running after {PORT_CHECK_JOIN_TIMEOUT_SEC}s); "
+            f"deferring port-down decision to next cycle")
+        node_port_check = None
+    else:
+        node_port_check = port_check_holder["result"]
 
-    if not node_port_check:
+    if node_port_check is False:
         cluster = db.get_cluster_by_id(snode.cluster_id)
         if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
             logger.error("Port check failed")
