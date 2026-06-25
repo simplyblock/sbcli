@@ -222,7 +222,8 @@ def _cleanup_created(migration):
         return
 
     nqn = lvol.nqn
-    bdev_short = lvol.lvol_bdev + _MIGRATION_BDEV_SUFFIX
+    _lvol_base = lvol.lvol_bdev[:-len(_MIGRATION_BDEV_SUFFIX)] if lvol.lvol_bdev.endswith(_MIGRATION_BDEV_SUFFIX) else lvol.lvol_bdev
+    bdev_short = _lvol_base + _MIGRATION_BDEV_SUFFIX
     composite = f"{tgt_node.lvstore}/{bdev_short}"
 
     # Compute overlap: nodes shared between SRC and TGT paths.
@@ -666,7 +667,8 @@ def create_migration(lvol_id, target_node_id,
     cluster = db.get_cluster_by_id(tgt_node.cluster_id)
     tgt_rpc = tgt_node.rpc_client()
     nqn = lvol.nqn
-    bdev_short = lvol.lvol_bdev + _MIGRATION_BDEV_SUFFIX
+    _lvol_base = lvol.lvol_bdev[:-len(_MIGRATION_BDEV_SUFFIX)] if lvol.lvol_bdev.endswith(_MIGRATION_BDEV_SUFFIX) else lvol.lvol_bdev
+    bdev_short = _lvol_base + _MIGRATION_BDEV_SUFFIX
     composite = f"{tgt_node.lvstore}/{bdev_short}"
     size_in_mib = convert_size(lvol.size, 'MiB')
     tgt_port = tgt_node.get_lvol_subsys_port(tgt_node.lvstore)
