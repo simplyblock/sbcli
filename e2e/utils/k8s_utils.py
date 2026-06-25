@@ -358,7 +358,7 @@ class K8sUtils:
                                 f"python scripts/rpc_sock.py {stack_file} {sock} "
                                 f"> {rpc_log} 2>&1"
                             )
-                            + f"; echo EXIT_CODE=$?"
+                            + "; echo EXIT_CODE=$?"
                         )
                         rpc_out, rpc_err = self._exec_kubectl(rpc_cmd, supress_logs=True)
                         combined = (rpc_out or "") + (rpc_err or "")
