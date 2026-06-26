@@ -100,6 +100,13 @@ class _MassCreateDeleteMixin:
     CLONE_PHASE_TIMEOUT = 7200       # 2 hours
     DELETE_PHASE_TIMEOUT = 3600      # 1 hour
 
+    # ── Persistent retry mode ─────────────────────────────────────────────
+    # Subclasses set PERSISTENT_RETRY = True to retry failed items until
+    # all expected entities are created or a terminal error is hit.
+    PERSISTENT_RETRY = False
+    PERSISTENT_PHASE_TIMEOUT = 14400   # 4 hours per creation phase
+    PERSISTENT_BACKOFF_SEC = 10        # sleep between retry rounds
+
     # ── Internal state ─────────────────────────────────────────────────────
     _lvol_registry: dict
     _snapshot_registry: dict
@@ -131,6 +138,7 @@ class _MassCreateDeleteMixin:
             "fio_lvol_failures": 0,
             "fio_clone_failures": 0,
         }
+        self._retry_round_counts = {}   # phase_name -> round_count
 
     # ── Error detection (from continuous_parallel_lvol_snapshot_clone.py) ──
 
@@ -148,6 +156,21 @@ class _MassCreateDeleteMixin:
 
     def _is_sync_deletion_error(self, exc):
         return "lvol sync deletion found" in str(exc).lower()
+
+    def _is_capacity_error(self, exc):
+        """Detect terminal capacity errors — the system cannot create more."""
+        text = str(exc).lower()
+        return (
+            "no space" in text
+            or "enospc" in text
+            or "pool max size has reached" in text
+            or "pool max lvol size" in text
+            or "exceeded the max number of lvol" in text
+        )
+
+    def _is_terminal_error(self, exc):
+        """Return True if retrying is pointless (limit or capacity hit)."""
+        return self._is_max_lvols_error(exc) or self._is_capacity_error(exc)
 
     # ── Bulk verify / soft validation ────────────────────────────────────────
 
@@ -287,6 +310,110 @@ class _MassCreateDeleteMixin:
                     consecutive_high_fail = 0
 
         return success, failures
+
+    def _batch_exec_persistent(self, items, task_fn, op_name: str,
+                               per_item_timeout: int = 600,
+                               max_workers: int = None,
+                               batch_size: int = None,
+                               phase_timeout: int = None):
+        """Retry failed items until all succeed or a terminal error is hit.
+
+        Returns (success_count, remaining_count) — compatible with
+        _batch_exec's 2-tuple return.
+
+        Terminal errors (_is_terminal_error) abort immediately.
+        Phase timeout (wall-clock) acts as upper bound.
+        Between retry rounds, sleeps PERSISTENT_BACKOFF_SEC seconds.
+        """
+        workers = max_workers or self.MAX_WORKERS
+        bs = batch_size or self.BATCH_SIZE
+        deadline = time.monotonic() + (
+            phase_timeout or self.PERSISTENT_PHASE_TIMEOUT
+        )
+        remaining = list(items)
+        total_ok = 0
+        total_items = len(items)
+        round_num = 0
+        terminal_hit = False
+
+        while remaining and time.monotonic() < deadline and not terminal_hit:
+            round_num += 1
+            self.logger.info(
+                f"[{op_name}] Persistent round {round_num}: "
+                f"{len(remaining)} items remaining, "
+                f"{total_ok}/{total_items} succeeded so far"
+            )
+
+            failed_items = []
+
+            for batch_start in range(0, len(remaining), bs):
+                if terminal_hit or time.monotonic() >= deadline:
+                    # Carry forward un-attempted items
+                    failed_items.extend(remaining[batch_start:])
+                    break
+
+                batch = remaining[batch_start:batch_start + bs]
+                futures = {}
+                with ThreadPoolExecutor(max_workers=workers) as pool:
+                    for item in batch:
+                        f = pool.submit(task_fn, item)
+                        futures[f] = item
+
+                    batch_ok = 0
+                    batch_fail = 0
+                    for f in as_completed(futures):
+                        item = futures[f]
+                        try:
+                            f.result(timeout=per_item_timeout)
+                            total_ok += 1
+                            batch_ok += 1
+                        except Exception as exc:
+                            if self._is_terminal_error(exc):
+                                terminal_hit = True
+                                self.logger.info(
+                                    f"[{op_name}] Terminal error after "
+                                    f"{total_ok} successes: {exc}"
+                                )
+                                break
+                            failed_items.append(item)
+                            batch_fail += 1
+
+                done = min(batch_start + len(batch), len(remaining))
+                self.logger.info(
+                    f"[{op_name}] Round {round_num} progress: "
+                    f"{done}/{len(remaining)} "
+                    f"(batch ok={batch_ok} fail={batch_fail}, "
+                    f"cumulative ok={total_ok}/{total_items})"
+                )
+
+                if terminal_hit:
+                    break
+
+            remaining = failed_items
+
+            if remaining and not terminal_hit and time.monotonic() < deadline:
+                self.logger.info(
+                    f"[{op_name}] Round {round_num} done: "
+                    f"{len(remaining)} items to retry. "
+                    f"Backing off {self.PERSISTENT_BACKOFF_SEC}s"
+                )
+                sleep_n_sec(self.PERSISTENT_BACKOFF_SEC)
+
+        self._retry_round_counts[op_name] = round_num
+
+        if remaining:
+            self.logger.warning(
+                f"[{op_name}] Persistent exec ended with "
+                f"{len(remaining)} items still failed "
+                f"(terminal={terminal_hit}, rounds={round_num})"
+            )
+        else:
+            self.logger.info(
+                f"[{op_name}] All {total_items} items succeeded "
+                f"after {round_num} round(s)"
+            )
+
+        return total_ok, len(remaining)
 
     # ── 8-phase orchestrator ───────────────────────────────────────────────
 
@@ -456,8 +583,14 @@ class _MassCreateDeleteMixin:
                          f"{self._metrics['fio_lvol_started']}")
         self.logger.info(f"  FIO clone sample:"
                          f" {self._metrics['fio_clone_started']}")
+        if self.PERSISTENT_RETRY:
+            self.logger.info("  Mode:            PERSISTENT RETRY")
         for phase, dur in self._phase_durations.items():
             self.logger.info(f"  Phase {phase:25s}: {dur}s")
+        if self._retry_round_counts:
+            self.logger.info("  --- Retry rounds ---")
+            for phase, rounds in self._retry_round_counts.items():
+                self.logger.info(f"    {phase:25s}: {rounds} round(s)")
         total_dur = sum(self._phase_durations.values())
         self.logger.info(f"  Total duration:  {total_dur:.1f}s")
         self.logger.info("=" * 65)
@@ -484,6 +617,9 @@ class _MassCreateDeleteMixin:
                 "total_duration_sec": round(total_dur, 2),
             },
         }
+        if self.PERSISTENT_RETRY:
+            report["persistent_retry"] = True
+            report["retry_rounds"] = dict(self._retry_round_counts)
 
         out_dir = Path("logs")
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -562,12 +698,16 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
             f"mcd-{_rand_seq(6)}-{i:04d}"
             for i in range(self.NUM_SUBSYSTEMS)
         ]
-        ok, fail = self._batch_exec(
-            [{"name": n, "idx": i} for i, n in enumerate(names)],
-            self._fire_create_standalone,
-            "create_lvols",
-            stop_on_max_lvols=True,
-        )
+        items = [{"name": n, "idx": i} for i, n in enumerate(names)]
+        if self.PERSISTENT_RETRY:
+            ok, fail = self._batch_exec_persistent(
+                items, self._fire_create_standalone, "create_lvols",
+            )
+        else:
+            ok, fail = self._batch_exec(
+                items, self._fire_create_standalone, "create_lvols",
+                stop_on_max_lvols=True,
+            )
 
         # Bulk-verify + populate IDs
         self.logger.info(
@@ -644,12 +784,16 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
         self.logger.info(
             f"[Phase 1a] Creating {len(parent_names)} parent lvols"
         )
-        ok, fail = self._batch_exec(
-            [{"name": n} for n in parent_names],
-            self._create_parent,
-            "create_parents",
-            stop_on_max_lvols=True,
-        )
+        parent_items = [{"name": n} for n in parent_names]
+        if self.PERSISTENT_RETRY:
+            ok, fail = self._batch_exec_persistent(
+                parent_items, self._create_parent, "create_parents",
+            )
+        else:
+            ok, fail = self._batch_exec(
+                parent_items, self._create_parent, "create_parents",
+                stop_on_max_lvols=True,
+            )
         # Filter to successfully created parents
         parent_names = [n for n in parent_names if n in self._parent_registry]
 
@@ -697,13 +841,16 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
             f"[Phase 1b] Creating {len(child_tasks)} children "
             f"across {len(parent_names)} parents"
         )
-        ok, fail = self._batch_exec(
-            child_tasks,
-            self._fire_create_child,
-            "create_children",
-            stop_on_max_lvols=True,
-            max_failures=self.MAX_FAILURES,
-        )
+        if self.PERSISTENT_RETRY:
+            ok, fail = self._batch_exec_persistent(
+                child_tasks, self._fire_create_child, "create_children",
+            )
+        else:
+            ok, fail = self._batch_exec(
+                child_tasks, self._fire_create_child, "create_children",
+                stop_on_max_lvols=True,
+                max_failures=self.MAX_FAILURES,
+            )
 
         # Bulk-verify children + populate IDs
         child_names = [t["name"] for t in child_tasks]
@@ -996,21 +1143,30 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
         )
 
         # Fire all snapshot creation calls.
-        # Scale max_failures to item count — with 50 snaps/lvol, the
-        # default MAX_FAILURES=500 is exhausted by just 10 bad lvols.
-        # Allow up to 10% of total items to fail before aborting.
-        snap_max_failures = max(self.MAX_FAILURES, expected_snaps // 10)
-        self.logger.info(
-            f"[Phase 3] max_failures for snapshots: {snap_max_failures}"
-        )
-        ok, fail = self._batch_exec(
-            snap_items,
-            self._fire_create_snapshot,
-            "create_snapshots",
-            batch_size=self.SNAPSHOT_BATCH_SIZE,
-            stop_on_max_lvols=True,
-            max_failures=snap_max_failures,
-        )
+        if self.PERSISTENT_RETRY:
+            self.logger.info(
+                f"[Phase 3] Persistent retry mode: will retry until "
+                f"all {expected_snaps} snapshots created or terminal error"
+            )
+            ok, fail = self._batch_exec_persistent(
+                snap_items, self._fire_create_snapshot, "create_snapshots",
+                batch_size=self.SNAPSHOT_BATCH_SIZE,
+                phase_timeout=self.SNAPSHOT_PHASE_TIMEOUT,
+            )
+        else:
+            # Scale max_failures to item count — with 50 snaps/lvol, the
+            # default MAX_FAILURES=500 is exhausted by just 10 bad lvols.
+            # Allow up to 10% of total items to fail before aborting.
+            snap_max_failures = max(self.MAX_FAILURES, expected_snaps // 10)
+            self.logger.info(
+                f"[Phase 3] max_failures for snapshots: {snap_max_failures}"
+            )
+            ok, fail = self._batch_exec(
+                snap_items, self._fire_create_snapshot, "create_snapshots",
+                batch_size=self.SNAPSHOT_BATCH_SIZE,
+                stop_on_max_lvols=True,
+                max_failures=snap_max_failures,
+            )
 
         # Bulk-verify snapshots + populate IDs
         snap_names = [s["snap_name"] for s in snap_items]
@@ -1573,12 +1729,15 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
             f"mcd-pvc-{_rand_seq(5)}-{i:04d}" for i in range(total)
         ]
 
-        ok, fail = self._batch_exec(
-            pvc_names,
-            self._create_single_pvc,
-            "create_pvcs",
-            stop_on_max_lvols=True,
-        )
+        if self.PERSISTENT_RETRY:
+            ok, fail = self._batch_exec_persistent(
+                pvc_names, self._create_single_pvc, "create_pvcs",
+            )
+        else:
+            ok, fail = self._batch_exec(
+                pvc_names, self._create_single_pvc, "create_pvcs",
+                stop_on_max_lvols=True,
+            )
 
         # Populate lvol registry from PVC -> volumeHandle
         for pvc_name in list(self._pvc_registry.keys()):
@@ -1687,15 +1846,24 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
             f"=== Phase 3: Create {expected_snaps} VolumeSnapshots ==="
         )
 
-        snap_max_failures = max(self.MAX_FAILURES, expected_snaps // 10)
-        ok, fail = self._batch_exec(
-            snap_items,
-            self._create_single_vs,
-            "create_snapshots",
-            batch_size=self.SNAPSHOT_BATCH_SIZE,
-            stop_on_max_lvols=True,
-            max_failures=snap_max_failures,
-        )
+        if self.PERSISTENT_RETRY:
+            self.logger.info(
+                f"[Phase 3] Persistent retry mode: will retry until "
+                f"all {expected_snaps} snapshots created or terminal error"
+            )
+            ok, fail = self._batch_exec_persistent(
+                snap_items, self._create_single_vs, "create_snapshots",
+                batch_size=self.SNAPSHOT_BATCH_SIZE,
+                phase_timeout=self.SNAPSHOT_PHASE_TIMEOUT,
+            )
+        else:
+            snap_max_failures = max(self.MAX_FAILURES, expected_snaps // 10)
+            ok, fail = self._batch_exec(
+                snap_items, self._create_single_vs, "create_snapshots",
+                batch_size=self.SNAPSHOT_BATCH_SIZE,
+                stop_on_max_lvols=True,
+                max_failures=snap_max_failures,
+            )
 
     def _create_single_vs(self, params: dict):
         vs_name = params["vs_name"]
@@ -2010,5 +2178,71 @@ class MassCreateDelete_300x10_K8s(_MassCreateDeleteK8s):
 
 class MassCreateDelete_3000x1_K8s(_MassCreateDeleteK8s):
     """3000 ns/sub × 1 subsystem = 3000 PVCs."""
+    NUM_SUBSYSTEMS = 1
+    NS_PER_SUBSYSTEM = 3000
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Persistent retry variants: retry failed items until all expected entities
+#  are created or a terminal error (capacity / subsystem limit) is hit.
+#  Same 8 phases, same ratios, same parallelism (20 threads).
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Docker persistent variants
+
+class MassCreateDeletePersistent_1x500_Docker(_MassCreateDeleteDocker):
+    """1 ns/sub × 500 subsystems = 500 standalone lvols (persistent retry)."""
+    PERSISTENT_RETRY = True
+    NUM_SUBSYSTEMS = 500
+    NS_PER_SUBSYSTEM = 1
+
+
+class MassCreateDeletePersistent_30x100_Docker(_MassCreateDeleteDocker):
+    """30 ns/sub × 100 subsystems = 3000 lvols (persistent retry)."""
+    PERSISTENT_RETRY = True
+    NUM_SUBSYSTEMS = 100
+    NS_PER_SUBSYSTEM = 30
+
+
+class MassCreateDeletePersistent_300x10_Docker(_MassCreateDeleteDocker):
+    """300 ns/sub × 10 subsystems = 3000 lvols (persistent retry)."""
+    PERSISTENT_RETRY = True
+    NUM_SUBSYSTEMS = 10
+    NS_PER_SUBSYSTEM = 300
+
+
+class MassCreateDeletePersistent_3000x1_Docker(_MassCreateDeleteDocker):
+    """3000 ns/sub × 1 subsystem = 3000 lvols (persistent retry)."""
+    PERSISTENT_RETRY = True
+    NUM_SUBSYSTEMS = 1
+    NS_PER_SUBSYSTEM = 3000
+
+
+# K8s persistent variants
+
+class MassCreateDeletePersistent_1x500_K8s(_MassCreateDeleteK8s):
+    """1 ns/sub × 500 subsystems = 500 PVCs (persistent retry)."""
+    PERSISTENT_RETRY = True
+    NUM_SUBSYSTEMS = 500
+    NS_PER_SUBSYSTEM = 1
+
+
+class MassCreateDeletePersistent_30x100_K8s(_MassCreateDeleteK8s):
+    """30 ns/sub × 100 subsystems = 3000 PVCs (persistent retry)."""
+    PERSISTENT_RETRY = True
+    NUM_SUBSYSTEMS = 100
+    NS_PER_SUBSYSTEM = 30
+
+
+class MassCreateDeletePersistent_300x10_K8s(_MassCreateDeleteK8s):
+    """300 ns/sub × 10 subsystems = 3000 PVCs (persistent retry)."""
+    PERSISTENT_RETRY = True
+    NUM_SUBSYSTEMS = 10
+    NS_PER_SUBSYSTEM = 300
+
+
+class MassCreateDeletePersistent_3000x1_K8s(_MassCreateDeleteK8s):
+    """3000 ns/sub × 1 subsystem = 3000 PVCs (persistent retry)."""
+    PERSISTENT_RETRY = True
     NUM_SUBSYSTEMS = 1
     NS_PER_SUBSYSTEM = 3000

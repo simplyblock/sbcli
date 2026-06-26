@@ -725,6 +725,7 @@ jobs:
           [ -z "${ADMIN_POD}" ] && echo "No admin pod found, skipping Graylog collection" && exit 0
 
           MGMT_IP=$(kubectl get svc -n ${NAMESPACE} | grep graylog | awk '{print $3}')
+          OPENSEARCH_IP=$(kubectl get svc opensearch-cluster-master -n ${NAMESPACE} -o jsonpath='{.spec.clusterIP}' 2>/dev/null || echo "")
           OUTPUT_DIR=""
           if [ -n "${RUN_BASE_DIR:-}" ] && [ -d "${RUN_BASE_DIR}" ]; then
             OUTPUT_DIR="${RUN_BASE_DIR}/graylog_collected"
@@ -748,13 +749,17 @@ jobs:
 
           run_collect() {
             local iso=$1 mins=$2 outdir=$3 extra_flag=${4:-}
+            local mgmt_ip_to_use="${MGMT_IP}"
+            if [[ "${extra_flag}" == *"--use-opensearch"* ]] && [ -n "${OPENSEARCH_IP}" ]; then
+              mgmt_ip_to_use="${OPENSEARCH_IP}"
+            fi
             kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- \
               python3 /usr/local/lib/python3.12/site-packages/simplyblock_core/scripts/collect_logs.py \
                 "${iso}" "${mins}" \
                 --mode kubernetes --namespace "${NAMESPACE}" \
                 --output-dir "${outdir}" \
                 ${extra_flag} \
-                ${MGMT_IP:+--mgmt-ip "${MGMT_IP}"} \
+                ${mgmt_ip_to_use:+--mgmt-ip "${mgmt_ip_to_use}"} \
                 ${CLUSTER_ID:+--cluster-id "${CLUSTER_ID}"} \
             2>&1
           }
