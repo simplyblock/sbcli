@@ -109,7 +109,6 @@ def add_lvol():
     """""
 
     cl_data = request.get_json()
-    logger.debug(cl_data)
     if 'size' not in cl_data:
         return utils.get_response(None, "missing required param: size", 400)
     if 'name' not in cl_data:

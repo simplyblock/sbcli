@@ -1,6 +1,5 @@
 # coding=utf-8
 import datetime
-import json
 import os
 import logging
 import uuid
@@ -9,6 +8,7 @@ import requests
 
 import docker
 from kubernetes import client as k8s_client
+from pydantic import SecretStr
 
 
 from simplyblock_core import utils, scripts, constants
@@ -20,10 +20,10 @@ logger = logging.getLogger()
 
 
 
-def deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret, mode):
+def deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret: SecretStr, mode):
 
     try:
-        headers = {'Authorization': f'{cluster_id} {cluster_secret}'}
+        headers = {'Authorization': f'{cluster_id} {cluster_secret.get_secret_value()}'}
         resp = requests.get(f"http://{cluster_ip}/api/v1/cluster/{cluster_id}", headers=headers)
         resp_json = resp.json()
         cluster_data = resp_json['results'][0]
@@ -245,11 +245,10 @@ def add_mgmt_node(mgmt_ip, mode, cluster_id=None):
     return node.uuid
 
 
-def list_mgmt_nodes(is_json):
+def list_mgmt_nodes():
     db_controller = DBController()
     nodes = db_controller.get_mgmt_nodes()
     data = []
-    output = ""
 
     for node in nodes:
         logging.debug(node)
@@ -261,14 +260,7 @@ def list_mgmt_nodes(is_json):
             "Status": node.status,
         })
 
-    if not data:
-        return output
-
-    if is_json:
-        output = json.dumps(data, indent=2)
-    else:
-        output = utils.print_table(data)
-    return output
+    return data
 
 
 def remove_mgmt_node(uuid):

@@ -51,8 +51,8 @@ class DBController(metaclass=Singleton):
             fdb.api_version(constants.KVD_DB_VERSION)
             self.kv_store = fdb.open(constants.KVD_DB_FILE_PATH)  # type: ignore[func-returns-value]
             self.kv_store.options.set_transaction_timeout(constants.KVD_DB_TIMEOUT_MS)
-        except Exception as e:
-            print(e)
+        except Exception:
+            logger.exception("FDB initialization failed")
 
     def get_storage_nodes(self) -> List[StorageNode]:
         ret = StorageNode().read_from_db(self.kv_store)
@@ -424,7 +424,7 @@ class DBController(metaclass=Singleton):
             lock.requested_snapshot_id = requested_snapshot_id
             lock.lvol_id = lvol_id
             lock.created_at = now
-            tr[key] = json.dumps(lock.to_dict()).encode()
+            tr[key] = json.dumps(lock.to_dict(unwrap_secrets=True)).encode()
 
         return True, None
 
@@ -578,7 +578,7 @@ class DBController(metaclass=Singleton):
         obj = model_cls().from_dict(json.loads(raw))
         if mutate_fn(obj) is False:
             return obj
-        tr[key] = json.dumps(obj.to_dict()).encode()
+        tr[key] = json.dumps(obj.to_dict(unwrap_secrets=True)).encode()
         return obj
 
     def atomic_update(self, obj, mutate_fn):
@@ -640,7 +640,7 @@ class DBController(metaclass=Singleton):
         if target:
             target.status = StorageNode.STATUS_RESTARTING
             prefix = target.get_db_id()
-            data = json.dumps(target.get_clean_dict())
+            data = json.dumps(target.get_clean_dict(unwrap_secrets=True))
             tr[prefix.encode()] = data.encode()
 
         return True, None

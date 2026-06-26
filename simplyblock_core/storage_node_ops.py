@@ -16,6 +16,7 @@ import uuid
 
 import docker
 from docker.types import LogConfig
+from pydantic import SecretStr
 
 from simplyblock_core import constants, scripts, distr_controller, cluster_ops
 from simplyblock_core import port_block, utils
@@ -1656,7 +1657,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
               "public_ip": "20.20.20.20",
         }
         """""
-        logger.debug(json.dumps(cloud_instance, indent=2))
+        logger.debug(utils.dump_json(cloud_instance, indent=2))
         logger.info(f"Instance id: {cloud_instance['id']}")
         logger.info(f"Instance cloud: {cloud_instance['cloud']}")
         logger.info(f"Instance type: {cloud_instance['type']}")
@@ -1915,8 +1916,8 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         snode.rpc_password = rpc_pass
         snode.cluster_id = cluster_id
         snode.api_endpoint = node_addr
-        snode.host_secret = utils.generate_string(20)
-        snode.ctrl_secret = utils.generate_string(20)
+        snode.host_secret = SecretStr(utils.generate_string(20))
+        snode.ctrl_secret = SecretStr(utils.generate_string(20))
         snode.number_of_distribs = number_of_distribs
         snode.number_of_alceml_devices = number_of_alceml_devices
         snode.enable_ha_jm = enable_ha_jm
@@ -2179,15 +2180,22 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
 
             snode.write_to_db(kv_store)
 
+            # Route the IN_CREATION -> ONLINE transition through set_node_status
+            # rather than a raw status write. set_node_status enforces the
+            # _ALLOWED_PRE_STATUSES_FOR_ONLINE guard (OFFLINE -> ONLINE is rejected),
+            # so a concurrent/stale path can no longer clobber a freshly-detected
+            # OFFLINE back to ONLINE through this code -- the raw write here was the
+            # node-side stale re-online hole (incident 2026-06-24: node re-marked
+            # online seconds after the monitor downed it, undoing the OFFLINE and
+            # forcing a duplicate offline/auto-restart cycle). set_node_status also
+            # emits the status event, broadcasts to peers, and cancels stale
+            # auto-restart tasks -- all previously done by hand here.
             snode = db_controller.get_storage_node_by_id(snode.get_id())
-            old_status = snode.status
-            snode.status = StorageNode.STATUS_ONLINE
-            snode.updated_at = str(datetime.datetime.now(datetime.timezone.utc))
-            snode.online_since = str(datetime.datetime.now(datetime.timezone.utc))
-            snode.write_to_db(db_controller.kv_store)
-
-            storage_events.snode_status_change(snode, snode.status, old_status, caused_by="monitor")
-            # distr_controller.send_node_status_event(snode, status)
+            if not set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE, caused_by="monitor"):
+                logger.error(
+                    f"Failed to bring node {snode.get_id()} ONLINE "
+                    f"(illegal transition from {snode.status})")
+                return False
 
             logger.info("Make other nodes connect to the node devices")
             snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
@@ -3237,14 +3245,13 @@ def _format_lvstore_ports(node):
     return " ".join(parts)
 
 
-def list_storage_nodes(is_json, cluster_id=None):
+def list_storage_nodes(cluster_id=None):
     db_controller = DBController()
     if cluster_id:
         nodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
     else:
         nodes = db_controller.get_storage_nodes()
     data = []
-    output = ""
     all_lvols = db_controller.get_mini_lvols()
     for node in nodes:
         logger.debug(node)
@@ -3281,17 +3288,10 @@ def list_storage_nodes(is_json, cluster_id=None):
 
         })
 
-    if not data:
-        return output
-
-    if is_json:
-        output = json.dumps(data, indent=2)
-    else:
-        output = utils.print_table(data)
-    return output
+    return data
 
 
-def list_storage_devices(node_id, is_json):
+def list_storage_devices(node_id):
     db_controller = DBController()
     try:
         snode = db_controller.get_storage_node_by_id(node_id)
@@ -3381,14 +3381,7 @@ def list_storage_devices(node_id, is_json):
     if bdev_devices:
         data["Distrib Block Devices"] = bdev_devices
 
-    if is_json:
-        return json.dumps(data, indent=2)
-    else:
-        out = "\n\n".join(
-            f'{key}\n{utils.print_table(value)}\n\n'
-            for key, value in data.items()
-        )
-        return out
+    return data
 
 
 def _check_ftt_allows_node_removal(node_id, db_controller):
@@ -4258,7 +4251,7 @@ def get_host_secret(node_id):
         logger.error("node not found")
         return False
 
-    return node.host_secret
+    return node.host_secret.get_secret_value()
 
 
 def get_ctrl_secret(node_id):
@@ -4269,7 +4262,7 @@ def get_ctrl_secret(node_id):
         logger.error("node not found")
         return False
 
-    return node.ctrl_secret
+    return node.ctrl_secret.get_secret_value()
 
 
 def health_check(node_id):
@@ -4365,7 +4358,7 @@ def get_info(node_id):
         return False
 
     node_info, _ = snode.client().info()
-    return json.dumps(node_info, indent=2)
+    return node_info
 
 
 def get_spdk_info(node_id):
@@ -4401,8 +4394,7 @@ def get(node_id):
         logger.exception("Can not find storage node")
         return False
 
-    data = snode.get_clean_dict()
-    return json.dumps(data, indent=2, sort_keys=True)
+    return snode.get_clean_dict()
 
 
 # States from which a node may legally transition INTO STATUS_ONLINE.
@@ -7039,15 +7031,52 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
 
 
 
+# Seconds to wait before the single retry of a failed distrib (re)creation,
+# giving the control plane time to reconcile a peer that went offline mid-restart
+# so the rebuilt cluster map no longer references its devices as online.
+_DISTR_RECREATE_RETRY_DELAY_SEC = 5
+
+
 def _create_bdev_stack(snode, lvstore_stack=None, primary_node=None):
+    # Per-distrib creation outcome, keyed by bdev name. Threads write their own
+    # key (distinct keys -> GIL-safe), the main loop reads after join.
+    distr_results: dict = {}
+
     def _create_distr(snode, name, params):
-        try:
-            rpc_client.bdev_distrib_create(**params)
-        except Exception:
-            logger.error("Failed to create bdev distrib")
-        ret = distr_controller.send_cluster_map_to_distr(snode, name)
-        if not ret:
-            logger.error("Failed to send cluster map")
+        # If a peer node goes offline at the exact moment a distrib is
+        # (re)created, the cluster map can be briefly stale -- it still flags
+        # that peer's devices as online -- and bdev_distrib_create (or the
+        # subsequent map push) fails. That is transient: once the control plane
+        # marks the departed devices offline, a freshly built map succeeds. So
+        # try once more (send_cluster_map_to_distr rebuilds the map from the
+        # current DB view each call) before giving up. A failure that survives
+        # the retry is recorded so the caller aborts the restart -- the standard
+        # unrecoverable-error path -- instead of completing on a broken distrib.
+        for attempt in range(2):
+            if attempt > 0:
+                # Give the control plane a moment to reconcile the departed
+                # node, then clear any half-created distrib before retrying.
+                time.sleep(_DISTR_RECREATE_RETRY_DELAY_SEC)
+                try:
+                    rpc_client.bdev_distrib_delete(name)
+                except Exception:
+                    pass
+            try:
+                rpc_client.bdev_distrib_create(**params)
+                if distr_controller.send_cluster_map_to_distr(snode, name):
+                    distr_results[name] = True
+                    return
+                logger.error(
+                    "Failed to send cluster map to distrib %s (attempt %d/2)",
+                    name, attempt + 1)
+            except Exception as e:
+                logger.error(
+                    "Failed to create bdev distrib %s (attempt %d/2): %s",
+                    name, attempt + 1, e)
+        distr_results[name] = False
+
+    def _distr_failures():
+        return [n for n, ok in distr_results.items() if not ok]
 
     rpc_client = snode.rpc_client()
     db_controller = DBController()
@@ -7100,6 +7129,14 @@ def _create_bdev_stack(snode, lvstore_stack=None, primary_node=None):
             if thread_list:
                 for t in thread_list:
                     t.join()
+            # Never assemble the raid on top of distribs that failed to
+            # (re)create after the retry -- that is the unrecoverable case the
+            # restart must abort on.
+            failed = _distr_failures()
+            if failed:
+                if created_bdevs:
+                    _remove_bdev_stack(created_bdevs[::-1], rpc_client)
+                return False, f"Failed to (re)create distrib(s) after retry: {failed}"
             distribs_list = bdev["distribs_list"]
             strip_size_kb = params["strip_size_kb"]
             ret = rpc_client.bdev_raid_create(name, distribs_list, strip_size_kb=strip_size_kb)
@@ -7120,6 +7157,13 @@ def _create_bdev_stack(snode, lvstore_stack=None, primary_node=None):
     if thread_list:
         for t in thread_list:
             t.join()
+    # Catch distrib failures for stacks without a trailing raid (the raid
+    # branch checks before assembling its raid; this covers everything else).
+    failed = _distr_failures()
+    if failed:
+        if created_bdevs:
+            _remove_bdev_stack(created_bdevs[::-1], rpc_client)
+        return False, f"Failed to (re)create distrib(s) after retry: {failed}"
     return True, None
 
 
@@ -7634,16 +7678,12 @@ def auto_repair(node_id, validate_only=False, force_remove_inconsistent=False, f
     # #sbctl sn list-lvols d4577fa7-545f-4506-b127-7e81fc3a6e34 --json > lvols_8080.json
     # with open('lvols_8082.json', 'r') as file:
     #     lvols = json.load(file)
-    lvols = lvol_controller.list_by_node(node_id, is_json=True)
-    if lvols:
-        lvols = json.loads(lvols)
+    lvols = lvol_controller.list_by_node(node_id)
 
     # #sbctl sn list-snapshots d4577fa7-545f-4506-b127-7e81fc3a6e34 --json > snaps_8080.json
     # with open('snaps_8082.json', 'r') as file:
     #     snaps = json.load(file)
-    snaps = snapshot_controller.list_snapshots(node_id=node_id, is_json=True)
-    if snaps:
-        snaps = json.loads(snaps)
+    snaps = snapshot_controller.list_snapshots(node_id=node_id)
 
     out_blobid_dict = {}
     lvols_blobid_dict = {}
@@ -7802,4 +7842,4 @@ def lvs_dump_tree(node_id):
         logger.error("Failed to dump lvstore tree")
         return False
 
-    return json.dumps(ret, indent=2)
+    return ret

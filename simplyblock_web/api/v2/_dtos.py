@@ -4,7 +4,7 @@ from typing import List, Literal, Tuple, Optional, cast
 from uuid import UUID
 
 from fastapi import Request
-from pydantic import BaseModel
+from pydantic import BaseModel, SecretStr, field_serializer
 
 from simplyblock_core.controllers import migration_controller
 from simplyblock_core.db_controller import DBController
@@ -110,11 +110,15 @@ class ClusterDTO(BaseModel):
     provisioned_capacity_warning: util.Unsigned
     node_affinity: bool
     anti_affinity: bool
-    secret: str
+    secret: SecretStr
     tls_enabled: bool
     max_fault_tolerance: int
     backup_enabled: bool
     capacity: CapacityStatDTO
+
+    @field_serializer('secret', when_used='json')
+    def _unwrap_secret_for_json(self, value: SecretStr) -> str:
+        return value.get_secret_value()
 
     @staticmethod
     def from_model(model: Cluster, stat_obj: Optional[StatsObject] = None):

@@ -1452,6 +1452,8 @@ jobs:
           # Get Graylog service ClusterIP for mgmt-ip
           MGMT_IP=$(kubectl get svc -n ${NAMESPACE} | grep graylog | awk '{print $3}')
           echo "  Graylog IP: ${MGMT_IP}"
+          OPENSEARCH_IP=$(kubectl get svc opensearch-cluster-master -n ${NAMESPACE} -o jsonpath='{.spec.clusterIP}' 2>/dev/null || echo "")
+          echo "  OpenSearch IP: ${OPENSEARCH_IP}"
 
           # Determine output dir from RUN_BASE_DIR
           OUTPUT_DIR=""
@@ -1476,54 +1478,122 @@ jobs:
             echo "${iso}"
           }
 
-          # Collect logs one hour at a time
+          # Build chunk boundaries, then iterate in REVERSE order (newest first)
+          # so the most critical logs (end of test) are captured first.
+          _CHUNK_STARTS=()
+          _C=${WINDOW_START}
+          while [ ${_C} -lt ${WINDOW_END} ]; do
+            _CHUNK_STARTS+=(${_C})
+            _C=$((_C + 3600))
+          done
+          NUM_CHUNKS=${#_CHUNK_STARTS[@]}
+
+          # Helper: run collect_logs.py with optional extra flags
+          run_collect() {
+            local iso=$1 mins=$2 outdir=$3 extra_flag=${4:-}
+            local mgmt_ip_to_use="${MGMT_IP}"
+            if [[ "${extra_flag}" == *"--use-opensearch"* ]] && [ -n "${OPENSEARCH_IP}" ]; then
+              mgmt_ip_to_use="${OPENSEARCH_IP}"
+            fi
+            kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- \
+              python3 /usr/local/lib/python3.12/site-packages/simplyblock_core/scripts/collect_logs.py \
+                "${iso}" "${mins}" \
+                --mode kubernetes \
+                --namespace "${NAMESPACE}" \
+                --monitoring-secret "${MON_SECRET}" \
+                --output-dir "${outdir}" \
+                ${extra_flag} \
+                ${mgmt_ip_to_use:+--mgmt-ip "${mgmt_ip_to_use}"} \
+                ${CLUSTER_ID:+--cluster-id "${CLUSTER_ID}"} \
+            2>&1
+          }
+
+          # Adaptive collection: try full window, on failure split into
+          # 5-min sub-windows, then 1-min if those also fail.
+          collect_adaptive() {
+            local start_epoch=$1 end_epoch=$2 outdir=$3 extra_flag=${4:-}
+            local duration=$((end_epoch - start_epoch))
+            local mins=$(( (duration + 59) / 60 ))
+            local iso=$(epoch_to_iso ${start_epoch})
+            if run_collect "${iso}" "${mins}" "${outdir}" "${extra_flag}"; then
+              return 0
+            fi
+            echo "  WARN: ${mins}m window failed, retrying with 5-min sub-windows..."
+            local sub_start=${start_epoch}
+            while [ ${sub_start} -lt ${end_epoch} ]; do
+              local sub_end=$((sub_start + 300))
+              [ ${sub_end} -gt ${end_epoch} ] && sub_end=${end_epoch}
+              local sub_mins=$(( ((sub_end - sub_start) + 59) / 60 ))
+              local sub_iso=$(epoch_to_iso ${sub_start})
+              if ! run_collect "${sub_iso}" "${sub_mins}" "${outdir}" "${extra_flag}"; then
+                echo "  WARN: 5-min window at ${sub_iso} failed, retrying with 1-min windows..."
+                local micro_start=${sub_start}
+                while [ ${micro_start} -lt ${sub_end} ]; do
+                  local micro_end=$((micro_start + 60))
+                  [ ${micro_end} -gt ${sub_end} ] && micro_end=${sub_end}
+                  local micro_mins=$(( ((micro_end - micro_start) + 59) / 60 ))
+                  local micro_iso=$(epoch_to_iso ${micro_start})
+                  run_collect "${micro_iso}" "${micro_mins}" "${outdir}" "${extra_flag}" || \
+                    echo "  WARN: 1-min window at ${micro_iso} also failed"
+                  micro_start=${micro_end}
+                done
+              fi
+              sub_start=${sub_end}
+            done
+          }
+
+          # Auto-detect preferred log backend on the first (newest) chunk:
+          # try OpenSearch; if it works use it for all chunks, else use Graylog.
+          PREFER_OPENSEARCH=""
           CHUNK=0
-          CURRENT=${WINDOW_START}
-          while [ ${CURRENT} -lt ${WINDOW_END} ]; do
+
+          for (( _IDX=NUM_CHUNKS-1; _IDX>=0; _IDX-- )); do
             CHUNK=$((CHUNK + 1))
-            CHUNK_END=$((CURRENT + 3600))
-            # Cap the last chunk at WINDOW_END
+            CHUNK_START=${_CHUNK_STARTS[$_IDX]}
+            CHUNK_END=$((CHUNK_START + 3600))
             if [ ${CHUNK_END} -gt ${WINDOW_END} ]; then
               CHUNK_END=${WINDOW_END}
             fi
-            CHUNK_SECONDS=$((CHUNK_END - CURRENT))
-            CHUNK_MINUTES=$(( (CHUNK_SECONDS + 59) / 60 ))
-            CHUNK_ISO=$(epoch_to_iso ${CURRENT})
+            CHUNK_MINUTES=$(( ((CHUNK_END - CHUNK_START) + 59) / 60 ))
+            CHUNK_ISO=$(epoch_to_iso ${CHUNK_START})
 
             echo ""
-            echo "--- Chunk ${CHUNK}/${TOTAL_HOURS}: ${CHUNK_ISO} for ${CHUNK_MINUTES}m ---"
+            echo "--- Chunk ${CHUNK}/${NUM_CHUNKS}: ${CHUNK_ISO} for ${CHUNK_MINUTES}m (newest-first) ---"
 
             POD_OUTPUT_DIR="/tmp/graylog_collect_chunk${CHUNK}"
             kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- mkdir -p "${POD_OUTPUT_DIR}" 2>/dev/null || true
 
-            kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- \
-              python3 /usr/local/lib/python3.12/site-packages/simplyblock_core/scripts/collect_logs.py \
-                "${CHUNK_ISO}" "${CHUNK_MINUTES}" \
-                --mode kubernetes \
-                --namespace "${NAMESPACE}" \
-                --monitoring-secret "${MON_SECRET}" \
-                --output-dir "${POD_OUTPUT_DIR}" \
-                ${MGMT_IP:+--mgmt-ip "${MGMT_IP}"} \
-                ${CLUSTER_ID:+--cluster-id "${CLUSTER_ID}"} \
-            2>&1 || {
-              echo "WARN: Graylog collect failed for chunk ${CHUNK}, retrying with --use-opensearch..."
-              kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- \
-                python3 /usr/local/lib/python3.12/site-packages/simplyblock_core/scripts/collect_logs.py \
-                  "${CHUNK_ISO}" "${CHUNK_MINUTES}" \
-                  --mode kubernetes \
-                  --namespace "${NAMESPACE}" \
-                  --monitoring-secret "${MON_SECRET}" \
-                  --output-dir "${POD_OUTPUT_DIR}" \
-                  --use-opensearch \
-                  ${MGMT_IP:+--mgmt-ip "${MGMT_IP}"} \
-                  ${CLUSTER_ID:+--cluster-id "${CLUSTER_ID}"} \
-              2>&1 || echo "WARN: OpenSearch fallback also failed for chunk ${CHUNK}"
-            }
+            if [ -z "${PREFER_OPENSEARCH}" ]; then
+              # First chunk: probe OpenSearch availability
+              echo "  Probing OpenSearch availability..."
+              if run_collect "${CHUNK_ISO}" "${CHUNK_MINUTES}" "${POD_OUTPUT_DIR}" "--use-opensearch"; then
+                PREFER_OPENSEARCH=true
+                echo "  OpenSearch works — using it for all chunks"
+              else
+                PREFER_OPENSEARCH=false
+                echo "  OpenSearch unavailable — using Graylog for all chunks"
+                kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- rm -rf "${POD_OUTPUT_DIR}" 2>/dev/null || true
+                kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- mkdir -p "${POD_OUTPUT_DIR}" 2>/dev/null || true
+                collect_adaptive ${CHUNK_START} ${CHUNK_END} "${POD_OUTPUT_DIR}" || \
+                  echo "WARN: Graylog also failed for chunk ${CHUNK}"
+              fi
+            elif [ "${PREFER_OPENSEARCH}" = "true" ]; then
+              collect_adaptive ${CHUNK_START} ${CHUNK_END} "${POD_OUTPUT_DIR}" "--use-opensearch" || {
+                echo "WARN: OpenSearch failed for chunk ${CHUNK}, falling back to Graylog..."
+                collect_adaptive ${CHUNK_START} ${CHUNK_END} "${POD_OUTPUT_DIR}" || \
+                  echo "WARN: Graylog fallback also failed for chunk ${CHUNK}"
+              }
+            else
+              collect_adaptive ${CHUNK_START} ${CHUNK_END} "${POD_OUTPUT_DIR}" || {
+                echo "WARN: Graylog failed for chunk ${CHUNK}, falling back to OpenSearch..."
+                collect_adaptive ${CHUNK_START} ${CHUNK_END} "${POD_OUTPUT_DIR}" "--use-opensearch" || \
+                  echo "WARN: OpenSearch fallback also failed for chunk ${CHUNK}"
+              }
+            fi
 
             # Copy tarballs from pod to NFS for this chunk
             TARBALLS=$(kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- \
               find "${POD_OUTPUT_DIR}" -name "*.tar.gz" -type f 2>/dev/null) || true
-
             if [ -n "${TARBALLS}" ]; then
               for TB in ${TARBALLS}; do
                 TB_NAME=$(basename "${TB}")
@@ -1539,12 +1609,10 @@ jobs:
 
             # Cleanup this chunk in pod
             kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- rm -rf "${POD_OUTPUT_DIR}" 2>/dev/null || true
-
-            CURRENT=${CHUNK_END}
           done
 
           echo ""
-          echo "=== Graylog collection complete (${CHUNK} chunks): ${OUTPUT_DIR} ==="
+          echo "=== Log collection complete (${CHUNK} chunks, newest-first): ${OUTPUT_DIR} ==="
           ls -la "${OUTPUT_DIR}/" 2>/dev/null || true
         env:
           CLUSTER_ID: ${{ env.CLUSTER_ID }}

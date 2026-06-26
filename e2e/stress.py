@@ -60,7 +60,7 @@ def main():
         seen = set()
         for needle in needles:
             for cls in tests:
-                if needle in cls.__name__.lower() and cls not in seen:
+                if needle in cls.__name__.lower().replace("_", "") and cls not in seen:
                     test_class_run.append(cls)
                     seen.add(cls)
 

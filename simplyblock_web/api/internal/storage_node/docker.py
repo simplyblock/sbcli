@@ -10,7 +10,6 @@ from typing import List, Optional, Union
 import cpuinfo
 import docker
 import psutil
-import requests
 import socket
 from docker.types import LogConfig
 from flask_openapi3 import APIBlueprint
@@ -21,68 +20,13 @@ import simplyblock_core.utils.pci as pci_utils
 import simplyblock_core.utils as init_utils
 from simplyblock_web import utils, node_utils
 
+from ._cloud_info import get_cloud_info
+
 logger = core_utils.get_logger(__name__)
 
 api = APIBlueprint("snode", __name__, url_prefix="/snode")
 
 cluster_id_file = "/etc/foundationdb/sbcli_cluster_id"
-
-
-def get_google_cloud_info():
-    try:
-        headers = {'Metadata-Flavor': 'Google'}
-        response = requests.get("http://169.254.169.254/computeMetadata/v1/instance/?recursive=true",
-                                headers=headers, timeout=3)
-        data = response.json()
-        return {
-            "id": str(data["id"]),
-            "type": data["machineType"].split("/")[-1],
-            "cloud": "google",
-            "ip": data["networkInterfaces"][0]["ip"],
-            "public_ip": data["networkInterfaces"][0]["accessConfigs"][0]["externalIp"],
-        }
-    except Exception:
-        pass
-
-
-def get_equinix_cloud_info():
-    try:
-        response = requests.get("https://metadata.platformequinix.com/metadata", timeout=3)
-        data = response.json()
-        public_ip = ""
-        ip = ""
-        for interface in data["network"]["addresses"]:
-            if interface["address_family"] == 4:
-                if interface["enabled"] and interface["public"]:
-                    public_ip = interface["address"]
-                elif interface["enabled"] and not interface["public"]:
-                    public_ip = interface["address"]
-        return {
-            "id": str(data["id"]),
-            "type": data["class"],
-            "cloud": "equinix",
-            "ip": public_ip,
-            "public_ip": ip
-        }
-    except Exception:
-        pass
-
-
-def get_amazon_cloud_info():
-    try:
-        import ec2_metadata
-        import requests
-        session = requests.session()
-        data = ec2_metadata.EC2Metadata(session=session).instance_identity_document  # type: ignore[call-arg]
-        return {
-            "id": data["instanceId"],
-            "type": data["instanceType"],
-            "cloud": "amazon",
-            "ip": data["privateIp"],
-            "public_ip": "",
-        }
-    except Exception:
-        pass
 
 
 def get_docker_client(timeout=60):
@@ -723,13 +667,7 @@ HOSTNAME, _, _ = shell_utils.run_command("hostname -s")
 SYSTEM_ID, _, _ = shell_utils.run_command("dmidecode -s system-uuid")
 CLOUD_INFO = {}
 if not os.environ.get("WITHOUT_CLOUD_INFO"):
-    CLOUD_INFO = get_amazon_cloud_info()
-    if not CLOUD_INFO:
-        CLOUD_INFO = get_google_cloud_info()
-
-    if not CLOUD_INFO:
-        CLOUD_INFO = get_equinix_cloud_info()
-
+    CLOUD_INFO = get_cloud_info() or {}
     if CLOUD_INFO:
         SYSTEM_ID = CLOUD_INFO["id"]
 

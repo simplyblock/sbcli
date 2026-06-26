@@ -4,6 +4,7 @@ import logging
 from simplyblock_core.controllers import events_controller as ec
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.nvme_device import NVMeDevice
+from simplyblock_core.models.events import EventObj
 from simplyblock_core import utils, constants
 
 logger = logging.getLogger()
@@ -63,3 +64,37 @@ def device_restarted(device, caused_by=ec.CAUSED_BY_CLI):
 
 def device_reset(device, caused_by=ec.CAUSED_BY_CLI):
     _device_event(device, "Device reset", caused_by, ec.EVENT_STATUS_CHANGE)
+
+
+def device_restart_teardown_warning(device, message, caused_by=ec.CAUSED_BY_MONITOR):
+    """WARNING-level cluster-log entry when one or more teardown steps failed
+    during a device restart (the restart still proceeds with the recreate)."""
+    db_controller = DBController()
+    snode = db_controller.get_storage_node_by_id(device.node_id)
+    ec.log_event_cluster(
+        cluster_id=snode.cluster_id,
+        domain=ec.DOMAIN_CLUSTER,
+        event=ec.EVENT_STATUS_CHANGE,
+        db_object=device,
+        caused_by=caused_by,
+        message=message,
+        node_id=device.get_id(),
+        event_level=EventObj.LEVEL_WARN,
+        storage_id=device.cluster_device_order)
+
+
+def device_latency_outlier(device, message, caused_by=ec.CAUSED_BY_MONITOR):
+    """WARNING-level cluster-log entry for a device whose IO latency deviates
+    significantly from the cluster's other devices (gray-failure early warning)."""
+    db_controller = DBController()
+    snode = db_controller.get_storage_node_by_id(device.node_id)
+    ec.log_event_cluster(
+        cluster_id=snode.cluster_id,
+        domain=ec.DOMAIN_CLUSTER,
+        event=ec.EVENT_STATUS_CHANGE,
+        db_object=device,
+        caused_by=caused_by,
+        message=message,
+        node_id=device.get_id(),
+        event_level=EventObj.LEVEL_WARN,
+        storage_id=device.cluster_device_order)

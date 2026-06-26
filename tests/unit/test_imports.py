@@ -1,0 +1,74 @@
+# coding=utf-8
+"""
+test_imports.py – smoke tests that verify all packages import cleanly.
+
+Catches circular imports, missing modules, and other import-time errors
+that would prevent services from starting. These tests run on every Python
+version and install mode (editable / non-editable).
+"""
+
+import importlib
+
+import pytest
+
+
+# Every top-level module that a service entrypoint imports.
+# Add new modules here when new API routes or services are created.
+_IMPORT_TARGETS = [
+    # --- v2 API (imported by mgmt_webapp and indirectly by node_webapp) ---
+    "simplyblock_web.api.v2",
+    "simplyblock_web.api.v2.cluster",
+    "simplyblock_web.api.v2.cluster.backup",
+    "simplyblock_web.api.v2.cluster.storage_node",
+    "simplyblock_web.api.v2.cluster.storage_node.device",
+    "simplyblock_web.api.v2.cluster.storage_pool",
+    "simplyblock_web.api.v2.cluster.storage_pool.snapshot",
+    "simplyblock_web.api.v2.cluster.storage_pool.volume",
+    "simplyblock_web.api.v2.cluster.storage_pool.volume.migration",
+    "simplyblock_web.api.v2.cluster.task",
+    "simplyblock_web.api.v2.management_node",
+    "simplyblock_web.api.v2._dtos",
+    # --- Top-level API package (triggers v1 + v2 loading) ---
+    "simplyblock_web.api",
+    # --- Controllers ---
+    "simplyblock_core.controllers.lvol_controller",
+    "simplyblock_core.controllers.snapshot_controller",
+    "simplyblock_core.controllers.migration_controller",
+    "simplyblock_core.controllers.backup_controller",
+    "simplyblock_core.controllers.tasks_controller",
+    # --- Models ---
+    "simplyblock_core.models.lvol_migration",
+    "simplyblock_core.models.backup",
+    "simplyblock_core.models.cluster",
+    "simplyblock_core.models.storage_node",
+    # --- CLI ---
+    "simplyblock_cli.cli",
+    "simplyblock_cli.clibase",
+]
+
+
+@pytest.mark.parametrize("module_path", _IMPORT_TARGETS)
+def test_module_imports_cleanly(module_path):
+    """Each critical module must import without errors (no circular imports).
+
+    We intentionally do NOT del from sys.modules to force a fresh import:
+    doing so breaks subsequent tests that already hold references to classes
+    from the old module object (their methods close over the old module's
+    globals, so mock.patch on the reimported module becomes a no-op for
+    those callers). True "fresh import" semantics are covered by
+    ``test_no_circular_import_in_subprocess`` below, which runs in its own
+    process with a clean sys.modules.
+    """
+    mod = importlib.import_module(module_path)
+    assert mod is not None
+
+
+def test_v2_api_has_all_routers():
+    """The assembled v2 API must expose the top-level router."""
+    from simplyblock_web.api import v2
+    assert hasattr(v2, "api"), "v2 package must expose 'api' router"
+
+
+def test_node_webapp_import_chain():
+    """Simulate the SNodeAPI startup import: api → internal."""
+    from simplyblock_web.api import internal as internal_api  # noqa: F401

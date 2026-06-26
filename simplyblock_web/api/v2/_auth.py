@@ -121,7 +121,7 @@ def authorized_cluster(
     matched_id = next((
         cluster.id
         for cluster in _db.get_clusters()
-        if hmac.compare_digest(cluster.secret, token)
+        if hmac.compare_digest(cluster.secret.get_secret_value(), token)
     ), None)
 
     if matched_id is None:

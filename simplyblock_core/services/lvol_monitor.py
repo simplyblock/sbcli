@@ -253,6 +253,10 @@ def check_node(snode, all_lvols):
         if lvol.node_id != snode.get_id():
             continue
 
+        if lvol.status in (LVol.STATUS_RESTORING, LVol.STATUS_RESTORE_FAILED):
+            # tasks_runner_backup.py owns status transitions for these states
+            continue
+
         if lvol.status == LVol.STATUS_IN_CREATION:
             # A create that died (process killed) between writing the
             # IN_CREATION record and the final ONLINE transition leaves a
