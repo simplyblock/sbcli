@@ -7,7 +7,7 @@ from typing import Literal, Optional
 import traceback
 
 from flask import jsonify
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, SecretBytes, SecretStr, model_validator
 from werkzeug.exceptions import HTTPException
 
 from simplyblock_core import constants
@@ -41,12 +41,16 @@ def response_schema(result_schema: dict) -> dict:
 def _to_jsonable(obj):
     """Recursively convert objects to JSON-serializable structures.
 
+    - SecretStr/SecretBytes -> plaintext via get_secret_value() (v1 wire
+      responses are authorized; mirrors v2's @field_serializer(when_used='json')).
     - Pydantic BaseModel -> dict via model_dump()
     - dict -> dict with values converted
     - list/tuple -> list with items converted
     - set/frozenset -> list with items converted
     Otherwise returned as-is.
     """
+    if isinstance(obj, (SecretStr, SecretBytes)):
+        return obj.get_secret_value()
     if isinstance(obj, BaseModel):
         # Pydantic v2: model_dump; v1: dict()
         try:
