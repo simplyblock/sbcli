@@ -844,6 +844,11 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
         lvol.crypto_key1 = snap.lvol.crypto_key1
         lvol.crypto_key2 = snap.lvol.crypto_key2
 
+    # Process pool allowed hosts (for host restriction and/or DH-HMAC-CHAP authentication)
+    if pool.dhchap:
+        # Pool-level DHCHAP: inherit allowed hosts from pool (no per-host key generation)
+        lvol.allowed_hosts = [{"nqn": h} for h in pool.allowed_hosts]
+
     conv_new_size = 0
     if new_size:
         conv_new_size = math.ceil(new_size / (1024 * 1024 * 1024)) * 1024 * 1024 * 1024
