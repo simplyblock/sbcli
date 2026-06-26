@@ -793,7 +793,7 @@ def create_migration(lvol_id, target_node_id,
                 pass
 
     tgt_ter_node = None
-    if lvol.ha_type == "ha3" and tgt_node.tertiary_node_id:
+    if tgt_node.tertiary_node_id:
         tgt_ter_node = (_pre_ter_node if _pre_ter_node is not None else None)
         if tgt_ter_node is None:
             try:
