@@ -1581,7 +1581,7 @@ def set_lvol(uuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, name=
     return True
 
 
-def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
+def list_lvols(cluster_id, pool_id_or_name, all=False):
     db_controller = DBController()
     lvols = []
     if cluster_id:
@@ -1657,10 +1657,7 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
         }
         data.append(lvol_data)
 
-    if is_json:
-        return utils.dump_json(data, indent=2, unwrap_secrets=True)
-    else:
-        return utils.print_table(data, unwrap_secrets=True)
+    return data
 
 
 def get_replication_info(lvol_id_or_name):
@@ -1721,7 +1718,7 @@ def get_replication_info(lvol_id_or_name):
     return out
 
 
-def get_lvol(lvol_id_or_name, is_json):
+def get_lvol(lvol_id_or_name):
     db_controller = DBController()
     try:
         lvol = db_controller.get_lvol_by_id(lvol_id_or_name)
@@ -1744,11 +1741,7 @@ def get_lvol(lvol_id_or_name, is_json):
     policy = db_controller.get_policy_for_lvol(lvol)
     data['policy'] = policy.policy_name if policy else ""
 
-    if is_json:
-        return utils.dump_json(data, indent=2, unwrap_secrets=True)
-    else:
-        data2 = [{"key": key, "value": data[key]} for key in data]
-        return utils.print_table(data2, unwrap_secrets=True)
+    return data
 
 
 def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, host_nqn=None):
@@ -2329,7 +2322,7 @@ def replication_start(lvol_id, replication_cluster_id=None):
     return True
 
 
-def list_by_node(node_id=None, is_json=False):
+def list_by_node(node_id=None):
     db_controller = DBController()
     lvols = db_controller.get_lvols()
     lvols = sorted(lvols, key=lambda x: x.create_dt)
@@ -2356,9 +2349,7 @@ def list_by_node(node_id=None, is_json=False):
             "Created At": lvol.create_dt,
             "Status": lvol.status,
         })
-    if is_json:
-        return utils.dump_json(data, indent=2, unwrap_secrets=True)
-    return utils.print_table(data, unwrap_secrets=True)
+    return data
 
 
 def clone_lvol(lvol_id, clone_name, new_size=None, pvc_name=None):
@@ -3040,43 +3031,6 @@ def remove_host_from_lvol(lvol_id, host_nqn):
     if errors:
         return True, f"Warning: SPDK remove_host failed on nodes: {', '.join(errors)}"
     return True, None
-
-
-def get_master_lvols_by_pool_uuid(pool_id, is_json=False):
-    db_controller = DBController()
-    lvols = db_controller.get_lvols_by_pool_id(pool_id)
-
-    # Count namespaced children per subsystem root in one pass instead of
-    # issuing a separate DB scan for each root (was O(M×N)).
-    ns_counts: dict[str, int] = {}
-
-    for lv in lvols:
-        if lv.namespace:
-            ns_counts[lv.namespace] = ns_counts.get(lv.namespace, 0) + 1
-
-    data = []
-
-    for lvol in lvols:
-        if lvol.deleted:
-            continue
-        if lvol.namespace:
-            continue
-
-        lvol_data = {
-            "Id": lvol.uuid,
-            "Name": lvol.lvol_name,
-            "Size": utils.humanbytes(lvol.size),
-            "Hostname": lvol.hostname,
-            "Status": lvol.status,
-            "Namespaces": ns_counts.get(lvol.uuid, 0),
-            "MaxNamespaces": lvol.max_namespace_per_subsys,
-        }
-        data.append(lvol_data)
-
-    if is_json:
-        return utils.dump_json(data, indent=2, unwrap_secrets=True)
-    else:
-        return utils.print_table(data, unwrap_secrets=True)
 
 
 def get_namespaces_per_lvol(lvol):

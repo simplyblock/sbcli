@@ -43,7 +43,7 @@ import time
 import uuid
 from datetime import datetime
 
-from simplyblock_core import constants, utils
+from simplyblock_core import constants
 from simplyblock_core.controllers import migration_events, tasks_controller, snapshot_controller
 from simplyblock_core.exceptions import MigrationConflictError, PreconditionError
 from simplyblock_core.controllers.host_auth import _reapply_allowed_hosts
@@ -327,7 +327,7 @@ def is_migration_active_on_node(node_id, cluster_id=None):
     return False
 
 
-def list_migrations(cluster_id=None, is_json=False):
+def list_migrations(cluster_id=None):
     """Return a formatted list (table or JSON) of all migrations."""
     migrations = db.get_migrations(cluster_id)
     migrations = sorted(migrations, key=lambda x: x.create_dt)
@@ -346,22 +346,16 @@ def list_migrations(cluster_id=None, is_json=False):
             "Retries": f"{m.retry_count}/{m.max_retries}",
             "Error": m.error_message or "",
         })
-    if is_json:
-        return utils.dump_json(data, indent=2, unwrap_secrets=True)
-    return utils.print_table(data, unwrap_secrets=True)
+    return data
 
 
-def get_migration(migration_id, is_json=False):
+def get_migration(migration_id):
     """Return details for a single migration."""
     try:
-        m = db.get_migration_by_id(migration_id)
+        return db.get_migration_by_id(migration_id)
     except KeyError as e:
         logger.error(e)
         return False
-    if is_json:
-        return utils.dump_json(m.get_clean_dict(), indent=2, unwrap_secrets=True)
-    data = [m.get_clean_dict()]
-    return utils.print_table(data, unwrap_secrets=True)
 
 
 # ---------------------------------------------------------------------------

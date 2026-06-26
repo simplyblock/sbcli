@@ -369,7 +369,7 @@ def delete_pool(uuid):
     return True
 
 
-def list_pools(is_json, cluster_id=None):
+def list_pools(cluster_id=None):
     db_controller = DBController()
     pools = db_controller.get_pools(cluster_id)
     data = []
@@ -393,10 +393,7 @@ def list_pools(is_json, cluster_id=None):
             "Status": pool.status,
         })
 
-    if is_json:
-        return utils.dump_json(data, indent=2, unwrap_secrets=True)
-    else:
-        return utils.print_table(data, unwrap_secrets=True)
+    return data
 
 
 def set_status(pool_id, status):
@@ -414,7 +411,7 @@ def set_status(pool_id, status):
     logger.info("Done")
 
 
-def get_pool(pool_id, is_json):
+def get_pool(pool_id):
     db_controller = DBController()
     try:
         pool = db_controller.get_pool_by_id(pool_id)
@@ -422,12 +419,7 @@ def get_pool(pool_id, is_json):
         logger.error(f"Pool not found {pool_id}")
         return False
 
-    data = pool.get_clean_dict()
-    if is_json:
-        return utils.dump_json(data, indent=2, unwrap_secrets=True)
-    else:
-        data2 = [{"key": key, "value": data[key]} for key in data]
-        return utils.print_table(data2, unwrap_secrets=True)
+    return pool.get_clean_dict()
 
 
 def get_capacity(pool_id):

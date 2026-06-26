@@ -143,8 +143,8 @@ def get_iface_ip(ifname):
 
 
 def print_table(data: list, title=None, unwrap_secrets: bool = False):
-    if data is None:
-        return None  # For compatibility with the previous implementation. This should raise.
+    if not data:
+        return ""
 
     x = PrettyTable(field_names=data[0].keys(), max_width=70, title=title)
     x.align = 'l'

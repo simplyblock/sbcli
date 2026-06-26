@@ -245,11 +245,10 @@ def add_mgmt_node(mgmt_ip, mode, cluster_id=None):
     return node.uuid
 
 
-def list_mgmt_nodes(is_json):
+def list_mgmt_nodes():
     db_controller = DBController()
     nodes = db_controller.get_mgmt_nodes()
     data = []
-    output = ""
 
     for node in nodes:
         logging.debug(node)
@@ -261,14 +260,7 @@ def list_mgmt_nodes(is_json):
             "Status": node.status,
         })
 
-    if not data:
-        return output
-
-    if is_json:
-        output = utils.dump_json(data, indent=2, unwrap_secrets=True)
-    else:
-        output = utils.print_table(data, unwrap_secrets=True)
-    return output
+    return data
 
 
 def remove_mgmt_node(uuid):

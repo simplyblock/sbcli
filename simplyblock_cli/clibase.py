@@ -2,6 +2,7 @@
 # PYTHON_ARGCOMPLETE_OK
 
 import argparse
+import json
 import re
 import sys
 import time
@@ -61,6 +62,14 @@ def regex_type(regex):
             raise argparse.ArgumentTypeError(f"Argument '{arg}' invalid: does not match regex ({regex})")
 
     return f
+
+
+def _format_json(data, *, sort_keys: bool = False) -> str:
+    return utils.dump_json(data, indent=2, sort_keys=sort_keys, unwrap_secrets=True)
+
+
+def _format_result(data, *, json: bool) -> str:
+    return _format_json(data) if json else utils.print_table(data, unwrap_secrets=True)
 
 
 class CLIWrapperBase:
@@ -250,10 +259,10 @@ class CLIWrapperBase:
         return storage_ops.remove_storage_node(args.node_id, args.force_remove)
 
     def storage_node__list(self, sub_command, args):
-        return storage_ops.list_storage_nodes(args.json, args.cluster_id)
+        return _format_result(storage_ops.list_storage_nodes(args.cluster_id), json=args.json)
 
     def storage_node__get(self, sub_command, args):
-        return storage_ops.get(args.node_id)
+        return _format_json(storage_ops.get(args.node_id), sort_keys=True)
 
     def storage_node__restart(self, sub_command, args):
         node_id = args.node_id
@@ -384,7 +393,7 @@ class CLIWrapperBase:
 
     def storage_node__info(self, sub_command, args):
         node_id = args.node_id
-        return storage_ops.get_info(node_id)
+        return _format_json(storage_ops.get_info(node_id))
 
     def storage_node__info_spdk(self, sub_command, args):
         node_id = args.node_id
@@ -416,17 +425,17 @@ class CLIWrapperBase:
         return device_controller.new_device_from_failed(args.device_id)
 
     def storage_node__list_snapshots(self, sub_command, args):
-        return snapshot_controller.list_snapshots(node_id=args.node_id, is_json=args.json)
+        return _format_result(snapshot_controller.list_snapshots(node_id=args.node_id), json=args.json)
 
     def storage_node__list_lvols(self, sub_command, args):
-        return lvol_controller.list_by_node(args.node_id, args.json)
+        return _format_result(lvol_controller.list_by_node(args.node_id), json=args.json)
 
     def storage_node__repair_lvstore(self, sub_command, args):
         return storage_ops.auto_repair(
             args.node_id, args.validate_only, args.force_remove_inconsistent, args.force_remove_wrong_ref)
 
     def storage_node__lvs_dump_tree(self, sub_command, args):
-        return storage_ops.lvs_dump_tree(args.node_id)
+        return _format_json(storage_ops.lvs_dump_tree(args.node_id))
 
     def storage_node__set(self, sub_command, args):
         return storage_ops.set_value(args.node_id, args.attr_name, args.attr_value)
@@ -630,10 +639,15 @@ class CLIWrapperBase:
             args.max_r_mbytes, args.max_w_mbytes)
 
     def volume__list(self, sub_command, args):
-        return lvol_controller.list_lvols(args.json, args.cluster_id, args.pool, args.all)
+        return _format_result(lvol_controller.list_lvols(args.cluster_id, args.pool, args.all), json=args.json)
 
     def volume__get(self, sub_command, args):
-        return lvol_controller.get_lvol(args.volume_id, args.json)
+        data = lvol_controller.get_lvol(args.volume_id)
+        if args.json:
+            return utils.dump_json(data, indent=2, unwrap_secrets=True)
+        else:
+            data2 = [{"key": key, "value": value} for key, value in data.items()]
+            return utils.print_table(data2, unwrap_secrets=True)
 
     def volume__delete(self, sub_command, args):
         db = db_controller.DBController()
@@ -755,7 +769,7 @@ class CLIWrapperBase:
         return True
 
     def volume__migrate_list(self, sub_command, args):
-        return migration_controller.list_migrations(cluster_id=args.cluster_id, is_json=args.json)
+        return _format_result(migration_controller.list_migrations(cluster_id=args.cluster_id), json=args.json)
 
     def volume__migrate_cancel(self, sub_command, args):
         try:
@@ -776,7 +790,7 @@ class CLIWrapperBase:
         return mgmt_ops.deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret, mode)
 
     def control_plane__list(self, sub_command, args):
-        return mgmt_ops.list_mgmt_nodes(args.json)
+        return _format_result(mgmt_ops.list_mgmt_nodes(), json=args.json)
 
     def control_plane__remove(self, sub_command, args):
         return mgmt_ops.remove_mgmt_node(args.node_id)
@@ -810,10 +824,15 @@ class CLIWrapperBase:
         return ret
 
     def storage_pool__list(self, sub_command, args):
-        return pool_controller.list_pools(args.json, args.cluster_id)
+        return _format_result(pool_controller.list_pools(args.cluster_id), json=args.json)
 
     def storage_pool__get(self, sub_command, args):
-        return pool_controller.get_pool(args.pool_id, args.json)
+        data = pool_controller.get_pool(args.pool_id)
+        if args.json:
+            return utils.dump_json(data, indent=2, unwrap_secrets=True)
+        else:
+            data2 = [{"key": key, "value": data[key]} for key in data]
+            return utils.print_table(data2, unwrap_secrets=True)
 
     def storage_pool__delete(self, sub_command, args):
         return pool_controller.delete_pool(args.pool_id)
@@ -858,7 +877,7 @@ class CLIWrapperBase:
         return True
 
     def snapshot__list(self, sub_command, args):
-        return snapshot_controller.list_snapshots(args.cluster_id, args.node_id, args.lvol_id, args.pool, args.with_details, args.json)
+        return _format_result(snapshot_controller.list_snapshots(args.cluster_id, args.node_id, args.lvol_id, args.pool, args.with_details), json=args.json)
 
     def snapshot__delete(self, sub_command, args):
         return snapshot_controller.delete(args.snapshot_id, args.force)
@@ -877,7 +896,7 @@ class CLIWrapperBase:
         return snapshot_controller.delete_replicated(args.snapshot_id)
 
     def snapshot__get(self, sub_command, args):
-        return snapshot_controller.get(args.snapshot_id)
+        return _format_json(snapshot_controller.get(args.snapshot_id))
 
     def snapshot__set(self, sub_command, args):
         return snapshot_controller.set_value(args.snapshot_id, args.attr_name, args.attr_value)
@@ -886,7 +905,7 @@ class CLIWrapperBase:
         return qos_controller.add_class(args.name, args.weight, args.cluster_id)
 
     def qos__list(self, sub_command, args):
-        return qos_controller.list_classes(args.cluster_id, args.json)
+        return _format_result(qos_controller.list_classes(args.cluster_id), json=args.json)
 
     def qos__delete(self, sub_command, args):
         return qos_controller.delete_class(args.name, args.cluster_id)
@@ -918,14 +937,13 @@ class CLIWrapperBase:
         return True
 
     def backup__export(self, sub_command, args):
-        import json as _json
         data = backup_controller.export_backups(
             cluster_id=getattr(args, 'cluster_id', None),
             lvol_name=getattr(args, 'lvol_name', None))
         if not data:
             print("No completed backups found")
             return False
-        output = _json.dumps(data, indent=2)
+        output = _format_json(data)
         output_file = getattr(args, 'output', None)
         if output_file:
             with open(output_file, 'w') as f:
@@ -936,10 +954,9 @@ class CLIWrapperBase:
         return True
 
     def backup__import(self, sub_command, args):
-        import json as _json
         try:
             with open(args.metadata_file, 'r') as f:
-                metadata_list = _json.load(f)
+                metadata_list = json.load(f)
         except Exception as e:
             print(f"Error reading metadata file: {e}")
             return False
@@ -1025,10 +1042,16 @@ class CLIWrapperBase:
         return True
 
     def storage_node_list_devices(self, args):
-        node_id = args.node_id
-        is_json = args.json
-        out = storage_ops.list_storage_devices(node_id, is_json)
-        return out
+        data = storage_ops.list_storage_devices(args.node_id)
+
+        if args.json:
+            return utils.dump_json(data, indent=2, unwrap_secrets=True)
+        else:
+            out = "\n\n".join(
+                f'{key}\n{utils.print_table(value, unwrap_secrets=True)}\n\n'
+                for key, value in data.items()
+            )
+            return out
 
     def cluster_add(self, args):
         page_size_in_blocks = args.page_size
@@ -1057,9 +1080,8 @@ class CLIWrapperBase:
 
         backup_config = None
         if args.use_backup:
-            import json as _json
             with open(args.use_backup, 'r') as f:
-                backup_config = _json.load(f)
+                backup_config = json.load(f)
 
         return cluster_ops.add_cluster(
             blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
@@ -1071,7 +1093,6 @@ class CLIWrapperBase:
         )
 
     def cluster_create(self, args):
-        import json as _json
         page_size_in_blocks = args.page_size
         blk_size = 4096
         CLI_PASS = args.CLI_PASS
@@ -1111,7 +1132,7 @@ class CLIWrapperBase:
         backup_config = None
         if args.use_backup:
             with open(args.use_backup, 'r') as f:
-                backup_config = _json.load(f)
+                backup_config = json.load(f)
 
         return cluster_ops.create_cluster(
             blk_size, page_size_in_blocks,
