@@ -35,22 +35,26 @@ is wasteful.
 
 ### Step 2 — During iteration: targeted tests only
 
-The `tests` environment is too slow for iteration.
+There are two test envs:
+
+- `unit` — pure-logic tests under `tests/unit/` and `simplyblock_core/test/`. Fast, no infra. Use for iteration.
+- `integration` — FDB-backed tests under `tests/integration/`. Requires Docker (testcontainers brings up FoundationDB). Slower; only run when the change touches paths exercised there.
+
 Run only the tests relevant to your current changes:
 
 **Previously failing tests** (re-run what was broken):
 ```bash
-tox run -e tests -- --last-failed
+tox run -e unit -- --last-failed
 ```
 
 **Tests related to files you changed** (pytest-based, using path or keyword):
 ```bash
-tox run -e tests -- tests/path/to/relevant_test.py
-tox run -e tests -- -k "keyword_matching_affected_area"
+tox run -e unit -- tests/unit/test_secrets.py
+tox run -e unit -- -k "keyword_matching_affected_area"
+tox run -e integration -- tests/integration/migration/test_migration_flow.py
 ```
 
-Use your judgment to pick the right scope. If you changed `src/foo/bar.py`, run
-`tests/foo/test_bar.py` plus any integration tests that import from that module.
+Use your judgment to pick the right scope. If you changed `simplyblock_core/foo.py`, run the relevant `tests/unit/` files; only reach for `integration` if your change is in the FDB / cluster / migration paths.
 
 Repeat steps 1–2 until the targeted tests pass.
 
@@ -76,7 +80,7 @@ Only report success after this passes clean.
 
 When handing back to the user, always include:
 - What you changed and why
-- The final tox result (e.g. `lint: OK  types: OK  tests: OK`)
+- The final tox result (e.g. `lint: OK  types: OK  unit: OK  integration: OK`)
 - Any pre-existing failures you found but did not introduce — flag these explicitly
 
 ## Pre-existing Failures
