@@ -16,11 +16,10 @@ boto3
 jinja2
 argcomplete
 jc
-sentry-sdk
 prometheus-client
 ec2-metadata
 flask-swagger-ui
-sentry-sdk[flask]
+sentry-sdk[flask]>=1.40
 flask-openapi3
 jsonschema
 fastapi

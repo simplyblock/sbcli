@@ -12,17 +12,15 @@ def unwrap_secrets_for_send(obj: Any) -> Any:
     wrapper's repr masks the value, while this function produces a plain
     JSON-serializable structure for the HTTP body.
     """
-    match obj:
-        case SecretStr() | SecretBytes():
-            return obj.get_secret_value()
-        case dict():
-            return {k: unwrap_secrets_for_send(v) for k, v in obj.items()}
-        case list():
-            return [unwrap_secrets_for_send(v) for v in obj]
-        case tuple():
-            return tuple(unwrap_secrets_for_send(v) for v in obj)
-        case _:
-            return obj
+    if isinstance(obj, (SecretStr, SecretBytes)):
+        return obj.get_secret_value()
+    if isinstance(obj, dict):
+        return {k: unwrap_secrets_for_send(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [unwrap_secrets_for_send(v) for v in obj]
+    if isinstance(obj, tuple):
+        return tuple(unwrap_secrets_for_send(v) for v in obj)
+    return obj
 
 
 def unwrap_secret(value: Union[SecretStr, str, None]) -> Optional[str]:
@@ -30,10 +28,8 @@ def unwrap_secret(value: Union[SecretStr, str, None]) -> Optional[str]:
 
     Removed once the surrounding code is type-correct on ``SecretStr``.
     """
-    match value:
-        case None:
-            return None
-        case SecretStr():
-            return value.get_secret_value()
-        case _:
-            return value
+    if value is None:
+        return None
+    if isinstance(value, SecretStr):
+        return value.get_secret_value()
+    return value

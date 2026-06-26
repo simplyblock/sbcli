@@ -2,7 +2,7 @@ import base64
 import hmac
 import json
 import logging
-from typing import Annotated
+from typing import Annotated, Optional, Tuple
 from json.decoder import JSONDecodeError
 from uuid import UUID
 
@@ -17,11 +17,11 @@ from simplyblock_web.settings import Settings as WebSettings
 _db = DBController()
 security = HTTPBearer()
 _web_settings = WebSettings()
-_k8s_auth_api: kubernetes.client.AuthenticationV1Api | None = None
+_k8s_auth_api: Optional[kubernetes.client.AuthenticationV1Api] = None
 _logger = logging.getLogger(__name__)
 
 
-def _get_k8s_auth_api() -> kubernetes.client.AuthenticationV1Api | None:
+def _get_k8s_auth_api() -> Optional[kubernetes.client.AuthenticationV1Api]:
     global _k8s_auth_api
     if _k8s_auth_api is not None:
         return _k8s_auth_api
@@ -44,7 +44,7 @@ def _urlsafe_b64decode_unpadded(encoded: str) -> bytes:
     return base64.urlsafe_b64decode(encoded + padding)
 
 
-def _insecure_decode_jwt(token: str) -> tuple[dict, dict, bytes]:
+def _insecure_decode_jwt(token: str) -> Tuple[dict, dict, bytes]:
     """Decodes the given JWT without verifying its authenticty
 
     Attempts to decode the given JWT. *Not* meant for validation, the signature is not verified.
@@ -72,7 +72,7 @@ def _is_kubernetes_jwt(token: str) -> bool:
 
 def authenticated_service_account(
     credentials: Annotated[HTTPAuthorizationCredentials, Depends(security)],
-) -> str | None:
+) -> Optional[str]:
     """FastAPI dependency: identify which k8s service account a bearer token authenticates as.
 
     Returns the service account username when the token has JWT structure, the
@@ -106,7 +106,7 @@ def authenticated_service_account(
 
 def authorized_cluster(
     credentials: Annotated[HTTPAuthorizationCredentials, Depends(security)],
-) -> UUID | None:
+) -> Optional[UUID]:
     """FastAPI dependency: identify which cluster a bearer token authenticates as.
 
     Returns `None` immediately when cluster-secret authentication is disabled via
@@ -133,9 +133,9 @@ def authorized_cluster(
 
 
 def verify_api_token(
-    sa_name: Annotated[str | None, Depends(authenticated_service_account)],
-    authorized_cluster_id: Annotated[UUID | None, Depends(authorized_cluster)],
-    cluster_id: UUID | None = None,
+    sa_name: Annotated[Optional[str], Depends(authenticated_service_account)],
+    authorized_cluster_id: Annotated[Optional[UUID], Depends(authorized_cluster)],
+    cluster_id: Optional[UUID] = None,
 ) -> None:
     """FastAPI dependency: enforce authentication and per-cluster authorization.
 
