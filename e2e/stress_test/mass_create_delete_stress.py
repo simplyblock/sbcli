@@ -584,7 +584,7 @@ class _MassCreateDeleteMixin:
         self.logger.info(f"  FIO clone sample:"
                          f" {self._metrics['fio_clone_started']}")
         if self.PERSISTENT_RETRY:
-            self.logger.info(f"  Mode:            PERSISTENT RETRY")
+            self.logger.info("  Mode:            PERSISTENT RETRY")
         for phase, dur in self._phase_durations.items():
             self.logger.info(f"  Phase {phase:25s}: {dur}s")
         if self._retry_round_counts:
