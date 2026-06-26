@@ -1766,7 +1766,7 @@ class SshUtils:
         add_node_cmd = f"{cmd} {cluster_id} {node_ip}:5000 {ifname}"
 
         if data_nic:
-            cmd = f"{cmd} --data-nics {data_nic}"
+            add_node_cmd = f"{add_node_cmd} --data-nics {data_nic}"
             
         self.exec_command(node=node, command=add_node_cmd)
 
