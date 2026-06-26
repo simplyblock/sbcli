@@ -1,33 +1,13 @@
 # coding=utf-8
 """
 conftest.py – shared fixtures for all tests in tests/.
+
+The ``fdb`` module stub used by the unit tier lives in ``tests/unit/conftest.py``
+so it does not leak into integration tests, which need the real
+``foundationdb`` client.
 """
 
-import sys
-import types
-
 import pytest
-
-# ---------------------------------------------------------------------------
-# Stub out native/unavailable dependencies before any simplyblock import so
-# that unit tests can run without a FoundationDB installation or a running
-# Docker / Kubernetes environment.
-# ---------------------------------------------------------------------------
-
-def _stub(name, **attrs):
-    """Create a minimal stub module and register it in sys.modules."""
-    m = types.ModuleType(name)
-    for k, v in attrs.items():
-        setattr(m, k, v)
-    sys.modules[name] = m
-    return m
-
-
-if 'fdb' not in sys.modules:
-    class _FDBError(Exception):
-        pass
-    _stub('fdb', open=lambda *a, **kw: None, FDBError=_FDBError)
-    _stub('fdb.tuple')
 
 
 @pytest.fixture(autouse=True)

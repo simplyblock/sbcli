@@ -1,19 +1,25 @@
 # coding=utf-8
-"""Session-scoped FoundationDB provisioning for the integration tier.
+"""FoundationDB provisioning for the integration tier.
 
-Resolution order:
+Resolution order (evaluated at conftest module load, before any test file
+imports ``simplyblock_core.constants`` — whose ``KVD_DB_FILE_PATH`` reads
+``$FDB_CLUSTER_FILE`` once at import time):
+
   1. If FDB_CLUSTER_FILE is already set and points at a readable file
      (developer's docker-compose-dev.yml, existing cluster, etc.),
      reuse it.
   2. Otherwise, start a foundationdb/foundationdb container via
-     testcontainers, wait until it accepts writes, expose its cluster
-     file on the host, and set FDB_CLUSTER_FILE for the session.
-  3. If neither path works (no docker, no testcontainers), skip every
-     test in tests/integration/ with a clear message.
+     testcontainers, wait until it accepts writes, write its cluster
+     contents to a temp file, and set FDB_CLUSTER_FILE for the session.
+  3. If neither path works (no docker, no testcontainers), defer the
+     skip to the session fixture below so every integration test shows
+     a clear "FDB unavailable" message instead of an obscure crash.
 
-This fixture only owns the FDB process lifecycle. Per-test keyspace
-cleanup and cluster-record bootstrap live in the sub-package conftests
-(ftt2/, migration/, expansion_sim/).
+Provisioning runs at module-load time (not inside a pytest fixture) so
+``simplyblock_core.constants.KVD_DB_FILE_PATH`` — captured at import — sees
+the testcontainers-provisioned path. Per-test keyspace cleanup and
+cluster-record bootstrap live in the sub-package conftests (ftt2/,
+migration/, expansion_sim/).
 """
 import os
 import shutil
@@ -79,27 +85,49 @@ def _start_fdb_container():
     )
 
 
-@pytest.fixture(scope="session", autouse=True)
-def fdb_cluster():
+_provisioned_container = None
+_provisioning_error: str = ""
+
+
+def _provision_fdb_at_module_load():
+    global _provisioned_container, _provisioning_error
+
     if _existing_cluster_file_works():
-        yield os.environ["FDB_CLUSTER_FILE"]
         return
 
     try:
         import testcontainers.core.container  # noqa: F401
     except ImportError:
-        pytest.skip("testcontainers not installed — `pip install testcontainers`")
+        _provisioning_error = "testcontainers not installed — `pip install testcontainers`"
+        return
 
     if shutil.which("docker") is None:
-        pytest.skip("docker not available — integration tier requires Docker")
+        _provisioning_error = "docker not available — integration tier requires Docker"
+        return
 
-    container = _start_fdb_container()
     try:
-        tmp = Path(tempfile.mkdtemp(prefix="sbcli-fdb-"))
-        cluster_file = tmp / "fdb.cluster"
-        cluster_file.write_text(FDB_CLUSTER_CONTENTS)
-        os.environ["FDB_CLUSTER_FILE"] = str(cluster_file)
-        yield str(cluster_file)
+        container = _start_fdb_container()
+    except Exception as exc:
+        _provisioning_error = f"FoundationDB container failed to start: {exc}"
+        return
+
+    tmp = Path(tempfile.mkdtemp(prefix="sbcli-fdb-"))
+    cluster_file = tmp / "fdb.cluster"
+    cluster_file.write_text(FDB_CLUSTER_CONTENTS)
+    os.environ["FDB_CLUSTER_FILE"] = str(cluster_file)
+    _provisioned_container = container
+
+
+_provision_fdb_at_module_load()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def fdb_cluster():
+    if not _existing_cluster_file_works():
+        pytest.skip(_provisioning_error or "FoundationDB cluster file unavailable")
+    try:
+        yield os.environ["FDB_CLUSTER_FILE"]
     finally:
-        container.stop()
-        os.environ.pop("FDB_CLUSTER_FILE", None)
+        if _provisioned_container is not None:
+            _provisioned_container.stop()
+            os.environ.pop("FDB_CLUSTER_FILE", None)
