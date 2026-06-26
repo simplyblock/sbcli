@@ -1029,11 +1029,7 @@ class CLIWrapperBase:
             clusters = db.get_clusters()
             if clusters:
                 cluster_id = clusters[0].get_id()
-        success, error = backup_controller.switch_backup_source(
-            cluster_id, args.source_cluster_id)
-        if error:
-            print(f"Error: {error}")
-            return False
+        backup_controller.switch_backup_source(cluster_id, args.source_cluster_id)
         target = args.source_cluster_id
         if target == cluster_id or target == "local":
             print("Switched to local backup source")

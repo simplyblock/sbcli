@@ -31,8 +31,6 @@ class LVol(BaseModel):
     cloned_from_snap: str = ""
     comp_bdev: str = ""
     crypto_bdev: str = ""
-    crypto_key1: str = ""
-    crypto_key2: str = ""
     crypto_key_name: str = ""
     deletion_status: str = ""
     guid: str = ""

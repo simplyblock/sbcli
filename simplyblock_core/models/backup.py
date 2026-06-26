@@ -43,6 +43,7 @@ class Backup(BaseModel):
     allowed_hosts: List[dict] = []
     # S3 metadata written to metadata bucket
     s3_metadata: dict = {}
+    encrypted: bool = False
 
     def get_id(self):
         return "%s/%s" % (self.cluster_id, self.uuid)

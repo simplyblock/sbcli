@@ -11,7 +11,7 @@ from simplyblock_core.controllers import lvol_controller, snapshot_events, pool_
 
 from simplyblock_core import utils
 from simplyblock_core.exceptions import PreconditionError
-from simplyblock_core.kms import create_kms_connection
+from simplyblock_core.kms import create_kms_connection, lvol_dek_path, pool_kek_name
 from simplyblock_core.kms._exceptions import KMSException
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.job_schedule import JobSchedule
@@ -827,22 +827,10 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
         }
     ]
 
-    if snap.lvol.crypto_bdev:
-        lvol.crypto_bdev = f"crypto_{lvol.lvol_bdev}"
-        lvol.bdev_stack.append({
-            "type": "crypto",
-            "name": lvol.crypto_bdev,
-            "params": {
-                "name": lvol.crypto_bdev,
-                "base_name": lvol.top_bdev,
-                "key1": snap.lvol.crypto_key1,
-                "key2": snap.lvol.crypto_key2,
-            }
-        })
-        lvol.lvol_type += ',crypto'
-        lvol.top_bdev = lvol.crypto_bdev
-        lvol.crypto_key1 = snap.lvol.crypto_key1
-        lvol.crypto_key2 = snap.lvol.crypto_key2
+    # Process pool allowed hosts (for host restriction and/or DH-HMAC-CHAP authentication)
+    if pool.dhchap:
+        # Pool-level DHCHAP: inherit allowed hosts from pool (no per-host key generation)
+        lvol.allowed_hosts = [{"nqn": h} for h in pool.allowed_hosts]
 
     conv_new_size = 0
     if new_size:
@@ -858,10 +846,18 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
             return False, msg
 
     if snap.lvol.crypto_bdev:
+        lvol.crypto_bdev = f"crypto_{lvol.lvol_bdev}"
+        lvol.bdev_stack.append({"type": "crypto"})
+        lvol.lvol_type += ',crypto'
+        lvol.top_bdev = lvol.crypto_bdev
         with create_kms_connection(cluster) as kms:
             try:
-                key1, key2 = kms.get_data_encryption_keys(snap.lvol)
-                kms.import_data_encryption_keys(lvol, (key1, key2))
+                kms.rekey_data_encryption_keys(
+                    lvol_dek_path(cluster.get_id(), snap.lvol.get_id()),
+                    pool_kek_name(pool.get_id()),
+                    lvol_dek_path(cluster.get_id(), lvol.get_id()),
+                    pool_kek_name(pool.get_id()),
+                )
             except KMSException:
                 msg = f"Failed to copy encryption keys for clone {lvol.crypto_bdev}"
                 logger.exception(msg)

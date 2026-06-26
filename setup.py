@@ -94,7 +94,7 @@ console_scripts = list(set(console_scripts))
 setup(
     name=COMMAND_NAME,
     version=VERSION,
-    requires_python='>= 3.13',
+    requires_python='>= 3.9',
     packages=find_packages(exclude=["e2e*"]),
     url='https://www.simplyblock.io/',
     author='Hamdy',

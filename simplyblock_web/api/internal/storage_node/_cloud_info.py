@@ -1,16 +1,18 @@
+from typing import Callable, List, Optional
+
 import requests
 
 
-def get_cloud_info() -> dict | None:
+def get_cloud_info() -> Optional[dict]:
+    getters: List[Callable[[], Optional[dict]]] = [_google_info, _amazon_info, _equinix_info]
     return next((
         info
-        for getter
-        in [_google_info, _amazon_info, _equinix_info]
+        for getter in getters
         if (info := getter()) is not None
     ), None)
 
 
-def _google_info() -> dict | None:
+def _google_info() -> Optional[dict]:
     try:
         headers = {'Metadata-Flavor': 'Google'}
         response = requests.get("http://169.254.169.254/computeMetadata/v1/instance/?recursive=true", headers=headers, timeout=2)
@@ -26,7 +28,7 @@ def _google_info() -> dict | None:
         return None
 
 
-def _amazon_info() -> dict | None:
+def _amazon_info() -> Optional[dict]:
     try:
         import ec2_metadata
         session = requests.session()
@@ -42,7 +44,7 @@ def _amazon_info() -> dict | None:
         return None
 
 
-def _equinix_info(timeout: int = 2) -> dict | None:
+def _equinix_info(timeout: int = 2) -> Optional[dict]:
     try:
         response = requests.get("https://metadata.platformequinix.com/metadata", timeout=2)
         data = response.json()

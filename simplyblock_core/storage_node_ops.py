@@ -1720,8 +1720,8 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                                 logger.warning(
                                     f"Node {node.get_id()} is in_creation status with SSD {ssd}, "
                                     f"removing and deleting it")
-                                remove_storage_node(node.get_id(), force_remove=True)
-                                delete_storage_node(node.get_id(), force=True)
+                                storage_events.snode_delete(node)
+                                node.remove(db_controller.kv_store)
                                 break
                             logger.error(f"SSD is being used by other node, ssd: {ssd}, node: {node.get_id()}")
                             return False
@@ -2027,8 +2027,9 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         rpc_client.log_set_print_level("DEBUG")
 
         if snode.lvol_poller_mask:
-            ret = rpc_client.bdev_lvol_create_poller_group(snode.lvol_poller_mask)
-            if not ret:
+            try:
+                rpc_client.bdev_lvol_create_poller_group(snode.lvol_poller_mask)
+            except RPCException:
                 logger.error("Failed to set pollers mask")
                 return False
 
@@ -2866,8 +2867,9 @@ def _restart_storage_node_impl(
     rpc_client.log_set_print_level("DEBUG")
 
     if snode.lvol_poller_mask:
-        ret = rpc_client.bdev_lvol_create_poller_group(snode.lvol_poller_mask)
-        if not ret:
+        try:
+            rpc_client.bdev_lvol_create_poller_group(snode.lvol_poller_mask)
+        except RPCException:
             logger.error("Failed to set pollers mask")
             return False
 
@@ -3169,7 +3171,11 @@ def _restart_storage_node_impl(
         if cluster.backup_config:
             from simplyblock_core.controllers import backup_controller
             logger.info("Creating S3 bdev on restarted node")
-            backup_controller.create_s3_bdev(snode, cluster.backup_config)
+            try:
+                backup_controller.create_s3_bdev(snode, cluster.backup_config)
+            except Exception as e:
+                logger.exception(str(e))
+                return False
 
         # make other nodes connect to the new devices
         logger.info("Make other nodes connect to the node devices")

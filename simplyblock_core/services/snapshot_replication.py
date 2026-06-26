@@ -1,6 +1,7 @@
 # coding=utf-8
 import time
 import uuid
+from typing import Optional
 
 from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.controllers import lvol_controller, snapshot_events, snapshot_controller
@@ -154,8 +155,8 @@ def process_snap_replicate_finish(task, snapshot):
         replicate_as_snap_instance = task.function_params["replicate_as_snap_instance"]
     else:
         replicate_as_snap_instance = False
-    target_prev_snap: dict | None = None
-    _prev_snap_for_db: SnapShot | None = None
+    target_prev_snap: Optional[dict] = None
+    _prev_snap_for_db: Optional[SnapShot] = None
     if replicate_to_source:
         org_snap = db.get_snapshot_by_id(snapshot.snap_ref_id)
         try:

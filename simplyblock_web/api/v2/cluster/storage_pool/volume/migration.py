@@ -1,4 +1,4 @@
-from typing import Annotated, List
+from typing import Annotated, List, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -27,7 +27,7 @@ def list_migrations(cluster: Cluster) -> List[MigrationDTO]:
 class _MigrationParams(BaseModel):
     target_node_id: UUID
     ctrl_loss_tmo: int = constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO
-    host_nqn: Annotated[str, Field(pattern=utils.NQN_PATTERN)] | None = None
+    host_nqn: Optional[Annotated[str, Field(pattern=utils.NQN_PATTERN)]] = None
 
 
 @api.post('/', name='cluster:storage-pools:volumes:migrations:create', status_code=201, responses={201: {"content": None}})

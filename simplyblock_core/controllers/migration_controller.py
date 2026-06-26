@@ -47,7 +47,7 @@ from simplyblock_core import constants
 from simplyblock_core.controllers import migration_events, tasks_controller, snapshot_controller
 from simplyblock_core.exceptions import MigrationConflictError, PreconditionError
 from simplyblock_core.controllers.host_auth import _reapply_allowed_hosts
-from simplyblock_core.kms import create_kms_connection
+from simplyblock_core.kms import create_kms_connection, lvol_dek_path, pool_kek_name
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.lvol_migration import LVolMigration
 from simplyblock_core.models.lvol_model import LVol
@@ -827,7 +827,10 @@ def create_migration(lvol_id, target_node_id,
             else:
                 try:
                     with create_kms_connection(cluster) as kms:
-                        _key1, _key2 = kms.get_data_encryption_keys(lvol)
+                        _key1, _key2 = kms.get_data_encryption_keys(
+                            lvol_dek_path(cluster.get_id(), lvol.get_id()),
+                            pool_kek_name(lvol.pool_uuid),
+                        )
                     _key_name = f"key_{_crypto_short}"
                     _ret = _rpc.lvol_crypto_key_create(_key_name, _key1, _key2)
                     if not _ret:

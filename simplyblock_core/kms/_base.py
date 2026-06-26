@@ -3,10 +3,6 @@ from __future__ import annotations
 from abc import abstractmethod
 from contextlib import AbstractContextManager
 from types import TracebackType
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from simplyblock_core.models.lvol_model import LVol
 
 
 class KMS(AbstractContextManager):
@@ -19,19 +15,29 @@ class KMS(AbstractContextManager):
         return None
 
     @abstractmethod
-    def create_data_encryption_keys(self, lvol: "LVol") -> None:
+    def create_data_encryption_keys(self, path: str, kek_name: str) -> None:
         raise NotImplementedError
 
     @abstractmethod
-    def import_data_encryption_keys(self, lvol: "LVol", keys: tuple[str, str]) -> None:
+    def import_data_encryption_keys(self, path: str, kek_name: str, keys: tuple[str, str]) -> None:
         pass
 
     @abstractmethod
-    def get_data_encryption_keys(self, lvol: "LVol") -> tuple[str, str]:
+    def get_data_encryption_keys(self, path: str, kek_name: str) -> tuple[str, str]:
         pass
 
     @abstractmethod
-    def delete_data_encryption_keys(self, name: str) -> None: ...
+    def delete_data_encryption_keys(self, path: str) -> None: ...
+
+    def rekey_data_encryption_keys(
+        self,
+        src_path: str, src_kek_name: str,
+        dst_path: str, dst_kek_name: str,
+    ) -> None:
+        # TODO: Implementing this as a combined operation via a plugin for HCP enables
+        # us to prevent the controller from seeing the plaintext altogether.
+        keys = self.get_data_encryption_keys(src_path, src_kek_name)
+        self.import_data_encryption_keys(dst_path, dst_kek_name, keys)
 
     @abstractmethod
     def create_key_encryption_key(self, name: str) -> None: ...
