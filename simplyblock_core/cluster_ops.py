@@ -260,7 +260,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     scripts.install_deps(mode)
     logger.info("Installing dependencies > Done")
 
-    db_connection: SecretStr | None = None
+    db_connection: t.Optional[SecretStr] = None
     if mode == "docker":
         if not ifname:
             ifname = "eth0"

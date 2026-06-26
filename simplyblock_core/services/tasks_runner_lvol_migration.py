@@ -1925,7 +1925,7 @@ def _handle_cleanup_target(migration, tgt_node, tgt_rpc, src_rpc=None):
 
         # Derive the migration bdev name in case it was pre-created but not yet
         # recorded in transfer_context (i.e. failure before LVOL_MIGRATE saved ctx).
-        _pre_nqn: str | None = None
+        _pre_nqn: Optional[str] = None
         try:
             _lvol = db.get_lvol_by_id(migration.lvol_id)
             _pre_bdev = f"{tgt_node.lvstore}/{_lvol.lvol_bdev}{_MIGRATION_BDEV_SUFFIX}"

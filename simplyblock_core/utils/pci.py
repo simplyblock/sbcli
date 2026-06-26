@@ -49,7 +49,7 @@ def list_devices(*, driver_name: Optional[str] = None, device_class: Optional[by
                 name
                 for device
                 in PCI_DEVICES.iterdir()
-                if int((device / 'class').read_text(), 16).to_bytes(3) == device_class
+                if int((device / 'class').read_text(), 16).to_bytes(3, 'big') == device_class
         ]
 
     raise AssertionError('unreachable')

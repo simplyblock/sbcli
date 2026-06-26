@@ -2,6 +2,7 @@ import json
 
 import requests
 import logging
+from typing import Optional
 
 from pydantic import SecretStr
 from requests.adapters import HTTPAdapter
@@ -116,8 +117,8 @@ class SNodeClient:
         return self._request("POST", "recalculate_cores_distribution", params)
 
     def spdk_process_start(self, l_cores, spdk_mem, spdk_image=None, spdk_debug=None, cluster_ip=None,
-                           fdb_connection: SecretStr | None = None, namespace=None, server_ip=None, rpc_port=None,
-                           rpc_username=None, rpc_password: SecretStr | None = None, multi_threading_enabled=False, timeout=0, ssd_pcie=None,
+                           fdb_connection: Optional[SecretStr] = None, namespace=None, server_ip=None, rpc_port=None,
+                           rpc_username=None, rpc_password: Optional[SecretStr] = None, multi_threading_enabled=False, timeout=0, ssd_pcie=None,
                            total_mem=None, system_mem=None, cluster_mode=None, socket=0, firewall_port=0, cluster_id=None,
                            spdk_proxy_image=None):
         params = {

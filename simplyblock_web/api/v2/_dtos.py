@@ -577,7 +577,7 @@ class MigrationDTO(BaseModel):
     connect_strings: list[NvmeConnectEntry] = []
 
     @staticmethod
-    def from_model(model: LVolMigration, connect_strings: list[NvmeConnectEntry] | None = None):
+    def from_model(model: LVolMigration, connect_strings: Optional[List[NvmeConnectEntry]] = None):
         return MigrationDTO(
             id=UUID(model.uuid),
             lvol_id=model.lvol_id,
