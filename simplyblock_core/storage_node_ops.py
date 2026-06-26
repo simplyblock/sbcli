@@ -1720,8 +1720,8 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                                 logger.warning(
                                     f"Node {node.get_id()} is in_creation status with SSD {ssd}, "
                                     f"removing and deleting it")
-                                remove_storage_node(node.get_id(), force_remove=True)
-                                delete_storage_node(node.get_id(), force=True)
+                                storage_events.snode_delete(node)
+                                node.remove(db_controller.kv_store)
                                 break
                             logger.error(f"SSD is being used by other node, ssd: {ssd}, node: {node.get_id()}")
                             return False
