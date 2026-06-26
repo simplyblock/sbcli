@@ -14,6 +14,7 @@ from pathlib import Path
 import string
 import random
 import json
+import shlex
 
 
 def generate_random_sequence(length):
@@ -2628,7 +2629,6 @@ class TestClusterBase:
         sock = f"/mnt/ramdisk/{container_name}/spdk.sock"
         rpc_cmd = f"sudo python spdk/scripts/rpc.py -s {sock} {method}"
         if params:
-            import shlex
             rpc_cmd += " " + " ".join(
                 f"-{k} {shlex.quote(str(v))}" if len(k) == 1
                 else f"--{k} {shlex.quote(str(v))}"
