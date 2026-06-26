@@ -725,7 +725,7 @@ def create_migration(lvol_id, target_node_id,
                 f"create_migration: secondary registration error (continuing): {_e}")
 
     _pre_ter_node = None
-    if lvol.ha_type == "ha3" and tgt_node.tertiary_node_id:
+    if tgt_node.tertiary_node_id:
         try:
             _pre_ter_node = db.get_storage_node_by_id(tgt_node.tertiary_node_id)
             _ter_rpc_reg  = _pre_ter_node.rpc_client()
@@ -775,7 +775,7 @@ def create_migration(lvol_id, target_node_id,
                 pass
 
     tgt_ter_node = None
-    if lvol.ha_type == "ha3" and tgt_node.tertiary_node_id:
+    if tgt_node.tertiary_node_id:
         tgt_ter_node = (_pre_ter_node if _pre_ter_node is not None else None)
         if tgt_ter_node is None:
             try:
