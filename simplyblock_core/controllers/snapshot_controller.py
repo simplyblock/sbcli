@@ -366,7 +366,7 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
     return snap.uuid, False
 
 
-def list_snapshots(cluster_id=None, node_id=None, lvol_id=None,pool_id_or_name=None, with_details=False, is_json=False):
+def list_snapshots(cluster_id=None, node_id=None, lvol_id=None,pool_id_or_name=None, with_details=False):
     all_snaps = db_controller.get_snapshots()
     if lvol_id:
         try:
@@ -444,10 +444,7 @@ def list_snapshots(cluster_id=None, node_id=None, lvol_id=None,pool_id_or_name=N
             d["Instance on other nodes"] = instances
         data.append(d)
 
-    if is_json and data:
-        return utils.dump_json(data, indent=2, unwrap_secrets=True)
-
-    return utils.print_table(data, unwrap_secrets=True)
+    return data
 
 
 def delete(snapshot_uuid, force_delete=False):
@@ -1070,7 +1067,7 @@ def get(snapshot_uuid):
         logger.error(f"Snapshot not found {snapshot_uuid}")
         return False
 
-    return utils.dump_json(snap.get_clean_dict(), indent=2, unwrap_secrets=True)
+    return snap.get_clean_dict()
 
 
 def set_value(snapshot_uuid, attr, value) -> bool:

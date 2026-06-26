@@ -3245,14 +3245,13 @@ def _format_lvstore_ports(node):
     return " ".join(parts)
 
 
-def list_storage_nodes(is_json, cluster_id=None):
+def list_storage_nodes(cluster_id=None):
     db_controller = DBController()
     if cluster_id:
         nodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
     else:
         nodes = db_controller.get_storage_nodes()
     data = []
-    output = ""
     all_lvols = db_controller.get_mini_lvols()
     for node in nodes:
         logger.debug(node)
@@ -3289,17 +3288,10 @@ def list_storage_nodes(is_json, cluster_id=None):
 
         })
 
-    if not data:
-        return output
-
-    if is_json:
-        output = utils.dump_json(data, indent=2, unwrap_secrets=True)
-    else:
-        output = utils.print_table(data, unwrap_secrets=True)
-    return output
+    return data
 
 
-def list_storage_devices(node_id, is_json):
+def list_storage_devices(node_id):
     db_controller = DBController()
     try:
         snode = db_controller.get_storage_node_by_id(node_id)
@@ -3389,14 +3381,7 @@ def list_storage_devices(node_id, is_json):
     if bdev_devices:
         data["Distrib Block Devices"] = bdev_devices
 
-    if is_json:
-        return utils.dump_json(data, indent=2, unwrap_secrets=True)
-    else:
-        out = "\n\n".join(
-            f'{key}\n{utils.print_table(value, unwrap_secrets=True)}\n\n'
-            for key, value in data.items()
-        )
-        return out
+    return data
 
 
 def _check_ftt_allows_node_removal(node_id, db_controller):
@@ -4373,7 +4358,7 @@ def get_info(node_id):
         return False
 
     node_info, _ = snode.client().info()
-    return utils.dump_json(node_info, indent=2, unwrap_secrets=True)
+    return node_info
 
 
 def get_spdk_info(node_id):
@@ -4409,8 +4394,7 @@ def get(node_id):
         logger.exception("Can not find storage node")
         return False
 
-    data = snode.get_clean_dict()
-    return utils.dump_json(data, indent=2, sort_keys=True, unwrap_secrets=True)
+    return snode.get_clean_dict()
 
 
 # States from which a node may legally transition INTO STATUS_ONLINE.
@@ -7694,16 +7678,12 @@ def auto_repair(node_id, validate_only=False, force_remove_inconsistent=False, f
     # #sbctl sn list-lvols d4577fa7-545f-4506-b127-7e81fc3a6e34 --json > lvols_8080.json
     # with open('lvols_8082.json', 'r') as file:
     #     lvols = json.load(file)
-    lvols = lvol_controller.list_by_node(node_id, is_json=True)
-    if lvols:
-        lvols = json.loads(lvols)
+    lvols = lvol_controller.list_by_node(node_id)
 
     # #sbctl sn list-snapshots d4577fa7-545f-4506-b127-7e81fc3a6e34 --json > snaps_8080.json
     # with open('snaps_8082.json', 'r') as file:
     #     snaps = json.load(file)
-    snaps = snapshot_controller.list_snapshots(node_id=node_id, is_json=True)
-    if snaps:
-        snaps = json.loads(snaps)
+    snaps = snapshot_controller.list_snapshots(node_id=node_id)
 
     out_blobid_dict = {}
     lvols_blobid_dict = {}
@@ -7862,4 +7842,4 @@ def lvs_dump_tree(node_id):
         logger.error("Failed to dump lvstore tree")
         return False
 
-    return utils.dump_json(ret, indent=2, unwrap_secrets=True)
+    return ret
