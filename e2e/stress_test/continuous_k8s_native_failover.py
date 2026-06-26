@@ -1678,10 +1678,13 @@ class K8sNativeFailoverTest(TestClusterBase):
         return len(self.pvc_details) + len(self.clone_details)
 
     def _enforce_lvol_cap(self):
-        """Delete oldest dynamic clones/snapshots/PVCs if total exceeds MAX_TOTAL_LVOLS.
+        """Delete dynamic resources randomly if total exceeds MAX_TOTAL_LVOLS.
 
-        Deletion order: clones (+ their snapshots) first, then standalone PVCs.
-        Keeps at least 1 PVC per storage node.
+        Randomly picks between clones and PVCs for deletion.  When a
+        clone is picked the chain is cleaned up: clone → snapshot →
+        source PVC (if safe).  When a PVC is picked its dependent
+        clones/snapshots are removed first.  Never removes the last PVC
+        on a storage node.
         """
         total = self._count_total_resources()
         if total <= self.MAX_TOTAL_LVOLS:
@@ -1697,95 +1700,181 @@ class K8sNativeFailoverTest(TestClusterBase):
             f"{self.MAX_TOTAL_LVOLS} by {excess} — pruning"
         )
 
-        # Phase 1: delete clones (+ their orphan snapshots)
-        clone_names = list(self.clone_details.keys())
-        for clone_name in clone_names:
-            if excess <= 0:
-                break
-            clone_info = self.clone_details[clone_name]
-            snap_name = clone_info.get("snap_name", "")
-            try:
-                if not self.use_client_fio:
+        def _node_pvc_counts():
+            counts = {}
+            for pname, pinfo in self.pvc_details.items():
+                nid = pinfo.get("node_id", "unknown")
+                counts.setdefault(nid, 0)
+                counts[nid] += 1
+            return counts
+
+        def _stop_clone_fio(cn):
+            ci = self.clone_details[cn]
+            if not self.use_client_fio:
+                try:
+                    self.k8s_utils.delete_job(ci["job_name"])
+                    self.k8s_utils.delete_configmap(ci["configmap_name"])
+                except Exception:
+                    pass
+            else:
+                client = ci.get("client")
+                if client:
+                    self._kill_fio_on_client(cn, client)
+                    sleep_n_sec(2)
                     try:
-                        self.k8s_utils.delete_job(clone_info["job_name"])
-                        self.k8s_utils.delete_configmap(clone_info["configmap_name"])
+                        self.ssh_obj.unmount_path(client, ci["mount_path"])
                     except Exception:
                         pass
-                else:
-                    client = clone_info.get("client")
-                    if client:
-                        self._kill_fio_on_client(clone_name, client)
-                        sleep_n_sec(2)
-                        try:
-                            self.ssh_obj.unmount_path(client, clone_info["mount_path"])
-                        except Exception:
-                            pass
-                self.k8s_utils.delete_pvc(clone_name)
-                del self.clone_details[clone_name]
-                excess -= 1
-                self.logger.info(f"[cap] Deleted clone {clone_name}")
-            except Exception as exc:
-                self.logger.warning(f"[cap] Failed to delete clone {clone_name}: {exc}")
 
-            # Delete orphan snapshot if no more clones reference it
+        def _stop_pvc_fio(pn):
+            pi = self.pvc_details[pn]
+            if not self.use_client_fio:
+                try:
+                    self.k8s_utils.delete_job(pi["job_name"])
+                    self.k8s_utils.delete_configmap(pi["configmap_name"])
+                except Exception:
+                    pass
+            else:
+                client = pi.get("client")
+                if client:
+                    self._kill_fio_on_client(pn, client)
+                    sleep_n_sec(2)
+                    try:
+                        self.ssh_obj.unmount_path(client, pi["mount_path"])
+                    except Exception:
+                        pass
+
+        def _delete_clone_chain(clone_name):
+            """Delete clone → snapshot → source PVC. Returns count removed."""
+            removed = 0
+            ci = self.clone_details.get(clone_name)
+            if not ci:
+                return 0
+            snap_name = ci.get("snap_name", "")
+
+            _stop_clone_fio(clone_name)
+            try:
+                self.k8s_utils.delete_pvc(clone_name)
+            except Exception:
+                pass
+            del self.clone_details[clone_name]
+            removed += 1
+            self.logger.info(f"[cap] Deleted clone {clone_name}")
+
             if snap_name and snap_name in self.snapshot_details:
-                remaining_clones = [
+                other = [
                     c for c in self.clone_details.values()
                     if c.get("snap_name") == snap_name
                 ]
-                if not remaining_clones:
+                if not other:
+                    parent_pvc = self.snapshot_details.get(
+                        snap_name, {}
+                    ).get("pvc_name")
                     try:
                         self.k8s_utils.delete_volume_snapshot(snap_name)
-                        del self.snapshot_details[snap_name]
-                        self.logger.info(f"[cap] Deleted orphan snapshot {snap_name}")
-                    except Exception as exc:
-                        self.logger.warning(f"[cap] Failed to delete snapshot {snap_name}: {exc}")
+                    except Exception:
+                        pass
+                    if (parent_pvc and parent_pvc in self.pvc_details
+                            and snap_name
+                            in self.pvc_details[parent_pvc].get(
+                                "snapshots", [])):
+                        self.pvc_details[parent_pvc][
+                            "snapshots"
+                        ].remove(snap_name)
+                    self.snapshot_details.pop(snap_name, None)
+                    if snap_name in self.snapshot_names:
+                        self.snapshot_names.remove(snap_name)
+                    self.logger.info(
+                        f"[cap] Deleted snapshot {snap_name} "
+                        f"(chain from clone {clone_name})"
+                    )
 
-        # Phase 2: delete standalone PVCs if still over cap
-        if excess > 0:
-            # Identify nodes with > 1 PVC (never remove the last PVC on a node)
-            node_pvc_count = {}
-            for pname, pinfo in self.pvc_details.items():
-                nid = pinfo.get("node_id", "unknown")
-                node_pvc_count.setdefault(nid, []).append(pname)
-            safe_to_delete = [
-                pname for nid, pnames in node_pvc_count.items()
-                if len(pnames) > 1
-                for pname in pnames[1:]  # keep first, rest are candidates
-            ]
-            for pvc_name in safe_to_delete:
-                if excess <= 0:
-                    break
-                pvc_info = self.pvc_details[pvc_name]
-                try:
-                    if not self.use_client_fio:
-                        try:
-                            self.k8s_utils.delete_job(pvc_info["job_name"])
-                            self.k8s_utils.delete_configmap(pvc_info["configmap_name"])
-                        except Exception:
-                            pass
-                    else:
-                        client = pvc_info.get("client")
-                        if client:
-                            self._kill_fio_on_client(pvc_name, client)
-                            sleep_n_sec(2)
+                    # Delete source PVC if safe
+                    if parent_pvc and parent_pvc in self.pvc_details:
+                        remaining_snaps = [
+                            s for s
+                            in self.pvc_details[parent_pvc].get(
+                                "snapshots", [])
+                            if s in self.snapshot_details
+                        ]
+                        nid = self.pvc_details[parent_pvc].get("node_id")
+                        nc = _node_pvc_counts()
+                        safe = nc.get(nid, 0) > 1
+                        if not remaining_snaps and safe:
+                            _stop_pvc_fio(parent_pvc)
                             try:
-                                self.ssh_obj.unmount_path(client, pvc_info["mount_path"])
+                                self.k8s_utils.delete_pvc(parent_pvc)
                             except Exception:
                                 pass
-                    # Delete snapshots of this PVC
-                    for snap_name in list(pvc_info.get("snapshots", [])):
-                        try:
-                            self.k8s_utils.delete_volume_snapshot(snap_name)
-                            self.snapshot_details.pop(snap_name, None)
-                        except Exception:
-                            pass
-                    self.k8s_utils.delete_pvc(pvc_name)
-                    del self.pvc_details[pvc_name]
-                    excess -= 1
-                    self.logger.info(f"[cap] Deleted PVC {pvc_name}")
-                except Exception as exc:
-                    self.logger.warning(f"[cap] Failed to delete PVC {pvc_name}: {exc}")
+                            del self.pvc_details[parent_pvc]
+                            removed += 1
+                            self.logger.info(
+                                f"[cap] Deleted source PVC "
+                                f"{parent_pvc} (chain from "
+                                f"clone {clone_name})"
+                            )
+            return removed
+
+        def _delete_pvc_with_deps(pvc_name):
+            """Delete PVC and its dependents. Returns count removed."""
+            removed = 0
+            pi = self.pvc_details[pvc_name]
+            for snap_name in list(pi.get("snapshots", [])):
+                clones = [
+                    cn for cn, cd in self.clone_details.items()
+                    if cd.get("snap_name") == snap_name
+                ]
+                for cn in clones:
+                    _stop_clone_fio(cn)
+                    try:
+                        self.k8s_utils.delete_pvc(cn)
+                    except Exception:
+                        pass
+                    del self.clone_details[cn]
+                    removed += 1
+                try:
+                    self.k8s_utils.delete_volume_snapshot(snap_name)
+                except Exception:
+                    pass
+                self.snapshot_details.pop(snap_name, None)
+                if snap_name in self.snapshot_names:
+                    self.snapshot_names.remove(snap_name)
+
+            _stop_pvc_fio(pvc_name)
+            try:
+                self.k8s_utils.delete_pvc(pvc_name)
+            except Exception:
+                pass
+            del self.pvc_details[pvc_name]
+            removed += 1
+            self.logger.info(f"[cap] Deleted PVC {pvc_name}")
+            return removed
+
+        while excess > 0:
+            clone_candidates = list(self.clone_details.keys())
+            nc = _node_pvc_counts()
+            pvc_candidates = [
+                p for p in self.pvc_details
+                if nc.get(
+                    self.pvc_details[p].get("node_id", "unknown"), 0
+                ) > 1
+            ]
+            candidates = (
+                [("clone", cn) for cn in clone_candidates]
+                + [("pvc", pn) for pn in pvc_candidates]
+            )
+            if not candidates:
+                self.logger.warning(
+                    f"[cap] No more deletable resources — excess={excess}"
+                )
+                break
+
+            kind, name = random.choice(candidates)
+            if kind == "clone":
+                removed = _delete_clone_chain(name)
+            else:
+                removed = _delete_pvc_with_deps(name)
+            excess -= removed
 
         final = self._count_total_resources()
         self.logger.info(
@@ -3710,9 +3799,6 @@ class K8sNativeResilientFailoverTest(K8sNativeFailoverTest):
         # Cap on total lvols (PVCs + clones) to avoid resource exhaustion
         # (inherits default 60 from parent; override via env var if needed)
 
-        # Skip clone creation entirely (set SKIP_CLONES=1 to disable)
-        self.skip_clones = os.environ.get("SKIP_CLONES", "0") == "1"
-
         # Sets tracking permanent resource names (never deleted)
         self.permanent_pvcs: set[str] = set()
         self.permanent_snapshots: set[str] = set()
@@ -4287,10 +4373,217 @@ class K8sNativeResilientFailoverTest(K8sNativeFailoverTest):
             )
             self.create_pvcs_with_fio(len(deleted_node_ids))
 
+    # ── Single-resource deletion helpers ─────────────────────────────
+
+    def _stop_fio_and_disconnect_clone(self, clone_name: str):
+        """Stop FIO, unmount, and disconnect NVMe for a clone."""
+        clone_info = self.clone_details[clone_name]
+        if not self.use_client_fio:
+            try:
+                self.k8s_utils.delete_job(clone_info["job_name"])
+                self.k8s_utils.delete_configmap(
+                    clone_info["configmap_name"]
+                )
+            except Exception:
+                pass
+        else:
+            client = clone_info.get("client")
+            if client:
+                self._kill_fio_on_client(clone_name, client)
+                sleep_n_sec(2)
+                try:
+                    self.ssh_obj.unmount_path(
+                        client, clone_info["mount_path"]
+                    )
+                except Exception:
+                    pass
+                self._disconnect_lvol_on_client(
+                    clone_info.get("lvol_name", ""), client
+                )
+                self.clone_mount_details.pop(
+                    clone_info.get("lvol_name"), None
+                )
+
+    def _stop_fio_and_disconnect_pvc(self, pvc_name: str):
+        """Stop FIO, unmount, and disconnect NVMe for a PVC."""
+        pvc_info = self.pvc_details[pvc_name]
+        if not self.use_client_fio:
+            try:
+                self.k8s_utils.delete_job(pvc_info["job_name"])
+                self.k8s_utils.delete_configmap(
+                    pvc_info["configmap_name"]
+                )
+            except Exception:
+                pass
+        else:
+            client = pvc_info.get("client")
+            if client:
+                self._kill_fio_on_client(pvc_name, client)
+                sleep_n_sec(2)
+                try:
+                    self.ssh_obj.unmount_path(
+                        client, pvc_info["mount_path"]
+                    )
+                except Exception:
+                    pass
+                self._disconnect_lvol_on_client(
+                    pvc_info.get("lvol_name", ""), client
+                )
+                self.lvol_mount_details.pop(
+                    pvc_info.get("lvol_name"), None
+                )
+
+    def _delete_clone_chain(self, clone_name: str) -> int:
+        """Delete clone → snapshot → source PVC (full chain cleanup).
+
+        Returns the number of resources removed (for cap accounting).
+        Only deletes snapshot/source PVC if they are dynamic (not
+        permanent) and have no other dependents.
+        """
+        removed = 0
+        clone_info = self.clone_details.get(clone_name)
+        if not clone_info:
+            return 0
+        snap_name = clone_info.get("snap_name", "")
+
+        # Step 1: delete the clone PVC
+        self._stop_fio_and_disconnect_clone(clone_name)
+        try:
+            self.k8s_utils.delete_pvc(clone_name)
+        except Exception:
+            pass
+        del self.clone_details[clone_name]
+        removed += 1
+        self.logger.info(f"[cap] Deleted clone {clone_name}")
+
+        # Step 2: delete the snapshot if no other clones reference it
+        if (snap_name
+                and snap_name not in self.permanent_snapshots
+                and snap_name in self.snapshot_details):
+            other_clones = [
+                cn for cn, cd in self.clone_details.items()
+                if cd.get("snap_name") == snap_name
+            ]
+            if not other_clones:
+                parent_pvc = self.snapshot_details.get(
+                    snap_name, {}
+                ).get("pvc_name")
+                try:
+                    self.k8s_utils.delete_volume_snapshot(snap_name)
+                except Exception:
+                    pass
+                if (parent_pvc and parent_pvc in self.pvc_details
+                        and snap_name
+                        in self.pvc_details[parent_pvc]["snapshots"]):
+                    self.pvc_details[parent_pvc][
+                        "snapshots"
+                    ].remove(snap_name)
+                self.snapshot_details.pop(snap_name, None)
+                if snap_name in self.snapshot_names:
+                    self.snapshot_names.remove(snap_name)
+                self.logger.info(
+                    f"[cap] Deleted snapshot {snap_name} "
+                    f"(chain cleanup from clone {clone_name})"
+                )
+
+                # Step 3: delete the source PVC if it is dynamic, has
+                # no remaining snapshots, and is not the last on its node
+                if (parent_pvc
+                        and parent_pvc not in self.permanent_pvcs
+                        and parent_pvc in self.pvc_details):
+                    remaining_snaps = [
+                        s for s in self.pvc_details[parent_pvc].get(
+                            "snapshots", []
+                        )
+                        if s in self.snapshot_details
+                    ]
+                    node_id = self.pvc_details[parent_pvc].get("node_id")
+                    node_pvcs = self.node_vs_pvc.get(node_id, [])
+                    safe = len(node_pvcs) > 1
+                    if not remaining_snaps and safe:
+                        self._stop_fio_and_disconnect_pvc(parent_pvc)
+                        try:
+                            self.k8s_utils.delete_pvc(parent_pvc)
+                        except Exception:
+                            pass
+                        if node_id and node_id in self.node_vs_pvc:
+                            if parent_pvc in self.node_vs_pvc[node_id]:
+                                self.node_vs_pvc[node_id].remove(
+                                    parent_pvc
+                                )
+                        del self.pvc_details[parent_pvc]
+                        removed += 1
+                        self.logger.info(
+                            f"[cap] Deleted source PVC {parent_pvc} "
+                            f"(chain cleanup from clone {clone_name})"
+                        )
+
+        return removed
+
+    def _delete_pvc_with_deps(self, pvc_name: str) -> int:
+        """Delete a PVC and its dependent clones/snapshots.
+
+        Returns the number of resources removed.
+        """
+        removed = 0
+        pvc_info = self.pvc_details[pvc_name]
+
+        # First delete all dynamic clones + snapshots of this PVC
+        for snap_name in list(pvc_info.get("snapshots", [])):
+            if snap_name in self.permanent_snapshots:
+                continue
+            clones = [
+                cn for cn, cd in self.clone_details.items()
+                if cd.get("snap_name") == snap_name
+                and cn not in self.permanent_clones
+            ]
+            for cn in clones:
+                self._stop_fio_and_disconnect_clone(cn)
+                try:
+                    self.k8s_utils.delete_pvc(cn)
+                except Exception:
+                    pass
+                del self.clone_details[cn]
+                removed += 1
+                self.logger.info(
+                    f"[cap] Deleted clone {cn} "
+                    f"(dep of PVC {pvc_name})"
+                )
+            try:
+                self.k8s_utils.delete_volume_snapshot(snap_name)
+            except Exception:
+                pass
+            self.snapshot_details.pop(snap_name, None)
+            if snap_name in self.snapshot_names:
+                self.snapshot_names.remove(snap_name)
+            self.logger.info(
+                f"[cap] Deleted snapshot {snap_name} "
+                f"(dep of PVC {pvc_name})"
+            )
+
+        # Now delete the PVC itself
+        self._stop_fio_and_disconnect_pvc(pvc_name)
+        try:
+            self.k8s_utils.delete_pvc(pvc_name)
+        except Exception:
+            pass
+        node_id = pvc_info.get("node_id")
+        if node_id and node_id in self.node_vs_pvc:
+            if pvc_name in self.node_vs_pvc[node_id]:
+                self.node_vs_pvc[node_id].remove(pvc_name)
+        del self.pvc_details[pvc_name]
+        removed += 1
+        self.logger.info(f"[cap] Deleted PVC {pvc_name}")
+
+        return removed
+
     def _enforce_lvol_cap(self):
         """Delete dynamic resources if total exceeds MAX_TOTAL_LVOLS.
 
-        Deletion order: dynamic clones + snapshots, then dynamic PVCs.
+        Randomly picks between dynamic clones and dynamic PVCs for
+        deletion.  When a clone is picked the full chain is cleaned up:
+        clone → snapshot → source PVC.  When a PVC is picked its
+        dependent clones/snapshots are removed first.
         """
         total = self._count_total_resources()
         if total <= self.MAX_TOTAL_LVOLS:
@@ -4306,159 +4599,48 @@ class K8sNativeResilientFailoverTest(K8sNativeFailoverTest):
             f"{self.MAX_TOTAL_LVOLS} by {excess} — pruning"
         )
 
-        # Phase 1: delete dynamic clones (+ their orphan snapshots)
-        dynamic_clones = [
-            cn for cn in self.clone_details
-            if cn not in self.permanent_clones
-        ]
-        for clone_name in dynamic_clones:
-            if excess <= 0:
-                break
-            clone_info = self.clone_details[clone_name]
-            snap_name = clone_info["snap_name"]
+        # Build per-node PVC counts for safety check (never remove
+        # the last PVC on a node)
+        def _node_pvc_counts():
+            counts = {}
+            for pname, pinfo in self.pvc_details.items():
+                nid = pinfo.get("node_id", "unknown")
+                counts.setdefault(nid, 0)
+                counts[nid] += 1
+            return counts
 
-            if not self.use_client_fio:
-                try:
-                    self.k8s_utils.delete_job(clone_info["job_name"])
-                    self.k8s_utils.delete_configmap(
-                        clone_info["configmap_name"]
-                    )
-                except Exception:
-                    pass
-            else:
-                client = clone_info.get("client")
-                if client:
-                    self._kill_fio_on_client(clone_name, client)
-                    sleep_n_sec(2)
-                    try:
-                        self.ssh_obj.unmount_path(
-                            client, clone_info["mount_path"]
-                        )
-                    except Exception:
-                        pass
-                    self._disconnect_lvol_on_client(
-                        clone_info.get("lvol_name", ""), client
-                    )
-                    self.clone_mount_details.pop(
-                        clone_info.get("lvol_name"), None
-                    )
-
-            try:
-                self.k8s_utils.delete_pvc(clone_name)
-            except Exception:
-                pass
-            del self.clone_details[clone_name]
-
-            # Delete orphan dynamic snapshot
-            if (snap_name not in self.permanent_snapshots
-                    and snap_name in self.snapshot_details):
-                other_clones = [
-                    cn for cn, cd in self.clone_details.items()
-                    if cd["snap_name"] == snap_name
-                ]
-                if not other_clones:
-                    try:
-                        self.k8s_utils.delete_volume_snapshot(snap_name)
-                    except Exception:
-                        pass
-                    parent_pvc = self.snapshot_details.get(
-                        snap_name, {}
-                    ).get("pvc_name")
-                    if (parent_pvc and parent_pvc in self.pvc_details
-                            and snap_name
-                            in self.pvc_details[parent_pvc]["snapshots"]):
-                        self.pvc_details[parent_pvc][
-                            "snapshots"
-                        ].remove(snap_name)
-                    self.snapshot_details.pop(snap_name, None)
-                    if snap_name in self.snapshot_names:
-                        self.snapshot_names.remove(snap_name)
-
-            excess -= 1
-
-        # Phase 2: delete dynamic PVCs if still over cap
-        if excess > 0:
+        while excess > 0:
+            # Collect candidates each round (lists shrink as we delete)
+            dynamic_clones = [
+                cn for cn in self.clone_details
+                if cn not in self.permanent_clones
+            ]
+            node_counts = _node_pvc_counts()
             dynamic_pvcs = [
                 p for p in self.pvc_details
                 if p not in self.permanent_pvcs
+                and node_counts.get(
+                    self.pvc_details[p].get("node_id", "unknown"), 0
+                ) > 1
             ]
-            for pvc_name in dynamic_pvcs:
-                if excess <= 0:
-                    break
-                pvc_info = self.pvc_details[pvc_name]
 
-                for snap_name in list(pvc_info["snapshots"]):
-                    if snap_name in self.permanent_snapshots:
-                        continue
-                    clones = [
-                        cn for cn, cd in self.clone_details.items()
-                        if cd["snap_name"] == snap_name
-                        and cn not in self.permanent_clones
-                    ]
-                    for cn in clones:
-                        ci = self.clone_details[cn]
-                        if not self.use_client_fio:
-                            try:
-                                self.k8s_utils.delete_job(
-                                    ci["job_name"]
-                                )
-                                self.k8s_utils.delete_configmap(
-                                    ci["configmap_name"]
-                                )
-                            except Exception:
-                                pass
-                        try:
-                            self.k8s_utils.delete_pvc(cn)
-                        except Exception:
-                            pass
-                        del self.clone_details[cn]
-                    try:
-                        self.k8s_utils.delete_volume_snapshot(snap_name)
-                    except Exception:
-                        pass
-                    self.snapshot_details.pop(snap_name, None)
-                    if snap_name in self.snapshot_names:
-                        self.snapshot_names.remove(snap_name)
+            candidates = (
+                [("clone", cn) for cn in dynamic_clones]
+                + [("pvc", pn) for pn in dynamic_pvcs]
+            )
+            if not candidates:
+                self.logger.warning(
+                    "[cap] No more deletable resources — "
+                    f"excess={excess}"
+                )
+                break
 
-                if not self.use_client_fio:
-                    try:
-                        self.k8s_utils.delete_job(
-                            pvc_info["job_name"]
-                        )
-                        self.k8s_utils.delete_configmap(
-                            pvc_info["configmap_name"]
-                        )
-                    except Exception:
-                        pass
-                else:
-                    client = pvc_info.get("client")
-                    if client:
-                        self._kill_fio_on_client(pvc_name, client)
-                        sleep_n_sec(2)
-                        try:
-                            self.ssh_obj.unmount_path(
-                                client, pvc_info["mount_path"]
-                            )
-                        except Exception:
-                            pass
-                        self._disconnect_lvol_on_client(
-                            pvc_info.get("lvol_name", ""), client
-                        )
-                        self.lvol_mount_details.pop(
-                            pvc_info.get("lvol_name"), None
-                        )
-
-                try:
-                    self.k8s_utils.delete_pvc(pvc_name)
-                except Exception:
-                    pass
-
-                node_id = pvc_info.get("node_id")
-                if node_id and node_id in self.node_vs_pvc:
-                    if pvc_name in self.node_vs_pvc[node_id]:
-                        self.node_vs_pvc[node_id].remove(pvc_name)
-                del self.pvc_details[pvc_name]
-                excess -= 1
+            kind, name = random.choice(candidates)
+            if kind == "clone":
+                removed = self._delete_clone_chain(name)
+            else:
+                removed = self._delete_pvc_with_deps(name)
+            excess -= removed
 
         self.logger.info(
             f"[cap] After pruning: {self._count_total_resources()} "

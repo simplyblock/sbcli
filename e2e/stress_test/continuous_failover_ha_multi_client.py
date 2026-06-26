@@ -7,6 +7,7 @@ import threading
 import string
 import random
 import os
+import re
 import time
 
 
@@ -1102,11 +1103,42 @@ class RandomMultiClientFailoverTest(TestLvolHACluster):
                                           command=f"{self.base_cmd} lvol list")
 
             connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=clone_name)
+            # Force ctrl-loss-tmo=-1 so NVMe controllers never time out
+            # during storage-node outages (matches lvol connect behaviour).
+            connect_ls = [
+                re.sub(r"--ctrl-loss-tmo[=\s]\S+", "--ctrl-loss-tmo=-1", cmd)
+                for cmd in connect_ls
+            ]
             self.clone_mount_details[clone_name]["Command"] = connect_ls
 
             # if self.secondary_outage:
             #     connect_ls = [connect_ls[0]]
             #     self.lvols_without_sec_connect.append(clone_name)
+
+            # Clone shares its parent's NQN (subsystem). If that NQN is
+            # already connected on a different client, we MUST connect the
+            # clone from the same client — otherwise two hosts access the
+            # same subsystem, which causes data corruption.
+            clone_nqn = None
+            for _cs in connect_ls:
+                if '--nqn=' in _cs:
+                    clone_nqn = _cs.split('--nqn=')[1].split()[0]
+                    break
+            if clone_nqn:
+                for _lname, _ldetails in self.lvol_mount_details.items():
+                    _lcmds = _ldetails.get("Command") or []
+                    if any(clone_nqn in str(c) for c in _lcmds):
+                        existing_client = _ldetails.get("Client")
+                        if existing_client and existing_client != client:
+                            self.logger.info(
+                                f"[clone_connect] NQN {clone_nqn} already "
+                                f"connected on {existing_client} (via lvol "
+                                f"{_lname}); switching clone {clone_name} "
+                                f"from {client} to {existing_client}"
+                            )
+                            client = existing_client
+                            self.clone_mount_details[clone_name]["Client"] = client
+                        break
 
             initial_devices = self.ssh_obj.get_devices(node=client)
             for connect_str in connect_ls:
