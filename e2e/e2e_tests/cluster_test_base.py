@@ -296,6 +296,7 @@ class TestClusterBase:
             self.start_root_monitor()
 
         self.start_nvme_iostat_monitor()
+        self.collect_bdev_snapshot(tag="start")
 
         sleep_n_sec(120)
 
@@ -1437,6 +1438,7 @@ class TestClusterBase:
                                             process_name="fio")
 
         self.stop_root_monitor()
+        self.collect_bdev_snapshot(tag="end")
         self.stop_nvme_iostat_monitor()
 
         if not self.k8s_test:
@@ -2617,70 +2619,123 @@ class TestClusterBase:
 
     # ── NVMe iostat background monitor ──────────────────────────────────
 
-    def _rpc_call(self, host, port, username, password, method, params=None):
-        """Make a JSON-RPC 2.0 call to an SPDK node.
+    def _rpc_via_docker_exec(self, ip, container_name, method, params=None):
+        """Run an SPDK RPC method via ``docker exec`` over SSH.
 
-        Returns the 'result' field on success, or None on any error.
-        Errors are logged but never raised — monitoring must not crash the test.
+        Returns the parsed JSON result on success, or None on any error.
+        Errors are logged but never raised — monitoring must not crash.
         """
-        import requests as _requests
-
-        url = f"http://{host}:{port}/"
-        payload = {"id": 1, "method": method}
+        sock = f"/mnt/ramdisk/{container_name}/spdk.sock"
+        rpc_cmd = f"sudo python spdk/scripts/rpc.py -s {sock} {method}"
         if params:
-            payload["params"] = params
-        try:
-            resp = _requests.post(
-                url,
-                json=payload,
-                auth=(username, password),
-                timeout=30,
+            import shlex
+            rpc_cmd += " " + " ".join(
+                f"-{k} {shlex.quote(str(v))}" if len(k) == 1
+                else f"--{k} {shlex.quote(str(v))}"
+                for k, v in params.items()
             )
-            if resp.status_code == 200:
-                data = resp.json()
-                if "result" in data:
-                    return data["result"]
-                if "error" in data:
-                    self.logger.warning(
-                        f"[NVMeIostat] RPC {method} on {host}:{port} "
-                        f"returned error: {data['error']}"
-                    )
-            else:
+        docker_cmd = (
+            f"sudo docker exec {container_name} bash -lc "
+            f"\"{rpc_cmd}\""
+        )
+        try:
+            stdout, stderr = self.ssh_obj.exec_command(ip, docker_cmd)
+            if stderr and stderr.strip() and not stdout:
                 self.logger.warning(
-                    f"[NVMeIostat] RPC {method} on {host}:{port} "
-                    f"HTTP {resp.status_code}"
+                    f"[NVMeIostat] RPC {method} on {ip}/{container_name} "
+                    f"stderr: {stderr.strip()}"
                 )
+                return None
+            if not stdout or not stdout.strip():
+                return None
+            return json.loads(stdout)
+        except json.JSONDecodeError as e:
+            self.logger.warning(
+                f"[NVMeIostat] RPC {method} on {ip}/{container_name} "
+                f"JSON parse error: {e}"
+            )
         except Exception as e:
             self.logger.warning(
-                f"[NVMeIostat] RPC {method} on {host}:{port} failed: {e}"
+                f"[NVMeIostat] RPC {method} on {ip}/{container_name} "
+                f"failed: {e}"
             )
         return None
 
-    def _discover_nvme_partition_devices(self, host, port, username, password):
-        """Discover NVMe partition bdev names (e.g. nvme1n1p1) on one node.
+    def _find_spdk_containers(self, ip):
+        """Find SPDK container names on a storage node via SSH.
 
-        Returns a list of device name strings, or an empty list on failure.
+        Returns a list of container name strings (Docker mode only).
         """
-        import re
-
-        result = self._rpc_call(host, port, username, password, "bdev_get_bdevs")
-        if not result:
+        cmd = "sudo docker ps --format '{{.Names}}' | grep -E '^spdk_[0-9]+$' || true"
+        try:
+            stdout, _ = self.ssh_obj.exec_command(ip, cmd)
+            return [c.strip() for c in (stdout or "").strip().splitlines()
+                    if c.strip()]
+        except Exception as e:
+            self.logger.warning(
+                f"[NVMeIostat] Cannot list containers on {ip}: {e}"
+            )
             return []
-        pattern = re.compile(r"^nvme\d+n\d+p\d+$")
-        return [b.get("name", "") for b in result if pattern.match(b.get("name", ""))]
+
+    def _rpc_via_kubectl_exec(self, ip, method):
+        """Run an SPDK RPC method via ``kubectl exec`` into the SPDK pod.
+
+        Returns the parsed JSON result on success, or None on any error.
+        Errors are logged but never raised — monitoring must not crash.
+        """
+        try:
+            k8s = self.sbcli_utils.k8s
+            pod_name = k8s.get_spdk_pod_name(ip)
+            sock = k8s._find_spdk_sock(pod_name)
+            rpc_cmd = f"python spdk/scripts/rpc.py -s {sock} {method}"
+            kubectl_cmd = (
+                f"kubectl exec {pod_name} -c spdk-container "
+                f"-n {k8s.namespace} -- bash -c {shlex.quote(rpc_cmd)}"
+            )
+            stdout, stderr = k8s._exec_kubectl(kubectl_cmd, supress_logs=True)
+            if stderr and stderr.strip() and not stdout:
+                self.logger.warning(
+                    f"[NVMeIostat] RPC {method} on {ip}/{pod_name} "
+                    f"stderr: {stderr.strip()}"
+                )
+                return None
+            if not stdout or not stdout.strip():
+                return None
+            return json.loads(stdout)
+        except json.JSONDecodeError as e:
+            self.logger.warning(
+                f"[NVMeIostat] RPC {method} on {ip} "
+                f"JSON parse error: {e}"
+            )
+        except Exception as e:
+            self.logger.warning(
+                f"[NVMeIostat] RPC {method} on {ip} "
+                f"failed: {e}"
+            )
+        return None
+
+    def _spdk_rpc(self, ip, method, container_name=None):
+        """Unified SPDK RPC dispatcher — works in both Docker and K8s mode.
+
+        In Docker mode, *container_name* is required (e.g. ``spdk_4422``).
+        In K8s mode, the SPDK pod and socket are resolved automatically.
+
+        Returns parsed JSON on success, or None.
+        """
+        if self.k8s_test:
+            return self._rpc_via_kubectl_exec(ip, method)
+        return self._rpc_via_docker_exec(ip, container_name, method)
 
     def start_nvme_iostat_monitor(self, interval_sec=60):
         """Start background NVMe iostat collection on all storage nodes.
 
-        Every *interval_sec* seconds, calls ``bdev_get_iostat`` (with
-        ``reset_mode=all``) on each storage node, filters results to NVMe
-        partition devices, and appends timestamp + JSON to a per-node log
-        file under ``docker_logs_path``.
-        """
-        if self.k8s_test:
-            self.logger.info("[NVMeIostat] Skipping in K8s mode")
-            return
+        Every *interval_sec* seconds, calls ``bdev_get_iostat`` on each
+        storage node, filters results to NVMe devices, and appends
+        timestamp + JSON to a per-node log file under ``docker_logs_path``.
 
+        Works in both Docker mode (``docker exec`` over SSH) and K8s mode
+        (``kubectl exec`` into spdk-container).
+        """
         if (
             hasattr(self, "_nvme_iostat_thread")
             and self._nvme_iostat_thread
@@ -2689,7 +2744,7 @@ class TestClusterBase:
             self.logger.info("[NVMeIostat] Already running; skipping start.")
             return
 
-        # Gather storage node RPC connection details
+        # Gather storage node IPs
         try:
             storage_nodes_resp = self.sbcli_utils.get_storage_nodes()
             node_list = storage_nodes_resp.get("results", [])
@@ -2697,100 +2752,179 @@ class TestClusterBase:
             self.logger.warning(f"[NVMeIostat] Cannot get storage nodes: {e}")
             return
 
-        # Build per-node info dict
+        # Build per-node info
         node_info = {}
         for node in node_list:
             ip = node.get("mgmt_ip", "")
-            port = node.get("rpc_port", -1)
-            user = node.get("rpc_username", "")
-            pw = node.get("rpc_password", "")
             node_uuid = node.get("uuid", ip)
-
-            if not ip or port < 0:
-                self.logger.warning(
-                    f"[NVMeIostat] Skipping node {node_uuid}: "
-                    f"missing mgmt_ip or rpc_port"
-                )
+            if not ip:
                 continue
-
-            devices = self._discover_nvme_partition_devices(ip, port, user, pw)
-            self.logger.info(
-                f"[NVMeIostat] Node {ip}: discovered {len(devices)} "
-                f"NVMe partitions: {devices}"
-            )
 
             file_path = os.path.join(
                 self.docker_logs_path,
                 f"nvme_iostat_{ip}.log",
             )
-            node_info[ip] = {
-                "port": port,
-                "username": user,
-                "password": pw,
-                "devices": set(devices),
-                "file_path": file_path,
-                "uuid": node_uuid,
-            }
+
+            if self.k8s_test:
+                # K8s mode: one SPDK pod per node, no container list needed
+                node_info[ip] = {
+                    "containers": [],
+                    "file_path": file_path,
+                    "uuid": node_uuid,
+                }
+                self.logger.info(
+                    f"[NVMeIostat] Node {ip}: K8s mode (pod resolved at poll time)"
+                )
+            else:
+                # Docker mode: discover SPDK containers
+                containers = self._find_spdk_containers(ip)
+                if not containers:
+                    self.logger.warning(
+                        f"[NVMeIostat] No SPDK containers on {ip}, skipping"
+                    )
+                    continue
+                node_info[ip] = {
+                    "containers": containers,
+                    "file_path": file_path,
+                    "uuid": node_uuid,
+                }
+                self.logger.info(
+                    f"[NVMeIostat] Node {ip}: containers={containers}"
+                )
 
         if not node_info:
             self.logger.warning(
-                "[NVMeIostat] No valid storage nodes found. Not starting monitor."
+                "[NVMeIostat] No valid storage nodes found. "
+                "Not starting monitor."
             )
             return
 
+        is_k8s = self.k8s_test
+
         self.logger.info(
             f"[NVMeIostat] Starting monitor for {len(node_info)} node(s), "
-            f"interval={interval_sec}s"
+            f"interval={interval_sec}s, mode={'k8s' if is_k8s else 'docker'}"
         )
 
         self._nvme_iostat_stop = threading.Event()
 
         def _iostat_loop():
             import re
-            nvme_part_re = re.compile(r"^nvme\d+n\d+p\d+$")
+            nvme_re = re.compile(r"^nvme_")
 
             while not self._nvme_iostat_stop.is_set():
                 for ip, info in node_info.items():
-                    try:
-                        result = self._rpc_call(
-                            ip, info["port"],
-                            info["username"], info["password"],
-                            "bdev_get_iostat",
-                            {"reset_mode": "all"},
-                        )
-                        if result is None:
-                            continue
-
-                        # Filter to NVMe partition bdevs only
-                        bdevs = result.get("bdevs", [])
-                        filtered = [
-                            b for b in bdevs
-                            if nvme_part_re.match(b.get("name", ""))
-                        ]
-
-                        if not filtered:
-                            continue
-
-                        timestamp = datetime.now().strftime("%H:%M:%S")
-                        output = {
-                            "tick_rate": result.get("tick_rate", 0),
-                            "ticks": result.get("ticks", 0),
-                            "bdevs": filtered,
-                        }
+                    if is_k8s:
+                        # K8s: single RPC per node via kubectl exec
                         try:
-                            with open(info["file_path"], "a") as f:
-                                f.write(f"{timestamp}\n")
-                                f.write(json.dumps(output))
-                                f.write("\n")
-                        except OSError as e:
-                            self.logger.warning(
-                                f"[NVMeIostat] Cannot write to "
-                                f"{info['file_path']}: {e}"
+                            result = self._rpc_via_kubectl_exec(
+                                ip, "bdev_get_iostat",
                             )
-                    except Exception as e:
-                        self.logger.warning(
-                            f"[NVMeIostat] Error polling {ip}: {e}"
-                        )
+                            if result is None:
+                                self.logger.info(
+                                    f"[NVMeIostat] {ip}: "
+                                    f"no response, skipping"
+                                )
+                                continue
+
+                            bdevs = result.get("bdevs", [])
+                            filtered = [
+                                b for b in bdevs
+                                if nvme_re.match(b.get("name", ""))
+                            ]
+
+                            if not filtered:
+                                self.logger.info(
+                                    f"[NVMeIostat] {ip}: "
+                                    f"{len(bdevs)} bdevs, "
+                                    f"0 match NVMe pattern"
+                                )
+                                continue
+
+                            timestamp = datetime.now().strftime(
+                                "%Y-%m-%d %H:%M:%S"
+                            )
+                            output = {
+                                "timestamp": timestamp,
+                                "node_ip": ip,
+                                "tick_rate": result.get("tick_rate", 0),
+                                "ticks": result.get("ticks", 0),
+                                "bdevs": filtered,
+                            }
+                            try:
+                                with open(info["file_path"], "a") as f:
+                                    f.write(json.dumps(output))
+                                    f.write("\n")
+                                self.logger.info(
+                                    f"[NVMeIostat] {ip}: "
+                                    f"collected {len(filtered)} bdevs"
+                                )
+                            except OSError as e:
+                                self.logger.warning(
+                                    f"[NVMeIostat] Cannot write to "
+                                    f"{info['file_path']}: {e}"
+                                )
+                        except Exception as e:
+                            self.logger.warning(
+                                f"[NVMeIostat] Error polling "
+                                f"{ip}: {e}"
+                            )
+                    else:
+                        # Docker: iterate over containers
+                        for container in info["containers"]:
+                            try:
+                                result = self._rpc_via_docker_exec(
+                                    ip, container, "bdev_get_iostat",
+                                )
+                                if result is None:
+                                    self.logger.info(
+                                        f"[NVMeIostat] {ip}/{container}: "
+                                        f"no response, skipping"
+                                    )
+                                    continue
+
+                                bdevs = result.get("bdevs", [])
+                                filtered = [
+                                    b for b in bdevs
+                                    if nvme_re.match(b.get("name", ""))
+                                ]
+
+                                if not filtered:
+                                    self.logger.info(
+                                        f"[NVMeIostat] {ip}/{container}: "
+                                        f"{len(bdevs)} bdevs, "
+                                        f"0 match NVMe pattern"
+                                    )
+                                    continue
+
+                                timestamp = datetime.now().strftime(
+                                    "%Y-%m-%d %H:%M:%S"
+                                )
+                                output = {
+                                    "timestamp": timestamp,
+                                    "container": container,
+                                    "tick_rate": result.get("tick_rate", 0),
+                                    "ticks": result.get("ticks", 0),
+                                    "bdevs": filtered,
+                                }
+                                try:
+                                    with open(info["file_path"], "a") as f:
+                                        f.write(json.dumps(output))
+                                        f.write("\n")
+                                    self.logger.info(
+                                        f"[NVMeIostat] {ip}/{container}: "
+                                        f"collected {len(filtered)} bdevs"
+                                    )
+                                except OSError as e:
+                                    self.logger.warning(
+                                        f"[NVMeIostat] Cannot write to "
+                                        f"{info['file_path']}: {e}"
+                                    )
+                            except Exception as e:
+                                self.logger.warning(
+                                    f"[NVMeIostat] Error polling "
+                                    f"{ip}/{container}: {e}"
+                                )
 
                 # Sleep in 10s slices for prompt shutdown
                 waited = 0
@@ -2813,6 +2947,115 @@ class TestClusterBase:
         if hasattr(self, "_nvme_iostat_thread") and self._nvme_iostat_thread:
             self._nvme_iostat_thread.join(timeout=15)
         self.logger.info("[NVMeIostat] Stopped NVMe iostat monitor.")
+
+    def collect_bdev_snapshot(self, tag="start"):
+        """Collect ``bdev_get_bdevs`` from all storage nodes and write to file.
+
+        Intended to be called once at the beginning (tag="start") and once
+        at the end (tag="end") of a test run to capture the full bdev
+        inventory for comparison.
+
+        Works in both Docker mode and K8s mode.
+        """
+        try:
+            storage_nodes_resp = self.sbcli_utils.get_storage_nodes()
+            node_list = storage_nodes_resp.get("results", [])
+        except Exception as e:
+            self.logger.warning(
+                f"[BdevSnapshot] Cannot get storage nodes: {e}"
+            )
+            return
+
+        for node in node_list:
+            ip = node.get("mgmt_ip", "")
+            if not ip:
+                continue
+
+            if self.k8s_test:
+                # K8s mode: one SPDK pod per node
+                try:
+                    result = self._rpc_via_kubectl_exec(
+                        ip, "bdev_get_bdevs",
+                    )
+                    if result is None:
+                        self.logger.warning(
+                            f"[BdevSnapshot] {ip}: "
+                            f"no response for bdev_get_bdevs"
+                        )
+                        continue
+
+                    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    output = {
+                        "timestamp": timestamp,
+                        "tag": tag,
+                        "node_ip": ip,
+                        "bdevs": result,
+                    }
+
+                    file_path = os.path.join(
+                        self.docker_logs_path,
+                        f"bdev_snapshot_{ip}_{tag}.json",
+                    )
+                    with open(file_path, "w") as f:
+                        json.dump(output, f, indent=2)
+
+                    bdev_count = len(result) if isinstance(result, list) else 0
+                    self.logger.info(
+                        f"[BdevSnapshot] {ip}: wrote "
+                        f"{bdev_count} bdevs to {file_path} ({tag})"
+                    )
+                except Exception as e:
+                    self.logger.warning(
+                        f"[BdevSnapshot] {ip}: "
+                        f"failed to collect bdev_get_bdevs: {e}"
+                    )
+            else:
+                # Docker mode: iterate over containers
+                containers = self._find_spdk_containers(ip)
+                if not containers:
+                    self.logger.warning(
+                        f"[BdevSnapshot] No SPDK containers on {ip}, skipping"
+                    )
+                    continue
+
+                for container in containers:
+                    try:
+                        result = self._rpc_via_docker_exec(
+                            ip, container, "bdev_get_bdevs",
+                        )
+                        if result is None:
+                            self.logger.warning(
+                                f"[BdevSnapshot] {ip}/{container}: "
+                                f"no response for bdev_get_bdevs"
+                            )
+                            continue
+
+                        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        output = {
+                            "timestamp": timestamp,
+                            "tag": tag,
+                            "node_ip": ip,
+                            "container": container,
+                            "bdevs": result,
+                        }
+
+                        file_path = os.path.join(
+                            self.docker_logs_path,
+                            f"bdev_snapshot_{ip}_{container}_{tag}.json",
+                        )
+                        with open(file_path, "w") as f:
+                            json.dump(output, f, indent=2)
+
+                        bdev_count = len(result) if isinstance(result, list) else 0
+                        self.logger.info(
+                            f"[BdevSnapshot] {ip}/{container}: wrote "
+                            f"{bdev_count} bdevs to {file_path} ({tag})"
+                        )
+                    except Exception as e:
+                        self.logger.warning(
+                            f"[BdevSnapshot] {ip}/{container}: "
+                            f"failed to collect bdev_get_bdevs: {e}"
+                        )
 
     def validations(self, node_uuid, node_status, device_status, lvol_status,
                     health_check_status, device_health_check):
