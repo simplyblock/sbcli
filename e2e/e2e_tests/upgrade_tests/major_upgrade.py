@@ -374,12 +374,12 @@ class TestMajorUpgrade(TestClusterBase):
 
     def _pip_install_target(self, node: str):
         """
-        pip install git+https://github.com/simplyblock-io/sbcli.git@<target> --upgrade --force-reinstall --no-deps
+        pip install git+https://github.com/simplyblock-io/sbcli.git@<target> --upgrade --force-reinstall
         """
         if not self.target_version:
             raise ValueError("target_version is required (e.g., R25.10-Hotfix)")
         pkg = f"git+https://github.com/simplyblock-io/sbcli.git@{self.target_version}"
-        cmd = f"pip install '{pkg}' --upgrade --force-reinstall --no-deps"
+        cmd = f"pip install '{pkg}' --upgrade --force-reinstall"
         self.logger.info(f"[{node}] Installing sbcli: {cmd}")
         self.ssh_obj.exec_command(node, cmd)
 

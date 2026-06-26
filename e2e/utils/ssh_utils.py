@@ -1717,7 +1717,7 @@ class SshUtils:
             max_prov_gb (int): Maximum provision size in GB.
             ifname (str): Mgmt Interface (Default: eth0)
         """
-        cmd = f"pip install --force-reinstall --no-deps git+https://github.com/simplyblock-io/sbcli.git@{branch}"
+        cmd = f"pip install --force-reinstall git+https://github.com/simplyblock-io/sbcli.git@{branch}"
         self.exec_command(node=node, command=cmd)
 
         time.sleep(10)
