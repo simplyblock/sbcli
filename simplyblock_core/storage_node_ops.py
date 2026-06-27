@@ -1720,6 +1720,11 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                                 logger.warning(
                                     f"Node {node.get_id()} is in_creation status with SSD {ssd}, "
                                     f"removing and deleting it")
+                                try:
+                                    stale_api = node.client(timeout=20)
+                                    stale_api.spdk_process_kill(node.rpc_port, node.cluster_id)
+                                except Exception:
+                                    logger.warning("Failed to kill SPDK process for stale in_creation node", exc_info=True)
                                 storage_events.snode_delete(node)
                                 node.remove(db_controller.kv_store)
                                 break
