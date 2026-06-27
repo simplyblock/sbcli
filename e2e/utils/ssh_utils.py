@@ -1664,12 +1664,27 @@ class SshUtils:
         command = f"{self.base_cmd} sn restart-device {device_id}"
         self.exec_command(node, command)
 
-    def get_lvol_vs_device(self, node, lvol_id=None):
+    def get_lvol_vs_device(self, node, lvol_id=None, nqn=None, ns_id=None):
+        """Map lvol UUIDs to NVMe device paths.
+
+        For parent/standalone lvols the UUID is extracted from the subsystem
+        NQN and matched to the first namespace (NSID 1).
+
+        For namespaced child lvols the caller must supply ``nqn`` (the
+        subsystem NQN, which contains the *parent* UUID) and ``ns_id``
+        (the child's namespace ID within that subsystem).  The method
+        then locates the namespace whose NSID matches under the correct
+        subsystem.
+        """
         command = "sudo nvme list --output-format=json"
-        output, _ = self.exec_command(node=node, command=command)
+        output, _ = self.exec_command(
+            node=node, command=command, supress_logs=True
+        )
         data = json.loads(output)
         nvme_dict = {}
-        self.logger.info(f"LVOL DEVICE output: {json.dumps(data, indent=2)}")
+
+        total_subsystems = 0
+        total_namespaces = 0
 
         for device in data.get('Devices', []):
             # Handle flat structure (2nd machine)
@@ -1681,19 +1696,57 @@ class SshUtils:
             # Handle structured Subsystems (1st machine)
             for subsystem in device.get('Subsystems', []):
                 subsystem_nqn = subsystem.get('SubsystemNQN', '')
-                if ':lvol:' in subsystem_nqn:
-                    lvol_uuid = subsystem_nqn.split(':lvol:')[-1]
-                    ns_list = subsystem.get('Namespaces', [])
-                    if ns_list:
-                        ns = ns_list[0]
-                        namespace = ns.get('NameSpace')
-                        if namespace:
-                            nvme_device = f"/dev/{namespace}"
-                            nvme_dict[lvol_uuid] = nvme_device
+                if ':lvol:' not in subsystem_nqn:
+                    continue
 
-        self.logger.info(f"LVOL vs device dict output: {nvme_dict}")
+                total_subsystems += 1
+                parent_uuid = subsystem_nqn.split(':lvol:')[-1]
+                ns_list = subsystem.get('Namespaces', [])
+                total_namespaces += len(ns_list)
+
+                # ── Namespaced child lookup ──
+                # When searching for a specific child lvol, match the
+                # subsystem by NQN and then find the namespace by NSID.
+                if lvol_id and nqn and ns_id is not None:
+                    if subsystem_nqn == nqn:
+                        for ns in ns_list:
+                            if ns.get('NSID') == ns_id:
+                                namespace = ns.get('NameSpace')
+                                if namespace:
+                                    nvme_dict[lvol_id] = f"/dev/{namespace}"
+                                break
+
+                # ── Parent / standalone lookup (NSID 1) ──
+                if ns_list:
+                    ns = ns_list[0]
+                    namespace = ns.get('NameSpace')
+                    if namespace:
+                        nvme_dict[parent_uuid] = f"/dev/{namespace}"
+
+        # Concise summary instead of dumping the full JSON
         if lvol_id:
-            return nvme_dict.get(lvol_id)
+            found = nvme_dict.get(lvol_id)
+            if found:
+                self.logger.info(
+                    f"[device_lookup] lvol {lvol_id} -> {found} "
+                    f"(subsystems={total_subsystems}, "
+                    f"namespaces={total_namespaces})"
+                )
+            else:
+                self.logger.warning(
+                    f"[device_lookup] lvol {lvol_id} NOT FOUND "
+                    f"(subsystems={total_subsystems}, "
+                    f"namespaces={total_namespaces}, "
+                    f"nqn={'yes' if nqn else 'no'}, "
+                    f"ns_id={ns_id})"
+                )
+            return found
+
+        self.logger.info(
+            f"[device_lookup] mapped {len(nvme_dict)} lvols "
+            f"(subsystems={total_subsystems}, "
+            f"namespaces={total_namespaces})"
+        )
         return nvme_dict
 
     # def get_already_mounted_points(self, node, mount_point):
