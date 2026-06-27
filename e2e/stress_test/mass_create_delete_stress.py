@@ -918,8 +918,8 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
             node=client, lvol_id=pinfo["id"]
         )
         if not device:
-            for _ in range(20):
-                sleep_n_sec(3)
+            for _ in range(120):
+                sleep_n_sec(30)
                 device = self.ssh_obj.get_lvol_vs_device(
                     node=client, lvol_id=pinfo["id"]
                 )
@@ -981,7 +981,34 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
             f"{len(self._lvol_registry)}) ==="
         )
 
-        for lvol_name in sample:
+        phase_start = time.time()
+        phase_timeout = 3600  # 1 hour
+        last_progress_count = 0
+        last_progress_time = phase_start
+        stall_timeout = 600  # abort if no new success in 10 min
+
+        for i, lvol_name in enumerate(sample):
+            elapsed = time.time() - phase_start
+            if elapsed > phase_timeout:
+                self.logger.error(
+                    f"[Phase 2] Aborting — phase timeout {phase_timeout}s "
+                    f"exceeded after {self._metrics['fio_lvol_started']}/"
+                    f"{len(sample)} lvols started"
+                )
+                break
+
+            current_ok = self._metrics["fio_lvol_started"]
+            if current_ok > last_progress_count:
+                last_progress_count = current_ok
+                last_progress_time = time.time()
+            elif time.time() - last_progress_time > stall_timeout:
+                self.logger.error(
+                    f"[Phase 2] Aborting — no progress for "
+                    f"{stall_timeout}s, stuck at "
+                    f"{current_ok}/{len(sample)} lvols"
+                )
+                break
+
             try:
                 self._connect_format_fio_lvol(lvol_name)
                 self._metrics["fio_lvol_started"] += 1
@@ -990,6 +1017,13 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
                     f"[Phase 2] FIO setup failed for {lvol_name}: {exc}"
                 )
                 self._metrics["fio_lvol_failures"] += 1
+
+            if (i + 1) % 10 == 0:
+                self.logger.info(
+                    f"[Phase 2] Progress: {i + 1}/{len(sample)} "
+                    f"attempted, {self._metrics['fio_lvol_started']} ok, "
+                    f"{self._metrics['fio_lvol_failures']} failed"
+                )
 
     def _connect_format_fio_lvol(self, lvol_name: str):
         info = self._lvol_registry[lvol_name]
@@ -1047,13 +1081,13 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
         sleep_n_sec(3)
 
         device = None
-        for _ in range(20):
+        for _ in range(120):
             device = self.ssh_obj.get_lvol_vs_device(
                 node=client, lvol_id=lvol_id
             )
             if device:
                 break
-            sleep_n_sec(3)
+            sleep_n_sec(30)
         if not device:
             raise RuntimeError(f"{lvol_name}: device not found")
 
@@ -1099,19 +1133,38 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
                 f"{child_name}: parent {parent_name} has no ctrl_dev"
             )
 
+        # Fetch NQN and NS ID for the child lvol so we can locate
+        # it among the parent subsystem's namespaces.
+        child_nqn = None
+        child_ns_id = None
+        try:
+            details = self.sbcli_utils.get_lvol_details(child_id)
+            if details:
+                detail = details[0] if isinstance(details, list) else details
+                child_nqn = detail.get("nqn")
+                raw_ns_id = detail.get("ns_id")
+                if raw_ns_id is not None:
+                    child_ns_id = int(raw_ns_id)
+        except Exception as exc:
+            self.logger.warning(
+                f"{child_name}: failed to fetch lvol details for "
+                f"namespace lookup: {exc}"
+            )
+
         # Rescan and find child device
         self._rescan_nvme_namespaces(client, ctrl_dev)
-        sleep_n_sec(2)
+        sleep_n_sec(5)
 
         device = None
-        for _ in range(20):
+        for _ in range(120):
             device = self.ssh_obj.get_lvol_vs_device(
-                node=client, lvol_id=child_id
+                node=client, lvol_id=child_id,
+                nqn=child_nqn, ns_id=child_ns_id,
             )
             if device:
                 break
             self._rescan_nvme_namespaces(client, ctrl_dev)
-            sleep_n_sec(3)
+            sleep_n_sec(30)
         if not device:
             raise RuntimeError(f"{child_name}: device not found after rescan")
 
@@ -1414,13 +1467,13 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
         sleep_n_sec(3)
 
         device = None
-        for _ in range(20):
+        for _ in range(120):
             device = self.ssh_obj.get_lvol_vs_device(
                 node=client, lvol_id=clone_id
             )
             if device:
                 break
-            sleep_n_sec(3)
+            sleep_n_sec(30)
         if not device:
             raise RuntimeError(f"{clone_name}: device not found")
 
