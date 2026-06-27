@@ -6,7 +6,7 @@ from utils.sbcli_utils import SbcliUtils
 from utils.ssh_utils import SshUtils, RunnerK8sLog
 from utils.k8s_utils import K8sUtils, K8sSbcliUtils
 from utils.common_utils import CommonUtils
-from logger_config import setup_logger
+from logger_config import setup_logger, start_log_flusher
 from utils.common_utils import sleep_n_sec
 import traceback
 from datetime import datetime, timedelta, timezone
@@ -188,6 +188,9 @@ class TestClusterBase:
         self.docker_logs_path = os.path.join(self.nfs_log_base, f"{self.test_name}-{timestamp}")
         self.log_path = os.path.join(self.docker_logs_path, "ClientLogs")
         os.makedirs(self.log_path, exist_ok=True)
+
+        # Start background thread to move rotated logs to NFS every 30 min
+        start_log_flusher(self.docker_logs_path)
         if not self.k8s_test:
             for node in self.fio_node:
                 self.ssh_obj.make_directory(node=node, dir_name=self.log_path)
