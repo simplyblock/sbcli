@@ -1529,6 +1529,16 @@ class TestClusterBase:
                 self.logger.info(f"Closing node ssh connection for {node}")
                 ssh.close()
 
+        # Move rotated automation logs from local disk to NFS to free space
+        try:
+            from logger_config import copy_logs_to_nfs
+            copy_logs_to_nfs(self.docker_logs_path)
+            self.logger.info(
+                f"Automation logs moved to {self.docker_logs_path}/automation_logs"
+            )
+        except Exception as e:
+            self.logger.warning(f"Failed to copy automation logs to NFS: {e}")
+
         try:
             if self.ec2_resource:
                 instance_id = self.common_utils.get_instance_id_by_name(ec2_resource=self.ec2_resource,
@@ -2639,7 +2649,9 @@ class TestClusterBase:
             f"\"{rpc_cmd}\""
         )
         try:
-            stdout, stderr = self.ssh_obj.exec_command(ip, docker_cmd)
+            stdout, stderr = self.ssh_obj.exec_command(
+                ip, docker_cmd, supress_logs=True,
+            )
             if stderr and stderr.strip() and not stdout:
                 self.logger.warning(
                     f"[NVMeIostat] RPC {method} on {ip}/{container_name} "
@@ -2668,7 +2680,7 @@ class TestClusterBase:
         """
         cmd = "sudo docker ps --format '{{.Names}}' | grep -E '^spdk_[0-9]+$' || true"
         try:
-            stdout, _ = self.ssh_obj.exec_command(ip, cmd)
+            stdout, _ = self.ssh_obj.exec_command(ip, cmd, supress_logs=True)
             return [c.strip() for c in (stdout or "").strip().splitlines()
                     if c.strip()]
         except Exception as e:
@@ -2754,22 +2766,19 @@ class TestClusterBase:
 
         # Build per-node info
         node_info = {}
+        iostat_dir = os.path.join(self.docker_logs_path, "nvme_iostat")
+        os.makedirs(iostat_dir, exist_ok=True)
+
         for node in node_list:
             ip = node.get("mgmt_ip", "")
             node_uuid = node.get("uuid", ip)
             if not ip:
                 continue
 
-            file_path = os.path.join(
-                self.docker_logs_path,
-                f"nvme_iostat_{ip}.log",
-            )
-
             if self.k8s_test:
                 # K8s mode: one SPDK pod per node, no container list needed
                 node_info[ip] = {
                     "containers": [],
-                    "file_path": file_path,
                     "uuid": node_uuid,
                 }
                 self.logger.info(
@@ -2785,7 +2794,6 @@ class TestClusterBase:
                     continue
                 node_info[ip] = {
                     "containers": containers,
-                    "file_path": file_path,
                     "uuid": node_uuid,
                 }
                 self.logger.info(
@@ -2841,9 +2849,9 @@ class TestClusterBase:
                                 )
                                 continue
 
-                            timestamp = datetime.now().strftime(
-                                "%Y-%m-%d %H:%M:%S"
-                            )
+                            now = datetime.now()
+                            timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
+                            file_ts = now.strftime("%Y%m%d_%H%M%S")
                             output = {
                                 "timestamp": timestamp,
                                 "node_ip": ip,
@@ -2851,10 +2859,13 @@ class TestClusterBase:
                                 "ticks": result.get("ticks", 0),
                                 "bdevs": filtered,
                             }
+                            file_path = os.path.join(
+                                iostat_dir,
+                                f"iostat_{ip}_{file_ts}.json",
+                            )
                             try:
-                                with open(info["file_path"], "a") as f:
-                                    f.write(json.dumps(output))
-                                    f.write("\n")
+                                with open(file_path, "w") as f:
+                                    json.dump(output, f, indent=2)
                                 self.logger.info(
                                     f"[NVMeIostat] {ip}: "
                                     f"collected {len(filtered)} bdevs"
@@ -2862,7 +2873,7 @@ class TestClusterBase:
                             except OSError as e:
                                 self.logger.warning(
                                     f"[NVMeIostat] Cannot write to "
-                                    f"{info['file_path']}: {e}"
+                                    f"{file_path}: {e}"
                                 )
                         except Exception as e:
                             self.logger.warning(
@@ -2897,9 +2908,9 @@ class TestClusterBase:
                                     )
                                     continue
 
-                                timestamp = datetime.now().strftime(
-                                    "%Y-%m-%d %H:%M:%S"
-                                )
+                                now = datetime.now()
+                                timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
+                                file_ts = now.strftime("%Y%m%d_%H%M%S")
                                 output = {
                                     "timestamp": timestamp,
                                     "container": container,
@@ -2907,10 +2918,13 @@ class TestClusterBase:
                                     "ticks": result.get("ticks", 0),
                                     "bdevs": filtered,
                                 }
+                                file_path = os.path.join(
+                                    iostat_dir,
+                                    f"iostat_{ip}_{container}_{file_ts}.json",
+                                )
                                 try:
-                                    with open(info["file_path"], "a") as f:
-                                        f.write(json.dumps(output))
-                                        f.write("\n")
+                                    with open(file_path, "w") as f:
+                                        json.dump(output, f, indent=2)
                                     self.logger.info(
                                         f"[NVMeIostat] {ip}/{container}: "
                                         f"collected {len(filtered)} bdevs"
@@ -2918,7 +2932,7 @@ class TestClusterBase:
                                 except OSError as e:
                                     self.logger.warning(
                                         f"[NVMeIostat] Cannot write to "
-                                        f"{info['file_path']}: {e}"
+                                        f"{file_path}: {e}"
                                     )
                             except Exception as e:
                                 self.logger.warning(
