@@ -1,0 +1,211 @@
+name: Collect Cluster Logs (Graylog / OpenSearch)
+run-name: "Logs | ${{ inputs.MGMT_IP }} | ${{ inputs.START_TIME }} | ${{ inputs.DURATION_MINUTES }}m"
+
+on:
+  workflow_dispatch:
+    inputs:
+      # =========================
+      # Cluster / Connection
+      # =========================
+      MGMT_IP:
+        description: "Management node IP (used for OpenSearch and Graylog if dedicated IPs not set)"
+        required: true
+        default: "192.168.10.210"
+
+      OPENSEARCH_IP:
+        description: "OpenSearch IP (leave empty to use MGMT_IP)"
+        required: false
+        default: ""
+
+      GRAYLOG_IP:
+        description: "Graylog IP (leave empty to use MGMT_IP)"
+        required: false
+        default: ""
+
+      CLUSTER_SECRET:
+        description: "Cluster secret (Graylog admin password). If empty, fetched via sbctl."
+        required: false
+        default: ""
+
+      CLUSTER_ID:
+        description: "Cluster UUID (if empty, auto-detected via sbctl)"
+        required: false
+        default: ""
+
+      # =========================
+      # Time window
+      # =========================
+      START_TIME:
+        description: "UTC start time (ISO-8601, e.g. 2026-06-27T21:59:00)"
+        required: true
+
+      DURATION_MINUTES:
+        description: "Duration in minutes from start time"
+        required: true
+        default: "60"
+
+      # =========================
+      # Output
+      # =========================
+      OUTPUT_DIR:
+        description: "Path on runner to write log files (default: /tmp/sb_collected_logs)"
+        required: false
+        default: "/tmp/sb_collected_logs"
+
+      DEPLOY_MODE:
+        description: "Deployment mode"
+        required: true
+        default: "docker"
+        type: choice
+        options:
+          - docker
+          - kubernetes
+
+      # =========================
+      # Upload
+      # =========================
+      UPLOAD_TO_MINIO:
+        description: "Upload collected logs to MinIO"
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: collect-logs-${{ inputs.MGMT_IP }}
+  cancel-in-progress: false
+
+jobs:
+  collect-logs:
+    name: Collect logs from ${{ inputs.MGMT_IP }}
+    runs-on: [self-hosted]
+    timeout-minutes: 120
+
+    env:
+      MGMT_IP: ${{ inputs.MGMT_IP }}
+      OPENSEARCH_IP: ${{ inputs.OPENSEARCH_IP }}
+      GRAYLOG_IP: ${{ inputs.GRAYLOG_IP }}
+      CLUSTER_SECRET: ${{ inputs.CLUSTER_SECRET }}
+      CLUSTER_ID: ${{ inputs.CLUSTER_ID }}
+      START_TIME: ${{ inputs.START_TIME }}
+      DURATION_MINUTES: ${{ inputs.DURATION_MINUTES }}
+      OUTPUT_DIR: ${{ inputs.OUTPUT_DIR }}
+      DEPLOY_MODE: ${{ inputs.DEPLOY_MODE }}
+      MINIO_ACCESS_KEY: ${{ secrets.MINIO_ACCESS_KEY }}
+      MINIO_SECRET_KEY: ${{ secrets.MINIO_SECRET_KEY }}
+
+    steps:
+      - name: Runner diagnostics
+        shell: bash
+        run: |
+          set -euxo pipefail
+          uname -a
+          whoami
+          python3 --version || true
+          pip3 install requests 2>/dev/null || true
+
+      - name: Clone sbcli repo
+        shell: bash
+        run: |
+          set -euxo pipefail
+          rm -rf sbcli
+          wf_branch="${{ github.ref_name }}"
+          fallback_branch="main"
+          if git ls-remote --heads https://github.com/simplyblock-io/sbcli.git "$wf_branch" | grep -q "$wf_branch"; then
+            git clone --branch "$wf_branch" --single-branch https://github.com/simplyblock-io/sbcli.git sbcli
+          else
+            git clone --branch "$fallback_branch" --single-branch https://github.com/simplyblock-io/sbcli.git sbcli
+          fi
+
+      - name: Resolve cluster secret (if not provided)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          if [[ -n "${CLUSTER_SECRET}" ]]; then
+            echo "Using provided CLUSTER_SECRET"
+            exit 0
+          fi
+
+          cid="${CLUSTER_ID}"
+          if [[ -z "$cid" ]]; then
+            cid="$(sbctl cluster list --json 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin)[0]["UUID"])' 2>/dev/null || true)"
+          fi
+
+          if [[ -z "$cid" ]]; then
+            echo "ERROR: Could not determine cluster ID. Provide CLUSTER_SECRET or ensure sbctl is configured."
+            exit 1
+          fi
+
+          secret="$(sbctl cluster get-secret "$cid" 2>/dev/null || true)"
+          if [[ -z "$secret" ]]; then
+            echo "ERROR: Could not retrieve cluster secret for $cid"
+            exit 1
+          fi
+
+          echo "CLUSTER_SECRET=${secret}" >> "$GITHUB_ENV"
+          echo "CLUSTER_ID=${cid}" >> "$GITHUB_ENV"
+          echo "Auto-detected cluster $cid"
+
+      - name: Collect logs (OpenSearch-first, Graylog-fallback)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p "${OUTPUT_DIR}"
+          python3 sbcli/e2e/utils/test_graylog_export.py
+
+      - name: Upload logs to MinIO
+        if: inputs.UPLOAD_TO_MINIO == true && always()
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          if [[ -z "${MINIO_ACCESS_KEY}" || -z "${MINIO_SECRET_KEY}" ]]; then
+            echo "WARN: MINIO_ACCESS_KEY / MINIO_SECRET_KEY not set, skipping upload"
+            exit 0
+          fi
+
+          python3 sbcli/e2e/logs/upload_logs_to_miniio_parallel.py \
+            --access_key "${MINIO_ACCESS_KEY}" \
+            --secret_key "${MINIO_SECRET_KEY}" \
+            --source_dir "${OUTPUT_DIR}" \
+            --run_id "collected-logs-$(date +%Y%m%d_%H%M%S)" || true
+
+      - name: Upload as GitHub artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: collected-logs-${{ inputs.MGMT_IP }}-${{ github.run_id }}
+          path: ${{ inputs.OUTPUT_DIR }}/**
+          if-no-files-found: warn
+
+      - name: Write Job Summary
+        if: always()
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          os_ip="${OPENSEARCH_IP:-$MGMT_IP}"
+          gl_ip="${GRAYLOG_IP:-$MGMT_IP}"
+          file_count="$(find "${OUTPUT_DIR}" -type f -name '*.log' 2>/dev/null | wc -l || echo 0)"
+          total_size="$(du -sh "${OUTPUT_DIR}" 2>/dev/null | awk '{print $1}' || echo 'unknown')"
+          total_lines="$(cat "${OUTPUT_DIR}"/*.log 2>/dev/null | wc -l || echo 0)"
+
+          {
+            echo "## Log Collection Summary"
+            echo ""
+            echo "| Field | Value |"
+            echo "|-------|-------|"
+            echo "| **Management IP** | \`${MGMT_IP}\` |"
+            echo "| **OpenSearch IP** | \`${os_ip}\` |"
+            echo "| **Graylog IP** | \`${gl_ip}\` |"
+            echo "| **Time Window** | \`${START_TIME}\` + ${DURATION_MINUTES} min |"
+            echo "| **Deploy Mode** | \`${DEPLOY_MODE}\` |"
+            echo "| **Output Dir** | \`${OUTPUT_DIR}\` |"
+            echo "| **Log Files** | ${file_count} |"
+            echo "| **Total Size** | ${total_size} |"
+            echo "| **Total Lines** | ${total_lines} |"
+            echo ""
+            echo "### Files Collected"
+            echo '```'
+            find "${OUTPUT_DIR}" -type f -name '*.log' -printf '%P  (%s bytes)\n' 2>/dev/null | sort || echo "(none)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -87,11 +87,11 @@ class _MassCreateDeleteMixin:
     FIO_SIZE = "800M"
 
     # ── Parallelism ────────────────────────────────────────────────────────
-    MAX_WORKERS = 20
+    MAX_WORKERS = 10
     BATCH_SIZE = 50
     SNAPSHOT_BATCH_SIZE = 200
-    CLONE_MAX_WORKERS = 20
-    DELETE_MAX_WORKERS = 20
+    CLONE_MAX_WORKERS = 10
+    DELETE_MAX_WORKERS = 10
     PARALLEL_PARENTS = 10       # concurrent parent subsystem child creation
     MAX_FAILURES = 500
 
