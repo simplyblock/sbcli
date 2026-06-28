@@ -2203,6 +2203,12 @@ class MassCreateDelete_300x10_Docker(_MassCreateDeleteDocker):
     NS_PER_SUBSYSTEM = 300
 
 
+class MassCreateDelete_500x1_Docker(_MassCreateDeleteDocker):
+    """500 ns/sub × 1 subsystem = 500 lvols (1 parent + 499 children)."""
+    NUM_SUBSYSTEMS = 1
+    NS_PER_SUBSYSTEM = 500
+
+
 class MassCreateDelete_3000x1_Docker(_MassCreateDeleteDocker):
     """3000 ns/sub × 1 subsystem = 3000 lvols."""
     NUM_SUBSYSTEMS = 1
@@ -2227,6 +2233,12 @@ class MassCreateDelete_300x10_K8s(_MassCreateDeleteK8s):
     """300 ns/sub × 10 subsystems = 3000 PVCs."""
     NUM_SUBSYSTEMS = 10
     NS_PER_SUBSYSTEM = 300
+
+
+class MassCreateDelete_500x1_K8s(_MassCreateDeleteK8s):
+    """500 ns/sub × 1 subsystem = 500 PVCs (1 parent + 499 children)."""
+    NUM_SUBSYSTEMS = 1
+    NS_PER_SUBSYSTEM = 500
 
 
 class MassCreateDelete_3000x1_K8s(_MassCreateDeleteK8s):
@@ -2264,6 +2276,13 @@ class MassCreateDeletePersistent_300x10_Docker(_MassCreateDeleteDocker):
     NS_PER_SUBSYSTEM = 300
 
 
+class MassCreateDeletePersistent_500x1_Docker(_MassCreateDeleteDocker):
+    """500 ns/sub × 1 subsystem = 500 lvols, 1 parent + 499 children (persistent retry)."""
+    PERSISTENT_RETRY = True
+    NUM_SUBSYSTEMS = 1
+    NS_PER_SUBSYSTEM = 500
+
+
 class MassCreateDeletePersistent_3000x1_Docker(_MassCreateDeleteDocker):
     """3000 ns/sub × 1 subsystem = 3000 lvols (persistent retry)."""
     PERSISTENT_RETRY = True
@@ -2292,6 +2311,13 @@ class MassCreateDeletePersistent_300x10_K8s(_MassCreateDeleteK8s):
     PERSISTENT_RETRY = True
     NUM_SUBSYSTEMS = 10
     NS_PER_SUBSYSTEM = 300
+
+
+class MassCreateDeletePersistent_500x1_K8s(_MassCreateDeleteK8s):
+    """500 ns/sub × 1 subsystem = 500 PVCs, 1 parent + 499 children (persistent retry)."""
+    PERSISTENT_RETRY = True
+    NUM_SUBSYSTEMS = 1
+    NS_PER_SUBSYSTEM = 500
 
 
 class MassCreateDeletePersistent_3000x1_K8s(_MassCreateDeleteK8s):

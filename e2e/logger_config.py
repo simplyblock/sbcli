@@ -126,6 +126,30 @@ def stop_log_flusher():
         _log_flusher_thread = None
 
 
+def flush_all_log_handlers():
+    """Flush all file handlers across all loggers.
+
+    Call before copying log files to ensure buffered data is written to disk.
+    Without this, ``shutil.copy2`` may produce 0-byte copies because
+    RotatingFileHandler keeps data in memory until the buffer fills or
+    the handler is explicitly flushed.
+    """
+    root = logging.getLogger()
+    for logger_name in list(logging.Logger.manager.loggerDict):
+        lgr = logging.getLogger(logger_name)
+        for handler in lgr.handlers:
+            try:
+                handler.flush()
+            except Exception:
+                pass
+    # Also flush the root logger's handlers
+    for handler in root.handlers:
+        try:
+            handler.flush()
+        except Exception:
+            pass
+
+
 def copy_logs_to_nfs(nfs_dest_dir):
     """Copy all local log files to *nfs_dest_dir* and remove
     local copies to free disk space on the runner.
@@ -134,6 +158,10 @@ def copy_logs_to_nfs(nfs_dest_dir):
     ``docker_logs_path`` has ample space; the runner root FS does not.
     """
     stop_log_flusher()
+
+    # Flush all handlers so buffered log data is written to disk
+    # before we copy the files.
+    flush_all_log_handlers()
 
     if not nfs_dest_dir or not os.path.isdir(nfs_dest_dir):
         return

@@ -235,6 +235,11 @@ def main():
                 if os.path.isdir(logs_src):
                     logs_dest = os.path.join(log_path, "automation_logs")
                     try:
+                        # Flush all log handlers so buffered data is written
+                        # to disk before copying — prevents 0-byte log files.
+                        from logger_config import flush_all_log_handlers
+                        flush_all_log_handlers()
+
                         shutil.copytree(logs_src, logs_dest, dirs_exist_ok=True)
                         logger.info(f"Automation logs copied to: {logs_dest}")
                         # Remove local log files to free runner disk space

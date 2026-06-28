@@ -156,7 +156,7 @@ class BackupTestBase(TestClusterBase):
             raise RuntimeError("K8sUtils not available -- was k8s_run=True passed?")
         return k8s
 
-    def _ensure_pool_and_sc(self, pool_name=None):
+    def _ensure_pool_and_sc(self, pool_name=None, retries=3):
         """Create (or reuse) a storage pool and set up the StorageClass.
 
         In K8s mode, ``add_storage_pool`` may return a pre-existing pool with
@@ -164,9 +164,30 @@ class BackupTestBase(TestClusterBase):
         ``bck_test_pool``).  This helper captures that actual name, updates
         ``self.pool_name`` (or the given attribute), and then creates the
         StorageClass pointing at the correct pool.
+
+        Retries up to *retries* times with backoff if pool creation times out
+        (e.g. operator still reconciling after a previous pool deletion).
         """
         target = pool_name or self.pool_name
-        actual = self.sbcli_utils.add_storage_pool(pool_name=target)
+        last_err = None
+        for attempt in range(1, retries + 1):
+            try:
+                actual = self.sbcli_utils.add_storage_pool(pool_name=target)
+                break
+            except (TimeoutError, Exception) as e:
+                last_err = e
+                self.logger.warning(
+                    f"[pool] add_storage_pool attempt {attempt}/{retries} "
+                    f"failed: {e}")
+                if attempt < retries:
+                    from time import sleep
+                    sleep(30 * attempt)  # 30s, 60s backoff
+        else:
+            raise RuntimeError(
+                f"[pool] Failed to create/find pool '{target}' "
+                f"after {retries} attempts"
+            ) from last_err
+
         if actual and actual != target:
             self.logger.info(
                 f"[pool] Requested '{target}' but using existing '{actual}'")
@@ -257,27 +278,46 @@ class BackupTestBase(TestClusterBase):
 
     # ── checksum / disconnect helpers ────────────────────────────────────────
 
-    def _get_checksums(self, node, mount):
+    def _get_checksums(self, node, mount, _max_attempts=2):
         """Find files in *mount* and return their checksums.
 
         In docker mode: *node* is an SSH host IP, *mount* is a filesystem path.
         In k8s mode:    *node* is ignored, *mount* is the PVC name.
+                        Retries up to *_max_attempts* times if the utility pod
+                        fails to reach Running state (scheduling pressure, etc.).
         """
         if self.k8s_test:
             k8s = self._ensure_k8s_utils()
             pvc_name = mount  # In k8s mode, _connect_and_mount returns PVC name
-            pod_name = f"cksum-{_rand_suffix().lower()}"
-            k8s.create_utility_pod(pod_name, pvc_name)
-            self.created_utility_pods.append(pod_name)
-            try:
-                k8s.wait_pod_running(pod_name)
-                files = k8s.find_files_in_pvc(pod_name)
-                checksums = k8s.generate_checksums_in_pvc(pod_name, files)
-            finally:
-                k8s.delete_pod(pod_name)
-                if pod_name in self.created_utility_pods:
-                    self.created_utility_pods.remove(pod_name)
-            return checksums
+            last_err = None
+            for attempt in range(1, _max_attempts + 1):
+                pod_name = f"cksum-{_rand_suffix().lower()}"
+                k8s.create_utility_pod(pod_name, pvc_name)
+                self.created_utility_pods.append(pod_name)
+                try:
+                    k8s.wait_pod_running(pod_name, timeout=600)
+                    files = k8s.find_files_in_pvc(pod_name)
+                    checksums = k8s.generate_checksums_in_pvc(pod_name, files)
+                    return checksums
+                except (TimeoutError, RuntimeError) as e:
+                    last_err = e
+                    self.logger.warning(
+                        f"[checksums] Utility pod '{pod_name}' attempt "
+                        f"{attempt}/{_max_attempts} failed: {e}")
+                finally:
+                    try:
+                        k8s.delete_pod(pod_name)
+                    except Exception:
+                        pass
+                    if pod_name in self.created_utility_pods:
+                        self.created_utility_pods.remove(pod_name)
+                if attempt < _max_attempts:
+                    from time import sleep
+                    sleep(30)
+            raise RuntimeError(
+                f"Utility pod for checksum failed after {_max_attempts} "
+                f"attempts on PVC '{pvc_name}'"
+            ) from last_err
         files = self.ssh_obj.find_files(node, mount)
         return self.ssh_obj.generate_checksums(node, files)
 
@@ -340,7 +380,7 @@ class BackupTestBase(TestClusterBase):
             actual_cmd = command.replace(mount, pod_mount)
             pod_name = f"vol-exec-{_rand_suffix()}"
             k8s.create_utility_pod(pod_name, pvc_name, mount_path=pod_mount)
-            k8s.wait_pod_running(pod_name)
+            k8s.wait_pod_running(pod_name, timeout=600)
             self.created_utility_pods.append(pod_name)
             try:
                 out, err = k8s.exec_in_pod(pod_name, actual_cmd)
@@ -1302,8 +1342,8 @@ class BackupTestBase(TestClusterBase):
 
             # Delete pool (same for both modes — sbcli call)
             try:
-                self.sbcli_utils.delete_storage_pools(
-                    pool_name=self.pool_name, skip_error=True)
+                self.sbcli_utils.delete_storage_pool(
+                    pool_name=self.pool_name)
             except Exception:
                 pass
 
@@ -1785,8 +1825,8 @@ class TestBackupRestoreDataIntegrity(BackupTestBase):
             except Exception:
                 pass
             try:
-                self.sbcli_utils.delete_storage_pools(
-                    pool_name=self.pool_name2, skip_error=True)
+                self.sbcli_utils.delete_storage_pool(
+                    pool_name=self.pool_name2)
             except Exception:
                 pass
 
@@ -1846,8 +1886,8 @@ class TestBackupRestoreDataIntegrity(BackupTestBase):
     def teardown(self, delete_lvols=True, close_ssh=True, skip_k8s_cleanup=False):
         if delete_lvols:
             try:
-                self.sbcli_utils.delete_storage_pools(
-                    pool_name=self.pool_name2, skip_error=True)
+                self.sbcli_utils.delete_storage_pool(
+                    pool_name=self.pool_name2)
             except Exception:
                 pass
         super().teardown(delete_lvols=delete_lvols, close_ssh=close_ssh,

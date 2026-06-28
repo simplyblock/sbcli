@@ -2247,9 +2247,9 @@ class K8sSbcliUtils:
             )
 
         # 4. Wait for operator to reconcile the Pool CRD into an actual pool
-        #    visible via sbcli pool list.  The stress tests show this works
-        #    once the operator has had time to reconcile.
-        for attempt in range(24):  # up to 120s
+        #    visible via sbcli pool list.  Use 300s timeout to handle slow
+        #    reconciliation after pool deletion/recreation cycles.
+        for attempt in range(60):  # up to 300s
             pools = self.list_storage_pools()
             if pools:
                 actual = next(iter(pools))
@@ -2265,14 +2265,14 @@ class K8sSbcliUtils:
                 )
             sleep_n_sec(5)
 
-        # 5. Fallback: pool not in sbcli but CRD exists.
-        #    Use the CRD name directly — the CSI driver may accept it.
-        self.logger.warning(
-            f"[pool] Pool not visible in sbcli after 120s. "
+        # 5. Raise instead of silently returning a non-existent pool name.
+        #    Returning the raw pool_name caused StorageClasses to reference
+        #    pools that don't exist on the backend, leading to PVC bind failures.
+        raise TimeoutError(
+            f"[pool] Pool not visible in sbcli after 300s. "
             f"Pool CRD(s): {existing_crds}. "
-            f"Falling back to pool_name='{pool_name}'"
+            f"Operator may not have reconciled the pool."
         )
-        return pool_name
 
     def pool_crd_exists(self, pool_name):
         """Check if a Pool CRD exists in K8s (with or without simplyblock- prefix).
