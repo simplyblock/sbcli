@@ -14,18 +14,28 @@ Fetch strategy:
   - Graylog REST API when reachable; OpenSearch scroll API otherwise.
 
 Environment variables:
-    MGMT_IP            Management node IP (required)
+    MGMT_IP            Management node IP (required unless both dedicated IPs are set)
     CLUSTER_SECRET     Graylog admin password / cluster secret (required)
     START_TIME         UTC start time, ISO-8601 (optional; defaults to now - DURATION_MINUTES)
     DURATION_MINUTES   Window length in minutes (default: 60)
     DEPLOY_MODE        "docker" (default) or "kubernetes"
     OUTPUT_DIR         Where to write per-container .log files (default: ./graylog_test_output)
+    OPENSEARCH_IP      Dedicated OpenSearch IP (optional; defaults to MGMT_IP)
+    GRAYLOG_IP         Dedicated Graylog IP (optional; defaults to MGMT_IP)
 
 Usage:
     export MGMT_IP=192.168.10.210
     export CLUSTER_SECRET="<your-cluster-secret>"
     export START_TIME="2026-04-25T16:38:00"
     export DURATION_MINUTES=420
+    python3 e2e/utils/test_graylog_export.py
+
+    # Or with separate IPs for OpenSearch and Graylog:
+    export OPENSEARCH_IP=192.168.10.210
+    export GRAYLOG_IP=192.168.10.211
+    export CLUSTER_SECRET="<your-cluster-secret>"
+    export START_TIME="2026-06-27T21:59:00"
+    export DURATION_MINUTES=660
     python3 e2e/utils/test_graylog_export.py
 """
 
@@ -48,11 +58,13 @@ CLUSTER_SECRET = os.environ.get("CLUSTER_SECRET", "")
 DEPLOY_MODE = os.environ.get("DEPLOY_MODE", "docker")
 DURATION_MINUTES = int(os.environ.get("DURATION_MINUTES", "60"))
 OUTPUT_DIR = os.environ.get("OUTPUT_DIR", "./graylog_test_output")
+OPENSEARCH_IP = os.environ.get("OPENSEARCH_IP", "") or MGMT_IP
+GRAYLOG_IP = os.environ.get("GRAYLOG_IP", "") or MGMT_IP
 
 START_TIME_STR = os.environ.get("START_TIME", "")
 
-if not MGMT_IP:
-    print("ERROR: MGMT_IP not set", file=sys.stderr)
+if not MGMT_IP and not (OPENSEARCH_IP and GRAYLOG_IP):
+    print("ERROR: MGMT_IP not set (or set OPENSEARCH_IP and GRAYLOG_IP)", file=sys.stderr)
     sys.exit(1)
 if not CLUSTER_SECRET:
     print("ERROR: CLUSTER_SECRET not set", file=sys.stderr)
@@ -78,13 +90,13 @@ TO_ISO = end_dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
 FROM_MS = int(start_dt.timestamp() * 1000)
 TO_MS = int(end_dt.timestamp() * 1000)
 
-# URLs
+# URLs — use dedicated IPs when set, otherwise fall back to MGMT_IP
 if DEPLOY_MODE == "kubernetes":
-    GRAYLOG_BASE = f"http://{MGMT_IP}:9000/api"
+    GRAYLOG_BASE = f"http://{GRAYLOG_IP}:9000/api"
 else:
-    GRAYLOG_BASE = f"http://{MGMT_IP}/graylog/api"
+    GRAYLOG_BASE = f"http://{GRAYLOG_IP}/graylog/api"
 
-OPENSEARCH_BASE = f"http://{MGMT_IP}/opensearch"
+OPENSEARCH_BASE = f"http://{OPENSEARCH_IP}/opensearch"
 
 CNAME_FIELD = "kubernetes_container_name" if DEPLOY_MODE == "kubernetes" else "container_name"
 
