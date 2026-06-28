@@ -62,6 +62,19 @@ on:
           - kubernetes
 
       # =========================
+      # SSH (for sbctl on mgmt node)
+      # =========================
+      SSH_USER:
+        description: "SSH user for mgmt node"
+        required: false
+        default: "root"
+
+      KEY_PATH:
+        description: "SSH private key path on runner"
+        required: false
+        default: "/home/ec2-user/.ssh/simplyblock-us-east-2.pem"
+
+      # =========================
       # Upload
       # =========================
       UPLOAD_TO_MINIO:
@@ -90,6 +103,9 @@ jobs:
       DURATION_MINUTES: ${{ inputs.DURATION_MINUTES }}
       OUTPUT_DIR: ${{ inputs.OUTPUT_DIR }}
       DEPLOY_MODE: ${{ inputs.DEPLOY_MODE }}
+      SSH_USER: ${{ inputs.SSH_USER }}
+      KEY_PATH: ${{ inputs.KEY_PATH }}
+      SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
       MINIO_ACCESS_KEY: ${{ secrets.MINIO_ACCESS_KEY }}
       MINIO_SECRET_KEY: ${{ secrets.MINIO_SECRET_KEY }}
 
@@ -125,25 +141,38 @@ jobs:
             exit 0
           fi
 
+          SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10)
+          if [[ -n "${KEY_PATH}" && -f "${KEY_PATH}" ]]; then
+            SSH_OPTS+=(-i "${KEY_PATH}")
+          fi
+
+          remote_cmd() {
+            if [[ -n "${SSH_PASSWORD:-}" ]]; then
+              sshpass -p "${SSH_PASSWORD}" ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" "bash -lc '$1'"
+            else
+              ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" "bash -lc '$1'"
+            fi
+          }
+
           cid="${CLUSTER_ID}"
           if [[ -z "$cid" ]]; then
-            cid="$(sbctl cluster list --json 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin)[0]["UUID"])' 2>/dev/null || true)"
+            cid="$(remote_cmd 'sbctl cluster list --json' 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin)[0]["UUID"])' 2>/dev/null || true)"
           fi
 
           if [[ -z "$cid" ]]; then
-            echo "ERROR: Could not determine cluster ID. Provide CLUSTER_SECRET or ensure sbctl is configured."
+            echo "ERROR: Could not determine cluster ID. Provide CLUSTER_SECRET or ensure sbctl is configured on ${MGMT_IP}."
             exit 1
           fi
 
-          secret="$(sbctl cluster get-secret "$cid" 2>/dev/null || true)"
+          secret="$(remote_cmd "sbctl cluster get-secret $cid" 2>/dev/null || true)"
           if [[ -z "$secret" ]]; then
-            echo "ERROR: Could not retrieve cluster secret for $cid"
+            echo "ERROR: Could not retrieve cluster secret for $cid from ${MGMT_IP}"
             exit 1
           fi
 
           echo "CLUSTER_SECRET=${secret}" >> "$GITHUB_ENV"
           echo "CLUSTER_ID=${cid}" >> "$GITHUB_ENV"
-          echo "Auto-detected cluster $cid"
+          echo "Auto-detected cluster $cid from ${MGMT_IP}"
 
       - name: Collect logs (OpenSearch-first, Graylog-fallback)
         shell: bash
