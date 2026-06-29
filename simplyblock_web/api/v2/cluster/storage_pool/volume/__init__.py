@@ -319,11 +319,19 @@ def list_replication_tasks(cluster: Cluster, pool: StoragePool, volume: Volume) 
     tasks = lvol_controller.list_replication_tasks(volume.get_id())
     return [TaskDTO.from_model(task) for task in tasks]
 
-@instance_api.get('/suspend', name='clusters:storage-pools:volumes:suspend')
+@instance_api.route(
+        '/suspend',
+        name='clusters:storage-pools:volumes:suspend',
+        methods=['GET', 'POST'],  # Support both until all clients have switched to POST
+)
 def suspend(cluster: Cluster, pool: StoragePool, volume: Volume) -> bool:
     return lvol_controller.suspend_lvol(volume.get_id())
 
-@instance_api.get('/resume', name='clusters:storage-pools:volumes:resume')
+@instance_api.route(
+        '/resume',
+        name='clusters:storage-pools:volumes:resume',
+        methods=['GET', 'POST'],  # Support both until all clients have switched to POST
+)
 def resume(cluster: Cluster, pool: StoragePool, volume: Volume) -> bool:
     return lvol_controller.resume_lvol(volume.get_id())
 
