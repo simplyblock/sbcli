@@ -189,14 +189,22 @@ def _check_node_ping(ip):
 
 
 def _check_ping_from_node(ip, ifname, node):
+    # Tri-state: True/False is the node agent's own ping_ip result; None means
+    # the SnodeAPI call itself timed out / errored and the result is
+    # INCONCLUSIVE. A timeout here is not evidence the data NIC is down -- node
+    # liveness is already confirmed by is_live() earlier in the check cycle, so
+    # the agent is alive, just slow to answer this probe. We must NOT flip the
+    # node DOWN on that; the caller ignores None and re-evaluates next cycle.
+    # (The previous mgmt-side ICMP fallback pinged the data IP from mgmt, which
+    # is typically off the data VLAN -> always False -> spurious node-down.)
     snodeapi = node.client(timeout=8, retry=3)
     try:
         ret, _ = snodeapi.ping_ip(ip, ifname)
         return bool(ret)
     except Exception as e:
         logger.error(e)
-        logger.info("using fallback ping method")
-        return utils.ping_host(ip)
+        logger.info("data-nic ping_ip timed out/errored; treating as inconclusive")
+        return None
 
 
 def _check_node_hublvol(node: StorageNode, node_bdev_names=None, node_lvols_nqns=None) -> bool:

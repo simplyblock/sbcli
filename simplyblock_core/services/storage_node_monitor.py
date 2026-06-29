@@ -818,14 +818,26 @@ def node_port_check_fun(snode):
             except Exception as e:
                 health_controller._log_port_check_failure(db, snode, port, e)
 
-        node_data_nic_ping_check = False
+        # Data-NIC reachability via the node agent. _check_ping_from_node is
+        # tri-state: True (up), False (agent ran ping, it failed / carrier down),
+        # None (SnodeAPI ping_ip timed out -> inconclusive). A timeout must NOT
+        # flip the node DOWN: ignore it and re-evaluate next cycle. Only a
+        # definitive False with no NIC confirmed up is a real data-NIC failure.
+        data_results = []
         for data_nic in snode.data_nics:
             if data_nic.ip4_address:
                 data_ping_check = health_controller._check_ping_from_node(data_nic.ip4_address, ifname=data_nic.if_name, node=snode)
                 logger.info(f"Check: ping data nic {data_nic.ip4_address} ... {data_ping_check}")
-                node_data_nic_ping_check |= data_ping_check
+                data_results.append(data_ping_check)
 
-        node_port_check &= node_data_nic_ping_check
+        if any(r is True for r in data_results):
+            pass  # at least one data NIC confirmed reachable
+        elif any(r is False for r in data_results):
+            node_port_check = False  # node reports its data NIC down
+        else:
+            logger.info(
+                f"Data-nic ping for {snode.mgmt_ip} inconclusive "
+                f"(SnodeAPI ping_ip timed out); ignoring this cycle")
 
     return node_port_check
 
