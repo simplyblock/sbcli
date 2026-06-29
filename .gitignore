@@ -13,3 +13,5 @@ dist
 .ruff_cache
 .env
 .tox
+
+AGENTS.local.md
