@@ -864,6 +864,12 @@ class TestSetClusterStatusDrainReset(unittest.TestCase):
         with patch.object(cluster_ops, "db_controller") as mock_dbc, \
              patch.object(cluster_ops, "cluster_events"):
             mock_dbc.get_cluster_by_id.return_value = cl
+            # set_cluster_status mutates via a compare-and-set closure:
+            # atomic_update(obj, fn) runs fn(obj) inside a tx and returns the
+            # object if it changed, else None. Emulate that so the closure's
+            # status / in_activation_since / suspend_drain_complete updates
+            # actually run against `cl`.
+            mock_dbc.atomic_update.side_effect = lambda obj, fn: obj if fn(obj) else None
             cluster_ops.set_cluster_status("cluster-1", to_status)
         return cl
 
