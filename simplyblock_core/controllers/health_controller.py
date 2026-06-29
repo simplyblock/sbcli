@@ -114,7 +114,7 @@ def check_cluster(cluster_id):
     return result
 
 
-def check_node_rpc(node, timeout=5, retry=2):
+def check_node_rpc(node, timeout=8, retry=2):
     try:
         rpc_client = node.rpc_client(timeout=timeout, retry=retry)
         ret = rpc_client.get_version()
@@ -157,7 +157,7 @@ def _log_port_check_failure(db_controller, snode, port, exc):
 
 
 def check_port_on_node(snode, port_id):
-    fw_api = FirewallClient(snode, timeout=5, retry=5)
+    fw_api = FirewallClient(snode, timeout=8, retry=5)
     iptables_command_output, _ = fw_api.get_firewall(snode.rpc_port)
     if type(iptables_command_output) is str:
         iptables_command_output = [iptables_command_output]
@@ -189,7 +189,7 @@ def _check_node_ping(ip):
 
 
 def _check_ping_from_node(ip, ifname, node):
-    snodeapi = node.client(timeout=3, retry=3)
+    snodeapi = node.client(timeout=8, retry=3)
     try:
         ret, _ = snodeapi.ping_ip(ip, ifname)
         return bool(ret)
@@ -209,7 +209,7 @@ def _check_node_hublvol(node: StorageNode, node_bdev_names=None, node_lvols_nqns
 
     passed = True
     try:
-        rpc_client = node.rpc_client(timeout=5, retry=1)
+        rpc_client = node.rpc_client(timeout=8, retry=1)
 
         if not node_bdev_names:
             node_bdev_names = {}
@@ -290,7 +290,7 @@ def _check_sec_node_hublvol(node: StorageNode, node_bdev=None, node_lvols_nqns=N
 
     passed = True
     try:
-        rpc_client = node.rpc_client(timeout=5, retry=1)
+        rpc_client = node.rpc_client(timeout=8, retry=1)
 
         if not node_bdev:
             node_bdev = {}
@@ -721,7 +721,7 @@ def check_node(node_id, with_devices=True):
 
         logger.info(f"Node remote device: {len(snode.remote_devices)}")
         print("*" * 100)
-        rpc_client = snode.rpc_client(timeout=5, retry=1)
+        rpc_client = snode.rpc_client(timeout=8, retry=1)
         for remote_device in snode.remote_devices:
             node_remote_devices_check &= check_remote_device(remote_device.get_id(), snode)
             print("*" * 100)
@@ -788,7 +788,7 @@ def check_node(node_id, with_devices=True):
                 if second_node_1.status == StorageNode.STATUS_ONLINE:
                     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
                     try:
-                        sec1_rpc = second_node_1.rpc_client(timeout=5, retry=1)
+                        sec1_rpc = second_node_1.rpc_client(timeout=8, retry=1)
                         if snode.hublvol and not sec1_rpc.subsystem_list(snode.hublvol.nqn):
                             logger.info("Secondary hublvol NQN missing on sec_1 %s, recreating",
                                         second_node_1.get_id())
@@ -898,7 +898,7 @@ def check_remote_device(device_id, target_node=None):
             if node.get_id() == snode.get_id():
                 continue
             logger.info(f"Checking device: {device_id}")
-            rpc_client = node.rpc_client(timeout=5, retry=1)
+            rpc_client = node.rpc_client(timeout=8, retry=1)
             name = f'remote_{device.alceml_bdev}n1'
             bdev_info = rpc_client.get_bdevs(name)
             logger.log(DEBUG if bdev_info else ERROR, f"Checking bdev: {name} ... " + ('ok' if bdev_info else 'failed'))
@@ -936,7 +936,7 @@ def check_lvol_on_node(lvol_id, node_id, node_bdev_names=None, node_lvols_nqns=N
     except KeyError:
         return False
 
-    rpc_client = snode.rpc_client(timeout=5, retry=1)
+    rpc_client = snode.rpc_client(timeout=8, retry=1)
 
     if not node_bdev_names:
         node_bdev_names = {}
@@ -1043,7 +1043,7 @@ def check_jm_device(device_id):
 
     passed = True
     try:
-        rpc_client = snode.rpc_client(timeout=5, retry=2)
+        rpc_client = snode.rpc_client(timeout=8, retry=2)
 
         passed &= check_bdev(jm_device.jm_bdev, rpc_client=rpc_client)
         if snode.enable_ha_jm:

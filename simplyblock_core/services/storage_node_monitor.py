@@ -91,7 +91,7 @@ def get_next_cluster_status(cluster_id):
             try:
                 # check for jm rep tasks:
                 if node.rpc_client(timeout=10).bdev_lvol_get_lvstores(node.lvstore):
-                    ret = node.rpc_client(timeout=5).jc_get_jm_status(node.jm_vuid)
+                    ret = node.rpc_client(timeout=8).jc_get_jm_status(node.jm_vuid)
                     for jm in ret:
                         if ret[jm] is False: # jm is not ready (has active replication task)
                             jm_replication_tasks = True
@@ -654,7 +654,7 @@ def _count_data_plane_votes(node):
     total = 0
 
     for peer in online_peers:
-        peer_rpc = peer.rpc_client(timeout=5, retry=1)
+        peer_rpc = peer.rpc_client(timeout=8, retry=1)
 
         # Fast path: does the namespace bdev still exist on the peer?
         # A missing bdev means the controller has been torn down / is being
