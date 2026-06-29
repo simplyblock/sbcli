@@ -1,21 +1,22 @@
 # AGENTS.md — tests
 
-Two-tier test suite for the Simplyblock control plane. Unit tests run as pure logic with the FDB module stubbed; integration tests exercise full controller flows against a real FoundationDB (storage nodes stay mocked).
+Two-tier test suite for the Simplyblock control plane. Unit tests run as pure logic with the FDB module stubbed; integration tests exercise full controller flows against a **real FoundationDB** (storage nodes stay mocked).
 
 ## Layout
 
 ```
 tests/
-├── conftest.py          # Stubs `fdb` module + clears DBController/RPC caches; applies to both tiers.
+├── conftest.py          # Clears DBController/RPC caches before each test. Does NOT stub `fdb`.
 ├── _mocks.py            # Shared mock factories (e.g. `make_mock_cluster`).
 ├── conftest_proxy.py    # `import_proxy_module()` helper that neutralizes spdk_http_proxy_server's module-level run_server side-effect; used by both proxy unit + e2e tests.
 ├── unit/                # Pure-logic tests; single module under test, no model state, no flows.
+│   ├── conftest.py      # Stubs the native `fdb` module so unit tests run without libfdb_c / a live cluster.
 │   └── web/             # Unit tests for simplyblock_web (settings, v2 auth).
-├── integration/         # Flow/controller tests + FDB-required subdirs.
-│   ├── conftest.py      # Session-scoped testcontainers fixture that provisions FDB.
-│   ├── ftt2/            # FTT=2 restart scenarios; requires real FDB.
-│   ├── migration/       # Live volume migration; requires real FDB.
-│   └── expansion_sim/   # Cluster-expansion simulator; requires real FDB and rebinds the stub.
+├── integration/         # Flow/controller tests — ALL run against real FDB.
+│   ├── conftest.py      # `pytest_configure` provisions FDB (testcontainers) before collection; autouse per-test keyspace wipe.
+│   ├── ftt2/            # FTT=2 restart scenarios.
+│   ├── migration/       # Live volume migration.
+│   └── expansion_sim/   # Cluster-expansion simulator (rebinds the real fdb client, routes RPC to simulators).
 └── perf/                # Performance scripts; excluded from pytest discovery via `norecursedirs`.
 ```
 
@@ -29,16 +30,23 @@ Pure-logic tests. Pick this tier when the test:
 - Doesn't build full `Cluster` / `StorageNode` / `LVol` / `Pool` state.
 - Doesn't drive controller flows (failover, restart, takeover, migration, expand, …).
 
-The repo-wide `tests/conftest.py` stubs out `fdb`, so unit tests never touch a real database. Run with `tox run -e unit` — no Docker, no infra.
+`tests/unit/conftest.py` stubs out `fdb` (returning `None` from `fdb.open`), so unit tests never touch a real database. Run with `tox run -e unit` — no Docker, no infra.
 
 ### `tests/integration/`
 
-Controller-flow tests + FDB-backed subdirs. Two flavors live here:
+Controller-flow tests, **all of which run against a real FoundationDB**. `tests/integration/conftest.py` provisions FDB once for the whole tier from `pytest_configure` — *before* test collection — reusing `$FDB_CLUSTER_FILE` if set, otherwise starting a `testcontainers` container and binding its cluster file into `simplyblock_core.constants`. Provisioning at `pytest_configure` (rather than in a session fixture) means the real `fdb` client and a live `DBController()` are available at **collection / module-import time**, so test modules may touch the DB at import scope. A separate autouse fixture wipes the user keyspace before every test for isolation. The FDB-backed subdirs (`ftt2/`, `migration/`, `expansion_sim/`) add their own per-suite topology/bootstrap fixtures on top of that same cluster.
 
-1. **Stubbed-FDB flow tests** at the top of `tests/integration/` — build full models, patch `RPCClient`/`SNodeClient`, run against the stubbed FDB from the repo-wide conftest.
-2. **Real-FDB subdirs** (`ftt2/`, `migration/`, `expansion_sim/`) — each has its own conftest that either skips on missing `kv_store` or replaces the stub with the real `fdb` module. The session-scoped `tests/integration/conftest.py` fixture provisions FoundationDB up-front so all three flavors find a working cluster.
+**Never spoof or mock the database layer in an integration test.** The whole point of the tier is to exercise real `DBController` → FoundationDB reads and writes. Concretely, in `tests/integration/` do **not**:
 
-Storage nodes are always mocked. The integration tier never starts SPDK.
+- `sys.modules.setdefault("fdb", MagicMock())` (or otherwise stub the `fdb` module),
+- patch `DBController`, or
+- assign `db.kv_store = MagicMock()` / mock `write_to_db` / `get_*` DB accessors.
+
+Build real model objects and persist them with `write_to_db(db.kv_store)`; read them back through `DBController()`. The `ftt2/` and `migration/` conftests show the canonical pattern (real `Cluster`/`StorageNode`/`LVol` written to FDB, torn down after).
+
+> **Migration in progress.** Several top-level files still carry the old stubbed-DB pattern (`test_cluster_duplicate_name.py`, `test_dual_fault_tolerance.py`, `test_backup.py`, …). These are the broken tests being sorted onto real FDB — do not copy them, and convert them when you touch them. As a transition guard, `integration/conftest.py`'s `pytest_configure` imports the real `fdb` before collection so a stray `setdefault("fdb", MagicMock())` becomes a no-op instead of poisoning the session.
+
+What you *may* still mock: everything **above** the database. Storage nodes are always mocked (in-process `RPCClient`/`SNodeClient` mock servers — see the per-suite `mock_rpc_server` fixtures), and external side-effects (firewall API, `ping_host`, k8s lookups, `time.sleep`, distrib-map sends) are patched. The integration tier never starts SPDK. The line is: real DB, mocked nodes.
 
 ## Running tests
 
@@ -55,7 +63,7 @@ The `integration` env brings up FoundationDB through `testcontainers` (image `fo
 sudo docker compose -f docker-compose-dev.yml up -d fdb-server
 docker compose -f docker-compose-dev.yml exec fdb-server cat /etc/foundationdb/fdb.cluster > /tmp/fdb.cluster
 export FDB_CLUSTER_FILE=/tmp/fdb.cluster
-tox run -e integration   # Fixture detects the env var and skips its own container.
+tox run -e integration   # pytest_configure detects the env var and skips its own container.
 ```
 
 **Targeted runs** use `{posargs}` passthrough:
@@ -70,7 +78,7 @@ tox run -e integration -- tests/integration/migration/test_migration_flow.py -v
 1. Decide the tier using the rules above. When in doubt, prefer `unit/` — if the test ends up needing real models, move it.
 2. Place test files directly under `tests/unit/` or `tests/integration/`. Mirroring the source layout is fine but not required.
 3. Reuse `from tests._mocks import make_mock_cluster` for mock `Cluster` objects rather than rebuilding the same fixture.
-4. For new FDB-backed scenarios, prefer extending `ftt2/`, `migration/`, or `expansion_sim/` over inventing another conftest. They already handle keyspace cleanup and cluster bootstrap.
+4. For new FDB-backed scenarios, prefer extending `ftt2/`, `migration/`, or `expansion_sim/` over inventing another conftest — they already provide topology/cluster bootstrap on top of the tier-wide keyspace wipe. Persist real models to FDB; never mock the DB layer (see the integration-tier rules above).
 5. Never edit symlink targets — `tests/CLAUDE.md` is a symlink to this file.
 
 ## Secret-handling tests
