@@ -1540,6 +1540,15 @@ jobs:
                 ${mgmt_ip_to_use:+--mgmt-ip "${mgmt_ip_to_use}"} \
                 ${CLUSTER_ID:+--cluster-id "${CLUSTER_ID}"} \
             2>&1
+            local rc=$?
+            [ $rc -ne 0 ] && return $rc
+            local has_content
+            has_content=$(kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- \
+              find "${outdir}" -name "*.log" -size +0 2>/dev/null | head -1)
+            if [ -z "${has_content}" ]; then
+              echo "  WARN: collect_logs.py succeeded but all .log files are 0 bytes"
+              return 1
+            fi
           }
 
           # Adaptive collection: try full window, on failure split into
