@@ -31,6 +31,11 @@ node_rpc_timeout_threads: dict[str, threading.Thread] = {}
 # paths run again. A healthy activation completes in well under a minute.
 CLUSTER_ACTIVATION_WATCHDOG_SEC = 600
 
+# In-flight suspend-recovery force-shutdowns, keyed by node_id. A force shutdown
+# (kill + ANA failover) can take many seconds; this keeps the monitor tick from
+# re-spawning one for the same node before it has flipped to in_shutdown/offline.
+recovery_shutdown_threads: dict[str, threading.Thread] = {}
+
 
 def is_new_migrated_node(cluster_id, node):
     dev_lst = []
@@ -224,6 +229,15 @@ def _requeue_stuck_auto_restarts(cluster_id):
     queue for the same reason.
     """
     try:
+        # While a suspended cluster is still draining to all-offline, auto-restart
+        # is paused (add_node_to_auto_restart would refuse anyway); skip the scan
+        # so it does not log a misleading "re-queuing" line every tick. Mirrors
+        # tasks_controller.is_auto_restart_paused; inlined here to avoid coupling
+        # the scan to that import.
+        cluster = db.get_cluster_by_id(cluster_id)
+        if (cluster.status == Cluster.STATUS_SUSPENDED
+                and not cluster.suspend_drain_complete):
+            return
         for node in db.get_storage_nodes_by_cluster_id(cluster_id):
             if node.status not in (StorageNode.STATUS_OFFLINE,
                                    StorageNode.STATUS_SCHEDULABLE):
@@ -331,6 +345,97 @@ def _watchdog_stuck_activation(cluster):
     cluster_ops.set_cluster_status(cluster.get_id(), Cluster.STATUS_SUSPENDED)
 
 
+# Node statuses that mean a node is NOT yet drained for suspend recovery:
+# either still up/serving or mid-transition. The drain is complete only once
+# every (non operator-stopped) node has left all of these for OFFLINE/REMOVED.
+_DRAIN_PENDING_STATUSES = (
+    StorageNode.STATUS_ONLINE,
+    StorageNode.STATUS_DOWN,
+    StorageNode.STATUS_UNREACHABLE,
+    StorageNode.STATUS_IN_SHUTDOWN,
+    StorageNode.STATUS_RESTARTING,
+    StorageNode.STATUS_IN_CREATION,
+    StorageNode.STATUS_SCHEDULABLE,
+)
+
+
+def _spawn_recovery_shutdown(node):
+    """Force-shutdown a node for suspend recovery in a daemon thread (so the
+    kill / ANA-failover work does not block the monitor tick). keep_auto_restart
+    leaves auto_restart_disabled unset, so once the whole cluster has drained
+    the existing auto-restart brings this node back."""
+    node_id = node.get_id()
+    existing = recovery_shutdown_threads.get(node_id)
+    if existing is not None and existing.is_alive():
+        return
+
+    def _run():
+        try:
+            storage_node_ops.shutdown_storage_node(
+                node_id, force=True, keep_auto_restart=True)
+        except Exception as e:
+            logger.error("Suspend-recovery shutdown of %s failed: %s", node_id, e)
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    recovery_shutdown_threads[node_id] = t
+
+
+def _drive_suspend_recovery(cluster):
+    """Drive a SUSPENDED cluster to a clean all-offline slate before any
+    auto-restart runs (auto-restart stays paused via
+    tasks_controller.is_auto_restart_paused until this finishes).
+
+    Per tick while the drain is incomplete:
+      * ONLINE / DOWN nodes (reachable and up) -> force-shutdown.
+      * UNREACHABLE nodes -> escalate to OFFLINE directly. We cannot reach them
+        to shut SPDK down, and once peers have drained there is no online quorum
+        left for the normal data-plane escalation, so without this the drain
+        would stall forever on a stranded UNREACHABLE node. (Nodes that move
+        UNREACHABLE -> OFFLINE on their own simply reach OFFLINE first; this is
+        just the convergence backstop.)
+      * Operator-stopped nodes (auto_restart_disabled) are left alone and
+        excluded from both the drain wait and the later restart.
+    Once every node has settled to OFFLINE/REMOVED, flip
+    suspend_drain_complete so the existing auto-restart resumes. After that this
+    is a no-op, so it never re-kills nodes that are restarting back up."""
+    if cluster.suspend_drain_complete:
+        return
+
+    nodes = db.get_storage_nodes_by_cluster_id(cluster.get_id())
+    for node in nodes:
+        if node.auto_restart_disabled:
+            continue
+        if node.status in (StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN):
+            logger.info(
+                "Cluster %s suspended: force-shutting-down node %s (status %s) "
+                "for clean recovery drain",
+                cluster.get_id(), node.get_id(), node.status)
+            _spawn_recovery_shutdown(node)
+        elif node.status == StorageNode.STATUS_UNREACHABLE:
+            logger.info(
+                "Cluster %s suspended: escalating unreachable node %s to OFFLINE "
+                "to converge recovery drain", cluster.get_id(), node.get_id())
+            try:
+                set_node_offline(node)
+            except Exception as e:
+                logger.error("Failed to escalate unreachable node %s to OFFLINE: %s",
+                             node.get_id(), e)
+
+    drained = all(
+        node.auto_restart_disabled or node.status not in _DRAIN_PENDING_STATUSES
+        for node in nodes
+    )
+    if drained:
+        fresh = db.get_cluster_by_id(cluster.get_id())
+        if fresh.status == Cluster.STATUS_SUSPENDED and not fresh.suspend_drain_complete:
+            fresh.suspend_drain_complete = True
+            fresh.write_to_db()
+            logger.info(
+                "Cluster %s drained to all-offline; suspend-recovery auto-restart "
+                "unpaused", cluster.get_id())
+
+
 def update_cluster_status(cluster_id):
     # Run the re-queue scan FIRST, before any of the transition branches
     # that may early-return. Otherwise OFFLINE/SCHEDULABLE nodes can stay
@@ -369,6 +474,15 @@ def update_cluster_status(cluster_id):
 
     current_cluster_status = cluster.status
     logger.info("cluster_status: %s", current_cluster_status)
+
+    # Suspend recovery: while the cluster is SUSPENDED, first drain every node
+    # to OFFLINE (auto-restart is paused until then), so recovery restarts from
+    # a clean slate instead of one-by-one onto stale/half-initialized peers.
+    if current_cluster_status == Cluster.STATUS_SUSPENDED:
+        try:
+            _drive_suspend_recovery(cluster)
+        except Exception:
+            logger.exception("Suspend-recovery drive failed for cluster %s", cluster_id)
 
     # One-shot auto-migration to shared (per-chunk) data placement.
     # Armed (shared_placement_migration_pending) by exactly two events:
