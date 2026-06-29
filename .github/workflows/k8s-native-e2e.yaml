@@ -1481,6 +1481,45 @@ jobs:
           RUN_BASE_DIR="$(cat "${RUN_DIR_FILE}" | tr -d '\r\n')"
           [[ -n "${RUN_BASE_DIR}" ]] && echo "RUN_BASE_DIR=${RUN_BASE_DIR}" >> "$GITHUB_ENV" || true
 
+      - name: Copy raw output.log to each test's NFS folder
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          out_log="$GITHUB_WORKSPACE/e2e/output.log"
+          if [ ! -f "${out_log}" ]; then
+            echo "No output.log found, skipping"
+            exit 0
+          fi
+          echo "output.log size: $(stat --printf='%s' "${out_log}" 2>/dev/null || echo '?') bytes"
+
+          # Parse all per-test NFS paths from the output log
+          mapfile -t log_paths < <(
+            grep 'Logs Path:' "${out_log}" 2>/dev/null \
+              | sed 's/\x1b\[[0-9;]*m//g' \
+              | sed 's/.*Logs Path: *//' \
+              | sed 's/[[:space:]]*$//' || true
+          )
+
+          if [ ${#log_paths[@]} -eq 0 ]; then
+            echo "No 'Logs Path:' entries found in output.log"
+            # Fallback: save to RUN_BASE_DIR
+            if [ -n "${RUN_BASE_DIR:-}" ] && [ -d "${RUN_BASE_DIR}" ]; then
+              cp "${out_log}" "${RUN_BASE_DIR}/github_raw_output.log" || true
+              echo "Saved to ${RUN_BASE_DIR}/github_raw_output.log"
+            fi
+            exit 0
+          fi
+
+          for path in "${log_paths[@]}"; do
+            if [ -d "${path}" ]; then
+              cp "${out_log}" "${path}/github_raw_output.log" || true
+              echo "Saved output.log -> ${path}/github_raw_output.log"
+            else
+              echo "WARN: path does not exist: ${path}"
+            fi
+          done
+
       - name: Record Test End Time
         if: always()
         run: echo "TEST_END_TIME=$(date +%s)" >> $GITHUB_ENV

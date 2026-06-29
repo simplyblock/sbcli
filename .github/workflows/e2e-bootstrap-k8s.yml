@@ -667,6 +667,43 @@ jobs:
             "${ha_args[@]}" \
             2>&1 | tee output.log
 
+      - name: Copy raw output.log to each test's NFS folder
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          out_log="sbcli/e2e/output.log"
+          if [ ! -f "${out_log}" ]; then
+            echo "No output.log found, skipping"
+            exit 0
+          fi
+          echo "output.log size: $(stat --printf='%s' "${out_log}" 2>/dev/null || echo '?') bytes"
+
+          mapfile -t log_paths < <(
+            grep 'Logs Path:' "${out_log}" 2>/dev/null \
+              | sed 's/\x1b\[[0-9;]*m//g' \
+              | sed 's/.*Logs Path: *//' \
+              | sed 's/[[:space:]]*$//' || true
+          )
+
+          if [ ${#log_paths[@]} -eq 0 ]; then
+            echo "No 'Logs Path:' entries found in output.log"
+            if [ -n "${RUN_BASE_DIR:-}" ] && [ -d "${RUN_BASE_DIR}" ]; then
+              cp "${out_log}" "${RUN_BASE_DIR}/github_raw_output.log" || true
+              echo "Saved to ${RUN_BASE_DIR}/github_raw_output.log"
+            fi
+            exit 0
+          fi
+
+          for path in "${log_paths[@]}"; do
+            if [ -d "${path}" ]; then
+              cp "${out_log}" "${path}/github_raw_output.log" || true
+              echo "Saved output.log -> ${path}/github_raw_output.log"
+            else
+              echo "WARN: path does not exist: ${path}"
+            fi
+          done
+
       # ============================================================
       # POST-TEST
       # ============================================================
