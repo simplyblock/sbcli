@@ -83,6 +83,25 @@ class Cluster(BaseModel):
     tls: bool = False
     tls_config: dict = {}
     is_re_balancing: bool = False
+    # Suspend-recovery drain phase marker.
+    #
+    # When a cluster becomes SUSPENDED, recovering it by auto-restarting nodes
+    # piecemeal is unsafe (stale/half state, e.g. a node left lvstore_status
+    # "in_creation" by a failed activation that then never gets health-checked).
+    # Instead the monitor first force-shuts-down every still-up node so the
+    # cluster reaches a clean all-offline slate, and PAUSES auto-restart until
+    # then; only afterwards is the existing auto-restart allowed to bring the
+    # nodes back (all of them except the ones deliberately stopped by an
+    # operator, i.e. auto_restart_disabled).
+    #
+    # False  -> drain still in progress (or no suspension): auto-restart paused,
+    #           auto-shutdown actively draining ONLINE/DOWN nodes.
+    # True   -> the all-offline drain completed for this suspension episode:
+    #           auto-restart resumes and the auto-shutdown stops (it must not
+    #           re-kill nodes that are restarting back up).
+    # Reset to False when the cluster returns to a healthy status
+    # (active/degraded/read_only) in cluster_ops.set_cluster_status.
+    suspend_drain_complete: bool = False
     # Cluster-wide data placement-binding mode for distrib bdevs.
     #   False = legacy per-page placement binding (default, safe everywhere)
     #   True  = new per-chunk placement binding (opt-in, propagated to every

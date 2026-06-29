@@ -87,7 +87,7 @@ def _node(uuid, status=StorageNode.STATUS_ONLINE, mgmt_ip=None,
 
 
 def _cluster(status=Cluster.STATUS_ACTIVE, distr_ndcs=1, distr_npcs=2,
-             strict_anti_affinity=False):
+             strict_anti_affinity=False, suspend_drain_complete=False):
     c = MagicMock(spec=Cluster)
     c.uuid = "cluster-1"
     c.status = status
@@ -95,6 +95,10 @@ def _cluster(status=Cluster.STATUS_ACTIVE, distr_ndcs=1, distr_npcs=2,
     c.distr_npcs = distr_npcs
     c.strict_node_anti_affinity = strict_anti_affinity
     c.max_fault_tolerance = distr_npcs
+    # Real bool default: a bare MagicMock attribute is truthy, which would make
+    # is_auto_restart_paused / the drain checks misbehave.
+    c.suspend_drain_complete = suspend_drain_complete
+    c.get_id = MagicMock(return_value="cluster-1")
     return c
 
 
@@ -271,7 +275,12 @@ class TestUpdateClusterStatusRequeuesOffline(unittest.TestCase):
             _node("down-1", status=StorageNode.STATUS_DOWN),
             _node("down-2", status=StorageNode.STATUS_DOWN),
         ]
+        # suspend_drain_complete=True: the suspend-recovery drain has finished,
+        # so auto-restart is no longer paused and the re-queue scan runs. (While
+        # the drain is still in progress the scan is paused — see
+        # test_requeue_paused_while_suspended_draining.)
         c = _cluster(status=Cluster.STATUS_SUSPENDED, distr_ndcs=1, distr_npcs=2)
+        c.suspend_drain_complete = True
         mod, mocks = self._patched_mod(c, nodes)
         # next status will compute SUSPENDED, current is SUSPENDED,
         # so update_cluster_status would call cluster_activate only if
@@ -344,6 +353,7 @@ class TestUpdateClusterStatusRequeuesOffline(unittest.TestCase):
                   n_online_devs=0, n_offline_devs=2),
         ]
         c = _cluster(status=Cluster.STATUS_SUSPENDED, distr_ndcs=1, distr_npcs=2)
+        c.suspend_drain_complete = True  # drain done -> re-queue scan active
         mod, mocks = self._patched_mod(c, nodes)
 
         # First call raises, second must still run.
@@ -352,6 +362,21 @@ class TestUpdateClusterStatusRequeuesOffline(unittest.TestCase):
         ]
         mod.update_cluster_status("cluster-1")
         self.assertEqual(mocks["tc"].add_node_to_auto_restart.call_count, 2)
+
+    def test_requeue_paused_while_suspended_draining(self):
+        # While a SUSPENDED cluster is still draining (suspend_drain_complete
+        # False), the re-queue scan is paused: no auto-restart is queued until
+        # the whole cluster has reached offline.
+        nodes = [
+            _node("off-1", status=StorageNode.STATUS_OFFLINE,
+                  n_online_devs=0, n_offline_devs=2),
+            _node("down-1", status=StorageNode.STATUS_DOWN),
+        ]
+        c = _cluster(status=Cluster.STATUS_SUSPENDED, distr_ndcs=1, distr_npcs=2)
+        c.suspend_drain_complete = False
+        mod, mocks = self._patched_mod(c, nodes)
+        mod.update_cluster_status("cluster-1")
+        mocks["tc"].add_node_to_auto_restart.assert_not_called()
 
 
 # ===========================================================================
@@ -550,6 +575,199 @@ class TestSetNodeOfflineRobustness(unittest.TestCase):
                 mod.set_node_offline(node)
                 mocks["ops"].set_node_status.assert_not_called()
                 mocks["tc"].add_node_to_auto_restart.assert_not_called()
+
+
+# ===========================================================================
+# Suspend recovery: pause auto-restart + auto-shutdown drain to all-offline
+# ===========================================================================
+
+
+class TestIsAutoRestartPaused(unittest.TestCase):
+    """Auto-restart is paused only while a cluster is SUSPENDED and the
+    all-offline drain has not yet completed."""
+
+    def test_paused_when_suspended_and_not_drained(self):
+        from simplyblock_core.controllers import tasks_controller
+        c = _cluster(status=Cluster.STATUS_SUSPENDED, suspend_drain_complete=False)
+        self.assertTrue(tasks_controller.is_auto_restart_paused(c))
+
+    def test_not_paused_when_suspended_and_drained(self):
+        from simplyblock_core.controllers import tasks_controller
+        c = _cluster(status=Cluster.STATUS_SUSPENDED, suspend_drain_complete=True)
+        self.assertFalse(tasks_controller.is_auto_restart_paused(c))
+
+    def test_not_paused_when_active(self):
+        from simplyblock_core.controllers import tasks_controller
+        c = _cluster(status=Cluster.STATUS_ACTIVE, suspend_drain_complete=False)
+        self.assertFalse(tasks_controller.is_auto_restart_paused(c))
+
+    def test_not_paused_when_degraded(self):
+        from simplyblock_core.controllers import tasks_controller
+        c = _cluster(status=Cluster.STATUS_DEGRADED, suspend_drain_complete=False)
+        self.assertFalse(tasks_controller.is_auto_restart_paused(c))
+
+
+class TestAddNodeToAutoRestartSuspendGate(unittest.TestCase):
+    """add_node_to_auto_restart must refuse while a suspended cluster is still
+    draining, and proceed once the drain is complete."""
+
+    def _call(self, node, cluster):
+        from simplyblock_core.controllers import tasks_controller
+        with patch.object(tasks_controller, "db") as mock_db, \
+             patch.object(tasks_controller, "_add_task") as mock_add_task:
+            mock_db.get_cluster_by_id.return_value = cluster
+            mock_db.get_storage_node_by_id.return_value = node
+            mock_db.get_storage_nodes_by_cluster_id.return_value = [node]
+            mock_add_task.return_value = "task-uuid"
+            return tasks_controller.add_node_to_auto_restart(node), mock_add_task
+
+    def test_refused_while_suspended_draining(self):
+        node = _node("off-1", status=StorageNode.STATUS_OFFLINE,
+                     n_online_devs=0, n_offline_devs=2)
+        c = _cluster(status=Cluster.STATUS_SUSPENDED, suspend_drain_complete=False)
+        result, add_task = self._call(node, c)
+        self.assertFalse(result)
+        add_task.assert_not_called()
+
+    def test_allowed_once_drained(self):
+        node = _node("off-1", status=StorageNode.STATUS_OFFLINE,
+                     n_online_devs=0, n_offline_devs=2)
+        c = _cluster(status=Cluster.STATUS_SUSPENDED, suspend_drain_complete=True)
+        result, add_task = self._call(node, c)
+        self.assertEqual(result, "task-uuid")
+        add_task.assert_called_once()
+
+
+class TestDriveSuspendRecovery(unittest.TestCase):
+    """_drive_suspend_recovery force-shuts-down still-up nodes, escalates
+    unreachable ones, and flips suspend_drain_complete once all are offline."""
+
+    def _patched_mod(self, cluster, nodes, fresh_cluster=None):
+        from simplyblock_core.services import storage_node_monitor as mod
+        db_p = patch.object(mod, "db")
+        spawn_p = patch.object(mod, "_spawn_recovery_shutdown")
+        offline_p = patch.object(mod, "set_node_offline")
+        mock_db = db_p.start()
+        mock_spawn = spawn_p.start()
+        mock_offline = offline_p.start()
+        self.addCleanup(db_p.stop)
+        self.addCleanup(spawn_p.stop)
+        self.addCleanup(offline_p.stop)
+        mock_db.get_storage_nodes_by_cluster_id.return_value = nodes
+        mock_db.get_cluster_by_id.return_value = fresh_cluster or cluster
+        return mod, {"db": mock_db, "spawn": mock_spawn, "offline": mock_offline}
+
+    def test_online_and_down_nodes_are_force_shutdown(self):
+        nodes = [
+            _node("on-1", status=StorageNode.STATUS_ONLINE),
+            _node("down-1", status=StorageNode.STATUS_DOWN),
+        ]
+        c = _cluster(status=Cluster.STATUS_SUSPENDED, suspend_drain_complete=False)
+        mod, mocks = self._patched_mod(c, nodes)
+        mod._drive_suspend_recovery(c)
+        shut = [call.args[0].get_id() for call in mocks["spawn"].call_args_list]
+        self.assertCountEqual(shut, ["on-1", "down-1"])
+
+    def test_operator_stopped_node_not_touched(self):
+        on = _node("on-1", status=StorageNode.STATUS_ONLINE)
+        on.auto_restart_disabled = True
+        c = _cluster(status=Cluster.STATUS_SUSPENDED, suspend_drain_complete=False)
+        mod, mocks = self._patched_mod(c, [on])
+        mod._drive_suspend_recovery(c)
+        mocks["spawn"].assert_not_called()
+        mocks["offline"].assert_not_called()
+
+    def test_unreachable_node_escalated_to_offline(self):
+        unr = _node("unr-1", status=StorageNode.STATUS_UNREACHABLE)
+        c = _cluster(status=Cluster.STATUS_SUSPENDED, suspend_drain_complete=False)
+        mod, mocks = self._patched_mod(c, [unr])
+        mod._drive_suspend_recovery(c)
+        mocks["offline"].assert_called_once()
+        self.assertEqual(mocks["offline"].call_args.args[0].get_id(), "unr-1")
+        mocks["spawn"].assert_not_called()
+
+    def test_drain_incomplete_does_not_set_flag(self):
+        # one node still ONLINE -> drain not complete
+        nodes = [
+            _node("off-1", status=StorageNode.STATUS_OFFLINE,
+                  n_online_devs=0, n_offline_devs=2),
+            _node("on-1", status=StorageNode.STATUS_ONLINE),
+        ]
+        c = _cluster(status=Cluster.STATUS_SUSPENDED, suspend_drain_complete=False)
+        fresh = _cluster(status=Cluster.STATUS_SUSPENDED, suspend_drain_complete=False)
+        mod, mocks = self._patched_mod(c, nodes, fresh_cluster=fresh)
+        mod._drive_suspend_recovery(c)
+        self.assertFalse(fresh.suspend_drain_complete)
+        fresh.write_to_db.assert_not_called()
+
+    def test_drain_complete_sets_flag(self):
+        # all nodes OFFLINE/REMOVED -> drain complete
+        nodes = [
+            _node("off-1", status=StorageNode.STATUS_OFFLINE,
+                  n_online_devs=0, n_offline_devs=2),
+            _node("rm-1", status=StorageNode.STATUS_REMOVED),
+        ]
+        c = _cluster(status=Cluster.STATUS_SUSPENDED, suspend_drain_complete=False)
+        fresh = _cluster(status=Cluster.STATUS_SUSPENDED, suspend_drain_complete=False)
+        mod, mocks = self._patched_mod(c, nodes, fresh_cluster=fresh)
+        mod._drive_suspend_recovery(c)
+        self.assertTrue(fresh.suspend_drain_complete)
+        fresh.write_to_db.assert_called_once()
+
+    def test_operator_stopped_node_does_not_block_drain(self):
+        # an operator-stopped node that is still ONLINE must not block the drain
+        on = _node("op-1", status=StorageNode.STATUS_ONLINE)
+        on.auto_restart_disabled = True
+        off = _node("off-1", status=StorageNode.STATUS_OFFLINE,
+                    n_online_devs=0, n_offline_devs=2)
+        c = _cluster(status=Cluster.STATUS_SUSPENDED, suspend_drain_complete=False)
+        fresh = _cluster(status=Cluster.STATUS_SUSPENDED, suspend_drain_complete=False)
+        mod, mocks = self._patched_mod(c, [on, off], fresh_cluster=fresh)
+        mod._drive_suspend_recovery(c)
+        self.assertTrue(fresh.suspend_drain_complete)
+
+    def test_noop_when_already_drained(self):
+        on = _node("on-1", status=StorageNode.STATUS_ONLINE)
+        c = _cluster(status=Cluster.STATUS_SUSPENDED, suspend_drain_complete=True)
+        mod, mocks = self._patched_mod(c, [on])
+        mod._drive_suspend_recovery(c)
+        mocks["spawn"].assert_not_called()
+        mocks["offline"].assert_not_called()
+        mocks["db"].get_storage_nodes_by_cluster_id.assert_not_called()
+
+
+class TestSetClusterStatusDrainReset(unittest.TestCase):
+    """set_cluster_status clears suspend_drain_complete on return to a healthy
+    status, but leaves it across the suspended<->in_activation recovery flap."""
+
+    def _call(self, from_status, to_status, drain_complete=True):
+        from simplyblock_core import cluster_ops
+        cl = MagicMock(spec=Cluster)
+        cl.status = from_status
+        cl.suspend_drain_complete = drain_complete
+        with patch.object(cluster_ops, "db_controller") as mock_dbc, \
+             patch.object(cluster_ops, "cluster_events"):
+            mock_dbc.get_cluster_by_id.return_value = cl
+            cluster_ops.set_cluster_status("cluster-1", to_status)
+        return cl
+
+    def test_reset_on_active(self):
+        cl = self._call(Cluster.STATUS_SUSPENDED, Cluster.STATUS_ACTIVE)
+        self.assertFalse(cl.suspend_drain_complete)
+
+    def test_reset_on_degraded(self):
+        cl = self._call(Cluster.STATUS_SUSPENDED, Cluster.STATUS_DEGRADED)
+        self.assertFalse(cl.suspend_drain_complete)
+
+    def test_kept_on_in_activation(self):
+        # suspended -> in_activation is part of the same recovery; the drain
+        # marker must survive so a failed activation does not re-drain.
+        cl = self._call(Cluster.STATUS_SUSPENDED, Cluster.STATUS_IN_ACTIVATION)
+        self.assertTrue(cl.suspend_drain_complete)
+
+    def test_kept_on_suspended(self):
+        cl = self._call(Cluster.STATUS_IN_ACTIVATION, Cluster.STATUS_SUSPENDED)
+        self.assertTrue(cl.suspend_drain_complete)
 
 
 if __name__ == "__main__":

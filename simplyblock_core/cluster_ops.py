@@ -1030,6 +1030,13 @@ def set_cluster_status(cl_id, status) -> None:
         cluster.in_activation_since = datetime.datetime.now(datetime.timezone.utc).isoformat()
     elif old_status == Cluster.STATUS_IN_ACTIVATION:
         cluster.in_activation_since = ""
+    # Leaving suspension for a healthy status closes the current
+    # suspend-recovery episode: clear the drain marker so the next suspension
+    # starts a fresh drain (auto-restart paused -> drain -> resume). Kept set
+    # across the suspended<->in_activation flapping of a single recovery so the
+    # drain does not restart on every failed activation attempt.
+    if status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
+        cluster.suspend_drain_complete = False
     cluster.write_to_db(db_controller.kv_store)
     cluster_events.cluster_status_change(cluster, cluster.status, old_status)
 

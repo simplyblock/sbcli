@@ -3549,8 +3549,15 @@ def _detach_remote_controllers_from_peers(snode, db_controller):
     return detached[0]
 
 
-def shutdown_storage_node(node_id, force=False):
+def shutdown_storage_node(node_id, force=False, keep_auto_restart=False):
     """Gracefully terminate a storage node.
+
+    keep_auto_restart=True is used by the suspend-recovery auto-shutdown
+    (storage_node_monitor): it brings the node down WITHOUT marking it
+    auto_restart_disabled, so once the whole cluster has drained to offline the
+    existing auto-restart brings it back. A genuine operator `sn shutdown`
+    (CLI/API) leaves the default (False) and stays stopped until an explicit
+    restart.
 
     Flow (graceful, force=False):
       1. FTT / concurrency guards, set node status to in_shutdown.
@@ -3667,8 +3674,14 @@ def shutdown_storage_node(node_id, force=False):
     # at the final OFFLINE flip, so an interrupted/forced shutdown that never
     # reaches a clean OFFLINE is still protected from being auto-restarted.
     # Cleared in set_node_status() when the node deliberately returns ONLINE.
-    snode.auto_restart_disabled = True
-    snode.write_to_db(db_controller.kv_store)
+    #
+    # Exception: a suspend-recovery auto-shutdown (keep_auto_restart=True) must
+    # NOT set this — the whole point is to drain the cluster offline and then
+    # let auto-restart bring these nodes back. Only operator-initiated shutdowns
+    # stay disabled.
+    if not keep_auto_restart:
+        snode.auto_restart_disabled = True
+        snode.write_to_db(db_controller.kv_store)
 
     # Step 2: cancel migration tasks while controllers are still up.
     pending_tasks = db_controller.get_job_tasks(snode.cluster_id)

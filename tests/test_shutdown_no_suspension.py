@@ -490,6 +490,28 @@ class TestShutdownStorageNodeGraceful(unittest.TestCase):
                 sno.shutdown_storage_node(env["snode"].get_id(), force=False))
             guard.assert_not_called()
 
+    def test_operator_shutdown_marks_auto_restart_disabled(self):
+        """A normal operator shutdown (default keep_auto_restart=False) marks
+        the node auto_restart_disabled so the monitor never auto-restarts it."""
+        from simplyblock_core import storage_node_ops as sno
+        env = self._patch()
+        env["snode"].auto_restart_disabled = False
+        self.assertTrue(
+            sno.shutdown_storage_node(env["snode"].get_id(), force=True))
+        self.assertTrue(env["snode"].auto_restart_disabled)
+
+    def test_recovery_shutdown_keeps_auto_restart_enabled(self):
+        """A suspend-recovery shutdown (keep_auto_restart=True) must NOT set
+        auto_restart_disabled: the whole point is to drain the cluster offline
+        and then let auto-restart bring this node back."""
+        from simplyblock_core import storage_node_ops as sno
+        env = self._patch()
+        env["snode"].auto_restart_disabled = False
+        self.assertTrue(
+            sno.shutdown_storage_node(
+                env["snode"].get_id(), force=True, keep_auto_restart=True))
+        self.assertFalse(env["snode"].auto_restart_disabled)
+
 
 if __name__ == '__main__':
     unittest.main()
