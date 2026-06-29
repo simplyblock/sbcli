@@ -1267,11 +1267,11 @@ class K8sUtils:
             for w in new_workers
         )
         cmd = (
-            f"kubectl patch storagenodes.storage.simplyblock.io {name} "
+            f"kubectl patch storagenodesets.storage.simplyblock.io {name} "
             f"-n {ns} --type=json -p '[{patch_ops}]'"
         )
         self.logger.info(
-            f"[K8sUtils] Patching StorageNode '{name}' to add workers: {new_workers}"
+            f"[K8sUtils] Patching StorageNodeSet '{name}' to add workers: {new_workers}"
         )
         out, err = self._exec_kubectl(cmd)
         return out, err
@@ -1378,7 +1378,7 @@ class K8sUtils:
             f'"workerNode":"{target_worker}"}}}}'
         )
         cmd = (
-            f"kubectl patch storagenodes.storage.simplyblock.io {name} "
+            f"kubectl patch storagenodesets.storage.simplyblock.io {name} "
             f"-n {ns} --type=merge -p '{patch}'"
         )
         self.logger.info(
@@ -1421,7 +1421,7 @@ class K8sUtils:
 
         patch_json = json.dumps(patch_dict)
         cmd = (
-            f"kubectl patch storagenodes.storage.simplyblock.io {name} "
+            f"kubectl patch storagenodesets.storage.simplyblock.io {name} "
             f"-n {ns} --type=merge -p '{patch_json}'"
         )
         self.logger.info(
