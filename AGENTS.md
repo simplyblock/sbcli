@@ -97,3 +97,7 @@ tests/CLAUDE.md → AGENTS.md
 ```
 
 Edit only `AGENTS.md` files and `.agents/skills/` contents. Never edit the symlink targets directly.
+
+### Local overrides
+
+At every level where an `AGENTS.md` exists, also check for a sibling `AGENTS.local.md`. If present, load it in addition to `AGENTS.md` — its contents extend or override the checked-in instructions. `AGENTS.local.md` is gitignored and intended for per-developer notes that should not be committed.
