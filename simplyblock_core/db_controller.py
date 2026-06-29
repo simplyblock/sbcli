@@ -23,6 +23,7 @@ from simplyblock_core.models.snapshot import SnapShot, SnapShotMini
 from simplyblock_core.models.stats import DeviceStatObject, NodeStatObject, ClusterStatObject, LVolStatObject, \
     PoolStatObject, CachedLVolStatObject
 from simplyblock_core.models.storage_node import StorageNode, NodeLVolDelLock
+from simplyblock_core.models.lvstore_lock import LVStoreMutationLock
 
 logger = logging.getLogger(__name__)
 
@@ -530,6 +531,85 @@ class DBController(metaclass=Singleton):
             return
         transactional = fdb.transactional(DBController._release_cluster_add_lock_tx)
         transactional(self, self.kv_store, cluster_id, owner)
+
+    # ---- Per-lvstore snapshot-mutation lock (Single FDB Transaction) ----
+
+    def _try_acquire_lvstore_lock_tx(self, tr, cluster_id, lvs_name, owner, now, ttl):
+        lock = LVStoreMutationLock()
+        lock.cluster_id = cluster_id
+        lock.lvs_name = lvs_name
+        key = lock.get_db_id().encode()
+        raw = tr.get(key).wait()
+        if raw.present():
+            existing = LVStoreMutationLock().from_dict(json.loads(raw))
+            fresh = (now - existing.heartbeat_at) <= ttl
+            if existing.owner and existing.owner != owner and fresh:
+                return False, existing.owner
+            # Stale (holder presumed dead) or already ours: (re)take it.
+            lock.acquired_at = existing.acquired_at if existing.owner == owner else now
+        else:
+            lock.acquired_at = now
+        lock.owner = owner
+        lock.heartbeat_at = now
+        tr[key] = json.dumps(lock.to_dict()).encode()
+        return True, None
+
+    def acquire_lvstore_lock(self, cluster_id, lvs_name, owner):
+        """Atomically acquire the per-lvstore snapshot-mutation lock.
+
+        Returns (True, None) if ``owner`` now holds the lock (newly acquired,
+        reclaimed from a dead holder whose heartbeat went stale, or already held
+        by this owner), or (False, current_owner) if a live holder owns it."""
+        if not self.kv_store:
+            return False, "No DB connection"
+        now = int(time.time())
+        ttl = constants.LVSTORE_MUTATION_LOCK_TTL_SEC
+        transactional = fdb.transactional(DBController._try_acquire_lvstore_lock_tx)
+        return transactional(self, self.kv_store, cluster_id, lvs_name, owner, now, ttl)
+
+    def _refresh_lvstore_lock_tx(self, tr, cluster_id, lvs_name, owner, now):
+        lock = LVStoreMutationLock()
+        lock.cluster_id = cluster_id
+        lock.lvs_name = lvs_name
+        key = lock.get_db_id().encode()
+        raw = tr.get(key).wait()
+        if not raw.present():
+            return False
+        existing = LVStoreMutationLock().from_dict(json.loads(raw))
+        if existing.owner != owner:
+            return False  # lost the lock (reclaimed by someone else)
+        existing.heartbeat_at = now
+        tr[key] = json.dumps(existing.to_dict()).encode()
+        return True
+
+    def refresh_lvstore_lock(self, cluster_id, lvs_name, owner):
+        """Heartbeat the lock so a slow create→register section isn't reclaimed.
+        Returns True if still held by ``owner``, False if it was lost."""
+        if not self.kv_store:
+            return False
+        now = int(time.time())
+        transactional = fdb.transactional(DBController._refresh_lvstore_lock_tx)
+        return transactional(self, self.kv_store, cluster_id, lvs_name, owner, now)
+
+    def _release_lvstore_lock_tx(self, tr, cluster_id, lvs_name, owner):
+        lock = LVStoreMutationLock()
+        lock.cluster_id = cluster_id
+        lock.lvs_name = lvs_name
+        key = lock.get_db_id().encode()
+        raw = tr.get(key).wait()
+        if not raw.present():
+            return
+        existing = LVStoreMutationLock().from_dict(json.loads(raw))
+        if existing.owner == owner:
+            del tr[key]
+
+    def release_lvstore_lock(self, cluster_id, lvs_name, owner):
+        """Release the lock only if still owned by ``owner`` (owner-scoped, so a
+        late release never deletes a lock another holder has since reclaimed)."""
+        if not self.kv_store:
+            return
+        transactional = fdb.transactional(DBController._release_lvstore_lock_tx)
+        transactional(self, self.kv_store, cluster_id, lvs_name, owner)
 
     # ---- Node-add port reservation (Single FDB Transaction) ----
 

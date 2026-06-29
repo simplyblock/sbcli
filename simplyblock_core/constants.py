@@ -124,6 +124,21 @@ CLUSTER_ADD_LOCK_TTL_SEC = 120
 # loses its reserved port.
 PORT_RESERVATION_TTL_SEC = 600
 
+# Snapshot create concurrency: the primary-create + replica-register sequence of
+# a snapshot is serialized per lvstore behind an LVStoreMutationLock so that
+# concurrent snapshot creates of the same lvstore register on the
+# secondary/tertiary in creation (blobid) order. Out-of-order registration
+# builds the replica blob tree with a child before its parent and corrupts the
+# lvstore. The holder refreshes the lock every LVSTORE_MUTATION_LOCK_HEARTBEAT_SEC;
+# a lock whose heartbeat is older than LVSTORE_MUTATION_LOCK_TTL_SEC is treated
+# as abandoned (holder crashed) and may be reclaimed. A caller waits at most
+# LVSTORE_MUTATION_LOCK_WAIT_SEC for the lock before failing (retryable). TTL is
+# several heartbeats wide so a live-but-slow holder (a register RPC can take many
+# seconds under load) is never falsely preempted.
+LVSTORE_MUTATION_LOCK_HEARTBEAT_SEC = 15
+LVSTORE_MUTATION_LOCK_TTL_SEC = 60
+LVSTORE_MUTATION_LOCK_WAIT_SEC = 120
+
 # An LVol left in STATUS_IN_CREATION longer than this is treated as an orphaned
 # create (the creating process died before reaching ONLINE) and is cleaned up
 # by lvol_monitor. Must be comfortably longer than the slowest legitimate
