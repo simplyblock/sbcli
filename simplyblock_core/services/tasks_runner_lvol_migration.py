@@ -410,20 +410,29 @@ def _delete_bdev_blocking(bdev_name, primary_rpc, secondary_rpc=None, tertiary_r
     """
     Two-phase blocking bdev delete with special_delete=True (non-coalescing).
 
-    Phase 1 — primary only, sync=False (del_async=False): initiates the
-      async special delete.  special_delete=True tells SPDK to free the bdev's
-      own clusters without merging them into any child — correct for source
-      cleanup, rollback, and any path where no child needs to inherit data.
+    Phase 1 — primary only, sync=False (del_async=False): initiates the async
+      special delete.  special_delete=True tells SPDK to free the bdev's own
+      clusters without merging them into any child — correct for source cleanup,
+      rollback, and any path where no child needs to inherit data.
+    Wait   — poll bdev_lvol_get_lvol_delete_status on primary until done.
     Phase 2 — all nodes (primary + secondary + tertiary), sync=True
-      (del_async=True): finalises the deletion on every replica.
+      (del_async=True, special_delete=False): finalises the deletion on every replica.
     """
     ret, _ = primary_rpc.delete_lvol(bdev_name, del_async=False, special_delete=True)
     if not ret:
-        logger.warning(f"delete bdev {bdev_name}: special_delete initiation failed (continuing)")
+        logger.warning(f"delete bdev {bdev_name}: initiation failed (continuing)")
         return
+
+    while True:
+        status = primary_rpc.bdev_lvol_get_lvol_delete_status(bdev_name)
+        if status == 1:
+            time.sleep(0.2)
+        else:
+            break
+
     for rpc in filter(None, [primary_rpc, secondary_rpc, tertiary_rpc]):
         try:
-            rpc.delete_lvol(bdev_name, del_async=True, special_delete=True)
+            rpc.delete_lvol(bdev_name, del_async=True, special_delete=False)
         except Exception as e:
             logger.warning(f"delete bdev {bdev_name} finalize on replica (non-fatal): {e}")
 
@@ -1844,13 +1853,6 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
                 bdev_name = source_snap_bdevs[snap_uuid]
             else:
                 bdev_name = f"{src_node.lvstore}/{_snap_short_name(snap)}"
-            # Mark as migration-source so SPDK drops only the blob reference
-            # without freeing the physical clusters (data lives on the target now).
-            src_rpc.bdev_lvol_set_migration_flag(bdev_name)
-            if src_sec_rpc:
-                src_sec_rpc.bdev_lvol_set_migration_flag(bdev_name)
-            if src_ter_rpc:
-                src_ter_rpc.bdev_lvol_set_migration_flag(bdev_name)
             _delete_bdev_blocking(bdev_name, src_rpc,
                                   secondary_rpc=src_sec_rpc, tertiary_rpc=src_ter_rpc)
             logger.info(f"Deleted source bdev {bdev_name}")
