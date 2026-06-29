@@ -850,7 +850,7 @@ spec:
   clusterName: {self.cluster_cr_name}
 ---
 apiVersion: storage.simplyblock.io/v1alpha1
-kind: StorageNode
+kind: StorageNodeSet
 metadata:
   name: {self.node_cr_name}
   namespace: {_NAMESPACE}

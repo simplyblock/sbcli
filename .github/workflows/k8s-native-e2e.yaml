@@ -1029,7 +1029,7 @@ jobs:
           ${ENCRYPTION_POOL_YAML}
           ---
           apiVersion: storage.simplyblock.io/v1alpha1
-          kind: StorageNode
+          kind: StorageNodeSet
           metadata:
             name: simplyblock-node
             namespace: ${NAMESPACE}
@@ -1092,7 +1092,7 @@ jobs:
           ${ENCRYPTION_POOL_YAML}
           ---
           apiVersion: storage.simplyblock.io/v1alpha1
-          kind: StorageNode
+          kind: StorageNodeSet
           metadata:
             name: simplyblock-node
             namespace: ${NAMESPACE}
