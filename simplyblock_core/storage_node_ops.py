@@ -4823,20 +4823,25 @@ def _count_fabric_disconnected_nodes(all_nodes, lvs_peer_ids=None):
 def find_leader_with_failover(all_nodes, lvs_name):
     """Detect the current leader and failover if needed.
 
-    1. Try each node as leader via bdev_lvol_get_lvstores (leadership field)
-    2. If leader's RPC is responsive → return it
-    3. If leader's RPC times out BUT fabric is healthy:
-       - Check if at least one non-leader has healthy fabric
-       - If yes → force leadership change, return the new leader
-       - If no → return None (reject)
-    4. If no leader found → return first fabric-connected node as fallback
+    1. Try each node as leader via bdev_lvol_get_lvstores (leadership field).
+       A node that answers leadership=True is CONFIRMED (the query is itself a
+       successful RPC to that node) → return it directly. A confirmed leader is
+       never failed over for being slow, only for genuinely not answering.
+    2. If no node admitted leadership (every probe returned False or raised),
+       attempt a failover — but only ever return a node whose leadership is
+       re-confirmed via is_node_leader:
+       - Guessed leader's fabric down → promote a non-leader, confirm, return it.
+       - Guessed leader's fabric healthy → force a leadership change to a
+         responsive non-leader, then VERIFY the change took effect before
+         returning. Reject (None) if leadership did not settle.
 
     Returns:
-        (leader_node, non_leader_nodes) or (None, []) if all unreachable.
+        (leader_node, non_leader_nodes) or (None, []) if no confirmable leader.
     """
     from simplyblock_core.controllers.lvol_controller import is_node_leader
 
     leader = None
+    leader_confirmed = False
     non_leaders = []
 
     # Find current leader
@@ -4844,6 +4849,10 @@ def find_leader_with_failover(all_nodes, lvs_name):
         try:
             if is_node_leader(node, lvs_name):
                 leader = node
+                # is_node_leader() is itself a successful RPC to the node that
+                # returned leadership=True. The node is therefore reachable and
+                # authoritative about its own leadership.
+                leader_confirmed = True
                 break
         except Exception:
             continue
@@ -4859,16 +4868,43 @@ def find_leader_with_failover(all_nodes, lvs_name):
 
     non_leaders = [n for n in all_nodes if n.get_id() != leader.get_id()]
 
-    # Check if leader's RPC is responsive
-    if _is_node_rpc_responsive(leader, lvs_name):
+    # If the leader answered the leadership query above, it is reachable and
+    # authoritative — return it directly. Do NOT re-probe with the tighter
+    # responsiveness timeout and force a failover: under high concurrency the
+    # SPDK reactor mgmt queue backs up and the confirmed leader's RPC can
+    # exceed the short probe timeout while the node is perfectly healthy.
+    # Treating that as "leader down" forces leadership onto a non-leader and
+    # routes the operation to the wrong node (split routing + retry storm).
+    # The responsiveness probe / forced failover below is only meaningful when
+    # leadership could NOT be confirmed by RPC (the fabric-connected fallback,
+    # i.e. the leader's mgmt RPC genuinely failed so is_node_leader raised).
+    if leader_confirmed:
         return leader, non_leaders
 
-    # Leader RPC failing — check if fabric is healthy
+    # Unconfirmed-leader fallback: `leader` is only a fabric-connected guess —
+    # no node admitted leadership above. RPC-responsiveness does NOT make a node
+    # the leader, so a tight responsiveness probe here can route the operation to
+    # a non-leader. Require an actual leadership confirmation before returning;
+    # otherwise fall through to the failover logic.
+    try:
+        if is_node_leader(leader, lvs_name):
+            return leader, non_leaders
+    except Exception:
+        pass
+
+    # Leader unconfirmed — check if fabric is healthy
     if not _is_fabric_connected(leader):
         # Fabric disconnected — leader truly down, find new leader
         for nl in non_leaders:
             if _is_fabric_connected(nl) and _is_node_rpc_responsive(nl, lvs_name):
-                logger.info("Leader %s fabric disconnected, failing over to %s",
+                # Promotion is driven by the JM heartbeat; confirm the peer has
+                # actually taken leadership before routing to it.
+                try:
+                    if not is_node_leader(nl, lvs_name):
+                        continue
+                except Exception:
+                    continue
+                logger.info("Leader %s fabric disconnected, failed over to %s",
                             leader.get_id(), nl.get_id())
                 new_non_leaders = [n for n in all_nodes if n.get_id() != nl.get_id()]
                 return nl, new_non_leaders
@@ -4899,6 +4935,26 @@ def find_leader_with_failover(all_nodes, lvs_name):
                     lvs_name, failover_target.get_id(), leader.get_id())
     except Exception as e:
         logger.error("Failed to send fabric signal for leadership change: %s", e)
+        return None, []
+
+    # Verify the forced leadership change actually took effect before routing.
+    # The signal is best-effort: if the old leader was merely slow (not down)
+    # and reclaims leadership, failover_target never becomes leader and routing
+    # to it would land the operation on a non-leader. Confirm with a short
+    # retry; reject if leadership did not settle on failover_target.
+    leadership_confirmed = False
+    for _ in range(3):
+        try:
+            if is_node_leader(failover_target, lvs_name):
+                leadership_confirmed = True
+                break
+        except Exception:
+            pass
+        time.sleep(1)
+    if not leadership_confirmed:
+        logger.error("Forced leadership change to %s for %s did not take effect — "
+                     "refusing to route to a non-leader",
+                     failover_target.get_id(), lvs_name)
         return None, []
 
     new_non_leaders = [n for n in all_nodes if n.get_id() != failover_target.get_id()]
