@@ -25,6 +25,8 @@ from simplyblock_core.models.lvstore_lock import LVStoreMutationLock
 # ---------------------------------------------------------------------------
 
 class _Val(bytes):
+    _present: bool  # set per-instance by _mk_val; declared so mypy accepts it
+
     def present(self):
         return getattr(self, "_present", len(self) > 0)
 
