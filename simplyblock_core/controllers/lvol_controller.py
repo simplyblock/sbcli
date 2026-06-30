@@ -170,22 +170,16 @@ def _get_next_3_nodes(cluster_id, lvol_size=0, all_lvols=None):
     db_controller = DBController()
     snodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
 
-    if not all_lvols:
-        all_lvols = db_controller.get_mini_lvols()
-    # Build node→subsystem-count map with a single cluster-wide DB read instead
-    # of one read per node (was O(K×N) where K = number of nodes).
-    node_nqns: dict[str, set] = {}
-    for lv in all_lvols:
-        if lv.status not in [LVol.STATUS_IN_DELETION, LVol.STATUS_DELETED]:
-            node_nqns.setdefault(lv.node_id, set()).add(lv.nqn)
-
     online_nodes = []
     node_stats = {}
     for node in snodes:
         if node.is_secondary_node:  # pass
             continue
         if node.status == node.STATUS_ONLINE:
-            subsys_count = len(node_nqns.get(node.get_id(), set()))
+            # Per-node lvol count is maintained on the node (reconciled each stats
+            # cycle by capacity_and_stats_collector) instead of scanning every
+            # lvol here on each create.
+            subsys_count = node.lvol_count
             if subsys_count >= node.max_lvol:
                 continue
             if node.lvol_sync_del():

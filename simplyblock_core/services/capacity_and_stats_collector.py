@@ -6,6 +6,7 @@ from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.controllers import device_events
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.stats import DeviceStatObject, NodeStatObject, ClusterStatObject
 
 logger = utils.get_logger(__name__)
@@ -305,6 +306,22 @@ if __name__ == "__main__":
                 logger.error(f"Cluster has no storage nodes: {cl.get_id()}")
 
             all_lvols =  db.get_mini_lvols()
+
+            # Reconcile per-node lvol counts (authoritative) so lvol placement
+            # (_get_next_3_nodes) reads node.lvol_count in O(1) instead of
+            # scanning every lvol on each create. Reuses the scan already done
+            # here; counts only non-deleting primaries (matches the old
+            # node_nqns logic). Placement balancing/max_lvol therefore lag by at
+            # most one collector cycle — soft and self-healing, never wrong data.
+            _node_lvol_counts: dict[str, int] = {}
+            for _lv in all_lvols:
+                if _lv.status not in (LVol.STATUS_IN_DELETION, LVol.STATUS_DELETED):
+                    _node_lvol_counts[_lv.node_id] = _node_lvol_counts.get(_lv.node_id, 0) + 1
+            for _n in snodes:
+                _desired = _node_lvol_counts.get(_n.get_id(), 0)
+                if _n.lvol_count != _desired:
+                    db.atomic_update(_n, lambda x, d=_desired: setattr(x, "lvol_count", d))
+
             node_records = []
             cluster_device_records = []
             for node in snodes:
