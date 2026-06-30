@@ -7418,10 +7418,10 @@ def get_secondary_nodes(current_node, exclude_ids=None, removed_node=None):
                     if nod_found:
                         return [node.get_id()]
 
-            elif removed_node and node.get_id() == removed_node.secondary_node_id:
-                nodes.append(node.get_id())
+                elif removed_node and node.get_id() == removed_node.secondary_node_id:
+                    nodes.append(node.get_id())
 
-    return nodes
+        return nodes
 
     # Anti-affinity is best-effort and honored on BOTH failure domain and
     # physical label, in that priority order: prefer a secondary that differs
