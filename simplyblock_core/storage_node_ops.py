@@ -4366,6 +4366,10 @@ def suspend_storage_node(node_id: str, force=False):
     logger.info("Setting node status to suspended")
     set_node_status(snode.get_id(), StorageNode.STATUS_SUSPENDED)
 
+    snode = db_controller.get_storage_node_by_id(node_id)
+    snode.auto_restart_disabled = True
+    snode.write_to_db(db_controller.kv_store)
+
     logger.info("Done")
     return True
 
@@ -4398,6 +4402,10 @@ def resume_storage_node(node_id):
 
     logger.info("Setting node status to online")
     set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE)
+    snode = db_controller.get_storage_node_by_id(node_id)
+    snode.auto_restart_disabled = False
+    snode.write_to_db(db_controller.kv_store)
+
     logger.info("Done")
     return True
 
