@@ -41,6 +41,20 @@ class TestLvolHACluster(FioWorkloadTest):
         self.log_path = Path.home()
         self.dump_validation_errors = []
 
+    def _pick_client(self, index=0):
+        """Return a client node for NVMe connect / mount / FIO.
+
+        Distributes across ``self.fio_node`` list round-robin using
+        *index*.  Falls back to the management node when no dedicated
+        client is available.
+        """
+        fio = getattr(self, "fio_node", None)
+        if isinstance(fio, list) and fio:
+            return fio[index % len(fio)]
+        if fio:
+            return fio
+        return self.mgmt_nodes[0]
+
     def _compute_fio_size(self, extra_lvols: int = 0) -> str:
         """Compute fio_size dynamically to target ~TARGET_DATA_PER_NODE_GB per node.
 
@@ -81,14 +95,18 @@ class TestLvolHACluster(FioWorkloadTest):
         return self.fio_size
     
     def create_lvols(self):
-        """Create 500 lvols with mixed crypto and non-crypto."""
-        self.logger.info("Creating 500 lvols.")
+        """Create lvols distributed round-robin across client (fio) nodes."""
+        self.logger.info(f"Creating {self.total_lvols} lvols.")
         for i in range(1, self.total_lvols + 1):
             # fs_type = random.choice(["xfs", "ext4"])
             fs_type = "ext4"
             is_crypto = random.choice([True, False])
             lvol_name = f"{self.lvol_name}_{i}" if not is_crypto else f"c{self.lvol_name}_{i}"
-            self.logger.info(f"Creating lvol with Name: {lvol_name}, fs type: {fs_type}, crypto: {is_crypto}")
+            client = self._pick_client(i - 1)
+            self.logger.info(
+                f"Creating lvol {lvol_name}, fs={fs_type}, "
+                f"crypto={is_crypto}, client={client}"
+            )
             self.sbcli_utils.add_lvol(
                 lvol_name=lvol_name,
                 pool_name=self.pool_name,
@@ -104,18 +122,19 @@ class TestLvolHACluster(FioWorkloadTest):
                    "Device": None,
                    "MD5": None,
                    "FS": fs_type,
+                   "Client": client,
                    "Log": f"{self.log_path}/{lvol_name}.log",
                    "snapshots": []
             }
             connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)
 
-            initial_devices = self.ssh_obj.get_devices(node=self.node)
+            initial_devices = self.ssh_obj.get_devices(node=client)
             for connect_str in connect_ls:
-                self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command=connect_str)
+                self.ssh_obj.exec_command(node=client, command=connect_str)
 
             self.lvol_mount_details[lvol_id]["Command"] = connect_ls
             sleep_n_sec(3)
-            final_devices = self.ssh_obj.get_devices(node=self.node)
+            final_devices = self.ssh_obj.get_devices(node=client)
             lvol_device = None
             for device in final_devices:
                 if device not in initial_devices:
@@ -124,13 +143,13 @@ class TestLvolHACluster(FioWorkloadTest):
             if not lvol_device:
                 raise LvolNotConnectException("LVOL did not connect")
             self.lvol_mount_details[lvol_id]["Device"] = lvol_device
-            self.ssh_obj.format_disk(node=self.node, device=lvol_device, fs_type=fs_type)
+            self.ssh_obj.format_disk(node=client, device=lvol_device, fs_type=fs_type)
 
-            # Mount and Run FIO
+            # Mount
             mount_point = f"{self.mount_path}/{lvol_name}"
-            self.ssh_obj.mount_path(node=self.node, device=lvol_device, mount_path=mount_point)
+            self.ssh_obj.mount_path(node=client, device=lvol_device, mount_path=mount_point)
             self.lvol_mount_details[lvol_id]["Mount"] = mount_point
-            
+
         self.logger.info("Completed lvol creation.")
 
     def create_snapshots(self):
@@ -197,11 +216,12 @@ class TestLvolHACluster(FioWorkloadTest):
 
             # Run dd in parallel for the current batch
             for _, lvol in batch:
-                self.logger.info(f"Running dd for lvol: {lvol['Name']}")
+                client = lvol.get("Client", self.node)
+                self.logger.info(f"Running dd for lvol: {lvol['Name']} on {client}")
                 mount_path = lvol["Mount"]
                 thread = threading.Thread(
                     target=self.ssh_obj.create_random_files,
-                    args=(self.node, mount_path, self.fio_size),
+                    args=(client, mount_path, self.fio_size),
                 )
                 thread.start()
                 dd_threads.append(thread)
@@ -217,9 +237,10 @@ class TestLvolHACluster(FioWorkloadTest):
     def calculate_md5(self):
         "Calculate Checksums"
         for lvol_id, lvol in self.lvol_mount_details.items():
+            client = lvol.get("Client", self.node)
             self.logger.info(f"Generating checksums for files in base volume: {lvol['Mount']}")
-            base_files = self.ssh_obj.find_files(node=self.node, directory=lvol['Mount'])
-            base_checksums = self.ssh_obj.generate_checksums(node=self.node, files=base_files)
+            base_files = self.ssh_obj.find_files(node=client, directory=lvol['Mount'])
+            base_checksums = self.ssh_obj.generate_checksums(node=client, files=base_files)
             self.logger.info(f"Base Checksum for lvol {lvol['Name']}: {base_checksums}")
             self.lvol_mount_details[lvol_id]["MD5"] = base_checksums
 
@@ -237,31 +258,11 @@ class TestLvolHACluster(FioWorkloadTest):
     
     def validate_checksums(self):
         "Validating checksums"
-        # existing_devices = []
-        # for lvol_id, lvol in self.lvol_mount_details.items():
-        #     self.ssh_obj.unmount_path(node=self.node, device=lvol["Mount"])
-        #     existing_devices.append(lvol["Device"][5:-1])
-
-        # self.wait_for_all_devices(existing_devices)
-        
-        # for lvol_id, lvol in self.lvol_mount_details.items():
-        #     device = lvol["Device"][5:-1]
-        #     final_devices = self.ssh_obj.get_devices(node=self.node)
-        #     lvol_device = None
-        #     for cur_device in final_devices:
-        #         if device in cur_device:
-        #             lvol_device = cur_device
-        #             break
-        #     if lvol_device:
-        #         self.lvol_mount_details[lvol_id]["Device"] = f"/dev/{lvol_device}"
-        #     self.ssh_obj.mount_path(node=self.node, 
-        #                             device=self.lvol_mount_details[lvol_id]["Device"],
-        #                             mount_path=lvol["Mount"])
-                
         for _, lvol in self.lvol_mount_details.items():
-            final_files = self.ssh_obj.find_files(node=self.node, directory=lvol['Mount'])
-            final_checksums = self.ssh_obj.generate_checksums(node=self.node, files=final_files)
-            
+            client = lvol.get("Client", self.node)
+            final_files = self.ssh_obj.find_files(node=client, directory=lvol['Mount'])
+            final_checksums = self.ssh_obj.generate_checksums(node=client, files=final_files)
+
             assert final_checksums == lvol["MD5"], f"Checksum validation for {lvol['Name']} is not successful. Intial: {lvol['MD5']}, Final: {final_checksums}"
 
 
@@ -304,7 +305,7 @@ class TestLvolHAClusterGracefulShutdown(TestLvolHACluster):
         """Main execution."""
         self.logger.info(f"Mount details: {self.lvol_mount_details}")
         self.logger.info("SCE-1: Starting high-volume stress test.")
-        self.node = self.mgmt_nodes[0]
+        self.node = self._pick_client(0)
         self.ssh_obj.make_directory(node=self.node, dir_name=self.log_path)
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
         self.lvol_node = self.sbcli_utils.get_node_without_lvols()
@@ -370,7 +371,7 @@ class TestLvolHAClusterStorageNodeCrash(TestLvolHACluster):
         """Main execution."""
         self.logger.info(f"Mount details: {self.lvol_mount_details}")
         self.logger.info("SCE-2: Starting high-volume stress test.")
-        self.node = self.mgmt_nodes[0]
+        self.node = self._pick_client(0)
         self.ssh_obj.make_directory(node=self.node, dir_name=self.log_path)
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
         self.lvol_node = self.sbcli_utils.get_node_without_lvols()
@@ -428,7 +429,7 @@ class TestLvolHAClusterNetworkInterrupt(TestLvolHACluster):
         """Main execution."""
         self.logger.info(f"Mount details: {self.lvol_mount_details}")
         self.logger.info("SCE-3: Starting high-volume stress test.")
-        self.node = self.mgmt_nodes[0]
+        self.node = self._pick_client(0)
         self.ssh_obj.make_directory(node=self.node, dir_name=self.log_path)
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
         self.lvol_node = self.sbcli_utils.get_node_without_lvols()
@@ -512,7 +513,7 @@ class TestLvolHAClusterPartialNetworkOutage(TestLvolHACluster):
         """Main execution."""
         self.logger.info(f"Mount details: {self.lvol_mount_details}")
         self.logger.info("SCE-4: Starting high-volume stress test.")
-        self.node = self.mgmt_nodes[0]
+        self.node = self._pick_client(0)
         self.ssh_obj.make_directory(node=self.node, dir_name=self.log_path)
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
         self.lvol_node = self.sbcli_utils.get_node_without_lvols()
@@ -595,7 +596,7 @@ class TestLvolHAClusterRunAllScenarios(TestLvolHACluster):
         
         # Setup performed only once
         self.logger.info("Performing initial setup.")
-        self.node = self.mgmt_nodes[0]
+        self.node = self._pick_client(0)
         self.ssh_obj.make_directory(node=self.node, dir_name=self.log_path)
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
         self.lvol_node = self.sbcli_utils.get_node_without_lvols()

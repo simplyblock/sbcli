@@ -1,6 +1,5 @@
 # coding=utf-8
 import copy
-import json
 import random
 import sys
 import time
@@ -13,7 +12,7 @@ from simplyblock_core.controllers import snapshot_controller, pool_controller, l
     snapshot_events
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.exceptions import PreconditionError
-from simplyblock_core.kms import KMSException, create_kms_connection
+from simplyblock_core.kms import KMSException, create_kms_connection, lvol_dek_path, pool_kek_name
 from simplyblock_core.controllers.host_auth import (
     _get_dhchap_group, _register_dhchap_keys_on_node, _register_pool_dhchap_keys_on_node)
 from simplyblock_core.models.cluster import Cluster
@@ -46,7 +45,10 @@ def _create_crypto_lvol(rpc_client, lvol, cluster):
 
     with create_kms_connection(cluster) as kms:
         try:
-            original_key1, original_key2 = kms.get_data_encryption_keys(lvol)
+            original_key1, original_key2 = kms.get_data_encryption_keys(
+                lvol_dek_path(cluster.get_id(), lvol.get_id()),
+                pool_kek_name(lvol.pool_uuid),
+            )
         except KMSException:
             logger.exception(f"Failed to get keys for lvol: {name} from KMS")
             return False
@@ -581,9 +583,16 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
         with create_kms_connection(cl) as kms:
             try:
                 if crypto_key is None:
-                    kms.create_data_encryption_keys(lvol)
+                    kms.create_data_encryption_keys(
+                        lvol_dek_path(cl.get_id(), lvol.get_id()),
+                        pool_kek_name(pool.get_id()),
+                    )
                 else:
-                    kms.import_data_encryption_keys(lvol, crypto_key)
+                    kms.import_data_encryption_keys(
+                        lvol_dek_path(cl.get_id(), lvol.get_id()),
+                        pool_kek_name(pool.get_id()),
+                        crypto_key,
+                    )
                 logger.info("Created lvol keys")
             except KMSException:
                 msg = "Failed to create lvol keys"
@@ -1459,7 +1468,7 @@ def delete_lvol(lvol: LVol, *, force_delete: bool = False) -> None:
     if lvol.crypto_bdev:
         with create_kms_connection(cl) as kms:
             try:
-                kms.delete_data_encryption_keys(lvol.crypto_bdev)
+                kms.delete_data_encryption_keys(lvol_dek_path(cl.get_id(), lvol.get_id()))
                 logger.info("Deleted lvol key")
             except KMSException:
                 logger.exception("Failed to delete lvol key")
@@ -1582,7 +1591,7 @@ def set_lvol(uuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, name=
     return True
 
 
-def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
+def list_lvols(cluster_id, pool_id_or_name, all=False):
     db_controller = DBController()
     lvols = []
     if cluster_id:
@@ -1658,10 +1667,7 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
         }
         data.append(lvol_data)
 
-    if is_json:
-        return json.dumps(data, indent=2)
-    else:
-        return utils.print_table(data)
+    return data
 
 
 def get_replication_info(lvol_id_or_name):
@@ -1722,7 +1728,7 @@ def get_replication_info(lvol_id_or_name):
     return out
 
 
-def get_lvol(lvol_id_or_name, is_json):
+def get_lvol(lvol_id_or_name):
     db_controller = DBController()
     try:
         lvol = db_controller.get_lvol_by_id(lvol_id_or_name)
@@ -1745,11 +1751,7 @@ def get_lvol(lvol_id_or_name, is_json):
     policy = db_controller.get_policy_for_lvol(lvol)
     data['policy'] = policy.policy_name if policy else ""
 
-    if is_json:
-        return json.dumps(data, indent=2)
-    else:
-        data2 = [{"key": key, "value": data[key]} for key in data]
-        return utils.print_table(data2)
+    return data
 
 
 def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, host_nqn=None):
@@ -1771,8 +1773,8 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
             if h["nqn"] == host_nqn:
                 host_entry = h
                 pool = db_controller.get_pool_by_id(lvol.pool_uuid)
-                host_entry["dhchap_key"] = pool.dhchap_key
-                host_entry["dhchap_ctrlr_key"] = pool.dhchap_ctrlr_key
+                host_entry["dhchap_key"] = pool.dhchap_key.get_secret_value()
+                host_entry["dhchap_ctrlr_key"] = pool.dhchap_ctrlr_key.get_secret_value()
                 break
         if not host_entry:
             return False, f"Host NQN {host_nqn} not found in allowed hosts for volume {uuid}"
@@ -2330,7 +2332,7 @@ def replication_start(lvol_id, replication_cluster_id=None):
     return True
 
 
-def list_by_node(node_id=None, is_json=False):
+def list_by_node(node_id=None):
     db_controller = DBController()
     lvols = db_controller.get_lvols()
     lvols = sorted(lvols, key=lambda x: x.create_dt)
@@ -2357,9 +2359,7 @@ def list_by_node(node_id=None, is_json=False):
             "Created At": lvol.create_dt,
             "Status": lvol.status,
         })
-    if is_json:
-        return json.dumps(data, indent=2)
-    return utils.print_table(data)
+    return data
 
 
 def clone_lvol(lvol_id, clone_name, new_size=None, pvc_name=None):
@@ -2537,16 +2537,7 @@ def replicate_lvol_on_target_cluster(lvol_id):
     ]
 
     if new_lvol.crypto_bdev:
-        new_lvol.bdev_stack.append({
-            "type": "crypto",
-            "name": new_lvol.crypto_bdev,
-            "params": {
-                "name": new_lvol.crypto_bdev,
-                "base_name": new_lvol.top_bdev,
-                "key1": new_lvol.crypto_key1,
-                "key2": new_lvol.crypto_key2,
-            }
-        })
+        new_lvol.bdev_stack.append({"type": "crypto"})
 
     new_lvol.write_to_db(db_controller.kv_store)
 
@@ -2803,16 +2794,7 @@ def replicate_lvol_on_source_cluster(lvol_id, cluster_id=None, pool_uuid=None):
     ]
 
     if new_lvol.crypto_bdev:
-        new_lvol.bdev_stack.append({
-            "type": "crypto",
-            "name": new_lvol.crypto_bdev,
-            "params": {
-                "name": new_lvol.crypto_bdev,
-                "base_name": new_lvol.top_bdev,
-                "key1": new_lvol.crypto_key1,
-                "key2": new_lvol.crypto_key2,
-            }
-        })
+        new_lvol.bdev_stack.append({"type": "crypto"})
 
     new_lvol.write_to_db(db_controller.kv_store)
 
@@ -3041,43 +3023,6 @@ def remove_host_from_lvol(lvol_id, host_nqn):
     if errors:
         return True, f"Warning: SPDK remove_host failed on nodes: {', '.join(errors)}"
     return True, None
-
-
-def get_master_lvols_by_pool_uuid(pool_id, is_json=False):
-    db_controller = DBController()
-    lvols = db_controller.get_lvols_by_pool_id(pool_id)
-
-    # Count namespaced children per subsystem root in one pass instead of
-    # issuing a separate DB scan for each root (was O(M×N)).
-    ns_counts: dict[str, int] = {}
-
-    for lv in lvols:
-        if lv.namespace:
-            ns_counts[lv.namespace] = ns_counts.get(lv.namespace, 0) + 1
-
-    data = []
-
-    for lvol in lvols:
-        if lvol.deleted:
-            continue
-        if lvol.namespace:
-            continue
-
-        lvol_data = {
-            "Id": lvol.uuid,
-            "Name": lvol.lvol_name,
-            "Size": utils.humanbytes(lvol.size),
-            "Hostname": lvol.hostname,
-            "Status": lvol.status,
-            "Namespaces": ns_counts.get(lvol.uuid, 0),
-            "MaxNamespaces": lvol.max_namespace_per_subsys,
-        }
-        data.append(lvol_data)
-
-    if is_json:
-        return json.dumps(data, indent=2)
-    else:
-        return utils.print_table(data)
 
 
 def get_namespaces_per_lvol(lvol):

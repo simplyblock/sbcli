@@ -1,49 +1,41 @@
-import re
+import json
 
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.cluster import Cluster
-from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.utils import generate_hex_string
 
 from ._base import KMS
 from ._exceptions import KMSException
 
-_KEY_NAME_PATTERN = re.compile(r"^crypto_(?P<lvol_bdev>.*)$")
-
 
 class LocalKMS(KMS):
     def __init__(self, cluster: Cluster):
-        self._db_controller = DBController()
-        self._cluster_id = cluster.get_id()
+        kv_store = DBController().kv_store
+        if kv_store is None:
+            raise KMSException("No database connection")
+        self._kv_store = kv_store
 
-    def _lvol_by_data_encryption_key_name(self, name: str) -> LVol:
-        if (match := re.match(_KEY_NAME_PATTERN, name)) is None:
-            raise KMSException("Key name does not match expectations")
+    @staticmethod
+    def _key(path: str) -> bytes:
+        return f"keys/{path}".encode()
 
-        lvol_bdev = match.group("lvol_bdev")
-        try:
-            return next(
-                lvol
-                for lvol in self._db_controller.get_lvols(cluster_id=self._cluster_id)
-                if lvol.lvol_bdev == lvol_bdev
-            )
-        except StopIteration:
-            raise KMSException(f"No LVol found for key {name}")
+    def create_data_encryption_keys(self, path: str, kek_name: str) -> None:
+        self.import_data_encryption_keys(
+            path, kek_name, (generate_hex_string(32), generate_hex_string(32)),
+        )
 
-    def create_data_encryption_keys(self, lvol: LVol) -> None:
-        self.import_data_encryption_keys(lvol, (generate_hex_string(32), generate_hex_string(32)))
+    def import_data_encryption_keys(self, path: str, kek_name: str, keys: tuple[str, str]) -> None:
+        self._kv_store.set(self._key(path), json.dumps(list(keys)).encode())
 
-    def import_data_encryption_keys(self, lvol: LVol, keys: tuple[str, str]) -> None:
-        lvol.crypto_key1, lvol.crypto_key2 = keys
+    def get_data_encryption_keys(self, path: str, kek_name: str) -> tuple[str, str]:
+        raw = self._kv_store.get(self._key(path))
+        if not raw:
+            raise KMSException(f"No keys found at {path}")
+        key1, key2 = json.loads(raw)
+        return key1, key2
 
-    def get_data_encryption_keys(self, lvol: LVol) -> tuple[str, str]:
-        return lvol.crypto_key1, lvol.crypto_key2
-
-    def delete_data_encryption_keys(self, name: str) -> None:
-        lvol = self._lvol_by_data_encryption_key_name(name)
-        lvol.crypto_key1 = None  # type: ignore[assignment]
-        lvol.crypto_key2 = None  # type: ignore[assignment]
-        lvol.write_to_db(self._db_controller.kv_store)
+    def delete_data_encryption_keys(self, path: str) -> None:
+        self._kv_store.clear(self._key(path))
 
     def create_key_encryption_key(self, name: str) -> None:
         pass

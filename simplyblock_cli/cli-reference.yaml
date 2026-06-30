@@ -835,7 +835,7 @@ commands:
           - name: "--CLI_PASS"
             help: "The password for CLI SSH connection."
             dest: CLI_PASS
-            type: str
+            type: secret
             private: true
           - name: "--cap-warn"
             help: "The capacity warning level in percent. Default: `89`."
@@ -1341,7 +1341,7 @@ commands:
           - name: "secret"
             help: "The new 20 characters password."
             dest: secret
-            type: str
+            type: secret
       - name: update-fabric
         help: "Updates a cluster's fabric."
         arguments:
@@ -2001,7 +2001,7 @@ commands:
           - name: "cluster_secret"
             help: "The cluster secret."
             dest: cluster_secret
-            type: str
+            type: secret
           - name: "--ifname"
             help: "The management interface name."
             dest: ifname

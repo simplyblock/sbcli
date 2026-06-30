@@ -14,11 +14,13 @@ REST API server for the Simplyblock control plane. Runs as a single uvicorn proc
 
 Use these patterns when adding new v2 endpoints:
 
-**DTOs** (`_dtos.py`): Pydantic `BaseModel` subclasses. Each DTO has a `from_model(model, ...)` static method that converts a core model into the DTO. Never expose core models directly in API responses.
+**DTOs** (`_dtos.py`): Pydantic `BaseModel` subclasses. Each DTO has a `from_model(model, ...)` static method that converts a core model into the DTO. Never expose core models directly in API responses. DTO fields that carry secrets use `SecretStr` with a `@field_serializer('field', when_used='json')` that calls `value.get_secret_value()` — this keeps wrappers in Python-mode `model_dump()` (safe for logging) while unwrapping to plaintext in `model_dump_json()` (for wire responses).
 
 **Dependencies** (`_dependencies.py`): FastAPI `Depends()`-based resource lookup. Typed aliases like `Cluster`, `StorageNode`, `Volume`, `Snapshot` resolve path parameters to core model objects (raising 404 on miss). Dependencies chain — e.g., `Volume` depends on `StoragePool` which depends on `Cluster` — enforcing hierarchical ownership.
 
-**Auth** (`_auth.py`): `verify_api_token` dependency on all routers. Supports k8s service account tokens (via TokenReview) and cluster-secret bearer tokens. Admin service accounts bypass per-cluster checks.
+**Auth** (`_auth.py`): `verify_api_token` dependency on all routers. Supports k8s service account tokens (via TokenReview) and cluster-secret bearer tokens. Admin service accounts bypass per-cluster checks. Secret comparison uses `hmac.compare_digest(secret.get_secret_value(), token)` for timing safety.
+
+**Access logging** (`app.py`): The `AccessLogMiddleware` logs only `request.url.path`, never the query string — query parameters can carry credentials (`?secret=…`, `?token=…`) and have no type info to mask by.
 
 **Route naming**: Routes use `name="resource:action"` format (e.g., `"clusters:pools:volumes:detail"`) for `request.url_for()` cross-references in DTOs.
 
@@ -34,6 +36,9 @@ Flask Blueprints registered in `api/v1/__init__.py`. Each resource module (`clus
 
 ## Tests
 
+Web-API tests live alongside the rest of the suite. Run via tox:
+
 ```bash
-pytest simplyblock_web/test/
+tox run -e unit -- tests/unit/web/         # unit tests for v2 auth / settings
+tox run -e integration                     # FDB-backed flow tests
 ```

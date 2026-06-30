@@ -1,6 +1,5 @@
 # coding=utf-8
 import datetime
-import json
 import logging
 import socket
 import time
@@ -218,6 +217,20 @@ def add_device_to_auto_restart(device):
     return _add_task(JobSchedule.FN_DEV_RESTART, device.cluster_id, device.node_id, device.get_id())
 
 
+def is_auto_restart_paused(cluster):
+    """Auto-restart is paused while a SUSPENDED cluster is still being drained
+    to a clean all-offline slate by the suspend-recovery auto-shutdown
+    (storage_node_monitor). Recovering a suspended cluster by restarting nodes
+    piecemeal — while others are still up or half-initialized — is what strands
+    it (e.g. a node left lvstore_status "in_creation" that then never gets
+    health-checked). So we hold every restart until the drain is complete
+    (cluster.suspend_drain_complete), then let the existing auto-restart bring
+    the nodes back from offline. Used by both the queue chokepoint
+    (add_node_to_auto_restart) and the restart task runner."""
+    return (cluster.status == Cluster.STATUS_SUSPENDED
+            and not cluster.suspend_drain_complete)
+
+
 def add_node_to_auto_restart(node):
     # Auto-restart kills SPDK and runs the full recreate path. Only states
     # where SPDK itself is the problem warrant that:
@@ -266,6 +279,17 @@ def add_node_to_auto_restart(node):
         return False
 
     cluster = db.get_cluster_by_id(node.cluster_id)
+    # Suspended cluster: hold every auto-restart until the suspend-recovery
+    # auto-shutdown has drained the whole cluster offline. Restarting nodes
+    # one-by-one before the drain completes is exactly what wedged the cluster
+    # (stale ONLINE peers / stuck lvstore "in_creation"). Once
+    # suspend_drain_complete flips true, the normal path below runs.
+    if is_auto_restart_paused(cluster):
+        logger.info(
+            "Cluster %s is SUSPENDED and not yet drained; pausing auto-restart "
+            "for node %s until all nodes are offline",
+            node.cluster_id, node.get_id())
+        return False
     if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED,
                               Cluster.STATUS_READONLY, Cluster.STATUS_UNREADY, Cluster.STATUS_SUSPENDED]:
         logger.warning(f"Cluster is not active, skip node auto restart, status: {cluster.status}")
@@ -319,8 +343,8 @@ def list_tasks(cluster_id, is_json=False, limit=50, **kwargs):
                 continue
             data.append(t.get_clean_dict())
             if len(data)+1 > limit > 0:
-                return json.dumps(data, indent=2)
-        return json.dumps(data, indent=2)
+                return utils.dump_json(data, indent=2, unwrap_secrets=True)
+        return utils.dump_json(data, indent=2, unwrap_secrets=True)
 
     for task in tasks:
         if task.function_name == JobSchedule.FN_DEV_MIG:
@@ -357,8 +381,8 @@ def list_tasks(cluster_id, is_json=False, limit=50, **kwargs):
             "Updated At": upd or "",
         })
         if len(data)+1 > limit > 0:
-            return utils.print_table(data)
-    return utils.print_table(data)
+            return utils.print_table(data, unwrap_secrets=True)
+    return utils.print_table(data, unwrap_secrets=True)
 
 
 def cancel_task(task_id):

@@ -37,18 +37,17 @@ or rolling back from the target we verify that no other volume still on
 that node references it through its ``cloned_from_snap`` lineage.
 """
 
-import json
 import logging
 import random
 import time
 import uuid
 from datetime import datetime
 
-from simplyblock_core import constants, utils
+from simplyblock_core import constants
 from simplyblock_core.controllers import migration_events, tasks_controller, snapshot_controller
 from simplyblock_core.exceptions import MigrationConflictError, PreconditionError
 from simplyblock_core.controllers.host_auth import _reapply_allowed_hosts
-from simplyblock_core.kms import create_kms_connection
+from simplyblock_core.kms import create_kms_connection, lvol_dek_path, pool_kek_name
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.lvol_migration import LVolMigration
 from simplyblock_core.models.lvol_model import LVol
@@ -78,7 +77,6 @@ def start_migration(migration_id,
 
     Returns migration_uuid on success; raises ValueError on failure.
     """
-    print(f"hi sadegh — start_migration called: migration_id={migration_id}", flush=True)
     try:
         migration = db.get_migration_by_id(migration_id)
     except KeyError:
@@ -329,7 +327,7 @@ def is_migration_active_on_node(node_id, cluster_id=None):
     return False
 
 
-def list_migrations(cluster_id=None, is_json=False):
+def list_migrations(cluster_id=None):
     """Return a formatted list (table or JSON) of all migrations."""
     migrations = db.get_migrations(cluster_id)
     migrations = sorted(migrations, key=lambda x: x.create_dt)
@@ -348,22 +346,16 @@ def list_migrations(cluster_id=None, is_json=False):
             "Retries": f"{m.retry_count}/{m.max_retries}",
             "Error": m.error_message or "",
         })
-    if is_json:
-        return json.dumps(data, indent=2)
-    return utils.print_table(data)
+    return data
 
 
-def get_migration(migration_id, is_json=False):
+def get_migration(migration_id):
     """Return details for a single migration."""
     try:
-        m = db.get_migration_by_id(migration_id)
+        return db.get_migration_by_id(migration_id)
     except KeyError as e:
         logger.error(e)
         return False
-    if is_json:
-        return json.dumps(m.get_clean_dict(), indent=2)
-    data = [m.get_clean_dict()]
-    return utils.print_table(data)
 
 
 # ---------------------------------------------------------------------------
@@ -663,6 +655,9 @@ def create_migration(lvol_id, target_node_id,
                 f"(phase={existing_migration.phase}). Use /continue or cancel it.")
 
     src_node_id = lvol.node_id
+    if src_node_id == target_node_id:
+        raise ValueError(f"LVol {lvol_id} is already on node {target_node_id}; cannot migrate to the same node")
+
     try:
         src_node = db.get_storage_node_by_id(src_node_id)
     except KeyError:
@@ -832,7 +827,10 @@ def create_migration(lvol_id, target_node_id,
             else:
                 try:
                     with create_kms_connection(cluster) as kms:
-                        _key1, _key2 = kms.get_data_encryption_keys(lvol)
+                        _key1, _key2 = kms.get_data_encryption_keys(
+                            lvol_dek_path(cluster.get_id(), lvol.get_id()),
+                            pool_kek_name(lvol.pool_uuid),
+                        )
                     _key_name = f"key_{_crypto_short}"
                     _ret = _rpc.lvol_crypto_key_create(_key_name, _key1, _key2)
                     if not _ret:
@@ -874,7 +872,6 @@ def create_migration(lvol_id, target_node_id,
                         f"create_migration: listener on overlap {_node_id[:8]} "
                         f"(non-fatal): {_e}")
         else:
-            print(f"hi sadegh — tgt_entries loop: node={_node_id[:8]} _min_cntlid={_min_cntlid} subsys_exists={bool(_rpc.subsystem_list(nqn))}", flush=True)
             if not _rpc.subsystem_list(nqn):
                 if _min_cntlid in subsys_min_cntlid_used:
                     _min_cntlid = _min_cntlid + 10000

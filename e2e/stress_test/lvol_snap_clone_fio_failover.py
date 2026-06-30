@@ -43,16 +43,23 @@ class TestLvolHAClusterWithClones(TestLvolHACluster):
         self.node_vs_lvol = []
 
     def create_clones(self):
-        """Create clones for snapshots."""
+        """Create clones for snapshots on the same client as the parent lvol."""
         self.logger.info("Creating clones from snapshots.")
         for idx, lvol_id in enumerate(list(self.lvol_mount_details.keys())):
+            # Clone goes on same client VM as its parent lvol
+            client = self.lvol_mount_details[lvol_id].get("Client", self.node)
             snapshot_name = self.lvol_mount_details[lvol_id]["snapshots"][0]
-            snapshot_id = self.ssh_obj.get_snapshot_id(node=self.node, snapshot_name=snapshot_name)
+            snapshot_id = self.ssh_obj.get_snapshot_id(node=client, snapshot_name=snapshot_name)
             self.lvol_mount_details[lvol_id]["clones"] = []
             for clone_idx in range(1, self.total_clones_per_lvol + 1):
                 clone_name = f"{self.clone_name}_{idx + 1}_{clone_idx}"
+
+                # Snapshot device list BEFORE clone creation — namespaced
+                # clones may auto-appear once parent subsystem is connected.
+                initial_devices = set(self.ssh_obj.get_devices(node=client))
+
                 self.ssh_obj.add_clone(
-                    node=self.node, snapshot_id=snapshot_id, clone_name=clone_name
+                    node=client, snapshot_id=snapshot_id, clone_name=clone_name
                 )
                 clone_id = self.sbcli_utils.get_lvol_id(lvol_name=clone_name)
                 connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=clone_name)
@@ -65,39 +72,71 @@ class TestLvolHAClusterWithClones(TestLvolHACluster):
                    "Device": None,
                    "MD5": None,
                    "FS": self.lvol_mount_details[lvol_id]["FS"],
+                   "Client": client,
                    "Log": f"{self.log_path}/{clone_name}.log",
                    "snapshots": snapshot_name
                 }
-
-                initial_devices = self.ssh_obj.get_devices(node=self.node)
+                already_connected = False
                 for connect_str in connect_ls:
-                    self.ssh_obj.exec_command(node=self.node, command=connect_str)
+                    _, error = self.ssh_obj.exec_command(
+                        node=client, command=connect_str)
+                    if error and "already connected" in error.lower():
+                        already_connected = True
 
                 sleep_n_sec(3)
-                final_devices = self.ssh_obj.get_devices(node=self.node)
+                final_devices = set(self.ssh_obj.get_devices(node=client))
+                new_devices = list(final_devices - initial_devices)
                 clone_device = None
-                for device in final_devices:
-                    if device not in initial_devices:
-                        clone_device = f"/dev/{device.strip()}"
-                        break
+                if new_devices:
+                    clone_device = f"/dev/{new_devices[0].strip()}"
+
+                if not clone_device and already_connected:
+                    # Namespaced clone shares parent's NQN — ns-rescan needed
+                    out, _ = self.ssh_obj.exec_command(
+                        client,
+                        "ls /dev/nvme[0-9]* 2>/dev/null | grep -oP 'nvme\\d+$' "
+                        "| sort -u",
+                        supress_logs=True,
+                    )
+                    for ctrl in (out or "").strip().splitlines():
+                        ctrl = ctrl.strip()
+                        if ctrl:
+                            self.ssh_obj.exec_command(
+                                client,
+                                f"sudo nvme ns-rescan /dev/{ctrl}",
+                                supress_logs=True,
+                            )
+                    sleep_n_sec(3)
+                    rescan_devices = set(self.ssh_obj.get_devices(node=client))
+                    new_after_rescan = list(rescan_devices - initial_devices)
+                    if new_after_rescan:
+                        clone_device = f"/dev/{new_after_rescan[0].strip()}"
+                        self.logger.info(
+                            f"[clone_connect] Located {clone_name} device "
+                            f"after ns-rescan: {clone_device}")
+
                 if not clone_device:
                     raise LvolNotConnectException("Clone did not connect")
                 self.clone_mount_details[clone_id]["Device"] = clone_device
 
-                # Mount and Run FIO
+                # Mount
+                fs_type = self.clone_mount_details[clone_id]["FS"]
+                if fs_type == "xfs":
+                    self.ssh_obj.clone_mount_gen_uuid(client, clone_device)
                 mount_point = f"{self.mount_path}/{clone_name}"
-                self.ssh_obj.mount_path(node=self.node, device=clone_device, mount_path=mount_point)
+                self.ssh_obj.mount_path(node=client, device=clone_device, mount_path=mount_point)
                 self.clone_mount_details[clone_id]["Mount"] = mount_point
         self.logger.info("Clones created successfully.")
 
     def run_fio_on_lvols_clones(self):
         """Run FIO workloads on all lvols and clones."""
         self.logger.info("Running FIO workloads on lvols and clones.")
-        
+
         for _, lvol_details in self.lvol_mount_details.items():
+            client = lvol_details.get("Client", self.node)
             fio_thread = threading.Thread(
                 target=self.ssh_obj.run_fio_test,
-                args=(self.node, None, lvol_details["Mount"], lvol_details["Log"]),
+                args=(client, None, lvol_details["Mount"], lvol_details["Log"]),
                 kwargs={
                     "size": self.fio_size,
                     "name": f"{lvol_details['Name']}_fio",
@@ -111,9 +150,10 @@ class TestLvolHAClusterWithClones(TestLvolHACluster):
             self.fio_threads.append(fio_thread)
 
         for _, clone_details in self.clone_mount_details.items():
+            client = clone_details.get("Client", self.node)
             fio_thread = threading.Thread(
                 target=self.ssh_obj.run_fio_test,
-                args=(self.node, None, clone_details["Mount"], clone_details["Log"]),
+                args=(client, None, clone_details["Mount"], clone_details["Log"]),
                 kwargs={
                     "size": self.fio_size,
                     "name": f"{clone_details['Name']}_fio",
@@ -139,7 +179,7 @@ class TestFailoverScenariosStorageNodes(TestLvolHAClusterWithClones):
 
         # Ensure the setup is performed once
         self.logger.info("Performing initial setup.")
-        self.node = self.mgmt_nodes[0]
+        self.node = self._pick_client(0)
 
         self.sbcli_utils.add_storage_pool(pool_name=self.pool_name)
 
@@ -225,9 +265,11 @@ class TestFailoverScenariosStorageNodes(TestLvolHAClusterWithClones):
         sleep_n_sec(60)
 
         for _, lvol_details in self.lvol_mount_details.items():
-            self.common_utils.validate_fio_test(self.node, lvol_details["Log"])
-        
+            client = lvol_details.get("Client", self.node)
+            self.common_utils.validate_fio_test(client, lvol_details["Log"])
+
         for _, clone_details in self.clone_mount_details.items():
-            self.common_utils.validate_fio_test(self.node, clone_details["Log"])
+            client = clone_details.get("Client", self.node)
+            self.common_utils.validate_fio_test(client, clone_details["Log"])
 
         self.logger.info(f"{failover_type} failover scenario completed.")

@@ -124,6 +124,39 @@ CLUSTER_ADD_LOCK_TTL_SEC = 120
 # loses its reserved port.
 PORT_RESERVATION_TTL_SEC = 600
 
+# Snapshot create concurrency: the primary-create + replica-register sequence of
+# a snapshot is serialized per lvstore behind an LVStoreMutationLock so that
+# concurrent snapshot creates of the same lvstore register on the
+# secondary/tertiary in creation (blobid) order. Out-of-order registration
+# builds the replica blob tree with a child before its parent and corrupts the
+# lvstore. The holder refreshes the lock every LVSTORE_MUTATION_LOCK_HEARTBEAT_SEC;
+# a lock whose heartbeat is older than LVSTORE_MUTATION_LOCK_TTL_SEC is treated
+# as abandoned (holder crashed) and may be reclaimed. A caller waits at most
+# LVSTORE_MUTATION_LOCK_WAIT_SEC for the lock before failing (retryable). TTL is
+# several heartbeats wide so a live-but-slow holder (a register RPC can take many
+# seconds under load) is never falsely preempted.
+LVSTORE_MUTATION_LOCK_HEARTBEAT_SEC = 15
+LVSTORE_MUTATION_LOCK_TTL_SEC = 60
+LVSTORE_MUTATION_LOCK_WAIT_SEC = 120
+
+# A create/snapshot/clone request may block on two sequential waits before doing
+# any RPC work: first the node-level sync-delete drain (LVOL_SYNC_DELETE_WAIT_SEC),
+# then the per-lvstore mutation lock (LVSTORE_MUTATION_LOCK_WAIT_SEC). These locks
+# MUST time out before the front-end API cuts the connection, otherwise a waiting
+# request is severed mid-operation and can leave a half-registered object. The
+# invariant the deployment must hold (HAProxy timeout server/client in
+# scripts/haproxy.cfg is the binding API timeout; uvicorn imposes none; the CLI
+# runs controllers in-process):
+#
+#   API_OPERATION_TIMEOUT  >  LVOL_SYNC_DELETE_WAIT_SEC
+#                             + LVSTORE_MUTATION_LOCK_WAIT_SEC
+#                             + worst-case create+register RPC work
+#
+# Current budget: 60 + 120 = 180s max lock wait, leaving 120s of the 300s API
+# timeout for RPC work. Keep haproxy.cfg in sync if these change.
+LVOL_SYNC_DELETE_WAIT_SEC = 60
+API_OPERATION_TIMEOUT_SEC = 300
+
 # An LVol left in STATUS_IN_CREATION longer than this is treated as an orphaned
 # create (the creating process died before reaching ONLINE) and is cleaned up
 # by lvol_monitor. Must be comfortably longer than the slowest legitimate
@@ -203,6 +236,8 @@ CLIENT_QPAIR_COUNT=3
 # action_on_timeout=reset switch — that switch stays; only the threshold
 # reverts).
 NVME_TIMEOUT_US=8000000
+PCIE_TIMEOUT_US=2000000
+
 NVMF_MAX_SUBSYSTEMS=50000
 KATO=5000
 # transport_ack_timeout exponent: server tears down a client qpair if it

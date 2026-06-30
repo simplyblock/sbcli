@@ -1,4 +1,5 @@
 # coding=utf-8
+import sys
 import time
 from typing import Optional
 
@@ -23,17 +24,38 @@ def get_primary_node(task) -> Optional[StorageNode]:
 
 
 logger.info("Starting Tasks runner...")
+
+# A persistent FDB read failure — or an unexpectedly empty cluster list — on this
+# long-lived process means the FDB client is wedged: fdb.open() caches the
+# Database and the network thread is per-process, so re-reading the same handle
+# never recovers; only a fresh process does. Incident
+# mass_create_delete_docker-20260629: this runner sat idle ~8h logging
+# "No clusters found!" after a startup FDBError(1031), so 2,664 lvols never
+# drained from in_deletion. Exit after this many consecutive failures so the
+# orchestrator restarts us with a clean FDB connection (~3 min at the 3s tick).
+_DB_FAILURE_RESTART_THRESHOLD = 60
+_consecutive_db_failures = 0
 while True:
     try:
-        db.get_clusters()
+        clusters = db.get_clusters()
     except Exception as e:
-        logger.error(f"Failed to get clusters: {e}")
+        _consecutive_db_failures += 1
+        logger.error(f"Failed to get clusters ({_consecutive_db_failures}): {e}")
+        if _consecutive_db_failures >= _DB_FAILURE_RESTART_THRESHOLD:
+            logger.error("FDB unreadable for too long; exiting for a clean restart")
+            sys.exit(1)
         time.sleep(3)
         continue
-    clusters = db.get_clusters()
+
     if not clusters:
-        logger.error("No clusters found!")
+        _consecutive_db_failures += 1
+        logger.error(f"No clusters found! ({_consecutive_db_failures})")
+        if _consecutive_db_failures >= _DB_FAILURE_RESTART_THRESHOLD:
+            logger.error("No clusters readable for too long (FDB client likely wedged); "
+                         "exiting for a clean restart")
+            sys.exit(1)
     else:
+        _consecutive_db_failures = 0
         for cl in clusters:
             if cl.status == Cluster.STATUS_IN_ACTIVATION:
                 continue

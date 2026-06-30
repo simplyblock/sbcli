@@ -68,43 +68,71 @@ class TestManyClonesFromSameSnapshot(TestClusterBase):
         # Print timings
         self.print_timings()
 
-    def connect_and_mount_lvol(self, lvol_name, lvol_id):
-        """Connects and mounts a logical volume"""
-        initial_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
+    def connect_and_mount_lvol(self, lvol_name, lvol_id, pre_initial_devices=None):
+        """Connects and mounts a logical volume.
+
+        Args:
+            pre_initial_devices: If provided, use this as the baseline device
+                set for diff detection (should be captured before clone creation
+                so namespaced clones that auto-appear are caught).
+        """
+        node = self.mgmt_nodes[0]
+        if pre_initial_devices is not None:
+            initial_devices = pre_initial_devices
+        else:
+            initial_devices = set(self.ssh_obj.get_devices(node=node))
 
         # Connect LVOL
         self.logger.info(f"Connecting logical volume: {lvol_id}")
         connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)
         start_time = time.time()
+        already_connected = False
         for connect_str in connect_ls:
-            self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command=connect_str)
+            _, error = self.ssh_obj.exec_command(node=node, command=connect_str)
+            if error and "already connected" in error.lower():
+                already_connected = True
         end_time = time.time()
 
         time_taken = end_time - start_time
         self.timings.append(f"Connect {lvol_name} - {time_taken} seconds")
 
-        final_devices = self.ssh_obj.get_devices(node=self.mgmt_nodes[0])
+        final_devices = set(self.ssh_obj.get_devices(node=node))
+        new_devices = list(final_devices - initial_devices)
         lvol_device = None
-        for device in final_devices:
-            if device not in initial_devices:
-                lvol_device = f"/dev/{device.strip()}"
-                break
+        if new_devices:
+            lvol_device = f"/dev/{new_devices[0].strip()}"
 
-        # Format LVOL
-        self.format_fs(lvol_device, self.fs_type)
+        if not lvol_device and already_connected:
+            # Namespaced clone shares parent's NQN — ns-rescan needed
+            out, _ = self.ssh_obj.exec_command(
+                node,
+                "ls /dev/nvme[0-9]* 2>/dev/null | grep -oP 'nvme\\d+$' "
+                "| sort -u",
+                supress_logs=True,
+            )
+            for ctrl in (out or "").strip().splitlines():
+                ctrl = ctrl.strip()
+                if ctrl:
+                    self.ssh_obj.exec_command(
+                        node, f"sudo nvme ns-rescan /dev/{ctrl}",
+                        supress_logs=True,
+                    )
+            sleep_n_sec(3)
+            rescan_devices = set(self.ssh_obj.get_devices(node=node))
+            new_after_rescan = list(rescan_devices - initial_devices)
+            if new_after_rescan:
+                lvol_device = f"/dev/{new_after_rescan[0].strip()}"
+
+        # Format LVOL (skip for clones — they already have data)
+        is_clone = "cl" in lvol_name
+        if not is_clone:
+            self.format_fs(lvol_device, self.fs_type)
 
         # Mount LVOL
         mount_point = f"{self.mount_path}/{lvol_name}"
-        if self.fs_type == "xfs" and "cl" in lvol_name:
-            cmd=f"sudo xfs_admin -U generate {lvol_device}"
-            self.logger.info(f"Run command (before mounting dev formatted in xfs: {cmd}")
-            self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command=cmd)
-            self.logger.info(f"Mounting clone device: {lvol_device} at {mount_point}")
-            cmd = f"sudo mount {lvol_device} {mount_point} -o nouuid"
-            self.ssh_obj.exec_command(node=self.mgmt_nodes[0], command=cmd)
-        else:
-            self.logger.info(f"Mounting clone {lvol_name} at {mount_point}")
-            self.ssh_obj.mount_path(node=self.mgmt_nodes[0], device=lvol_device, mount_path=mount_point)
+        if self.fs_type == "xfs" and is_clone:
+            self.ssh_obj.clone_mount_gen_uuid(node, lvol_device)
+        self.ssh_obj.mount_path(node=node, device=lvol_device, mount_path=mount_point)
 
         return lvol_device
 
@@ -142,11 +170,15 @@ class TestManyClonesFromSameSnapshot(TestClusterBase):
         """Creates a clone from a snapshot and runs FIO workload"""
         snapshot_id = self.ssh_obj.get_snapshot_id(node=self.mgmt_nodes[0], snapshot_name=snapshot_name)
         self.logger.info(f"Creating clone from snapshot: {snapshot_name} with clone name {clone_name}")
+
+        # Capture device list before clone creation — namespaced clones
+        # may auto-appear if parent subsystem is already connected.
+        initial_devices = set(self.ssh_obj.get_devices(node=self.mgmt_nodes[0]))
         self.ssh_obj.add_clone(node=self.mgmt_nodes[0], snapshot_id=snapshot_id, clone_name=clone_name)
 
         # Get the clone's LVOL ID and connect it
         clone_id = self.sbcli_utils.get_lvol_id(lvol_name=clone_name)
-        lvol_device = self.connect_and_mount_lvol(clone_name, clone_id)
+        lvol_device = self.connect_and_mount_lvol(clone_name, clone_id, pre_initial_devices=initial_devices)
 
         # Run FIO workload on the clone
         mount_point_clone = f"{self.mount_path}/{clone_name}"

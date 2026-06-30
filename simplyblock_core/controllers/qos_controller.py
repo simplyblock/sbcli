@@ -1,9 +1,8 @@
 # coding=utf-8
-import json
 import logging
 import uuid
 
-from simplyblock_core import utils, constants
+from simplyblock_core import constants
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.qos import QOSClass
@@ -63,23 +62,17 @@ def add_class(name: str, weight: int, cluster_id: str) -> bool:
     return True
 
 
-def list_classes(cluster_id=None, is_json=False):
-    classes = db.get_qos(cluster_id)
-    classes = sorted(classes, key=lambda x: x.class_id)
-    data = []
-    for qos_class in classes:
-        data.append({
+def list_classes(cluster_id=None):
+    return [
+        {
             "UUID": qos_class.uuid,
             "Class ID": qos_class.class_id,
             "Name": qos_class.class_name,
             "Weight": qos_class.weight,
             "Cluster ID": qos_class.cluster_id,
-        })
-
-    if is_json:
-        return json.dumps(data, indent=2)
-    else:
-        return utils.print_table(data)
+        }
+        for qos_class in sorted(db.get_qos(cluster_id), key=lambda x: x.class_id)
+    ]
 
 
 def delete_class(name, cluster_id):

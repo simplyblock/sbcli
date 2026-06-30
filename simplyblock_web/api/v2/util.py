@@ -1,4 +1,4 @@
-from typing import Annotated, Any, Callable, Literal
+from typing import Annotated, Any, Callable, Literal, Optional
 from urllib.parse import urlparse
 from uuid import UUID
 
@@ -40,16 +40,17 @@ def creation_response(
     route_name: str,
     route_kwargs: dict[str, UUID],
     get_full: Callable[[UUID], BaseModel],
-    extra_headers: dict[str, str] | None = None,
+    extra_headers: Optional[dict[str, str]] = None,
 ) -> Response:
     headers = {"Location": str(request.app.url_path_for(route_name, **route_kwargs))}
     if extra_headers:
         headers.update(extra_headers)
 
-    match response_format:
-        case "empty":
-            return Response(status_code=201, headers=headers)
-        case "identifier":
-            return JSONResponse(content=str(entity_id), status_code=201, headers=headers)
-        case "full":
-            return JSONResponse(content=jsonable_encoder(get_full(entity_id)), status_code=201, headers=headers)
+    if response_format == "empty":
+        return Response(status_code=201, headers=headers)
+    elif response_format == "identifier":
+        return JSONResponse(content=str(entity_id), status_code=201, headers=headers)
+    elif response_format == "full":
+        return JSONResponse(content=jsonable_encoder(get_full(entity_id)), status_code=201, headers=headers)
+    else:
+        raise ValueError(f"Unknown response format: {response_format!r}")

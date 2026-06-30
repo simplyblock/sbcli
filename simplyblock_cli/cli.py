@@ -5,6 +5,8 @@ import logging
 import sys
 import traceback
 
+from pydantic import SecretStr
+
 from simplyblock_cli.clibase import CLIWrapperBase, range_type, size_type, list_type
 from simplyblock_core import utils, constants
 
@@ -388,7 +390,7 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             subcommand.add_argument('--page_size', help='The size of a data page in bytes. Default: `2097152`.', type=int, default=2097152, dest='page_size')
         if self.developer_mode:
-            subcommand.add_argument('--CLI_PASS', help='The password for CLI SSH connection.', type=str, dest='CLI_PASS')
+            subcommand.add_argument('--CLI_PASS', help='The password for CLI SSH connection.', type=SecretStr, dest='CLI_PASS')
         subcommand.add_argument('--cap-warn', help='The capacity warning level in percent. Default: `89`.', type=int, default=89, dest='cap_warn')
         subcommand.add_argument('--cap-crit', help='The capacity critical level in percent. Default: `99`.', type=int, default=99, dest='cap_crit')
         subcommand.add_argument('--prov-cap-warn', help='The capacity warning level in percent. Default: `250`.', type=int, default=250, dest='prov_cap_warn')
@@ -518,7 +520,7 @@ class CLIWrapper(CLIWrapperBase):
     def init_cluster__update_secret(self, subparser):
         subcommand = self.add_sub_command(subparser, 'update-secret', 'Updates a cluster\'s secret.')
         subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
-        subcommand.add_argument('secret', help='The new 20 characters password.', type=str)
+        subcommand.add_argument('secret', help='The new 20 characters password.', type=SecretStr)
 
     def init_cluster__update_fabric(self, subparser):
         subcommand = self.add_sub_command(subparser, 'update-fabric', 'Updates a cluster\'s fabric.')
@@ -789,7 +791,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'add', 'Adds a control plane to the cluster (local run).')
         subcommand.add_argument('cluster_ip', help='The cluster IP address.', type=str)
         subcommand.add_argument('cluster_id', help='The cluster id.', type=str)
-        subcommand.add_argument('cluster_secret', help='The cluster secret.', type=str)
+        subcommand.add_argument('cluster_secret', help='The cluster secret.', type=SecretStr)
         subcommand.add_argument('--ifname', help='The management interface name.', type=str, dest='ifname')
         subcommand.add_argument('--mgmt-ip', help='Management IP address to use for the node (e.g., 192.168.1.10).', type=str, dest='mgmt_ip')
         subcommand.add_argument('--mode', help='The environment to deploy management services. Default: `docker`.', type=str, default='docker', dest='mode', choices=['docker','kubernetes',])

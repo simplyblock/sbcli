@@ -593,18 +593,25 @@ class SbcliUtils:
         connect_lines = []
 
         for entry in data.get("results", []):
-            connect_line = (
-                "sudo nvme connect "
-                f"--reconnect-delay={entry['reconnect-delay']} "
-                f"--ctrl-loss-tmo=-1 "
-                f"--nr-io-queues={entry['nr-io-queues']} "
-                f"--keep-alive-tmo={entry['keep-alive-tmo']} "
-                f"--transport={entry['transport']} "
-                f"--traddr={entry['ip']} "
-                f"--trsvcid={entry['port']} "
-                f"--nqn={entry['nqn']}"
-            )
-            connect_lines.append(connect_line)
+            if "connect" in entry:
+                connect_lines.append(entry["connect"])
+            else:
+                # Fallback: support both hyphenated and underscored keys
+                def _g(key):
+                    return entry.get(key) or entry.get(key.replace("-", "_"))
+
+                connect_line = (
+                    "sudo nvme connect "
+                    f"--reconnect-delay={_g('reconnect-delay')} "
+                    f"--ctrl-loss-tmo=-1 "
+                    f"--nr-io-queues={_g('nr-io-queues')} "
+                    f"--keep-alive-tmo={_g('keep-alive-tmo')} "
+                    f"--transport={entry.get('transport', 'tcp')} "
+                    f"--traddr={entry.get('ip')} "
+                    f"--trsvcid={entry.get('port')} "
+                    f"--nqn={entry.get('nqn')}"
+                )
+                connect_lines.append(connect_line)
 
         return connect_lines
 

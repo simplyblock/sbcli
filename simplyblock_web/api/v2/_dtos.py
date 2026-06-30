@@ -1,10 +1,10 @@
 from datetime import datetime, timedelta, timezone
 from ipaddress import IPv4Address
-from typing import List, Literal, Tuple, Optional, cast
+from typing import List, Literal, Optional, cast
 from uuid import UUID
 
 from fastapi import Request
-from pydantic import BaseModel
+from pydantic import BaseModel, SecretStr, field_serializer
 
 from simplyblock_core.controllers import migration_controller
 from simplyblock_core.db_controller import DBController
@@ -110,11 +110,15 @@ class ClusterDTO(BaseModel):
     provisioned_capacity_warning: util.Unsigned
     node_affinity: bool
     anti_affinity: bool
-    secret: str
+    secret: SecretStr
     tls_enabled: bool
     max_fault_tolerance: int
     backup_enabled: bool
     capacity: CapacityStatDTO
+
+    @field_serializer('secret', when_used='json')
+    def _unwrap_secret_for_json(self, value: SecretStr) -> str:
+        return value.get_secret_value()
 
     @staticmethod
     def from_model(model: Cluster, stat_obj: Optional[StatsObject] = None):
@@ -407,7 +411,6 @@ class VolumeDTO(BaseModel):
     blobid: int
     ns_id: int
     cloned_from: Optional[util.UrlPath]
-    crypto_key: Optional[Tuple[str, str]]
     high_availability: bool
     do_replicate: bool = False
     max_namespace_per_subsys: int
@@ -468,11 +471,6 @@ class VolumeDTO(BaseModel):
             )
             if model.cloned_from_snap
             else None,
-            crypto_key=(
-                (model.crypto_key1, model.crypto_key2)
-                if model.crypto_key1 and model.crypto_key2
-                else None
-            ),
             high_availability=model.ha_type == "ha",
             pool_uuid=model.pool_uuid,
             pool_name=model.pool_name,
@@ -573,7 +571,7 @@ class MigrationDTO(BaseModel):
     connect_strings: list[NvmeConnectEntry] = []
 
     @staticmethod
-    def from_model(model: LVolMigration, connect_strings: list[NvmeConnectEntry] | None = None):
+    def from_model(model: LVolMigration, connect_strings: Optional[List[NvmeConnectEntry]] = None):
         return MigrationDTO(
             id=UUID(model.uuid),
             lvol_id=model.lvol_id,

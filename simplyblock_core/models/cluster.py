@@ -2,6 +2,8 @@
 
 from typing import List, Optional
 
+from pydantic import SecretStr
+
 from simplyblock_core.models.base_model import BaseModel
 
 
@@ -39,12 +41,17 @@ class Cluster(BaseModel):
     auth_hosts_only: bool = False
     blk_size: int = 0
     cap_crit: int = 90
+    # ISO-8601 UTC timestamp of when the cluster last entered IN_ACTIVATION.
+    # Stamped/cleared by cluster_ops.set_cluster_status and consumed by the
+    # storage_node_monitor watchdog to detect and revert a wedged activation
+    # (incident 2026-06-25). Empty string means "not currently activating".
+    in_activation_since: str = ""
     cap_warn: int = 80
-    cli_pass: str = ""
+    cli_pass: SecretStr = SecretStr("")
     cluster_max_devices: int = 0
     cluster_max_nodes: int = 0
     cluster_max_size: int = 0
-    db_connection: str = ""
+    db_connection: SecretStr = SecretStr("")
     dhchap: str = ""
     distr_bs: int = 0
     distr_chunk_bs: int = 0
@@ -53,7 +60,7 @@ class Cluster(BaseModel):
     enable_node_affinity: bool = False
     grafana_endpoint: str = ""
     mode: str = "docker"
-    grafana_secret: str = ""
+    grafana_secret: SecretStr = SecretStr("")
     contact_point: str = ""
     ha_type: str = "single"
     inflight_io_threshold: int = 4
@@ -69,7 +76,7 @@ class Cluster(BaseModel):
     fabric_tcp: bool = True
     fabric_rdma: bool = False
     client_qpair_count: int = 3
-    secret: str = ""
+    secret: SecretStr = SecretStr("")
     cr_name: str = ""
     cr_namespace: str = ""
     cr_plural: str = ""
@@ -78,6 +85,25 @@ class Cluster(BaseModel):
     tls: bool = False
     tls_config: dict = {}
     is_re_balancing: bool = False
+    # Suspend-recovery drain phase marker.
+    #
+    # When a cluster becomes SUSPENDED, recovering it by auto-restarting nodes
+    # piecemeal is unsafe (stale/half state, e.g. a node left lvstore_status
+    # "in_creation" by a failed activation that then never gets health-checked).
+    # Instead the monitor first force-shuts-down every still-up node so the
+    # cluster reaches a clean all-offline slate, and PAUSES auto-restart until
+    # then; only afterwards is the existing auto-restart allowed to bring the
+    # nodes back (all of them except the ones deliberately stopped by an
+    # operator, i.e. auto_restart_disabled).
+    #
+    # False  -> drain still in progress (or no suspension): auto-restart paused,
+    #           auto-shutdown actively draining ONLINE/DOWN nodes.
+    # True   -> the all-offline drain completed for this suspension episode:
+    #           auto-restart resumes and the auto-shutdown stops (it must not
+    #           re-kill nodes that are restarting back up).
+    # Reset to False when the cluster returns to a healthy status
+    # (active/degraded/read_only) in cluster_ops.set_cluster_status.
+    suspend_drain_complete: bool = False
     # Cluster-wide data placement-binding mode for distrib bdevs.
     #   False = legacy per-page placement binding (default, safe everywhere)
     #   True  = new per-chunk placement binding (opt-in, propagated to every
@@ -123,11 +149,6 @@ class Cluster(BaseModel):
             return self.STATUS_CODE_MAP[self.status]
         else:
             return -1
-
-    def get_clean_dict(self):
-        data = super(Cluster, self).get_clean_dict()
-        data['status_code'] = self.get_status_code()
-        return data
 
     def is_qos_set(self) -> bool:
         # Import is here is to avoid circular import dependency

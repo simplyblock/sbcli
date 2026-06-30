@@ -14,6 +14,8 @@ import uuid
 import time
 from datetime import datetime, timezone
 from typing import Union, Any, Optional, Tuple, List, Dict, Iterable
+
+from pydantic import SecretStr
 from docker import DockerClient
 from kubernetes import client, config
 from kubernetes.client import ApiException, V1Deployment, V1DeploymentSpec, V1ObjectMeta, \
@@ -140,16 +142,21 @@ def get_iface_ip(ifname):
     return False
 
 
-def print_table(data: list, title=None):
-    if data:
-        x = PrettyTable(field_names=data[0].keys(), max_width=70, title=title)
-        x.align = 'l'
-        for node_data in data:
-            row = []
-            for key in node_data:
-                row.append(node_data[key])
-            x.add_row(row)
-        return x.__str__()
+def print_table(data: list, title=None, unwrap_secrets: bool = False):
+    if not data:
+        return ""
+
+    x = PrettyTable(field_names=data[0].keys(), max_width=70, title=title)
+    x.align = 'l'
+    for node_data in data:
+        row = []
+        for key in node_data:
+            value = node_data[key]
+            if isinstance(value, SecretStr):
+                value = value.get_secret_value() if unwrap_secrets else str(value)
+            row.append(value)
+        x.add_row(row)
+    return x.__str__()
 
 
 _humanbytes_parameter = {
@@ -287,12 +294,12 @@ def print_table_dict(node_stats):
     print(print_table(d))
 
 
-def generate_rpc_user_and_pass():
+def generate_rpc_user_and_pass() -> Tuple[str, SecretStr]:
     def _generate_string(length):
         return ''.join(random.SystemRandom().choice(
             string.ascii_letters + string.digits) for _ in range(length))
 
-    return _generate_string(8), _generate_string(16)
+    return _generate_string(8), SecretStr(_generate_string(16))
 
 
 def parse_history_param(history_string):
@@ -385,39 +392,13 @@ def _used_bdev_name_numbers(db_controller, all_lvols=None, all_snapshots=None):
 
 
 def get_random_vuid(all_lvols=None, all_snapshots=None):
+    # Monotonic allocation via DBController.next_vuid (single shared vuid
+    # sequence). The old random-pick + scan-all-lvols/snapshots/nodes dedupe was
+    # O(N) per create (O(N^2) for mass create). A strictly-increasing vuid can
+    # never collide with an existing bdev-name number, so no scan/dedupe is
+    # needed. Args kept for call-site compatibility but no longer used.
     from simplyblock_core.db_controller import DBController
-    db_controller = DBController()
-    if not all_lvols:
-        all_lvols = db_controller.get_mini_lvols()
-
-    used_vuids = []
-    nodes = db_controller.get_storage_nodes()
-    for node in nodes:
-        for bdev in node.lvstore_stack:
-            type = bdev['type']
-            if type == "bdev_distr":
-                vuid = bdev['params']['vuid']
-            elif type == "bdev_raid" and "jm_vuid" in bdev:
-                vuid = bdev['jm_vuid']
-            else:
-                continue
-            used_vuids.append(vuid)
-
-    for lvol in all_lvols:
-        used_vuids.append(lvol.vuid)
-
-    used = set(used_vuids) | _used_bdev_name_numbers(db_controller, all_lvols, all_snapshots)
-
-    # 1M range + dedupe against existing bdev-name numeric suffixes
-    # (CLN_xxxx / LVOL_xxxx / SNAP_xxxx). With ~10k lvols+snaps the
-    # 10k-only legacy range hit ~50% birthday-collision probability;
-    # 1M brings that to <1%. Combined with the dedupe set we avoid the
-    # SPDK ``lvol with name already exists`` rejection that triggered
-    # the snapshot-delete-in-flight metadata corruption.
-    r = 1 + int(random.random() * 10000)
-    while r in used:
-        r = 1 + int(random.random() * 10000)
-    return r
+    return DBController().next_vuid()
 
 
 def hexa_to_cpu_list(cpu_mask):
@@ -678,7 +659,11 @@ def decimal_to_hex_power_of_2(decimal_number):
 
 def get_logger(name=""):
     # first configure a root logger
-    logging.getLogger("urllib3.connectionpool").setLevel(logging.WARNING)
+    # Silence external libraries that log secrets (tokens, full HTTP response
+    # bodies) at DEBUG level.  Keep them at WARNING so our own DEBUG logging
+    # is unaffected.
+    for _ext in ("urllib3", "kubernetes.client.rest"):
+        logging.getLogger(_ext).setLevel(logging.WARNING)
     logg = logging.getLogger()
 
     log_level = os.getenv("SIMPLYBLOCK_LOG_LEVEL")
@@ -1383,26 +1368,12 @@ def addNvmeDevices(rpc_client, snode, devs):
 
 
 def get_random_snapshot_vuid(all_lvols=None, all_snapshots=None):
+    # Monotonic allocation via DBController.next_vuid — shares the single vuid
+    # sequence with lvols/clones (one numeric space, so no cross-collision).
+    # Replaces the old random-pick + scan-all-snapshots dedupe (O(N) per create).
+    # Args kept for call-site compatibility but no longer used.
     from simplyblock_core.db_controller import DBController
-    db_controller = DBController()
-    used_vuids = set()
-    if not all_snapshots:
-        all_snapshots = db_controller.get_snapshots()
-    for snap in all_snapshots:
-        used_vuids.add(snap.vuid)
-
-    # Same dedupe rationale as ``get_random_vuid``: avoid colliding with
-    # any existing CLN_/LVOL_/SNAP_ bdev-name numeric suffix so the
-    # SPDK-side create cannot reject with "lvol with name already
-    # exists". That rejection in the clone path is what triggered the
-    # mgmt-side async snapshot delete + reuse-during-deletion sequence
-    # producing stuck snapshots (incident: aws_dual_soak 2026-04-30).
-    used = used_vuids | _used_bdev_name_numbers(db_controller, all_lvols, all_snapshots)
-
-    r = 1 + int(random.random() * 1000000)
-    while r in used:
-        r = 1 + int(random.random() * 1000000)
-    return r
+    return DBController().next_vuid()
 
 
 def pull_docker_image_with_retry(client: docker.DockerClient, image_name, retries=3, delay=5):
@@ -2741,7 +2712,7 @@ def get_mgmt_ip(node_info: Any, iface_names: Union[str, list[str]]) -> Optional[
     return None
 
 
-def get_fdb_cluster_string(configmap_name: str, namespace: str) -> str:
+def get_fdb_cluster_string(configmap_name: str, namespace: str) -> SecretStr:
     load_kube_config_with_fallback()
     v1 = client.CoreV1Api()
 
@@ -2749,8 +2720,8 @@ def get_fdb_cluster_string(configmap_name: str, namespace: str) -> str:
         cm = v1.read_namespaced_config_map(configmap_name, namespace)
         cluster_file = cm.data.get("cluster-file") if cm.data else None
         if cluster_file:
-            logger.info(f"fdb cluster connection string: {cluster_file}")
-            return cluster_file
+            logger.info("fdb cluster connection string retrieved")
+            return SecretStr(cluster_file)
         else:
             raise ValueError("cluster-file not found in ConfigMap")
     except client.exceptions.ApiException as e:
@@ -3448,3 +3419,18 @@ def resolve_address(host_port: str) -> str:
     if not isinstance(ip, str):
         raise ValueError(f"Invalid return value {ip}")
     return ip
+
+
+class _SecretAwareEncoder(json.JSONEncoder):
+    def __init__(self, *args, unwrap_secrets: bool = False, **kwargs):
+        self.unwrap_secrets = unwrap_secrets
+        super().__init__(*args, **kwargs)
+
+    def default(self, obj):
+        if isinstance(obj, SecretStr):
+            return obj.get_secret_value() if self.unwrap_secrets else str(obj)
+        return super().default(obj)
+
+
+def dump_json(data, unwrap_secrets: bool = False, **kwargs):
+    return json.dumps(data, cls=_SecretAwareEncoder, unwrap_secrets=unwrap_secrets, **kwargs)

@@ -2,11 +2,14 @@ import json
 
 import requests
 import logging
+from typing import Optional
 
+from pydantic import SecretStr
 from requests.adapters import HTTPAdapter
 from urllib3 import Retry
 
 from simplyblock_core.settings import Settings
+from simplyblock_core.utils.secrets import unwrap_secrets_for_send
 
 logger = logging.getLogger()
 
@@ -42,21 +45,27 @@ class SNodeClient:
     def _request(self, method, path, payload=None):
         try:
             logger.debug("Requesting path: %s, params: %s", path, payload)
+            wire_payload = unwrap_secrets_for_send(payload) if payload else None
             data = None
             params = None
-            if payload:
-                if method == "GET" :
-                    params = payload
+            if wire_payload:
+                if method == "GET":
+                    params = wire_payload
                 else:
-                    data = json.dumps(payload)
+                    data = json.dumps(wire_payload)
 
             response = self.session.request(method, self.url+path, data=data,
                                             timeout=self.timeout, params=params)
         except Exception as e:
             raise SNodeClientException(str(e))
 
-        logger.debug("Response: status_code: %s, content: %s",
-                     response.status_code, response.content)
+        log_body = Settings().log_response_bodies
+        if log_body:
+            logger.debug("Response: status_code: %s, content: %s",
+                         response.status_code, response.content)
+        else:
+            logger.debug("Response: status_code: %s, content-length: %s",
+                         response.status_code, len(response.content))
         ret_code = response.status_code
 
         result = None
@@ -79,7 +88,7 @@ class SNodeClient:
             raise SNodeClientException("Invalid http status: %s" % ret_code)
 
         if ret_code == 422:
-            raise SNodeClientException(f"Request validation failed: '{response.text}'")
+            raise SNodeClientException("Request validation failed (status 422)")
 
         raise SNodeClientException(f"Unknown http status: {ret_code}")
 
@@ -108,8 +117,8 @@ class SNodeClient:
         return self._request("POST", "recalculate_cores_distribution", params)
 
     def spdk_process_start(self, l_cores, spdk_mem, spdk_image=None, spdk_debug=None, cluster_ip=None,
-                           fdb_connection=None, namespace=None, server_ip=None, rpc_port=None,
-                           rpc_username=None, rpc_password=None, multi_threading_enabled=False, timeout=0, ssd_pcie=None,
+                           fdb_connection: Optional[SecretStr] = None, namespace=None, server_ip=None, rpc_port=None,
+                           rpc_username=None, rpc_password: Optional[SecretStr] = None, multi_threading_enabled=False, timeout=0, ssd_pcie=None,
                            total_mem=None, system_mem=None, cluster_mode=None, socket=0, firewall_port=0, cluster_id=None,
                            spdk_proxy_image=None):
         params = {

@@ -60,7 +60,7 @@ def main():
         seen = set()
         for needle in needles:
             for cls in tests:
-                if needle in cls.__name__.lower() and cls not in seen:
+                if needle in cls.__name__.lower().replace("_", "") and cls not in seen:
                     test_class_run.append(cls)
                     seen.add(cls)
 
@@ -161,6 +161,13 @@ def main():
                     try:
                         shutil.copytree(logs_src, logs_dest, dirs_exist_ok=True)
                         logger.info(f"Automation logs copied to: {logs_dest}")
+                        # Remove local log files to free runner disk space
+                        for f in os.listdir(logs_src):
+                            if f.startswith("log_"):
+                                try:
+                                    os.remove(os.path.join(logs_src, f))
+                                except OSError:
+                                    pass
                     except Exception as _copy_err:
                         logger.warning(f"Failed to copy automation logs to NFS: {_copy_err}")
             if check_for_dumps():

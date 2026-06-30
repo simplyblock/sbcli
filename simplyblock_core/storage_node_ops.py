@@ -17,6 +17,7 @@ import uuid
 
 import docker
 from docker.types import LogConfig
+from pydantic import SecretStr
 
 from simplyblock_core import constants, scripts, distr_controller, cluster_ops
 from simplyblock_core import port_block, utils
@@ -1662,7 +1663,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
               "public_ip": "20.20.20.20",
         }
         """""
-        logger.debug(json.dumps(cloud_instance, indent=2))
+        logger.debug(utils.dump_json(cloud_instance, indent=2))
         logger.info(f"Instance id: {cloud_instance['id']}")
         logger.info(f"Instance cloud: {cloud_instance['cloud']}")
         logger.info(f"Instance type: {cloud_instance['type']}")
@@ -1725,8 +1726,13 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                                 logger.warning(
                                     f"Node {node.get_id()} is in_creation status with SSD {ssd}, "
                                     f"removing and deleting it")
-                                remove_storage_node(node.get_id(), force_remove=True)
-                                delete_storage_node(node.get_id(), force=True)
+                                try:
+                                    stale_api = node.client(timeout=20)
+                                    stale_api.spdk_process_kill(node.rpc_port, node.cluster_id)
+                                except Exception:
+                                    logger.warning("Failed to kill SPDK process for stale in_creation node", exc_info=True)
+                                storage_events.snode_delete(node)
+                                node.remove(db_controller.kv_store)
                                 break
                             logger.error(f"SSD is being used by other node, ssd: {ssd}, node: {node.get_id()}")
                             return False
@@ -1921,8 +1927,8 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         snode.rpc_password = rpc_pass
         snode.cluster_id = cluster_id
         snode.api_endpoint = node_addr
-        snode.host_secret = utils.generate_string(20)
-        snode.ctrl_secret = utils.generate_string(20)
+        snode.host_secret = SecretStr(utils.generate_string(20))
+        snode.ctrl_secret = SecretStr(utils.generate_string(20))
         snode.number_of_distribs = number_of_distribs
         snode.number_of_alceml_devices = number_of_alceml_devices
         snode.enable_ha_jm = enable_ha_jm
@@ -2032,8 +2038,9 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         rpc_client.log_set_print_level("DEBUG")
 
         if snode.lvol_poller_mask:
-            ret = rpc_client.bdev_lvol_create_poller_group(snode.lvol_poller_mask)
-            if not ret:
+            try:
+                rpc_client.bdev_lvol_create_poller_group(snode.lvol_poller_mask)
+            except RPCException:
                 logger.error("Failed to set pollers mask")
                 return False
 
@@ -2185,15 +2192,22 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
 
             snode.write_to_db(kv_store)
 
+            # Route the IN_CREATION -> ONLINE transition through set_node_status
+            # rather than a raw status write. set_node_status enforces the
+            # _ALLOWED_PRE_STATUSES_FOR_ONLINE guard (OFFLINE -> ONLINE is rejected),
+            # so a concurrent/stale path can no longer clobber a freshly-detected
+            # OFFLINE back to ONLINE through this code -- the raw write here was the
+            # node-side stale re-online hole (incident 2026-06-24: node re-marked
+            # online seconds after the monitor downed it, undoing the OFFLINE and
+            # forcing a duplicate offline/auto-restart cycle). set_node_status also
+            # emits the status event, broadcasts to peers, and cancels stale
+            # auto-restart tasks -- all previously done by hand here.
             snode = db_controller.get_storage_node_by_id(snode.get_id())
-            old_status = snode.status
-            snode.status = StorageNode.STATUS_ONLINE
-            snode.updated_at = str(datetime.datetime.now(datetime.timezone.utc))
-            snode.online_since = str(datetime.datetime.now(datetime.timezone.utc))
-            snode.write_to_db(db_controller.kv_store)
-
-            storage_events.snode_status_change(snode, snode.status, old_status, caused_by="monitor")
-            # distr_controller.send_node_status_event(snode, status)
+            if not set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE, caused_by="monitor"):
+                logger.error(
+                    f"Failed to bring node {snode.get_id()} ONLINE "
+                    f"(illegal transition from {snode.status})")
+                return False
 
             logger.info("Make other nodes connect to the node devices")
             snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
@@ -3239,8 +3253,9 @@ def _restart_storage_node_impl(
     rpc_client.log_set_print_level("DEBUG")
 
     if snode.lvol_poller_mask:
-        ret = rpc_client.bdev_lvol_create_poller_group(snode.lvol_poller_mask)
-        if not ret:
+        try:
+            rpc_client.bdev_lvol_create_poller_group(snode.lvol_poller_mask)
+        except RPCException:
             logger.error("Failed to set pollers mask")
             return False
 
@@ -3542,7 +3557,11 @@ def _restart_storage_node_impl(
         if cluster.backup_config:
             from simplyblock_core.controllers import backup_controller
             logger.info("Creating S3 bdev on restarted node")
-            backup_controller.create_s3_bdev(snode, cluster.backup_config)
+            try:
+                backup_controller.create_s3_bdev(snode, cluster.backup_config)
+            except Exception as e:
+                logger.exception(str(e))
+                return False
 
         # make other nodes connect to the new devices
         logger.info("Make other nodes connect to the node devices")
@@ -3618,14 +3637,13 @@ def _format_lvstore_ports(node):
     return " ".join(parts)
 
 
-def list_storage_nodes(is_json, cluster_id=None):
+def list_storage_nodes(cluster_id=None):
     db_controller = DBController()
     if cluster_id:
         nodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
     else:
         nodes = db_controller.get_storage_nodes()
     data = []
-    output = ""
     all_lvols = db_controller.get_mini_lvols()
     for node in nodes:
         logger.debug(node)
@@ -3662,17 +3680,10 @@ def list_storage_nodes(is_json, cluster_id=None):
 
         })
 
-    if not data:
-        return output
-
-    if is_json:
-        output = json.dumps(data, indent=2)
-    else:
-        output = utils.print_table(data)
-    return output
+    return data
 
 
-def list_storage_devices(node_id, is_json):
+def list_storage_devices(node_id):
     db_controller = DBController()
     try:
         snode = db_controller.get_storage_node_by_id(node_id)
@@ -3762,14 +3773,7 @@ def list_storage_devices(node_id, is_json):
     if bdev_devices:
         data["Distrib Block Devices"] = bdev_devices
 
-    if is_json:
-        return json.dumps(data, indent=2)
-    else:
-        out = "\n\n".join(
-            f'{key}\n{utils.print_table(value)}\n\n'
-            for key, value in data.items()
-        )
-        return out
+    return data
 
 
 def _check_ftt_allows_node_removal(node_id, db_controller):
@@ -4038,8 +4042,15 @@ def _detach_remote_controllers_from_peers(snode, db_controller):
     return detached[0]
 
 
-def shutdown_storage_node(node_id, force=False):
+def shutdown_storage_node(node_id, force=False, keep_auto_restart=False):
     """Gracefully terminate a storage node.
+
+    keep_auto_restart=True is used by the suspend-recovery auto-shutdown
+    (storage_node_monitor): it brings the node down WITHOUT marking it
+    auto_restart_disabled, so once the whole cluster has drained to offline the
+    existing auto-restart brings it back. A genuine operator `sn shutdown`
+    (CLI/API) leaves the default (False) and stays stopped until an explicit
+    restart.
 
     Flow (graceful, force=False):
       1. FTT / concurrency guards, set node status to in_shutdown.
@@ -4156,8 +4167,14 @@ def shutdown_storage_node(node_id, force=False):
     # at the final OFFLINE flip, so an interrupted/forced shutdown that never
     # reaches a clean OFFLINE is still protected from being auto-restarted.
     # Cleared in set_node_status() when the node deliberately returns ONLINE.
-    snode.auto_restart_disabled = True
-    snode.write_to_db(db_controller.kv_store)
+    #
+    # Exception: a suspend-recovery auto-shutdown (keep_auto_restart=True) must
+    # NOT set this — the whole point is to drain the cluster offline and then
+    # let auto-restart bring these nodes back. Only operator-initiated shutdowns
+    # stay disabled.
+    if not keep_auto_restart:
+        snode.auto_restart_disabled = True
+        snode.write_to_db(db_controller.kv_store)
 
     # Step 2: cancel migration tasks while controllers are still up.
     pending_tasks = db_controller.get_job_tasks(snode.cluster_id)
@@ -4639,7 +4656,7 @@ def get_host_secret(node_id):
         logger.error("node not found")
         return False
 
-    return node.host_secret
+    return node.host_secret.get_secret_value()
 
 
 def get_ctrl_secret(node_id):
@@ -4650,7 +4667,7 @@ def get_ctrl_secret(node_id):
         logger.error("node not found")
         return False
 
-    return node.ctrl_secret
+    return node.ctrl_secret.get_secret_value()
 
 
 def health_check(node_id):
@@ -4746,7 +4763,7 @@ def get_info(node_id):
         return False
 
     node_info, _ = snode.client().info()
-    return json.dumps(node_info, indent=2)
+    return node_info
 
 
 def get_spdk_info(node_id):
@@ -4782,8 +4799,7 @@ def get(node_id):
         logger.exception("Can not find storage node")
         return False
 
-    data = snode.get_clean_dict()
-    return json.dumps(data, indent=2, sort_keys=True)
+    return snode.get_clean_dict()
 
 
 # States from which a node may legally transition INTO STATUS_ONLINE.
@@ -5127,20 +5143,25 @@ def _count_fabric_disconnected_nodes(all_nodes, lvs_peer_ids=None):
 def find_leader_with_failover(all_nodes, lvs_name):
     """Detect the current leader and failover if needed.
 
-    1. Try each node as leader via bdev_lvol_get_lvstores (leadership field)
-    2. If leader's RPC is responsive → return it
-    3. If leader's RPC times out BUT fabric is healthy:
-       - Check if at least one non-leader has healthy fabric
-       - If yes → force leadership change, return the new leader
-       - If no → return None (reject)
-    4. If no leader found → return first fabric-connected node as fallback
+    1. Try each node as leader via bdev_lvol_get_lvstores (leadership field).
+       A node that answers leadership=True is CONFIRMED (the query is itself a
+       successful RPC to that node) → return it directly. A confirmed leader is
+       never failed over for being slow, only for genuinely not answering.
+    2. If no node admitted leadership (every probe returned False or raised),
+       attempt a failover — but only ever return a node whose leadership is
+       re-confirmed via is_node_leader:
+       - Guessed leader's fabric down → promote a non-leader, confirm, return it.
+       - Guessed leader's fabric healthy → force a leadership change to a
+         responsive non-leader, then VERIFY the change took effect before
+         returning. Reject (None) if leadership did not settle.
 
     Returns:
-        (leader_node, non_leader_nodes) or (None, []) if all unreachable.
+        (leader_node, non_leader_nodes) or (None, []) if no confirmable leader.
     """
     from simplyblock_core.controllers.lvol_controller import is_node_leader
 
     leader = None
+    leader_confirmed = False
     non_leaders = []
 
     # Find current leader
@@ -5148,6 +5169,10 @@ def find_leader_with_failover(all_nodes, lvs_name):
         try:
             if is_node_leader(node, lvs_name):
                 leader = node
+                # is_node_leader() is itself a successful RPC to the node that
+                # returned leadership=True. The node is therefore reachable and
+                # authoritative about its own leadership.
+                leader_confirmed = True
                 break
         except Exception:
             continue
@@ -5163,16 +5188,43 @@ def find_leader_with_failover(all_nodes, lvs_name):
 
     non_leaders = [n for n in all_nodes if n.get_id() != leader.get_id()]
 
-    # Check if leader's RPC is responsive
-    if _is_node_rpc_responsive(leader, lvs_name):
+    # If the leader answered the leadership query above, it is reachable and
+    # authoritative — return it directly. Do NOT re-probe with the tighter
+    # responsiveness timeout and force a failover: under high concurrency the
+    # SPDK reactor mgmt queue backs up and the confirmed leader's RPC can
+    # exceed the short probe timeout while the node is perfectly healthy.
+    # Treating that as "leader down" forces leadership onto a non-leader and
+    # routes the operation to the wrong node (split routing + retry storm).
+    # The responsiveness probe / forced failover below is only meaningful when
+    # leadership could NOT be confirmed by RPC (the fabric-connected fallback,
+    # i.e. the leader's mgmt RPC genuinely failed so is_node_leader raised).
+    if leader_confirmed:
         return leader, non_leaders
 
-    # Leader RPC failing — check if fabric is healthy
+    # Unconfirmed-leader fallback: `leader` is only a fabric-connected guess —
+    # no node admitted leadership above. RPC-responsiveness does NOT make a node
+    # the leader, so a tight responsiveness probe here can route the operation to
+    # a non-leader. Require an actual leadership confirmation before returning;
+    # otherwise fall through to the failover logic.
+    try:
+        if is_node_leader(leader, lvs_name):
+            return leader, non_leaders
+    except Exception:
+        pass
+
+    # Leader unconfirmed — check if fabric is healthy
     if not _is_fabric_connected(leader):
         # Fabric disconnected — leader truly down, find new leader
         for nl in non_leaders:
             if _is_fabric_connected(nl) and _is_node_rpc_responsive(nl, lvs_name):
-                logger.info("Leader %s fabric disconnected, failing over to %s",
+                # Promotion is driven by the JM heartbeat; confirm the peer has
+                # actually taken leadership before routing to it.
+                try:
+                    if not is_node_leader(nl, lvs_name):
+                        continue
+                except Exception:
+                    continue
+                logger.info("Leader %s fabric disconnected, failed over to %s",
                             leader.get_id(), nl.get_id())
                 new_non_leaders = [n for n in all_nodes if n.get_id() != nl.get_id()]
                 return nl, new_non_leaders
@@ -5203,6 +5255,26 @@ def find_leader_with_failover(all_nodes, lvs_name):
                     lvs_name, failover_target.get_id(), leader.get_id())
     except Exception as e:
         logger.error("Failed to send fabric signal for leadership change: %s", e)
+        return None, []
+
+    # Verify the forced leadership change actually took effect before routing.
+    # The signal is best-effort: if the old leader was merely slow (not down)
+    # and reclaims leadership, failover_target never becomes leader and routing
+    # to it would land the operation on a non-leader. Confirm with a short
+    # retry; reject if leadership did not settle on failover_target.
+    leadership_confirmed = False
+    for _ in range(3):
+        try:
+            if is_node_leader(failover_target, lvs_name):
+                leadership_confirmed = True
+                break
+        except Exception:
+            pass
+        time.sleep(1)
+    if not leadership_confirmed:
+        logger.error("Forced leadership change to %s for %s did not take effect — "
+                     "refusing to route to a non-leader",
+                     failover_target.get_id(), lvs_name)
         return None, []
 
     new_non_leaders = [n for n in all_nodes if n.get_id() != failover_target.get_id()]
@@ -7423,15 +7495,52 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
 
 
 
+# Seconds to wait before the single retry of a failed distrib (re)creation,
+# giving the control plane time to reconcile a peer that went offline mid-restart
+# so the rebuilt cluster map no longer references its devices as online.
+_DISTR_RECREATE_RETRY_DELAY_SEC = 5
+
+
 def _create_bdev_stack(snode, lvstore_stack=None, primary_node=None):
+    # Per-distrib creation outcome, keyed by bdev name. Threads write their own
+    # key (distinct keys -> GIL-safe), the main loop reads after join.
+    distr_results: dict = {}
+
     def _create_distr(snode, name, params):
-        try:
-            rpc_client.bdev_distrib_create(**params)
-        except Exception:
-            logger.error("Failed to create bdev distrib")
-        ret = distr_controller.send_cluster_map_to_distr(snode, name)
-        if not ret:
-            logger.error("Failed to send cluster map")
+        # If a peer node goes offline at the exact moment a distrib is
+        # (re)created, the cluster map can be briefly stale -- it still flags
+        # that peer's devices as online -- and bdev_distrib_create (or the
+        # subsequent map push) fails. That is transient: once the control plane
+        # marks the departed devices offline, a freshly built map succeeds. So
+        # try once more (send_cluster_map_to_distr rebuilds the map from the
+        # current DB view each call) before giving up. A failure that survives
+        # the retry is recorded so the caller aborts the restart -- the standard
+        # unrecoverable-error path -- instead of completing on a broken distrib.
+        for attempt in range(2):
+            if attempt > 0:
+                # Give the control plane a moment to reconcile the departed
+                # node, then clear any half-created distrib before retrying.
+                time.sleep(_DISTR_RECREATE_RETRY_DELAY_SEC)
+                try:
+                    rpc_client.bdev_distrib_delete(name)
+                except Exception:
+                    pass
+            try:
+                rpc_client.bdev_distrib_create(**params)
+                if distr_controller.send_cluster_map_to_distr(snode, name):
+                    distr_results[name] = True
+                    return
+                logger.error(
+                    "Failed to send cluster map to distrib %s (attempt %d/2)",
+                    name, attempt + 1)
+            except Exception as e:
+                logger.error(
+                    "Failed to create bdev distrib %s (attempt %d/2): %s",
+                    name, attempt + 1, e)
+        distr_results[name] = False
+
+    def _distr_failures():
+        return [n for n, ok in distr_results.items() if not ok]
 
     rpc_client = snode.rpc_client()
     db_controller = DBController()
@@ -7484,6 +7593,14 @@ def _create_bdev_stack(snode, lvstore_stack=None, primary_node=None):
             if thread_list:
                 for t in thread_list:
                     t.join()
+            # Never assemble the raid on top of distribs that failed to
+            # (re)create after the retry -- that is the unrecoverable case the
+            # restart must abort on.
+            failed = _distr_failures()
+            if failed:
+                if created_bdevs:
+                    _remove_bdev_stack(created_bdevs[::-1], rpc_client)
+                return False, f"Failed to (re)create distrib(s) after retry: {failed}"
             distribs_list = bdev["distribs_list"]
             strip_size_kb = params["strip_size_kb"]
             ret = rpc_client.bdev_raid_create(name, distribs_list, strip_size_kb=strip_size_kb)
@@ -7504,6 +7621,13 @@ def _create_bdev_stack(snode, lvstore_stack=None, primary_node=None):
     if thread_list:
         for t in thread_list:
             t.join()
+    # Catch distrib failures for stacks without a trailing raid (the raid
+    # branch checks before assembling its raid; this covers everything else).
+    failed = _distr_failures()
+    if failed:
+        if created_bdevs:
+            _remove_bdev_stack(created_bdevs[::-1], rpc_client)
+        return False, f"Failed to (re)create distrib(s) after retry: {failed}"
     return True, None
 
 
@@ -8018,16 +8142,12 @@ def auto_repair(node_id, validate_only=False, force_remove_inconsistent=False, f
     # #sbctl sn list-lvols d4577fa7-545f-4506-b127-7e81fc3a6e34 --json > lvols_8080.json
     # with open('lvols_8082.json', 'r') as file:
     #     lvols = json.load(file)
-    lvols = lvol_controller.list_by_node(node_id, is_json=True)
-    if lvols:
-        lvols = json.loads(lvols)
+    lvols = lvol_controller.list_by_node(node_id)
 
     # #sbctl sn list-snapshots d4577fa7-545f-4506-b127-7e81fc3a6e34 --json > snaps_8080.json
     # with open('snaps_8082.json', 'r') as file:
     #     snaps = json.load(file)
-    snaps = snapshot_controller.list_snapshots(node_id=node_id, is_json=True)
-    if snaps:
-        snaps = json.loads(snaps)
+    snaps = snapshot_controller.list_snapshots(node_id=node_id)
 
     out_blobid_dict = {}
     lvols_blobid_dict = {}
@@ -8186,4 +8306,4 @@ def lvs_dump_tree(node_id):
         logger.error("Failed to dump lvstore tree")
         return False
 
-    return json.dumps(ret, indent=2)
+    return ret

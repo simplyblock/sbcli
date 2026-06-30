@@ -1,0 +1,186 @@
+# coding=utf-8
+"""Pytest fixtures for the expansion simulator framework.
+
+Connects to a real FoundationDB (no in-memory shortcut) and patches every
+known import site of ``simplyblock_core.rpc_client.RPCClient`` with the
+``RpcRouter`` so all RPC traffic is routed to the simulators.
+
+Requires:
+* a reachable FDB cluster file at the path indicated by
+  ``$FDB_CLUSTER_FILE`` (or ``/etc/foundationdb/fdb.cluster``)
+* the ``foundationdb`` Python client + the matching libfdb shared library
+
+Tests in this directory mutate FDB. The ``fdb_clean`` fixture wipes the
+cluster's keyspace at the start of each test so test ordering doesn't
+matter.
+"""
+
+import os
+import sys
+import pytest
+
+_FDB_CLUSTER_FILE = os.environ.get(
+    "FDB_CLUSTER_FILE", "/etc/foundationdb/fdb.cluster")
+
+
+def _ensure_real_fdb():
+    """Restore the real FoundationDB client, replacing the stub that the
+    repo-wide ``tests/conftest.py`` installs for the stubbed unit suite.
+
+    Because ``simplyblock_core.db_controller`` does a top-level ``import fdb``,
+    it binds whatever ``sys.modules['fdb']`` is at first import. The unit-suite
+    stub (no ``api_version``) shadows the real client, so the expansion_sim
+    suite could never connect regardless of a running FDB. We pop the stub,
+    re-import the genuine package (needs ``libfdb_c`` on ``LD_LIBRARY_PATH``),
+    and rebind it on any simplyblock module that already grabbed the stub.
+
+    NOTE: this mutates global ``sys.modules``, so the expansion_sim suite must
+    run as its own pytest invocation, separate from the stubbed unit suite
+    (the intended multi-step layout: fast unit tier, then FDB-backed tier).
+    """
+    import importlib
+
+    current = sys.modules.get("fdb")
+    if current is not None and hasattr(current, "api_version"):
+        real = current  # real client already active
+    else:
+        sys.modules.pop("fdb", None)
+        sys.modules.pop("fdb.tuple", None)
+        real = importlib.import_module("fdb")
+        importlib.import_module("fdb.tuple")
+
+    # Rebind on modules that did `import fdb` at top level against the stub.
+    for mod_name in ("simplyblock_core.db_controller",
+                     "simplyblock_core.utils.hublvol_reconnect"):
+        mod = sys.modules.get(mod_name)
+        if mod is not None and getattr(mod, "fdb", None) is not real:
+            mod.fdb = real
+    return real
+
+
+@pytest.fixture(autouse=True)
+def fast_sleep(monkeypatch):
+    """Neutralize real ``time.sleep`` for the duration of every sim test.
+
+    The expansion path runs through ``storage_node_ops`` helpers
+    (recreate_lvstore_on_sec, teardown_non_leader_lvstore, the JC-compression
+    wait, etc.) that contain many multi-second-to-multi-minute sleeps and
+    poll-until-deadline loops. Against the in-memory RPC simulator those waits
+    serve no purpose but run in real wall-clock — they are the reason the
+    end-to-end sim suite took hours. Patching ``time.sleep`` to a no-op on the
+    modules the expansion drives turns the simulation into a logic check that
+    completes in milliseconds. Real deployments keep the real sleeps.
+    """
+    import time as _time
+    _real_sleep = _time.sleep
+
+    def _no_sleep(_seconds):
+        # Yield nothing; honor a zero/near-zero sleep so any genuine
+        # cooperative-yield semantics still hold without the wall-clock cost.
+        return None
+
+    # ``storage_node_ops`` does ``import time``; patch the bound module attr so
+    # every ``time.sleep(...)`` in the expansion path becomes a no-op without
+    # touching the 200+ call sites or affecting unrelated modules.
+    import simplyblock_core.storage_node_ops as sno
+    monkeypatch.setattr(sno.time, "sleep", _no_sleep)
+    # Keep a reference so a test that genuinely needs to wait can opt back in.
+    yield _real_sleep
+
+
+def _require_fdb():
+    if not os.path.isfile(_FDB_CLUSTER_FILE):
+        pytest.skip(f"FDB cluster file not found at {_FDB_CLUSTER_FILE}; "
+                    f"set FDB_CLUSTER_FILE or run on the EC2 sim host.")
+    try:
+        fdb = _ensure_real_fdb()
+    except ImportError:
+        pytest.skip("foundationdb python client not installed")
+    if not hasattr(fdb, "api_version"):
+        pytest.skip("real foundationdb client unavailable (stub active); "
+                    "run the expansion_sim suite as its own pytest invocation")
+    return fdb
+
+
+@pytest.fixture(scope="session")
+def fdb_db():
+    """Session-level real-FDB connection. Reused across tests."""
+    fdb = _require_fdb()
+    fdb.api_version(730)
+    db = fdb.open(_FDB_CLUSTER_FILE)
+    db.options.set_transaction_timeout(10000)
+    return db
+
+
+@pytest.fixture
+def fdb_clean(fdb_db):
+    """Wipe the FDB keyspace before the test. Yields the db handle."""
+    # Clear everything. This is a destructive op — the test's instance is
+    # dedicated to this work so it is acceptable; do not run against a
+    # production FDB.
+    fdb_db.clear_range(b"\x00", b"\xff")
+    yield fdb_db
+
+
+@pytest.fixture
+def patched_rpc_router():
+    """Replace simplyblock_core's RPCClient with RpcRouter in every known
+    import site for the duration of the test. Yields the
+    :class:`ClusterSim` the test should populate."""
+    from tests.integration.expansion_sim._rpc_sim import (
+        ClusterSim, RpcRouter, FirewallClientSim,
+        install_rpc_router, restore_rpc_router,
+        install_firewall_stub, restore_firewall_stub,
+    )
+
+    cluster_sim = ClusterSim()
+    RpcRouter.set_active_cluster(cluster_sim)
+    FirewallClientSim.set_active_cluster(cluster_sim)
+
+    # Modules that do `from simplyblock_core.rpc_client import RPCClient`.
+    # Enumerated by `grep -l RPCClient simplyblock_core/**/*.py`. Excludes
+    # ``services.*`` which start daemon loops on import (see
+    # health_check_service:logger.info("Starting health check service")) —
+    # the expansion path doesn't import them anyway.
+    target_modules = [
+        "simplyblock_core.rpc_client",  # patches the canonical name too
+        "simplyblock_core.storage_node_ops",
+        "simplyblock_core.distr_controller",
+        "simplyblock_core.models.storage_node",  # snode.rpc_client() factory
+        "simplyblock_core.controllers.lvol_controller",
+        "simplyblock_core.controllers.health_controller",
+        "simplyblock_core.controllers.device_controller",
+        "simplyblock_core.controllers.snapshot_controller",
+        "simplyblock_core.controllers.pool_controller",
+        "simplyblock_core.controllers.backup_controller",
+    ]
+    saved_rpc = install_rpc_router(target_modules)
+    saved_fw = install_firewall_stub([
+        "simplyblock_core.storage_node_ops",
+        "simplyblock_core.controllers.lvol_controller",
+        "simplyblock_core.controllers.health_controller",
+    ])
+    try:
+        yield cluster_sim
+    finally:
+        restore_firewall_stub(saved_fw)
+        restore_rpc_router(saved_rpc)
+        FirewallClientSim.set_active_cluster(None)
+        RpcRouter.set_active_cluster(None)
+
+
+@pytest.fixture
+def db_controller_singleton_reset():
+    """Clear the DBController singleton instance so each test gets a fresh
+    one bound to the test-scoped fdb_db."""
+    from simplyblock_core.db_controller import DBController, Singleton
+    Singleton._instances.pop(DBController, None)
+    yield
+    Singleton._instances.pop(DBController, None)
+
+
+@pytest.fixture
+def db_controller(fdb_clean, db_controller_singleton_reset):
+    """A fresh DBController bound to the cleaned FDB."""
+    from simplyblock_core.db_controller import DBController
+    return DBController()

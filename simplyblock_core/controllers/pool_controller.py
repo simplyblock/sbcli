@@ -2,16 +2,17 @@
 
 import logging as lg
 
-import json
 import random
 import string
 import time
 import uuid
 
+from pydantic import SecretStr
+
 from simplyblock_core import utils
 from simplyblock_core.controllers import pool_events, lvol_controller
 from simplyblock_core.db_controller import DBController
-from simplyblock_core.kms import KMSException, create_kms_connection
+from simplyblock_core.kms import KMSException, create_kms_connection, pool_kek_name
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.prom_client import PromClient
 
@@ -98,13 +99,13 @@ def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes,
 
     pool.dhchap = bool(dhchap)
     if pool.dhchap:
-        pool.dhchap_key = utils.generate_dhchap_key(length=32)
-        pool.dhchap_ctrlr_key = utils.generate_dhchap_key(length=32)
+        pool.dhchap_key = SecretStr(utils.generate_dhchap_key(length=32))
+        pool.dhchap_ctrlr_key = SecretStr(utils.generate_dhchap_key(length=32))
 
 
     try:
         with create_kms_connection(cluster) as kms:
-            kms.create_key_encryption_key(pool.get_id())
+            kms.create_key_encryption_key(pool_kek_name(pool.get_id()))
             logger.info("Created pool key")
     except KMSException:
         logger.exception("Failed to create pool key")
@@ -359,7 +360,7 @@ def delete_pool(uuid):
 
     with create_kms_connection(cluster) as kms:
         try:
-            kms.delete_key_encryption_key(pool.get_id())
+            kms.delete_key_encryption_key(pool_kek_name(pool.get_id()))
             logger.info("Deleted pool key")
         except KMSException:
             logger.exception("Failed to delete pool key")
@@ -368,7 +369,7 @@ def delete_pool(uuid):
     return True
 
 
-def list_pools(is_json, cluster_id=None):
+def list_pools(cluster_id=None):
     db_controller = DBController()
     pools = db_controller.get_pools(cluster_id)
     data = []
@@ -392,10 +393,7 @@ def list_pools(is_json, cluster_id=None):
             "Status": pool.status,
         })
 
-    if is_json:
-        return json.dumps(data, indent=2)
-    else:
-        return utils.print_table(data)
+    return data
 
 
 def set_status(pool_id, status):
@@ -413,7 +411,7 @@ def set_status(pool_id, status):
     logger.info("Done")
 
 
-def get_pool(pool_id, is_json):
+def get_pool(pool_id):
     db_controller = DBController()
     try:
         pool = db_controller.get_pool_by_id(pool_id)
@@ -421,12 +419,7 @@ def get_pool(pool_id, is_json):
         logger.error(f"Pool not found {pool_id}")
         return False
 
-    data = pool.get_clean_dict()
-    if is_json:
-        return json.dumps(data, indent=2)
-    else:
-        data2 = [{"key": key, "value": data[key]} for key in data]
-        return utils.print_table(data2)
+    return pool.get_clean_dict()
 
 
 def get_capacity(pool_id):
@@ -504,7 +497,8 @@ def get_pool_total_capacity(pool_id, all_lvols=None, all_snaps=None):
     if not all_lvols:
         all_lvols = db_controller.get_lvols_by_pool_id(pool_id)
     for lvol in all_lvols:
-        total += lvol.size
+        if lvol.pool_uuid == pool_id:
+            total += lvol.size
 
     if not all_snaps:
         all_snaps = db_controller.get_mini_snapshots()
