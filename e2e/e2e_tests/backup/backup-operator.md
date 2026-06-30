@@ -91,7 +91,7 @@ create storage nodes
 ```
 kubectl apply -f - <<'EOF'
 apiVersion: storage.simplyblock.io/v1alpha1
-kind: StorageNode
+kind: StorageNodeSet
 metadata:
   name: simplyblock-node
   namespace: cluster1

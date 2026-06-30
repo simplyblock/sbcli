@@ -79,9 +79,15 @@ class LVol(BaseModel):
         super().write_to_db(kv_store)
         lvol_mini = LVolMini().from_lvol(self)
         lvol_mini.write_to_db(kv_store)
+        # Maintain the per-pool name index here so every create/update path keeps
+        # it current (used for O(1) name-uniqueness instead of scanning all lvols).
+        from simplyblock_core.db_controller import DBController
+        DBController().index_lvol_name(self)
 
     def remove(self, kv_store):
         super().remove(kv_store)
+        from simplyblock_core.db_controller import DBController
+        DBController().unindex_lvol_name(self)
         try:
             lvol_mini = LVolMini().read_from_db(kv_store, self.uuid)[0]
             lvol_mini.remove(kv_store)

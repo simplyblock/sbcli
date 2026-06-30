@@ -1347,7 +1347,11 @@ class BackupTestBase(TestClusterBase):
             except Exception:
                 pass
 
-        super().teardown(delete_lvols=delete_lvols, close_ssh=close_ssh, skip_k8s_cleanup=skip_k8s_cleanup)
+        # The backup test already handles its own resource + pool cleanup above.
+        # Pass delete_lvols=False to prevent the base teardown from calling
+        # delete_all_storage_pools() which would nuke infrastructure pools
+        # (e.g. encryption-pool, simplyblock-pool) in K8s shared-cluster mode.
+        super().teardown(delete_lvols=False, close_ssh=close_ssh, skip_k8s_cleanup=skip_k8s_cleanup)
 
     def _k8s_teardown(self):
         """Delete all K8s resources created during the test."""
@@ -1803,7 +1807,7 @@ class TestBackupRestoreDataIntegrity(BackupTestBase):
             self._restore_backup(backup_id, pool2_name, pool_name=self.pool_name2)
             self._wait_for_restore(pool2_name)
             pool2_id = self._get_lvol_id(pool2_name)
-            self._connect_and_mount(pool2_name, pool2_id, mount=p2_mount, format_disk=False)
+            _, p2_mount = self._connect_and_mount(pool2_name, pool2_id, mount=p2_mount, format_disk=False)
             self._verify_checksums(self.fio_node, p2_mount, original_checksums)
             self.logger.info("TC-BCK-017: restore to second pool checksums match ✓")
         finally:

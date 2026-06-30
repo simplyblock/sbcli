@@ -84,6 +84,86 @@ def _in_shutdown_longer_than(node, seconds):
         return False
 
 
+def _down_longer_than(node, seconds):
+    """True if a DOWN node has been DOWN for at least ``seconds``.
+
+    Keyed off ``node.down_since`` (stamped by set_node_status on the ->DOWN
+    transition). A missing/blank/unparseable timestamp is treated as
+    "long enough" so we stay conservative: an old row without the field still
+    suspends + auto-restarts rather than being silently ignored forever.
+    """
+    ds = getattr(node, "down_since", "") or ""
+    if not ds:
+        return True
+    try:
+        return (datetime.now(timezone.utc) - datetime.fromisoformat(ds)).total_seconds() >= seconds
+    except Exception:
+        return True
+
+
+def _fd_aware_cluster_status(cluster, snodes, affected_ips, n, k, jm_replication_tasks):
+    """Failure-domain-aware cluster status.
+
+    Implements the operator-agreed availability contract for clusters created
+    with ``--enable-failure-domain`` (where data/parity chunks are spread
+    across distinct domains):
+
+      (A) Losing ALL nodes and/or any combination of devices within a SINGLE
+          failure domain is tolerated — the cluster stays serving (DEGRADED),
+          never SUSPENDED.
+      (B) Losing a whole failure domain AND one additional node/device outage
+          (>=1 devices on a SINGLE node) on ONE other domain is also tolerated,
+          but ONLY when FTT == 2 (``distr_npcs`` == 2) AND the cluster spans at
+          least ndcs (``distr_ndcs``) independent failure domains.
+
+    Anything broader than (A)/(B) -> SUSPENDED.
+
+    ``affected_ips`` is the list of distinct physical-host mgmt IPs that have a
+    device/node outage (the same set the flat per-node logic counts).
+
+    Failure-domain ids are 32-bit ints: ``-1`` means "unset", ``>= 0`` is a
+    real domain (0 is a valid domain — never test truthiness here).
+
+    Returns a ``Cluster.STATUS_*`` string, or ``None`` to signal "this is not a
+    usable failure-domain layout — fall back to the flat per-node suspend
+    logic": fewer than 2 tagged domains, or an affected host carrying no domain
+    tag (mixed/partially-tagged cluster — be safe, don't reason FD-wise).
+    """
+    all_fds = {nd.failure_domain for nd in snodes if nd.failure_domain >= 0}
+    if len(all_fds) < 2:
+        return None
+
+    fd_by_ip = {nd.mgmt_ip: nd.failure_domain for nd in snodes}
+    # Group the affected physical hosts by their failure domain.
+    damaged = {}
+    for ip in affected_ips:
+        fd = fd_by_ip.get(ip, -1)
+        if fd < 0:
+            return None
+        damaged.setdefault(fd, set()).add(ip)
+
+    num_damaged_fds = len(damaged)
+    if num_damaged_fds == 0:
+        # No FTT-affecting damage; an in-flight JM replication still degrades.
+        return Cluster.STATUS_DEGRADED if jm_replication_tasks else Cluster.STATUS_ACTIVE
+
+    # Any surviving damage means reduced redundancy -> at best DEGRADED.
+    # (A) Damage confined to one domain is always tolerated.
+    if num_damaged_fds == 1:
+        return Cluster.STATUS_DEGRADED
+
+    # (B) One whole domain + at most one extra affected node on exactly one
+    # other domain, gated on FTT==2 and >=ndcs independent domains.
+    if num_damaged_fds == 2 and k == 2 and len(all_fds) >= n:
+        nodes_in_smaller_domain = min(len(ips) for ips in damaged.values())
+        if nodes_in_smaller_domain <= 1:
+            return Cluster.STATUS_DEGRADED
+
+    # Damage spans more domains (or more than one extra node on the second
+    # domain) than the contract permits.
+    return Cluster.STATUS_SUSPENDED
+
+
 def get_next_cluster_status(cluster_id):
     logger.info(f"get_next_cluster_status for cluster_id: {cluster_id}")
     cluster = db.get_cluster_by_id(cluster_id)
@@ -170,6 +250,19 @@ def get_next_cluster_status(cluster_id):
     # npcs k = 1
     n = cluster.distr_ndcs
     k = cluster.distr_npcs
+
+    # Failure-domain-aware suspend criteria. When the cluster was created with
+    # --enable-failure-domain, chunks are spread across distinct domains, so it
+    # can survive losing whole domains that the flat per-node count below would
+    # treat as a fatal FTT breach (affected_nodes > k). The helper returns None
+    # when the layout isn't a usable FD layout (<2 tagged domains, or an
+    # affected host without a domain tag), in which case we fall through to the
+    # legacy node-count logic unchanged.
+    if cluster.enable_failure_domain:
+        fd_status = _fd_aware_cluster_status(
+            cluster, snodes, affected_physical_nodes, n, k, jm_replication_tasks)
+        if fd_status is not None:
+            return fd_status
 
     # if number of devices in the cluster unavailable on DIFFERENT nodes > k --> I cannot read and in some cases cannot write (suspended)
     if affected_nodes == k and (not cluster.strict_node_anti_affinity or online_nodes >= (n + k)):
@@ -875,6 +968,32 @@ def node_port_check_fun(snode):
     return node_port_check
 
 
+# Bounded wait (s) for the parallel port/data-nic check to finish before we
+# read its result. The probe started in parallel with the liveness checks, so
+# by the time we collect it it has usually completed; if not, we treat it as
+# inconclusive for this cycle rather than blocking node-status evaluation.
+PORT_CHECK_JOIN_TIMEOUT_SEC = 5
+
+
+def _spawn_port_check(snode):
+    """Run node_port_check_fun in a background daemon thread so the LVS-port /
+    data-nic probes — which matter ONLY for an otherwise-online node and can
+    hang on a rebooting host's SnodeAPI — run in PARALLEL with the liveness
+    checks instead of serializing after them. Returns (thread, holder); read
+    holder['result'] after a bounded join (None = errored/never-finished)."""
+    holder = {"result": None}
+
+    def _run():
+        try:
+            holder["result"] = node_port_check_fun(snode)
+        except Exception as e:
+            logger.debug(f"Port check thread failed for {snode.get_id()}: {e}")
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    return t, holder
+
+
 class State:
     counter = 0
 def increment():
@@ -969,9 +1088,19 @@ def check_node(snode):
         set_node_unreachable(snode)
         return False
 
+    # Kick off the LVS-port / data-nic check NOW so it runs in parallel with
+    # the liveness checks below (its result is only consumed at the end, and
+    # only matters for an otherwise-online node). If a liveness check fails
+    # first we return early and this daemon thread is simply abandoned.
+    port_check_thread, port_check_holder = _spawn_port_check(snode)
+
     # 2- check node API
     try:
-        snode_api = snode.client(timeout=10, retry=2)
+        # Liveness probe: short timeout, no connect retries — a host that is
+        # rebooting stops accepting connections, and retrying with backoff only
+        # delays flipping it not-online (incident 2026-06-25: ~21s of detection
+        # latency on a host_reboot came from stacked SnodeAPI retries/timeouts).
+        snode_api = snode.client(timeout=5, retry=1, connect_retry=0)
         ret, _ = snode_api.is_live()
         logger.info(f"Check: node API {snode.mgmt_ip}:5000 ... {ret}")
         if not ret:
@@ -985,7 +1114,7 @@ def check_node(snode):
 
     # 3- check spdk process through node API
     try:
-        snode_api = snode.client(timeout=40, retry=2)
+        snode_api = snode.client(timeout=10, retry=1, connect_retry=0)
         is_up, _ = snode_api.spdk_process_is_up(snode.rpc_port, snode.cluster_id)
         logger.info(f"Check: spdk process {snode.mgmt_ip}:5000 ... {bool(is_up)}")
         if not is_up:
@@ -1019,9 +1148,21 @@ def check_node(snode):
     #    t.start()
     #    node_rpc_timeout_threads[snode.get_id()] = t
 
-    node_port_check = node_port_check_fun(snode)
+    # Collect the port/data-nic check that ran in parallel with the liveness
+    # checks. Bounded wait: if it hasn't finished (e.g. a slow/hung SnodeAPI on
+    # a rebooting host) treat it as inconclusive and let the next cycle decide,
+    # rather than pinning this node's cycle. Only a definitive False escalates.
+    port_check_thread.join(PORT_CHECK_JOIN_TIMEOUT_SEC)
+    if port_check_thread.is_alive():
+        logger.info(
+            f"Check: port/data-nic for {snode.mgmt_ip} inconclusive "
+            f"(still running after {PORT_CHECK_JOIN_TIMEOUT_SEC}s); "
+            f"deferring port-down decision to next cycle")
+        node_port_check = None
+    else:
+        node_port_check = port_check_holder["result"]
 
-    if not node_port_check:
+    if node_port_check is False:
         cluster = db.get_cluster_by_id(snode.cluster_id)
         if cluster.status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
             logger.error("Port check failed")
