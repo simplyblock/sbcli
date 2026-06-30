@@ -116,10 +116,9 @@ _WAIT = object()
 _INTERMEDIATE_POLL_INTERVAL_S = 1      # seconds between stat checks
 _INTERMEDIATE_POLL_MAX = 300           # max iterations ≈ 5 min
 
-# Fault-injection: set _INJECT_SNAP_FAIL = True to make each snapshot's first
-# transfer attempt fail before launching, then succeed on retry. Remove when done.
-_INJECT_SNAP_FAIL = True
-_snap_fail_injected: set = set()
+# Test flags — remove when done
+_SKIP_CLEANUP_SOURCE = True
+_SKIP_INTERMEDIATE_SNAP_DELETE = True
 
 
 def _now_ms():
@@ -982,14 +981,6 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                     except Exception as e:
                         logger.warning(f"Pre-cleanup of {tgt_composite} failed (continuing): {e}")
 
-                if _INJECT_SNAP_FAIL and snap_uuid not in _snap_fail_injected:
-                    _snap_fail_injected.add(snap_uuid)
-                    migration.transfer_context = {}
-                    migration.write_to_db(db.kv_store)
-                    logger.warning(
-                        f"[INJECT] Artificial snap transfer failure for {snap_uuid}")
-                    return False, True, f"[INJECT] snap transfer failure for {snap_uuid}"
-
                 t, err = _setup_snap_transfer(
                     snap, snap_index, src_node, tgt_node,
                     src_rpc, tgt_rpc, trtype,
@@ -1792,7 +1783,7 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
             migration,
             tgt_lvol_uuid=_ctx.get('tgt_lvol_uuid'),
             tgt_lvol_bdev=_ctx.get('tgt_lvol_bdev'))
-        if migration.intermediate_snaps:
+        if migration.intermediate_snaps and not _SKIP_INTERMEDIATE_SNAP_DELETE:
             tgt_sec_rpc = _get_secondary_rpc(tgt_node)
             _tgt_ter = _get_target_tertiary_node(tgt_node)[0]
             tgt_ter_rpc = _make_rpc(_tgt_ter) if _tgt_ter else None
@@ -1937,7 +1928,7 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
     # Delete intermediate (shrink) snapshots from the target — they are migration
     # artifacts and do not need to be preserved. No migration flag so SPDK
     # coalesces and frees their clusters into the child bdev.
-    if migration.intermediate_snaps:
+    if migration.intermediate_snaps and not _SKIP_INTERMEDIATE_SNAP_DELETE:
         tgt_sec_rpc = _get_secondary_rpc(tgt_node)
         _tgt_ter = _get_target_tertiary_node(tgt_node)[0]
         tgt_ter_rpc = _make_rpc(_tgt_ter) if _tgt_ter else None
