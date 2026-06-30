@@ -376,7 +376,7 @@ class K8sNativeNodeMigrationTest(TestClusterBase):
 
         # Verify the CRD patch was applied
         verify_out, _ = self.k8s_utils._exec_kubectl(
-            f"kubectl get storagenodes.storage.simplyblock.io simplyblock-node "
+            f"kubectl get storagenodesets.storage.simplyblock.io simplyblock-node "
             f"-n {self.k8s_utils.namespace} "
             f"-o jsonpath='{{.spec.action}} {{.spec.nodeUUID}} {{.spec.workerNode}}'"
         )

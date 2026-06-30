@@ -1078,6 +1078,14 @@ def set_cluster_status(cl_id, status) -> None:
             fresh.in_activation_since = datetime.datetime.now(datetime.timezone.utc).isoformat()
         elif captured['old'] == Cluster.STATUS_IN_ACTIVATION:
             fresh.in_activation_since = ""
+        # Leaving suspension for a healthy status closes the current
+        # suspend-recovery episode: clear the drain marker so the next
+        # suspension starts a fresh drain (auto-restart paused -> drain ->
+        # resume). Kept set across the suspended<->in_activation flapping of a
+        # single recovery so the drain does not restart on every failed
+        # activation attempt. Inside the CAS so it is written atomically.
+        if status in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
+            fresh.suspend_drain_complete = False
         return True
 
     updated = db_controller.atomic_update(cluster, _mutate)

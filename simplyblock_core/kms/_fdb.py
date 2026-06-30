@@ -28,10 +28,10 @@ class LocalKMS(KMS):
         self._kv_store.set(self._key(path), json.dumps(list(keys)).encode())
 
     def get_data_encryption_keys(self, path: str, kek_name: str) -> tuple[str, str]:
-        raw = self._kv_store.get(self._key(path)).wait()
-        if not raw.present():
+        raw = self._kv_store.get(self._key(path))
+        if not raw:
             raise KMSException(f"No keys found at {path}")
-        key1, key2 = json.loads(bytes(raw))
+        key1, key2 = json.loads(raw)
         return key1, key2
 
     def delete_data_encryption_keys(self, path: str) -> None:

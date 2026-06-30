@@ -392,39 +392,13 @@ def _used_bdev_name_numbers(db_controller, all_lvols=None, all_snapshots=None):
 
 
 def get_random_vuid(all_lvols=None, all_snapshots=None):
+    # Monotonic allocation via DBController.next_vuid (single shared vuid
+    # sequence). The old random-pick + scan-all-lvols/snapshots/nodes dedupe was
+    # O(N) per create (O(N^2) for mass create). A strictly-increasing vuid can
+    # never collide with an existing bdev-name number, so no scan/dedupe is
+    # needed. Args kept for call-site compatibility but no longer used.
     from simplyblock_core.db_controller import DBController
-    db_controller = DBController()
-    if not all_lvols:
-        all_lvols = db_controller.get_mini_lvols()
-
-    used_vuids = []
-    nodes = db_controller.get_storage_nodes()
-    for node in nodes:
-        for bdev in node.lvstore_stack:
-            type = bdev['type']
-            if type == "bdev_distr":
-                vuid = bdev['params']['vuid']
-            elif type == "bdev_raid" and "jm_vuid" in bdev:
-                vuid = bdev['jm_vuid']
-            else:
-                continue
-            used_vuids.append(vuid)
-
-    for lvol in all_lvols:
-        used_vuids.append(lvol.vuid)
-
-    used = set(used_vuids) | _used_bdev_name_numbers(db_controller, all_lvols, all_snapshots)
-
-    # 1M range + dedupe against existing bdev-name numeric suffixes
-    # (CLN_xxxx / LVOL_xxxx / SNAP_xxxx). With ~10k lvols+snaps the
-    # 10k-only legacy range hit ~50% birthday-collision probability;
-    # 1M brings that to <1%. Combined with the dedupe set we avoid the
-    # SPDK ``lvol with name already exists`` rejection that triggered
-    # the snapshot-delete-in-flight metadata corruption.
-    r = 1 + int(random.random() * 10000)
-    while r in used:
-        r = 1 + int(random.random() * 10000)
-    return r
+    return DBController().next_vuid()
 
 
 def hexa_to_cpu_list(cpu_mask):
@@ -1394,26 +1368,12 @@ def addNvmeDevices(rpc_client, snode, devs):
 
 
 def get_random_snapshot_vuid(all_lvols=None, all_snapshots=None):
+    # Monotonic allocation via DBController.next_vuid — shares the single vuid
+    # sequence with lvols/clones (one numeric space, so no cross-collision).
+    # Replaces the old random-pick + scan-all-snapshots dedupe (O(N) per create).
+    # Args kept for call-site compatibility but no longer used.
     from simplyblock_core.db_controller import DBController
-    db_controller = DBController()
-    used_vuids = set()
-    if not all_snapshots:
-        all_snapshots = db_controller.get_snapshots()
-    for snap in all_snapshots:
-        used_vuids.add(snap.vuid)
-
-    # Same dedupe rationale as ``get_random_vuid``: avoid colliding with
-    # any existing CLN_/LVOL_/SNAP_ bdev-name numeric suffix so the
-    # SPDK-side create cannot reject with "lvol with name already
-    # exists". That rejection in the clone path is what triggered the
-    # mgmt-side async snapshot delete + reuse-during-deletion sequence
-    # producing stuck snapshots (incident: aws_dual_soak 2026-04-30).
-    used = used_vuids | _used_bdev_name_numbers(db_controller, all_lvols, all_snapshots)
-
-    r = 1 + int(random.random() * 1000000)
-    while r in used:
-        r = 1 + int(random.random() * 1000000)
-    return r
+    return DBController().next_vuid()
 
 
 def pull_docker_image_with_retry(client: docker.DockerClient, image_name, retries=3, delay=5):

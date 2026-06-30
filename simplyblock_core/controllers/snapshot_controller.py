@@ -2,6 +2,9 @@
 import builtins
 import logging as lg
 import math
+import os
+import socket
+import threading
 import time
 import uuid
 from datetime import datetime
@@ -9,7 +12,7 @@ from datetime import datetime
 from simplyblock_core.controllers import lvol_controller, snapshot_events, pool_controller, tasks_controller, \
     migration_controller
 
-from simplyblock_core import utils
+from simplyblock_core import constants, utils
 from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.kms import create_kms_connection, lvol_dek_path, pool_kek_name
 from simplyblock_core.kms._exceptions import KMSException
@@ -26,17 +29,72 @@ logger = lg.getLogger()
 db_controller = DBController()
 
 
-def _acquire_lvol_mutation_lock(node):
-    """Block concurrent lvstore mutations while HA registration is in flight."""
-    had_lock = node.lvol_sync_del()
-    if not had_lock:
-        node.lvol_del_sync_lock()
-    return had_lock
+def _wait_for_node_sync_delete(node, timeout=None, poll=0.5):
+    """Block until any in-flight LVol sync-deletion on this node's HA peers
+    drains, then let the create proceed — instead of rejecting it.
+
+    The node-level ``lvol_del_sync_lock`` is set by the lvol/snapshot delete
+    monitors when an object is deleted on the primary while a secondary/tertiary
+    is down: that secondary's delete is deferred to an FN_LVOL_SYNC_DEL task, and
+    until it drains a new create/register on the same node could race the pending
+    delete in the replica blob tree. Previously the create was rejected (HTTP
+    400); now it waits for the deferred delete to finish.
+
+    Returns True once clear, or False if ``timeout`` seconds elapse (caller fails
+    the create so the client retries). Bounded by LVOL_SYNC_DELETE_WAIT_SEC; this
+    plus the later per-lvstore lock wait must stay under the front-end API timeout
+    (HAProxy ``timeout server``) so the lock always times out before the API cuts
+    the connection — see the budget note in constants.py. ``node.lvol_sync_del()``
+    reads the lock fresh from the DB each call, so re-fetching the node is
+    unnecessary."""
+    if timeout is None:
+        timeout = constants.LVOL_SYNC_DELETE_WAIT_SEC
+    deadline = time.time() + timeout
+    while node.lvol_sync_del():
+        if time.time() >= deadline:
+            return False
+        time.sleep(poll)
+    return True
 
 
-def _release_lvol_mutation_lock(node, had_lock):
-    if not had_lock:
-        node.lvol_del_sync_lock_reset()
+def _new_lvstore_lock_owner():
+    """Unique owner id for one critical section: host + pid + thread + nonce, so
+    a stale lock is never mistaken for a live holder's and an owner-scoped
+    release only ever frees this section's own lock."""
+    return f"{socket.gethostname()}-{os.getpid()}-{threading.get_ident()}-{uuid.uuid4().hex[:8]}"
+
+
+def _acquire_lvstore_lock_blocking(db_controller, cluster_id, lvs_name, owner,
+                                   timeout=None, poll=0.5):
+    """Block until the per-lvstore snapshot-mutation lock is held by ``owner``.
+
+    Returns True once acquired, or False if ``timeout`` seconds elapse without
+    acquiring (the caller should fail the create so it is retried). A lock
+    abandoned by a crashed holder is reclaimed once its heartbeat goes stale
+    (constants.LVSTORE_MUTATION_LOCK_TTL_SEC), so the wait is bounded even if a
+    holder died mid-section."""
+    if timeout is None:
+        timeout = constants.LVSTORE_MUTATION_LOCK_WAIT_SEC
+    deadline = time.time() + timeout
+    while True:
+        won, current_owner = db_controller.acquire_lvstore_lock(cluster_id, lvs_name, owner)
+        if won:
+            return True
+        if time.time() >= deadline:
+            logger.error("Timed out waiting for lvstore lock %s (held by %s)",
+                         lvs_name, current_owner)
+            return False
+        time.sleep(poll)
+
+
+def _lvstore_lock_heartbeat(db_controller, cluster_id, lvs_name, owner, stop_event):
+    """Refresh the lvstore lock until ``stop_event`` is set, so a slow
+    create→register section (register RPCs can take many seconds under load) is
+    not reclaimed out from under a live holder."""
+    while not stop_event.wait(constants.LVSTORE_MUTATION_LOCK_HEARTBEAT_SEC):
+        if not db_controller.refresh_lvstore_lock(cluster_id, lvs_name, owner):
+            logger.warning("Lost lvstore lock %s heartbeat (reclaimed)", lvs_name)
+            return
 
 
 def _rollback_lvol_creation(lvol, node_ids):
@@ -113,17 +171,17 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
         logger.error(msg)
         return False, msg
 
-    if not all_snaps:
-        all_snaps = db_controller.get_snapshots(pool.cluster_id)
-    for sn in all_snaps:
-        if sn.snap_name == snapshot_name:
-            return False, f"Snapshot name must be unique: {snapshot_name}"
+    # Name uniqueness via the per-cluster name index (O(1) point read) instead of
+    # scanning every snapshot in the cluster on each create.
+    if db_controller.snap_name_taken(pool.cluster_id, snapshot_name):
+        return False, f"Snapshot name must be unique: {snapshot_name}"
 
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
 
-    if snode.lvol_sync_del() and lock:
-        logger.error(f"LVol sync deletion found on node: {snode.get_id()}")
-        return False, f"LVol sync deletion found on node: {snode.get_id()}"
+    if lock and not _wait_for_node_sync_delete(snode):
+        msg = f"Timed out waiting for in-flight LVol sync deletion to drain on node: {snode.get_id()}"
+        logger.error(msg)
+        return False, msg
 
     logger.info(f"Creating snapshot: {snapshot_name} from LVol: {lvol.get_id()}")
 
@@ -138,9 +196,13 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
         logger.error(msg)
         return False, msg
 
-    if not all_lvols:
-        all_lvols = db_controller.get_mini_lvols()
     if pool.pool_max_size > 0:
+        # Only load the full lvol/snapshot sets when a pool size limit is set
+        # (the capacity sum). Unlimited pools — the common case — skip both scans.
+        if not all_lvols:
+            all_lvols = db_controller.get_mini_lvols()
+        if not all_snaps:
+            all_snaps = db_controller.get_snapshots(pool.cluster_id)
         total = pool_controller.get_pool_total_capacity(pool.get_id(), all_lvols, all_snaps)
         if total + size > pool.pool_max_size:
             msg = f"Invalid LVol size: {utils.humanbytes(size)}. pool max size has reached {utils.humanbytes(total+size)} of {utils.humanbytes(pool.pool_max_size)}"
@@ -155,7 +217,7 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
     if cluster.status not in [cluster.STATUS_ACTIVE, cluster.STATUS_DEGRADED]:
         return False, f"Cluster is not active, status: {cluster.status}"
 
-    snap_vuid = utils.get_random_snapshot_vuid(all_lvols, all_snaps)
+    snap_vuid = utils.get_random_snapshot_vuid()
     snap_bdev_name = f"SNAP_{snap_vuid}"
     size = lvol.size
     blobid = 0
@@ -227,9 +289,23 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
                 secondary_nodes.append(candidate)
             # "skip", "queue" — handled by the registration gate below
 
-        had_lock = False
+        lvs_lock_owner = None
+        lvs_lock_stop = None
         if lock:
-            had_lock = _acquire_lvol_mutation_lock(host_node)
+            # Serialize the create→replica-register sequence per lvstore so
+            # concurrent snapshot creates of this lvstore register their
+            # snapshots on the secondary/tertiary in creation (blobid) order.
+            # Out-of-order registration builds the replica blob tree with a
+            # child before its parent and corrupts the lvstore.
+            lvs_lock_owner = _new_lvstore_lock_owner()
+            if not _acquire_lvstore_lock_blocking(
+                    db_controller, pool.cluster_id, lvol.lvs_name, lvs_lock_owner):
+                return False, f"Timed out acquiring lvstore lock for snapshot create on {lvol.lvs_name}"
+            lvs_lock_stop = threading.Event()
+            threading.Thread(
+                target=_lvstore_lock_heartbeat,
+                args=(db_controller, pool.cluster_id, lvol.lvs_name, lvs_lock_owner, lvs_lock_stop),
+                daemon=True).start()
 
         try:
             if primary_node:
@@ -287,7 +363,10 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
                     return False, msg
         finally:
             if lock:
-                _release_lvol_mutation_lock(host_node, had_lock)
+                if lvs_lock_stop is not None:
+                    lvs_lock_stop.set()
+                db_controller.release_lvstore_lock(
+                    pool.cluster_id, lvol.lvs_name, lvs_lock_owner)
 
     snap = SnapShot()
     snap.uuid = str(uuid.uuid4())
@@ -328,16 +407,18 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
                 snap.snap_ref_id = original_snap.get_id()
                 snap.write_to_db(db_controller.kv_store)
 
-    for sn in all_snaps:
-        if sn.get_id() == snap.get_id():
-            continue
-        if sn.lvol.get_id() == lvol_id:
-            if not sn.next_snap_uuid:
-                sn.next_snap_uuid = snap.get_id()
-                snap.prev_snap_uuid = sn.get_id()
-                sn.write_to_db()
-                snap.write_to_db()
-                break
+    # Link into this lvol's snapshot chain using the by-lvol index (a single
+    # reverse read for the current tail) instead of scanning every cluster
+    # snapshot. Find the predecessor BEFORE registering the new snap below.
+    prev = db_controller.get_lvol_latest_snapshot(lvol_id, exclude_uuid=snap.get_id())
+    if prev is not None and not prev.next_snap_uuid:
+        prev.next_snap_uuid = snap.get_id()
+        snap.prev_snap_uuid = prev.get_id()
+        prev.write_to_db()
+        snap.write_to_db()
+
+    # Register the new snapshot in the name + by-lvol indexes (O(1)).
+    db_controller.index_snapshot(snap)
 
     snapshot_events.snapshot_create(snap)
     if lvol.do_replicate:
@@ -500,6 +581,7 @@ def delete(snapshot_uuid, force_delete=False):
     except KeyError:
         logger.exception(f"Storage node not found {snap.lvol.node_id}")
         if force_delete:
+            db_controller.unindex_snapshot(snap)
             snap.remove(db_controller.kv_store)
             return True
         return False
@@ -702,9 +784,10 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
         logger.error(msg)
         return False, msg
 
-    if snode.lvol_sync_del() and lock:
-        logger.error(f"LVol sync deletion found on node: {snode.get_id()}")
-        return False, f"LVol sync deletion found on node: {snode.get_id()}"
+    if lock and not _wait_for_node_sync_delete(snode):
+        msg = f"Timed out waiting for in-flight LVol sync deletion to drain on node: {snode.get_id()}"
+        logger.error(msg)
+        return False, msg
 
     cluster = db_controller.get_cluster_by_id(pool.cluster_id)
     if cluster.status not in [cluster.STATUS_ACTIVE, cluster.STATUS_DEGRADED]:
@@ -937,9 +1020,26 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
                     f"register clone {lvol.uuid} on {candidate.get_id()[:8]}")
             # "skip" — disconnected or pre_block, skip
 
-        had_lock = False
+        lvs_lock_owner = None
+        lvs_lock_stop = None
         if lock:
-            had_lock = _acquire_lvol_mutation_lock(host_node)
+            # Serialize the create→replica-register sequence per lvstore (one
+            # operation at a time per LVS) so concurrent clones/snapshots of this
+            # lvstore register on the secondary/tertiary in creation (blobid)
+            # order. Out-of-order registration builds the replica blob tree with a
+            # child before its parent and corrupts the lvstore. Waits for the lock
+            # rather than rejecting the request.
+            lvs_lock_owner = _new_lvstore_lock_owner()
+            if not _acquire_lvstore_lock_blocking(
+                    db_controller, pool.cluster_id, lvol.lvs_name, lvs_lock_owner):
+                if lvol.status != LVol.STATUS_IN_DELETION:
+                    lvol.remove(db_controller.kv_store)
+                return False, f"Timed out acquiring lvstore lock for clone create on {lvol.lvs_name}"
+            lvs_lock_stop = threading.Event()
+            threading.Thread(
+                target=_lvstore_lock_heartbeat,
+                args=(db_controller, pool.cluster_id, lvol.lvs_name, lvs_lock_owner, lvs_lock_stop),
+                daemon=True).start()
 
         try:
             if primary_node:
@@ -963,7 +1063,10 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
                     return False, error
         finally:
             if lock:
-                _release_lvol_mutation_lock(host_node, had_lock)
+                if lvs_lock_stop is not None:
+                    lvs_lock_stop.set()
+                db_controller.release_lvstore_lock(
+                    pool.cluster_id, lvol.lvs_name, lvs_lock_owner)
 
     lvol.status = LVol.STATUS_ONLINE
     lvol.write_to_db(db_controller.kv_store)

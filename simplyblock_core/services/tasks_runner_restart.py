@@ -474,6 +474,19 @@ while True:
             tasks = db.get_job_tasks(cl.get_id(), reverse=False)
             for task in tasks:
                 if task.function_name in [JobSchedule.FN_DEV_RESTART, JobSchedule.FN_NODE_RESTART]:
+                    # Suspend recovery: while a SUSPENDED cluster is still being
+                    # drained to all-offline, pause node restarts. Executing one
+                    # now would fight the auto-shutdown and re-create the
+                    # wedged half-restarted state we are fixing. The task stays
+                    # pending and runs once the drain completes
+                    # (suspend_drain_complete).
+                    if task.function_name == JobSchedule.FN_NODE_RESTART:
+                        cl_fresh = db.get_cluster_by_id(cl.get_id())
+                        if tasks_controller.is_auto_restart_paused(cl_fresh):
+                            logger.info(
+                                "Cluster %s suspended and draining; deferring "
+                                "node-restart task %s", cl.get_id(), task.uuid)
+                            continue
                     # Restart tasks start at a short cadence and cap the
                     # exponential backoff at RESTART_TASK_EXEC_INTERVAL_MAX_SEC
                     # so recovery time is bounded even after several retries.

@@ -204,6 +204,15 @@ jobs:
                 ${extra_flag} \
                 ${CLUSTER_ID:+--cluster-id '${CLUSTER_ID}'}" \
             2>&1
+            local rc=$?
+            [ $rc -ne 0 ] && return $rc
+            local has_content
+            has_content=$(ssh "${SSH_OPTS[@]}" "root@${MGMT_IP}" \
+              "find '${outdir}' -name '*.log' -size +0 2>/dev/null | head -1")
+            if [ -z "${has_content}" ]; then
+              echo "  WARN: collect_logs.py succeeded but all .log files are 0 bytes"
+              return 1
+            fi
           }
 
           collect_adaptive() {

@@ -1807,7 +1807,7 @@ class TestBackupRestoreDataIntegrity(BackupTestBase):
             self._restore_backup(backup_id, pool2_name, pool_name=self.pool_name2)
             self._wait_for_restore(pool2_name)
             pool2_id = self._get_lvol_id(pool2_name)
-            self._connect_and_mount(pool2_name, pool2_id, mount=p2_mount, format_disk=False)
+            _, p2_mount = self._connect_and_mount(pool2_name, pool2_id, mount=p2_mount, format_disk=False)
             self._verify_checksums(self.fio_node, p2_mount, original_checksums)
             self.logger.info("TC-BCK-017: restore to second pool checksums match ✓")
         finally:
