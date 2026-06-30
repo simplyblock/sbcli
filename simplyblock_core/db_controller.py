@@ -806,6 +806,44 @@ class DBController(metaclass=Singleton):
                 continue
         return None
 
+    # ---- lvol name index (per pool) ----
+    #
+    # lvol name uniqueness used to scan every lvol in the DB (get_mini_lvols) on
+    # each create. Index it per pool for an O(1) point read. Maintained at the
+    # LVol model layer (write_to_db / remove) so every create/delete path keeps
+    # it current without per-call-site wiring. Self-healing: a hit is verified
+    # against the real record, so a stale entry is treated as free.
+    @staticmethod
+    def _lvol_name_idx_key(pool_uuid, name) -> bytes:
+        return ("name_index/lvol/%s/%s" % (pool_uuid, name)).encode()
+
+    def lvol_name_lookup(self, pool_uuid, name):
+        """Return the LVol with this name in this pool, or None (verify-on-hit)."""
+        key = self._lvol_name_idx_key(pool_uuid, name)
+        raw = self.kv_store.get(key)
+        if raw is None:
+            return None
+        try:
+            lv = self.get_lvol_by_id(raw.decode())
+        except KeyError:
+            self.kv_store.clear(key)  # stale
+            return None
+        if lv.lvol_name == name and lv.pool_uuid == pool_uuid:
+            return lv
+        self.kv_store.clear(key)  # stale
+        return None
+
+    def lvol_name_taken(self, pool_uuid, name) -> bool:
+        return self.lvol_name_lookup(pool_uuid, name) is not None
+
+    def index_lvol_name(self, lvol) -> None:
+        if self.kv_store is not None and lvol.pool_uuid and lvol.lvol_name:
+            self.kv_store[self._lvol_name_idx_key(lvol.pool_uuid, lvol.lvol_name)] = lvol.get_id().encode()
+
+    def unindex_lvol_name(self, lvol) -> None:
+        if self.kv_store is not None and lvol.pool_uuid and lvol.lvol_name:
+            self.kv_store.clear(self._lvol_name_idx_key(lvol.pool_uuid, lvol.lvol_name))
+
     # ---- Pre-Restart Guard (Single FDB Transaction) ----
 
     def _try_set_node_restarting_tx(self, tr, cluster_id, node_id):

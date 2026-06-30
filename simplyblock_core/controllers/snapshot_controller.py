@@ -1,5 +1,6 @@
 # coding=utf-8
 import builtins
+import contextlib
 import logging as lg
 import math
 import os
@@ -95,6 +96,85 @@ def _lvstore_lock_heartbeat(db_controller, cluster_id, lvs_name, owner, stop_eve
         if not db_controller.refresh_lvstore_lock(cluster_id, lvs_name, owner):
             logger.warning("Lost lvstore lock %s heartbeat (reclaimed)", lvs_name)
             return
+
+
+@contextlib.contextmanager
+def lvstore_op_lock(cluster_id, lvs_name, *, enabled=True):
+    """INNER lock — serialize a SINGLE single-node data-plane operation per
+    lvstore (one RPC to one node).
+
+    A "single operation" is an operation on one node only: one snapshot/clone
+    create on the primary, one replica register on a secondary, one delete on
+    the leader, one sync-delete on a non-leader, one resize on a node. This
+    lock is acquired and released around each such op individually — it is
+    NOT held across the whole multi-node sequence. It guarantees no two object
+    operations (create/delete/resize of any lvol/snapshot/clone) mutate the
+    lvstore on a node at the same time, so replica blob-tree mutations never
+    interleave and corrupt the tree.
+
+    Chain (blobid) ordering across operations on the *same* object is provided
+    by the OUTER per-object lock (``object_mutation_lock``), not by this one.
+    """
+    if not enabled or not cluster_id:
+        yield
+        return
+    owner = _new_lvstore_lock_owner()
+    if not _acquire_lvstore_lock_blocking(db_controller, cluster_id, lvs_name, owner):
+        raise PreconditionError(
+            f"Timed out acquiring lvstore lock on {lvs_name}")
+    stop = threading.Event()
+    threading.Thread(
+        target=_lvstore_lock_heartbeat,
+        args=(db_controller, cluster_id, lvs_name, owner, stop),
+        daemon=True).start()
+    try:
+        yield
+    finally:
+        stop.set()
+        db_controller.release_lvstore_lock(cluster_id, lvs_name, owner)
+
+
+# Namespace prefix so a per-object lock key can never collide with a real
+# lvs_name in the shared FDB lock table.
+_OBJECT_LOCK_PREFIX = "__obj__"
+
+
+@contextlib.contextmanager
+def object_mutation_lock(cluster_id, object_uuid, *, enabled=True):
+    """OUTER lock — serialize the WHOLE multi-node sequence of one operation on
+    a single object (lvol / snapshot / clone) and exclude any other operation
+    (create / delete / resize / clone) on that SAME object while it runs.
+
+    Held across the entire controller action; the inner per-lvstore lock
+    (``lvstore_op_lock``) is taken and released around each single-node RPC
+    inside it. Because same-object operations serialize here, the per-object
+    blob chain (snapshots of one lvol, clones of one snapshot) is always
+    created and registered in order — which is the only place blobid order
+    matters; distinct objects live in distinct chains.
+
+    Reuses the lvstore-lock primitive keyed on the object uuid (namespaced via
+    ``_OBJECT_LOCK_PREFIX`` so it never collides with a real lvs_name). The
+    outer key and the inner lvs_name are different keys in the same lock table,
+    always acquired outer-then-inner, so the two never deadlock.
+    """
+    if not enabled or not cluster_id or not object_uuid:
+        yield
+        return
+    key = f"{_OBJECT_LOCK_PREFIX}/{object_uuid}"
+    owner = _new_lvstore_lock_owner()
+    if not _acquire_lvstore_lock_blocking(db_controller, cluster_id, key, owner):
+        raise PreconditionError(
+            f"Timed out acquiring object lock on {object_uuid}")
+    stop = threading.Event()
+    threading.Thread(
+        target=_lvstore_lock_heartbeat,
+        args=(db_controller, cluster_id, key, owner, stop),
+        daemon=True).start()
+    try:
+        yield
+    finally:
+        stop.set()
+        db_controller.release_lvstore_lock(cluster_id, key, owner)
 
 
 def _rollback_lvol_creation(lvol, node_ids):
@@ -289,52 +369,41 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
                 secondary_nodes.append(candidate)
             # "skip", "queue" — handled by the registration gate below
 
-        lvs_lock_owner = None
-        lvs_lock_stop = None
-        if lock:
-            # Serialize the create→replica-register sequence per lvstore so
-            # concurrent snapshot creates of this lvstore register their
-            # snapshots on the secondary/tertiary in creation (blobid) order.
-            # Out-of-order registration builds the replica blob tree with a
-            # child before its parent and corrupts the lvstore.
-            lvs_lock_owner = _new_lvstore_lock_owner()
-            if not _acquire_lvstore_lock_blocking(
-                    db_controller, pool.cluster_id, lvol.lvs_name, lvs_lock_owner):
-                return False, f"Timed out acquiring lvstore lock for snapshot create on {lvol.lvs_name}"
-            lvs_lock_stop = threading.Event()
-            threading.Thread(
-                target=_lvstore_lock_heartbeat,
-                args=(db_controller, pool.cluster_id, lvol.lvs_name, lvs_lock_owner, lvs_lock_stop),
-                daemon=True).start()
-
-        try:
+        # OUTER per-object lock: serialize the whole snapshot-create sequence
+        # for this source lvol, so its snapshot chain is created and registered
+        # in blobid order and no concurrent delete/resize/clone of the same
+        # lvol races it. The INNER lvstore_op_lock wraps each single-node RPC
+        # (primary create, each replica register) so no two object operations
+        # touch the lvstore on a node at once.
+        with object_mutation_lock(pool.cluster_id, lvol.uuid, enabled=lock):
             if primary_node:
                 rpc_client = primary_node.rpc_client()
 
                 logger.info("Creating Snapshot bdev")
                 ret = False
-                for i in range(5):
-                    ret, err = rpc_client.lvol_create_snapshot2(f"{lvol.lvs_name}/{lvol.lvol_bdev}", snap_bdev_name)
-                    if not ret:
-                        if err and err.get("code") == -32602: # {"code": -32602, "message": "Device or resource busy"}}
-                            logger.error(f"Failed to create snapshot, retrying: {err}")
-                            time.sleep(0.1)
+                with lvstore_op_lock(pool.cluster_id, lvol.lvs_name, enabled=lock):
+                    for i in range(5):
+                        ret, err = rpc_client.lvol_create_snapshot2(f"{lvol.lvs_name}/{lvol.lvol_bdev}", snap_bdev_name)
+                        if not ret:
+                            if err and err.get("code") == -32602: # {"code": -32602, "message": "Device or resource busy"}}
+                                logger.error(f"Failed to create snapshot, retrying: {err}")
+                                time.sleep(0.1)
+                            else:
+                                break
                         else:
                             break
-                    else:
-                        break
-                if not ret:
-                    return False, f"Failed to create snapshot on node: {snode.get_id()}"
+                    if not ret:
+                        return False, f"Failed to create snapshot on node: {snode.get_id()}"
 
-                snap_bdev = rpc_client.get_bdevs(f"{lvol.lvs_name}/{snap_bdev_name}")
-                if snap_bdev:
-                    snap_uuid = snap_bdev[0]['uuid']
-                    blobid = snap_bdev[0]['driver_specific']['lvol']['blobid']
-                    cluster_size = cluster.page_size_in_blocks
-                    num_allocated_clusters = snap_bdev[0]["driver_specific"]["lvol"]["num_allocated_clusters"]
-                    used_size = int(num_allocated_clusters*cluster_size)
-                else:
-                    return False, f"Failed to create snapshot on node: {snode.get_id()}"
+                    snap_bdev = rpc_client.get_bdevs(f"{lvol.lvs_name}/{snap_bdev_name}")
+                    if snap_bdev:
+                        snap_uuid = snap_bdev[0]['uuid']
+                        blobid = snap_bdev[0]['driver_specific']['lvol']['blobid']
+                        cluster_size = cluster.page_size_in_blocks
+                        num_allocated_clusters = snap_bdev[0]["driver_specific"]["lvol"]["num_allocated_clusters"]
+                        used_size = int(num_allocated_clusters*cluster_size)
+                    else:
+                        return False, f"Failed to create snapshot on node: {snode.get_id()}"
 
             for sec in secondary_nodes:
                 # Per design: gate snapshot registration around restart port block.
@@ -350,23 +419,19 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
 
                 sec_rpc_client = sec.rpc_client()
 
-                ret = sec_rpc_client.bdev_lvol_snapshot_register(
-                    f"{lvol.lvs_name}/{lvol.lvol_bdev}", snap_bdev_name, snap_uuid, blobid)
+                with lvstore_op_lock(pool.cluster_id, lvol.lvs_name, enabled=lock):
+                    ret = sec_rpc_client.bdev_lvol_snapshot_register(
+                        f"{lvol.lvs_name}/{lvol.lvol_bdev}", snap_bdev_name, snap_uuid, blobid)
                 if not ret:
                     msg = f"Failed to register snapshot on node: {sec.get_id()}"
                     logger.error(msg)
                     logger.info(f"Removing snapshot from {primary_node.get_id()}")
                     rpc_client = primary_node.rpc_client()
-                    ret, _ = rpc_client.delete_lvol(f"{lvol.lvs_name}/{snap_bdev_name}")
+                    with lvstore_op_lock(pool.cluster_id, lvol.lvs_name, enabled=lock):
+                        ret, _ = rpc_client.delete_lvol(f"{lvol.lvs_name}/{snap_bdev_name}")
                     if not ret:
                         logger.error(f"Failed to delete snap from node: {snode.get_id()}")
                     return False, msg
-        finally:
-            if lock:
-                if lvs_lock_stop is not None:
-                    lvs_lock_stop.set()
-                db_controller.release_lvstore_lock(
-                    pool.cluster_id, lvol.lvs_name, lvs_lock_owner)
 
     snap = SnapShot()
     snap.uuid = str(uuid.uuid4())
@@ -528,13 +593,29 @@ def list_snapshots(cluster_id=None, node_id=None, lvol_id=None,pool_id_or_name=N
     return data
 
 
-def delete(snapshot_uuid, force_delete=False):
+def delete(snapshot_uuid, force_delete=False, lock=True):
     try:
         snap = db_controller.get_snapshot_by_id(snapshot_uuid)
     except KeyError:
         logger.error(f"Snapshot not found {snapshot_uuid}")
         return False
 
+    # OUTER per-object lock: make the clone-count check and the data-plane
+    # delete atomic against a concurrent clone-create of this same snapshot
+    # (which holds the same lock for its whole sequence). Without it a clone
+    # can register against the snapshot's blob just as the snapshot is
+    # hard-deleted, corrupting the replica blob tree ("Clone entry not
+    # found"). force_delete (recovery/cleanup) bypasses the lock so it always
+    # pushes through.
+    try:
+        with object_mutation_lock(snap.cluster_id, snap.uuid, enabled=lock and not force_delete):
+            return _delete_locked(snap, snapshot_uuid, force_delete, lock=lock)
+    except PreconditionError as e:
+        logger.error(str(e))
+        return False
+
+
+def _delete_locked(snap, snapshot_uuid, force_delete=False, lock=True):
     if snap.status == SnapShot.STATUS_IN_DELETION:
         logger.error(f"Snapshot is in deletion {snapshot_uuid}")
         if not force_delete:
@@ -640,7 +721,8 @@ def delete(snapshot_uuid, force_delete=False):
         if snode.status == StorageNode.STATUS_ONLINE:
             rpc_client = snode.rpc_client()
 
-            ret, _ = rpc_client.delete_lvol(snap.snap_bdev)
+            with lvstore_op_lock(snap.cluster_id, snap.lvol.lvs_name, enabled=lock and not force_delete):
+                ret, _ = rpc_client.delete_lvol(snap.snap_bdev)
             if not ret:
                 logger.error(f"Failed to delete snap from node: {snode.get_id()}")
                 if not force_delete:
@@ -692,7 +774,8 @@ def delete(snapshot_uuid, force_delete=False):
         except Exception:
             pass
 
-        ret, _ = rpc_client.delete_lvol(snap.snap_bdev, del_async=False, special_delete=special_delete)
+        with lvstore_op_lock(snap.cluster_id, snap.lvol.lvs_name, enabled=lock and not force_delete):
+            ret, _ = rpc_client.delete_lvol(snap.snap_bdev, del_async=False, special_delete=special_delete)
         if not ret:
             logger.error(f"Failed to delete snap from node: {snode.get_id()}")
             if not force_delete:
@@ -793,24 +876,25 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     if cluster.status not in [cluster.STATUS_ACTIVE, cluster.STATUS_DEGRADED]:
         return False, f"Cluster is not active, status: {cluster.status}"
 
-    if not all_lvols:
-        all_lvols = db_controller.get_mini_lvols()
-    for lvol in all_lvols:
-        if lvol.pool_uuid != pool.get_id() or lvol.lvol_name != clone_name:
-            continue
-        if lvol.cloned_from_snap == snapshot_id:
-            if lvol.status in [LVol.STATUS_IN_DELETION, LVol.STATUS_IN_CREATION]:
-                msg = f"Clone status {lvol.status} can not proceed"
+    # Clone-name uniqueness / reuse via the per-pool lvol name index (O(1) point
+    # read) instead of scanning every lvol in the DB.
+    existing = db_controller.lvol_name_lookup(pool.get_id(), clone_name)
+    if existing is not None:
+        if existing.cloned_from_snap == snapshot_id:
+            if existing.status in [LVol.STATUS_IN_DELETION, LVol.STATUS_IN_CREATION]:
+                msg = f"Clone status {existing.status} can not proceed"
                 logger.error(msg)
                 return False, msg
-            logger.info(f"Clone already exists, reusing lvol: {lvol.get_id()}")
-            return lvol.get_id(), False
+            logger.info(f"Clone already exists, reusing lvol: {existing.get_id()}")
+            return existing.get_id(), False
         msg = f"LVol name must be unique: {clone_name}"
         logger.error(msg)
         return False, msg
 
     if not all_snaps:
         all_snaps = db_controller.get_snapshots()
+    if not all_lvols:
+        all_lvols = db_controller.get_mini_lvols()
     size = snap.size
     if 0 < pool.lvol_max_size < size:
         msg = f"Pool Max LVol size is: {utils.humanbytes(pool.lvol_max_size)}, LVol size: {utils.humanbytes(size)} must be below this limit"
@@ -844,11 +928,8 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     _available_subsys = lvol_controller.get_next_available_subsystem_on_node(snode.get_id(), all_lvols=all_lvols) if namespaced else None
 
     if not _available_subsys:
-        subsys_count = len(set(
-            lv.nqn for lv in all_lvols if lv.node_id == snode.get_id() and
-            lv.status not in [LVol.STATUS_IN_DELETION, LVol.STATUS_DELETED]
-        ))
-        if subsys_count >= snode.max_lvol:
+        subsys_count = lvol_controller.count_lvol_subsystems(snode)
+        if subsys_count is not None and subsys_count >= snode.max_lvol:
             error = f"Too many subsystems on node: {snode.get_id()}, max subsystems reached: {snode.max_lvol}"
             logger.error(error)
             return False, error
@@ -1020,53 +1101,40 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
                     f"register clone {lvol.uuid} on {candidate.get_id()[:8]}")
             # "skip" — disconnected or pre_block, skip
 
-        lvs_lock_owner = None
-        lvs_lock_stop = None
-        if lock:
-            # Serialize the create→replica-register sequence per lvstore (one
-            # operation at a time per LVS) so concurrent clones/snapshots of this
-            # lvstore register on the secondary/tertiary in creation (blobid)
-            # order. Out-of-order registration builds the replica blob tree with a
-            # child before its parent and corrupts the lvstore. Waits for the lock
-            # rather than rejecting the request.
-            lvs_lock_owner = _new_lvstore_lock_owner()
-            if not _acquire_lvstore_lock_blocking(
-                    db_controller, pool.cluster_id, lvol.lvs_name, lvs_lock_owner):
-                if lvol.status != LVol.STATUS_IN_DELETION:
-                    lvol.remove(db_controller.kv_store)
-                return False, f"Timed out acquiring lvstore lock for clone create on {lvol.lvs_name}"
-            lvs_lock_stop = threading.Event()
-            threading.Thread(
-                target=_lvstore_lock_heartbeat,
-                args=(db_controller, pool.cluster_id, lvol.lvs_name, lvs_lock_owner, lvs_lock_stop),
-                daemon=True).start()
-
+        # OUTER per-object lock keyed on the SOURCE snapshot: serialize the
+        # whole clone-create sequence so concurrent clones of this snapshot
+        # (and a concurrent delete of it) never race the snapshot's clone
+        # tree, and the clone's replica blobs register after the snapshot's.
+        # The INNER lvstore_op_lock wraps each single-node add (primary, then
+        # each replica) so no two object operations touch the lvstore on a
+        # node at once.
         try:
-            if primary_node:
-                lvol_bdev, error = lvol_controller.add_lvol_on_node(lvol, primary_node)
-                if error:
-                    logger.error(error)
-                    if lvol.status != LVol.STATUS_IN_DELETION:
-                        lvol.remove(db_controller.kv_store)
-                    return False, error
-                lvol.lvol_uuid = lvol_bdev['uuid']
-                lvol.blobid = lvol_bdev['driver_specific']['lvol']['blobid']
+            with object_mutation_lock(pool.cluster_id, snap.uuid, enabled=lock):
+                if primary_node:
+                    with lvstore_op_lock(pool.cluster_id, lvol.lvs_name, enabled=lock):
+                        lvol_bdev, error = lvol_controller.add_lvol_on_node(lvol, primary_node)
+                    if error:
+                        logger.error(error)
+                        if lvol.status != LVol.STATUS_IN_DELETION:
+                            lvol.remove(db_controller.kv_store)
+                        return False, error
+                    lvol.lvol_uuid = lvol_bdev['uuid']
+                    lvol.blobid = lvol_bdev['driver_specific']['lvol']['blobid']
 
-            for sec in secondary_nodes:
-                lvol_bdev, error = lvol_controller.add_lvol_on_node(
-                    lvol, sec, is_primary=False,
-                    secondary_index=secondary_index_map[sec.get_id()])
-                if error:
-                    logger.error(error)
-                    if lvol.status != LVol.STATUS_IN_DELETION:
-                        lvol.remove(db_controller.kv_store)
-                    return False, error
-        finally:
-            if lock:
-                if lvs_lock_stop is not None:
-                    lvs_lock_stop.set()
-                db_controller.release_lvstore_lock(
-                    pool.cluster_id, lvol.lvs_name, lvs_lock_owner)
+                for sec in secondary_nodes:
+                    with lvstore_op_lock(pool.cluster_id, lvol.lvs_name, enabled=lock):
+                        lvol_bdev, error = lvol_controller.add_lvol_on_node(
+                            lvol, sec, is_primary=False,
+                            secondary_index=secondary_index_map[sec.get_id()])
+                    if error:
+                        logger.error(error)
+                        if lvol.status != LVol.STATUS_IN_DELETION:
+                            lvol.remove(db_controller.kv_store)
+                        return False, error
+        except PreconditionError as e:
+            if lvol.status != LVol.STATUS_IN_DELETION:
+                lvol.remove(db_controller.kv_store)
+            return False, str(e)
 
     lvol.status = LVol.STATUS_ONLINE
     lvol.write_to_db(db_controller.kv_store)

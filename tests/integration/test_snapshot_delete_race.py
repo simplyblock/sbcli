@@ -326,7 +326,7 @@ class TestSnapshotDeleteWaitsForCloneInFlight(unittest.TestCase):
         self._setup_db(mock_db, snap, clone, node)
         mock_get_active_mig.return_value = None
 
-        ok = snapshot_controller.delete("snap-1")
+        ok = snapshot_controller.delete("snap-1", lock=False)
 
         self.assertTrue(ok)  # soft delete returns True
         self.assertTrue(snap.deleted)
@@ -355,7 +355,7 @@ class TestSnapshotDeleteWaitsForCloneInFlight(unittest.TestCase):
         self._setup_db(mock_db, snap, clone, node)
         mock_get_active_mig.return_value = None
 
-        ok = snapshot_controller.delete("snap-1")
+        ok = snapshot_controller.delete("snap-1", lock=False)
 
         self.assertTrue(ok)
         self.assertEqual(
@@ -398,7 +398,7 @@ class TestSnapshotDeleteWaitsForCloneInFlight(unittest.TestCase):
         self._setup_db(mock_db, snap, clone, node)
         mock_get_active_mig.return_value = None
 
-        snapshot_controller.delete("snap-1")
+        snapshot_controller.delete("snap-1", lock=False)
 
         self.assertFalse(
             snap.deleted,
