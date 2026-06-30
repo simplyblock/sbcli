@@ -242,15 +242,27 @@ def main():
 
                         shutil.copytree(logs_src, logs_dest, dirs_exist_ok=True)
                         logger.info(f"Automation logs copied to: {logs_dest}")
-                        # Remove local log files to free runner disk space
-                        for f in os.listdir(logs_src):
-                            if f.startswith("log_"):
-                                try:
-                                    os.remove(os.path.join(logs_src, f))
-                                except OSError:
-                                    pass
+                        # Do NOT remove local log files here — RotatingFileHandlers
+                        # hold open FDs. Deleting the directory entry causes
+                        # subsequent tests to log into an unreachable inode,
+                        # producing empty logs for tests 2+. Runner disk cleanup
+                        # is handled by the CI workflow.
                     except Exception as _copy_err:
                         logger.warning(f"Failed to copy automation logs to NFS: {_copy_err}")
+            # Copy the tee'd output.log to the test's NFS folder for
+            # easy access to full raw stdout/stderr per test.
+            if log_path:
+                output_log = os.path.join(
+                    os.path.dirname(os.path.abspath(__file__)), "output.log"
+                )
+                if os.path.isfile(output_log):
+                    try:
+                        shutil.copy2(
+                            output_log,
+                            os.path.join(log_path, "github_raw_output.log"),
+                        )
+                    except Exception:
+                        pass
             if not args.run_k8s and check_for_dumps():
                 logger.info("Found a core dump during test execution. "
                             "Cannot execute more tests as cluster is not stable. Exiting")
