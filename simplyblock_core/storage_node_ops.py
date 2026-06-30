@@ -27,7 +27,6 @@ from simplyblock_core.controllers import lvol_controller, storage_events, snapsh
     device_controller, tasks_controller, health_controller, tcp_ports_events, qos_controller
 from simplyblock_core.controllers.host_auth import _reapply_allowed_hosts
 from simplyblock_core.db_controller import DBController
-from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
