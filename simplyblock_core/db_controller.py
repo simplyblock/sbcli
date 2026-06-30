@@ -682,6 +682,65 @@ class DBController(metaclass=Singleton):
         transactional = fdb.transactional(DBController._atomic_update_tx)
         return transactional(self, self.kv_store, key, type(obj), mutate_fn)
 
+    # ---- vuid allocation (monotonic sequence) ----
+    #
+    # vuids (lvol / snapshot / clone bdev-name numbers, distrib vuid, JM jm_vuid)
+    # share one numeric space — SPDK rejects a create whose bdev-name number
+    # already exists. The old allocator picked a random number in a bounded range
+    # and rejected collisions by scanning EVERY lvol + snapshot + node lvstore
+    # stack on each create — O(N) per create, i.e. O(N^2) for a mass create
+    # (incident mass_create_delete_docker-20260629: lvol create degraded 12x as
+    # the count grew; snapshot create likewise). A single monotonic counter
+    # removes the scan: every allocation is strictly larger than all earlier
+    # ones, so a name collision is impossible by construction. vuids are plain
+    # ints (formatted at most as 64-bit :016X), so the unbounded growth is fine.
+    _VUID_SEQ_KEY = b"sequence/vuid"
+
+    def _incr_vuid_tx(self, tr):
+        raw = tr.get(DBController._VUID_SEQ_KEY).wait()
+        if not raw.present():
+            return None
+        nxt = int(json.loads(raw)) + 1
+        tr[DBController._VUID_SEQ_KEY] = json.dumps(nxt).encode()
+        return nxt
+
+    def _seed_vuid_tx(self, tr, seed):
+        # Only-if-absent CAS: the first allocator (across all API workers / mgmt
+        # nodes) seeds the counter; concurrent racers see it present and skip.
+        raw = tr.get(DBController._VUID_SEQ_KEY).wait()
+        if raw.present():
+            return
+        tr[DBController._VUID_SEQ_KEY] = json.dumps(int(seed)).encode()
+
+    def _max_existing_vuid(self) -> int:
+        """Highest vuid currently in use across every source the old allocator
+        deduped against. Read once to seed the counter on an upgraded cluster so
+        the sequence never reuses a pre-existing vuid; never read again."""
+        mx = 0
+        for lv in self.get_mini_lvols():
+            mx = max(mx, lv.vuid or 0)
+        for sn in self.get_mini_snapshots():
+            mx = max(mx, sn.vuid or 0)
+        for node in self.get_storage_nodes():
+            for bdev in (node.lvstore_stack or []):
+                if bdev.get("type") == "bdev_distr":
+                    mx = max(mx, (bdev.get("params", {}) or {}).get("vuid", 0) or 0)
+                elif bdev.get("type") == "bdev_raid" and "jm_vuid" in bdev:
+                    mx = max(mx, bdev.get("jm_vuid", 0) or 0)
+        return mx
+
+    def next_vuid(self) -> int:
+        """Allocate the next globally-unique vuid (monotonic, O(1))."""
+        val = fdb.transactional(DBController._incr_vuid_tx)(self, self.kv_store)
+        if val is not None:
+            return val
+        # Counter absent (first allocation ever / freshly upgraded cluster):
+        # seed it above any pre-existing vuid (one-time scan, outside the txn),
+        # then increment. The seed CAS is idempotent under concurrency.
+        seed = self._max_existing_vuid()
+        fdb.transactional(DBController._seed_vuid_tx)(self, self.kv_store, seed)
+        return fdb.transactional(DBController._incr_vuid_tx)(self, self.kv_store)
+
     # ---- Pre-Restart Guard (Single FDB Transaction) ----
 
     def _try_set_node_restarting_tx(self, tr, cluster_id, node_id):
