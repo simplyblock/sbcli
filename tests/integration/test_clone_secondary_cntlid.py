@@ -59,6 +59,8 @@ def _make_snap(node_id):
     src.max_namespace_per_subsys = 50
 
     snap = types.SimpleNamespace(
+        uuid="snap-1",
+        cluster_id="cluster-1",
         lvol=src,
         deleted=False,
         status="online",          # not STATUS_IN_DELETION
