@@ -268,6 +268,25 @@ def get_distr_cluster_map(snodes, target_node, distr_name=""):
     return cl_map
 
 
+# Node states in which the node is not serving client IO. A node in any of
+# these legitimately appears offline/unreachable in peers' data-plane cluster
+# maps, and its devices legitimately appear `unavailable` there. Neither is a
+# health failure: without this, one transiently down/unreachable node flips the
+# whole cluster's Storage-node Health=False until it recovers (incident
+# 2026-06-30 — a node's SPDK process died, leaving a device `online` in the CP
+# DB while peers' cluster maps reported it `unavailable`, failing the distr-map
+# check ~350x and flagging Health=False cluster-wide for the entire window).
+# DOWN is intentionally excluded: a DOWN node only has its client-facing LVS
+# port firewall-blocked; SPDK and its devices stay alive and reachable to peers.
+_NODE_NOT_SERVING = frozenset({
+    StorageNode.STATUS_OFFLINE,
+    StorageNode.STATUS_UNREACHABLE,
+    StorageNode.STATUS_SCHEDULABLE,
+    StorageNode.STATUS_RESTARTING,
+    StorageNode.STATUS_IN_SHUTDOWN,
+})
+
+
 def parse_distr_cluster_map(map_string, nodes=None, devices=None):
     db_controller = DBController()
     # status is a single token; do NOT greedily swallow trailing fields such as
@@ -317,7 +336,11 @@ def parse_distr_cluster_map(map_string, nodes=None, devices=None):
                 ):
                     node_status = StorageNode.STATUS_UNREACHABLE
                 data["Desired Status"] = node_status
-                if node_status == status:
+                # An exact match is ok; so is any pairing of two "not serving"
+                # states (e.g. CP=unreachable vs. data-plane=offline) — both
+                # mean the node isn't serving, so it is not a real mismatch.
+                if node_status == status or (
+                        node_status in _NODE_NOT_SERVING and status in _NODE_NOT_SERVING):
                     data["Results"] = "ok"
                 else:
                     data["Results"] = "failed"
@@ -339,7 +362,15 @@ def parse_distr_cluster_map(map_string, nodes=None, devices=None):
             try:
                 sd =  devices[device_id]
                 data["Desired Status"] = sd.status
+                owner = nodes.get(sd.node_id) if nodes else None
                 if sd.status == status:
+                    data["Results"] = "ok"
+                elif status == NVMeDevice.STATUS_UNAVAILABLE and \
+                        owner is not None and owner.status in _NODE_NOT_SERVING:
+                    # The device's owning node is not serving IO, so peers
+                    # correctly report its devices `unavailable` in the cluster
+                    # map even while the CP DB still shows the device `online`
+                    # (until escalation reconciles it). Not a health failure.
                     data["Results"] = "ok"
                 else:
                     data["Results"] = "failed"

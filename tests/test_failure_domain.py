@@ -329,6 +329,46 @@ class TestDistrClusterMap(unittest.TestCase):
         _, passed = dc.parse_distr_cluster_map(map_string, nodes, devices)
         assert passed is False
 
+    @patch("simplyblock_core.distr_controller.DBController")
+    def test_parse_tolerates_not_serving_node_and_its_devices(self, MockDBCtrl):
+        """Regression: a node that is not serving IO (unreachable/offline/...)
+        legitimately appears offline in peers' cluster maps, and its devices
+        appear `unavailable` there even while the CP DB still shows them
+        `online` (until escalation reconciles). Neither is a real mismatch — if
+        it were, one transiently-down node would flip Storage-node Health=False
+        cluster-wide (incident 2026-06-30: a node's SPDK died and a device left
+        `online` in the DB failed the distr-map check ~350x)."""
+        import simplyblock_core.distr_controller as dc
+
+        snode = _node("n1", "10.0.0.1")
+        snode.status = StorageNode.STATUS_UNREACHABLE
+        nodes = {"n1": snode}
+
+        dev = _dev(status=NVMeDevice.STATUS_ONLINE)  # CP DB still says online
+        dev.uuid = "dev-2"
+        dev.node_id = "n1"
+        devices = {"dev-2": dev}
+
+        # Data-plane map: the dead node shows offline; its device unavailable.
+        not_serving_map = (
+            "uuid_node=n1  status=offline  failure_domain=-1\n"
+            "storage_ID=2  status=unavailable  uuid_device=dev-2  "
+            "storage_bdev_name=alceml_dev-2"
+        )
+        results, passed = dc.parse_distr_cluster_map(not_serving_map, nodes, devices)
+        assert passed is True, results
+
+        # Sanity: the SAME device mismatch when the owning node is online (in
+        # both the DB and the map) is a genuine failure and must still be caught.
+        snode.status = StorageNode.STATUS_ONLINE
+        online_map = (
+            "uuid_node=n1  status=online  failure_domain=-1\n"
+            "storage_ID=2  status=unavailable  uuid_device=dev-2  "
+            "storage_bdev_name=alceml_dev-2"
+        )
+        _, passed = dc.parse_distr_cluster_map(online_map, nodes, devices)
+        assert passed is False, results
+
 
 # ===========================================================================
 # 5. FD-aware cluster suspend criteria (storage_node_monitor)

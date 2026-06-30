@@ -7312,7 +7312,7 @@ def get_sorted_ha_jms(current_node):
     else:
         per_fd_cap = total_jms  # no domain constraint
 
-    selected = []
+    selected: list[str] = []
     used_ips = {current_node.mgmt_ip}
     used_labels = {current_node.physical_label} if current_node.physical_label > 0 else set()
     fd_count = {}
@@ -7530,7 +7530,7 @@ def get_secondary_nodes_2(current_node, exclude_ids=None, exclude_mgmt_ips=None,
         if current_node.physical_label > 0:
             forbidden_labels.add(current_node.physical_label)
         if exclude_physical_labels:
-            forbidden_labels.update(l for l in exclude_physical_labels if l and l > 0)
+            forbidden_labels.update(lbl for lbl in exclude_physical_labels if lbl and lbl > 0)
 
     for f_fds, f_labels in ((forbidden_fds, forbidden_labels),
                             (forbidden_fds, None),

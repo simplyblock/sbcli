@@ -77,6 +77,10 @@ def _node(uuid, status=StorageNode.STATUS_ONLINE, mgmt_ip=None,
     # Default False: a bare MagicMock attribute is truthy, which would make
     # the re-queue scan treat every node as a deliberate shutdown and skip it.
     n.auto_restart_disabled = False
+    # -1 = no failure domain assigned: keeps the FD-aware suspend branch
+    # (get_next_cluster_status -> failure_domain >= 0) from choking on a bare
+    # MagicMock and lets these tests exercise the flat per-node suspend logic.
+    n.failure_domain = -1
     n.jm_vuid = jm_vuid
     n.rpc_port = rpc_port
     n.online_since = online_since
