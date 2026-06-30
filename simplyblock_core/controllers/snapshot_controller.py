@@ -171,11 +171,10 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
         logger.error(msg)
         return False, msg
 
-    if not all_snaps:
-        all_snaps = db_controller.get_snapshots(pool.cluster_id)
-    for sn in all_snaps:
-        if sn.snap_name == snapshot_name:
-            return False, f"Snapshot name must be unique: {snapshot_name}"
+    # Name uniqueness via the per-cluster name index (O(1) point read) instead of
+    # scanning every snapshot in the cluster on each create.
+    if db_controller.snap_name_taken(pool.cluster_id, snapshot_name):
+        return False, f"Snapshot name must be unique: {snapshot_name}"
 
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
 
@@ -197,9 +196,13 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
         logger.error(msg)
         return False, msg
 
-    if not all_lvols:
-        all_lvols = db_controller.get_mini_lvols()
     if pool.pool_max_size > 0:
+        # Only load the full lvol/snapshot sets when a pool size limit is set
+        # (the capacity sum). Unlimited pools — the common case — skip both scans.
+        if not all_lvols:
+            all_lvols = db_controller.get_mini_lvols()
+        if not all_snaps:
+            all_snaps = db_controller.get_snapshots(pool.cluster_id)
         total = pool_controller.get_pool_total_capacity(pool.get_id(), all_lvols, all_snaps)
         if total + size > pool.pool_max_size:
             msg = f"Invalid LVol size: {utils.humanbytes(size)}. pool max size has reached {utils.humanbytes(total+size)} of {utils.humanbytes(pool.pool_max_size)}"
@@ -214,7 +217,7 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
     if cluster.status not in [cluster.STATUS_ACTIVE, cluster.STATUS_DEGRADED]:
         return False, f"Cluster is not active, status: {cluster.status}"
 
-    snap_vuid = utils.get_random_snapshot_vuid(all_lvols, all_snaps)
+    snap_vuid = utils.get_random_snapshot_vuid()
     snap_bdev_name = f"SNAP_{snap_vuid}"
     size = lvol.size
     blobid = 0
@@ -404,16 +407,18 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
                 snap.snap_ref_id = original_snap.get_id()
                 snap.write_to_db(db_controller.kv_store)
 
-    for sn in all_snaps:
-        if sn.get_id() == snap.get_id():
-            continue
-        if sn.lvol.get_id() == lvol_id:
-            if not sn.next_snap_uuid:
-                sn.next_snap_uuid = snap.get_id()
-                snap.prev_snap_uuid = sn.get_id()
-                sn.write_to_db()
-                snap.write_to_db()
-                break
+    # Link into this lvol's snapshot chain using the by-lvol index (a single
+    # reverse read for the current tail) instead of scanning every cluster
+    # snapshot. Find the predecessor BEFORE registering the new snap below.
+    prev = db_controller.get_lvol_latest_snapshot(lvol_id, exclude_uuid=snap.get_id())
+    if prev is not None and not prev.next_snap_uuid:
+        prev.next_snap_uuid = snap.get_id()
+        snap.prev_snap_uuid = prev.get_id()
+        prev.write_to_db()
+        snap.write_to_db()
+
+    # Register the new snapshot in the name + by-lvol indexes (O(1)).
+    db_controller.index_snapshot(snap)
 
     snapshot_events.snapshot_create(snap)
     if lvol.do_replicate:
@@ -576,6 +581,7 @@ def delete(snapshot_uuid, force_delete=False):
     except KeyError:
         logger.exception(f"Storage node not found {snap.lvol.node_id}")
         if force_delete:
+            db_controller.unindex_snapshot(snap)
             snap.remove(db_controller.kv_store)
             return True
         return False

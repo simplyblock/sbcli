@@ -133,6 +133,7 @@ def process_snap_delete_finish(snap, leader_node):
         process_snap_delete(new_main_instance, snode)
     else:
         snapshot_events.snapshot_delete(snap)
+        db.unindex_snapshot(snap)
         snap.remove(db.kv_store)
 
 
