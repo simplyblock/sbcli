@@ -442,21 +442,16 @@ commands:
             type: bool
             action: store_true
       - name: suspend
-        help: "DEPRECATED: the suspension phase was removed from graceful shutdown (it caused writer conflicts on sec/tert lvstores). This command is now a no-op returning success. Use `sn shutdown`."
-        usage: The node will stop accepting new IO, but will finish processing any IO, which has been received already.
+        help: "Exclude node from lvol allocation."
+        usage: The node will be excluded from lvol allocation. It will not be able to create new logical volumes on this node.
         arguments:
           - name: node_id
             help: Storage node id
             dest: node_id
             completer: _completer_get_sn_list
             type: str
-          - name: "--force"
-            help: "Ignored (kept for backwards compatibility)."
-            dest: force
-            type: bool
-            action: store_true
       - name: resume
-        help: "DEPRECATED: counterpart to `sn suspend`, also a no-op."
+        help: "Include node in lvol allocation."
         arguments:
           - name: node_id
             help: Storage node id

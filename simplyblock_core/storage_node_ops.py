@@ -2357,9 +2357,9 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
         logger.warning(f"Node already removed: {node_id}")
         return False
 
-    if snode.status != StorageNode.STATUS_ONLINE:
+    if snode.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED]:
         logger.error(
-            f"Can not remove node {node_id}: it must be ONLINE to start removal "
+            f"Can not remove node {node_id}: it must be ONLINE or SUSPENDED to start removal "
             f"(current status: {snode.status}). Removal shuts the node down itself.")
         return False
 
@@ -2414,22 +2414,6 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
     if not feasible:
         logger.error(f"Can not remove node {node_id}: {reason}")
         return False
-
-    lvols = db_controller.get_lvols_by_node_id(node_id)
-    if lvols:
-        if force_migrate:
-            for lvol in lvols:
-                pass
-                # lvol_controller.migrate(lvol_id)
-        elif force_remove:
-            for lvol in lvols:
-                try:
-                    lvol_controller.delete_lvol(lvol, force_delete=True)
-                except (PreconditionError, RuntimeError):
-                    logger.warning("Failed to delete volume", exc_info=True)
-        else:
-            logger.warning("LVols found on the storage node, use --force-remove or --force-migrate")
-            return False
 
     task_id = tasks_controller.add_node_removal_task(
         snode.cluster_id, node_id, {"force_remove": force_remove})
@@ -2506,7 +2490,7 @@ def node_removal_orchestrate(node_id, force_remove=False):
         return True
 
     # Phase 1 — shut the node down (graceful). Skipped on re-entry.
-    if snode.status == StorageNode.STATUS_ONLINE:
+    if snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED]:
         logger.info(f"[REMOVAL] {node_id}: phase 1 — shutdown")
         ret = shutdown_storage_node(node_id, force=force_remove)
         if isinstance(ret, tuple):
@@ -4272,44 +4256,72 @@ def shutdown_storage_node(node_id, force=False, keep_auto_restart=False):
     return True
 
 
-def suspend_storage_node(node_id, force=False, change_node_status=True):
-    """Deprecated: the suspension phase is no longer a precursor to
-    graceful shutdown. Kept as a noop-stub so any external automation
-    still calling `sbctl sn suspend` doesn't hard-fail.
-
-    Earlier revisions blocked sec/tert + own-primary lvstore ports via
-    iptables-`REJECT --reject-with tcp-reset` here, then transitioned
-    the node to STATUS_SUSPENDED. That fence cannot stop SPDK's lvol
-    layer from resubmitting failed-redirect IO inside the dying node
-    as if it were new host IO, which races the surviving sec/tert
-    peer's auto-promotion and produces a writer conflict (incident
-    2026-05-19, jm_vuid=4818). The new shutdown_storage_node() drops
-    the entire suspension phase and instead relies on:
-      (a) device-unavailable events to peers (already part of the
-          old flow, retained in shutdown_storage_node),
-      (b) bdev_nvme_detach_controller on every peer's remote_alceml
-          / remote_jm controller pointing at the dying node (new
-          Loop 2 in shutdown_storage_node), and
-      (c) a hard SPDK kill — every condition we used to "drain" is
-          now resolved post-kill by the peers' normal recovery path.
+def suspend_storage_node(node_id: str, force=False):
     """
-    logger.warning(
-        "sn suspend is deprecated: the suspension phase has been removed "
-        "from graceful shutdown (see shutdown_storage_node docstring). "
-        "Treating call as no-op for node %s.",
-        node_id,
-    )
+    Suspends a storage node by changing its status to suspended if the node is in an online state.
+
+    This would exclude this node from lvol host selection, see: lvol_controller._get_next_3_nodes
+
+    Parameters
+    ----------
+    node_id : int
+        The unique identifier of the storage node to be suspended.
+    force : bool, optional
+        A flag to indicate whether to forcibly suspend the node. Currently unused, defaults to False.
+
+    Returns
+    -------
+    bool
+        Returns True if the node was successfully suspended, or False if the operation failed.
+    """
+    db_controller = DBController()
+    try:
+        snode = db_controller.get_storage_node_by_id(node_id)
+    except KeyError:
+        logger.exception("This storage node is not part of the cluster")
+        return False
+
+    logger.info("Node found: %s in state: %s", snode.hostname, snode.status)
+    if snode.status != StorageNode.STATUS_ONLINE:
+        logger.error("Node is not in online state")
+        return False
+
+    logger.info("Setting node status to suspended")
+    set_node_status(snode.get_id(), StorageNode.STATUS_SUSPENDED)
+
+    logger.info("Done")
     return True
 
 
 def resume_storage_node(node_id):
-    """Deprecated: counterpart to suspend_storage_node, which is now a
-    noop. There is nothing to resume."""
-    logger.warning(
-        "sn resume is deprecated: the suspension phase has been removed "
-        "from graceful shutdown. Treating call as no-op for node %s.",
-        node_id,
-    )
+    """
+    Resumes a storage node currently in a suspended state.
+
+    This function sets the node status to online.
+
+    Parameters:
+    node_id: int
+        The unique identifier of the storage node to resume.
+
+    Returns:
+    bool
+        True if the storage node was successfully resumed, False otherwise.
+    """
+    db_controller = DBController()
+    try:
+        snode = db_controller.get_storage_node_by_id(node_id)
+    except KeyError:
+        logger.error("This storage node is not part of the cluster")
+        return False
+
+    logger.info("Node found: %s in state: %s", snode.hostname, snode.status)
+    if snode.status != StorageNode.STATUS_SUSPENDED:
+        logger.error("Node is not in suspended state")
+        return False
+
+    logger.info("Setting node status to online")
+    set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE)
+    logger.info("Done")
     return True
 
 
