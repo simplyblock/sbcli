@@ -627,40 +627,13 @@ def get_firewall():
     return utils.get_response(False, "deprecated bath get snode/get_firewall")
 
 
-class UpdateNodeConfigParams(BaseModel):
-    max_lvol: int
-    huge_page_memory: int
-    numa: int
-    ssd_list: list
-
-
 @api.post('/update_node_config', responses={
     200: {'content': {'application/json': {'schema': utils.response_schema({
         'type': 'boolean'
     })}}},
 })
-def update_node_config(body: UpdateNodeConfigParams):
-    node_info = core_utils.load_config(constants.NODES_CONFIG_FILE)
-    if not node_info.get("nodes"):
-        return utils.get_response(False, "Config not found")
-
-    ssd_set = set(body.ssd_list)
-    matched = False
-    for node_config in node_info["nodes"]:
-        if node_config["socket"] != body.numa:
-            continue
-        if not ssd_set.intersection(set(node_config.get("ssd_pcis", []))):
-            continue
-        node_config["max_lvol"] = body.max_lvol
-        node_config["huge_page_memory"] = body.huge_page_memory
-        matched = True
-        break
-
-    if not matched:
-        return utils.get_response(False, "No matching node found for given numa and ssd_list")
-
-    core_utils.store_config_file(node_info, constants.NODES_CONFIG_FILE)
-    return utils.get_response(True)
+def update_node_config(body: snode_ops.UpdateNodeConfigParams):
+    return snode_ops.update_node_config(body)
 
 
 @api.post('/set_hugepages', responses={

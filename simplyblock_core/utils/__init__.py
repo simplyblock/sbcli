@@ -2095,14 +2095,16 @@ def _get_sb_hugepages_allocation(node):
     return None
 
 
-def _save_sb_hugepages_allocation(node, hugepages_needed):
+def _save_sb_hugepages_allocation(node, hugepages_needed) -> bool:
     sb_file = os.path.join(_HUGEPAGES_BASELINE_DIR, f"hugepages_sb_node{node}")
     try:
         os.makedirs(_HUGEPAGES_BASELINE_DIR, exist_ok=True)
         with open(sb_file, "w") as f:
             f.write(str(hugepages_needed))
+        return True
     except Exception as e:
         logger.warning(f"Node {node}: could not save sb allocation to {sb_file}: {e}")
+        return False
 
 
 def _save_user_hugepages_baseline(node, baseline):
@@ -2155,7 +2157,8 @@ def set_hugepages_if_needed(node, hugepages_needed, page_size_kb=2048):
 
         # Store the adjusted total (what was actually written to the kernel) so
         # the next deploy computes user_delta = current - prev_total correctly.
-        _save_sb_hugepages_allocation(node, required)
+        if not _save_sb_hugepages_allocation(node, required):
+            logger.error(f"Node {node}: failed to persist hugepage allocation — delta tracking will be incorrect on next restart")
 
     except FileNotFoundError:
         logger.error(f"Node {node}: Hugepage path not found. Is hugepage support enabled?")

@@ -225,11 +225,11 @@ class SNodeClient:
     def set_hugepages(self):
         return self._request("POST", "set_hugepages")
 
-    def update_node_config(self, max_lvol, huge_page_memory, numa, ssd_list):
+    def update_node_config(self, max_lvol, huge_page_memory, numa_node, ssd_list):
         payload = {
             "max_lvol": max_lvol,
             "huge_page_memory": huge_page_memory,
-            "numa": numa,
+            "numa_node": numa_node,
             "ssd_list": ssd_list,
         }
         return self._request("POST", "update_node_config", payload)

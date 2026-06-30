@@ -705,10 +705,10 @@ def bind_device_to_spdk(body: utils.DeviceParams):
 
 
 class UpdateNodeConfigParams(BaseModel):
-    max_lvol: int
-    huge_page_memory: int
-    numa: int
-    ssd_list: list
+    max_lvol: Optional[int] = Field(None, ge=0)
+    huge_page_memory: Optional[int] = Field(None, ge=0)
+    numa_node: Optional[int] = Field(None, ge=0)
+    ssd_list: Optional[List[str]] = Field(None)
 
 
 @api.post('/update_node_config', responses={
@@ -721,20 +721,22 @@ def update_node_config(body: UpdateNodeConfigParams):
     if not node_info.get("nodes"):
         return utils.get_response(False, "Config not found")
 
-    ssd_set = set(body.ssd_list)
+    ssd_set = set(body.ssd_list) if body.ssd_list is not None else None
     matched = False
     for node_config in node_info["nodes"]:
-        if node_config["socket"] != body.numa:
+        if body.numa_node is not None and node_config["socket"] != body.numa_node:
             continue
-        if not ssd_set.intersection(set(node_config.get("ssd_pcis", []))):
+        if ssd_set is not None and not ssd_set.intersection(set(node_config.get("ssd_pcis", []))):
             continue
-        node_config["max_lvol"] = body.max_lvol
-        node_config["huge_page_memory"] = body.huge_page_memory
+        if body.max_lvol is not None:
+            node_config["max_lvol"] = body.max_lvol
+        if body.huge_page_memory is not None:
+            node_config["huge_page_memory"] = body.huge_page_memory
         matched = True
         break
 
     if not matched:
-        return utils.get_response(False, "No matching node found for given numa and ssd_list")
+        return utils.get_response(False, "No matching node found for given numa_node and ssd_list")
 
     core_utils.store_config_file(node_info, constants.NODES_CONFIG_FILE)
     return utils.get_response(True)
