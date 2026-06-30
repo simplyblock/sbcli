@@ -99,6 +99,26 @@ class TestClusterBase:
         self._k8s_snapshot_class_name = "simplyblock-csi-snapshotclass"
         self._volume_registry = {}  # lvol_name -> {pvc_name, lvol_id, device, mount}
 
+    def _validate_storage_node_health(self):
+        """Validate all storage nodes are online and healthy before starting test."""
+        self.logger.info("Validating storage node health before test...")
+        storage_nodes = self.sbcli_utils.get_storage_nodes()["results"]
+        unhealthy = []
+        for node in storage_nodes:
+            node_id = node.get("id", "unknown")
+            status = node.get("status", "unknown")
+            health = node.get("health_check", False)
+            if status != "online" or not health:
+                unhealthy.append(f"  Node {node_id}: status={status}, health_check={health}")
+        if unhealthy:
+            msg = (
+                f"Pre-test health check FAILED — {len(unhealthy)} storage node(s) not healthy:\n"
+                + "\n".join(unhealthy)
+            )
+            self.logger.error(msg)
+            raise RuntimeError(msg)
+        self.logger.info(f"All {len(storage_nodes)} storage node(s) are online and healthy.")
+
     def setup(self):
         """Contains setup required to run the test case
         """
@@ -110,6 +130,7 @@ class TestClusterBase:
                 self.mgmt_nodes, self.storage_nodes = self.sbcli_utils.get_all_nodes_ip()
                 self.sbcli_utils.list_lvols()
                 self.sbcli_utils.list_storage_pools()
+                self._validate_storage_node_health()
                 break
             except Exception as e:
                 self.logger.debug(f"API call failed with error:{e}")
