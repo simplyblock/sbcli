@@ -55,9 +55,11 @@ tox run -e unit          # Fast; no infra.
 tox run -e integration   # Requires Docker + libfdb_c on host.
 ```
 
-The `integration` env brings up FoundationDB through `testcontainers` (image `foundationdb/foundationdb:7.3.63`, ~3–5s boot, pulled on first run).
+The `integration` env brings up FoundationDB through `testcontainers` (image `foundationdb/foundationdb:7.3.63`, ~3–5s boot, pulled on first run). **By default, always run the integration tests through tox and rely on this testcontainers-provisioned FDB** — do not point them at another cluster.
 
-**Reuse an existing FDB instance** (developer with `docker-compose-dev.yml` already up) by exporting a working cluster file before tox runs:
+> **Hard rule — do not touch the dev compose stack on your own.** `docker-compose-dev.yml` (and reusing its FDB instance) is **off-limits unless the user has explicitly told you, in this conversation, to use it.** That includes "just checking what's already running" — do **not** run `docker compose -f docker-compose-dev.yml ps`/`up`/`exec` or probe for a cluster file as a setup step. There is no default-path reason to invoke it; reach only for `tox run -e integration`. This is enforced for hook-capable agent runners by `.agents/hooks/guard-dev-compose.py` (wired into Claude Code via `.claude/settings.json`), which intercepts any command referencing `docker-compose-dev.yml` and requires explicit human confirmation.
+
+**Reuse an existing FDB instance** only when the user has explicitly instructed it (e.g. a developer with `docker-compose-dev.yml` already up who wants to avoid the container boot). In that case, export a working cluster file before tox runs:
 
 ```bash
 sudo docker compose -f docker-compose-dev.yml up -d fdb-server
