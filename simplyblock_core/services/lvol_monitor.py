@@ -336,11 +336,20 @@ def check_node(snode, all_lvols):
                 logger.error("Async deletion is done, but leadership has changed (sync deletion is now blocked)")
 
             elif ret == 4:  # No async delete request exists for this lvol
+                # Transient during leadership/RPC churn (e.g. a peer down +
+                # post-unblock drain): the async-delete request was never
+                # registered on the node we polled because leadership flipped or
+                # the re-issue RPC didn't land on a flaky leader. This is NOT a
+                # terminal error — flipping the lvol OFFLINE + io_error here
+                # abandons the deletion and strands it (incident
+                # mass_create_delete_docker-20260629: 14 lvols stuck offline).
+                # Reset deletion_status so the next pass re-issues the async
+                # delete on the then-current leader; the lvol stays in_deletion
+                # and drains once leadership/RPC settles (same handling as the
+                # -35 "leadership changed" case).
                 logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
-                logger.error("No async delete request exists for this lvol")
-                lvol = db.atomic_update(db.get_lvol_by_id(lvol.get_id()),
-                                        lambda x: setattr(x, "io_error", True))
-                set_lvol_status(lvol, LVol.STATUS_OFFLINE)
+                logger.warning("No async delete request exists for this lvol; re-issuing on next pass")
+                process_lvol_delete_try_again(lvol)
 
             elif ret == -1:  # Operation not permitted
                 logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
