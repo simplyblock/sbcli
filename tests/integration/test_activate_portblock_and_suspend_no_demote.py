@@ -343,6 +343,7 @@ class TestSuspendIsDeprecatedNoop(unittest.TestCase):
 
         with patch.object(storage_node_ops, "port_block") as pb, \
                 patch.object(storage_node_ops, "DBController") as _db:
+            _db.get_storage_node_by_id.return_value = snode
             self.assertTrue(
                 storage_node_ops.suspend_storage_node(snode.get_id()))
             pb.set_port.assert_not_called()
@@ -354,6 +355,7 @@ class TestSuspendIsDeprecatedNoop(unittest.TestCase):
 
         with patch.object(storage_node_ops, "port_block") as pb, \
                 patch.object(storage_node_ops, "DBController") as _db:
+            _db.get_storage_node_by_id.return_value = snode
             self.assertTrue(
                 storage_node_ops.resume_storage_node(snode.get_id()))
             pb.set_port.assert_not_called()
