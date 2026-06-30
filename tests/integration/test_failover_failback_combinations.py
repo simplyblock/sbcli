@@ -1034,16 +1034,19 @@ class TestLvolSecondSecondaryFallback(unittest.TestCase):
     # --- delete_lvol ---
 
     def test_delete_code_uses_leader_failover(self):
-        """delete_lvol must use execute_on_leader_with_failover."""
-        src = self._get_function_source(self._read_lvol_controller_source(), "delete_lvol")
+        """The per-node delete dispatch must use execute_on_leader_with_failover.
+        (delete_lvol delegates the single+ha dispatch to
+        _delete_lvol_from_all_nodes.)"""
+        src = self._get_function_source(self._read_lvol_controller_source(), "_delete_lvol_from_all_nodes")
         self.assertIn("execute_on_leader_with_failover", src,
-                       "delete_lvol must use execute_on_leader_with_failover")
+                       "_delete_lvol_from_all_nodes must use execute_on_leader_with_failover")
 
     def test_delete_code_checks_non_leaders(self):
-        """delete_lvol must use check_non_leader_for_operation for all non-leaders."""
-        src = self._get_function_source(self._read_lvol_controller_source(), "delete_lvol")
+        """The per-node delete dispatch must use check_non_leader_for_operation
+        for all non-leaders."""
+        src = self._get_function_source(self._read_lvol_controller_source(), "_delete_lvol_from_all_nodes")
         self.assertIn("check_non_leader_for_operation", src,
-                       "delete_lvol must use check_non_leader_for_operation")
+                       "_delete_lvol_from_all_nodes must use check_non_leader_for_operation")
 
     def test_create_code_uses_leader_failover(self):
         """add_lvol_ha must use find_leader_with_failover."""
@@ -1068,10 +1071,11 @@ class TestLvolSecondSecondaryFallback(unittest.TestCase):
                        "resize function must use check_non_leader_for_operation")
 
     def test_delete_first_sec_online_adds_remaining_secs(self):
-        """delete_lvol must iterate all non-leaders, not just first secondary."""
-        src = self._get_function_source(self._read_lvol_controller_source(), "delete_lvol")
+        """The per-node delete dispatch must iterate all non-leaders, not just
+        the first secondary. (Logic lives in _delete_lvol_from_all_nodes.)"""
+        src = self._get_function_source(self._read_lvol_controller_source(), "_delete_lvol_from_all_nodes")
         self.assertIn("for nl in non_leaders", src,
-                       "delete_lvol must iterate all non-leaders")
+                       "_delete_lvol_from_all_nodes must iterate all non-leaders")
 
 
 # ===========================================================================

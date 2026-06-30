@@ -893,6 +893,8 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
 
     if not all_snaps:
         all_snaps = db_controller.get_snapshots()
+    if not all_lvols:
+        all_lvols = db_controller.get_mini_lvols()
     size = snap.size
     if 0 < pool.lvol_max_size < size:
         msg = f"Pool Max LVol size is: {utils.humanbytes(pool.lvol_max_size)}, LVol size: {utils.humanbytes(size)} must be below this limit"
