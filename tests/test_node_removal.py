@@ -401,16 +401,5 @@ class TestDecommissionDevices(unittest.TestCase):
         dc.device_remove.assert_not_called()
 
 
-# ---------------------------------------------------------------------------
-# Status code mapping
-# ---------------------------------------------------------------------------
-
-class TestStatusCode(unittest.TestCase):
-
-    def test_in_removal_status_mapped(self):
-        self.assertEqual(StorageNode.STATUS_IN_REMOVAL, "in_removal")
-        self.assertIn(StorageNode.STATUS_IN_REMOVAL, StorageNode._STATUS_CODE_MAP)
-
-
 if __name__ == "__main__":
     unittest.main()

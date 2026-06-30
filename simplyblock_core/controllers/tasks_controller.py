@@ -453,7 +453,7 @@ def add_device_failed_mig_task(device_id):
         # a migration task targeting their distribs can never run and would
         # stall the node-removal completion check forever. Skip them like
         # already-REMOVED nodes.
-        if node.status in [StorageNode.STATUS_REMOVED, StorageNode.STATUS_IN_REMOVAL]:
+        if node.status == StorageNode.STATUS_REMOVED:
             continue
         for bdev in node.lvstore_stack:
             if bdev['type'] == "bdev_distr":
@@ -465,7 +465,7 @@ def add_device_failed_mig_task(device_id):
 def add_new_device_mig_task(device_id):
     device = db.get_storage_device_by_id(device_id)
     for node in db.get_storage_nodes_by_cluster_id(device.cluster_id):
-        if node.status in [StorageNode.STATUS_REMOVED, StorageNode.STATUS_IN_REMOVAL]:
+        if node.status == StorageNode.STATUS_REMOVED:
             continue
         for bdev in node.lvstore_stack:
             if bdev['type'] == "bdev_distr":

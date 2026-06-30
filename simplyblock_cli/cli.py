@@ -160,13 +160,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--force', help='Force delete storage node from DB. Ensure you know what you\'re doing.', dest='force_remove', action='store_true')
 
     def init_storage_node__remove(self, subparser):
-        subcommand = self.add_sub_command(
-            subparser, 'remove',
-            'Removes a storage node from the cluster (inverse of cluster expansion). '
-            'The node must be ONLINE and all other nodes ONLINE; it must host no logical '
-            'volumes or snapshots (migrate those first). Runs as a background task: shuts '
-            'the node down, rewires LVS replicas onto other nodes, then removes, fails and '
-            'migrates its devices before marking the node removed.')
+        subcommand = self.add_sub_command(subparser, 'remove', 'Removes a storage node from the cluster (inverse of cluster expansion). The node must be ONLINE and all other nodes ONLINE; it must host no logical volumes or snapshots (migrate those first). Runs as a background task: shuts the node down, rewires LVS replicas onto other nodes, then removes, fails and migrates its devices before marking the node removed.')
         subcommand.add_argument('node_id', help='Storage node id', type=str).completer = self._completer_get_sn_list
         subcommand.add_argument('--force-remove', help='Cancel any active tasks on the node before starting removal.', dest='force_remove', action='store_true')
 
