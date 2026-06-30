@@ -1,4 +1,5 @@
 # coding=utf-8
+import threading
 import time
 from datetime import datetime
 
@@ -208,7 +209,7 @@ def process_lvol_delete_try_again(lvol):
                      lambda x: setattr(x, "deletion_status", ""))
 
 
-def check_node(snode, all_lvols):
+def check_node(snode):
     node_bdev_names = []
     node_lvols_nqns = {}
     sec_node_bdev_names = {}
@@ -249,9 +250,7 @@ def check_node(snode, all_lvols):
                 for sub in ret:
                     sec_node_lvols_nqns[sub['nqn']] = sub
 
-    for lvol in all_lvols:
-        if lvol.node_id != snode.get_id():
-            continue
+    for lvol in db.get_lvols_by_node_id(snode.get_id()):
 
         if lvol.status in (LVol.STATUS_RESTORING, LVol.STATUS_RESTORE_FAILED):
             # tasks_runner_backup.py owns status transitions for these states
@@ -440,6 +439,15 @@ def check_node(snode, all_lvols):
                 set_lvol_status(lvol, LVol.STATUS_ONLINE)
 
 
+def loop_for_node(snode):
+    while True:
+        try:
+            check_node(snode)
+        except Exception as e:
+            logger.error(e)
+        logger.info(f"Sleeping for {constants.NODE_MONITOR_INTERVAL_SEC} seconds")
+        time.sleep(constants.NODE_MONITOR_INTERVAL_SEC)
+
 
 # get DB controller
 db = db_controller.DBController()
@@ -452,16 +460,22 @@ while True:
         logger.error(f"Failed to get clusters: {e}")
         time.sleep(3)
         continue
+
+    threads_maps: dict[str, threading.Thread] = {}
     for cluster in db.get_clusters():
 
         if cluster.status in [Cluster.STATUS_INACTIVE, Cluster.STATUS_UNREADY, Cluster.STATUS_IN_ACTIVATION]:
             logger.warning(f"Cluster {cluster.get_id()} is in {cluster.status} state, skipping")
             continue
-        all_lvols = db.get_all_lvols()
-        for snode in db.get_storage_nodes_by_cluster_id(cluster.get_id()):
-            try:
-                check_node(snode, all_lvols)
-            except Exception as e:
-                logger.error(e)
+
+        for node in db.get_storage_nodes_by_cluster_id(cluster.get_id()):
+            node_id = node.get_id()
+            if node_id not in threads_maps or threads_maps[node_id].is_alive() is False:
+                logger.info(f"Creating thread for node {node_id}")
+                t = threading.Thread(target=loop_for_node, args=(node,))
+                t.start()
+                threads_maps[node_id] = t
+                logger.debug(threads_maps[node_id])
+
 
     time.sleep(constants.LVOL_MONITOR_INTERVAL_SEC)
