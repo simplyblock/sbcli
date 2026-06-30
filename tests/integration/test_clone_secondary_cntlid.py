@@ -18,32 +18,47 @@ pins the fix: each non-leader node passed to ``add_lvol_on_node`` from clone()
 must receive a DISTINCT ``secondary_index`` (0, 1, ...), so the per-node
 cntlid windows (1000, 2000, ...) never collide.
 
-All external dependencies (DB, RPC, locks, events) are mocked.
+This is an integration test: the cluster / pool / storage nodes / source
+snapshot are real records in FoundationDB (provisioned by the tier conftest),
+and ``clone()`` drives the real ``db_controller`` reads/writes. Only the layer
+*above* the database is mocked — the per-node SPDK registration
+(``lvol_controller.add_lvol_on_node`` / ``is_node_leader``), the non-leader
+readiness probe, and event emission — because the integration tier never talks
+to a real storage node.
 """
 
-import types
 import unittest
+import uuid as uuid_mod
 from unittest.mock import MagicMock, patch
 
+from simplyblock_core.db_controller import DBController
+from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.lvol_model import LVol
+from simplyblock_core.models.pool import Pool
+from simplyblock_core.models.snapshot import SnapShot
+from simplyblock_core.models.storage_node import StorageNode
 
 
-def _make_node(node_id, secondary_id=None, tertiary_id=None):
-    node = MagicMock(name=node_id)
-    node.get_id.return_value = node_id
+def _make_node(db, cluster_id, node_id, secondary_id="", tertiary_id=""):
+    node = StorageNode()
+    node.uuid = node_id
+    node.cluster_id = cluster_id
     node.hostname = node_id
+    node.status = StorageNode.STATUS_ONLINE
     node.max_lvol = 100
     node.lvstore_status = "ready"
-    node.lvol_sync_del.return_value = False
-    node.secondary_node_id = secondary_id
-    node.tertiary_node_id = tertiary_id
+    node.secondary_node_id = secondary_id or ""
+    node.tertiary_node_id = tertiary_id or ""
+    node.write_to_db(db.kv_store)
     return node
 
 
-def _make_snap(node_id):
-    """A snapshot whose source lvol is HA, with all fields clone() reads."""
+def _make_source_lvol(cluster_id, pool_id, node_id):
+    """The snapshot's source lvol — HA, with every field clone() reads."""
     src = LVol()
-    src.pool_uuid = "pool-1"
+    src.uuid = str(uuid_mod.uuid4())
+    src.cluster_id = cluster_id
+    src.pool_uuid = pool_id
     src.node_id = node_id
     src.size = 1024 ** 3
     src.max_size = 10 * 1024 ** 3
@@ -57,69 +72,70 @@ def _make_snap(node_id):
     src.npcs = 0
     src.crypto_bdev = ""
     src.max_namespace_per_subsys = 50
+    return src
 
-    snap = types.SimpleNamespace(
-        uuid="snap-1",
-        cluster_id="cluster-1",
-        lvol=src,
-        deleted=False,
-        status="online",          # not STATUS_IN_DELETION
-        size=src.size,
-        snap_bdev="LVS_100/SNAP_parent",
-        fabric="tcp",
-        snap_ref_id=None,
-        ref_count=0,
-        write_to_db=MagicMock(),
-    )
+
+def _make_snapshot(db, cluster_id, pool_id, src):
+    snap = SnapShot()
+    snap.uuid = "snap-1"
+    snap.cluster_id = cluster_id
+    snap.pool_uuid = pool_id
+    snap.lvol = src
+    snap.deleted = False
+    snap.status = SnapShot.STATUS_ONLINE
+    snap.size = src.size
+    snap.snap_bdev = "LVS_100/SNAP_parent"
+    snap.fabric = "tcp"
+    snap.snap_ref_id = ""
+    snap.ref_count = 0
+    snap.write_to_db(db.kv_store)
     return snap
 
 
 class TestCloneSecondaryCntlidIndex(unittest.TestCase):
 
-    def _run_clone(self, secondary_id, tertiary_id):
-        """Drive clone() through the HA registration block and return the list
-        of (node_id, is_primary, secondary_index) tuples passed to
-        add_lvol_on_node."""
-        from simplyblock_core.controllers import snapshot_controller
+    def setUp(self):
+        self.db = DBController()
+        if self.db.kv_store is None:
+            self.skipTest("FoundationDB is not available")
+        # Per-test isolation: both tests reuse the same clone name / snapshot id,
+        # so wipe the user keyspace before seeding fresh state.
+        self.db.kv_store.clear_range(b"\x00", b"\xff")
 
-        primary_id = "node-primary"
-        host = _make_node(primary_id, secondary_id, tertiary_id)
-        nodes_by_id = {primary_id: host}
-        if secondary_id:
-            nodes_by_id[secondary_id] = _make_node(secondary_id)
-        if tertiary_id:
-            nodes_by_id[tertiary_id] = _make_node(tertiary_id)
+    def _seed(self, secondary_id, tertiary_id):
+        cluster = Cluster()
+        cluster.uuid = "cluster-1"
+        cluster.status = Cluster.STATUS_ACTIVE
+        cluster.nqn = "nqn.test:cluster-1"
+        cluster.write_to_db(self.db.kv_store)
 
-        snap = _make_snap(primary_id)
-
-        pool = MagicMock()
-        pool.status = "active"
-        pool.get_id.return_value = "pool-1"
-        pool.cluster_id = "cluster-1"
+        pool = Pool()
+        pool.uuid = "pool-1"
+        pool.pool_name = "pool-1"
+        pool.cluster_id = cluster.get_id()
+        pool.status = Pool.STATUS_ACTIVE
         pool.lvol_max_size = 0
         pool.pool_max_size = 0
+        pool.write_to_db(self.db.kv_store)
 
-        cluster = MagicMock()
-        cluster.status = "active"
-        cluster.STATUS_ACTIVE = "active"
-        cluster.STATUS_DEGRADED = "degraded"
-        cluster.nqn = "nqn.test:cluster-1"
+        primary_id = "node-primary"
+        _make_node(self.db, cluster.get_id(), primary_id,
+                   secondary_id=secondary_id, tertiary_id=tertiary_id)
+        if secondary_id:
+            _make_node(self.db, cluster.get_id(), secondary_id)
+        if tertiary_id:
+            _make_node(self.db, cluster.get_id(), tertiary_id)
 
-        db = MagicMock()
-        db.get_snapshot_by_id.return_value = snap
-        db.get_pool_by_id.return_value = pool
-        db.get_storage_node_by_id.side_effect = lambda i: nodes_by_id[i]
-        db.get_cluster_by_id.return_value = cluster
-        db.get_lvols.return_value = []
-        db.get_mini_lvols.return_value = []
-        db.get_snapshots.return_value = []
-        # clone() now resolves name-uniqueness/reuse via the per-pool name index
-        # (db.lvol_name_lookup) instead of scanning get_mini_lvols; None => free.
-        db.lvol_name_lookup.return_value = None
-        # No capacity records -> skip the prov-cap-crit/warn gate (which would
-        # otherwise compare MagicMock attrs against ints).
-        db.get_cluster_capacity.return_value = []
-        db.kv_store = MagicMock()
+        src = _make_source_lvol(cluster.get_id(), pool.get_id(), primary_id)
+        _make_snapshot(self.db, cluster.get_id(), pool.get_id(), src)
+
+    def _run_clone(self, secondary_id, tertiary_id):
+        """Drive clone() through the HA registration block against real FDB and
+        return the list of (node_id, is_primary, secondary_index) tuples passed
+        to add_lvol_on_node."""
+        from simplyblock_core.controllers import snapshot_controller
+
+        self._seed(secondary_id, tertiary_id)
 
         calls = []
 
@@ -130,26 +146,26 @@ class TestCloneSecondaryCntlidIndex(unittest.TestCase):
 
         lvol_ctrl = MagicMock()
         lvol_ctrl.add_lvol_on_node.side_effect = _record_add
-        lvol_ctrl.is_node_leader.side_effect = lambda c, lvs: c is host
+        # Leader detection iterates candidates and breaks on the first truthy
+        # result; the host (primary) is first, so a blanket True elects it.
+        lvol_ctrl.is_node_leader.return_value = True
         lvol_ctrl.get_next_available_subsystem_on_node.return_value = None
         # clone() now counts the node's lvol subsystems directly via the data
         # plane (count_lvol_subsystems) instead of scanning all_lvols; 0 => the
         # host is well under its max_lvol so the limit check passes.
         lvol_ctrl.count_lvol_subsystems.return_value = 0
 
-        with patch.object(snapshot_controller, "db_controller", db), \
-             patch.object(snapshot_controller, "lvol_controller", lvol_ctrl), \
+        with patch.object(snapshot_controller, "lvol_controller", lvol_ctrl), \
              patch.object(snapshot_controller, "snapshot_events", MagicMock()), \
              patch.object(snapshot_controller.utils, "get_random_vuid",
                           return_value=12345), \
-             patch.object(LVol, "write_to_db", MagicMock()), \
              patch("simplyblock_core.storage_node_ops.check_non_leader_for_operation",
                    return_value="proceed"), \
              patch("simplyblock_core.storage_node_ops.queue_for_restart_drain",
                    MagicMock()):
             # namespaced=False -> each clone creates its own subsystem (the
             # path that calls subsystem_create with the per-node min_cntlid);
-            # lock=False -> skip the mutation-lock helpers.
+            # lock=False -> skip the lvstore-lock helpers.
             result, err = snapshot_controller.clone(
                 "snap-1", "CLN_test", namespaced=False, lock=False)
 
