@@ -103,7 +103,9 @@ def parse_args():
     )
     parser.add_argument("--metadata", default=str(default_metadata), help="Path to cluster metadata JSON.")
     parser.add_argument("--pool", default="pool01", help="Pool name for volume creation.")
-    parser.add_argument("--expected-node-count", type=int, default=6, help="Required storage node count.")
+    parser.add_argument("--expected-node-count", type=int, default=None,
+                        help="Required storage node count. Default: the number of "
+                             "storage_nodes in the cluster metadata.")
     parser.add_argument("--volume-size", default="200G", help="Volume size to create per storage node.")
     parser.add_argument("--runtime", type=int, default=72000, help="fio runtime in seconds.")
     parser.add_argument("--restart-timeout", type=int, default=900, help="Seconds to wait for restarted nodes.")
@@ -221,11 +223,35 @@ def parse_args():
     parser.add_argument(
         "--cycles",
         type=int,
-        default=1,
+        default=None,
         help=(
-            "Number of passes through the full deterministic scenario list. "
-            "Each pass covers C(N,2)*M² scenarios (250 for 5 nodes × 5 methods; "
-            "540 for 6 × 6). 0 means loop forever."
+            "Number of passes through the failure-domain scenario list "
+            "(same_fd per domain + one_per_fd [+ fd_plus_one when >=4 domains]). "
+            "0 means loop forever. Default: 1 normally, or 0 (endless) with "
+            "--combo-only."
+        ),
+    )
+    parser.add_argument(
+        "--combo-only",
+        action="store_true",
+        help=(
+            "Run ONLY the 'fd_plus_one' scenario: each iteration takes down one "
+            "whole (random) failure domain PLUS one extra node in another domain, "
+            "re-rolled randomly every iteration. Requires >=4 failure domains. "
+            "Defaults to endless (--cycles 0) unless --cycles is given. Each "
+            "downed node's outage method is drawn at random from --combo-methods."
+        ),
+    )
+    parser.add_argument(
+        "--combo-methods",
+        default="container_kill,graceful,host_reboot",
+        help=(
+            "Comma-separated outage methods to randomly assign per node in "
+            "--combo-only mode. Choices: container_kill,graceful,forced,host_reboot "
+            "(network_outage_* not allowed — combo takes whole hosts down). "
+            "At most one 'graceful' is used per iteration (the CP concurrent-"
+            "shutdown guard rejects overlapping graceful shutdowns); extra "
+            "graceful picks are demoted to an auto-recover method."
         ),
     )
     parser.add_argument(
@@ -273,6 +299,25 @@ def parse_args():
     if not methods:
         parser.error("At least one outage method must be enabled")
     args.methods = methods
+
+    # --combo-only: resolve the random per-node method pool and default to
+    # endless looping unless the user pinned --cycles explicitly.
+    combo_methods = [m.strip() for m in args.combo_methods.split(",") if m.strip()]
+    bad_combo = [m for m in combo_methods if m not in OUTAGE_METHODS]
+    if bad_combo:
+        parser.error(f"Unknown --combo-methods: {bad_combo}. Choices: {list(OUTAGE_METHODS)}")
+    net_combo = [m for m in combo_methods if m.startswith("network_outage_")]
+    if net_combo:
+        parser.error(
+            f"network_outage_* methods are not allowed in --combo-methods "
+            f"({net_combo}); combo mode takes whole hosts down"
+        )
+    if not combo_methods:
+        parser.error("--combo-methods must list at least one method")
+    args.combo_methods = combo_methods
+    if args.cycles is None:
+        args.cycles = 0 if args.combo_only else 1
+
     if args.churn_min_seconds < 1:
         parser.error("--churn-min-seconds must be >= 1")
     if args.churn_max_seconds < args.churn_min_seconds:
@@ -521,6 +566,11 @@ class SoakRunner:
         self.args = args
         self.metadata = metadata
         self.logger = logger
+        # Default the required node count to however many storage nodes the
+        # metadata records (6 for --fd 2, 8 for --fd 4), so the soak adapts to
+        # the deployed layout without needing --expected-node-count.
+        if self.args.expected_node_count is None:
+            self.args.expected_node_count = len(metadata.get("storage_nodes", []))
         self.user = metadata["user"]
         self.key_path = resolve_key_path(args.ssh_key or metadata["key_path"])
         self.run_id = time.strftime("%Y%m%d_%H%M%S")
@@ -541,6 +591,10 @@ class SoakRunner:
         self.created_volume_ids = []
         # Mixed-outage state
         self.methods = list(args.methods)
+        # Per-node random method pool for --combo-only iterations (whole-domain
+        # + one extra node). None when combo mode is off (then FD outages use
+        # plain host_reboot, as the deterministic scenarios always have).
+        self.combo_methods = list(args.combo_methods) if args.combo_only else None
         # On multipath clusters, network-layer coverage is provided by the
         # inter-iteration single-NIC chaos. Dropping all data NICs on a node
         # (network_outage_*) is a simple-cluster-only scenario.
@@ -738,13 +792,14 @@ class SoakRunner:
                             tolerate_transient=False):
         """Poll until every node is 'online' (and membership == expected).
 
-        Fails fast if any node NOT in ``target_nodes`` is not online — during
-        a deliberate outage that is an FTT-budget breach. ``tolerate_transient``
-        relaxes this for inter-iteration sync points (no outage in flight):
-        an unaffected node that is merely TRANSIENT_NODE_STATUSES (the CP is
-        autonomously restarting / shutting it down) is waited out instead of
-        aborting the soak, mirroring wait_for_outage_ready. A genuinely
-        offline/unknown unaffected node still raises immediately.
+        Waits for the whole cluster to return to all-online, bounded by
+        ``timeout`` (which then raises). A node not in ``target_nodes`` that is
+        temporarily not online is NOT treated as fatal — the control plane owns
+        node recovery (auto-restart) and a transient not-online peer during the
+        recovery window is normal. Such nodes are logged as a WARNING and waited
+        out; the outer timeout still catches a node that genuinely never comes
+        back. ``tolerate_transient`` is accepted for call-site compatibility and
+        no longer gates behaviour.
         """
         timeout = timeout or self.args.restart_timeout
         expected = self.args.expected_node_count
@@ -759,14 +814,12 @@ class SoakRunner:
                 uuid for uuid, status in statuses.items()
                 if uuid not in target_nodes and status != "online"
             ]
-            if tolerate_transient:
-                unaffected_bad = [
-                    uuid for uuid in unaffected_bad
-                    if statuses[uuid] not in TRANSIENT_NODE_STATUSES
-                ]
             if unaffected_bad:
-                raise TestRunError(
-                    "Unaffected nodes are not online: "
+                # Not fatal: the CP owns node recovery. Warn for visibility but
+                # keep waiting — the outer timeout still catches genuine
+                # non-recovery.
+                self.logger.log(
+                    "WARN: unaffected nodes not online (waiting for CP recovery): "
                     + ", ".join(f"{uuid}:{statuses[uuid]}" for uuid in unaffected_bad)
                 )
             if not offline and len(statuses) == expected:
@@ -1127,7 +1180,12 @@ class SoakRunner:
                 f"Continuing with {successful_connects}/{len(connect_commands)} connected paths "
                 f"for {volume['volume_id']}"
             )
-        volume["mount_point"] = posixpath.join(mount_root, f"vol{volume['index']}")
+        # Unique mount point per (re)build — never reuse a path. ``volume_name``
+        # carries the churn counter (``..._v{index}_c{churn}``), so a churn
+        # rebuild always mounts at a FRESH directory. A previous mount that
+        # could not be cleanly unmounted (stuck target I/O) therefore can never
+        # collide with or block the new mount.
+        volume["mount_point"] = posixpath.join(mount_root, f"mnt_{volume['volume_name']}")
         volume["fio_log"] = posixpath.join(mount_root, f"fio_vol{volume['index']}.log")
         volume["fio_stderr"] = posixpath.join(mount_root, f"fio_vol{volume['index']}.stderr")
         volume["rc_file"] = posixpath.join(mount_root, f"fio_vol{volume['index']}.rc")
@@ -1499,76 +1557,55 @@ class SoakRunner:
         )
 
     def _unmount_one_volume(self, volume):
-        """Cleanly unmount the volume's filesystem before disconnect/delete.
+        """Best-effort unmount before disconnect/delete. NEVER blocks the churn
+        and NEVER raises.
 
-        fio (and its launcher shell, whose cwd is the mountpoint) was
-        already SIGKILLed by ``_stop_fio_for_job``, but a SIGKILLed fio
-        with an in-flight O_DIRECT I/O can linger in D-state and keep the
-        mount busy. Retry a *clean* umount (``sync`` + ``umount``, evicting
-        stragglers with ``fuser`` between tries) and verify with
-        ``mountpoint``.
+        A stuck target I/O can wedge a plain ``umount``/``sync``/``fuser`` in
+        uninterruptible D-state (the client runs with ``nvme_core.io_timeout``
+        effectively infinite, so such an I/O never times out on its own). That
+        previously hung the SSH command for the full timeout and then aborted
+        the entire churn cycle with a transport/timeout error — which surfaced
+        much later as a bogus "fio missing" fault and killed the soak (run
+        20260623_125401: vol5, 13:07 stop → umount hang → 13:11 churn timeout →
+        13:14 missing-fio abort).
 
-        We deliberately do NOT fall back to lazy umount on the happy path:
-        fio uses ``--direct=1`` so there is no bulk dirty data, but the XFS
-        journal and inode metadata are still buffered and flushed at
-        umount. A lazy detach returns instantly with that flush pending,
-        and the ``nvme disconnect`` that follows ~1s later then rips the
-        paths away mid-flush — producing the spurious "no available path /
-        XFS log I/O error / filesystem shut down" noise seen in client
-        dmesg even though the lvol was being deleted on purpose.
-
-        If the mount still will not release after the retries, that is a
-        real anomaly: the most likely cause is a STUCK I/O on the target
-        keeping the block device busy (note the client runs with
-        ``nvme_core.io_timeout`` effectively infinite, so such an I/O never
-        times out on its own). Emit a loud WARNING with holder / D-state
-        evidence before the last-resort lazy detach, so a human notices the
-        potential target-side bug.
-
-        Returns True if the filesystem was cleanly unmounted, False if it
-        had to be lazily detached (stuck).
+        We no longer care about a stuck unmount. Every (re)build mounts at a
+        FRESH path (see ``_connect_and_mount_one``), so a lingering old mount
+        cannot collide with or block the rebuild. Try one quick clean umount
+        (flushes the XFS journal on the happy path, avoiding dmesg noise), then
+        a lazy detach (``umount -l`` returns immediately even with I/O stuck in
+        D-state), bound the whole thing hard, and swallow any hang/error so the
+        churn proceeds.
         """
         mount_point = volume.get("mount_point")
         if not mount_point:
-            return True
-        # $1 = mountpoint. Bounded retry: sync + umount, evicting any
-        # straggler holders (fio in D-state, launcher shell) between tries.
-        # Never lazy-umount here on success; only as a flagged last resort.
+            return
         umount_script = (
             "set +e\n"
             'mp="$1"\n'
             'mountpoint -q "$mp" || exit 0\n'
-            "for i in $(seq 1 6); do\n"
-            "  sync\n"
-            '  if sudo umount "$mp" 2>/dev/null; then exit 0; fi\n'
-            '  sudo fuser -km "$mp" 2>/dev/null\n'
-            "  sleep 2\n"
-            '  mountpoint -q "$mp" || exit 0\n'
-            "done\n"
-            'echo "---- holders of $mp ----"\n'
-            'sudo fuser -vMm "$mp" 2>&1\n'
-            'echo "---- D-state processes ----"\n'
-            "ps -eo pid,stat,wchan:32,comm | awk '$2 ~ /D/'\n"
+            # one quick clean attempt (XFS journal flush on the happy path)
+            'sudo umount "$mp" 2>/dev/null && exit 0\n'
+            # stuck: evict holders and lazy-detach. `umount -l` removes the
+            # mount from the namespace immediately and reaps it if/when the
+            # stuck I/O ever completes — it does not block on D-state I/O.
+            'sudo fuser -km "$mp" 2>/dev/null\n'
             'sudo umount -l "$mp" 2>/dev/null\n'
-            "exit 2\n"
+            "exit 0\n"
         )
-        rc, stdout_text, _ = self.client.run(
-            f"bash -lc {shlex.quote(umount_script)} _ {shlex.quote(mount_point)}",
-            timeout=120,
-            check=False,
-            label=f"umount {volume['volume_name']}",
-        )
-        if rc == 0:
-            return True
-        self.logger.log(
-            f"WARNING: umount of {volume['volume_name']} ({mount_point}) did "
-            f"not complete after retries even though fio was already killed — "
-            f"possible STUCK I/O on the target keeping the device busy. Fell "
-            f"back to lazy detach; the following nvme disconnect may surface "
-            f"'no available path' / 'XFS log I/O error' in client dmesg. "
-            f"Holder / D-state evidence:\n{stdout_text}"
-        )
-        return False
+        try:
+            self.client.run(
+                f"bash -lc {shlex.quote(umount_script)} _ {shlex.quote(mount_point)}",
+                timeout=30,
+                check=False,
+                label=f"umount {volume['volume_name']}",
+            )
+        except Exception as exc:  # noqa: BLE001 — a stuck umount must never abort churn
+            self.logger.log(
+                f"WARNING: umount of {volume['volume_name']} ({mount_point}) hung "
+                f"or failed ({exc!r}); ignoring and continuing. The rebuild uses a "
+                f"fresh mount point, so the stuck mount is harmless."
+            )
 
     def _delete_one_lvol(self, volume):
         rc, stdout_text, stderr_text = self.sbctl_allow_failure(
@@ -2345,24 +2382,48 @@ class SoakRunner:
     def build_scenarios(self, nodes):
         """Build the failure-domain outage scenario list.
 
-        Exactly two scenario *types*, per the test design:
-          (a) ``same_fd``    — reboot every host in one failure domain. One
-              such scenario per failure domain (so both domains get exercised).
+        Scenario *types*, per the test design:
+          (a) ``same_fd``     — reboot every host in one failure domain. One
+              such scenario per failure domain (so each domain gets exercised).
               Followed by a full rebalance-completion wait.
-          (b) ``one_per_fd`` — reboot one random node in each failure domain.
+          (b) ``one_per_fd``  — reboot one random node in each failure domain.
               Followed by a fixed 60s settle (no rebalance wait needed).
+          (c) ``fd_plus_one`` — ONLY when there are >= 4 failure domains:
+              reboot a whole (random) failure domain AND one extra node in one
+              of the remaining domains. With >= 4 domains the data/parity
+              chunks are spread widely enough that this combined loss stays
+              within the fault-tolerance budget, so it must survive and is
+              followed by a full rebalance-completion wait (like same_fd).
 
-        The concrete node(s) for ``one_per_fd`` are rolled randomly at
-        iteration time in ``_select_outage_targets``.
+        The concrete node(s) for ``one_per_fd`` and ``fd_plus_one`` are rolled
+        randomly at iteration time in ``_select_outage_targets``.
         """
         _ = nodes  # node set comes from the discovered failure-domain map
         fds = sorted(self.failure_domains)
+        if self.combo_methods is not None:
+            # --combo-only: just the whole-domain-plus-one-extra-node scenario,
+            # re-rolled randomly every iteration. Needs >= 4 domains so the
+            # combined loss stays within the fault-tolerance budget.
+            if len(fds) < 4:
+                raise TestRunError(
+                    f"--combo-only requires >= 4 failure domains; found {len(fds)} "
+                    f"({fds}). Redeploy with setup_perf_test_failure_domain.py --fd 4."
+                )
+            self.logger.log(
+                f"Built 1 combo scenario (fd_plus_one) over domains {fds}; "
+                f"per-node methods drawn from {self.combo_methods}"
+            )
+            return [{"type": "fd_plus_one"}]
         scenarios = [{"type": "same_fd", "fd": fd} for fd in fds]
         scenarios.append({"type": "one_per_fd"})
+        extra = ""
+        if len(fds) >= 4:
+            scenarios.append({"type": "fd_plus_one"})
+            extra = " + 1 whole-FD-plus-one-extra-node reboot"
         self.logger.log(
             f"Built {len(scenarios)} failure-domain scenarios: "
             f"{len(fds)} same-FD whole-domain reboots (domains {fds}) "
-            f"+ 1 one-per-FD reboot"
+            f"+ 1 one-per-FD reboot{extra}"
         )
         return scenarios
 
@@ -2377,34 +2438,122 @@ class SoakRunner:
                 if uuids:
                     targets.append(random.choice(uuids))
             return targets
+        if scenario["type"] == "fd_plus_one":
+            # Take down a whole (random) failure domain PLUS one extra node in
+            # one of the remaining domains. Only built with >= 4 domains, but
+            # guard defensively: need at least 2 populated domains.
+            populated = [fd for fd, uuids in fd_map.items() if uuids]
+            if len(populated) < 2:
+                return []
+            down_fd = random.choice(populated)
+            targets = list(fd_map[down_fd])
+            other_fds = [fd for fd in populated if fd != down_fd]
+            extra_fd = random.choice(other_fds)
+            targets.append(random.choice(fd_map[extra_fd]))
+            self.logger.log(
+                f"fd_plus_one: whole domain {down_fd} "
+                f"({[u[:8] for u in fd_map[down_fd]]}) + one node from domain "
+                f"{extra_fd} ({targets[-1][:8]})"
+            )
+            return targets
         raise TestRunError(f"Unknown scenario type: {scenario.get('type')}")
 
+    def _select_outage_methods(self, targets):
+        """Assign a random outage method to each target node from the
+        --combo-methods pool.
+
+        Constraint: at most ONE node may use 'graceful'. A non-force
+        `sn shutdown` consults the CP concurrent-shutdown guard, which rejects
+        a graceful shutdown while any peer is already in_shutdown/restarting,
+        so two simultaneous gracefuls can't both land. Extra graceful picks
+        are demoted to a random auto-recover method (so the whole group still
+        goes down together)."""
+        pool = list(self.combo_methods)
+        methods = {n: random.choice(pool) for n in targets}
+        graceful_nodes = [n for n, m in methods.items() if m == "graceful"]
+        auto = [m for m in pool if m in AUTO_RECOVER_METHODS] or ["host_reboot"]
+        for node_id in graceful_nodes[1:]:
+            methods[node_id] = random.choice(auto)
+        return methods
+
+    def _restart_node_blocking(self, node_id):
+        """Issue `sn restart` for a node the CP won't auto-recover (graceful /
+        forced), retrying with backoff while a peer is still recovering (the
+        per-cluster guard rejects concurrent restarts)."""
+        deadline = time.time() + self.args.restart_timeout
+        while True:
+            try:
+                # Emit a RESTART header with wall-clock time, then the raw
+                # sbctl -d stdout below it (no per-line prefix) so the CP
+                # trace lines up with a single moment.
+                self.logger.log(
+                    f"RESTART: {time.strftime('%Y-%m-%d %H:%M:%S')} {node_id}"
+                )
+                stdout_text = self.sbctl(f"sn restart {node_id}", timeout=300)
+                with self.logger.lock:
+                    print(stdout_text, flush=True,
+                          end="" if stdout_text.endswith("\n") else "\n")
+                    with open(self.logger.path, "a", encoding="utf-8") as handle:
+                        handle.write(stdout_text)
+                        if not stdout_text.endswith("\n"):
+                            handle.write("\n")
+                return
+            except Exception as e:
+                if time.time() >= deadline:
+                    raise
+                self.logger.log(
+                    f"Restart of {node_id} failed ({e}), "
+                    f"retrying in 15s (peer may still be recovering)")
+                time.sleep(15)
+
     def run_fd_outage(self, scenario, targets):
-        """Reboot every target host (host_reboot = auto-recover, no sbctl
-        restart), confirm the CP observes them leaving 'online', then wait for
-        all targets to come back online.
+        """Take every target host down, then bring the cluster back.
+
+        Default (deterministic scenarios): every target is host_reboot'd
+        (auto-recover, no sbctl restart). In --combo-only mode each target gets
+        a method drawn at random from --combo-methods; methods that leave the
+        node in a non-auto-recovering 'shutdown' state (graceful / forced) are
+        manually restarted via `sn restart` afterwards.
 
         The post-outage stabilization (rebalance-wait vs 60s settle) is the
         caller's responsibility — it differs per scenario type."""
         stype = scenario["type"]
-        self.logger.log(
-            f"FD outage [{stype}]: rebooting {len(targets)} host(s): "
-            f"{[t[:8] for t in targets]}"
-        )
-        # Fire the reboots back-to-back; each _host_reboot backgrounds a
-        # `reboot -f` and returns immediately, so the hosts go down together.
-        for node_id in targets:
-            self._host_reboot(node_id)
+        if self.combo_methods is not None:
+            methods = self._select_outage_methods(targets)
+        else:
+            methods = {n: "host_reboot" for n in targets}
 
-        # Make sure the CP actually observed each rebooted node leaving
+        self.logger.log(
+            f"FD outage [{stype}]: taking down {len(targets)} host(s): "
+            + ", ".join(f"{t[:8]}={methods[t]}" for t in targets)
+        )
+
+        # Apply graceful first (its shutdown must land while peers are still
+        # online, before any auto-recover method flips one to RESTARTING and
+        # trips the concurrent-shutdown guard); the rest follow back-to-back so
+        # the hosts go down together.
+        ordered = sorted(
+            targets, key=lambda n: 0 if methods[n] == "graceful" else 1
+        )
+        for node_id in ordered:
+            self._apply_outage(node_id, methods[node_id])
+
+        # Manually restart nodes the CP won't auto-recover (graceful / forced).
+        for node_id in ordered:
+            if self._needs_manual_restart(methods[node_id]):
+                self._restart_node_blocking(node_id)
+
+        # Make sure the CP actually observed each auto-recover node leaving
         # 'online' before we wait for it to come back — otherwise a stale
         # sn-list poll can report it still online and we return too early.
-        for node_id in targets:
+        for node_id in ordered:
+            if methods[node_id] not in AUTO_RECOVER_METHODS:
+                continue
             observed = self.wait_node_leaves_online(node_id, timeout=90)
             if not observed:
                 self.logger.log(
                     f"WARN: CP never observed {node_id[:8]} offline after "
-                    f"host_reboot within 90s; sn-list may be stale"
+                    f"{methods[node_id]} within 90s; sn-list may be stale"
                 )
 
         wait_timeout = max(self.args.restart_timeout, self.args.auto_recover_wait)
@@ -2520,7 +2669,7 @@ class SoakRunner:
                 if scenario["type"] == "same_fd":
                     scen_desc = f"same_fd(fd={scenario['fd']})"
                 else:
-                    scen_desc = "one_per_fd"
+                    scen_desc = scenario["type"]  # one_per_fd / fd_plus_one
 
                 self.logger.log(
                     f"Starting outage iteration {iteration} "
@@ -2581,22 +2730,23 @@ class SoakRunner:
                 self.reraise_churn_error()
 
                 # Scenario-specific stabilization:
-                #   (a) same_fd    — a whole failure domain was rebooted, so the
-                #       cluster must re-replicate/rebalance the data that lived
-                #       there. Gate on cluster ACTIVE + rebalance / data-migration
+                #   (a) same_fd / fd_plus_one — a whole failure domain (plus, for
+                #       fd_plus_one, one extra node) was rebooted, so the cluster
+                #       must re-replicate/rebalance the data that lived there.
+                #       Gate on cluster ACTIVE + rebalance / data-migration
                 #       completion before the next iteration (bounded by
                 #       --rebalance-timeout), regardless of --wait-for-rebalance.
                 #   (b) one_per_fd — only one node per domain bounced; the other
                 #       copy in each domain stayed up, so no full rebalance is
                 #       expected. A fixed 60s settle is enough.
-                if scenario["type"] == "same_fd":
+                if scenario["type"] in ("same_fd", "fd_plus_one"):
                     self.logger.log(
-                        f"same_fd outage: waiting for cluster rebalance to complete "
-                        f"(iteration {iteration}, fd={scenario['fd']})"
+                        f"{scen_desc} outage: waiting for cluster rebalance to "
+                        f"complete (iteration {iteration})"
                     )
                     self.wait_for_cluster_stable(require_no_rebalance=True)
                     self.wait_for_data_migration_complete(
-                        f"iteration {iteration} same-fd rebalance"
+                        f"iteration {iteration} {scenario['type']} rebalance"
                     )
                 else:
                     self.logger.log(

@@ -1267,11 +1267,11 @@ class K8sUtils:
             for w in new_workers
         )
         cmd = (
-            f"kubectl patch storagenodes.storage.simplyblock.io {name} "
+            f"kubectl patch storagenodesets.storage.simplyblock.io {name} "
             f"-n {ns} --type=json -p '[{patch_ops}]'"
         )
         self.logger.info(
-            f"[K8sUtils] Patching StorageNode '{name}' to add workers: {new_workers}"
+            f"[K8sUtils] Patching StorageNodeSet '{name}' to add workers: {new_workers}"
         )
         out, err = self._exec_kubectl(cmd)
         return out, err
@@ -1378,7 +1378,7 @@ class K8sUtils:
             f'"workerNode":"{target_worker}"}}}}'
         )
         cmd = (
-            f"kubectl patch storagenodes.storage.simplyblock.io {name} "
+            f"kubectl patch storagenodesets.storage.simplyblock.io {name} "
             f"-n {ns} --type=merge -p '{patch}'"
         )
         self.logger.info(
@@ -1421,7 +1421,7 @@ class K8sUtils:
 
         patch_json = json.dumps(patch_dict)
         cmd = (
-            f"kubectl patch storagenodes.storage.simplyblock.io {name} "
+            f"kubectl patch storagenodesets.storage.simplyblock.io {name} "
             f"-n {ns} --type=merge -p '{patch_json}'"
         )
         self.logger.info(
@@ -2060,6 +2060,24 @@ class K8sSbcliUtils:
             return False
         raise Exception(f"Lvol {lvol_name} is not getting deleted!!")
 
+    def delete_all_clones(self):
+        """Delete all clone lvols (lvols with cloned_from_snap set).
+
+        Must be called BEFORE delete_all_snapshots, because SPDK refuses
+        to delete a snapshot that still has clones.
+        """
+        lvols = self.list_lvols()
+        for name, lvol_id in lvols.items():
+            details = self.get_lvol_details(lvol_id)
+            if details and details[0].get("cloned_from_snap"):
+                self.logger.info(f"Deleting clone lvol: {name}")
+                try:
+                    self.delete_lvol(lvol_name=name, skip_error=True)
+                except Exception as e:
+                    self.logger.warning(
+                        f"Clone delete failed (continuing): {name}, err={e}"
+                    )
+
     def delete_all_lvols(self):
         lvols = self.list_lvols()
         for name in list(lvols.keys()):
@@ -2219,7 +2237,31 @@ class K8sSbcliUtils:
             # 3. No pools at all — create one via kubectl apply
             cid = cluster_id or self.cluster_id
             cluster_details = self.get_cluster_details(cluster_id=cid)
-            cluster_name = cluster_details.get("name") or cluster_details.get("Name", cid)
+            # sbcli cluster get returns "cluster_name" (not "name")
+            cluster_name = (
+                cluster_details.get("cluster_name")
+                or cluster_details.get("name")
+                or cluster_details.get("Name", cid)
+            )
+
+            # Look up the StorageCluster CRD name from K8s to ensure
+            # the Pool CRD references the correct CRD resource name.
+            sc_out, _ = self.k8s._exec_kubectl(
+                f"kubectl get storageclusters -n {ns} --no-headers "
+                f"-o custom-columns=NAME:.metadata.name 2>/dev/null || true"
+            )
+            sc_names = [s.strip() for s in sc_out.strip().splitlines() if s.strip()]
+            if sc_names:
+                cluster_name = sc_names[0]
+                self.logger.info(
+                    f"[pool] Using StorageCluster CRD name '{cluster_name}' "
+                    f"from K8s (found {len(sc_names)} CRD(s))"
+                )
+            else:
+                self.logger.warning(
+                    f"[pool] No StorageCluster CRDs found in namespace {ns}; "
+                    f"falling back to cluster_name='{cluster_name}' from sbcli"
+                )
 
             k8s_resource_name = f"simplyblock-{pool_name.lower().replace('_', '-')}"
 

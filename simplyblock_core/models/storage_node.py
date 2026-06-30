@@ -140,6 +140,13 @@ class StorageNode(BaseNodeObject):
     restart_phases: dict = {}
     nvmf_port: int = 4420
     physical_label: int = 0
+    # Operator-supplied failure-domain id (rack/cabinet/DC). 32-bit integer,
+    # default -1 (unset); a value >= 0 activates failure-domain placement for
+    # the node. Mandatory when the cluster has enable_failure_domain set.
+    # Used both as the control-plane anti-affinity key for JM/secondary/tertiary
+    # placement and emitted verbatim into the distrib cluster map for the data
+    # plane.
+    failure_domain: int = -1
     hublvol: HubLVol = None  # type: ignore[assignment]
     active_tcp: bool = True
     active_rdma: bool = False

@@ -23,6 +23,9 @@ RESOURCES=(
   "simplyblockstoragenodes.storage.simplyblock.io simplyblock-node"
   "simplyblockstoragenodes.storage.simplyblock.io simplyblock-node2"
   "simplyblockstoragenodes.storage.simplyblock.io simplyblock-node-action"
+  "simplyblockstoragenodesets.storage.simplyblock.io simplyblock-node"
+  "simplyblockstoragenodesets.storage.simplyblock.io simplyblock-node2"
+  "simplyblockstoragenodesets.storage.simplyblock.io simplyblock-node-action"
   "simplyblockstorageclusters.storage.simplyblock.io simplyblock-cluster"
   "simplyblockstorageclusters.storage.simplyblock.io simplyblock-cluster2"
   "simplyblockstorageclusters.storage.simplyblock.io simplyblock-cluster-activate"
@@ -37,6 +40,9 @@ RESOURCES=(
   "storagenodes.storage.simplyblock.io simplyblock-node"
   "storagenodes.storage.simplyblock.io simplyblock-node2"
   "storagenodes.storage.simplyblock.io simplyblock-node-action"
+  "storagenodesets.storage.simplyblock.io simplyblock-node"
+  "storagenodesets.storage.simplyblock.io simplyblock-node2"
+  "storagenodesets.storage.simplyblock.io simplyblock-node-action"
   "storageclusters.storage.simplyblock.io simplyblock-cluster"
   "storageclusters.storage.simplyblock.io simplyblock-cluster2"
   "storageclusters.storage.simplyblock.io simplyblock-cluster-activate"
@@ -72,6 +78,7 @@ for CR_TYPE in \
   "simplyblocktask.storage.simplyblock.io" \
   "simplyblockdevices.storage.simplyblock.io" \
   "simplyblockstoragenodes.storage.simplyblock.io" \
+  "simplyblockstoragenodesets.storage.simplyblock.io" \
   "simplyblockstorageclusters.storage.simplyblock.io" \
   "simplyblocksnapshotreplications.storage.simplyblock.io" \
   "pool.storage.simplyblock.io" \
@@ -79,6 +86,7 @@ for CR_TYPE in \
   "task.storage.simplyblock.io" \
   "devices.storage.simplyblock.io" \
   "storagenodes.storage.simplyblock.io" \
+  "storagenodesets.storage.simplyblock.io" \
   "storageclusters.storage.simplyblock.io" \
   "snapshotreplications.storage.simplyblock.io" \
   "storagebackups.storage.simplyblock.io" \
@@ -216,10 +224,12 @@ for CR_TYPE in \
   "simplyblockpool.storage.simplyblock.io" \
   "simplyblocklvol.storage.simplyblock.io" \
   "simplyblockstoragenodes.storage.simplyblock.io" \
+  "simplyblockstoragenodesets.storage.simplyblock.io" \
   "simplyblockstorageclusters.storage.simplyblock.io" \
   "pool.storage.simplyblock.io" \
   "lvol.storage.simplyblock.io" \
   "storagenodes.storage.simplyblock.io" \
+  "storagenodesets.storage.simplyblock.io" \
   "storageclusters.storage.simplyblock.io" \
   "storagebackups.storage.simplyblock.io" \
   "backuprestores.storage.simplyblock.io" \

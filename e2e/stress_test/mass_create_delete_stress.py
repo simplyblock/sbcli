@@ -1765,9 +1765,8 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
             npcs=self.npcs,
             max_namespace_per_subsys=self.NS_PER_SUBSYSTEM,
         )
-        self.k8s_utils.create_snapshot_class(
+        self.k8s_utils.create_volume_snapshot_class(
             name=self.SNAPSHOT_CLASS_NAME,
-            cluster_id=cluster_id,
         )
 
         self._run_mass_create_delete_test()

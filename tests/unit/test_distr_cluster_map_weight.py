@@ -45,6 +45,8 @@ def _node(devices):
     n.cluster_id = "cluster-1"
     n.status = StorageNode.STATUS_ONLINE
     n.is_secondary_node = False
+    # -1 = no failure domain assigned (feature inactive for this node).
+    n.failure_domain = -1
     n.nvme_devices = devices
     # target_node is the node itself, so no remote devices are consulted.
     n.remote_devices = []
@@ -62,6 +64,7 @@ class TestClusterMapParentWeightInvariant(unittest.TestCase):
         with patch.object(distr_controller, "DBController") as DBCtor:
             cluster = MagicMock()
             cluster.enable_node_affinity = False
+            cluster.enable_failure_domain = False
             DBCtor.return_value.get_cluster_by_id.return_value = cluster
             return distr_controller.get_distr_cluster_map([node], node, "distr-1")
 

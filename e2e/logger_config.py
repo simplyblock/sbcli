@@ -151,11 +151,17 @@ def flush_all_log_handlers():
 
 
 def copy_logs_to_nfs(nfs_dest_dir):
-    """Copy all local log files to *nfs_dest_dir* and remove
-    local copies to free disk space on the runner.
+    """Copy all local log files to *nfs_dest_dir*.
 
     Call this from teardown after the test is done.  The NFS-backed
     ``docker_logs_path`` has ample space; the runner root FS does not.
+
+    Local log files are **not** deleted because RotatingFileHandler
+    instances still hold open file descriptors.  Removing the directory
+    entry would cause subsequent tests in the same suite to log into
+    an unreachable inode, producing empty NFS copies for tests 2+.
+    Runner disk cleanup is handled by the CI workflow when the
+    workspace is destroyed.
     """
     stop_log_flusher()
 
@@ -173,6 +179,5 @@ def copy_logs_to_nfs(nfs_dest_dir):
     for src_file in glob.glob(pattern):
         try:
             shutil.copy2(src_file, dest)
-            os.remove(src_file)
         except OSError:
             pass  # best-effort; don't crash teardown

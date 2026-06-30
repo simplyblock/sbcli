@@ -21,7 +21,7 @@ class SNodeClientException(Exception):
 
 class SNodeClient:
 
-    def __init__(self, host, timeout=300, retry=5):
+    def __init__(self, host, timeout=300, retry=5, connect_retry=None, backoff_factor=1):
         settings = Settings()
         scheme = "https" if settings.tls_connect != "disabled" else "http"
         self.url = f'{scheme}://{host}/snode/'
@@ -36,7 +36,19 @@ class SNodeClient:
         # (add-node, restart, …). Bounding per-attempt backoff for an
         # unreachable node agent is handled at the call layer instead (the
         # restart pre-flight reachability check in _restart_storage_node_impl).
-        retries = Retry(total=retry, backoff_factor=1, connect=retry, read=retry)
+        #
+        # connect_retry lets liveness probes (the StorageNodeMonitor health
+        # checks) FAIL FAST on connection errors: a refused/timed-out connect
+        # (Errno 111) means the node agent is not serving, and retrying it with
+        # backoff only delays detecting a down node. Such probes pass
+        # connect_retry=0 so a connect failure raises immediately, while read
+        # retries (a slow-but-alive agent) are still governed by `retry`.
+        # Defaults to `retry` to preserve existing behaviour for all other
+        # callers (e.g. add-node, which legitimately waits for the agent).
+        if connect_retry is None:
+            connect_retry = retry
+        retries = Retry(total=retry, backoff_factor=backoff_factor,
+                        connect=connect_retry, read=retry)
         self.session.mount("http://", HTTPAdapter(max_retries=retries))
         self.session.mount("https://", HTTPAdapter(max_retries=retries))
         if settings.tls_connect == "authenticated":

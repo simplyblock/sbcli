@@ -5,7 +5,7 @@ import os.path
 import time
 
 import fdb
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from simplyblock_core import constants
 from simplyblock_core.models.cluster import Cluster, ClusterAddNodeLock, PortReservation
@@ -44,7 +44,7 @@ class Singleton(type):
 
 class DBController(metaclass=Singleton):
 
-    kv_store=None
+    kv_store: Any = None
 
     def __init__(self):
         try:
@@ -740,6 +740,109 @@ class DBController(metaclass=Singleton):
         seed = self._max_existing_vuid()
         fdb.transactional(DBController._seed_vuid_tx)(self, self.kv_store, seed)
         return fdb.transactional(DBController._incr_vuid_tx)(self, self.kv_store)
+
+    # ---- snapshot indexes (replace per-create cluster-wide scans) ----
+    #
+    # Snapshot create used to read EVERY snapshot in the cluster on each request
+    # (name-uniqueness scan + chain-linking scan) — O(N) per create, O(N^2) for a
+    # mass run (incident mass_create_delete_docker-20260629, Phase 3). Two indexes
+    # remove that:
+    #   name_index/snapshot/<cluster_id>/<name>   -> snap uuid   (uniqueness, O(1))
+    #   lvol_snaps/<lvol_uuid>/<created_at>/<vuid> -> snap uuid   (this lvol's
+    #     snapshots in creation order; the tail = chain predecessor, one read)
+    # The name index is self-healing: a hit is verified against the real record,
+    # so a stale entry (missed clear) is treated as free, never a false reject.
+    @staticmethod
+    def _snap_name_idx_key(cluster_id, name) -> bytes:
+        return ("name_index/snapshot/%s/%s" % (cluster_id, name)).encode()
+
+    @staticmethod
+    def _snap_lvol_idx_prefix(lvol_uuid) -> str:
+        return "lvol_snaps/%s/" % lvol_uuid
+
+    @staticmethod
+    def _snap_lvol_idx_key(lvol_uuid, created_at, vuid, snap_uuid) -> bytes:
+        return ("%s%020d/%020d/%s" % (DBController._snap_lvol_idx_prefix(lvol_uuid),
+                                      int(created_at or 0), int(vuid or 0), snap_uuid)).encode()
+
+    def snap_name_taken(self, cluster_id, name) -> bool:
+        raw = self.kv_store.get(self._snap_name_idx_key(cluster_id, name))
+        if raw is None:
+            return False
+        try:
+            snap = self.get_snapshot_by_id(raw.decode())
+        except KeyError:
+            self.kv_store.clear(self._snap_name_idx_key(cluster_id, name))  # stale
+            return False
+        if snap.snap_name == name and snap.cluster_id == cluster_id:
+            return True
+        self.kv_store.clear(self._snap_name_idx_key(cluster_id, name))  # stale
+        return False
+
+    def index_snapshot(self, snap) -> None:
+        self.kv_store[self._snap_name_idx_key(snap.cluster_id, snap.snap_name)] = snap.uuid.encode()
+        self.kv_store[self._snap_lvol_idx_key(
+            snap.lvol.get_id(), snap.created_at, snap.vuid, snap.uuid)] = snap.uuid.encode()
+
+    def unindex_snapshot(self, snap) -> None:
+        self.kv_store.clear(self._snap_name_idx_key(snap.cluster_id, snap.snap_name))
+        self.kv_store.clear(self._snap_lvol_idx_key(
+            snap.lvol.get_id(), snap.created_at, snap.vuid, snap.uuid))
+
+    def get_lvol_latest_snapshot(self, lvol_uuid, exclude_uuid=None):
+        """Newest snapshot of an lvol (chain tail) via a single reverse range
+        read of the by-lvol index — replaces the cluster-wide chain-linking scan.
+        Returns the SnapShot or None. On a fresh cluster the index is complete
+        from the first snapshot; pre-index snapshots on an upgraded cluster are
+        simply not found (a one-time cosmetic chain gap, not corruption)."""
+        prefix = self._snap_lvol_idx_prefix(lvol_uuid).encode()
+        for _k, v in self.kv_store.get_range_startswith(prefix, limit=2, reverse=True):
+            snap_uuid = v.decode()
+            if exclude_uuid and snap_uuid == exclude_uuid:
+                continue
+            try:
+                return self.get_snapshot_by_id(snap_uuid)
+            except KeyError:
+                continue
+        return None
+
+    # ---- lvol name index (per pool) ----
+    #
+    # lvol name uniqueness used to scan every lvol in the DB (get_mini_lvols) on
+    # each create. Index it per pool for an O(1) point read. Maintained at the
+    # LVol model layer (write_to_db / remove) so every create/delete path keeps
+    # it current without per-call-site wiring. Self-healing: a hit is verified
+    # against the real record, so a stale entry is treated as free.
+    @staticmethod
+    def _lvol_name_idx_key(pool_uuid, name) -> bytes:
+        return ("name_index/lvol/%s/%s" % (pool_uuid, name)).encode()
+
+    def lvol_name_lookup(self, pool_uuid, name):
+        """Return the LVol with this name in this pool, or None (verify-on-hit)."""
+        key = self._lvol_name_idx_key(pool_uuid, name)
+        raw = self.kv_store.get(key)
+        if raw is None:
+            return None
+        try:
+            lv = self.get_lvol_by_id(raw.decode())
+        except KeyError:
+            self.kv_store.clear(key)  # stale
+            return None
+        if lv.lvol_name == name and lv.pool_uuid == pool_uuid:
+            return lv
+        self.kv_store.clear(key)  # stale
+        return None
+
+    def lvol_name_taken(self, pool_uuid, name) -> bool:
+        return self.lvol_name_lookup(pool_uuid, name) is not None
+
+    def index_lvol_name(self, lvol) -> None:
+        if self.kv_store is not None and lvol.pool_uuid and lvol.lvol_name:
+            self.kv_store[self._lvol_name_idx_key(lvol.pool_uuid, lvol.lvol_name)] = lvol.get_id().encode()
+
+    def unindex_lvol_name(self, lvol) -> None:
+        if self.kv_store is not None and lvol.pool_uuid and lvol.lvol_name:
+            self.kv_store.clear(self._lvol_name_idx_key(lvol.pool_uuid, lvol.lvol_name))
 
     # ---- Pre-Restart Guard (Single FDB Transaction) ----
 

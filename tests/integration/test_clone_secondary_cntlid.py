@@ -59,6 +59,8 @@ def _make_snap(node_id):
     src.max_namespace_per_subsys = 50
 
     snap = types.SimpleNamespace(
+        uuid="snap-1",
+        cluster_id="cluster-1",
         lvol=src,
         deleted=False,
         status="online",          # not STATUS_IN_DELETION
@@ -111,6 +113,9 @@ class TestCloneSecondaryCntlidIndex(unittest.TestCase):
         db.get_lvols.return_value = []
         db.get_mini_lvols.return_value = []
         db.get_snapshots.return_value = []
+        # clone() now resolves name-uniqueness/reuse via the per-pool name index
+        # (db.lvol_name_lookup) instead of scanning get_mini_lvols; None => free.
+        db.lvol_name_lookup.return_value = None
         # No capacity records -> skip the prov-cap-crit/warn gate (which would
         # otherwise compare MagicMock attrs against ints).
         db.get_cluster_capacity.return_value = []
@@ -127,6 +132,10 @@ class TestCloneSecondaryCntlidIndex(unittest.TestCase):
         lvol_ctrl.add_lvol_on_node.side_effect = _record_add
         lvol_ctrl.is_node_leader.side_effect = lambda c, lvs: c is host
         lvol_ctrl.get_next_available_subsystem_on_node.return_value = None
+        # clone() now counts the node's lvol subsystems directly via the data
+        # plane (count_lvol_subsystems) instead of scanning all_lvols; 0 => the
+        # host is well under its max_lvol so the limit check passes.
+        lvol_ctrl.count_lvol_subsystems.return_value = 0
 
         with patch.object(snapshot_controller, "db_controller", db), \
              patch.object(snapshot_controller, "lvol_controller", lvol_ctrl), \
