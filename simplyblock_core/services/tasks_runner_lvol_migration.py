@@ -116,6 +116,11 @@ _WAIT = object()
 _INTERMEDIATE_POLL_INTERVAL_S = 1      # seconds between stat checks
 _INTERMEDIATE_POLL_MAX = 300           # max iterations ≈ 5 min
 
+# Fault-injection: set _INJECT_SNAP_FAIL = True to make each snapshot's first
+# transfer attempt fail before launching, then succeed on retry. Remove when done.
+_INJECT_SNAP_FAIL = True
+_snap_fail_injected: set = set()
+
 
 def _now_ms():
     """Return current wall-clock time as an ISO-8601 string with milliseconds."""
@@ -976,6 +981,14 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                             time.sleep(0.2)
                     except Exception as e:
                         logger.warning(f"Pre-cleanup of {tgt_composite} failed (continuing): {e}")
+
+                if _INJECT_SNAP_FAIL and snap_uuid not in _snap_fail_injected:
+                    _snap_fail_injected.add(snap_uuid)
+                    migration.transfer_context = {}
+                    migration.write_to_db(db.kv_store)
+                    logger.warning(
+                        f"[INJECT] Artificial snap transfer failure for {snap_uuid}")
+                    return False, True, f"[INJECT] snap transfer failure for {snap_uuid}"
 
                 t, err = _setup_snap_transfer(
                     snap, snap_index, src_node, tgt_node,
