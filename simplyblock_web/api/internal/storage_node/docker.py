@@ -704,19 +704,19 @@ def bind_device_to_spdk(body: utils.DeviceParams):
     return utils.get_response(True)
 
 
-class UpdateNodeConfigParams(BaseModel):
+class PersistNodeConfigParams(BaseModel):
     max_lvol: Optional[int] = Field(None, ge=0)
     huge_page_memory: Optional[int] = Field(None, ge=0)
     numa_node: Optional[int] = Field(None, ge=0)
     ssd_list: Optional[List[str]] = Field(None)
 
 
-@api.post('/update_node_config', responses={
+@api.post('/persist_node_config', responses={
     200: {'content': {'application/json': {'schema': utils.response_schema({
         'type': 'boolean'
     })}}},
 })
-def update_node_config(body: UpdateNodeConfigParams):
+def persist_node_config(body: PersistNodeConfigParams):
     node_info = core_utils.load_config(constants.NODES_CONFIG_FILE)
     if not node_info.get("nodes"):
         return utils.get_response(False, "Config not found")

@@ -225,14 +225,14 @@ class SNodeClient:
     def set_hugepages(self):
         return self._request("POST", "set_hugepages")
 
-    def update_node_config(self, max_lvol, huge_page_memory, numa_node, ssd_list):
+    def persist_node_config(self, max_lvol, huge_page_memory, numa_node, ssd_list):
         payload = {
             "max_lvol": max_lvol,
             "huge_page_memory": huge_page_memory,
             "numa_node": numa_node,
             "ssd_list": ssd_list,
         }
-        return self._request("POST", "update_node_config", payload)
+        return self._request("POST", "persist_node_config", payload)
 
     def ifc_is_roce(self, nic):
         params = {"nic": nic}
