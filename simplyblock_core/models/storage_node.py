@@ -77,7 +77,6 @@ class StorageNode(BaseNodeObject):
     jm_percent: int = 3
     jm_vuid: int = 0
     lvols: int = 0
-    lvol_count: int = 0  # primary lvols on this node; reconciled by the stats collector, read for O(1) placement
     lvstore: str = ""
     lvstore_stack: List[dict] = []
     lvstore_stack_secondary: List[dict] = []
