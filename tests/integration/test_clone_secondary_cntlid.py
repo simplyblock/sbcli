@@ -111,6 +111,9 @@ class TestCloneSecondaryCntlidIndex(unittest.TestCase):
         db.get_lvols.return_value = []
         db.get_mini_lvols.return_value = []
         db.get_snapshots.return_value = []
+        # clone() now resolves name-uniqueness/reuse via the per-pool name index
+        # (db.lvol_name_lookup) instead of scanning get_mini_lvols; None => free.
+        db.lvol_name_lookup.return_value = None
         # No capacity records -> skip the prov-cap-crit/warn gate (which would
         # otherwise compare MagicMock attrs against ints).
         db.get_cluster_capacity.return_value = []
