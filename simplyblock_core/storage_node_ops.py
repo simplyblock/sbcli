@@ -7386,7 +7386,10 @@ def get_node_jm_names(current_node, remote_node=None):
                     continue
 
             jm_dev = DBController().get_jm_device_by_id(jm_id)
-            jm_list.append(f"remote_{jm_dev.jm_bdev}n1")
+            if jm_dev.override_name_on_node and current_node.get_id() in jm_dev.override_name_on_node:
+                jm_list.append(f"remote_{jm_dev.override_name_on_node[current_node.get_id()]}n1")
+            else:
+                jm_list.append(f"remote_{jm_dev.jm_bdev}n1")
 
     return jm_list[:current_node.ha_jm_count]
 

@@ -769,7 +769,7 @@ def check_node(node_id, with_devices=True):
             logger.info(f"Node remote JMs: {len(snode.remote_jm_devices)}")
             for remote_device in snode.remote_jm_devices:
 
-                name = f'remote_{remote_device.jm_bdev}n1'
+                name = remote_device.remote_bdev
                 bdev_info = rpc_client.get_bdevs(name)
                 logger.log(INFO if bdev_info else ERROR,
                            f"Checking bdev: {name} ... " + ('ok' if bdev_info else 'failed'))
