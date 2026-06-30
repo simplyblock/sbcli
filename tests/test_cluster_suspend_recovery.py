@@ -8,12 +8,14 @@ Three interlocking bugs were fixed in
 ``simplyblock_core/services/storage_node_monitor.py``:
 
 1. ``get_next_cluster_status`` only marked a node "affected" when its
-   ``nvme_devices[*].status`` were not ONLINE. ``set_node_down`` does
-   NOT flip device statuses (a DOWN node still has SPDK + devices alive,
-   only the client port is blocked), and ``set_node_unreachable`` does
-   not either. So a state like {2 OFFLINE, 2 DOWN} on a 1×2 cluster
-   produced ``affected_nodes == 2 == k`` -> DEGRADED, when by FTT
-   semantics it should be SUSPENDED.
+   ``nvme_devices[*].status`` were not ONLINE. ``set_node_unreachable``
+   leaves device records ONLINE, so a multi-node UNREACHABLE outage was
+   under-counted and left the cluster DEGRADED when FTT semantics require
+   SUSPENDED — UNREACHABLE / SCHEDULABLE now count toward the affected bucket.
+
+   DOWN is the deliberate exception: a DOWN node has SPDK + devices alive and
+   only its client-facing LVS port firewall-blocked (recovered by port-unblock,
+   not a restart), so it never counts toward suspension.
 
 2. ``add_node_to_auto_restart`` refuses to queue when
    ``offline_nodes > distr_npcs`` *unless* the cluster is already
@@ -141,14 +143,13 @@ class TestGetNextClusterStatusCountsNonOnline(unittest.TestCase):
         c = _cluster(distr_ndcs=1, distr_npcs=1)
         self.assertEqual(self._run(nodes, c), Cluster.STATUS_DEGRADED)
 
-    # ---- the new behavior: DOWN/UNREACHABLE/SCHEDULABLE contribute ------
+    # ---- UNREACHABLE / SCHEDULABLE contribute; DOWN does NOT ------------
 
-    def test_down_node_with_online_devices_counts_as_affected(self):
-        # Reproduces test case 2's final state on a 1x2 cluster
-        # (distr_ndcs=1, distr_npcs=2): 2 nodes OFFLINE (devs 2/0) and
-        # 2 nodes DOWN (devs 2/2). Without the fix, affected_nodes=2==k
-        # and we'd return DEGRADED. With the fix, the DOWN nodes also
-        # count -> affected_nodes=4 > k=2 -> SUSPENDED.
+    def test_down_nodes_do_not_count_as_affected(self):
+        # 2 nodes OFFLINE (devs 2/0) and 2 nodes DOWN (devs 2/2) on a 1x2
+        # cluster (k=2). DOWN never counts toward the FTT bucket (SPDK + devices
+        # alive, only the client port blocked), so affected_nodes = 2 (the
+        # OFFLINE ones) == k -> DEGRADED, not SUSPENDED.
         nodes = [
             _node("n0", status=StorageNode.STATUS_OFFLINE,
                   n_online_devs=0, n_offline_devs=2),
@@ -162,12 +163,11 @@ class TestGetNextClusterStatusCountsNonOnline(unittest.TestCase):
                   n_online_devs=2, n_offline_devs=0),
         ]
         c = _cluster(distr_ndcs=1, distr_npcs=2)
-        self.assertEqual(self._run(nodes, c), Cluster.STATUS_SUSPENDED)
+        self.assertEqual(self._run(nodes, c), Cluster.STATUS_DEGRADED)
 
-    def test_test_case_1_state_three_not_online_suspended(self):
-        # Test case 1's final state: 2 OFFLINE (2/0 devs), 1 DOWN (2/2),
-        # 1 ONLINE on a 1x2 (k=2) cluster. Three nodes are not online;
-        # by user's FTT semantics this must be SUSPENDED.
+    def test_two_offline_plus_down_and_online_is_degraded(self):
+        # 2 OFFLINE (2/0 devs), 1 DOWN (2/2), 1 ONLINE on a 1x2 (k=2) cluster.
+        # The DOWN node does not count, so affected = 2 == k -> DEGRADED.
         nodes = [
             _node("n0", status=StorageNode.STATUS_OFFLINE,
                   n_online_devs=0, n_offline_devs=2),
@@ -178,7 +178,7 @@ class TestGetNextClusterStatusCountsNonOnline(unittest.TestCase):
             _node("n3", status=StorageNode.STATUS_ONLINE),
         ]
         c = _cluster(distr_ndcs=1, distr_npcs=2)
-        self.assertEqual(self._run(nodes, c), Cluster.STATUS_SUSPENDED)
+        self.assertEqual(self._run(nodes, c), Cluster.STATUS_DEGRADED)
 
     def test_unreachable_node_counts_as_affected(self):
         # Same story for UNREACHABLE — mgmt-plane gone, data records

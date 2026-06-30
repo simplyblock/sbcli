@@ -116,16 +116,18 @@ def get_next_cluster_status(cluster_id):
             affected_nodes += 1
             if node.mgmt_ip not in affected_physical_nodes:
                 affected_physical_nodes.append(node.mgmt_ip)
-        elif node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_REMOVED]:
+        elif node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_REMOVED,
+                                 StorageNode.STATUS_DOWN]:
             # Node is non-ONLINE but its devices are still flagged online in
-            # the DB. Happens for DOWN (set_node_down only flips node status,
-            # not device records — port is blocked but SPDK + devices alive),
-            # and for UNREACHABLE before _check_data_plane_and_escalate fires.
-            # From a client's perspective the node is unavailable, so it must
-            # contribute to the FTT bucket: otherwise multi-node DOWN /
-            # UNREACHABLE outages leave the cluster DEGRADED, which in turn
-            # blocks add_node_to_auto_restart's "too many peers offline"
-            # guard from being bypassed (it only bypasses when SUSPENDED).
+            # the DB. Happens for UNREACHABLE before _check_data_plane_and_escalate
+            # fires. From a client's perspective the node is unavailable, so it
+            # contributes to the FTT bucket.
+            #
+            # DOWN is intentionally excluded and never counts toward suspension:
+            # set_node_down only flips node status (SPDK + devices alive, only the
+            # client-facing LVS port firewall-blocked). Recovery is a port-unblock,
+            # not a destructive restart, so a DOWN node must not tip the cluster
+            # toward SUSPENDED.
             if node.mgmt_ip not in affected_physical_nodes:
                 affected_physical_nodes.append(node.mgmt_ip)
 
