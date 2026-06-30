@@ -60,11 +60,6 @@ def is_new_migrated_node(cluster_id, node):
     return False
 
 
-# A DOWN node only counts toward the cluster suspend threshold once it has been
-# DOWN at least this long. Below it, a DOWN node is treated as a transient blip
-# (it commonly self-heals in seconds) and does not contribute to the FTT bucket.
-DOWN_SUSPEND_GRACE_SEC = 60
-
 # How long a node may sit in IN_SHUTDOWN before the monitor treats it as a
 # stranded shutdown and reconciles it to OFFLINE. A graceful shutdown (device
 # events + SPDK kill + ANA failover) completes well within this; anything longer
@@ -87,23 +82,6 @@ def _in_shutdown_longer_than(node, seconds):
         return (datetime.now(timezone.utc) - datetime.fromisoformat(ss)).total_seconds() >= seconds
     except Exception:
         return False
-
-
-def _down_longer_than(node, seconds):
-    """True if a DOWN node has been DOWN for at least ``seconds``.
-
-    Keyed off ``node.down_since`` (stamped by set_node_status on the ->DOWN
-    transition). A missing/blank/unparseable timestamp is treated as
-    "long enough" so we stay conservative: an old row without the field still
-    suspends + auto-restarts rather than being silently ignored forever.
-    """
-    ds = getattr(node, "down_since", "") or ""
-    if not ds:
-        return True
-    try:
-        return (datetime.now(timezone.utc) - datetime.fromisoformat(ds)).total_seconds() >= seconds
-    except Exception:
-        return True
 
 
 def get_next_cluster_status(cluster_id):
@@ -162,28 +140,20 @@ def get_next_cluster_status(cluster_id):
             affected_nodes += 1
             if node.mgmt_ip not in affected_physical_nodes:
                 affected_physical_nodes.append(node.mgmt_ip)
-        elif node.status == StorageNode.STATUS_DOWN:
-            # DOWN is a temporary, self-recovering state: SPDK and its devices
-            # are alive, only the client-facing LVS port is firewall-blocked
-            # (set_node_down flips node status only). A brief DOWN — e.g. a
-            # transient writer conflict the data plane unfreezes in seconds —
-            # must NOT tip an otherwise-survivable outage into a full cluster
-            # suspend + reactivation (incident 2026-06-08: cbc62adc DOWN for
-            # ~6.5s pushed affected_nodes 2->3 and suspended the cluster).
-            #
-            # But a SUSTAINED DOWN must still count: the cluster has to reach
-            # SUSPENDED for add_node_to_auto_restart's peer-count guard to accept
-            # the recovery queue. So apply a grace window — only count the node
-            # once it has been DOWN at least DOWN_SUSPEND_GRACE_SEC.
-            if _down_longer_than(node, DOWN_SUSPEND_GRACE_SEC):
-                if node.mgmt_ip not in affected_physical_nodes:
-                    affected_physical_nodes.append(node.mgmt_ip)
-        elif node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_REMOVED]:
+        elif node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_REMOVED,
+                                 StorageNode.STATUS_DOWN]:
             # Non-ONLINE (UNREACHABLE / SCHEDULABLE / IN_SHUTDOWN / RESTARTING)
             # with devices still flagged online in the DB (e.g. UNREACHABLE
             # before _check_data_plane_and_escalate fires). From a client's
             # perspective the node is unavailable, so it contributes to the FTT
             # bucket.
+            #
+            # DOWN is intentionally excluded and never counts toward suspension:
+            # it is a temporary, self-recovering state — SPDK and its devices are
+            # alive, only the client-facing LVS port is firewall-blocked
+            # (set_node_down flips node status only). Recovery is a port-unblock,
+            # not a destructive restart, so a DOWN node must not tip the cluster
+            # toward SUSPENDED.
             if node.mgmt_ip not in affected_physical_nodes:
                 affected_physical_nodes.append(node.mgmt_ip)
 
