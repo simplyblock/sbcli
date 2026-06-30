@@ -1009,14 +1009,6 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                     except Exception as e:
                         logger.warning(f"Pre-cleanup of {tgt_composite} failed (continuing): {e}")
 
-                if _INJECT_SNAP_FAIL and snap_uuid not in _snap_fail_injected:
-                    _snap_fail_injected.add(snap_uuid)
-                    migration.transfer_context = {}
-                    migration.write_to_db(db.kv_store)
-                    logger.warning(
-                        f"[INJECT] Artificial snap transfer failure for {snap_uuid}")
-                    return False, True, f"[INJECT] snap transfer failure for {snap_uuid}"
-
                 t, err = _setup_snap_transfer(
                     snap, snap_index, src_node, tgt_node,
                     src_rpc, tgt_rpc, trtype,
