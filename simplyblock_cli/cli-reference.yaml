@@ -244,6 +244,10 @@ commands:
             help: "HA JM count. Defaults to 4 for FT=2 clusters, otherwise 3."
             dest: ha_jm_count
             type: int
+          - name: "--failure-domain"
+            help: "The failure-domain id (a non-negative integer identifying the rack/cabinet/DC) this node belongs to. Required when the cluster was created with --enable-failure-domain; must be omitted otherwise."
+            dest: failure_domain
+            type: int
           - name: "--namespace"
             help: "The Kubernetes namespace to deploy on."
             dest: namespace
@@ -990,6 +994,11 @@ commands:
             dest: strict_node_anti_affinity
             type: bool
             action: store_true
+          - name: "--enable-failure-domain"
+            help: "Enable failure-domain anti-affinity. Each storage node must then be added with a --failure-domain tag (rack/cabinet/DC); data, journal and secondary/tertiary copies are spread across distinct failure domains (best-effort). Deploy-time only: a cluster cannot be upgraded into this feature, it must be redeployed."
+            dest: enable_failure_domain
+            type: bool
+            action: store_true
           - name: "--name"
             help: >
               Assigns a name to the newly created cluster.
@@ -1165,6 +1174,11 @@ commands:
               Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node.
               This requires a minimum of _data-chunks-in-stripe + parity-chunks-in-stripe + 1_ nodes in the cluster."
             dest: strict_node_anti_affinity
+            type: bool
+            action: store_true
+          - name: "--enable-failure-domain"
+            help: "Enable failure-domain anti-affinity. Each storage node must then be added with a --failure-domain tag (rack/cabinet/DC); data, journal and secondary/tertiary copies are spread across distinct failure domains (best-effort). Deploy-time only: a cluster cannot be upgraded into this feature, it must be redeployed."
+            dest: enable_failure_domain
             type: bool
             action: store_true
           - name: "--name"

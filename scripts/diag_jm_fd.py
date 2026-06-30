@@ -11,7 +11,8 @@ db = DBController()
 sns = db.get_storage_nodes()
 fd = {n.get_id(): n.failure_domain for n in sns}
 status = {n.get_id(): n.status for n in sns}
-short = lambda u: u[:8]
+def short(u):
+    return u[:8]
 
 print("node      fd  status")
 for n in sns:

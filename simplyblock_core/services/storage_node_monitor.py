@@ -135,7 +135,7 @@ def _fd_aware_cluster_status(cluster, snodes, affected_ips, n, k, jm_replication
 
     fd_by_ip = {nd.mgmt_ip: nd.failure_domain for nd in snodes}
     # Group the affected physical hosts by their failure domain.
-    damaged = {}
+    damaged: dict[int, set] = {}
     for ip in affected_ips:
         fd = fd_by_ip.get(ip, -1)
         if fd < 0:
