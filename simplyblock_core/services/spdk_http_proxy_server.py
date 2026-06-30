@@ -111,7 +111,34 @@ def wait_for_spdk_ready():
         time.sleep(1)
 
 
-def rpc_call(req):
+def _resolve_sock_timeout(client_timeout):
+    """Bound the SPDK unix-socket wait (and hence the spdk_semaphore-slot hold)
+    to a value tied to the CALLER's HTTP timeout, rather than the global
+    ``TIMEOUT``.
+
+    Each in-flight RPC holds one of ``MAX_CONCURRENT_SPDK`` semaphore slots for
+    the entire SPDK round-trip. If a slot were always held for the full global
+    ``TIMEOUT`` (default 300s) while the caller abandons the request after its
+    own (often 1-5s) timeout, a handful of never-completing RPCs (e.g. a
+    ``distr_status_events_update`` that the distrib can't finish applying) would
+    squat every slot for minutes and starve all other RPCs to this node —
+    unrelated calls (port_block, bdev_get_bdevs) then never even reach SPDK and
+    time out at the caller. Holding the slot only ~SPDK_TIMEOUT_MARGIN× longer
+    than the caller waits lets slots recycle promptly. Capped at the global
+    ``TIMEOUT`` so genuinely long operations keep today's budget; falls back to
+    ``TIMEOUT`` when the caller sends no hint (backward compatible).
+    """
+    if client_timeout is None:
+        return TIMEOUT
+    try:
+        ct = float(client_timeout)
+    except (TypeError, ValueError):
+        return TIMEOUT
+    if ct <= 0:
+        return TIMEOUT
+    return min(ct * SPDK_TIMEOUT_MARGIN, TIMEOUT)
+
+def rpc_call(req, client_timeout=None):
     logger.info(f"active threads: {threading.active_count()}")
     logger.info(f"active unix sockets: {len(unix_sockets)}")
     req_data = json.loads(req.decode('ascii'))
@@ -120,17 +147,18 @@ def rpc_call(req):
     if "params" in req_data:
         params = str(req_data['params'])
     logger.info(f"Request:{req_time} function: {str(req_data['method'])}, params: {params}")
+    sock_timeout = _resolve_sock_timeout(client_timeout)
     spdk_semaphore.acquire()
     try:
-        return _rpc_call_inner(req, req_data, req_time)
+        return _rpc_call_inner(req, req_data, req_time, sock_timeout)
     finally:
         spdk_semaphore.release()
 
-def _rpc_call_inner(req, req_data, req_time):
+def _rpc_call_inner(req, req_data, req_time, sock_timeout):
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     unix_sockets.append(sock)
     try:
-        sock.settimeout(TIMEOUT)
+        sock.settimeout(sock_timeout)
         sock.connect(rpc_sock)
         sock.sendall(req)
 
@@ -233,7 +261,7 @@ class ServerHandler(BaseHTTPRequestHandler):
             logger.info(f"read_line_time_diff: {time_diff}")
             read_line_time_diff[read_line_time_start] = time_diff
             try:
-                response = rpc_call(data_string)
+                response = rpc_call(data_string, self.headers.get('X-RPC-Timeout'))
                 if response is not None:
                     self.do_HEAD()
                     self.wfile.write(bytes(response.encode(encoding='ascii')))
@@ -270,6 +298,12 @@ def run_server(host, port, user, password, is_threading_enabled=False):
 
 TIMEOUT = int(get_env_var("TIMEOUT", is_required=False, default=60*5))
 MAX_CONCURRENT_SPDK = int(get_env_var("MAX_CONCURRENT_SPDK", is_required=False, default=16))
+# Multiplier applied to the caller-supplied HTTP timeout (X-RPC-Timeout header)
+# to derive how long the proxy waits on SPDK while holding a semaphore slot.
+# >1 so a request that completes just after the caller's deadline still returns
+# instead of being aborted; small enough that abandoned/stuck RPCs free their
+# slot quickly. See _resolve_sock_timeout.
+SPDK_TIMEOUT_MARGIN = float(get_env_var("SPDK_TIMEOUT_MARGIN", is_required=False, default=2))
 is_threading_enabled = get_env_var("MULTI_THREADING_ENABLED", is_required=False, default=False)
 server_ip = get_env_var("SERVER_IP", is_required=True, default="")
 rpc_port = get_env_var("RPC_PORT", is_required=True)

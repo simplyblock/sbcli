@@ -156,7 +156,13 @@ class RPCClient:
         effective_timeout = request_timeout if request_timeout is not None else self.timeout
         try:
             logger.debug("From: %s, Requesting method: %s, params: %s", self.host, method, params)
-            response = self.session.post(self.url, data=json.dumps(payload), timeout=effective_timeout)
+            # Tell the SPDK proxy how long we are willing to wait, so it bounds
+            # its own SPDK round-trip (and the semaphore slot it holds) to this
+            # instead of the proxy-global timeout. Prevents an abandoned/stuck
+            # RPC from squatting a proxy slot for minutes and starving other RPCs.
+            response = self.session.post(
+                self.url, data=json.dumps(payload), timeout=effective_timeout,
+                headers={"X-RPC-Timeout": str(effective_timeout)})
         except Exception:
             raise RPCException("connection error")
 
@@ -196,7 +202,7 @@ class RPCClient:
                 'id': 1,
                 'method': method,
                 'params': kwargs,
-            }), timeout=self.timeout)
+            }), timeout=self.timeout, headers={"X-RPC-Timeout": str(self.timeout)})
             response.raise_for_status()
             data = response.json()
             _response_validator.validate(data)
@@ -1667,18 +1673,22 @@ class RPCClient:
         """
         return self._request("bdev_lvol_get_lvols", {"lvs_name": lvs_name})
 
-    def bdev_lvol_final_migration(self, lvol_name, lvol_id, snapshot_name, batch_size, bdev_name, operation="migrate"):
+    def bdev_lvol_transfer_final_step(self, lvol_name, lvol_id, snapshot_name, batch_size, gateway, operation="migrate"):
         """
-        Start the final (live) migration of a writable lvol from source to target.
-        The source I/O is frozen for the brief delta transfer.
+        Start the final (live) transfer of a writable lvol from source to target.
+        The source I/O is frozen for the brief delta transfer, then resumed.
+
+        Used both for intra-cluster migration (``operation="migrate"``, metadata
+        only) and cross-cluster replication cutover / fail-back
+        (``operation="replicate"``, metadata + data).
 
         Args:
             lvol_name:     source lvol composite bdev name
-            lvol_id:       blobid of the target lvol (from :meth:`bdev_lvol_get_lvols`)
-            snapshot_name: composite name of the last transferred snapshot on source
-            block_size:    constant – pass ``2``
-            bdev_name:     bdev exposed by connecting to the target hub lvol
-            operation: (migrate or replicate)
+            lvol_id:       map_id of the target lvol (from :meth:`bdev_lvol_get_lvols`)
+            snapshot_name: composite name of the last transferred snapshot on target
+            batch_size:    cluster batch size – pass ``2`` for the final step
+            gateway:       target hub lvol bdev name (NVMe-oF attached on source)
+            operation:     ``"migrate"`` or ``"replicate"``
 
         Poll progress with :meth:`bdev_lvol_transfer_stat` using *lvol_name*.
         """
@@ -1687,9 +1697,18 @@ class RPCClient:
             "lvol_id": lvol_id,
             "snapshot_name": snapshot_name,
             "cluster_batch": batch_size,
-            "gateway": bdev_name,
+            "gateway": gateway,
             "operation": operation,
         })
+
+    def bdev_lvol_final_migration(self, lvol_name, lvol_id, snapshot_name, batch_size, bdev_name, operation="migrate"):
+        """Deprecated alias for :meth:`bdev_lvol_transfer_final_step`.
+
+        Retained for the intra-cluster migration runner; new replication code
+        should call ``bdev_lvol_transfer_final_step`` directly.
+        """
+        return self.bdev_lvol_transfer_final_step(
+            lvol_name, lvol_id, snapshot_name, batch_size, bdev_name, operation)
 
     # ---- S3 Backup RPCs ----
 
