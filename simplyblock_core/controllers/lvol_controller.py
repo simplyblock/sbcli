@@ -154,12 +154,10 @@ def validate_add_lvol_func(name, size, host_id_or_name, pool_id_or_name,
             return False, f"Invalid LVol size: {utils.humanbytes(size)} " \
                           f"Pool max size has reached {utils.humanbytes(total+size)} of {utils.humanbytes(pool.pool_max_size)}"
 
-    if not all_lvols:
-        all_lvols = db_controller.get_mini_lvols()
-    for lvol in all_lvols:
-        if lvol.pool_uuid == pool.get_id():
-            if lvol.lvol_name == name:
-                return False, f"LVol name must be unique: {name}"
+    # Name uniqueness via the per-pool name index (O(1)) instead of scanning
+    # every lvol in the DB.
+    if db_controller.lvol_name_taken(pool.get_id(), name):
+        return False, f"LVol name must be unique: {name}"
 
     # If user gave a QOS and the pool also have a QOS, return error
     if (max_rw_iops or max_rw_mbytes or max_r_mbytes or max_w_mbytes) and (pool.has_qos()):

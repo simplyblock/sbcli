@@ -793,18 +793,17 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     if cluster.status not in [cluster.STATUS_ACTIVE, cluster.STATUS_DEGRADED]:
         return False, f"Cluster is not active, status: {cluster.status}"
 
-    if not all_lvols:
-        all_lvols = db_controller.get_mini_lvols()
-    for lvol in all_lvols:
-        if lvol.pool_uuid != pool.get_id() or lvol.lvol_name != clone_name:
-            continue
-        if lvol.cloned_from_snap == snapshot_id:
-            if lvol.status in [LVol.STATUS_IN_DELETION, LVol.STATUS_IN_CREATION]:
-                msg = f"Clone status {lvol.status} can not proceed"
+    # Clone-name uniqueness / reuse via the per-pool lvol name index (O(1) point
+    # read) instead of scanning every lvol in the DB.
+    existing = db_controller.lvol_name_lookup(pool.get_id(), clone_name)
+    if existing is not None:
+        if existing.cloned_from_snap == snapshot_id:
+            if existing.status in [LVol.STATUS_IN_DELETION, LVol.STATUS_IN_CREATION]:
+                msg = f"Clone status {existing.status} can not proceed"
                 logger.error(msg)
                 return False, msg
-            logger.info(f"Clone already exists, reusing lvol: {lvol.get_id()}")
-            return lvol.get_id(), False
+            logger.info(f"Clone already exists, reusing lvol: {existing.get_id()}")
+            return existing.get_id(), False
         msg = f"LVol name must be unique: {clone_name}"
         logger.error(msg)
         return False, msg
