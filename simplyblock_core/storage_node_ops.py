@@ -7713,20 +7713,19 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
 
         sec_node.write_to_db()
 
-    # Create hublvol on primary after all secondaries have their stacks
+    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+    try:
+        snode.create_hublvol(cluster_nqn=cluster.nqn)
+    except RPCException as e:
+        logger.error("Error establishing hublvol: %s", e.message)
+        # return False
+
+    try:
+        snode.create_transfer_hublvol()
+    except RPCException as e:
+        logger.error("Error creating transfer hublvol: %s", e.message)
+
     if secondary_ids:
-        cluster = db_controller.get_cluster_by_id(snode.cluster_id)
-        try:
-            snode.create_hublvol(cluster_nqn=cluster.nqn)
-        except RPCException as e:
-            logger.error("Error establishing hublvol: %s", e.message)
-            # return False
-
-        try:
-            snode.create_transfer_hublvol()
-        except RPCException as e:
-            logger.error("Error creating transfer hublvol: %s", e.message)
-
         # Create secondary hublvol on sec_1 so tertiary can multipath
         sec1 = db_controller.get_storage_node_by_id(secondary_ids[0])
         if sec1 and sec1.status == StorageNode.STATUS_ONLINE:
