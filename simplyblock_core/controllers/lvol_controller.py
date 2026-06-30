@@ -166,18 +166,29 @@ def validate_add_lvol_func(name, size, host_id_or_name, pool_id_or_name,
     return True, ""
 
 
+def count_lvol_subsystems(node):
+    """Count the lvol subsystems currently present on ``node``.
+
+    Queries the data plane directly (``subsystem_list``) and counts NQNs
+    carrying the ``:lvol:`` tag, instead of scanning every lvol record in the
+    DB (which is O(N) per create and does not scale to thousands of volumes).
+    Namespaced volumes share a single subsystem (one NQN) so they correctly
+    count as one; device (``:dev:``) and hublvol (``:hublvol:``) subsystems are
+    excluded by the tag match.
+
+    Returns the count, or ``None`` if the node could not be queried.
+    """
+    try:
+        subsystems = node.rpc_client().subsystem_list() or []
+    except Exception as e:
+        logger.warning(f"Failed to list subsystems on node {node.get_id()}: {e}")
+        return None
+    return sum(1 for s in subsystems if ":lvol:" in s.get("nqn", ""))
+
+
 def _get_next_3_nodes(cluster_id, lvol_size=0, all_lvols=None):
     db_controller = DBController()
     snodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
-
-    if not all_lvols:
-        all_lvols = db_controller.get_mini_lvols()
-    # Build node→subsystem-count map with a single cluster-wide DB read instead
-    # of one read per node (was O(K×N) where K = number of nodes).
-    node_nqns: dict[str, set] = {}
-    for lv in all_lvols:
-        if lv.status not in [LVol.STATUS_IN_DELETION, LVol.STATUS_DELETED]:
-            node_nqns.setdefault(lv.node_id, set()).add(lv.nqn)
 
     online_nodes = []
     node_stats = {}
@@ -185,7 +196,11 @@ def _get_next_3_nodes(cluster_id, lvol_size=0, all_lvols=None):
         if node.is_secondary_node:  # pass
             continue
         if node.status == node.STATUS_ONLINE:
-            subsys_count = len(node_nqns.get(node.get_id(), set()))
+            subsys_count = count_lvol_subsystems(node)
+            if subsys_count is None:
+                # Could not reach the node to count its subsystems; don't place
+                # here (the create would fail on it anyway).
+                continue
             if subsys_count >= node.max_lvol:
                 continue
             if node.lvol_sync_del():
@@ -513,11 +528,8 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     # created. Namespaced lvols that found a free slot (namespace is set) share
     # an existing NQN and do not increase the subsystem count.
     if namespace is None:
-        subsys_count = len(set(
-            lv.nqn for lv in all_lvols if lv.node_id == host_node.get_id() and
-            lv.status not in [LVol.STATUS_IN_DELETION, LVol.STATUS_DELETED]
-        ))
-        if subsys_count >= host_node.max_lvol:
+        subsys_count = count_lvol_subsystems(host_node)
+        if subsys_count is not None and subsys_count >= host_node.max_lvol:
             error = f"Too many subsystems on node: {host_node.get_id()}, max subsystems reached: {host_node.max_lvol}"
             logger.error(error)
             return False, error
@@ -825,12 +837,8 @@ def _resolve_namespaced_subsystem(lvol, rpc_client, snode):
             lvol.max_namespace_per_subsys = result.max_namespace_per_subsys
             return False
         else:
-            all_lvols = db_ctrl.get_mini_lvols()
-            subsys_count = len(set(
-                lv.nqn for lv in all_lvols if lv.node_id == snode.get_id() and
-                lv.status not in [LVol.STATUS_IN_DELETION, LVol.STATUS_DELETED]
-            ))
-            if subsys_count >= snode.max_lvol:
+            subsys_count = count_lvol_subsystems(snode)
+            if subsys_count is not None and subsys_count >= snode.max_lvol:
                 error = f"Too many subsystems on node: {snode.get_id()}, max subsystems reached: {snode.max_lvol}"
                 logger.error(error)
                 raise Exception(error)
@@ -990,11 +998,8 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
                 lvol.namespace = result.uuid
                 lvol.max_namespace_per_subsys = result.max_namespace_per_subsys
             else:
-                subsys_count = len(set(
-                    lv.nqn for lv in all_lvols if lv.node_id == snode.get_id() and
-                    lv.status not in [LVol.STATUS_IN_DELETION, LVol.STATUS_DELETED]
-                ))
-                if subsys_count >= snode.max_lvol:
+                subsys_count = count_lvol_subsystems(snode)
+                if subsys_count is not None and subsys_count >= snode.max_lvol:
                     error = f"Too many subsystems on node: {snode.get_id()}, max subsystems reached: {snode.max_lvol}"
                     logger.error(error)
                     return _fail_after_bdev(lvol, rpc_client, error)
@@ -2439,13 +2444,9 @@ def clone_lvol(lvol_id, clone_name, new_size=None, pvc_name=None):
     _available_subsys = get_next_available_subsystem_on_node(lvol.node_id, all_lvols=all_lvols)
 
     if not _available_subsys:
-        subsys_count = len(set(
-            lv.nqn for lv in all_lvols if lv.node_id == lvol.node_id and
-            lv.status not in [LVol.STATUS_IN_DELETION, LVol.STATUS_DELETED]
-        ))
         snode = db_controller.get_storage_node_by_id(lvol.node_id)
-
-        if subsys_count >= snode.max_lvol:
+        subsys_count = count_lvol_subsystems(snode)
+        if subsys_count is not None and subsys_count >= snode.max_lvol:
             error = f"Too many subsystems on node: {snode.get_id()}, max subsystems reached: {snode.max_lvol}"
             logger.error(error)
             return False, error
