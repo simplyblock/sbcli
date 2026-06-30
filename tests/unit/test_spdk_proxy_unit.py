@@ -90,7 +90,7 @@ class TestRpcCallInnerSocketCleanup(unittest.TestCase):
         mock_sock.recv = MagicMock(side_effect=[response, b''])
 
         with patch("simplyblock_core.services.spdk_http_proxy_server.socket.socket", return_value=mock_sock):
-            result = proxy_mod._rpc_call_inner(req, req_data, time.time_ns())
+            result = proxy_mod._rpc_call_inner(req, req_data, time.time_ns(), proxy_mod.TIMEOUT)
 
         self.assertIsNotNone(result)
         mock_sock.close.assert_called_once()
@@ -105,7 +105,7 @@ class TestRpcCallInnerSocketCleanup(unittest.TestCase):
 
         with patch("simplyblock_core.services.spdk_http_proxy_server.socket.socket", return_value=mock_sock):
             with self.assertRaises(ValueError) as ctx:
-                proxy_mod._rpc_call_inner(req, req_data, time.time_ns())
+                proxy_mod._rpc_call_inner(req, req_data, time.time_ns(), proxy_mod.TIMEOUT)
 
         self.assertIn("timeout", str(ctx.exception))
         mock_sock.close.assert_called_once()
@@ -120,7 +120,7 @@ class TestRpcCallInnerSocketCleanup(unittest.TestCase):
 
         with patch("simplyblock_core.services.spdk_http_proxy_server.socket.socket", return_value=mock_sock):
             with self.assertRaises(ConnectionRefusedError):
-                proxy_mod._rpc_call_inner(req, req_data, time.time_ns())
+                proxy_mod._rpc_call_inner(req, req_data, time.time_ns(), proxy_mod.TIMEOUT)
 
         mock_sock.close.assert_called_once()
         self.assertEqual(len(proxy_mod.unix_sockets), 0)
@@ -131,11 +131,39 @@ class TestRpcCallInnerSocketCleanup(unittest.TestCase):
         mock_sock = MagicMock()
 
         with patch("simplyblock_core.services.spdk_http_proxy_server.socket.socket", return_value=mock_sock):
-            result = proxy_mod._rpc_call_inner(req, req_data, time.time_ns())
+            result = proxy_mod._rpc_call_inner(req, req_data, time.time_ns(), proxy_mod.TIMEOUT)
 
         self.assertIsNone(result)
         mock_sock.close.assert_called_once()
         self.assertEqual(len(proxy_mod.unix_sockets), 0)
+
+
+class TestResolveSockTimeout(unittest.TestCase):
+    """The proxy must bound its SPDK wait (and hence the semaphore-slot hold)
+    to the caller's HTTP timeout, so an abandoned/stuck RPC frees its slot
+    quickly instead of squatting it for the full global TIMEOUT and starving
+    other RPCs to the node."""
+
+    def test_missing_hint_falls_back_to_global(self):
+        self.assertEqual(proxy_mod._resolve_sock_timeout(None), proxy_mod.TIMEOUT)
+
+    def test_invalid_hint_falls_back_to_global(self):
+        self.assertEqual(proxy_mod._resolve_sock_timeout("not-a-number"), proxy_mod.TIMEOUT)
+        self.assertEqual(proxy_mod._resolve_sock_timeout("0"), proxy_mod.TIMEOUT)
+        self.assertEqual(proxy_mod._resolve_sock_timeout("-5"), proxy_mod.TIMEOUT)
+
+    def test_short_caller_timeout_yields_short_hold(self):
+        # A 1s caller (e.g. distr_status_events_update) must not pin a slot for
+        # the global TIMEOUT; it gets margin x 1s, well under the global cap.
+        with patch.object(proxy_mod, "SPDK_TIMEOUT_MARGIN", 2), \
+                patch.object(proxy_mod, "TIMEOUT", 300):
+            self.assertEqual(proxy_mod._resolve_sock_timeout("1"), 2)
+            self.assertEqual(proxy_mod._resolve_sock_timeout("3"), 6)
+
+    def test_long_caller_timeout_capped_at_global(self):
+        with patch.object(proxy_mod, "SPDK_TIMEOUT_MARGIN", 2), \
+                patch.object(proxy_mod, "TIMEOUT", 300):
+            self.assertEqual(proxy_mod._resolve_sock_timeout("180"), 300)
 
 
 class TestSemaphoreConcurrency(unittest.TestCase):
@@ -144,7 +172,7 @@ class TestSemaphoreConcurrency(unittest.TestCase):
         max_concurrent = {"seen": 0, "current": 0}
         lock = threading.Lock()
 
-        def mock_inner(req, req_data, req_time):
+        def mock_inner(req, req_data, req_time, sock_timeout=None):
             with lock:
                 max_concurrent["current"] += 1
                 if max_concurrent["current"] > max_concurrent["seen"]:
