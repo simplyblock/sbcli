@@ -139,6 +139,24 @@ LVSTORE_MUTATION_LOCK_HEARTBEAT_SEC = 15
 LVSTORE_MUTATION_LOCK_TTL_SEC = 60
 LVSTORE_MUTATION_LOCK_WAIT_SEC = 120
 
+# A create/snapshot/clone request may block on two sequential waits before doing
+# any RPC work: first the node-level sync-delete drain (LVOL_SYNC_DELETE_WAIT_SEC),
+# then the per-lvstore mutation lock (LVSTORE_MUTATION_LOCK_WAIT_SEC). These locks
+# MUST time out before the front-end API cuts the connection, otherwise a waiting
+# request is severed mid-operation and can leave a half-registered object. The
+# invariant the deployment must hold (HAProxy timeout server/client in
+# scripts/haproxy.cfg is the binding API timeout; uvicorn imposes none; the CLI
+# runs controllers in-process):
+#
+#   API_OPERATION_TIMEOUT  >  LVOL_SYNC_DELETE_WAIT_SEC
+#                             + LVSTORE_MUTATION_LOCK_WAIT_SEC
+#                             + worst-case create+register RPC work
+#
+# Current budget: 60 + 120 = 180s max lock wait, leaving 120s of the 300s API
+# timeout for RPC work. Keep haproxy.cfg in sync if these change.
+LVOL_SYNC_DELETE_WAIT_SEC = 60
+API_OPERATION_TIMEOUT_SEC = 300
+
 # An LVol left in STATUS_IN_CREATION longer than this is treated as an orphaned
 # create (the creating process died before reaching ONLINE) and is cleaned up
 # by lvol_monitor. Must be comfortably longer than the slowest legitimate
