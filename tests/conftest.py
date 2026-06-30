@@ -8,7 +8,31 @@ tier can connect to a real testcontainer-provided FoundationDB without a
 stale stub shadowing it.
 """
 
+import pathlib
+
 import pytest
+
+
+def pytest_configure(config):
+    """Fail fast if a test module is dropped directly under ``tests/``.
+
+    Every test must live in a tier — ``tests/unit/`` (pure logic, fdb stubbed)
+    or ``tests/integration/`` (real FoundationDB). A ``test_*.py`` sitting at the
+    top level belongs to neither, so it silently escapes the tier split (it is
+    not selected by either tox env and gets no tier-specific conftest). This
+    guard runs for both ``tox -e unit`` and ``tox -e integration`` because this
+    conftest is a parent of both, and turns the mistake into a hard collection
+    error instead of a quietly-skipped test.
+    """
+    tests_dir = pathlib.Path(__file__).parent
+    strays = sorted(p.name for p in tests_dir.glob("test_*.py"))
+    if strays:
+        raise pytest.UsageError(
+            "Test modules must live in a tier, not directly under tests/. "
+            "Move these into tests/unit/ (pure logic, fdb stubbed) or "
+            "tests/integration/ (real FDB) — see tests/AGENTS.md § Tiers:\n  "
+            + "\n  ".join(f"tests/{name}" for name in strays)
+        )
 
 
 @pytest.fixture(autouse=True)
