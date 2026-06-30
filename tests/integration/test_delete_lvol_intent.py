@@ -169,7 +169,7 @@ class TestDeleteLvolIntentPersisted(unittest.TestCase):
         mod, _db, _exec, _writes = self._patch(lvol, leader_op_fails=True)
 
         with self.assertRaises(RuntimeError):
-            mod.delete_lvol(lvol, force_delete=False)
+            mod.delete_lvol(lvol, force_delete=False, lock=False)
 
         # Exception signals failure to caller; the important invariant is
         # the persisted state — the reconciler path relies on IN_DELETION.
@@ -182,7 +182,7 @@ class TestDeleteLvolIntentPersisted(unittest.TestCase):
         lvol = _make_lvol(status=LVol.STATUS_ONLINE, ha_type="ha")
         mod, _db, _exec, _writes = self._patch(lvol, leader_op_fails=False)
 
-        mod.delete_lvol(lvol, force_delete=False)  # must not raise
+        mod.delete_lvol(lvol, force_delete=False, lock=False)  # must not raise
 
         self.assertEqual(lvol.status, LVol.STATUS_IN_DELETION)
 
@@ -206,7 +206,7 @@ class TestDeleteLvolIntentPersisted(unittest.TestCase):
 
         exec_mock.side_effect = _exec_capture
         with self.assertRaises(RuntimeError):
-            mod.delete_lvol(lvol, force_delete=False)
+            mod.delete_lvol(lvol, force_delete=False, lock=False)
 
         self.assertEqual(seen_status.get("status_at_call_time"),
                          LVol.STATUS_IN_DELETION,
@@ -229,7 +229,7 @@ class TestDeleteLvolIntentPersisted(unittest.TestCase):
         lvol = _make_lvol(status=LVol.STATUS_IN_DELETION, ha_type="ha")
         mod, _db, exec_mock, _writes = self._patch(lvol, leader_op_fails=False)
 
-        mod.delete_lvol(lvol, force_delete=False)  # must not raise
+        mod.delete_lvol(lvol, force_delete=False, lock=False)  # must not raise
 
         exec_mock.assert_not_called()  # short-circuit before leader op
 
@@ -243,7 +243,7 @@ class TestDeleteLvolIntentPersisted(unittest.TestCase):
 
         # delete_lvol_from_node is patched to return True in our setup,
         # so the single-path completes successfully.
-        mod.delete_lvol(lvol, force_delete=False)  # must not raise
+        mod.delete_lvol(lvol, force_delete=False, lock=False)  # must not raise
 
         self.assertEqual(lvol.status, LVol.STATUS_IN_DELETION)
 
@@ -279,15 +279,19 @@ class TestDeleteLvolSourceOrder(unittest.TestCase):
     def test_status_assignment_precedes_ha_branch(self):
         body = self._delete_lvol_body()
         in_del_pos = body.find("STATUS_IN_DELETION")
-        ha_branch_pos = body.find('lvol.ha_type == "ha"')
+        # The per-node delete dispatch (single + ha branch, leader failover,
+        # non-leader syncs) now lives in the _delete_lvol_from_all_nodes
+        # helper; delete_lvol must persist the deletion intent before
+        # invoking it.
+        dispatch_pos = body.find('_delete_lvol_from_all_nodes(')
         self.assertGreater(in_del_pos, 0,
                             "delete_lvol must reference STATUS_IN_DELETION")
-        self.assertGreater(ha_branch_pos, 0,
-                            "delete_lvol must branch on ha_type")
-        self.assertLess(in_del_pos, ha_branch_pos,
+        self.assertGreater(dispatch_pos, 0,
+                            "delete_lvol must dispatch to _delete_lvol_from_all_nodes")
+        self.assertLess(in_del_pos, dispatch_pos,
                          "STATUS_IN_DELETION assignment must live BEFORE "
-                         "the ha-type branch — otherwise a failed leader "
-                         "op leaves the lvol in 'online' and the "
+                         "the per-node delete dispatch — otherwise a failed "
+                         "leader op leaves the lvol in 'online' and the "
                          "reconciler path in lvol_monitor never fires")
 
     def test_status_assignment_precedes_leader_failover_call(self):
@@ -295,14 +299,18 @@ class TestDeleteLvolSourceOrder(unittest.TestCase):
         # Look for the assignment statement specifically (not the
         # short-circuit check earlier in the function).
         assign_pos = body.find("lvol.status = LVol.STATUS_IN_DELETION")
-        exec_call_pos = body.find("execute_on_leader_with_failover(")
+        # execute_on_leader_with_failover is invoked inside the
+        # _delete_lvol_from_all_nodes helper, which delete_lvol calls only
+        # after persisting the deletion intent.
+        dispatch_pos = body.find("_delete_lvol_from_all_nodes(")
         self.assertGreater(assign_pos, 0,
                             "delete_lvol must assign STATUS_IN_DELETION")
-        self.assertGreater(exec_call_pos, 0,
-                            "delete_lvol must call execute_on_leader_with_failover")
-        self.assertLess(assign_pos, exec_call_pos,
-                         "STATUS_IN_DELETION must be persisted before "
-                         "execute_on_leader_with_failover is invoked")
+        self.assertGreater(dispatch_pos, 0,
+                            "delete_lvol must dispatch to _delete_lvol_from_all_nodes")
+        self.assertLess(assign_pos, dispatch_pos,
+                         "STATUS_IN_DELETION must be persisted before the "
+                         "per-node delete dispatch (which runs the leader "
+                         "failover) is invoked")
 
 
 if __name__ == "__main__":

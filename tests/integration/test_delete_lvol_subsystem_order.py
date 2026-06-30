@@ -207,7 +207,7 @@ class TestSubsystemDeleteOrder(unittest.TestCase):
         """All three peers online: order must be T -> S -> P -> sleep(2) -> leader_op."""
         mod, events, lvol, _p, _s, _t = self._patch()
 
-        mod.delete_lvol(lvol, force_delete=False)
+        mod.delete_lvol(lvol, force_delete=False, lock=False)
 
         # Filter out anything other than the four signal events. (The
         # leader_op stub doesn't run delete_lvol_from_node, so there are
@@ -226,7 +226,7 @@ class TestSubsystemDeleteOrder(unittest.TestCase):
         mod, events, lvol, _p, _s, _t = self._patch(
             tertiary_status=StorageNode.STATUS_DOWN)
 
-        mod.delete_lvol(lvol, force_delete=False)
+        mod.delete_lvol(lvol, force_delete=False, lock=False)
 
         self.assertEqual(events, [
             ("subsystem_delete", "node-secondary"),
@@ -240,7 +240,7 @@ class TestSubsystemDeleteOrder(unittest.TestCase):
         mod, events, lvol, _p, _s, _t = self._patch(
             secondary_status=StorageNode.STATUS_RESTARTING)
 
-        mod.delete_lvol(lvol, force_delete=False)
+        mod.delete_lvol(lvol, force_delete=False, lock=False)
 
         self.assertEqual(events, [
             ("subsystem_delete", "node-tertiary"),
@@ -256,7 +256,7 @@ class TestSubsystemDeleteOrder(unittest.TestCase):
         mod, events, lvol, _p, _s, _t = self._patch(
             primary_status=StorageNode.STATUS_UNREACHABLE)
 
-        mod.delete_lvol(lvol, force_delete=False)
+        mod.delete_lvol(lvol, force_delete=False, lock=False)
 
         # No sleep event, no primary subsystem delete.
         self.assertEqual(events, [
@@ -269,7 +269,7 @@ class TestSubsystemDeleteOrder(unittest.TestCase):
         """Even with all three peers online, there must be exactly one
         drain sleep and it must land immediately before the leader op."""
         mod, events, lvol, _p, _s, _t = self._patch()
-        mod.delete_lvol(lvol, force_delete=False)
+        mod.delete_lvol(lvol, force_delete=False, lock=False)
 
         sleeps = [e for e in events if e[0] == "sleep"]
         self.assertEqual(len(sleeps), 1)
@@ -284,7 +284,7 @@ class TestSubsystemDeleteOrder(unittest.TestCase):
         """The pre-leader rpc_client must be built with (timeout=5, retry=2)
         so a hung peer doesn't block the user-facing delete request."""
         mod, _events, lvol, primary, secondary, tertiary = self._patch()
-        mod.delete_lvol(lvol, force_delete=False)
+        mod.delete_lvol(lvol, force_delete=False, lock=False)
 
         for n in (primary, secondary, tertiary):
             n.rpc_client.assert_called_with(timeout=5, retry=2)
