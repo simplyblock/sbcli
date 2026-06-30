@@ -1011,7 +1011,20 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
 
     if snap.lvol.crypto_bdev:
         lvol.crypto_bdev = f"crypto_{lvol.lvol_bdev}"
-        lvol.bdev_stack.append({"type": "crypto"})
+        # The crypto stack entry must carry name + params: _create_bdev_stack
+        # reads bdev['name']/bdev['params'] for every entry. Appending only
+        # {"type": "crypto"} raised KeyError: 'name' when cloning an encrypted
+        # volume. Mirror the create path (lvol_controller.add_lvol). base_name
+        # is the current top_bdev (the clone bdev) — captured before top_bdev is
+        # reassigned to the crypto bdev below.
+        lvol.bdev_stack.append({
+            "type": "crypto",
+            "name": lvol.crypto_bdev,
+            "params": {
+                "name": lvol.crypto_bdev,
+                "base_name": lvol.top_bdev,
+            },
+        })
         lvol.lvol_type += ',crypto'
         lvol.top_bdev = lvol.crypto_bdev
         with create_kms_connection(cluster) as kms:
