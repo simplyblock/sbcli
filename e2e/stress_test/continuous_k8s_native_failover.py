@@ -171,7 +171,6 @@ class K8sNativeFailoverTest(TestClusterBase):
                 self.mgmt_nodes, self.storage_nodes = self.sbcli_utils.get_all_nodes_ip()
                 self.sbcli_utils.list_lvols()
                 self.sbcli_utils.list_storage_pools()
-                self._validate_storage_node_health()
                 break
             except Exception as e:
                 self.logger.debug(f"API call failed with error: {e}")
@@ -181,6 +180,8 @@ class K8sNativeFailoverTest(TestClusterBase):
                     raise e
                 self.logger.info(f"Retrying Base APIs before starting tests. Attempt: {30 - retry + 1}")
                 sleep_n_sec(10)
+
+        self._validate_storage_node_health()
 
         # 2. No client machines needed — FIO runs as K8s Jobs
         self.client_machines = []

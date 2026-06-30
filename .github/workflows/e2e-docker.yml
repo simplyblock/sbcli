@@ -161,7 +161,7 @@ jobs:
 
       - name: Collect Graylog/OpenSearch logs
         if: '!cancelled()'
-        timeout-minutes: 240
+        timeout-minutes: 480
         env:
           MNODES: "${{ needs.deploy.outputs.mnodes }}"
           CLUSTER_ID: "${{ needs.deploy.outputs.cluster_id }}"
@@ -208,9 +208,9 @@ jobs:
             [ $rc -ne 0 ] && return $rc
             local has_content
             has_content=$(ssh "${SSH_OPTS[@]}" "root@${MGMT_IP}" \
-              "find '${outdir}' -name '*.log' -size +0 2>/dev/null | head -1")
+              "find '${outdir}' -name '*.tar.gz' -size +0 2>/dev/null | head -1")
             if [ -z "${has_content}" ]; then
-              echo "  WARN: collect_logs.py succeeded but all .log files are 0 bytes"
+              echo "  WARN: collect_logs.py succeeded but no .tar.gz output found"
               return 1
             fi
           }

@@ -757,7 +757,7 @@ jobs:
 
       - name: Collect Graylog/OpenSearch logs
         if: '!cancelled()'
-        timeout-minutes: ${{ fromJSON(env.LOG_COLLECT_TIMEOUT_MINS || '240') }}
+        timeout-minutes: ${{ fromJSON(env.LOG_COLLECT_TIMEOUT_MINS || '480') }}
         shell: bash
         run: |
           set +e
@@ -806,9 +806,9 @@ jobs:
             [ $rc -ne 0 ] && return $rc
             local has_content
             has_content=$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" \
-              "find '${outdir}' -name '*.log' -size +0 2>/dev/null | head -1")
+              "find '${outdir}' -name '*.tar.gz' -size +0 2>/dev/null | head -1")
             if [ -z "${has_content}" ]; then
-              echo "  WARN: collect_logs.py succeeded but all .log files are 0 bytes"
+              echo "  WARN: collect_logs.py succeeded but no .tar.gz output found"
               return 1
             fi
           }
