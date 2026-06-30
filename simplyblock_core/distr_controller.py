@@ -264,7 +264,14 @@ def get_distr_cluster_map(snodes, target_node, distr_name=""):
 
 def parse_distr_cluster_map(map_string, nodes=None, devices=None):
     db_controller = DBController()
-    node_pattern = re.compile(r".*uuid_node=(.*)  status=(.*)$", re.IGNORECASE)
+    # status is a single whitespace-free token (online/offline/unreachable/…).
+    # Capture it as such rather than greedily to end-of-line: SPDK appends
+    # trailing fields to the node line (e.g. "  failure_domain=-1"), and a greedy
+    # `status=(.*)` swallows them into the status value, so every node mismatched
+    # its DB status and flipped Health=False cluster-wide. The device line below
+    # keeps its `(.*)` capture because there the status is delimited by the
+    # following "  uuid_device=" field.
+    node_pattern = re.compile(r".*uuid_node=(.*)  status=(\S+)", re.IGNORECASE)
     device_pattern = re.compile(
         r".*storage_ID=(.*)  status=(.*)  uuid_device=(.*)  storage_bdev_name=(.*)$", re.IGNORECASE)
 
