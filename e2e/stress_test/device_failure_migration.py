@@ -2653,7 +2653,7 @@ class _DeviceAddAfterBootstrapBase:
                 size=self.LVOL_SIZE,
                 crypto=False,
             )
-            connect_info = self.sbcli_utils.connect_lvol(name)
+            connect_info = self.sbcli_utils.get_lvol_connect_str(name)
             device = self.ssh_obj.get_nvme_device(client, connect_info)
             mount = f"/mnt/add_dev_{i}"
             self.ssh_obj.exec_command(client, f"mkdir -p {mount}")

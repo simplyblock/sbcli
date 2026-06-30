@@ -109,7 +109,8 @@ class BackupStressBase(BackupTestBase):
         self._log_outage(node_id, outage_type, "start")
         self.logger.info(f"[outage] {outage_type} on node {node_id}")
 
-        sn_node_ip = self.sbcli_utils.get_node_without_lvols(node_id)
+        node_details = self.sbcli_utils.get_storage_node_details(node_id)
+        sn_node_ip = node_details[0]["mgmt_ip"]
 
         if outage_type == "graceful_shutdown":
             self.ssh_obj.exec_command(
@@ -130,7 +131,8 @@ class BackupStressBase(BackupTestBase):
                 "docker start $(docker ps -aq --filter name=spdk) || true")
 
         elif outage_type == "interface_full_network_interrupt":
-            iface = self.sbcli_utils.get_node_interface(node_id)
+            data_nics = node_details[0].get("data_nics", [])
+            iface = data_nics[0]["if_name"] if data_nics else "eth0"
             self.ssh_obj.exec_command(
                 sn_node_ip,
                 f"nmcli dev disconnect {iface} || true")
@@ -140,7 +142,7 @@ class BackupStressBase(BackupTestBase):
                 f"nmcli dev connect {iface} || true")
 
         elif outage_type == "interface_partial_network_interrupt":
-            port = self.sbcli_utils.get_node_port(node_id)
+            port = 4420  # NVMe-oF target port
             self.ssh_obj.exec_command(
                 sn_node_ip,
                 f"iptables -A INPUT -p tcp --dport {port} -j DROP || true")

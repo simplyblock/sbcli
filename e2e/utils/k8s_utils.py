@@ -2060,6 +2060,24 @@ class K8sSbcliUtils:
             return False
         raise Exception(f"Lvol {lvol_name} is not getting deleted!!")
 
+    def delete_all_clones(self):
+        """Delete all clone lvols (lvols with cloned_from_snap set).
+
+        Must be called BEFORE delete_all_snapshots, because SPDK refuses
+        to delete a snapshot that still has clones.
+        """
+        lvols = self.list_lvols()
+        for name, lvol_id in lvols.items():
+            details = self.get_lvol_details(lvol_id)
+            if details and details[0].get("cloned_from_snap"):
+                self.logger.info(f"Deleting clone lvol: {name}")
+                try:
+                    self.delete_lvol(lvol_name=name, skip_error=True)
+                except Exception as e:
+                    self.logger.warning(
+                        f"Clone delete failed (continuing): {name}, err={e}"
+                    )
+
     def delete_all_lvols(self):
         lvols = self.list_lvols()
         for name in list(lvols.keys()):

@@ -208,6 +208,7 @@ class K8sNativeMajorUpgrade(TestClusterBase):
                 )
                 self.sbcli_utils.list_lvols()
                 self.sbcli_utils.list_storage_pools()
+                self._validate_storage_node_health()
                 break
             except Exception as e:
                 self.logger.debug(f"API call failed: {e}")
