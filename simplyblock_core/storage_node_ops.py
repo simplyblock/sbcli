@@ -326,6 +326,7 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names:
 
     expected_ips = [ip.strip() for ip in (device.nvmf_ip or "").split(",") if ip.strip()]
     is_multipath = bool(device.nvmf_multipath) and len(expected_ips) >= 2
+    rpc_client = node.rpc_client()
 
     # Fast path: bdev already present in the caller's snapshot of get_bdevs().
     # Only safe for single-path devices — for multipath the bdev can survive
@@ -337,12 +338,17 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names:
     # missing path. With multipath we always go on to inspect the controller
     # list and re-attach any missing path.
     if not is_multipath:
-        for bdev in bdev_names:
-            if bdev.startswith(name):
-                logger.debug(f"Already connected, bdev found in bdev_get_bdevs: {bdev}")
-                return bdev
+        if bdev_names:
+            for bdev in bdev_names:
+                if bdev.startswith(name):
+                    logger.debug(f"Already connected, bdev found in bdev_get_bdevs: {bdev}")
+                    return bdev
+        else:
+            bdev_name = f"{name}n1"
+            if rpc_client.get_bdevs(bdev_name):
+                logger.debug(f"Already connected, bdev found in bdev_get_bdevs: {bdev_name}")
+                return bdev_name
 
-    rpc_client = node.rpc_client()
     if attach_timeout is None or attach_timeout > _ATTACH_CONTROLLER_MAX_TIMEOUT_SEC:
         attach_timeout = _ATTACH_CONTROLLER_MAX_TIMEOUT_SEC
     attach_rpc_client = node.rpc_client(timeout=attach_timeout, retry=0)
@@ -479,12 +485,7 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names:
                     name, still_missing, len(now_attached), len(expected_ips))
 
     device.release_device_connection()
-    # Return the bdev name if it exists; otherwise hint with the canonical
-    # ``<name>n1`` so callers (e.g. _connect_to_remote_jm_devs) can poll for
-    # it via get_bdevs.
-    for bdev in bdev_names:
-        if bdev.startswith(name):
-            return bdev
+
     if rpc_client.get_bdevs(bdev_name):
         return bdev_name
     return None
@@ -1205,11 +1206,11 @@ def _connect_to_remote_devs(
 
     rpc_client = this_node.rpc_client(timeout=30, retry=1)
 
-    node_bdevs = rpc_client.get_bdevs()
-    if node_bdevs:
-        node_bdev_names = [b['name'] for b in node_bdevs]
-    else:
-        node_bdev_names = []
+    # node_bdevs = rpc_client.get_bdevs()
+    # if node_bdevs:
+    #     node_bdev_names = [b['name'] for b in node_bdevs]
+    # else:
+    #     node_bdev_names = []
 
     remote_devices = []
     existing_remote_devices = {dev.get_id(): dev for dev in this_node.remote_devices}
@@ -1240,16 +1241,12 @@ def _connect_to_remote_devs(
             devices_to_connect.append(dev)
             t = threading.Thread(
                 target=connect_device,
-                args=(f"remote_{dev.alceml_bdev}", dev, this_node, node_bdev_names, reattach,))
+                args=(f"remote_{dev.alceml_bdev}", dev, this_node, [], reattach,))
             connect_threads.append(t)
             t.start()
 
     for t in connect_threads:
         t.join()
-
-    node_bdevs = rpc_client.get_bdevs()
-    if node_bdevs:
-        node_bdev_names = [b['name'] for b in node_bdevs]
 
     def _find_remote_bdev(dev):
         expected_prefix = f"remote_{dev.alceml_bdev}"
@@ -1272,9 +1269,7 @@ def _connect_to_remote_devs(
             if remote_bdev.remote_bdev:
                 break
             time.sleep(0.5)
-            node_bdevs = rpc_client.get_bdevs()
-            if node_bdevs:
-                node_bdev_names = [b['name'] for b in node_bdevs]
+
             remote_bdev.remote_bdev = _find_remote_bdev(dev)
         if not remote_bdev.remote_bdev and dev.get_id() in existing_remote_devices:
             existing_remote_device = existing_remote_devices[dev.get_id()]
@@ -1408,11 +1403,6 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=None):
 
     rpc_client = this_node.rpc_client(timeout=30, retry=2)
 
-    node_bdevs = rpc_client.get_bdevs()
-    if node_bdevs:
-        node_bdev_names = [b['name'] for b in node_bdevs]
-    else:
-        node_bdev_names = []
     remote_devices = []
     if jm_ids:
         for jm_id in jm_ids:
@@ -1485,8 +1475,7 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=None):
         try:
             remote_device.remote_bdev = connect_device(
                 f"remote_{org_dev.jm_bdev}", org_dev, this_node,
-                bdev_names=node_bdev_names, reattach=True,
-                attach_timeout=1,
+                reattach=True, attach_timeout=1,
             )
         except RuntimeError:
             logger.error(f'Failed to connect to {org_dev.get_id()}')
