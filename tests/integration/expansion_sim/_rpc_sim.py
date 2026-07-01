@@ -152,6 +152,13 @@ class RpcServerSim:
         name = params.get("lvs_name") or params.get("name") or "LVS"
         self.bdevs[name] = BdevSim(name=name, type="bdev_lvstore",
                                     params=dict(params))
+        # Record the lvstore's persisted-superblock location (its base
+        # bdev, i.e. the raid or single distrib) at cluster scope so a
+        # non-leader that later examines that same base bdev rediscovers
+        # the lvstore — mirroring SPDK reading the superblock off disk.
+        base = params.get("bdev_name")
+        if base and self.cluster_sim is not None:
+            self.cluster_sim.lvstore_by_base[base] = name
         return True
 
     def bdev_lvol_delete_lvstore(self, name, **_):
@@ -178,6 +185,14 @@ class RpcServerSim:
     def bdev_examine(self, name=None, **_):
         if name and name in self.bdevs:
             self.bdevs[name].examined = True
+        # Examining the base bdev of a known lvstore surfaces that lvstore
+        # on this node — this is how a non-leader replica rediscovers the
+        # lvstore from its superblock after building the distrib/raid stack
+        # (recreate_lvstore_on_non_leader step 4 → bdev_examine(raid)).
+        if name and self.cluster_sim is not None:
+            lvs = self.cluster_sim.lvstore_by_base.get(name)
+            if lvs and lvs not in self.bdevs:
+                self.bdevs[lvs] = BdevSim(name=lvs, type="bdev_lvstore")
         return True
 
     def bdev_wait_for_examine(self, **_):
@@ -233,6 +248,23 @@ class RpcServerSim:
                 params={"nqn": nqn})
         ctrl.paths.append((traddr, int(trsvcid), trtype))
         return True
+
+    def bdev_nvme_controller_list(self, name=None, **_):
+        """Mirror SPDK's ``bdev_nvme_controller_list``: one entry per named
+        controller, each carrying its attached paths as ``ctrlrs`` with a
+        terminal ``enabled`` state. The hublvol reconnect coordinator
+        (:mod:`simplyblock_core.utils.hublvol_reconnect`) consumes this shape
+        (``ret[0]["ctrlrs"][i]["state"|"trid"]``)."""
+        ctrl = self.controllers.get(name)
+        if ctrl is None:
+            return []
+        ctrlrs = [
+            {"state": "enabled",
+             "trid": {"traddr": traddr, "trsvcid": str(trsvcid),
+                      "trtype": trtype}}
+            for (traddr, trsvcid, trtype) in ctrl.paths
+        ]
+        return [{"name": name, "ctrlrs": ctrlrs}]
 
     def bdev_nvme_detach_controller(self, name, **_):
         ctrl = self.controllers.pop(name, None)
@@ -309,6 +341,11 @@ class ClusterSim:
     def __init__(self):
         self.servers: Dict[str, RpcServerSim] = {}  # node_id -> sim
         self._by_endpoint: Dict[Tuple[str, int], RpcServerSim] = {}
+        # Cluster-wide "persisted lvstore superblock" registry: base bdev
+        # name (raid / single distrib) -> lvstore name. Populated when an
+        # lvstore is created and read back when any node examines the base
+        # bdev, so a non-leader rediscovers the lvstore the way SPDK does.
+        self.lvstore_by_base: Dict[str, str] = {}
 
     def add_server(self, sim: RpcServerSim) -> None:
         self.servers[sim.node_id] = sim
