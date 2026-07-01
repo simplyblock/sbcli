@@ -1203,7 +1203,7 @@ def _connect_to_remote_devs(
 ):
     db_controller = DBController()
 
-    rpc_client = this_node.rpc_client(timeout=5, retry=1)
+    rpc_client = this_node.rpc_client(timeout=30, retry=1)
 
     node_bdevs = rpc_client.get_bdevs()
     if node_bdevs:
@@ -1406,7 +1406,7 @@ def _peer_reachable_via_jm_quorum(target_node_id, this_node, peer_probe_timeout=
 def _connect_to_remote_jm_devs(this_node, jm_ids=None):
     db_controller = DBController()
 
-    rpc_client = this_node.rpc_client(timeout=5, retry=2)
+    rpc_client = this_node.rpc_client(timeout=30, retry=2)
 
     node_bdevs = rpc_client.get_bdevs()
     if node_bdevs:
