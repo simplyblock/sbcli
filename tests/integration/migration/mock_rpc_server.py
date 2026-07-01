@@ -74,6 +74,7 @@ class NodeState:
         self.nvme_options: Dict[str, Any] = {}
 
         self._blobid_counter = 1000
+        self._map_id_counter = 1
         self._nsid_counter: Dict[str, int] = {}  # nqn → next nsid
         self.lock = threading.Lock()
 
@@ -83,6 +84,11 @@ class NodeState:
         bid = self._blobid_counter
         self._blobid_counter += 1
         return bid
+
+    def next_map_id(self) -> int:
+        mid = self._map_id_counter
+        self._map_id_counter += 1
+        return mid
 
     def next_nsid(self, nqn: str) -> int:
         self._nsid_counter.setdefault(nqn, 1)
@@ -254,12 +260,14 @@ def _bdev_lvol_create(s: NodeState, p: dict):
     if composite in s.lvols or composite in s.snapshots:
         raise _RpcError(-17, f"bdev {composite} already exists")
     blobid = s.next_blobid()
+    map_id = s.next_map_id()
     obj_uuid = p.get('uuid') or str(_uuid_mod.uuid4())
     s.lvols[composite] = {
         'name': name,
         'composite': composite,
         'uuid': obj_uuid,
         'blobid': blobid,
+        'map_id': map_id,
         'size_mib': size_mib,
         'migration_flag': False,
         'driver_specific': {
@@ -336,6 +344,7 @@ def _bdev_lvol_snapshot(s: NodeState, p: dict):
         raise _RpcError(-17, f"snapshot {composite_snap} already exists")
     src = s.lvols[composite_src]
     blobid = s.next_blobid()
+    map_id = s.next_map_id()
     snap_uuid = str(_uuid_mod.uuid4())
     src_size_mib = src.get('size_mib', 1024)
     s.snapshots[composite_snap] = {
@@ -343,6 +352,7 @@ def _bdev_lvol_snapshot(s: NodeState, p: dict):
         'composite': composite_snap,
         'uuid': snap_uuid,
         'blobid': blobid,
+        'map_id': map_id,
         'size_mib': src_size_mib,
         'driver_specific': {
             'lvol': {
@@ -370,6 +380,7 @@ def _bdev_lvol_clone(s: NodeState, p: dict):
     if composite_clone in s.lvols:
         raise _RpcError(-17, f"clone {composite_clone} already exists")
     blobid = s.next_blobid()
+    map_id = s.next_map_id()
     clone_uuid = str(_uuid_mod.uuid4())
     snap_size_mib = s.snapshots[composite_snap].get('size_mib', 1024)
     s.lvols[composite_clone] = {
@@ -377,6 +388,7 @@ def _bdev_lvol_clone(s: NodeState, p: dict):
         'composite': composite_clone,
         'uuid': clone_uuid,
         'blobid': blobid,
+        'map_id': map_id,
         'size_mib': snap_size_mib,
         'migration_flag': False,
         'driver_specific': {
@@ -437,6 +449,7 @@ def _bdev_lvol_register(s: NodeState, p: dict):
         'composite': composite,
         'uuid': registered_uuid,
         'blobid': blobid,
+        'map_id': s.next_map_id(),
         'migration_flag': False,
         'driver_specific': {'lvol': {'blobid': blobid, 'lvs_name': lvs_name,
                                      'base_snapshot': None, 'clone': False, 'snapshot': False,
@@ -459,6 +472,7 @@ def _bdev_lvol_snapshot_register(s: NodeState, p: dict):
         'composite': composite,
         'uuid': registered_uuid,
         'blobid': blobid,
+        'map_id': s.next_map_id(),
         'driver_specific': {'lvol': {'blobid': blobid, 'lvs_name': s.lvstore,
                                      'base_snapshot': lvol_name, 'clone': False, 'snapshot': True,
                                      'num_allocated_clusters': 1024}}
@@ -490,6 +504,7 @@ def _bdev_lvol_get_lvols(s: NodeState, p: dict):
             'lvol_name': entry['name'],
             'uuid': entry['uuid'],
             'blobid': entry['blobid'],
+            'map_id': entry.get('map_id'),
         })
     return result
 
