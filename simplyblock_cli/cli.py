@@ -148,6 +148,7 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             subcommand.add_argument('--disable-ha-jm', help='Disable HA JM for distrib creation. Default: `true`.', dest='enable_ha_jm', action='store_false')
         subcommand.add_argument('--ha-jm-count', help='HA JM count. Defaults to 4 for FT=2 clusters, otherwise 3.', type=int, dest='ha_jm_count')
+        subcommand.add_argument('--failure-domain', help='The failure-domain id (a non-negative integer identifying the rack/cabinet/DC) this node belongs to. Required when the cluster was created with --enable-failure-domain; must be omitted otherwise.', type=int, dest='failure_domain')
         subcommand.add_argument('--namespace', help='The Kubernetes namespace to deploy on.', type=str, dest='namespace')
         if self.developer_mode:
             subcommand.add_argument('--id-device-by-nqn', help='Use the device NQN instead of the serial number for identification. Default: `false`.', dest='id_device_by_nqn', action='store_true')
@@ -431,6 +432,7 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             subcommand.add_argument('--disable-monitoring', help='Disable monitoring stack, false by default. Default: `false`.', dest='disable_monitoring', action='store_true')
         subcommand.add_argument('--strict-node-anti-affinity', help='Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node. This requires a minimum of _data-chunks-in-stripe + parity-chunks-in-stripe + 1_ nodes in the cluster.', dest='strict_node_anti_affinity', action='store_true')
+        subcommand.add_argument('--enable-failure-domain', help='Enable failure-domain anti-affinity. Each storage node must then be added with a --failure-domain tag (rack/cabinet/DC); data, journal and secondary/tertiary copies are spread across distinct failure domains (best-effort). Deploy-time only: a cluster cannot be upgraded into this feature, it must be redeployed.', dest='enable_failure_domain', action='store_true')
         subcommand.add_argument('--name', '-n', help='Assigns a name to the newly created cluster.', type=str, dest='name')
         subcommand.add_argument('--qpair-count', help='The NVMe/TCP transport qpair count per logical volume. Default: `32`.', type=range_type(0, 128), default=32, dest='qpair_count')
         subcommand.add_argument('--client-qpair-count', help='The default NVMe/TCP transport qpair count per logical volume for client. Default: `3`.', type=range_type(0, 128), default=3, dest='client_qpair_count')
@@ -466,6 +468,7 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             subcommand.add_argument('--inflight-io-threshold', help='The number of inflight IOs allowed before the IO queuing starts. Default: `4`.', type=int, default=4, dest='inflight_io_threshold')
         subcommand.add_argument('--strict-node-anti-affinity', help='Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node. This requires a minimum of _data-chunks-in-stripe + parity-chunks-in-stripe + 1_ nodes in the cluster."', dest='strict_node_anti_affinity', action='store_true')
+        subcommand.add_argument('--enable-failure-domain', help='Enable failure-domain anti-affinity. Each storage node must then be added with a --failure-domain tag (rack/cabinet/DC); data, journal and secondary/tertiary copies are spread across distinct failure domains (best-effort). Deploy-time only: a cluster cannot be upgraded into this feature, it must be redeployed.', dest='enable_failure_domain', action='store_true')
         subcommand.add_argument('--name', '-n', help='Assigns a name to the newly created cluster.', type=str, dest='name')
         subcommand.add_argument('--client-data-nic', help='Network interface name from client to use for logical volume connection.', type=str, dest='client_data_nic')
         subcommand.add_argument('--use-backup', help='The path to JSON file with S3/MinIO backup configuration.', type=str, dest='use_backup')
@@ -617,11 +620,8 @@ class CLIWrapper(CLIWrapperBase):
         self.init_volume__check(subparser)
         self.init_volume__inflate(subparser)
         self.init_volume__replication_start(subparser)
-        self.init_volume__replication_commit(subparser)
-        self.init_volume__replication_failback(subparser)
         self.init_volume__replication_stop(subparser)
         self.init_volume__replication_status(subparser)
-        self.init_volume__replication_info(subparser)
         self.init_volume__replication_trigger(subparser)
         self.init_volume__suspend(subparser)
         self.init_volume__resume(subparser)
@@ -743,17 +743,6 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'replication-start', 'Start snapshot replication taken from lvol')
         subcommand.add_argument('lvol_id', help='Logical volume id', type=str)
         subcommand.add_argument('--replication-cluster-id', help='Cluster ID of the replication target cluster', type=str, dest='replication_cluster_id')
-        subcommand.add_argument('--mode', help='Replication mode: \'failover\' (async DR, default) or \'migration\' (planned cutover)', type=str, dest='mode', choices=['failover','migration',])
-        subcommand.add_argument('--interval-min', help='Interval in minutes for automatic internal snapshots (0 = none)', type=int, dest='interval_min')
-
-    def init_volume__replication_commit(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'replication-commit', 'Commit a migration/fail-back cutover: minimize delta then fail the client over to the target')
-        subcommand.add_argument('lvol_id', help='Logical volume id', type=str)
-
-    def init_volume__replication_failback(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'replication-failback', 'Configure fail-back of a failed-over volume to a source cluster (recovered = delta only; fresh = full). Cut over with replication-commit.')
-        subcommand.add_argument('lvol_id', help='Failed-over logical volume id (currently on the target cluster)', type=str)
-        subcommand.add_argument('--source-cluster-id', help='Fresh source cluster id. Omit to fail back (delta) to the recovered original source.', type=str, dest='source_cluster_id')
 
     def init_volume__replication_stop(self, subparser):
         subcommand = self.add_sub_command(subparser, 'replication-stop', 'Stop snapshot replication taken from lvol')
@@ -762,10 +751,6 @@ class CLIWrapper(CLIWrapperBase):
     def init_volume__replication_status(self, subparser):
         subcommand = self.add_sub_command(subparser, 'replication-status', 'Lists replication status')
         subcommand.add_argument('cluster_id', help='Cluster UUID', type=str)
-
-    def init_volume__replication_info(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'replication-info', 'Show replication progress (time lag and outstanding data) for a volume')
-        subcommand.add_argument('volume_id', help='Logical volume id or name', type=str)
 
     def init_volume__replication_trigger(self, subparser):
         subcommand = self.add_sub_command(subparser, 'replication-trigger', 'Start replication for lvol')
@@ -1381,16 +1366,10 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.volume__inflate(sub_command, args)
                 elif sub_command in ['replication-start']:
                     ret = self.volume__replication_start(sub_command, args)
-                elif sub_command in ['replication-commit']:
-                    ret = self.volume__replication_commit(sub_command, args)
-                elif sub_command in ['replication-failback']:
-                    ret = self.volume__replication_failback(sub_command, args)
                 elif sub_command in ['replication-stop']:
                     ret = self.volume__replication_stop(sub_command, args)
                 elif sub_command in ['replication-status']:
                     ret = self.volume__replication_status(sub_command, args)
-                elif sub_command in ['replication-info']:
-                    ret = self.volume__replication_info(sub_command, args)
                 elif sub_command in ['replication-trigger']:
                     ret = self.volume__replication_trigger(sub_command, args)
                 elif sub_command in ['suspend']:
