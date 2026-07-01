@@ -3827,7 +3827,8 @@ class SshUtils:
     def create_sec_lvol(self, node, lvol_name, size, pool,
                         encrypt=False,
                         distr_ndcs=0, distr_npcs=0, fabric="tcp",
-                        allowed_hosts=None, sec_options=None):
+                        allowed_hosts=None, sec_options=None,
+                        max_namespace_per_subsys=None):
         """
         Create an lvol via CLI.
 
@@ -3845,6 +3846,8 @@ class SshUtils:
             cmd += f" --fabric {fabric}"
         if distr_ndcs and distr_npcs:
             cmd += f" --data-chunks-per-stripe {distr_ndcs} --parity-chunks-per-stripe {distr_npcs}"
+        if max_namespace_per_subsys is not None:
+            cmd += f" --max-namespace-per-subsys {max_namespace_per_subsys}"
 
         self.logger.info(f"[create_sec_lvol] encrypt={encrypt} fabric={fabric} "
                          f"ndcs={distr_ndcs} npcs={distr_npcs}")

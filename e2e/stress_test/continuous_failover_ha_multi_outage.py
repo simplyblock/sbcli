@@ -731,20 +731,24 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
                             initial_devices = set(self.ssh_obj.get_devices(node=client))
                         break
 
-            already_connected = False
+            # Step 1: Try nvme connect.  If the subsystem NQN is already
+            # connected on this client (e.g. clone landed on another lvol's
+            # subsystem due to max-namespace-per-subsys), the connect may
+            # fail with "already connected" or "invalid arguments".  That is
+            # fine — the clone will appear as a new namespace on the existing
+            # controller after an ns-rescan.
             for connect_str in connect_ls:
                 _, error = self.ssh_obj.exec_command(node=client, command=connect_str)
                 if error:
-                    if "already connected" in error.lower():
-                        # Device is already connected from a previous cycle — not an error
-                        already_connected = True
+                    if "already connected" in error.lower() or "invalid arguments" in error.lower():
                         self.logger.info(
-                            f"[clone_connect] {clone_name} already connected on {client}"
-                            f" (NQN={clone_nqn}); will locate existing device."
+                            f"[clone_connect] {clone_name} controller exists on {client}"
+                            f" (NQN={clone_nqn}); will try ns-rescan."
                         )
                     else:
                         self.record_failed_nvme_connect(clone_name, connect_str, client=client)
 
+            # Step 2: Check if a new top-level device appeared (new subsystem)
             sleep_n_sec(3)
             final_devices = set(self.ssh_obj.get_devices(node=client))
             new_devices = list(final_devices - set(initial_devices))
@@ -752,9 +756,10 @@ class RandomMultiClientMultiFailoverTest(RandomMultiClientFailoverTest):
             if new_devices:
                 lvol_device = f"/dev/{new_devices[0].strip()}"
 
-            if not lvol_device and already_connected:
-                # Namespaced clone shares parent's NQN — subsystem already
-                # connected but the new namespace needs an ns-rescan.
+            # Step 3: No new device — try ns-rescan on all controllers.
+            # The clone may have appeared as a new namespace (e.g. nvme0n2)
+            # on an existing controller rather than a new device.
+            if not lvol_device:
                 out, _ = self.ssh_obj.exec_command(
                     client,
                     "ls /dev/nvme[0-9]* 2>/dev/null | grep -oP 'nvme\\d+$' "

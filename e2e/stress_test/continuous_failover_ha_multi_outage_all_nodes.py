@@ -249,12 +249,14 @@ class RandomMultiClientMultiFailoverAllNodesTest(RandomMultiClientMultiFailoverT
             f"(crypto={is_crypto}, dhchap={is_dhchap}, pool={pool}, "
             f"client={client_node})")
 
-        # Create lvol
+        # Create lvol — use max_namespace_per_subsys=100 so clones stay
+        # on the parent's subsystem instead of spilling to another lvol's.
         try:
             if is_dhchap:
                 _, err = self.ssh_obj.create_sec_lvol(
                     self.mgmt_nodes[0], lvol_name, self.lvol_size, pool,
                     encrypt=True,
+                    max_namespace_per_subsys=100,
                 )
                 if err and "error" in err.lower():
                     self.logger.warning(f"CLI lvol creation error for {lvol_name}: {err}")
@@ -266,6 +268,7 @@ class RandomMultiClientMultiFailoverAllNodesTest(RandomMultiClientMultiFailoverT
                     size=self.lvol_size,
                     crypto=is_crypto,
                     host_id=host_id,
+                    max_namespace_per_subsys=100,
                 )
         except Exception as exc:
             self.logger.warning(f"lvol creation failed for {lvol_name}: {exc}. Retrying...")
@@ -276,11 +279,13 @@ class RandomMultiClientMultiFailoverAllNodesTest(RandomMultiClientMultiFailoverT
                     self.ssh_obj.create_sec_lvol(
                         self.mgmt_nodes[0], lvol_name, self.lvol_size, pool,
                         encrypt=True,
+                        max_namespace_per_subsys=100,
                     )
                 else:
                     self.sbcli_utils.add_lvol(
                         lvol_name=lvol_name, pool_name=pool,
                         size=self.lvol_size, crypto=is_crypto, host_id=host_id,
+                        max_namespace_per_subsys=100,
                     )
             except Exception as exc2:
                 self.logger.warning(f"Retry lvol creation also failed: {exc2}")
