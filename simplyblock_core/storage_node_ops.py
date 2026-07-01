@@ -1250,7 +1250,7 @@ def _connect_to_remote_devs(
 
     def _find_remote_bdev(dev):
         expected_prefix = f"remote_{dev.alceml_bdev}"
-        for bdev in node_bdev_names:
+        for bdev in rpc_client.get_bdevs():
             if bdev.startswith(expected_prefix):
                 return bdev
         return ""
@@ -1293,7 +1293,7 @@ def _connect_to_remote_devs(
             if dev.status not in allowed_dev_statuses:
                 continue
             expected_bdev = f"remote_{dev.alceml_bdev}n1"
-            if expected_bdev not in node_bdev_names:
+            if not node.rpc_client().get_bdevs(expected_bdev):
                 continue
             remote_bdev = RemoteDevice()
             remote_bdev.uuid = dev.uuid
