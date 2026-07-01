@@ -19,6 +19,7 @@ import threading
 import time
 import pytest
 
+from simplyblock_core import constants
 from simplyblock_core.controllers import migration_controller
 from simplyblock_core.models.lvol_migration import LVolMigration
 from simplyblock_core.models.storage_node import StorageNode
@@ -287,7 +288,6 @@ class TestSharedSnapshotChain:
         """
         ctx = topology_clone_chain
         tgt_node = ctx.node("tgt")
-        tgt_lvstore = tgt_node.lvstore
 
         _seed_all(mock_src_server, ctx, "src")
 
@@ -309,13 +309,19 @@ class TestSharedSnapshotChain:
 
         _assert_migration_failed(mig2_id)
 
-        # s1 and s2 must still be on target. Fetch fresh from DB (not ctx's
-        # cached pre-migration objects) since c1's migration already updated
-        # snap_bdev to the target path with the migration suffix.
+        # s1 and s2 must still be on target. s1/s2 are owned by l1, not c1, so
+        # c1's migration recorded its target-side copy as an ``instances``
+        # entry rather than mutating the canonical (still source-side)
+        # snap_bdev — look up that instance's bdev, which carries the
+        # migration suffix (e.g. SNAP_xxxm).
         for snap_sym in ["s1", "s2"]:
             snap = db.get_snapshot_by_id(ctx.snap_uuid(snap_sym))
-            short = snap.snap_bdev.split('/', 1)[1] if '/' in snap.snap_bdev else snap.snap_bdev
-            tgt_composite = f"{tgt_lvstore}/{short}"
+            instance = next(
+                (i for i in snap.instances if i.get('lvol', {}).get('node_id') == tgt_node.uuid),
+                None)
+            assert instance is not None, \
+                f"No target-side instance recorded for pre-existing snap {snap.snap_name}"
+            tgt_composite = instance['snap_bdev']
             with mock_tgt_server.state.lock:
                 assert tgt_composite in mock_tgt_server.state.snapshots, \
                     f"Pre-existing snap {snap.snap_name} was incorrectly deleted from target"
@@ -344,8 +350,13 @@ class TestPreconditions:
         assert mig_id is False
         assert "same node" in err.lower()
 
-    def test_reject_duplicate_active_migration_on_node(
+    def test_second_migration_from_same_source_node_is_allowed(
             self, custom_topology, mock_src_server, mock_tgt_server):
+        """
+        Migration is only serialized per-lvol (``create_migration`` checks
+        ``get_active_migration_for_lvol``), not per-source-node — a second,
+        distinct lvol on the same source may migrate concurrently.
+        """
         spec = {
             "cluster": {},
             "nodes": [
@@ -373,11 +384,11 @@ class TestPreconditions:
             ctx.lvol_uuid("l1"), ctx.node_uuid("tgt"))
         assert err is None
 
-        # Second migration from same source node must fail
+        # Second migration for a different lvol on the same source node succeeds.
         mig2_id, err2 = start_migration(
             ctx.lvol_uuid("l2"), ctx.node_uuid("tgt"))
-        assert mig2_id is False
-        assert "active on source node" in err2
+        assert err2 is None
+        assert mig2_id
 
 
 # ---------------------------------------------------------------------------
@@ -438,13 +449,16 @@ class TestRandomFailureMode:
 
         _seed_all(mock_src_server, ctx, "src")
 
-        # Enable failure injection
-        mock_src_server.set_failure_rate(failure_rate, timeout_seconds=0.05)
-        mock_tgt_server.set_failure_rate(failure_rate, timeout_seconds=0.05)
-
+        # create_migration()/start_migration() perform synchronous target
+        # setup RPCs with no retry of their own, so failure injection starts
+        # only once the migration exists — exercising the task runner's own
+        # retry logic, which is what "retries carry it through" means here.
         mig_id, err = start_migration(
             ctx.lvol_uuid("l1"), tgt_node.uuid)
         assert err is None
+
+        mock_src_server.set_failure_rate(failure_rate, timeout_seconds=0.05)
+        mock_tgt_server.set_failure_rate(failure_rate, timeout_seconds=0.05)
 
         run_migration_task(mig_id, max_steps=2000, step_sleep=0.01)
 
@@ -465,12 +479,16 @@ class TestRandomFailureMode:
 
         _seed_all(mock_src_server, ctx, "src")
 
-        mock_src_server.set_failure_rate(1.0, timeout_seconds=0.05)
-        mock_tgt_server.set_failure_rate(1.0, timeout_seconds=0.05)
-
+        # create_migration()/start_migration() perform synchronous target
+        # setup RPCs with no retry of their own, so the failure rate is only
+        # injected once the migration exists — exercising the task runner's
+        # own retry-then-give-up behavior instead of the one-shot setup call.
         mig_id, err = start_migration(
             ctx.lvol_uuid("l1"), tgt_node.uuid)
         assert err is None
+
+        mock_src_server.set_failure_rate(1.0, timeout_seconds=0.05)
+        mock_tgt_server.set_failure_rate(1.0, timeout_seconds=0.05)
 
         run_migration_task(mig_id, max_steps=500, step_sleep=0.01)
 
@@ -507,9 +525,10 @@ class TestHASecondaryRegistration:
         run_migration_task(mig_id, max_steps=500, step_sleep=0.02)
         _assert_migration_done(mig_id)
 
-        # The secondary mock should have a snapshot registered
+        # The secondary mock should have a snapshot registered. Target bdevs
+        # carry the migration suffix (e.g. SNAP_xxxm).
         short = snap.snap_bdev.split('/', 1)[1] if '/' in snap.snap_bdev else snap.snap_bdev
-        sec_composite = f"{ctx.node('tgt-sec').lvstore}/{short}"
+        sec_composite = f"{ctx.node('tgt-sec').lvstore}/{short}{constants.LVOL_MIG_BDEV_SUFFIX}"
         with mock_sec_server.state.lock:
             assert sec_composite in mock_sec_server.state.snapshots, \
                 f"Snapshot not registered on secondary: {sec_composite}"
@@ -650,7 +669,8 @@ class TestFourNodeFourSnapshotMigration:
             snap = ctx.snap(snap_sym)
             short = snap.snap_bdev.split('/', 1)[1] if '/' in snap.snap_bdev \
                 else snap.snap_bdev
-            composite = f"{tgt_lvstore}/{short}"
+            # Target bdevs carry the migration suffix (e.g. SNAP_xxxm).
+            composite = f"{tgt_lvstore}/{short}{constants.LVOL_MIG_BDEV_SUFFIX}"
             assert composite in tgt_snaps, (
                 f"Snapshot {snap.snap_name} ({composite}) missing from target")
 
