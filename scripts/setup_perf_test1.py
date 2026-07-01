@@ -418,7 +418,8 @@ def main():
     # Step 5a: Create cluster on mgmt (sequential, must complete first)
     print("Phase 2a: Creating cluster on management node...")
     ssh_exec(mgmt_ip, [
-        "sudo /usr/local/bin/sbctl -d cluster create --enable-node-affinity"
+        # --dev enables developer-mode-only (private) args like --enable-hang-device.
+        "sudo /usr/local/bin/sbctl -d --dev cluster create --enable-node-affinity"
         " --enable-hang-device"
         " --data-chunks-per-stripe 2 --parity-chunks-per-stripe 2"
     ], check=True)
