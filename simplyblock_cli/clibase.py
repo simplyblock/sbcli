@@ -1153,7 +1153,8 @@ class CLIWrapperBase:
         fabric = args.fabric
         client_data_nic = args.client_data_nic
         enable_failure_domain = args.enable_failure_domain
-        enable_hang_device = args.enable_hang_device
+        # Private (developer-mode-only) arg: absent unless sbctl was run with --dev.
+        enable_hang_device = getattr(args, "enable_hang_device", False)
 
         max_fault_tolerance = min(distr_npcs, 2) if distr_npcs >= 1 else 1
 
