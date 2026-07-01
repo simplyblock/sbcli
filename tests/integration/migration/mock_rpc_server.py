@@ -64,6 +64,10 @@ class NodeState:
         self.subsystems: Dict[str, dict] = {}
         # ctrl_name → {nqn, traddr, trsvcid, trtype}
         self.nvme_controllers: Dict[str, dict] = {}
+        # remote bdev name (e.g. "<ctrl_name>n1") → {name, controller} — mirrors
+        # the local bdev(s) real SPDK creates when bdev_nvme_attach_controller
+        # succeeds, so get_bdevs()-based "already attached" checks work.
+        self.nvme_bdevs: Dict[str, dict] = {}
         # async-delete: composite_name → complete_at float
         self.delete_ops: Dict[str, float] = {}
         # async-transfer: composite_name → {complete_at, state}
@@ -105,6 +109,9 @@ class NodeState:
         return composite
 
     def all_bdevs(self) -> Dict[str, dict]:
+        """Lvol-store bdevs only (lvols + snapshots) — excludes NVMe-attached
+        remote bdevs, which have a different shape and are looked up separately
+        (see ``_bdev_get_bdevs``)."""
         return {**self.lvols, **self.snapshots}
 
 
@@ -484,7 +491,7 @@ def _bdev_lvol_snapshot_register(s: NodeState, p: dict):
 
 def _bdev_get_bdevs(s: NodeState, p: dict):
     name: Optional[str] = p.get('name')
-    all_bdevs = s.all_bdevs()
+    all_bdevs = {**s.all_bdevs(), **s.nvme_bdevs}
     if name:
         composite = name if name in all_bdevs else s.composite(name)
         entry = all_bdevs.get(composite)
@@ -717,8 +724,12 @@ def _bdev_nvme_set_options(s: NodeState, p: dict):
 
 def _bdev_nvme_attach_controller(s: NodeState, p: dict):
     name = _req(p, 'name')
+    remote_bdev = f"{name}n1"
     if name in s.nvme_controllers:
-        raise _RpcError(-17, f"controller {name} already attached")
+        # Idempotent: real SPDK keeps the existing controller (and its bdev)
+        # when the same name/subnqn is re-attached, rather than erroring.
+        logger.debug("mock attach_controller %s already attached — idempotent", name)
+        return [remote_bdev]
     s.nvme_controllers[name] = {
         'name': name,
         'nqn': _req(p, 'subnqn'),
@@ -726,15 +737,28 @@ def _bdev_nvme_attach_controller(s: NodeState, p: dict):
         'trsvcid': p.get('trsvcid', ''),
         'trtype': p.get('trtype', 'TCP'),
     }
+    # Real SPDK exposes the attached controller's namespaces as local bdevs
+    # (convention: ctrlname + "n1"); mirror that so get_bdevs()-based
+    # "already attached" checks in the migration hub logic can find it.
+    s.nvme_bdevs[remote_bdev] = {'name': remote_bdev, 'composite': remote_bdev, 'controller': name}
     logger.debug("mock attach_controller %s → %s", name, p.get('subnqn'))
-    # Return list of remote bdev names (convention: ctrlname + "n1")
-    return [f"{name}n1"]
+    return [remote_bdev]
 
 
 def _bdev_nvme_detach_controller(s: NodeState, p: dict):
     name = _req(p, 'name')
     s.nvme_controllers.pop(name, None)
+    s.nvme_bdevs.pop(f"{name}n1", None)
     return True
+
+
+def _bdev_nvme_controller_list(s: NodeState, p: dict):
+    """Return controller entries matching ``name`` (or all, if omitted)."""
+    name = p.get('name')
+    if name:
+        entry = s.nvme_controllers.get(name)
+        return [entry] if entry else []
+    return list(s.nvme_controllers.values())
 
 
 # ---- misc / version ----
@@ -777,6 +801,7 @@ _DISPATCH = {
     'bdev_nvme_set_options':                 _bdev_nvme_set_options,
     'bdev_nvme_attach_controller':           _bdev_nvme_attach_controller,
     'bdev_nvme_detach_controller':           _bdev_nvme_detach_controller,
+    'bdev_nvme_controller_list':              _bdev_nvme_controller_list,
 }
 
 
