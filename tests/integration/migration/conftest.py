@@ -137,11 +137,17 @@ def mock_tgt_server():
 
 @pytest.fixture(scope="session")
 def mock_sec_server():
-    """Mock RPC server for the target secondary node (HA tests)."""
+    """Mock RPC server for the target secondary node (HA tests).
+
+    Shares the primary target's lvstore name ("lvs_tgt"): the migration
+    runner always builds secondary-bound composites from ``tgt_node.lvstore``
+    (the primary's), never the secondary's own lvstore field, matching the
+    real-world convention that HA peers mirror the same lvstore name.
+    """
     offset = _worker_port_offset()
     srv = MockRpcServer(
         host="127.0.0.1", port=_BASE_PORT_SEC + offset,
-        lvstore="lvs_tgt_sec", node_id="tgt-sec",
+        lvstore="lvs_tgt", node_id="tgt-sec",
     )
     srv.start()
     yield srv
