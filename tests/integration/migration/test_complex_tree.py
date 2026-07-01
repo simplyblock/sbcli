@@ -39,7 +39,9 @@ from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.models.lvol_migration import LVolMigration
 from simplyblock_core.models.storage_node import StorageNode
 
-from tests.integration.migration.conftest import run_migration_task, run_migration_with_crashes, set_node_status
+from tests.integration.migration.conftest import (
+    run_migration_task, run_migration_with_crashes, set_node_status, start_migration,
+)
 from tests.integration.migration.topology_loader import TestContext
 
 # ---------------------------------------------------------------------------
@@ -145,7 +147,7 @@ def _assert_failed(mig_id):
 def _migrate_one(lvol_uuid, tgt_uuid, max_steps=1500, step_sleep=0.02,
                   max_retries=20):
     """Start and run a migration to completion. Returns migration_id."""
-    mig_id, err = migration_controller.start_migration(
+    mig_id, err = start_migration(
         lvol_uuid, tgt_uuid, max_retries=max_retries)
     assert err is None, f"start_migration failed: {err}"
     run_migration_task(mig_id, max_steps=max_steps, step_sleep=step_sleep)
@@ -240,7 +242,7 @@ class TestComplexTreeFailures:
         tgt = ctx.node("tgt")
         _seed_all(mock_src_server, ctx, "src")
 
-        mig_id, err = migration_controller.start_migration(
+        mig_id, err = start_migration(
             ctx.lvol_uuid("l4"), tgt.uuid, max_retries=3)
         assert err is None
 
@@ -261,7 +263,7 @@ class TestComplexTreeFailures:
         _seed_all(mock_src_server, ctx, "src")
 
         # Very short deadline: 2 seconds
-        mig_id, err = migration_controller.start_migration(
+        mig_id, err = start_migration(
             ctx.lvol_uuid("l5"), tgt.uuid, deadline_seconds=2)
         assert err is None
 
@@ -285,7 +287,7 @@ class TestComplexTreeFailures:
         _seed_all(mock_src_server, ctx, "src")
 
         # Short deadline (3s)
-        mig_id, err = migration_controller.start_migration(
+        mig_id, err = start_migration(
             ctx.lvol_uuid("l6"), tgt.uuid, deadline_seconds=3)
         assert err is None
 
@@ -339,7 +341,7 @@ class TestConcurrentIndependentOperations:
         tgt = ctx.node("tgt")
         _seed_all(mock_src_server, ctx, "src")
 
-        mig_id, err = migration_controller.start_migration(
+        mig_id, err = start_migration(
             ctx.lvol_uuid("l2"), tgt.uuid)
         assert err is None
 
@@ -374,7 +376,7 @@ class TestConcurrentIndependentOperations:
         tgt = ctx.node("tgt")
         _seed_all(mock_src_server, ctx, "src")
 
-        mig_id, err = migration_controller.start_migration(
+        mig_id, err = start_migration(
             ctx.lvol_uuid("l3"), tgt.uuid)
         assert err is None
 
@@ -419,7 +421,7 @@ class TestMigrationProtection:
         tgt = ctx.node("tgt")
         _seed_all(mock_src_server, ctx, "src")
 
-        mig_id, err = migration_controller.start_migration(
+        mig_id, err = start_migration(
             ctx.lvol_uuid("l1"), tgt.uuid)
         assert err is None
 
@@ -457,7 +459,7 @@ class TestMigrationProtection:
         tgt = ctx.node("tgt")
         _seed_all(mock_src_server, ctx, "src")
 
-        mig_id, err = migration_controller.start_migration(
+        mig_id, err = start_migration(
             ctx.lvol_uuid("l2"), tgt.uuid)
         assert err is None
 
@@ -486,7 +488,7 @@ class TestMigrationProtection:
         tgt = ctx.node("tgt")
         _seed_all(mock_src_server, ctx, "src")
 
-        mig_id, err = migration_controller.start_migration(
+        mig_id, err = start_migration(
             ctx.lvol_uuid("l3"), tgt.uuid)
         assert err is None
 
@@ -519,7 +521,7 @@ class TestMigrationProtection:
         tgt = ctx.node("tgt")
         _seed_all(mock_src_server, ctx, "src")
 
-        mig_id, err = migration_controller.start_migration(
+        mig_id, err = start_migration(
             ctx.lvol_uuid("l2"), tgt.uuid)
         assert err is None
 
@@ -547,7 +549,7 @@ class TestMigrationProtection:
         tgt = ctx.node("tgt")
         _seed_all(mock_src_server, ctx, "src")
 
-        mig_id, err = migration_controller.start_migration(
+        mig_id, err = start_migration(
             ctx.lvol_uuid("l1"), tgt.uuid)
         assert err is None
 
@@ -587,7 +589,7 @@ class TestCrashRestartResilience:
         tgt = ctx.node("tgt")
         _seed_all(mock_src_server, ctx, "src")
 
-        mig_id, err = migration_controller.start_migration(
+        mig_id, err = start_migration(
             ctx.lvol_uuid("l2"), tgt.uuid, max_retries=50)
         assert err is None
 
@@ -609,7 +611,7 @@ class TestCrashRestartResilience:
         _seed_all(mock_src_server, ctx, "src")
 
         # l3 has only 1 snap (s1) — snap_copy finishes fast, crash hits lvol_migrate
-        mig_id, err = migration_controller.start_migration(
+        mig_id, err = start_migration(
             ctx.lvol_uuid("l3"), tgt.uuid, max_retries=50)
         assert err is None
 
@@ -630,7 +632,7 @@ class TestCrashRestartResilience:
         _seed_all(mock_src_server, ctx, "src")
 
         # l3 (1 snap) — let it get far enough into cleanup_source before crashing
-        mig_id, err = migration_controller.start_migration(
+        mig_id, err = start_migration(
             ctx.lvol_uuid("l3"), tgt.uuid, max_retries=50)
         assert err is None
 
@@ -650,7 +652,7 @@ class TestCrashRestartResilience:
         tgt = ctx.node("tgt")
         _seed_all(mock_src_server, ctx, "src")
 
-        mig_id, err = migration_controller.start_migration(
+        mig_id, err = start_migration(
             ctx.lvol_uuid("l1"), tgt.uuid, max_retries=100)
         assert err is None
 
@@ -675,7 +677,7 @@ class TestCrashRestartResilience:
         mock_src_server.set_failure_rate(0.05, timeout_seconds=0.1)
         mock_tgt_server.set_failure_rate(0.05, timeout_seconds=0.1)
 
-        mig_id, err = migration_controller.start_migration(
+        mig_id, err = start_migration(
             ctx.lvol_uuid("l2"), tgt.uuid, max_retries=500)
         assert err is None
 
