@@ -975,6 +975,29 @@ class RPCClient:
         }
         return self._request("bdev_passtest_create", params)
 
+    def bdev_delay_create(self, name, base_name, avg_read_latency=0, p99_read_latency=0,
+                          avg_write_latency=0, p99_write_latency=0):
+        # Transparent pass-through when all latencies are 0; arm later via
+        # bdev_delay_update_latency to make the device "hang".
+        params = {
+            "base_bdev_name": base_name,
+            "name": name,
+            "avg_read_latency": avg_read_latency,
+            "p99_read_latency": p99_read_latency,
+            "avg_write_latency": avg_write_latency,
+            "p99_write_latency": p99_write_latency,
+        }
+        return self._request("bdev_delay_create", params)
+
+    def bdev_delay_update_latency(self, name, latency_type, latency_us):
+        # latency_type: one of avg_read, p99_read, avg_write, p99_write
+        params = {
+            "delay_bdev_name": name,
+            "latency_type": latency_type,
+            "latency_us": latency_us,
+        }
+        return self._request("bdev_delay_update_latency", params)
+
     def bdev_passtest_mode(self, name, mode):
         params = {
             "pt_name": name,

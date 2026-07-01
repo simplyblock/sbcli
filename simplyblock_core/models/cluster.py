@@ -58,6 +58,10 @@ class Cluster(BaseModel):
     distr_ndcs: int = 0
     distr_npcs: int = 0
     enable_node_affinity: bool = False
+    # Undocumented chaos-testing switch: when set at cluster create, a transparent
+    # SPDK delay bdev is inserted between each device's nvme bdev and its alceml so
+    # a device can be made to "hang" on demand (see device_controller device-hang).
+    enable_hang_device: bool = False
     grafana_endpoint: str = ""
     mode: str = "docker"
     grafana_secret: SecretStr = SecretStr("")

@@ -533,6 +533,18 @@ commands:
               - io_error_on_unmap
               - io_error_on_read
             default: full_pass_through
+      - name: device-hang
+        help: "Make a device hang for N seconds (0 to release). Requires --enable-hang-device at cluster create."
+        private: true
+        arguments:
+          - name: "device_id"
+            help: "The storage device id."
+            dest: device_id
+            type: str
+          - name: "seconds"
+            help: "Hang duration in seconds (0 disarms)."
+            dest: seconds
+            type: int
       - name: get-device
         help: "Gets storage device by its id."
         arguments:
@@ -959,6 +971,12 @@ commands:
             dest: enable_node_affinity
             type: bool
             action: store_true
+          - name: "--enable-hang-device"
+            help: "Insert a delay bdev per device for hang injection (chaos testing)."
+            dest: enable_hang_device
+            type: bool
+            action: store_true
+            private: true
           - name: "--fabric"
             help: "The NVMe fabric to use (specify: `tcp`, `rdma`, `tcp,rdma`). Default: `tcp`."
             dest: fabric
@@ -1891,6 +1909,33 @@ commands:
             help: "Cluster ID of the replication target cluster"
             dest: replication_cluster_id
             type: str
+          - name: "--mode"
+            help: "Replication mode: 'failover' (async DR, default) or 'migration' (planned cutover)"
+            dest: mode
+            type: str
+            choices: ["failover", "migration"]
+          - name: "--interval-min"
+            help: "Interval in minutes for automatic internal snapshots (0 = none)"
+            dest: interval_min
+            type: int
+      - name: replication-commit
+        help: "Commit a migration/fail-back cutover: minimize delta then fail the client over to the target"
+        arguments:
+          - name: "lvol_id"
+            help: "Logical volume id"
+            dest: lvol_id
+            type: str
+      - name: replication-failback
+        help: "Configure fail-back of a failed-over volume to a source cluster (recovered = delta only; fresh = full). Cut over with replication-commit."
+        arguments:
+          - name: "lvol_id"
+            help: "Failed-over logical volume id (currently on the target cluster)"
+            dest: lvol_id
+            type: str
+          - name: "--source-cluster-id"
+            help: "Fresh source cluster id. Omit to fail back (delta) to the recovered original source."
+            dest: source_cluster_id
+            type: str
       - name: replication-stop
         help: "Stop snapshot replication taken from lvol"
         arguments:
@@ -1904,6 +1949,13 @@ commands:
           - name: "cluster_id"
             help: "Cluster UUID"
             dest: cluster_id
+            type: str
+      - name: replication-info
+        help: "Show replication progress (time lag and outstanding data) for a volume"
+        arguments:
+          - name: "volume_id"
+            help: "Logical volume id or name"
+            dest: volume_id
             type: str
       - name: replication-trigger
         help: "Start replication for lvol"

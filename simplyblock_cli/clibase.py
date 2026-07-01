@@ -338,6 +338,9 @@ class CLIWrapperBase:
     def storage_node__device_testing_mode(self, sub_command, args):
         return device_controller.set_device_testing_mode(args.device_id, args.mode)
 
+    def storage_node__device_hang(self, sub_command, args):
+        return device_controller.set_device_hang(args.device_id, args.seconds)
+
     def storage_node__get_device(self, sub_command, args):
         device_id = args.device_id
         return device_controller.get_device(device_id)
@@ -721,13 +724,36 @@ class CLIWrapperBase:
         return lvol_controller.inflate_lvol(args.volume_id)
 
     def volume__replication_start(self, sub_command, args):
-        return lvol_controller.replication_start(args.lvol_id, args.replication_cluster_id)
+        return lvol_controller.replication_start(
+            args.lvol_id, args.replication_cluster_id,
+            mode=getattr(args, 'mode', None), interval_min=getattr(args, 'interval_min', None))
+
+    def volume__replication_commit(self, sub_command, args):
+        return lvol_controller.replication_commit(args.lvol_id)
+
+    def volume__replication_failback(self, sub_command, args):
+        return lvol_controller.replication_failback(
+            args.lvol_id, source_cluster_id=getattr(args, 'source_cluster_id', None))
 
     def volume__replication_stop(self, sub_command, args):
         return lvol_controller.replication_stop(args.lvol_id)
 
     def volume__replication_status(self, sub_command, args):
         return snapshot_controller.list_replication_tasks(args.cluster_id)
+
+    def volume__replication_info(self, sub_command, args):
+        info = lvol_controller.get_replication_info(args.volume_id)
+        if not info:
+            return False
+        return utils.print_table([
+            {"Last Snapshot": info["last_snapshot_id"],
+             "Last Replication": info["last_replication_time"],
+             "Last Duration": info["last_replication_duration"],
+             "Replicated Count": info["replicated_count"],
+             "Time Lag": info["lag"] or "-",
+             "Outstanding": info["outstanding"],
+             "Outstanding Count": info["outstanding_count"]},
+        ])
 
     def volume__replication_trigger(self, sub_command, args):
         return lvol_controller.replication_trigger(args.lvol_id)
@@ -1127,6 +1153,7 @@ class CLIWrapperBase:
         fabric = args.fabric
         client_data_nic = args.client_data_nic
         enable_failure_domain = args.enable_failure_domain
+        enable_hang_device = args.enable_hang_device
 
         max_fault_tolerance = min(distr_npcs, 2) if distr_npcs >= 1 else 1
 
@@ -1147,6 +1174,7 @@ class CLIWrapperBase:
             nvmf_base_port=args.nvmf_base_port, rpc_base_port=args.rpc_base_port, snode_api_port=args.snode_api_port,
             hashicorp_vault_settings=HashicorpVaultSettings({"base_url": args.hashicorp_vault_url}) if args.hashicorp_vault_url else None,
             enable_failure_domain=enable_failure_domain,
+            enable_hang_device=enable_hang_device,
         )
 
     def query_yes_no(self, question, default="yes"):
