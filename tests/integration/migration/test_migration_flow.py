@@ -309,9 +309,11 @@ class TestSharedSnapshotChain:
 
         _assert_migration_failed(mig2_id)
 
-        # s1 and s2 must still be on target
+        # s1 and s2 must still be on target. Fetch fresh from DB (not ctx's
+        # cached pre-migration objects) since c1's migration already updated
+        # snap_bdev to the target path with the migration suffix.
         for snap_sym in ["s1", "s2"]:
-            snap = ctx.snap(snap_sym)
+            snap = db.get_snapshot_by_id(ctx.snap_uuid(snap_sym))
             short = snap.snap_bdev.split('/', 1)[1] if '/' in snap.snap_bdev else snap.snap_bdev
             tgt_composite = f"{tgt_lvstore}/{short}"
             with mock_tgt_server.state.lock:
