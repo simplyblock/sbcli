@@ -13,7 +13,7 @@ Each MockRpcServer instance:
 
 Async-operation simulation
 --------------------------
-`delete_lvol(sync=False)` and `bdev_lvol_transfer` / `bdev_lvol_final_migration`
+`delete_lvol(sync=False)` and `bdev_lvol_transfer` / `bdev_lvol_transfer_final_step`
 are modelled as asynchronous: they record a ``complete_at`` timestamp drawn from an
 exponential distribution centred around 0.2 s (λ = 5), clipped to [0.1, 100] s.
 Subsequent poll calls (`bdev_lvol_get_lvol_delete_status`,
@@ -220,7 +220,7 @@ _METHOD_ERROR_CODES: Dict[str, list] = {
     "bdev_lvol_add_clone":           [-1, -22, -2],
     "bdev_lvol_convert":             [-1, -22],
     "bdev_lvol_get_lvols":           [-1],
-    "bdev_lvol_final_migration":     [-1, -22, -2],
+    "bdev_lvol_transfer_final_step": [-1, -22, -2],
     "bdev_lvol_register":            [-1, -22, -17],
     "bdev_lvol_snapshot_register":   [-1, -22],
     "bdev_get_bdevs":                [-1],
@@ -558,8 +558,12 @@ def _bdev_lvol_transfer_stat(s: NodeState, p: dict):
     return {'transfer_state': op['state'], 'offset': 0}
 
 
-def _bdev_lvol_final_migration(s: NodeState, p: dict):
-    """Start async final-migration (source lvol → target blobstore)."""
+def _bdev_lvol_transfer_final_step(s: NodeState, p: dict):
+    """Start async final-migration (source lvol → target blobstore).
+
+    Wire name for ``RPCClient.bdev_lvol_final_migration`` (a deprecated alias
+    for ``bdev_lvol_transfer_final_step``).
+    """
     lvol_name = _req(p, 'lvol_name')
     composite = lvol_name if lvol_name in s.lvols else s.composite(lvol_name)
     if composite not in s.lvols:
@@ -568,7 +572,7 @@ def _bdev_lvol_final_migration(s: NodeState, p: dict):
         'complete_at': time.time() + _async_delay(),
         'state': 'In progress',
     }
-    logger.debug("mock bdev_lvol_final_migration started for %s", composite)
+    logger.debug("mock bdev_lvol_transfer_final_step started for %s", composite)
     return True
 
 
@@ -788,7 +792,7 @@ _DISPATCH = {
     'ultra21_lvol_set':                      _ultra21_lvol_set,
     'bdev_lvol_transfer':                    _bdev_lvol_transfer,
     'bdev_lvol_transfer_stat':               _bdev_lvol_transfer_stat,
-    'bdev_lvol_final_migration':             _bdev_lvol_final_migration,
+    'bdev_lvol_transfer_final_step':         _bdev_lvol_transfer_final_step,
     'nvmf_create_subsystem':                 _nvmf_create_subsystem,
     'nvmf_delete_subsystem':                 _nvmf_delete_subsystem,
     'nvmf_get_subsystems':                   _nvmf_get_subsystems,

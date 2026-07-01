@@ -37,7 +37,7 @@
       "rpc_port": 9903,
       "rpc_username": "spdkuser",
       "rpc_password": "spdkpass",
-      "lvstore": "lvs_tgt_sec",
+      "lvstore": "lvs_tgt",
       "lvol_subsys_port": 9090,
       "status": "online",
       "data_nics": [
