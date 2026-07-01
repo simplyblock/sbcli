@@ -1,33 +1,38 @@
 # coding=utf-8
 """
 conftest.py – shared fixtures for all tests in tests/.
+
+The unit-tier fdb stub lives in ``tests/unit/conftest.py`` (and
+``simplyblock_core/test/conftest.py``) rather than here, so the integration
+tier can connect to a real testcontainer-provided FoundationDB without a
+stale stub shadowing it.
 """
 
-import sys
-import types
+import pathlib
 
 import pytest
 
-# ---------------------------------------------------------------------------
-# Stub out native/unavailable dependencies before any simplyblock import so
-# that unit tests can run without a FoundationDB installation or a running
-# Docker / Kubernetes environment.
-# ---------------------------------------------------------------------------
 
-def _stub(name, **attrs):
-    """Create a minimal stub module and register it in sys.modules."""
-    m = types.ModuleType(name)
-    for k, v in attrs.items():
-        setattr(m, k, v)
-    sys.modules[name] = m
-    return m
+def pytest_configure(config):
+    """Fail fast if a test module is dropped directly under ``tests/``.
 
-
-if 'fdb' not in sys.modules:
-    class _FDBError(Exception):
-        pass
-    _stub('fdb', open=lambda *a, **kw: None, FDBError=_FDBError)
-    _stub('fdb.tuple')
+    Every test must live in a tier — ``tests/unit/`` (pure logic, fdb stubbed)
+    or ``tests/integration/`` (real FoundationDB). A ``test_*.py`` sitting at the
+    top level belongs to neither, so it silently escapes the tier split (it is
+    not selected by either tox env and gets no tier-specific conftest). This
+    guard runs for both ``tox -e unit`` and ``tox -e integration`` because this
+    conftest is a parent of both, and turns the mistake into a hard collection
+    error instead of a quietly-skipped test.
+    """
+    tests_dir = pathlib.Path(__file__).parent
+    strays = sorted(p.name for p in tests_dir.glob("test_*.py"))
+    if strays:
+        raise pytest.UsageError(
+            "Test modules must live in a tier, not directly under tests/. "
+            "Move these into tests/unit/ (pure logic, fdb stubbed) or "
+            "tests/integration/ (real FDB) — see tests/AGENTS.md § Tiers:\n  "
+            + "\n  ".join(f"tests/{name}" for name in strays)
+        )
 
 
 @pytest.fixture(autouse=True)

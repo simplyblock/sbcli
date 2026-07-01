@@ -227,6 +227,26 @@ def _bdev_lvol_set_leader(s, p):
 
 def _bdev_examine(s, p):
     s.examined = True
+    # Simulate SPDK surfacing the lvstore when examining a raid/distrib device.
+    # In real SPDK, bdev_examine reads on-disk lvstore metadata from the raid
+    # and creates the lvstore entry.  Mock this by creating a generic lvstore
+    # when none exists yet — _bdev_lvol_get_lvstores returns it for any name.
+    bdev_name = p.get('name', '')
+    if not s.lvstores and bdev_name in s.bdevs:
+        lvs_name = f"lvs_examined_{bdev_name}"
+        s.lvstores[lvs_name] = {
+            'name': lvs_name,
+            'base_bdev': bdev_name,
+            'block_size': 4096,
+            'cluster_size': 4096,
+            'lvs leadership': False,
+            'lvs_primary': False,
+            'lvs_read_only': False,
+            'lvs_secondary': True,
+            'lvs_redirect': False,
+            'remote_bdev': '',
+            'connect_state': False,
+        }
     return True
 
 
@@ -319,13 +339,21 @@ def _nvmf_subsystem_add_ns(s, p):
 
 def _bdev_nvme_attach_controller(s, p):
     name = p.get('name', '')
-    s.nvme_controllers[name] = {
-        'name': name,
-        'nqn': p.get('subnqn', ''),
-        'traddr': p.get('traddr', ''),
-        'trsvcid': p.get('trsvcid', ''),
-        'trtype': p.get('trtype', 'TCP'),
+    traddr = p.get('traddr', '')
+    trsvcid = p.get('trsvcid', '')
+    trtype = p.get('trtype', 'TCP')
+    ctrlr_entry = {
+        'state': 'enabled',
+        'trid': {'traddr': traddr, 'trsvcid': trsvcid, 'trtype': trtype},
     }
+    if name in s.nvme_controllers:
+        # Add path to existing controller (multipath)
+        s.nvme_controllers[name]['ctrlrs'].append(ctrlr_entry)
+    else:
+        s.nvme_controllers[name] = {
+            'name': name,
+            'ctrlrs': [ctrlr_entry],
+        }
     return [f"{name}n1"]
 
 
@@ -458,6 +486,7 @@ _CLUSTER_DISPATCH = {
     'nvmf_delete_subsystem':                 _nvmf_delete_subsystem,
     'bdev_nvme_attach_controller':           _bdev_nvme_attach_controller,
     'bdev_nvme_controller_list':             _bdev_nvme_controller_list,
+    'bdev_nvme_get_controllers':             _bdev_nvme_controller_list,
     'bdev_nvme_set_options':                 _bdev_nvme_set_options,
     'bdev_PT_NoExcl_create':                 _bdev_PT_NoExcl_create,
     'alceml_set_qos_weights':                _alceml_set_qos_weights,
@@ -780,11 +809,16 @@ def _patch_externals():
         patch('simplyblock_core.storage_node_ops.get_sorted_ha_jms', return_value=[]),
         # get_next_physical_device_order
         patch('simplyblock_core.storage_node_ops.get_next_physical_device_order', return_value=1),
-        # Override get_secondary_nodes to skip mgmt_ip != check (all nodes on 127.0.0.1)
+        # Override get_secondary_nodes / _2 to skip mgmt_ip check (all nodes on 127.0.0.1)
         patch('simplyblock_core.storage_node_ops.get_secondary_nodes',
               side_effect=_mock_get_secondary_nodes),
-        # time.sleep: skip waits
+        patch('simplyblock_core.storage_node_ops.get_secondary_nodes_2',
+              side_effect=_mock_get_secondary_nodes_2),
+        # time.sleep: skip waits in all modules on the activation path
         patch('simplyblock_core.storage_node_ops.time.sleep'),
+        patch('simplyblock_core.utils.hublvol_reconnect.time.sleep'),
+        patch('simplyblock_core.cluster_ops.time.sleep'),
+        patch('simplyblock_core.models.storage_node.time.sleep'),
     ]
     return patches
 
@@ -803,6 +837,29 @@ def _mock_get_secondary_nodes(current_node, exclude_ids=None):
             continue
         if node.status == StorageNode.STATUS_ONLINE and node.is_secondary_node:
             if not node.lvstore_stack_secondary or node.lvstore_stack_secondary == current_node.get_id():
+                nodes.append(node.get_id())
+    return nodes
+
+
+def _mock_get_secondary_nodes_2(current_node, exclude_ids=None, exclude_mgmt_ips=None,
+                                exclude_failure_domains=None, exclude_physical_labels=None):
+    """Mock get_secondary_nodes_2 that skips mgmt_ip check (all nodes share 127.0.0.1).
+    Checks lvstore_stack_tertiary instead of lvstore_stack_secondary.
+
+    All nodes share a host/domain/label in this harness, so the failure-domain
+    and physical-label anti-affinity args are accepted for signature parity with
+    the real function and otherwise ignored."""
+    if exclude_ids is None:
+        exclude_ids = []
+    from simplyblock_core.db_controller import DBController
+    db_controller = DBController()
+    nodes = []
+    all_nodes = db_controller.get_storage_nodes_by_cluster_id(current_node.cluster_id)
+    for node in all_nodes:
+        if node.get_id() == current_node.get_id() or node.get_id() in exclude_ids:
+            continue
+        if node.status == StorageNode.STATUS_ONLINE and node.is_secondary_node:
+            if not node.lvstore_stack_tertiary or node.lvstore_stack_tertiary == current_node.get_id():
                 nodes.append(node.get_id())
     return nodes
 
@@ -1298,10 +1355,14 @@ def _seed_secondary_for_health_check(env, primary, sec_node_id, db):
             # Add controller entry so bdev_nvme_controller_list returns it
             srv.state.nvme_controllers[primary.hublvol.bdev_name] = {
                 'name': primary.hublvol.bdev_name,
-                'nqn': primary.hublvol.nqn,
-                'traddr': primary.mgmt_ip,
-                'trsvcid': str(primary.hublvol.nvmf_port),
-                'trtype': 'TCP',
+                'ctrlrs': [{
+                    'state': 'enabled',
+                    'trid': {
+                        'traddr': primary.mgmt_ip,
+                        'trsvcid': str(primary.hublvol.nvmf_port),
+                        'trtype': 'TCP',
+                    },
+                }],
             }
         # Add lvstore info (secondary perspective)
         if primary.lvstore:

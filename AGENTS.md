@@ -94,9 +94,17 @@ tests/CLAUDE.md → AGENTS.md
 .agents/skills/                    ← shared skills (source of truth)
   tox-verify.md                    ← tox verification workflow
 .claude/skills → ../.agents/skills ← Claude Code skill symlink
+
+.agents/hooks/                     ← shared, runner-neutral guard scripts (source of truth)
+  guard-dev-compose.py             ← gates use of docker-compose-dev.yml (see tests/AGENTS.md)
+.claude/settings.json              ← Claude Code wiring: references the .agents/hooks/ scripts
 ```
 
 Edit only `AGENTS.md` files and `.agents/skills/` contents. Never edit the symlink targets directly.
+
+### Guard hooks
+
+`.agents/hooks/` holds runner-neutral guard scripts that enforce instructions which agents otherwise tend to ignore. Each script reads a pre-tool-execution payload as JSON on stdin and emits a decision on stdout; keep the matching logic in the script (the source of truth) so any agent runner can wire it. Claude Code wires them via `.claude/settings.json` (`PreToolUse` hooks). Other runners (Codex, etc.) that lack a hook system still get the underlying rule because it is also stated in the relevant `AGENTS.md`; wire the same script into their pre-exec hook if/when one is available.
 
 ### Local overrides
 
