@@ -1160,7 +1160,10 @@ class K8sNativeFailoverTest(TestClusterBase):
             sleep_n_sec(10)
 
     def _disconnect_lvol_on_client(self, lvol_name: str, client: str):
-        """NVMe-disconnect *lvol_name* on *client*."""
+        """NVMe-disconnect *lvol_name* on *client*.
+
+        Skips disconnect if other namespaces share the subsystem.
+        """
         try:
             lvol_id = self.sbcli_utils.get_lvol_id(lvol_name)
             if lvol_id:
@@ -1168,7 +1171,7 @@ class K8sNativeFailoverTest(TestClusterBase):
                 if details:
                     nqn = details[0].get("nqn", "")
                     if nqn:
-                        self.ssh_obj.disconnect_nvme(node=client, nqn_grep=nqn)
+                        self.ssh_obj.safe_disconnect_nvme(node=client, nqn=nqn)
                         return
         except Exception as exc:
             self.logger.warning(

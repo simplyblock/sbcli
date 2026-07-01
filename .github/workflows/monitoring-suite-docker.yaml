@@ -755,6 +755,37 @@ jobs:
             done <<< "${CONTAINERS}"
           done
 
+      - name: Write Job Summary
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          out_log="sbcli/e2e/output.log"
+          total="$(grep -m1 'Number of Total Cases:' "$out_log" 2>/dev/null | grep -oE '[0-9]+$' || echo '?')"
+          passed="$(grep -m1 'Number of Passed Cases:' "$out_log" 2>/dev/null | grep -oE '[0-9]+$' || echo '?')"
+          failed="$(grep -m1 'Number of Failed Cases:' "$out_log" 2>/dev/null | grep -oE '[0-9]+$' || echo '?')"
+          skipped="$(grep -m1 'Number of Skipped Cases:' "$out_log" 2>/dev/null | grep -oE '[0-9]+$' || echo '0')"
+
+          conclusion="SUCCESS"
+          if [[ "${{ job.status }}" != "success" ]]; then
+            conclusion="FAILED"
+          fi
+
+          {
+            echo "## Docker Monitoring Suite – ${TEST_CLASS} Summary"
+            echo ""
+            echo "**Result:** ${conclusion}"
+            echo ""
+            echo "### Test Results"
+            echo "- **Total:** ${total} | **Passed:** ${passed} | **Failed:** ${failed} | **Skipped:** ${skipped}"
+            echo ""
+            echo "### Run Info"
+            echo "- **Test class:** \`${TEST_CLASS}\`"
+            echo "- **Branch:** \`${{ github.ref_name }}\`"
+            echo ""
+            echo "> **Note:** Graylog/OpenSearch logs are currently being collected and will be available in the NFS log directory shortly."
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Collect Graylog/OpenSearch logs
         if: '!cancelled()'
         timeout-minutes: ${{ fromJSON(env.LOG_COLLECT_TIMEOUT_MINS || '480') }}

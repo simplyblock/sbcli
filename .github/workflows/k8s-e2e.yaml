@@ -337,20 +337,6 @@ jobs:
           echo "TEST_TIME_MINS=$TEST_TIME_MINS" >> $GITHUB_ENV
           echo "TEST_TIME_SECS=$TEST_TIME_SECS" >> $GITHUB_ENV
 
-      - name: Upload automation and docker logs to s3
-        run: |
-          cd $GITHUB_WORKSPACE/e2e/logs
-          ./upload_logs.sh
-          cd $GITHUB_WORKSPACE/simplyBlockDeploy
-          ./upload_docker_logs_to_s3.sh --k8s --namespace "spdk-csi"
-        if: always()
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_REGION: ${{ secrets.AWS_REGION }}
-          S3_BUCKET_NAME: "simplyblock-e2e-test-logs"
-          RUN_ID: ${{ github.run_id }}
-
       - name: Parse test results
         if: always() && (github.event_name == 'schedule' || env.send_slack_notification == 'true')
         id: parse_results
@@ -414,6 +400,28 @@ jobs:
           echo "${FAILED_CASES_BULLETS}" >> $GITHUB_ENV
           echo "EOF" >> $GITHUB_ENV
 
+      - name: Write Job Summary
+        if: always()
+        run: |
+          {
+            echo "## K8s E2E Run Summary"
+            echo ""
+            if [[ "${{ job.status }}" == "success" ]]; then
+              echo "**Result:** SUCCESS"
+            else
+              echo "**Result:** FAILED"
+            fi
+            echo ""
+            echo "### Test Results"
+            echo "- **Total:** ${TOTAL_TESTS:-?} | **Passed:** ${PASSED_TESTS:-?} | **Failed:** ${FAILED_TESTS:-?}"
+            echo ""
+            echo "### Run Info"
+            echo "- **Branch:** \`${{ github.ref_name }}\`"
+            echo "- **Duration:** ${TEST_TIME_HOURS:-0}h ${TEST_TIME_MINS:-0}m ${TEST_TIME_SECS:-0}s"
+            echo ""
+            echo "> **Note:** Graylog/OpenSearch logs are currently being collected and will be available in the NFS log directory shortly."
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Send Slack Notification
         if: always() && (github.event_name == 'schedule' || env.send_slack_notification == 'true')
         env:
@@ -448,10 +456,24 @@ jobs:
 
           TIME_TAKEN="${TEST_TIME_HOURS}h ${TEST_TIME_MINS}m ${TEST_TIME_SECS}s"
 
-          MESSAGE="Python E2E *K8s* tests run triggered on branch *${BRANCH_NAME}*. \nTotal Time Taken to run the tests: ${TIME_TAKEN}. \n\n${OVERALL_STATUS}\nGitHub Run: ${GITHUB_RUN_URL}\nAWS Logs: ${AWS_LOGS_URL}\n\n*Configuration*: *NDCS: ${NDCS}, NPCS: ${NPCS}, Block Size: ${BS}, Chunk Block Size: ${CHUNK_BS}*\n\nTotal Tests: *${TOTAL_TESTS}*, Passed Tests: *${PASSED_TESTS}*, Failed Tests: *${FAILED_TESTS}*\n\n-- Test Cases Passed :white_check_mark:\n${PASSED_CASES_BULLETS}\n\n-- Test Cases Failed :x:\n${FAILED_CASES_BULLETS}"
+          MESSAGE="Python E2E *K8s* tests run triggered on branch *${BRANCH_NAME}*. \nTotal Time Taken to run the tests: ${TIME_TAKEN}. \n\n${OVERALL_STATUS}\nGitHub Run: ${GITHUB_RUN_URL}\nAWS Logs: ${AWS_LOGS_URL}\n\n*Configuration*: *NDCS: ${NDCS}, NPCS: ${NPCS}, Block Size: ${BS}, Chunk Block Size: ${CHUNK_BS}*\n\nTotal Tests: *${TOTAL_TESTS}*, Passed Tests: *${PASSED_TESTS}*, Failed Tests: *${FAILED_TESTS}*\n\n:hourglass_flowing_sand: _Logs are being collected and will be available shortly._\n\n-- Test Cases Passed :white_check_mark:\n${PASSED_CASES_BULLETS}\n\n-- Test Cases Failed :x:\n${FAILED_CASES_BULLETS}"
 
           curl -X POST -H 'Content-type: application/json' --data "{\"text\":\"${MESSAGE}\"}" $SLACK_WEBHOOK_URL
 
+
+      - name: Upload automation and docker logs to s3
+        run: |
+          cd $GITHUB_WORKSPACE/e2e/logs
+          ./upload_logs.sh
+          cd $GITHUB_WORKSPACE/simplyBlockDeploy
+          ./upload_docker_logs_to_s3.sh --k8s --namespace "spdk-csi"
+        if: always()
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          S3_BUCKET_NAME: "simplyblock-e2e-test-logs"
+          RUN_ID: ${{ github.run_id }}
       - name: Destroy Cluster
         if: always()
         run: |
