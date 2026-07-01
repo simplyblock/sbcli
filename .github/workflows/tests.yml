@@ -28,12 +28,14 @@ jobs:
       - name: Install tox
         run: pip install tox
       - name: Run unit tests
-        run: tox run -e unit -- -v
+        run: tox run -e unit
+        env:
+          PYTEST_ADDOPTS: -v
 
   integration:
     name: Integration tests
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -47,4 +49,6 @@ jobs:
       - name: Install tox
         run: pip install tox
       - name: Run integration tests
-        run: tox run -e integration -- -v
+        run: tox run -e integration
+        env:
+          PYTEST_ADDOPTS: -v

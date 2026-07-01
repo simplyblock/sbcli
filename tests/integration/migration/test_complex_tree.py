@@ -39,7 +39,9 @@ from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.models.lvol_migration import LVolMigration
 from simplyblock_core.models.storage_node import StorageNode
 
-from tests.integration.migration.conftest import run_migration_task, run_migration_with_crashes, set_node_status
+from tests.integration.migration.conftest import (
+    run_migration_task, run_migration_with_crashes, set_node_status, start_migration,
+)
 from tests.integration.migration.topology_loader import TestContext
 
 # ---------------------------------------------------------------------------
@@ -143,12 +145,29 @@ def _assert_failed(mig_id):
 
 
 def _migrate_one(lvol_uuid, tgt_uuid, max_steps=1500, step_sleep=0.02,
-                  max_retries=20):
-    """Start and run a migration to completion. Returns migration_id."""
-    mig_id, err = migration_controller.start_migration(
-        lvol_uuid, tgt_uuid, max_retries=max_retries)
+                  max_retries=20, deadline_seconds=None,
+                  failure_servers=(), failure_rate=0.0):
+    """Start and run a migration to completion. Returns migration_id.
+
+    When ``failure_servers`` and ``failure_rate`` are given, the RPC failure
+    rate is injected only *after* start_migration succeeds and reset once the
+    run finishes.  start_migration performs un-retried synchronous setup RPCs,
+    so injecting earlier would flake the one-shot setup instead of exercising
+    the task runner's own retry logic — which is what a failure-rate test means.
+    Pass ``deadline_seconds=0`` to disable the migration deadline when the test
+    asserts completion-via-retry (so injected failure latency can't trip it).
+    """
+    mig_id, err = start_migration(
+        lvol_uuid, tgt_uuid, max_retries=max_retries,
+        deadline_seconds=deadline_seconds)
     assert err is None, f"start_migration failed: {err}"
-    run_migration_task(mig_id, max_steps=max_steps, step_sleep=step_sleep)
+    for srv in failure_servers:
+        srv.set_failure_rate(failure_rate, timeout_seconds=0.1)
+    try:
+        run_migration_task(mig_id, max_steps=max_steps, step_sleep=step_sleep)
+    finally:
+        for srv in failure_servers:
+            srv.set_failure_rate(0.0)
     return mig_id
 
 
@@ -207,20 +226,20 @@ class TestComplexTreeMigration:
         tgt = ctx.node("tgt")
         _seed_all(mock_src_server, ctx, "src")
 
-        mock_src_server.set_failure_rate(0.03, timeout_seconds=0.1)
-        mock_tgt_server.set_failure_rate(0.03, timeout_seconds=0.1)
-
+        # Inject the 3% failure rate only during each migration's execution
+        # (handled inside _migrate_one, after start_migration) — the un-retried
+        # setup RPCs must not be subject to it.
         for vol_id in ["l2", "l3", "l1", "l7"]:
             mig_id = _migrate_one(ctx.lvol_uuid(vol_id), tgt.uuid,
-                                   max_steps=10000, max_retries=500)
+                                   max_steps=10000, max_retries=500,
+                                   deadline_seconds=0,  # retry-resilience test, not a deadline test
+                                   failure_servers=(mock_src_server, mock_tgt_server),
+                                   failure_rate=0.03)
             _assert_done(mig_id)
 
         # l1 DB record must point to target
         updated = db.get_lvol_by_id(ctx.lvol_uuid("l1"))
         assert updated.node_id == tgt.uuid
-
-        mock_src_server.set_failure_rate(0.0)
-        mock_tgt_server.set_failure_rate(0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -240,7 +259,7 @@ class TestComplexTreeFailures:
         tgt = ctx.node("tgt")
         _seed_all(mock_src_server, ctx, "src")
 
-        mig_id, err = migration_controller.start_migration(
+        mig_id, err = start_migration(
             ctx.lvol_uuid("l4"), tgt.uuid, max_retries=3)
         assert err is None
 
@@ -261,7 +280,7 @@ class TestComplexTreeFailures:
         _seed_all(mock_src_server, ctx, "src")
 
         # Very short deadline: 2 seconds
-        mig_id, err = migration_controller.start_migration(
+        mig_id, err = start_migration(
             ctx.lvol_uuid("l5"), tgt.uuid, deadline_seconds=2)
         assert err is None
 
@@ -285,28 +304,43 @@ class TestComplexTreeFailures:
         _seed_all(mock_src_server, ctx, "src")
 
         # Short deadline (3s)
-        mig_id, err = migration_controller.start_migration(
+        mig_id, err = start_migration(
             ctx.lvol_uuid("l6"), tgt.uuid, deadline_seconds=3)
         assert err is None
 
-        # Let it run a few steps normally, then stall by taking target offline.
-        # Use only 3 steps to avoid completing the migration before we stall.
+        # Drive the migration until it has made *real* partial progress — i.e. at
+        # least one snapshot has finished transferring — before we stall it.
+        #
+        # Snapshot transfers complete asynchronously after a random mock delay
+        # (mean ~0.2s) and are only counted in ``snaps_migrated`` once the runner
+        # post-processes the completed transfer.  A fixed number of steps races
+        # that delay and frequently observes *zero* completions (~50% of runs),
+        # so instead pump until at least one snap lands — bounded to stay well
+        # within the 3s deadline.  Transfers are strictly sequential
+        # (``_PARALLEL_BATCH == 1``), so this stops right after the first snapshot
+        # and cannot accidentally complete the whole migration before we stall.
         from simplyblock_core.services.tasks_runner_lvol_migration import task_runner
         from tests.integration.migration.conftest import _find_migration_task
 
         task = _find_migration_task(db, mig_id)
-        for _ in range(3):
+        m = db.get_migration_by_id(mig_id)
+        for _ in range(50):  # up to ~2.5s; first snap typically lands in ~0.2s
             task = db.get_task_by_id(task.uuid)
             task_runner(task)
             time.sleep(0.05)
+            m = db.get_migration_by_id(mig_id)
+            if len(m.snaps_migrated) > 0 or m.status in (
+                    LVolMigration.STATUS_DONE, LVolMigration.STATUS_FAILED,
+                    LVolMigration.STATUS_CANCELLED):
+                break
 
-        # Check if migration already completed (fast mock RPCs can finish quickly)
-        m = db.get_migration_by_id(mig_id)
+        assert len(m.snaps_migrated) > 0, \
+            "Expected at least one snap to migrate before stalling"
+
+        # If the migration somehow already reached a terminal state, the partial
+        # progress assertion above is all we can verify.
         if m.status in (LVolMigration.STATUS_DONE, LVolMigration.STATUS_FAILED,
                          LVolMigration.STATUS_CANCELLED):
-            # Migration finished before we could stall — skip the deadline check
-            # but verify partial progress assertion still holds
-            assert len(m.snaps_migrated) > 0, "Expected some snaps to have been migrated"
             return
 
         # Now stall until deadline
@@ -339,7 +373,7 @@ class TestConcurrentIndependentOperations:
         tgt = ctx.node("tgt")
         _seed_all(mock_src_server, ctx, "src")
 
-        mig_id, err = migration_controller.start_migration(
+        mig_id, err = start_migration(
             ctx.lvol_uuid("l2"), tgt.uuid)
         assert err is None
 
@@ -374,7 +408,7 @@ class TestConcurrentIndependentOperations:
         tgt = ctx.node("tgt")
         _seed_all(mock_src_server, ctx, "src")
 
-        mig_id, err = migration_controller.start_migration(
+        mig_id, err = start_migration(
             ctx.lvol_uuid("l3"), tgt.uuid)
         assert err is None
 
@@ -419,7 +453,7 @@ class TestMigrationProtection:
         tgt = ctx.node("tgt")
         _seed_all(mock_src_server, ctx, "src")
 
-        mig_id, err = migration_controller.start_migration(
+        mig_id, err = start_migration(
             ctx.lvol_uuid("l1"), tgt.uuid)
         assert err is None
 
@@ -457,7 +491,7 @@ class TestMigrationProtection:
         tgt = ctx.node("tgt")
         _seed_all(mock_src_server, ctx, "src")
 
-        mig_id, err = migration_controller.start_migration(
+        mig_id, err = start_migration(
             ctx.lvol_uuid("l2"), tgt.uuid)
         assert err is None
 
@@ -486,7 +520,7 @@ class TestMigrationProtection:
         tgt = ctx.node("tgt")
         _seed_all(mock_src_server, ctx, "src")
 
-        mig_id, err = migration_controller.start_migration(
+        mig_id, err = start_migration(
             ctx.lvol_uuid("l3"), tgt.uuid)
         assert err is None
 
@@ -519,7 +553,7 @@ class TestMigrationProtection:
         tgt = ctx.node("tgt")
         _seed_all(mock_src_server, ctx, "src")
 
-        mig_id, err = migration_controller.start_migration(
+        mig_id, err = start_migration(
             ctx.lvol_uuid("l2"), tgt.uuid)
         assert err is None
 
@@ -547,7 +581,7 @@ class TestMigrationProtection:
         tgt = ctx.node("tgt")
         _seed_all(mock_src_server, ctx, "src")
 
-        mig_id, err = migration_controller.start_migration(
+        mig_id, err = start_migration(
             ctx.lvol_uuid("l1"), tgt.uuid)
         assert err is None
 
@@ -587,7 +621,7 @@ class TestCrashRestartResilience:
         tgt = ctx.node("tgt")
         _seed_all(mock_src_server, ctx, "src")
 
-        mig_id, err = migration_controller.start_migration(
+        mig_id, err = start_migration(
             ctx.lvol_uuid("l2"), tgt.uuid, max_retries=50)
         assert err is None
 
@@ -609,7 +643,7 @@ class TestCrashRestartResilience:
         _seed_all(mock_src_server, ctx, "src")
 
         # l3 has only 1 snap (s1) — snap_copy finishes fast, crash hits lvol_migrate
-        mig_id, err = migration_controller.start_migration(
+        mig_id, err = start_migration(
             ctx.lvol_uuid("l3"), tgt.uuid, max_retries=50)
         assert err is None
 
@@ -630,7 +664,7 @@ class TestCrashRestartResilience:
         _seed_all(mock_src_server, ctx, "src")
 
         # l3 (1 snap) — let it get far enough into cleanup_source before crashing
-        mig_id, err = migration_controller.start_migration(
+        mig_id, err = start_migration(
             ctx.lvol_uuid("l3"), tgt.uuid, max_retries=50)
         assert err is None
 
@@ -650,7 +684,7 @@ class TestCrashRestartResilience:
         tgt = ctx.node("tgt")
         _seed_all(mock_src_server, ctx, "src")
 
-        mig_id, err = migration_controller.start_migration(
+        mig_id, err = start_migration(
             ctx.lvol_uuid("l1"), tgt.uuid, max_retries=100)
         assert err is None
 
@@ -672,12 +706,17 @@ class TestCrashRestartResilience:
         tgt = ctx.node("tgt")
         _seed_all(mock_src_server, ctx, "src")
 
+        # Inject the failure rate only after start_migration: its un-retried
+        # synchronous setup RPCs would flake otherwise. The task runner
+        # (max_retries=500) is what must carry the migration through failures;
+        # deadline_seconds=0 disables the deadline so injected failure latency
+        # can't trip it (this asserts retry-resilience, not deadline behaviour).
+        mig_id, err = start_migration(
+            ctx.lvol_uuid("l2"), tgt.uuid, max_retries=500, deadline_seconds=0)
+        assert err is None
+
         mock_src_server.set_failure_rate(0.05, timeout_seconds=0.1)
         mock_tgt_server.set_failure_rate(0.05, timeout_seconds=0.1)
-
-        mig_id, err = migration_controller.start_migration(
-            ctx.lvol_uuid("l2"), tgt.uuid, max_retries=500)
-        assert err is None
 
         crash_points = [3, 8, 14, 22, 30]
         m = run_migration_with_crashes(
