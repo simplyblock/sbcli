@@ -3257,20 +3257,23 @@ class TestClusterBase:
                     self.ssh_obj.remove_dir(node=node, dir_path=mount_dir)
     
     def disconnect_lvol(self, lvol_device):
-        """Disconnects the logical volume."""
+        """Disconnects the logical volume.
+
+        Skips full subsystem disconnect if other namespaces (e.g. clones
+        placed by server-side random subsystem assignment) still share
+        the subsystem, to avoid disrupting their active IO.
+        """
         if isinstance(self.fio_node, list):
             for node in self.fio_node:
                 nqn_lvol = self.ssh_obj.get_nvme_subsystems(node=node,
                                                             nqn_filter=lvol_device)
                 for nqn in nqn_lvol:
-                    self.logger.info(f"Disconnecting NVMe subsystem: {nqn}")
-                    self.ssh_obj.disconnect_nvme(node=node, nqn_grep=nqn)
+                    self.ssh_obj.safe_disconnect_nvme(node=node, nqn=nqn)
         else:
             nqn_lvol = self.ssh_obj.get_nvme_subsystems(node=self.fio_node,
                                                         nqn_filter=lvol_device)
             for nqn in nqn_lvol:
-                self.logger.info(f"Disconnecting NVMe subsystem: {nqn}")
-                self.ssh_obj.disconnect_nvme(node=self.fio_node, nqn_grep=nqn)
+                self.ssh_obj.safe_disconnect_nvme(node=self.fio_node, nqn=nqn)
 
     def disconnect_lvols(self):
         """ Disconnect all NVMe devices with NQN containing 'lvol' """

@@ -1365,6 +1365,187 @@ jobs:
           [ "$LOG_COLLECT_TIMEOUT_MINS" -lt 30 ] && LOG_COLLECT_TIMEOUT_MINS=30
           echo "LOG_COLLECT_TIMEOUT_MINS=$LOG_COLLECT_TIMEOUT_MINS" >> $GITHUB_ENV
 
+      - name: Write Job Summary
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          out_log="$GITHUB_WORKSPACE/e2e/output.log"
+
+          dur_fmt="${TEST_TIME_HOURS:-0}h ${TEST_TIME_MINS:-0}m ${TEST_TIME_SECS:-0}s"
+
+          total_cases="$(grep -E 'Number of Total Cases:' "${out_log}" 2>/dev/null | tail -n 1 | grep -oE '[0-9]+$' || echo '?')"
+          passed_cnt="$(grep -E 'Number of Passed Cases:' "${out_log}" 2>/dev/null | tail -n 1 | grep -oE '[0-9]+$' || echo '?')"
+          failed_cnt="$(grep -E 'Number of Failed Cases:' "${out_log}" 2>/dev/null | tail -n 1 | grep -oE '[0-9]+$' || echo '?')"
+          skipped_cnt="$(grep -E 'Number of Skipped Cases:' "${out_log}" 2>/dev/null | tail -n 1 | grep -oE '[0-9]+$' || echo '0')"
+          test_wise="$(grep -E '(PASSED|FAILED|SKIPPED) CASE' "${out_log}" 2>/dev/null \
+            | sed 's/\x1b\[[0-9;]*m//g' | sed 's/.*INFO - //' || true)"
+
+          failure_summary="(unknown)"
+          log_tail=""
+          if [[ -f "${out_log}" ]]; then
+            failure_summary="$(grep -oE 'MultipleExceptions: .+|SkippedTestsException: .+' "${out_log}" \
+              | tail -n 1 | sed 's/\x1b\[[0-9;]*m//g' || true)"
+            if [[ -z "${failure_summary}" ]]; then
+              failure_summary="$(grep -E 'RuntimeError:|AssertionError:|Error:' "${out_log}" \
+                | tail -n 1 | sed 's/\x1b\[[0-9;]*m//g' || true)"
+            fi
+            [[ -z "${failure_summary}" ]] && failure_summary="(no exception line found)"
+            log_tail="$(tail -n 50 "${out_log}" | sed 's/\x1b\[[0-9;]*m//g' || true)"
+          fi
+
+          conclusion="SUCCESS"
+          if [[ "${{ job.status }}" != "success" ]]; then
+            conclusion="FAILED"
+          fi
+
+          {
+            echo "## K8s Native Add Node Summary"
+            echo ""
+            echo "**Result:** ${conclusion}"
+            echo ""
+            echo "### Run Info"
+            echo "- **Test class:** \`K8sNativeAddNodeTest\`"
+            echo "- **Cluster ID:** \`${CLUSTER_ID}\`"
+            echo "- **Branch:** \`${{ github.ref_name }}\`"
+            echo "- **Helm Charts Branch:** \`${{ github.event.inputs.helm_charts_branch }}\`"
+            echo "- **NDCS/NPCS:** \`${NDCS}/${NPCS}\`"
+            echo "- **BS/Chunk BS:** \`${BS}/${CHUNK_BS}\`"
+            echo "- **Initial Workers:** \`${{ github.event.inputs.worker_nodes }}\`"
+            echo "- **New Workers:** \`${{ github.event.inputs.new_worker_nodes }}\`"
+            echo "- **Duration:** ${dur_fmt}"
+            echo ""
+            echo "### Test Results"
+            echo "- **Total:** ${total_cases} | **Passed:** ${passed_cnt} | **Failed:** ${failed_cnt} | **Skipped:** ${skipped_cnt}"
+            if [[ -n "${test_wise}" ]]; then
+              echo '```'
+              printf '%s\n' "${test_wise}"
+              echo '```'
+            fi
+            echo ""
+            echo "### Failure Reason"
+            echo '```'
+            printf '%s\n' "${failure_summary}"
+            echo '```'
+            if [[ -n "${log_tail}" ]]; then
+              echo ""
+              echo "<details><summary>Last 50 lines of output.log</summary>"
+              echo ""
+              echo '```'
+              printf '%s\n' "${log_tail}"
+              echo '```'
+              echo "</details>"
+            fi
+            echo ""
+            echo "### NFS Log Locations"
+            echo "- **RUN_BASE_DIR:** \`${RUN_BASE_DIR:-not detected}\`"
+            echo "- Graylog logs: \`${RUN_BASE_DIR:-<run_dir>}/graylog_collected/\`"
+            if [[ -n "${RUN_BASE_DIR:-}" && -d "${RUN_BASE_DIR}" ]]; then
+              echo ""
+              echo "<details><summary>NFS directory listing</summary>"
+              echo ""
+              echo '```'
+              ls -la "${RUN_BASE_DIR}/" 2>/dev/null || echo "(empty)"
+              echo '```'
+              echo "</details>"
+            fi
+            echo ""
+            echo "> **Note:** Graylog/OpenSearch logs are currently being collected and will be available in the NFS log directory shortly."
+          } >> "$GITHUB_STEP_SUMMARY"
+        env:
+          CLUSTER_ID: ${{ env.CLUSTER_ID }}
+          NDCS: ${{ env.NDCS }}
+          NPCS: ${{ env.NPCS }}
+          BS: ${{ env.BS }}
+          CHUNK_BS: ${{ env.CHUNK_BS }}
+          RUN_BASE_DIR: ${{ env.RUN_BASE_DIR }}
+          TEST_TIME_HOURS: ${{ env.TEST_TIME_HOURS }}
+          TEST_TIME_MINS: ${{ env.TEST_TIME_MINS }}
+          TEST_TIME_SECS: ${{ env.TEST_TIME_SECS }}
+
+      - name: Send Slack Notification
+        if: always() && (github.event.inputs.send_slack_notification || 'true') == 'true'
+        shell: bash
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          JOB_STATUS: ${{ job.status }}
+          SLACK_RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+          SLACK_WF_NAME: "K8s Native Add Node"
+          TESTNAME: K8sNativeAddNodeTest
+          RUN_BASE_DIR: ${{ env.RUN_BASE_DIR }}
+          NDCS: ${{ env.NDCS }}
+          NPCS: ${{ env.NPCS }}
+          TEST_START_TIME: ${{ env.TEST_START_TIME }}
+          TEST_END_TIME: ${{ env.TEST_END_TIME }}
+        run: |
+          python3 - <<'PYEOF'
+          import json, os, re, sys, urllib.request, urllib.error
+          webhook = os.environ.get("SLACK_WEBHOOK_URL", "")
+          if not webhook:
+              print("No SLACK_WEBHOOK_URL set, skipping.")
+              sys.exit(0)
+          out_log = os.path.join(os.environ.get("GITHUB_WORKSPACE", "."), "e2e", "output.log")
+          total = passed = failed = skipped = 0
+          if os.path.isfile(out_log):
+              content = open(out_log).read()
+              def px(pat):
+                  m = re.search(pat, content)
+                  return int(m.group(1)) if m else 0
+              total   = px(r'Number of Total Cases:\s*(\d+)')
+              passed  = px(r'Number of Passed Cases:\s*(\d+)')
+              failed  = px(r'Number of Failed Cases:\s*(\d+)')
+              skipped = px(r'Number of Skipped Cases:\s*(\d+)')
+          pass_pct = (passed * 100 // total) if total > 0 else 0
+          s    = int(os.environ.get("TEST_START_TIME", "0") or "0")
+          e    = int(os.environ.get("TEST_END_TIME",   "0") or "0")
+          secs = max(0, e - s) if e >= s > 0 else 0
+          dur  = f"{secs//3600}h {(secs%3600)//60}m {secs%60}s"
+          run_url  = os.environ.get("SLACK_RUN_URL",   "")
+          log_dir  = os.environ.get("RUN_BASE_DIR",    "N/A")
+          ndcs     = os.environ.get("NDCS",            "?")
+          npcs     = os.environ.get("NPCS",            "?")
+          test_cls = os.environ.get("TESTNAME",        "") or "all"
+          branch   = os.environ.get("GITHUB_REF_NAME", "?")
+          wf_name  = os.environ.get("SLACK_WF_NAME",   "Run")
+          ok       = os.environ.get("JOB_STATUS",      "") == "success"
+          icon    = ":white_check_mark:" if ok else ":x:"
+          status  = "SUCCESS" if ok else "FAILURE"
+          mention = "" if ok else " <!channel>"
+          lines = [
+              f"{icon} *SimplyBlock {wf_name}*{mention}",
+              f"*Status:* {status}  |  *Duration:* {dur}",
+              f"*Branch:* `{branch}`  |  *NDCS/NPCS:* `{ndcs}/{npcs}`  |  *Test class:* `{test_cls}`",
+              "",
+          ]
+          if total > 0:
+              lines += [
+                  f":white_check_mark: *Passed:*  {passed}/{total}  ({pass_pct}%)",
+                  f":x: *Failed:*  {failed}",
+                  f":fast_forward: *Skipped:*  {skipped}",
+              ]
+          else:
+              lines.append("_(test counts not found in log)_")
+          lines += [
+              "",
+              f":link: *Run:* <{run_url}|View on GitHub>",
+              f":file_folder: *Final Logs:* `{log_dir}`",
+              f":hourglass_flowing_sand: _Logs are being collected and will be available shortly._",
+          ]
+          payload = {"text": "\n".join(lines)}
+          req = urllib.request.Request(
+              webhook,
+              data=json.dumps(payload).encode(),
+              headers={"Content-Type": "application/json"},
+          )
+          try:
+              urllib.request.urlopen(req, timeout=15)
+              print("Slack notification sent.")
+          except Exception as exc:
+              print(f"WARN: Slack notification failed: {exc}", file=sys.stderr)
+          PYEOF
+
+
       - name: Collect Graylog/OpenSearch logs
         if: '!cancelled()'
         timeout-minutes: ${{ fromJSON(env.LOG_COLLECT_TIMEOUT_MINS || '480') }}
@@ -1588,184 +1769,6 @@ jobs:
         env:
           CLUSTER_ID: ${{ env.CLUSTER_ID }}
           MON_SECRET: ${{ secrets.MON_SECRET }}
-
-      - name: Write Job Summary
-        if: always()
-        shell: bash
-        run: |
-          set +e
-          out_log="$GITHUB_WORKSPACE/e2e/output.log"
-
-          dur_fmt="${TEST_TIME_HOURS:-0}h ${TEST_TIME_MINS:-0}m ${TEST_TIME_SECS:-0}s"
-
-          total_cases="$(grep -E 'Number of Total Cases:' "${out_log}" 2>/dev/null | tail -n 1 | grep -oE '[0-9]+$' || echo '?')"
-          passed_cnt="$(grep -E 'Number of Passed Cases:' "${out_log}" 2>/dev/null | tail -n 1 | grep -oE '[0-9]+$' || echo '?')"
-          failed_cnt="$(grep -E 'Number of Failed Cases:' "${out_log}" 2>/dev/null | tail -n 1 | grep -oE '[0-9]+$' || echo '?')"
-          skipped_cnt="$(grep -E 'Number of Skipped Cases:' "${out_log}" 2>/dev/null | tail -n 1 | grep -oE '[0-9]+$' || echo '0')"
-          test_wise="$(grep -E '(PASSED|FAILED|SKIPPED) CASE' "${out_log}" 2>/dev/null \
-            | sed 's/\x1b\[[0-9;]*m//g' | sed 's/.*INFO - //' || true)"
-
-          failure_summary="(unknown)"
-          log_tail=""
-          if [[ -f "${out_log}" ]]; then
-            failure_summary="$(grep -oE 'MultipleExceptions: .+|SkippedTestsException: .+' "${out_log}" \
-              | tail -n 1 | sed 's/\x1b\[[0-9;]*m//g' || true)"
-            if [[ -z "${failure_summary}" ]]; then
-              failure_summary="$(grep -E 'RuntimeError:|AssertionError:|Error:' "${out_log}" \
-                | tail -n 1 | sed 's/\x1b\[[0-9;]*m//g' || true)"
-            fi
-            [[ -z "${failure_summary}" ]] && failure_summary="(no exception line found)"
-            log_tail="$(tail -n 50 "${out_log}" | sed 's/\x1b\[[0-9;]*m//g' || true)"
-          fi
-
-          conclusion="SUCCESS"
-          if [[ "${{ job.status }}" != "success" ]]; then
-            conclusion="FAILED"
-          fi
-
-          {
-            echo "## K8s Native Add Node Summary"
-            echo ""
-            echo "**Result:** ${conclusion}"
-            echo ""
-            echo "### Run Info"
-            echo "- **Test class:** \`K8sNativeAddNodeTest\`"
-            echo "- **Cluster ID:** \`${CLUSTER_ID}\`"
-            echo "- **Branch:** \`${{ github.ref_name }}\`"
-            echo "- **Helm Charts Branch:** \`${{ github.event.inputs.helm_charts_branch }}\`"
-            echo "- **NDCS/NPCS:** \`${NDCS}/${NPCS}\`"
-            echo "- **BS/Chunk BS:** \`${BS}/${CHUNK_BS}\`"
-            echo "- **Initial Workers:** \`${{ github.event.inputs.worker_nodes }}\`"
-            echo "- **New Workers:** \`${{ github.event.inputs.new_worker_nodes }}\`"
-            echo "- **Duration:** ${dur_fmt}"
-            echo ""
-            echo "### Test Results"
-            echo "- **Total:** ${total_cases} | **Passed:** ${passed_cnt} | **Failed:** ${failed_cnt} | **Skipped:** ${skipped_cnt}"
-            if [[ -n "${test_wise}" ]]; then
-              echo '```'
-              printf '%s\n' "${test_wise}"
-              echo '```'
-            fi
-            echo ""
-            echo "### Failure Reason"
-            echo '```'
-            printf '%s\n' "${failure_summary}"
-            echo '```'
-            if [[ -n "${log_tail}" ]]; then
-              echo ""
-              echo "<details><summary>Last 50 lines of output.log</summary>"
-              echo ""
-              echo '```'
-              printf '%s\n' "${log_tail}"
-              echo '```'
-              echo "</details>"
-            fi
-            echo ""
-            echo "### NFS Log Locations"
-            echo "- **RUN_BASE_DIR:** \`${RUN_BASE_DIR:-not detected}\`"
-            echo "- Graylog logs: \`${RUN_BASE_DIR:-<run_dir>}/graylog_collected/\`"
-            if [[ -n "${RUN_BASE_DIR:-}" && -d "${RUN_BASE_DIR}" ]]; then
-              echo ""
-              echo "<details><summary>NFS directory listing</summary>"
-              echo ""
-              echo '```'
-              ls -la "${RUN_BASE_DIR}/" 2>/dev/null || echo "(empty)"
-              echo '```'
-              echo "</details>"
-            fi
-          } >> "$GITHUB_STEP_SUMMARY"
-        env:
-          CLUSTER_ID: ${{ env.CLUSTER_ID }}
-          NDCS: ${{ env.NDCS }}
-          NPCS: ${{ env.NPCS }}
-          BS: ${{ env.BS }}
-          CHUNK_BS: ${{ env.CHUNK_BS }}
-          RUN_BASE_DIR: ${{ env.RUN_BASE_DIR }}
-          TEST_TIME_HOURS: ${{ env.TEST_TIME_HOURS }}
-          TEST_TIME_MINS: ${{ env.TEST_TIME_MINS }}
-          TEST_TIME_SECS: ${{ env.TEST_TIME_SECS }}
-
-      - name: Send Slack Notification
-        if: always() && (github.event.inputs.send_slack_notification || 'true') == 'true'
-        shell: bash
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-          JOB_STATUS: ${{ job.status }}
-          SLACK_RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          GITHUB_REF_NAME: ${{ github.ref_name }}
-          SLACK_WF_NAME: "K8s Native Add Node"
-          TESTNAME: K8sNativeAddNodeTest
-          RUN_BASE_DIR: ${{ env.RUN_BASE_DIR }}
-          NDCS: ${{ env.NDCS }}
-          NPCS: ${{ env.NPCS }}
-          TEST_START_TIME: ${{ env.TEST_START_TIME }}
-          TEST_END_TIME: ${{ env.TEST_END_TIME }}
-        run: |
-          python3 - <<'PYEOF'
-          import json, os, re, sys, urllib.request, urllib.error
-          webhook = os.environ.get("SLACK_WEBHOOK_URL", "")
-          if not webhook:
-              print("No SLACK_WEBHOOK_URL set, skipping.")
-              sys.exit(0)
-          out_log = os.path.join(os.environ.get("GITHUB_WORKSPACE", "."), "e2e", "output.log")
-          total = passed = failed = skipped = 0
-          if os.path.isfile(out_log):
-              content = open(out_log).read()
-              def px(pat):
-                  m = re.search(pat, content)
-                  return int(m.group(1)) if m else 0
-              total   = px(r'Number of Total Cases:\s*(\d+)')
-              passed  = px(r'Number of Passed Cases:\s*(\d+)')
-              failed  = px(r'Number of Failed Cases:\s*(\d+)')
-              skipped = px(r'Number of Skipped Cases:\s*(\d+)')
-          pass_pct = (passed * 100 // total) if total > 0 else 0
-          s    = int(os.environ.get("TEST_START_TIME", "0") or "0")
-          e    = int(os.environ.get("TEST_END_TIME",   "0") or "0")
-          secs = max(0, e - s) if e >= s > 0 else 0
-          dur  = f"{secs//3600}h {(secs%3600)//60}m {secs%60}s"
-          run_url  = os.environ.get("SLACK_RUN_URL",   "")
-          log_dir  = os.environ.get("RUN_BASE_DIR",    "N/A")
-          ndcs     = os.environ.get("NDCS",            "?")
-          npcs     = os.environ.get("NPCS",            "?")
-          test_cls = os.environ.get("TESTNAME",        "") or "all"
-          branch   = os.environ.get("GITHUB_REF_NAME", "?")
-          wf_name  = os.environ.get("SLACK_WF_NAME",   "Run")
-          ok       = os.environ.get("JOB_STATUS",      "") == "success"
-          icon    = ":white_check_mark:" if ok else ":x:"
-          status  = "SUCCESS" if ok else "FAILURE"
-          mention = "" if ok else " <!channel>"
-          lines = [
-              f"{icon} *SimplyBlock {wf_name}*{mention}",
-              f"*Status:* {status}  |  *Duration:* {dur}",
-              f"*Branch:* `{branch}`  |  *NDCS/NPCS:* `{ndcs}/{npcs}`  |  *Test class:* `{test_cls}`",
-              "",
-          ]
-          if total > 0:
-              lines += [
-                  f":white_check_mark: *Passed:*  {passed}/{total}  ({pass_pct}%)",
-                  f":x: *Failed:*  {failed}",
-                  f":fast_forward: *Skipped:*  {skipped}",
-              ]
-          else:
-              lines.append("_(test counts not found in log)_")
-          lines += [
-              "",
-              f":link: *Run:* <{run_url}|View on GitHub>",
-              f":file_folder: *Final Logs:* `{log_dir}`",
-          ]
-          payload = {"text": "\n".join(lines)}
-          req = urllib.request.Request(
-              webhook,
-              data=json.dumps(payload).encode(),
-              headers={"Content-Type": "application/json"},
-          )
-          try:
-              urllib.request.urlopen(req, timeout=15)
-              print("Slack notification sent.")
-          except Exception as exc:
-              print(f"WARN: Slack notification failed: {exc}", file=sys.stderr)
-          PYEOF
-
       - name: Cleanup build folder
         if: always()
         run: |

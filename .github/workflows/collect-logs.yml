@@ -174,38 +174,6 @@ jobs:
           echo "CLUSTER_ID=${cid}" >> "$GITHUB_ENV"
           echo "Auto-detected cluster $cid from ${MGMT_IP}"
 
-      - name: Collect logs (OpenSearch-first, Graylog-fallback)
-        shell: bash
-        run: |
-          set -euxo pipefail
-          mkdir -p "${OUTPUT_DIR}"
-          python3 sbcli/e2e/utils/test_graylog_export.py
-
-      - name: Upload logs to MinIO
-        if: inputs.UPLOAD_TO_MINIO == true && always()
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          if [[ -z "${MINIO_ACCESS_KEY}" || -z "${MINIO_SECRET_KEY}" ]]; then
-            echo "WARN: MINIO_ACCESS_KEY / MINIO_SECRET_KEY not set, skipping upload"
-            exit 0
-          fi
-
-          python3 sbcli/e2e/logs/upload_logs_to_miniio_parallel.py \
-            --access_key "${MINIO_ACCESS_KEY}" \
-            --secret_key "${MINIO_SECRET_KEY}" \
-            --source_dir "${OUTPUT_DIR}" \
-            --run_id "collected-logs-$(date +%Y%m%d_%H%M%S)" || true
-
-      - name: Upload as GitHub artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: collected-logs-${{ inputs.MGMT_IP }}-${{ github.run_id }}
-          path: ${{ inputs.OUTPUT_DIR }}/**
-          if-no-files-found: warn
-
       - name: Write Job Summary
         if: always()
         shell: bash
@@ -237,4 +205,39 @@ jobs:
             echo '```'
             find "${OUTPUT_DIR}" -type f -name '*.log' -printf '%P  (%s bytes)\n' 2>/dev/null | sort || echo "(none)"
             echo '```'
+            echo ""
+            echo "> **Note:** Graylog/OpenSearch logs are currently being collected and will be available in the NFS log directory shortly."
           } >> "$GITHUB_STEP_SUMMARY"
+
+
+      - name: Collect logs (OpenSearch-first, Graylog-fallback)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p "${OUTPUT_DIR}"
+          python3 sbcli/e2e/utils/test_graylog_export.py
+
+      - name: Upload logs to MinIO
+        if: inputs.UPLOAD_TO_MINIO == true && always()
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          if [[ -z "${MINIO_ACCESS_KEY}" || -z "${MINIO_SECRET_KEY}" ]]; then
+            echo "WARN: MINIO_ACCESS_KEY / MINIO_SECRET_KEY not set, skipping upload"
+            exit 0
+          fi
+
+          python3 sbcli/e2e/logs/upload_logs_to_miniio_parallel.py \
+            --access_key "${MINIO_ACCESS_KEY}" \
+            --secret_key "${MINIO_SECRET_KEY}" \
+            --source_dir "${OUTPUT_DIR}" \
+            --run_id "collected-logs-$(date +%Y%m%d_%H%M%S)" || true
+
+      - name: Upload as GitHub artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: collected-logs-${{ inputs.MGMT_IP }}-${{ github.run_id }}
+          path: ${{ inputs.OUTPUT_DIR }}/**
+          if-no-files-found: warn

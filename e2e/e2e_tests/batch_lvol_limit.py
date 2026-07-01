@@ -132,8 +132,7 @@ class TestBatchLVOLsLimit(TestClusterBase):
         """Disconnects the logical volume."""
         nqn_lvol = self.ssh_obj.get_nvme_subsystems(node=self.mgmt_nodes[0], nqn_filter=lvol_device)
         for nqn in nqn_lvol:
-            self.logger.info(f"Disconnecting NVMe subsystem: {nqn}")
-            self.ssh_obj.disconnect_nvme(node=self.mgmt_nodes[0], nqn_grep=nqn)
+            self.ssh_obj.safe_disconnect_nvme(node=self.mgmt_nodes[0], nqn=nqn)
 
     def cleanup(self):
         """Cleans up by unmounting, disconnecting, and deleting all logical volumes."""
