@@ -107,6 +107,12 @@ def _cluster(status=Cluster.STATUS_ACTIVE, distr_ndcs=1, distr_npcs=2,
     # Real bool default: a bare MagicMock attribute is truthy, which would make
     # is_auto_restart_paused / the drain checks misbehave.
     c.suspend_drain_complete = suspend_drain_complete
+    # Same truthiness trap: an unset MagicMock attribute would enable the
+    # failure-domain-aware suspend path, whose _fd_aware_cluster_status reads
+    # node.failure_domain as an int. These tests exercise the flat per-node
+    # logic, so keep the feature off (FD-aware cases live in the unit suite's
+    # test_failure_domain.py).
+    c.enable_failure_domain = False
     c.get_id = MagicMock(return_value="cluster-1")
     return c
 
