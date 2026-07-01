@@ -21,7 +21,7 @@ Each outage scenario is tested with:
   - With and without multipathing (ha_type="ha" vs "single")
 
 Concurrent operations (create/delete with various volume types) are tested
-using the OperationRunner + PhaseGate infrastructure.
+by seeding volumes in FDB before the restart runs.
 """
 
 import pytest
@@ -211,7 +211,9 @@ class TestScenario3_N3Out:
         _assert_restart_ok(result, node)
 
         srv0 = env['servers'][RESTART_NODE]
-        leader_calls = srv0.get_rpc_calls('bdev_lvol_set_leader')
+        # RPCClient.bdev_lvol_set_leader sends the wire method
+        # 'bdev_lvol_set_leader_all' (with an 'lvs_leadership' param).
+        leader_calls = srv0.get_rpc_calls('bdev_lvol_set_leader_all')
         assert any(p.get('lvs_leadership', p.get('leader', False))
                    for _, _, p in leader_calls), \
             "n0 must take leadership for LVS_3"
@@ -309,7 +311,9 @@ class TestRpcVerification:
         _run_restart(env)
 
         srv1 = env['servers'][1]
-        calls = srv1.get_rpc_calls('bdev_lvol_set_leader')
+        # RPCClient.bdev_lvol_set_leader sends the wire method
+        # 'bdev_lvol_set_leader_all' (with an 'lvs_leadership' param).
+        calls = srv1.get_rpc_calls('bdev_lvol_set_leader_all')
         assert any(not p.get('lvs_leadership', p.get('leader', True))
                    for _, _, p in calls)
 
@@ -342,7 +346,9 @@ class TestRpcVerification:
         create_test_lvol(env, 0, name="rpc-no-offline")
         env['servers'][1].state.rpc_log.clear()
         _run_restart(env)
-        assert not env['servers'][1].was_called('bdev_lvol_set_leader')
+        # RPCClient.bdev_lvol_set_leader sends the wire method
+        # 'bdev_lvol_set_leader_all'.
+        assert not env['servers'][1].was_called('bdev_lvol_set_leader_all')
 
 
 # ###########################################################################
@@ -351,7 +357,7 @@ class TestRpcVerification:
 
 class TestConcurrentOperations:
     """Operations running through the real control plane concurrently with
-    restart.  Uses PhaseGate to pause restart at bdev_examine (Phase 5)."""
+    restart.  Volumes are seeded in FDB before the restart runs."""
 
     def test_volume_created_before_examine_is_discovered(self, ftt2_env):
         """A volume that exists in FDB before restart begins should be
