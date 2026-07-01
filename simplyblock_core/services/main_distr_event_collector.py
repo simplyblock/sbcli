@@ -213,31 +213,37 @@ def process_device_event(event, logger):
                 if n.get_id() != device_node_obj.get_id() and n.status != StorageNode.STATUS_REMOVED
             ]
             if _remote_timeout_quorum_reached(device_obj.get_id(), other_nodes):
-                # Guard: don't misclassify a node network-partition as a bad device.
-                # device_node_obj.status can still read ONLINE for a second or two
-                # after a partition begins (CP status lag) -- exactly the window in
-                # which remote peers rack up IO timeouts against every one of the
-                # node's devices. If the data plane says the home node itself is
-                # disconnected (a majority of peers see its remote JM controller
-                # down), these timeouts are a node-outage effect, not a device
-                # fault: skip the global force and let the node-status paths handle
-                # it. The device self-heals when the node's port_allow recovery
-                # re-admits it (see tasks_runner_port_allow).
-                from simplyblock_core.services import storage_node_monitor
-                if storage_node_monitor.is_node_data_plane_disconnected_quorum(device_node_obj):
+                # Node-outage vs. bad-device disambiguation. During ANY node outage
+                # (graceful / forced / container_kill / host_reboot / network) the
+                # peers time out on EVERY one of that node's devices in the same
+                # IO-timeout cycle -- so a sibling device on the same home node also
+                # reaches quorum. A genuine single-device fault trips only its own
+                # device. This signal is evaluated from the SAME in-memory vote
+                # store that just tripped, so it is true at the instant of the trip
+                # (unlike node.status or the peers' JM-controller state, both of
+                # which lag the device IO-error quorum by a second or more and left
+                # the earlier guard firing 0/N times). If a sibling also reached
+                # quorum, treat this as a node outage and do NOT force the device
+                # globally unavailable -- the node-status paths handle exclusion and
+                # the device is re-admitted when the node recovers/restarts.
+                sibling_quorum = any(
+                    _remote_timeout_quorum_reached(d.get_id(), other_nodes)
+                    for d in device_node_obj.nvme_devices
+                    if d.get_id() != device_obj.get_id()
+                )
+                if sibling_quorum:
                     logger.warning(
-                        f"IO-error quorum for storage_id {storage_id}, but home node "
-                        f"{device_node_obj.get_id()} is data-plane disconnected "
-                        f"(peer quorum) -- treating as node partition, NOT forcing "
-                        f"device globally unavailable")
-                    event.status = 'skipped:home_node_partition'
+                        f"IO-error quorum for storage_id {storage_id}, but a sibling "
+                        f"device on home node {device_node_obj.get_id()} also reached "
+                        f"quorum -- treating as a NODE outage, NOT forcing device "
+                        f"globally unavailable")
+                    event.status = 'skipped:node_wide_io_quorum'
                     device_obj.release_device_connection()
                     return
-                # A quorum of nodes report this device failing AND the home node is
-                # not itself partitioned => the device itself is bad: set it GLOBALLY
-                # unavailable, independent of what the remote NVMe controller's state
-                # reports. Erasure coding compensates; re-admitted on device/node
-                # restart or when the home node's port_allow recovery runs.
+                # Only THIS device is failing across the cluster => the device itself
+                # is bad: set it GLOBALLY unavailable, independent of what the remote
+                # NVMe controller's state reports. Erasure coding compensates;
+                # re-admitted on device/node restart or port_allow recovery.
                 logger.warning(
                     f"IO-error quorum reached for storage_id {storage_id}; "
                     f"forcing device globally UNAVAILABLE")
