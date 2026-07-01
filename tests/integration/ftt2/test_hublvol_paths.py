@@ -133,17 +133,27 @@ class TestHublvolActivate:
         cluster = ftt2_env['cluster']
         n0, n1, n2 = ftt2_env['nodes'][0], ftt2_env['nodes'][1], ftt2_env['nodes'][2]
 
-        # Step 1: primary creates hublvol
-        n0.create_hublvol(cluster_nqn=cluster.nqn)
+        # patch_externals makes the hublvol coordinator's deferred redundant-path
+        # attach run synchronously (production defers it to a daemon thread), so
+        # the tertiary's second path is present when the tests inspect state.
+        patches = patch_externals()
+        for p in patches:
+            p.start()
+        try:
+            # Step 1: primary creates hublvol
+            n0.create_hublvol(cluster_nqn=cluster.nqn)
 
-        # Step 2: sec_1 creates secondary hublvol (same NQN, non_optimized)
-        n1.create_secondary_hublvol(n0, cluster.nqn)
+            # Step 2: sec_1 creates secondary hublvol (same NQN, non_optimized)
+            n1.create_secondary_hublvol(n0, cluster.nqn)
 
-        # Step 3a: secondary connects to primary's hublvol (1 path)
-        n1.connect_to_hublvol(n0, failover_node=None, role="secondary")
+            # Step 3a: secondary connects to primary's hublvol (1 path)
+            n1.connect_to_hublvol(n0, failover_node=None, role="secondary")
 
-        # Step 3b: tertiary connects with 2 paths (primary + sec_1)
-        n2.connect_to_hublvol(n0, failover_node=n1, role="tertiary")
+            # Step 3b: tertiary connects with 2 paths (primary + sec_1)
+            n2.connect_to_hublvol(n0, failover_node=n1, role="tertiary")
+        finally:
+            for p in patches:
+                p.stop()
 
     def test_primary_hublvol_optimized_ana(self):
         """Primary's hublvol listener must use ANA state = optimized."""

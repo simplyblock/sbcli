@@ -33,6 +33,7 @@ import pytest
 from pydantic import SecretStr
 
 from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.models.hublvol import HubLVol
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.nvme_device import NVMeDevice
@@ -186,7 +187,13 @@ def ftt2_env(ensure_db, mock_rpc_servers):
         n.number_of_distribs = 1
         n.active_tcp = True
         n.active_rdma = False
-        n.data_nics = [_make_nic("127.0.0.1")]
+        # Distinct data-NIC IP per node. The mock RPC servers are all reached
+        # via mgmt_ip:rpc_port (127.0.0.1:<port>); the data-NIC IP is only used
+        # to build NVMe attach payloads (traddr). Distinct IPs are required so
+        # the hublvol multipath coordinator sees the primary and the secondary
+        # as *separate* paths — with a shared 127.0.0.1 it dedups them by IP
+        # and a tertiary ends up with a single path instead of two.
+        n.data_nics = [_make_nic(f"10.10.0.{i + 1}")]
         n.enable_ha_jm = True
         n.jm_vuid = jm_vuids[i]
         n.nvme_devices = [_make_device(cluster.uuid, n.uuid, d) for d in range(2)]
@@ -219,6 +226,22 @@ def ftt2_env(ensure_db, mock_rpc_servers):
         pri_where_tert = (j - 2) % NUM_NODES  # j is tertiary for this primary
         nodes[j].lvstore_stack_secondary = nodes[pri_where_sec].uuid
         nodes[j].lvstore_stack_tertiary = nodes[pri_where_tert].uuid
+
+    # Every active LVS carries hublvol metadata in a real cluster (created at
+    # activation). The takeover path reads the offline primary's hublvol from
+    # FDB (adopt_hublvol) — without it, any test that drives an LVS takeover
+    # (primary confirmed down) aborts with "no hublvol metadata". Populate it
+    # here so the baseline mirrors an activated cluster.
+    for i in range(NUM_NODES):
+        n = nodes[i]
+        n.hublvol = HubLVol({
+            'uuid': str(_uuid_mod.uuid4()),
+            'nqn': f"{cluster.nqn}:hublvol:{n.lvstore}",
+            'bdev_name': f'{n.lvstore}/hublvol',
+            'model_number': str(_uuid_mod.uuid4()),
+            'nguid': 'ab' * 16,
+            'nvmf_port': n.lvstore_ports[n.lvstore]['hublvol_port'],
+        })
 
     # Write nodes
     for n in nodes:
@@ -410,6 +433,26 @@ def create_test_lvol(env, primary_node_idx: int, name: str = "test-vol",
 
     lvol.bdev_stack = bdev_stack
     lvol.write_to_db(db.kv_store)
+
+    # Model raid-durable lvol blobs: after bdev_examine on any peer of this
+    # LVS (primary/secondary/tertiary), SPDK rediscovers the lvstore *and*
+    # every lvol blob from the raid metadata, so the lvol bdev appears in the
+    # registry on all three nodes. The non-leader restart path verifies this
+    # (recreate_lvstore_on_non_leader → "Expected lvol bdevs missing"), so the
+    # mock must register the bdev on every node that hosts this LVS. Keyed by
+    # the lvol uuid to satisfy the uuid-or-alias check in storage_node_ops.
+    bdev_entry = {
+        'name': lvol.lvol_uuid,
+        'aliases': [lvol.top_bdev],
+        'uuid': lvol.lvol_uuid,
+        'driver_specific': {'lvol': {'lvol_store_uuid': node.lvstore}},
+    }
+    for peer_idx in (primary_node_idx,
+                     (primary_node_idx + 1) % NUM_NODES,
+                     (primary_node_idx + 2) % NUM_NODES):
+        srv = env['servers'][peer_idx]
+        with srv.state.lock:
+            srv.state.bdevs[lvol.lvol_uuid] = dict(bdev_entry)
     return lvol
 
 
@@ -417,9 +460,46 @@ def create_test_lvol(env, primary_node_idx: int, name: str = "test-vol",
 # External patches
 # ---------------------------------------------------------------------------
 
+def _sync_defer_remaining_attaches(self, rpc, ctrl_name, nqn, port, remaining,
+                                   attach_mode, last_attach_at, node, role,
+                                   rpc_timeout):
+    """Test shim for ``HublvolReconnectCoordinator._defer_remaining_attaches``.
+
+    Production attaches redundant multipath paths in a daemon thread with
+    ``INTER_ATTACH_SLEEP_SEC`` pauses, so the second hublvol path lands
+    asynchronously after the restart call returns. Tests inspect the mock
+    controller state synchronously right after the call, so run the deferred
+    attaches inline (same ``_ensure_attach_ready`` gating and ``_do_attach``
+    as the real worker, minus the sleeps/threading) to make path counts
+    deterministic.
+    """
+    from simplyblock_core.utils import hublvol_reconnect as _hr
+    for ip, trtype in remaining:
+        try:
+            decision = _hr._ensure_attach_ready(rpc, ctrl_name, ip)
+        except Exception:
+            continue
+        if decision in ("failed", "skip"):
+            continue
+        try:
+            _hr._do_attach(rpc, ctrl_name, nqn, ip, port, trtype,
+                           multipath=attach_mode, rpc_timeout=rpc_timeout)
+        except Exception:
+            # Best-effort in test shim: ignore per-path attach failures so
+            # remaining deferred paths can still be attempted deterministically.
+            continue
+
+
 def patch_externals():
     """Mock all external deps so restart runs purely against mock RPC servers."""
     return [
+        # Hublvol multipath: drop the coordinator's inter-attach sleeps and run
+        # the deferred redundant-path attach synchronously so tests see the
+        # fully-converged multipath state immediately after restart returns.
+        patch('simplyblock_core.utils.hublvol_reconnect.time.sleep'),
+        patch('simplyblock_core.utils.hublvol_reconnect.'
+              'HublvolReconnectCoordinator._defer_remaining_attaches',
+              _sync_defer_remaining_attaches),
         patch('simplyblock_core.distr_controller.send_cluster_map_to_distr',
               return_value=True),
         patch('simplyblock_core.distr_controller.send_cluster_map_add_node',
