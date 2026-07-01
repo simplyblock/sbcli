@@ -841,9 +841,14 @@ def _mock_get_secondary_nodes(current_node, exclude_ids=None):
     return nodes
 
 
-def _mock_get_secondary_nodes_2(current_node, exclude_ids=None, exclude_mgmt_ips=None):
+def _mock_get_secondary_nodes_2(current_node, exclude_ids=None, exclude_mgmt_ips=None,
+                                exclude_failure_domains=None, exclude_physical_labels=None):
     """Mock get_secondary_nodes_2 that skips mgmt_ip check (all nodes share 127.0.0.1).
-    Checks lvstore_stack_tertiary instead of lvstore_stack_secondary."""
+    Checks lvstore_stack_tertiary instead of lvstore_stack_secondary.
+
+    All nodes share a host/domain/label in this harness, so the failure-domain
+    and physical-label anti-affinity args are accepted for signature parity with
+    the real function and otherwise ignored."""
     if exclude_ids is None:
         exclude_ids = []
     from simplyblock_core.db_controller import DBController
