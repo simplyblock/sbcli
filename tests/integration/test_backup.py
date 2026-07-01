@@ -588,12 +588,14 @@ class TestRestoreBackup(unittest.TestCase):
     @patch("simplyblock_core.controllers.backup_controller.tasks_controller")
     @patch("simplyblock_core.controllers.backup_controller.db_controller")
     def test_success(self, mock_db, mock_tasks):
-        backup = _backup(s3_id=5)
+        cluster_uuid = "00000000-0000-0000-0000-000000000001"
+        backup = _backup(s3_id=5, cluster_id=cluster_uuid)
         mock_db.get_backup_by_id.return_value = backup
         mock_db.get_backup_chain.return_value = [backup]
         mock_tasks.add_backup_restore_task.return_value = True
 
         mock_cluster = MagicMock()
+        mock_cluster.uuid = cluster_uuid
         mock_cluster.backup_source = ""
         mock_db.get_cluster_by_id.return_value = mock_cluster
 
@@ -610,7 +612,7 @@ class TestRestoreBackup(unittest.TestCase):
             mock_add_ha.return_value = ("lvol-new", None)
 
             from simplyblock_core.controllers.backup_controller import restore_backup
-            result, error = restore_backup("backup-1", "restored_lvol", "pool-1", "cluster-1")
+            result, error = restore_backup("backup-1", "restored_lvol", "pool-1", cluster_uuid)
 
         self.assertEqual(result, "lvol-new")
         self.assertIsNone(error)
@@ -630,11 +632,13 @@ class TestRestoreBackup(unittest.TestCase):
 
     @patch("simplyblock_core.controllers.backup_controller.db_controller")
     def test_add_lvol_ha_fails(self, mock_db):
-        mock_db.get_backup_by_id.return_value = _backup()
-        mock_db.get_backup_chain.return_value = [_backup()]
+        cluster_uuid = "00000000-0000-0000-0000-000000000001"
+        mock_db.get_backup_by_id.return_value = _backup(cluster_id=cluster_uuid)
+        mock_db.get_backup_chain.return_value = [_backup(cluster_id=cluster_uuid)]
         mock_db.get_storage_node_by_id.return_value = _node()
 
         mock_cluster = MagicMock()
+        mock_cluster.uuid = cluster_uuid
         mock_cluster.backup_source = ""
         mock_db.get_cluster_by_id.return_value = mock_cluster
 
@@ -642,7 +646,7 @@ class TestRestoreBackup(unittest.TestCase):
             mock_add_ha.return_value = (None, "Pool not found")
 
             from simplyblock_core.controllers.backup_controller import restore_backup
-            result, error = restore_backup("backup-1", "lvol", "bad-pool", "cluster-1")
+            result, error = restore_backup("backup-1", "lvol", "bad-pool", cluster_uuid)
 
         self.assertIsNone(result)
         self.assertIn("Failed to create restore volume", error)

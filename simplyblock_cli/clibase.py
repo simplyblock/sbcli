@@ -930,7 +930,7 @@ class CLIWrapperBase:
     def backup__restore(self, sub_command, args):
         result, error = backup_controller.restore_backup(
             args.backup_id, args.lvol_name, args.pool,
-            cluster_id=getattr(args, 'cluster_id', None),
+            cluster_id=args.cluster_id,
             target_node_id=getattr(args, 'node', None))
         if error:
             print(f"Error: {error}")

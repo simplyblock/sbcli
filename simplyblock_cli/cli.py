@@ -988,7 +988,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--lvol', help='The new logical volume name.', type=str, dest='lvol_name', required=True)
         subcommand.add_argument('--pool', help='The target pool name or id.', type=str, dest='pool', required=True)
         subcommand.add_argument('--node', help='The target storage node id.', type=str, dest='node')
-        subcommand.add_argument('--cluster-id', help='The cluster id.', type=str, dest='cluster_id')
+        subcommand.add_argument('--cluster-id', help='The target cluster id.', type=str, dest='cluster_id', required=True)
 
     def init_backup__export(self, subparser):
         subcommand = self.add_sub_command(subparser, 'export', 'Export backup metadata to a JSON file for cross-cluster restore.')
