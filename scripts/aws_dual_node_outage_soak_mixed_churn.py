@@ -37,18 +37,18 @@ UUID_RE = re.compile(r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}")
 NQN_RE = re.compile(r"(?:--nqn[=\s]+|-n\s+)(\S+)")
 
 
+# NOTE: "device_hang" is temporarily DISABLED (removed from rotation for now).
+# The dormant _device_hang machinery below is kept so it can be re-enabled by
+# adding "device_hang" back to these two tuples.
 OUTAGE_METHODS = (
     "graceful", "forced", "container_kill", "host_reboot",
     "network_outage_20", "network_outage_50",
-    "device_hang",
 )
 # Methods that leave the node in a state where it recovers on its own
-# (no sbctl restart required from the soak driver). device_hang never takes
-# the node down at all -- it only stalls one device -- so it self-recovers too.
+# (no sbctl restart required from the soak driver).
 AUTO_RECOVER_METHODS = (
     "container_kill", "host_reboot",
     "network_outage_20", "network_outage_50",
-    "device_hang",
 )
 
 # device_hang stalls a single device on the target node for a random duration
@@ -72,7 +72,7 @@ TRANSIENT_NODE_STATUSES = ("in_restart", "in_shutdown")
 # Examples:
 #   M=5 → 3 × 20 = 60
 #   M=6 → 3 × 30 = 90
-#   M=7 → 3 × 42 = 126   (adding device_hang to the 6 base methods)
+#   (device_hang would add a 7th method → 126, but it is disabled for now)
 # Role categories (relative ring-distance preserved; the actual node pair
 # is re-rolled randomly per scenario at execution time so the soak hits
 # many different concrete pairs while keeping the topological distance
