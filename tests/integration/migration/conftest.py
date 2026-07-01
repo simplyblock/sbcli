@@ -94,6 +94,7 @@ def ensure_cluster():
 _BASE_PORT_SRC = 9901
 _BASE_PORT_TGT = 9902
 _BASE_PORT_SEC = 9903
+_BASE_PORT_SRC_SEC = 9904
 
 
 def _worker_port_offset() -> int:
@@ -154,6 +155,27 @@ def mock_sec_server():
     srv.stop()
 
 
+@pytest.fixture(scope="session")
+def mock_src_sec_server():
+    """Mock RPC server for the source node's own HA secondary.
+
+    Some data-plane operations against an ha_type="ha" lvol (e.g. taking an
+    intermediate snapshot mid-migration) unconditionally resolve the current
+    host node's secondary/tertiary peers. The source node needs a real,
+    resolvable secondary for those code paths — sharing the source's own
+    lvstore name ("lvs_src"), per the same HA-peer-naming convention as
+    ``mock_sec_server``.
+    """
+    offset = _worker_port_offset()
+    srv = MockRpcServer(
+        host="127.0.0.1", port=_BASE_PORT_SRC_SEC + offset,
+        lvstore="lvs_src", node_id="src-sec",
+    )
+    srv.start()
+    yield srv
+    srv.stop()
+
+
 # ---------------------------------------------------------------------------
 # Per-test helpers
 # ---------------------------------------------------------------------------
@@ -192,9 +214,10 @@ def topology_two_node(ensure_cluster, mock_src_server, mock_tgt_server):
 
 
 @pytest.fixture()
-def topology_two_node_ha(ensure_cluster, mock_src_server, mock_tgt_server, mock_sec_server):
-    """Two-node HA topology (primary + secondary on target)."""
-    _reset_servers(mock_src_server, mock_tgt_server, mock_sec_server)
+def topology_two_node_ha(ensure_cluster, mock_src_server, mock_tgt_server, mock_sec_server,
+                         mock_src_sec_server):
+    """Two-node HA topology (primary + secondary on both source and target)."""
+    _reset_servers(mock_src_server, mock_tgt_server, mock_sec_server, mock_src_sec_server)
 
     spec = _load_spec("two_node_ha.json")
 
@@ -206,6 +229,8 @@ def topology_two_node_ha(ensure_cluster, mock_src_server, mock_tgt_server, mock_
             node["rpc_port"] = _BASE_PORT_TGT + offset
         elif node["id"] == "tgt-sec":
             node["rpc_port"] = _BASE_PORT_SEC + offset
+        elif node["id"] == "src-sec":
+            node["rpc_port"] = _BASE_PORT_SRC_SEC + offset
 
     ctx = load_topology(spec)
     yield ctx
@@ -323,6 +348,7 @@ def start_migration(lvol_id, target_node_id, max_retries=None, deadline_seconds=
     """
     from simplyblock_core.controllers import migration_controller
     from simplyblock_core.exceptions import MigrationConflictError, PreconditionError
+    from simplyblock_core.rpc_client import RPCException
 
     create_kwargs = {}
     if ctrl_loss_tmo is not None:
@@ -333,7 +359,7 @@ def start_migration(lvol_id, target_node_id, max_retries=None, deadline_seconds=
     try:
         migration_id, _connect_strings = migration_controller.create_migration(
             lvol_id, target_node_id, **create_kwargs)
-    except (ValueError, MigrationConflictError, PreconditionError) as e:
+    except (ValueError, MigrationConflictError, PreconditionError, RPCException) as e:
         return False, str(e)
 
     start_kwargs = {}
@@ -344,7 +370,7 @@ def start_migration(lvol_id, target_node_id, max_retries=None, deadline_seconds=
 
     try:
         migration_controller.start_migration(migration_id, **start_kwargs)
-    except ValueError as e:
+    except (ValueError, RPCException) as e:
         return False, str(e)
 
     return migration_id, None
