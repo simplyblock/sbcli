@@ -658,12 +658,17 @@ class TestDeviceReadmitOnPortAllow(_BasePortAllowTest):
             self.dev_unavail, self.dev_ioerr, self.dev_removed, self.dev_online]
 
         self.readmitted = []
-        p = patch(
+
+        def _record(dev_id, *a, **kw):
+            self.readmitted.append(dev_id)
+            return True
+
+        self._readmit_patch = patch(
             "simplyblock_core.services.tasks_runner_port_allow.device_controller.device_set_online",
-            side_effect=lambda dev_id, *a, **kw: self.readmitted.append(dev_id),
+            side_effect=_record,
         )
-        p.start()
-        self.addCleanup(p.stop)
+        self._readmit_patch.start()
+        self.addCleanup(self._readmit_patch.stop)
 
     def _run(self):
         from simplyblock_core.services.tasks_runner_port_allow import exec_port_allow_task
@@ -694,6 +699,25 @@ class TestDeviceReadmitOnPortAllow(_BasePortAllowTest):
         self.assertNotIn(
             "dev-online", self.readmitted,
             "an already-ONLINE device needs no re-admit")
+
+    def test_refused_readmit_is_logged_and_does_not_fail_task(self):
+        # device_set_state refuses ONLINE while the node is not ONLINE and
+        # returns False (it does not raise). The 2026-07-02 suspend series
+        # went unnoticed for five iterations because this refusal was silent:
+        # port_allow logged "Re-admitting …" and moved on. It must now warn
+        # loudly and still complete the task (the monitor's node-ONLINE clear
+        # owns the actual re-admit). Nested patch overrides the recording one.
+        with patch(
+            "simplyblock_core.services.tasks_runner_port_allow."
+            "device_controller.device_set_online",
+            return_value=False,
+        ):
+            with self.assertLogs(level="WARNING") as logs:
+                self._run()
+        self.assertTrue(
+            any("refused" in line for line in logs.output),
+            "a refused re-admit must be logged, never silent")
+        self.assertEqual(self.task.status, JobSchedule.STATUS_DONE)
 
 
 if __name__ == "__main__":
