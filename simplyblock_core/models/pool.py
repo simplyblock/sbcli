@@ -9,6 +9,8 @@ from simplyblock_core.models.base_model import BaseModel
 
 class Pool(BaseModel):
 
+    _WATCHED = True
+
     STATUS_ACTIVE = "active"
     STATUS_INACTIVE = "inactive"
 

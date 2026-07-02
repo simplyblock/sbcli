@@ -1,16 +1,20 @@
 from threading import Thread
-from typing import List, Optional
+from typing import List, Optional, Union
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel
+from sse_starlette import EventSourceResponse
 
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.controllers import tasks_controller
+from simplyblock_core.models.cluster import Cluster as ClusterModel
+from simplyblock_core.models.storage_node import StorageNode as StorageNodeModel
 from simplyblock_core import storage_node_ops
 
 from ... import util as util
 from ..._dependencies import Cluster, StorageNode
+from ..._watch import WATCH_RESPONSES, WatchParam, watch_response
 from .device import api as device_api
 from ..._dtos import StorageNodeDTO, TaskDTO
 
@@ -19,8 +23,22 @@ api = APIRouter()
 db = DBController()
 
 
-@api.get('/', name='clusters:storage-nodes:list')
-def list(cluster: Cluster) -> List[StorageNodeDTO]:
+def _storage_node_dto(data: dict) -> StorageNodeDTO:
+    storage_node = StorageNodeModel(data)
+    ret = db.get_node_capacity(storage_node, 1)
+    return StorageNodeDTO.from_model(storage_node, ret[0] if ret else None)
+
+
+@api.get('/', name='clusters:storage-nodes:list', response_model=List[StorageNodeDTO], responses=WATCH_RESPONSES)
+def list(cluster: Cluster, watch: WatchParam = False) -> Union[List[StorageNodeDTO], EventSourceResponse]:
+    if watch:
+        cluster_id = cluster.get_id()
+        return watch_response(
+            StorageNodeModel,
+            lambda state: {k: d for k, d in state.items() if d.get('cluster_id') == cluster_id},
+            _storage_node_dto,
+            ancestors=[(ClusterModel, cluster_id)],
+        )
     data = []
     for storage_node in db.get_storage_nodes_by_cluster_id(cluster.get_id()):
         node_stat_obj = None
@@ -103,8 +121,17 @@ def add(request: Request, cluster: Cluster, parameters: StorageNodeParams, respo
 instance_api = APIRouter(prefix='/{storage_node_id}')
 
 
-@instance_api.get('/', name='clusters:storage-nodes:detail')
-def get(cluster: Cluster, storage_node: StorageNode):
+@instance_api.get('/', name='clusters:storage-nodes:detail', response_model=StorageNodeDTO, responses=WATCH_RESPONSES)
+def get(cluster: Cluster, storage_node: StorageNode, watch: WatchParam = False) -> Union[StorageNodeDTO, EventSourceResponse]:
+    if watch:
+        node_id = storage_node.get_id()
+        return watch_response(
+            StorageNodeModel,
+            lambda state: {k: d for k, d in state.items() if d.get('uuid') == node_id},
+            _storage_node_dto,
+            single_id=node_id,
+            ancestors=[(ClusterModel, cluster.get_id())],
+        )
     node_stat_obj = None
     ret = db.get_node_capacity(storage_node, 1)
     if ret:

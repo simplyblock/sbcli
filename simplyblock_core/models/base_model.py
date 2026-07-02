@@ -9,10 +9,17 @@ from collections import ChainMap
 
 from pydantic import SecretBytes, SecretStr
 
+from simplyblock_core import watches
+
 
 class BaseModel(object):
 
     _STATUS_CODE_MAP: dict = {}
+
+    # When True, write_to_db()/remove() atomically bump watch_seq/<ClassName>
+    # in the same FDB transaction so watchers (SSE API) wake up. Plain class
+    # attribute, not an annotation: must stay out of get_attrs_map()/to_dict().
+    _WATCHED = False
 
     id: str = ""
     uuid: str = ""
@@ -239,14 +246,29 @@ class BaseModel(object):
             return objects[0]
         return None
 
+    @staticmethod
+    def _write_tx(tr, key, value, counter_key):
+        tr.set(key, value)
+        tr.add(counter_key, watches.ONE_LE64)
+
+    @staticmethod
+    def _remove_tx(tr, key, counter_key):
+        tr.clear(key)
+        tr.add(counter_key, watches.ONE_LE64)
+
     def write_to_db(self, kv_store=None):
         if not kv_store:
             from simplyblock_core.db_controller import DBController
             kv_store = DBController().kv_store
         try:
-            prefix = self.get_db_id()
-            st = json.dumps(self.to_dict(unwrap_secrets=True))
-            kv_store.set(prefix.encode(), st.encode())
+            key = self.get_db_id().encode()
+            value = json.dumps(self.to_dict(unwrap_secrets=True)).encode()
+            if self._WATCHED:
+                import fdb
+                fdb.transactional(BaseModel._write_tx)(
+                    kv_store, key, value, watches.watch_counter_key(type(self)))
+            else:
+                kv_store.set(key, value)
             return True
         except Exception:
             from simplyblock_core import utils
@@ -254,8 +276,12 @@ class BaseModel(object):
             exit(1)
 
     def remove(self, kv_store):
-        prefix = self.get_db_id()
-        return kv_store.clear(prefix.encode())
+        key = self.get_db_id().encode()
+        if not self._WATCHED:
+            return kv_store.clear(key)
+        import fdb
+        return fdb.transactional(BaseModel._remove_tx)(
+            kv_store, key, watches.watch_counter_key(type(self)))
 
     def keys(self):
         return self.get_attrs_map().keys()
