@@ -94,24 +94,32 @@ class TestRestartRestartOverlap:
         results = [None, None]
 
         def _restart_node(idx):
-            patches = patch_externals()
-            for p in patches:
-                p.start()
             try:
                 results[idx] = storage_node_ops.restart_storage_node(
                     env['nodes'][idx].uuid)
             except Exception:
                 results[idx] = False
-            finally:
-                for p in patches:
-                    p.stop()
 
-        t0 = threading.Thread(target=_restart_node, args=(0,))
-        t1 = threading.Thread(target=_restart_node, args=(1,))
-        t0.start()
-        t1.start()
-        t0.join(timeout=60)
-        t1.join(timeout=60)
+        # Start the external mocks ONCE in this thread. patch_externals patches
+        # global module attributes, so a single set covers both restart threads.
+        # Starting/stopping a separate patch_externals() inside each thread races
+        # on the same global targets: mock.patch's stop() restores the value
+        # saved at its start(), so overlapping start/stop from two threads can
+        # leave a MagicMock permanently installed (e.g. set_node_status), which
+        # then breaks every subsequent test in the process.
+        patches = patch_externals()
+        for p in patches:
+            p.start()
+        try:
+            t0 = threading.Thread(target=_restart_node, args=(0,))
+            t1 = threading.Thread(target=_restart_node, args=(1,))
+            t0.start()
+            t1.start()
+            t0.join(timeout=60)
+            t1.join(timeout=60)
+        finally:
+            for p in patches:
+                p.stop()
 
         # At most one should succeed (the FDB transaction prevents both)
         successes = sum(1 for r in results if r is True)
