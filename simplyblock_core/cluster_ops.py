@@ -26,6 +26,7 @@ from simplyblock_core.utils import port_block
 from simplyblock_core.controllers import backup_controller, cluster_events, device_controller, qos_controller, tasks_controller, tcp_ports_events
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.cluster import Cluster, HashicorpVaultSettings, DeployConfig
+from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.mgmt_node import MgmtNode
@@ -51,6 +52,33 @@ SUPPORTED_ERASURE_CODING_SCHEMES = {
     (2, 2),
     (4, 2),
 }
+
+# Default window for both get_logs() and the watch_events() live tail, so a
+# watch subscriber's initial snapshot matches the plain GET's default page.
+EVENT_LOG_TAIL = 50
+
+
+async def watch_clusters():
+    """Stream changes across all clusters."""
+    async for batch in db_controller.watch(Cluster):
+        yield batch
+
+
+async def watch_cluster(cluster_id):
+    """Stream changes for a single cluster."""
+    async for batch in db_controller.watch(Cluster, entity_id=cluster_id):
+        yield batch
+
+
+async def watch_events(cluster_id):
+    """Stream the cluster's most recent log entries (tailed to EVENT_LOG_TAIL,
+    since the event log is append-only and otherwise unbounded)."""
+    async for batch in db_controller.watch(
+            EventObj, scope=(cluster_id,), tail=EVENT_LOG_TAIL,
+            select=lambda models: sorted(models, key=lambda e: e.date),
+            ancestors=[(Cluster, (), cluster_id)]):
+        yield batch
+
 
 def _create_update_user(cluster_id, grafana_url, grafana_secret: SecretStr, user_secret: SecretStr, update_secret=False):
     session = requests.session()
@@ -2556,13 +2584,21 @@ def change_cluster_name(cluster_id, new_name) -> None:
     logger.info(f"Cluster has been renamed: {old_name} -> {new_name}")
 
 
-def get_logs(cluster_id, limit=50, **kwargs) -> builtins.list[dict]:
-    db_controller.get_cluster_by_id(cluster_id)  # ensure exists
+def get_log_events(cluster_id, limit=EVENT_LOG_TAIL) -> builtins.list[EventObj]:
+    """Cluster's most recent log entries, oldest first.
 
+    Shared by get_logs() (legacy dict shape, v1 API + CLI) and the v2 API's
+    ClusterLogEntryDTO, so both render the exact same underlying set.
+    """
+    db_controller.get_cluster_by_id(cluster_id)  # ensure exists
     events = db_controller.get_events(cluster_id, limit=limit, reverse=True)
-    out = []
     events.reverse()
-    for record in events:
+    return events
+
+
+def get_logs(cluster_id, limit=50, **kwargs) -> builtins.list[dict]:
+    out = []
+    for record in get_log_events(cluster_id, limit):
         Storage_ID = None
         if record.storage_id >= 0:
             Storage_ID = record.storage_id

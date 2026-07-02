@@ -10,6 +10,7 @@ from simplyblock_core.controllers import migration_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.utils import hexa_to_cpu_list
 from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.mgmt_node import MgmtNode
@@ -163,6 +164,44 @@ class ClusterDTO(BaseModel):
             capacity=CapacityStatDTO.from_model(
                 stat_obj if stat_obj else StatsObject()
             ),
+        )
+
+
+class ClusterLogEntryDTO(BaseModel):
+    id: UUID
+    cluster_id: UUID
+    date: datetime
+    node_id: str
+    event: str
+    level: str
+    message: str
+    storage_id: int | None
+    vuid: int | None
+    status: str
+
+    @staticmethod
+    def from_model(model: EventObj):
+        storage_id = None
+        if model.storage_id >= 0:
+            storage_id = model.storage_id
+        elif 'cluster_device_order' in model.object_dict:
+            storage_id = model.object_dict['cluster_device_order']
+
+        message = model.message
+        if model.event in ("device_status", "node_status"):
+            message = f"{message} ({model.count})"
+
+        return ClusterLogEntryDTO(
+            id=UUID(model.uuid),
+            cluster_id=UUID(model.cluster_uuid),
+            date=datetime.fromtimestamp(model.date / 1000, tz=UTC),
+            node_id=model.node_id,
+            event=model.event,
+            level=model.event_level,
+            message=message,
+            storage_id=storage_id,
+            vuid=model.vuid if model.vuid > 0 else None,
+            status=model.status,
         )
 
 

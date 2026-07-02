@@ -8,6 +8,8 @@ from simplyblock_core.models.base_model import BaseModel, default_factory
 
 class Pool(BaseModel):
 
+    _WATCHED = True
+
     STATUS_ACTIVE = "active"
     STATUS_INACTIVE = "inactive"
 
@@ -41,6 +43,9 @@ class Pool(BaseModel):
     dhchap_key: SecretStr = SecretStr("")
     dhchap_ctrlr_key: SecretStr = SecretStr("")
     allowed_hosts: list[str] = default_factory(list)
+
+    def watch_scope(self):
+        return (self.cluster_id,)
 
 
     def has_qos(self):

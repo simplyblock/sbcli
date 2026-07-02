@@ -232,3 +232,28 @@ class TestVolumeHosts:
         assert response.status_code == 204
         lvol_controller.remove_host_from_lvol.assert_called_once_with(
             VOLUME_ID, 'nqn.2014-08.org.nvmexpress:host-1')
+
+
+class TestWatchVolumes:
+
+    def test_list_dispatches_watch_volumes(self, client, volume, lvol_controller, watch_stream):
+        lvol_controller.watch_volumes.return_value = watch_stream([volume])
+
+        response = client.get(f'{BASE}/?watch=true')
+
+        assert response.status_code == 200
+        assert response.headers['content-type'].startswith('text/event-stream')
+        assert 'event: snapshot' in response.text
+        assert VOLUME_ID in response.text
+        lvol_controller.watch_volumes.assert_called_once_with(CLUSTER_ID, POOL_ID)
+
+    def test_detail_dispatches_watch_volume(self, client, volume, lvol_controller, watch_stream):
+        lvol_controller.watch_volume.return_value = watch_stream([volume])
+
+        response = client.get(f'{BASE}/{VOLUME_ID}/?watch=true')
+
+        assert response.status_code == 200
+        assert response.headers['content-type'].startswith('text/event-stream')
+        assert 'event: snapshot' in response.text
+        assert VOLUME_ID in response.text
+        lvol_controller.watch_volume.assert_called_once_with(CLUSTER_ID, POOL_ID, VOLUME_ID)
