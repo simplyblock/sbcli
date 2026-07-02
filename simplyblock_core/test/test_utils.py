@@ -118,7 +118,7 @@ def test_convert_size(size, unit, expected):
         assert utils.convert_size(size, unit) == expected
 
 
-def test_singleton():
+def test_single():
     with pytest.raises(ValueError):
         helpers.single([])
 
@@ -126,6 +126,14 @@ def test_singleton():
 
     with pytest.raises(ValueError):
         helpers.single([1, 2])
+
+
+def test_single_or_none():
+    assert helpers.single_or_none([]) is None
+    assert helpers.single_or_none([1]) == 1
+
+    with pytest.raises(ValueError):
+        helpers.single_or_none([1, 2])
 
 
 @pytest.mark.parametrize('input,expected', [
