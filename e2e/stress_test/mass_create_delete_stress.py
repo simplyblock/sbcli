@@ -1873,15 +1873,23 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
             return 0
 
     def _fire_in_batches(self, items, fire_fn, label,
-                         concurrent=20, pause=30, phase_timeout=14400):
+                         concurrent=20, pause=30, phase_timeout=14400,
+                         stop_on_capacity=False):
         """Fire items in concurrent batches (fire-and-forget).
 
         Fires *concurrent* items at a time, waits *pause* seconds
-        between batches.  Returns (fired_items, error_count).
+        between batches.
+
+        When *stop_on_capacity* is True, stops early once a full batch
+        of capacity/terminal errors is detected (the system has hit its
+        limit and further attempts are pointless).
+
+        Returns (fired_items, error_count, capacity_errors).
         """
         deadline = time.time() + phase_timeout
         fired_items = []
         errors = 0
+        capacity_errors = 0
 
         for batch_start in range(0, len(items), concurrent):
             if time.time() >= deadline:
@@ -1892,6 +1900,7 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
                 break
 
             batch = items[batch_start:batch_start + concurrent]
+            batch_capacity_errors = 0
             with ThreadPoolExecutor(max_workers=concurrent) as pool:
                 futures = {pool.submit(fire_fn, item): item for item in batch}
                 for f in as_completed(futures, timeout=120):
@@ -1901,20 +1910,37 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
                         fired_items.append(item)
                     except Exception as exc:
                         errors += 1
-                        self.logger.error(
-                            f"[{label}] Fire failed: {exc}"
-                        )
+                        if self._is_terminal_error(exc):
+                            capacity_errors += 1
+                            batch_capacity_errors += 1
+                            self.logger.warning(
+                                f"[{label}] Capacity/limit error: {exc}"
+                            )
+                        else:
+                            self.logger.error(
+                                f"[{label}] Fire failed: {exc}"
+                            )
 
             done = min(batch_start + len(batch), len(items))
             self.logger.info(
                 f"[{label}] Fired {done}/{len(items)} "
-                f"(ok={len(fired_items)}, errors={errors})"
+                f"(ok={len(fired_items)}, errors={errors}, "
+                f"capacity={capacity_errors})"
             )
+
+            # If an entire batch hit capacity errors, stop — system is full
+            if (stop_on_capacity and batch_capacity_errors > 0
+                    and batch_capacity_errors == len(batch)):
+                self.logger.info(
+                    f"[{label}] Full batch hit capacity limit — "
+                    f"stopping after {len(fired_items)} successes"
+                )
+                break
 
             if batch_start + concurrent < len(items):
                 time.sleep(pause)
 
-        return fired_items, errors
+        return fired_items, errors, capacity_errors
 
     def _bulk_wait_pvcs_bound(self, pvc_names, label="PVCs",
                                timeout=1800, poll_interval=30):
@@ -1967,6 +1993,183 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
         for elapsed, count in series:
             self.logger.info(f"  +{elapsed:>6}s: {count}")
 
+    # ── Overflow / capacity error verification ────────────────────────────
+
+    _CAPACITY_PATTERNS = [
+        "max subsystems reached",
+        "too many subsystems",
+        "pool max size has reached",
+        "pool max lvol size",
+        "no space",
+        "exceeded the max number of lvol",
+    ]
+
+    def _check_unbound_pvc_events(self, unbound_names, label, sample=10):
+        """Check K8s events + web API logs for capacity errors on unbound PVCs.
+
+        Samples up to *sample* unbound PVCs, inspects their K8s events,
+        and greps the web API log on the mgmt node for matching capacity
+        error strings.  Logs a summary indicating whether the system
+        correctly rejected provisioning beyond its limit or if there is
+        an unexpected failure.
+        """
+        if not unbound_names:
+            return
+
+        self.logger.info(
+            f"[{label}] {len(unbound_names)} PVCs stayed Pending — "
+            f"checking K8s events and web API logs for capacity errors"
+        )
+        capacity_confirmed = 0
+        unknown_failures = 0
+
+        # Check K8s events on a sample of unbound PVCs
+        for pvc_name in unbound_names[:sample]:
+            try:
+                ns = self.k8s_utils.namespace
+                events_out, _ = self.k8s_utils._exec_kubectl(
+                    f"kubectl get events -n {ns} "
+                    f"--field-selector involvedObject.name={pvc_name} "
+                    f"--sort-by=.lastTimestamp "
+                    f"--request-timeout=30s 2>/dev/null || true",
+                    supress_logs=True,
+                )
+                events_text = (events_out or "").lower()
+                is_capacity = any(
+                    pat in events_text for pat in self._CAPACITY_PATTERNS
+                )
+                if is_capacity:
+                    capacity_confirmed += 1
+                else:
+                    unknown_failures += 1
+                    self.logger.warning(
+                        f"[{label}] Unbound PVC {pvc_name} — no "
+                        f"capacity error in K8s events:\n"
+                        f"{(events_out or '(none)').strip()}"
+                    )
+            except Exception:
+                unknown_failures += 1
+
+        # Also check web API logs on mgmt node for capacity errors
+        try:
+            mgmt_ip = self.mgmt_nodes[0]
+            log_cmd = (
+                "docker logs simplyblock-webapi 2>&1 | "
+                "grep -iE 'max subsystems reached|pool max size|"
+                "too many subsystems|no space' | tail -5"
+            )
+            log_out, _ = self.ssh_obj.exec_command(
+                node=mgmt_ip, command=log_cmd, timeout=30,
+            )
+            if log_out and log_out.strip():
+                self.logger.info(
+                    f"[{label}] Web API capacity errors:\n"
+                    f"{log_out.strip()}"
+                )
+                capacity_confirmed += 1
+        except Exception as exc:
+            self.logger.debug(
+                f"[{label}] Could not check web API logs: {exc}"
+            )
+
+        sampled = min(len(unbound_names), sample)
+        self.logger.info(
+            f"[{label}] Overflow verification: sampled {sampled} "
+            f"unbound PVCs + web API logs — "
+            f"{capacity_confirmed} confirmed capacity error, "
+            f"{unknown_failures} unknown/missing"
+        )
+        if capacity_confirmed > 0:
+            self.logger.info(
+                f"[{label}] System correctly refused provisioning "
+                f"beyond capacity limit"
+            )
+        if unknown_failures > 0 and capacity_confirmed == 0:
+            self.logger.warning(
+                f"[{label}] {unknown_failures} unbound PVCs with no "
+                f"recognizable capacity error — may indicate a bug "
+                f"or timeout rather than overflow"
+            )
+
+    def _check_unready_snapshot_events(self, unready_names, label, sample=10):
+        """Check K8s events + web API logs for errors on unready snapshots."""
+        if not unready_names:
+            return
+
+        self.logger.info(
+            f"[{label}] {len(unready_names)} snapshots not readyToUse — "
+            f"checking K8s events and web API logs"
+        )
+        capacity_confirmed = 0
+        unknown_failures = 0
+
+        for vs_name in unready_names[:sample]:
+            try:
+                ns = self.k8s_utils.namespace
+                events_out, _ = self.k8s_utils._exec_kubectl(
+                    f"kubectl get events -n {ns} "
+                    f"--field-selector involvedObject.name={vs_name} "
+                    f"--sort-by=.lastTimestamp "
+                    f"--request-timeout=30s 2>/dev/null || true",
+                    supress_logs=True,
+                )
+                events_text = (events_out or "").lower()
+                is_capacity = any(
+                    pat in events_text for pat in self._CAPACITY_PATTERNS
+                )
+                if is_capacity:
+                    capacity_confirmed += 1
+                else:
+                    unknown_failures += 1
+                    self.logger.warning(
+                        f"[{label}] Unready snapshot {vs_name} — no "
+                        f"capacity error in K8s events:\n"
+                        f"{(events_out or '(none)').strip()}"
+                    )
+            except Exception:
+                unknown_failures += 1
+
+        # Check web API logs
+        try:
+            mgmt_ip = self.mgmt_nodes[0]
+            log_cmd = (
+                "docker logs simplyblock-webapi 2>&1 | "
+                "grep -iE 'max subsystems reached|pool max size|"
+                "too many subsystems|no space' | tail -5"
+            )
+            log_out, _ = self.ssh_obj.exec_command(
+                node=mgmt_ip, command=log_cmd, timeout=30,
+            )
+            if log_out and log_out.strip():
+                self.logger.info(
+                    f"[{label}] Web API capacity errors:\n"
+                    f"{log_out.strip()}"
+                )
+                capacity_confirmed += 1
+        except Exception as exc:
+            self.logger.debug(
+                f"[{label}] Could not check web API logs: {exc}"
+            )
+
+        sampled = min(len(unready_names), sample)
+        self.logger.info(
+            f"[{label}] Snapshot failure check: sampled {sampled} "
+            f"unready snapshots + web API logs — "
+            f"{capacity_confirmed} confirmed capacity error, "
+            f"{unknown_failures} unknown/missing"
+        )
+        if capacity_confirmed > 0:
+            self.logger.info(
+                f"[{label}] System correctly refused snapshot creation "
+                f"beyond capacity limit"
+            )
+        if unknown_failures > 0 and capacity_confirmed == 0:
+            self.logger.warning(
+                f"[{label}] {unknown_failures} unready snapshots with no "
+                f"recognizable capacity error — may indicate a bug "
+                f"or timeout rather than a limit"
+            )
+
     # ── Phase 1: Create PVCs ──────────────────────────────────────────────
 
     def _phase_1_create_lvols(self):
@@ -1990,7 +2193,7 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
 
         try:
             # Fire all PVCs (fire-and-forget kubectl apply, no per-PVC wait)
-            fired_items, errors = self._fire_in_batches(
+            fired_items, errors, _ = self._fire_in_batches(
                 pvc_names,
                 lambda name: self.k8s_utils.create_pvc(
                     name, self.PVC_SIZE, self.STORAGE_CLASS_NAME,
@@ -2015,6 +2218,19 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
 
         self._time_series["phase_1_pvcs"] = series
         self._log_time_series("Phase 1", series)
+
+        # Report any unbound PVCs and check for capacity errors
+        unbound = len(fired_items) - len(bound_names)
+        self.logger.info(
+            f"[Phase 1] PVC creation summary: target={total}, "
+            f"fired={len(fired_items)}, apply_errors={errors}, "
+            f"bound={len(bound_names)}, unbound={unbound}"
+        )
+        if unbound > 0:
+            self._check_unbound_pvc_events(
+                [n for n in fired_items if n not in bound_names],
+                "Phase 1",
+            )
 
         # Populate registries with only Bound PVCs
         for pvc_name in bound_names:
@@ -2202,6 +2418,11 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
                 )
             self.logger.warning(msg)
             self._soft_failures.append(msg)
+
+            # Check why unready snapshots failed — K8s events + web API
+            self._check_unready_snapshot_events(
+                list(not_ready), "Phase 3"
+            )
         else:
             self.logger.info(
                 f"[Phase 3] All {len(ready_names)} snapshots verified "
@@ -2239,7 +2460,7 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
         )
 
         try:
-            fired_items, errors = self._fire_in_batches(
+            fired_items, errors, _ = self._fire_in_batches(
                 pvc_names,
                 self._delete_single_pvc,
                 "Phase 4",
@@ -2262,18 +2483,21 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
             return
 
         snap_list = list(self._snapshot_registry.keys())
-        # Cap clones at cluster capacity: after Phase 4 deleted all PVCs,
-        # we have NUM_SUBSYSTEMS * NS_PER_SUBSYSTEM slots available.
-        max_clones = self.NUM_SUBSYSTEMS * self.NS_PER_SUBSYSTEM
+        # Create more clones than cluster capacity to verify the system
+        # handles overflow gracefully (proper errors, no corruption).
+        cluster_capacity = self.NUM_SUBSYSTEMS * self.NS_PER_SUBSYSTEM
+        overflow = max(10, cluster_capacity // 5)  # 20% extra past the limit
+        target_clones = cluster_capacity + overflow
         self.logger.info(
-            f"=== Phase 5: Create up to {max_clones} clones from "
+            f"=== Phase 5: Create {target_clones} clones from "
             f"{len(snap_list)} snapshots "
-            f"(batch={self.CREATE_CONCURRENT}, "
+            f"(capacity={cluster_capacity}, overflow={overflow}, "
+            f"batch={self.CREATE_CONCURRENT}, "
             f"pause={self.CREATE_BATCH_PAUSE}s) ==="
         )
 
         clone_items = []
-        for idx in range(max_clones):
+        for idx in range(target_clones):
             vs_name = snap_list[idx % len(snap_list)]
             clone_pvc = f"clone-pvc-{_rand_seq(5)}-{idx:06d}"
             clone_items.append({"clone_pvc": clone_pvc, "vs_name": vs_name})
@@ -2286,8 +2510,9 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
         )
 
         try:
-            # Fire all clone PVCs (fire-and-forget)
-            fired_items, errors = self._fire_in_batches(
+            # Fire clone PVCs past capacity — kubectl apply always
+            # succeeds; overflow is detected as PVCs stuck in Pending.
+            fired_items, errors, _ = self._fire_in_batches(
                 clone_items,
                 lambda params: self.k8s_utils.create_clone_pvc(
                     params["clone_pvc"], self.PVC_SIZE,
@@ -2302,8 +2527,8 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
             # Bulk wait for clone PVCs to reach Bound
             fired_names = [p["clone_pvc"] for p in fired_items]
             self.logger.info(
-                f"[Phase 5] {len(fired_names)} clone PVCs fired, "
-                f"waiting for Bound..."
+                f"[Phase 5] {len(fired_names)} clone PVCs fired "
+                f"({errors} create errors), waiting for Bound..."
             )
             bound_names = self._bulk_wait_pvcs_bound(
                 fired_names, label="Phase 5",
@@ -2314,6 +2539,24 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
 
         self._time_series["phase_5_clones"] = series
         self._log_time_series("Phase 5", series)
+
+        # Report overflow behavior — in K8s, capacity overflow shows up
+        # as PVCs stuck in Pending (kubectl apply always succeeds, the
+        # CSI driver rejects provisioning asynchronously).
+        unbound = len(fired_items) - len(bound_names)
+        self.logger.info(
+            f"[Phase 5] Clone creation summary: "
+            f"target={target_clones} (capacity={cluster_capacity} + "
+            f"overflow={overflow}), fired={len(fired_items)}, "
+            f"apply_errors={errors}, bound={len(bound_names)}, "
+            f"unbound={unbound}"
+        )
+        if unbound > 0:
+            unbound_names = [
+                p["clone_pvc"] for p in fired_items
+                if p["clone_pvc"] not in bound_names
+            ]
+            self._check_unbound_pvc_events(unbound_names, "Phase 5")
 
         # Build lookup from fired items for registry population
         name_to_snap = {
@@ -2441,7 +2684,7 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
         )
 
         try:
-            fired_items, errors = self._fire_in_batches(
+            fired_items, errors, _ = self._fire_in_batches(
                 clone_names,
                 self._delete_single_pvc,
                 "Phase 7",
