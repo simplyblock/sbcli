@@ -22,5 +22,11 @@ def _stub(name, **attrs):
 if 'fdb' not in sys.modules:
     class _FDBError(Exception):
         pass
-    _stub('fdb', open=lambda *a, **kw: None, FDBError=_FDBError)
+    # ``transactional`` mirrors the real decorator's calling convention: the
+    # wrapped function's first argument is the database/transaction. Unit
+    # tests pass a MagicMock kv_store, so running the body directly against
+    # it keeps existing ``kv_store.set(...)`` assertions working while
+    # watched-model writes land their counter ``add(...)`` on the same mock.
+    _stub('fdb', open=lambda *a, **kw: None, FDBError=_FDBError,
+          transactional=lambda f: f)
     _stub('fdb.tuple')
