@@ -538,7 +538,16 @@ def exec_port_allow_task(task):
             logger.info(
                 f"Re-admitting device {dev.get_id()} (was {dev.status}) after port "
                 f"allow on {node.get_id()}")
-            device_controller.device_set_online(dev.get_id())
+            if not device_controller.device_set_online(dev.get_id()):
+                # device_set_state refuses a device ONLINE while its node is not
+                # ONLINE (stale re-online guard), and port_allow usually runs a
+                # couple of seconds BEFORE the monitor flips the node ONLINE. Not
+                # an error path: the monitor's DOWN/UNREACHABLE -> ONLINE clear
+                # re-admits the node's devices right after the flip.
+                logger.warning(
+                    f"Re-admit of device {dev.get_id()} refused (node "
+                    f"{node.get_id()} is {node.status}, not yet ONLINE); the "
+                    f"node-online clear in storage_node_monitor will re-admit it")
     except Exception as e:
         logger.error(f"Device re-admit after port allow failed: {e}")
 
