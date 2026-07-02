@@ -1,9 +1,10 @@
 import builtins
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Union
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field, RootModel
+from sse_starlette import EventSourceResponse
 
 from simplyblock_core.db_controller import DBController
 from simplyblock_core import utils as core_utils
@@ -12,6 +13,7 @@ from simplyblock_core.models.lvol_model import LVol
 
 from ...._dependencies import Cluster, StoragePool, Volume
 from ...._dtos import BackupDTO, VolumeDTO, SnapshotDTO
+from ...._sse import WATCH_RESPONSES, WatchParam, sse_response
 from .... import util
 from .replication import (
     api as replication_api,
@@ -24,8 +26,14 @@ api = APIRouter()
 db = DBController()
 
 
-@api.get('/', name='clusters:storage-pools:volumes:list')
-def list(request: Request, cluster: Cluster, pool: StoragePool) -> builtins.list[VolumeDTO]:
+@api.get('/', name='clusters:storage-pools:volumes:list', response_model=builtins.list[VolumeDTO], responses=WATCH_RESPONSES)
+def list(request: Request, cluster: Cluster, pool: StoragePool, watch: WatchParam = False) -> Union[builtins.list[VolumeDTO], EventSourceResponse]:
+    if watch:
+        cluster_id = cluster.get_id()
+        return sse_response(
+            lvol_controller.watch_volumes(cluster_id, pool.get_id()),
+            lambda lvol: VolumeDTO.from_model(lvol, request, cluster_id, None),
+        )
     data = []
     for lvol in db.get_lvols_by_pool_id(pool.get_id()):
         stat_obj = None
@@ -140,8 +148,20 @@ def add(
 instance_api = APIRouter(prefix='/{volume_id}')
 
 
-@instance_api.get('/', name='clusters:storage-pools:volumes:detail')
-def get(request: Request, cluster: Cluster, pool: StoragePool, volume: Volume) -> VolumeDTO:
+@instance_api.get('/', name='clusters:storage-pools:volumes:detail', response_model=VolumeDTO, responses=WATCH_RESPONSES)
+def get(request: Request, cluster: Cluster, pool: StoragePool, volume: Volume, watch: WatchParam = False) -> Union[VolumeDTO, EventSourceResponse]:
+    if watch:
+        cluster_id = cluster.get_id()
+
+        def _volume_dto(lvol: LVol) -> VolumeDTO:
+            rep_info = lvol_controller.get_replication_info(lvol.get_id())
+            return VolumeDTO.from_model(lvol, request, cluster_id, None, rep_info)
+
+        return sse_response(
+            lvol_controller.watch_volume(cluster_id, pool.get_id(), volume.get_id()),
+            _volume_dto,
+            single=True,
+        )
     stat_obj = None
     rep_info = lvol_controller.get_replication_info(volume.get_id())
     return VolumeDTO.from_model(volume, request, cluster.get_id(), stat_obj, rep_info)

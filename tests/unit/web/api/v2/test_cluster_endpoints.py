@@ -2,7 +2,7 @@
 
 import pytest
 
-from tests.unit.web.api.v2._factories import CLUSTER_ID
+from tests.unit.web.api.v2._factories import CLUSTER_ID, EVENT_ID, make_event
 
 
 # max_subsys and spdk_vcpu_count are capacity decisions with real
@@ -183,12 +183,26 @@ class TestClusterStats:
         cluster_ops.get_iostats_history.assert_called_once_with(CLUSTER_ID, None, with_sizes=True)
 
     def test_logs_pass_limit(self, client, cluster, cluster_ops):
-        cluster_ops.get_logs.return_value = [{'message': 'started'}]
+        cluster_ops.get_log_events.return_value = [make_event()]
 
         response = client.get(f'/api/v2/clusters/{CLUSTER_ID}/logs', params={'limit': 10})
 
         assert response.status_code == 200
-        cluster_ops.get_logs.assert_called_once_with(CLUSTER_ID, is_json=True, limit=10)
+        (body,) = response.json()
+        assert body['id'] == EVENT_ID
+        assert body['message'] == 'started'
+        cluster_ops.get_log_events.assert_called_once_with(CLUSTER_ID, 10)
+
+    def test_logs_dispatches_watch_events(self, client, cluster, cluster_ops, watch_stream):
+        cluster_ops.watch_events.return_value = watch_stream([make_event()])
+
+        response = client.get(f'/api/v2/clusters/{CLUSTER_ID}/logs?watch=true')
+
+        assert response.status_code == 200
+        assert response.headers['content-type'].startswith('text/event-stream')
+        assert 'event: snapshot' in response.text
+        assert EVENT_ID in response.text
+        cluster_ops.watch_events.assert_called_once_with(CLUSTER_ID)
 
 
 class TestUpgradeCluster:
@@ -244,3 +258,28 @@ class TestAddReplication:
             timeout=30,
             target_pool='pool-1',
         )
+
+
+class TestWatchClusters:
+
+    def test_list_dispatches_watch_clusters(self, client, cluster, cluster_ops, watch_stream):
+        cluster_ops.watch_clusters.return_value = watch_stream([cluster])
+
+        response = client.get('/api/v2/clusters/?watch=true')
+
+        assert response.status_code == 200
+        assert response.headers['content-type'].startswith('text/event-stream')
+        assert 'event: snapshot' in response.text
+        assert CLUSTER_ID in response.text
+        cluster_ops.watch_clusters.assert_called_once_with()
+
+    def test_detail_dispatches_watch_cluster(self, client, cluster, cluster_ops, watch_stream):
+        cluster_ops.watch_cluster.return_value = watch_stream([cluster])
+
+        response = client.get(f'/api/v2/clusters/{CLUSTER_ID}/?watch=true')
+
+        assert response.status_code == 200
+        assert response.headers['content-type'].startswith('text/event-stream')
+        assert 'event: snapshot' in response.text
+        assert CLUSTER_ID in response.text
+        cluster_ops.watch_cluster.assert_called_once_with(CLUSTER_ID)

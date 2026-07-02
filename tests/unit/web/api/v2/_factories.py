@@ -9,6 +9,7 @@ from pydantic import SecretStr
 
 from simplyblock_core.models.backup import Backup, BackupPolicy
 from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_migration import LVolMigration
 from simplyblock_core.models.lvol_model import LVol
@@ -28,6 +29,7 @@ DEVICE_ID = '55555555-5555-5555-5555-555555555555'
 SNAPSHOT_ID = '66666666-6666-6666-6666-666666666666'
 TASK_ID = '77777777-7777-7777-7777-777777777777'
 MANAGEMENT_NODE_ID = '88888888-8888-8888-8888-888888888888'
+EVENT_ID = 'aeaeaeae-aeae-aeae-aeae-aeaeaeaeaeae'
 BACKUP_ID = '99999999-9999-9999-9999-999999999999'
 POLICY_ID = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
 MIGRATION_ID = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'
@@ -135,6 +137,18 @@ def make_task(**attrs) -> JobSchedule:
     task.function_name = JobSchedule.FN_NODE_RESTART
     task.status = JobSchedule.STATUS_NEW
     return _apply(task, attrs)
+
+
+def make_event(**attrs) -> EventObj:
+    event = EventObj()
+    event.uuid = EVENT_ID
+    event.cluster_uuid = CLUSTER_ID
+    event.date = 1700000000000
+    event.node_id = STORAGE_NODE_ID
+    event.event = 'status_change'
+    event.event_level = EventObj.LEVEL_INFO
+    event.message = 'started'
+    return _apply(event, attrs)
 
 
 def make_management_node(**attrs) -> MgmtNode:
