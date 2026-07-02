@@ -28,6 +28,7 @@ class CLIWrapper(CLIWrapperBase):
         self.init_storage_pool()
         self.init_snapshot()
         self.init_qos()
+        self.init_backup()
         super().__init__()
 
     def init_storage_node(self):
@@ -792,6 +793,7 @@ class CLIWrapper(CLIWrapperBase):
         self.init_snapshot__list(subparser)
         self.init_snapshot__delete(subparser)
         self.init_snapshot__clone(subparser)
+        self.init_snapshot__backup(subparser)
 
 
     def init_snapshot__add(self, subparser):
@@ -813,6 +815,11 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('snapshot_id', help='Snapshot id', type=str)
         subcommand.add_argument('lvol_name', help='Logical volume name', type=str)
         argument = subcommand.add_argument('--resize', help='New logical volume size: 10M, 10G, 10(bytes). Can only increase.', type=size_type(), default='0', dest='resize')
+
+    def init_snapshot__backup(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'backup', 'create backup task for snapshot')
+        subcommand.add_argument('snapshot_id', help='Snapshot id', type=str)
+        argument = subcommand.add_argument('--delete-after-finish', help='Delete the snapshot after backup is completed', dest='delete_after_finish', action='store_true')
 
 
     def init_qos(self):
@@ -837,6 +844,38 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'delete', 'Delete a class')
         subcommand.add_argument('name', help='QOS class name', type=str)
         subcommand.add_argument('cluster_id', help='Cluster UUID', type=str, default='')
+
+
+    def init_backup(self):
+        subparser = self.add_command('backup', 'FDB Backup operations')
+        self.init_backup__create(subparser)
+        self.init_backup__list(subparser)
+        self.init_backup__status(subparser)
+        self.init_backup__restore(subparser)
+        self.init_backup__config(subparser)
+
+
+    def init_backup__create(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'create', 'Creates an fdb backup')
+        subcommand.add_argument('cluster_id', help='Cluster ID to create db backup for', type=str)
+
+    def init_backup__list(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'list', 'Lists all fdb backups')
+
+    def init_backup__status(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'status', 'get backup status')
+
+    def init_backup__restore(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'restore', 'restore a backup')
+        subcommand.add_argument('name', help='backup class name', type=str)
+
+    def init_backup__config(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'config', 'Set backup configuration')
+        argument = subcommand.add_argument('--backup-path', help='local backup path, defaults to /etc/foundationdb/backup', type=str, dest='backup_path')
+        argument = subcommand.add_argument('--backup-frequency', help='backup frequency, can be 3h, 1d', type=str, dest='backup_frequency')
+        argument = subcommand.add_argument('--s3-bucket', help='AWS S3 bucket name', type=str, dest='bucket_name')
+        argument = subcommand.add_argument('--s3-region', help='AWS S3 region', type=str, dest='region_name')
+        argument = subcommand.add_argument('--s3-credentials', help='AWS S3 API key and secret, should be supplied like this: [API_KEY]:[API_SECRET]', type=str, dest='backup_credentials')
 
 
     def run(self):
@@ -1177,6 +1216,8 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.snapshot__delete(sub_command, args)
                 elif sub_command in ['clone']:
                     ret = self.snapshot__clone(sub_command, args)
+                elif sub_command in ['backup']:
+                    ret = self.snapshot__backup(sub_command, args)
                 else:
                     self.parser.print_help()
 
@@ -1188,6 +1229,21 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.qos__list(sub_command, args)
                 elif sub_command in ['delete']:
                     ret = self.qos__delete(sub_command, args)
+                else:
+                    self.parser.print_help()
+
+            elif args.command in ['backup']:
+                sub_command = args_dict['backup']
+                if sub_command in ['create']:
+                    ret = self.backup__create(sub_command, args)
+                elif sub_command in ['list']:
+                    ret = self.backup__list(sub_command, args)
+                elif sub_command in ['status']:
+                    ret = self.backup__status(sub_command, args)
+                elif sub_command in ['restore']:
+                    ret = self.backup__restore(sub_command, args)
+                elif sub_command in ['config']:
+                    ret = self.backup__config(sub_command, args)
                 else:
                     self.parser.print_help()
 
