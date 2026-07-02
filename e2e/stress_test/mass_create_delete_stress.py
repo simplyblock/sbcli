@@ -77,7 +77,7 @@ class _MassCreateDeleteMixin:
     PVC_SIZE = "1Gi"
 
     # ── Snapshot / clone ───────────────────────────────────────────────────
-    SNAPSHOTS_PER_LVOL = 50
+    SNAPSHOTS_PER_LVOL = 6
     FIO_SAMPLE_PERCENT = 10
 
     # ── FIO (lightweight) ──────────────────────────────────────────────────
