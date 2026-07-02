@@ -325,219 +325,9 @@ jobs:
           set +e
           NAMESPACE=simplyblock
 
-          echo "=== Phase 1: Helm uninstall ==="
-          helm uninstall spdk-csi -n $NAMESPACE 2>/dev/null || true
-
-          echo "=== Phase 2: Patch finalizers and delete CRs ==="
-          RESOURCES=(
-            "simplyblockpool.storage.simplyblock.io simplyblock-pool"
-            "simplyblockpool.storage.simplyblock.io simplyblock-pool2"
-            "simplyblocklvol.storage.simplyblock.io simplyblock-lvol"
-            "simplyblocktask.storage.simplyblock.io simplyblock-task"
-            "simplyblockdevices.storage.simplyblock.io simplyblock-devices"
-            "simplyblockdevices.storage.simplyblock.io simplyblock-device-action"
-            "simplyblockstoragenodes.storage.simplyblock.io simplyblock-node"
-            "simplyblockstoragenodes.storage.simplyblock.io simplyblock-node2"
-            "simplyblockstoragenodes.storage.simplyblock.io simplyblock-node-action"
-            "simplyblockstoragenodesets.storage.simplyblock.io simplyblock-node"
-            "simplyblockstoragenodesets.storage.simplyblock.io simplyblock-node2"
-            "simplyblockstoragenodesets.storage.simplyblock.io simplyblock-node-action"
-            "simplyblockstorageclusters.storage.simplyblock.io simplyblock-cluster"
-            "simplyblockstorageclusters.storage.simplyblock.io simplyblock-cluster2"
-            "simplyblockstorageclusters.storage.simplyblock.io simplyblock-cluster-activate"
-            "simplyblocksnapshotreplications.storage.simplyblock.io simplyblock-snap-replication"
-            "simplyblocksnapshotreplications.storage.simplyblock.io simplyblock-snap-replication-failback"
-            "pool.storage.simplyblock.io simplyblock-pool"
-            "pool.storage.simplyblock.io simplyblock-pool2"
-            "lvol.storage.simplyblock.io simplyblock-lvol"
-            "task.storage.simplyblock.io simplyblock-task"
-            "devices.storage.simplyblock.io simplyblock-devices"
-            "devices.storage.simplyblock.io simplyblock-device-action"
-            "storagenodes.storage.simplyblock.io simplyblock-node"
-            "storagenodes.storage.simplyblock.io simplyblock-node2"
-            "storagenodes.storage.simplyblock.io simplyblock-node-action"
-            "storagenodesets.storage.simplyblock.io simplyblock-node"
-            "storagenodesets.storage.simplyblock.io simplyblock-node2"
-            "storagenodesets.storage.simplyblock.io simplyblock-node-action"
-            "storageclusters.storage.simplyblock.io simplyblock-cluster"
-            "storageclusters.storage.simplyblock.io simplyblock-cluster2"
-            "storageclusters.storage.simplyblock.io simplyblock-cluster-activate"
-            "snapshotreplications.storage.simplyblock.io simplyblock-snap-replication"
-            "snapshotreplications.storage.simplyblock.io simplyblock-snap-replication-failback"
-          )
-
-          patch_and_delete_crs() {
-            echo "Removing finalizers..."
-            for item in "${RESOURCES[@]}"; do
-              KIND=$(echo "$item" | awk '{print $1}')
-              NAME=$(echo "$item" | awk '{print $2}')
-              kubectl -n $NAMESPACE patch "$KIND" "$NAME" \
-                --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
-            done
-
-            echo "Deleting resources..."
-            for item in "${RESOURCES[@]}"; do
-              KIND=$(echo "$item" | awk '{print $1}')
-              NAME=$(echo "$item" | awk '{print $2}')
-              kubectl -n $NAMESPACE delete "$KIND" "$NAME" \
-                --ignore-not-found --wait=false 2>/dev/null || true
-            done
-          }
-          patch_and_delete_crs
-
-          # Dynamic catch-all: patch finalizers and delete ALL CRs of each type
-          # (handles resources not in the hardcoded list, e.g. encryption-pool)
-          echo "Cleaning up any remaining CRs..."
-          for CR_TYPE in \
-            "simplyblockpool.storage.simplyblock.io" \
-            "simplyblocklvol.storage.simplyblock.io" \
-            "simplyblocktask.storage.simplyblock.io" \
-            "simplyblockdevices.storage.simplyblock.io" \
-            "simplyblockstoragenodes.storage.simplyblock.io" \
-            "simplyblockstoragenodesets.storage.simplyblock.io" \
-            "simplyblockstorageclusters.storage.simplyblock.io" \
-            "simplyblocksnapshotreplications.storage.simplyblock.io" \
-            "pool.storage.simplyblock.io" \
-            "lvol.storage.simplyblock.io" \
-            "task.storage.simplyblock.io" \
-            "devices.storage.simplyblock.io" \
-            "storagenodes.storage.simplyblock.io" \
-            "storagenodesets.storage.simplyblock.io" \
-            "storageclusters.storage.simplyblock.io" \
-            "snapshotreplications.storage.simplyblock.io"; do
-            for CR_NAME in $(kubectl -n $NAMESPACE get "$CR_TYPE" --no-headers -o custom-columns=:metadata.name 2>/dev/null); do
-              kubectl -n $NAMESPACE patch "$CR_TYPE" "$CR_NAME" \
-                --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
-              kubectl -n $NAMESPACE delete "$CR_TYPE" "$CR_NAME" \
-                --ignore-not-found --wait=false 2>/dev/null || true
-            done
-          done
-
-          echo "=== Phase 3a: Delete VolumeSnapshots & VolumeSnapshotContents ==="
-          for VS in $(kubectl get volumesnapshot -n $NAMESPACE --no-headers -o custom-columns=:metadata.name 2>/dev/null); do
-            kubectl -n $NAMESPACE patch volumesnapshot "$VS" \
-              --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
-            kubectl -n $NAMESPACE delete volumesnapshot "$VS" --wait=false 2>/dev/null || true
-          done
-
-          for VSC in $(kubectl get volumesnapshotcontent --no-headers -o custom-columns=:metadata.name 2>/dev/null); do
-            kubectl patch volumesnapshotcontent "$VSC" \
-              --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
-            kubectl delete volumesnapshotcontent "$VSC" --wait=false 2>/dev/null || true
-          done
-
-          for VSCLASS in $(kubectl get volumesnapshotclass --no-headers -o custom-columns=:metadata.name 2>/dev/null); do
-            kubectl delete volumesnapshotclass "$VSCLASS" --ignore-not-found 2>/dev/null || true
-          done
-
-          echo "=== Phase 3b: Delete PVCs (with timeout + retry) ==="
-          kubectl -n $NAMESPACE delete pvc --all --wait=false 2>/dev/null || true
-
-          PVC_TIMEOUT=60
-          while [ $PVC_TIMEOUT -gt 0 ]; do
-            REMAINING=$(kubectl -n $NAMESPACE get pvc --no-headers 2>/dev/null | wc -l)
-            if [ "$REMAINING" -eq 0 ]; then
-              echo "All PVCs deleted"
-              break
-            fi
-            echo "Waiting for $REMAINING PVCs to delete ($PVC_TIMEOUT s remaining)..."
-            sleep 5
-            PVC_TIMEOUT=$((PVC_TIMEOUT - 5))
-          done
-
-          STUCK_PVCS=$(kubectl -n $NAMESPACE get pvc --no-headers -o custom-columns=:metadata.name 2>/dev/null)
-          if [ -n "$STUCK_PVCS" ]; then
-            echo "Patching finalizers on stuck PVCs..."
-            echo "$STUCK_PVCS" | while read PVC; do
-              kubectl -n $NAMESPACE patch pvc "$PVC" \
-                --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null &
-            done
-            wait
-            kubectl -n $NAMESPACE delete pvc --all --force --grace-period=0 --wait=false 2>/dev/null || true
-            echo "PVC force-delete issued"
-          fi
-
-          echo "=== Phase 3c: Delete PVs ==="
-          PV_LIST=$(kubectl get pv --no-headers -o custom-columns=NAME:.metadata.name,CLAIM:.spec.claimRef.namespace 2>/dev/null \
-            | grep -v -E '\bvault\b' 2>/dev/null | awk '{print $1}')
-          if [ -n "$PV_LIST" ]; then
-            echo "Patching finalizers on $(echo "$PV_LIST" | wc -l) PVs..."
-            echo "$PV_LIST" | while read PV; do
-              kubectl patch pv "$PV" \
-                --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null &
-            done
-            wait
-            echo "$PV_LIST" | while read PV; do
-              kubectl delete pv "$PV" --force --grace-period=0 --wait=false 2>/dev/null &
-            done
-            wait
-            echo "PV force-delete issued"
-          fi
-
-          echo "=== Phase 3d: Force delete remaining namespaced resources ==="
-          for RTYPE in pod jobs service ds statefulset deployment replicaset secret sa configmap; do
-            kubectl -n $NAMESPACE delete $RTYPE --all --force --grace-period=0 2>/dev/null || true
-          done
-
-          echo "=== Phase 4: Cleanup cluster-scoped and kube-system resources ==="
-          for SC in $(kubectl get sc --no-headers -o custom-columns=:metadata.name 2>/dev/null | grep -i simplyblock 2>/dev/null); do
-            kubectl delete sc "$SC" --ignore-not-found 2>/dev/null || true
-          done
-          kubectl delete clusterrole simplyblock-storage-node-role --ignore-not-found 2>/dev/null || true
-          kubectl delete clusterrolebinding simplyblock-storage-node-binding --ignore-not-found 2>/dev/null || true
-          # Clean up simplyblock resources in kube-system (snapshot-controller, numa-plugin, etc.)
-          for RTYPE in deployment service ds sa configmap; do
-            for NAME in $(kubectl -n kube-system get $RTYPE --no-headers -o custom-columns=:metadata.name 2>/dev/null | grep -i simplyblock 2>/dev/null); do
-              kubectl -n kube-system delete $RTYPE "$NAME" --ignore-not-found 2>/dev/null || true
-            done
-          done
-          # Clean up simplyblock clusterroles and clusterrolebindings
-          for RES in clusterrole clusterrolebinding; do
-            for NAME in $(kubectl get $RES --no-headers -o custom-columns=:metadata.name 2>/dev/null | grep -i simplyblock 2>/dev/null); do
-              kubectl delete $RES "$NAME" --ignore-not-found 2>/dev/null || true
-            done
-          done
-
-          echo "=== Phase 5: Verify nothing remains ==="
-          echo "Namespaced resources:"
-          kubectl -n $NAMESPACE get all 2>/dev/null || echo "No resources found"
-          echo ""
-          echo "CRDs:"
-          for CR_TYPE in \
-            "simplyblockpool.storage.simplyblock.io" \
-            "simplyblocklvol.storage.simplyblock.io" \
-            "simplyblockstoragenodes.storage.simplyblock.io" \
-            "simplyblockstoragenodesets.storage.simplyblock.io" \
-            "simplyblockstorageclusters.storage.simplyblock.io" \
-            "pool.storage.simplyblock.io" \
-            "lvol.storage.simplyblock.io" \
-            "storagenodes.storage.simplyblock.io" \
-            "storagenodesets.storage.simplyblock.io" \
-            "storageclusters.storage.simplyblock.io"; do
-            kubectl -n $NAMESPACE get "$CR_TYPE" 2>/dev/null || true
-          done
-
-          echo "=== Phase 6: Delete namespace ==="
-          kubectl delete namespace $NAMESPACE --wait=false 2>/dev/null || true
-
-          for i in $(seq 1 36); do
-            if ! kubectl get namespace $NAMESPACE 2>/dev/null; then
-              echo "Namespace $NAMESPACE deleted"
-              break
-            fi
-
-            echo "Namespace still terminating, re-patching finalizers ($i/36)..."
-            patch_and_delete_crs
-
-            if [ "$i" -ge 6 ]; then
-              echo "Force-removing namespace finalizers..."
-              kubectl get namespace $NAMESPACE -o json 2>/dev/null | \
-                jq '.spec.finalizers = []' | \
-                kubectl replace --raw "/api/v1/namespaces/$NAMESPACE/finalize" -f - 2>/dev/null || true
-            fi
-
-            sleep 5
-          done
+          # Run the shared cleanup script (handles etcd overload with
+          # --request-timeout, bulk deletes, and parallel finalizer patching)
+          bash $GITHUB_WORKSPACE/e2e/scripts/cleanup_k8s.sh $NAMESPACE
 
           echo "=== Phase 7: Delete Released PVs from simplyblock ==="
           for pv in $(kubectl get pv --no-headers 2>/dev/null | grep 'simplyblock/' | awk '{print $1}'); do
@@ -1551,225 +1341,6 @@ jobs:
           [ "$LOG_COLLECT_TIMEOUT_MINS" -lt 30 ] && LOG_COLLECT_TIMEOUT_MINS=30
           echo "LOG_COLLECT_TIMEOUT_MINS=$LOG_COLLECT_TIMEOUT_MINS" >> $GITHUB_ENV
 
-      - name: Collect Graylog/OpenSearch logs
-        if: '!cancelled()'
-        timeout-minutes: ${{ fromJSON(env.LOG_COLLECT_TIMEOUT_MINS || '240') }}
-        run: |
-          set +e
-          echo "=== Collecting Graylog/OpenSearch logs (per-hour chunks) ==="
-          NAMESPACE=simplyblock
-
-          if [ -z "${TEST_START_TIME}" ] || [ -z "${TEST_END_TIME}" ]; then
-            echo "WARN: TEST_START_TIME or TEST_END_TIME not set, skipping"
-            exit 0
-          fi
-
-          ELAPSED=$((TEST_END_TIME - TEST_START_TIME))
-          if [ "${ELAPSED}" -le 0 ]; then
-            echo "WARN: Elapsed time is zero or negative, skipping"
-            exit 0
-          fi
-
-          WINDOW_START=$((TEST_START_TIME - 3600))
-          WINDOW_END=$((TEST_END_TIME + 3600))
-          TOTAL_SECONDS=$((WINDOW_END - WINDOW_START))
-          TOTAL_HOURS=$(( (TOTAL_SECONDS + 3599) / 3600 ))
-          echo "  Total window: ${TOTAL_HOURS} hour(s) to collect"
-
-          ADMIN_POD=""
-          for i in $(seq 1 12); do
-            ADMIN_POD=$(kubectl -n ${NAMESPACE} get pods \
-              -l app=simplyblock-admin-control \
-              -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) || true
-            if [ -n "${ADMIN_POD}" ]; then
-              PHASE=$(kubectl -n ${NAMESPACE} get pod "${ADMIN_POD}" \
-                -o jsonpath='{.status.phase}' 2>/dev/null) || true
-              [ "${PHASE}" = "Running" ] && break
-              ADMIN_POD=""
-            fi
-            sleep 10
-          done
-          if [ -z "${ADMIN_POD}" ]; then
-            echo "ERROR: No running admin pod found, skipping"
-            exit 0
-          fi
-          echo "  Admin pod: ${ADMIN_POD}"
-
-          MGMT_IP=$(kubectl get svc -n ${NAMESPACE} | grep graylog | awk '{print $3}')
-          echo "  Graylog IP: ${MGMT_IP}"
-          OPENSEARCH_IP=$(kubectl get svc opensearch-cluster-master -n ${NAMESPACE} -o jsonpath='{.spec.clusterIP}' 2>/dev/null || echo "")
-          echo "  OpenSearch IP: ${OPENSEARCH_IP}"
-
-          OUTPUT_DIR=""
-          if [ -n "${RUN_BASE_DIR:-}" ] && [ -d "${RUN_BASE_DIR}" ]; then
-            OUTPUT_DIR="${RUN_BASE_DIR}/graylog_collected"
-          else
-            NFS_BASE="${NFS_MOUNTPOINT:-/mnt/nfs_share}"
-            TIMESTAMP=$(date -u "+%Y%m%d-%H%M%S")
-            OUTPUT_DIR="${NFS_BASE}/graylog_collected-${TIMESTAMP}"
-          fi
-          mkdir -p "${OUTPUT_DIR}" 2>/dev/null || true
-          echo "  Output: ${OUTPUT_DIR}"
-
-          epoch_to_iso() {
-            local ep=$1
-            local iso
-            iso=$(date -u -d "@${ep}" "+%Y-%m-%dT%H:%M:%S" 2>/dev/null)
-            if [ -z "${iso}" ]; then
-              iso=$(python3 -c "from datetime import datetime,timezone; print(datetime.fromtimestamp(${ep},tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%S'))")
-            fi
-            echo "${iso}"
-          }
-
-          # Build chunk boundaries, then iterate in REVERSE order (newest first)
-          # so the most critical logs (end of test) are captured first.
-          _CHUNK_STARTS=()
-          _C=${WINDOW_START}
-          while [ ${_C} -lt ${WINDOW_END} ]; do
-            _CHUNK_STARTS+=(${_C})
-            _C=$((_C + 3600))
-          done
-          NUM_CHUNKS=${#_CHUNK_STARTS[@]}
-
-          # Helper: run collect_logs.py with optional extra flags
-          run_collect() {
-            local iso=$1 mins=$2 outdir=$3 extra_flag=${4:-}
-            local mgmt_ip_to_use="${MGMT_IP}"
-            if [[ "${extra_flag}" == *"--use-opensearch"* ]] && [ -n "${OPENSEARCH_IP}" ]; then
-              mgmt_ip_to_use="${OPENSEARCH_IP}"
-            fi
-            kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- \
-              python3 /usr/local/lib/python3.12/site-packages/simplyblock_core/scripts/collect_logs.py \
-                "${iso}" "${mins}" \
-                --mode kubernetes \
-                --namespace "${NAMESPACE}" \
-                --monitoring-secret "${MON_SECRET}" \
-                --output-dir "${outdir}" \
-                ${extra_flag} \
-                ${mgmt_ip_to_use:+--mgmt-ip "${mgmt_ip_to_use}"} \
-                ${CLUSTER_ID:+--cluster-id "${CLUSTER_ID}"} \
-            2>&1
-            local rc=$?
-            [ $rc -ne 0 ] && return $rc
-            local has_content
-            has_content=$(kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- \
-              find "${outdir}" -name "*.log" -size +0 2>/dev/null | head -1)
-            if [ -z "${has_content}" ]; then
-              echo "  WARN: collect_logs.py succeeded but all .log files are 0 bytes"
-              return 1
-            fi
-          }
-
-          # Adaptive collection: try full window, on failure split into
-          # 5-min sub-windows, then 1-min if those also fail.
-          collect_adaptive() {
-            local start_epoch=$1 end_epoch=$2 outdir=$3 extra_flag=${4:-}
-            local duration=$((end_epoch - start_epoch))
-            local mins=$(( (duration + 59) / 60 ))
-            local iso=$(epoch_to_iso ${start_epoch})
-            if run_collect "${iso}" "${mins}" "${outdir}" "${extra_flag}"; then
-              return 0
-            fi
-            echo "  WARN: ${mins}m window failed, retrying with 5-min sub-windows..."
-            local sub_start=${start_epoch}
-            while [ ${sub_start} -lt ${end_epoch} ]; do
-              local sub_end=$((sub_start + 300))
-              [ ${sub_end} -gt ${end_epoch} ] && sub_end=${end_epoch}
-              local sub_mins=$(( ((sub_end - sub_start) + 59) / 60 ))
-              local sub_iso=$(epoch_to_iso ${sub_start})
-              if ! run_collect "${sub_iso}" "${sub_mins}" "${outdir}" "${extra_flag}"; then
-                echo "  WARN: 5-min window at ${sub_iso} failed, retrying with 1-min windows..."
-                local micro_start=${sub_start}
-                while [ ${micro_start} -lt ${sub_end} ]; do
-                  local micro_end=$((micro_start + 60))
-                  [ ${micro_end} -gt ${sub_end} ] && micro_end=${sub_end}
-                  local micro_mins=$(( ((micro_end - micro_start) + 59) / 60 ))
-                  local micro_iso=$(epoch_to_iso ${micro_start})
-                  run_collect "${micro_iso}" "${micro_mins}" "${outdir}" "${extra_flag}" || \
-                    echo "  WARN: 1-min window at ${micro_iso} also failed"
-                  micro_start=${micro_end}
-                done
-              fi
-              sub_start=${sub_end}
-            done
-          }
-
-          # Auto-detect preferred log backend on the first (newest) chunk:
-          # try OpenSearch; if it works use it for all chunks, else use Graylog.
-          PREFER_OPENSEARCH=""
-          CHUNK=0
-
-          for (( _IDX=NUM_CHUNKS-1; _IDX>=0; _IDX-- )); do
-            CHUNK=$((CHUNK + 1))
-            CHUNK_START=${_CHUNK_STARTS[$_IDX]}
-            CHUNK_END=$((CHUNK_START + 3600))
-            if [ ${CHUNK_END} -gt ${WINDOW_END} ]; then
-              CHUNK_END=${WINDOW_END}
-            fi
-            CHUNK_MINUTES=$(( ((CHUNK_END - CHUNK_START) + 59) / 60 ))
-            CHUNK_ISO=$(epoch_to_iso ${CHUNK_START})
-
-            echo ""
-            echo "--- Chunk ${CHUNK}/${NUM_CHUNKS}: ${CHUNK_ISO} for ${CHUNK_MINUTES}m (newest-first) ---"
-
-            POD_OUTPUT_DIR="/tmp/graylog_collect_chunk${CHUNK}"
-            kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- mkdir -p "${POD_OUTPUT_DIR}" 2>/dev/null || true
-
-            if [ -z "${PREFER_OPENSEARCH}" ]; then
-              # First chunk: probe OpenSearch availability
-              echo "  Probing OpenSearch availability..."
-              if run_collect "${CHUNK_ISO}" "${CHUNK_MINUTES}" "${POD_OUTPUT_DIR}" "--use-opensearch"; then
-                PREFER_OPENSEARCH=true
-                echo "  OpenSearch works — using it for all chunks"
-              else
-                PREFER_OPENSEARCH=false
-                echo "  OpenSearch unavailable — using Graylog for all chunks"
-                kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- rm -rf "${POD_OUTPUT_DIR}" 2>/dev/null || true
-                kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- mkdir -p "${POD_OUTPUT_DIR}" 2>/dev/null || true
-                collect_adaptive ${CHUNK_START} ${CHUNK_END} "${POD_OUTPUT_DIR}" || \
-                  echo "WARN: Graylog also failed for chunk ${CHUNK}"
-              fi
-            elif [ "${PREFER_OPENSEARCH}" = "true" ]; then
-              collect_adaptive ${CHUNK_START} ${CHUNK_END} "${POD_OUTPUT_DIR}" "--use-opensearch" || {
-                echo "WARN: OpenSearch failed for chunk ${CHUNK}, falling back to Graylog..."
-                collect_adaptive ${CHUNK_START} ${CHUNK_END} "${POD_OUTPUT_DIR}" || \
-                  echo "WARN: Graylog fallback also failed for chunk ${CHUNK}"
-              }
-            else
-              collect_adaptive ${CHUNK_START} ${CHUNK_END} "${POD_OUTPUT_DIR}" || {
-                echo "WARN: Graylog failed for chunk ${CHUNK}, falling back to OpenSearch..."
-                collect_adaptive ${CHUNK_START} ${CHUNK_END} "${POD_OUTPUT_DIR}" "--use-opensearch" || \
-                  echo "WARN: OpenSearch fallback also failed for chunk ${CHUNK}"
-              }
-            fi
-
-            # Copy tarballs from pod to NFS for this chunk
-            TARBALLS=$(kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- \
-              find "${POD_OUTPUT_DIR}" -name "*.tar.gz" -type f 2>/dev/null) || true
-            if [ -n "${TARBALLS}" ]; then
-              for TB in ${TARBALLS}; do
-                TB_NAME=$(basename "${TB}")
-                echo "  Copying ${TB_NAME}..."
-                kubectl -n ${NAMESPACE} cp "${ADMIN_POD}:${TB}" "${OUTPUT_DIR}/${TB_NAME}" 2>&1 || true
-              done
-              for TB_FILE in "${OUTPUT_DIR}"/*.tar.gz; do
-                [ -f "${TB_FILE}" ] && tar -xzf "${TB_FILE}" -C "${OUTPUT_DIR}/" 2>/dev/null || true
-              done
-            else
-              echo "WARN: No tarballs found for chunk ${CHUNK}"
-            fi
-
-            # Cleanup this chunk in pod
-            kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- rm -rf "${POD_OUTPUT_DIR}" 2>/dev/null || true
-          done
-
-          echo ""
-          echo "=== Log collection complete (${CHUNK} chunks, newest-first): ${OUTPUT_DIR} ==="
-          ls -la "${OUTPUT_DIR}/" 2>/dev/null || true
-        env:
-          CLUSTER_ID: ${{ env.CLUSTER_ID }}
-          MON_SECRET: ${{ secrets.MON_SECRET }}
-
       - name: Write Job Summary
         if: always()
         shell: bash
@@ -1883,6 +1454,8 @@ jobs:
               echo '```'
               echo "</details>"
             fi
+            echo ""
+            echo "> **Note:** Graylog/OpenSearch logs are currently being collected and will be available in the NFS log directory shortly."
           } >> "$GITHUB_STEP_SUMMARY"
         env:
           TESTNAME: ${{ env.TESTNAME }}
@@ -1963,6 +1536,7 @@ jobs:
               "",
               f":link: *Run:* <{run_url}|View on GitHub>",
               f":file_folder: *Final Logs:* `{log_dir}`",
+              f":hourglass_flowing_sand: _Logs are being collected and will be available shortly._",
           ]
           payload = {"text": "\n".join(lines)}
           req = urllib.request.Request(
@@ -1977,6 +1551,225 @@ jobs:
               print(f"WARN: Slack notification failed: {exc}", file=sys.stderr)
           PYEOF
 
+
+      - name: Collect Graylog/OpenSearch logs
+        if: '!cancelled()'
+        timeout-minutes: ${{ fromJSON(env.LOG_COLLECT_TIMEOUT_MINS || '480') }}
+        run: |
+          set +e
+          echo "=== Collecting Graylog/OpenSearch logs (per-hour chunks) ==="
+          NAMESPACE=simplyblock
+
+          if [ -z "${TEST_START_TIME}" ] || [ -z "${TEST_END_TIME}" ]; then
+            echo "WARN: TEST_START_TIME or TEST_END_TIME not set, skipping"
+            exit 0
+          fi
+
+          ELAPSED=$((TEST_END_TIME - TEST_START_TIME))
+          if [ "${ELAPSED}" -le 0 ]; then
+            echo "WARN: Elapsed time is zero or negative, skipping"
+            exit 0
+          fi
+
+          WINDOW_START=$((TEST_START_TIME - 3600))
+          WINDOW_END=$((TEST_END_TIME + 3600))
+          TOTAL_SECONDS=$((WINDOW_END - WINDOW_START))
+          TOTAL_HOURS=$(( (TOTAL_SECONDS + 3599) / 3600 ))
+          echo "  Total window: ${TOTAL_HOURS} hour(s) to collect"
+
+          ADMIN_POD=""
+          for i in $(seq 1 12); do
+            ADMIN_POD=$(kubectl -n ${NAMESPACE} get pods \
+              -l app=simplyblock-admin-control \
+              -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) || true
+            if [ -n "${ADMIN_POD}" ]; then
+              PHASE=$(kubectl -n ${NAMESPACE} get pod "${ADMIN_POD}" \
+                -o jsonpath='{.status.phase}' 2>/dev/null) || true
+              [ "${PHASE}" = "Running" ] && break
+              ADMIN_POD=""
+            fi
+            sleep 10
+          done
+          if [ -z "${ADMIN_POD}" ]; then
+            echo "ERROR: No running admin pod found, skipping"
+            exit 0
+          fi
+          echo "  Admin pod: ${ADMIN_POD}"
+
+          MGMT_IP=$(kubectl get svc -n ${NAMESPACE} | grep graylog | awk '{print $3}')
+          echo "  Graylog IP: ${MGMT_IP}"
+          OPENSEARCH_IP=$(kubectl get svc opensearch-cluster-master -n ${NAMESPACE} -o jsonpath='{.spec.clusterIP}' 2>/dev/null || echo "")
+          echo "  OpenSearch IP: ${OPENSEARCH_IP}"
+
+          OUTPUT_DIR=""
+          if [ -n "${RUN_BASE_DIR:-}" ] && [ -d "${RUN_BASE_DIR}" ]; then
+            OUTPUT_DIR="${RUN_BASE_DIR}/graylog_collected"
+          else
+            NFS_BASE="${NFS_MOUNTPOINT:-/mnt/nfs_share}"
+            TIMESTAMP=$(date -u "+%Y%m%d-%H%M%S")
+            OUTPUT_DIR="${NFS_BASE}/graylog_collected-${TIMESTAMP}"
+          fi
+          mkdir -p "${OUTPUT_DIR}" 2>/dev/null || true
+          echo "  Output: ${OUTPUT_DIR}"
+
+          epoch_to_iso() {
+            local ep=$1
+            local iso
+            iso=$(date -u -d "@${ep}" "+%Y-%m-%dT%H:%M:%S" 2>/dev/null)
+            if [ -z "${iso}" ]; then
+              iso=$(python3 -c "from datetime import datetime,timezone; print(datetime.fromtimestamp(${ep},tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%S'))")
+            fi
+            echo "${iso}"
+          }
+
+          # Build chunk boundaries, then iterate in REVERSE order (newest first)
+          # so the most critical logs (end of test) are captured first.
+          _CHUNK_STARTS=()
+          _C=${WINDOW_START}
+          while [ ${_C} -lt ${WINDOW_END} ]; do
+            _CHUNK_STARTS+=(${_C})
+            _C=$((_C + 3600))
+          done
+          NUM_CHUNKS=${#_CHUNK_STARTS[@]}
+
+          # Helper: run collect_logs.py with optional extra flags
+          run_collect() {
+            local iso=$1 mins=$2 outdir=$3 extra_flag=${4:-}
+            local mgmt_ip_to_use="${MGMT_IP}"
+            if [[ "${extra_flag}" == *"--use-opensearch"* ]] && [ -n "${OPENSEARCH_IP}" ]; then
+              mgmt_ip_to_use="${OPENSEARCH_IP}"
+            fi
+            kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- \
+              python3 /usr/local/lib/python3.12/site-packages/simplyblock_core/scripts/collect_logs.py \
+                "${iso}" "${mins}" \
+                --mode kubernetes \
+                --namespace "${NAMESPACE}" \
+                --monitoring-secret "${MON_SECRET}" \
+                --output-dir "${outdir}" \
+                ${extra_flag} \
+                ${mgmt_ip_to_use:+--mgmt-ip "${mgmt_ip_to_use}"} \
+                ${CLUSTER_ID:+--cluster-id "${CLUSTER_ID}"} \
+            2>&1
+            local rc=$?
+            [ $rc -ne 0 ] && return $rc
+            local has_content
+            has_content=$(kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- \
+              find "${outdir}" -name "*.tar.gz" -size +0 2>/dev/null | head -1)
+            if [ -z "${has_content}" ]; then
+              echo "  WARN: collect_logs.py succeeded but no .tar.gz output found"
+              return 1
+            fi
+          }
+
+          # Adaptive collection: try full window, on failure split into
+          # 5-min sub-windows, then 1-min if those also fail.
+          collect_adaptive() {
+            local start_epoch=$1 end_epoch=$2 outdir=$3 extra_flag=${4:-}
+            local duration=$((end_epoch - start_epoch))
+            local mins=$(( (duration + 59) / 60 ))
+            local iso=$(epoch_to_iso ${start_epoch})
+            if run_collect "${iso}" "${mins}" "${outdir}" "${extra_flag}"; then
+              return 0
+            fi
+            echo "  WARN: ${mins}m window failed, retrying with 5-min sub-windows..."
+            local sub_start=${start_epoch}
+            while [ ${sub_start} -lt ${end_epoch} ]; do
+              local sub_end=$((sub_start + 300))
+              [ ${sub_end} -gt ${end_epoch} ] && sub_end=${end_epoch}
+              local sub_mins=$(( ((sub_end - sub_start) + 59) / 60 ))
+              local sub_iso=$(epoch_to_iso ${sub_start})
+              if ! run_collect "${sub_iso}" "${sub_mins}" "${outdir}" "${extra_flag}"; then
+                echo "  WARN: 5-min window at ${sub_iso} failed, retrying with 1-min windows..."
+                local micro_start=${sub_start}
+                while [ ${micro_start} -lt ${sub_end} ]; do
+                  local micro_end=$((micro_start + 60))
+                  [ ${micro_end} -gt ${sub_end} ] && micro_end=${sub_end}
+                  local micro_mins=$(( ((micro_end - micro_start) + 59) / 60 ))
+                  local micro_iso=$(epoch_to_iso ${micro_start})
+                  run_collect "${micro_iso}" "${micro_mins}" "${outdir}" "${extra_flag}" || \
+                    echo "  WARN: 1-min window at ${micro_iso} also failed"
+                  micro_start=${micro_end}
+                done
+              fi
+              sub_start=${sub_end}
+            done
+          }
+
+          # Auto-detect preferred log backend on the first (newest) chunk:
+          # try OpenSearch; if it works use it for all chunks, else use Graylog.
+          PREFER_OPENSEARCH=""
+          CHUNK=0
+
+          for (( _IDX=NUM_CHUNKS-1; _IDX>=0; _IDX-- )); do
+            CHUNK=$((CHUNK + 1))
+            CHUNK_START=${_CHUNK_STARTS[$_IDX]}
+            CHUNK_END=$((CHUNK_START + 3600))
+            if [ ${CHUNK_END} -gt ${WINDOW_END} ]; then
+              CHUNK_END=${WINDOW_END}
+            fi
+            CHUNK_MINUTES=$(( ((CHUNK_END - CHUNK_START) + 59) / 60 ))
+            CHUNK_ISO=$(epoch_to_iso ${CHUNK_START})
+
+            echo ""
+            echo "--- Chunk ${CHUNK}/${NUM_CHUNKS}: ${CHUNK_ISO} for ${CHUNK_MINUTES}m (newest-first) ---"
+
+            POD_OUTPUT_DIR="/tmp/graylog_collect_chunk${CHUNK}"
+            kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- mkdir -p "${POD_OUTPUT_DIR}" 2>/dev/null || true
+
+            if [ -z "${PREFER_OPENSEARCH}" ]; then
+              # First chunk: probe OpenSearch availability
+              echo "  Probing OpenSearch availability..."
+              if run_collect "${CHUNK_ISO}" "${CHUNK_MINUTES}" "${POD_OUTPUT_DIR}" "--use-opensearch"; then
+                PREFER_OPENSEARCH=true
+                echo "  OpenSearch works — using it for all chunks"
+              else
+                PREFER_OPENSEARCH=false
+                echo "  OpenSearch unavailable — using Graylog for all chunks"
+                kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- rm -rf "${POD_OUTPUT_DIR}" 2>/dev/null || true
+                kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- mkdir -p "${POD_OUTPUT_DIR}" 2>/dev/null || true
+                collect_adaptive ${CHUNK_START} ${CHUNK_END} "${POD_OUTPUT_DIR}" || \
+                  echo "WARN: Graylog also failed for chunk ${CHUNK}"
+              fi
+            elif [ "${PREFER_OPENSEARCH}" = "true" ]; then
+              collect_adaptive ${CHUNK_START} ${CHUNK_END} "${POD_OUTPUT_DIR}" "--use-opensearch" || {
+                echo "WARN: OpenSearch failed for chunk ${CHUNK}, falling back to Graylog..."
+                collect_adaptive ${CHUNK_START} ${CHUNK_END} "${POD_OUTPUT_DIR}" || \
+                  echo "WARN: Graylog fallback also failed for chunk ${CHUNK}"
+              }
+            else
+              collect_adaptive ${CHUNK_START} ${CHUNK_END} "${POD_OUTPUT_DIR}" || {
+                echo "WARN: Graylog failed for chunk ${CHUNK}, falling back to OpenSearch..."
+                collect_adaptive ${CHUNK_START} ${CHUNK_END} "${POD_OUTPUT_DIR}" "--use-opensearch" || \
+                  echo "WARN: OpenSearch fallback also failed for chunk ${CHUNK}"
+              }
+            fi
+
+            # Copy tarballs from pod to NFS for this chunk
+            TARBALLS=$(kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- \
+              find "${POD_OUTPUT_DIR}" -name "*.tar.gz" -type f 2>/dev/null) || true
+            if [ -n "${TARBALLS}" ]; then
+              for TB in ${TARBALLS}; do
+                TB_NAME=$(basename "${TB}")
+                echo "  Copying ${TB_NAME}..."
+                kubectl -n ${NAMESPACE} cp "${ADMIN_POD}:${TB}" "${OUTPUT_DIR}/${TB_NAME}" 2>&1 || true
+              done
+              for TB_FILE in "${OUTPUT_DIR}"/*.tar.gz; do
+                [ -f "${TB_FILE}" ] && tar -xzf "${TB_FILE}" -C "${OUTPUT_DIR}/" 2>/dev/null || true
+              done
+            else
+              echo "WARN: No tarballs found for chunk ${CHUNK}"
+            fi
+
+            # Cleanup this chunk in pod
+            kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- rm -rf "${POD_OUTPUT_DIR}" 2>/dev/null || true
+          done
+
+          echo ""
+          echo "=== Log collection complete (${CHUNK} chunks, newest-first): ${OUTPUT_DIR} ==="
+          ls -la "${OUTPUT_DIR}/" 2>/dev/null || true
+        env:
+          CLUSTER_ID: ${{ env.CLUSTER_ID }}
+          MON_SECRET: ${{ secrets.MON_SECRET }}
       - name: Cleanup MinIO namespace (if deployed)
         if: always()
         run: kubectl delete namespace minio --wait=false 2>/dev/null || true

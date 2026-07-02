@@ -171,7 +171,6 @@ class K8sNativeFailoverTest(TestClusterBase):
                 self.mgmt_nodes, self.storage_nodes = self.sbcli_utils.get_all_nodes_ip()
                 self.sbcli_utils.list_lvols()
                 self.sbcli_utils.list_storage_pools()
-                self._validate_storage_node_health()
                 break
             except Exception as e:
                 self.logger.debug(f"API call failed with error: {e}")
@@ -181,6 +180,8 @@ class K8sNativeFailoverTest(TestClusterBase):
                     raise e
                 self.logger.info(f"Retrying Base APIs before starting tests. Attempt: {30 - retry + 1}")
                 sleep_n_sec(10)
+
+        self._validate_storage_node_health()
 
         # 2. No client machines needed — FIO runs as K8s Jobs
         self.client_machines = []
@@ -1159,7 +1160,10 @@ class K8sNativeFailoverTest(TestClusterBase):
             sleep_n_sec(10)
 
     def _disconnect_lvol_on_client(self, lvol_name: str, client: str):
-        """NVMe-disconnect *lvol_name* on *client*."""
+        """NVMe-disconnect *lvol_name* on *client*.
+
+        Skips disconnect if other namespaces share the subsystem.
+        """
         try:
             lvol_id = self.sbcli_utils.get_lvol_id(lvol_name)
             if lvol_id:
@@ -1167,7 +1171,7 @@ class K8sNativeFailoverTest(TestClusterBase):
                 if details:
                     nqn = details[0].get("nqn", "")
                     if nqn:
-                        self.ssh_obj.disconnect_nvme(node=client, nqn_grep=nqn)
+                        self.ssh_obj.safe_disconnect_nvme(node=client, nqn=nqn)
                         return
         except Exception as exc:
             self.logger.warning(

@@ -15,6 +15,27 @@ from utils.common_utils import sleep_n_sec
 # Volume security types cycled in equal thirds
 _SEC_TYPES = ["plain", "crypto", "dhchap"]
 
+# Outage types that affect the entire physical host (not just the target node).
+# In 2-nodes-per-host deployments, these make the host unreachable or reboot it,
+# so sibling nodes on the same host cannot have independent outages triggered.
+HOST_LEVEL_OUTAGES = {
+    "storage_node_reboot",
+    "interface_full_network_interrupt",
+    "interface_partial_network_interrupt",
+}
+
+# Outage types that only affect the targeted storage node process/container.
+# Sibling nodes on the same host remain fully operational and reachable.
+NODE_LEVEL_OUTAGES = {
+    "container_stop",
+    "graceful_shutdown",
+    "forced_shutdown",
+}
+
+# Host-level outages that make mgmt_ip completely unreachable (all NICs down
+# or host rebooted).  Siblings on the same host must be skipped entirely.
+_HOST_UNREACHABLE_OUTAGES = {"storage_node_reboot", "interface_full_network_interrupt"}
+
 
 class RandomMultiClientMultiFailoverAllNodesTest(RandomMultiClientMultiFailoverTest):
     """
@@ -145,22 +166,95 @@ class RandomMultiClientMultiFailoverAllNodesTest(RandomMultiClientMultiFailoverT
             types_rest = self.outage_types2
 
         # ── Phase 1: pick types + collect node details for ALL nodes ─────────
-        node_plans = []  # (node, outage_type, node_ip, node_rpc_port)
-        outage_num = 0
+        # First pass: collect node details and group by physical host (mgmt_ip)
+        host_to_nodes = {}   # mgmt_ip → [node_uuid, ...]
+        node_info = {}       # node_uuid → (mgmt_ip, rpc_port)
         for node in outage_nodes:
-            if outage_num == 0:
-                outage_type = random.choice(types_first)
-                outage_num = 1
-            else:
-                outage_type = random.choice(types_rest)
-
             node_details = self.sbcli_utils.get_storage_node_details(node)
             node_ip = node_details[0]["mgmt_ip"]
             node_rpc_port = node_details[0]["rpc_port"]
+            node_info[node] = (node_ip, node_rpc_port)
+            host_to_nodes.setdefault(node_ip, []).append(node)
+
+        co_located = {ip: nodes for ip, nodes in host_to_nodes.items() if len(nodes) > 1}
+        if co_located:
+            self.logger.info(f"Co-located outage nodes by host: {co_located}")
+
+        # Second pass: assign outage types with host-topology constraints.
+        # When two nodes share a host (same mgmt_ip), host-level outages
+        # (reboot, full/partial NIC down) make the host unreachable for the
+        # sibling's outage commands (all use SSH/API to mgmt_ip).
+        host_has_host_level_outage = {}  # mgmt_ip → outage_type
+        skip_nodes = set()               # siblings that cannot be outaged
+
+        node_plans = []  # (node, outage_type, node_ip, node_rpc_port)
+        outage_num = 0
+        for node in outage_nodes:
+            node_ip, node_rpc_port = node_info[node]
+
+            if node in skip_nodes:
+                self.logger.info(
+                    f"Skipping outage on {node} — host {node_ip} is unreachable "
+                    f"(sibling has {host_has_host_level_outage.get(node_ip, '?')})"
+                )
+                continue
+
+            siblings_on_host = host_to_nodes[node_ip]
+
+            # Pick outage type pool
+            if use_multipath_outage:
+                type_pool = list(self.multipath_outage_types)
+            elif outage_num == 0:
+                type_pool = list(types_first)
+            else:
+                type_pool = list(types_rest)
+
+            # If a sibling on this host already got a host-level outage,
+            # decide whether to skip or restrict this node
+            if len(siblings_on_host) > 1 and node_ip in host_has_host_level_outage:
+                prev_outage = host_has_host_level_outage[node_ip]
+                if prev_outage in _HOST_UNREACHABLE_OUTAGES:
+                    # Host unreachable (rebooted or all NICs down)
+                    skip_nodes.add(node)
+                    self.logger.info(
+                        f"Skipping outage on {node} — host {node_ip} is unreachable "
+                        f"(sibling has {prev_outage})"
+                    )
+                    continue
+                # Partial network outage — mgmt_ip still reachable, restrict to node-level
+                type_pool = [t for t in type_pool if t in NODE_LEVEL_OUTAGES]
+                if not type_pool:
+                    type_pool = ["graceful_shutdown"]
+                self.logger.info(
+                    f"Node {node} shares host {node_ip} with partial network outage; "
+                    f"restricting to node-level types: {type_pool}"
+                )
+
+            outage_type = random.choice(type_pool)
+            outage_num += 1
+
+            # Record if this is a host-level outage on a shared host
+            if outage_type in HOST_LEVEL_OUTAGES and len(siblings_on_host) > 1:
+                host_has_host_level_outage[node_ip] = outage_type
+                if outage_type in _HOST_UNREACHABLE_OUTAGES:
+                    # Mark all remaining siblings for skip
+                    for sib in siblings_on_host:
+                        if sib != node and sib not in {p[0] for p in node_plans}:
+                            skip_nodes.add(sib)
+                            self.logger.info(
+                                f"Will skip sibling {sib} — host {node_ip} will be "
+                                f"unreachable ({outage_type} on {node})"
+                            )
 
             node_plans.append((node, outage_type, node_ip, node_rpc_port))
 
+        if skip_nodes:
+            self.logger.info(f"Skipped nodes (host unreachable): {skip_nodes}")
+
         # ── Phase 2: trigger all outages simultaneously via threads ────────────
+        # When co-located nodes have a mix of host-level and node-level outages,
+        # start node-level outages first so their API/SSH calls complete before
+        # the host-level outage makes mgmt_ip unreachable.
         outage_results = {}  # node → (effective_type, outage_dur)
 
         def _trigger(node, outage_type, node_ip, node_rpc_port):
@@ -184,19 +278,51 @@ class RandomMultiClientMultiFailoverAllNodesTest(RandomMultiClientMultiFailoverT
             self.log_outage_event(node, effective_type, "Outage started")
             outage_results[node] = (effective_type, node_outage_dur)
 
-        threads = [
-            threading.Thread(target=_trigger, args=(node, otype, nip, nrpc))
-            for node, otype, nip, nrpc in node_plans
+        # Separate co-located node-level outages (must fire first) from
+        # host-level outages (fire after a small delay) and independent plans.
+        node_level_plans = []
+        host_level_plans = []
+        independent_plans = []
+        for plan in node_plans:
+            node, otype, nip, nrpc = plan
+            if len(host_to_nodes[nip]) > 1 and otype in HOST_LEVEL_OUTAGES:
+                host_level_plans.append(plan)
+            elif len(host_to_nodes[nip]) > 1 and otype in NODE_LEVEL_OUTAGES:
+                node_level_plans.append(plan)
+            else:
+                independent_plans.append(plan)
+
+        # Start node-level co-located outages first
+        threads_early = [
+            threading.Thread(target=_trigger, args=(n, o, ip, rpc))
+            for n, o, ip, rpc in node_level_plans
         ]
-        for t in threads:
+        threads_rest = [
+            threading.Thread(target=_trigger, args=(n, o, ip, rpc))
+            for n, o, ip, rpc in host_level_plans + independent_plans
+        ]
+
+        for t in threads_early:
             t.start()
-        for t in threads:
+        if threads_early and threads_rest:
+            # Let node-level API calls complete before host-level NICs go down
+            time.sleep(3)
+        for t in threads_rest:
+            t.start()
+        for t in threads_early + threads_rest:
             t.join()
 
         outage_combinations = []
         for node, _, _, _ in node_plans:
             effective_type, node_outage_dur = outage_results[node]
             outage_combinations.append((node, effective_type, node_outage_dur))
+            self.current_outage_nodes.append(node)
+
+        # Also track skipped nodes — they are affected by the host-level
+        # outage and will come back when the host recovers.
+        for node in skip_nodes:
+            host_outage = host_has_host_level_outage.get(node_info[node][0], "host_level_outage")
+            outage_combinations.append((node, f"skipped_{host_outage}", 0))
             self.current_outage_nodes.append(node)
 
         self.outage_start_time = int(datetime.now().timestamp())
@@ -249,12 +375,14 @@ class RandomMultiClientMultiFailoverAllNodesTest(RandomMultiClientMultiFailoverT
             f"(crypto={is_crypto}, dhchap={is_dhchap}, pool={pool}, "
             f"client={client_node})")
 
-        # Create lvol
+        # Create lvol — use max_namespace_per_subsys=100 so clones stay
+        # on the parent's subsystem instead of spilling to another lvol's.
         try:
             if is_dhchap:
                 _, err = self.ssh_obj.create_sec_lvol(
                     self.mgmt_nodes[0], lvol_name, self.lvol_size, pool,
                     encrypt=True,
+                    max_namespace_per_subsys=100,
                 )
                 if err and "error" in err.lower():
                     self.logger.warning(f"CLI lvol creation error for {lvol_name}: {err}")
@@ -266,6 +394,7 @@ class RandomMultiClientMultiFailoverAllNodesTest(RandomMultiClientMultiFailoverT
                     size=self.lvol_size,
                     crypto=is_crypto,
                     host_id=host_id,
+                    max_namespace_per_subsys=100,
                 )
         except Exception as exc:
             self.logger.warning(f"lvol creation failed for {lvol_name}: {exc}. Retrying...")
@@ -276,11 +405,13 @@ class RandomMultiClientMultiFailoverAllNodesTest(RandomMultiClientMultiFailoverT
                     self.ssh_obj.create_sec_lvol(
                         self.mgmt_nodes[0], lvol_name, self.lvol_size, pool,
                         encrypt=True,
+                        max_namespace_per_subsys=100,
                     )
                 else:
                     self.sbcli_utils.add_lvol(
                         lvol_name=lvol_name, pool_name=pool,
                         size=self.lvol_size, crypto=is_crypto, host_id=host_id,
+                        max_namespace_per_subsys=100,
                     )
             except Exception as exc2:
                 self.logger.warning(f"Retry lvol creation also failed: {exc2}")

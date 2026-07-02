@@ -555,11 +555,15 @@ class K8sUtils:
 
     # ── Generic YAML apply / delete ─────────────────────────────────────────
 
-    def apply_yaml(self, yaml_content: str, namespace: str = None):
+    def apply_yaml(self, yaml_content: str, namespace: str = None,
+                   request_timeout: str = "60s"):
         """Apply a YAML manifest via ``kubectl apply -f -``."""
         ns = namespace or self.namespace
         escaped = yaml_content.replace("'", "'\\''")
-        return self._exec_kubectl(f"echo '{escaped}' | kubectl apply -n {ns} -f -")
+        return self._exec_kubectl(
+            f"echo '{escaped}' | kubectl apply -n {ns} "
+            f"--request-timeout={request_timeout} -f -"
+        )
 
     def apply_yaml_cluster_scoped(self, yaml_content: str):
         """Apply a cluster-scoped YAML manifest (no namespace flag)."""

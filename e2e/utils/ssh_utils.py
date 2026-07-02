@@ -1332,6 +1332,49 @@ class SshUtils:
         cmd = "sudo nvme list-subsys | grep -i %s | awk '{print $3}' | cut -d '=' -f 2" % nqn_filter
         output, error = self.exec_command(node=node, command=cmd)
         return output.strip().split()
+
+    def get_namespace_count_for_nqn(self, node, nqn):
+        """Count namespaces in the given NVMe subsystem on the client.
+
+        Returns the number of namespaces visible on the client for the
+        subsystem identified by *nqn*.  Returns -1 if the count cannot
+        be determined (caller should fall back to normal disconnect).
+        """
+        command = "sudo nvme list --output-format=json"
+        output, _ = self.exec_command(node=node, command=command, supress_logs=True)
+        try:
+            data = json.loads(output)
+            for device in data.get('Devices', []):
+                for subsystem in device.get('Subsystems', []):
+                    if subsystem.get('SubsystemNQN', '') == nqn:
+                        return len(subsystem.get('Namespaces', []))
+            return 0
+        except Exception as e:
+            self.logger.warning(f"Failed to count namespaces for NQN {nqn}: {e}")
+            return -1
+
+    def safe_disconnect_nvme(self, node, nqn):
+        """Disconnect NVMe subsystem only if no other namespaces share it.
+
+        When clone volumes are placed in unrelated lvols' subsystems
+        (due to server-side random assignment), disconnecting the
+        subsystem would destroy the clone's IO.  This method checks
+        first and skips if ns_count > 1.
+
+        Returns True if disconnect was performed, False if skipped.
+        """
+        ns_count = self.get_namespace_count_for_nqn(node=node, nqn=nqn)
+        if ns_count > 1:
+            self.logger.warning(
+                f"Subsystem {nqn} has {ns_count} namespaces on {node}; "
+                f"skipping NVMe disconnect to avoid disrupting other volumes. "
+                f"Server-side DELETE will remove the namespace."
+            )
+            return False
+        # ns_count <= 1 or -1 (error -> proceed with disconnect to preserve existing behavior)
+        self.logger.info(f"Disconnecting NVMe subsystem: {nqn}")
+        self.disconnect_nvme(node=node, nqn_grep=nqn)
+        return True
     
     def get_nvme_device_subsystems(self, node):
         """Get json for nvme device wise
@@ -3827,7 +3870,8 @@ class SshUtils:
     def create_sec_lvol(self, node, lvol_name, size, pool,
                         encrypt=False,
                         distr_ndcs=0, distr_npcs=0, fabric="tcp",
-                        allowed_hosts=None, sec_options=None):
+                        allowed_hosts=None, sec_options=None,
+                        max_namespace_per_subsys=None):
         """
         Create an lvol via CLI.
 
@@ -3845,6 +3889,8 @@ class SshUtils:
             cmd += f" --fabric {fabric}"
         if distr_ndcs and distr_npcs:
             cmd += f" --data-chunks-per-stripe {distr_ndcs} --parity-chunks-per-stripe {distr_npcs}"
+        if max_namespace_per_subsys is not None:
+            cmd += f" --max-namespace-per-subsys {max_namespace_per_subsys}"
 
         self.logger.info(f"[create_sec_lvol] encrypt={encrypt} fabric={fabric} "
                          f"ndcs={distr_ndcs} npcs={distr_npcs}")

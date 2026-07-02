@@ -294,219 +294,9 @@ jobs:
           set +e
           NAMESPACE=simplyblock
 
-          echo "=== Phase 1: Helm uninstall ==="
-          helm uninstall spdk-csi -n $NAMESPACE 2>/dev/null || true
-
-          echo "=== Phase 2: Patch finalizers and delete CRs ==="
-          RESOURCES=(
-            "simplyblockpool.storage.simplyblock.io simplyblock-pool"
-            "simplyblockpool.storage.simplyblock.io simplyblock-pool2"
-            "simplyblocklvol.storage.simplyblock.io simplyblock-lvol"
-            "simplyblocktask.storage.simplyblock.io simplyblock-task"
-            "simplyblockdevices.storage.simplyblock.io simplyblock-devices"
-            "simplyblockdevices.storage.simplyblock.io simplyblock-device-action"
-            "simplyblockstoragenodes.storage.simplyblock.io simplyblock-node"
-            "simplyblockstoragenodes.storage.simplyblock.io simplyblock-node2"
-            "simplyblockstoragenodes.storage.simplyblock.io simplyblock-node-action"
-            "simplyblockstoragenodesets.storage.simplyblock.io simplyblock-node"
-            "simplyblockstoragenodesets.storage.simplyblock.io simplyblock-node2"
-            "simplyblockstoragenodesets.storage.simplyblock.io simplyblock-node-action"
-            "simplyblockstorageclusters.storage.simplyblock.io simplyblock-cluster"
-            "simplyblockstorageclusters.storage.simplyblock.io simplyblock-cluster2"
-            "simplyblockstorageclusters.storage.simplyblock.io simplyblock-cluster-activate"
-            "simplyblocksnapshotreplications.storage.simplyblock.io simplyblock-snap-replication"
-            "simplyblocksnapshotreplications.storage.simplyblock.io simplyblock-snap-replication-failback"
-            "pool.storage.simplyblock.io simplyblock-pool"
-            "pool.storage.simplyblock.io simplyblock-pool2"
-            "lvol.storage.simplyblock.io simplyblock-lvol"
-            "task.storage.simplyblock.io simplyblock-task"
-            "devices.storage.simplyblock.io simplyblock-devices"
-            "devices.storage.simplyblock.io simplyblock-device-action"
-            "storagenodes.storage.simplyblock.io simplyblock-node"
-            "storagenodes.storage.simplyblock.io simplyblock-node2"
-            "storagenodes.storage.simplyblock.io simplyblock-node-action"
-            "storagenodesets.storage.simplyblock.io simplyblock-node"
-            "storagenodesets.storage.simplyblock.io simplyblock-node2"
-            "storagenodesets.storage.simplyblock.io simplyblock-node-action"
-            "storageclusters.storage.simplyblock.io simplyblock-cluster"
-            "storageclusters.storage.simplyblock.io simplyblock-cluster2"
-            "storageclusters.storage.simplyblock.io simplyblock-cluster-activate"
-            "snapshotreplications.storage.simplyblock.io simplyblock-snap-replication"
-            "snapshotreplications.storage.simplyblock.io simplyblock-snap-replication-failback"
-          )
-
-          patch_and_delete_crs() {
-            echo "Removing finalizers..."
-            for item in "${RESOURCES[@]}"; do
-              KIND=$(echo "$item" | awk '{print $1}')
-              NAME=$(echo "$item" | awk '{print $2}')
-              kubectl -n $NAMESPACE patch "$KIND" "$NAME" \
-                --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
-            done
-
-            echo "Deleting resources..."
-            for item in "${RESOURCES[@]}"; do
-              KIND=$(echo "$item" | awk '{print $1}')
-              NAME=$(echo "$item" | awk '{print $2}')
-              kubectl -n $NAMESPACE delete "$KIND" "$NAME" \
-                --ignore-not-found --wait=false 2>/dev/null || true
-            done
-          }
-          patch_and_delete_crs
-
-          # Dynamic catch-all: patch finalizers and delete ALL CRs of each type
-          # (handles resources not in the hardcoded list, e.g. encryption-pool)
-          echo "Cleaning up any remaining CRs..."
-          for CR_TYPE in \
-            "simplyblockpool.storage.simplyblock.io" \
-            "simplyblocklvol.storage.simplyblock.io" \
-            "simplyblocktask.storage.simplyblock.io" \
-            "simplyblockdevices.storage.simplyblock.io" \
-            "simplyblockstoragenodes.storage.simplyblock.io" \
-            "simplyblockstoragenodesets.storage.simplyblock.io" \
-            "simplyblockstorageclusters.storage.simplyblock.io" \
-            "simplyblocksnapshotreplications.storage.simplyblock.io" \
-            "pool.storage.simplyblock.io" \
-            "lvol.storage.simplyblock.io" \
-            "task.storage.simplyblock.io" \
-            "devices.storage.simplyblock.io" \
-            "storagenodes.storage.simplyblock.io" \
-            "storagenodesets.storage.simplyblock.io" \
-            "storageclusters.storage.simplyblock.io" \
-            "snapshotreplications.storage.simplyblock.io"; do
-            for CR_NAME in $(kubectl -n $NAMESPACE get "$CR_TYPE" --no-headers -o custom-columns=:metadata.name 2>/dev/null); do
-              kubectl -n $NAMESPACE patch "$CR_TYPE" "$CR_NAME" \
-                --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
-              kubectl -n $NAMESPACE delete "$CR_TYPE" "$CR_NAME" \
-                --ignore-not-found --wait=false 2>/dev/null || true
-            done
-          done
-
-          echo "=== Phase 3a: Delete VolumeSnapshots & VolumeSnapshotContents ==="
-          for VS in $(kubectl get volumesnapshot -n $NAMESPACE --no-headers -o custom-columns=:metadata.name 2>/dev/null); do
-            kubectl -n $NAMESPACE patch volumesnapshot "$VS" \
-              --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
-            kubectl -n $NAMESPACE delete volumesnapshot "$VS" --wait=false 2>/dev/null || true
-          done
-
-          for VSC in $(kubectl get volumesnapshotcontent --no-headers -o custom-columns=:metadata.name 2>/dev/null); do
-            kubectl patch volumesnapshotcontent "$VSC" \
-              --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
-            kubectl delete volumesnapshotcontent "$VSC" --wait=false 2>/dev/null || true
-          done
-
-          for VSCLASS in $(kubectl get volumesnapshotclass --no-headers -o custom-columns=:metadata.name 2>/dev/null); do
-            kubectl delete volumesnapshotclass "$VSCLASS" --ignore-not-found 2>/dev/null || true
-          done
-
-          echo "=== Phase 3b: Delete PVCs (with timeout + retry) ==="
-          kubectl -n $NAMESPACE delete pvc --all --wait=false 2>/dev/null || true
-
-          PVC_TIMEOUT=60
-          while [ $PVC_TIMEOUT -gt 0 ]; do
-            REMAINING=$(kubectl -n $NAMESPACE get pvc --no-headers 2>/dev/null | wc -l)
-            if [ "$REMAINING" -eq 0 ]; then
-              echo "All PVCs deleted"
-              break
-            fi
-            echo "Waiting for $REMAINING PVCs to delete ($PVC_TIMEOUT s remaining)..."
-            sleep 5
-            PVC_TIMEOUT=$((PVC_TIMEOUT - 5))
-          done
-
-          STUCK_PVCS=$(kubectl -n $NAMESPACE get pvc --no-headers -o custom-columns=:metadata.name 2>/dev/null)
-          if [ -n "$STUCK_PVCS" ]; then
-            echo "Patching finalizers on stuck PVCs..."
-            echo "$STUCK_PVCS" | while read PVC; do
-              kubectl -n $NAMESPACE patch pvc "$PVC" \
-                --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null &
-            done
-            wait
-            kubectl -n $NAMESPACE delete pvc --all --force --grace-period=0 --wait=false 2>/dev/null || true
-            echo "PVC force-delete issued"
-          fi
-
-          echo "=== Phase 3c: Delete PVs ==="
-          PV_LIST=$(kubectl get pv --no-headers -o custom-columns=NAME:.metadata.name,CLAIM:.spec.claimRef.namespace 2>/dev/null \
-            | grep -v -E '\bvault\b' 2>/dev/null | awk '{print $1}')
-          if [ -n "$PV_LIST" ]; then
-            echo "Patching finalizers on $(echo "$PV_LIST" | wc -l) PVs..."
-            echo "$PV_LIST" | while read PV; do
-              kubectl patch pv "$PV" \
-                --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null &
-            done
-            wait
-            echo "$PV_LIST" | while read PV; do
-              kubectl delete pv "$PV" --force --grace-period=0 --wait=false 2>/dev/null &
-            done
-            wait
-            echo "PV force-delete issued"
-          fi
-
-          echo "=== Phase 3d: Force delete remaining namespaced resources ==="
-          for RTYPE in pod jobs service ds statefulset deployment replicaset secret sa configmap; do
-            kubectl -n $NAMESPACE delete $RTYPE --all --force --grace-period=0 2>/dev/null || true
-          done
-
-          echo "=== Phase 4: Cleanup cluster-scoped and kube-system resources ==="
-          for SC in $(kubectl get sc --no-headers -o custom-columns=:metadata.name 2>/dev/null | grep -i simplyblock 2>/dev/null); do
-            kubectl delete sc "$SC" --ignore-not-found 2>/dev/null || true
-          done
-          kubectl delete clusterrole simplyblock-storage-node-role --ignore-not-found 2>/dev/null || true
-          kubectl delete clusterrolebinding simplyblock-storage-node-binding --ignore-not-found 2>/dev/null || true
-          # Clean up simplyblock resources in kube-system (snapshot-controller, numa-plugin, etc.)
-          for RTYPE in deployment service ds sa configmap; do
-            for NAME in $(kubectl -n kube-system get $RTYPE --no-headers -o custom-columns=:metadata.name 2>/dev/null | grep -i simplyblock 2>/dev/null); do
-              kubectl -n kube-system delete $RTYPE "$NAME" --ignore-not-found 2>/dev/null || true
-            done
-          done
-          # Clean up simplyblock clusterroles and clusterrolebindings
-          for RES in clusterrole clusterrolebinding; do
-            for NAME in $(kubectl get $RES --no-headers -o custom-columns=:metadata.name 2>/dev/null | grep -i simplyblock 2>/dev/null); do
-              kubectl delete $RES "$NAME" --ignore-not-found 2>/dev/null || true
-            done
-          done
-
-          echo "=== Phase 5: Verify nothing remains ==="
-          echo "Namespaced resources:"
-          kubectl -n $NAMESPACE get all 2>/dev/null || echo "No resources found"
-          echo ""
-          echo "CRDs:"
-          for CR_TYPE in \
-            "simplyblockpool.storage.simplyblock.io" \
-            "simplyblocklvol.storage.simplyblock.io" \
-            "simplyblockstoragenodes.storage.simplyblock.io" \
-            "simplyblockstoragenodesets.storage.simplyblock.io" \
-            "simplyblockstorageclusters.storage.simplyblock.io" \
-            "pool.storage.simplyblock.io" \
-            "lvol.storage.simplyblock.io" \
-            "storagenodes.storage.simplyblock.io" \
-            "storagenodesets.storage.simplyblock.io" \
-            "storageclusters.storage.simplyblock.io"; do
-            kubectl -n $NAMESPACE get "$CR_TYPE" 2>/dev/null || true
-          done
-
-          echo "=== Phase 6: Delete namespace ==="
-          kubectl delete namespace $NAMESPACE --wait=false 2>/dev/null || true
-
-          for i in $(seq 1 36); do
-            if ! kubectl get namespace $NAMESPACE 2>/dev/null; then
-              echo "Namespace $NAMESPACE deleted"
-              break
-            fi
-
-            echo "Namespace still terminating, re-patching finalizers ($i/36)..."
-            patch_and_delete_crs
-
-            if [ "$i" -ge 6 ]; then
-              echo "Force-removing namespace finalizers..."
-              kubectl get namespace $NAMESPACE -o json 2>/dev/null | \
-                jq '.spec.finalizers = []' | \
-                kubectl replace --raw "/api/v1/namespaces/$NAMESPACE/finalize" -f - 2>/dev/null || true
-            fi
-
-            sleep 5
-          done
+          # Run the shared cleanup script (handles etcd overload with
+          # --request-timeout, bulk deletes, and parallel finalizer patching)
+          bash $GITHUB_WORKSPACE/e2e/scripts/cleanup_k8s.sh $NAMESPACE
 
           echo "=== Phase 7: Delete Released PVs from simplyblock ==="
           for pv in $(kubectl get pv --no-headers 2>/dev/null | grep 'simplyblock/' | awk '{print $1}'); do
@@ -1365,9 +1155,190 @@ jobs:
           [ "$LOG_COLLECT_TIMEOUT_MINS" -lt 30 ] && LOG_COLLECT_TIMEOUT_MINS=30
           echo "LOG_COLLECT_TIMEOUT_MINS=$LOG_COLLECT_TIMEOUT_MINS" >> $GITHUB_ENV
 
+      - name: Write Job Summary
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          out_log="$GITHUB_WORKSPACE/e2e/output.log"
+
+          dur_fmt="${TEST_TIME_HOURS:-0}h ${TEST_TIME_MINS:-0}m ${TEST_TIME_SECS:-0}s"
+
+          total_cases="$(grep -E 'Number of Total Cases:' "${out_log}" 2>/dev/null | tail -n 1 | grep -oE '[0-9]+$' || echo '?')"
+          passed_cnt="$(grep -E 'Number of Passed Cases:' "${out_log}" 2>/dev/null | tail -n 1 | grep -oE '[0-9]+$' || echo '?')"
+          failed_cnt="$(grep -E 'Number of Failed Cases:' "${out_log}" 2>/dev/null | tail -n 1 | grep -oE '[0-9]+$' || echo '?')"
+          skipped_cnt="$(grep -E 'Number of Skipped Cases:' "${out_log}" 2>/dev/null | tail -n 1 | grep -oE '[0-9]+$' || echo '0')"
+          test_wise="$(grep -E '(PASSED|FAILED|SKIPPED) CASE' "${out_log}" 2>/dev/null \
+            | sed 's/\x1b\[[0-9;]*m//g' | sed 's/.*INFO - //' || true)"
+
+          failure_summary="(unknown)"
+          log_tail=""
+          if [[ -f "${out_log}" ]]; then
+            failure_summary="$(grep -oE 'MultipleExceptions: .+|SkippedTestsException: .+' "${out_log}" \
+              | tail -n 1 | sed 's/\x1b\[[0-9;]*m//g' || true)"
+            if [[ -z "${failure_summary}" ]]; then
+              failure_summary="$(grep -E 'RuntimeError:|AssertionError:|Error:' "${out_log}" \
+                | tail -n 1 | sed 's/\x1b\[[0-9;]*m//g' || true)"
+            fi
+            [[ -z "${failure_summary}" ]] && failure_summary="(no exception line found)"
+            log_tail="$(tail -n 50 "${out_log}" | sed 's/\x1b\[[0-9;]*m//g' || true)"
+          fi
+
+          conclusion="SUCCESS"
+          if [[ "${{ job.status }}" != "success" ]]; then
+            conclusion="FAILED"
+          fi
+
+          {
+            echo "## K8s Native Add Node Summary"
+            echo ""
+            echo "**Result:** ${conclusion}"
+            echo ""
+            echo "### Run Info"
+            echo "- **Test class:** \`K8sNativeAddNodeTest\`"
+            echo "- **Cluster ID:** \`${CLUSTER_ID}\`"
+            echo "- **Branch:** \`${{ github.ref_name }}\`"
+            echo "- **Helm Charts Branch:** \`${{ github.event.inputs.helm_charts_branch }}\`"
+            echo "- **NDCS/NPCS:** \`${NDCS}/${NPCS}\`"
+            echo "- **BS/Chunk BS:** \`${BS}/${CHUNK_BS}\`"
+            echo "- **Initial Workers:** \`${{ github.event.inputs.worker_nodes }}\`"
+            echo "- **New Workers:** \`${{ github.event.inputs.new_worker_nodes }}\`"
+            echo "- **Duration:** ${dur_fmt}"
+            echo ""
+            echo "### Test Results"
+            echo "- **Total:** ${total_cases} | **Passed:** ${passed_cnt} | **Failed:** ${failed_cnt} | **Skipped:** ${skipped_cnt}"
+            if [[ -n "${test_wise}" ]]; then
+              echo '```'
+              printf '%s\n' "${test_wise}"
+              echo '```'
+            fi
+            echo ""
+            echo "### Failure Reason"
+            echo '```'
+            printf '%s\n' "${failure_summary}"
+            echo '```'
+            if [[ -n "${log_tail}" ]]; then
+              echo ""
+              echo "<details><summary>Last 50 lines of output.log</summary>"
+              echo ""
+              echo '```'
+              printf '%s\n' "${log_tail}"
+              echo '```'
+              echo "</details>"
+            fi
+            echo ""
+            echo "### NFS Log Locations"
+            echo "- **RUN_BASE_DIR:** \`${RUN_BASE_DIR:-not detected}\`"
+            echo "- Graylog logs: \`${RUN_BASE_DIR:-<run_dir>}/graylog_collected/\`"
+            if [[ -n "${RUN_BASE_DIR:-}" && -d "${RUN_BASE_DIR}" ]]; then
+              echo ""
+              echo "<details><summary>NFS directory listing</summary>"
+              echo ""
+              echo '```'
+              ls -la "${RUN_BASE_DIR}/" 2>/dev/null || echo "(empty)"
+              echo '```'
+              echo "</details>"
+            fi
+            echo ""
+            echo "> **Note:** Graylog/OpenSearch logs are currently being collected and will be available in the NFS log directory shortly."
+          } >> "$GITHUB_STEP_SUMMARY"
+        env:
+          CLUSTER_ID: ${{ env.CLUSTER_ID }}
+          NDCS: ${{ env.NDCS }}
+          NPCS: ${{ env.NPCS }}
+          BS: ${{ env.BS }}
+          CHUNK_BS: ${{ env.CHUNK_BS }}
+          RUN_BASE_DIR: ${{ env.RUN_BASE_DIR }}
+          TEST_TIME_HOURS: ${{ env.TEST_TIME_HOURS }}
+          TEST_TIME_MINS: ${{ env.TEST_TIME_MINS }}
+          TEST_TIME_SECS: ${{ env.TEST_TIME_SECS }}
+
+      - name: Send Slack Notification
+        if: always() && (github.event.inputs.send_slack_notification || 'true') == 'true'
+        shell: bash
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          JOB_STATUS: ${{ job.status }}
+          SLACK_RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+          SLACK_WF_NAME: "K8s Native Add Node"
+          TESTNAME: K8sNativeAddNodeTest
+          RUN_BASE_DIR: ${{ env.RUN_BASE_DIR }}
+          NDCS: ${{ env.NDCS }}
+          NPCS: ${{ env.NPCS }}
+          TEST_START_TIME: ${{ env.TEST_START_TIME }}
+          TEST_END_TIME: ${{ env.TEST_END_TIME }}
+        run: |
+          python3 - <<'PYEOF'
+          import json, os, re, sys, urllib.request, urllib.error
+          webhook = os.environ.get("SLACK_WEBHOOK_URL", "")
+          if not webhook:
+              print("No SLACK_WEBHOOK_URL set, skipping.")
+              sys.exit(0)
+          out_log = os.path.join(os.environ.get("GITHUB_WORKSPACE", "."), "e2e", "output.log")
+          total = passed = failed = skipped = 0
+          if os.path.isfile(out_log):
+              content = open(out_log).read()
+              def px(pat):
+                  m = re.search(pat, content)
+                  return int(m.group(1)) if m else 0
+              total   = px(r'Number of Total Cases:\s*(\d+)')
+              passed  = px(r'Number of Passed Cases:\s*(\d+)')
+              failed  = px(r'Number of Failed Cases:\s*(\d+)')
+              skipped = px(r'Number of Skipped Cases:\s*(\d+)')
+          pass_pct = (passed * 100 // total) if total > 0 else 0
+          s    = int(os.environ.get("TEST_START_TIME", "0") or "0")
+          e    = int(os.environ.get("TEST_END_TIME",   "0") or "0")
+          secs = max(0, e - s) if e >= s > 0 else 0
+          dur  = f"{secs//3600}h {(secs%3600)//60}m {secs%60}s"
+          run_url  = os.environ.get("SLACK_RUN_URL",   "")
+          log_dir  = os.environ.get("RUN_BASE_DIR",    "N/A")
+          ndcs     = os.environ.get("NDCS",            "?")
+          npcs     = os.environ.get("NPCS",            "?")
+          test_cls = os.environ.get("TESTNAME",        "") or "all"
+          branch   = os.environ.get("GITHUB_REF_NAME", "?")
+          wf_name  = os.environ.get("SLACK_WF_NAME",   "Run")
+          ok       = os.environ.get("JOB_STATUS",      "") == "success"
+          icon    = ":white_check_mark:" if ok else ":x:"
+          status  = "SUCCESS" if ok else "FAILURE"
+          mention = "" if ok else " <!channel>"
+          lines = [
+              f"{icon} *SimplyBlock {wf_name}*{mention}",
+              f"*Status:* {status}  |  *Duration:* {dur}",
+              f"*Branch:* `{branch}`  |  *NDCS/NPCS:* `{ndcs}/{npcs}`  |  *Test class:* `{test_cls}`",
+              "",
+          ]
+          if total > 0:
+              lines += [
+                  f":white_check_mark: *Passed:*  {passed}/{total}  ({pass_pct}%)",
+                  f":x: *Failed:*  {failed}",
+                  f":fast_forward: *Skipped:*  {skipped}",
+              ]
+          else:
+              lines.append("_(test counts not found in log)_")
+          lines += [
+              "",
+              f":link: *Run:* <{run_url}|View on GitHub>",
+              f":file_folder: *Final Logs:* `{log_dir}`",
+              f":hourglass_flowing_sand: _Logs are being collected and will be available shortly._",
+          ]
+          payload = {"text": "\n".join(lines)}
+          req = urllib.request.Request(
+              webhook,
+              data=json.dumps(payload).encode(),
+              headers={"Content-Type": "application/json"},
+          )
+          try:
+              urllib.request.urlopen(req, timeout=15)
+              print("Slack notification sent.")
+          except Exception as exc:
+              print(f"WARN: Slack notification failed: {exc}", file=sys.stderr)
+          PYEOF
+
+
       - name: Collect Graylog/OpenSearch logs
         if: '!cancelled()'
-        timeout-minutes: ${{ fromJSON(env.LOG_COLLECT_TIMEOUT_MINS || '240') }}
+        timeout-minutes: ${{ fromJSON(env.LOG_COLLECT_TIMEOUT_MINS || '480') }}
         run: |
           set +e
           echo "=== Collecting Graylog/OpenSearch logs (per-hour chunks) ==="
@@ -1472,9 +1443,9 @@ jobs:
             [ $rc -ne 0 ] && return $rc
             local has_content
             has_content=$(kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- \
-              find "${outdir}" -name "*.log" -size +0 2>/dev/null | head -1)
+              find "${outdir}" -name "*.tar.gz" -size +0 2>/dev/null | head -1)
             if [ -z "${has_content}" ]; then
-              echo "  WARN: collect_logs.py succeeded but all .log files are 0 bytes"
+              echo "  WARN: collect_logs.py succeeded but no .tar.gz output found"
               return 1
             fi
           }
@@ -1588,184 +1559,6 @@ jobs:
         env:
           CLUSTER_ID: ${{ env.CLUSTER_ID }}
           MON_SECRET: ${{ secrets.MON_SECRET }}
-
-      - name: Write Job Summary
-        if: always()
-        shell: bash
-        run: |
-          set +e
-          out_log="$GITHUB_WORKSPACE/e2e/output.log"
-
-          dur_fmt="${TEST_TIME_HOURS:-0}h ${TEST_TIME_MINS:-0}m ${TEST_TIME_SECS:-0}s"
-
-          total_cases="$(grep -E 'Number of Total Cases:' "${out_log}" 2>/dev/null | tail -n 1 | grep -oE '[0-9]+$' || echo '?')"
-          passed_cnt="$(grep -E 'Number of Passed Cases:' "${out_log}" 2>/dev/null | tail -n 1 | grep -oE '[0-9]+$' || echo '?')"
-          failed_cnt="$(grep -E 'Number of Failed Cases:' "${out_log}" 2>/dev/null | tail -n 1 | grep -oE '[0-9]+$' || echo '?')"
-          skipped_cnt="$(grep -E 'Number of Skipped Cases:' "${out_log}" 2>/dev/null | tail -n 1 | grep -oE '[0-9]+$' || echo '0')"
-          test_wise="$(grep -E '(PASSED|FAILED|SKIPPED) CASE' "${out_log}" 2>/dev/null \
-            | sed 's/\x1b\[[0-9;]*m//g' | sed 's/.*INFO - //' || true)"
-
-          failure_summary="(unknown)"
-          log_tail=""
-          if [[ -f "${out_log}" ]]; then
-            failure_summary="$(grep -oE 'MultipleExceptions: .+|SkippedTestsException: .+' "${out_log}" \
-              | tail -n 1 | sed 's/\x1b\[[0-9;]*m//g' || true)"
-            if [[ -z "${failure_summary}" ]]; then
-              failure_summary="$(grep -E 'RuntimeError:|AssertionError:|Error:' "${out_log}" \
-                | tail -n 1 | sed 's/\x1b\[[0-9;]*m//g' || true)"
-            fi
-            [[ -z "${failure_summary}" ]] && failure_summary="(no exception line found)"
-            log_tail="$(tail -n 50 "${out_log}" | sed 's/\x1b\[[0-9;]*m//g' || true)"
-          fi
-
-          conclusion="SUCCESS"
-          if [[ "${{ job.status }}" != "success" ]]; then
-            conclusion="FAILED"
-          fi
-
-          {
-            echo "## K8s Native Add Node Summary"
-            echo ""
-            echo "**Result:** ${conclusion}"
-            echo ""
-            echo "### Run Info"
-            echo "- **Test class:** \`K8sNativeAddNodeTest\`"
-            echo "- **Cluster ID:** \`${CLUSTER_ID}\`"
-            echo "- **Branch:** \`${{ github.ref_name }}\`"
-            echo "- **Helm Charts Branch:** \`${{ github.event.inputs.helm_charts_branch }}\`"
-            echo "- **NDCS/NPCS:** \`${NDCS}/${NPCS}\`"
-            echo "- **BS/Chunk BS:** \`${BS}/${CHUNK_BS}\`"
-            echo "- **Initial Workers:** \`${{ github.event.inputs.worker_nodes }}\`"
-            echo "- **New Workers:** \`${{ github.event.inputs.new_worker_nodes }}\`"
-            echo "- **Duration:** ${dur_fmt}"
-            echo ""
-            echo "### Test Results"
-            echo "- **Total:** ${total_cases} | **Passed:** ${passed_cnt} | **Failed:** ${failed_cnt} | **Skipped:** ${skipped_cnt}"
-            if [[ -n "${test_wise}" ]]; then
-              echo '```'
-              printf '%s\n' "${test_wise}"
-              echo '```'
-            fi
-            echo ""
-            echo "### Failure Reason"
-            echo '```'
-            printf '%s\n' "${failure_summary}"
-            echo '```'
-            if [[ -n "${log_tail}" ]]; then
-              echo ""
-              echo "<details><summary>Last 50 lines of output.log</summary>"
-              echo ""
-              echo '```'
-              printf '%s\n' "${log_tail}"
-              echo '```'
-              echo "</details>"
-            fi
-            echo ""
-            echo "### NFS Log Locations"
-            echo "- **RUN_BASE_DIR:** \`${RUN_BASE_DIR:-not detected}\`"
-            echo "- Graylog logs: \`${RUN_BASE_DIR:-<run_dir>}/graylog_collected/\`"
-            if [[ -n "${RUN_BASE_DIR:-}" && -d "${RUN_BASE_DIR}" ]]; then
-              echo ""
-              echo "<details><summary>NFS directory listing</summary>"
-              echo ""
-              echo '```'
-              ls -la "${RUN_BASE_DIR}/" 2>/dev/null || echo "(empty)"
-              echo '```'
-              echo "</details>"
-            fi
-          } >> "$GITHUB_STEP_SUMMARY"
-        env:
-          CLUSTER_ID: ${{ env.CLUSTER_ID }}
-          NDCS: ${{ env.NDCS }}
-          NPCS: ${{ env.NPCS }}
-          BS: ${{ env.BS }}
-          CHUNK_BS: ${{ env.CHUNK_BS }}
-          RUN_BASE_DIR: ${{ env.RUN_BASE_DIR }}
-          TEST_TIME_HOURS: ${{ env.TEST_TIME_HOURS }}
-          TEST_TIME_MINS: ${{ env.TEST_TIME_MINS }}
-          TEST_TIME_SECS: ${{ env.TEST_TIME_SECS }}
-
-      - name: Send Slack Notification
-        if: always() && (github.event.inputs.send_slack_notification || 'true') == 'true'
-        shell: bash
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-          JOB_STATUS: ${{ job.status }}
-          SLACK_RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          GITHUB_REF_NAME: ${{ github.ref_name }}
-          SLACK_WF_NAME: "K8s Native Add Node"
-          TESTNAME: K8sNativeAddNodeTest
-          RUN_BASE_DIR: ${{ env.RUN_BASE_DIR }}
-          NDCS: ${{ env.NDCS }}
-          NPCS: ${{ env.NPCS }}
-          TEST_START_TIME: ${{ env.TEST_START_TIME }}
-          TEST_END_TIME: ${{ env.TEST_END_TIME }}
-        run: |
-          python3 - <<'PYEOF'
-          import json, os, re, sys, urllib.request, urllib.error
-          webhook = os.environ.get("SLACK_WEBHOOK_URL", "")
-          if not webhook:
-              print("No SLACK_WEBHOOK_URL set, skipping.")
-              sys.exit(0)
-          out_log = os.path.join(os.environ.get("GITHUB_WORKSPACE", "."), "e2e", "output.log")
-          total = passed = failed = skipped = 0
-          if os.path.isfile(out_log):
-              content = open(out_log).read()
-              def px(pat):
-                  m = re.search(pat, content)
-                  return int(m.group(1)) if m else 0
-              total   = px(r'Number of Total Cases:\s*(\d+)')
-              passed  = px(r'Number of Passed Cases:\s*(\d+)')
-              failed  = px(r'Number of Failed Cases:\s*(\d+)')
-              skipped = px(r'Number of Skipped Cases:\s*(\d+)')
-          pass_pct = (passed * 100 // total) if total > 0 else 0
-          s    = int(os.environ.get("TEST_START_TIME", "0") or "0")
-          e    = int(os.environ.get("TEST_END_TIME",   "0") or "0")
-          secs = max(0, e - s) if e >= s > 0 else 0
-          dur  = f"{secs//3600}h {(secs%3600)//60}m {secs%60}s"
-          run_url  = os.environ.get("SLACK_RUN_URL",   "")
-          log_dir  = os.environ.get("RUN_BASE_DIR",    "N/A")
-          ndcs     = os.environ.get("NDCS",            "?")
-          npcs     = os.environ.get("NPCS",            "?")
-          test_cls = os.environ.get("TESTNAME",        "") or "all"
-          branch   = os.environ.get("GITHUB_REF_NAME", "?")
-          wf_name  = os.environ.get("SLACK_WF_NAME",   "Run")
-          ok       = os.environ.get("JOB_STATUS",      "") == "success"
-          icon    = ":white_check_mark:" if ok else ":x:"
-          status  = "SUCCESS" if ok else "FAILURE"
-          mention = "" if ok else " <!channel>"
-          lines = [
-              f"{icon} *SimplyBlock {wf_name}*{mention}",
-              f"*Status:* {status}  |  *Duration:* {dur}",
-              f"*Branch:* `{branch}`  |  *NDCS/NPCS:* `{ndcs}/{npcs}`  |  *Test class:* `{test_cls}`",
-              "",
-          ]
-          if total > 0:
-              lines += [
-                  f":white_check_mark: *Passed:*  {passed}/{total}  ({pass_pct}%)",
-                  f":x: *Failed:*  {failed}",
-                  f":fast_forward: *Skipped:*  {skipped}",
-              ]
-          else:
-              lines.append("_(test counts not found in log)_")
-          lines += [
-              "",
-              f":link: *Run:* <{run_url}|View on GitHub>",
-              f":file_folder: *Final Logs:* `{log_dir}`",
-          ]
-          payload = {"text": "\n".join(lines)}
-          req = urllib.request.Request(
-              webhook,
-              data=json.dumps(payload).encode(),
-              headers={"Content-Type": "application/json"},
-          )
-          try:
-              urllib.request.urlopen(req, timeout=15)
-              print("Slack notification sent.")
-          except Exception as exc:
-              print(f"WARN: Slack notification failed: {exc}", file=sys.stderr)
-          PYEOF
-
       - name: Cleanup build folder
         if: always()
         run: |

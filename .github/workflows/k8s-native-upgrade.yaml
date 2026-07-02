@@ -1014,9 +1014,52 @@ jobs:
           [ "$LOG_COLLECT_TIMEOUT_MINS" -lt 30 ] && LOG_COLLECT_TIMEOUT_MINS=30
           echo "LOG_COLLECT_TIMEOUT_MINS=$LOG_COLLECT_TIMEOUT_MINS" >> $GITHUB_ENV
 
+      - name: Write Job Summary
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          out_log="$GITHUB_WORKSPACE/e2e/output.log"
+          dur_fmt="${TEST_TIME_HOURS:-0}h ${TEST_TIME_MINS:-0}m ${TEST_TIME_SECS:-0}s"
+
+          total_cases="$(grep -E 'Total Cases:|Total Test Cases:' "${out_log}" 2>/dev/null | tail -n 1 | grep -oE '[0-9]+' | tail -1 || echo '?')"
+          passed_cnt="$(grep -E 'Passed:' "${out_log}" 2>/dev/null | tail -n 1 | grep -oE '[0-9]+' | tail -1 || echo '?')"
+          failed_cnt="$(grep -E 'Failed:' "${out_log}" 2>/dev/null | tail -n 1 | grep -oE '[0-9]+' | tail -1 || echo '?')"
+
+          {
+            echo "## K8s Native Upgrade Test Results"
+            echo ""
+            echo "| Metric | Value |"
+            echo "|--------|-------|"
+            echo "| Base Version | \`${{ github.event.inputs.base_simplyblock_image }}\` |"
+            echo "| Target Version | \`${{ github.event.inputs.target_simplyblock_image }}\` |"
+            echo "| Duration | ${dur_fmt} |"
+            echo "| Total | ${total_cases} |"
+            echo "| Passed | ${passed_cnt} |"
+            echo "| Failed | ${failed_cnt} |"
+            echo ""
+            if [ -n "${RUN_BASE_DIR:-}" ]; then
+              echo "**Logs:** \`${RUN_BASE_DIR}\`"
+            fi
+            echo ""
+            echo "> **Note:** Graylog/OpenSearch logs are currently being collected and will be available in the NFS log directory shortly."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Send Slack notification
+        if: ${{ always() && github.event.inputs.send_slack_notification == 'true' }}
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          payload: |
+            {
+              "text": "K8s Upgrade Test: ${{ job.status }} | ${{ github.event.inputs.base_simplyblock_image }} -> ${{ github.event.inputs.target_simplyblock_image }} | ${{ github.event.inputs.cluster_environment }} | Duration: ${{ env.TEST_TIME_HOURS }}h ${{ env.TEST_TIME_MINS }}m | <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Run>\n:hourglass_flowing_sand: _Logs are being collected and will be available shortly._"
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+
       - name: Collect Graylog/OpenSearch logs
         if: '!cancelled()'
-        timeout-minutes: ${{ fromJSON(env.LOG_COLLECT_TIMEOUT_MINS || '240') }}
+        timeout-minutes: ${{ fromJSON(env.LOG_COLLECT_TIMEOUT_MINS || '480') }}
         run: |
           set +e
           echo "=== Collecting Graylog/OpenSearch logs ==="
@@ -1112,9 +1155,9 @@ jobs:
             [ $rc -ne 0 ] && return $rc
             local has_content
             has_content=$(kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- \
-              find "${outdir}" -name "*.log" -size +0 2>/dev/null | head -1)
+              find "${outdir}" -name "*.tar.gz" -size +0 2>/dev/null | head -1)
             if [ -z "${has_content}" ]; then
-              echo "  WARN: collect_logs.py succeeded but all .log files are 0 bytes"
+              echo "  WARN: collect_logs.py succeeded but no .tar.gz output found"
               return 1
             fi
           }
@@ -1228,43 +1271,3 @@ jobs:
         env:
           CLUSTER_ID: ${{ env.CLUSTER_ID }}
           MON_SECRET: ${{ secrets.MON_SECRET }}
-
-      - name: Write Job Summary
-        if: always()
-        shell: bash
-        run: |
-          set +e
-          out_log="$GITHUB_WORKSPACE/e2e/output.log"
-          dur_fmt="${TEST_TIME_HOURS:-0}h ${TEST_TIME_MINS:-0}m ${TEST_TIME_SECS:-0}s"
-
-          total_cases="$(grep -E 'Total Cases:|Total Test Cases:' "${out_log}" 2>/dev/null | tail -n 1 | grep -oE '[0-9]+' | tail -1 || echo '?')"
-          passed_cnt="$(grep -E 'Passed:' "${out_log}" 2>/dev/null | tail -n 1 | grep -oE '[0-9]+' | tail -1 || echo '?')"
-          failed_cnt="$(grep -E 'Failed:' "${out_log}" 2>/dev/null | tail -n 1 | grep -oE '[0-9]+' | tail -1 || echo '?')"
-
-          {
-            echo "## K8s Native Upgrade Test Results"
-            echo ""
-            echo "| Metric | Value |"
-            echo "|--------|-------|"
-            echo "| Base Version | \`${{ github.event.inputs.base_simplyblock_image }}\` |"
-            echo "| Target Version | \`${{ github.event.inputs.target_simplyblock_image }}\` |"
-            echo "| Duration | ${dur_fmt} |"
-            echo "| Total | ${total_cases} |"
-            echo "| Passed | ${passed_cnt} |"
-            echo "| Failed | ${failed_cnt} |"
-            echo ""
-            if [ -n "${RUN_BASE_DIR:-}" ]; then
-              echo "**Logs:** \`${RUN_BASE_DIR}\`"
-            fi
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Send Slack notification
-        if: ${{ always() && github.event.inputs.send_slack_notification == 'true' }}
-        uses: slackapi/slack-github-action@v1.26.0
-        with:
-          payload: |
-            {
-              "text": "K8s Upgrade Test: ${{ job.status }} | ${{ github.event.inputs.base_simplyblock_image }} -> ${{ github.event.inputs.target_simplyblock_image }} | ${{ github.event.inputs.cluster_environment }} | Duration: ${{ env.TEST_TIME_HOURS }}h ${{ env.TEST_TIME_MINS }}m | <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Run>"
-            }
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
