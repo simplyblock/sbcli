@@ -54,6 +54,8 @@ class CLIWrapper(CLIWrapperBase):
         self.init_storage_node__list_devices(subparser)
         if self.developer_mode:
             self.init_storage_node__device_testing_mode(subparser)
+        if self.developer_mode:
+            self.init_storage_node__device_hang(subparser)
         self.init_storage_node__get_device(subparser)
         self.init_storage_node__restart_device(subparser)
         self.init_storage_node__add_device(subparser)
@@ -235,6 +237,11 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('device_id', help='The storage device id.', type=str)
         subcommand.add_argument('mode', help='The testing mode. Default: `full_pass_through`.', type=str, default='full_pass_through', choices=['full_pass_through','io_error_on_write','io_error_on_all','hotplug_removal','discard_io_all','io_error_on_unmap','io_error_on_read',])
 
+    def init_storage_node__device_hang(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'device-hang', 'Make a device hang for N seconds (0 to release). Requires --enable-hang-device at cluster create.')
+        subcommand.add_argument('device_id', help='The storage device id.', type=str)
+        subcommand.add_argument('seconds', help='Hang duration in seconds (0 disarms).', type=int)
+
     def init_storage_node__get_device(self, subparser):
         subcommand = self.add_sub_command(subparser, 'get-device', 'Gets storage device by its id.')
         subcommand.add_argument('device_id', help='The storage device id.', type=str)
@@ -414,6 +421,8 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--ingress-host-source', help='Ingress host source: \'hostip\' for node IP, \'loadbalancer\' for external LB, or \'dns\' for custom domain. Default: `hostip`.', type=str, default='hostip', dest='ingress_host_source', choices=['hostip','loadbalancer','dns',])
         subcommand.add_argument('--dns-name', help='Fully qualified DNS name to use as the Ingress host (required if --ingress-host-source=dns).', type=str, default='', dest='dns_name')
         subcommand.add_argument('--enable-node-affinity', help='Enable node affinity for storage nodes.', dest='enable_node_affinity', action='store_true')
+        if self.developer_mode:
+            subcommand.add_argument('--enable-hang-device', help='Insert a delay bdev per device for hang injection (chaos testing).', dest='enable_hang_device', action='store_true')
         subcommand.add_argument('--fabric', help='The NVMe fabric to use (specify: `tcp`, `rdma`, `tcp,rdma`). Default: `tcp`.', type=str, default='tcp', dest='fabric', choices=['tcp','rdma','tcp,rdma',])
         if self.developer_mode:
             subcommand.add_argument('--max-queue-size', help='The max size the queue will grow. Default: `128`.', type=int, default=128, dest='max_queue_size')
@@ -1144,6 +1153,12 @@ class CLIWrapper(CLIWrapperBase):
                         ret = False
                     else:
                         ret = self.storage_node__device_testing_mode(sub_command, args)
+                elif sub_command in ['device-hang']:
+                    if not self.developer_mode:
+                        print("This command is private.")
+                        ret = False
+                    else:
+                        ret = self.storage_node__device_hang(sub_command, args)
                 elif sub_command in ['get-device']:
                     ret = self.storage_node__get_device(sub_command, args)
                 elif sub_command in ['restart-device']:
@@ -1233,6 +1248,7 @@ class CLIWrapper(CLIWrapperBase):
                         args.CLI_PASS = None
                         args.distr_bs = 4096
                         args.distr_chunk_bs = 4096
+                        args.enable_hang_device = None
                         args.max_queue_size = 128
                         args.inflight_io_threshold = 4
                         args.disable_monitoring = False

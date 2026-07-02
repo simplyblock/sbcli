@@ -37,6 +37,9 @@ UUID_RE = re.compile(r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}")
 NQN_RE = re.compile(r"(?:--nqn[=\s]+|-n\s+)(\S+)")
 
 
+# NOTE: "device_hang" is temporarily DISABLED (removed from rotation for now).
+# The dormant _device_hang machinery below is kept so it can be re-enabled by
+# adding "device_hang" back to these two tuples.
 OUTAGE_METHODS = (
     "graceful", "forced", "container_kill", "host_reboot",
     "network_outage_20", "network_outage_50",
@@ -47,6 +50,13 @@ AUTO_RECOVER_METHODS = (
     "container_kill", "host_reboot",
     "network_outage_20", "network_outage_50",
 )
+
+# device_hang stalls a single device on the target node for a random duration
+# in this range (seconds); the node itself stays ONLINE. Implemented via the
+# delay bdev inserted between the nvme bdev and alceml at cluster create time
+# (requires the cluster created with --enable-hang-device).
+DEVICE_HANG_MIN_S = 5
+DEVICE_HANG_MAX_S = 20
 
 # Node statuses that are TRANSIENT rather than a fault: the control plane's
 # StorageNodeMonitor can autonomously kick off a node_restart (hublvol
@@ -62,6 +72,7 @@ TRANSIENT_NODE_STATUSES = ("in_restart", "in_shutdown")
 # Examples:
 #   M=5 → 3 × 20 = 60
 #   M=6 → 3 × 30 = 90
+#   (device_hang would add a 7th method → 126, but it is disabled for now)
 # Role categories (relative ring-distance preserved; the actual node pair
 # is re-rolled randomly per scenario at execution time so the soak hits
 # many different concrete pairs while keeping the topological distance
@@ -569,6 +580,11 @@ class SoakRunner:
         # loop is the final per-iteration wait_for_cluster_stable /
         # wait_for_data_migration_complete, which is a pure poller.
         self.serial_lock = threading.RLock()
+        # Serializes the actual command execution on the mgmt host. self.mgmt may
+        # be a RemoteHost whose single paramiko client is not safe for concurrent
+        # exec_command; the device_hang async release thread issues sbctl calls
+        # off the main thread, so guard every mgmt.run behind this lock.
+        self._mgmt_lock = threading.Lock()
         self.churn_thread = None
         self.churn_stop_event = threading.Event()
         self.churn_error = None
@@ -634,12 +650,13 @@ class SoakRunner:
 
     def sbctl(self, args, timeout=600, json_output=False):
         command = "sudo /usr/local/bin/sbctl -d " + args
-        _, stdout_text, stderr_text = self.mgmt.run(
-            command,
-            timeout=timeout,
-            check=True,
-            label=f"sbctl {args}",
-        )
+        with self._mgmt_lock:
+            _, stdout_text, stderr_text = self.mgmt.run(
+                command,
+                timeout=timeout,
+                check=True,
+                label=f"sbctl {args}",
+            )
         if not json_output:
             return stdout_text
         for candidate in (stdout_text, stderr_text, stdout_text + "\n" + stderr_text):
@@ -966,12 +983,13 @@ class SoakRunner:
 
     def sbctl_allow_failure(self, args, timeout=600):
         command = "sudo /usr/local/bin/sbctl -d " + args
-        rc, stdout_text, stderr_text = self.mgmt.run(
-            command,
-            timeout=timeout,
-            check=False,
-            label=f"sbctl {args}",
-        )
+        with self._mgmt_lock:
+            rc, stdout_text, stderr_text = self.mgmt.run(
+                command,
+                timeout=timeout,
+                check=False,
+                label=f"sbctl {args}",
+            )
         return rc, stdout_text, stderr_text
 
     def _graceful_shutdown(self, node_id):
@@ -1885,51 +1903,145 @@ class SoakRunner:
         self.wait_for_cluster_stable(require_no_rebalance=self.args.wait_for_rebalance)
 
     def _network_outage(self, node_id, duration):
-        """Drop data NICs on one storage node; schedule the NIC bring-up
-        ``duration`` seconds later on a background daemon thread, then
-        return.
+        """Isolate one storage node from the network for ``duration`` seconds.
 
-        Previously this method blocked for the full ``duration`` (the
-        sleep ran inline before bringing NICs back up). That made it
-        impossible to overlap a network_outage_N outage with a second
-        outage applied within the same iteration — by the time
-        run_outage_pair called _apply_outage for node 2, node 1's NICs
-        were already up and the CP was already healing it. Decoupling
-        the bring-up from the call site lets the second outage land
-        while the first node is still partitioned.
+        Two cases, distinguished by whether the cluster has dedicated data
+        NICs (metadata ``data_nics``):
 
-        The bring-up thread is daemonized so the soak's exit (atexit /
-        unhandled exception) does not block on it. We do NOT join the
-        thread anywhere in the iteration: the only thing that depends
-        on the NICs being back up is the next iteration's
-        wait_for_all_online, which polls anyway.
+        * Multipath clusters carry data on eth1/eth2, separate from the mgmt
+          NIC (eth0). We can drop just the data NICs and bring them back
+          over the still-live mgmt SSH path on a background daemon thread.
+          Decoupling the bring-up (async, non-blocking) lets a second outage
+          in the same iteration land while this node is still partitioned.
+
+        * Single-NIC clusters (the common AWS case) carry mgmt AND data on
+          the SAME interface (ens5/eth0). A real network block therefore
+          severs the RPC/health path too, so the node correctly goes
+          ``unreachable -> offline`` — which is the whole point of the
+          scenario. But because our own SSH channel dies with the block, the
+          restore CANNOT run over SSH. We launch a detached, self-restoring
+          iptables partition on the node that flushes itself after
+          ``duration`` seconds.
+
+        Historical bug: this method used ``self._get_data_nics() or ["eth1"]``
+        and dropped a nonexistent ``eth1`` on single-NIC hosts — a no-op that
+        left the node fully ONLINE and serving IO, so the network_outage
+        scenarios (a third of the soak) exercised nothing.
         """
         host = self._node_host(node_id)
-        nics = self._get_data_nics() or ["eth1"]
-        self.logger.log(
-            f"network_outage on {node_id}: dropping {nics} for {duration}s "
-            "(async bring-up)"
+        data_nics = self._get_data_nics()
+
+        if data_nics:
+            # --- multipath: drop dedicated data NICs; mgmt NIC stays up ---
+            self.logger.log(
+                f"network_outage on {node_id}: dropping {data_nics} for {duration}s "
+                "(multipath; async bring-up over mgmt NIC)"
+            )
+            for nic in data_nics:
+                try:
+                    host.run(f"sudo ip link set {nic} down", timeout=10, check=False,
+                             label=f"netout down {nic} on {node_id}")
+                except Exception as e:
+                    self.logger.log(f"WARNING: failed to down {nic} on {node_id}: {e}")
+
+            def _bring_up_later():
+                try:
+                    time.sleep(duration)
+                finally:
+                    for nic in data_nics:
+                        try:
+                            host.run(f"sudo ip link set {nic} up", timeout=10, check=False,
+                                     label=f"netout up {nic} on {node_id}")
+                        except Exception as e:
+                            self.logger.log(f"WARNING: failed to up {nic} on {node_id}: {e}")
+
+            t = threading.Thread(target=_bring_up_later, daemon=True,
+                                 name=f"netout-bringup-{node_id[:8]}")
+            t.start()
+            return
+
+        # --- single-NIC: full L3 partition with a detached local self-restore ---
+        # The block also cuts our SSH from the mgmt node, so we cannot restore
+        # remotely. A setsid+detached child on the node saves the current
+        # rules, DROPs all non-loopback traffic, sleeps, then restores (also
+        # via a trap so it heals even if killed). The leading `sleep 1` lets
+        # this SSH command close cleanly before connectivity drops.
+        dur = int(max(1, duration))
+        inner = (
+            "sleep 1; "
+            "bak=$(mktemp /tmp/netout.XXXXXX); iptables-save > \"$bak\"; "
+            "trap 'iptables-restore < \"$bak\"; rm -f \"$bak\"' EXIT; "
+            "iptables -I INPUT 1 ! -i lo -j DROP; "
+            "iptables -I OUTPUT 1 ! -o lo -j DROP; "
+            f"sleep {dur}"
         )
-        for nic in nics:
-            try:
-                host.run(f"sudo ip link set {nic} down", timeout=10, check=False,
-                         label=f"netout down {nic} on {node_id}")
-            except Exception as e:
-                self.logger.log(f"WARNING: failed to down {nic} on {node_id}: {e}")
+        remote = (
+            f"sudo setsid bash -c {shlex.quote(inner)} "
+            ">/tmp/netout.log 2>&1 </dev/null & echo netout-armed"
+        )
+        self.logger.log(
+            f"network_outage on {node_id}: single-NIC host — blocking all "
+            f"non-loopback traffic for {dur}s (node will go unreachable; "
+            "detached self-restore)"
+        )
+        try:
+            host.run(remote, timeout=15, check=False,
+                     label=f"netout partition on {node_id} for {dur}s")
+        except Exception as e:
+            self.logger.log(f"WARNING: failed to apply network_outage on {node_id}: {e}")
 
-        def _bring_up_later():
-            try:
-                time.sleep(duration)
-            finally:
-                for nic in nics:
-                    try:
-                        host.run(f"sudo ip link set {nic} up", timeout=10, check=False,
-                                 label=f"netout up {nic} on {node_id}")
-                    except Exception as e:
-                        self.logger.log(f"WARNING: failed to up {nic} on {node_id}: {e}")
+    def _get_device_on_node(self, node_id):
+        """Return the UUID of a device on node_id, preferring an online one.
+        None if the node has no devices / the query fails."""
+        try:
+            devices = self.sbctl(f"list-devices {node_id} --json", json_output=True)
+        except Exception as exc:
+            self.logger.log(f"device_hang: list-devices failed for {node_id[:8]} ({exc})")
+            return None
+        if not isinstance(devices, list) or not devices:
+            return None
+        online = [d for d in devices if str(d.get("Status", "")).lower() == "online"]
+        chosen = random.choice(online) if online else random.choice(devices)
+        return chosen.get("UUID") or chosen.get("uuid")
 
-        t = threading.Thread(target=_bring_up_later, daemon=True,
-                             name=f"netout-bringup-{node_id[:8]}")
+    def _device_hang(self, node_id):
+        """Stall a single device on node_id for a random 5-20s via the delay
+        bdev (cluster must be created with --enable-hang-device). The node stays
+        online; only that device's I/O hangs. Non-blocking: a daemon thread
+        disarms (sets the hang back to 0) after the duration so a second outage
+        in the same pair can overlap, mirroring _network_outage.
+        """
+        device_id = self._get_device_on_node(node_id)
+        if not device_id:
+            self.logger.log(
+                f"WARNING: device_hang on {node_id[:8]} skipped -- no device found")
+            return
+
+        duration = random.randint(DEVICE_HANG_MIN_S, DEVICE_HANG_MAX_S)
+        self.logger.log(
+            f"device_hang on {node_id[:8]}: stalling device {device_id[:8]} "
+            f"for {duration}s (async release)"
+        )
+        rc, _, stderr_text = self.sbctl_allow_failure(f"sn device-hang {device_id} {duration}")
+        if rc != 0:
+            # Most likely the cluster was not created with --enable-hang-device.
+            self.logger.log(
+                f"WARNING: device_hang arm failed on device {device_id[:8]} "
+                f"(rc={rc}); is the cluster created with --enable-hang-device? "
+                f"{stderr_text.strip()[:200]}"
+            )
+            return
+
+        def _release_later():
+            time.sleep(duration)
+            try:
+                self.sbctl_allow_failure(f"sn device-hang {device_id} 0")
+            except Exception as exc:
+                self.logger.log(
+                    f"WARNING: device_hang release failed on {device_id[:8]}: {exc}")
+
+        t = threading.Thread(target=_release_later, daemon=True,
+                             name=f"devhang-release-{device_id[:8]}")
         t.start()
 
     def _apply_outage(self, node_id, method):
@@ -1948,6 +2060,8 @@ class SoakRunner:
             except ValueError:
                 raise TestRunError(f"Unknown outage method: {method}")
             self._network_outage(node_id, duration)
+        elif method == "device_hang":
+            self._device_hang(node_id)
         else:
             raise TestRunError(f"Unknown outage method: {method}")
 
@@ -2003,6 +2117,9 @@ class SoakRunner:
         "container_kill": 30,
         # Reboot itself, BIOS, boot, SPDK start. Floor is generous.
         "host_reboot": 90,
+        # device_hang: node stays online, one device stalls for >= the minimum
+        # random hang; use the floor so the gap cap guarantees overlap.
+        "device_hang": DEVICE_HANG_MIN_S,
         # network_outage_N handled by name parsing below.
     }
 
@@ -2143,6 +2260,9 @@ class SoakRunner:
         for node_id, method in [(node1, method1), (node2, method2)]:
             if method not in AUTO_RECOVER_METHODS:
                 continue
+            if method == "device_hang":
+                # A hung device does not take the node offline; nothing to observe.
+                continue
             if method.startswith("network_outage_"):
                 observed = self.wait_node_leaves_online(node_id, timeout=30)
                 if not observed:
@@ -2223,8 +2343,12 @@ class SoakRunner:
           * the pinned topology has no LVS (empty cluster)
           * no LVS has both primary and secondary (primary_secondary unservable)
           * no LVS has both primary and tertiary (primary_tertiary unservable)
-          * no unrelated pair exists — in a dense FT=2 ring with N ≤ 4 this
-            is possible; raise so the coverage gap is explicit.
+          * a STRICTLY-unrelated pair (sharing no LVS) may not exist — with
+            real mutual-secondary HA pairing every node can co-occur with
+            every other (observed on a 6-node FT=2 cluster, not just N <= 4).
+            This is NOT fatal: the 'unrelated' category falls back to the
+            least-related pair(s) in ``pick_pair_for_category``; warn so the
+            reduced coverage is explicit.
         """
         if not self.topology:
             raise TestRunError("Empty topology; cannot pick representative pairs")
@@ -2242,9 +2366,12 @@ class SoakRunner:
 
         all_nodes, lvs_members = self._lvs_membership()
         if not self._unrelated_pairs(all_nodes, lvs_members):
-            raise TestRunError(
-                "No unrelated node pair found in topology "
-                f"({len(all_nodes)} nodes across {len(lvs_members)} LVSs)"
+            self.logger.log(
+                "WARNING: no strictly-unrelated node pair in topology "
+                f"({len(all_nodes)} nodes across {len(lvs_members)} LVSs) — "
+                "real mutual-secondary HA pairing makes every node share an "
+                "LVS with every other. The 'unrelated' category will use the "
+                "least-related pair(s) (fewest shared LVSs) instead."
             )
 
     def _candidate_pairs_for_role(self, role_b):
@@ -2275,6 +2402,24 @@ class SoakRunner:
                 pairs.append((a, b))
         return pairs
 
+    def _least_related_pairs(self, all_nodes, lvs_members):
+        """Pairs sharing the FEWEST LVSs — the most-unrelated available.
+
+        Fallback for the 'unrelated' category when no strictly-unrelated
+        (zero-shared) pair exists (dense topology, e.g. a 6-node FT=2 cluster
+        with mutual-secondary pairing). Picking the minimum-overlap pair keeps
+        the category's intent (widest practical blast radius) on any topology.
+        """
+        pairs = list(itertools.combinations(sorted(all_nodes), 2))
+        if not pairs:
+            return []
+
+        def shared(a, b):
+            return sum(1 for m in lvs_members if a in m and b in m)
+
+        fewest = min(shared(a, b) for a, b in pairs)
+        return [(a, b) for a, b in pairs if shared(a, b) == fewest]
+
     def pick_pair_for_category(self, category):
         """Randomly pick a (node_a, node_b) pair for the given role category.
 
@@ -2287,6 +2432,10 @@ class SoakRunner:
         if category == "unrelated":
             all_nodes, lvs_members = self._lvs_membership()
             candidates = self._unrelated_pairs(all_nodes, lvs_members)
+            if not candidates:
+                # Dense topology (e.g. 6-node FT=2 mutual-secondary pairing):
+                # no zero-shared pair exists. Use the least-related pair(s).
+                candidates = self._least_related_pairs(all_nodes, lvs_members)
         elif category == "primary_secondary":
             candidates = self._candidate_pairs_for_role("secondary")
         elif category == "primary_tertiary":

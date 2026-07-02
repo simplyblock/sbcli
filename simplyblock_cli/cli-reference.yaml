@@ -525,6 +525,18 @@ commands:
               - io_error_on_unmap
               - io_error_on_read
             default: full_pass_through
+      - name: device-hang
+        help: "Make a device hang for N seconds (0 to release). Requires --enable-hang-device at cluster create."
+        private: true
+        arguments:
+          - name: "device_id"
+            help: "The storage device id."
+            dest: device_id
+            type: str
+          - name: "seconds"
+            help: "Hang duration in seconds (0 disarms)."
+            dest: seconds
+            type: int
       - name: get-device
         help: "Gets storage device by its id."
         arguments:
@@ -951,6 +963,12 @@ commands:
             dest: enable_node_affinity
             type: bool
             action: store_true
+          - name: "--enable-hang-device"
+            help: "Insert a delay bdev per device for hang injection (chaos testing)."
+            dest: enable_hang_device
+            type: bool
+            action: store_true
+            private: true
           - name: "--fabric"
             help: "The NVMe fabric to use (specify: `tcp`, `rdma`, `tcp,rdma`). Default: `tcp`."
             dest: fabric

@@ -2048,7 +2048,7 @@ def task_runner(task):
 
     # For cleanup_target we only need the target node to be reachable.
     if migration.phase != LVolMigration.PHASE_CLEANUP_TARGET:
-        if src_node.status != StorageNode.STATUS_ONLINE:
+        if src_node.status not in (StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED):
             return _suspend_task(
                 task, migration, f"source node not online (status={src_node.status})")
 

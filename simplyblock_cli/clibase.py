@@ -338,6 +338,9 @@ class CLIWrapperBase:
     def storage_node__device_testing_mode(self, sub_command, args):
         return device_controller.set_device_testing_mode(args.device_id, args.mode)
 
+    def storage_node__device_hang(self, sub_command, args):
+        return device_controller.set_device_hang(args.device_id, args.seconds)
+
     def storage_node__get_device(self, sub_command, args):
         device_id = args.device_id
         return device_controller.get_device(device_id)
@@ -1073,7 +1076,7 @@ class CLIWrapperBase:
         strict_node_anti_affinity = args.strict_node_anti_affinity
         is_single_node = args.is_single_node
         client_data_nic = args.client_data_nic
-        enable_failure_domain = args.enable_failure_domain
+        enable_failure_domain = getattr(args, 'enable_failure_domain', False)
 
         max_fault_tolerance = min(distr_npcs, 2) if distr_npcs >= 1 else 1
 
@@ -1126,7 +1129,9 @@ class CLIWrapperBase:
         is_single_node = args.is_single_node
         fabric = args.fabric
         client_data_nic = args.client_data_nic
-        enable_failure_domain = args.enable_failure_domain
+        enable_failure_domain = getattr(args, 'enable_failure_domain', False)
+        # Private (developer-mode-only) arg: absent unless sbctl was run with --dev.
+        enable_hang_device = getattr(args, "enable_hang_device", False)
 
         max_fault_tolerance = min(distr_npcs, 2) if distr_npcs >= 1 else 1
 
@@ -1147,6 +1152,7 @@ class CLIWrapperBase:
             nvmf_base_port=args.nvmf_base_port, rpc_base_port=args.rpc_base_port, snode_api_port=args.snode_api_port,
             hashicorp_vault_settings=HashicorpVaultSettings({"base_url": args.hashicorp_vault_url}) if args.hashicorp_vault_url else None,
             enable_failure_domain=enable_failure_domain,
+            enable_hang_device=enable_hang_device,
         )
 
     def query_yes_no(self, question, default="yes"):

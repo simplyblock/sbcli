@@ -4,11 +4,12 @@ import time
 
 from simplyblock_core import db_controller, utils, storage_node_ops, distr_controller
 from simplyblock_core.controllers import (
-    tcp_ports_events, health_controller, tasks_controller, storage_events,
+    tcp_ports_events, health_controller, tasks_controller, storage_events, device_controller,
 )
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.models.nvme_device import NVMeDevice
 
 logger = utils.get_logger(__name__)
 
@@ -514,6 +515,26 @@ def exec_port_allow_task(task):
     from simplyblock_core import port_block
     port_block.set_port(node, port_number, block=False, timeout=5, retry=2)
     tcp_ports_events.port_allowed(node, port_number)
+
+    # Self-heal devices that were forced globally UNAVAILABLE by the remote-IO
+    # quorum (main_distr_event_collector) while this node was network-partitioned.
+    # Such devices carry status=UNAVAILABLE with io_error=False; a genuine local
+    # failure sets io_error=True and is left to the device-restart/removal path.
+    # Now that the node is back ONLINE and its port is unblocked, re-admit them so
+    # peers re-attach their remote controllers -- otherwise a transient partition
+    # leaves the device unavailable until a full node restart.
+    try:
+        node = db.get_storage_node_by_id(node.get_id())
+        if node.status == StorageNode.STATUS_ONLINE:
+            for dev in node.nvme_devices:
+                if (dev.status == NVMeDevice.STATUS_UNAVAILABLE
+                        and not dev.io_error and not dev.retries_exhausted):
+                    logger.info(
+                        f"Re-admitting quorum-forced-unavailable device "
+                        f"{dev.get_id()} after port allow on {node.get_id()}")
+                    device_controller.device_set_online(dev.get_id())
+    except Exception as e:
+        logger.error(f"Device re-admit after port allow failed: {e}")
 
     task.function_result = f"Port {port_number} allowed on node"
     task.status = JobSchedule.STATUS_DONE
