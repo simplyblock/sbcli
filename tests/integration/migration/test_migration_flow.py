@@ -409,16 +409,23 @@ class TestCancellation:
             ctx.lvol_uuid("l1"), tgt_node.uuid)
         assert err is None
 
-        # Run a few steps, then cancel
+        # Force failures so the migration cannot race to completion before
+        # we cancel it — with a single snapshot it can otherwise finish
+        # within a handful of task_runner() calls.
+        mock_tgt_server.set_failure_rate(1.0, timeout_seconds=0.1)
+
         from simplyblock_core.services.tasks_runner_lvol_migration import task_runner
         from tests.integration.migration.conftest import _find_migration_task
         task = _find_migration_task(db, mig_id)
         for _ in range(5):
             task = db.get_task_by_id(task.uuid)
-            done = task_runner(task)
-            if done:
-                break
+            task_runner(task)
             time.sleep(0.02)
+
+        mock_tgt_server.set_failure_rate(0.0)
+
+        m = db.get_migration_by_id(mig_id)
+        assert m.is_active(), f"Migration should still be active, got {m.status}"
 
         # Cancel
         migration_controller.cancel_migration(mig_id)

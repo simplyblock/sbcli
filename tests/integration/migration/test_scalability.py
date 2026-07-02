@@ -537,8 +537,12 @@ class TestLargeVolumeMigration:
         assert lvol.node_id == tgt.uuid, "node_id not updated"
         assert lvol.hostname == tgt.hostname, "hostname not updated"
 
-        # All snapshots should have updated snap_bdev prefix
+        # All snapshots should have updated snap_bdev prefix. Intermediate
+        # snapshots are removed from FDB during cleanup, so skip those.
+        intermediate_uuids = set(m.intermediate_snaps)
         for snap_uuid in m.snaps_migrated:
+            if snap_uuid in intermediate_uuids:
+                continue
             snap = db.get_snapshot_by_id(snap_uuid)
             if snap and snap.snap_bdev and '/' in snap.snap_bdev:
                 assert snap.snap_bdev.startswith(tgt.lvstore + "/"), (
