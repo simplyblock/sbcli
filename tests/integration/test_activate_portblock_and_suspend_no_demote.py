@@ -339,10 +339,11 @@ class TestSuspendIsDeprecatedNoop(unittest.TestCase):
     def test_suspend_is_noop_and_does_not_touch_firewall(self):
         from simplyblock_core import storage_node_ops
 
-        snode = _node("node-A", lvstore="LVS_A")
+        snode = _node("node-A", lvstore="LVS_A", status=StorageNode.STATUS_ONLINE)
 
         with patch.object(storage_node_ops, "port_block") as pb, \
                 patch.object(storage_node_ops, "DBController") as _db:
+            _db.get_storage_node_by_id.return_value = snode
             self.assertTrue(
                 storage_node_ops.suspend_storage_node(snode.get_id()))
             pb.set_port.assert_not_called()
@@ -350,10 +351,11 @@ class TestSuspendIsDeprecatedNoop(unittest.TestCase):
     def test_resume_is_noop_and_does_not_touch_firewall(self):
         from simplyblock_core import storage_node_ops
 
-        snode = _node("node-A", lvstore="LVS_A")
+        snode = _node("node-A", lvstore="LVS_A", status=StorageNode.STATUS_SUSPENDED)
 
         with patch.object(storage_node_ops, "port_block") as pb, \
                 patch.object(storage_node_ops, "DBController") as _db:
+            _db.get_storage_node_by_id.return_value = snode
             self.assertTrue(
                 storage_node_ops.resume_storage_node(snode.get_id()))
             pb.set_port.assert_not_called()

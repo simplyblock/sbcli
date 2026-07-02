@@ -301,7 +301,7 @@ class CLIWrapperBase:
         return ret
 
     def storage_node__suspend(self, sub_command, args):
-        ret = storage_ops.suspend_storage_node(args.node_id, args.force)
+        ret = storage_ops.suspend_storage_node(args.node_id)
         if isinstance(ret, tuple):
             ok, reason = ret
             if not ok:

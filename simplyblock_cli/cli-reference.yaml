@@ -297,14 +297,11 @@ commands:
             type: bool
             action: store_true
       - name: remove
-        help: "Removes a storage node from the cluster."
-        description: >
-          The storage node cannot be used or added any more. Any data residing on this storage node will be migrated to
-          the remaining storage nodes. The user must ensure that there is sufficient free space in remaining cluster to
-          allow for successful node removal.
-
-          !!! danger
-              If there isn't enough storage available, the cluster may run full and switch to read-only mode.
+        help: 'Removes a storage node from the cluster (inverse of cluster expansion). 
+        The node must be ONLINE and all other nodes ONLINE; it must host no logical 
+        volumes or snapshots (migrate those first). Runs as a background task: shuts 
+        the node down, rewires LVS replicas onto other nodes, then removes, fails and 
+        migrates its devices before marking the node removed.'
         arguments:
           - name: node_id
             help: Storage node id
@@ -312,7 +309,7 @@ commands:
             completer: _completer_get_sn_list
             type: str
           - name: "--force-remove"
-            help: "Force remove all logical volumes and snapshots."
+            help: "Cancel any active tasks on the node before starting removal."
             dest: force_remove
             type: bool
             action: store_true
@@ -449,21 +446,16 @@ commands:
             type: bool
             action: store_true
       - name: suspend
-        help: "DEPRECATED: the suspension phase was removed from graceful shutdown (it caused writer conflicts on sec/tert lvstores). This command is now a no-op returning success. Use `sn shutdown`."
-        usage: The node will stop accepting new IO, but will finish processing any IO, which has been received already.
+        help: "Exclude node from lvol allocation."
+        usage: The node will be excluded from lvol allocation. It will not be able to create new logical volumes on this node.
         arguments:
           - name: node_id
             help: Storage node id
             dest: node_id
             completer: _completer_get_sn_list
             type: str
-          - name: "--force"
-            help: "Ignored (kept for backwards compatibility)."
-            dest: force
-            type: bool
-            action: store_true
       - name: resume
-        help: "DEPRECATED: counterpart to `sn suspend`, also a no-op."
+        help: "Include node in lvol allocation."
         arguments:
           - name: node_id
             help: Storage node id
