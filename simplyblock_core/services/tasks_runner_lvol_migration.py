@@ -500,7 +500,7 @@ def _delete_bdev_blocking(bdev_name, primary_rpc, secondary_rpc=None, max_polls=
 # Secondary-node helpers
 # ---------------------------------------------------------------------------
 
-def _get_target_secondary_node(tgt_node):
+def _get_target_secondary_node(tgt_node, src_node_id=None):
     """
     Return ``(sec_node, error_string)`` describing how to handle the target's
     secondary node when creating a new object on the target primary.
@@ -509,6 +509,9 @@ def _get_target_secondary_node(tgt_node):
       - No secondary configured   → (None, None)   skip silently
       - Secondary STATUS_ONLINE   → (sec_node, None) register on secondary
       - Secondary STATUS_OFFLINE  → (None, None)   administratively down, skip
+      - Secondary STATUS_SUSPENDED and node == src_node → (sec_node, None)
+        overlap drain: source is being drained but is still the target's
+        secondary; migration must continue through it
       - Any other status          → (None, err)    block creation on primary
     """
     if not tgt_node.secondary_node_id:
@@ -522,13 +525,15 @@ def _get_target_secondary_node(tgt_node):
         return sec, None
     if sec.status == StorageNode.STATUS_OFFLINE:
         return None, None
+    if sec.status == StorageNode.STATUS_SUSPENDED and src_node_id and sec.get_id() == src_node_id:
+        return sec, None
     return None, (
         f"Target secondary node {tgt_node.secondary_node_id} is in state "
         f"'{sec.status}'; cannot create on target primary"
     )
 
 
-def _get_target_tertiary_node(tgt_node):
+def _get_target_tertiary_node(tgt_node, src_node_id=None):
     """Like _get_target_secondary_node but for the tertiary node."""
     if not tgt_node.tertiary_node_id:
         return None, None
@@ -540,6 +545,8 @@ def _get_target_tertiary_node(tgt_node):
         return ter, None
     if ter.status == StorageNode.STATUS_OFFLINE:
         return None, None
+    if ter.status == StorageNode.STATUS_SUSPENDED and src_node_id and ter.get_id() == src_node_id:
+        return ter, None
     return None, (
         f"Target tertiary node {tgt_node.tertiary_node_id} is in state "
         f"'{ter.status}'; cannot create on target primary"
@@ -617,10 +624,10 @@ def _build_paths(src_node, tgt_node, src_rpc, tgt_rpc):
             pass
 
     tgt_paths = [_entry(tgt_node, tgt_rpc, tgt_node.lvstore)]
-    tgt_sec, sec_err = _get_target_secondary_node(tgt_node)
+    tgt_sec, sec_err = _get_target_secondary_node(tgt_node, src_node.get_id())
     if not sec_err and tgt_sec is not None:
         tgt_paths.append(_entry(tgt_sec, _make_rpc(tgt_sec), tgt_node.lvstore))
-    tgt_ter, ter_err = _get_target_tertiary_node(tgt_node)
+    tgt_ter, ter_err = _get_target_tertiary_node(tgt_node, src_node.get_id())
     if not ter_err and tgt_ter is not None:
         tgt_paths.append(_entry(tgt_ter, _make_rpc(tgt_ter), tgt_node.lvstore))
 
@@ -935,7 +942,7 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                 except KeyError:
                     return False, True, f"Snapshot {snap_uuid} not found in DB"
                 if snap.lvol.ha_type == "ha":
-                    tgt_sec, sec_err = _get_target_secondary_node(tgt_node)
+                    tgt_sec, sec_err = _get_target_secondary_node(tgt_node, src_node.get_id())
                     if sec_err:
                         migration.error_message = sec_err
                         migration.write_to_db(db.kv_store)
@@ -1156,7 +1163,7 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         tgt_sec = None
         sec_rpc = None
         if snap.lvol.ha_type == "ha":
-            tgt_sec, sec_err = _get_target_secondary_node(tgt_node)
+            tgt_sec, sec_err = _get_target_secondary_node(tgt_node, src_node.get_id())
             if sec_err:
                 migration.error_message = sec_err
                 migration.write_to_db(db.kv_store)
@@ -1343,7 +1350,7 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
     else:
         # --- Gate: check target secondary state before creating on target primary ---
         if lvol.ha_type == "ha":
-            _, sec_err = _get_target_secondary_node(tgt_node)
+            _, sec_err = _get_target_secondary_node(tgt_node, src_node.get_id())
             if sec_err:
                 migration.error_message = sec_err
                 migration.write_to_db(db.kv_store)
@@ -1693,12 +1700,12 @@ def _delete_intermediate_snaps_on_target(migration, tgt_rpc, tgt_sec_rpc=None):
 
 
 def _get_secondary_rpc(node):
-    """Return RPC clients for node's online secondaries."""
+    """Return RPC client for node's secondary if reachable (online or suspended)."""
     if not node.secondary_node_id:
         return None
     try:
         sec = db.get_storage_node_by_id(node.secondary_node_id)
-        if sec.status == StorageNode.STATUS_ONLINE:
+        if sec.status in (StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED):
             return _make_rpc(sec)
     except KeyError:
         pass
