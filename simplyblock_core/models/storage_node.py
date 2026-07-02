@@ -21,6 +21,8 @@ logger = utils.get_logger(__name__)
 
 class StorageNode(BaseNodeObject):
 
+    _WATCHED = True
+
     # Restart phase constants (per-LVS)
     RESTART_PHASE_PRE_BLOCK = "pre_block"
     RESTART_PHASE_BLOCKED = "blocked"

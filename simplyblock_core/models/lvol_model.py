@@ -7,6 +7,8 @@ from simplyblock_core.models.base_model import BaseModel
 
 class LVol(BaseModel):
 
+    _WATCHED = True
+
     STATUS_IN_CREATION = 'in_creation'
     STATUS_ONLINE = 'online'
     STATUS_OFFLINE = 'offline'
