@@ -302,6 +302,12 @@ def spdk_process_start(body: SPDKParams):
 
     try:
         env = Environment(loader=PackageLoader('simplyblock_web', 'templates'), trim_blocks=True, lstrip_blocks=True)
+        image_pull_secrets_raw = os.environ.get("IMAGE_PULL_SECRETS", "")
+        try:
+            image_pull_secrets = [{"name": n} for n in json.loads(image_pull_secrets_raw)] if image_pull_secrets_raw else []
+        except Exception:
+            image_pull_secrets = []
+
         values = {
             'SPDK_IMAGE': body.spdk_image,
             "L_CORES": body.l_cores,
@@ -335,6 +341,7 @@ def spdk_process_start(body: SPDKParams):
             'TLS_CONNECT': settings.tls_connect,
             'TLS_CLIENT_AUTH': settings.model_dump()["tls_client_auth"],
             'TLS_PROVIDER': settings.tls_provider,
+            'IMAGE_PULL_SECRETS': image_pull_secrets,
         }
 
         if ubuntu_host:
