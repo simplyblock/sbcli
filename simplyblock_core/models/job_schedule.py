@@ -29,6 +29,10 @@ class JobSchedule(BaseModel):
     FN_BACKUP_RESTORE = "s3_backup_restore"
     FN_BACKUP_MERGE = "s3_backup_merge"
     FN_CLUSTER_EXPAND = "cluster_expand"
+    # Cross-cluster replication cutover: freeze source IO, transfer the final
+    # lvol delta to the target, flip ANA so the client fails over. Used for
+    # migration commit and fail-back (fresh or recovered source).
+    FN_REPLICATION_FINAL = "replication_final"
 
     canceled: bool = False
     cluster_id: str = ""
