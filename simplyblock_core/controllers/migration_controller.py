@@ -114,7 +114,7 @@ def start_migration(migration_id,
     if source_node_id == target_node_id:
         raise ValueError("Source and target nodes must be different")
 
-    if source_node.status != StorageNode.STATUS_ONLINE:
+    if source_node.status not in (StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED):
         raise ValueError(f"Source node is not online (status={source_node.status})")
 
     if target_node.status != StorageNode.STATUS_ONLINE:
