@@ -1065,6 +1065,21 @@ class CLIWrapperBase:
             print(f"Switched to external backup source: {target}")
         return True
 
+    def db_backup__create(self, sub_command, args):
+        return tasks_controller.add_backup_task(args.cluster_id)
+
+    def db_backup__list(self, sub_command, args):
+        return backup_controller.list_backups()
+
+    def db_backup__status(self, sub_command, args):
+        return backup_controller.backup_status()
+
+    def db_backup__restore(self, sub_command, args):
+        return backup_controller.backup_restore(args.name)
+
+    def db_backup__config(self, sub_command, args):
+        return backup_controller.backup_configure(args.backup_path, args.backup_frequency, args.bucket_name, args.region_name, args.backup_credentials)
+
     def storage_node_list_devices(self, args):
         data = storage_ops.list_storage_devices(args.node_id)
 

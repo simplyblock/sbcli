@@ -33,6 +33,7 @@ class JobSchedule(BaseModel):
     # lvol delta to the target, flip ANA so the client fails over. Used for
     # migration commit and fail-back (fresh or recovered source).
     FN_REPLICATION_FINAL = "replication_final"
+    FN_FDB_BACKUP = "fdb_backup"
 
     canceled: bool = False
     cluster_id: str = ""
