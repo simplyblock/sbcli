@@ -281,7 +281,8 @@ class SnapshotDTO(BaseModel):
             created_at=datetime.fromtimestamp(model.created_at, tz=timezone.utc),
             lvol=str(
                 request.url_for(
-                    "clusters:pools:volumes:detail",
+                    #"clusters:pools:volumes:detail",
+                    "clusters:storage-pools:volumes:detail",
                     cluster_id=cluster_id,
                     pool_id=pool_id,
                     volume_id=model.lvol.get_id(),

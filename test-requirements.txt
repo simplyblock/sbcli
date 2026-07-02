@@ -1,3 +1,4 @@
+httpx  # fastapi.testclient
 pytest
 pytest-timeout
 requests
