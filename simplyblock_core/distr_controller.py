@@ -358,6 +358,7 @@ def send_cluster_map_add_device(device: NVMeDevice, target_node: StorageNode):
                 "bdev_name": name,
                 "status": device.status,
                 "weight": dev_w_gib,
+                "physical_label":  device.physical_label if device.physical_label > 0 else -1,
             }}
         }
         try:

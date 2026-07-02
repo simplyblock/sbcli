@@ -140,36 +140,17 @@ def _get_next_3_nodes(cluster_id, lvol_size=0):
     for node in snodes:
         if node.is_secondary_node:  # pass
             continue
-
         if node.status == node.STATUS_ONLINE:
-
-            lvol_count = len(db_controller.get_lvols_by_node_id(node.get_id()))
-            if lvol_count >= node.max_lvol:
+            subsys_count = len(set(lv.nqn for lv in db_controller.get_lvols_by_node_id(node.get_id())))
+            if subsys_count >= node.max_lvol:
                 continue
-
-            # Validate Eligible nodes for adding lvol
-            # snode_api = SNodeClient(node.api_endpoint)
-            # result, _ = snode_api.info()
-            # memory_free = result["memory_details"]["free"]
-            # huge_free = result["memory_details"]["huge_free"]
-            # total_node_capacity = db_controller.get_snode_size(node.get_id())
-            # error = utils.validate_add_lvol_or_snap_on_node(memory_free, huge_free, node.max_lvol, lvol_size,  total_node_capacity, len(node.lvols))
-            # if error:
-            #     logger.warning(error)
-            #     continue
-            #
+            if node.lvol_sync_del():
+                logger.warning(f"LVol sync delete task found on node: {node.get_id()}, skipping")
+                continue
             online_nodes.append(node)
-            # node_stat_list = db_controller.get_node_stats(node, limit=1000)
-            # combined_record = utils.sum_records(node_stat_list)
             node_st = {
-                "lvol": lvol_count+1,
-                # "cpu": 1 + (node.cpu * node.cpu_hz),
-                # "r_io": combined_record.read_io_ps,
-                # "w_io": combined_record.write_io_ps,
-                # "r_b": combined_record.read_bytes_ps,
-                # "w_b": combined_record.write_bytes_ps
+                "lvol": subsys_count+1
             }
-
             node_stats[node.get_id()] = node_st
 
     if len(online_nodes) <= 1:
@@ -281,6 +262,9 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
                 host_node = nodes[0]
             else:
                 return False, f"Can not find storage node: {host_id_or_name}"
+        if host_node.lvol_sync_del():
+            logger.error(f"LVol sync deletion found on node: {host_node.get_id()}")
+            return False, f"LVol sync deletion found on node: {host_node.get_id()}"
 
     if namespace:
         try:
@@ -456,14 +440,12 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         lvol.nqn = cl.nqn + ":lvol:" + lvol.uuid
         lvol.max_namespace_per_subsys = max_namespace_per_subsys
 
-    nodes = []
-    if host_node:
-        nodes.insert(0, host_node)
-    else:
+    if not host_node:
         nodes = _get_next_3_nodes(cl.get_id(), lvol.size)
         if not nodes:
             return False, "No nodes found with enough resources to create the LVol"
         host_node = nodes[0]
+
     s_node = db_controller.get_storage_node_by_id(host_node.secondary_node_id)
     attr_name = f"active_{fabric}"
     is_active_primary = getattr(host_node, attr_name)
@@ -486,9 +468,9 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp,
         lvol.npcs = cl.distr_npcs
         lvol.ndcs = cl.distr_ndcs
 
-    lvol_count = len(db_controller.get_lvols_by_node_id(host_node.get_id()))
-    if lvol_count > host_node.max_lvol:
-        error = f"Too many lvols on node: {host_node.get_id()}, max lvols reached: {lvol_count}"
+    subsys_count = len(set(lv.nqn for lv in db_controller.get_lvols_by_node_id(host_node.get_id())))
+    if subsys_count > host_node.max_lvol:
+        error = f"Too many subsystems on node: {host_node.get_id()}, max subsystems reached: {subsys_count}"
         logger.error(error)
         return False, error
 
@@ -1032,8 +1014,12 @@ def delete_lvol(id_or_name, force_delete=False):
     lvol.write_to_db()
     lvol_events.lvol_status_change(lvol, lvol.status, old_status)
 
+    if lvol.cloned_from_snap and lvol.delete_snap_on_lvol_delete:
+        logger.info(f"Deleting snap: {lvol.cloned_from_snap}")
+        snapshot_controller.delete(lvol.cloned_from_snap)
+
     # if lvol is clone and snapshot is deleted, then delete snapshot
-    if lvol.cloned_from_snap:
+    elif lvol.cloned_from_snap:
         try:
             snap = db_controller.get_snapshot_by_id(lvol.cloned_from_snap)
             if snap.snap_ref_id:
@@ -1195,14 +1181,10 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
 
     data = []
 
-    snap_dict : dict[str, int] = {}
     for lvol in lvols:
         logger.debug(lvol)
         if lvol.deleted is True and all is False:
             continue
-        cloned_snapped = lvol.cloned_from_snap
-        if cloned_snapped:
-            snap_dict[cloned_snapped] = snap_dict.get(cloned_snapped, 0) + 1
         size_used = 0
         records = db_controller.get_lvol_stats(lvol, 1)
         if records:
@@ -1229,11 +1211,6 @@ def list_lvols(is_json, cluster_id, pool_id_or_name, all=False):
             "Mode": mode
         }
         data.append(lvol_data)
-
-    for snap, count in snap_dict.items():
-        ref_snap = db_controller.get_snapshot_by_id(snap)
-        ref_snap.ref_count = count
-        ref_snap.write_to_db(db_controller.kv_store)
 
     if is_json:
         return json.dumps(data, indent=2)
@@ -1320,6 +1297,9 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO):
             else:
                 keep_alive_to = constants.LVOL_NVME_KEEP_ALIVE_TO
 
+            client_data_nic_str = ""
+            if  cluster.client_data_nic:
+                client_data_nic_str = f"--host-iface={cluster.client_data_nic}"
             out.append({
                 "ns_id": lvol.ns_id,
                 "transport": transport,
@@ -1330,11 +1310,13 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO):
                 "ctrl-loss-tmo": ctrl_loss_tmo,
                 "nr-io-queues": cluster.client_qpair_count,
                 "keep-alive-tmo": keep_alive_to,
+                "host-iface": cluster.client_data_nic,
                 "connect": f"sudo nvme connect --reconnect-delay={constants.LVOL_NVME_CONNECT_RECONNECT_DELAY} "
                            f"--ctrl-loss-tmo={ctrl_loss_tmo} "
                            f"--nr-io-queues={cluster.client_qpair_count} "
                            f"--keep-alive-tmo={keep_alive_to} "
-                           f"--transport={transport} --traddr={ip} --trsvcid={port} --nqn={lvol.nqn}",
+                           f"--transport={transport} --traddr={ip} --trsvcid={port} --nqn={lvol.nqn} "
+                           f"{client_data_nic_str}",
             })
     return out
 
@@ -1380,6 +1362,10 @@ def resize_lvol(id, new_size):
             return False, msg
 
     snode = db_controller.get_storage_node_by_id(lvol.node_id)
+
+    if snode.lvol_sync_del():
+        logger.error(f"LVol sync deletion found on node: {snode.get_id()}")
+        return False, f"LVol sync deletion found on node: {snode.get_id()}"
 
     logger.info(f"Resizing LVol: {lvol.get_id()}")
     logger.info(f"Current size: {utils.humanbytes(lvol.size)}, new size: {utils.humanbytes(new_size)}")
@@ -1752,3 +1738,80 @@ def inflate_lvol(lvol_id):
     else:
         logger.error(f"Failed to inflate LVol: {lvol_id}")
     return ret
+
+
+def list_by_node(node_id=None, is_json=False):
+    db_controller = DBController()
+    lvols = db_controller.get_lvols()
+    lvols = sorted(lvols, key=lambda x: x.create_dt)
+    data = []
+    for lvol in lvols:
+        if node_id:
+            if lvol.node_id != node_id:
+                continue
+        logger.debug(lvol)
+        cloned_from_snap = ""
+        if lvol.cloned_from_snap:
+            snap = db_controller.get_snapshot_by_id(lvol.cloned_from_snap)
+            cloned_from_snap = snap.snap_uuid
+        data.append({
+            "UUID": lvol.uuid,
+            "BDdev UUID": lvol.lvol_uuid,
+            "BlobID": lvol.blobid,
+            "Name": lvol.lvol_name,
+            "Size": utils.humanbytes(lvol.size),
+            "LVS name": lvol.lvs_name,
+            "BDev": lvol.lvol_bdev,
+            "Node ID": lvol.node_id,
+            "Clone From Snap BDev": cloned_from_snap,
+            "Created At": lvol.create_dt,
+        })
+    if is_json:
+        return json.dumps(data, indent=2)
+    return utils.print_table(data)
+
+
+def clone_lvol(lvol_id, clone_name, new_size=None, pvc_name=None):
+    db_controller = DBController()
+    try:
+        lvol = db_controller.get_lvol_by_id(lvol_id)
+    except KeyError as e:
+        logger.error(e)
+        return False, str(e)
+
+    host_node = db_controller.get_storage_node_by_id(lvol.node_id)
+    lvol_count = len(db_controller.get_lvols_by_node_id(lvol.node_id))
+    if lvol_count >= host_node.max_lvol:
+        error = f"Too many lvols on node: {host_node.get_id()}, max lvols reached: {lvol_count}"
+        logger.error(error)
+        return False, error
+
+    had_lock = None
+    snapshot_uuid = None
+    for snap in db_controller.get_snapshots_by_node_id(lvol.node_id):
+        if snap.snap_name == clone_name:
+            logger.info(f"Snapshot with name {clone_name} already exists for this LVol: {snap.uuid}, using it for cloning")
+            snapshot_uuid = snap.uuid
+            break
+
+    if not snapshot_uuid:
+        had_lock = snapshot_controller._acquire_lvol_mutation_lock(host_node)
+        snapshot_uuid, err = snapshot_controller.add(lvol_id, clone_name, lock=False)
+        if err:
+            snapshot_controller._release_lvol_mutation_lock(host_node, had_lock)
+            logger.error(err)
+            return False, str(err)
+    if not had_lock:
+        had_lock = snapshot_controller._acquire_lvol_mutation_lock(host_node)
+    new_lvol_uuid, err = snapshot_controller.clone(
+        snapshot_uuid, clone_name, new_size, pvc_name, delete_snap_on_lvol_delete=True, lock=False)
+    if err:
+        logger.error(err)
+        if snapshot_uuid:
+                snapshot_controller.delete(snapshot_uuid)
+        snapshot_controller._release_lvol_mutation_lock(host_node, had_lock)
+        return False, str(err)
+
+    snapshot_controller._release_lvol_mutation_lock(host_node, had_lock)
+    return new_lvol_uuid, False
+

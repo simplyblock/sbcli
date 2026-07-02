@@ -3,6 +3,7 @@ import time
 
 from simplyblock_core import constants, db_controller, storage_node_ops, utils
 from simplyblock_core.controllers import device_controller, health_controller, tasks_controller
+from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
@@ -118,7 +119,8 @@ def task_runner_device(task):
         task.status = JobSchedule.STATUS_DONE
         task.write_to_db(db.kv_store)
 
-        tasks_controller.add_device_mig_task([device.get_id()], task.cluster_id)
+        tasks_controller.add_device_mig_task_for_node(task.node_id)
+
         return True
 
     task.retry += 1
@@ -172,6 +174,13 @@ def task_runner_node(task):
         task.status = JobSchedule.STATUS_RUNNING
         task.write_to_db(db.kv_store)
 
+    cluster = db.get_cluster_by_id(task.cluster_id)
+    if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
+        task.function_result = f"Cluster is not active: {cluster.status}, retry"
+        task.status = JobSchedule.STATUS_SUSPENDED
+        task.write_to_db(db.kv_store)
+        return False
+
     # is node reachable?
     ping_check = health_controller._check_node_ping(node.mgmt_ip)
     logger.info(f"Check: ping mgmt ip {node.mgmt_ip} ... {ping_check}")
@@ -180,7 +189,7 @@ def task_runner_node(task):
     node_data_nic_ping_check = False
     for data_nic in node.data_nics:
         if data_nic.ip4_address:
-            data_ping_check = health_controller._check_node_ping(data_nic.ip4_address)
+            data_ping_check = health_controller._check_ping_from_node(data_nic.ip4_address, ifname=data_nic.if_name, node=node)
             logger.info(f"Check: ping data nic {data_nic.ip4_address} ... {data_ping_check}")
             node_data_nic_ping_check |= data_ping_check
     if not ping_check or not node_api_check or not node_data_nic_ping_check:

@@ -1,6 +1,6 @@
 # coding=utf-8
 import time
-
+from typing import Optional
 
 from simplyblock_core import db_controller, utils
 from simplyblock_core.models.job_schedule import JobSchedule
@@ -11,6 +11,15 @@ logger = utils.get_logger(__name__)
 
 # get DB controller
 db = db_controller.DBController()
+
+def get_primary_node(task) -> Optional[StorageNode]:
+    if "primary_node" in task.function_params:
+        return db.get_storage_node_by_id(task.function_params["primary_node"])
+
+    nodes = db.get_primary_storage_nodes_by_secondary_node_id(task.node_id)
+    if nodes:
+        return nodes[0]
+    return None
 
 
 logger.info("Starting Tasks runner...")
@@ -37,6 +46,9 @@ while True:
                             task.function_result = "canceled"
                             task.status = JobSchedule.STATUS_DONE
                             task.write_to_db(db.kv_store)
+                            primary_node = get_primary_node(task)
+                            if primary_node:
+                                primary_node.lvol_del_sync_lock_reset()
                             continue
 
                         node = db.get_storage_node_by_id(task.node_id)
@@ -45,6 +57,8 @@ while True:
                             task.function_result = "node not found"
                             task.status = JobSchedule.STATUS_DONE
                             task.write_to_db(db.kv_store)
+                            primary_node = db.get_storage_node_by_id(task.function_params["primary_node"])
+                            primary_node.lvol_del_sync_lock_reset()
                             continue
 
                         if node.status not in [StorageNode.STATUS_DOWN, StorageNode.STATUS_ONLINE]:
@@ -67,11 +81,18 @@ while True:
                             if "code" in err and err["code"] == -19:
                                 logger.error(f"Sync delete completed with error: {err}")
                             else:
-                                logger.error(
-                                    f"Failed to sync delete bdev: {lvol_bdev_name} from node: {node.get_id()}")
+                                msg =  f"Failed to sync delete bdev: {lvol_bdev_name} from node: {node.get_id()}"
+                                logger.error(msg)
+                                task.function_result = msg
+                                task.status = JobSchedule.STATUS_SUSPENDED
+                                task.write_to_db(db.kv_store)
+                                continue
 
                         task.function_result = f"bdev {lvol_bdev_name} deleted"
                         task.status = JobSchedule.STATUS_DONE
                         task.write_to_db(db.kv_store)
+                        primary_node = get_primary_node(task)
+                        if primary_node:
+                            primary_node.lvol_del_sync_lock_reset()
 
     time.sleep(3)

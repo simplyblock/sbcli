@@ -149,6 +149,7 @@ def error_handler(exception: Exception):
 
 class RPCPortParams(BaseModel):
     rpc_port: int = Field(constants.RPC_PORT_RANGE_START, ge=0, le=65536)
+    cluster_id: Optional[str]
 
 
 class DeviceParams(BaseModel):

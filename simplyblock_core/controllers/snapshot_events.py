@@ -21,11 +21,11 @@ def _snapshot_event(snapshot, message, caused_by, event):
 
 
 def snapshot_create(snapshot, caused_by=ec.CAUSED_BY_CLI):
-    _snapshot_event(snapshot, f"Snapshot created: {snapshot.get_id()}", caused_by, ec.EVENT_OBJ_CREATED)
+    _snapshot_event(snapshot, f"Snapshot created: {snapshot.get_id()}, {snapshot.snap_bdev}", caused_by, ec.EVENT_OBJ_CREATED)
 
 
 def snapshot_delete(snapshot, caused_by=ec.CAUSED_BY_CLI):
-    _snapshot_event(snapshot, f"Snapshot deleted: {snapshot.get_id()}", caused_by, ec.EVENT_OBJ_DELETED)
+    _snapshot_event(snapshot, f"Snapshot deleted: {snapshot.get_id()}, {snapshot.snap_bdev}", caused_by, ec.EVENT_OBJ_DELETED)
 
 
 def snapshot_clone(snapshot, lvol_clone, caused_by=ec.CAUSED_BY_CLI):

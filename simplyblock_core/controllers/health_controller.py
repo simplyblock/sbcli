@@ -130,10 +130,10 @@ def _check_node_api(ip):
     return False
 
 
-def _check_spdk_process_up(ip, rpc_port):
+def _check_spdk_process_up(ip, rpc_port, cluster_id):
     snode_api = SNodeClient(f"{ip}:5000", timeout=90, retry=2)
     logger.debug(f"Node API={ip}:5000")
-    is_up, _ = snode_api.spdk_process_is_up(rpc_port)
+    is_up, _ = snode_api.spdk_process_is_up(rpc_port, cluster_id)
     logger.debug(f"SPDK is {is_up}")
     return is_up
 
@@ -168,6 +168,18 @@ def _check_node_ping(ip):
         return True
     else:
         return False
+
+
+def _check_ping_from_node(ip, ifname, node):
+    snodeapi = SNodeClient(node.api_endpoint, timeout=3, retry=3)
+    try:
+        ret, _ = snodeapi.ping_ip(ip, ifname)
+        return bool(ret)
+    except Exception as e:
+        logger.error(e)
+        logger.info("using fallback ping method")
+        return utils.ping_host(ip)
+
 
 def _check_node_hublvol(node: StorageNode, node_bdev_names=None, node_lvols_nqns=None) -> bool:
     if not node.hublvol:
@@ -458,6 +470,10 @@ def _check_node_lvstore(
                                                     distr_controller.send_dev_status_event(dev, dev.status, node)
                                             except Exception as e:
                                                 logger.error(f"Failed to connect to {dev.get_id()}: {e}")
+                                        elif dev.status == NVMeDevice.STATUS_ONLINE and dev_node.status in [
+                                            StorageNode.STATUS_OFFLINE, StorageNode.STATUS_UNREACHABLE]:
+                                            logger.warning(f"Node is offline or unreachable, setting device unavailable: {dev.get_id()}")
+                                            device_controller.device_set_unavailable(dev.get_id())
                                         else:
                                             if dev_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
                                                 distr_controller.send_dev_status_event(dev, dev.status, node)
@@ -539,7 +555,7 @@ def check_node(node_id, with_devices=True):
     data_nics_check = True
     for data_nic in snode.data_nics:
         if data_nic.ip4_address:
-            ping_check = _check_node_ping(data_nic.ip4_address)
+            ping_check = _check_ping_from_node(data_nic.ip4_address, ifname=data_nic.if_name, node=snode)
             logger.info(f"Check: ping ip {data_nic.ip4_address} ... {ping_check}")
             data_nics_check &= ping_check
 
@@ -604,6 +620,7 @@ def check_node(node_id, with_devices=True):
 
         if snode.enable_ha_jm:
             print("*" * 100)
+            connected_jms = []
             logger.info(f"Node remote JMs: {len(snode.remote_jm_devices)}")
             for remote_device in snode.remote_jm_devices:
 
@@ -612,6 +629,7 @@ def check_node(node_id, with_devices=True):
                 logger.log(INFO if bdev_info else ERROR,
                            f"Checking bdev: {name} ... " + ('ok' if bdev_info else 'failed'))
                 node_remote_devices_check &= bool(bdev_info)
+                connected_jms.append(remote_device.get_id())
 
                 controller_info = rpc_client.bdev_nvme_controller_list(f'remote_{remote_device.jm_bdev}')
                 if controller_info:
@@ -627,6 +645,15 @@ def check_node(node_id, with_devices=True):
 
                     if bdev_info:
                         logger.info(f"multipath policy: {bdev_info[0]['driver_specific']['mp_policy']}")
+
+            for jm_id in snode.jm_ids:
+                logger.info(f"Checking connection to JM device {jm_id}")
+                if jm_id and jm_id not in connected_jms:
+                    for nd in db_controller.get_storage_nodes():
+                        if nd.jm_device and nd.jm_device.get_id() == jm_id:
+                            if nd.status == StorageNode.STATUS_ONLINE:
+                                node_remote_devices_check = False
+                                logger.error(f"JM device {jm_id} is not connected")
 
         print("*" * 100)
         if snode.lvstore_stack:
@@ -781,17 +808,23 @@ def check_lvol_on_node(lvol_id, node_id, node_bdev_names=None, node_lvols_nqns=N
 
     if not node_bdev_names:
         node_bdev_names = {}
-        ret = rpc_client.get_bdevs()
-        if ret:
-            for bdev in ret:
-                node_bdev_names[bdev['name']] = bdev
+        try:
+            ret = rpc_client.get_bdevs()
+            if ret:
+                for bdev in ret:
+                    node_bdev_names[bdev['name']] = bdev
+        except Exception as e:
+            logger.error(f"Failed to connect to node's SPDK: {e}")
 
     if not node_lvols_nqns:
         node_lvols_nqns = {}
-        ret = rpc_client.subsystem_list()
-        if ret:
-            for sub in ret:
-                node_lvols_nqns[sub['nqn']] = sub
+        try:
+            ret = rpc_client.subsystem_list()
+            if ret:
+                for sub in ret:
+                    node_lvols_nqns[sub['nqn']] = sub
+        except Exception as e:
+            logger.error(f"Failed to connect to node's SPDK: {e}")
 
     passed = True
     try:

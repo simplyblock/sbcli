@@ -206,17 +206,19 @@ def set_node_online(node):
         # start migration tasks on node online status change
         online_devices_list = []
         for dev in node.nvme_devices:
-            if dev.status == NVMeDevice.STATUS_ONLINE:
-                logger.info("Adding task to device data migration")
+            if dev.status in [NVMeDevice.STATUS_ONLINE,
+                              NVMeDevice.STATUS_CANNOT_ALLOCATE,
+                              NVMeDevice.STATUS_FAILED_AND_MIGRATED]:
                 online_devices_list.append(dev.get_id())
         if online_devices_list:
-            tasks_controller.add_device_mig_task(online_devices_list, node.cluster_id)
+            logger.info(f"Starting migration task for node {node.get_id()}")
+            tasks_controller.add_device_mig_task_for_node(node.get_id())
 
         update_cluster_status(cluster_id)
 
 
 def set_node_offline(node):
-    if node.status != StorageNode.STATUS_OFFLINE:
+    if node.status != StorageNode.STATUS_OFFLINE and node.status != StorageNode.STATUS_IN_SHUTDOWN:
         try:
             storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_OFFLINE)
             for dev in node.nvme_devices:
@@ -242,7 +244,7 @@ def set_node_unreachable(node):
 
 
 def set_node_schedulable(node):
-    if node.status != StorageNode.STATUS_SCHEDULABLE:
+    if node.status != StorageNode.STATUS_SCHEDULABLE and node.status != StorageNode.STATUS_IN_SHUTDOWN:
         try:
             storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_SCHEDULABLE)
             # initiate shutdown
@@ -301,7 +303,7 @@ def node_port_check_fun(snode):
         node_data_nic_ping_check = False
         for data_nic in snode.data_nics:
             if data_nic.ip4_address:
-                data_ping_check = health_controller._check_node_ping(data_nic.ip4_address)
+                data_ping_check = health_controller._check_ping_from_node(data_nic.ip4_address, ifname=data_nic.if_name, node=snode)
                 logger.info(f"Check: ping data nic {data_nic.ip4_address} ... {data_ping_check}")
                 node_data_nic_ping_check |= data_ping_check
 
@@ -323,7 +325,7 @@ def check_node(snode):
     snode = db.get_storage_node_by_id(snode.get_id())
 
     if snode.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_UNREACHABLE,
-                            StorageNode.STATUS_SCHEDULABLE, StorageNode.STATUS_DOWN]:
+                            StorageNode.STATUS_SCHEDULABLE, StorageNode.STATUS_DOWN, StorageNode.STATUS_IN_SHUTDOWN]:
         logger.info(f"Node status is: {snode.status}, skipping")
         return False
 
@@ -359,7 +361,7 @@ def check_node(snode):
     # 3- check spdk process through node API
     try:
         snode_api = SNodeClient(f"{snode.mgmt_ip}:5000", timeout=40, retry=2)
-        is_up, _ = snode_api.spdk_process_is_up( snode.rpc_port)
+        is_up, _ = snode_api.spdk_process_is_up( snode.rpc_port, snode.cluster_id)
         logger.info(f"Check: spdk process {snode.mgmt_ip}:5000 ... {bool(is_up)}")
         if not is_up:
             logger.info("Check: node API failed, setting node offline")
@@ -427,17 +429,20 @@ while True:
         if cluster.status == Cluster.STATUS_IN_ACTIVATION:
             logger.info(f"Cluster status is: {cluster.status}, skipping monitoring")
             continue
-
+        logger.info(f"Looping for cluster {cluster_id}")
         nodes = db.get_storage_nodes_by_cluster_id(cluster_id)
         for node in nodes:
             node_id = node.get_id()
             if node_id not in threads_maps or threads_maps[node_id].is_alive() is False:
+                logger.info(f"Creating thread for node {node_id}")
                 t = threading.Thread(target=loop_for_node, args=(node,))
                 t.start()
                 threads_maps[node_id] = t
+                logger.debug(threads_maps[node_id])
 
         try:
             update_cluster_status(cluster_id)
+            logger.debug("Iteration has been finished...")
         except Exception:
             logger.error("Error while updating cluster status")
     time.sleep(constants.NODE_MONITOR_INTERVAL_SEC)

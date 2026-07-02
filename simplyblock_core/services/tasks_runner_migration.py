@@ -46,21 +46,37 @@ def task_runner(task):
         return False
 
     if task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED]:
+        current_online_devices = []
+        all_devices_online = True
         for node in db.get_storage_nodes_by_cluster_id(task.cluster_id):
             if node.is_secondary_node:  # pass
                 continue
-
+            for dev in node.nvme_devices:
+                if dev.status == NVMeDevice.STATUS_ONLINE:
+                    current_online_devices.append(dev.get_id())
+                else:
+                    all_devices_online = False
             if node.status == StorageNode.STATUS_ONLINE and node.online_since:
                 try:
                     diff = datetime.now(timezone.utc) - datetime.fromisoformat(node.online_since)
                     if diff.total_seconds() < 60:
                         task.function_result = "node is online < 1 min, retrying"
                         task.status = JobSchedule.STATUS_SUSPENDED
-                        task.retry += 1
                         task.write_to_db(db.kv_store)
                         return False
                 except Exception as e:
                     logger.error(f"Failed to get online since: {e}")
+
+        migration_devices = []
+        if "migration_devices" in task.function_params:
+            migration_devices = task.function_params["migration_devices"]
+
+        if not all_devices_online and current_online_devices == migration_devices:
+            task.function_result = f"only {len(current_online_devices)} devices online, waiting for more devices to be online"
+            task.status = JobSchedule.STATUS_SUSPENDED
+            task.retry += 1
+            task.write_to_db(db.kv_store)
+            return False
 
         task.status = JobSchedule.STATUS_RUNNING
         task.function_result = ""
@@ -70,13 +86,11 @@ def task_runner(task):
     rpc_client = RPCClient(snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password,
                            timeout=5, retry=2)
     if "migration" not in task.function_params:
-        try:
-            device = db.get_storage_device_by_id(task.device_id)
-        except KeyError:
-            task.status = JobSchedule.STATUS_DONE
-            task.function_result = "Device not found"
-            task.write_to_db(db.kv_store)
-            return True
+        current_online_devices = []
+        for node in db.get_storage_nodes_by_cluster_id(task.cluster_id):
+            for dev in node.nvme_devices:
+                if dev.status == NVMeDevice.STATUS_ONLINE:
+                    current_online_devices.append(dev.get_id())
 
         distr_name = task.function_params["distr_name"]
 
@@ -90,23 +104,23 @@ def task_runner(task):
             logger.error(e)
             rsp = False
         if not rsp:
-            logger.error(f"Failed to start device migration task, storage_ID: {device.cluster_device_order}")
-            task.function_result = "Failed to start device migration task, retry later"
+            msg = "Failed to start device migration task, retry later"
+            logger.error(msg)
+            task.function_result =msg
             task.status = JobSchedule.STATUS_SUSPENDED
             task.retry += 1
             task.write_to_db(db.kv_store)
             return True
-        task.function_params['migration'] = {
-            "name": distr_name}
+        task.function_params['migration'] = {"name": distr_name}
+        task.function_params['migration_devices'] = current_online_devices
         task.write_to_db(db.kv_store)
-        # time.sleep(1)
 
     try:
         if "migration" in task.function_params:
             allow_all_errors = False
             for node in db.get_storage_nodes_by_cluster_id(task.cluster_id):
                 for dev in node.nvme_devices:
-                    if dev.status in [NVMeDevice.STATUS_READONLY, NVMeDevice.STATUS_CANNOT_ALLOCATE]:
+                    if dev.status in [NVMeDevice.STATUS_READONLY, NVMeDevice.STATUS_CANNOT_ALLOCATE, NVMeDevice.STATUS_FAILED]:
                         allow_all_errors = True
                         break
 
@@ -214,8 +228,8 @@ while True:
                             rpc_client = RPCClient(
                                 node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=5, retry=2)
                             try:
-                                ret, err = rpc_client.jc_compression_start(jm_vuid=node.jm_vuid)
-                                if err and "code" in err and err["code"] != -2:
+                                ret, err = rpc_client.jc_suspend_compression(jm_vuid=node.jm_vuid, suspend=False)
+                                if err:
                                     logger.info("Failed to resume JC compression adding task...")
                                     tasks_controller.add_jc_comp_resume_task(task.cluster_id, task.node_id, node.jm_vuid)
                             except Exception as e:

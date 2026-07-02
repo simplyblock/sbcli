@@ -236,12 +236,14 @@ class RPCClient:
             params.update({"c2h_success": True,"sock_priority": 0})
         return self._request("nvmf_create_transport", params)
 
-    def sock_impl_set_options(self):
-        method = "sock_impl_set_options"
-        params = {"impl_name": "posix", "enable_quickack": True,
-                  "enable_zerocopy_send_server": True,
-                  "enable_zerocopy_send_client": True}
-        return self._request(method, params)
+    def sock_impl_set_options(self, bind_to_device=None):
+        params = {
+            "impl_name": "posix", "enable_quickack": True,
+            "enable_zerocopy_send_server": True,
+            "enable_zerocopy_send_client": True}
+        if bind_to_device:
+            params["bind_to_device"] = bind_to_device
+        return self._request("sock_impl_set_options", params)
 
     def transport_create_caching(self, trtype):
         params = {
@@ -278,6 +280,12 @@ class RPCClient:
         if name:
             params = {"name": name}
         return self._request("bdev_nvme_get_controllers", params)
+
+    def bdev_nvme_controller_list_2(self, name=None):
+        params = None
+        if name:
+            params = {"name": name}
+        return self._request2("bdev_nvme_get_controllers", params)
 
     def bdev_nvme_controller_attach(self, name, pci_addr):
         return self._request3(
@@ -580,7 +588,7 @@ class RPCClient:
             params["uuid"] = uuid
         return self._request("bdev_get_iostat", params)
 
-    def bdev_raid_create(self, name, bdevs_list, raid_level="0", strip_size_kb=4):
+    def bdev_raid_create(self, name, bdevs_list, raid_level="0", strip_size_kb=4, superblock=False):
         try:
             ret = self.get_bdevs(name)
             if ret:
@@ -592,7 +600,8 @@ class RPCClient:
             "raid_level": raid_level,
             "strip_size_kb": strip_size_kb,
             "base_bdevs": bdevs_list,
-            "io_unmap_limit": 100
+            "io_unmap_limit": 100,
+            "superblock": superblock
         }
         if raid_level == "1":
             params["strip_size_kb"] = 0
@@ -959,10 +968,9 @@ class RPCClient:
         }
         return self._request("bdev_raid_add_base_bdev", params)
 
-    def bdev_raid_remove_base_bdev(self, raid_bdev, base_bdev):
+    def bdev_raid_remove_base_bdev(self, base_bdev):
         params = {
-            "raid_bdev": raid_bdev,
-            "base_bdev": base_bdev,
+            "name": base_bdev,
         }
         return self._request("bdev_raid_remove_base_bdev", params)
 
@@ -1147,7 +1155,7 @@ class RPCClient:
             "jm_vuid": jm_vuid,
             "suspend": suspend,
         }
-        return self._request("jc_suspend_compression", params)
+        return self._request2("jc_suspend_compression", params)
 
     def nvmf_subsystem_add_listener(self, nqn, trtype, traddr, trsvcid, ana_state=None):
         params = {
@@ -1242,3 +1250,15 @@ class RPCClient:
             "snapshots": snapshots
         }
         return self._request2("bdev_lvol_s3_backup", params)
+
+    def bdev_raid_get_bdevs(self):
+        params = {
+            "category": "online"
+        }
+        return self._request("bdev_raid_get_bdevs", params)
+
+    def bdev_lvs_dump_tree(self, lvstore_uuid):
+        params = {
+            "uuid": lvstore_uuid
+        }
+        return self._request("bdev_lvs_dump_tree", params)

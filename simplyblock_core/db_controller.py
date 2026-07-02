@@ -2,7 +2,7 @@
 import os.path
 
 import fdb
-from typing import List
+from typing import List, Optional
 
 from simplyblock_core import constants
 from simplyblock_core.models.cluster import Cluster
@@ -17,8 +17,7 @@ from simplyblock_core.models.qos import QOSClass
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.stats import DeviceStatObject, NodeStatObject, ClusterStatObject, LVolStatObject, \
     PoolStatObject, CachedLVolStatObject
-from simplyblock_core.models.storage_node import StorageNode
-
+from simplyblock_core.models.storage_node import StorageNode, NodeLVolDelLock
 
 
 class Singleton(type):
@@ -309,3 +308,10 @@ class DBController(metaclass=Singleton):
         else:
             classes = QOSClass().read_from_db(self.kv_store)
         return sorted(classes, key=lambda x: x.class_id)
+
+    def get_lvol_del_lock(self, node_id) -> Optional[NodeLVolDelLock]:
+        ret = NodeLVolDelLock().read_from_db(self.kv_store, id=node_id)
+        if ret:
+            return ret[0]
+        else:
+            return None

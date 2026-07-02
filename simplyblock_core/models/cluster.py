@@ -70,6 +70,8 @@ class Cluster(BaseModel):
     is_re_balancing: bool = False
     full_page_unmap: bool = True
     is_single_node: bool = False
+    client_data_nic: str = ""
+    container_image_prefix: str = ""
     backup_local_path: str = constants.KVD_DB_BACKUP_PATH
     backup_frequency_seconds: int = 3*60*60
     backup_s3_bucket: str = ""

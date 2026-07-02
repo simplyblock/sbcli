@@ -15,7 +15,7 @@ import requests
 
 from docker.errors import DockerException
 from simplyblock_core import utils, scripts, constants, mgmt_node_ops, storage_node_ops
-from simplyblock_core.controllers import cluster_events, device_controller, qos_controller
+from simplyblock_core.controllers import cluster_events, device_controller, qos_controller, tasks_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
@@ -223,7 +223,9 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, ifname, mgmt_ip, log_del_interval, metrics_retention_period,
                    contact_point, grafana_endpoint, distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, mode,
                    enable_node_affinity, qpair_count, client_qpair_count, max_queue_size, inflight_io_threshold, disable_monitoring, strict_node_anti_affinity, name,
-                   tls_secret, ingress_host_source, dns_name, fabric, is_single_node) -> str:
+                   tls_secret, ingress_host_source, dns_name, fabric, is_single_node, client_data_nic,
+                   container_image_prefix=None
+                   ) -> str:
 
     if distr_ndcs == 0 and distr_npcs == 0:
         raise ValueError("both distr_ndcs and distr_npcs cannot be 0")
@@ -332,6 +334,9 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.contact_point = contact_point
     cluster.disable_monitoring = disable_monitoring
     cluster.mode = mode
+    cluster.full_page_unmap = False
+    cluster.client_data_nic = client_data_nic or ""
+    cluster.container_image_prefix = container_image_prefix or ""
 
     if mode == "docker":
         if not disable_monitoring:
@@ -351,8 +356,10 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     elif mode == "kubernetes":
         logger.info("Retrieving foundationdb connection string...")
         fdb_cluster_string = utils.get_fdb_cluster_string(constants.FDB_CONFIG_NAME, constants.K8S_NAMESPACE)
-
         db_connection = fdb_cluster_string
+        
+        logger.info("Patching prometheus configmap...")
+        utils.patch_prometheus_configmap(cluster.uuid, cluster.secret)
 
     if not disable_monitoring:
         if ingress_host_source == "hostip":
@@ -363,8 +370,6 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         _add_graylog_input(dns_name, monitoring_secret)
 
         _create_update_user(cluster.uuid, cluster.grafana_endpoint, monitoring_secret, cluster.secret)
-        if mode == "kubernetes":
-            utils.patch_prometheus_configmap(cluster.uuid, cluster.secret)
 
     cluster.db_connection = db_connection
     cluster.status = Cluster.STATUS_UNREADY
@@ -436,7 +441,8 @@ def _run_fio(mount_point) -> None:
 
 def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
                 distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity, qpair_count,
-                max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name, fabric="tcp") -> str:
+                max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name, fabric="tcp",
+                client_data_nic="") -> str:
 
     clusters = db_controller.get_clusters()
     if not clusters:
@@ -458,6 +464,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     cluster.strict_node_anti_affinity = strict_node_anti_affinity
 
     default_cluster = clusters[0]
+    cluster.mode = default_cluster.mode
     cluster.db_connection = default_cluster.db_connection
     cluster.grafana_secret = monitoring_secret if default_cluster.mode == "kubernetes" else default_cluster.grafana_secret
     cluster.grafana_endpoint = default_cluster.grafana_endpoint
@@ -485,6 +492,8 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     protocols = parse_protocols(fabric)
     cluster.fabric_tcp = protocols["tcp"]
     cluster.fabric_rdma = protocols["rdma"]
+    cluster.full_page_unmap = False
+    cluster.client_data_nic = client_data_nic or ""
 
     cluster.status = Cluster.STATUS_UNREADY
     cluster.create_dt = str(datetime.datetime.now())
@@ -640,6 +649,15 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                 ret = node.rpc_client().alceml_set_qos_weights(qos_controller.get_qos_weights_list(cl_id))
                 if not ret:
                     logger.error(f"Failed to set Alcemls QOS on node: {node.get_id()}")
+
+    # Start JC compression on each node
+    if ols_status == Cluster.STATUS_UNREADY:
+        for node in db_controller.get_storage_nodes_by_cluster_id(cl_id):
+            if node.status == StorageNode.STATUS_ONLINE:
+                ret, err = node.rpc_client().jc_suspend_compression(jm_vuid=node.jm_vuid, suspend=False)
+                if not ret:
+                    logger.info("Failed to resume JC compression adding task...")
+                    tasks_controller.add_jc_comp_resume_task(node.cluster_id, node.get_id(), jm_vuid=node.jm_vuid)
 
     if not cluster.cluster_max_size:
         cluster = db_controller.get_cluster_by_id(cl_id)
@@ -1315,8 +1333,12 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
 
 
 def cluster_grace_startup(cl_id, clear_data=False, spdk_image=None) -> None:
-    db_controller.get_cluster_by_id(cl_id)  # ensure exists
+    get_cluster = db_controller.get_cluster_by_id(cl_id)  # ensure exists
 
+    st = db_controller.get_storage_nodes_by_cluster_id(cl_id)
+    for node in st:
+        logger.info(f"Shutting down node: {node.get_id()}")
+        storage_node_ops.shutdown_storage_node(node.get_id(), force=True)
     st = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     for node in st:
         logger.info(f"Restarting node: {node.get_id()}")
@@ -1325,6 +1347,19 @@ def cluster_grace_startup(cl_id, clear_data=False, spdk_image=None) -> None:
         get_node = db_controller.get_storage_node_by_id(node.get_id())
         if get_node.status != StorageNode.STATUS_ONLINE:
             raise ValueError("failed to restart node")
+    if get_cluster.status == Cluster.STATUS_UNREADY:
+        logger.info("Cluster is not activated yet, please manually activate it")
+
+    else:
+        while True:
+            get_cluster = db_controller.get_cluster_by_id(cl_id)
+            if get_cluster.status != Cluster.STATUS_ACTIVE:
+                logger.info(f"wait for cluster to be active, current status is: {get_cluster.status}")
+                time.sleep(5)
+            else:
+                break
+    logger.info("Cluster gracefully started")
+
 
 
 def cluster_grace_shutdown(cl_id) -> None:
@@ -1332,11 +1367,10 @@ def cluster_grace_shutdown(cl_id) -> None:
 
     st = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     for node in st:
-        if node.status == StorageNode.STATUS_ONLINE:
-            logger.info(f"Suspending node: {node.get_id()}")
-            storage_node_ops.suspend_storage_node(node.get_id())
-            logger.info(f"Shutting down node: {node.get_id()}")
-            storage_node_ops.shutdown_storage_node(node.get_id())
+        logger.info(f"Suspending node: {node.get_id()}")
+        storage_node_ops.suspend_storage_node(node.get_id(), force=True)
+        logger.info(f"Shutting down node: {node.get_id()}")
+        storage_node_ops.shutdown_storage_node(node.get_id(), force=True)
 
 
 def delete_cluster(cl_id) -> None:

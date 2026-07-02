@@ -98,7 +98,7 @@ spec:
           args:
             - |
               set -e
-              
+
               if [[ -f /etc/os-release ]]; then
                   source /etc/os-release
                   OS_ID=$ID
@@ -120,7 +120,7 @@ spec:
                       export YUM_RELEASEVER=$(awk -F'=' '/^VERSION_ID=/{gsub(/"/,"",$2); print $2}' /etc/os-release)
                       export DNF_RELEASEVER=$(awk -F'=' '/^VERSION_ID=/{gsub(/"/,"",$2); print $2}' /etc/os-release)
                       dnf install -y grep jq nvme-cli kernel-modules-extra tuned \
-                       --setopt=tsflags=nocontexts,noscripts --setopt=install_weak_deps=False 
+                       --setopt=tsflags=nocontexts,noscripts --setopt=install_weak_deps=False
                       ;;
                   *)
                       echo "[WARN] OS $OS_ID not supported for automatic NVMe package installation"
@@ -212,5 +212,5 @@ spec:
               esac
 
               echo "[INFO] Init setup and CPU isolation complete."
-              
+
               echo "--- Init setup complete ---"

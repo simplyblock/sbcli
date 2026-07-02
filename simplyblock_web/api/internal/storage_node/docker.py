@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 
 from simplyblock_core import scripts, constants, shell_utils, utils as core_utils
 import simplyblock_core.utils.pci as pci_utils
+import simplyblock_core.utils as init_utils
 from simplyblock_web import utils, node_utils
 
 logger = core_utils.get_logger(__name__)
@@ -72,7 +73,7 @@ def get_amazon_cloud_info():
         import ec2_metadata
         import requests
         session = requests.session()
-        data = ec2_metadata.EC2Metadata(session=session).instance_identity_document
+        data = ec2_metadata.EC2Metadata(session=session).instance_identity_document  # type: ignore[call-arg]
         return {
             "id": data["instanceId"],
             "type": data["instanceType"],
@@ -139,10 +140,12 @@ class SPDKParams(BaseModel):
     multi_threading_enabled: Optional[bool] = Field(False)
     timeout: Optional[int] = Field(5 * 60)
     spdk_image: Optional[str] = Field(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
+    spdk_proxy_image: Optional[str] = Field(constants.SIMPLY_BLOCK_DOCKER_IMAGE)
     cluster_ip: Optional[str] = Field(default=None, pattern=utils.IP_PATTERN)
     cluster_mode: str
     socket: Optional[int] = Field(None, ge=0)
     firewall_port: int = Field(constants.FW_PORT_START)
+    cluster_id: str
 
 
 @api.post('/spdk_process_start', responses={
@@ -155,8 +158,7 @@ def spdk_process_start(body: SPDKParams):
     ssd_pcie_list = " ".join(body.ssd_pcie) if body.ssd_pcie else "none"
     spdk_debug = '1' if body.spdk_debug else ''
     total_mem_mib = core_utils.convert_size(core_utils.parse_size(body.total_mem), 'MiB') if body.total_mem else ''
-    # spdk_mem_mib = core_utils.convert_size(body.spdk_mem, 'MiB')
-    spdk_mem_mib = 0
+    spdk_mem_mib = core_utils.convert_size(body.spdk_mem, 'MiB')
 
     node_docker = get_docker_client(timeout=60 * 3)
     for name in {f"/spdk_{body.rpc_port}", f"/spdk_proxy_{body.rpc_port}"}:
@@ -196,7 +198,7 @@ def spdk_process_start(body: SPDKParams):
         # restart_policy={"Name": "on-failure", "MaximumRetryCount": 99}
     )
     node_docker.containers.run(
-        constants.SIMPLY_BLOCK_DOCKER_IMAGE,
+        body.spdk_proxy_image,
         "python simplyblock_core/services/spdk_http_proxy_server.py ",
         name=f"spdk_proxy_{body.rpc_port}",
         detach=True,
@@ -267,7 +269,7 @@ def spdk_process_is_up(query: utils.RPCPortParams):
     except Exception as e:
         logger.error(e)
     logger.debug(f"function:spdk_process_is_up end f{req_unique_id}")
-    total_time = int(( time.time_ns()-req_unique_id)/(1000*1000*1000))
+    total_time = int((time.time_ns() - req_unique_id) / (1000 * 1000 * 1000))
     logger.debug(f"function:spdk_process_is_up total time {total_time}")
     return utils.get_response(False, f"container not found: /spdk_{query.rpc_port}")
 
@@ -521,7 +523,7 @@ def delete_gpt_partitions_for_dev(body: utils.DeviceParams):
     cmd = f"parted -fs /dev/{device_name} mklabel gpt"
     out, err, ret_code = shell_utils.run_command(cmd)
     logger.info(f"out: {out}, err: {err}, ret_code: {ret_code}")
-    return utils.get_response(ret_code==0, error=err)
+    return utils.get_response(ret_code == 0, error=err)
 
 
 CPU_INFO = cpuinfo.get_cpu_info()
@@ -538,6 +540,13 @@ if not os.environ.get("WITHOUT_CLOUD_INFO"):
 
     if CLOUD_INFO:
         SYSTEM_ID = CLOUD_INFO["id"]
+
+
+@api.post('/format_device_with_4k')
+def format_device_with_4k(body: utils.DeviceParams):
+    pci_utils.ensure_driver(body.device_pci, 'nvme')
+    init_utils.format_device_with_4k(body.device_pci)
+    return utils.get_response(True)
 
 
 @api.post('/bind_device_to_spdk')
@@ -709,3 +718,65 @@ def ifc_is_tcp(query: NicQuery):
 })
 def is_alive():
     return utils.get_response(True)
+
+
+class PingQuery(BaseModel):
+    ip: str
+    ifname: str
+
+@api.get('/ping_ip', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean',
+    })}}},
+})
+def ping_ip(query: PingQuery):
+    try:
+        ping_response = os.system(f"ping -c 3 -W 1 {query.ip} > /dev/null 2>&1")
+        link_is_up = False
+        with open(f"/sys/class/net/{query.ifname}/carrier") as f:
+            link_is_up = f.read().strip() == "1"
+        return utils.get_response(ping_response == 0 and link_is_up)
+    except Exception as e:
+        logger.error(e)
+        return utils.get_response(False, str(e))
+
+@api.get('/read_allowed_list', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'object',
+        'additionalProperties': True,
+    })}}},
+})
+def read_allowed_list():
+    try:
+        with open("/etc/simplyblock/allowed_list") as f:
+            cores = [int(line.strip()) for line in f.read().split(' ')]
+    except Exception:
+        cores = []
+    resp = utils.get_response(cores)
+    return resp
+
+
+class CoresParams(BaseModel):
+    cores: Optional[List[int]] = Field(default=None)
+    number_of_alceml_devices: Optional[int] = Field(None, ge=0)
+
+
+@api.post('/recalculate_cores_distribution', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean'
+    })}}},
+})
+def recalculate_cores_distribution(body: CoresParams):
+    cores = body.cores
+    number_of_alceml_devices = body.number_of_alceml_devices
+    distribution = init_utils.recalculate_cores_distribution(cores, number_of_alceml_devices)
+
+    resp = utils.get_response({
+        "app_thread_core": distribution["app_thread_core"],
+        "jm_cpu_core": distribution["jm_cpu_core"],
+        "poller_cpu_cores": distribution["poller_cpu_cores"],
+        "alceml_cpu_cores": distribution["alceml_cpu_cores"],
+        "alceml_worker_cpu_cores": distribution["alceml_worker_cpu_cores"],
+        "distrib_cpu_cores": distribution["distrib_cpu_cores"],
+        "jc_singleton_core": distribution["jc_singleton_core"]})
+    return resp

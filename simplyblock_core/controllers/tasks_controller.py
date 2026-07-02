@@ -94,15 +94,12 @@ def _add_task(function_name, cluster_id, node_id, device_id,
     return task_obj.uuid
 
 
-def add_device_mig_task(device_id_list, cluster_id):
-    if not device_id_list:
-        return False
+def add_device_mig_task_for_node(node_id):
     sub_tasks = []
-
-    device = db.get_storage_device_by_id(device_id_list[0])
-    tasks = db.get_job_tasks(cluster_id)
+    node = db.get_storage_node_by_id(node_id)
+    cluster_id = node.cluster_id
     master_task = None
-    for task in tasks:
+    for task in  db.get_job_tasks(cluster_id):
         if task.function_name == JobSchedule.FN_BALANCING_AFTER_NODE_RESTART :
             if task.status != JobSchedule.STATUS_DONE and task.canceled is False:
                 logger.info("Master task found, skip adding new master task")
@@ -115,7 +112,7 @@ def add_device_mig_task(device_id_list, cluster_id):
 
         for bdev in node.lvstore_stack:
             if bdev['type'] == "bdev_distr":
-                task_id = _add_task(JobSchedule.FN_DEV_MIG, cluster_id, node.get_id(), device.get_id(),
+                task_id = _add_task(JobSchedule.FN_DEV_MIG, cluster_id, node.get_id(), bdev['name'],
                           max_retry=-1, function_params={'distr_name': bdev['name']}, send_to_cluster_log=False)
                 if task_id:
                     sub_tasks.append(task_id)
@@ -146,10 +143,13 @@ def add_node_to_auto_restart(node):
                               Cluster.STATUS_READONLY, Cluster.STATUS_UNREADY]:
         logger.warning(f"Cluster is not active, skip node auto restart, status: {cluster.status}")
         return False
+    offline_nodes = 0
     for sn in db.get_storage_nodes_by_cluster_id(node.cluster_id):
         if node.get_id() != sn.get_id() and sn.status != StorageNode.STATUS_ONLINE and node.mgmt_ip != sn.mgmt_ip:
-            logger.info("Node found that is not online, skip node auto restart")
-            return False
+            offline_nodes += 1
+    if offline_nodes > cluster.distr_npcs :
+        logger.info("Node found that is not online, skip node auto restart")
+        return False
     return _add_task(JobSchedule.FN_NODE_RESTART, node.cluster_id, node.get_id(), "", max_retry=11)
 
 
@@ -251,7 +251,8 @@ def get_subtasks(master_task_id):
         logger.debug(sub_task)
         data.append({
             "Task ID": sub_task.uuid,
-            "Node ID / Device ID": f"{sub_task.node_id}\n{sub_task.device_id}",
+            "Node ID": sub_task.node_id,
+            "Distrib": sub_task.device_id,
             "Function": sub_task.function_name,
             "Retry": retry,
             "Status": sub_task.status,
@@ -404,9 +405,9 @@ def get_jc_comp_task(cluster_id, node_id, jm_vuid=0):
     return False
 
 
-def add_lvol_sync_del_task(cluster_id, node_id, lvol_bdev_name):
+def add_lvol_sync_del_task(cluster_id, node_id, lvol_bdev_name, primary_node):
     return _add_task(JobSchedule.FN_LVOL_SYNC_DEL, cluster_id, node_id, "",
-                     function_params={"lvol_bdev_name": lvol_bdev_name}, max_retry=10)
+                     function_params={"lvol_bdev_name": lvol_bdev_name, "primary_node": primary_node}, max_retry=10)
 
 def get_lvol_sync_del_task(cluster_id, node_id, lvol_bdev_name=None):
     tasks = db.get_job_tasks(cluster_id)

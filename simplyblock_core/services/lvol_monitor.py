@@ -60,8 +60,8 @@ def resume_comp(lvol):
             return
     rpc_client = RPCClient(
         node.mgmt_ip, node.rpc_port, node.rpc_username, node.rpc_password, timeout=5, retry=2)
-    ret, err = rpc_client.jc_compression_start(jm_vuid=node.jm_vuid)
-    if err and "code" in err and err["code"] != -2:
+    ret, err = rpc_client.jc_suspend_compression(jm_vuid=node.jm_vuid, suspend=False)
+    if err:
         logger.info("Failed to resume JC compression adding task...")
         tasks_controller.add_jc_comp_resume_task(node.cluster_id, node.get_id(), node.jm_vuid)
 
@@ -118,21 +118,36 @@ def process_lvol_delete_finish(lvol):
         lvol_controller.delete_lvol_from_node(lvol.get_id(), leader_node.get_id())
         return
 
-    # 3-1 async delete lvol bdev from primary
-    primary_node = db.get_storage_node_by_id(leader_node.get_id())
-    if primary_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
-        ret = lvol_controller.delete_lvol_from_node(lvol.get_id(), primary_node.get_id(), del_async=True)
-        if not ret:
-            logger.error(f"Failed to delete lvol from primary_node node: {primary_node.get_id()}")
-
-    # 3-2 async delete lvol bdev from secondary
     if snode.get_id() == leader_node.get_id():
         sec_node = db.get_storage_node_by_id(snode.secondary_node_id)
     else:
         sec_node = db.get_storage_node_by_id(snode.get_id())
 
+    # 3-1 async delete lvol bdev from primary
+    primary_node = db.get_storage_node_by_id(leader_node.get_id())
+    if primary_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
+        if sec_node and sec_node.status in [StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN, StorageNode.STATUS_UNREACHABLE]:
+            primary_node.lvol_del_sync_lock()
+        ret = lvol_controller.delete_lvol_from_node(lvol.get_id(), primary_node.get_id(), del_async=True)
+        if not ret:
+            logger.error(f"Failed to delete lvol from primary_node node: {primary_node.get_id()}")
+
+    lvol_bdev_name=f"{lvol.lvs_name}/{lvol.lvol_bdev}"
     if sec_node:
-        tasks_controller.add_lvol_sync_del_task(sec_node.cluster_id, sec_node.get_id(), f"{lvol.lvs_name}/{lvol.lvol_bdev}")
+        if sec_node.status in [StorageNode.STATUS_ONLINE]:
+            logger.info(f"Sync delete bdev: {lvol_bdev_name} from node: {sec_node.get_id()}")
+            ret, err = sec_node.rpc_client().delete_lvol(lvol_bdev_name, del_async=True)
+            if not ret:
+                if "code" in err and err["code"] == -19:
+                    logger.error(f"Sync delete completed with error: {err}")
+                else:
+                    msg = f"Failed to sync delete bdev: {lvol_bdev_name} from node: {sec_node.get_id()}, ading task..."
+                    logger.error(msg)
+                    tasks_controller.add_lvol_sync_del_task(sec_node.cluster_id, sec_node.get_id(), lvol_bdev_name,
+                                                            primary_node.get_id())
+        elif sec_node.status in [StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN, StorageNode.STATUS_UNREACHABLE]:
+            # 3-2 async delete lvol bdev from secondary
+            tasks_controller.add_lvol_sync_del_task(sec_node.cluster_id, sec_node.get_id(), lvol_bdev_name, primary_node.get_id())
 
     lvol_events.lvol_delete(lvol)
     lvol.remove(db.kv_store)
@@ -308,20 +323,28 @@ def check_node(snode):
             continue
 
         passed = True
-        ret = health_controller.check_lvol_on_node(
-            lvol.get_id(), lvol.node_id, node_bdev_names, node_lvols_nqns)
-        if not ret:
-            passed = False
+        try:
+            ret = health_controller.check_lvol_on_node(
+                lvol.get_id(), lvol.node_id, node_bdev_names, node_lvols_nqns)
+            if not ret:
+                passed = False
+        except Exception as e:
+            logger.error(f"Failed to check lvol:{lvol.get_id()} on node: {lvol.node_id}")
+            logger.error(e)
 
         if lvol.ha_type == "ha":
             sec_node = db.get_storage_node_by_id(snode.secondary_node_id)
             if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
-                ret = health_controller.check_lvol_on_node(
-                    lvol.get_id(), snode.secondary_node_id, sec_node_bdev_names, sec_node_lvols_nqns)
-                if not ret:
-                    passed = False
-                else:
-                    passed = True
+                try:
+                    ret = health_controller.check_lvol_on_node(
+                        lvol.get_id(), snode.secondary_node_id, sec_node_bdev_names, sec_node_lvols_nqns)
+                    if not ret:
+                        passed = False
+                    else:
+                        passed = True
+                except Exception as e:
+                    logger.error(f"Failed to check lvol: {lvol.get_id()} on node: {snode.secondary_node_id}")
+                    logger.error(e)
 
         if snode.lvstore_status == "ready":
 

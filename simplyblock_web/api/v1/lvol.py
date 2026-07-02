@@ -306,3 +306,15 @@ def inflate_lvol(uuid):
 
     ret = lvol_controller.inflate_lvol(uuid)
     return utils.get_response(ret)
+
+@bp.route('/lvol/clone', methods=['POST'])
+def clone():
+    cl_data = request.get_json()
+    lvol_id = cl_data['lvol_id']
+    clone_name = cl_data['clone_name']
+    pvc_name = cl_data.get('pvc_name', None)
+    new_size = 0
+    if 'new_size' in cl_data:
+        new_size = core_utils.parse_size(cl_data.get('new_size', 0))
+    clone_id, error = lvol_controller.clone_lvol(lvol_id, clone_name, new_size, pvc_name)
+    return utils.get_response(clone_id, error, http_code=400)

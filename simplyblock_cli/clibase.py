@@ -8,7 +8,7 @@ import sys
 import time
 import argcomplete
 
-from simplyblock_core import cluster_ops, utils, db_controller
+from simplyblock_core import cluster_ops, utils, db_controller, constants
 from simplyblock_core import storage_node_ops as storage_ops
 from simplyblock_core import mgmt_node_ops as mgmt_ops
 from simplyblock_core.controllers import pool_controller, lvol_controller, snapshot_controller, device_controller, \
@@ -63,9 +63,10 @@ class CLIWrapperBase:
         argcomplete.autocomplete(self.parser)
 
     def init_parser(self):
-        self.parser = argparse.ArgumentParser(description='Simplyblock management CLI')
+        self.parser = argparse.ArgumentParser(description=f'Simplyblock management CLI v{constants.SIMPLY_BLOCK_VERSION}')
         self.parser.add_argument("-d", '--debug', help='Print debug messages', required=False, action='store_true')
         self.parser.add_argument('--dev', help='Enable developer options', required=False, action='store_true')
+        self.parser.add_argument("-v", '--version', help='Show package version', required=False, action='store_true')
         self.subparser = self.parser.add_subparsers(dest='command')
 
     def add_command(self, command, help, aliases=None):
@@ -88,6 +89,7 @@ class CLIWrapperBase:
         if not args.max_lvol:
             self.parser.error(f"Mandatory argument '--max-lvol' not provided for {sub_command}")
         max_size = getattr(args, "max_prov") or 0
+        number_of_devices = getattr(args, "number_of_devices") or 0
         sockets_to_use = [0]
         if args.sockets_to_use:
             try:
@@ -103,12 +105,15 @@ class CLIWrapperBase:
         max_prov = utils.parse_size(max_size, assume_unit='G')
         pci_allowed = []
         pci_blocked = []
+        nvme_names = []
         if args.pci_allowed:
             pci_allowed = [str(x) for x in args.pci_allowed.split(',')]
         if args.pci_blocked:
             pci_blocked = [str(x) for x in args.pci_blocked.split(',')]
         if (args.device_model and not args.size_range) or (not args.device_model and args.size_range):
             self.parser.error("device_model and size_range must be set together")
+        if args.nvme_names:
+            nvme_names = [str(x) for x in args.nvme_names.split(',')]
         use_pci_allowed = bool(args.pci_allowed)
         use_pci_blocked = bool(args.pci_blocked)
         use_model_range = bool(args.device_model and args.size_range)
@@ -118,18 +123,24 @@ class CLIWrapperBase:
                 "(--device-model with --size-range) are mutually exclusive; choose only one."
             )
         cores_percentage = int(args.cores_percentage)
+        if args.calculate_hp_only:
+            if not args.number_of_devices:
+                self.parser.error("For calculating huge pages memory, you must provide the --number-of-devices")
+            else:
+                number_of_devices = args.number_of_devices
 
         return storage_ops.generate_automated_deployment_config(
             args.max_lvol, max_prov, sockets_to_use,args.nodes_per_socket,
             pci_allowed, pci_blocked, force=args.force, device_model=args.device_model,
-            size_range=args.size_range, cores_percentage=cores_percentage)
+            size_range=args.size_range, cores_percentage=cores_percentage, nvme_names=nvme_names,
+            calculate_hp_only=args.calculate_hp_only, number_of_devices=number_of_devices)
 
     def storage_node__deploy_cleaner(self, sub_command, args):
         storage_ops.deploy_cleaner()
         return True  # remove once CLI changed to exceptions
 
     def storage_node__clean_devices(self, sub_command, args):
-        storage_ops.clean_devices(args.config_path)
+        storage_ops.clean_devices(args.config_path, format_4k=args.format_4k)
         return True  # remove once CLI changed to exceptions
 
     def storage_node__add_node(self, sub_command, args):
@@ -150,6 +161,7 @@ class CLIWrapperBase:
         enable_ha_jm = args.enable_ha_jm
         namespace = args.namespace
         ha_jm_count = args.ha_jm_count
+        format_4k = args.format_4k
         try:
             out = storage_ops.add_node(
                 cluster_id=cluster_id,
@@ -169,6 +181,8 @@ class CLIWrapperBase:
                 id_device_by_nqn=args.id_device_by_nqn,
                 partition_size=args.partition_size,
                 ha_jm_count=ha_jm_count,
+                format_4k=format_4k,
+                spdk_proxy_image=getattr(args, 'spdk_proxy_image', None),
             )
         except Exception as e:
             print(e)
@@ -208,7 +222,7 @@ class CLIWrapperBase:
                 node_id, max_lvol, max_snap, max_prov,
                 spdk_image, spdk_debug,
                 small_bufsize, large_bufsize, node_ip=args.node_ip, reattach_volume=reattach_volume, force=args.force,
-                new_ssd_pcie=ssd_pcie, force_lvol_recreate=args.force_lvol_recreate)
+                new_ssd_pcie=ssd_pcie, force_lvol_recreate=args.force_lvol_recreate, spdk_proxy_image=getattr(args, 'spdk_proxy_image', None))
         except Exception as e:
             print(e)
             return False
@@ -256,7 +270,7 @@ class CLIWrapperBase:
         return device_controller.reset_storage_device(args.device_id)
 
     def storage_node__restart_device(self, sub_command, args):
-        return device_controller.restart_device(args.device_id)
+        return device_controller.restart_device(args.device_id, args.force)
 
     def storage_node__add_device(self, sub_command, args):
         return device_controller.add_device(args.device_id)
@@ -315,7 +329,7 @@ class CLIWrapperBase:
         return device_controller.remove_jm_device(args.jm_device_id, args.force)
 
     def storage_node__restart_jm_device(self, sub_command, args):
-        return device_controller.restart_jm_device(args.jm_device_id, args.force)
+        return device_controller.restart_jm_device(args.jm_device_id, args.force, args.format)
 
     def storage_node__send_cluster_map(self, sub_command, args):
         node_id = args.node_id
@@ -332,6 +346,22 @@ class CLIWrapperBase:
     def storage_node__dump_lvstore(self, sub_command, args):
         node_id = args.node_id
         return storage_ops.dump_lvstore(node_id)
+
+    def storage_node__new_device_from_failed(self, sub_command, args):
+        return device_controller.new_device_from_failed(args.device_id)
+
+    def storage_node__list_snapshots(self, sub_command, args):
+        return snapshot_controller.list_by_node(args.node_id, args.json)
+
+    def storage_node__list_lvols(self, sub_command, args):
+        return lvol_controller.list_by_node(args.node_id, args.json)
+
+    def storage_node__repair_lvstore(self, sub_command, args):
+        return storage_ops.auto_repair(
+            args.node_id, args.validate_only, args.force_remove_inconsistent, args.force_remove_wrong_ref)
+
+    def storage_node__lvs_dump_tree(self, sub_command, args):
+        return storage_ops.lvs_dump_tree(args.node_id)
 
     def storage_node__set(self, sub_command, args):
         return storage_ops.set_value(args.node_id, args.attr_name, args.attr_value)
@@ -578,6 +608,9 @@ class CLIWrapperBase:
     def volume__inflate(self, sub_command, args):
         return lvol_controller.inflate_lvol(args.volume_id)
 
+    def volume__clone_lvol(self, sub_command, args):
+        return lvol_controller.clone_lvol(args.volume_id, args.clone_name)
+
     def control_plane__add(self, sub_command, args):
         cluster_id = args.cluster_id
         cluster_ip = args.cluster_ip
@@ -711,11 +744,13 @@ class CLIWrapperBase:
         inflight_io_threshold = args.inflight_io_threshold
         strict_node_anti_affinity = args.strict_node_anti_affinity
         is_single_node = args.is_single_node
+        client_data_nic = args.client_data_nic
 
         return cluster_ops.add_cluster(
             blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
             distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity,
-            qpair_count, max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name, fabric)
+            qpair_count, max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name, fabric,
+            client_data_nic)
 
     def cluster_create(self, args):
         page_size_in_blocks = args.page_size
@@ -750,6 +785,7 @@ class CLIWrapperBase:
         dns_name = args.dns_name
         is_single_node = args.is_single_node
         fabric = args.fabric
+        client_data_nic = args.client_data_nic
 
         return cluster_ops.create_cluster(
             blk_size, page_size_in_blocks,
@@ -757,7 +793,7 @@ class CLIWrapperBase:
             ifname, mgmt_ip, log_del_interval, metrics_retention_period, contact_point, grafana_endpoint,
             distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, mode, enable_node_affinity,
             qpair_count, client_qpair_count, max_queue_size, inflight_io_threshold, disable_monitoring,
-            strict_node_anti_affinity, name, tls_secret, ingress_host_source, dns_name, fabric, is_single_node)
+            strict_node_anti_affinity, name, tls_secret, ingress_host_source, dns_name, fabric, is_single_node, client_data_nic)
 
     def query_yes_no(self, question, default="yes"):
         """Ask a yes/no question via raw_input() and return their answer.

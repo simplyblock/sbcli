@@ -77,14 +77,24 @@ class SNodeClient:
             logger.warning("Failed to call snode/check, trying snode/info")
             return self.info()
 
-
     def info(self):
         return self._request("GET", "info")
+
+    def read_allowed_list(self):
+        return self._request("GET", "read_allowed_list")
+
+    def recalculate_cores_distribution(self, cores, number_of_alceml_devices):
+        params = {
+            "cores": cores,
+            "number_of_alceml_devices": number_of_alceml_devices
+        }
+        return self._request("POST", "recalculate_cores_distribution", params)
 
     def spdk_process_start(self, l_cores, spdk_mem, spdk_image=None, spdk_debug=None, cluster_ip=None,
                            fdb_connection=None, namespace=None, server_ip=None, rpc_port=None,
                            rpc_username=None, rpc_password=None, multi_threading_enabled=False, timeout=0, ssd_pcie=None,
-                           total_mem=None, system_mem=None, cluster_mode=None, socket=0, firewall_port=0):
+                           total_mem=None, system_mem=None, cluster_mode=None, socket=0, firewall_port=0, cluster_id=None,
+                           spdk_proxy_image=None):
         params = {
             "cluster_ip": cluster_ip,
             "server_ip": server_ip,
@@ -119,6 +129,10 @@ class SNodeClient:
         if firewall_port:
             params["firewall_port"] = firewall_port
         params["socket"] = socket
+        if cluster_id:
+            params["cluster_id"] = cluster_id
+        if spdk_proxy_image:
+            params["spdk_proxy_image"] = spdk_proxy_image
         return self._request("POST", "spdk_process_start", params)
 
     def join_swarm(self, cluster_ip, join_token, db_connection, cluster_id):
@@ -130,8 +144,8 @@ class SNodeClient:
         #     "db_connection": db_connection}
         # return self._request("POST", "join_swarm", params)
 
-    def spdk_process_kill(self, rpc_port):
-        return self._request("GET", "spdk_process_kill", {"rpc_port": rpc_port})
+    def spdk_process_kill(self, rpc_port, cluster_id=None):
+        return self._request("GET", "spdk_process_kill", {"rpc_port": rpc_port, "cluster_id": cluster_id})
 
     def leave_swarm(self):
         return True
@@ -154,12 +168,16 @@ class SNodeClient:
         params = {"device_pci": device_pci}
         return self._request("POST", "bind_device_to_nvme", params)
 
+    def format_device_with_4k(self, device_pci):
+        params = {"device_pci": device_pci}
+        return self._request("POST", "format_device_with_4k", params)
+
     def bind_device_to_spdk(self, device_pci):
         params = {"device_pci": device_pci}
         return self._request("POST", "bind_device_to_spdk", params)
 
-    def spdk_process_is_up(self, rpc_port):
-        params = {"rpc_port": rpc_port}
+    def spdk_process_is_up(self, rpc_port, cluster_id):
+        params = {"rpc_port": rpc_port, "cluster_id": cluster_id}
         return self._request("GET", "spdk_process_is_up", params)
 
     def get_file_content(self, file_name):
@@ -179,3 +197,10 @@ class SNodeClient:
     def ifc_is_tcp(self, nic):
         params = {"nic": nic}
         return self._request("GET", "ifc_is_tcp", params)
+
+    def ping_ip(self, ip_address, ifname):
+        params = {
+            "ip": ip_address,
+            "ifname": ifname,
+        }
+        return self._request("GET", "ping_ip", params)

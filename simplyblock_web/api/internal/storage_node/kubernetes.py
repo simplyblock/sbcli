@@ -266,10 +266,12 @@ class SPDKParams(BaseModel):
     system_mem: int = Field(core_utils.parse_size('4GiB'))
     fdb_connection: str = Field('')
     spdk_image: str = Field(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
+    spdk_proxy_image: Optional[str] = Field(constants.SIMPLY_BLOCK_DOCKER_IMAGE)
     cluster_ip: str = Field(pattern=utils.IP_PATTERN)
     cluster_mode: str
     socket: Optional[int] = Field(None, ge=0)
     firewall_port: Optional[int] = Field(constants.FW_PORT_START)
+    cluster_id: str
 
 
 @api.post('/spdk_process_start', responses={
@@ -288,13 +290,13 @@ def spdk_process_start(body: SPDKParams):
 
     total_mem_mib = core_utils.convert_size(core_utils.parse_size(body.total_mem), 'MB') if body.total_mem else ""
 
-    if _is_pod_up(body.rpc_port) or _is_pod_present(body.rpc_port):
+    first_six_cluster_id = core_utils.first_six_chars(body.cluster_id)
+    if _is_pod_up(body.rpc_port, first_six_cluster_id) or _is_pod_present(body.rpc_port, first_six_cluster_id):
         logger.info("SPDK pod found, removing...")
-        query = utils.RPCPortParams(rpc_port=body.rpc_port)
+        query = utils.RPCPortParams(rpc_port=body.rpc_port, cluster_id=body.cluster_id)
         spdk_process_kill(query)
 
     node_prepration_job_name = "snode-spdk-job-"
-    node_prepration_core_name = "snode-spdk-core-isolate-"
     node_prepration_ubuntu_name = "snode-spdk-ubuntu-extra-"
 
     node_name = os.environ.get("HOSTNAME", "")
@@ -312,23 +314,32 @@ def spdk_process_start(body: SPDKParams):
 
     # limit the job name length to 63 characters
     k8s_job_name_length = len(node_prepration_job_name+node_name)
-    core_name_length = len(node_prepration_core_name+node_name)
     ubuntu_name_length = len(node_prepration_ubuntu_name+node_name)
     if k8s_job_name_length > 63:
         node_prepration_job_name += node_name[k8s_job_name_length-63:]
     else:
         node_prepration_job_name += node_name
-        
-    if core_name_length > 63:
-        node_prepration_core_name += node_name[core_name_length-63:]
-    else:
-         node_prepration_core_name += node_name
 
     if ubuntu_name_length > 63:
         node_prepration_ubuntu_name += node_name[ubuntu_name_length-63:]
     else:
          node_prepration_ubuntu_name += node_name
+    cpu_topology_enabled = os.environ.get("CPU_TOPOLOGY_ENABLED", False)
+    if isinstance(cpu_topology_enabled, str):
+       cpu_topology_enabled = cpu_topology_enabled.strip().lower() in ("true")
+    skip_kubelet_configuration = os.environ.get("SKIP_KUBELET_CONFIGURATION", False)
+    if isinstance(skip_kubelet_configuration, str):
+       skip_kubelet_configuration = skip_kubelet_configuration.strip().lower() in ("true")
+    reserved_system_cpus = os.environ.get("RESERVED_SYSTEM_CPUS", "0,1")
 
+    node_prepration_core_name = "snode-spdk-core-isolate-"
+    if cpu_topology_enabled:
+        node_prepration_core_name = "snode-spdk-enable-cpu-topology-"
+    core_name_length = len(node_prepration_core_name+node_name)
+    if core_name_length > 63:
+        node_prepration_core_name += node_name[core_name_length-63:]
+    else:
+         node_prepration_core_name += node_name
     logger.debug(f"deploying k8s job to prepare worker: {node_name}")
 
     try:
@@ -338,8 +349,8 @@ def spdk_process_start(body: SPDKParams):
             "L_CORES": body.l_cores,
             "CORES": core_utils.get_total_cpu_cores(body.l_cores),
             'SPDK_MEM': core_utils.convert_size(body.spdk_mem, 'MiB'),
-            'MEM_GEGA': core_utils.convert_size(body.spdk_mem, 'GiB', round_up=True),
-            'MEM2_GEGA': core_utils.convert_size(body.system_mem, 'GiB', round_up=True),
+            'MEM_MEGA': (core_utils.convert_size(body.spdk_mem, 'MiB', round_up=True) // 2) * 2 + 512,
+            'MEM2_MEGA': (core_utils.convert_size(body.system_mem, 'MiB', round_up=True) // 2) * 2,
             'SERVER_IP': body.server_ip,
             'RPC_PORT': body.rpc_port,
             'RPC_USERNAME': body.rpc_username,
@@ -350,14 +361,18 @@ def spdk_process_start(body: SPDKParams):
             'CORE_JOBNAME': node_prepration_core_name,
             'NAMESPACE': namespace,
             'FDB_CONNECTION': body.fdb_connection,
-            'SIMPLYBLOCK_DOCKER_IMAGE': constants.SIMPLY_BLOCK_DOCKER_IMAGE,
+            'SIMPLYBLOCK_DOCKER_IMAGE': body.spdk_proxy_image,
             'GRAYLOG_SERVER_IP': body.cluster_ip,
             'MODE': body.cluster_mode,
+            'CLUSTER_ID': first_six_cluster_id,
             'SSD_PCIE': ssd_pcie_params,
             'PCI_ALLOWED': ssd_pcie_list,
             'TOTAL_HP': total_mem_mib,
             'NSOCKET': body.socket,
-            'FW_PORT': body.firewall_port
+            'FW_PORT': body.firewall_port,
+            'CPU_TOPOLOGY_ENABLED': cpu_topology_enabled,
+            'HT_ENABLED': core_utils.is_hyperthreading_enabled_via_siblings(),
+            'RESERVED_SYSTEM_CPUS': reserved_system_cpus
         }
 
         if ubuntu_host:
@@ -401,29 +416,17 @@ def spdk_process_start(body: SPDKParams):
             )
         )
         logger.info(f"Job deleted: '{job_resp.metadata.name}' in namespace '{namespace}")
-
-        if core_isolate and not openshift:
-            core_template = env.get_template('storage_core_isolation.yaml.j2')
-            core_yaml = yaml.safe_load(core_template.render(values))
-            batch_v1 = core_utils.get_k8s_batch_client()
-            core_resp = batch_v1.create_namespaced_job(namespace=namespace, body=core_yaml)
-            msg = f"Job created: '{core_resp.metadata.name}' in namespace '{namespace}"
-            logger.info(msg)
-
-            node_utils_k8s.wait_for_job_completion(core_resp.metadata.name, namespace)
-            logger.info(f"Job '{core_resp.metadata.name}' completed successfully")
-
-            batch_v1.delete_namespaced_job(
-                name=core_resp.metadata.name,
-                namespace=namespace,
-                body=V1DeleteOptions(
-                    propagation_policy='Foreground',
-                    grace_period_seconds=0
-                )
-            )
-            logger.info(f"Job deleted: '{core_resp.metadata.name}' in namespace '{namespace}")
-
-        elif core_isolate and openshift:
+        if (cpu_topology_enabled and not skip_kubelet_configuration) or (core_isolate and not cpu_topology_enabled):
+            if cpu_topology_enabled and not skip_kubelet_configuration:
+                if not openshift:
+                    template_name = 'storage_cpu_topology.yaml.j2'
+                else:
+                    template_name = 'oc_storage_cpu_topology.yaml.j2'
+            elif core_isolate:
+                if not openshift:
+                    template_name = 'storage_core_isolation.yaml.j2'
+                else:
+                    template_name = 'oc_storage_core_isolation.yaml.j2'
             batch_v1 = core_utils.get_k8s_batch_client()
             try:
                 batch_v1.read_namespaced_job(
@@ -450,16 +453,14 @@ def spdk_process_start(body: SPDKParams):
                     logger.info(f"No pre-existing Job '{node_prepration_core_name}' found. Proceeding.")
                 else:
                     raise
-                
-            core_template = env.get_template('oc_storage_core_isolation.yaml.j2')
+            core_template = env.get_template(template_name)
             core_yaml = yaml.safe_load(core_template.render(values))
+            batch_v1 = core_utils.get_k8s_batch_client()
             core_resp = batch_v1.create_namespaced_job(namespace=namespace, body=core_yaml)
             msg = f"Job created: '{core_resp.metadata.name}' in namespace '{namespace}"
             logger.info(msg)
-
             node_utils_k8s.wait_for_job_completion(core_resp.metadata.name, namespace)
             logger.info(f"Job '{core_resp.metadata.name}' completed successfully")
-
             batch_v1.delete_namespaced_job(
                 name=core_resp.metadata.name,
                 namespace=namespace,
@@ -472,12 +473,13 @@ def spdk_process_start(body: SPDKParams):
 
         env = Environment(loader=PackageLoader('simplyblock_web', 'templates'), trim_blocks=True, lstrip_blocks=True)
         template = env.get_template('storage_deploy_spdk.yaml.j2')
-        dep = yaml.safe_load(template.render(values))
-        logger.debug(dep)
+        docs = yaml.safe_load_all(template.render(values))
         k8s_core_v1 = core_utils.get_k8s_core_client()
-        resp = k8s_core_v1.create_namespaced_pod(body=dep, namespace=namespace)
-        msg = f"Pod created: '{resp.metadata.name}' in namespace '{namespace}"
-        logger.info(msg)
+        for dep in docs:
+            logger.debug(dep)
+            resp = k8s_core_v1.create_namespaced_pod(body=dep, namespace=namespace)
+            msg = f"Pod created: '{resp.metadata.name}' in namespace '{namespace}'"
+            logger.info(msg)
     except Exception:
         return utils.get_response(False, f"Pod failed:\n{traceback.format_exc()}")
 
@@ -493,8 +495,22 @@ def spdk_process_kill(query: utils.RPCPortParams):
     k8s_core_v1 = core_utils.get_k8s_core_client()
     try:
         namespace = node_utils_k8s.get_namespace()
-        pod_name = f"snode-spdk-pod-{query.rpc_port}"
+        if not query.cluster_id:
+            return utils.get_response(False, "param required: cluster_id")
+
+        first_six_cluster_id = core_utils.first_six_chars(query.cluster_id)
+        pod_name = f"snode-spdk-pod-{query.rpc_port}-{first_six_cluster_id}"
         resp = k8s_core_v1.delete_namespaced_pod(pod_name, namespace)
+
+        fluent_pod_name = f"simplyblock-fluentd-{query.rpc_port}-{first_six_cluster_id}"
+        try:
+            k8s_core_v1.read_namespaced_pod(fluent_pod_name, namespace)
+            logger.info(f"Deleting fluent pod {fluent_pod_name}")
+            k8s_core_v1.delete_namespaced_pod(fluent_pod_name, namespace)
+        except ApiException as e:
+            if e.status != 404:
+                raise
+
         retries = 10
         while retries > 0:
             resp = k8s_core_v1.list_namespaced_pod(namespace)
@@ -516,14 +532,21 @@ def spdk_process_kill(query: utils.RPCPortParams):
     return utils.get_response(True)
 
 
-def _is_pod_up(rpc_port):
+def _is_pod_up(rpc_port, cluster_id):
     k8s_core_v1 = core_utils.get_k8s_core_client()
-    pod_name = f"snode-spdk-pod-{rpc_port}"
+    pod_name = f"snode-spdk-pod-{rpc_port}-{cluster_id}"
+    container_name = "spdk-container"
     try:
         resp = k8s_core_v1.list_namespaced_pod(node_utils_k8s.get_namespace())
         for pod in resp.items:
             if pod.metadata.name.startswith(pod_name):
-                return pod.status.phase == "Running"
+                if pod.status.phase == "Running":
+                    cs = next((c for c in pod.status.container_statuses if c.name == container_name),None)
+                    if cs is None:
+                        logger.error(f"Container '{container_name}' not found in pod '{pod_name}'")
+                        return False
+                    if cs.state.running:
+                        return True
     except ApiException as e:
         logger.error(f"API error: {e}")
         return False
@@ -532,9 +555,9 @@ def _is_pod_up(rpc_port):
         return False
     return False
 
-def _is_pod_present(rpc_port):
+def _is_pod_present(rpc_port, cluster_id):
     k8s_core_v1 = core_utils.get_k8s_core_client()
-    pod_name = f"snode-spdk-pod-{rpc_port}"
+    pod_name = f"snode-spdk-pod-{rpc_port}-{cluster_id}"
     try:
         resp = k8s_core_v1.list_namespaced_pod(node_utils_k8s.get_namespace())
         for pod in resp.items:
@@ -555,7 +578,11 @@ def _is_pod_present(rpc_port):
     })}}},
 })
 def spdk_process_is_up(query: utils.RPCPortParams):
-    if _is_pod_up(query.rpc_port):
+    if not query.cluster_id:
+        return utils.get_response(False, "param required: cluster_id")
+
+    first_six_cluster_id = core_utils.first_six_chars(query.cluster_id)
+    if _is_pod_up(query.rpc_port, first_six_cluster_id):
         return utils.get_response(True)
     else:
         return utils.get_response(False, "SPDK container is not running")
@@ -636,7 +663,7 @@ def apply_config():
         if int(node_config["max_size"]) > 0:
             hg_memory = max(hg_memory , node_config["max_size"])
         numa = node_config["socket"]
-        huge_page_memory_dict[numa] = huge_page_memory_dict.get(numa, 0) + hg_memory
+        huge_page_memory_dict[numa] = huge_page_memory_dict.get(numa, 0) + hg_memory + 1000000000
     for numa, huge_page_memory in huge_page_memory_dict.items():
         num_pages = huge_page_memory // 2000000
         core_utils.set_hugepages_if_needed(numa, num_pages)
@@ -669,3 +696,10 @@ api.get('/ifc_is_tcp')(snode_ops.ifc_is_tcp)
 
 api.get('/ifc_is_roce')(snode_ops.ifc_is_roce)
 
+api.post('/format_device_with_4k')(snode_ops.format_device_with_4k)
+
+api.get('/ping_ip')(snode_ops.ping_ip)
+
+api.get('/read_allowed_list')(snode_ops.read_allowed_list)
+
+api.post('/recalculate_cores_distribution')(snode_ops.recalculate_cores_distribution)

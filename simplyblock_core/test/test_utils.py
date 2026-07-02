@@ -174,7 +174,14 @@ def test_get_node_jm_names(db_controller_get_jm_device_by_id):
     node_4_jm = JMDevice()
     node_4_jm.uuid = "node_4_jm_id"
     node_4_jm.jm_bdev = "node_4_jm"
-    jm_devices.append(node_4_jm)
+
+    def get_jm_device_by_id(jm_id):
+        for jm in [node_1_jm, node_2_jm, node_3_jm, node_4_jm]:
+            if jm.uuid == jm_id:
+                return jm
+
+    db_controller_get_jm_device_by_id.side_effect = get_jm_device_by_id
+
     node_1 = StorageNode()
     node_1.uuid = str(uuid.uuid4())
     node_1.enable_ha_jm = True

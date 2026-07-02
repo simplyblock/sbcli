@@ -19,6 +19,25 @@ spec:
         app: simplyblock-admin-control
     spec:
       serviceAccountName: simplyblock-control-sa
+      {{- if .Values.nodeSelector.create }}
+      nodeSelector:
+        {{ .Values.nodeSelector.key }}: {{ .Values.nodeSelector.value }}
+      {{- end }}
+      {{- if .Values.tolerations.create }}
+      tolerations:
+      {{- range .Values.tolerations.list }}
+      - operator: {{ .operator | quote }}
+        {{- if .effect }}
+        effect: {{ .effect | quote }}
+        {{- end }}
+        {{- if .key }}
+        key: {{ .key | quote }}
+        {{- end }}
+        {{- if .value }}
+        value: {{ .value | quote }}
+        {{- end }}
+      {{- end }}
+      {{- end }}
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet 
       affinity:
@@ -36,15 +55,21 @@ spec:
         env:
         - name: LVOL_NVMF_PORT_START
           value: "{{ .Values.ports.lvolNvmfPortStart }}"
+        - name: PROMETHEUS_URL
+          value: "{{ .Values.prometheus.simplyblock.prometheusURL }}"
+        - name: PROMETHEUS_PORT
+          value: "{{ .Values.prometheus.simplyblock.prometheusPORT }}"
         - name: K8S_NAMESPACE
           valueFrom:
             fieldRef:
               fieldPath: metadata.namespace
+{{- if .Values.monitoring.enabled }}
         - name: MONITORING_SECRET
           valueFrom:
             secretKeyRef:
               name: simplyblock-grafana-secrets
               key: MONITORING_SECRET
+{{- end }}
         - name: SIMPLYBLOCK_LOG_LEVEL
           valueFrom:
             configMapKeyRef:
@@ -86,7 +111,26 @@ spec:
         reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
       labels:
         app: simplyblock-webappapi
-    spec:       
+    spec:
+      {{- if .Values.nodeSelector.create }}
+      nodeSelector:
+        {{ .Values.nodeSelector.key }}: {{ .Values.nodeSelector.value }}
+      {{- end }}
+      {{- if .Values.tolerations.create }}
+      tolerations:
+      {{- range .Values.tolerations.list }}
+      - operator: {{ .operator | quote }}
+        {{- if .effect }}
+        effect: {{ .effect | quote }}
+        {{- end }}
+        {{- if .key }}
+        key: {{ .key | quote }}
+        {{- end }}
+        {{- if .value }}
+        value: {{ .value | quote }}
+        {{- end }}
+      {{- end }}
+      {{- end }}       
       containers:
       - name: webappapi
         image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
@@ -104,6 +148,10 @@ spec:
           value: "False"
         - name: FLASK_ENV
           value: "production"
+        - name: PROMETHEUS_URL
+          value: "{{ .Values.prometheus.simplyblock.prometheusURL }}"
+        - name: PROMETHEUS_PORT
+          value: "{{ .Values.prometheus.simplyblock.prometheusPORT }}"
         volumeMounts:
         - name: fdb-cluster-file
           mountPath: /etc/foundationdb/fdb.cluster
@@ -144,12 +192,35 @@ spec:
     spec:
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet 
+      {{- if .Values.nodeSelector.create }}
+      nodeSelector:
+        {{ .Values.nodeSelector.key }}: {{ .Values.nodeSelector.value }}
+      {{- end }}
+      {{- if .Values.tolerations.create }}
+      tolerations:
+      {{- range .Values.tolerations.list }}
+      - operator: {{ .operator | quote }}
+        {{- if .effect }}
+        effect: {{ .effect | quote }}
+        {{- end }}
+        {{- if .key }}
+        key: {{ .key | quote }}
+        {{- end }}
+        {{- if .value }}
+        value: {{ .value | quote }}
+        {{- end }}
+      {{- end }}
+      {{- end }}
       containers:
       - name: storage-node-monitor
         image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
         imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
         command: ["python", "simplyblock_core/services/storage_node_monitor.py"]
         env:
+        - name: PROMETHEUS_URL
+          value: "{{ .Values.prometheus.simplyblock.prometheusURL }}"
+        - name: PROMETHEUS_PORT
+          value: "{{ .Values.prometheus.simplyblock.prometheusPORT }}"
         - name: SIMPLYBLOCK_LOG_LEVEL
           valueFrom:
             configMapKeyRef:
@@ -195,13 +266,36 @@ spec:
         app: simplyblock-mgmt-node-monitor
     spec:
       hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet 
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- if .Values.nodeSelector.create }}
+      nodeSelector:
+        {{ .Values.nodeSelector.key }}: {{ .Values.nodeSelector.value }}
+      {{- end }}
+      {{- if .Values.tolerations.create }}
+      tolerations:
+      {{- range .Values.tolerations.list }}
+      - operator: {{ .operator | quote }}
+        {{- if .effect }}
+        effect: {{ .effect | quote }}
+        {{- end }}
+        {{- if .key }}
+        key: {{ .key | quote }}
+        {{- end }}
+        {{- if .value }}
+        value: {{ .value | quote }}
+        {{- end }}
+      {{- end }}
+      {{- end }}
       containers:
         - name: mgmt-node-monitor
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
           imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
           command: ["python", "simplyblock_core/services/mgmt_node_monitor.py"]
           env:
+          - name: PROMETHEUS_URL
+            value: "{{ .Values.prometheus.simplyblock.prometheusURL }}"
+          - name: PROMETHEUS_PORT
+            value: "{{ .Values.prometheus.simplyblock.prometheusPORT }}"
           - name: BACKEND_TYPE
             value: "k8s"
           - name: SIMPLYBLOCK_LOG_LEVEL
@@ -249,13 +343,36 @@ spec:
         app: simplyblock-lvol-stats-collector
     spec:
       hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet 
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- if .Values.nodeSelector.create }}
+      nodeSelector:
+        {{ .Values.nodeSelector.key }}: {{ .Values.nodeSelector.value }}
+      {{- end }}
+      {{- if .Values.tolerations.create }}
+      tolerations:
+      {{- range .Values.tolerations.list }}
+      - operator: {{ .operator | quote }}
+        {{- if .effect }}
+        effect: {{ .effect | quote }}
+        {{- end }}
+        {{- if .key }}
+        key: {{ .key | quote }}
+        {{- end }}
+        {{- if .value }}
+        value: {{ .value | quote }}
+        {{- end }}
+      {{- end }}
+      {{- end }}
       containers:
         - name: lvol-stats-collector
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
           imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
           command: ["python", "simplyblock_core/services/lvol_stat_collector.py"]
           env:
+          - name: PROMETHEUS_URL
+            value: "{{ .Values.prometheus.simplyblock.prometheusURL }}"
+          - name: PROMETHEUS_PORT
+            value: "{{ .Values.prometheus.simplyblock.prometheusPORT }}"
           - name: SIMPLYBLOCK_LOG_LEVEL
             valueFrom:
               configMapKeyRef:
@@ -301,13 +418,36 @@ spec:
         app: simplyblock-main-distr-event-collector
     spec:
       hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet       
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- if .Values.nodeSelector.create }}
+      nodeSelector:
+        {{ .Values.nodeSelector.key }}: {{ .Values.nodeSelector.value }}
+      {{- end }}
+      {{- if .Values.tolerations.create }}
+      tolerations:
+      {{- range .Values.tolerations.list }}
+      - operator: {{ .operator | quote }}
+        {{- if .effect }}
+        effect: {{ .effect | quote }}
+        {{- end }}
+        {{- if .key }}
+        key: {{ .key | quote }}
+        {{- end }}
+        {{- if .value }}
+        value: {{ .value | quote }}
+        {{- end }}
+      {{- end }}
+      {{- end }}  
       containers:
         - name: main-distr-event-collector
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
           imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
           command: ["python", "simplyblock_core/services/main_distr_event_collector.py"]
           env:
+          - name: PROMETHEUS_URL
+            value: "{{ .Values.prometheus.simplyblock.prometheusURL }}"
+          - name: PROMETHEUS_PORT
+            value: "{{ .Values.prometheus.simplyblock.prometheusPORT }}"
           - name: SIMPLYBLOCK_LOG_LEVEL
             valueFrom:
               configMapKeyRef:
@@ -353,13 +493,36 @@ spec:
         app: simplyblock-capacity-and-stats-collector
     spec:
       hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet       
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- if .Values.nodeSelector.create }}
+      nodeSelector:
+        {{ .Values.nodeSelector.key }}: {{ .Values.nodeSelector.value }}
+      {{- end }}
+      {{- if .Values.tolerations.create }}
+      tolerations:
+      {{- range .Values.tolerations.list }}
+      - operator: {{ .operator | quote }}
+        {{- if .effect }}
+        effect: {{ .effect | quote }}
+        {{- end }}
+        {{- if .key }}
+        key: {{ .key | quote }}
+        {{- end }}
+        {{- if .value }}
+        value: {{ .value | quote }}
+        {{- end }}
+      {{- end }}
+      {{- end }}  
       containers:
       - name: capacity-and-stats-collector
         image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
         imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
         command: ["python", "simplyblock_core/services/capacity_and_stats_collector.py"]
         env:
+        - name: PROMETHEUS_URL
+          value: "{{ .Values.prometheus.simplyblock.prometheusURL }}"
+        - name: PROMETHEUS_PORT
+          value: "{{ .Values.prometheus.simplyblock.prometheusPORT }}"
         - name: SIMPLYBLOCK_LOG_LEVEL
           valueFrom:
             configMapKeyRef:
@@ -405,13 +568,36 @@ spec:
         app: simplyblock-capacity-monitor
     spec:
       hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet       
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- if .Values.nodeSelector.create }}
+      nodeSelector:
+        {{ .Values.nodeSelector.key }}: {{ .Values.nodeSelector.value }}
+      {{- end }}
+      {{- if .Values.tolerations.create }}
+      tolerations:
+      {{- range .Values.tolerations.list }}
+      - operator: {{ .operator | quote }}
+        {{- if .effect }}
+        effect: {{ .effect | quote }}
+        {{- end }}
+        {{- if .key }}
+        key: {{ .key | quote }}
+        {{- end }}
+        {{- if .value }}
+        value: {{ .value | quote }}
+        {{- end }}
+      {{- end }}
+      {{- end }}       
       containers:
       - name: capacity-monitor
         image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
         imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
         command: ["python", "simplyblock_core/services/cap_monitor.py"]
         env:
+        - name: PROMETHEUS_URL
+          value: "{{ .Values.prometheus.simplyblock.prometheusURL }}"
+        - name: PROMETHEUS_PORT
+          value: "{{ .Values.prometheus.simplyblock.prometheusPORT }}"
         - name: SIMPLYBLOCK_LOG_LEVEL
           valueFrom:
             configMapKeyRef:
@@ -457,13 +643,36 @@ spec:
         app: simplyblock-health-check
     spec:
       hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet       
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- if .Values.nodeSelector.create }}
+      nodeSelector:
+        {{ .Values.nodeSelector.key }}: {{ .Values.nodeSelector.value }}
+      {{- end }}
+      {{- if .Values.tolerations.create }}
+      tolerations:
+      {{- range .Values.tolerations.list }}
+      - operator: {{ .operator | quote }}
+        {{- if .effect }}
+        effect: {{ .effect | quote }}
+        {{- end }}
+        {{- if .key }}
+        key: {{ .key | quote }}
+        {{- end }}
+        {{- if .value }}
+        value: {{ .value | quote }}
+        {{- end }}
+      {{- end }}
+      {{- end }}       
       containers:
       - name: health-check
         image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
         imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
         command: ["python", "simplyblock_core/services/health_check_service.py"]
         env:
+        - name: PROMETHEUS_URL
+          value: "{{ .Values.prometheus.simplyblock.prometheusURL }}"
+        - name: PROMETHEUS_PORT
+          value: "{{ .Values.prometheus.simplyblock.prometheusPORT }}"
         - name: SIMPLYBLOCK_LOG_LEVEL
           valueFrom:
             configMapKeyRef:
@@ -509,13 +718,36 @@ spec:
         app: simplyblock-device-monitor
     spec:
       hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet       
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- if .Values.nodeSelector.create }}
+      nodeSelector:
+        {{ .Values.nodeSelector.key }}: {{ .Values.nodeSelector.value }}
+      {{- end }}
+      {{- if .Values.tolerations.create }}
+      tolerations:
+      {{- range .Values.tolerations.list }}
+      - operator: {{ .operator | quote }}
+        {{- if .effect }}
+        effect: {{ .effect | quote }}
+        {{- end }}
+        {{- if .key }}
+        key: {{ .key | quote }}
+        {{- end }}
+        {{- if .value }}
+        value: {{ .value | quote }}
+        {{- end }}
+      {{- end }}
+      {{- end }}       
       containers:
       - name: device-monitor
         image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
         imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
         command: ["python", "simplyblock_core/services/device_monitor.py"]
         env:
+          - name: PROMETHEUS_URL
+            value: "{{ .Values.prometheus.simplyblock.prometheusURL }}"
+          - name: PROMETHEUS_PORT
+            value: "{{ .Values.prometheus.simplyblock.prometheusPORT }}"
           - name: SIMPLYBLOCK_LOG_LEVEL
             valueFrom:
               configMapKeyRef:
@@ -561,13 +793,36 @@ spec:
         app: simplyblock-lvol-monitor
     spec:
       hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet       
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- if .Values.nodeSelector.create }}
+      nodeSelector:
+        {{ .Values.nodeSelector.key }}: {{ .Values.nodeSelector.value }}
+      {{- end }}
+      {{- if .Values.tolerations.create }}
+      tolerations:
+      {{- range .Values.tolerations.list }}
+      - operator: {{ .operator | quote }}
+        {{- if .effect }}
+        effect: {{ .effect | quote }}
+        {{- end }}
+        {{- if .key }}
+        key: {{ .key | quote }}
+        {{- end }}
+        {{- if .value }}
+        value: {{ .value | quote }}
+        {{- end }}
+      {{- end }}
+      {{- end }}       
       containers:
       - name: lvol-monitor
         image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
         imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
         command: ["python", "simplyblock_core/services/lvol_monitor.py"]
         env:
+        - name: PROMETHEUS_URL
+          value: "{{ .Values.prometheus.simplyblock.prometheusURL }}"
+        - name: PROMETHEUS_PORT
+          value: "{{ .Values.prometheus.simplyblock.prometheusPORT }}"
         - name: SIMPLYBLOCK_LOG_LEVEL
           valueFrom:
             configMapKeyRef:
@@ -612,13 +867,36 @@ spec:
         app: simplyblock-snapshot-monitor
     spec:
       hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet      
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- if .Values.nodeSelector.create }}
+      nodeSelector:
+        {{ .Values.nodeSelector.key }}: {{ .Values.nodeSelector.value }}
+      {{- end }}
+      {{- if .Values.tolerations.create }}
+      tolerations:
+      {{- range .Values.tolerations.list }}
+      - operator: {{ .operator | quote }}
+        {{- if .effect }}
+        effect: {{ .effect | quote }}
+        {{- end }}
+        {{- if .key }}
+        key: {{ .key | quote }}
+        {{- end }}
+        {{- if .value }}
+        value: {{ .value | quote }}
+        {{- end }}
+      {{- end }}
+      {{- end }}      
       containers:
       - name: snapshot-monitor
         image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
         imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
         command: ["python", "simplyblock_core/services/snapshot_monitor.py"]
         env:
+        - name: PROMETHEUS_URL
+          value: "{{ .Values.prometheus.simplyblock.prometheusURL }}"
+        - name: PROMETHEUS_PORT
+          value: "{{ .Values.prometheus.simplyblock.prometheusPORT }}"
         - name: SIMPLYBLOCK_LOG_LEVEL
           valueFrom:
             configMapKeyRef:
@@ -661,20 +939,43 @@ spec:
         reloader.stakater.com/configmap: "simplyblock-fdb-cluster-config"
       labels:
         app: simplyblock-cleanupfdb
-    spec:      
+    spec:
+      {{- if .Values.nodeSelector.create }}
+      nodeSelector:
+        {{ .Values.nodeSelector.key }}: {{ .Values.nodeSelector.value }}
+      {{- end }}
+      {{- if .Values.tolerations.create }}
+      tolerations:
+      {{- range .Values.tolerations.list }}
+      - operator: {{ .operator | quote }}
+        {{- if .effect }}
+        effect: {{ .effect | quote }}
+        {{- end }}
+        {{- if .key }}
+        key: {{ .key | quote }}
+        {{- end }}
+        {{- if .value }}
+        value: {{ .value | quote }}
+        {{- end }}
+      {{- end }}
+      {{- end }}      
       containers:
         - name: cleanupfdb
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
           imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
           command: ["python", "simplyblock_core/workers/cleanup_foundationdb.py"]
           env:
-            - name: SIMPLYBLOCK_LOG_LEVEL
-              valueFrom:
-                configMapKeyRef:
-                  name: simplyblock-config
-                  key: LOG_LEVEL
-            - name: LOG_DELETION_INTERVAL
-              value: "${LOG_DELETION_INTERVAL}"
+          - name: PROMETHEUS_URL
+            value: "{{ .Values.prometheus.simplyblock.prometheusURL }}"
+          - name: PROMETHEUS_PORT
+            value: "{{ .Values.prometheus.simplyblock.prometheusPORT }}"
+          - name: SIMPLYBLOCK_LOG_LEVEL
+            valueFrom:
+              configMapKeyRef:
+                name: simplyblock-config
+                key: LOG_LEVEL
+          - name: LOG_DELETION_INTERVAL
+            value: "${LOG_DELETION_INTERVAL}"
           volumeMounts:
           - name: fdb-cluster-file
             mountPath: /etc/foundationdb/fdb.cluster
@@ -715,18 +1016,41 @@ spec:
         app: simplyblock-tasks-runner-restart
     spec:
       hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet      
+      dnsPolicy: ClusterFirstWithHostNet  
+      {{- if .Values.nodeSelector.create }}
+      nodeSelector:
+        {{ .Values.nodeSelector.key }}: {{ .Values.nodeSelector.value }}
+      {{- end }}
+      {{- if .Values.tolerations.create }}
+      tolerations:
+      {{- range .Values.tolerations.list }}
+      - operator: {{ .operator | quote }}
+        {{- if .effect }}
+        effect: {{ .effect | quote }}
+        {{- end }}
+        {{- if .key }}
+        key: {{ .key | quote }}
+        {{- end }}
+        {{- if .value }}
+        value: {{ .value | quote }}
+        {{- end }}
+      {{- end }}
+      {{- end }}    
       containers:
         - name: tasks-runner-restart
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
           imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
           command: ["python", "simplyblock_core/services/tasks_runner_restart.py"]
           env:
-            - name: SIMPLYBLOCK_LOG_LEVEL
-              valueFrom:
-                configMapKeyRef:
-                  name: simplyblock-config
-                  key: LOG_LEVEL
+          - name: PROMETHEUS_URL
+            value: "{{ .Values.prometheus.simplyblock.prometheusURL }}"
+          - name: PROMETHEUS_PORT
+            value: "{{ .Values.prometheus.simplyblock.prometheusPORT }}"
+          - name: SIMPLYBLOCK_LOG_LEVEL
+            valueFrom:
+              configMapKeyRef:
+                name: simplyblock-config
+                key: LOG_LEVEL
           volumeMounts:
           - name: fdb-cluster-file
             mountPath: /etc/foundationdb/fdb.cluster
@@ -767,18 +1091,41 @@ spec:
         app: simplyblock-tasks-runner-migration
     spec:
       hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet       
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- if .Values.nodeSelector.create }}
+      nodeSelector:
+        {{ .Values.nodeSelector.key }}: {{ .Values.nodeSelector.value }}
+      {{- end }}
+      {{- if .Values.tolerations.create }}
+      tolerations:
+      {{- range .Values.tolerations.list }}
+      - operator: {{ .operator | quote }}
+        {{- if .effect }}
+        effect: {{ .effect | quote }}
+        {{- end }}
+        {{- if .key }}
+        key: {{ .key | quote }}
+        {{- end }}
+        {{- if .value }}
+        value: {{ .value | quote }}
+        {{- end }}
+      {{- end }}
+      {{- end }}       
       containers:
         - name: tasks-runner-migration
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
           imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
           command: ["python", "simplyblock_core/services/tasks_runner_migration.py"]
           env:
-            - name: SIMPLYBLOCK_LOG_LEVEL
-              valueFrom:
-                configMapKeyRef:
-                  name: simplyblock-config
-                  key: LOG_LEVEL
+          - name: PROMETHEUS_URL
+            value: "{{ .Values.prometheus.simplyblock.prometheusURL }}"
+          - name: PROMETHEUS_PORT
+            value: "{{ .Values.prometheus.simplyblock.prometheusPORT }}"
+          - name: SIMPLYBLOCK_LOG_LEVEL
+            valueFrom:
+              configMapKeyRef:
+                name: simplyblock-config
+                key: LOG_LEVEL
           volumeMounts:
           - name: fdb-cluster-file
             mountPath: /etc/foundationdb/fdb.cluster
@@ -818,18 +1165,41 @@ spec:
         app: simplyblock-tasks-runner-failed-migration
     spec:
       hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet       
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- if .Values.nodeSelector.create }}
+      nodeSelector:
+        {{ .Values.nodeSelector.key }}: {{ .Values.nodeSelector.value }}
+      {{- end }}
+      {{- if .Values.tolerations.create }}
+      tolerations:
+      {{- range .Values.tolerations.list }}
+      - operator: {{ .operator | quote }}
+        {{- if .effect }}
+        effect: {{ .effect | quote }}
+        {{- end }}
+        {{- if .key }}
+        key: {{ .key | quote }}
+        {{- end }}
+        {{- if .value }}
+        value: {{ .value | quote }}
+        {{- end }}
+      {{- end }}
+      {{- end }}       
       containers:
         - name: tasks-runner-failed-migration
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
           imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
           command: ["python", "simplyblock_core/services/tasks_runner_failed_migration.py"]
           env:
-            - name: SIMPLYBLOCK_LOG_LEVEL
-              valueFrom:
-                configMapKeyRef:
-                  name: simplyblock-config
-                  key: LOG_LEVEL
+          - name: PROMETHEUS_URL
+            value: "{{ .Values.prometheus.simplyblock.prometheusURL }}"
+          - name: PROMETHEUS_PORT
+            value: "{{ .Values.prometheus.simplyblock.prometheusPORT }}"
+          - name: SIMPLYBLOCK_LOG_LEVEL
+            valueFrom:
+              configMapKeyRef:
+                name: simplyblock-config
+                key: LOG_LEVEL
           volumeMounts:
           - name: fdb-cluster-file
             mountPath: /etc/foundationdb/fdb.cluster
@@ -869,18 +1239,41 @@ spec:
         app: simplyblock-tasks-runner-cluster-status
     spec:
       hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet       
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- if .Values.nodeSelector.create }}
+      nodeSelector:
+        {{ .Values.nodeSelector.key }}: {{ .Values.nodeSelector.value }}
+      {{- end }}
+      {{- if .Values.tolerations.create }}
+      tolerations:
+      {{- range .Values.tolerations.list }}
+      - operator: {{ .operator | quote }}
+        {{- if .effect }}
+        effect: {{ .effect | quote }}
+        {{- end }}
+        {{- if .key }}
+        key: {{ .key | quote }}
+        {{- end }}
+        {{- if .value }}
+        value: {{ .value | quote }}
+        {{- end }}
+      {{- end }}
+      {{- end }}       
       containers:
         - name: tasks-runner-cluster-status
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
           imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
           command: ["python", "simplyblock_core/services/tasks_cluster_status.py"]
           env:
-            - name: SIMPLYBLOCK_LOG_LEVEL
-              valueFrom:
-                configMapKeyRef:
-                  name: simplyblock-config
-                  key: LOG_LEVEL
+          - name: PROMETHEUS_URL
+            value: "{{ .Values.prometheus.simplyblock.prometheusURL }}"
+          - name: PROMETHEUS_PORT
+            value: "{{ .Values.prometheus.simplyblock.prometheusPORT }}"
+          - name: SIMPLYBLOCK_LOG_LEVEL
+            valueFrom:
+              configMapKeyRef:
+                name: simplyblock-config
+                key: LOG_LEVEL
           volumeMounts:
           - name: fdb-cluster-file
             mountPath: /etc/foundationdb/fdb.cluster
@@ -920,18 +1313,41 @@ spec:
         app: simplyblock-tasks-runner-new-device-migration
     spec:
       hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet       
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- if .Values.nodeSelector.create }}
+      nodeSelector:
+        {{ .Values.nodeSelector.key }}: {{ .Values.nodeSelector.value }}
+      {{- end }}
+      {{- if .Values.tolerations.create }}
+      tolerations:
+      {{- range .Values.tolerations.list }}
+      - operator: {{ .operator | quote }}
+        {{- if .effect }}
+        effect: {{ .effect | quote }}
+        {{- end }}
+        {{- if .key }}
+        key: {{ .key | quote }}
+        {{- end }}
+        {{- if .value }}
+        value: {{ .value | quote }}
+        {{- end }}
+      {{- end }}
+      {{- end }}       
       containers:
         - name: tasks-runner-new-device-migration
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
           imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
           command: ["python", "simplyblock_core/services/tasks_runner_new_dev_migration.py"]
           env:
-            - name: SIMPLYBLOCK_LOG_LEVEL
-              valueFrom:
-                configMapKeyRef:
-                  name: simplyblock-config
-                  key: LOG_LEVEL
+          - name: PROMETHEUS_URL
+            value: "{{ .Values.prometheus.simplyblock.prometheusURL }}"
+          - name: PROMETHEUS_PORT
+            value: "{{ .Values.prometheus.simplyblock.prometheusPORT }}"
+          - name: SIMPLYBLOCK_LOG_LEVEL
+            valueFrom:
+              configMapKeyRef:
+                name: simplyblock-config
+                key: LOG_LEVEL
           volumeMounts:
           - name: fdb-cluster-file
             mountPath: /etc/foundationdb/fdb.cluster
@@ -971,20 +1387,43 @@ spec:
         app: simplyblock-tasks-node-add-runner
     spec:
       hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet       
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- if .Values.nodeSelector.create }}
+      nodeSelector:
+        {{ .Values.nodeSelector.key }}: {{ .Values.nodeSelector.value }}
+      {{- end }}
+      {{- if .Values.tolerations.create }}
+      tolerations:
+      {{- range .Values.tolerations.list }}
+      - operator: {{ .operator | quote }}
+        {{- if .effect }}
+        effect: {{ .effect | quote }}
+        {{- end }}
+        {{- if .key }}
+        key: {{ .key | quote }}
+        {{- end }}
+        {{- if .value }}
+        value: {{ .value | quote }}
+        {{- end }}
+      {{- end }}
+      {{- end }}       
       containers:
         - name: tasks-node-addrunner
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
           imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
           command: ["python", "simplyblock_core/services/tasks_runner_node_add.py"]
           env:
-            - name: LVOL_NVMF_PORT_START
-              value: "{{ .Values.ports.lvolNvmfPortStart }}"
-            - name: SIMPLYBLOCK_LOG_LEVEL
-              valueFrom:
-                configMapKeyRef:
-                  name: simplyblock-config
-                  key: LOG_LEVEL
+          - name: LVOL_NVMF_PORT_START
+            value: "{{ .Values.ports.lvolNvmfPortStart }}"
+          - name: PROMETHEUS_URL
+            value: "{{ .Values.prometheus.simplyblock.prometheusURL }}"
+          - name: PROMETHEUS_PORT
+            value: "{{ .Values.prometheus.simplyblock.prometheusPORT }}"
+          - name: SIMPLYBLOCK_LOG_LEVEL
+            valueFrom:
+              configMapKeyRef:
+                name: simplyblock-config
+                key: LOG_LEVEL
           volumeMounts:
           - name: fdb-cluster-file
             mountPath: /etc/foundationdb/fdb.cluster
@@ -1025,18 +1464,41 @@ spec:
         app: simplyblock-tasks-runner-port-allow
     spec:
       hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet       
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- if .Values.nodeSelector.create }}
+      nodeSelector:
+        {{ .Values.nodeSelector.key }}: {{ .Values.nodeSelector.value }}
+      {{- end }}
+      {{- if .Values.tolerations.create }}
+      tolerations:
+      {{- range .Values.tolerations.list }}
+      - operator: {{ .operator | quote }}
+        {{- if .effect }}
+        effect: {{ .effect | quote }}
+        {{- end }}
+        {{- if .key }}
+        key: {{ .key | quote }}
+        {{- end }}
+        {{- if .value }}
+        value: {{ .value | quote }}
+        {{- end }}
+      {{- end }}
+      {{- end }}       
       containers:
         - name: tasks-runner-port-allow
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
           imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
           command: ["python", "simplyblock_core/services/tasks_runner_port_allow.py"]
           env:
-            - name: SIMPLYBLOCK_LOG_LEVEL
-              valueFrom:
-                configMapKeyRef:
-                  name: simplyblock-config
-                  key: LOG_LEVEL
+          - name: PROMETHEUS_URL
+            value: "{{ .Values.prometheus.simplyblock.prometheusURL }}"
+          - name: PROMETHEUS_PORT
+            value: "{{ .Values.prometheus.simplyblock.prometheusPORT }}"
+          - name: SIMPLYBLOCK_LOG_LEVEL
+            valueFrom:
+              configMapKeyRef:
+                name: simplyblock-config
+                key: LOG_LEVEL
           volumeMounts:
           - name: fdb-cluster-file
             mountPath: /etc/foundationdb/fdb.cluster
@@ -1076,18 +1538,41 @@ spec:
         app: simplyblock-tasks-runner-jc-comp-resume
     spec:
       hostNetwork: true
-      dnsPolicy: ClusterFirstWithHostNet       
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- if .Values.nodeSelector.create }}
+      nodeSelector:
+        {{ .Values.nodeSelector.key }}: {{ .Values.nodeSelector.value }}
+      {{- end }}
+      {{- if .Values.tolerations.create }}
+      tolerations:
+      {{- range .Values.tolerations.list }}
+      - operator: {{ .operator | quote }}
+        {{- if .effect }}
+        effect: {{ .effect | quote }}
+        {{- end }}
+        {{- if .key }}
+        key: {{ .key | quote }}
+        {{- end }}
+        {{- if .value }}
+        value: {{ .value | quote }}
+        {{- end }}
+      {{- end }}
+      {{- end }}       
       containers:
         - name: tasks-runner-jc-comp-resume
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
           imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
           command: ["python", "simplyblock_core/services/tasks_runner_jc_comp.py"]
           env:
-            - name: SIMPLYBLOCK_LOG_LEVEL
-              valueFrom:
-                configMapKeyRef:
-                  name: simplyblock-config
-                  key: LOG_LEVEL
+          - name: PROMETHEUS_URL
+            value: "{{ .Values.prometheus.simplyblock.prometheusURL }}"
+          - name: PROMETHEUS_PORT
+            value: "{{ .Values.prometheus.simplyblock.prometheusPORT }}"
+          - name: SIMPLYBLOCK_LOG_LEVEL
+            valueFrom:
+              configMapKeyRef:
+                name: simplyblock-config
+                key: LOG_LEVEL
           volumeMounts:
           - name: fdb-cluster-file
             mountPath: /etc/foundationdb/fdb.cluster
@@ -1128,17 +1613,40 @@ spec:
     spec:
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
+      {{- if .Values.nodeSelector.create }}
+      nodeSelector:
+        {{ .Values.nodeSelector.key }}: {{ .Values.nodeSelector.value }}
+      {{- end }}
+      {{- if .Values.tolerations.create }}
+      tolerations:
+      {{- range .Values.tolerations.list }}
+      - operator: {{ .operator | quote }}
+        {{- if .effect }}
+        effect: {{ .effect | quote }}
+        {{- end }}
+        {{- if .key }}
+        key: {{ .key | quote }}
+        {{- end }}
+        {{- if .value }}
+        value: {{ .value | quote }}
+        {{- end }}
+      {{- end }}
+      {{- end }}
       containers:
         - name: tasks-runner-sync-lvol-del
           image: "{{ .Values.image.simplyblock.repository }}:{{ .Values.image.simplyblock.tag }}"
           imagePullPolicy: "{{ .Values.image.simplyblock.pullPolicy }}"
           command: ["python", "simplyblock_core/services/tasks_runner_sync_lvol_del.py"]
           env:
-            - name: SIMPLYBLOCK_LOG_LEVEL
-              valueFrom:
-                configMapKeyRef:
-                  name: simplyblock-config
-                  key: LOG_LEVEL
+          - name: PROMETHEUS_URL
+            value: "{{ .Values.prometheus.simplyblock.prometheusURL }}"
+          - name: PROMETHEUS_PORT
+            value: "{{ .Values.prometheus.simplyblock.prometheusPORT }}"
+          - name: SIMPLYBLOCK_LOG_LEVEL
+            valueFrom:
+              configMapKeyRef:
+                name: simplyblock-config
+                key: LOG_LEVEL
           volumeMounts:
           - name: fdb-cluster-file
             mountPath: /etc/foundationdb/fdb.cluster
@@ -1225,7 +1733,26 @@ spec:
     metadata:
       labels:
         app: simplyblock-fluent-bit
-    spec:      
+    spec:
+      {{- if .Values.nodeSelector.create }}
+      nodeSelector:
+        {{ .Values.nodeSelector.key }}: {{ .Values.nodeSelector.value }}
+      {{- end }}
+      {{- if .Values.tolerations.create }}
+      tolerations:
+      {{- range .Values.tolerations.list }}
+      - operator: {{ .operator | quote }}
+        {{- if .effect }}
+        effect: {{ .effect | quote }}
+        {{- end }}
+        {{- if .key }}
+        key: {{ .key | quote }}
+        {{- end }}
+        {{- if .value }}
+        value: {{ .value | quote }}
+        {{- end }}
+      {{- end }}
+      {{- end }}      
       containers:
         - name: fluent-bit
           image: fluent/fluent-bit:1.8.11

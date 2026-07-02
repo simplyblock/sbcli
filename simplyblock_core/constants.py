@@ -86,6 +86,7 @@ SIMPLY_BLOCK_CLI_NAME = get_config_var(
         "SIMPLY_BLOCK_COMMAND_NAME", "sbcli")
 SIMPLY_BLOCK_SPDK_ULTRA_IMAGE = get_config_var(
         "SIMPLY_BLOCK_SPDK_ULTRA_IMAGE", "public.ecr.aws/simply-block/ultra:main-latest")
+SIMPLY_BLOCK_VERSION = get_config_var("SIMPLY_BLOCK_VERSION", "1")
 
 GELF_PORT = 12202
 
@@ -166,7 +167,8 @@ K8S_NAMESPACE = os.getenv('K8S_NAMESPACE', 'simplyblock')
 OS_STATEFULSET_NAME = "simplyblock-opensearch"
 MONGODB_STATEFULSET_NAME = "simplyblock-mongo"
 GRAYLOG_STATEFULSET_NAME = "simplyblock-graylog"
-PROMETHEUS_STATEFULSET_NAME = "simplyblock-prometheus"
+PROMETHEUS_STATEFULSET_NAME = os.getenv('PROMETHEUS_URL', "simplyblock-prometheus")
+PROMETHEUS_STATEFULSET_PORT = os.getenv('PROMETHEUS_PORT', "9090")
 FDB_SERVICE_NAME = "simplyblock-fdb-cluster"
 FDB_CONFIG_NAME = "simplyblock-fdb-cluster-config"
 ADMIN_DEPLOY_NAME = "simplyblock-admin-control"
@@ -225,7 +227,9 @@ MIG_JOB_SIZE = 64
 
 # ports ranges
 RPC_PORT_RANGE_START = 8080
-LVOL_NVMF_PORT_START = 9100
 NODE_NVMF_PORT_START=9060
 NODE_HUBLVOL_PORT_START=9030
 FW_PORT_START = 50001
+# todo(hamdy): make it configurable: sfam-2586
+LVOL_NVMF_PORT_ENV = os.getenv("LVOL_NVMF_PORT_START", "")
+LVOL_NVMF_PORT_START = int(LVOL_NVMF_PORT_ENV) if LVOL_NVMF_PORT_ENV else 9100
