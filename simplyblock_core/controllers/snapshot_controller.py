@@ -5,7 +5,7 @@ import math
 import time
 import uuid
 
-from simplyblock_core.controllers import lvol_controller, snapshot_events, pool_controller
+from simplyblock_core.controllers import lvol_controller, snapshot_events, pool_controller, tasks_controller
 
 from simplyblock_core import utils, constants
 from simplyblock_core.db_controller import DBController
@@ -271,6 +271,10 @@ def add(lvol_id, snapshot_name, backup=False, lock=True):
 
     logger.info("Done")
     snapshot_events.snapshot_create(snap)
+
+    if cluster.backup_s3_bucket and cluster.backup_s3_cred:
+        tasks_controller.add_snap_backup_task(snap)
+
     return snap.uuid, False
 
 
@@ -747,3 +751,20 @@ def list_by_node(node_id=None, is_json=False):
     if is_json:
         return json.dumps(data, indent=2)
     return utils.print_table(data)
+
+
+def create_backup(snapshot_uuid, delete_after_finish=False):
+    try:
+        snap = db_controller.get_snapshot_by_id(snapshot_uuid)
+    except KeyError:
+        logger.error(f"Snapshot not found {snapshot_uuid}")
+        return False
+
+    cluster = db_controller.get_cluster_by_id(snap.cluster_id)
+    if cluster.backup_s3_bucket and cluster.backup_s3_cred:
+        tasks_controller.add_snap_backup_task(snap, delete_after_finish)
+        logger.info("Done")
+        return True
+    else:
+        logger.error("Cluster S3 backup is not configured")
+        return False
