@@ -1191,6 +1191,36 @@ def check_node(snode):
         )
         storage_node_ops.set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE)
 
+        # Node bring-up owns device re-online (device_set_state refuses a device
+        # ONLINE while its node is not ONLINE -- the stale re-online guard). The
+        # full-restart path raw-writes its devices back online, but THIS fast
+        # clear is a recovery WITHOUT restart (transient mgmt blip / port flap /
+        # network outage), and no other path re-onlines devices that were marked
+        # unavailable during the outage window: port_allow runs seconds BEFORE
+        # this flip and its re-admit is refused by the guard, and device_monitor
+        # auto-restart only touches io_error devices. A device left unavailable
+        # here counts toward affected_nodes forever and a later unrelated dual
+        # outage then suspends the whole cluster (incidents 2026-07-02, x3).
+        # So: now that the node IS online (guard passes), re-admit its devices.
+        # REMOVED is terminal; FAILED transitions are owned by the explicit
+        # device-restart / failure-migration paths.
+        try:
+            fresh = db.get_storage_node_by_id(snode.get_id())
+            for dev in fresh.nvme_devices:
+                if dev.status in (NVMeDevice.STATUS_ONLINE,
+                                  NVMeDevice.STATUS_REMOVED,
+                                  NVMeDevice.STATUS_FAILED):
+                    continue
+                logger.info(
+                    f"Re-admitting device {dev.get_id()} (was {dev.status}) "
+                    f"after node {fresh.get_id()} cleared to ONLINE")
+                if not device_controller.device_set_online(dev.get_id()):
+                    logger.error(
+                        f"Re-admit of device {dev.get_id()} after node "
+                        f"{fresh.get_id()} cleared to ONLINE was refused")
+        except Exception as e:
+            logger.error(f"Device re-admit after node clear to ONLINE failed: {e}")
+
 
 def loop_for_node(snode):
     # global logger
