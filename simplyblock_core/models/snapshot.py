@@ -6,6 +6,8 @@ from simplyblock_core.models.lvol_model import LVol, LVolMini
 
 class SnapShot(BaseModel):
 
+    _WATCHED = True
+
     STATUS_ONLINE = 'online'
     STATUS_OFFLINE = 'offline'
     STATUS_IN_DELETION = 'in_deletion'

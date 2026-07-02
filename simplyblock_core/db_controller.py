@@ -7,7 +7,7 @@ import time
 import fdb
 from typing import Any, List, Optional
 
-from simplyblock_core import constants
+from simplyblock_core import constants, watches
 from simplyblock_core.models.cluster import Cluster, ClusterAddNodeLock, PortReservation
 from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.job_schedule import JobSchedule
@@ -650,6 +650,8 @@ class DBController(metaclass=Singleton):
         if mutate_fn(obj) is False:
             return obj
         tr[key] = json.dumps(obj.to_dict(unwrap_secrets=True)).encode()
+        if getattr(model_cls, '_WATCHED', False):
+            tr.add(watches.watch_counter_key(model_cls), watches.ONE_LE64)
         return obj
 
     def atomic_update(self, obj, mutate_fn):
@@ -875,6 +877,7 @@ class DBController(metaclass=Singleton):
             prefix = target.get_db_id()
             data = json.dumps(target.get_clean_dict(unwrap_secrets=True))
             tr[prefix.encode()] = data.encode()
+            tr.add(watches.watch_counter_key(StorageNode), watches.ONE_LE64)
 
         return True, None
 

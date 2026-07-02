@@ -6,6 +6,8 @@ from simplyblock_core.models.base_model import BaseModel
 
 class JobSchedule(BaseModel):
 
+    _WATCHED = True
+
     STATUS_NEW = 'new'
     STATUS_RUNNING = 'running'
     STATUS_SUSPENDED = 'suspended'
