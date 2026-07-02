@@ -589,9 +589,17 @@ class WriteKeyFileBody(BaseModel):
     })}}},
 })
 def write_key_file(body: WriteKeyFileBody):
-    """Write a DHCHAP key file for SPDK keyring_file module."""
+    """Write a DHCHAP key file for SPDK keyring_file module.
+
+    Deprecated: keys are now delivered through the spdk-proxy's
+    keyring_add_key interceptor onto a memory-backed volume. This endpoint
+    remains one release as a fallback for proxies without interception
+    support and will be removed.
+    """
+    logger.warning("write_key_file is deprecated; keys should be registered "
+                   "via the spdk-proxy keyring_add_key method")
     import re
-    if not re.match(r'^[a-zA-Z0-9_\\-]+$', body.name):
+    if not re.match(r'^[a-zA-Z0-9_-]+$', body.name):
         return utils.get_response(None, "Invalid key name")
     os.makedirs(DHCHAP_KEY_DIR, mode=0o700, exist_ok=True)
     key_path = os.path.join(DHCHAP_KEY_DIR, body.name)

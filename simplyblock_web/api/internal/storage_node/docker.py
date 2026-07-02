@@ -144,6 +144,15 @@ def spdk_process_start(body: SPDKParams):
     else:
         log_config = LogConfig(type=LogConfig.types.JOURNALD)
 
+    # Memory-backed volume shared between the SPDK and spdk-proxy containers:
+    # the proxy's keyring_add_key interceptor writes key files here, so key
+    # material never touches persistent host storage. volumes.create is
+    # idempotent by name; contents evaporate once both containers are gone.
+    secrets_volume = f"spdk_keys_{body.rpc_port}"
+    node_docker.volumes.create(
+        name=secrets_volume, driver='local',
+        driver_opts={'type': 'tmpfs', 'device': 'tmpfs', 'o': 'size=16m,mode=0700'})
+
     container = node_docker.containers.run(
         body.spdk_image,
         f"sudo -E /root/scripts/run_distr_with_ssd.sh {body.l_cores} {spdk_mem_mib} {spdk_debug}",
@@ -161,6 +170,7 @@ def spdk_process_start(body: SPDKParams):
             '/var/lib/systemd/coredump/:/var/lib/systemd/coredump/',
             '/sys:/sys',
             '/mnt/ramdisk:/mnt/ramdisk',
+            f'{secrets_volume}:/var/run/secrets/simplyblock',
         ],
         environment=[
             f"RPC_PORT={body.rpc_port}",
@@ -183,6 +193,7 @@ def spdk_process_start(body: SPDKParams):
         volumes=[
             f'/var/tmp/spdk_{body.rpc_port}:/var/tmp',
             '/mnt/ramdisk:/mnt/ramdisk',
+            f'{secrets_volume}:/var/run/secrets/simplyblock',
         ],
         environment=[
             f"SERVER_IP={body.server_ip}",
@@ -191,6 +202,7 @@ def spdk_process_start(body: SPDKParams):
             f"RPC_PASSWORD={body.rpc_password}",
             f"MULTI_THREADING_ENABLED={body.multi_threading_enabled}",
             f"TIMEOUT={body.timeout}",
+            "SPDK_PROXY_KEY_DIR=/var/run/secrets/simplyblock/keys",
         ]
         # restart_policy={"Name": "always"}
     )
@@ -439,7 +451,15 @@ class WriteKeyFileBody(BaseModel):
     })}}},
 })
 def write_key_file(body: WriteKeyFileBody):
-    """Write a DHCHAP key file for SPDK keyring_file module."""
+    """Write a DHCHAP key file for SPDK keyring_file module.
+
+    Deprecated: keys are now delivered through the spdk-proxy's
+    keyring_add_key interceptor onto a memory-backed volume. This endpoint
+    remains one release as a fallback for proxies without interception
+    support and will be removed.
+    """
+    logger.warning("write_key_file is deprecated; keys should be registered "
+                   "via the spdk-proxy keyring_add_key method")
     import re
     if not re.match(r'^[a-zA-Z0-9_\-]+$', body.name):
         return utils.get_response(None, "Invalid key name")

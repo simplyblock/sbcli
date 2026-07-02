@@ -115,7 +115,13 @@ class SNodeClient:
         return self._request("GET", "info")
 
     def write_key_file(self, name, content):
-        """Write a DHCHAP key file on the storage node for SPDK keyring."""
+        """Write a DHCHAP key file on the storage node for SPDK keyring.
+
+        Deprecated: use RPCClient.keyring_add_key, which delivers the key
+        material through the spdk-proxy onto a memory-backed volume instead
+        of persistent host storage. Kept one release as a fallback for
+        proxies without interception support.
+        """
         return self._request("POST", "write_key_file", {"name": name, "content": content})
 
     def read_allowed_list(self):

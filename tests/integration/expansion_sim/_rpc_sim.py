@@ -318,6 +318,9 @@ class RpcServerSim:
     def keyring_file_add_key(self, *_, **__):
         return True
 
+    def keyring_add_key(self, *_, **__):
+        return True
+
     # -- Misc ---------------------------------------------------------------
 
     def bdev_lvol_create(self, *_, **__):
