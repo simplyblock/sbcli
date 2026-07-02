@@ -121,12 +121,6 @@ def start_migration(migration_id,
         raise ValueError(f"Target node is not online (status={target_node.status})")
 
     snap_plan = get_snapshot_chain(lvol_id, source_node_id)
-    if not snap_plan:
-        snap_name = f"_mig_{migration.uuid[:8]}_lvol_{migration.lvol_id[:8]}"
-        snap_uuid, err = snapshot_controller.add(lvol_id, snap_name, bypass_migration_check=True)
-        if err:
-            raise ValueError(f"Failed to create snapshot: {err}")
-        snap_plan = [snap_uuid]
 
     snaps_found_on_target = [s for s in snap_plan if _is_snap_on_node(s, target_node_id)]
     snap_migration_plan = [s for s in snap_plan if s not in snaps_found_on_target]
@@ -222,7 +216,8 @@ def _cleanup_created(migration):
         return
 
     nqn = lvol.nqn
-    bdev_short = lvol.lvol_bdev + _MIGRATION_BDEV_SUFFIX
+    _lvol_base = lvol.lvol_bdev[:-len(_MIGRATION_BDEV_SUFFIX)] if lvol.lvol_bdev.endswith(_MIGRATION_BDEV_SUFFIX) else lvol.lvol_bdev
+    bdev_short = _lvol_base + _MIGRATION_BDEV_SUFFIX
     composite = f"{tgt_node.lvstore}/{bdev_short}"
 
     # Compute overlap: nodes shared between SRC and TGT paths.
@@ -666,7 +661,8 @@ def create_migration(lvol_id, target_node_id,
     cluster = db.get_cluster_by_id(tgt_node.cluster_id)
     tgt_rpc = tgt_node.rpc_client()
     nqn = lvol.nqn
-    bdev_short = lvol.lvol_bdev + _MIGRATION_BDEV_SUFFIX
+    _lvol_base = lvol.lvol_bdev[:-len(_MIGRATION_BDEV_SUFFIX)] if lvol.lvol_bdev.endswith(_MIGRATION_BDEV_SUFFIX) else lvol.lvol_bdev
+    bdev_short = _lvol_base + _MIGRATION_BDEV_SUFFIX
     composite = f"{tgt_node.lvstore}/{bdev_short}"
     size_in_mib = convert_size(lvol.size, 'MiB')
     tgt_port = tgt_node.get_lvol_subsys_port(tgt_node.lvstore)
@@ -729,7 +725,7 @@ def create_migration(lvol_id, target_node_id,
                 f"create_migration: secondary registration error (continuing): {_e}")
 
     _pre_ter_node = None
-    if lvol.ha_type == "ha3" and tgt_node.tertiary_node_id:
+    if tgt_node.tertiary_node_id:
         try:
             _pre_ter_node = db.get_storage_node_by_id(tgt_node.tertiary_node_id)
             _ter_rpc_reg  = _pre_ter_node.rpc_client()
