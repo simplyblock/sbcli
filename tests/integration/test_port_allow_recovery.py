@@ -42,6 +42,17 @@ from unittest.mock import MagicMock, patch
 
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.models.nvme_device import NVMeDevice
+
+
+def _make_device(uuid, status, io_error=False, retries_exhausted=False, order=0):
+    d = NVMeDevice()
+    d.uuid = uuid
+    d.status = status
+    d.io_error = io_error
+    d.retries_exhausted = retries_exhausted
+    d.cluster_device_order = order
+    return d
 
 
 def _make_node(uuid, mgmt_ip, status=StorageNode.STATUS_ONLINE):
@@ -612,6 +623,77 @@ class TestSourceShapeStrictGate(unittest.TestCase):
                            "tcp_ports_events.port_allowed must appear after "
                            "the abort path's return so it cannot fire on the "
                            "abort code path")
+
+
+class TestDeviceReadmitOnPortAllow(_BasePortAllowTest):
+    """Regression: the device re-admit at the end of port_allow must NOT be
+    gated on ``node.status == ONLINE``.
+
+    port_allow runs as the last step of node recovery and completes a couple of
+    seconds BEFORE the storage-node monitor flips the node's status to ONLINE.
+    The original self-heal guarded on ``node.status == ONLINE``, so it was False
+    every time and the re-admit was skipped -- a device the remote-IO quorum had
+    force-marked UNAVAILABLE during the outage stayed down with no other recovery
+    path (device_monitor auto-restart only touches io_error devices), leaving a
+    phantom offline-device baseline that a later node outage turned into a cluster
+    suspension.
+
+    The re-admit must run regardless of node status and regardless of prior device
+    state; REMOVED is the one terminal state we never resurrect.
+    """
+
+    def setUp(self):
+        super().setUp()
+        # The node is NOT yet ONLINE when port_allow runs -- this is the bug.
+        self.node.status = StorageNode.STATUS_DOWN
+        self.dev_unavail = _make_device(
+            "dev-unavail", NVMeDevice.STATUS_UNAVAILABLE, order=0)
+        self.dev_ioerr = _make_device(
+            "dev-ioerr", NVMeDevice.STATUS_UNAVAILABLE, io_error=True, order=1)
+        self.dev_removed = _make_device(
+            "dev-removed", NVMeDevice.STATUS_REMOVED, order=2)
+        self.dev_online = _make_device(
+            "dev-online", NVMeDevice.STATUS_ONLINE, order=3)
+        self.node.nvme_devices = [
+            self.dev_unavail, self.dev_ioerr, self.dev_removed, self.dev_online]
+
+        self.readmitted = []
+        p = patch(
+            "simplyblock_core.services.tasks_runner_port_allow.device_controller.device_set_online",
+            side_effect=lambda dev_id, *a, **kw: self.readmitted.append(dev_id),
+        )
+        p.start()
+        self.addCleanup(p.stop)
+
+    def _run(self):
+        from simplyblock_core.services.tasks_runner_port_allow import exec_port_allow_task
+        exec_port_allow_task(self.task)
+
+    def test_unavailable_device_readmitted_though_node_not_online(self):
+        self._run()
+        self.assertIn(
+            "dev-unavail", self.readmitted,
+            "an UNAVAILABLE device must be re-admitted on port_allow even while "
+            "node.status is still DOWN (port_allow precedes the ONLINE flip)")
+
+    def test_readmit_regardless_of_prior_device_state(self):
+        self._run()
+        self.assertIn(
+            "dev-ioerr", self.readmitted,
+            "port_allow runs only on node recovery, so every non-terminal device "
+            "is flipped back online regardless of io_error/retries_exhausted")
+
+    def test_removed_device_not_resurrected(self):
+        self._run()
+        self.assertNotIn(
+            "dev-removed", self.readmitted,
+            "a deliberately REMOVED device must never be resurrected by port_allow")
+
+    def test_online_device_not_retouched(self):
+        self._run()
+        self.assertNotIn(
+            "dev-online", self.readmitted,
+            "an already-ONLINE device needs no re-admit")
 
 
 if __name__ == "__main__":
