@@ -94,6 +94,9 @@ class _MassCreateDeleteMixin:
     DELETE_MAX_WORKERS = 10
     PARALLEL_PARENTS = 10       # concurrent parent subsystem child creation
     MAX_FAILURES = 500
+    FIO_CONCURRENT = 20         # concurrent FIO job creations per batch
+    FIO_BATCH_PAUSE = 30        # seconds between FIO job creation batches
+    FIO_PHASE_TIMEOUT = 7200    # 2 hours max for FIO job creation phase
 
     # ── Phase timeouts (seconds) ───────────────────────────────────────────
     SNAPSHOT_PHASE_TIMEOUT = 14400   # 4 hours
@@ -217,12 +220,22 @@ class _MassCreateDeleteMixin:
             )
         return len(resolved), resolved
 
-    def _check_count(self, actual, expected, label):
-        """Soft-validate count is within ±10% tolerance.
+    def _check_count(self, actual, expected, label, hard_min_pct=0.50):
+        """Validate count against hard minimum and soft tolerance.
 
-        If below tolerance, logs a warning and appends to _soft_failures
-        but does NOT raise — the test continues.
+        If actual < hard_min_pct of expected, raises RuntimeError to stop
+        the test immediately — proceeding with <50% of resources is
+        meaningless and wastes compute.
+
+        If actual < 90% of expected (but above hard min), logs a warning
+        and appends to _soft_failures for end-of-test reporting.
         """
+        if expected > 0 and actual < expected * hard_min_pct:
+            raise RuntimeError(
+                f"[{label}] only {actual}/{expected} created "
+                f"({actual / expected:.1%}) — below "
+                f"{hard_min_pct:.0%} hard minimum, aborting test"
+            )
         tolerance = 0.10
         if expected > 0 and actual < expected * (1 - tolerance):
             msg = (
@@ -457,10 +470,28 @@ class _MassCreateDeleteMixin:
             self._phase_durations["3_create_snapshots"] = round(
                 time.time() - t0, 1
             )
-            self._metrics["snapshots_created"] = len(self._snapshot_registry)
+            submitted_snaps = len(self._snapshot_registry)
             self.logger.info(
-                f"[Phase 3] Done: {len(self._snapshot_registry)} snapshots "
+                f"[Phase 3] kubectl apply done: {submitted_snaps} "
+                f"snapshot objects submitted "
                 f"in {self._phase_durations['3_create_snapshots']}s"
+            )
+
+            # Verify snapshots are actually readyToUse — prunes registry
+            # to only contain verified snapshots
+            if hasattr(self, '_verify_snapshots_ready'):
+                self._verify_snapshots_ready()
+
+            verified_snaps = len(self._snapshot_registry)
+            self._metrics["snapshots_created"] = verified_snaps
+            self.logger.info(
+                f"[Phase 3] Verified: {verified_snaps}/{submitted_snaps} "
+                f"snapshots readyToUse"
+            )
+            self._check_count(
+                verified_snaps,
+                total * self.SNAPSHOTS_PER_LVOL,
+                "snapshots",
             )
 
             # Phase 4: Delete lvols to free subsystem slots for clones.
@@ -486,6 +517,9 @@ class _MassCreateDeleteMixin:
             self.logger.info(
                 f"[Phase 5] Done: {len(self._clone_registry)} clones "
                 f"in {self._phase_durations['5_create_clones']}s"
+            )
+            self._check_count(
+                len(self._clone_registry), total, "clones",
             )
 
             # Phase 6: FIO on 10% of clones
@@ -1733,6 +1767,14 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
     STORAGE_CLASS_NAME = "mcd-sc"
     SNAPSHOT_CLASS_NAME = "mcd-snapshotclass"
 
+    # ── Batched fire-and-monitor config ─────────────────────────────────
+    CREATE_CONCURRENT = 20      # concurrent fire-and-forget per batch
+    CREATE_BATCH_PAUSE = 30     # seconds between creation batches
+    DELETE_CONCURRENT = 20      # concurrent deletes per batch
+    DELETE_BATCH_PAUSE = 30     # seconds between deletion batches
+    MONITOR_INTERVAL = 30       # seconds between background count polls
+    BOUND_WAIT_TIMEOUT = 1800   # max seconds to wait for PVCs to bind
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.test_name = "mass_create_delete_k8s"
@@ -1741,6 +1783,7 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
         self._snap_pvc_map: dict[str, str] = {}     # vs_name -> pvc_name
         self._clone_pvc_registry: dict[str, dict] = {}  # clone_pvc -> {vs_name}
         self._fio_jobs: dict[str, str] = {}          # job_name -> pvc/clone
+        self._time_series: dict[str, list] = {}      # phase -> [(elapsed_s, count)]
 
     # ── run() ──────────────────────────────────────────────────────────────
 
@@ -1771,57 +1814,214 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
 
         self._run_mass_create_delete_test()
 
+    # ── Fire-and-monitor helpers ──────────────────────────────────────────
+
+    def _start_monitor(self, label, count_fn, interval=30):
+        """Start a daemon thread that polls count_fn every *interval* seconds.
+
+        Returns (stop_event, time_series) where time_series is a list of
+        (elapsed_seconds, count) tuples populated by the background thread.
+        """
+        stop = threading.Event()
+        series: list[tuple[float, int]] = []
+        t0 = time.time()
+
+        def _poll():
+            while not stop.is_set():
+                try:
+                    count = count_fn()
+                    elapsed = round(time.time() - t0)
+                    series.append((elapsed, count))
+                    self.logger.info(
+                        f"[{label} monitor] count={count} at +{elapsed}s"
+                    )
+                except Exception as exc:
+                    self.logger.warning(
+                        f"[{label} monitor] query failed: {exc}"
+                    )
+                stop.wait(interval)
+
+        threading.Thread(
+            target=_poll, daemon=True, name=f"monitor-{label}",
+        ).start()
+        return stop, series
+
+    def _count_bound_pvcs(self, prefix: str) -> int:
+        """Count PVCs in Bound state whose names start with *prefix*."""
+        ns = self.k8s_utils.namespace
+        out, _ = self.k8s_utils._exec_kubectl(
+            f"kubectl get pvc -n {ns} --no-headers 2>/dev/null "
+            f"| grep '^{prefix}' | grep -c ' Bound ' || echo 0",
+            supress_logs=True,
+        )
+        try:
+            return int(out.strip())
+        except ValueError:
+            return 0
+
+    def _count_pvcs_by_prefix(self, prefix: str) -> int:
+        """Count PVCs matching *prefix* (any state)."""
+        ns = self.k8s_utils.namespace
+        out, _ = self.k8s_utils._exec_kubectl(
+            f"kubectl get pvc -n {ns} --no-headers 2>/dev/null "
+            f"| grep -c '^{prefix}' || echo 0",
+            supress_logs=True,
+        )
+        try:
+            return int(out.strip())
+        except ValueError:
+            return 0
+
+    def _fire_in_batches(self, items, fire_fn, label,
+                         concurrent=20, pause=30, phase_timeout=14400):
+        """Fire items in concurrent batches (fire-and-forget).
+
+        Fires *concurrent* items at a time, waits *pause* seconds
+        between batches.  Returns (fired_items, error_count).
+        """
+        deadline = time.time() + phase_timeout
+        fired_items = []
+        errors = 0
+
+        for batch_start in range(0, len(items), concurrent):
+            if time.time() >= deadline:
+                self.logger.warning(
+                    f"[{label}] Phase timeout after "
+                    f"{len(fired_items)}/{len(items)} fired"
+                )
+                break
+
+            batch = items[batch_start:batch_start + concurrent]
+            with ThreadPoolExecutor(max_workers=concurrent) as pool:
+                futures = {pool.submit(fire_fn, item): item for item in batch}
+                for f in as_completed(futures, timeout=120):
+                    item = futures[f]
+                    try:
+                        f.result(timeout=60)
+                        fired_items.append(item)
+                    except Exception as exc:
+                        errors += 1
+                        self.logger.error(
+                            f"[{label}] Fire failed: {exc}"
+                        )
+
+            done = min(batch_start + len(batch), len(items))
+            self.logger.info(
+                f"[{label}] Fired {done}/{len(items)} "
+                f"(ok={len(fired_items)}, errors={errors})"
+            )
+
+            if batch_start + concurrent < len(items):
+                time.sleep(pause)
+
+        return fired_items, errors
+
+    def _bulk_wait_pvcs_bound(self, pvc_names, label="PVCs",
+                               timeout=1800, poll_interval=30):
+        """Wait for PVCs to reach Bound state via bulk kubectl query.
+
+        Returns the set of PVC names that became Bound.
+        """
+        ns = self.k8s_utils.namespace
+        deadline = time.time() + timeout
+        target = set(pvc_names)
+        bound = set()
+
+        while time.time() < deadline and len(bound) < len(target):
+            try:
+                out, _ = self.k8s_utils._exec_kubectl(
+                    f"kubectl get pvc -n {ns} --no-headers "
+                    f"-o custom-columns=NAME:.metadata.name,"
+                    f"STATUS:.status.phase "
+                    f"2>/dev/null || true",
+                    supress_logs=True,
+                )
+                for line in (out or "").strip().splitlines():
+                    parts = line.split()
+                    if (len(parts) >= 2 and parts[1] == "Bound"
+                            and parts[0] in target):
+                        bound.add(parts[0])
+            except Exception as exc:
+                self.logger.warning(
+                    f"[{label}] Bulk PVC query failed: {exc}"
+                )
+
+            pending = len(target) - len(bound)
+            if pending > 0:
+                self.logger.info(
+                    f"[{label}] Bound wait: {len(bound)}/{len(target)} "
+                    f"Bound, {pending} pending"
+                )
+                time.sleep(poll_interval)
+
+        self.logger.info(
+            f"[{label}] Bound wait done: {len(bound)}/{len(target)} Bound"
+        )
+        return bound
+
+    def _log_time_series(self, label, series):
+        """Log time-series data from a monitor."""
+        if not series:
+            return
+        self.logger.info(f"[{label}] Time series ({len(series)} samples):")
+        for elapsed, count in series:
+            self.logger.info(f"  +{elapsed:>6}s: {count}")
+
     # ── Phase 1: Create PVCs ──────────────────────────────────────────────
 
     def _phase_1_create_lvols(self):
         total = self.NUM_SUBSYSTEMS * self.NS_PER_SUBSYSTEM
-        self.logger.info(f"=== Phase 1: Create {total} PVCs ===")
+        self.logger.info(
+            f"=== Phase 1: Create {total} PVCs "
+            f"(batch={self.CREATE_CONCURRENT}, "
+            f"pause={self.CREATE_BATCH_PAUSE}s) ==="
+        )
 
         pvc_names = [
             f"mcd-pvc-{_rand_seq(5)}-{i:04d}" for i in range(total)
         ]
 
-        if self.PERSISTENT_RETRY:
-            ok, fail = self._batch_exec_persistent(
-                pvc_names, self._create_single_pvc, "create_pvcs",
-            )
-        else:
-            ok, fail = self._batch_exec(
-                pvc_names, self._create_single_pvc, "create_pvcs",
-                stop_on_max_lvols=True,
-            )
-
-        # Populate lvol registry from PVC -> volumeHandle
-        for pvc_name in list(self._pvc_registry.keys()):
-            self._lvol_registry[pvc_name] = {
-                "id": pvc_name,
-                "parent_name": None,
-            }
-
-    def _create_single_pvc(self, pvc_name: str):
-        ns = self.k8s_utils.namespace
-        self.k8s_utils.create_pvc(
-            pvc_name, self.PVC_SIZE, self.STORAGE_CLASS_NAME
+        # Start background monitor — counts Bound PVCs every MONITOR_INTERVAL
+        stop_mon, series = self._start_monitor(
+            "Phase 1",
+            lambda: self._count_bound_pvcs("mcd-pvc"),
+            self.MONITOR_INTERVAL,
         )
-        # Wait for Bound
-        bound = False
-        for _ in range(60):
-            try:
-                out, _ = self.k8s_utils._exec_kubectl(
-                    f"kubectl get pvc {pvc_name} -n {ns} "
-                    f"-o jsonpath='{{.status.phase}}'"
-                )
-                if "Bound" in (out or ""):
-                    bound = True
-                    break
-            except Exception:
-                pass
-            sleep_n_sec(5)
 
-        if not bound:
-            raise RuntimeError(f"PVC {pvc_name} not Bound after 300s")
+        try:
+            # Fire all PVCs (fire-and-forget kubectl apply, no per-PVC wait)
+            fired_items, errors = self._fire_in_batches(
+                pvc_names,
+                lambda name: self.k8s_utils.create_pvc(
+                    name, self.PVC_SIZE, self.STORAGE_CLASS_NAME,
+                ),
+                "Phase 1",
+                concurrent=self.CREATE_CONCURRENT,
+                pause=self.CREATE_BATCH_PAUSE,
+                phase_timeout=self.PERSISTENT_PHASE_TIMEOUT,
+            )
 
-        self._pvc_registry[pvc_name] = {"bound": True}
+            # Bulk wait for PVCs to reach Bound
+            self.logger.info(
+                f"[Phase 1] {len(fired_items)} PVCs fired, "
+                f"waiting for Bound..."
+            )
+            bound_names = self._bulk_wait_pvcs_bound(
+                fired_items, label="Phase 1",
+                timeout=self.BOUND_WAIT_TIMEOUT,
+            )
+        finally:
+            stop_mon.set()
+
+        self._time_series["phase_1_pvcs"] = series
+        self._log_time_series("Phase 1", series)
+
+        # Populate registries with only Bound PVCs
+        for pvc_name in bound_names:
+            self._pvc_registry[pvc_name] = {"bound": True}
+            self._lvol_registry[pvc_name] = {
+                "id": pvc_name, "parent_name": None,
+            }
 
     # ── Phase 2: FIO on 10% of PVCs ──────────────────────────────────────
 
@@ -1929,6 +2129,85 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
         }
         self._snap_pvc_map[vs_name] = pvc_name
 
+    def _verify_snapshots_ready(self, timeout: int = 900,
+                                poll_interval: int = 30):
+        """Verify snapshots actually reach readyToUse=true after fire-and-forget creation.
+
+        Uses bulk kubectl queries to count ready snapshots across
+        the entire registry, polling until all are ready or timeout.
+        Prunes _snapshot_registry to only contain verified-ready snapshots
+        so downstream phases (clone creation) work with real data.
+        """
+        if not self._snapshot_registry:
+            return
+
+        submitted = len(self._snapshot_registry)
+        ns = self.k8s_utils.namespace
+        self.logger.info(
+            f"[Phase 3] Verifying {submitted} snapshots reach "
+            f"readyToUse=true (timeout={timeout}s, poll={poll_interval}s)"
+        )
+
+        deadline = time.time() + timeout
+        ready_names = set()
+
+        while time.time() < deadline:
+            # Bulk query: get all snapshots that are readyToUse=true
+            try:
+                out, _ = self.k8s_utils._exec_kubectl(
+                    f"kubectl get volumesnapshot -n {ns} "
+                    f"-o jsonpath='{{range .items[?(@.status.readyToUse==true)]}}{{.metadata.name}}{{\"\\n\"}}{{end}}' "
+                    f"2>/dev/null || true",
+                    supress_logs=True,
+                )
+                current_ready = set()
+                for line in (out or "").strip().splitlines():
+                    name = line.strip()
+                    if name and name in self._snapshot_registry:
+                        current_ready.add(name)
+                ready_names = current_ready
+            except Exception as exc:
+                self.logger.warning(
+                    f"[Phase 3] Bulk snapshot query failed: {exc}"
+                )
+
+            self.logger.info(
+                f"[Phase 3] Snapshot readiness: {len(ready_names)}/{submitted} "
+                f"readyToUse=true"
+            )
+
+            if len(ready_names) >= submitted:
+                break
+
+            # Check if progress is stalling — if no new snapshots became
+            # ready in the last poll, check snapshot-controller health
+            time.sleep(poll_interval)
+
+        # Prune registry to only verified-ready snapshots
+        not_ready = set(self._snapshot_registry.keys()) - ready_names
+        if not_ready:
+            for name in not_ready:
+                del self._snapshot_registry[name]
+                self._snap_pvc_map.pop(name, None)
+
+            pct = len(ready_names) / submitted * 100
+            msg = (
+                f"[Phase 3] {len(ready_names)}/{submitted} snapshots "
+                f"verified readyToUse ({pct:.1f}%). "
+                f"Pruned {len(not_ready)} unready snapshots from registry."
+            )
+            if len(ready_names) == 0:
+                raise RuntimeError(
+                    f"{msg} snapshot-controller may be down, aborting"
+                )
+            self.logger.warning(msg)
+            self._soft_failures.append(msg)
+        else:
+            self.logger.info(
+                f"[Phase 3] All {len(ready_names)} snapshots verified "
+                f"readyToUse=true"
+            )
+
     # ── Phase 4: Delete PVCs (free subsystem slots for clones) ──────────
 
     def _phase_4_delete_lvols(self):
@@ -1945,19 +2224,35 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
         sleep_n_sec(10)
 
         pvc_names = list(self._pvc_registry.keys())
+        initial_count = len(pvc_names)
         self.logger.info(
-            f"=== Phase 4: Delete {len(pvc_names)} PVCs "
-            f"(freeing subsystem slots for clones) ==="
+            f"=== Phase 4: Delete {initial_count} PVCs "
+            f"(batch={self.DELETE_CONCURRENT}, "
+            f"pause={self.DELETE_BATCH_PAUSE}s) ==="
         )
 
-        ok, fail = self._batch_exec(
-            pvc_names,
-            self._delete_single_pvc,
-            "delete_pvcs",
-            max_workers=self.DELETE_MAX_WORKERS,
-            max_failures=len(pvc_names),
+        # Start background monitor — tracks remaining PVCs
+        stop_mon, series = self._start_monitor(
+            "Phase 4",
+            lambda: self._count_pvcs_by_prefix("mcd-pvc"),
+            self.MONITOR_INTERVAL,
         )
-        self._metrics["lvols_deleted"] = ok
+
+        try:
+            fired_items, errors = self._fire_in_batches(
+                pvc_names,
+                self._delete_single_pvc,
+                "Phase 4",
+                concurrent=self.DELETE_CONCURRENT,
+                pause=self.DELETE_BATCH_PAUSE,
+                phase_timeout=self.DELETE_PHASE_TIMEOUT,
+            )
+        finally:
+            stop_mon.set()
+
+        self._time_series["phase_4_delete_pvcs"] = series
+        self._log_time_series("Phase 4", series)
+        self._metrics["lvols_deleted"] = len(fired_items)
 
     # ── Phase 5: Create clone PVCs from VolumeSnapshots ───────────────────
 
@@ -1967,54 +2262,69 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
             return
 
         snap_list = list(self._snapshot_registry.keys())
+        # Cap clones at cluster capacity: after Phase 4 deleted all PVCs,
+        # we have NUM_SUBSYSTEMS * NS_PER_SUBSYSTEM slots available.
+        max_clones = self.NUM_SUBSYSTEMS * self.NS_PER_SUBSYSTEM
         self.logger.info(
-            f"=== Phase 5: Create clones from {len(snap_list)} "
-            f"snapshots (until limit) ==="
+            f"=== Phase 5: Create up to {max_clones} clones from "
+            f"{len(snap_list)} snapshots "
+            f"(batch={self.CREATE_CONCURRENT}, "
+            f"pause={self.CREATE_BATCH_PAUSE}s) ==="
         )
 
-        clone_idx = [0]
-        hit_limit = [False]
-        lock = threading.Lock()
-
-        def _create_clone_pvc(_):
-            if hit_limit[0]:
-                return
-            vs_name = random.choice(snap_list)
-            with lock:
-                idx = clone_idx[0]
-                clone_idx[0] += 1
+        clone_items = []
+        for idx in range(max_clones):
+            vs_name = snap_list[idx % len(snap_list)]
             clone_pvc = f"clone-pvc-{_rand_seq(5)}-{idx:06d}"
-            try:
-                self.k8s_utils.create_clone_pvc(
-                    clone_pvc, self.PVC_SIZE, self.STORAGE_CLASS_NAME,
-                    vs_name,
-                )
-                self._clone_registry[clone_pvc] = {
-                    "clone_id": clone_pvc, "snap_name": vs_name,
-                }
-                self._clone_pvc_registry[clone_pvc] = {"vs_name": vs_name}
-            except Exception as e:
-                if self._is_max_lvols_error(e):
-                    hit_limit[0] = True
-                    return
-                raise
+            clone_items.append({"clone_pvc": clone_pvc, "vs_name": vs_name})
 
-        deadline = time.time() + self.CLONE_PHASE_TIMEOUT
-        batch_num = 0
-        while not hit_limit[0] and time.time() < deadline:
-            batch = list(range(self.BATCH_SIZE))
-            ok, fail = self._batch_exec(
-                batch, _create_clone_pvc,
-                f"create_clones_b{batch_num}",
-                max_workers=self.CLONE_MAX_WORKERS,
-                max_failures=self.BATCH_SIZE,
+        # Start background monitor — counts Bound clone PVCs
+        stop_mon, series = self._start_monitor(
+            "Phase 5",
+            lambda: self._count_bound_pvcs("clone-pvc"),
+            self.MONITOR_INTERVAL,
+        )
+
+        try:
+            # Fire all clone PVCs (fire-and-forget)
+            fired_items, errors = self._fire_in_batches(
+                clone_items,
+                lambda params: self.k8s_utils.create_clone_pvc(
+                    params["clone_pvc"], self.PVC_SIZE,
+                    self.STORAGE_CLASS_NAME, params["vs_name"],
+                ),
+                "Phase 5",
+                concurrent=self.CREATE_CONCURRENT,
+                pause=self.CREATE_BATCH_PAUSE,
+                phase_timeout=self.CLONE_PHASE_TIMEOUT,
             )
-            batch_num += 1
-            if fail >= self.BATCH_SIZE:
-                break
+
+            # Bulk wait for clone PVCs to reach Bound
+            fired_names = [p["clone_pvc"] for p in fired_items]
             self.logger.info(
-                f"[Phase 5] {len(self._clone_registry)} clones so far"
+                f"[Phase 5] {len(fired_names)} clone PVCs fired, "
+                f"waiting for Bound..."
             )
+            bound_names = self._bulk_wait_pvcs_bound(
+                fired_names, label="Phase 5",
+                timeout=self.BOUND_WAIT_TIMEOUT,
+            )
+        finally:
+            stop_mon.set()
+
+        self._time_series["phase_5_clones"] = series
+        self._log_time_series("Phase 5", series)
+
+        # Build lookup from fired items for registry population
+        name_to_snap = {
+            p["clone_pvc"]: p["vs_name"] for p in fired_items
+        }
+        for clone_pvc in bound_names:
+            vs_name = name_to_snap.get(clone_pvc, "")
+            self._clone_registry[clone_pvc] = {
+                "clone_id": clone_pvc, "snap_name": vs_name,
+            }
+            self._clone_pvc_registry[clone_pvc] = {"vs_name": vs_name}
 
     # ── Phase 6: FIO on 10% of clone PVCs ─────────────────────────────────
 
@@ -2032,28 +2342,69 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
         )
         self._fio_clone_sample = set(sample)
         self.logger.info(
-            f"=== Phase 6: FIO on {len(sample)} clone PVCs ==="
+            f"=== Phase 6: FIO on {len(sample)} clone PVCs "
+            f"(concurrent={self.FIO_CONCURRENT}, "
+            f"pause={self.FIO_BATCH_PAUSE}s) ==="
         )
 
         clone_fio_jobs = {}
-        for clone_pvc in sample:
-            try:
-                job_name = f"fio-clone-{_rand_seq(6)}"
-                cm_name = f"fio-cm-clone-{_rand_seq(6)}"
-                fio_cfg = self._build_simple_fio_config()
-                self.k8s_utils.create_fio_job(
-                    job_name=job_name,
-                    pvc_name=clone_pvc,
-                    configmap_name=cm_name,
-                    fio_config=fio_cfg,
+        deadline = time.monotonic() + self.FIO_PHASE_TIMEOUT
+        concurrent = self.FIO_CONCURRENT
+        batch_pause = self.FIO_BATCH_PAUSE
+
+        for batch_start in range(0, len(sample), concurrent):
+            if time.monotonic() >= deadline:
+                self.logger.warning(
+                    f"[Phase 6] Phase timeout ({self.FIO_PHASE_TIMEOUT}s) "
+                    f"reached after {len(clone_fio_jobs)} FIO jobs created "
+                    f"(of {len(sample)})"
                 )
-                clone_fio_jobs[job_name] = clone_pvc
-                self._metrics["fio_clone_started"] += 1
-            except Exception as exc:
-                self.logger.error(
-                    f"[Phase 6] FIO Job failed for {clone_pvc}: {exc}"
-                )
-                self._metrics["fio_clone_failures"] += 1
+                break
+
+            batch = sample[batch_start:batch_start + concurrent]
+            batch_ok = 0
+            batch_fail = 0
+
+            with ThreadPoolExecutor(max_workers=concurrent) as pool:
+                futures = {}
+                for clone_pvc in batch:
+                    job_name = f"fio-clone-{_rand_seq(6)}"
+                    cm_name = f"fio-cm-clone-{_rand_seq(6)}"
+                    fio_cfg = self._build_simple_fio_config()
+                    f = pool.submit(
+                        self.k8s_utils.create_fio_job,
+                        job_name=job_name,
+                        pvc_name=clone_pvc,
+                        configmap_name=cm_name,
+                        fio_config=fio_cfg,
+                    )
+                    futures[f] = (job_name, clone_pvc)
+
+                for f in as_completed(futures, timeout=120):
+                    job_name, clone_pvc = futures[f]
+                    try:
+                        f.result(timeout=60)
+                        clone_fio_jobs[job_name] = clone_pvc
+                        self._metrics["fio_clone_started"] += 1
+                        batch_ok += 1
+                    except Exception as exc:
+                        self.logger.error(
+                            f"[Phase 6] FIO Job failed for "
+                            f"{clone_pvc}: {exc}"
+                        )
+                        self._metrics["fio_clone_failures"] += 1
+                        batch_fail += 1
+
+            total_done = batch_start + len(batch)
+            self.logger.info(
+                f"[Phase 6] FIO batch progress: {total_done}/{len(sample)} "
+                f"(batch ok={batch_ok} fail={batch_fail}, "
+                f"cumulative started={self._metrics['fio_clone_started']})"
+            )
+
+            # Pause between batches to avoid overwhelming etcd
+            if batch_start + concurrent < len(sample):
+                time.sleep(batch_pause)
 
         # Wait for FIO jobs
         self.logger.info(
@@ -2075,20 +2426,35 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
             self.logger.info("[Phase 7] No clones — skipping")
             return
 
+        clone_names = list(self._clone_registry.keys())
         self.logger.info(
-            f"=== Phase 7: Delete {len(self._clone_registry)} "
-            f"clone PVCs ==="
+            f"=== Phase 7: Delete {len(clone_names)} clone PVCs "
+            f"(batch={self.DELETE_CONCURRENT}, "
+            f"pause={self.DELETE_BATCH_PAUSE}s) ==="
         )
 
-        clone_names = list(self._clone_registry.keys())
-        ok, fail = self._batch_exec(
-            clone_names,
-            self._delete_single_pvc,
-            "delete_clones",
-            max_workers=self.DELETE_MAX_WORKERS,
-            max_failures=len(clone_names),
+        # Start background monitor — tracks remaining clone PVCs
+        stop_mon, series = self._start_monitor(
+            "Phase 7",
+            lambda: self._count_pvcs_by_prefix("clone-pvc"),
+            self.MONITOR_INTERVAL,
         )
-        self._metrics["clones_deleted"] = ok
+
+        try:
+            fired_items, errors = self._fire_in_batches(
+                clone_names,
+                self._delete_single_pvc,
+                "Phase 7",
+                concurrent=self.DELETE_CONCURRENT,
+                pause=self.DELETE_BATCH_PAUSE,
+                phase_timeout=self.DELETE_PHASE_TIMEOUT,
+            )
+        finally:
+            stop_mon.set()
+
+        self._time_series["phase_7_delete_clones"] = series
+        self._log_time_series("Phase 7", series)
+        self._metrics["clones_deleted"] = len(fired_items)
 
     # ── Phase 8: Delete VolumeSnapshots ───────────────────────────────────
 
