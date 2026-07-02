@@ -704,6 +704,44 @@ def bind_device_to_spdk(body: utils.DeviceParams):
     return utils.get_response(True)
 
 
+class PersistNodeConfigParams(BaseModel):
+    max_lvol: Optional[int] = Field(None, ge=0)
+    huge_page_memory: Optional[int] = Field(None, ge=0)
+    numa_node: Optional[int] = Field(None, ge=0)
+    ssd_list: Optional[List[str]] = Field(None)
+
+
+@api.post('/persist_node_config', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean'
+    })}}},
+})
+def persist_node_config(body: PersistNodeConfigParams):
+    node_info = core_utils.load_config(constants.NODES_CONFIG_FILE)
+    if not node_info.get("nodes"):
+        return utils.get_response(False, "Config not found")
+
+    ssd_set = set(body.ssd_list) if body.ssd_list is not None else None
+    matched = False
+    for node_config in node_info["nodes"]:
+        if body.numa_node is not None and node_config["socket"] != body.numa_node:
+            continue
+        if ssd_set is not None and not ssd_set.intersection(set(node_config.get("ssd_pcis", []))):
+            continue
+        if body.max_lvol is not None:
+            node_config["max_lvol"] = body.max_lvol
+        if body.huge_page_memory is not None:
+            node_config["huge_page_memory"] = body.huge_page_memory
+        matched = True
+        break
+
+    if not matched:
+        return utils.get_response(False, "No matching node found for given numa_node and ssd_list")
+
+    core_utils.store_config_file(node_info, constants.NODES_CONFIG_FILE)
+    return utils.get_response(True)
+
+
 @api.post('/set_hugepages', responses={
     200: {'content': {'application/json': {'schema': utils.response_schema({
         'type': 'boolean'

@@ -627,6 +627,15 @@ def get_firewall():
     return utils.get_response(False, "deprecated bath get snode/get_firewall")
 
 
+@api.post('/persist_node_config', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean'
+    })}}},
+})
+def persist_node_config(body: snode_ops.PersistNodeConfigParams):
+    return snode_ops.persist_node_config(body)
+
+
 @api.post('/set_hugepages', responses={
     200: {'content': {'application/json': {'schema': utils.response_schema({
         'type': 'boolean'
