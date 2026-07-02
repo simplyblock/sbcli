@@ -516,23 +516,29 @@ def exec_port_allow_task(task):
     port_block.set_port(node, port_number, block=False, timeout=5, retry=2)
     tcp_ports_events.port_allowed(node, port_number)
 
-    # Self-heal devices that were forced globally UNAVAILABLE by the remote-IO
-    # quorum (main_distr_event_collector) while this node was network-partitioned.
-    # Such devices carry status=UNAVAILABLE with io_error=False; a genuine local
-    # failure sets io_error=True and is left to the device-restart/removal path.
-    # Now that the node is back ONLINE and its port is unblocked, re-admit them so
-    # peers re-attach their remote controllers -- otherwise a transient partition
-    # leaves the device unavailable until a full node restart.
+    # Self-heal devices that went UNAVAILABLE while this node was fenced/partitioned
+    # (e.g. forced globally UNAVAILABLE by the remote-IO quorum in
+    # main_distr_event_collector during the ONLINE-status-lag window at the start of
+    # a network outage). port_allow runs as the LAST step of node recovery, so by
+    # definition the node's ports are being unblocked and the node is healthy again
+    # -- every one of its local devices must serve.
+    #
+    # This must NOT be gated on node.status == ONLINE: port_allow completes a couple
+    # of seconds BEFORE the storage-node monitor flips the node's status to ONLINE,
+    # so gating on it skipped the re-admit every time and left the device stranded
+    # (UNAVAILABLE with no other recovery path -- device_monitor's auto-restart only
+    # touches io_error devices) until the cluster later suspended on the phantom
+    # offline-device count. Flip the node's devices back online regardless of prior
+    # device state; REMOVED is the one terminal state we never resurrect.
     try:
         node = db.get_storage_node_by_id(node.get_id())
-        if node.status == StorageNode.STATUS_ONLINE:
-            for dev in node.nvme_devices:
-                if (dev.status == NVMeDevice.STATUS_UNAVAILABLE
-                        and not dev.io_error and not dev.retries_exhausted):
-                    logger.info(
-                        f"Re-admitting quorum-forced-unavailable device "
-                        f"{dev.get_id()} after port allow on {node.get_id()}")
-                    device_controller.device_set_online(dev.get_id())
+        for dev in node.nvme_devices:
+            if dev.status in (NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_REMOVED):
+                continue
+            logger.info(
+                f"Re-admitting device {dev.get_id()} (was {dev.status}) after port "
+                f"allow on {node.get_id()}")
+            device_controller.device_set_online(dev.get_id())
     except Exception as e:
         logger.error(f"Device re-admit after port allow failed: {e}")
 
