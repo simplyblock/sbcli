@@ -219,7 +219,9 @@ class EntityWatchHub:
                     try:
                         watch.cancel()
                     except Exception:
-                        pass
+                        # Best-effort cleanup: cancellation failures should not
+                        # mask the main loop error/retry behavior.
+                        logger.debug('Ignoring watch cancellation failure for %s', self._name, exc_info=True)
 
 
 _hubs: Dict[type, EntityWatchHub] = {}
