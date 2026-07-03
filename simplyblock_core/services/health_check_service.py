@@ -354,8 +354,12 @@ def check_node(snode):
         health_check_status = is_node_online and node_devices_check and node_remote_devices_check and lvstore_check
     # Report true/false only for ONLINE/DOWN; UNREACHABLE/SUSPENDED ran the
     # self-heal pass above but their health stays "not applicable" (None).
+    # No sleep here: loop_for_node() owns the polling cadence (30s healthy /
+    # 5s recovering). A trailing sleep in this function stacked on the loop's
+    # own sleep and doubled the effective cycle to ~60s, so a self-blocked
+    # client port could stay undetected past the kernel's 60s nvme Connect
+    # budget (incident 2026-07-02 19:49:20).
     set_node_health_check(snode, bool(health_check_status) if report_health else None)
-    time.sleep(constants.HEALTH_CHECK_INTERVAL_SEC)
 
 
 def loop_for_node(snode):
