@@ -1,323 +1,234 @@
 # coding=utf-8
-"""Watch stream builder: diffing, event ordering, ancestor close, secrets."""
+"""SSE framing (_sse.py): snapshot/diff rendering, suppression, secrets."""
 
 import asyncio
 import logging
-from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
 from pydantic import BaseModel
 
+from simplyblock_core.watch import ChangeEvent, WatchUnavailable
 from simplyblock_core.models.cluster import Cluster as ClusterModel
 from simplyblock_core.models.job_schedule import JobSchedule
-from simplyblock_web.api.v2 import _watch
+from simplyblock_web.api.v2 import _sse
+from simplyblock_web.api.v2._sse import _build_events, _build_snapshot, sse_response
 from simplyblock_web.api.v2._dtos import ClusterDTO, TaskDTO
-from simplyblock_web.api.v2._watch import _Subscription, _build_diff, _build_snapshot, watch_response
+
+
+class FakeModel:
+    def __init__(self, entity_id, **fields):
+        self._id = entity_id
+        self._fields = fields
+
+    def get_id(self):
+        return self._id
+
+    def to_dict(self):
+        return {'uuid': self._id, **self._fields}
 
 
 class _DTO(BaseModel):
-    uuid: str
+    id: str
     status: str = ''
 
 
-def _dto(entity: dict) -> _DTO:
-    return _DTO(uuid=entity['uuid'], status=entity.get('status', ''))
+def _dto(model) -> _DTO:
+    return _DTO(id=model.get_id(), status=model.to_dict().get('status', ''))
 
 
-# ---- _build_snapshot / _build_diff (pure functions) ----
+def _created(entity_id, **f):
+    return ChangeEvent('created', entity_id, FakeModel(entity_id, **f))
+
+
+def _updated(entity_id, **f):
+    return ChangeEvent('updated', entity_id, FakeModel(entity_id, **f))
+
+
+def _deleted(entity_id, model=None):
+    return ChangeEvent('deleted', entity_id, model)
+
+
+# ---- _build_snapshot ----
 
 def test_snapshot_collection_is_json_array():
-    events, cache = _build_snapshot(
-        {b'k1': {'uuid': 'a'}, b'k2': {'uuid': 'b'}}, _dto, single=False)
+    events, cache = _build_snapshot([_created('a'), _created('b')], _dto, single=False)
     [event] = events
     assert event.event == 'snapshot'
     assert event.data.startswith('[') and event.data.endswith(']')
     assert '"a"' in event.data and '"b"' in event.data
-    assert set(cache) == {b'k1', b'k2'}
+    assert set(cache) == {'a', 'b'}
 
 
 def test_snapshot_single_is_bare_object():
-    events, _ = _build_snapshot({b'k1': {'uuid': 'a'}}, _dto, single=True)
+    events, _ = _build_snapshot([_created('a')], _dto, single=True)
     [event] = events
     assert event.event == 'snapshot'
     assert event.data.startswith('{')
 
 
-def test_diff_created_updated_deleted():
-    prev = {b'k1': {'uuid': 'a', 'status': 'x'}, b'k2': {'uuid': 'b', 'status': 'x'}}
-    _, cache = _build_snapshot(prev, _dto, single=False)
-    new = {b'k2': {'uuid': 'b', 'status': 'y'}, b'k3': {'uuid': 'c', 'status': 'x'}}
-    events, new_cache = _build_diff(prev, new, new, cache, _dto, single=False)
+def test_snapshot_single_empty_emits_nothing():
+    events, cache = _build_snapshot([], _dto, single=True)
+    assert events == [] and cache == {}
+
+
+# ---- _build_events ----
+
+def test_events_created_updated_deleted():
+    _, cache = _build_snapshot([_created('a', status='x')], _dto, single=False)
+    events, new_cache, deleted = _build_events(
+        [_updated('a', status='y'), _created('c', status='x'), _deleted('b')],
+        cache, _dto, single=False)
     by_name = {e.event: e.data for e in events}
-    assert set(by_name) == {'created', 'updated', 'deleted'}
+    assert set(by_name) == {'updated', 'created', 'deleted'}
+    assert '"y"' in by_name['updated']
     assert '"c"' in by_name['created']
-    assert '"b"' in by_name['updated'] and '"y"' in by_name['updated']
-    assert by_name['deleted'] == '{}'  # key physically gone: no representation
-    assert set(new_cache) == {b'k2', b'k3'}
+    assert by_name['deleted'] == '{}'  # physically gone: no representation
+    assert deleted is True
+    assert set(new_cache) == {'a', 'c'}
 
 
-def test_diff_suppresses_changes_invisible_in_dto():
-    """Raw dict changed (lease heartbeat) but the DTO is identical -> no event."""
+def test_events_suppress_dto_invisible_update():
+    """Raw model changed (lease heartbeat) but the DTO is identical -> no event."""
     task = {
         'uuid': str(uuid4()), 'cluster_id': str(uuid4()), 'date': 1,
         'function_name': 'node_restart', 'status': 'running',
         'updated_at': '2026-01-01T00:00:00',
     }
-    build = lambda d: TaskDTO.from_model(JobSchedule(d))  # noqa: E731
-    prev = {b'k1': task}
-    _, cache = _build_snapshot(prev, build, single=False)
-    new = {b'k1': {**task, 'updated_at': '2026-01-01T00:00:05'}}
-    events, _ = _build_diff(prev, new, new, cache, build, single=False)
+    build = lambda m: TaskDTO.from_model(m)  # noqa: E731
+    js1 = JobSchedule(task)
+    _, cache, _ = _build_events([ChangeEvent('created', js1.get_id(), js1)], {}, build, single=False)
+    js2 = JobSchedule({**task, 'updated_at': '2026-01-01T00:00:05'})
+    events, _, _ = _build_events([ChangeEvent('updated', js2.get_id(), js2)], cache, build, single=False)
     assert events == []
 
 
-def test_diff_compound_keys():
-    """JobSchedule FDB keys share a cluster prefix; diff must key exactly."""
-    cluster_id = str(uuid4())
-    t1 = {'uuid': str(uuid4()), 'cluster_id': cluster_id, 'date': 1,
-          'function_name': 'node_restart', 'status': 'running'}
-    t2 = {'uuid': str(uuid4()), 'cluster_id': cluster_id, 'date': 2,
-          'function_name': 'node_restart', 'status': 'running'}
-    build = lambda d: TaskDTO.from_model(JobSchedule(d))  # noqa: E731
-    k1 = f'object/JobSchedule/{cluster_id}/1/{t1["uuid"]}'.encode()
-    k2 = f'object/JobSchedule/{cluster_id}/2/{t2["uuid"]}'.encode()
-    prev = {k1: t1, k2: t2}
-    _, cache = _build_snapshot(prev, build, single=False)
-    new = {k1: t1, k2: {**t2, 'status': 'done'}}
-    events, _ = _build_diff(prev, new, new, cache, build, single=False)
-    [event] = events
-    assert event.event == 'updated'
-    assert t2['uuid'] in event.data
-
-
-def test_diff_single_mode_maps_created_to_updated():
-    new = {b'k1': {'uuid': 'a'}}
-    events, _ = _build_diff({}, new, new, {}, _dto, single=True)
+def test_events_single_maps_created_to_updated():
+    events, _, _ = _build_events([_created('a')], {}, _dto, single=True)
     [event] = events
     assert event.event == 'updated'
 
 
-def test_diff_scope_leave_emits_deleted_with_current_state():
-    """An entity leaving the projected set but still present in the DB emits
-    deleted carrying its *current* representation, not the stale one."""
-    project = lambda state: {  # noqa: E731
-        k: d for k, d in state.items() if d.get('status') != 'deleted'}
-    full1 = {b'k1': {'uuid': 'a', 'status': 'online'}}
-    s1 = project(full1)
-    _, cache = _build_snapshot(s1, _dto, single=False)
-    full2 = {b'k1': {'uuid': 'a', 'status': 'deleted'}}
-    s2 = project(full2)
-    events, _ = _build_diff(s1, s2, full2, cache, _dto, single=False)
+def test_events_deleted_carries_current_state():
+    events, _, _ = _build_events(
+        [_deleted('a', FakeModel('a', status='deleted'))], {}, _dto, single=False)
     [event] = events
     assert event.event == 'deleted'
-    assert '"deleted"' in event.data  # the final state, not the cached 'online'
-    assert '"online"' not in event.data
+    assert '"deleted"' in event.data
 
 
-def test_diff_physical_removal_emits_deleted_without_representation():
-    full1 = {b'k1': {'uuid': 'a', 'status': 'online'}}
-    _, cache = _build_snapshot(full1, _dto, single=False)
-    events, _ = _build_diff(full1, {}, {}, cache, _dto, single=False)
-    [event] = events
-    assert event.event == 'deleted'
-    assert event.data == '{}'
+# ---- sse_response generator ----
+
+class FakeStream:
+    def __init__(self, batches):
+        self._it = iter(batches)
+        self.closed = False
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        try:
+            return next(self._it)
+        except StopIteration:
+            raise StopAsyncIteration
+
+    async def aclose(self):
+        self.closed = True
 
 
-# ---- generator behavior with a fake hub ----
-
-class FakeHub:
+class FailingStream:
     def __init__(self):
-        self.subs = []
-        self.cache = None
+        self.n = 0
 
-    def subscribe(self, loop, notify):
-        sub = _Subscription(loop, notify)
-        self.subs.append(sub)
-        if self.cache is not None:
-            sub._deliver(self.cache)
-        return sub
+    def __aiter__(self):
+        return self
 
-    def unsubscribe(self, sub):
-        self.subs.remove(sub)
+    async def __anext__(self):
+        self.n += 1
+        if self.n == 1:
+            return [_created('a')]
+        raise WatchUnavailable()
 
-    def publish(self, state):
-        self.cache = state
-        for sub in list(self.subs):
-            sub._deliver(state)
-
-    def fail(self):
-        for sub in list(self.subs):
-            sub._fail()
+    async def aclose(self):
+        pass
 
 
-class Thing:
-    pass
-
-
-class Parent:
-    pass
-
-
-def _patch(monkeypatch, hubs):
-    monkeypatch.setattr(_watch, 'DBController', lambda: SimpleNamespace(kv_store=object()))
-    monkeypatch.setattr(_watch, 'get_hub', lambda cls: hubs[cls])
-
-
-async def _next_event(gen, timeout=2.0):
+async def _event(gen, timeout=2.0):
     return await asyncio.wait_for(gen.__anext__(), timeout)
 
 
 def test_stream_snapshot_update_delete(monkeypatch):
-    hub = FakeHub()
-    _patch(monkeypatch, {Thing: hub})
-    hub.publish({b'k1': {'uuid': 'a', 'status': 'online'}})
+    monkeypatch.setattr(_sse, 'backend_available', lambda: True)
 
     async def scenario():
-        response = watch_response(Thing, lambda s: s, _dto)
-        gen = response.body_iterator
-        event = await _next_event(gen)
-        assert event.event == 'snapshot'
-
-        hub.publish({b'k1': {'uuid': 'a', 'status': 'offline'}})
-        event = await _next_event(gen)
+        stream = FakeStream([[_created('a', status='online')],
+                             [_updated('a', status='offline')],
+                             [_deleted('a')]])
+        gen = sse_response(stream, _dto).body_iterator
+        assert (await _event(gen)).event == 'snapshot'
+        event = await _event(gen)
         assert event.event == 'updated' and 'offline' in event.data
-
-        hub.publish({})
-        event = await _next_event(gen)
-        assert event.event == 'deleted'
-
-        await gen.aclose()
-        assert hub.subs == []
-
-    asyncio.run(scenario())
-
-
-def test_stream_coalesces_bursts(monkeypatch):
-    hub = FakeHub()
-    _patch(monkeypatch, {Thing: hub})
-    hub.publish({b'k1': {'uuid': 'a', 'status': 's0'}})
-
-    async def scenario():
-        gen = watch_response(Thing, lambda s: s, _dto).body_iterator
-        assert (await _next_event(gen)).event == 'snapshot'
-
-        # Two publications without yielding to the generator: only the
-        # latest state is diffed.
-        hub.publish({b'k1': {'uuid': 'a', 'status': 's1'}})
-        hub.publish({b'k1': {'uuid': 'a', 'status': 's2'}})
-        event = await _next_event(gen)
-        assert event.event == 'updated' and 's2' in event.data
-
-        with pytest.raises(asyncio.TimeoutError):
-            await _next_event(gen, timeout=0.2)
+        assert (await _event(gen)).event == 'deleted'
+        with pytest.raises(StopAsyncIteration):
+            await _event(gen)
+        assert stream.closed
 
     asyncio.run(scenario())
 
 
 def test_detail_stream_closes_after_delete(monkeypatch):
-    hub = FakeHub()
-    _patch(monkeypatch, {Thing: hub})
-    hub.publish({b'k1': {'uuid': 'a', 'status': 'online'}})
+    monkeypatch.setattr(_sse, 'backend_available', lambda: True)
 
     async def scenario():
-        gen = watch_response(
-            Thing,
-            lambda s: {k: d for k, d in s.items() if d['uuid'] == 'a'},
-            _dto,
-            single_id='a',
-        ).body_iterator
-        assert (await _next_event(gen)).event == 'snapshot'
-        hub.publish({})
-        assert (await _next_event(gen)).event == 'deleted'
+        stream = FakeStream([[_created('a')], [_deleted('a')]])
+        gen = sse_response(stream, _dto, single=True).body_iterator
+        assert (await _event(gen)).event == 'snapshot'
+        assert (await _event(gen)).event == 'deleted'
         with pytest.raises(StopAsyncIteration):
-            await _next_event(gen)
-        assert hub.subs == []
+            await _event(gen)
 
     asyncio.run(scenario())
 
 
-def test_ancestor_deletion_closes_stream(monkeypatch):
-    hub, parent_hub = FakeHub(), FakeHub()
-    _patch(monkeypatch, {Thing: hub, Parent: parent_hub})
-    hub.publish({b'k1': {'uuid': 'a'}})
-    parent_hub.publish({b'p1': {'uuid': 'p'}})
+def test_stream_failure_emits_error_and_closes(monkeypatch):
+    monkeypatch.setattr(_sse, 'backend_available', lambda: True)
 
     async def scenario():
-        gen = watch_response(
-            Thing, lambda s: s, _dto, ancestors=[(Parent, 'p')],
-        ).body_iterator
-        assert (await _next_event(gen)).event == 'snapshot'
-        parent_hub.publish({})
+        gen = sse_response(FailingStream(), _dto).body_iterator
+        assert (await _event(gen)).event == 'snapshot'
+        event = await _event(gen)
+        assert event.event == 'error' and 'backend unavailable' in event.data
         with pytest.raises(StopAsyncIteration):
-            await _next_event(gen)
-        assert hub.subs == [] and parent_hub.subs == []
-
-    asyncio.run(scenario())
-
-
-def test_hub_failure_emits_error_and_closes(monkeypatch):
-    hub = FakeHub()
-    _patch(monkeypatch, {Thing: hub})
-    hub.publish({b'k1': {'uuid': 'a'}})
-
-    async def scenario():
-        gen = watch_response(Thing, lambda s: s, _dto).body_iterator
-        assert (await _next_event(gen)).event == 'snapshot'
-        hub.fail()
-        event = await _next_event(gen)
-        assert event.event == 'error'
-        assert 'backend unavailable' in event.data
-        with pytest.raises(StopAsyncIteration):
-            await _next_event(gen)
+            await _event(gen)
 
     asyncio.run(scenario())
 
 
 def test_kv_store_unavailable_yields_503(monkeypatch):
     from fastapi import HTTPException
-    monkeypatch.setattr(_watch, 'DBController', lambda: SimpleNamespace(kv_store=None))
+    monkeypatch.setattr(_sse, 'backend_available', lambda: False)
     with pytest.raises(HTTPException) as exc_info:
-        watch_response(Thing, lambda s: s, _dto)
+        sse_response(FakeStream([]), _dto)
     assert exc_info.value.status_code == 503
-
-
-# ---- device projection (importable helper) ----
-
-def test_device_projection_explodes_node():
-    from simplyblock_web.api.v2.cluster.storage_node.device import _make_device_projection
-    state = {
-        b'n1': {'uuid': 'node-1', 'nvme_devices': [
-            {'uuid': 'dev-1', 'status': 'online'},
-            {'uuid': 'dev-2', 'status': 'unavailable'},
-        ]},
-        b'n2': {'uuid': 'node-2', 'nvme_devices': [{'uuid': 'dev-3'}]},
-    }
-    assert set(_make_device_projection('node-1')(state)) == {'dev-1', 'dev-2'}
-    assert set(_make_device_projection('node-1', 'dev-2')(state)) == {'dev-2'}
-    assert _make_device_projection('node-404')(state) == {}
 
 
 # ---- secrets on the stream (ClusterDTO carries `secret`) ----
 
-def _cluster_dict(secret='hunter2'):
-    return {'uuid': str(uuid4()), 'secret': secret, 'status': 'active'}
-
-
-def _cluster_dto(data: dict) -> ClusterDTO:
-    return ClusterDTO.from_model(ClusterModel(data), None)
-
-
 def test_stream_payload_unwraps_secret_on_wire(caplog):
     """Same behavior as the plain GET: JSON wire carries plaintext."""
+    cluster = ClusterModel({'uuid': str(uuid4()), 'secret': 'hunter2', 'status': 'active'})
+    build = lambda m: ClusterDTO.from_model(m, None)  # noqa: E731
     with caplog.at_level(logging.DEBUG):
-        events, _ = _build_snapshot({b'k1': _cluster_dict()}, _cluster_dto, single=False)
+        events, _ = _build_snapshot(
+            [ChangeEvent('created', cluster.get_id(), cluster)], build, single=False)
     [event] = events
     assert 'hunter2' in event.data
     assert 'hunter2' not in caplog.text
 
 
 def test_dto_python_mode_masks_secret():
-    dto = _cluster_dto(_cluster_dict())
+    cluster = ClusterModel({'uuid': str(uuid4()), 'secret': 'hunter2', 'status': 'active'})
+    dto = ClusterDTO.from_model(cluster, None)
     assert 'hunter2' not in repr(dto)
     assert str(dto.model_dump()['secret']) == '**********'

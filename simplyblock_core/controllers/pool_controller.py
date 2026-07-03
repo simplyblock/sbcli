@@ -13,10 +13,31 @@ from simplyblock_core import utils
 from simplyblock_core.controllers import pool_events, lvol_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.kms import KMSException, create_kms_connection, pool_kek_name
+from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.prom_client import PromClient
 
 logger = lg.getLogger()
+
+
+def watch_pools(cluster_id):
+    """Stream pool changes for one cluster (same scope as get_pools)."""
+    db = DBController()
+    return db.watch(
+        Pool,
+        select=lambda models: db.get_pools(cluster_id, source=models),
+        ancestors=[(Cluster, cluster_id)],
+    )
+
+
+def watch_pool(cluster_id, pool_id):
+    """Stream changes for a single pool."""
+    db = DBController()
+    return db.watch(
+        Pool,
+        select=lambda models: [pool for pool in models if pool.get_id() == pool_id],
+        ancestors=[(Cluster, cluster_id)],
+    )
 
 
 def _generate_string(length):
