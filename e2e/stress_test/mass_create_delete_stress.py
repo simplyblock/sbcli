@@ -556,6 +556,12 @@ class _MassCreateDeleteMixin:
             )
 
         finally:
+            try:
+                self.collect_management_details(suffix="_pre_delete")
+            except Exception as exc:
+                self.logger.warning(
+                    f"Failed to collect management details before cleanup: {exc}"
+                )
             t0 = time.time()
             self._phase_cleanup()
             self._phase_durations["cleanup"] = round(time.time() - t0, 1)
@@ -986,6 +992,7 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
         """Fire add_lvol(namespace=True) for a child. No ID fetch, no
         device discovery. ID populated later by bulk verify."""
         name = params["name"]
+        host_id = self.sn_nodes[0] if self.sn_nodes else None
         self.sbcli_utils.add_lvol(
             lvol_name=name,
             pool_name=self.pool_name,
@@ -995,6 +1002,7 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
             distr_bs=self.bs,
             distr_chunk_bs=self.chunk_bs,
             namespace=True,
+            host_id=host_id,
             retry=3,
         )
 
