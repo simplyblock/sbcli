@@ -182,6 +182,21 @@ def check_node(snode):
         if storage_node_ops.sync_remote_devices_from_spdk(snode, node_bdev_names=node_bdev_names):
             snode = db.get_storage_node_by_id(snode.get_id())
 
+        # Reconcile against cluster topology. node.remote_devices is rebuilt
+        # as "whatever was reachable at that moment" by the restart /
+        # port-allow paths, so a peer that was unreachable while this node
+        # restarted (e.g. network outage) gets silently dropped from the
+        # list — and the list-driven loop below can then never see, check,
+        # or repair the missing connection. Gate on cluster status like the
+        # remote-JM rebuild below, to stay out of activation's way.
+        if cluster is not None and cluster.status in [
+                Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
+            reconnected, reconcile_ok = storage_node_ops.reconnect_dropped_remote_devs(
+                snode, node_bdev_names=node_bdev_names)
+            if reconnected:
+                snode = db.get_storage_node_by_id(snode.get_id())
+            node_remote_devices_check &= reconcile_ok
+
         logger.info(f"Node remote device: {len(snode.remote_devices)}")
 
         for remote_device in snode.remote_devices:
@@ -270,8 +285,27 @@ def check_node(snode):
                                 remote_device.remote_bdev, remote_device.node_id,
                                 jm_owner.status if jm_owner else "not-found")
 
-            for jm_id in snode.jm_ids:
-                if jm_id and jm_id not in connected_jms:
+            # The expected remote-JM set is topology-derived: the node's own
+            # JM quorum (jm_ids) plus the JMs of every primary this node is
+            # secondary/tertiary for — the same sources _connect_to_remote_
+            # jm_devs rebuilds from. Detecting only jm_ids left secondary->
+            # primary JM connections that were dropped during a restart-
+            # while-outage unnoticed forever.
+            expected_jm_ids = {jm_id for jm_id in snode.jm_ids if jm_id}
+            for sec_attr in ('lvstore_stack_secondary', 'lvstore_stack_tertiary'):
+                sec_primary_id = getattr(snode, sec_attr, None)
+                if not sec_primary_id:
+                    continue
+                try:
+                    org_node = db.get_storage_node_by_id(sec_primary_id)
+                except KeyError:
+                    continue
+                if org_node.jm_device and org_node.jm_device.get_id():
+                    expected_jm_ids.add(org_node.jm_device.get_id())
+                expected_jm_ids.update(jm_id for jm_id in org_node.jm_ids if jm_id)
+
+            for jm_id in expected_jm_ids:
+                if jm_id not in connected_jms:
                     for nd in db.get_storage_nodes():
                         if nd.jm_device and nd.jm_device.get_id() == jm_id:
                             if health_controller._peer_connections_relevant(nd):

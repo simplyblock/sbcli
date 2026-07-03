@@ -510,6 +510,7 @@ class TestHealthCheckMultipathIntegration(unittest.TestCase):
 
         # sync returns False (no changes)
         mock_sn_ops.sync_remote_devices_from_spdk.return_value = False
+        mock_sn_ops.reconnect_dropped_remote_devs.return_value = (False, True)
 
         # RPCClient.get_bdevs / subsystem_list must not hit the network.
         mock_rpc_cls.return_value.get_bdevs.return_value = []
@@ -564,6 +565,7 @@ class TestHealthCheckMultipathIntegration(unittest.TestCase):
         mock_hc.check_bdev.return_value = True
         mock_hc.check_subsystem.return_value = True
         mock_sn_ops.sync_remote_devices_from_spdk.return_value = False
+        mock_sn_ops.reconnect_dropped_remote_devs.return_value = (False, True)
 
         mock_rpc_cls.return_value.get_bdevs.return_value = []
         mock_rpc_cls.return_value.subsystem_list.return_value = []
@@ -626,6 +628,7 @@ class TestHealthCheckMultipathIntegration(unittest.TestCase):
         ]
         mock_hc.check_subsystem.return_value = True
         mock_sn_ops.sync_remote_devices_from_spdk.return_value = False
+        mock_sn_ops.reconnect_dropped_remote_devs.return_value = (False, True)
 
         mock_rpc_cls.return_value.get_bdevs.return_value = []
         mock_rpc_cls.return_value.subsystem_list.return_value = []

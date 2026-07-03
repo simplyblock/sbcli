@@ -1368,6 +1368,94 @@ def sync_remote_devices_from_spdk(this_node: StorageNode, node_bdev_names=None):
     return changed
 
 
+def reconnect_dropped_remote_devs(this_node: StorageNode, node_bdev_names=None):
+    """Topology-driven repair for remote data-device connections.
+
+    ``node.remote_devices`` is rebuilt as "whatever was reachable at that
+    moment" by the restart / port-allow paths (via ``_connect_to_remote_devs``),
+    so a peer that is unreachable while this node restarts is silently dropped
+    from the list. The health-check repair loop iterates only the persisted
+    list, which makes the dropped connection invisible: it is never checked
+    and never re-established. Observed after restarting a node during another
+    node's network outage — the cross connections stayed down long after the
+    outage ended, because the outage node recovered via port-unblock (DOWN →
+    port_allow), not a restart, and therefore never fanned out reconnects to
+    its peers.
+
+    Derive the *expected* remote-device set from cluster topology instead:
+    every relevant peer's usable devices. Reconnect any device missing from
+    ``this_node.remote_devices`` and append it to the persisted list, so the
+    regular list-driven health check covers it from the next cycle on.
+
+    The peer gate mirrors ``health_controller._peer_connections_relevant``
+    (ONLINE/DOWN/UNREACHABLE — inlined here to avoid a circular import):
+    connections to those peers are expected to exist, so a failed reconnect
+    counts as a fault, exactly like a failed reconnect of a listed entry.
+    Peers in transitional states are skipped — a RESTARTING peer's own
+    restart fans out reconnects to all online nodes when it completes.
+
+    Returns ``(changed, all_ok)``: ``changed`` is True when entries were
+    appended (callers holding a stale node object should re-read it);
+    ``all_ok`` is False when at least one expected device could not be
+    connected.
+    """
+    db_controller = DBController()
+    if node_bdev_names is None:
+        node_bdevs = this_node.rpc_client(timeout=5, retry=1).get_bdevs()
+        node_bdev_names = [b["name"] for b in node_bdevs] if node_bdevs else []
+    elif isinstance(node_bdev_names, dict):
+        node_bdev_names = list(node_bdev_names.keys())
+
+    fresh_node = db_controller.get_storage_node_by_id(this_node.get_id())
+    known_ids = {dev.get_id() for dev in fresh_node.remote_devices}
+    changed = False
+    all_ok = True
+
+    for peer in db_controller.get_storage_nodes_by_cluster_id(fresh_node.cluster_id):
+        if peer.get_id() == fresh_node.get_id():
+            continue
+        if peer.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN,
+                               StorageNode.STATUS_UNREACHABLE]:
+            continue
+        for dev in peer.nvme_devices:
+            if dev.get_id() in known_ids:
+                continue
+            if dev.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY,
+                                  NVMeDevice.STATUS_CANNOT_ALLOCATE]:
+                continue
+            if not dev.alceml_bdev:
+                logger.error(f"device alceml bdev not found!, {dev.get_id()}")
+                continue
+            logger.info(
+                "Remote device %s on peer %s missing from remote_devices; reconnecting",
+                dev.get_id(), peer.get_id())
+            try:
+                remote_bdev = connect_device(
+                    f"remote_{dev.alceml_bdev}", dev, fresh_node,
+                    bdev_names=node_bdev_names, reattach=False)
+            except Exception as e:
+                logger.error(
+                    "Failed to reconnect dropped remote device %s on peer %s: %s",
+                    dev.get_id(), peer.get_id(), e)
+                all_ok = False
+                continue
+            remote_dev = RemoteDevice()
+            remote_dev.uuid = dev.uuid
+            remote_dev.alceml_name = dev.alceml_name
+            remote_dev.node_id = dev.node_id
+            remote_dev.size = dev.size
+            remote_dev.status = NVMeDevice.STATUS_ONLINE
+            remote_dev.nvmf_multipath = dev.nvmf_multipath
+            remote_dev.remote_bdev = remote_bdev or f"remote_{dev.alceml_bdev}n1"
+            fresh_node.remote_devices.append(remote_dev)
+            known_ids.add(dev.get_id())
+            changed = True
+
+    if changed:
+        fresh_node.write_to_db(db_controller.kv_store)
+    return changed, all_ok
+
+
 def _peer_reachable_via_jm_quorum(target_node_id, this_node, peer_probe_timeout=1):
     """Check whether ``target_node`` is reachable on the data plane by asking
     other online peers about their JM quorum state.
