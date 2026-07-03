@@ -929,8 +929,8 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     _available_subsys = lvol_controller.get_next_available_subsystem_on_node(snode.get_id(), all_lvols=all_lvols) if namespaced else None
 
     if not _available_subsys:
-        subsys_count = lvol_controller.count_lvol_subsystems(snode)
-        if subsys_count is not None and subsys_count >= snode.max_lvol:
+        subsys_count = lvol_controller.count_lvol_subsystems(snode, all_lvols)
+        if subsys_count >= snode.max_lvol:
             error = f"Too many subsystems on node: {snode.get_id()}, max subsystems reached: {snode.max_lvol}"
             logger.error(error)
             return False, error

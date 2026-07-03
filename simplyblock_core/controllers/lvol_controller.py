@@ -167,43 +167,52 @@ def validate_add_lvol_func(name, size, host_id_or_name, pool_id_or_name,
     return True, ""
 
 
-def count_lvol_subsystems(node):
-    """Count the lvol subsystems currently present on ``node``.
+def count_lvol_subsystems(node, all_lvols=None):
+    """Count the lvol subsystems for which ``node`` is the primary.
 
-    Queries the data plane directly (``subsystem_list``) and counts NQNs
-    carrying the ``:lvol:`` tag, instead of scanning every lvol record in the
-    DB (which is O(N) per create and does not scale to thousands of volumes).
-    Namespaced volumes share a single subsystem (one NQN) so they correctly
-    count as one; device (``:dev:``) and hublvol (``:hublvol:``) subsystems are
-    excluded by the tag match.
+    Only primary subsystems count against ``max_lvol``: the node's memory
+    reservation already provisions for the secondary/tertiary replica
+    subsystems it hosts for other nodes' lvols, so replicas must not consume
+    subsystem slots. Namespaced volumes share a single subsystem (one NQN) and
+    count as one. LVols being deleted are excluded; lvols still in creation
+    are counted (their subsystem is about to exist).
 
-    Returns the count, or ``None`` if the node could not be queried.
+    ``all_lvols`` is an optional pre-fetched ``get_mini_lvols()`` result so
+    hot paths that already hold the list avoid a second DB scan.
     """
-    try:
-        subsystems = node.rpc_client().subsystem_list() or []
-    except Exception as e:
-        logger.warning(f"Failed to list subsystems on node {node.get_id()}: {e}")
-        return None
-    return sum(1 for s in subsystems if ":lvol:" in s.get("nqn", ""))
+    if all_lvols is None:
+        all_lvols = DBController().get_mini_lvols()
+    return len({
+        lv.nqn for lv in all_lvols
+        if lv.node_id == node.get_id()
+        and lv.status not in (LVol.STATUS_IN_DELETION, LVol.STATUS_DELETED)
+    })
 
 
-def _get_next_3_nodes(cluster_id, lvol_size=0, all_lvols=None):
+def _get_next_3_nodes(cluster_id, lvol_size=0, all_lvols=None, namespaced=False):
     db_controller = DBController()
     snodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
+    if all_lvols is None:
+        all_lvols = db_controller.get_mini_lvols()
 
     online_nodes = []
     node_stats = {}
+    nodes_at_capacity = {}
+    nodes_with_ns_slot = set()
     for node in snodes:
         if node.is_secondary_node:  # pass
             continue
         if node.status == node.STATUS_ONLINE:
-            subsys_count = count_lvol_subsystems(node)
-            if subsys_count is None:
-                # Could not reach the node to count its subsystems; don't place
-                # here (the create would fail on it anyway).
+            subsys_count = count_lvol_subsystems(node, all_lvols)
+            has_ns_slot = bool(
+                namespaced and get_next_available_subsystem_on_node(node.get_id(), all_lvols))
+            if subsys_count >= node.max_lvol and not has_ns_slot:
+                # At subsystem capacity, and (for namespaced creates) no
+                # existing subsystem on the node has a free namespace slot.
+                nodes_at_capacity[node.get_id()] = subsys_count
                 continue
-            if subsys_count >= node.max_lvol:
-                continue
+            if has_ns_slot:
+                nodes_with_ns_slot.add(node.get_id())
             if node.lvol_sync_del():
                 logger.info(f"LVol sync delete task found on node: {node.get_id()}, proceeding anyway")
             online_nodes.append(node)
@@ -211,6 +220,18 @@ def _get_next_3_nodes(cluster_id, lvol_size=0, all_lvols=None):
                 "lvol": subsys_count+1
             }
             node_stats[node.get_id()] = node_st
+
+    if not online_nodes and nodes_at_capacity:
+        logger.warning(
+            "No eligible node for LVol placement: all online nodes are at max subsystem "
+            "capacity (max_lvol): %s",
+            ", ".join(f"{nid}={cnt}" for nid, cnt in nodes_at_capacity.items()))
+
+    # A namespaced lvol should fill existing subsystems before opening new
+    # ones — prefer nodes that have a free namespace slot when any exist.
+    if nodes_with_ns_slot and len(nodes_with_ns_slot) < len(online_nodes):
+        online_nodes = [n for n in online_nodes if n.get_id() in nodes_with_ns_slot]
+        node_stats = {nid: st for nid, st in node_stats.items() if nid in nodes_with_ns_slot}
 
     if len(online_nodes) <= 1:
         return online_nodes
@@ -304,13 +325,45 @@ def validate_aes_xts_keys(key1: str, key2: str) -> Tuple[bool, str]:
     return True, ""
 
 
+def _resolve_lvol_subsystem(lvol, host_node, cl, namespaced, all_lvols):
+    """Pick the subsystem NQN for a new lvol.
+
+    A namespaced lvol joins an existing subsystem on the host node when one
+    has a free namespace slot; otherwise (and for non-namespaced lvols) a new
+    subsystem is claimed. The node's ``max_lvol`` subsystem cap is enforced
+    only when a new subsystem would actually be created — joining an existing
+    one consumes no subsystem slot.
+
+    Returns ``(True, "")`` or ``(False, error)``.
+    """
+    lvol.nqn = cl.nqn + ":lvol:" + lvol.uuid
+    if namespaced:
+        result = get_next_available_subsystem_on_node(host_node.get_id(), all_lvols)
+        if result:
+            lvol.nqn = result.nqn
+            lvol.namespace = result.uuid
+            lvol.max_namespace_per_subsys = result.max_namespace_per_subsys
+            return True, ""
+
+    subsys_count = count_lvol_subsystems(host_node, all_lvols)
+    if subsys_count >= host_node.max_lvol:
+        return False, (f"Too many subsystems on node: {host_node.get_id()}, "
+                       f"max subsystems reached: {host_node.max_lvol}")
+    return True, ""
+
+
 def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=False, use_crypto=False,
                 distr_vuid=0, max_rw_iops=0, max_rw_mbytes=0, max_r_mbytes=0, max_w_mbytes=0,
                 with_snapshot=False, max_size=0, lvol_priority_class=0,
-                uid=None, pvc_name=None, namespaced=None, max_namespace_per_subsys=1, fabric="tcp", ndcs=0, npcs=0,
+                uid=None, pvc_name=None, namespaced=None, max_namespace_per_subsys=None, fabric="tcp", ndcs=0, npcs=0,
                 allowed_hosts=None, do_replicate=False, replication_cluster_id=None, crypto_key=None):
     db_controller = DBController()
     logger.info(f"Adding LVol: {name}")
+    if max_namespace_per_subsys is None:
+        # A namespaced lvol whose new subsystem allows only one namespace can
+        # never be joined by later namespaced lvols, silently degenerating to
+        # one-subsystem-per-lvol — default to a shareable capacity instead.
+        max_namespace_per_subsys = constants.LVO_MAX_NAMESPACES_PER_SUBSYS if namespaced else 1
     host_node = None
     if host_id_or_name:
         try:
@@ -476,22 +529,18 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     lvol.fabric = fabric
 
     if not host_node:
-        nodes = _get_next_3_nodes(cl.get_id(), lvol.size, all_lvols)
+        nodes = _get_next_3_nodes(cl.get_id(), lvol.size, all_lvols, namespaced=bool(namespaced))
         if not nodes:
             return False, "No nodes found with enough resources to create the LVol"
         host_node = nodes[0]
 
-    # Create a new subsystem by default unless namespaced is set
-    lvol.nqn = cl.nqn + ":lvol:" + lvol.uuid
+    # Create a new subsystem by default unless namespaced is set and an
+    # existing subsystem on the host node has a free namespace slot.
     lvol.max_namespace_per_subsys = max_namespace_per_subsys
-    namespace = None
-
-    if namespaced:
-        result = get_next_available_subsystem_on_node(host_node.get_id(), all_lvols)
-        if result:
-            lvol.nqn = result.nqn
-            lvol.namespace = result.uuid
-            lvol.max_namespace_per_subsys = result.max_namespace_per_subsys
+    ret, error = _resolve_lvol_subsystem(lvol, host_node, cl, namespaced, all_lvols)
+    if not ret:
+        logger.error(error)
+        return False, error
 
     s_node = db_controller.get_storage_node_by_id(host_node.secondary_node_id)
     attr_name = f"active_{fabric}"
@@ -524,16 +573,6 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
             replication_cluster_id = cl.snapshot_replication_target_cluster
         random_nodes = _get_next_3_nodes(replication_cluster_id, lvol.size, all_lvols)
         lvol.replication_node_id = random_nodes[0].get_id()
-
-    # Only enforce the subsystem limit when a new subsystem would actually be
-    # created. Namespaced lvols that found a free slot (namespace is set) share
-    # an existing NQN and do not increase the subsystem count.
-    if namespace is None:
-        subsys_count = count_lvol_subsystems(host_node)
-        if subsys_count is not None and subsys_count >= host_node.max_lvol:
-            error = f"Too many subsystems on node: {host_node.get_id()}, max subsystems reached: {host_node.max_lvol}"
-            logger.error(error)
-            return False, error
 
     lvol_dict: dict = {
         "type": "bdev_lvol",
@@ -568,8 +607,11 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
         lvol.lvol_type += ',crypto'
         lvol.top_bdev = lvol.crypto_bdev
 
-    # Process allowed hosts (for host restriction and/or DH-HMAC-CHAP authentication)
-    if not namespace:
+    # Process allowed hosts (for host restriction and/or DH-HMAC-CHAP
+    # authentication). Only when this lvol owns a new subsystem — a namespaced
+    # lvol that joined an existing subsystem (lvol.namespace set) inherits
+    # that subsystem's host configuration.
+    if not lvol.namespace:
         if pool.dhchap:
             # Pool-level DHCHAP: inherit allowed hosts from pool (no per-host key generation)
             lvol.allowed_hosts = [{"nqn": h} for h in pool.allowed_hosts]
@@ -839,7 +881,7 @@ def _resolve_namespaced_subsystem(lvol, rpc_client, snode):
             return False
         else:
             subsys_count = count_lvol_subsystems(snode)
-            if subsys_count is not None and subsys_count >= snode.max_lvol:
+            if subsys_count >= snode.max_lvol:
                 error = f"Too many subsystems on node: {snode.get_id()}, max subsystems reached: {snode.max_lvol}"
                 logger.error(error)
                 raise Exception(error)
@@ -999,8 +1041,8 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
                 lvol.namespace = result.uuid
                 lvol.max_namespace_per_subsys = result.max_namespace_per_subsys
             else:
-                subsys_count = count_lvol_subsystems(snode)
-                if subsys_count is not None and subsys_count >= snode.max_lvol:
+                subsys_count = count_lvol_subsystems(snode, all_lvols)
+                if subsys_count >= snode.max_lvol:
                     error = f"Too many subsystems on node: {snode.get_id()}, max subsystems reached: {snode.max_lvol}"
                     logger.error(error)
                     return _fail_after_bdev(lvol, rpc_client, error)
@@ -2484,8 +2526,8 @@ def clone_lvol(lvol_id, clone_name, new_size=None, pvc_name=None):
 
     if not _available_subsys:
         snode = db_controller.get_storage_node_by_id(lvol.node_id)
-        subsys_count = count_lvol_subsystems(snode)
-        if subsys_count is not None and subsys_count >= snode.max_lvol:
+        subsys_count = count_lvol_subsystems(snode, all_lvols)
+        if subsys_count >= snode.max_lvol:
             error = f"Too many subsystems on node: {snode.get_id()}, max subsystems reached: {snode.max_lvol}"
             logger.error(error)
             return False, error
