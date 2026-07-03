@@ -8,12 +8,11 @@ from sse_starlette import EventSourceResponse
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.controllers import pool_controller
 from simplyblock_core import utils as core_utils
-from simplyblock_core.models.cluster import Cluster as ClusterModel
 from simplyblock_core.models.pool import Pool as PoolModel
 
 from ... import util as util
 from ..._dependencies import Cluster, StoragePool
-from ..._watch import WATCH_RESPONSES, WatchParam, watch_response
+from ..._sse import WATCH_RESPONSES, WatchParam, sse_response
 from .volume import api as volume_api
 from .snapshot import api as snapshot_api
 from ..._dtos import StoragePoolDTO
@@ -23,19 +22,16 @@ api = APIRouter()
 db = DBController()
 
 
-def _pool_dto(data: dict) -> StoragePoolDTO:
-    return StoragePoolDTO.from_model(PoolModel(data), None)
+def _pool_dto(pool: PoolModel) -> StoragePoolDTO:
+    return StoragePoolDTO.from_model(pool, None)
 
 
 @api.get('/', name='clusters:storage-pools:list', response_model=List[StoragePoolDTO], responses=WATCH_RESPONSES)
 def list(cluster: Cluster, watch: WatchParam = False) -> Union[List[StoragePoolDTO], EventSourceResponse]:
     if watch:
-        cluster_id = cluster.get_id()
-        return watch_response(
-            PoolModel,
-            lambda state: {k: d for k, d in state.items() if d.get('cluster_id') == cluster_id},
+        return sse_response(
+            pool_controller.watch_pools(cluster.get_id()),
             _pool_dto,
-            ancestors=[(ClusterModel, cluster_id)],
         )
     return [StoragePoolDTO.from_model(pool, None) for pool in db.get_pools(cluster.get_id())]
 
@@ -86,13 +82,10 @@ instance_api = APIRouter(prefix='/{pool_id}')
 @instance_api.get('/', name='clusters:storage-pools:detail', response_model=StoragePoolDTO, responses=WATCH_RESPONSES)
 def get(cluster: Cluster, pool: StoragePool, watch: WatchParam = False) -> Union[StoragePoolDTO, EventSourceResponse]:
     if watch:
-        pool_id = pool.get_id()
-        return watch_response(
-            PoolModel,
-            lambda state: {k: d for k, d in state.items() if d.get('uuid') == pool_id},
+        return sse_response(
+            pool_controller.watch_pool(cluster.get_id(), pool.get_id()),
             _pool_dto,
-            single_id=pool_id,
-            ancestors=[(ClusterModel, cluster.get_id())],
+            single=True,
         )
     stat_obj = None
     return StoragePoolDTO.from_model(pool, stat_obj)

@@ -20,7 +20,7 @@ from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.pool import Pool
-from simplyblock_web.api.v2._watch import get_hub
+from simplyblock_core.watch import get_hub
 
 
 @pytest.fixture(scope='module')

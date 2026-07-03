@@ -8,13 +8,11 @@ from sse_starlette import EventSourceResponse
 from simplyblock_core.db_controller import DBController
 from simplyblock_core import utils as core_utils
 from simplyblock_core.controllers import backup_controller, lvol_controller, snapshot_controller
-from simplyblock_core.models.cluster import Cluster as ClusterModel
 from simplyblock_core.models.lvol_model import LVol
-from simplyblock_core.models.pool import Pool as PoolModel
 
 from ...._dependencies import Cluster, StoragePool, Volume
 from ...._dtos import BackupDTO, VolumeDTO, SnapshotDTO, TaskDTO
-from ...._watch import WATCH_RESPONSES, WatchParam, watch_response
+from ...._sse import WATCH_RESPONSES, WatchParam, sse_response
 from .... import util
 from .migration import api as migration_api
 
@@ -26,17 +24,10 @@ db = DBController()
 @api.get('/', name='clusters:storage-pools:volumes:list', response_model=List[VolumeDTO], responses=WATCH_RESPONSES)
 def list(request: Request, cluster: Cluster, pool: StoragePool, watch: WatchParam = False) -> Union[List[VolumeDTO], EventSourceResponse]:
     if watch:
-        pool_id = pool.get_id()
         cluster_id = cluster.get_id()
-        return watch_response(
-            LVol,
-            # Same filter as get_lvols_by_pool_id: pool membership, deleted excluded.
-            lambda state: {
-                k: d for k, d in state.items()
-                if d.get('pool_uuid') == pool_id and d.get('status') != LVol.STATUS_DELETED
-            },
-            lambda d: VolumeDTO.from_model(LVol(d), request, cluster_id, None),
-            ancestors=[(ClusterModel, cluster_id), (PoolModel, pool_id)],
+        return sse_response(
+            lvol_controller.watch_volumes(cluster_id, pool.get_id()),
+            lambda lvol: VolumeDTO.from_model(lvol, request, cluster_id, None),
         )
     data = []
     for lvol in db.get_lvols_by_pool_id(pool.get_id()):
@@ -160,23 +151,16 @@ instance_api = APIRouter(prefix='/{volume_id}')
 @instance_api.get('/', name='clusters:storage-pools:volumes:detail', response_model=VolumeDTO, responses=WATCH_RESPONSES)
 def get(request: Request, cluster: Cluster, pool: StoragePool, volume: Volume, watch: WatchParam = False) -> Union[VolumeDTO, EventSourceResponse]:
     if watch:
-        volume_id = volume.get_id()
         cluster_id = cluster.get_id()
 
-        def _volume_dto(d: dict) -> VolumeDTO:
-            lvol = LVol(d)
+        def _volume_dto(lvol: LVol) -> VolumeDTO:
             rep_info = lvol_controller.get_replication_info(lvol.get_id())
             return VolumeDTO.from_model(lvol, request, cluster_id, None, rep_info)
 
-        return watch_response(
-            LVol,
-            lambda state: {
-                k: d for k, d in state.items()
-                if d.get('uuid') == volume_id and d.get('status') != LVol.STATUS_DELETED
-            },
+        return sse_response(
+            lvol_controller.watch_volume(cluster_id, pool.get_id(), volume.get_id()),
             _volume_dto,
-            single_id=volume_id,
-            ancestors=[(ClusterModel, cluster_id), (PoolModel, pool.get_id())],
+            single=True,
         )
     stat_obj = None
     rep_info = lvol_controller.get_replication_info(volume.get_id())

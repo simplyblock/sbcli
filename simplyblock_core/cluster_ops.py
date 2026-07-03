@@ -37,6 +37,19 @@ logger = utils.get_logger(__name__)
 
 db_controller = DBController()
 
+
+def watch_clusters():
+    """Stream changes across all clusters."""
+    return db_controller.watch(Cluster)
+
+
+def watch_cluster(cluster_id):
+    """Stream changes for a single cluster."""
+    return db_controller.watch(
+        Cluster,
+        select=lambda models: [c for c in models if c.get_id() == cluster_id],
+    )
+
 def _create_update_user(cluster_id, grafana_url, grafana_secret: SecretStr, user_secret: SecretStr, update_secret=False):
     session = requests.session()
     session.auth = ("admin", grafana_secret.get_secret_value())

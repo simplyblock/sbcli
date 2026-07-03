@@ -202,3 +202,28 @@ class TestAddReplication:
             timeout=30,
             target_pool='pool-1',
         )
+
+
+class TestWatchClusters:
+
+    def test_list_dispatches_watch_clusters(self, client, cluster, cluster_ops, watch_stream):
+        cluster_ops.watch_clusters.return_value = watch_stream([cluster])
+
+        response = client.get('/api/v2/clusters/?watch=true')
+
+        assert response.status_code == 200
+        assert response.headers['content-type'].startswith('text/event-stream')
+        assert 'event: snapshot' in response.text
+        assert CLUSTER_ID in response.text
+        cluster_ops.watch_clusters.assert_called_once_with()
+
+    def test_detail_dispatches_watch_cluster(self, client, cluster, cluster_ops, watch_stream):
+        cluster_ops.watch_cluster.return_value = watch_stream([cluster])
+
+        response = client.get(f'/api/v2/clusters/{CLUSTER_ID}/?watch=true')
+
+        assert response.status_code == 200
+        assert response.headers['content-type'].startswith('text/event-stream')
+        assert 'event: snapshot' in response.text
+        assert CLUSTER_ID in response.text
+        cluster_ops.watch_cluster.assert_called_once_with(CLUSTER_ID)

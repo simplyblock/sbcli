@@ -26,7 +26,7 @@ mypy simplyblock_web simplyblock_cli simplyblock_core  # Type check (or: tox -e 
 
 ## Architecture
 
-Three packages, one entry point:
+Three packages, two front-ends (CLI and Web API) over a shared core:
 
 | Package | Role |
 |---------|------|
@@ -34,7 +34,12 @@ Three packages, one entry point:
 | `simplyblock_core/` | Business logic, data models, background services, FDB access |
 | `simplyblock_web/` | REST API — FastAPI (v2) + Flask (v1) hybrid on a single uvicorn process |
 
-Data flows: **CLI → Web API → Core controllers → FoundationDB**. Storage nodes are reached via JSON-RPC (`rpc_client.py`).
+Two front-ends sit on top of the core and **both call it in-process** — the CLI does *not* go through the Web API:
+
+- **`sbctl` CLI → Core controllers → FoundationDB.** `clibase.py` imports `simplyblock_core` directly (`cluster_ops`, `storage_node_ops`, the `controllers` package, `DBController`) and instantiates `DBController()` itself.
+- **Web API → Core controllers → FoundationDB.** `simplyblock_web` is a separate entry point serving remote/programmatic clients over the same core.
+
+Storage nodes are reached via JSON-RPC (`rpc_client.py`).
 
 ## Coding Conventions
 
@@ -109,3 +114,13 @@ Edit only `AGENTS.md` files and `.agents/skills/` contents. Never edit the symli
 ### Local overrides
 
 At every level where an `AGENTS.md` exists, also check for a sibling `AGENTS.local.md`. If present, load it in addition to `AGENTS.md` — its contents extend or override the checked-in instructions. `AGENTS.local.md` is gitignored and intended for per-developer notes that should not be committed.
+
+## graphify
+
+This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
+
+Rules:
+- For codebase questions, first run `graphify query "<question>"` when graphify-out/graph.json exists. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts. These return a scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw grep output.
+- If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
+- Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
+- After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).

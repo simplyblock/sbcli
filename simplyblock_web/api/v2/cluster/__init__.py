@@ -18,7 +18,7 @@ from .storage_pool import api as pool_api
 from .storage_node import api as storage_node_api
 from .task import api as task_api
 from .._dtos import ClusterDTO
-from .._watch import WATCH_RESPONSES, WatchParam, watch_response
+from .._sse import WATCH_RESPONSES, WatchParam, sse_response
 from .. import util as util
 
 
@@ -91,8 +91,7 @@ class ClusterParams(BaseModel):
     enable_failure_domain: bool = False
 
 
-def _cluster_dto(data: dict) -> ClusterDTO:
-    cluster = ClusterModel(data)
+def _cluster_dto(cluster: ClusterModel) -> ClusterDTO:
     ret = db.get_cluster_capacity(cluster, 1)
     return ClusterDTO.from_model(cluster, ret[0] if ret else None)
 
@@ -100,7 +99,7 @@ def _cluster_dto(data: dict) -> ClusterDTO:
 @api.get('/', name='clusters:list', response_model=List[ClusterDTO], responses=WATCH_RESPONSES)
 def list(watch: WatchParam = False) -> Union[List[ClusterDTO], EventSourceResponse]:
     if watch:
-        return watch_response(ClusterModel, lambda state: state, _cluster_dto)
+        return sse_response(cluster_ops.watch_clusters(), _cluster_dto)
     data = []
     for cluster in db.get_clusters():
         stat_obj = None
@@ -142,12 +141,10 @@ instance_api = APIRouter(prefix='/{cluster_id}')
 @instance_api.get('/', name='clusters:detail', response_model=ClusterDTO, responses=WATCH_RESPONSES)
 def get(cluster: Cluster, watch: WatchParam = False) -> Union[ClusterDTO, EventSourceResponse]:
     if watch:
-        cluster_id = cluster.get_id()
-        return watch_response(
-            ClusterModel,
-            lambda state: {k: d for k, d in state.items() if d.get('uuid') == cluster_id},
+        return sse_response(
+            cluster_ops.watch_cluster(cluster.get_id()),
             _cluster_dto,
-            single_id=cluster_id,
+            single=True,
         )
     stat_obj = None
     ret = db.get_cluster_capacity(cluster, 1)

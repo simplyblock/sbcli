@@ -53,3 +53,29 @@ class TestDeleteSnapshot:
 
         assert response.status_code == 204
         snapshot_controller.delete.assert_called_once_with(SNAPSHOT_ID)
+
+
+class TestWatchSnapshots:
+
+    def test_list_dispatches_watch_snapshots(self, client, snapshot, snapshot_controller, watch_stream):
+        snapshot_controller.watch_snapshots.return_value = watch_stream([snapshot])
+
+        response = client.get(f'{BASE}/?watch=true')
+
+        assert response.status_code == 200
+        assert response.headers['content-type'].startswith('text/event-stream')
+        assert 'event: snapshot' in response.text
+        assert SNAPSHOT_ID in response.text
+        snapshot_controller.watch_snapshots.assert_called_once_with(CLUSTER_ID, POOL_ID)
+
+    def test_detail_dispatches_watch_snapshot(self, client, snapshot, snapshot_controller, watch_stream):
+        snapshot_controller.watch_snapshot.return_value = watch_stream([snapshot])
+
+        response = client.get(f'{BASE}/{SNAPSHOT_ID}/?watch=true')
+
+        assert response.status_code == 200
+        assert response.headers['content-type'].startswith('text/event-stream')
+        assert 'event: snapshot' in response.text
+        assert SNAPSHOT_ID in response.text
+        snapshot_controller.watch_snapshot.assert_called_once_with(
+            CLUSTER_ID, POOL_ID, SNAPSHOT_ID)

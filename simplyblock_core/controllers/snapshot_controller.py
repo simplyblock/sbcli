@@ -19,6 +19,7 @@ from simplyblock_core.kms import create_kms_connection, lvol_dek_path, pool_kek_
 from simplyblock_core.kms._exceptions import KMSException
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.job_schedule import JobSchedule
+from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.lvol_model import LVol
@@ -26,6 +27,29 @@ from simplyblock_core.models.storage_node import StorageNode
 
 
 logger = lg.getLogger()
+
+
+def watch_snapshots(cluster_id, pool_id):
+    """Stream snapshot changes for one pool (same scope as get_snapshots_by_pool_id)."""
+    db = DBController()
+    return db.watch(
+        SnapShot,
+        select=lambda models: db.get_snapshots_by_pool_id(pool_id, source=models),
+        ancestors=[(Cluster, cluster_id), (Pool, pool_id)],
+    )
+
+
+def watch_snapshot(cluster_id, pool_id, snapshot_id):
+    """Stream changes for a single snapshot."""
+    db = DBController()
+    return db.watch(
+        SnapShot,
+        select=lambda models: [
+            snap for snap in db.get_snapshots_by_pool_id(pool_id, source=models)
+            if snap.get_id() == snapshot_id
+        ],
+        ancestors=[(Cluster, cluster_id), (Pool, pool_id)],
+    )
 
 db_controller = DBController()
 

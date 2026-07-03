@@ -121,3 +121,28 @@ class TestStoragePoolHosts:
 
         assert response.status_code == 204
         pool_controller.remove_host_from_pool.assert_called_once_with(POOL_ID, HOST_NQN)
+
+
+class TestWatchStoragePools:
+
+    def test_list_dispatches_watch_pools(self, client, pool, pool_controller, watch_stream):
+        pool_controller.watch_pools.return_value = watch_stream([pool])
+
+        response = client.get(f'{BASE}/?watch=true')
+
+        assert response.status_code == 200
+        assert response.headers['content-type'].startswith('text/event-stream')
+        assert 'event: snapshot' in response.text
+        assert POOL_ID in response.text
+        pool_controller.watch_pools.assert_called_once_with(CLUSTER_ID)
+
+    def test_detail_dispatches_watch_pool(self, client, pool, pool_controller, watch_stream):
+        pool_controller.watch_pool.return_value = watch_stream([pool])
+
+        response = client.get(f'{BASE}/{POOL_ID}/?watch=true')
+
+        assert response.status_code == 200
+        assert response.headers['content-type'].startswith('text/event-stream')
+        assert 'event: snapshot' in response.text
+        assert POOL_ID in response.text
+        pool_controller.watch_pool.assert_called_once_with(CLUSTER_ID, POOL_ID)
