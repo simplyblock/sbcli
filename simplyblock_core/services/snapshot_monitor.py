@@ -5,7 +5,9 @@ from datetime import datetime
 
 from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.models.cluster import Cluster
-from simplyblock_core.controllers import health_controller, snapshot_events, tasks_controller
+from simplyblock_core.controllers import (
+    health_controller, snapshot_events, snapshot_controller, tasks_controller)
+from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 
@@ -162,13 +164,24 @@ def process_snap_delete(snap, snode):
         if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
             leader_node = snode
 
-    if not leader_node and sec_node:
-        ret = sec_node.rpc_client().bdev_lvol_get_lvstores(sec_node.lvstore)
-        if not ret:
-            raise Exception("Failed to get LVol store info")
-        lvs_info = ret[0]
-        if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
-            leader_node = sec_node
+    if not leader_node:
+        for peer_id in [snode.secondary_node_id, snode.tertiary_node_id]:
+            if not peer_id:
+                continue
+            try:
+                sec_node = db.get_storage_node_by_id(peer_id)
+            except KeyError:
+                continue
+            if sec_node.status not in [StorageNode.STATUS_ONLINE,
+                                       StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
+                continue
+            ret = sec_node.rpc_client().bdev_lvol_get_lvstores(sec_node.lvstore)
+            if not ret:
+                continue
+            lvs_info = ret[0]
+            if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
+                leader_node = sec_node
+                break
 
     if not leader_node:
         raise Exception("Failed to get leader node")
@@ -274,69 +287,121 @@ def process_snap_delete(snap, snode):
 # get DB controller
 db = db_controller.DBController()
 
-logger.info("Starting LVol monitor...")
-while True:
-    try:
-        db.get_clusters()
-    except Exception as e:
-        logger.error(f"Failed to get clusters: {e}")
-        time.sleep(3)
-        continue
-    for cluster in db.get_clusters():
 
-        if cluster.status in [Cluster.STATUS_INACTIVE, Cluster.STATUS_UNREADY, Cluster.STATUS_IN_ACTIVATION]:
-            logger.warning(f"Cluster {cluster.get_id()} is in {cluster.status} state, skipping")
+def _due_for_internal_snapshot(lvol, all_snaps, now_ts):
+    """Whether an interval-driven internal snapshot is due for *lvol*.
+
+    Replication-enabled volumes with a positive ``replication_interval_min``
+    get an automatic internal snapshot every interval; the first one is taken
+    immediately (no internal snapshot exists yet). User snapshots do not reset
+    the interval.
+    """
+    if not lvol.do_replicate or lvol.replication_interval_min <= 0:
+        return False
+    if lvol.status != LVol.STATUS_ONLINE:
+        return False
+    interval_sec = lvol.replication_interval_min * 60
+    last_ts = 0
+    for s in all_snaps:
+        if (s.lvol.get_id() == lvol.get_id()
+                and s.snap_type == SnapShot.TYPE_INTERNAL
+                and s.created_at > last_ts):
+            last_ts = s.created_at
+    return (now_ts - last_ts) >= interval_sec
+
+
+def take_due_internal_snapshots(cluster_id, now_ts):
+    """Create an internal snapshot for every replicated volume whose interval
+    has elapsed. The snapshot's creation auto-enqueues a replication task."""
+    all_snaps = db.get_snapshots(cluster_id)
+    for lvol in db.get_lvols(cluster_id):
+        try:
+            if not _due_for_internal_snapshot(lvol, all_snaps, now_ts):
+                continue
+            name = f"repl_internal_{lvol.get_id()[:8]}_{now_ts}"
+            logger.info(f"Taking internal replication snapshot for lvol {lvol.get_id()}: {name}")
+            _id, err = snapshot_controller.add(
+                lvol.get_id(), name, snap_type=SnapShot.TYPE_INTERNAL)
+            if err:
+                logger.warning(f"Internal snapshot for {lvol.get_id()} failed: {err}")
+        except Exception as e:
+            logger.error(f"Internal snapshot scheduling failed for {lvol.get_id()}: {e}")
+
+
+def main():
+    logger.info("Starting LVol monitor...")
+    while True:
+        try:
+            db.get_clusters()
+        except Exception as e:
+            logger.error(f"Failed to get clusters: {e}")
+            time.sleep(3)
             continue
-        all_snaps = db.get_snapshots(cluster.get_id())
-        for snode in db.get_storage_nodes_by_cluster_id(cluster.get_id()):
-            node_bdev_names = []
-            sec_node_bdev_names = {}
-            sec_node = None
+        for cluster in db.get_clusters():
 
-            if snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
-                rpc_client = snode.rpc_client()
-                try:
-                    node_bdevs = rpc_client.get_bdevs()
-                except Exception as e:
-                    logger.error(e)
-                    continue
-                if node_bdevs:
-                    node_bdev_names = [b['name'] for b in node_bdevs]
-                    for bdev in node_bdevs:
-                        if "aliases" in bdev and bdev["aliases"]:
-                            node_bdev_names.extend(bdev['aliases'])
+            if cluster.status in [Cluster.STATUS_INACTIVE, Cluster.STATUS_UNREADY, Cluster.STATUS_IN_ACTIVATION]:
+                logger.warning(f"Cluster {cluster.get_id()} is in {cluster.status} state, skipping")
+                continue
 
-            for peer_id in [snode.secondary_node_id, snode.tertiary_node_id]:
-                if not peer_id:
-                    continue
-                try:
-                    sec_node = db.get_storage_node_by_id(peer_id)
-                except KeyError:
-                    continue
-                if sec_node and sec_node.status in [
-                    StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
-                    sec_rpc_client = sec_node.rpc_client()
+            try:
+                take_due_internal_snapshots(cluster.get_id(), int(time.time()))
+            except Exception as e:
+                logger.error(f"Internal snapshot scheduling failed for cluster {cluster.get_id()}: {e}")
+
+            all_snaps = db.get_snapshots(cluster.get_id())
+            for snode in db.get_storage_nodes_by_cluster_id(cluster.get_id()):
+                node_bdev_names = []
+                sec_node_bdev_names = {}
+                sec_node = None
+
+                if snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
+                    rpc_client = snode.rpc_client()
                     try:
-                        ret = sec_rpc_client.get_bdevs()
+                        node_bdevs = rpc_client.get_bdevs()
                     except Exception as e:
                         logger.error(e)
                         continue
-                    if ret:
-                        for bdev in ret:
-                            sec_node_bdev_names[bdev['name']] = bdev
+                    if node_bdevs:
+                        node_bdev_names = [b['name'] for b in node_bdevs]
+                        for bdev in node_bdevs:
+                            if "aliases" in bdev and bdev["aliases"]:
+                                node_bdev_names.extend(bdev['aliases'])
 
-            for snap in all_snaps:
-                if snap.lvol.node_id != snode.get_id():
-                    continue
-                if snap.status == SnapShot.STATUS_ONLINE:
-                    present = health_controller.check_bdev(snap.snap_bdev, bdev_names=node_bdev_names)
-                    if snode.lvstore_status == "ready":
-                        set_snapshot_health_check(snap, present)
-
-                elif snap.status == SnapShot.STATUS_IN_DELETION:
+                for peer_id in [snode.secondary_node_id, snode.tertiary_node_id]:
+                    if not peer_id:
+                        continue
                     try:
-                        process_snap_delete(snap, snode)
-                    except Exception as e:
-                        logger.error(e)
+                        sec_node = db.get_storage_node_by_id(peer_id)
+                    except KeyError:
+                        continue
+                    if sec_node and sec_node.status in [
+                        StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
+                        sec_rpc_client = sec_node.rpc_client()
+                        try:
+                            ret = sec_rpc_client.get_bdevs()
+                        except Exception as e:
+                            logger.error(e)
+                            continue
+                        if ret:
+                            for bdev in ret:
+                                sec_node_bdev_names[bdev['name']] = bdev
 
-    time.sleep(constants.LVOL_MONITOR_INTERVAL_SEC)
+                for snap in all_snaps:
+                    if snap.lvol.node_id != snode.get_id():
+                        continue
+                    if snap.status == SnapShot.STATUS_ONLINE:
+                        present = health_controller.check_bdev(snap.snap_bdev, bdev_names=node_bdev_names)
+                        if snode.lvstore_status == "ready":
+                            set_snapshot_health_check(snap, present)
+
+                    elif snap.status == SnapShot.STATUS_IN_DELETION:
+                        try:
+                            process_snap_delete(snap, snode)
+                        except Exception as e:
+                            logger.error(e)
+
+        time.sleep(constants.LVOL_MONITOR_INTERVAL_SEC)
+
+
+if __name__ == "__main__":
+    main()

@@ -20,6 +20,7 @@ from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_connect import NvmeConnectEntry
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.lvol_model import LVol, LVolReplication
+from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.prom_client import PromClient
 
@@ -1722,10 +1723,18 @@ def get_replication_info(lvol_id_or_name):
         "last_replication_time": "",
         "last_replication_duration": "",
         "replicated_count": 0,
+        # Replication progress monitoring.
+        "lag_seconds": None,            # how far the target is behind the source
+        "lag": "",                      # human-readable lag
+        "outstanding_count": 0,         # snapshots queued but not yet replicated
+        "outstanding_bytes": 0,         # bytes still to transfer
+        "outstanding": "0B",            # human-readable outstanding bytes
         "snaps": [],
         "tasks": [],
     }
     node = db_controller.get_storage_node_by_id(lvol.node_id)
+    # Each replication task maps 1:1 to a source snapshot for this lvol.
+    items = []  # list of (task, snap)
     for task in db_controller.get_job_tasks(node.cluster_id):
         if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION:
             logger.debug(task)
@@ -1738,13 +1747,36 @@ def get_replication_info(lvol_id_or_name):
                 continue
             snaps.append(snap)
             tasks.append(task)
+            items.append((task, snap))
 
-    if tasks:
+    if items:
+        now = int(time.time())
         tasks = sorted(tasks, key=lambda x: x.date)
         snaps = sorted(snaps, key=lambda x: x.created_at)
         out["snaps"] = [s.to_dict() for s in snaps]
         out["tasks"] = [t.to_dict() for t in tasks]
         out["replicated_count"] = len(snaps)
+
+        # A snapshot is replicated once its task is done or it has a target copy.
+        def _is_replicated(task, snap):
+            return task.status == JobSchedule.STATUS_DONE or bool(snap.target_replicated_snap_uuid)
+
+        replicated = [s for (t, s) in items if _is_replicated(t, s)]
+        outstanding = [s for (t, s) in items if not _is_replicated(t, s)]
+
+        outstanding_bytes = sum(s.used_size for s in outstanding)
+        out["outstanding_count"] = len(outstanding)
+        out["outstanding_bytes"] = outstanding_bytes
+        out["outstanding"] = utils.humanbytes(outstanding_bytes)
+
+        # Time lag = age of the most recent point-in-time that exists on the
+        # target (the newest successfully-replicated snapshot).
+        if replicated:
+            last_replicated_created = max(s.created_at for s in replicated)
+            lag_seconds = max(0, now - last_replicated_created)
+            out["lag_seconds"] = lag_seconds
+            out["lag"] = utils.strfdelta_seconds(lag_seconds)
+
         last_task = tasks[-1]
         last_snap = db_controller.get_snapshot_by_id(last_task.function_params["snapshot_id"])
         out["last_snapshot_id"] = last_snap.get_id()
@@ -1753,7 +1785,7 @@ def get_replication_info(lvol_id_or_name):
             duration = utils.strfdelta_seconds(
                 last_task.function_params["end_time"] - last_task.function_params["start_time"])
         elif "start_time" in last_task.function_params:
-            duration = utils.strfdelta_seconds(int(time.time()) - last_task.function_params["start_time"])
+            duration = utils.strfdelta_seconds(now - last_task.function_params["start_time"])
         else:
             duration = ""
         out["last_replication_duration"] = duration
@@ -2323,7 +2355,7 @@ def replication_trigger(lvol_id):
 
     return out
 
-def replication_start(lvol_id, replication_cluster_id=None):
+def replication_start(lvol_id, replication_cluster_id=None, mode=None, interval_min=None):
     db_controller = DBController()
     try:
         lvol = db_controller.get_lvol_by_id(lvol_id)
@@ -2332,6 +2364,13 @@ def replication_start(lvol_id, replication_cluster_id=None):
         return False
 
     lvol.do_replicate = True
+    if mode in ("failover", "migration"):
+        lvol.replication_mode = mode
+    if interval_min is not None and interval_min >= 0:
+        lvol.replication_interval_min = interval_min
+    # Persist do_replicate/mode/interval regardless of whether a replication
+    # node still needs to be selected below.
+    lvol.write_to_db()
     if not lvol.replication_node_id:
         excluded_nodes = []
         if lvol.cloned_from_snap:
@@ -2500,6 +2539,108 @@ def replication_stop(lvol_id, delete=False):
     return True
 
 
+def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snapshot):
+    """Create a writable clone of *lvol* on *target_node* (primary + online HA
+    peers) from *snapshot*, preserving the original NQN/ns_id.
+
+    Shared by fail-over (replicate_lvol_on_target_cluster) and migration-commit
+    (replication_commit). Returns (new_lvol, error). The new lvol is left in
+    STATUS_IN_CREATION with lvol_uuid/blobid populated; the caller is
+    responsible for setting STATUS_ONLINE and any replication bookkeeping.
+    """
+    new_lvol = copy.deepcopy(lvol)
+    new_lvol.uuid = str(uuid.uuid4())
+    new_lvol.create_dt = str(datetime.now())
+    new_lvol.node_id = target_node.get_id()
+    new_lvol.nodes = [target_node.get_id()]
+    if target_node.secondary_node_id:
+        new_lvol.nodes.append(target_node.secondary_node_id)
+    if target_node.tertiary_node_id:
+        new_lvol.nodes.append(target_node.tertiary_node_id)
+    new_lvol.replication_node_id = ""
+    new_lvol.do_replicate = False
+    new_lvol.cloned_from_snap = snapshot.get_id()
+    new_lvol.pool_uuid = pool_uuid
+    new_lvol.lvs_name = target_node.lvstore
+    new_lvol.top_bdev = f"{new_lvol.lvs_name}/{new_lvol.lvol_bdev}"
+    new_lvol.snapshot_name = snapshot.snap_bdev
+    new_lvol.status = LVol.STATUS_IN_CREATION
+    # Preserve the ORIGINAL subsystem NQN and namespace id: the client must
+    # reconnect to the SAME NQN/NS on the target cluster — only the IP/port
+    # differ. new_lvol is a deep copy of lvol, so nqn/ns_id are already
+    # identical; do NOT rewrite the NQN with the target cluster's prefix.
+
+    new_lvol.bdev_stack = [
+        {
+            "type": "bdev_lvol_clone",
+            "name": new_lvol.top_bdev,
+            "params": {
+                "snapshot_name": snapshot.snap_bdev,
+                "clone_name": new_lvol.lvol_bdev
+            }
+        }
+    ]
+
+    if new_lvol.crypto_bdev:
+        new_lvol.bdev_stack.append({"type": "crypto"})
+
+    new_lvol.write_to_db(db_controller.kv_store)
+
+    lvol_bdev, error = add_lvol_on_node(new_lvol, target_node)
+    if error:
+        logger.error(error)
+        new_lvol.remove(db_controller.kv_store)
+        return None, error
+
+    new_lvol.lvol_uuid = lvol_bdev['uuid']
+    new_lvol.blobid = lvol_bdev['driver_specific']['lvol']['blobid']
+
+    # Expose the volume on the secondary and tertiary target nodes too (HA),
+    # so connect_lvol returns all client paths.
+    for peer_id in [target_node.secondary_node_id, target_node.tertiary_node_id]:
+        if not peer_id:
+            continue
+        try:
+            peer_node = db_controller.get_storage_node_by_id(peer_id)
+        except KeyError:
+            continue
+        if peer_node.status != StorageNode.STATUS_ONLINE:
+            continue
+        lvol_bdev, error = add_lvol_on_node(new_lvol, peer_node, is_primary=False)
+        if error:
+            logger.error(error)
+            # remove lvol from primary
+            ret = delete_lvol_from_node(new_lvol, target_node)
+            if not ret:
+                logger.error("")
+            new_lvol.remove(db_controller.kv_store)
+            return None, error
+
+    return new_lvol, None
+
+
+def _last_replicated_target_snapshot(db_controller, lvol_id, cluster_id):
+    """Return the target-cluster copy of the most recent replicated snapshot of
+    *lvol_id*, or None."""
+    snaps = []
+    for task in db_controller.get_job_tasks(cluster_id):
+        if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION:
+            try:
+                snap = db_controller.get_snapshot_by_id(task.function_params["snapshot_id"])
+            except KeyError:
+                continue
+            if snap.lvol.get_id() != lvol_id or not snap.target_replicated_snap_uuid:
+                continue
+            snaps.append(snap)
+    if not snaps:
+        return None
+    snaps.sort(key=lambda x: x.created_at)
+    try:
+        return db_controller.get_snapshot_by_id(snaps[-1].target_replicated_snap_uuid)
+    except KeyError:
+        return None
+
+
 def replicate_lvol_on_target_cluster(lvol_id):
     db_controller = DBController()
     try:
@@ -2530,82 +2671,16 @@ def replicate_lvol_on_target_cluster(lvol_id):
             logger.info(f"LVol with same nqn already exists on target cluster: {lv.get_id()}")
             return lv.get_id()
 
-    snaps = []
-    snapshot = None
-    for task in db_controller.get_job_tasks(source_node.cluster_id):
-        if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION:
-            logger.debug(task)
-            try:
-                snap = db_controller.get_snapshot_by_id(task.function_params["snapshot_id"])
-            except KeyError:
-                continue
-
-            if snap.lvol.get_id() != lvol_id:
-                continue
-            snaps.append(snap)
-
-    if snaps:
-        snaps = sorted(snaps, key=lambda x: x.created_at)
-        last_snapshot = snaps[-1]
-        rep_snap = db_controller.get_snapshot_by_id(last_snapshot.target_replicated_snap_uuid)
-        snapshot = rep_snap
-
+    snapshot = _last_replicated_target_snapshot(db_controller, lvol_id, source_node.cluster_id)
     if not snapshot:
         logger.error(f"Snapshot for replication not found for lvol: {lvol_id}")
         return False
 
-    # create lvol on target node
-    new_lvol = copy.deepcopy(lvol)
-    new_lvol.uuid = str(uuid.uuid4())
-    new_lvol.create_dt = str(datetime.now())
-    new_lvol.node_id = target_node.get_id()
-    new_lvol.nodes = [target_node.get_id(), target_node.secondary_node_id]
-    new_lvol.replication_node_id = ""
-    new_lvol.do_replicate = False
-    new_lvol.cloned_from_snap = snapshot.get_id()
-    new_lvol.pool_uuid = source_cluster.snapshot_replication_target_pool
-    new_lvol.lvs_name = target_node.lvstore
-    new_lvol.top_bdev = f"{new_lvol.lvs_name}/{new_lvol.lvol_bdev}"
-    new_lvol.snapshot_name = snapshot.snap_bdev
-    new_lvol.status = LVol.STATUS_IN_CREATION
-    new_lvol.nqn = target_cluster.nqn + ":lvol:" + lvol.uuid
-
-    new_lvol.bdev_stack = [
-        {
-            "type": "bdev_lvol_clone",
-            "name": new_lvol.top_bdev,
-            "params": {
-                "snapshot_name": snapshot.snap_bdev,
-                "clone_name": new_lvol.lvol_bdev
-            }
-        }
-    ]
-
-    if new_lvol.crypto_bdev:
-        new_lvol.bdev_stack.append({"type": "crypto"})
-
-    new_lvol.write_to_db(db_controller.kv_store)
-
-    lvol_bdev, error = add_lvol_on_node(new_lvol, target_node)
+    new_lvol, error = _create_target_lvol_clone(
+        db_controller, lvol, target_node,
+        source_cluster.snapshot_replication_target_pool, snapshot)
     if error:
-        logger.error(error)
-        new_lvol.remove(db_controller.kv_store)
         return False, error
-
-    new_lvol.lvol_uuid = lvol_bdev['uuid']
-    new_lvol.blobid = lvol_bdev['driver_specific']['lvol']['blobid']
-
-    secondary_node = db_controller.get_storage_node_by_id(target_node.secondary_node_id)
-    if secondary_node.status == StorageNode.STATUS_ONLINE:
-        lvol_bdev, error = add_lvol_on_node(new_lvol, secondary_node, is_primary=False)
-        if error:
-            logger.error(error)
-            # remove lvol from primary
-            ret = delete_lvol_from_node(new_lvol, target_node)
-            if not ret:
-                logger.error("")
-            new_lvol.remove(db_controller.kv_store)
-            return False, error
 
     new_lvol.status = LVol.STATUS_ONLINE
     new_lvol.write_to_db(db_controller.kv_store)
@@ -2616,15 +2691,200 @@ def replicate_lvol_on_target_cluster(lvol_id):
     lvol_replication = LVolReplication()
     lvol_replication.uuid = str(uuid.uuid4())
     lvol_replication.create_dt = str(datetime.now())
-    lvol_replication.source_lvol=lvol
-    lvol_replication.target_lvol=new_lvol
-    lvol_replication.source_cluster_id=source_cluster.get_id()
-    lvol_replication.target_cluster_id=target_cluster.get_id()
+    lvol_replication.source_lvol = lvol
+    lvol_replication.target_lvol = new_lvol
+    lvol_replication.source_cluster_id = source_cluster.get_id()
+    lvol_replication.target_cluster_id = target_cluster.get_id()
+    lvol_replication.mode = lvol.replication_mode
+    lvol_replication.state = LVolReplication.STATE_FAILED_OVER
+    lvol_replication.direction = LVolReplication.DIRECTION_TO_TARGET
+    lvol_replication.target_nqn = new_lvol.nqn
+    lvol_replication.target_ns_id = new_lvol.ns_id
     lvol_replication.write_to_db(db_controller.kv_store)
 
     lvol_events.lvol_replicated(lvol, new_lvol)
 
-    return new_lvol.lvol_uuid
+    # Provide the new connection paths (primary/secondary/tertiary) — identical
+    # NQN, different IP/port — so the client can fail over to the target cluster.
+    connection_strings = []
+    conn, conn_err = connect_lvol(new_lvol.get_id())
+    if conn_err:
+        logger.warning(f"Fail-over lvol created but connection-string build failed: {conn_err}")
+    else:
+        connection_strings = [c.model_dump() for c in conn]
+
+    return {
+        "lvol_id": new_lvol.uuid,
+        "nqn": new_lvol.nqn,
+        "ns_id": new_lvol.ns_id,
+        "connection_strings": connection_strings,
+    }
+
+
+def _resolve_target_map_id(target_node, lvol_bdev):
+    """Look up the map_id of *lvol_bdev* on *target_node*'s lvstore."""
+    composite = f"{target_node.lvstore}/{lvol_bdev}"
+    lvols_list = target_node.rpc_client().bdev_lvol_get_lvols(target_node.lvstore) or []
+    for entry in lvols_list:
+        entry_name = entry.get('name', '') or entry.get('lvol_name', '')
+        if entry_name in (lvol_bdev, composite):
+            return entry.get('map_id')
+    return None
+
+
+def replication_commit(lvol_id):
+    """Planned cutover for migration mode (and the final step of fail-back).
+
+    Builds the writable target lvol on top of the last replicated snapshot,
+    exposes it inaccessible (so it does not serve IO until cutover), then
+    enqueues the FN_REPLICATION_FINAL task that freezes source IO, transfers the
+    remaining lvol delta via bdev_lvol_transfer_final_step, and flips ANA so the
+    client fails over to the target paths.
+
+    Continuous replication is expected to have kept the lag small; the final
+    step copies only the residual delta under a brief IO freeze. Returns a dict
+    describing the queued cutover, or (False, error).
+    """
+    db_controller = DBController()
+    try:
+        lvol = db_controller.get_lvol_by_id(lvol_id)
+    except KeyError as e:
+        logger.error(e)
+        return False
+
+    if not lvol.replication_node_id:
+        logger.error(f"LVol: {lvol_id} replication node id not found")
+        return False
+
+    target_node = db_controller.get_storage_node_by_id(lvol.replication_node_id)
+    if target_node.status != StorageNode.STATUS_ONLINE:
+        logger.error(f"Target node is not online: {lvol.replication_node_id}")
+        return False
+
+    source_node = db_controller.get_storage_node_by_id(lvol.node_id)
+    source_cluster = db_controller.get_cluster_by_id(source_node.cluster_id)
+    target_cluster = db_controller.get_cluster_by_id(source_cluster.snapshot_replication_target_cluster)
+
+    # Take a final short internal snapshot to shrink the delta the freeze must
+    # copy. Best-effort: the final step covers whatever residual remains.
+    _snap_uuid, snap_err = snapshot_controller.add(
+        lvol_id, f"repl_commit_{uuid.uuid4()}", snap_type=SnapShot.TYPE_INTERNAL)
+    if snap_err:
+        logger.warning(f"Final pre-cutover snapshot failed (continuing): {snap_err}")
+
+    snapshot = _last_replicated_target_snapshot(db_controller, lvol_id, source_node.cluster_id)
+    if not snapshot:
+        logger.error(f"No replicated snapshot found on target for lvol: {lvol_id}")
+        return False, "No replicated snapshot on target yet"
+
+    new_lvol, error = _create_target_lvol_clone(
+        db_controller, lvol, target_node,
+        source_cluster.snapshot_replication_target_pool, snapshot)
+    if error:
+        return False, error
+
+    new_lvol.status = LVol.STATUS_ONLINE
+    new_lvol.write_to_db(db_controller.kv_store)
+
+    # Expose inaccessible until cutover flips ANA — the client may already be
+    # multipath-connected to these target paths (migration mode).
+    suspend_lvol(new_lvol.get_id())
+
+    tgt_map_id = _resolve_target_map_id(target_node, new_lvol.lvol_bdev)
+    if tgt_map_id is None:
+        logger.error(f"Could not resolve target map_id for {new_lvol.lvol_bdev}")
+        delete_lvol_from_node(new_lvol, target_node)
+        new_lvol.remove(db_controller.kv_store)
+        return False, "Could not resolve target map_id"
+
+    lvol_replication = LVolReplication()
+    lvol_replication.uuid = str(uuid.uuid4())
+    lvol_replication.create_dt = str(datetime.now())
+    lvol_replication.source_lvol = lvol
+    lvol_replication.target_lvol = new_lvol
+    lvol_replication.source_cluster_id = source_cluster.get_id()
+    lvol_replication.target_cluster_id = target_cluster.get_id()
+    lvol_replication.mode = lvol.replication_mode
+    lvol_replication.state = LVolReplication.STATE_CUTOVER_PENDING
+    lvol_replication.direction = LVolReplication.DIRECTION_TO_TARGET
+    lvol_replication.target_nqn = new_lvol.nqn
+    lvol_replication.target_ns_id = new_lvol.ns_id
+    lvol_replication.write_to_db(db_controller.kv_store)
+
+    task = tasks_controller.add_replication_final_task(
+        source_cluster.get_id(), source_node.get_id(),
+        {
+            "lvol_id": lvol_id,
+            "src_node_id": source_node.get_id(),
+            "tgt_node_id": target_node.get_id(),
+            "tgt_lvol_composite": new_lvol.top_bdev,
+            "tgt_map_id": tgt_map_id,
+            "tgt_snap_composite": snapshot.snap_bdev,
+            "operation": "replicate",
+            "replication_id": lvol_replication.get_id(),
+            "final_state": LVolReplication.STATE_CUTOVER_DONE,
+        })
+    if not task:
+        logger.error("Failed to enqueue replication-final task")
+        return False, "Failed to enqueue cutover task"
+
+    return {
+        "replication_id": lvol_replication.get_id(),
+        "target_lvol_id": new_lvol.uuid,
+        "cutover_task_queued": True,
+    }
+
+
+def replication_failback(lvol_id, source_cluster_id=None, pool_uuid=None):
+    """Configure fail-back of a failed-over volume back to a source cluster.
+
+    The actual cutover is then performed with replication_commit — fail-back and
+    the migration final step are the same operation. Two cases:
+
+      * Recovered source — ``source_cluster_id`` omitted or equal to the original
+        source cluster. Replication is pointed at the ORIGINAL source node so the
+        backlog match links the snapshots already present there (by data_uuid):
+        only the DELTA by which the target advanced is replicated.
+
+      * Fresh source — a different ``source_cluster_id`` is given. A node is
+        selected in that cluster and the full dataset is replicated.
+    """
+    db_controller = DBController()
+    try:
+        lvol = db_controller.get_lvol_by_id(lvol_id)
+    except KeyError as e:
+        logger.error(e)
+        return False
+
+    # Locate the fail-over relationship for this (target-resident) volume.
+    rep = None
+    for r in reversed(db_controller.get_lvol_replication_objects()):
+        if r.target_lvol and r.target_lvol.get_id() == lvol_id:
+            rep = r
+            break
+
+    if rep is not None and (not source_cluster_id or source_cluster_id == rep.source_cluster_id):
+        orig_node_id = rep.source_lvol.node_id
+        try:
+            orig_node = db_controller.get_storage_node_by_id(orig_node_id)
+        except KeyError:
+            orig_node = None
+        if orig_node is None or orig_node.status != StorageNode.STATUS_ONLINE:
+            logger.error(f"Original source node {orig_node_id} not available for delta fail-back")
+            return False, "Original source node not available"
+        # Pre-set the replication node to the original source node so the backlog
+        # match in replication_start links the pre-existing snapshots (delta only).
+        lvol.replication_node_id = orig_node_id
+        lvol.write_to_db()
+        return replication_start(
+            lvol_id, replication_cluster_id=rep.source_cluster_id, mode="migration")
+
+    # Fresh source cluster: full replication to a freshly selected node.
+    if not source_cluster_id:
+        logger.error("source_cluster_id required for fail-back to a fresh cluster")
+        return False, "source_cluster_id required"
+    return replication_start(
+        lvol_id, replication_cluster_id=source_cluster_id, mode="migration")
 
 
 def list_replication_tasks(lvol_id):

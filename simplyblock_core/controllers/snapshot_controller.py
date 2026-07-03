@@ -186,7 +186,7 @@ def _rollback_lvol_creation(lvol, node_ids):
 
 
 def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvols=None,
-        bypass_migration_check=False):
+        bypass_migration_check=False, snap_type=SnapShot.TYPE_USER):
     try:
         lvol = db_controller.get_lvol_by_id(lvol_id)
     except KeyError:
@@ -449,6 +449,7 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
     snap.fabric = lvol.fabric
     snap.vuid = snap_vuid
     snap.status = SnapShot.STATUS_ONLINE
+    snap.snap_type = snap_type
     snap.create_dt = str(datetime.now())
 
     snap.write_to_db(db_controller.kv_store)

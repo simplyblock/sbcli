@@ -361,10 +361,26 @@ def _def_create_device_stack(device_obj, snode, force=False, clear_data=False):
         device_obj.testing_bdev = test_name
         nvme_bdev = test_name
 
+    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+
+    if cluster.enable_hang_device:
+        # Insert a transparent delay bdev between the nvme bdev and alceml so the
+        # device can be made to "hang" on demand (chaos testing). Created with zero
+        # latency; arm via device_controller.set_device_hang / bdev_delay_update_latency.
+        hang_name = f"{device_obj.nvme_bdev}_hang"
+        if hang_name not in bdev_names:
+            ret = rpc_client.bdev_delay_create(hang_name, nvme_bdev)
+            if not ret:
+                logger.error(f"Failed to create hang bdev: {hang_name}")
+                if not force:
+                    return False
+        else:
+            logger.info(f"bdev already exists {hang_name}")
+        device_obj.hang_bdev = hang_name
+        nvme_bdev = hang_name
+
     alceml_id = device_obj.get_id()
     alceml_name = get_alceml_name(alceml_id)
-
-    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     if alceml_name not in bdev_names:
         ret = snode.create_alceml(
             alceml_name, nvme_bdev, alceml_id,
@@ -585,6 +601,36 @@ def set_device_testing_mode(device_id, mode):
 
     ret = rpc_client.bdev_passtest_mode(device.testing_bdev, mode)
     return ret
+
+
+def set_device_hang(device_id, seconds):
+    """Make a device 'hang' (chaos injection). Sets the inserted delay bdev's
+    read/write latency to `seconds` (0 disarms). Requires the cluster to have been
+    created with enable_hang_device."""
+    db_controller = DBController()
+    try:
+        device = db_controller.get_storage_device_by_id(device_id)
+        snode = db_controller.get_storage_node_by_id(device.node_id)
+    except KeyError as e:
+        logger.error(e)
+        return False
+
+    if not device.hang_bdev:
+        logger.error(
+            "Device has no hang bdev; the cluster must be created with "
+            "--enable-hang-device for device-hang injection")
+        return False
+
+    latency_us = int(seconds * 1_000_000)
+    logger.info(f"Set device:{device_id} hang:{seconds}s (delay bdev {device.hang_bdev})")
+    rpc_client = snode.rpc_client()
+    ok = True
+    for latency_type in ("avg_read", "p99_read", "avg_write", "p99_write"):
+        ret = rpc_client.bdev_delay_update_latency(device.hang_bdev, latency_type, latency_us)
+        if not ret:
+            logger.error(f"Failed to set {latency_type} latency on {device.hang_bdev}")
+            ok = False
+    return ok
 
 
 # def set_jm_device_testing_mode(device_id, mode):

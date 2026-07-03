@@ -1203,7 +1203,7 @@ def _connect_to_remote_devs(
 ):
     db_controller = DBController()
 
-    rpc_client = this_node.rpc_client(timeout=5, retry=1)
+    rpc_client = this_node.rpc_client(timeout=30, retry=1)
 
     node_bdevs = rpc_client.get_bdevs()
     if node_bdevs:
@@ -1406,7 +1406,7 @@ def _peer_reachable_via_jm_quorum(target_node_id, this_node, peer_probe_timeout=
 def _connect_to_remote_jm_devs(this_node, jm_ids=None):
     db_controller = DBController()
 
-    rpc_client = this_node.rpc_client(timeout=5, retry=2)
+    rpc_client = this_node.rpc_client(timeout=30, retry=2)
 
     node_bdevs = rpc_client.get_bdevs()
     if node_bdevs:
@@ -2713,7 +2713,8 @@ def _restart_storage_node_impl(
 
     logger.info("Restarting SPDK")
 
-    if max_lvol:
+    lvol_changed = bool(max_lvol) and max_lvol != snode.max_lvol
+    if lvol_changed:
         snode.max_lvol = max_lvol
     if max_snap:
         snode.max_snap = max_snap
@@ -2811,6 +2812,8 @@ def _restart_storage_node_impl(
                     snode.ssd_pcie.append(new_ssd)
 
         fdb_connection = cluster.db_connection
+        if lvol_changed:
+            snode_api.persist_node_config(snode.max_lvol, minimum_hp_memory, snode.socket, snode.ssd_pcie)
         snode_api.set_hugepages()
         results, err = snode_api.spdk_process_start(
             snode.l_cores, snode.spdk_mem, snode.spdk_image, spdk_debug, cluster_ip, fdb_connection,
@@ -4323,7 +4326,7 @@ def start_storage_node_api_container(node_ip, cluster_ip=None):
             # has to fall through to dockerd, which can stall for 60-80s
             # during post-outage Swarm reconciliation (incident 2026-04-24).
             '/mnt/ramdisk:/mnt/ramdisk',
-            '/tmp/simplyblock:/tmp/simplyblock'],
+            '/var/run/simplyblock:/var/run/simplyblock'],
         restart_policy={"Name": "always"},
         environment=[
             f"DOCKER_IP={node_ip}",

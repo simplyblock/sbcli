@@ -4,11 +4,12 @@ import time
 
 from simplyblock_core import db_controller, utils, storage_node_ops, distr_controller
 from simplyblock_core.controllers import (
-    tcp_ports_events, health_controller, tasks_controller, storage_events,
+    tcp_ports_events, health_controller, tasks_controller, storage_events, device_controller,
 )
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.models.nvme_device import NVMeDevice
 
 logger = utils.get_logger(__name__)
 
@@ -514,6 +515,41 @@ def exec_port_allow_task(task):
     from simplyblock_core import port_block
     port_block.set_port(node, port_number, block=False, timeout=5, retry=2)
     tcp_ports_events.port_allowed(node, port_number)
+
+    # Self-heal devices that went UNAVAILABLE while this node was fenced/partitioned
+    # (e.g. forced globally UNAVAILABLE by the remote-IO quorum in
+    # main_distr_event_collector during the ONLINE-status-lag window at the start of
+    # a network outage). port_allow runs as the LAST step of node recovery, so by
+    # definition the node's ports are being unblocked and the node is healthy again
+    # -- every one of its local devices must serve.
+    #
+    # This must NOT be gated on node.status == ONLINE: port_allow completes a couple
+    # of seconds BEFORE the storage-node monitor flips the node's status to ONLINE,
+    # so gating on it skipped the re-admit every time and left the device stranded
+    # (UNAVAILABLE with no other recovery path -- device_monitor's auto-restart only
+    # touches io_error devices) until the cluster later suspended on the phantom
+    # offline-device count. Flip the node's devices back online regardless of prior
+    # device state; REMOVED is the one terminal state we never resurrect.
+    try:
+        node = db.get_storage_node_by_id(node.get_id())
+        for dev in node.nvme_devices:
+            if dev.status in (NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_REMOVED):
+                continue
+            logger.info(
+                f"Re-admitting device {dev.get_id()} (was {dev.status}) after port "
+                f"allow on {node.get_id()}")
+            if not device_controller.device_set_online(dev.get_id()):
+                # device_set_state refuses a device ONLINE while its node is not
+                # ONLINE (stale re-online guard), and port_allow usually runs a
+                # couple of seconds BEFORE the monitor flips the node ONLINE. Not
+                # an error path: the monitor's DOWN/UNREACHABLE -> ONLINE clear
+                # re-admits the node's devices right after the flip.
+                logger.warning(
+                    f"Re-admit of device {dev.get_id()} refused (node "
+                    f"{node.get_id()} is {node.status}, not yet ONLINE); the "
+                    f"node-online clear in storage_node_monitor will re-admit it")
+    except Exception as e:
+        logger.error(f"Device re-admit after port allow failed: {e}")
 
     task.function_result = f"Port {port_number} allowed on node"
     task.status = JobSchedule.STATUS_DONE

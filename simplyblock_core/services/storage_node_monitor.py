@@ -224,9 +224,17 @@ def get_next_cluster_status(cluster_id):
                                  StorageNode.STATUS_DOWN]:
             # Non-ONLINE (UNREACHABLE / SCHEDULABLE / IN_SHUTDOWN / RESTARTING)
             # with devices still flagged online in the DB (e.g. UNREACHABLE
-            # before _check_data_plane_and_escalate fires). From a client's
-            # perspective the node is unavailable, so it contributes to the FTT
-            # bucket.
+            # before _check_data_plane_and_escalate fires).
+            #
+            # Suspension must be driven by DATA-PLANE truth only. UNREACHABLE
+            # is a mgmt-plane verdict (ping / SnodeAPI / RPC from the CP); the
+            # storage network is a different plane, and an API blip or mgmt-NIC
+            # flap leaves the node's NVMe-TCP targets serving IO perfectly.
+            # Counting such a node toward affected_nodes > k suspends the whole
+            # cluster while clients see zero impact. So only count it if a peer
+            # majority actually lost the node's data plane; once the outage is
+            # real, _check_data_plane_and_escalate flips its devices unavailable
+            # and the branch above counts it from device state anyway.
             #
             # DOWN is intentionally excluded and never counts toward suspension:
             # it is a temporary, self-recovering state — SPDK and its devices are
@@ -234,7 +242,8 @@ def get_next_cluster_status(cluster_id):
             # (set_node_down flips node status only). Recovery is a port-unblock,
             # not a destructive restart, so a DOWN node must not tip the cluster
             # toward SUSPENDED.
-            if node.mgmt_ip not in affected_physical_nodes:
+            if (node.mgmt_ip not in affected_physical_nodes
+                    and is_node_data_plane_disconnected_quorum(node)):
                 affected_physical_nodes.append(node.mgmt_ip)
 
         online_devices += node_online_devices
@@ -274,6 +283,68 @@ def get_next_cluster_status(cluster_id):
         return Cluster.STATUS_SUSPENDED
     else:
         return Cluster.STATUS_ACTIVE
+
+
+# Backstop grace before the reconciler re-admits a stranded device: the normal
+# recovery paths (node-ONLINE clear, port_allow, restart raw-write) get this
+# long to do their job first, and legitimate mid-recovery flaps (a device
+# bouncing while its node is actively recovering) never live this long on an
+# ONLINE node.
+STRANDED_DEVICE_READMIT_GRACE_SEC = 30
+
+# (cluster_id, node_id, device_id) -> first tick we saw the device stranded.
+_stranded_first_seen: dict = {}
+
+
+def _readmit_stranded_devices(cluster_id):
+    """Backstop reconciler: no UNAVAILABLE device may survive on an ONLINE node.
+
+    Every observed path into the 2026-07-02 suspend series ended the same way:
+    a device left UNAVAILABLE (io_error=False) on a node that reads ONLINE, with
+    no recovery path responsible for it — it then counts toward affected_nodes
+    forever and the next unrelated outage suspends the cluster. The targeted
+    fixes close the known entry points (node-ONLINE clear, port_allow); this
+    sweep closes ALL of them, including one-shot failures of those fixes and
+    entry points nobody has hit yet: if a device stays stranded for longer than
+    the grace window on an ONLINE node, re-admit it and say so loudly.
+
+    Deliberately narrow: only UNAVAILABLE devices without io_error /
+    retries_exhausted. FAILED / REMOVED / NEW and io_error devices are owned by
+    the device-restart, removal, and auto-restart paths respectively.
+    """
+    now = time.time()
+    live_keys = set()
+    try:
+        for node in db.get_storage_nodes_by_cluster_id(cluster_id):
+            if node.status != StorageNode.STATUS_ONLINE:
+                continue
+            for dev in node.nvme_devices:
+                if dev.status != NVMeDevice.STATUS_UNAVAILABLE:
+                    continue
+                if dev.io_error or dev.retries_exhausted:
+                    continue
+                key = (cluster_id, node.get_id(), dev.get_id())
+                live_keys.add(key)
+                first = _stranded_first_seen.setdefault(key, now)
+                if now - first < STRANDED_DEVICE_READMIT_GRACE_SEC:
+                    continue
+                logger.warning(
+                    f"Reconciler: device {dev.get_id()} stranded UNAVAILABLE on "
+                    f"ONLINE node {node.get_id()} for {now - first:.0f}s with no "
+                    f"recovery path; re-admitting")
+                if device_controller.device_set_online(dev.get_id()):
+                    _stranded_first_seen.pop(key, None)
+                else:
+                    logger.error(
+                        f"Reconciler: re-admit of stranded device {dev.get_id()} "
+                        f"was refused; will retry next tick")
+    except Exception as e:
+        logger.error(f"Stranded-device reconciler failed: {e}")
+    # Forget devices that are no longer stranded (recovered, node went down,
+    # device removed) so a later re-strand starts a fresh grace window.
+    for key in [k for k in _stranded_first_seen
+                if k[0] == cluster_id and k not in live_keys]:
+        _stranded_first_seen.pop(key, None)
 
 
 def _requeue_stuck_auto_restarts(cluster_id):
@@ -505,6 +576,9 @@ def update_cluster_status(cluster_id):
     # stranded whenever the cluster takes a recovery path (e.g.
     # DEGRADED -> ACTIVE).
     _requeue_stuck_auto_restarts(cluster_id)
+    # Same reasoning for stranded devices: sweep before the status decision so
+    # a re-admitted device stops counting toward affected_nodes on this tick.
+    _readmit_stranded_devices(cluster_id)
 
     next_current_status = get_next_cluster_status(cluster_id)
     logger.info("cluster_new_status: %s", next_current_status)
@@ -1190,6 +1264,42 @@ def check_node(snode):
             snode.get_id(), snode.status,
         )
         storage_node_ops.set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE)
+        readmit_devices_after_node_online(snode.get_id())
+
+
+def readmit_devices_after_node_online(node_id):
+    """Re-admit a recovered node's devices right after it was set ONLINE.
+
+    Node bring-up owns device re-online (device_set_state refuses a device
+    ONLINE while its node is not ONLINE -- the stale re-online guard). The
+    full-restart path raw-writes its devices back online, but the fast
+    DOWN/UNREACHABLE -> ONLINE clear is a recovery WITHOUT restart (transient
+    mgmt blip / port flap / network outage), and no other path re-onlines
+    devices that were marked unavailable during the outage window: port_allow
+    runs seconds BEFORE the ONLINE flip so its re-admit is refused by the
+    guard, and device_monitor auto-restart only touches io_error devices. A
+    device left unavailable here counts toward affected_nodes forever, and a
+    later unrelated dual outage then suspends the whole cluster (incidents
+    2026-07-02, x3). So: now that the node IS online (guard passes), re-admit
+    its devices. REMOVED is terminal; FAILED transitions are owned by the
+    explicit device-restart / failure-migration paths.
+    """
+    try:
+        fresh = db.get_storage_node_by_id(node_id)
+        for dev in fresh.nvme_devices:
+            if dev.status in (NVMeDevice.STATUS_ONLINE,
+                              NVMeDevice.STATUS_REMOVED,
+                              NVMeDevice.STATUS_FAILED):
+                continue
+            logger.info(
+                f"Re-admitting device {dev.get_id()} (was {dev.status}) "
+                f"after node {fresh.get_id()} cleared to ONLINE")
+            if not device_controller.device_set_online(dev.get_id()):
+                logger.error(
+                    f"Re-admit of device {dev.get_id()} after node "
+                    f"{fresh.get_id()} cleared to ONLINE was refused")
+    except Exception as e:
+        logger.error(f"Device re-admit after node clear to ONLINE failed: {e}")
 
 
 def loop_for_node(snode):

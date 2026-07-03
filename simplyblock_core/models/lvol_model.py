@@ -71,6 +71,13 @@ class LVol(BaseModel):
     do_replicate: bool = False
     replication_node_id: str = ""
     from_source: bool = True
+    # "failover": async DR — target volume is materialised only on fail-over.
+    # "migration": target subsystem is pre-created (ANA inaccessible) up front
+    # and the volume is cut over to it on an explicit commit.
+    replication_mode: str = "failover"
+    # Interval in minutes for automatic internal snapshots that drive
+    # replication. 0 disables interval snapshots (only user snaps replicate).
+    replication_interval_min: int = 0
 
     def has_qos(self):
         return (self.rw_ios_per_sec > 0 or self.rw_mbytes_per_sec > 0 or self.r_mbytes_per_sec > 0 or self.w_mbytes_per_sec > 0)
@@ -97,10 +104,26 @@ class LVol(BaseModel):
 
 
 class LVolReplication(BaseModel):
+    # Lifecycle of the replication relationship.
+    STATE_REPLICATING = "replicating"        # snapshots streaming to target
+    STATE_CUTOVER_PENDING = "cutover_pending"  # final-step queued/running
+    STATE_CUTOVER_DONE = "cutover_done"      # migration cutover completed
+    STATE_FAILED_OVER = "failed_over"        # volume now live on target
+
+    DIRECTION_TO_TARGET = "to_target"
+    DIRECTION_TO_SOURCE = "to_source"
+
     source_lvol: LVol = None # type: ignore[assignment]
     target_lvol: LVol = None # type: ignore[assignment]
     source_cluster_id: str = ""
     target_cluster_id: str = ""
+    mode: str = "failover"
+    state: str = STATE_REPLICATING
+    direction: str = DIRECTION_TO_TARGET
+    # Identity of the pre-created / cut-over target subsystem. Preserved so the
+    # client keeps the same NQN/namespace across fail-over and migration.
+    target_nqn: str = ""
+    target_ns_id: int = 0
 
 class LVolMini(BaseModel):
     lvol_uuid: str = ""

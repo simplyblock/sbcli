@@ -54,6 +54,8 @@ class CLIWrapper(CLIWrapperBase):
         self.init_storage_node__list_devices(subparser)
         if self.developer_mode:
             self.init_storage_node__device_testing_mode(subparser)
+        if self.developer_mode:
+            self.init_storage_node__device_hang(subparser)
         self.init_storage_node__get_device(subparser)
         self.init_storage_node__restart_device(subparser)
         self.init_storage_node__add_device(subparser)
@@ -146,7 +148,6 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             subcommand.add_argument('--disable-ha-jm', help='Disable HA JM for distrib creation. Default: `true`.', dest='enable_ha_jm', action='store_false')
         subcommand.add_argument('--ha-jm-count', help='HA JM count. Defaults to 4 for FT=2 clusters, otherwise 3.', type=int, dest='ha_jm_count')
-        subcommand.add_argument('--failure-domain', help='The failure-domain id (a non-negative integer identifying the rack/cabinet/DC) this node belongs to. Required when the cluster was created with --enable-failure-domain; must be omitted otherwise.', type=int, dest='failure_domain')
         subcommand.add_argument('--namespace', help='The Kubernetes namespace to deploy on.', type=str, dest='namespace')
         if self.developer_mode:
             subcommand.add_argument('--id-device-by-nqn', help='Use the device NQN instead of the serial number for identification. Default: `false`.', dest='id_device_by_nqn', action='store_true')
@@ -235,6 +236,11 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'device-testing-mode', 'Sets a device to testing mode.')
         subcommand.add_argument('device_id', help='The storage device id.', type=str)
         subcommand.add_argument('mode', help='The testing mode. Default: `full_pass_through`.', type=str, default='full_pass_through', choices=['full_pass_through','io_error_on_write','io_error_on_all','hotplug_removal','discard_io_all','io_error_on_unmap','io_error_on_read',])
+
+    def init_storage_node__device_hang(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'device-hang', 'Make a device hang for N seconds (0 to release). Requires --enable-hang-device at cluster create.')
+        subcommand.add_argument('device_id', help='The storage device id.', type=str)
+        subcommand.add_argument('seconds', help='Hang duration in seconds (0 disarms).', type=int)
 
     def init_storage_node__get_device(self, subparser):
         subcommand = self.add_sub_command(subparser, 'get-device', 'Gets storage device by its id.')
@@ -415,6 +421,8 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--ingress-host-source', help='Ingress host source: \'hostip\' for node IP, \'loadbalancer\' for external LB, or \'dns\' for custom domain. Default: `hostip`.', type=str, default='hostip', dest='ingress_host_source', choices=['hostip','loadbalancer','dns',])
         subcommand.add_argument('--dns-name', help='Fully qualified DNS name to use as the Ingress host (required if --ingress-host-source=dns).', type=str, default='', dest='dns_name')
         subcommand.add_argument('--enable-node-affinity', help='Enable node affinity for storage nodes.', dest='enable_node_affinity', action='store_true')
+        if self.developer_mode:
+            subcommand.add_argument('--enable-hang-device', help='Insert a delay bdev per device for hang injection (chaos testing).', dest='enable_hang_device', action='store_true')
         subcommand.add_argument('--fabric', help='The NVMe fabric to use (specify: `tcp`, `rdma`, `tcp,rdma`). Default: `tcp`.', type=str, default='tcp', dest='fabric', choices=['tcp','rdma','tcp,rdma',])
         if self.developer_mode:
             subcommand.add_argument('--max-queue-size', help='The max size the queue will grow. Default: `128`.', type=int, default=128, dest='max_queue_size')
@@ -423,7 +431,6 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             subcommand.add_argument('--disable-monitoring', help='Disable monitoring stack, false by default. Default: `false`.', dest='disable_monitoring', action='store_true')
         subcommand.add_argument('--strict-node-anti-affinity', help='Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node. This requires a minimum of _data-chunks-in-stripe + parity-chunks-in-stripe + 1_ nodes in the cluster.', dest='strict_node_anti_affinity', action='store_true')
-        subcommand.add_argument('--enable-failure-domain', help='Enable failure-domain anti-affinity. Each storage node must then be added with a --failure-domain tag (rack/cabinet/DC); data, journal and secondary/tertiary copies are spread across distinct failure domains (best-effort). Deploy-time only: a cluster cannot be upgraded into this feature, it must be redeployed.', dest='enable_failure_domain', action='store_true')
         subcommand.add_argument('--name', '-n', help='Assigns a name to the newly created cluster.', type=str, dest='name')
         subcommand.add_argument('--qpair-count', help='The NVMe/TCP transport qpair count per logical volume. Default: `32`.', type=range_type(0, 128), default=32, dest='qpair_count')
         subcommand.add_argument('--client-qpair-count', help='The default NVMe/TCP transport qpair count per logical volume for client. Default: `3`.', type=range_type(0, 128), default=3, dest='client_qpair_count')
@@ -459,7 +466,6 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             subcommand.add_argument('--inflight-io-threshold', help='The number of inflight IOs allowed before the IO queuing starts. Default: `4`.', type=int, default=4, dest='inflight_io_threshold')
         subcommand.add_argument('--strict-node-anti-affinity', help='Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node. This requires a minimum of _data-chunks-in-stripe + parity-chunks-in-stripe + 1_ nodes in the cluster."', dest='strict_node_anti_affinity', action='store_true')
-        subcommand.add_argument('--enable-failure-domain', help='Enable failure-domain anti-affinity. Each storage node must then be added with a --failure-domain tag (rack/cabinet/DC); data, journal and secondary/tertiary copies are spread across distinct failure domains (best-effort). Deploy-time only: a cluster cannot be upgraded into this feature, it must be redeployed.', dest='enable_failure_domain', action='store_true')
         subcommand.add_argument('--name', '-n', help='Assigns a name to the newly created cluster.', type=str, dest='name')
         subcommand.add_argument('--client-data-nic', help='Network interface name from client to use for logical volume connection.', type=str, dest='client_data_nic')
         subcommand.add_argument('--use-backup', help='The path to JSON file with S3/MinIO backup configuration.', type=str, dest='use_backup')
@@ -611,8 +617,11 @@ class CLIWrapper(CLIWrapperBase):
         self.init_volume__check(subparser)
         self.init_volume__inflate(subparser)
         self.init_volume__replication_start(subparser)
+        self.init_volume__replication_commit(subparser)
+        self.init_volume__replication_failback(subparser)
         self.init_volume__replication_stop(subparser)
         self.init_volume__replication_status(subparser)
+        self.init_volume__replication_info(subparser)
         self.init_volume__replication_trigger(subparser)
         self.init_volume__suspend(subparser)
         self.init_volume__resume(subparser)
@@ -734,6 +743,17 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'replication-start', 'Start snapshot replication taken from lvol')
         subcommand.add_argument('lvol_id', help='Logical volume id', type=str)
         subcommand.add_argument('--replication-cluster-id', help='Cluster ID of the replication target cluster', type=str, dest='replication_cluster_id')
+        subcommand.add_argument('--mode', help='Replication mode: \'failover\' (async DR, default) or \'migration\' (planned cutover)', type=str, dest='mode', choices=['failover','migration',])
+        subcommand.add_argument('--interval-min', help='Interval in minutes for automatic internal snapshots (0 = none)', type=int, dest='interval_min')
+
+    def init_volume__replication_commit(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'replication-commit', 'Commit a migration/fail-back cutover: minimize delta then fail the client over to the target')
+        subcommand.add_argument('lvol_id', help='Logical volume id', type=str)
+
+    def init_volume__replication_failback(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'replication-failback', 'Configure fail-back of a failed-over volume to a source cluster (recovered = delta only; fresh = full). Cut over with replication-commit.')
+        subcommand.add_argument('lvol_id', help='Failed-over logical volume id (currently on the target cluster)', type=str)
+        subcommand.add_argument('--source-cluster-id', help='Fresh source cluster id. Omit to fail back (delta) to the recovered original source.', type=str, dest='source_cluster_id')
 
     def init_volume__replication_stop(self, subparser):
         subcommand = self.add_sub_command(subparser, 'replication-stop', 'Stop snapshot replication taken from lvol')
@@ -742,6 +762,10 @@ class CLIWrapper(CLIWrapperBase):
     def init_volume__replication_status(self, subparser):
         subcommand = self.add_sub_command(subparser, 'replication-status', 'Lists replication status')
         subcommand.add_argument('cluster_id', help='Cluster UUID', type=str)
+
+    def init_volume__replication_info(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'replication-info', 'Show replication progress (time lag and outstanding data) for a volume')
+        subcommand.add_argument('volume_id', help='Logical volume id or name', type=str)
 
     def init_volume__replication_trigger(self, subparser):
         subcommand = self.add_sub_command(subparser, 'replication-trigger', 'Start replication for lvol')
@@ -1145,6 +1169,12 @@ class CLIWrapper(CLIWrapperBase):
                         ret = False
                     else:
                         ret = self.storage_node__device_testing_mode(sub_command, args)
+                elif sub_command in ['device-hang']:
+                    if not self.developer_mode:
+                        print("This command is private.")
+                        ret = False
+                    else:
+                        ret = self.storage_node__device_hang(sub_command, args)
                 elif sub_command in ['get-device']:
                     ret = self.storage_node__get_device(sub_command, args)
                 elif sub_command in ['restart-device']:
@@ -1234,6 +1264,7 @@ class CLIWrapper(CLIWrapperBase):
                         args.CLI_PASS = None
                         args.distr_bs = 4096
                         args.distr_chunk_bs = 4096
+                        args.enable_hang_device = None
                         args.max_queue_size = 128
                         args.inflight_io_threshold = 4
                         args.disable_monitoring = False
@@ -1350,10 +1381,16 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.volume__inflate(sub_command, args)
                 elif sub_command in ['replication-start']:
                     ret = self.volume__replication_start(sub_command, args)
+                elif sub_command in ['replication-commit']:
+                    ret = self.volume__replication_commit(sub_command, args)
+                elif sub_command in ['replication-failback']:
+                    ret = self.volume__replication_failback(sub_command, args)
                 elif sub_command in ['replication-stop']:
                     ret = self.volume__replication_stop(sub_command, args)
                 elif sub_command in ['replication-status']:
                     ret = self.volume__replication_status(sub_command, args)
+                elif sub_command in ['replication-info']:
+                    ret = self.volume__replication_info(sub_command, args)
                 elif sub_command in ['replication-trigger']:
                     ret = self.volume__replication_trigger(sub_command, args)
                 elif sub_command in ['suspend']:

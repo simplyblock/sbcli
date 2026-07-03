@@ -212,6 +212,12 @@ class DBController(metaclass=Singleton):
         ret = LVolReplication().read_from_db(self.kv_store)
         return sorted(ret, key=lambda x: x.create_dt)
 
+    def get_lvol_replication_by_id(self, uuid) -> LVolReplication:
+        ret = LVolReplication().read_from_db(self.kv_store, uuid)
+        if not ret:
+            raise KeyError(f'LVolReplication {uuid} not found')
+        return ret[0]
+
     def get_lvol_by_name(self, lvol_name: str) -> LVol:
         lvol = single_or_none(lvol for lvol in self.get_lvols() if lvol.lvol_name == lvol_name)
         if lvol is None:

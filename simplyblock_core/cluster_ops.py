@@ -231,6 +231,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001, container_image_prefix=None,
                    hashicorp_vault_settings : t.Optional[HashicorpVaultSettings] = None,
                    enable_failure_domain=False,
+                   enable_hang_device=False,
 ) -> str:
 
     if distr_ndcs == 0 and distr_npcs == 0:
@@ -356,6 +357,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
 
     cluster.grafana_endpoint = grafana_endpoint or default_grafana
     cluster.enable_node_affinity = enable_node_affinity
+    cluster.enable_hang_device = enable_hang_device
     cluster.qpair_count = qpair_count or constants.QPAIR_COUNT
     cluster.client_qpair_count = client_qpair_count or constants.CLIENT_QPAIR_COUNT
 

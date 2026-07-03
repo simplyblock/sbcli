@@ -142,6 +142,13 @@ def _add_task(function_name, cluster_id, node_id, device_id,
             logger.info(f"Task found, skip adding new task: {task_id}")
             return False
 
+    elif function_name == JobSchedule.FN_REPLICATION_FINAL:
+        # One replication cutover per volume at a time.
+        task_id = get_active_replication_final_task(cluster_id, function_params.get("lvol_id"))
+        if task_id:
+            logger.info(f"Task found, skip adding new task: {task_id}")
+            return False
+
     elif function_name == JobSchedule.FN_CLUSTER_EXPAND:
         # One expansion per cluster at a time: the orchestrator freezes the
         # role rotation while it runs, so a second concurrent expansion would
@@ -731,3 +738,25 @@ def add_snapshot_replication_task(cluster_id, node_id, snapshot_id, replicate_to
     return _add_task(JobSchedule.FN_SNAPSHOT_REPLICATION, cluster_id, node_id, "",
                      function_params={"snapshot_id": snapshot_id, "replicate_to_source": replicate_to_source},
                      send_to_cluster_log=False)
+
+
+def get_active_replication_final_task(cluster_id, lvol_id):
+    """Return the UUID of an active (non-done, non-cancelled) replication
+    cutover task for *lvol_id*, or False."""
+    for task in db.get_job_tasks(cluster_id):
+        if task.function_name == JobSchedule.FN_REPLICATION_FINAL and task.canceled is False:
+            if task.status != JobSchedule.STATUS_DONE and task.function_params.get("lvol_id") == lvol_id:
+                return task.uuid
+    return False
+
+
+def add_replication_final_task(cluster_id, src_node_id, function_params):
+    """Create the JobSchedule task that drives a cross-cluster replication
+    cutover (freeze + final delta + ANA flip).
+
+    function_params must carry: lvol_id, src_node_id, tgt_node_id,
+    tgt_lvol_composite, tgt_map_id, tgt_snap_composite, operation, replication_id,
+    final_state.
+    """
+    return _add_task(JobSchedule.FN_REPLICATION_FINAL, cluster_id, src_node_id, "",
+                     function_params=function_params, send_to_cluster_log=False)

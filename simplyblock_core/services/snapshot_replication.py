@@ -120,27 +120,47 @@ def process_snap_replicate_start(task, snapshot):
         snapshot.write_to_db()
 
 
-def delete_last_snapshot_if_needed(this_task, lvol):
-    snaps = []
-    for task in db.get_job_tasks(this_task.cluster_id):
-        if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION:
-            if task.get_id() == this_task.get_id():
-                continue
-            logger.debug(task)
-            try:
-                snap = db.get_snapshot_by_id(task.function_params["snapshot_id"])
-            except KeyError:
-                continue
-            if snap.lvol.get_id() != lvol.get_id():
-                continue
-            snaps.append(snap)
+def _prune_internal_snapshots(source_lvol):
+    """Retention for replication-driven internal snapshots.
 
-    if snaps:
-        snaps = sorted(snaps, key=lambda x: x.created_at)
-        snapshot = snaps[-1]
-        logger.info("Deleting snapshot: %s", snapshot.get_id())
-        ret = snapshot_controller.delete(snapshot)
-        logger.debug(ret)
+    Internal snapshots are transient checkpoints taken at a fixed interval
+    purely to drive replication. Once a newer internal snapshot has been
+    successfully replicated, the older internal snapshots are redundant: they
+    are removed on BOTH the target (the explicit requirement — only the last
+    replicated internal snapshot persists there) and the source (so the source
+    snapshot chain stays bounded). User snapshots are never auto-deleted, on
+    either side.
+
+    Only snapshots strictly older than the most-recent replicated internal
+    snapshot are pruned, so the newest internal snapshot — which serves as the
+    base for the next delta transfer — always remains.
+    """
+    replicated_internal = [
+        s for s in db.get_snapshots_by_node_id(source_lvol.node_id)
+        if s.lvol.get_id() == source_lvol.get_id()
+        and s.snap_type == SnapShot.TYPE_INTERNAL
+        and s.status == SnapShot.STATUS_ONLINE
+        and s.target_replicated_snap_uuid
+    ]
+    if len(replicated_internal) <= 1:
+        return
+
+    replicated_internal.sort(key=lambda s: s.created_at)
+    # Keep the newest replicated internal snapshot; prune everything older.
+    for snap in replicated_internal[:-1]:
+        target_uuid = snap.target_replicated_snap_uuid
+        try:
+            db.get_snapshot_by_id(target_uuid)
+        except KeyError:
+            target_uuid = ""  # already gone — fall through to source cleanup
+        if target_uuid:
+            logger.info("Pruning replicated internal snapshot on target: %s", target_uuid)
+            if not snapshot_controller.delete(target_uuid):
+                logger.warning("Failed to delete target internal snapshot %s, will retry", target_uuid)
+                continue
+        logger.info("Pruning internal snapshot on source: %s", snap.get_id())
+        if not snapshot_controller.delete(snap.get_id()):
+            logger.warning("Failed to delete source internal snapshot %s, will retry", snap.get_id())
 
 
 def process_snap_replicate_finish(task, snapshot):
@@ -253,7 +273,7 @@ def process_snap_replicate_finish(task, snapshot):
     lvol_controller.delete_lvol(remote_lv, force_delete=True)
     remote_lv.remove(db.kv_store)
     snapshot_events.replication_task_finished(snapshot)
-    delete_last_snapshot_if_needed(task, snapshot.lvol)
+    _prune_internal_snapshots(snapshot.lvol)
     return new_snapshot_uuid
 
 
@@ -342,38 +362,42 @@ def task_runner(task: JobSchedule):
             return True
 
 
-logger.info("Starting Tasks runner...")
-while True:
-    try:
-        db.get_clusters()
-    except Exception as e:
-        logger.error(f"Failed to get clusters: {e}")
-        time.sleep(3)
-        continue
-    clusters = db.get_clusters()
-    if not clusters:
-        logger.error("No clusters found!")
-    else:
-        for cl in clusters:
-            tasks = db.get_job_tasks(cl.get_id(), reverse=False)
-            for task in tasks:
-                delay_seconds = constants.TASK_EXEC_INTERVAL_SEC
-                if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION:
-                    if task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED]:
-                        active_task = False
-                        for t in db.get_job_tasks(task.cluster_id):
-                            if t.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION and t.function_params["snapshot_id"] ==  task.function_params['snapshot_id']:
-                                if t.status == JobSchedule.STATUS_RUNNING and t.canceled is False:
-                                    active_task = True
-                                    break
-                        if active_task:
-                            logger.info("replication task found for same snapshot, retry")
-                            continue
-                    if task.status != JobSchedule.STATUS_DONE:
-                        # get new task object because it could be changed from cancel task
-                        task = db.get_task_by_id(task.uuid)
-                        res = task_runner(task)
-                        if not res:
-                            time.sleep(3)
+def main():
+    logger.info("Starting Tasks runner...")
+    while True:
+        try:
+            db.get_clusters()
+        except Exception as e:
+            logger.error(f"Failed to get clusters: {e}")
+            time.sleep(3)
+            continue
+        clusters = db.get_clusters()
+        if not clusters:
+            logger.error("No clusters found!")
+        else:
+            for cl in clusters:
+                tasks = db.get_job_tasks(cl.get_id(), reverse=False)
+                for task in tasks:
+                    if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION:
+                        if task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED]:
+                            active_task = False
+                            for t in db.get_job_tasks(task.cluster_id):
+                                if t.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION and t.function_params["snapshot_id"] ==  task.function_params['snapshot_id']:
+                                    if t.status == JobSchedule.STATUS_RUNNING and t.canceled is False:
+                                        active_task = True
+                                        break
+                            if active_task:
+                                logger.info("replication task found for same snapshot, retry")
+                                continue
+                        if task.status != JobSchedule.STATUS_DONE:
+                            # get new task object because it could be changed from cancel task
+                            task = db.get_task_by_id(task.uuid)
+                            res = task_runner(task)
+                            if not res:
+                                time.sleep(3)
 
-    time.sleep(constants.TASK_EXEC_INTERVAL_SEC)
+        time.sleep(constants.TASK_EXEC_INTERVAL_SEC)
+
+
+if __name__ == "__main__":
+    main()
