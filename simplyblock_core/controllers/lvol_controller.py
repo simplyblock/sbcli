@@ -29,6 +29,29 @@ from simplyblock_core.prom_client import PromClient
 logger = utils.get_logger(__name__)
 
 
+async def watch_volumes(cluster_id, pool_id):
+    """Stream volume changes for one pool (same scope as get_lvols_by_pool_id)."""
+    db = DBController()
+    async for batch in db.watch(
+            LVol,
+            select=lambda models: db.get_lvols_by_pool_id(pool_id, source=models),
+            ancestors=[(Cluster, cluster_id), (Pool, pool_id)]):
+        yield batch
+
+
+async def watch_volume(cluster_id, pool_id, volume_id):
+    """Stream changes for a single volume."""
+    db = DBController()
+    async for batch in db.watch(
+            LVol,
+            select=lambda models: [
+                lvol for lvol in db.get_lvols_by_pool_id(pool_id, source=models)
+                if lvol.get_id() == volume_id
+            ],
+            ancestors=[(Cluster, cluster_id), (Pool, pool_id)]):
+        yield batch
+
+
 def _create_crypto_lvol(rpc_client, lvol, cluster):
     name = lvol.crypto_bdev
     base_name = f"{lvol.lvs_name}/{lvol.lvol_bdev}"

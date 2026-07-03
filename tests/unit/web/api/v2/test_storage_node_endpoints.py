@@ -185,3 +185,28 @@ class TestStorageNodeStats:
         assert response.status_code == 200
         storage_node_ops.get_node_iostats_history.assert_called_once_with(
             STORAGE_NODE_ID, '10', parse_sizes=False, with_sizes=True)
+
+
+class TestWatchStorageNodes:
+
+    def test_list_dispatches_watch_storage_nodes(self, client, storage_node, storage_node_ops, watch_stream):
+        storage_node_ops.watch_storage_nodes.return_value = watch_stream([storage_node])
+
+        response = client.get(f'{BASE}/?watch=true')
+
+        assert response.status_code == 200
+        assert response.headers['content-type'].startswith('text/event-stream')
+        assert 'event: snapshot' in response.text
+        assert STORAGE_NODE_ID in response.text
+        storage_node_ops.watch_storage_nodes.assert_called_once_with(CLUSTER_ID)
+
+    def test_detail_dispatches_watch_storage_node(self, client, storage_node, storage_node_ops, watch_stream):
+        storage_node_ops.watch_storage_node.return_value = watch_stream([storage_node])
+
+        response = client.get(f'{BASE}/{STORAGE_NODE_ID}/?watch=true')
+
+        assert response.status_code == 200
+        assert response.headers['content-type'].startswith('text/event-stream')
+        assert 'event: snapshot' in response.text
+        assert STORAGE_NODE_ID in response.text
+        storage_node_ops.watch_storage_node.assert_called_once_with(CLUSTER_ID, STORAGE_NODE_ID)

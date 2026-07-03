@@ -5,51 +5,31 @@ from sse_starlette import EventSourceResponse
 
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.controllers import device_controller
-from simplyblock_core.models.cluster import Cluster as ClusterModel
 from simplyblock_core.models.nvme_device import NVMeDevice
-from simplyblock_core.models.storage_node import StorageNode as StorageNodeModel
 
 from ..._dependencies import Cluster, StorageNode, Device
 from ..._dtos import DeviceDTO, DeviceHealthInfoDTO
-from ..._watch import RawState, WATCH_RESPONSES, WatchParam, watch_response
+from ..._sse import WATCH_RESPONSES, WatchParam, sse_response
 
 
 api = APIRouter()
 db = DBController()
 
 
-def _make_device_dto(storage_node_id: str) -> Callable[[dict], DeviceDTO]:
-    def build(data: dict) -> DeviceDTO:
-        device = NVMeDevice(data)
+def _make_device_dto(storage_node_id: str) -> Callable[[NVMeDevice], DeviceDTO]:
+    def build(device: NVMeDevice) -> DeviceDTO:
         ret = db.get_device_stats(device, 1)
         return DeviceDTO.from_model(device, storage_node_id, ret[0] if ret else None)
     return build
-
-
-def _make_device_projection(node_id: str, device_id: Optional[str] = None) -> Callable[[RawState], RawState]:
-    # Devices are embedded in their StorageNode record; explode them into
-    # per-device entries so the diff yields device-level events.
-    def project(state: RawState) -> RawState:
-        for node in state.values():
-            if node.get('uuid') == node_id:
-                return {
-                    device['uuid']: device
-                    for device in node.get('nvme_devices', [])
-                    if device_id is None or device.get('uuid') == device_id
-                }
-        return {}
-    return project
 
 
 @api.get('/', name='clusters:storage_nodes:devices:list', response_model=List[DeviceDTO], responses=WATCH_RESPONSES)
 def list(cluster: Cluster, storage_node: StorageNode, watch: WatchParam = False) -> Union[List[DeviceDTO], EventSourceResponse]:
     if watch:
         node_id = storage_node.get_id()
-        return watch_response(
-            StorageNodeModel,
-            _make_device_projection(node_id),
+        return sse_response(
+            device_controller.watch_devices(cluster.get_id(), node_id),
             _make_device_dto(node_id),
-            ancestors=[(ClusterModel, cluster.get_id()), (StorageNodeModel, node_id)],
         )
     data = []
     for device in storage_node.nvme_devices:
@@ -68,12 +48,10 @@ instance_api = APIRouter(prefix='/{device_id}')
 def get(cluster: Cluster, storage_node: StorageNode, device: Device, watch: WatchParam = False) -> Union[DeviceDTO, EventSourceResponse]:
     if watch:
         node_id = storage_node.get_id()
-        return watch_response(
-            StorageNodeModel,
-            _make_device_projection(node_id, device.get_id()),
+        return sse_response(
+            device_controller.watch_device(cluster.get_id(), node_id, device.get_id()),
             _make_device_dto(node_id),
-            single_id=device.get_id(),
-            ancestors=[(ClusterModel, cluster.get_id()), (StorageNodeModel, node_id)],
+            single=True,
         )
     stat_obj = None
     ret = db.get_device_stats(device, 1)
