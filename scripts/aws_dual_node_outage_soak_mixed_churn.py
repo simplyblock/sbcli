@@ -35,6 +35,19 @@ UUID_RE = re.compile(r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}")
 # (long form with `=`, see lvol_controller.py:1737). Tolerate the legacy
 # short form `-n <NQN>` as well so older sbctl deployments still parse.
 NQN_RE = re.compile(r"(?:--nqn[=\s]+|-n\s+)(\S+)")
+# `sbctl lvol connect` emits one command per path with `-a <traddr>`
+# (primary first, then secondary, then tertiary).
+TRADDR_RE = re.compile(r"(?:--traddr[=\s]+|-a\s+)(\S+)")
+
+# Per-path nvme connect retry policy. A path connect can fail transiently:
+# the target self-blocks its client port for the duration of a leadership
+# conflict/failback and the port-allow service takes up to ~70s to re-open
+# it (observed 2026-07-02: block 19:49:20 -> allow 19:50:30). The kernel's
+# io-queue Connect gives up after ~60s (ret=881), so a single-shot connect
+# turns that transient into a churn failure. Retry with pauses that
+# comfortably outlast the port-allow reaction time.
+CONNECT_ATTEMPTS = 4
+CONNECT_RETRY_DELAY_S = 30
 
 
 # NOTE: "device_hang" is temporarily DISABLED (removed from rotation for now).
@@ -1129,15 +1142,43 @@ class SoakRunner:
                 f"Failed to parse NQN from lvol connect output for {volume['volume_id']}"
             )
         volume["nqn"] = nqn
+        # Record the per-path target addresses in sbctl output order
+        # (primary, secondary[, tertiary]) so the disconnect side can tear
+        # paths down in the reverse, safe order: tertiary -> secondary ->
+        # primary.
+        path_addrs = []
+        for cmd in connect_commands:
+            am = TRADDR_RE.search(cmd)
+            if am:
+                path_addrs.append(am.group(1))
+        volume["path_addrs"] = path_addrs
         successful_connects = 0
         failed_connects = []
         for connect_cmd in connect_commands:
-            try:
-                self.client.run(connect_cmd, timeout=120, label=f"connect {volume['volume_id']}")
-                successful_connects += 1
-            except TestRunError as exc:
-                failed_connects.append(str(exc))
-                self.logger.log(f"Path connect failed for {volume['volume_id']}: {exc}")
+            last_exc = None
+            for attempt in range(1, CONNECT_ATTEMPTS + 1):
+                try:
+                    self.client.run(
+                        connect_cmd,
+                        timeout=180,
+                        label=(
+                            f"connect {volume['volume_id']} "
+                            f"(attempt {attempt}/{CONNECT_ATTEMPTS})"
+                        ),
+                    )
+                    successful_connects += 1
+                    last_exc = None
+                    break
+                except (TestRunError, RemoteCommandError) as exc:
+                    last_exc = exc
+                    self.logger.log(
+                        f"Path connect attempt {attempt}/{CONNECT_ATTEMPTS} failed "
+                        f"for {volume['volume_id']}: {exc}"
+                    )
+                    if attempt < CONNECT_ATTEMPTS:
+                        time.sleep(CONNECT_RETRY_DELAY_S)
+            if last_exc is not None:
+                failed_connects.append(str(last_exc))
         if successful_connects == 0:
             raise TestRunError(
                 f"No nvme paths connected for {volume['volume_id']}: {'; '.join(failed_connects)}"
@@ -1195,7 +1236,7 @@ class SoakRunner:
                 f"cd {shlex.quote(volume['mount_point'])} && "
                 f"fio --name={fio_name} --directory={shlex.quote(volume['mount_point'])} "
                 "--direct=1 --rw=randrw --bs=4K --group_reporting --time_based "
-                f"--numjobs={FIO_NUMJOBS} --iodepth=4 --size=40G --runtime={self.args.runtime} "
+                f"--numjobs={FIO_NUMJOBS} --iodepth=128 --size=40G --runtime={self.args.runtime} "
                 "--ioengine=aiolib --max_latency=20s --exitall_on_error=1 "
                 f"--output={shlex.quote(volume['fio_log'])}; "
                 "rc=$?; "
@@ -1514,9 +1555,36 @@ class SoakRunner:
                 f"WARNING: no NQN saved for {volume['volume_name']}; skipping nvme disconnect"
             )
             return
-        # ``nvme disconnect -n <nqn>`` tears down every controller (path) for
-        # that subsystem in one call, so multipath connections are handled
-        # without a per-path teardown loop.
+        # Tear paths down in fixed order tertiary -> secondary -> primary
+        # (reverse of the sbctl connect-command order). Removing the
+        # optimized/primary path first makes the kernel requeue any pending
+        # teardown I/O onto a non-optimized path; if that secondary cannot
+        # redirect (hublvol down after an outage) it self-promotes and
+        # raises a writer conflict against the live primary (incident
+        # 2026-07-02 19:46:56). Primary-last means pending I/O keeps
+        # draining to the actual leader and the secondary/tertiary
+        # listeners never see teardown traffic.
+        path_addrs = volume.get("path_addrs") or []
+        if path_addrs:
+            script_lines = []
+            for addr in reversed(path_addrs):
+                script_lines.append(
+                    "for c in /sys/class/nvme/nvme*; do\n"
+                    '  [ -e "$c/subsysnqn" ] || continue\n'
+                    f"  grep -qx {shlex.quote(nqn)} \"$c/subsysnqn\" || continue\n"
+                    f"  grep -Eq 'traddr={addr}(,|$)' \"$c/address\" || continue\n"
+                    '  sudo nvme disconnect -d "/dev/$(basename "$c")" || true\n'
+                    "done"
+                )
+            self.client.run(
+                f"bash -lc {shlex.quote(chr(10).join(script_lines))}",
+                timeout=180,
+                check=False,
+                label=f"nvme disconnect per-path tert->sec->prim {volume['volume_name']}",
+            )
+        # Final sweep: catches any controller the ordered loop missed (path
+        # reconnected under a new controller name mid-loop, or no
+        # path_addrs recorded for this volume).
         self.client.run(
             f"sudo nvme disconnect -n {shlex.quote(nqn)}",
             timeout=60,
