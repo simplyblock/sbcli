@@ -2585,7 +2585,7 @@ def patch_cr_node_status(
         node_mgmt_ip: str,
         updates: Optional[Dict[str, Any]] = None,
         remove: bool = False,
-):
+) -> bool:
     """
     Patch status.nodes[*] fields for a specific node identified by UUID.
 
@@ -2597,18 +2597,38 @@ def patch_cr_node_status(
         {"health": "true"}
         {"status": "offline"}
         {"capacity": {"sizeUsed": 1234}}
+
+    Returns True on success, False on failure. Never raises: this mirrors
+    state into the CR for observability and must not crash business logic
+    (an unhandled raise here killed cluster_activate mid-flight, leaving the
+    cluster wedged in in_activation).
     """
     load_kube_config_with_fallback()
     api = client.CustomObjectsApi()
 
-    try:
-        cr = api.get_namespaced_custom_object(
-            group=group,
-            version=version,
-            namespace=namespace,
-            plural=plural,
-            name=name,
-        )
+    # status.nodes is replaced wholesale by several concurrent writers (node
+    # registration, monitor health patches, port events), so a read can
+    # transiently miss a node that a concurrent writer is about to (re)add,
+    # and a blind write can silently drop a concurrent update. Retry with
+    # optimistic locking instead of failing hard.
+    attempts = 5
+    for attempt in range(attempts):
+        if attempt:
+            time.sleep(2)
+
+        try:
+            cr = api.get_namespaced_custom_object(
+                group=group,
+                version=version,
+                namespace=namespace,
+                plural=plural,
+                name=name,
+            )
+        except ApiException as e:
+            logger.error(
+                f"Failed to read CR {name}: {e.reason} {e.body}"
+            )
+            return False
 
         status_nodes = cr.get("status", {}).get("nodes", [])
         found = False
@@ -2634,32 +2654,62 @@ def patch_cr_node_status(
         if not found:
             if remove:
                 # Node already absent from status — nothing to do.
-                return
-            # Node not yet in status.nodes[] — operator syncs this asynchronously.
-            # Log and return so callers during node_add (in_creation phase) don't abort.
+                return True
+            # Node not (yet) in status.nodes[] — most commonly the operator
+            # hasn't synced this node into the CR yet (node_add in_creation
+            # phase), which the retry loop below cannot fix: nothing here
+            # controls the operator's reconciliation timing, and this call
+            # sits on a synchronous hot path (set_node_status ->
+            # snode_status_change on every status transition), so retrying
+            # for several seconds would only add latency to the exact case
+            # this is meant to make cheap. Skip immediately rather than
+            # failing the caller — an earlier version raised/returned falsy
+            # here and crashed/aborted node_add / cluster_activate
+            # mid-flight. This is best-effort CR mirroring (not authoritative
+            # state), so a skipped patch here self-heals on this node's next
+            # status-change event.
             logger.warning(
                 f"patch_cr_node_status: node not yet in status.nodes for {namespace}/{name} "
                 f"(uuid={node_uuid}, mgmtIp={node_mgmt_ip}), skipping"
             )
-            return
+            return True
 
-        api.patch_namespaced_custom_object_status(
-            group=group,
-            version=version,
-            namespace=namespace,
-            plural=plural,
-            name=name,
-            body={
-                "status": {
-                    "nodes": new_status_nodes
-                }
-            },
-        )
+        try:
+            api.patch_namespaced_custom_object_status(
+                group=group,
+                version=version,
+                namespace=namespace,
+                plural=plural,
+                name=name,
+                body={
+                    # resourceVersion makes this a compare-and-swap: if
+                    # another writer replaced status.nodes since our read,
+                    # the API returns 409 and we retry on fresh data instead
+                    # of clobbering their update.
+                    "metadata": {"resourceVersion": cr["metadata"]["resourceVersion"]},
+                    "status": {
+                        "nodes": new_status_nodes
+                    }
+                },
+            )
+            return True
+        except ApiException as e:
+            if e.status == 409:
+                # Lost-update conflict — retry on fresh data.
+                continue
+            logger.error(
+                f"Failed to patch node for {name}: {e.reason} {e.body}"
+            )
+            return False
 
-    except ApiException as e:
-        logger.error(
-            f"Failed to patch node for {name}: {e.reason} {e.body}"
-        )
+    # Only reachable via persistent 409 lost-update conflicts on the patch
+    # call — the not-found case now returns from inside the loop above and
+    # never falls through to here.
+    logger.error(
+        f"Failed to patch CR {name} after {attempts} attempts: persistent "
+        f"write conflicts (uuid={node_uuid}, mgmtIp={node_mgmt_ip})"
+    )
+    return False
 
 
 def patch_cr_lvol_status(

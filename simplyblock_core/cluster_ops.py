@@ -794,6 +794,27 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
 
 def _cluster_activate_impl(cl_id, force=False, force_lvstore_create=False) -> None:
     cluster = db_controller.get_cluster_by_id(cl_id)
+    prev_status = cluster.status
+    if prev_status == Cluster.STATUS_IN_ACTIVATION:
+        prev_status = Cluster.STATUS_UNREADY
+    try:
+        _cluster_activate(cl_id, force=force, force_lvstore_create=force_lvstore_create)
+    except Exception:
+        # Never leave the cluster wedged in in_activation: this often runs in
+        # a fire-and-forget thread, and an unhandled failure would otherwise
+        # block any retry (the activate API rejects in_activation clusters).
+        # The expected-failure paths inside _cluster_activate restore the
+        # status themselves; this only catches what they missed.
+        cluster = db_controller.get_cluster_by_id(cl_id)
+        if cluster.status == Cluster.STATUS_IN_ACTIVATION:
+            logger.error("Cluster activation failed unexpectedly; reverting status "
+                         f"from {Cluster.STATUS_IN_ACTIVATION} to {prev_status}")
+            set_cluster_status(cl_id, prev_status)
+        raise
+
+
+def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
+    cluster = db_controller.get_cluster_by_id(cl_id)
 
     if cluster.status == Cluster.STATUS_ACTIVE:
         logger.warning("Cluster is ACTIVE")
