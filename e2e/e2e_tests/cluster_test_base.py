@@ -872,6 +872,8 @@ class TestClusterBase:
             return
         self.runner_k8s_log.stop_resource_monitor()
         self.runner_k8s_log.stop_log_monitor()
+        # Capture final one-shot logs before killing tmux sessions
+        self.runner_k8s_log.collect_final_k8s_logs()
         self.runner_k8s_log.stop_logging()
 
     def fetch_all_nodes_distrib_log(self):

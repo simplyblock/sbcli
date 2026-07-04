@@ -2192,7 +2192,7 @@ class SshUtils:
                 tmux_session_name = f"{container}_logs_{random_suffix}"
                 command_logs = (
                     f"sudo tmux new-session -d -s {tmux_session_name} "
-                    f"\"docker logs --follow {container} > {log_file} 2>&1\""
+                    f"\"docker logs --follow --tail 0 {container} > {log_file} 2>&1\""
                 )
                 self.logger.info(f"Restarting Docker log collection for container '{container}' on {node_ip}. Command: {command_logs}")
                 self.exec_command(node_ip, command_logs, timeout=timeout, max_retries=max_retries)
@@ -3400,7 +3400,7 @@ class SshUtils:
                                 self.logger.info(f"[{node_ip}] Logging for container: {container}")
                                 cmd = (
                                     f"sudo tmux new-session -d -s {session} "
-                                    f"\"docker logs --follow {container} > {log_file} 2>&1\""
+                                    f"\"docker logs --follow --tail 0 {container} > {log_file} 2>&1\""
                                 )
                                 self.exec_command(node_ip, cmd, supress_logs=True)
                         except Exception as e:
@@ -4119,6 +4119,19 @@ class RunnerK8sLog:
                 session_name = f"{pod}_{container}_logs_{self.generate_random_string()}"
                 container_id = self._get_container_id(pod, container)
                 key = f"{pod}:{container}"
+
+                # Kill any existing stream for this container to avoid duplicates
+                existing = self._active_log_streams.get(key)
+                if existing and existing.get("session"):
+                    try:
+                        subprocess.run(
+                            ["tmux", "kill-session", "-t", existing["session"]],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                        )
+                        self.logger.info(f"Killed old tmux session '{existing['session']}' for {key}")
+                    except Exception:
+                        pass
+
                 self._pod_container_map[key] = container_id
 
                 command_logs = [
@@ -4136,14 +4149,173 @@ class RunnerK8sLog:
                 }
                 self.logger.info(f"Started logging for pod '{pod}', container '{container}' ({outage_type}), logs stored at {log_file}.")
 
+            # Capture init container logs (one-shot, they're already completed)
+            try:
+                init_containers = subprocess.check_output(
+                    ["kubectl", "get", "pod", pod, "-n", self.namespace,
+                     "-o", "jsonpath={.spec.initContainers[*].name}"],
+                    universal_newlines=True,
+                ).strip().split()
+            except subprocess.CalledProcessError:
+                init_containers = []
+
+            for ic in init_containers:
+                if not ic:
+                    continue
+                ic_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                ic_log_file = f"{pod_log_dir}/{ic}_{self.test_name}_{ic_timestamp}_init.log"
+                try:
+                    subprocess.run(
+                        f"kubectl logs {pod} -c {ic} -n {self.namespace}"
+                        f" > {ic_log_file} 2>&1",
+                        shell=True, timeout=60,
+                    )
+                except Exception as e:
+                    self.logger.warning(f"Failed to capture init container logs for {pod}:{ic}: {e}")
+
 
     def stop_logging(self):
+        """Stop all Kubernetes logging processes with graceful shutdown."""
+        # Send C-c to each tmux session so kubectl can flush its buffer
+        try:
+            result = subprocess.run(
+                ["tmux", "list-sessions", "-F", "#{session_name}"],
+                capture_output=True, text=True,
+            )
+            if result.returncode == 0:
+                for session in result.stdout.splitlines():
+                    session = session.strip()
+                    if session:
+                        subprocess.run(
+                            ["tmux", "send-keys", "-t", session, "C-c", ""],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                        )
+        except Exception:
+            pass
+
+        # Give kubectl processes a moment to flush and exit
+        time.sleep(3)
+
+        subprocess.run(
+            ["tmux", "kill-server"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        self.logger.info("Stopped all Kubernetes logging processes.")
+
+    def collect_final_k8s_logs(self):
+        """One-shot kubectl logs for all containers — safety net at test end.
+
+        This is the K8s equivalent of
+        ``SshUtils.collect_final_docker_logs_simple()``.  It captures the
+        complete final state of every container's logs independent of the
+        follow-stream mechanism, so even if a tmux session crashed between
+        polls those logs are not lost.
         """
-        Stop all Kubernetes logging processes.
-        """
-        stop_command = ["tmux", "kill-server"]
-        subprocess.run(stop_command)
-        print("Stopped all Kubernetes logging processes.")
+        _LOG_PREFIXES = (
+            "simplyblock-admin-control",
+            "simplyblock-csi-controller",
+            "simplyblock-csi-node",
+            "simplyblock-fdb-",
+            "simplyblock-manager",
+            "simplyblock-mgmt-api-job",
+            "simplyblock-monitoring",
+            "simplyblock-operator",
+            "simplyblock-prometheus",
+            "simplyblock-storage-node-controller",
+            "simplyblock-storage-node-ds",
+            "simplyblock-tasks",
+            "simplyblock-webappapi",
+            "snode-spdk-pod",
+            "fio-",
+        )
+
+        pods = self.get_running_pods()
+        if not pods:
+            self.logger.warning("[final-logs] No running pods found")
+            return
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        for pod in pods:
+            if not pod.startswith(_LOG_PREFIXES):
+                continue
+
+            pod_log_dir = os.path.join(self.log_dir, pod)
+            os.makedirs(pod_log_dir, exist_ok=True)
+
+            # Discover regular containers
+            try:
+                containers = subprocess.check_output(
+                    ["kubectl", "get", "pod", pod, "-n", self.namespace,
+                     "-o", "jsonpath={.spec.containers[*].name}"],
+                    universal_newlines=True,
+                ).strip().split()
+            except subprocess.CalledProcessError:
+                containers = []
+
+            # Discover init containers
+            try:
+                init_containers = subprocess.check_output(
+                    ["kubectl", "get", "pod", pod, "-n", self.namespace,
+                     "-o", "jsonpath={.spec.initContainers[*].name}"],
+                    universal_newlines=True,
+                ).strip().split()
+            except subprocess.CalledProcessError:
+                init_containers = []
+
+            # Capture current logs for all containers (one-shot, no --follow)
+            for container in containers:
+                if not container:
+                    continue
+                log_file = f"{pod_log_dir}/{container}_{self.test_name}_{timestamp}_final.log"
+                try:
+                    subprocess.run(
+                        f"kubectl logs {pod} -c {container} -n {self.namespace}"
+                        f" --timestamps > {log_file} 2>&1",
+                        shell=True, timeout=120,
+                    )
+                except Exception as exc:
+                    self.logger.warning(f"[final-logs] Failed for {pod}:{container}: {exc}")
+
+                # Also capture --previous logs if available
+                prev_file = f"{pod_log_dir}/{container}_{self.test_name}_{timestamp}_final_previous.log"
+                try:
+                    subprocess.run(
+                        f"kubectl logs --previous {pod} -c {container}"
+                        f" -n {self.namespace} > {prev_file} 2>&1",
+                        shell=True, timeout=120,
+                    )
+                    if os.path.exists(prev_file) and os.path.getsize(prev_file) == 0:
+                        os.remove(prev_file)
+                except Exception:
+                    pass
+
+            # Capture init container logs (one-shot, they're completed)
+            for ic in init_containers:
+                if not ic:
+                    continue
+                ic_file = f"{pod_log_dir}/{ic}_{self.test_name}_{timestamp}_init.log"
+                try:
+                    subprocess.run(
+                        f"kubectl logs {pod} -c {ic} -n {self.namespace}"
+                        f" > {ic_file} 2>&1",
+                        shell=True, timeout=60,
+                    )
+                except Exception as exc:
+                    self.logger.warning(f"[final-logs] Failed for init {pod}:{ic}: {exc}")
+
+            # Capture pod describe
+            describe_file = f"{pod_log_dir}/{pod}_{self.test_name}_{timestamp}_final_describe.log"
+            try:
+                with open(describe_file, "w") as f:
+                    subprocess.run(
+                        ["kubectl", "describe", "pod", pod, "-n", self.namespace],
+                        stdout=f, stderr=subprocess.STDOUT, timeout=60,
+                    )
+            except Exception as exc:
+                self.logger.warning(f"[final-logs] describe failed for {pod}: {exc}")
+
+        self.logger.info(f"[final-logs] Captured final logs for {len(pods)} pods")
 
     def store_pod_descriptions(self):
         """
@@ -4193,7 +4365,7 @@ class RunnerK8sLog:
         cmd = [
             "tmux", "new-session", "-d", "-s", session_name,
             "bash", "-c",
-            f"kubectl logs --follow {pod} -c {container} -n {self.namespace} > {log_file} 2>&1"
+            f"kubectl logs --follow --tail=0 {pod} -c {container} -n {self.namespace} > {log_file} 2>&1"
         ]
         subprocess.Popen(cmd)
         self._active_log_streams[key] = {
@@ -4272,8 +4444,8 @@ class RunnerK8sLog:
         )
 
         # Number of consecutive stale checks before restarting a stream.
-        # With poll_interval=60s, 3 means the file hasn't grown for ~3 min.
-        STALE_THRESHOLD = 3
+        # With poll_interval=60s, 2 means the file hasn't grown for ~2 min.
+        STALE_THRESHOLD = 2
 
         def _monitor():
             while not self._monitor_stop_flag.is_set():

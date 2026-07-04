@@ -118,7 +118,7 @@ jobs:
   collect-logs:
     name: "Collect logs (${{ inputs.DEPLOY_MODE }}${{ inputs.DEPLOY_MODE == 'k8s-native' && format(' / {0}', inputs.cluster_environment) || '' }})"
     runs-on: ${{ inputs.DEPLOY_MODE == 'k8s-native' && inputs.cluster_environment == 'aws-openshift' && 'vm-runner-43' || 'self-hosted' }}
-    timeout-minutes: 120
+    timeout-minutes: 300
 
     env:
       MGMT_IP: ${{ inputs.MGMT_IP }}
@@ -191,26 +191,34 @@ jobs:
           set -euxo pipefail
           NAMESPACE="${{ inputs.NAMESPACE || 'simplyblock' }}"
 
-          echo "=== Discovering admin pod ==="
-          ADMIN_POD=""
+          echo "=== Discovering admin pod(s) ==="
+          ADMIN_PODS_ARR=()
           for i in $(seq 1 12); do
-            ADMIN_POD=$(kubectl -n "${NAMESPACE}" get pods \
-              -l app=simplyblock-admin-control \
-              -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) || true
-            if [ -n "${ADMIN_POD}" ]; then
-              PHASE=$(kubectl -n "${NAMESPACE}" get pod "${ADMIN_POD}" \
+            ADMIN_PODS_ARR=()
+            while IFS= read -r pod; do
+              [ -z "${pod}" ] && continue
+              PHASE=$(kubectl -n "${NAMESPACE}" get pod "${pod}" \
                 -o jsonpath='{.status.phase}' 2>/dev/null) || true
-              [ "${PHASE}" = "Running" ] && break
-              ADMIN_POD=""
+              if [ "${PHASE}" = "Running" ]; then
+                ADMIN_PODS_ARR+=("${pod}")
+              fi
+            done < <(kubectl -n "${NAMESPACE}" get pods \
+              -l app=simplyblock-admin-control \
+              -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null)
+            if [ ${#ADMIN_PODS_ARR[@]} -gt 0 ]; then
+              break
             fi
             echo "Waiting for admin pod (attempt ${i}/12)..."
             sleep 10
           done
-          if [ -z "${ADMIN_POD}" ]; then
-            echo "ERROR: No running admin pod found in namespace ${NAMESPACE}"
+          if [ ${#ADMIN_PODS_ARR[@]} -eq 0 ]; then
+            echo "ERROR: No running admin pods found in namespace ${NAMESPACE}"
             exit 1
           fi
-          echo "Admin pod: ${ADMIN_POD}"
+          echo "Found ${#ADMIN_PODS_ARR[@]} running admin pod(s): ${ADMIN_PODS_ARR[*]}"
+          echo "ADMIN_PODS=${ADMIN_PODS_ARR[*]}" >> "$GITHUB_ENV"
+          # Keep ADMIN_POD for cluster info discovery below
+          ADMIN_POD="${ADMIN_PODS_ARR[0]}"
           echo "ADMIN_POD=${ADMIN_POD}" >> "$GITHUB_ENV"
 
           echo "=== Discovering Graylog / OpenSearch IPs ==="
@@ -254,6 +262,7 @@ jobs:
       # ============================================================
       - name: Collect logs (k8s-native)
         if: inputs.DEPLOY_MODE == 'k8s-native'
+        timeout-minutes: 240
         shell: bash
         run: |
           set -euxo pipefail
@@ -261,9 +270,14 @@ jobs:
           LOCAL_OUTPUT_DIR="${OUTPUT_DIR}"
           mkdir -p "${LOCAL_OUTPUT_DIR}"
 
-          echo "=== Collecting logs via admin pod (reverse, chunked) ==="
+          echo "=== Collecting logs via admin pods (reverse, chunked, parallel) ==="
+
+          # Parse admin pods into array
+          IFS=' ' read -ra PODS <<< "${ADMIN_PODS}"
+          NUM_PODS=${#PODS[@]}
+
           echo "  Namespace:  ${NAMESPACE}"
-          echo "  Admin pod:  ${ADMIN_POD}"
+          echo "  Admin pods: ${PODS[*]} (${NUM_PODS} pod(s))"
           echo "  Start time: ${START_TIME}"
           echo "  Duration:   ${DURATION_MINUTES} min"
 
@@ -284,14 +298,15 @@ jobs:
             echo "${iso}"
           }
 
-          # Helper: run collect_logs.py inside the admin pod
+          # Helper: run collect_logs.py inside a specific admin pod
+          # $5 = pod (default: first pod)
           run_collect() {
-            local iso=$1 mins=$2 outdir=$3 extra_flag=${4:-}
+            local iso=$1 mins=$2 outdir=$3 extra_flag=${4:-} pod=${5:-${PODS[0]}}
             local mgmt_ip_to_use="${GRAYLOG_IP}"
             if [[ "${extra_flag}" == *"--use-opensearch"* ]] && [ -n "${OPENSEARCH_IP}" ]; then
               mgmt_ip_to_use="${OPENSEARCH_IP}"
             fi
-            kubectl -n "${NAMESPACE}" exec "${ADMIN_POD}" -- \
+            kubectl -n "${NAMESPACE}" exec "${pod}" -- \
               python3 /usr/local/lib/python3.12/site-packages/simplyblock_core/scripts/collect_logs.py \
                 "${iso}" "${mins}" \
                 --mode kubernetes \
@@ -305,7 +320,7 @@ jobs:
             local rc=$?
             [ $rc -ne 0 ] && return $rc
             local has_content
-            has_content=$(kubectl -n "${NAMESPACE}" exec "${ADMIN_POD}" -- \
+            has_content=$(kubectl -n "${NAMESPACE}" exec "${pod}" -- \
               find "${outdir}" -name "*.tar.gz" -size +0 2>/dev/null | head -1)
             if [ -z "${has_content}" ]; then
               echo "  WARN: collect_logs.py succeeded but no .tar.gz output found"
@@ -313,38 +328,82 @@ jobs:
             fi
           }
 
-          # Adaptive collection: try full window, on failure split into
-          # 5-min sub-windows, then 1-min if those also fail.
+          # Adaptive collection with pod parameter
+          # $5 = pod (default: first pod)
           collect_adaptive() {
-            local start_epoch=$1 end_epoch=$2 outdir=$3 extra_flag=${4:-}
+            local start_epoch=$1 end_epoch=$2 outdir=$3 extra_flag=${4:-} pod=${5:-${PODS[0]}}
             local duration=$((end_epoch - start_epoch))
             local mins=$(( (duration + 59) / 60 ))
             local iso=$(epoch_to_iso ${start_epoch})
-            if run_collect "${iso}" "${mins}" "${outdir}" "${extra_flag}"; then
+            if run_collect "${iso}" "${mins}" "${outdir}" "${extra_flag}" "${pod}"; then
               return 0
             fi
-            echo "  WARN: ${mins}m window failed, retrying with 5-min sub-windows..."
+            echo "  WARN: ${mins}m window failed on ${pod}, retrying with 5-min sub-windows..."
             local sub_start=${start_epoch}
             while [ ${sub_start} -lt ${end_epoch} ]; do
               local sub_end=$((sub_start + 300))
               [ ${sub_end} -gt ${end_epoch} ] && sub_end=${end_epoch}
               local sub_mins=$(( ((sub_end - sub_start) + 59) / 60 ))
               local sub_iso=$(epoch_to_iso ${sub_start})
-              if ! run_collect "${sub_iso}" "${sub_mins}" "${outdir}" "${extra_flag}"; then
-                echo "  WARN: 5-min window at ${sub_iso} failed, retrying with 1-min windows..."
+              if ! run_collect "${sub_iso}" "${sub_mins}" "${outdir}" "${extra_flag}" "${pod}"; then
+                echo "  WARN: 5-min window at ${sub_iso} failed on ${pod}, retrying with 1-min windows..."
                 local micro_start=${sub_start}
                 while [ ${micro_start} -lt ${sub_end} ]; do
                   local micro_end=$((micro_start + 60))
                   [ ${micro_end} -gt ${sub_end} ] && micro_end=${sub_end}
                   local micro_mins=$(( ((micro_end - micro_start) + 59) / 60 ))
                   local micro_iso=$(epoch_to_iso ${micro_start})
-                  run_collect "${micro_iso}" "${micro_mins}" "${outdir}" "${extra_flag}" || \
-                    echo "  WARN: 1-min window at ${micro_iso} also failed"
+                  run_collect "${micro_iso}" "${micro_mins}" "${outdir}" "${extra_flag}" "${pod}" || \
+                    echo "  WARN: 1-min window at ${micro_iso} also failed on ${pod}"
                   micro_start=${micro_end}
                 done
               fi
               sub_start=${sub_end}
             done
+          }
+
+          # Process a single chunk on a given pod, copy results to LOCAL_OUTPUT_DIR
+          process_chunk() {
+            local chunk_num=$1 chunk_start=$2 chunk_end=$3 pod=$4 prefer_graylog=$5
+            local chunk_minutes=$(( ((chunk_end - chunk_start) + 59) / 60 ))
+            local chunk_iso=$(epoch_to_iso ${chunk_start})
+            local pod_output_dir="/tmp/graylog_collect_chunk${chunk_num}"
+
+            echo ""
+            echo "--- Chunk ${chunk_num}/${NUM_CHUNKS}: ${chunk_iso} for ${chunk_minutes}m on pod ${pod} ---"
+
+            kubectl -n "${NAMESPACE}" exec "${pod}" -- mkdir -p "${pod_output_dir}" 2>/dev/null || true
+
+            if [ "${prefer_graylog}" = "true" ]; then
+              collect_adaptive ${chunk_start} ${chunk_end} "${pod_output_dir}" "" "${pod}" || {
+                echo "WARN: Graylog failed for chunk ${chunk_num} on ${pod}, falling back to OpenSearch..."
+                collect_adaptive ${chunk_start} ${chunk_end} "${pod_output_dir}" "--use-opensearch" "${pod}" || \
+                  echo "WARN: OpenSearch fallback also failed for chunk ${chunk_num}"
+              }
+            else
+              collect_adaptive ${chunk_start} ${chunk_end} "${pod_output_dir}" "--use-opensearch" "${pod}" || {
+                echo "WARN: OpenSearch failed for chunk ${chunk_num} on ${pod}, falling back to Graylog..."
+                collect_adaptive ${chunk_start} ${chunk_end} "${pod_output_dir}" "" "${pod}" || \
+                  echo "WARN: Graylog fallback also failed for chunk ${chunk_num}"
+              }
+            fi
+
+            # Copy tarballs from pod to runner
+            local tarballs
+            tarballs=$(kubectl -n "${NAMESPACE}" exec "${pod}" -- \
+              find "${pod_output_dir}" -name "*.tar.gz" -type f 2>/dev/null) || true
+            if [ -n "${tarballs}" ]; then
+              for tb in ${tarballs}; do
+                local tb_name=$(basename "${tb}")
+                echo "  [${pod}] Copying ${tb_name}..."
+                kubectl -n "${NAMESPACE}" cp "${pod}:${tb}" "${LOCAL_OUTPUT_DIR}/${tb_name}" 2>&1 || true
+              done
+            else
+              echo "WARN: No tarballs found for chunk ${chunk_num} on ${pod}"
+            fi
+
+            # Cleanup this chunk in pod
+            kubectl -n "${NAMESPACE}" exec "${pod}" -- rm -rf "${pod_output_dir}" 2>/dev/null || true
           }
 
           # Build 1-hour chunk boundaries
@@ -356,79 +415,96 @@ jobs:
           done
           NUM_CHUNKS=${#_CHUNK_STARTS[@]}
 
-          # Auto-detect preferred log backend on the first (newest) chunk
-          # Default: try Graylog first, fall back to OpenSearch
-          PREFER_GRAYLOG=""
+          # ── FIRST CHUNK: synchronous probe to determine preferred backend ──
           CHUNK=0
+          FIRST_IDX=$((NUM_CHUNKS - 1))
+          CHUNK=$((CHUNK + 1))
+          FIRST_START=${_CHUNK_STARTS[$FIRST_IDX]}
+          FIRST_END=$((FIRST_START + 3600))
+          [ ${FIRST_END} -gt ${WINDOW_END} ] && FIRST_END=${WINDOW_END}
+          FIRST_MINUTES=$(( ((FIRST_END - FIRST_START) + 59) / 60 ))
+          FIRST_ISO=$(epoch_to_iso ${FIRST_START})
 
-          # Iterate in REVERSE order (newest first) — most critical logs first
-          for (( _IDX=NUM_CHUNKS-1; _IDX>=0; _IDX-- )); do
-            CHUNK=$((CHUNK + 1))
-            CHUNK_START=${_CHUNK_STARTS[$_IDX]}
-            CHUNK_END=$((CHUNK_START + 3600))
-            if [ ${CHUNK_END} -gt ${WINDOW_END} ]; then
-              CHUNK_END=${WINDOW_END}
-            fi
-            CHUNK_MINUTES=$(( ((CHUNK_END - CHUNK_START) + 59) / 60 ))
-            CHUNK_ISO=$(epoch_to_iso ${CHUNK_START})
+          echo ""
+          echo "--- Chunk 1/${NUM_CHUNKS}: ${FIRST_ISO} for ${FIRST_MINUTES}m (probe on ${PODS[0]}) ---"
 
+          PROBE_DIR="/tmp/graylog_collect_chunk1"
+          kubectl -n "${NAMESPACE}" exec "${PODS[0]}" -- mkdir -p "${PROBE_DIR}" 2>/dev/null || true
+
+          PREFER_GRAYLOG=""
+          echo "  Probing Graylog availability..."
+          if run_collect "${FIRST_ISO}" "${FIRST_MINUTES}" "${PROBE_DIR}" "" "${PODS[0]}"; then
+            PREFER_GRAYLOG=true
+            echo "  Graylog works — using it for all chunks"
+          else
+            PREFER_GRAYLOG=false
+            echo "  Graylog unavailable — trying OpenSearch for all chunks"
+            kubectl -n "${NAMESPACE}" exec "${PODS[0]}" -- rm -rf "${PROBE_DIR}" 2>/dev/null || true
+            kubectl -n "${NAMESPACE}" exec "${PODS[0]}" -- mkdir -p "${PROBE_DIR}" 2>/dev/null || true
+            collect_adaptive ${FIRST_START} ${FIRST_END} "${PROBE_DIR}" "--use-opensearch" "${PODS[0]}" || \
+              echo "WARN: OpenSearch also failed for chunk 1"
+          fi
+
+          # Copy first chunk results
+          TARBALLS=$(kubectl -n "${NAMESPACE}" exec "${PODS[0]}" -- \
+            find "${PROBE_DIR}" -name "*.tar.gz" -type f 2>/dev/null) || true
+          if [ -n "${TARBALLS}" ]; then
+            for TB in ${TARBALLS}; do
+              TB_NAME=$(basename "${TB}")
+              echo "  Copying ${TB_NAME}..."
+              kubectl -n "${NAMESPACE}" cp "${PODS[0]}:${TB}" "${LOCAL_OUTPUT_DIR}/${TB_NAME}" 2>&1 || true
+            done
+          else
+            echo "WARN: No tarballs found for chunk 1"
+          fi
+          kubectl -n "${NAMESPACE}" exec "${PODS[0]}" -- rm -rf "${PROBE_DIR}" 2>/dev/null || true
+
+          # ── REMAINING CHUNKS: parallel across admin pods ──
+          if [ ${NUM_CHUNKS} -gt 1 ]; then
+            REMAINING=$((NUM_CHUNKS - 1))
             echo ""
-            echo "--- Chunk ${CHUNK}/${NUM_CHUNKS}: ${CHUNK_ISO} for ${CHUNK_MINUTES}m (newest-first) ---"
+            echo "=== Processing remaining ${REMAINING} chunk(s) in parallel across ${NUM_PODS} pod(s) ==="
 
-            POD_OUTPUT_DIR="/tmp/graylog_collect_chunk${CHUNK}"
-            kubectl -n "${NAMESPACE}" exec "${ADMIN_POD}" -- mkdir -p "${POD_OUTPUT_DIR}" 2>/dev/null || true
+            BATCH_PIDS=()
+            BATCH_CHUNKS=()
 
-            if [ -z "${PREFER_GRAYLOG}" ]; then
-              # First chunk: probe Graylog first
-              echo "  Probing Graylog availability..."
-              if run_collect "${CHUNK_ISO}" "${CHUNK_MINUTES}" "${POD_OUTPUT_DIR}" ""; then
-                PREFER_GRAYLOG=true
-                echo "  Graylog works — using it for all chunks"
-              else
-                PREFER_GRAYLOG=false
-                echo "  Graylog unavailable — trying OpenSearch for all chunks"
-                kubectl -n "${NAMESPACE}" exec "${ADMIN_POD}" -- rm -rf "${POD_OUTPUT_DIR}" 2>/dev/null || true
-                kubectl -n "${NAMESPACE}" exec "${ADMIN_POD}" -- mkdir -p "${POD_OUTPUT_DIR}" 2>/dev/null || true
-                collect_adaptive ${CHUNK_START} ${CHUNK_END} "${POD_OUTPUT_DIR}" "--use-opensearch" || \
-                  echo "WARN: OpenSearch also failed for chunk ${CHUNK}"
+            for (( _IDX=FIRST_IDX-1; _IDX>=0; _IDX-- )); do
+              CHUNK=$((CHUNK + 1))
+              C_START=${_CHUNK_STARTS[$_IDX]}
+              C_END=$((C_START + 3600))
+              [ ${C_END} -gt ${WINDOW_END} ] && C_END=${WINDOW_END}
+
+              # Round-robin pod assignment within each batch
+              POD_IDX=$(( ${#BATCH_PIDS[@]} % NUM_PODS ))
+              POD=${PODS[$POD_IDX]}
+
+              process_chunk ${CHUNK} ${C_START} ${C_END} "${POD}" "${PREFER_GRAYLOG}" &
+              BATCH_PIDS+=($!)
+              BATCH_CHUNKS+=("${CHUNK}")
+
+              # Wait for batch when all pods are busy or last chunk
+              if [ ${#BATCH_PIDS[@]} -ge ${NUM_PODS} ] || [ ${_IDX} -eq 0 ]; then
+                echo ""
+                echo "  Waiting for batch (chunks: ${BATCH_CHUNKS[*]}) on ${#BATCH_PIDS[@]} pod(s)..."
+                for pid in "${BATCH_PIDS[@]}"; do
+                  wait ${pid} || true
+                done
+                echo "  Batch complete."
+                BATCH_PIDS=()
+                BATCH_CHUNKS=()
               fi
-            elif [ "${PREFER_GRAYLOG}" = "true" ]; then
-              collect_adaptive ${CHUNK_START} ${CHUNK_END} "${POD_OUTPUT_DIR}" || {
-                echo "WARN: Graylog failed for chunk ${CHUNK}, falling back to OpenSearch..."
-                collect_adaptive ${CHUNK_START} ${CHUNK_END} "${POD_OUTPUT_DIR}" "--use-opensearch" || \
-                  echo "WARN: OpenSearch fallback also failed for chunk ${CHUNK}"
-              }
-            else
-              collect_adaptive ${CHUNK_START} ${CHUNK_END} "${POD_OUTPUT_DIR}" "--use-opensearch" || {
-                echo "WARN: OpenSearch failed for chunk ${CHUNK}, falling back to Graylog..."
-                collect_adaptive ${CHUNK_START} ${CHUNK_END} "${POD_OUTPUT_DIR}" || \
-                  echo "WARN: Graylog fallback also failed for chunk ${CHUNK}"
-              }
-            fi
+            done
+          fi
 
-            # Copy tarballs from pod to runner for this chunk
-            TARBALLS=$(kubectl -n "${NAMESPACE}" exec "${ADMIN_POD}" -- \
-              find "${POD_OUTPUT_DIR}" -name "*.tar.gz" -type f 2>/dev/null) || true
-            if [ -n "${TARBALLS}" ]; then
-              for TB in ${TARBALLS}; do
-                TB_NAME=$(basename "${TB}")
-                echo "  Copying ${TB_NAME}..."
-                kubectl -n "${NAMESPACE}" cp "${ADMIN_POD}:${TB}" "${LOCAL_OUTPUT_DIR}/${TB_NAME}" 2>&1 || true
-              done
-              # Extract tarballs locally
-              for TB_FILE in "${LOCAL_OUTPUT_DIR}"/*.tar.gz; do
-                [ -f "${TB_FILE}" ] && tar -xzf "${TB_FILE}" -C "${LOCAL_OUTPUT_DIR}/" 2>/dev/null || true
-              done
-            else
-              echo "WARN: No tarballs found for chunk ${CHUNK}"
-            fi
-
-            # Cleanup this chunk in pod
-            kubectl -n "${NAMESPACE}" exec "${ADMIN_POD}" -- rm -rf "${POD_OUTPUT_DIR}" 2>/dev/null || true
+          # Extract all tarballs
+          echo ""
+          echo "=== Extracting tarballs ==="
+          for TB_FILE in "${LOCAL_OUTPUT_DIR}"/*.tar.gz; do
+            [ -f "${TB_FILE}" ] && tar -xzf "${TB_FILE}" -C "${LOCAL_OUTPUT_DIR}/" 2>/dev/null || true
           done
 
           echo ""
-          echo "=== Log collection complete (${CHUNK} chunks, newest-first): ${LOCAL_OUTPUT_DIR} ==="
+          echo "=== Log collection complete (${NUM_CHUNKS} chunks, ${NUM_PODS} pod(s), newest-first): ${LOCAL_OUTPUT_DIR} ==="
           ls -la "${LOCAL_OUTPUT_DIR}/" 2>/dev/null || echo "(empty)"
         env:
           MON_SECRET: ${{ secrets.MON_SECRET }}
@@ -484,6 +560,7 @@ jobs:
       # ============================================================
       - name: Collect logs (docker)
         if: inputs.DEPLOY_MODE == 'docker'
+        timeout-minutes: 120
         shell: bash
         run: |
           set -euxo pipefail
