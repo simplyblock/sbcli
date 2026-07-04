@@ -2088,6 +2088,7 @@ class SshUtils:
         - Auto-discovers containers via `docker ps -a`.
         - Writes logs to: <log_dir>/<node_ip>/containers-final-<ts>/
         - Captures: docker ps -a, docker logs, docker inspect (per container).
+        - Nodes are collected in parallel (one thread per node) for speed.
         """
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -2095,79 +2096,93 @@ class SshUtils:
             # Keep it filesystem friendly
             return re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("_") or "unnamed"
 
-        for node in nodes:
-            base_dir = os.path.join(log_dir, f"{node}", f"containers-final-{ts}")
-            # Ensure base dir exists on the remote
-            self.exec_command(node, f"bash -lc \"mkdir -p '{base_dir}' && chmod -R 777 '{base_dir}'\"")
+        def _collect_node(node):
+            """Collect all docker logs for a single node."""
+            try:
+                base_dir = os.path.join(log_dir, f"{node}", f"containers-final-{ts}")
+                # Ensure base dir exists on the remote
+                self.exec_command(node, f"bash -lc \"mkdir -p '{base_dir}' && chmod -R 777 '{base_dir}'\"")
 
-            # Always save a full container listing for later forensics
-            self.exec_command(
-                node,
-                f"bash -lc \"sudo docker ps -a > '{base_dir}/docker_ps_a_{_safe(node)}_{ts}.txt' 2>&1 || true\""
-            )
-
-            # Discover container names (include exited)
-            out, _ = self.exec_command(node, "bash -lc \"sudo docker ps -a --format '{{.Names}}' 2>/dev/null || true\"")
-            containers = [c.strip() for c in (out or "").splitlines() if c.strip()]
-
-            if not containers:
+                # Always save a full container listing for later forensics
                 self.exec_command(
                     node,
-                    f"bash -lc \"echo 'No containers found' > '{base_dir}/_NO_CONTAINERS_{_safe(node)}_{ts}.txt'\""
-                )
-                continue
-
-            for c in containers:
-                sc = _safe(c)
-                cont_dir = f"{base_dir}/{sc}"
-                self.exec_command(node, f"bash -lc \"mkdir -p '{cont_dir}'\"")
-
-                # docker logs (timestamps; non-follow). Use a tmp file then mv for atomicity.
-                self.exec_command(
-                    node,
-                    "bash -lc "
-                    f"\"sudo docker logs --timestamps {c} > '{cont_dir}/docker_logs_{sc}_{ts}.log.tmp' 2>&1 || true; "
-                    f"mv -f '{cont_dir}/docker_logs_{sc}_{ts}.log.tmp' '{cont_dir}/docker_logs_{sc}_{ts}.log' || true\""
+                    f"bash -lc \"sudo docker ps -a > '{base_dir}/docker_ps_a_{_safe(node)}_{ts}.txt' 2>&1 || true\""
                 )
 
-                # Extract delay-qpair entries from SPDK container logs for quick analysis
-                if re.match(r'^spdk_\d+$', c):
+                # Discover container names (include exited)
+                out, _ = self.exec_command(node, "bash -lc \"sudo docker ps -a --format '{{.Names}}' 2>/dev/null || true\"")
+                containers = [c.strip() for c in (out or "").splitlines() if c.strip()]
+
+                if not containers:
+                    self.exec_command(
+                        node,
+                        f"bash -lc \"echo 'No containers found' > '{base_dir}/_NO_CONTAINERS_{_safe(node)}_{ts}.txt'\""
+                    )
+                    return
+
+                for c in containers:
+                    sc = _safe(c)
+                    cont_dir = f"{base_dir}/{sc}"
+                    self.exec_command(node, f"bash -lc \"mkdir -p '{cont_dir}'\"")
+
+                    # docker logs (timestamps; non-follow). Use a tmp file then mv for atomicity.
                     self.exec_command(
                         node,
                         "bash -lc "
-                        f"\"grep -E 'nvmf_tcp_dump_delay_req_status|delay-qpair' "
-                        f"'{cont_dir}/docker_logs_{sc}_{ts}.log' "
-                        f"> '{cont_dir}/delay_qpair_{sc}_{ts}.log' 2>/dev/null; "
-                        f"[ -s '{cont_dir}/delay_qpair_{sc}_{ts}.log' ] || "
-                        f"rm -f '{cont_dir}/delay_qpair_{sc}_{ts}.log'\""
+                        f"\"sudo docker logs --timestamps {c} > '{cont_dir}/docker_logs_{sc}_{ts}.log.tmp' 2>&1 || true; "
+                        f"mv -f '{cont_dir}/docker_logs_{sc}_{ts}.log.tmp' '{cont_dir}/docker_logs_{sc}_{ts}.log' || true\""
                     )
 
-                # docker inspect (JSON)
+                    # Extract delay-qpair entries from SPDK container logs for quick analysis
+                    if re.match(r'^spdk_\d+$', c):
+                        self.exec_command(
+                            node,
+                            "bash -lc "
+                            f"\"grep -E 'nvmf_tcp_dump_delay_req_status|delay-qpair' "
+                            f"'{cont_dir}/docker_logs_{sc}_{ts}.log' "
+                            f"> '{cont_dir}/delay_qpair_{sc}_{ts}.log' 2>/dev/null; "
+                            f"[ -s '{cont_dir}/delay_qpair_{sc}_{ts}.log' ] || "
+                            f"rm -f '{cont_dir}/delay_qpair_{sc}_{ts}.log'\""
+                        )
+
+                    # docker inspect (JSON)
+                    self.exec_command(
+                        node,
+                        "bash -lc "
+                        f"\"sudo docker inspect {c} > '{cont_dir}/docker_inspect_{sc}_{ts}.json.tmp' 2>&1 || true; "
+                        f"mv -f '{cont_dir}/docker_inspect_{sc}_{ts}.json.tmp' '{cont_dir}/docker_inspect_{sc}_{ts}.json' || true\""
+                    )
+
+                    # Optional extras that often help:
+                    # docker top (may fail on exited containers, so '|| true')
+                    self.exec_command(
+                        node,
+                        f"bash -lc \"sudo docker top {c} > '{cont_dir}/docker_top_{sc}_{ts}.txt' 2>&1 || true\""
+                    )
+
+                    # container fs usage (size); harmless if unsupported
+                    self.exec_command(
+                        node,
+                        f"bash -lc \"sudo docker inspect --size {c} > '{cont_dir}/docker_inspect_size_{sc}_{ts}.json' 2>&1 || true\""
+                    )
+
+                # For convenience, also dump names list used
                 self.exec_command(
                     node,
-                    "bash -lc "
-                    f"\"sudo docker inspect {c} > '{cont_dir}/docker_inspect_{sc}_{ts}.json.tmp' 2>&1 || true; "
-                    f"mv -f '{cont_dir}/docker_inspect_{sc}_{ts}.json.tmp' '{cont_dir}/docker_inspect_{sc}_{ts}.json' || true\""
+                    f"bash -lc \"printf '%s\\n' {' '.join([repr(x) for x in containers])} > '{base_dir}/_containers_list_{_safe(node)}_{ts}.txt'\""
                 )
+            except Exception as exc:
+                self.logger.warning(f"[collect_final_docker_logs] Node {node} failed: {exc}")
 
-                # Optional extras that often help:
-                # docker top (may fail on exited containers, so '|| true')
-                self.exec_command(
-                    node,
-                    f"bash -lc \"sudo docker top {c} > '{cont_dir}/docker_top_{sc}_{ts}.txt' 2>&1 || true\""
-                )
+        # Collect all nodes in parallel
+        threads = []
+        for node in nodes:
+            t = threading.Thread(target=_collect_node, args=(node,), daemon=True)
+            threads.append(t)
+            t.start()
 
-                # container fs usage (size); harmless if unsupported
-                self.exec_command(
-                    node,
-                    f"bash -lc \"sudo docker inspect --size {c} > '{cont_dir}/docker_inspect_size_{sc}_{ts}.json' 2>&1 || true\""
-                )
-
-            # For convenience, also dump names list used
-            self.exec_command(
-                node,
-                f"bash -lc \"printf '%s\\n' {' '.join([repr(x) for x in containers])} > '{base_dir}/_containers_list_{_safe(node)}_{ts}.txt'\""
-            )
+        for t in threads:
+            t.join(timeout=300)  # 5 min max per node
 
 
     def restart_docker_logging(self, node_ip, containers, log_dir, test_name, timeout=60, max_retries=2):

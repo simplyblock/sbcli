@@ -203,6 +203,20 @@ from e2e_tests.test_shared_placement import TestSharedPlacement              # U
 from e2e_tests.test_qpair_tuning import TestQpairTuning                     # UNCERTAIN: requires RDMA-enabled cluster
 from e2e_tests.test_capacity_thresholds import TestCapacityThresholds
 
+# ── Phase 3 functional E2E tests (new coverage gaps) ────────────────
+from e2e_tests.test_health_checks import TestHealthChecks
+from e2e_tests.test_snapshot_lifecycle import TestSnapshotLifecycle
+from e2e_tests.test_migration_lifecycle import TestMigrationLifecycle
+from e2e_tests.test_storage_node_listing import TestStorageNodeListing
+from e2e_tests.test_device_capacity_io import TestDeviceCapacityIO
+from e2e_tests.test_lvol_connect_lifecycle import TestLvolConnectLifecycle
+from e2e_tests.test_volume_qos_dynamic import TestVolumeQosDynamic
+from e2e_tests.test_cluster_operations import TestClusterOperations
+from e2e_tests.test_concurrent_operations import TestConcurrentOperations
+from e2e_tests.test_pool_host_management import TestPoolHostManagement
+from e2e_tests.test_lvol_placement import TestLvolPlacement
+from e2e_tests.test_node_shutdown_restart import TestNodeShutdownRestart
+
 from e2e_tests.backup.test_backup_restore import (
     TestBackupBasicPositive,
     TestBackupRestoreDataIntegrity,
@@ -444,6 +458,19 @@ ALL_TESTS = [
     TestSharedPlacement,
     TestQpairTuning,
     TestCapacityThresholds,
+    # ── Phase 3 functional E2E tests (new coverage gaps) ───────────────
+    TestHealthChecks,
+    TestSnapshotLifecycle,
+    TestMigrationLifecycle,
+    TestStorageNodeListing,
+    TestDeviceCapacityIO,
+    TestLvolConnectLifecycle,
+    TestVolumeQosDynamic,
+    TestClusterOperations,
+    TestConcurrentOperations,
+    TestPoolHostManagement,
+    TestLvolPlacement,
+    TestNodeShutdownRestart,
 ]
 
 def get_all_tests(custom=True, ha_test=False):
@@ -516,6 +543,20 @@ def get_all_tests(custom=True, ha_test=False):
         # TestSharedPlacement,            # UNCERTAIN: requires cluster set-shared-placement
         # TestQpairTuning,               # UNCERTAIN: requires RDMA-enabled cluster
         TestCapacityThresholds,
+
+        # ── Phase 3 functional E2E tests (new coverage gaps) ───────────
+        TestHealthChecks,
+        TestSnapshotLifecycle,
+        TestMigrationLifecycle,
+        TestStorageNodeListing,
+        TestDeviceCapacityIO,
+        TestLvolConnectLifecycle,
+        TestVolumeQosDynamic,
+        TestClusterOperations,
+        TestConcurrentOperations,
+        TestPoolHostManagement,
+        TestLvolPlacement,
+        TestNodeShutdownRestart,
     ]
     # tests += [
     #     # Security E2E tests
