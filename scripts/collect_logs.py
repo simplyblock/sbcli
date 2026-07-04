@@ -349,20 +349,30 @@ def _gl_search_page(session, search_url, query, from_iso, to_iso, limit, offset)
 def _gl_write_window(session, search_url, query, from_iso, to_iso, fh):
     """
     Paginate through a single time window and write lines to *fh*.
-    Returns number of lines written.
+
+    Returns ``(lines_written, hit_limit)`` where *hit_limit* is ``True``
+    when a page request failed mid-stream (typically the OpenSearch 100 k
+    offset ceiling returning HTTP 500).  On *hit_limit* the partial writes
+    are rolled back so the caller can retry with smaller sub-windows.
     """
+    pos_before = fh.tell()
     written = 0
     offset = 0
 
     # Probe total size first
     msgs, total = _gl_search_page(session, search_url, query, from_iso, to_iso, 1, 0)
     if msgs is None:
-        return 0
+        return 0, False
 
     while offset < total:
         msgs, _ = _gl_search_page(
             session, search_url, query, from_iso, to_iso, PAGE_SIZE, offset
         )
+        if msgs is None:
+            # Request failed (likely 500 at offset limit) – roll back
+            fh.seek(pos_before)
+            fh.truncate()
+            return 0, True
         if not msgs:
             break
         for m in msgs:
@@ -372,24 +382,22 @@ def _gl_write_window(session, search_url, query, from_iso, to_iso, fh):
         if len(msgs) < PAGE_SIZE:
             break
 
-    return written
+    return written, False
 
 
 def graylog_fetch_all(session, base_url, query, from_iso, to_iso, out_path):
     """
     Download all log messages matching *query* within [from_iso, to_iso].
 
-    Strategy:
-      1. Probe total_results.
-      2. If <= MAX_RESULT_WINDOW  → straightforward offset pagination.
-      3. If >  MAX_RESULT_WINDOW  → split into 10-minute sub-windows and
-                                    paginate each one independently.
+    Reactive fallback strategy: try the full window first.  If pagination
+    hits an HTTP 500 (OpenSearch offset limit), roll back and retry with
+    5-minute sub-windows.  If a 5-minute window still hits the limit,
+    split that window into 1-minute slices.
 
     Writes one text line per message to *out_path*.
     Returns number of lines written.
     """
     search_url = f"{base_url}/search/universal/absolute"
-    written = 0
 
     # Probe
     msgs, total = _gl_search_page(session, search_url, query, from_iso, to_iso, 1, 0)
@@ -400,22 +408,44 @@ def graylog_fetch_all(session, base_url, query, from_iso, to_iso, out_path):
     print(f"    total entries: {total}")
 
     with open(out_path, "w") as fh:
-        if total <= MAX_RESULT_WINDOW:
-            written = _gl_write_window(session, search_url, query, from_iso, to_iso, fh)
-        else:
-            # Split into 10-minute chunks to stay under max_result_window
-            print("    NOTE: >100 k entries – collecting via 10-minute sub-windows")
-            t = datetime.fromisoformat(from_iso.replace("Z", "+00:00"))
-            t_end = datetime.fromisoformat(to_iso.replace("Z", "+00:00"))
-            chunk = timedelta(minutes=10)
-            while t < t_end:
-                chunk_end = min(t + chunk, t_end)
-                c_from = t.strftime("%Y-%m-%dT%H:%M:%S.000Z")
-                c_to = chunk_end.strftime("%Y-%m-%dT%H:%M:%S.000Z")
-                written += _gl_write_window(
-                    session, search_url, query, c_from, c_to, fh
-                )
-                t = chunk_end
+        # Level 1: try full window
+        written, hit = _gl_write_window(session, search_url, query, from_iso, to_iso, fh)
+
+        if not hit:
+            return written
+
+        # Level 2: retry with 5-min sub-windows
+        print(f"    NOTE: hit pagination limit, retrying with 5-min sub-windows")
+        written = 0
+        t = datetime.fromisoformat(from_iso.replace("Z", "+00:00"))
+        t_end = datetime.fromisoformat(to_iso.replace("Z", "+00:00"))
+        sub = timedelta(minutes=5)
+
+        while t < t_end:
+            sub_end = min(t + sub, t_end)
+            c_from = t.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+            c_to = sub_end.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+            w, sub_hit = _gl_write_window(session, search_url, query, c_from, c_to, fh)
+
+            if not sub_hit:
+                written += w
+            else:
+                # Level 3: 5-min still too big, split into 1-min
+                print(f"    NOTE: 5-min at {c_from} still hit limit, using 1-min windows")
+                mt = t
+                micro = timedelta(minutes=1)
+                while mt < sub_end:
+                    mt_end = min(mt + micro, sub_end)
+                    mc_from = mt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+                    mc_to = mt_end.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+                    mw, _ = _gl_write_window(session, search_url, query, mc_from, mc_to, fh)
+                    # If 1-min still hits limit, partial data was already
+                    # rolled back – we just move on (best effort).
+                    written += mw
+                    mt = mt_end
+
+            t = sub_end
 
     return written
 

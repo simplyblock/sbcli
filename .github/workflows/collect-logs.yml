@@ -258,6 +258,31 @@ jobs:
           echo "CLUSTER_SECRET=${csecret}" >> "$GITHUB_ENV"
 
       # ============================================================
+      # K8s-native: Deploy updated collect_logs.py into admin pods
+      # ============================================================
+      - name: Deploy collect_logs.py to admin pods
+        if: inputs.DEPLOY_MODE == 'k8s-native'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          NAMESPACE="${{ inputs.NAMESPACE || 'simplyblock' }}"
+          SCRIPT_SRC="sbcli/scripts/collect_logs.py"
+          SCRIPT_DST="/usr/local/lib/python3.12/site-packages/simplyblock_core/scripts/collect_logs.py"
+
+          if [ ! -f "${SCRIPT_SRC}" ]; then
+            echo "WARN: ${SCRIPT_SRC} not found, using pod's built-in version"
+            exit 0
+          fi
+
+          IFS=' ' read -ra PODS <<< "${ADMIN_PODS}"
+          for pod in "${PODS[@]}"; do
+            echo "Copying collect_logs.py to ${pod} ..."
+            kubectl -n "${NAMESPACE}" cp "${SCRIPT_SRC}" "${pod}:${SCRIPT_DST}" 2>&1 || \
+              echo "WARN: failed to copy to ${pod}, will use built-in version"
+          done
+          echo "Deployed updated collect_logs.py to ${#PODS[@]} pod(s)"
+
+      # ============================================================
       # K8s-native: Collect logs via kubectl exec (reverse, chunked)
       # ============================================================
       - name: Collect logs (k8s-native)

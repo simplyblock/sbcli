@@ -1596,6 +1596,13 @@ jobs:
           fi
           echo "  Admin pod: ${ADMIN_POD}"
 
+          # Deploy updated collect_logs.py to admin pod
+          SCRIPT_SRC="${GITHUB_WORKSPACE}/scripts/collect_logs.py"
+          if [ -f "${SCRIPT_SRC}" ]; then
+            kubectl -n ${NAMESPACE} cp "${SCRIPT_SRC}" "${ADMIN_POD}:/usr/local/lib/python3.12/site-packages/simplyblock_core/scripts/collect_logs.py" 2>/dev/null || \
+              echo "WARN: failed to deploy updated collect_logs.py, using built-in version"
+          fi
+
           MGMT_IP=$(kubectl get svc -n ${NAMESPACE} | grep graylog | awk '{print $3}')
           echo "  Graylog IP: ${MGMT_IP}"
           OPENSEARCH_IP=$(kubectl get svc opensearch-cluster-master -n ${NAMESPACE} -o jsonpath='{.spec.clusterIP}' 2>/dev/null || echo "")
