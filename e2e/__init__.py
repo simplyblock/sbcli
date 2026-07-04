@@ -162,6 +162,47 @@ from e2e_tests.security.test_lvol_security import (
 from e2e_tests.upgrade_tests.major_upgrade import TestMajorUpgrade, TestMajorUpgradeSingleNode
 from e2e_tests.upgrade_tests.k8s_major_upgrade import K8sNativeMajorUpgrade
 
+# ── Phase 1 functional E2E tests ─────────────────────────────────────
+from e2e_tests.test_lvol_basic import TestLvolBasicCRUD
+from e2e_tests.test_lvol_stats import TestLvolCapacityIOStats
+from e2e_tests.test_lvol_negative import TestLvolNegativeCases
+from e2e_tests.test_snapshot_negative import TestSnapshotNegativeCases
+from e2e_tests.test_pool_attributes import TestPoolAttributes
+from e2e_tests.test_pool_enable_disable import TestPoolEnableDisable
+from e2e_tests.test_pool_negative import TestPoolNegativeCases
+from e2e_tests.test_node_suspend_resume import TestNodeSuspendResume          # DEPRECATED: sn suspend/resume are no-ops
+from e2e_tests.test_pool_disable_io import TestPoolDisableIO
+from e2e_tests.test_negative_cases import TestCrossResourceNegative
+from e2e_tests.test_namespace_placement import TestNamespacePlacement
+from e2e_tests.test_namespace_fio import TestNamespaceFio
+from e2e_tests.test_namespace_limits import TestNamespaceLimits
+from e2e_tests.test_namespace_negative import TestNamespaceNegative
+from e2e_tests.test_volume_suspend_resume import TestVolumeSuspendResume      # UNCERTAIN: volume suspend/resume may not be wired
+from e2e_tests.test_volume_clone_lvol import TestVolumeCloneLvol
+from e2e_tests.test_node_anti_affinity import TestNodeAntiAffinity            # UNCERTAIN: requires --strict-node-anti-affinity cluster flag
+
+# ── Phase 2 functional E2E tests ─────────────────────────────────────
+from e2e_tests.test_lvol_inflate import TestLvolInflate
+from e2e_tests.test_lvol_migration_load import TestLvolMigrationLoad
+from e2e_tests.test_storage_node_stats import TestStorageNodeStats
+from e2e_tests.test_storage_node_ports import TestStorageNodePorts
+from e2e_tests.test_cluster_stats import TestClusterStats
+from e2e_tests.test_cluster_tasks import TestClusterTasks
+from e2e_tests.test_cluster_secret import TestClusterSecret
+from e2e_tests.test_qos_class import TestQosClass                            # DEPRECATED: QoS class API not verified
+from e2e_tests.test_qos_enforcement import TestQosEnforcement                # DEPRECATED: QoS enforcement API not verified
+from e2e_tests.test_pool_stats import TestPoolStats
+from e2e_tests.test_cluster_graceful_shutdown import TestClusterGracefulShutdown
+from e2e_tests.test_multi_client_connect import TestMultiClientConnect
+from e2e_tests.test_pool_dhchap import TestPoolDhchap
+from e2e_tests.test_pool_capacity_limits import TestPoolCapacityLimits
+from e2e_tests.test_namespace_e2e import TestNamespaceE2E
+from e2e_tests.test_device_restart import TestDeviceRestart
+from e2e_tests.test_volume_priority import TestVolumePriority                # UNCERTAIN: volume priority enforcement unclear
+from e2e_tests.test_shared_placement import TestSharedPlacement              # UNCERTAIN: requires cluster set-shared-placement
+from e2e_tests.test_qpair_tuning import TestQpairTuning                     # UNCERTAIN: requires RDMA-enabled cluster
+from e2e_tests.test_capacity_thresholds import TestCapacityThresholds
+
 from e2e_tests.backup.test_backup_restore import (
     TestBackupBasicPositive,
     TestBackupRestoreDataIntegrity,
@@ -364,6 +405,45 @@ ALL_TESTS = [
     TestMultiNodeVMRebootDocker,
     MgmtNodeNetworkOutageTest,
     MgmtNodeRebootTest,
+    # ── Phase 1 functional E2E tests ─────────────────────────────────
+    TestLvolBasicCRUD,
+    TestLvolCapacityIOStats,
+    TestLvolNegativeCases,
+    TestSnapshotNegativeCases,
+    TestPoolAttributes,
+    TestPoolEnableDisable,
+    TestPoolNegativeCases,
+    TestNodeSuspendResume,
+    TestPoolDisableIO,
+    TestCrossResourceNegative,
+    TestNamespacePlacement,
+    TestNamespaceFio,
+    TestNamespaceLimits,
+    TestNamespaceNegative,
+    TestVolumeSuspendResume,
+    TestVolumeCloneLvol,
+    TestNodeAntiAffinity,
+    # ── Phase 2 functional E2E tests ─────────────────────────────────
+    TestLvolInflate,
+    TestLvolMigrationLoad,
+    TestStorageNodeStats,
+    TestStorageNodePorts,
+    TestClusterStats,
+    TestClusterTasks,
+    TestClusterSecret,
+    TestQosClass,
+    TestQosEnforcement,
+    TestPoolStats,
+    TestClusterGracefulShutdown,
+    TestMultiClientConnect,
+    TestPoolDhchap,
+    TestPoolCapacityLimits,
+    TestNamespaceE2E,
+    TestDeviceRestart,
+    TestVolumePriority,
+    TestSharedPlacement,
+    TestQpairTuning,
+    TestCapacityThresholds,
 ]
 
 def get_all_tests(custom=True, ha_test=False):
@@ -395,6 +475,47 @@ def get_all_tests(custom=True, ha_test=False):
         # TestSnapshotBatchCloneLVOLs,
         # TestManyClonesFromSameSnapshot,
         # TestDeviceNodeRestart
+
+        # ── Phase 1 functional E2E tests ─────────────────────────────
+        TestLvolBasicCRUD,
+        TestLvolCapacityIOStats,
+        TestLvolNegativeCases,
+        TestSnapshotNegativeCases,
+        TestPoolAttributes,
+        TestPoolEnableDisable,
+        TestPoolNegativeCases,
+        # TestNodeSuspendResume,          # DEPRECATED: sn suspend/resume are no-ops in CLI
+        TestPoolDisableIO,
+        TestCrossResourceNegative,
+        TestNamespacePlacement,
+        TestNamespaceFio,
+        TestNamespaceLimits,
+        TestNamespaceNegative,
+        # TestVolumeSuspendResume,        # UNCERTAIN: volume suspend/resume may not be wired to API
+        TestVolumeCloneLvol,
+        # TestNodeAntiAffinity,           # UNCERTAIN: requires --strict-node-anti-affinity cluster flag
+
+        # ── Phase 2 functional E2E tests ─────────────────────────────
+        TestLvolInflate,
+        TestLvolMigrationLoad,
+        TestStorageNodeStats,
+        TestStorageNodePorts,
+        TestClusterStats,
+        TestClusterTasks,
+        TestClusterSecret,
+        # TestQosClass,                   # DEPRECATED: QoS class API not verified
+        # TestQosEnforcement,             # DEPRECATED: QoS enforcement API not verified
+        TestPoolStats,
+        TestClusterGracefulShutdown,
+        TestMultiClientConnect,
+        TestPoolDhchap,
+        TestPoolCapacityLimits,
+        TestNamespaceE2E,
+        TestDeviceRestart,
+        # TestVolumePriority,             # UNCERTAIN: volume priority enforcement unclear
+        # TestSharedPlacement,            # UNCERTAIN: requires cluster set-shared-placement
+        # TestQpairTuning,               # UNCERTAIN: requires RDMA-enabled cluster
+        TestCapacityThresholds,
     ]
     # tests += [
     #     # Security E2E tests
