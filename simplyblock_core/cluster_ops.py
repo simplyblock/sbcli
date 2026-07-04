@@ -614,6 +614,27 @@ def set_name(cl_id, name) -> Cluster:
 
 def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     cluster = db_controller.get_cluster_by_id(cl_id)
+    prev_status = cluster.status
+    if prev_status == Cluster.STATUS_IN_ACTIVATION:
+        prev_status = Cluster.STATUS_UNREADY
+    try:
+        _cluster_activate(cl_id, force=force, force_lvstore_create=force_lvstore_create)
+    except Exception:
+        # Never leave the cluster wedged in in_activation: this often runs in
+        # a fire-and-forget thread, and an unhandled failure would otherwise
+        # block any retry (the activate API rejects in_activation clusters).
+        # The expected-failure paths inside _cluster_activate restore the
+        # status themselves; this only catches what they missed.
+        cluster = db_controller.get_cluster_by_id(cl_id)
+        if cluster.status == Cluster.STATUS_IN_ACTIVATION:
+            logger.error("Cluster activation failed unexpectedly; reverting status "
+                         f"from {Cluster.STATUS_IN_ACTIVATION} to {prev_status}")
+            set_cluster_status(cl_id, prev_status)
+        raise
+
+
+def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
+    cluster = db_controller.get_cluster_by_id(cl_id)
 
     if cluster.status == Cluster.STATUS_ACTIVE:
         logger.warning("Cluster is ACTIVE")
@@ -757,8 +778,13 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                 set_cluster_status(cl_id, ols_status)
                 raise ValueError("Failed to activate cluster")
         else:
-            ret = storage_node_ops.create_lvstore(snode, cluster.distr_ndcs, cluster.distr_npcs, cluster.distr_bs,
-                                              cluster.distr_chunk_bs, cluster.page_size_in_blocks, max_size)
+            try:
+                ret = storage_node_ops.create_lvstore(snode, cluster.distr_ndcs, cluster.distr_npcs, cluster.distr_bs,
+                                                      cluster.distr_chunk_bs, cluster.page_size_in_blocks, max_size)
+            except Exception as e:
+                logger.error(e)
+                set_cluster_status(cl_id, ols_status)
+                raise ValueError("Failed to activate cluster")
         snode = db_controller.get_storage_node_by_id(snode.get_id())
         if ret:
             snode.lvstore_status = "ready"
