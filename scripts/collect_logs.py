@@ -351,11 +351,11 @@ def _gl_write_window(session, search_url, query, from_iso, to_iso, fh):
     Paginate through a single time window and write lines to *fh*.
 
     Returns ``(lines_written, hit_limit)`` where *hit_limit* is ``True``
-    when a page request failed mid-stream (typically the OpenSearch 100 k
-    offset ceiling returning HTTP 500).  On *hit_limit* the partial writes
-    are rolled back so the caller can retry with smaller sub-windows.
+    when the total exceeds MAX_RESULT_WINDOW and the caller should retry
+    with smaller sub-windows for better coverage.  Unlike before, partial
+    writes up to MAX_RESULT_WINDOW are kept (not rolled back) so that
+    even the smallest 1-minute windows still capture data.
     """
-    pos_before = fh.tell()
     written = 0
     offset = 0
 
@@ -364,15 +364,24 @@ def _gl_write_window(session, search_url, query, from_iso, to_iso, fh):
     if msgs is None:
         return 0, False
 
-    while offset < total:
+    # Signal caller to try smaller windows, but still fetch what we can
+    hit_limit = total > MAX_RESULT_WINDOW
+    capped_total = min(total, MAX_RESULT_WINDOW)
+
+    if hit_limit:
+        print(
+            f"    NOTE: window {from_iso}..{to_iso} has {total} entries "
+            f"(>{MAX_RESULT_WINDOW}), will fetch first {capped_total}",
+            file=sys.stderr,
+        )
+
+    while offset < capped_total:
         msgs, _ = _gl_search_page(
             session, search_url, query, from_iso, to_iso, PAGE_SIZE, offset
         )
         if msgs is None:
-            # Request failed (likely 500 at offset limit) – roll back
-            fh.seek(pos_before)
-            fh.truncate()
-            return 0, True
+            # Unexpected failure mid-stream — keep what we have
+            break
         if not msgs:
             break
         for m in msgs:
@@ -382,7 +391,7 @@ def _gl_write_window(session, search_url, query, from_iso, to_iso, fh):
         if len(msgs) < PAGE_SIZE:
             break
 
-    return written, False
+    return written, hit_limit
 
 
 def graylog_fetch_all(session, base_url, query, from_iso, to_iso, out_path):
@@ -439,9 +448,13 @@ def graylog_fetch_all(session, base_url, query, from_iso, to_iso, out_path):
                     mt_end = min(mt + micro, sub_end)
                     mc_from = mt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
                     mc_to = mt_end.strftime("%Y-%m-%dT%H:%M:%S.000Z")
-                    mw, _ = _gl_write_window(session, search_url, query, mc_from, mc_to, fh)
-                    # If 1-min still hits limit, partial data was already
-                    # rolled back – we just move on (best effort).
+                    mw, micro_hit = _gl_write_window(session, search_url, query, mc_from, mc_to, fh)
+                    if micro_hit:
+                        print(
+                            f"    WARN: 1-min window {mc_from} still >{MAX_RESULT_WINDOW} entries, "
+                            f"captured first {mw} (best effort)",
+                            file=sys.stderr,
+                        )
                     written += mw
                     mt = mt_end
 

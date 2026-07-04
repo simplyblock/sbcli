@@ -1103,6 +1103,7 @@ jobs:
           # Deploy updated collect_logs.py to admin pod
           SCRIPT_SRC="${GITHUB_WORKSPACE}/scripts/collect_logs.py"
           if [ -f "${SCRIPT_SRC}" ]; then
+            kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- rm -f /usr/local/lib/python3.12/site-packages/simplyblock_core/scripts/collect_logs.py 2>/dev/null || true
             kubectl -n ${NAMESPACE} cp "${SCRIPT_SRC}" "${ADMIN_POD}:/usr/local/lib/python3.12/site-packages/simplyblock_core/scripts/collect_logs.py" 2>/dev/null || \
               echo "WARN: failed to deploy updated collect_logs.py, using built-in version"
           fi

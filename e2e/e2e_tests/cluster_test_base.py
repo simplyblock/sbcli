@@ -2178,13 +2178,15 @@ class TestClusterBase:
             text = str(msg.get("message", "")).replace("\n", "\\n")
             return f"{ts}  src={src}  ctr={cname}  lvl={lvl}  {text}"
 
-        def _write_window(fh, q, f_iso, t_iso):
+        def _write_window_simple(fh, q, f_iso, t_iso):
+            """Paginate a single Graylog window, stopping at MAX_RESULT_WINDOW."""
             written = 0
             offset = 0
             msgs, total = _fetch_page(q, f_iso, t_iso, 1, 0)
             if msgs is None:
-                return 0
-            while offset < total:
+                return written, total
+            capped_total = min(total, MAX_RESULT_WINDOW)
+            while offset < capped_total:
                 msgs, _ = _fetch_page(q, f_iso, t_iso, PAGE_SIZE, offset)
                 if not msgs:
                     break
@@ -2194,6 +2196,49 @@ class TestClusterBase:
                 offset += len(msgs)
                 if len(msgs) < PAGE_SIZE:
                     break
+            return written, total
+
+        # Minimum sub-window granularity: 1 minute
+        _MIN_CHUNK_MINUTES = 1
+
+        def _write_window_adaptive(fh, q, f_iso, t_iso, chunk_minutes):
+            """Fetch a window, recursively splitting if total > 100k."""
+            msgs, total = _fetch_page(q, f_iso, t_iso, 1, 0)
+            if msgs is None:
+                return 0
+            if total <= MAX_RESULT_WINDOW:
+                w, _ = _write_window_simple(fh, q, f_iso, t_iso)
+                return w
+
+            # Window exceeds 100k — split into smaller sub-windows
+            sub_minutes = max(chunk_minutes // 2, _MIN_CHUNK_MINUTES)
+            if sub_minutes >= chunk_minutes:
+                # Already at minimum granularity; fetch what we can
+                self.logger.warning(
+                    f"[graylog-export] {container_name}: "
+                    f"{total} entries in {chunk_minutes}m window "
+                    f"(>{MAX_RESULT_WINDOW}), fetching first {MAX_RESULT_WINDOW}"
+                )
+                w, _ = _write_window_simple(fh, q, f_iso, t_iso)
+                return w
+
+            self.logger.info(
+                f"[graylog-export] {container_name}: "
+                f"{total} entries in {chunk_minutes}m window, "
+                f"splitting into {sub_minutes}m sub-windows"
+            )
+            t = datetime.fromisoformat(f_iso.replace("Z", "+00:00"))
+            t_end = datetime.fromisoformat(t_iso.replace("Z", "+00:00"))
+            delta = timedelta(minutes=sub_minutes)
+            written = 0
+            while t < t_end:
+                c_end = min(t + delta, t_end)
+                c_from = t.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+                c_to = c_end.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+                written += _write_window_adaptive(
+                    fh, q, c_from, c_to, sub_minutes,
+                )
+                t = c_end
             return written
 
         # Probe total result count
@@ -2205,12 +2250,15 @@ class TestClusterBase:
         written = 0
         with open(out_path, "w") as fh:
             if total <= MAX_RESULT_WINDOW:
-                written = _write_window(fh, query, from_iso, to_iso)
+                written, _ = _write_window_simple(
+                    fh, query, from_iso, to_iso,
+                )
             else:
-                # Split into 10-minute sub-windows
+                # Split into 10-minute sub-windows, recursively halving
+                # if a sub-window still exceeds 100k
                 self.logger.info(
-                    f"[graylog-export] {container_name}: >100k entries, "
-                    f"using 10-min sub-windows"
+                    f"[graylog-export] {container_name}: {total} entries "
+                    f"(>{MAX_RESULT_WINDOW}), using adaptive sub-windows"
                 )
                 t = datetime.fromisoformat(from_iso.replace("Z", "+00:00"))
                 t_end = datetime.fromisoformat(to_iso.replace("Z", "+00:00"))
@@ -2219,7 +2267,9 @@ class TestClusterBase:
                     chunk_end = min(t + chunk, t_end)
                     c_from = t.strftime("%Y-%m-%dT%H:%M:%S.000Z")
                     c_to = chunk_end.strftime("%Y-%m-%dT%H:%M:%S.000Z")
-                    written += _write_window(fh, query, c_from, c_to)
+                    written += _write_window_adaptive(
+                        fh, query, c_from, c_to, 10,
+                    )
                     t = chunk_end
 
         return written
