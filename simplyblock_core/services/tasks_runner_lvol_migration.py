@@ -116,9 +116,8 @@ _WAIT = object()
 _INTERMEDIATE_POLL_INTERVAL_S = 1      # seconds between stat checks
 _INTERMEDIATE_POLL_MAX = 300           # max iterations ≈ 5 min
 
-# Test flags — remove when done
-_SKIP_CLEANUP_SOURCE = True
-_SKIP_INTERMEDIATE_SNAP_DELETE = True
+_SKIP_CLEANUP_SOURCE = False
+_SKIP_INTERMEDIATE_SNAP_DELETE = False
 
 
 def _now_ms():
@@ -410,7 +409,8 @@ def _log_spdk_bdev_size(rpc, composite_name, label):
         return None
 
 
-def _delete_bdev_blocking(bdev_name, primary_rpc, secondary_rpc=None, tertiary_rpc=None):
+def _delete_bdev_blocking(bdev_name, primary_rpc, secondary_rpc=None, tertiary_rpc=None,
+                          timeout_s=120):
     """
     Two-phase blocking bdev delete with special_delete=True (non-coalescing).
 
@@ -427,12 +427,20 @@ def _delete_bdev_blocking(bdev_name, primary_rpc, secondary_rpc=None, tertiary_r
         logger.warning(f"delete bdev {bdev_name}: initiation failed (continuing)")
         return
 
+    deadline = time.monotonic() + timeout_s
     while True:
         status = primary_rpc.bdev_lvol_get_lvol_delete_status(bdev_name)
-        if status == 1:
-            time.sleep(0.2)
-        else:
+        if status != 1:
             break
+        if time.monotonic() > deadline:
+            if not primary_rpc.get_bdevs(bdev_name):
+                logger.warning(
+                    f"delete bdev {bdev_name}: poll timed out after {timeout_s}s "
+                    f"but bdev is gone — treating as success")
+                break
+            raise RuntimeError(
+                f"delete bdev {bdev_name}: timed out after {timeout_s}s, bdev still present")
+        time.sleep(0.2)
 
     for rpc in filter(None, [primary_rpc, secondary_rpc, tertiary_rpc]):
         try:
@@ -1554,27 +1562,51 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             rpc.nvmf_subsystem_listener_set_ana_state(
                 nqn, ip, port, trtype=trtype, ana=state)
             logger.info(f"ANA {nqn} {label} {ip}:{port} → {state}")
+            return True
         except Exception as e:
-            logger.error(f"ANA {label} failed (non-fatal): {e}")
+            logger.error(f"ANA {label} failed: {e}")
+            return False
+
+    def _flip_required(rpc, ip, port, trtype, state, label, attempts=3):
+        for i in range(attempts):
+            if _flip(rpc, ip, port, trtype, state, label):
+                return True
+            if i < attempts - 1:
+                time.sleep(1.0)
+        return False
 
     if not overlap_ids:
-        # Step 1 (no-overlap): set all TGT to final states before killing SRC
-        for i, tgt in enumerate(tgt_paths):
-            state = "optimized" if i == 0 else "non_optimized"
+        # Step 1 (no-overlap): TGT primary must be confirmed optimized before
+        # making SRC inaccessible — otherwise clients lose all I/O paths.
+        primary_tgt = tgt_paths[0]
+        if not _flip_required(primary_tgt['rpc'], primary_tgt['ip'], primary_tgt['port'],
+                               primary_tgt['trtype'], "optimized",
+                               f"TGT-{primary_tgt['node_id'][:8]}"):
+            return False, False, (
+                "ANA flip: TGT primary→optimized failed after retries "
+                "— aborting to keep SRC paths accessible")
+
+        # Secondary TGT paths best-effort — clients survive without them
+        for tgt in tgt_paths[1:]:
             _flip(tgt['rpc'], tgt['ip'], tgt['port'], tgt['trtype'],
-                  state, f"TGT-{tgt['node_id'][:8]}")
+                  "non_optimized", f"TGT-{tgt['node_id'][:8]}")
 
         # Step 3 (no-overlap): all SRC paths → inaccessible
         for src in src_paths:
             _flip(src['rpc'], src['ip'], src['port'], src['trtype'],
                   "inaccessible", f"SRC-{src['node_id'][:8]}")
     else:
-        # Step 1: first non-overlap TGT → optimized (live path before touching overlap)
-        for tgt in tgt_paths:
-            if tgt['node_id'] not in overlap_ids:
-                _flip(tgt['rpc'], tgt['ip'], tgt['port'], tgt['trtype'],
-                      "optimized", f"TGT-{tgt['node_id'][:8]}(pre)")
-                break
+        # Step 1: first non-overlap TGT → optimized. Must succeed before
+        # making any SRC path inaccessible.
+        non_overlap_tgt = next(
+            (t for t in tgt_paths if t['node_id'] not in overlap_ids), None)
+        if non_overlap_tgt:
+            if not _flip_required(non_overlap_tgt['rpc'], non_overlap_tgt['ip'],
+                                   non_overlap_tgt['port'], non_overlap_tgt['trtype'],
+                                   "optimized", f"TGT-{non_overlap_tgt['node_id'][:8]}(pre)"):
+                return False, False, (
+                    "ANA flip: non-overlap TGT primary→optimized failed after retries "
+                    "— aborting to keep SRC paths accessible")
 
         # Step 2: overlap SRC paths → inaccessible at SRC port
         for src in src_paths:
@@ -1599,11 +1631,17 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                 except Exception as e:
                     logger.error(f"Namespace swap on {tgt['node_id'][:8]} failed: {e}")
 
-        # Step 5: all TGT paths → correct ANA state at TGT port
-        for i, tgt in enumerate(tgt_paths):
-            state = "optimized" if i == 0 else "non_optimized"
+        # Step 5: all TGT paths → correct ANA state at TGT port.
+        # Primary required; secondaries best-effort.
+        primary_tgt = tgt_paths[0]
+        if not _flip_required(primary_tgt['rpc'], primary_tgt['ip'], primary_tgt['port'],
+                               primary_tgt['trtype'], "optimized",
+                               f"TGT-{primary_tgt['node_id'][:8]}"):
+            return False, False, (
+                "ANA flip: TGT primary→optimized (step 5) failed after retries")
+        for tgt in tgt_paths[1:]:
             _flip(tgt['rpc'], tgt['ip'], tgt['port'], tgt['trtype'],
-                  state, f"TGT-{tgt['node_id'][:8]}")
+                  "non_optimized", f"TGT-{tgt['node_id'][:8]}")
 
     # Step 6: overlap TGT paths → remove old SRC listener if port changed
     for tgt in tgt_paths:
@@ -1814,6 +1852,11 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
         # bdevs even after apply_migration_to_db renamed them to target names in DB.
         source_snap_bdevs_saved = ctx.get('source_snap_bdevs', {})
         source_lvol_bdev_saved  = ctx.get('source_lvol_bdev', '')
+        if not source_lvol_bdev_saved:
+            return False, False, (
+                "source_lvol_bdev missing from transfer_context — cannot safely "
+                "identify source bdev; apply_migration_to_db may have already "
+                "renamed lvol.lvol_bdev to the target name")
 
         to_delete = migration_controller.get_snaps_safe_to_delete_on_source(migration)
 
@@ -1902,8 +1945,11 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
         try:
             # Use the saved pre-apply bdev name; apply_migration_to_db already
             # renamed lvol.lvol_bdev to the target 'm'-suffix name in DB.
-            _raw_src_bdev = ctx.get('source_lvol_bdev')
-            src_bdev_short = _raw_src_bdev if isinstance(_raw_src_bdev, str) and _raw_src_bdev else lvol.lvol_bdev
+            src_bdev_short = ctx.get('source_lvol_bdev')
+            if not src_bdev_short:
+                raise RuntimeError(
+                    "source_lvol_bdev missing from ctx at delete site — "
+                    "refusing to fall back to lvol.lvol_bdev which may point to target")
             src_lvol_composite = f"{src_node.lvstore}/{src_bdev_short}"
             # Set migration flag so SPDK drops only the blob reference without
             # freeing the physical clusters — data now lives on the target.
