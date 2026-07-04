@@ -357,7 +357,8 @@ jobs:
           NUM_CHUNKS=${#_CHUNK_STARTS[@]}
 
           # Auto-detect preferred log backend on the first (newest) chunk
-          PREFER_OPENSEARCH=""
+          # Default: try Graylog first, fall back to OpenSearch
+          PREFER_GRAYLOG=""
           CHUNK=0
 
           # Iterate in REVERSE order (newest first) — most critical logs first
@@ -377,31 +378,31 @@ jobs:
             POD_OUTPUT_DIR="/tmp/graylog_collect_chunk${CHUNK}"
             kubectl -n "${NAMESPACE}" exec "${ADMIN_POD}" -- mkdir -p "${POD_OUTPUT_DIR}" 2>/dev/null || true
 
-            if [ -z "${PREFER_OPENSEARCH}" ]; then
-              # First chunk: probe OpenSearch availability
-              echo "  Probing OpenSearch availability..."
-              if run_collect "${CHUNK_ISO}" "${CHUNK_MINUTES}" "${POD_OUTPUT_DIR}" "--use-opensearch"; then
-                PREFER_OPENSEARCH=true
-                echo "  OpenSearch works — using it for all chunks"
+            if [ -z "${PREFER_GRAYLOG}" ]; then
+              # First chunk: probe Graylog first
+              echo "  Probing Graylog availability..."
+              if run_collect "${CHUNK_ISO}" "${CHUNK_MINUTES}" "${POD_OUTPUT_DIR}" ""; then
+                PREFER_GRAYLOG=true
+                echo "  Graylog works — using it for all chunks"
               else
-                PREFER_OPENSEARCH=false
-                echo "  OpenSearch unavailable — using Graylog for all chunks"
+                PREFER_GRAYLOG=false
+                echo "  Graylog unavailable — trying OpenSearch for all chunks"
                 kubectl -n "${NAMESPACE}" exec "${ADMIN_POD}" -- rm -rf "${POD_OUTPUT_DIR}" 2>/dev/null || true
                 kubectl -n "${NAMESPACE}" exec "${ADMIN_POD}" -- mkdir -p "${POD_OUTPUT_DIR}" 2>/dev/null || true
-                collect_adaptive ${CHUNK_START} ${CHUNK_END} "${POD_OUTPUT_DIR}" || \
-                  echo "WARN: Graylog also failed for chunk ${CHUNK}"
+                collect_adaptive ${CHUNK_START} ${CHUNK_END} "${POD_OUTPUT_DIR}" "--use-opensearch" || \
+                  echo "WARN: OpenSearch also failed for chunk ${CHUNK}"
               fi
-            elif [ "${PREFER_OPENSEARCH}" = "true" ]; then
-              collect_adaptive ${CHUNK_START} ${CHUNK_END} "${POD_OUTPUT_DIR}" "--use-opensearch" || {
-                echo "WARN: OpenSearch failed for chunk ${CHUNK}, falling back to Graylog..."
-                collect_adaptive ${CHUNK_START} ${CHUNK_END} "${POD_OUTPUT_DIR}" || \
-                  echo "WARN: Graylog fallback also failed for chunk ${CHUNK}"
-              }
-            else
+            elif [ "${PREFER_GRAYLOG}" = "true" ]; then
               collect_adaptive ${CHUNK_START} ${CHUNK_END} "${POD_OUTPUT_DIR}" || {
                 echo "WARN: Graylog failed for chunk ${CHUNK}, falling back to OpenSearch..."
                 collect_adaptive ${CHUNK_START} ${CHUNK_END} "${POD_OUTPUT_DIR}" "--use-opensearch" || \
                   echo "WARN: OpenSearch fallback also failed for chunk ${CHUNK}"
+              }
+            else
+              collect_adaptive ${CHUNK_START} ${CHUNK_END} "${POD_OUTPUT_DIR}" "--use-opensearch" || {
+                echo "WARN: OpenSearch failed for chunk ${CHUNK}, falling back to Graylog..."
+                collect_adaptive ${CHUNK_START} ${CHUNK_END} "${POD_OUTPUT_DIR}" || \
+                  echo "WARN: Graylog fallback also failed for chunk ${CHUNK}"
               }
             fi
 
