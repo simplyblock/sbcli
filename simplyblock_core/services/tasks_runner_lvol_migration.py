@@ -116,8 +116,8 @@ _WAIT = object()
 _INTERMEDIATE_POLL_INTERVAL_S = 1      # seconds between stat checks
 _INTERMEDIATE_POLL_MAX = 300           # max iterations ≈ 5 min
 
-_SKIP_CLEANUP_SOURCE = False
-_SKIP_INTERMEDIATE_SNAP_DELETE = False
+_SKIP_CLEANUP_SOURCE = True
+_SKIP_INTERMEDIATE_SNAP_DELETE = True
 
 
 def _now_ms():
