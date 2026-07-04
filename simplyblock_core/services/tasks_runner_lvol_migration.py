@@ -1836,12 +1836,6 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
 
     ctx = migration.transfer_context or {}
 
-    # --- Cutover grace period ---
-    # Wait here until the client has had time to reconnect to the new TGT
-    # subsystem before we tear down the source subsystem.  The grace period
-    # begins when PHASE_LVOL_MIGRATE sets cutover_notified_at and changes
-    # migration.status to STATUS_CUTOVER — the test script polls for that
-    # status and triggers client reconnect immediately upon seeing it.
     # --- First entry: initialize cleanup state ---
     if ctx.get('stage') != 'cleanup_src':
         # Preserve the target lvol UUID and bdev name written by PHASE_LVOL_MIGRATE
