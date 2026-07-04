@@ -277,6 +277,7 @@ jobs:
           IFS=' ' read -ra PODS <<< "${ADMIN_PODS}"
           for pod in "${PODS[@]}"; do
             echo "Copying collect_logs.py to ${pod} ..."
+            kubectl -n "${NAMESPACE}" exec "${pod}" -- rm -f "${SCRIPT_DST}" 2>/dev/null || true
             kubectl -n "${NAMESPACE}" cp "${SCRIPT_SRC}" "${pod}:${SCRIPT_DST}" 2>&1 || \
               echo "WARN: failed to copy to ${pod}, will use built-in version"
           done
