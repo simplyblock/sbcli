@@ -1100,12 +1100,21 @@ jobs:
             exit 0
           fi
 
-          # Deploy updated collect_logs.py to admin pod
+          # Deploy updated collect_logs.py to admin pod (use /tmp since package dir is read-only)
+          BUILTIN_SCRIPT="/usr/local/lib/python3.12/site-packages/simplyblock_core/scripts/collect_logs.py"
+          DEPLOYED_SCRIPT="/tmp/collect_logs.py"
           SCRIPT_SRC="${GITHUB_WORKSPACE}/scripts/collect_logs.py"
           if [ -f "${SCRIPT_SRC}" ]; then
-            kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- rm -f /usr/local/lib/python3.12/site-packages/simplyblock_core/scripts/collect_logs.py 2>/dev/null || true
-            kubectl -n ${NAMESPACE} cp "${SCRIPT_SRC}" "${ADMIN_POD}:/usr/local/lib/python3.12/site-packages/simplyblock_core/scripts/collect_logs.py" 2>/dev/null || \
+            kubectl -n ${NAMESPACE} cp "${SCRIPT_SRC}" "${ADMIN_POD}:${DEPLOYED_SCRIPT}" 2>/dev/null || \
               echo "WARN: failed to deploy updated collect_logs.py, using built-in version"
+          fi
+          # Determine which script to use
+          COLLECT_SCRIPT="${BUILTIN_SCRIPT}"
+          if kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- test -f "${DEPLOYED_SCRIPT}" 2>/dev/null; then
+            COLLECT_SCRIPT="${DEPLOYED_SCRIPT}"
+            echo "  Using deployed script: ${COLLECT_SCRIPT}"
+          else
+            echo "  Using built-in script: ${COLLECT_SCRIPT}"
           fi
 
           MGMT_IP=$(kubectl get svc -n ${NAMESPACE} | grep graylog | awk '{print $3}')
@@ -1149,7 +1158,7 @@ jobs:
               mgmt_ip_to_use="${OPENSEARCH_IP}"
             fi
             kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- \
-              python3 /usr/local/lib/python3.12/site-packages/simplyblock_core/scripts/collect_logs.py \
+              python3 "${COLLECT_SCRIPT}" \
                 "${iso}" "${mins}" \
                 --mode kubernetes \
                 --namespace "${NAMESPACE}" \
