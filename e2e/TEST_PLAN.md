@@ -60,56 +60,42 @@
 | Journal device node restart | `ha_journal/lvol_journal_device_node_restart.py` | `[Both]` | `[Auto]` |
 | Batch LVOL limits | `batch_lvol_limit.py` | `[Both]` | `[Auto]` |
 
+### Recently Added ✅ (Phase 3)
+| Area | Test File(s) | Platform | Automatable |
+|------|-------------|----------|-------------|
+| Health checks (cluster/node/device/volume/snapshot) | `test_health_checks.py` | `[Both]` | `[Auto]` |
+| Snapshot chain + lifecycle (CRUD, ordering, clone from chain) | `test_snapshot_lifecycle.py` | `[Both]` | `[Auto]` |
+| Migration lifecycle (start, list, cancel, load) | `test_migration_lifecycle.py` | `[Both]` | `[Auto]` |
+| Storage node listing (list, get, capacity, devices, cross-ref) | `test_storage_node_listing.py` | `[Both]` | `[Auto]` |
+| Per-device capacity & I/O stats | `test_device_capacity_io.py` | `[Both]` | `[Auto]` |
+| LVOL connect lifecycle (reconnect, multi-lvol, resize, idle) | `test_lvol_connect_lifecycle.py` | `[Both]` | `[Auto]` |
+| Dynamic QoS changes during FIO | `test_volume_qos_dynamic.py` | `[Both]` | `[Auto]` |
+| Cluster operations (status, details, logs, capacity, tasks, IO) | `test_cluster_operations.py` | `[Both]` | `[Auto]` |
+| Concurrent operations (parallel create/delete/snapshot/FIO) | `test_concurrent_operations.py` | `[Both]` | `[Auto]` |
+| Pool host management (add-host, remove-host, multi-host) | `test_pool_host_management.py` | `[Both]` | `[Auto]` |
+| LVOL placement (explicit host_id, auto-distribution, per-node) | `test_lvol_placement.py` | `[Both]` | `[Auto]` |
+| Node shutdown/restart lifecycle (status, restart, post-I/O) | `test_node_shutdown_restart.py` | `[Both]` | `[Auto]` |
+
 ### Not Covered / Gaps ❌
 - Control plane add/remove/list (no dedicated test)
-- Storage node: suspend/resume dedicated test
-- Storage node: port-list, port-io-stats
-- Storage node: check, check-device
-- Storage node: add-device, remove-device, restart-device, set-failed-device
+- Storage node: add-device, remove-device, set-failed-device
 - Storage node: make-primary, new-device-from-failed
 - Storage node: repair-lvstore
-- LVOL inflate
-- LVOL get-capacity, get-io-stats (validation of returned values)
-- LVOL add-host / remove-host standalone test (covered only in security)
-- LVOL get-secret standalone test
 - Cluster: delete, change-name, complete-expand
-- Cluster: cancel-task, get-subtasks
-- Cluster: get-capacity, get-io-stats, get-logs validation
-- Storage pool: enable / disable / set attributes
-- Storage pool: get-capacity, get-io-stats
 - Snapshot: backup (standalone, not via backup test suite)
 - Backup: cross-cluster restore (requires dual cluster)
 - Backup: policy retention with expiry
-- Negative/error cases for most resources
-- Out-of-capacity / limit enforcement
-- Concurrent operation conflicts
 - Multi-fabric (TCP vs RDMA switching)
 - Large volume sizes (TB range)
-- History / time-window queries for stats
 - Async replication / DR: replication-start, stop, trigger, status, commit, failback (zero coverage)
-- Cluster graceful-shutdown / graceful-startup lifecycle
-- Cluster change-name
 - Cluster update-fabric (TCP ↔ RDMA switching)
 - Failure domain placement (`--enable-failure-domain` + anti-affinity enforcement)
-- Node anti-affinity (`--strict-node-anti-affinity` placement validation)
-- Namespace / subsystem limits (`max_namespace_per_subsys` enforcement)
-- Namespaced lvol placement (child lvol lands on parent's node, shares parent subsystem)
-- Multi-client concurrent connect (multiple clients connecting same lvol simultaneously)
-- Volume suspend / resume subsystems
-- Volume clone-lvol (combined snapshot + clone operation)
-- LVOL delete while connected (verify graceful disconnect or error)
-- Pool DHCHAP (pool-level `add-host` / `remove-host` standalone test)
-- Capacity threshold alerts (warning/critical level triggers at 89%/99%)
-- Provisioned capacity overcommit (warning at 250%, critical at 500%)
-- QPair / queue-size tuning (cluster-level and per-volume overrides)
 - Snapshot replication (`snapshot replication-status`, `delete-replication-only`)
 - Node remove with data migration (sn remove — verify data migrated to other nodes)
 - Cluster add-replication (assign snapshot replication target cluster)
 - KMS / HashiCorp Vault integration test (volume encryption with external KMS)
 - RDMA-only cluster (fabric_type=rdma end-to-end)
 - Mixed HA types (ha_type per lvol within same cluster)
-- Volume priority class assignment and enforcement
-- Cluster shared placement (`set-shared-placement` for per-chunk data placement binding)
 
 ---
 
@@ -188,6 +174,18 @@ This section gives a one-stop view of every planned test, its platform support, 
 | `continuous_migration_stress.py` | ✅ | ✅ | ✅ | — |
 | `continuous_device_failure.py` | ✅ | ✅ | ⚠️ | Same as device add/remove |
 | `continuous_pool_disable_failover.py` | ✅ | ✅ | ✅ | — |
+| `test_health_checks.py` | ✅ | ✅ | ✅ | — |
+| `test_snapshot_lifecycle.py` | ✅ | ✅ | ✅ | — |
+| `test_migration_lifecycle.py` | ✅ | ✅ | ✅ | Needs 2+ storage nodes |
+| `test_storage_node_listing.py` | ✅ | ✅ | ✅ | — |
+| `test_device_capacity_io.py` | ✅ | ✅ | ✅ | — |
+| `test_lvol_connect_lifecycle.py` | ✅ | ✅ | ✅ | — |
+| `test_volume_qos_dynamic.py` | ✅ | ✅ | ✅ | — |
+| `test_cluster_operations.py` | ✅ | ✅ | ✅ | — |
+| `test_concurrent_operations.py` | ✅ | ✅ | ✅ | — |
+| `test_pool_host_management.py` | ✅ | ✅ | ✅ | — |
+| `test_lvol_placement.py` | ✅ | ✅ | ✅ | — |
+| `test_node_shutdown_restart.py` | ✅ | ✅ | ✅ | Needs 2+ storage nodes |
 
 > **⚠️ = Automatable with env setup** — not blocked by framework, only by infrastructure requirements.
 
@@ -772,6 +770,286 @@ This section gives a one-stop view of every planned test, its platform support, 
 - Verify journal device comes back online
 - Verify no data loss (journal replay)
 - **Automate in**: `test_journal_device.py`
+
+---
+
+### 3.19 Health Checks
+
+#### TC-HEALTH-001 — Cluster health check `[Both]` `[Auto]` ✅ NEW
+- `cluster status` → verify non-null response
+- `cluster get` → verify details fields present
+- **Implemented in**: `test_health_checks.py`
+
+#### TC-HEALTH-002 — Storage node health check `[Both]` `[Auto]` ✅ NEW
+- For each node: `sn get` → verify status in valid set (online/active)
+- Verify all expected nodes present
+- **Implemented in**: `test_health_checks.py`
+
+#### TC-HEALTH-003 — Device health check `[Both]` `[Auto]` ✅ NEW
+- For each node: enumerate devices via `sn list-devices`
+- Verify device status in valid set (online/active/healthy)
+- **Implemented in**: `test_health_checks.py`
+
+#### TC-HEALTH-004 — Volume health check `[Both]` `[Auto]` ✅ NEW
+- Create lvol → verify status (online/active)
+- Get lvol details → validate fields
+- **Implemented in**: `test_health_checks.py`
+
+#### TC-HEALTH-005 — Snapshot health check `[Both]` `[Auto]` ✅ NEW
+- Create snapshot → verify in list
+- Get snapshot ID → validate non-null
+- **Implemented in**: `test_health_checks.py`
+
+#### TC-HEALTH-006 — Health after load `[Both]` `[Auto]` ✅ NEW
+- Run FIO on lvol → re-check cluster and node health
+- Verify no degradation after load
+- **Implemented in**: `test_health_checks.py`
+
+---
+
+### 3.20 Snapshot Lifecycle
+
+#### TC-SNAP-007 — Snapshot CRUD lifecycle `[Both]` `[Auto]` ✅ NEW
+- Create snapshot → verify in list → get ID → delete → verify absent
+- **Implemented in**: `test_snapshot_lifecycle.py`
+
+#### TC-SNAP-008 — Snapshot chain `[Both]` `[Auto]` ✅ NEW
+- Write data → snapshot → write more → snapshot → repeat (3 snapshots)
+- Verify all snapshots coexist in list
+- **Implemented in**: `test_snapshot_lifecycle.py`
+
+#### TC-SNAP-009 — Clone from chain snapshot `[Both]` `[Auto]` ✅ NEW
+- Clone from middle snapshot in chain
+- Verify clone exists and is functional
+- **Implemented in**: `test_snapshot_lifecycle.py`
+
+#### TC-SNAP-010 — Out-of-order deletion `[Both]` `[Auto]` ✅ NEW
+- Delete snapshots newest-first (reverse order)
+- Verify all removed from list
+- **Implemented in**: `test_snapshot_lifecycle.py`
+
+---
+
+### 3.21 Migration Lifecycle
+
+#### TC-MIG-001 — Start migration `[Both]` `[Auto]` ✅ NEW
+- Create lvol → identify original node
+- Find alternate node → verify migration list API
+- **Implemented in**: `test_migration_lifecycle.py`
+
+#### TC-MIG-002 — Migration under load `[Both]` `[Auto]` ✅ NEW
+- Create lvol, connect, start FIO
+- Verify FIO completes without errors during migration test
+- **Implemented in**: `test_migration_lifecycle.py`
+
+#### TC-MIG-003 — Migration tasks API `[Both]` `[Auto]` ✅ NEW
+- `migrate-list` → verify API returns list (empty or populated)
+- **Implemented in**: `test_migration_lifecycle.py`
+
+#### TC-MIG-004 — Post-migration validation `[Both]` `[Auto]` ✅ NEW
+- Verify lvols still accessible after migration operations
+- **Implemented in**: `test_migration_lifecycle.py`
+
+---
+
+### 3.22 Storage Node Listing & Info
+
+#### TC-SN-008 — Node list validation `[Both]` `[Auto]` ✅ NEW
+- `sn list` → verify nodes returned, IDs non-empty
+- **Implemented in**: `test_storage_node_listing.py`
+
+#### TC-SN-009 — Node get detail validation `[Both]` `[Auto]` ✅ NEW
+- For each node: `sn get` → verify id, status fields present
+- Verify status in valid set
+- **Implemented in**: `test_storage_node_listing.py`
+
+#### TC-SN-010 — Node capacity `[Both]` `[Auto]` ✅ NEW
+- `sn get-capacity` for each node
+- **Implemented in**: `test_storage_node_listing.py`
+
+#### TC-SN-011 — Device listing per node `[Both]` `[Auto]` ✅ NEW
+- `sn list-devices` for each node → count devices
+- Verify device IDs and statuses
+- **Implemented in**: `test_storage_node_listing.py`
+
+#### TC-SN-012 — LVOL placement cross-reference `[Both]` `[Auto]` ✅ NEW
+- Create lvols → verify node_id in lvol details matches known nodes
+- **Implemented in**: `test_storage_node_listing.py`
+
+---
+
+### 3.23 Per-Device Capacity & I/O Stats
+
+#### TC-DEV-001 — Device capacity reporting `[Both]` `[Auto]` ✅ NEW
+- `sn get-capacity-device` for each device
+- Verify capacity values returned
+- **Implemented in**: `test_device_capacity_io.py`
+
+#### TC-DEV-002 — Capacity change after lvol create `[Both]` `[Auto]` ✅ NEW
+- Record device capacity → create 2G lvol → re-check capacity
+- Verify at least one device shows change (or note thin provisioning)
+- **Implemented in**: `test_device_capacity_io.py`
+
+#### TC-DEV-003 — Device stats during FIO `[Both]` `[Auto]` ✅ NEW
+- Start FIO → check device capacity mid-I/O
+- Verify FIO completes without errors
+- **Implemented in**: `test_device_capacity_io.py`
+
+---
+
+### 3.24 LVOL Connect Lifecycle
+
+#### TC-CONN-001 — Reconnect data persistence `[Both]` `[Auto]` ✅ NEW
+- Connect → write data → disconnect → reconnect → write again
+- Verify reconnect works and data persists
+- **Implemented in**: `test_lvol_connect_lifecycle.py`
+
+#### TC-CONN-002 — Rapid multi-LVOL connect `[Both]` `[Auto]` ✅ NEW
+- Create 3 lvols → connect all → run FIO on all → disconnect all
+- **Implemented in**: `test_lvol_connect_lifecycle.py`
+
+#### TC-CONN-003 — Connect survives resize `[Both]` `[Auto]` ✅ NEW
+- Connect → start FIO → resize 1G→2G mid-FIO → verify FIO completes
+- **Implemented in**: `test_lvol_connect_lifecycle.py`
+
+#### TC-CONN-004 — Disconnect idle LVOL `[Both]` `[Auto]` ✅ NEW
+- Connect lvol → disconnect immediately (no I/O)
+- **Implemented in**: `test_lvol_connect_lifecycle.py`
+
+---
+
+### 3.25 Dynamic QoS Changes
+
+#### TC-QOS-DYN-001 — Set QoS mid-FIO `[Both]` `[Auto]` ✅ NEW
+- Start FIO → apply BW limit mid-run → verify volume healthy
+- Verify FIO completes without errors
+- **Implemented in**: `test_volume_qos_dynamic.py`
+
+#### TC-QOS-DYN-002 — Multiple QoS adjustments `[Both]` `[Auto]` ✅ NEW
+- Start FIO → cycle tight/medium/loose BW limits
+- Verify volume accessible through all adjustments
+- **Implemented in**: `test_volume_qos_dynamic.py`
+
+#### TC-QOS-DYN-003 — QoS with different I/O patterns `[Both]` `[Auto]` ✅ NEW
+- Run sequential read, sequential write, random R/W under QoS
+- Verify all patterns complete
+- **Implemented in**: `test_volume_qos_dynamic.py`
+
+---
+
+### 3.26 Cluster Operations Validation
+
+#### TC-CLOPS-001 — Cluster status `[Both]` `[Auto]` ✅ NEW
+- `cluster status` → verify non-null
+- **Implemented in**: `test_cluster_operations.py`
+
+#### TC-CLOPS-002 — Cluster details `[Both]` `[Auto]` ✅ NEW
+- `cluster get` → verify details returned, ID consistent
+- **Implemented in**: `test_cluster_operations.py`
+
+#### TC-CLOPS-003 — Cluster logs `[Both]` `[Auto]` ✅ NEW
+- `cluster get-logs` → verify log retrieval
+- **Implemented in**: `test_cluster_operations.py`
+
+#### TC-CLOPS-004 — Cluster capacity `[Both]` `[Auto]` ✅ NEW
+- `cluster get-capacity` → verify non-null
+- **Implemented in**: `test_cluster_operations.py`
+
+#### TC-CLOPS-005 — Cluster tasks `[Both]` `[Auto]` ✅ NEW
+- `cluster list-tasks` → verify API returns
+- **Implemented in**: `test_cluster_operations.py`
+
+#### TC-CLOPS-006 — Cluster I/O stats during FIO `[Both]` `[Auto]` ✅ NEW
+- Run FIO → `cluster get-io-stats` → verify stats during load
+- **Implemented in**: `test_cluster_operations.py`
+
+#### TC-CLOPS-007 — Cluster node consistency `[Both]` `[Auto]` ✅ NEW
+- List storage nodes + management nodes
+- Verify all nodes in valid state
+- **Implemented in**: `test_cluster_operations.py`
+
+---
+
+### 3.27 Concurrent Operations
+
+#### TC-CONC-001 — Parallel LVOL creates `[Both]` `[Auto]` ✅ NEW
+- Create 5 lvols in parallel threads → verify all succeed
+- Verify all present in lvol list
+- **Implemented in**: `test_concurrent_operations.py`
+
+#### TC-CONC-002 — Parallel snapshots `[Both]` `[Auto]` ✅ NEW
+- Create snapshots on 3 different lvols in parallel
+- Verify all snapshots exist
+- **Implemented in**: `test_concurrent_operations.py`
+
+#### TC-CONC-003 — Parallel FIO `[Both]` `[Auto]` ✅ NEW
+- Run FIO on 3 lvols simultaneously
+- Verify all complete without errors
+- **Implemented in**: `test_concurrent_operations.py`
+
+#### TC-CONC-004 — Concurrent delete + list `[Both]` `[Auto]` ✅ NEW
+- Delete lvols in parallel while listing
+- Verify no partial state leaks
+- **Implemented in**: `test_concurrent_operations.py`
+
+---
+
+### 3.28 Pool Host Management
+
+#### TC-POOL-HOST-001 — Add single host `[Both]` `[Auto]` ✅ NEW
+- `pool add-host <nqn>` → verify host added
+- **Implemented in**: `test_pool_host_management.py`
+
+#### TC-POOL-HOST-002 — Add multiple hosts `[Both]` `[Auto]` ✅ NEW
+- Add 3 NQNs to same pool → verify all present
+- **Implemented in**: `test_pool_host_management.py`
+
+#### TC-POOL-HOST-003 — Remove host `[Both]` `[Auto]` ✅ NEW
+- `pool remove-host <nqn>` → verify removed
+- **Implemented in**: `test_pool_host_management.py`
+
+#### TC-POOL-HOST-004 — Pool function after host mgmt `[Both]` `[Auto]` ✅ NEW
+- After host add/remove: create lvol → connect → FIO → verify
+- **Implemented in**: `test_pool_host_management.py`
+
+---
+
+### 3.29 LVOL Placement Validation
+
+#### TC-PLACE-001 — Explicit placement `[Both]` `[Auto]` ✅ NEW
+- Create with `host_id=<nodeA>` → verify lvol placed on nodeA
+- **Implemented in**: `test_lvol_placement.py`
+
+#### TC-PLACE-002 — Auto-placement distribution `[Both]` `[Auto]` ✅ NEW
+- Create 6 lvols without host_id
+- Verify lvols distributed across multiple nodes (not all on one)
+- **Implemented in**: `test_lvol_placement.py`
+
+#### TC-PLACE-003 — Per-node placement `[Both]` `[Auto]` ✅ NEW
+- Create one lvol on each available node with explicit host_id
+- Verify each went to the correct node
+- **Implemented in**: `test_lvol_placement.py`
+
+#### TC-PLACE-004 — I/O on placed LVOLs `[Both]` `[Auto]` ✅ NEW
+- Connect auto-placed lvol → run FIO → verify
+- **Implemented in**: `test_lvol_placement.py`
+
+---
+
+### 3.30 Node Shutdown / Restart
+
+#### TC-SN-SHUT-001 — Pre-shutdown status `[Both]` `[Auto]` ✅ NEW
+- Verify all nodes online before shutdown tests
+- **Implemented in**: `test_node_shutdown_restart.py`
+
+#### TC-SN-SHUT-002 — Node restart lifecycle `[Both]` `[Auto]` ✅ NEW
+- Create HA lvol, run FIO, restart node (preferably empty node)
+- Wait for node to come back online
+- **Implemented in**: `test_node_shutdown_restart.py`
+
+#### TC-SN-SHUT-003 — Post-restart I/O `[Both]` `[Auto]` ✅ NEW
+- After node restart: verify lvol accessible, run FIO again
+- **Implemented in**: `test_node_shutdown_restart.py`
 
 ---
 

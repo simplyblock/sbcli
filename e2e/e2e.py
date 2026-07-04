@@ -207,6 +207,7 @@ def main():
         _skip_k8s = _test_failed and test_obj.preserve_resources_on_failure
         if _skip_k8s:
             logger.info(f"[cleanup] Test {test.__name__} failed — preserving K8s resources for debugging (--preserve_resources_on_failure)")
+        _is_bulk_run = len(test_class_run) > 1
         try:
             test_obj.collect_management_details(post_teardown=False)
             test_obj.teardown(delete_lvols=False, close_ssh=False, skip_k8s_cleanup=_skip_k8s)
@@ -214,13 +215,19 @@ def main():
                 test_obj.stop_docker_logs_collect()
             else:
                 test_obj.stop_k8s_log_collect()
-            test_obj.fetch_all_nodes_distrib_log()
+            if _test_failed:
+                test_obj.fetch_all_nodes_distrib_log()
+            else:
+                logger.info(f"[perf] Skipping distrib dump for passed test {test.__name__}")
             test_obj.collect_management_details(post_teardown=True)
             test_obj.teardown(delete_lvols=not _skip_k8s, close_ssh=False, skip_k8s_cleanup=_skip_k8s)
             if not args.run_k8s:
                 all_nodes = test_obj._get_all_nodes()
                 test_obj.ssh_obj.collect_final_docker_logs_simple(all_nodes, test_obj.docker_logs_path)
-            test_obj.export_graylog_logs()
+            if _is_bulk_run:
+                logger.info(f"[perf] Skipping per-test Graylog export in bulk run ({len(test_class_run)} tests)")
+            else:
+                test_obj.export_graylog_logs()
             test_obj.extract_delay_qpair_logs()
             test_obj.teardown(delete_lvols=False, close_ssh=True)
             # pass
