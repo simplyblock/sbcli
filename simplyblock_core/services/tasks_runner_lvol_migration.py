@@ -652,7 +652,9 @@ def _setup_snap_transfer(snap, snap_index, src_node, tgt_node,
         f"size_in_mib={size_in_mib} (lvol_size_mib={lvol_size_mib})"
     )
     _log_spdk_bdev_size(src_rpc, src_composite, f"SRC snap[{snap_uuid[:8]}] pre-create")
-    ret = tgt_rpc.create_lvol(snap_short, size_in_mib, tgt_node.lvstore)
+    _ndcs = snap.lvol.ndcs if hasattr(snap, 'lvol') and snap.lvol else 0
+    _npcs = snap.lvol.npcs if hasattr(snap, 'lvol') and snap.lvol else 0
+    ret = tgt_rpc.create_lvol(snap_short, size_in_mib, tgt_node.lvstore, ndcs=_ndcs, npcs=_npcs)
     if not ret:
         return None, f"Failed to create target lvol for snap {snap_uuid}"
     _log_spdk_bdev_size(tgt_rpc, tgt_composite, f"TGT snap[{snap_uuid[:8]}] post-create")
@@ -2055,7 +2057,9 @@ def _handle_cleanup_target(migration, tgt_node, tgt_rpc, src_rpc=None):
     # Reverse order: children/leaves before parents/roots (SPDK open-ref constraint).
     # _delete_bdev_blocking handles "not found" (status 2) gracefully, so a
     # crash-recovery re-run that re-deletes already-removed bdevs is safe.
-    for snap_uuid in reversed(migration.snaps_migrated):
+    # Uses get_snaps_to_delete_on_target to skip pre-existing snaps and snaps
+    # still referenced by other lvols already on the target node.
+    for snap_uuid in reversed(migration_controller.get_snaps_to_delete_on_target(migration)):
         try:
             snap = db.get_snapshot_by_id(snap_uuid)
             snap_short = _snap_tgt_short_name(snap)
