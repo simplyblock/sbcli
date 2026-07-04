@@ -116,8 +116,8 @@ _WAIT = object()
 _INTERMEDIATE_POLL_INTERVAL_S = 1      # seconds between stat checks
 _INTERMEDIATE_POLL_MAX = 300           # max iterations ≈ 5 min
 
-_SKIP_CLEANUP_SOURCE = True
-_SKIP_INTERMEDIATE_SNAP_DELETE = True
+_SKIP_CLEANUP_SOURCE = False
+_SKIP_INTERMEDIATE_SNAP_DELETE = False
 
 
 def _now_ms():
@@ -140,6 +140,10 @@ def _get_migration_nic(node):
 
 
 _MIGRATION_BDEV_SUFFIX = constants.LVOL_MIG_BDEV_SUFFIX
+# Suffix applied when the canonical (no-suffix) name is already taken on the
+# target after migration.  "am" = "after migration" — stays distinct from the
+# in-flight 'm' suffix so pre-existing migrated snapshots remain identifiable.
+_MIGRATION_BDEV_SUFFIX_DONE = 'am'
 
 
 def _apply_migration_to_db(migration, tgt_lvol_uuid=None, tgt_lvol_bdev=None):
@@ -904,10 +908,16 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                 _s = db.get_snapshot_by_id(_snap_uuid)
             except KeyError:
                 continue
-            _short_tgt = _snap_tgt_short_name(_s)
-            if _short_tgt in _tgt_immutable:
+            _short_tgt = _snap_tgt_short_name(_s)          # SNAP_Xm  (in-flight)
+            _short_canonical = _snap_short_name(_s)         # SNAP_X   (post-rename)
+            _short_am = _short_canonical + _MIGRATION_BDEV_SUFFIX_DONE  # SNAP_Xam (fallback)
+            _found_as = next(
+                (n for n in (_short_tgt, _short_canonical, _short_am)
+                 if n in _tgt_immutable),
+                None)
+            if _found_as:
                 logger.info(
-                    f"Pre-scan: {_snap_uuid} ({_short_tgt}) is already an immutable "
+                    f"Pre-scan: {_snap_uuid} ({_found_as}) is already an immutable "
                     f"snapshot on target; marking pre-existing")
                 migration.snaps_preexisting_on_target.append(_snap_uuid)
                 _pre_scan_updated = True
@@ -1809,6 +1819,125 @@ def _get_tertiary_rpc(node):
 
 
 
+def _rename_migrated_bdevs(migration, tgt_node, tgt_rpc, tgt_sec_rpc=None, tgt_ter_rpc=None):
+    """
+    After migration completes, rename 'm'-suffixed bdevs on the target back to
+    their canonical names (without the suffix).  This prevents suffix accumulation
+    on repeated migrations of the same volume.
+
+    A pre-check ensures we only rename when the canonical name is free on the
+    target.  If the canonical name already exists the 'm' name is kept as-is so
+    both snapshots can coexist without conflict.
+
+    Must be called AFTER _apply_migration_to_db() — snap.snap_bdev and
+    lvol.lvol_bdev already point to the 'm'-suffixed target paths at that point.
+    """
+    lvstore = tgt_node.lvstore
+    preexisting = set(migration.snaps_preexisting_on_target or [])
+
+    try:
+        existing_bdevs = {
+            e.get('name', '').split('/')[-1]
+            for e in (tgt_rpc.bdev_lvol_get_lvols(lvstore) or [])
+        }
+    except Exception as exc:
+        logger.warning(f"_rename_migrated_bdevs: could not query target bdevs: {exc}")
+        return
+
+    def _do_rename(old_composite, new_composite, label):
+        tgt_rpc.bdev_lvol_rename(old_composite, new_composite)
+        for role, rpc in [("sec", tgt_sec_rpc), ("ter", tgt_ter_rpc)]:
+            if rpc:
+                try:
+                    rpc.bdev_lvol_rename(old_composite, new_composite)
+                except Exception as exc:
+                    logger.warning(
+                        f"_rename_migrated_bdevs: {role} rename {label} (non-fatal): {exc}")
+
+    # --- Snapshots ---
+    for snap_uuid in migration.snaps_migrated:
+        if snap_uuid in preexisting:
+            continue
+        try:
+            snap = db.get_snapshot_by_id(snap_uuid)
+        except KeyError:
+            continue
+
+        snap_bdev = snap.snap_bdev  # e.g. LVS_TGT/SNAP_Xm
+        if '/' not in snap_bdev:
+            continue
+        current_short = snap_bdev.split('/', 1)[1]
+        if not current_short.endswith(_MIGRATION_BDEV_SUFFIX):
+            continue  # already canonical
+
+        canonical_short = current_short[:-len(_MIGRATION_BDEV_SUFFIX)]
+        if canonical_short in existing_bdevs:
+            fallback_short = canonical_short + _MIGRATION_BDEV_SUFFIX_DONE
+            if fallback_short in existing_bdevs:
+                logger.warning(
+                    f"_rename_migrated_bdevs: both {canonical_short} and {fallback_short} "
+                    f"exist — cannot rename {current_short}, leaving as-is")
+                continue
+            target_short = fallback_short
+            logger.info(
+                f"_rename_migrated_bdevs: {canonical_short} taken — renaming {current_short} → {fallback_short}")
+        else:
+            target_short = canonical_short
+
+        try:
+            _do_rename(f"{lvstore}/{current_short}", f"{lvstore}/{target_short}", current_short)
+            snap.snap_bdev = f"{lvstore}/{target_short}"
+            snap.write_to_db(db.kv_store)
+            existing_bdevs.discard(current_short)
+            existing_bdevs.add(target_short)
+            logger.info(f"_rename_migrated_bdevs: snap {current_short} → {target_short}")
+        except Exception as exc:
+            logger.warning(
+                f"_rename_migrated_bdevs: snap rename {current_short} failed: {exc}")
+
+    # --- Lvol ---
+    try:
+        lvol = db.get_lvol_by_id(migration.lvol_id)
+    except KeyError:
+        logger.warning(f"_rename_migrated_bdevs: lvol {migration.lvol_id} not found")
+        return
+
+    current_lvol_short = lvol.lvol_bdev
+    if not current_lvol_short.endswith(_MIGRATION_BDEV_SUFFIX):
+        return  # already canonical
+
+    canonical_lvol_short = current_lvol_short[:-len(_MIGRATION_BDEV_SUFFIX)]
+    if canonical_lvol_short in existing_bdevs:
+        fallback_lvol_short = canonical_lvol_short + _MIGRATION_BDEV_SUFFIX_DONE
+        if fallback_lvol_short in existing_bdevs:
+            logger.warning(
+                f"_rename_migrated_bdevs: both {canonical_lvol_short} and {fallback_lvol_short} "
+                f"exist — cannot rename {current_lvol_short}, leaving as-is")
+            return
+        target_lvol_short = fallback_lvol_short
+        logger.info(
+            f"_rename_migrated_bdevs: {canonical_lvol_short} taken — renaming {current_lvol_short} → {fallback_lvol_short}")
+    else:
+        target_lvol_short = canonical_lvol_short
+
+    try:
+        _do_rename(
+            f"{lvstore}/{current_lvol_short}",
+            f"{lvstore}/{target_lvol_short}",
+            current_lvol_short)
+        lvol.lvol_bdev = target_lvol_short
+        lvol.top_bdev = f"{lvstore}/{target_lvol_short}"
+        for entry in lvol.bdev_stack:
+            if (entry.get('type') == 'bdev_lvol'
+                    and entry.get('params', {}).get('name') == current_lvol_short):
+                entry['params']['name'] = target_lvol_short
+        lvol.write_to_db(db.kv_store)
+        logger.info(f"_rename_migrated_bdevs: lvol {current_lvol_short} → {target_lvol_short}")
+    except Exception as exc:
+        logger.warning(
+            f"_rename_migrated_bdevs: lvol rename failed: {exc}")
+
+
 def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
     """
     Delete snapshots from the source node that are exclusively owned by the
@@ -1829,11 +1958,12 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
             migration,
             tgt_lvol_uuid=_ctx.get('tgt_lvol_uuid'),
             tgt_lvol_bdev=_ctx.get('tgt_lvol_bdev'))
+        _tgt_sec_rpc = _get_secondary_rpc(tgt_node)
+        _tgt_ter = _get_target_tertiary_node(tgt_node)[0]
+        _tgt_ter_rpc = _make_rpc(_tgt_ter) if _tgt_ter else None
         if migration.intermediate_snaps and not _SKIP_INTERMEDIATE_SNAP_DELETE:
-            tgt_sec_rpc = _get_secondary_rpc(tgt_node)
-            _tgt_ter = _get_target_tertiary_node(tgt_node)[0]
-            tgt_ter_rpc = _make_rpc(_tgt_ter) if _tgt_ter else None
-            _delete_intermediate_snaps_on_target(migration, tgt_rpc, tgt_sec_rpc, tgt_ter_rpc)
+            _delete_intermediate_snaps_on_target(migration, tgt_rpc, _tgt_sec_rpc, _tgt_ter_rpc)
+        _rename_migrated_bdevs(migration, tgt_node, tgt_rpc, _tgt_sec_rpc, _tgt_ter_rpc)
         return True, False, None
 
     ctx = migration.transfer_context or {}
@@ -1857,17 +1987,25 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
         to_delete = migration_controller.get_snaps_safe_to_delete_on_source(migration)
 
         # Verify each snapshot to be deleted physically exists on the target
-        # before we remove anything from the source.  Target bdevs carry the
-        # migration suffix (e.g. SNAP_xxxm) — derive from source short name.
+        # before we remove anything from the source.  Bdevs may carry the
+        # migration suffix (SNAP_Xm), canonical name (SNAP_X), or the
+        # post-rename fallback (SNAP_Xam) — check all three so that a
+        # crash-recovery re-run after a partial rename still passes.
         tgt_lvols = tgt_rpc.bdev_lvol_get_lvols(tgt_node.lvstore) or []
         tgt_names = {e.get('name', '').split('/')[-1] for e in tgt_lvols}
         for snap_uuid in to_delete:
             try:
                 snap = db.get_snapshot_by_id(snap_uuid)
-                snap_short_tgt = _snap_tgt_short_name(snap)
-                if snap_short_tgt not in tgt_names:
+                # snap.snap_bdev was updated to the target path by apply_migration_to_db;
+                # use it as the primary lookup, then fall back to derived names.
+                _snap_bdev = snap.snap_bdev or ''
+                _primary = _snap_bdev.split('/', 1)[1] if '/' in _snap_bdev else _snap_bdev
+                _m_name = _snap_tgt_short_name(snap)
+                _canonical = _snap_short_name(snap)
+                _am_name = _canonical + _MIGRATION_BDEV_SUFFIX_DONE
+                if not any(n in tgt_names for n in (_primary, _m_name, _canonical, _am_name)):
                     return False, False, (
-                        f"Target missing snapshot {snap_short_tgt} ({snap_uuid}) "
+                        f"Target missing snapshot {_m_name} ({snap_uuid}) "
                         "— aborting source cleanup to prevent data loss"
                     )
             except KeyError:
@@ -1973,14 +2111,17 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
             migration, tgt_lvol_uuid=tgt_lvol_uuid, tgt_lvol_bdev=tgt_lvol_bdev):
         return False, False, "Failed to update DB records after source cleanup"
 
+    tgt_sec_rpc = _get_secondary_rpc(tgt_node)
+    _tgt_ter = _get_target_tertiary_node(tgt_node)[0]
+    tgt_ter_rpc = _make_rpc(_tgt_ter) if _tgt_ter else None
+
     # Delete intermediate (shrink) snapshots from the target — they are migration
     # artifacts and do not need to be preserved. No migration flag so SPDK
     # coalesces and frees their clusters into the child bdev.
     if migration.intermediate_snaps and not _SKIP_INTERMEDIATE_SNAP_DELETE:
-        tgt_sec_rpc = _get_secondary_rpc(tgt_node)
-        _tgt_ter = _get_target_tertiary_node(tgt_node)[0]
-        tgt_ter_rpc = _make_rpc(_tgt_ter) if _tgt_ter else None
         _delete_intermediate_snaps_on_target(migration, tgt_rpc, tgt_sec_rpc, tgt_ter_rpc)
+
+    _rename_migrated_bdevs(migration, tgt_node, tgt_rpc, tgt_sec_rpc, tgt_ter_rpc)
 
     return True, False, None
 
@@ -2062,10 +2203,21 @@ def _handle_cleanup_target(migration, tgt_node, tgt_rpc, src_rpc=None):
     for snap_uuid in reversed(migration_controller.get_snaps_to_delete_on_target(migration)):
         try:
             snap = db.get_snapshot_by_id(snap_uuid)
-            snap_short = _snap_tgt_short_name(snap)
-            bdev_name = f"{tgt_node.lvstore}/{snap_short}"
-            if not tgt_rpc.get_bdevs(bdev_name):
-                logger.info(f"Target bdev {bdev_name} not found; skipping (already cleaned up)")
+            # Try all possible bdev name variants: in-flight (m), canonical, am-fallback.
+            # After a partial rename (crash mid-cleanup) the bdev may have been
+            # renamed before the rollback was triggered.
+            _lvstore = tgt_node.lvstore
+            _m_name  = _snap_tgt_short_name(snap)
+            _canonical = _snap_short_name(snap)
+            _am_name = _canonical + _MIGRATION_BDEV_SUFFIX_DONE
+            bdev_name = next(
+                (f"{_lvstore}/{n}" for n in (_m_name, _canonical, _am_name)
+                 if tgt_rpc.get_bdevs(f"{_lvstore}/{n}")),
+                None)
+            if not bdev_name:
+                logger.info(
+                    f"Target bdev {_lvstore}/{_m_name} not found in any variant; "
+                    f"skipping (already cleaned up)")
                 continue
             _delete_bdev_blocking(bdev_name, tgt_rpc,
                                   secondary_rpc=tgt_sec_rpc, tertiary_rpc=tgt_ter_rpc)
