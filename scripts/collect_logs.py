@@ -351,13 +351,26 @@ def graylog_fetch_all(session, base_url, query, from_iso, to_iso, out_path):
                     mc_from = mt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
                     mc_to = mt_end.strftime("%Y-%m-%dT%H:%M:%S.000Z")
                     mw, micro_hit = _gl_write_window(session, search_url, query, mc_from, mc_to, fh)
-                    if micro_hit:
-                        print(
-                            f"    WARN: 1-min window {mc_from} still >{MAX_RESULT_WINDOW} entries, "
-                            f"captured first {mw} (best effort)",
-                            file=sys.stderr,
-                        )
-                    written += mw
+                    if not micro_hit:
+                        written += mw
+                    else:
+                        # Level 4: 1-min still too big, split into 15-sec
+                        print(f"    NOTE: 1-min at {mc_from} still hit limit, using 15-sec windows")
+                        st = mt
+                        nano = timedelta(seconds=15)
+                        while st < mt_end:
+                            st_end = min(st + nano, mt_end)
+                            sc_from = st.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+                            sc_to = st_end.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+                            sw, nano_hit = _gl_write_window(session, search_url, query, sc_from, sc_to, fh)
+                            if nano_hit:
+                                print(
+                                    f"    WARN: 15-sec window {sc_from} still >{MAX_RESULT_WINDOW} entries, "
+                                    f"captured first {sw} (best effort)",
+                                    file=sys.stderr,
+                                )
+                            written += sw
+                            st = st_end
                     mt = mt_end
 
             t = sub_end
