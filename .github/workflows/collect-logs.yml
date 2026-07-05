@@ -118,7 +118,7 @@ jobs:
   collect-logs:
     name: "Collect logs (${{ inputs.DEPLOY_MODE }}${{ inputs.DEPLOY_MODE == 'k8s-native' && format(' / {0}', inputs.cluster_environment) || '' }})"
     runs-on: ${{ inputs.DEPLOY_MODE == 'k8s-native' && inputs.cluster_environment == 'aws-openshift' && 'vm-runner-43' || 'self-hosted' }}
-    timeout-minutes: 300
+    timeout-minutes: 720
 
     env:
       MGMT_IP: ${{ inputs.MGMT_IP }}
@@ -287,7 +287,7 @@ jobs:
       # ============================================================
       - name: Collect logs (k8s-native)
         if: inputs.DEPLOY_MODE == 'k8s-native'
-        timeout-minutes: 240
+        timeout-minutes: 600
         shell: bash
         run: |
           set -euxo pipefail
