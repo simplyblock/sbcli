@@ -252,34 +252,18 @@ def _gl_search_page(session, search_url, query, from_iso, to_iso, limit, offset)
 
 def _gl_write_window(session, search_url, query, from_iso, to_iso, fh):
     """
-    Paginate through a single time window and write lines to *fh*.
+    Paginate through a single time window and write ALL lines to *fh*.
 
-    Returns ``(lines_written, hit_limit)`` where *hit_limit* is ``True``
-    when the total exceeds MAX_RESULT_WINDOW and the caller should retry
-    with smaller sub-windows for better coverage.  Partial writes up to
-    MAX_RESULT_WINDOW are kept so that even the smallest 1-minute windows
-    still capture data.
+    The window MUST have total <= MAX_RESULT_WINDOW.  Caller is responsible
+    for checking the count first (via ``_gl_probe_total``) and bisecting
+    the window when it exceeds the limit.
+
+    Returns number of lines written.
     """
     written = 0
     offset = 0
 
-    # Probe total size first
-    msgs, total = _gl_search_page(session, search_url, query, from_iso, to_iso, 1, 0)
-    if msgs is None:
-        return 0, False
-
-    # Signal caller to try smaller windows, but still fetch what we can
-    hit_limit = total > MAX_RESULT_WINDOW
-    capped_total = min(total, MAX_RESULT_WINDOW)
-
-    if hit_limit:
-        print(
-            f"    NOTE: window {from_iso}..{to_iso} has {total} entries "
-            f"(>{MAX_RESULT_WINDOW}), will fetch first {capped_total}",
-            file=sys.stderr,
-        )
-
-    while offset < capped_total:
+    while True:
         msgs, _ = _gl_search_page(
             session, search_url, query, from_iso, to_iso, PAGE_SIZE, offset
         )
@@ -293,89 +277,109 @@ def _gl_write_window(session, search_url, query, from_iso, to_iso, fh):
         offset += len(msgs)
         if len(msgs) < PAGE_SIZE:
             break
+        if offset >= MAX_RESULT_WINDOW:
+            break
 
-    return written, hit_limit
+    return written
+
+
+def _gl_probe_total(session, search_url, query, from_iso, to_iso):
+    """Return total number of matching entries for a window, or -1 on error."""
+    msgs, total = _gl_search_page(session, search_url, query, from_iso, to_iso, 1, 0)
+    if msgs is None:
+        return -1
+    return total
+
+
+# Minimum bisection window size in seconds.  Windows smaller than this are
+# fetched best-effort (capped at MAX_RESULT_WINDOW).
+MIN_BISECT_SEC = 1
+
+
+def _gl_fetch_recursive(session, search_url, query, from_dt, to_dt, fh,
+                         depth=0):
+    """
+    Recursively bisect the time window until entries fit within
+    MAX_RESULT_WINDOW, then paginate and write.
+
+    Returns ``(lines_written, truncated_count)`` where *truncated_count*
+    is the number of leaf windows that exceeded the limit even at the
+    minimum window size (data loss).
+    """
+    from_iso = from_dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    to_iso = to_dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    window_sec = (to_dt - from_dt).total_seconds()
+    indent = "    " + "  " * min(depth, 6)
+
+    total = _gl_probe_total(session, search_url, query, from_iso, to_iso)
+    if total <= 0:
+        return 0, 0
+
+    # Window fits — fetch everything
+    if total <= MAX_RESULT_WINDOW:
+        written = _gl_write_window(session, search_url, query,
+                                    from_iso, to_iso, fh)
+        return written, 0
+
+    # Window too big — can we bisect further?
+    if window_sec <= MIN_BISECT_SEC:
+        # Smallest window reached — best-effort fetch (capped at 100k)
+        print(f"{indent}WARN: {window_sec:.0f}s window at {from_iso} has "
+              f"{total} entries (>{MAX_RESULT_WINDOW}), capturing first "
+              f"{MAX_RESULT_WINDOW} (best effort)", file=sys.stderr)
+        written = _gl_write_window(session, search_url, query,
+                                    from_iso, to_iso, fh)
+        return written, 1
+
+    # Bisect
+    mid_dt = from_dt + (to_dt - from_dt) / 2
+    print(f"{indent}NOTE: {from_iso}..{to_iso} ({window_sec:.0f}s) has "
+          f"{total} entries, bisecting")
+
+    w1, t1 = _gl_fetch_recursive(session, search_url, query,
+                                  from_dt, mid_dt, fh, depth + 1)
+    w2, t2 = _gl_fetch_recursive(session, search_url, query,
+                                  mid_dt, to_dt, fh, depth + 1)
+    return w1 + w2, t1 + t2
 
 
 def graylog_fetch_all(session, base_url, query, from_iso, to_iso, out_path):
     """
     Download all log messages matching *query* within [from_iso, to_iso].
 
-    Reactive fallback strategy: try the full window first.  If pagination
-    hits the MAX_RESULT_WINDOW limit, retry with 5-minute sub-windows.
-    If a 5-minute window still hits the limit, split into 1-minute slices.
+    Uses recursive binary bisection: probe the window count first, and if
+    it exceeds MAX_RESULT_WINDOW, split the window in half and recurse.
+    Keeps halving down to MIN_BISECT_SEC (1 second).  Only writes data at
+    leaf windows that fit within the limit (no duplicate writes).
 
     Writes one text line per message to *out_path*.
-    Returns number of lines written.
+    Returns ``(lines_written, truncated_count)`` where *truncated_count*
+    is the number of leaf windows that still exceeded the limit at the
+    minimum window size.
     """
     search_url = f"{base_url}/search/universal/absolute"
 
-    # Probe
-    msgs, total = _gl_search_page(session, search_url, query, from_iso, to_iso, 1, 0)
-    if msgs is None:
+    # Quick probe
+    total = _gl_probe_total(session, search_url, query, from_iso, to_iso)
+    if total < 0:
         Path(out_path).touch()
-        return 0
+        return 0, 0
+    if total == 0:
+        Path(out_path).touch()
+        print(f"    total entries: 0")
+        return 0, 0
 
     print(f"    total entries: {total}")
 
+    from_dt = datetime.fromisoformat(from_iso.replace("Z", "+00:00"))
+    to_dt = datetime.fromisoformat(to_iso.replace("Z", "+00:00"))
+
     with open(out_path, "w") as fh:
-        # Level 1: try full window
-        written, hit = _gl_write_window(session, search_url, query, from_iso, to_iso, fh)
+        written, truncated = _gl_fetch_recursive(
+            session, search_url, query, from_dt, to_dt, fh,
+        )
 
-        if not hit:
-            return written
-
-        # Level 2: retry with 5-min sub-windows
-        print(f"    NOTE: hit pagination limit, retrying with 5-min sub-windows")
-        written = 0
-        t = datetime.fromisoformat(from_iso.replace("Z", "+00:00"))
-        t_end = datetime.fromisoformat(to_iso.replace("Z", "+00:00"))
-        sub = timedelta(minutes=5)
-
-        while t < t_end:
-            sub_end = min(t + sub, t_end)
-            c_from = t.strftime("%Y-%m-%dT%H:%M:%S.000Z")
-            c_to = sub_end.strftime("%Y-%m-%dT%H:%M:%S.000Z")
-
-            w, sub_hit = _gl_write_window(session, search_url, query, c_from, c_to, fh)
-
-            if not sub_hit:
-                written += w
-            else:
-                # Level 3: 5-min still too big, split into 1-min
-                print(f"    NOTE: 5-min at {c_from} still hit limit, using 1-min windows")
-                mt = t
-                micro = timedelta(minutes=1)
-                while mt < sub_end:
-                    mt_end = min(mt + micro, sub_end)
-                    mc_from = mt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
-                    mc_to = mt_end.strftime("%Y-%m-%dT%H:%M:%S.000Z")
-                    mw, micro_hit = _gl_write_window(session, search_url, query, mc_from, mc_to, fh)
-                    if not micro_hit:
-                        written += mw
-                    else:
-                        # Level 4: 1-min still too big, split into 15-sec
-                        print(f"    NOTE: 1-min at {mc_from} still hit limit, using 15-sec windows")
-                        st = mt
-                        nano = timedelta(seconds=15)
-                        while st < mt_end:
-                            st_end = min(st + nano, mt_end)
-                            sc_from = st.strftime("%Y-%m-%dT%H:%M:%S.000Z")
-                            sc_to = st_end.strftime("%Y-%m-%dT%H:%M:%S.000Z")
-                            sw, nano_hit = _gl_write_window(session, search_url, query, sc_from, sc_to, fh)
-                            if nano_hit:
-                                print(
-                                    f"    WARN: 15-sec window {sc_from} still >{MAX_RESULT_WINDOW} entries, "
-                                    f"captured first {sw} (best effort)",
-                                    file=sys.stderr,
-                                )
-                            written += sw
-                            st = st_end
-                    mt = mt_end
-
-            t = sub_end
-
-    return written
+    return written, truncated
 
 
 # ---------------------------------------------------------------------------
@@ -740,7 +744,12 @@ def fetch(
     probe_cache,
     os_pod_name=None,
 ):
-    """Route to Graylog or OpenSearch depending on *use_opensearch*."""
+    """Route to Graylog or OpenSearch depending on *use_opensearch*.
+
+    When using Graylog and the recursive bisection still has truncated
+    leaf windows, automatically falls back to OpenSearch scroll API
+    (which has no offset limit) for the entire service.
+    """
     if use_opensearch:
         return opensearch_fetch_all(
             os_session, opensearch_base,
@@ -749,10 +758,33 @@ def fetch(
             probe_cache=probe_cache,
             pod_name=os_pod_name,
         )
-    return graylog_fetch_all(
+
+    written, truncated = graylog_fetch_all(
         gl_session, graylog_base,
         gl_query, from_iso, to_iso, str(out_path),
     )
+
+    if truncated and opensearch_base:
+        print(f"    NOTE: Graylog had {truncated} truncated window(s), "
+              f"retrying via OpenSearch scroll API for complete data")
+        try:
+            os_written = opensearch_fetch_all(
+                os_session, opensearch_base,
+                os_container, os_source,
+                from_iso, to_iso, str(out_path),
+                probe_cache=probe_cache,
+                pod_name=os_pod_name,
+            )
+            if os_written > 0:
+                return os_written
+            print(f"    WARN: OpenSearch fallback returned 0 lines, "
+                  f"keeping Graylog result ({written} lines)")
+        except Exception as exc:
+            print(f"    WARN: OpenSearch fallback failed ({exc}), "
+                  f"keeping Graylog result ({written} lines)",
+                  file=sys.stderr)
+
+    return written
 
 
 # ---------------------------------------------------------------------------
