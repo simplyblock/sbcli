@@ -161,6 +161,74 @@ jobs:
           fi
 
       # ============================================================
+      # Common: Validate runner and ensure NFS is mounted
+      # ============================================================
+      - name: Validate runner for NFS access
+        if: always() && inputs.NFS_COPY_PATH != ''
+        shell: bash
+        run: |
+          set -euxo pipefail
+          HOSTNAME_SHORT="$(hostname -s)"
+          ALLOWED_RUNNERS="vm22 vm-runner-2 vm-runner-3 vm-runner-43"
+
+          found=false
+          for r in ${ALLOWED_RUNNERS}; do
+            if [[ "${HOSTNAME_SHORT}" == "${r}" ]]; then
+              found=true
+              break
+            fi
+          done
+
+          if [[ "${found}" != "true" ]]; then
+            echo "ERROR: Runner '${HOSTNAME_SHORT}' is not in the NFS-capable list (${ALLOWED_RUNNERS})."
+            echo "       NFS copy was requested but this runner cannot reach the NFS server."
+            exit 1
+          fi
+          echo "Runner '${HOSTNAME_SHORT}' is NFS-capable — proceeding."
+
+      - name: Ensure NFS is mounted
+        if: always() && inputs.NFS_COPY_PATH != ''
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          NFS_SERVER="10.10.10.140"
+          NFS_EXPORT="/srv/nfs_share"
+          NFS_MOUNT="/mnt/nfs_share"
+
+          # Check if already mounted
+          if mount | grep -qw "${NFS_MOUNT}"; then
+            echo "NFS already mounted at ${NFS_MOUNT}"
+          else
+            echo "NFS not mounted at ${NFS_MOUNT} — attempting mount..."
+
+            # Install nfs-utils if missing
+            if ! rpm -q nfs-utils &>/dev/null; then
+              echo "Installing nfs-utils..."
+              sudo dnf install -y nfs-utils || sudo yum install -y nfs-utils
+            fi
+
+            sudo mkdir -p "${NFS_MOUNT}"
+            sudo mount -t nfs "${NFS_SERVER}:${NFS_EXPORT}" "${NFS_MOUNT}"
+
+            # Verify mount succeeded
+            if mount | grep -qw "${NFS_MOUNT}"; then
+              echo "NFS mounted successfully at ${NFS_MOUNT}"
+            else
+              echo "ERROR: Failed to mount NFS ${NFS_SERVER}:${NFS_EXPORT} at ${NFS_MOUNT}"
+              exit 1
+            fi
+          fi
+
+          # Create the full NFS_COPY_PATH (including subdirs like graylog-gh-dut)
+          NFS_BASE="${{ inputs.NFS_COPY_PATH }}"
+          if [[ ! -d "${NFS_BASE}" ]]; then
+            echo "Creating NFS destination directory ${NFS_BASE}..."
+            sudo mkdir -p "${NFS_BASE}"
+          fi
+          echo "NFS path ready: ${NFS_BASE}"
+
+      # ============================================================
       # K8s-native: Setup kubeconfig
       # ============================================================
       - name: Setup kubeconfig
@@ -611,8 +679,13 @@ jobs:
           NFS_BASE="${{ inputs.NFS_COPY_PATH }}"
 
           if [ ! -d "${NFS_BASE}" ]; then
-            echo "WARN: NFS path ${NFS_BASE} does not exist or is not mounted, skipping copy"
-            exit 0
+            echo "NFS_BASE ${NFS_BASE} does not exist — creating it..."
+            sudo mkdir -p "${NFS_BASE}"
+          fi
+
+          if [ ! -d "${NFS_BASE}" ]; then
+            echo "ERROR: NFS path ${NFS_BASE} still does not exist after mkdir. NFS may not be mounted."
+            exit 1
           fi
 
           TIMESTAMP=$(date -u "+%Y%m%d-%H%M%S")
