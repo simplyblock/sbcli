@@ -429,10 +429,18 @@ def _is_snap_on_node(snap_id, node_id):
 
 def _get_snap_ancestry(snap_uuid):
     """
-    Walk the ``snap_ref_id`` chain from *snap_uuid* upward to the root and
+    Walk the blobstore parent chain from *snap_uuid* upward to the root and
     return the UUIDs in root-first order (oldest ancestor first).
 
-    ``snap_ref_id`` points from a child snapshot to its parent snapshot.
+    Two parent pointers are tried in order:
+    - ``snap_ref_id``: set for snapshots taken from a clone volume (points to
+      the clone's parent snapshot, used for ref-count tracking).
+    - ``prev_snap_uuid``: set for all snapshots and records the previous
+      snapshot in the lvol's own sequence — this is the blobstore parent for
+      snapshots taken from a non-clone volume (e.g. snap_A3 → snap_A2 →
+      snap_A1 taken from the original lvol_A).  Without this fallback, the
+      ancestry walk stops at the clone's immediate parent and misses the older
+      ancestor snapshots whose data is not copied standalone.
     """
     chain = []
     current = snap_uuid
@@ -444,7 +452,7 @@ def _get_snap_ancestry(snap_uuid):
         except KeyError:
             break
         chain.append(current)
-        current = snap.snap_ref_id
+        current = snap.snap_ref_id or snap.prev_snap_uuid
     chain.reverse()  # oldest → newest
     return chain
 
@@ -538,7 +546,7 @@ def _protect_snap_and_ancestors(snap_uuid, candidate_set):
         candidate_set.discard(current)
         try:
             snap = db.get_snapshot_by_id(current)
-            current = snap.snap_ref_id
+            current = snap.snap_ref_id or snap.prev_snap_uuid
         except KeyError:
             break
 
@@ -552,7 +560,7 @@ def _collect_snap_ancestry(snap_uuid, out_set):
         out_set.add(current)
         try:
             snap = db.get_snapshot_by_id(current)
-            current = snap.snap_ref_id
+            current = snap.snap_ref_id or snap.prev_snap_uuid
         except KeyError:
             break
 
