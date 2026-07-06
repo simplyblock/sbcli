@@ -1954,9 +1954,8 @@ def _rename_migrated_bdevs(migration, tgt_node, tgt_rpc, tgt_sec_rpc=None, tgt_t
             snap.write_to_db(db.kv_store)
 
     # --- Ancestor chain blobs (non-owned snaps) ---
-    # These belong to another lvol's chain; _apply_migration_to_db did NOT update
-    # snap.snap_bdev for them — it only added an instances entry with the _m name.
-    # Find the _m bdev via instances, rename it on TGT, and update the entry.
+    # _apply_migration_to_db added an instances entry with the _m bdev name.
+    # Rename it and update the entry in place.
     for snap_uuid in migration.snaps_migrated:
         if snap_uuid in preexisting:
             continue
@@ -1974,32 +1973,19 @@ def _rename_migrated_bdevs(migration, tgt_node, tgt_rpc, tgt_sec_rpc=None, tgt_t
                 continue
             inst_lvstore, inst_short = inst_bdev.split('/', 1)
             if inst_lvstore != lvstore:
-                continue  # not on this migration's TGT lvstore
+                continue
             if not inst_short.endswith(_MIGRATION_BDEV_SUFFIX):
-                continue  # already renamed by a previous call
-
-            canonical_short = inst_short[:-len(_MIGRATION_BDEV_SUFFIX)]
-            if canonical_short in existing_bdevs:
-                fallback_short = canonical_short + _MIGRATION_BDEV_SUFFIX_DONE
-                if fallback_short in existing_bdevs:
-                    logger.warning(
-                        f"_rename_migrated_bdevs: ancestor {inst_short} — both "
-                        f"{canonical_short} and {fallback_short} exist, leaving as-is")
-                    continue
-                target_short = fallback_short
-            else:
-                target_short = canonical_short
+                continue
 
             try:
-                _do_rename(f"{lvstore}/{inst_short}", f"{lvstore}/{target_short}", inst_short)
-                inst['snap_bdev'] = f"{lvstore}/{target_short}"
-                existing_bdevs.discard(inst_short)
-                existing_bdevs.add(target_short)
-                updated = True
-                logger.info(f"_rename_migrated_bdevs: ancestor snap {inst_short} → {target_short}")
+                target = _rename_with_fallback(inst_short, inst_short)
             except Exception as exc:
                 logger.warning(
-                    f"_rename_migrated_bdevs: ancestor snap rename {inst_short} failed: {exc}")
+                    f"_rename_migrated_bdevs: ancestor {inst_short} failed: {exc}")
+                continue
+            if target:
+                inst['snap_bdev'] = f"{lvstore}/{target}"
+                updated = True
 
         if updated:
             snap.write_to_db(db.kv_store)
