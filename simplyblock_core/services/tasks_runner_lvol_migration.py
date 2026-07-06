@@ -116,8 +116,9 @@ _WAIT = object()
 _INTERMEDIATE_POLL_INTERVAL_S = 1      # seconds between stat checks
 _INTERMEDIATE_POLL_MAX = 300           # max iterations ≈ 5 min
 
-_SKIP_CLEANUP_SOURCE = True
-_SKIP_INTERMEDIATE_SNAP_DELETE = True
+_SKIP_CLEANUP_SOURCE = False
+_SKIP_INTERMEDIATE_SNAP_DELETE = False
+_SKIP_RENAME_BDEVS = True
 
 
 def _now_ms():
@@ -1832,6 +1833,10 @@ def _rename_migrated_bdevs(migration, tgt_node, tgt_rpc, tgt_sec_rpc=None, tgt_t
     Must be called AFTER _apply_migration_to_db() — snap.snap_bdev and
     lvol.lvol_bdev already point to the 'm'-suffixed target paths at that point.
     """
+    if _SKIP_RENAME_BDEVS:
+        logger.info("_rename_migrated_bdevs: skipped (SKIP_RENAME_BDEVS=True)")
+        return
+
     lvstore = tgt_node.lvstore
     preexisting = set(migration.snaps_preexisting_on_target or [])
 
