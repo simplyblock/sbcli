@@ -617,6 +617,83 @@ def _process_restart_task(task_uuid):
             time.time() + _restart_backoff_seconds(retry))
 
 
+
+# Watchdog for orphaned transitional states. A node whose restart/shutdown
+# flow is interrupted (this runner's pod evicted mid-restart during a node
+# drain, node crash, ...) is left in STATUS_RESTARTING / STATUS_IN_SHUTDOWN
+# with no pending task and no live process owning the transition. Those
+# states are locked against outside writers (set_node_status) and the only
+# sanctioned cleanup, _reset_if_transient, runs solely while a task for that
+# node is being processed — so an ownerless node is wedged forever. The k8s
+# operator's nodedrain controller then holds its drain slot waiting for the
+# node to come online, deadlocking MachineConfig rollouts cluster-wide
+# (incident 2026-07-04: every MCO reboot wedged the rollout until the node
+# was manually reset).
+#
+# First-seen tracking is in-memory: a runner restart resets the clock, which
+# only delays recovery by one grace period. Two grace tiers: when the node's
+# SPDK pod is absent, nothing can be mid-flight on the data plane and we
+# recover fast; when a pod exists, an unseen foreground CLI restart (which
+# holds no task and looks ownerless to this check) may be driving it, and
+# resetting under it would kill the SPDK it just started — so wait long
+# enough for any legitimate restart to finish.
+_transitional_first_seen: dict = {}
+ORPHANED_STATE_GRACE_SEC = 20 * 60
+ORPHANED_STATE_FAST_GRACE_SEC = 5 * 60
+
+
+def _spdk_pod_exists(node):
+    """Whether the node's SPDK pod exists (kubernetes mode). Used only to
+    pick the watchdog grace tier — on any doubt return True so the
+    conservative (long) tier applies."""
+    try:
+        cluster = db.get_cluster_by_id(node.cluster_id)
+        if cluster.mode != "kubernetes":
+            return True
+        utils.load_kube_config_with_fallback()
+        from kubernetes import client as k8s_client
+        namespace = getattr(node, "cr_namespace", "") or constants.K8S_NAMESPACE
+        prefix = f"snode-spdk-pod-{node.rpc_port}-"
+        for pod in k8s_client.CoreV1Api().list_namespaced_pod(namespace=namespace).items:
+            if pod.metadata.name.startswith(prefix):
+                return True
+        return False
+    except Exception as e:
+        logger.debug(f"SPDK pod lookup failed for {node.get_id()}: {e}")
+        return True
+
+
+def _watchdog_orphaned_transitional_nodes(cluster_id):
+    """Detect nodes stuck in a transitional CP state with no restart task
+    owning them, and route them through the sanctioned recovery: verify the
+    data plane is down, reset to OFFLINE (_reset_if_transient), then queue a
+    normal auto-restart task."""
+    for node in db.get_storage_nodes_by_cluster_id(cluster_id):
+        node_id = node.get_id()
+        if node.status not in (StorageNode.STATUS_RESTARTING, StorageNode.STATUS_IN_SHUTDOWN):
+            _transitional_first_seen.pop(node_id, None)
+            continue
+        # An unfinished restart task owns this state; its own flow calls
+        # _reset_if_transient when appropriate.
+        if not _validate_no_task_node_restart(cluster_id, node_id):
+            _transitional_first_seen.pop(node_id, None)
+            continue
+        first_seen = _transitional_first_seen.setdefault(node_id, time.time())
+        elapsed = time.time() - first_seen
+        grace = ORPHANED_STATE_GRACE_SEC if _spdk_pod_exists(node) else ORPHANED_STATE_FAST_GRACE_SEC
+        if elapsed < grace:
+            continue
+        logger.warning(
+            f"Node {node_id} stuck in {node.status} for {int(elapsed)}s with no "
+            f"restart task owning it; attempting reset to OFFLINE")
+        _reset_if_transient(node_id)
+        node = db.get_storage_node_by_id(node_id)
+        if node.status == StorageNode.STATUS_OFFLINE:
+            _transitional_first_seen.pop(node_id, None)
+            if tasks_controller.add_node_to_auto_restart(node):
+                logger.info(f"Queued auto-restart for recovered node {node_id}")
+
+
 def main():
     logger.info("Starting Tasks runner...")
     while True:
@@ -661,11 +738,11 @@ def main():
                             _restart_next_attempt[task.uuid] = (
                                 time.time() + constants.RESTART_TASK_EXEC_INTERVAL_SEC)
                             continue
-                        # SUSPENDED and drained: full-cluster recovery — fan node
+                        # SUSPENDED and drained: full-cluster recovery â€” fan node
                         # restarts out on the pool (see _restart_pool). Online
                         # clusters stay strictly sequential. suspend_drain_complete
                         # is required: it certifies every (non operator-stopped)
-                        # node went OFFLINE, i.e. no client IO — an operator-caused
+                        # node went OFFLINE, i.e. no client IO â€” an operator-caused
                         # suspension never drains, its survivors are still serving,
                         # and its restarts must stay sequential with full guards.
                         # Parallel dispatch in the two sanctioned cases only:
@@ -708,6 +785,11 @@ def main():
                     # raises, so a crash in one task cannot escape to the outer
                     # `while True` and kill recovery of every other node.
                     _process_restart_task(task.uuid)
+
+                try:
+                    _watchdog_orphaned_transitional_nodes(cl.get_id())
+                except Exception as e:
+                    logger.error(f"Orphaned-node watchdog failed for cluster {cl.get_id()}: {e}")
 
         time.sleep(constants.TASK_EXEC_INTERVAL_SEC)
 
