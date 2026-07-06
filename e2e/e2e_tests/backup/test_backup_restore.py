@@ -841,12 +841,23 @@ class BackupTestBase(TestClusterBase):
                     status = latest[4]
                     result = latest[5] if len(latest) > 5 else ""
                     if status == "done":
+                        # Detect product-side failures marked as "done"
+                        # (e.g. "S3 transfer failed on data plane (attempt 3)")
+                        if "failed" in result.lower():
+                            raise AssertionError(
+                                f"Restore task for {lvol_name} completed with "
+                                f"failure: {result}"
+                            )
                         self.logger.info(
                             f"[restore] Restore task for {lvol_name} is done "
                             f"({result}). Waiting 60s before connect/mount."
                         )
                         sleep_n_sec(60)
                         return
+                    if status == "failed":
+                        raise AssertionError(
+                            f"Restore task for {lvol_name} failed: {result}"
+                        )
                     self.logger.info(
                         f"[restore] Restore task status: {status} "
                         f"({int(deadline - time.time())}s remaining)"

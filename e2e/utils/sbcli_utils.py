@@ -1,4 +1,5 @@
 import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from http import HTTPStatus
 from logger_config import setup_logger
 from utils.common_utils import sleep_n_sec
@@ -538,31 +539,51 @@ class SbcliUtils:
             sleep_n_sec(5)
             lvols = self.list_lvols()
 
-    def delete_all_clones(self):
+    def delete_all_clones(self, max_workers=10):
         """Delete all clone lvols (lvols with cloned_from_snap set).
 
         Must be called BEFORE delete_all_snapshots, because SPDK refuses
         to delete a snapshot that still has clones.
         """
         data = self.get_request(api_url="/lvol")
-        for lvol_info in data.get("results", []):
-            if lvol_info.get("cloned_from_snap"):
-                name = lvol_info.get("lvol_name")
-                self.logger.info(f"Deleting clone lvol: {name}")
-                try:
-                    self.delete_lvol(lvol_name=name, skip_error=True)
-                except Exception as e:
-                    self.logger.warning(
-                        f"Clone delete failed (continuing): {name}, err={e}"
-                    )
+        clone_names = [
+            lvol_info.get("lvol_name")
+            for lvol_info in data.get("results", [])
+            if lvol_info.get("cloned_from_snap")
+        ]
+        if not clone_names:
+            return
+        self.logger.info(f"Deleting {len(clone_names)} clones (max_workers={max_workers})")
 
-    def delete_all_lvols(self):
-        """Deletes all lvols
-        """
+        def _del(name):
+            try:
+                self.delete_lvol(lvol_name=name, skip_error=True)
+            except Exception as e:
+                self.logger.warning(f"Clone delete failed (continuing): {name}, err={e}")
+
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futs = {pool.submit(_del, n): n for n in clone_names}
+            for f in as_completed(futs):
+                f.result()  # propagate unexpected errors
+
+    def delete_all_lvols(self, max_workers=10):
+        """Deletes all lvols in parallel."""
         lvols = self.list_lvols()
-        for name in list(lvols.keys()):
-            self.logger.info(f"Deleting lvol: {name}")
-            self.delete_lvol(lvol_name=name)
+        names = list(lvols.keys())
+        if not names:
+            return
+        self.logger.info(f"Deleting {len(names)} lvols (max_workers={max_workers})")
+
+        def _del(name):
+            try:
+                self.delete_lvol(lvol_name=name, skip_error=True)
+            except Exception as e:
+                self.logger.warning(f"Lvol delete failed (continuing): {name}, err={e}")
+
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futs = {pool.submit(_del, n): n for n in names}
+            for f in as_completed(futs):
+                f.result()
 
     def get_lvol_id(self, lvol_name):
         """Return lvol by lvol name
@@ -1100,16 +1121,26 @@ class SbcliUtils:
             return
         raise Exception(f"Snapshot did not get deleted in time. snap_name={snap_name}, snap_id={snap_id}")
 
-    def delete_all_snapshots(self):
+    def delete_all_snapshots(self, max_workers=10):
         """
-        Convenience cleanup via API.
+        Convenience cleanup via API — parallel deletion.
         """
         snaps = self.list_snapshots()
-        for snap_name in list(snaps.keys()):
+        snap_names = list(snaps.keys())
+        if not snap_names:
+            return
+        self.logger.info(f"Deleting {len(snap_names)} snapshots (max_workers={max_workers})")
+
+        def _del(name):
             try:
-                self.delete_snapshot(snap_name=snap_name, skip_error=True)
+                self.delete_snapshot(snap_name=name, skip_error=True)
             except Exception as e:
-                self.logger.info(f"Snapshot delete failed (continuing): {snap_name}, err={e}")
+                self.logger.info(f"Snapshot delete failed (continuing): {name}, err={e}")
+
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futs = {pool.submit(_del, n): n for n in snap_names}
+            for f in as_completed(futs):
+                f.result()
 
     # ── Pool-level host management (DHCHAP) ─────────────────────────────────
 

@@ -3543,7 +3543,7 @@ class SshUtils:
         docker_cmd = f"""
         sudo tmux new-session -d -s docker_mem_monitor \
         'bash -c "while true; do date >> {docker_mem_log}; \
-        docker stats --no-stream --format \\"table {{.Name}}\\t{{.MemUsage}}\\" >> {docker_mem_log}; \
+        docker stats --no-stream --format \\"table {{{{.Name}}}}\\t{{{{.MemUsage}}}}\\" >> {docker_mem_log}; \
         echo >> {docker_mem_log}; sleep 10; done"'
         """
 

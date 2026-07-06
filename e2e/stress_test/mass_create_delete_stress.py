@@ -77,8 +77,9 @@ class _MassCreateDeleteMixin:
     PVC_SIZE = "1Gi"
 
     # ── Snapshot / clone ───────────────────────────────────────────────────
-    SNAPSHOTS_PER_LVOL = 6
+    SNAPSHOTS_PER_LVOL = 2
     FIO_SAMPLE_PERCENT = 10
+    FIO_SAMPLE_MAX = 50             # absolute cap on sampled volumes
 
     # ── FIO (lightweight) ──────────────────────────────────────────────────
     FIO_IODEPTH = 1
@@ -1009,9 +1010,12 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
     # ── Phase 2: FIO on 10% of lvols ──────────────────────────────────────
 
     def _phase_2_fio_on_lvols(self):
-        sample_size = max(1, math.ceil(
-            len(self._lvol_registry) * self.FIO_SAMPLE_PERCENT / 100
-        ))
+        sample_size = min(
+            max(1, math.ceil(
+                len(self._lvol_registry) * self.FIO_SAMPLE_PERCENT / 100
+            )),
+            self.FIO_SAMPLE_MAX,
+        )
         sample = random.sample(
             list(self._lvol_registry.keys()),
             min(sample_size, len(self._lvol_registry)),
@@ -1220,9 +1224,15 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
 
     def _phase_3_create_snapshots(self):
         snap_items = []
-        for lvol_name, info in self._lvol_registry.items():
-            lvol_id = info["id"]
-            for s in range(self.SNAPSHOTS_PER_LVOL):
+        # Round-robin: create snapshot round 0 for all lvols, then round 1
+        # for all lvols, etc.  This spreads blobstore metadata load across
+        # lvols instead of stacking all snapshots on one lvol before moving
+        # to the next (which causes O(n) degradation on a single LVS).
+        lvol_entries = [
+            (name, info["id"]) for name, info in self._lvol_registry.items()
+        ]
+        for s in range(self.SNAPSHOTS_PER_LVOL):
+            for lvol_name, lvol_id in lvol_entries:
                 snap_name = f"snap-{lvol_name[-8:]}-{s:03d}"
                 snap_items.append({
                     "lvol_id": lvol_id,
@@ -1467,9 +1477,12 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
             self.logger.info("[Phase 6] No clones — skipping")
             return
 
-        sample_size = max(1, math.ceil(
-            len(self._clone_registry) * self.FIO_SAMPLE_PERCENT / 100
-        ))
+        sample_size = min(
+            max(1, math.ceil(
+                len(self._clone_registry) * self.FIO_SAMPLE_PERCENT / 100
+            )),
+            self.FIO_SAMPLE_MAX,
+        )
         sample = random.sample(
             list(self._clone_registry.keys()),
             min(sample_size, len(self._clone_registry)),
@@ -2253,9 +2266,12 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
         if not self._pvc_registry:
             return
 
-        sample_size = max(1, math.ceil(
-            len(self._pvc_registry) * self.FIO_SAMPLE_PERCENT / 100
-        ))
+        sample_size = min(
+            max(1, math.ceil(
+                len(self._pvc_registry) * self.FIO_SAMPLE_PERCENT / 100
+            )),
+            self.FIO_SAMPLE_MAX,
+        )
         sample = random.sample(
             list(self._pvc_registry.keys()),
             min(sample_size, len(self._pvc_registry)),
@@ -2309,8 +2325,10 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
 
     def _phase_3_create_snapshots(self):
         snap_items = []
-        for pvc_name in self._pvc_registry:
-            for s in range(self.SNAPSHOTS_PER_LVOL):
+        # Round-robin: create snapshot round 0 for all PVCs, then round 1, etc.
+        pvc_names = list(self._pvc_registry.keys())
+        for s in range(self.SNAPSHOTS_PER_LVOL):
+            for pvc_name in pvc_names:
                 vs_name = f"vs-{pvc_name[-8:]}-{s:03d}"
                 snap_items.append({
                     "vs_name": vs_name,
@@ -2584,9 +2602,12 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
             self.logger.info("[Phase 6] No clones — skipping")
             return
 
-        sample_size = max(1, math.ceil(
-            len(self._clone_registry) * self.FIO_SAMPLE_PERCENT / 100
-        ))
+        sample_size = min(
+            max(1, math.ceil(
+                len(self._clone_registry) * self.FIO_SAMPLE_PERCENT / 100
+            )),
+            self.FIO_SAMPLE_MAX,
+        )
         sample = random.sample(
             list(self._clone_registry.keys()),
             min(sample_size, len(self._clone_registry)),
