@@ -1,4 +1,5 @@
 # coding=utf-8
+import socket
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -71,6 +72,54 @@ def process_task(task, cl):
         return False
 
 
+# Applying the CPU topology during add_node makes the node reboot
+# (kubeletconfig / MCP update). The in-flight attempt then fails, but the
+# right reaction is neither a quick blind retry (the node is down for
+# 5-8 minutes; each attempt burns one of max_retry) nor exponential backoff
+# (which keeps sleeping long after the node is back). Bound how long we are
+# willing to wait for the node's agent to answer again — matches the
+# topology job's own reboot budget (sleep 900).
+NODE_REBOOT_WAIT_MAX_SEC = 900
+NODE_REBOOT_POLL_SEC = 15
+
+
+def _node_api_reachable(task, timeout=5):
+    """TCP-level reachability of the node agent (host:port from the task's
+    node_addr). During add the StorageNode record may not exist yet, so this
+    intentionally checks the address, not the DB object."""
+    addr = (task.function_params or {}).get("node_addr", "")
+    if ":" not in addr:
+        return True  # can't tell — let the normal retry path decide
+    host, _, port = addr.rpartition(":")
+    try:
+        with socket.create_connection((host, int(port)), timeout=timeout):
+            return True
+    except Exception:
+        return False
+
+
+def _wait_node_reachable(task, task_uuid):
+    """After a failed attempt, if the node is unreachable (rebooting for the
+    CPU-topology change), wait for it to answer again — up to
+    NODE_REBOOT_WAIT_MAX_SEC — instead of consuming retries against a node
+    that cannot possibly respond. Returns True if a wait took place."""
+    if _node_api_reachable(task):
+        return False
+    logger.info(
+        f"Node-add task {task_uuid}: node agent unreachable (rebooting for "
+        f"CPU topology?); waiting up to {NODE_REBOOT_WAIT_MAX_SEC}s for it to return")
+    deadline = time.time() + NODE_REBOOT_WAIT_MAX_SEC
+    while time.time() < deadline:
+        time.sleep(NODE_REBOOT_POLL_SEC)
+        if _node_api_reachable(task):
+            logger.info(f"Node-add task {task_uuid}: node agent reachable again; retrying add")
+            return True
+    logger.warning(
+        f"Node-add task {task_uuid}: node agent still unreachable after "
+        f"{NODE_REBOOT_WAIT_MAX_SEC}s; resuming normal retry schedule")
+    return True
+
+
 def _run_task(task_uuid, cluster_id):
     """Worker thread: drive one node-add task to completion (or suspension),
     then drop it from the in-flight set so a later cycle can retry it.
@@ -99,7 +148,14 @@ def _run_task(task_uuid, cluster_id):
             if res:
                 if task.status == JobSchedule.STATUS_DONE:
                     break
-            else:
+            # Reboot-aware wait: an attempt that failed because the node went
+            # down (topology reboot) neither burns the backoff nor retries
+            # blindly — wait for the agent to answer, then retry promptly on
+            # a fresh schedule.
+            if _wait_node_reachable(task, task_uuid):
+                delay_seconds = constants.TASK_EXEC_INTERVAL_SEC
+                continue
+            if not res:
                 # Cap the exponential backoff so a permanently failing node-add
                 # can't grow the sleep without bound.
                 delay_seconds = min(

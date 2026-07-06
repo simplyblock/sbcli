@@ -2499,10 +2499,21 @@ def render_and_deploy_alerting_configs(contact_point, grafana_endpoint, cluster_
         print(f"File moved to {prometheus_file_path} successfully.")
 
 
+# hostPath mount of the host's /etc/modules-load.d inside the k8s storage-node
+# agent (see storage-node.yaml in the CSI chart). Writing to the container's
+# own /etc/modules-load.d is a silent no-op there: the file lands in the
+# ephemeral container layer, the host's systemd-modules-load never sees it,
+# and modules are gone after the next node reboot — which wedged node-adds
+# resuming after the CPU-topology reboot (2026-07-06, bind_device_to_spdk 500).
+HOST_MODULES_LOAD_DIR = "/host/etc/modules-load.d"
+
+
 def load_kernel_module(module):
     """
-    Loads a kernel module using modprobe and ensures it is persistent across reboots
-    by creating a module file in /etc/modules-load.d/<module>.conf.
+    Loads a kernel module using modprobe and ensures it is persistent across
+    reboots by creating a module file in modules-load.d/<module>.conf — on the
+    HOST when running inside the k8s agent (via the HOST_MODULES_LOAD_DIR
+    hostPath mount), otherwise locally.
     """
     try:
         # Attempt to load the module immediately
@@ -2514,8 +2525,12 @@ def load_kernel_module(module):
 
     # Ensure persistence across reboots
     try:
-        path = f"/etc/modules-load.d/{module}.conf"
-        os.makedirs("/etc/modules-load.d", exist_ok=True)
+        if os.path.isdir(HOST_MODULES_LOAD_DIR):
+            target_dir = HOST_MODULES_LOAD_DIR
+        else:
+            target_dir = "/etc/modules-load.d"
+            os.makedirs(target_dir, exist_ok=True)
+        path = f"{target_dir}/{module}.conf"
 
         with open(path, "w") as f:
             f.write(f"{module}\n")
