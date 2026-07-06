@@ -69,6 +69,48 @@ def claim_task(task, owner=None):
     return decision["won"]
 
 
+def refresh_task_lease(task, owner=None):
+    """Heartbeat: refresh this host's lease on a task it already owns, so a
+    live owner is never preempted while blocking on long RPCs. Returns False
+    (without touching the task) if the task is done or owned by another host —
+    the caller lost the lease and should treat the takeover as authoritative."""
+    owner = owner or _RUNNER_HOST
+    now = str(datetime.datetime.now(datetime.timezone.utc))
+    refreshed = {"ok": False}
+
+    def _mutate(t):
+        if t.status == JobSchedule.STATUS_DONE:
+            return False
+        if t.owner != owner:
+            return False
+        t.updated_at = now
+        refreshed["ok"] = True
+        return True
+
+    if db.atomic_update(task, _mutate) is None:
+        return False
+    return refreshed["ok"]
+
+
+def ensure_node_restart_task(node):
+    """Return the id of an unfinished FN_NODE_RESTART task for this node,
+    creating one if none exists. Used by explicit restarts
+    (restart_storage_node wrapper) to make their ownership transferable: the
+    driver claims and heartbeats the task's lease, and if the driving process
+    dies mid-restart, a live tasks-runner claims the stale lease and resumes.
+
+    Deliberately bypasses the auto_restart_disabled guard of
+    add_node_to_auto_restart: that flag means "no UNATTENDED restart after a
+    deliberate shutdown" — an explicit restart is precisely the operator
+    intervention the flag waits for, and this task only continues that
+    expressed intent. On success the ONLINE transition cancels the task
+    (cancel_pending_node_restart_tasks via set_node_status)."""
+    existing = _validate_new_task_node_restart(node.cluster_id, node.get_id())
+    if existing:
+        return existing
+    return _add_task(JobSchedule.FN_NODE_RESTART, node.cluster_id, node.get_id(), "", max_retry=11)
+
+
 def _validate_new_task_dev_restart(cluster_id, node_id, device_id):
     tasks = db.get_job_tasks(cluster_id)
     for task in tasks:
