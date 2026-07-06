@@ -681,6 +681,7 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
 
     pt_name = ""
     subsystem_nqn = ""
+    pt_spdk_uuid = ""
     ip_list = []
     if snode.enable_ha_jm:
         # add pass through
@@ -690,6 +691,7 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
             logger.error(f"Failed to create pt noexcl bdev: {pt_name}")
             return False
 
+        pt_spdk_uuid = rpc_client.get_bdevs(pt_name)[0]["aliases"][0]
         subsystem_nqn = snode.subsystem + ":dev:" + jm_bdev
         logger.info("creating subsystem %s", subsystem_nqn)
         ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', jm_bdev)
@@ -731,6 +733,7 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
         'nvmf_port': snode.nvmf_port,
         'nvmf_multipath': multipath,
         'node_id': snode.get_id(),
+        'pt_bdev_uuid': pt_spdk_uuid,
     })
 
 
@@ -771,6 +774,7 @@ def _create_jm_stack_on_device(rpc_client, nvme, snode, after_restart):
 
     pt_name = ""
     subsystem_nqn = ""
+    pt_spdk_uuid = ""
     ip_list = []
     if snode.enable_ha_jm:
         # add pass through
@@ -779,7 +783,7 @@ def _create_jm_stack_on_device(rpc_client, nvme, snode, after_restart):
         if not ret:
             logger.error(f"Failed to create pt noexcl bdev: {pt_name}")
             return False
-
+        pt_spdk_uuid = rpc_client.get_bdevs(pt_name)[0]["aliases"][0]
         subsystem_nqn = snode.subsystem + ":dev:" + jm_bdev
         logger.info("creating subsystem %s", subsystem_nqn)
         ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', jm_bdev)
@@ -820,6 +824,7 @@ def _create_jm_stack_on_device(rpc_client, nvme, snode, after_restart):
         'nvmf_port': snode.nvmf_port,
         'nvmf_multipath': multipath,
         'node_id': snode.get_id(),
+        'pt_bdev_uuid': pt_spdk_uuid,
     })
 
 
@@ -858,6 +863,7 @@ def _create_storage_device_stack(rpc_client, nvme, snode, after_restart):
         logger.error(f"Failed to create pt noexcl bdev: {pt_name}")
         return None
 
+    pt_spdk_uuid = rpc_client.get_bdevs(pt_name)[0]["aliases"][0]
     subsystem_nqn = snode.subsystem + ":dev:" + alceml_id
     logger.info("creating subsystem %s", subsystem_nqn)
     ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', alceml_id)
@@ -889,6 +895,7 @@ def _create_storage_device_stack(rpc_client, nvme, snode, after_restart):
     nvme.nvmf_port = snode.nvmf_port
     nvme.io_error = False
     nvme.nvmf_multipath = multipath
+    nvme.pt_spdk_uuid = pt_spdk_uuid
     # if nvme.status != NVMeDevice.STATUS_NEW:
     #     nvme.status = NVMeDevice.STATUS_ONLINE
     return nvme
@@ -1177,7 +1184,8 @@ def _prepare_cluster_devices_on_restart(snode, clear_data=False):
                 logger.error(f"Failed to create pt noexcl bdev: {pt_name}")
                 return False
 
-            cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+            pt_spdk_uuid = rpc_client.get_bdevs(pt_name)[0]["aliases"][0]
+            jm_device.pt_bdev_uuid = pt_spdk_uuid
             subsystem_nqn = snode.subsystem + ":dev:" + jm_bdev
             logger.info("creating subsystem %s", subsystem_nqn)
             ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', jm_bdev)
@@ -1205,12 +1213,6 @@ def _connect_to_remote_devs(
     db_controller = DBController()
 
     rpc_client = this_node.rpc_client(timeout=30, retry=1)
-
-    # node_bdevs = rpc_client.get_bdevs()
-    # if node_bdevs:
-    #     node_bdev_names = [b['name'] for b in node_bdevs]
-    # else:
-    #     node_bdev_names = []
 
     remote_devices = []
     existing_remote_devices = {dev.get_id(): dev for dev in this_node.remote_devices}
@@ -1249,10 +1251,9 @@ def _connect_to_remote_devs(
         t.join()
 
     def _find_remote_bdev(dev):
-        expected_prefix = f"remote_{dev.alceml_bdev}"
-        for bdev in rpc_client.get_bdevs():
-            if bdev.startswith(expected_prefix):
-                return bdev
+        ret = rpc_client.get_bdevs(dev.pt_bdev_uuid)
+        if ret:
+            return ret[0]["name"]
         return ""
 
     remote_device_ids = set()
