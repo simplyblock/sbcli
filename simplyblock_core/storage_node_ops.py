@@ -355,34 +355,41 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names:
 
     ret = rpc_client.bdev_nvme_controller_list(name)
     if ret:
-        counter = 0
-        while (counter < 5):
-            waiting = False
-            for controller in ret[0]["ctrlrs"]:
-                controller_state = controller["state"]
-                logger.info(f"Controller found: {name}, status: {controller_state}")
-                if controller_state== "failed":
-                    # we can remove the controller only for certain, if its failed. other states are intermediate and require retry.
-                    rpc_client.bdev_nvme_detach_controller(name)
-                    time.sleep(2)
-                    break
-                elif controller_state == "resetting" or controller_state == "deleting" or controller_state == "reconnect_is_delayed":
-                    if counter < 5:
-                        time.sleep(2)
-                        waiting = True
-                        break
-                    else:  # this should never happen. It means controller is "hanging" in an intermediate state for more than 10 seconds. usually if some io is hanging.
-                        raise RuntimeError(f"Controller: {name}, status is {controller_state}")
-            if not waiting:
-                counter = 5
-            else:
-                counter += 1
+        # "failed" is transient here, NOT a terminal state to act on: the
+        # state string reports is_failed BEFORE resetting /
+        # reconnect_is_delayed (nvme_ctrlr_get_state_str), so a controller
+        # mid reset/reconnect cycle reads "failed" in the window between a
+        # reset failure and its disposition. With the cluster-wide
+        # bdev_nvme options (reconnect_delay_sec=1, ctrlr_loss_timeout_sec=1,
+        # set at node bring-up before any attach) the module self-resolves
+        # every failure to either "enabled" or destruct within ~1s — a
+        # persistently parked "failed" controller (only possible with
+        # reconnect_delay=0) cannot arise. The previous code issued a
+        # controller detach RPC on "failed", which raced the module's own
+        # destruct/reconnect machinery and — with only a fixed sleep, no
+        # detach-and-wait-gone — set up the attach-during-destroy race
+        # ("cntlid N are duplicated" class) on the immediate re-attach.
+        # Wait transients out; on a controller that stays transient past
+        # the budget, raise so the calling task suspends and retries.
+        _TRANSIENT_STATES = ("failed", "resetting", "deleting", "reconnect_is_delayed")
+        states: List[str] = []
+        for _attempt in range(5):
+            if not ret:
+                # The module destructed the controller on its own; the
+                # fresh-attach path below takes over.
+                break
+            states = [c.get("state") for c in ret[0].get("ctrlrs", [])]
+            logger.info(f"Controller found: {name}, states: {states}")
+            if not any(s in _TRANSIENT_STATES for s in states):
+                break  # settled (enabled/disabled) — reuse/repair below
+            time.sleep(2)
             # Refresh on retry so we don't loop on a stale snapshot.
             ret = rpc_client.bdev_nvme_controller_list(name) or []
-
-        # if reattach:
-        #    rpc_client.bdev_nvme_detach_controller(name)
-        #    time.sleep(1)
+        else:
+            # Still transient after the full budget: something is genuinely
+            # hanging (usually stuck IO). Never detach here — surface it.
+            device.release_device_connection()
+            raise RuntimeError(f"Controller: {name}, status is {states}")
 
     db_ctrl = DBController()
     target_node = db_ctrl.get_storage_node_by_id(device.node_id)
