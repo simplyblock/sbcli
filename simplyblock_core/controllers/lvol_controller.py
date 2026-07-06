@@ -508,6 +508,15 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
 
     logger.info(f"Max size: {utils.humanbytes(max_size)}")
     lvol = LVol()
+    # ns_id semantics in the create flow: 0 = "not assigned yet". The model
+    # default is 1 (a legitimate nsid), so it must be reset here — the
+    # primary's namespace add assigns the real value and every replica add
+    # is REQUIRED to reuse it (see add_lvol_on_node). Never let a replica
+    # add run with an auto-assigned nsid: namespace IDs must be identical
+    # on every path of a shared subsystem, or the client kernel rejects
+    # the namespaces ("duplicate IDs in subsystem" / "IDs don't match for
+    # shared namespace", mass-create incident 2026-07-06).
+    lvol.ns_id = 0
     lvol.lvol_name = name
     lvol.pvc_name = pvc_name or ""
     lvol.size = int(size)
@@ -1009,7 +1018,30 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
                             f"Failed to create listener for {lvol.get_id()}")
 
     logger.info("Add BDev to subsystem")
-    ret, err = rpc_client.nvmf_subsystem_add_ns2(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid)
+    # Cluster-consistent namespace IDs: the PRIMARY add lets the target
+    # auto-assign (nsid omitted) and persists the result in lvol.ns_id;
+    # every REPLICA add must pass that exact nsid. Auto-assignment on
+    # replicas gives each node its own arrival-order nsid map — under a
+    # concurrent mass create the maps diverge (verified 2026-07-06:
+    # 10/10 shared subsystems diverged across the three replicas, first
+    # mismatch as early as nsid=2), and the client kernel then rejects
+    # the namespaces ("IDs don't match for shared namespace N" /
+    # "duplicate IDs in subsystem for nsid M"), leaving lvols without
+    # block devices. A replica running before the primary assigned the
+    # nsid (ns_id == 0, e.g. a drain-queued registration firing early)
+    # must fail loudly instead of guessing.
+    if is_primary:
+        requested_nsid = None
+    else:
+        if not lvol.ns_id:
+            return _fail_after_bdev(
+                lvol, rpc_client,
+                f"Replica namespace add for {lvol.get_id()} has no primary-"
+                f"assigned ns_id; refusing auto-assignment (divergent nsid "
+                f"maps across the shared subsystem's paths)")
+        requested_nsid = lvol.ns_id
+    ret, err = rpc_client.nvmf_subsystem_add_ns2(
+        lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid, nsid=requested_nsid)
     if  err:
         if err and err["code"] == -32602 and lvol.namespace and lvol.node_id == snode.get_id():
             logger.info("Error adding namespace to subsystem, finding new subsystem for namespaced lvol")
@@ -1034,7 +1066,11 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
             return _fail_after_bdev(
                 lvol, rpc_client, "Failed to add bdev to subsystem")
 
-    lvol.ns_id = int(ret)
+    if is_primary:
+        # Persist the target-assigned nsid; replicas re-add with exactly
+        # this value, so it must never be overwritten by a replica's
+        # (identical) response.
+        lvol.ns_id = int(ret)
 
     if not is_primary:
         # Replica registration: the bdev was registered with the uuid/blobid
@@ -1117,9 +1153,19 @@ def recreate_lvol_on_node(lvol, snode, ha_inode_self=0, ana_state=None):
 
     # if namespace_found is False:
     logger.info("Add BDev to subsystem")
-    ret = rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid)
-    # if not ret:
-    #     return False, "Failed to add bdev to subsystem"
+    # Recreate must present the SAME nsid as every other path of the shared
+    # subsystem — pass the persisted primary-assigned value. Legacy records
+    # created before ns_id persistence carry the model default; for those
+    # (and dedicated one-namespace subsystems) the stored value is the
+    # correct nsid as well. Only a record with ns_id unset falls back to
+    # auto-assignment.
+    ret = rpc_client.nvmf_subsystem_add_ns(
+        lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid,
+        nsid=lvol.ns_id if lvol.ns_id else None)
+    if not ret:
+        logger.error(
+            "Failed to (re)add namespace for %s to %s with nsid=%s",
+            lvol.get_id(), lvol.nqn, lvol.ns_id or "auto")
 
     # add listeners - use per-lvstore port
     recreate_lvs_port = snode.get_lvol_subsys_port(lvol.lvs_name)
