@@ -996,14 +996,25 @@ def node_port_check_fun(snode):
                 if n.lvstore_status != "ready":
                     continue
                 # Skip port check during failback: if the primary or the
-                # other secondary (sec_1) for this lvstore is online/restarting,
-                # the port on this node may be intentionally blocked.
+                # OTHER follower (sec_1 / tertiary) for this lvstore is
+                # online/restarting, the port on this node may be
+                # intentionally blocked (recreate_lvstore and the port-allow
+                # failback both block follower ports for the re-wiring
+                # window). Both follower directions must be covered: a
+                # restarting tertiary blocks the acting-leader secondary's
+                # port just like a restarting secondary blocks the
+                # tertiary's — checking only secondary_node_id flipped the
+                # healthy secondary DOWN during a tertiary restart.
                 skip = False
                 if n.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_RESTARTING]:
                     skip = True
                 elif n.secondary_node_id and n.secondary_node_id != snode.get_id():
                     sec1 = db.get_storage_node_by_id(n.secondary_node_id)
                     if sec1 and sec1.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_RESTARTING]:
+                        skip = True
+                if not skip and n.tertiary_node_id and n.tertiary_node_id != snode.get_id():
+                    tert = db.get_storage_node_by_id(n.tertiary_node_id)
+                    if tert and tert.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_RESTARTING]:
                         skip = True
                 if not skip:
                     ports.append(n.get_lvol_subsys_port(n.lvstore))

@@ -13,28 +13,36 @@ Invariants covered:
      ``status_device=48 / is_device_available_read=0`` and raises a
      DISTRIBD "Unable to read stripe" error.
 
-  2. **No leadership manipulation.** The runner must not block any
-     peer's port, must not call ``bdev_lvol_set_leader`` /
-     ``bdev_distrib_force_to_non_leader`` on a peer, and must not call
-     ``bdev_lvol_set_lvs_opts`` to "take leadership locally" on the
-     recovering node. Leadership belongs to the JM heartbeat /
-     writer-conflict resolution; ``port_allow`` only allows the port.
+  2. **Fenced leadership failback.** When a peer holds LVS leadership at
+     port_allow time (it became acting leader during the outage), the
+     runner must fail leadership back to the recovering primary BEFORE
+     the node's port is unblocked: block the peer's port, drain
+     in-flight IO (bounded), demote the peer
+     (``bdev_lvol_set_leader(leader=False, bs_nonleadership=True)`` +
+     ``bdev_distrib_force_to_non_leader``), take leadership on the
+     primary, re-commit the peer's follower role, and only then unblock
+     the peer's port and allow the node's port.
 
-     Background: an earlier implementation did force-failback —
-     when ``_get_lvs_leader`` returned a peer (typical after a
-     failover), the runner would block the peer's port, demote the
-     peer, take leadership locally on the recovering node, and
-     additionally walk every secondary and block + demote them too.
-     That was wrong: a writer conflict only ever blocks the *primary*,
-     and once a failover succeeded the peer is the legitimate new
-     leader — blocking it cuts client IO and opens a fresh writer
-     conflict. See incident 2026-05-02 (k8s_native_failover_ha-
-     20260502-101452): worker5's port_allow at 15:51:44.818 blocked
-     worker1 (the new primary), producing client IO errors.
+     Background: an unfenced force-failback here caused incident
+     2026-05-02 (k8s_native_failover_ha-20260502-101452) — it demoted
+     the legitimately-elected new leader with unverified hublvols and
+     no drain, cutting client IO. It was removed; but leaving
+     leadership on the peer turned out equally wrong: nothing on the
+     no-restart recovery path reconciles the ex-leader afterwards, its
+     redirect stays broken and the monitor flips it DOWN. The failback
+     is therefore reinstated WITH fencing: it runs only after the peer
+     hublvol gate has proven every online follower can redirect.
 
-  3. **Only the recovering node's port is firewall-allowed.** Exactly
-     one ``firewall_set_port(..., "allow", ...)`` call, on the
-     recovering node, on the requested port number.
+  3. **Own follower-side hublvols wired before unblock.** The recovering
+     node's hublvol connections for lvstores it serves as secondary /
+     tertiary (reverse refs ``lvstore_stack_secondary`` /
+     ``lvstore_stack_tertiary``) — outbound to the primary, plus the
+     inbound secondary-hublvol exposure the tertiary multipaths to —
+     must be (re)established before the port opens; the periodic health
+     loop repaired them only after.
+
+  4. **The recovering node's port is firewall-allowed exactly once**, on
+     the requested port number, as the last step.
 """
 
 import unittest
@@ -105,19 +113,29 @@ class _BasePortAllowTest(unittest.TestCase):
 
         self.node_rpc = MagicMock(name="node_rpc")
         self.sec_rpc = MagicMock(name="sec_rpc")
+        # Default scenario: the secondary became acting leader during the
+        # outage; the recovering primary reads back leadership after the
+        # failback's take (poll on bdev_lvol_get_lvstores).
         self.sec_rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": True}]
         self.sec_rpc.jc_compression_get_status.return_value = False
+        self.sec_rpc.jc_disable_replication.return_value = True
+        self.sec_rpc.bdev_distrib_check_inflight_io.return_value = False
+        self.node_rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": True}]
 
         self.node.rpc_client = MagicMock(return_value=self.node_rpc)
         self.sec.rpc_client = MagicMock(return_value=self.sec_rpc)
         self.sec.wait_for_jm_rep_tasks_to_finish = MagicMock(return_value=True)
+        # Follower re-commit after the demote drives connect_to_hublvol on
+        # the ex-leader (set_lvs_opts + connect_hublvol re-commit).
+        self.sec.connect_to_hublvol = MagicMock(return_value=True)
 
         self.node.get_lvol_subsys_port = MagicMock(return_value=self.port)
         self.sec.get_lvol_subsys_port = MagicMock(return_value=self.port)
 
         self.calls = []
 
-        # Record any RPC that would represent leadership manipulation.
+        # Record any RPC that represents leadership manipulation, with its
+        # kwargs so tests can distinguish demote from promote.
         for rpc in (self.node_rpc, self.sec_rpc):
             owner = "node" if rpc is self.node_rpc else "sec"
             for method in ("bdev_lvol_set_leader",
@@ -125,7 +143,7 @@ class _BasePortAllowTest(unittest.TestCase):
                            "bdev_lvol_set_lvs_opts"):
                 def _make_side(name=method, who=owner):
                     def _side(*a, **kw):
-                        self.calls.append((name, who))
+                        self.calls.append((name, who, kw))
                         return True
                     return _side
                 getattr(rpc, method).side_effect = _make_side()
@@ -140,14 +158,17 @@ class _BasePortAllowTest(unittest.TestCase):
             self.calls.append(("firewall_set_port", node.uuid, port, action))
             return True
 
+        self.db_mock = MagicMock(
+            get_task_by_id=MagicMock(return_value=self.task),
+            get_storage_node_by_id=MagicMock(side_effect=self._get_node),
+            get_lvols_by_node_id=MagicMock(return_value=[]),
+            kv_store=MagicMock(),
+        )
+
         self._patches = [
             patch(
                 "simplyblock_core.services.tasks_runner_port_allow.db",
-                MagicMock(
-                    get_task_by_id=MagicMock(return_value=self.task),
-                    get_storage_node_by_id=MagicMock(side_effect=self._get_node),
-                    kv_store=MagicMock(),
-                ),
+                self.db_mock,
             ),
             patch(
                 "simplyblock_core.services.tasks_runner_port_allow.health_controller._check_node_ping",
@@ -185,8 +206,25 @@ class _BasePortAllowTest(unittest.TestCase):
                 return_value=None,
             ),
             patch(
+                "simplyblock_core.services.tasks_runner_port_allow.tasks_controller.get_active_node_restart_task",
+                return_value=None,
+            ),
+            patch(
                 "simplyblock_core.port_block.set_port",
                 side_effect=_set_port_side_effect,
+            ),
+            patch(
+                "simplyblock_core.port_block.is_port_blocked",
+                return_value=False,
+            ),
+            patch(
+                "simplyblock_core.services.tasks_runner_port_allow.storage_node_ops._failback_primary_ana",
+                side_effect=lambda n: self.calls.append(("ana_failback", n.uuid)),
+            ),
+            patch(
+                "simplyblock_core.services.tasks_runner_port_allow.storage_node_ops._set_lvol_ana_on_node",
+                side_effect=lambda lvol, n, ana: self.calls.append(
+                    ("ana_set", lvol.nqn, n.uuid, ana)),
             ),
             patch(
                 "simplyblock_core.services.tasks_runner_port_allow.tcp_ports_events.port_deny",
@@ -263,95 +301,209 @@ class TestClusterMapBeforeUnblock(_BasePortAllowTest):
                          "no firewall allow may fire when cluster map push failed")
 
 
-class TestNoLeadershipManipulation(_BasePortAllowTest):
-    """Regression for incident 2026-05-02: port_allow must not touch
-    leadership at all (no peer demote, no local take-leadership, no
-    secondary block)."""
+class TestLeadershipFailback(_BasePortAllowTest):
+    """Fenced leadership failback (reinstated 2026-07-06): when a peer is
+    acting leader at port_allow time, demote it and hand leadership back
+    to the recovering primary BEFORE the node's port opens — with the
+    port-block window, bounded drain, follower re-commit, and
+    zero-leader protection that the pre-2026-05-02 version lacked."""
 
-    def test_no_peer_port_block(self):
+    def _run(self):
         from simplyblock_core.services.tasks_runner_port_allow import exec_port_allow_task
         exec_port_allow_task(self.task)
 
-        peer_blocks = [
+    def _idx(self, pred):
+        return next(i for i, c in enumerate(self.calls) if pred(c))
+
+    def test_peer_leader_demoted_and_primary_takes_over(self):
+        self._run()
+        sec_demotes = [
             c for c in self.calls
-            if c[0] == "firewall_set_port"
-            and c[1] == self.sec.uuid
-            and c[3] == "block"
+            if c[0] == "bdev_lvol_set_leader" and c[1] == "sec"
+            and c[2].get("leader") is False and c[2].get("bs_nonleadership") is True
         ]
-        self.assertEqual(
-            peer_blocks, [],
-            "port_allow must not block any peer's port — once a failover "
-            "succeeded the peer is the legitimate new leader and blocking "
-            "it cuts client IO (incident 2026-05-02)",
-        )
-
-    def test_no_peer_demote(self):
-        from simplyblock_core.services.tasks_runner_port_allow import exec_port_allow_task
-        exec_port_allow_task(self.task)
-
-        peer_demote_calls = [
+        self.assertEqual(len(sec_demotes), 1, f"expected one peer demote; calls={self.calls}")
+        force_calls = [
             c for c in self.calls
-            if c[1] == "sec" and c[0] in (
-                "bdev_lvol_set_leader",
-                "bdev_distrib_force_to_non_leader",
-            )
+            if c[0] == "bdev_distrib_force_to_non_leader" and c[1] == "sec"
         ]
-        self.assertEqual(
-            peer_demote_calls, [],
-            "port_allow must not call bdev_lvol_set_leader or "
-            "bdev_distrib_force_to_non_leader on a peer",
-        )
-
-    def test_no_local_take_leadership(self):
-        from simplyblock_core.services.tasks_runner_port_allow import exec_port_allow_task
-        exec_port_allow_task(self.task)
-
-        local_leader_calls = [
+        self.assertEqual(len(force_calls), 1)
+        node_takes = [
             c for c in self.calls
-            if c[1] == "node" and c[0] in (
-                "bdev_lvol_set_leader",
-                "bdev_lvol_set_lvs_opts",
-            )
+            if c[0] == "bdev_lvol_set_leader" and c[1] == "node"
+            and c[2].get("leader") is True
         ]
-        self.assertEqual(
-            local_leader_calls, [],
-            "port_allow must not 'take leadership locally' on the recovering "
-            "node — leadership belongs to the JM heartbeat, not this task",
-        )
+        self.assertEqual(len(node_takes), 1, "recovering primary must take leadership back")
+
+    def test_failback_ordering_block_drain_demote_recommit_unblock_allow(self):
+        self._run()
+        i_block_sec = self._idx(
+            lambda c: c[0] == "firewall_set_port" and c[1] == self.sec.uuid and c[3] == "block")
+        i_demote = self._idx(
+            lambda c: c[0] == "bdev_lvol_set_leader" and c[1] == "sec"
+            and c[2].get("leader") is False)
+        i_take = self._idx(
+            lambda c: c[0] == "bdev_lvol_set_leader" and c[1] == "node"
+            and c[2].get("leader") is True)
+        i_unblock_sec = self._idx(
+            lambda c: c[0] == "firewall_set_port" and c[1] == self.sec.uuid and c[3] == "allow")
+        i_allow_node = self._idx(
+            lambda c: c[0] == "firewall_set_port" and c[1] == self.node.uuid and c[3] == "allow")
+        self.assertLess(i_block_sec, i_demote,
+                        "peer port must be blocked before the demote")
+        self.assertLess(i_demote, i_take, "demote precedes the primary's take")
+        self.assertLess(i_take, i_unblock_sec,
+                        "the peer's port reopens only after leadership moved "
+                        "and the follower role was re-committed")
+        self.assertLess(i_unblock_sec, i_allow_node,
+                        "the recovering node's port opens last")
+        # Follower re-commit happened before the peer port reopened.
+        self.sec.connect_to_hublvol.assert_called()
+
+    def test_ana_failback_fired_for_secondary_only(self):
+        self._run()
+        self.assertIn(("ana_failback", self.node.uuid), self.calls,
+                      "successful failback must reconcile the secondary's ANA "
+                      "listeners back to non_optimized")
+
+    def test_no_failback_when_no_peer_leader(self):
+        self.sec_rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": False}]
+        self._run()
+        leadership_calls = [
+            c for c in self.calls
+            if c[0] in ("bdev_lvol_set_leader", "bdev_distrib_force_to_non_leader")
+        ]
+        self.assertEqual(leadership_calls, [],
+                         "no demote and no take when the primary already leads")
+        sec_blocks = [
+            c for c in self.calls
+            if c[0] == "firewall_set_port" and c[1] == self.sec.uuid and c[3] == "block"
+        ]
+        self.assertEqual(sec_blocks, [], "no peer port-block without a failback")
+        node_allows = [
+            c for c in self.calls
+            if c[0] == "firewall_set_port" and c[1] == self.node.uuid and c[3] == "allow"
+        ]
+        self.assertEqual(len(node_allows), 1)
+
+    def test_zero_leader_is_healed_by_taking_leadership(self):
+        # Nobody holds leadership (no-abort outage aftermath): the primary
+        # must take it before the port opens.
+        self.sec_rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": False}]
+        self.node_rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": False}]
+
+        # Once set_leader(leader=True) fires on the node, leadership reads True.
+        def _set_leader_side(*a, **kw):
+            self.calls.append(("bdev_lvol_set_leader", "node", kw))
+            self.node_rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": True}]
+            return True
+        self.node_rpc.bdev_lvol_set_leader.side_effect = _set_leader_side
+
+        self._run()
+        node_takes = [
+            c for c in self.calls
+            if c[0] == "bdev_lvol_set_leader" and c[1] == "node" and c[2].get("leader") is True
+        ]
+        self.assertEqual(len(node_takes), 1,
+                         "zero-leader LVS must be healed by the primary taking leadership")
+        node_allows = [
+            c for c in self.calls
+            if c[0] == "firewall_set_port" and c[1] == self.node.uuid and c[3] == "allow"
+        ]
+        self.assertEqual(len(node_allows), 1)
+
+    def test_drain_timeout_suspends_and_releases_peer(self):
+        self.sec_rpc.bdev_distrib_check_inflight_io.return_value = True
+        with patch(
+            "simplyblock_core.services.tasks_runner_port_allow._FAILBACK_DRAIN_BOUND_SEC",
+            0.05,
+        ):
+            self._run()
+        self.assertEqual(self.task.status, JobSchedule.STATUS_SUSPENDED)
+        demotes = [
+            c for c in self.calls
+            if c[0] == "bdev_lvol_set_leader" and c[1] == "sec"
+        ]
+        self.assertEqual(demotes, [],
+                         "no demote may fire against a non-drained distrib pipeline")
+        # The peer's port must have been released again.
+        i_block = self._idx(
+            lambda c: c[0] == "firewall_set_port" and c[1] == self.sec.uuid and c[3] == "block")
+        i_release = self._idx(
+            lambda c: c[0] == "firewall_set_port" and c[1] == self.sec.uuid and c[3] == "allow")
+        self.assertLess(i_block, i_release)
+        node_allows = [
+            c for c in self.calls
+            if c[0] == "firewall_set_port" and c[1] == self.node.uuid and c[3] == "allow"
+        ]
+        self.assertEqual(node_allows, [], "node port must stay blocked on drain failure")
+
+    def test_failed_take_repromotes_old_leader(self):
+        # The primary never reads back leadership after take.
+        self.node_rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": False}]
+        self._run()
+        self.assertEqual(self.task.status, JobSchedule.STATUS_SUSPENDED)
+        # Old leader was demoted, then re-promoted (leader=True on sec).
+        i_demote = self._idx(
+            lambda c: c[0] == "bdev_lvol_set_leader" and c[1] == "sec"
+            and c[2].get("leader") is False)
+        i_repromote = self._idx(
+            lambda c: c[0] == "bdev_lvol_set_leader" and c[1] == "sec"
+            and c[2].get("leader") is True)
+        self.assertLess(i_demote, i_repromote,
+                        "a failed take must re-promote the old leader — the LVS "
+                        "may never be left with zero leaders")
+        node_allows = [
+            c for c in self.calls
+            if c[0] == "firewall_set_port" and c[1] == self.node.uuid and c[3] == "allow"
+        ]
+        self.assertEqual(node_allows, [])
 
 
 class TestOnlyNodePortAllowed(_BasePortAllowTest):
-    """The runner must firewall-allow exactly one port on exactly one node:
-    the requested port on the recovering node."""
+    """The recovering node's own port is allowed exactly once, as the last
+    step; ports may only ever be blocked on peers (the failback window),
+    never on the recovering node, and every peer block is paired with a
+    release."""
 
-    def test_exactly_one_firewall_allow_on_recovering_node(self):
+    def test_exactly_one_allow_on_recovering_node_and_it_is_last(self):
         from simplyblock_core.services.tasks_runner_port_allow import exec_port_allow_task
         exec_port_allow_task(self.task)
 
-        allow_calls = [
+        node_allows = [
             c for c in self.calls
-            if c[0] == "firewall_set_port" and c[3] == "allow"
+            if c[0] == "firewall_set_port" and c[1] == self.node.uuid and c[3] == "allow"
         ]
         self.assertEqual(
-            len(allow_calls), 1,
-            f"expected exactly 1 firewall_set_port allow; got {allow_calls}",
+            len(node_allows), 1,
+            f"expected exactly 1 allow on the recovering node; got {node_allows}",
         )
-        self.assertEqual(allow_calls[0][1], self.node.uuid)
-        self.assertEqual(allow_calls[0][2], self.port)
+        self.assertEqual(node_allows[0][2], self.port)
+        fw_calls = [c for c in self.calls if c[0] == "firewall_set_port"]
+        self.assertEqual(fw_calls[-1][1], self.node.uuid)
+        self.assertEqual(fw_calls[-1][3], "allow")
 
-    def test_no_block_calls_at_all(self):
+    def test_recovering_node_never_blocked_and_peer_blocks_released(self):
         from simplyblock_core.services.tasks_runner_port_allow import exec_port_allow_task
         exec_port_allow_task(self.task)
 
-        block_calls = [
+        node_blocks = [
             c for c in self.calls
-            if c[0] == "firewall_set_port" and c[3] == "block"
+            if c[0] == "firewall_set_port" and c[1] == self.node.uuid and c[3] == "block"
         ]
-        self.assertEqual(
-            block_calls, [],
-            "port_allow must not block any port — only allow on the "
-            "recovering node",
-        )
+        self.assertEqual(node_blocks, [],
+                         "the recovering node's own port must never be blocked here")
+        for c in [c for c in self.calls
+                  if c[0] == "firewall_set_port" and c[3] == "block"]:
+            releases = [
+                r for r in self.calls
+                if r[0] == "firewall_set_port" and r[1] == c[1]
+                and r[2] == c[2] and r[3] == "allow"
+            ]
+            self.assertTrue(
+                releases,
+                f"peer block {c} has no matching release — a failback must "
+                f"never leave a peer port permanently blocked on success")
 
 
 class TestSourceShape(unittest.TestCase):
@@ -369,23 +521,40 @@ class TestSourceShape(unittest.TestCase):
             cls.src = f.read()
 
     def test_no_get_lvs_leader_helper(self):
-        # The helper that resolved current_leader is no longer needed and
-        # was deleted along with the leadership-manipulation block.
+        # The old pre-2026-05-02 helper stays gone; leader detection lives
+        # inline in exec_port_allow_task with explicit failure handling.
         self.assertNotIn("def _get_lvs_leader", self.src)
 
-    def test_no_peer_leader_demote_branch(self):
-        self.assertNotIn("Demoting before port_allow", self.src)
-        self.assertNotIn("current_leader.get_id() != node.get_id()", self.src)
-        self.assertNotIn("bdev_distrib_force_to_non_leader", self.src)
-        self.assertNotIn("bs_nonleadership=True", self.src)
+    def test_fenced_failback_present_and_ordered(self):
+        # The failback is reinstated WITH fencing: helper present, demote
+        # semantics present, and — in exec — the failback call sits after
+        # the peer hublvol gate and before the node's port unblock.
+        self.assertIn("def _failback_leadership_to_primary", self.src)
+        self.assertIn("bs_nonleadership=True", self.src)
+        self.assertIn("bdev_distrib_force_to_non_leader", self.src)
+        i_gate = self.src.find("_verify_or_reconnect_peer_hublvol(sec_node, node)")
+        i_failback_call = self.src.find(
+            "failback_ok, failback_msg = _failback_leadership_to_primary(")
+        i_unblock = self.src.find(
+            "port_block.set_port(node, port_number, block=False")
+        self.assertGreater(i_gate, 0)
+        self.assertGreater(i_failback_call, i_gate,
+                           "failback must run only after the peer hublvol gate")
+        self.assertGreater(i_unblock, i_failback_call,
+                           "the node's port opens only after the failback")
+
+    def test_zero_leader_protection_present(self):
+        # A failed take must re-promote the old leader, and a zero-leader
+        # LVS must be healed by the primary taking leadership.
+        self.assertIn("def _take_leadership_on_primary", self.src)
+        self.assertIn("re-promote", self.src)
 
     def test_no_unconditional_secondary_loop(self):
-        # The loop iterated `for sid in sec_ids` and called
-        # firewall_set_port(..., "block", ...) on every secondary. That
-        # entire pattern must be gone.
-        # Multiple `for sid in sec_ids` loops still exist for legitimate
-        # purposes (hublvol checks, JC compression), but none of them may
-        # contain a firewall block call.
+        # The old loop iterated `for sid in sec_ids` and called
+        # firewall_set_port(..., "block", ...) on every secondary
+        # unconditionally. Peer blocks now exist only inside the fenced
+        # failback helper (with paired releases), never in a bare sec_ids
+        # loop.
         import re
         for m in re.finditer(r"for sid in [\w_]+", self.src):
             window = self.src[m.start():m.start() + 1500]
@@ -397,7 +566,7 @@ class TestSourceShape(unittest.TestCase):
 
     def test_rationale_documented_in_source(self):
         self.assertIn("incident 2026-05-02", self.src)
-        self.assertIn("port_allow's correct scope", self.src)
+        self.assertIn("verified-open", self.src)
 
 
 class _StrictGateBase(_BasePortAllowTest):
@@ -419,6 +588,11 @@ class _StrictGateBase(_BasePortAllowTest):
         hub = MagicMock(name="hublvol")
         hub.bdev_name = "LVS_TEST/hublvol"
         self.node.hublvol = hub
+        # Keep these tests focused on the strict gate: no peer holds
+        # leadership and the primary already does, so the leadership
+        # failback block is a no-op (its own coverage lives in
+        # TestLeadershipFailback).
+        self.sec_rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": False}]
 
 
 class TestStrictHublvolGate(_StrictGateBase):
@@ -615,7 +789,10 @@ class TestSourceShapeStrictGate(unittest.TestCase):
         i_abort = self.src.find("_abort_recovering_node(node, reason)")
         i_done = self.src.find("STATUS_DONE", i_abort)
         i_return = self.src.find("return", i_done)
-        i_allow_event = self.src.find("tcp_ports_events.port_allowed")
+        # port_allowed also appears earlier in the failback helpers (peer
+        # port releases); the invariant here is about the occurrence in
+        # exec_port_allow_task AFTER the abort path's return.
+        i_allow_event = self.src.find("tcp_ports_events.port_allowed", i_abort)
         self.assertGreater(i_abort, 0)
         self.assertGreater(i_done, i_abort)
         self.assertGreater(i_return, i_done)
@@ -718,6 +895,245 @@ class TestDeviceReadmitOnPortAllow(_BasePortAllowTest):
             any("refused" in line for line in logs.output),
             "a refused re-admit must be logged, never silent")
         self.assertEqual(self.task.status, JobSchedule.STATUS_DONE)
+
+
+class _SecRoleReconnectBase(_BasePortAllowTest):
+    """Shared topology for the own-hublvol tests: the recovering node is
+    ALSO the secondary of primary P, which has tertiary T."""
+
+    def setUp(self):
+        super().setUp()
+        # node is ALSO the secondary of primary P, which has tertiary T.
+        self.prim = _make_node("node-p", "10.0.0.12")
+        self.prim.hublvol = MagicMock(name="p_hublvol")
+        self.prim.hublvol.nqn = "nqn-p-hub"
+        self.prim.secondary_node_id = self.node.uuid
+        self.prim.tertiary_node_id = "node-t"
+        self.tert = _make_node("node-t", "10.0.0.13")
+        self.tert.add_hublvol_failover_path = MagicMock(return_value=True)
+        self.node.lvstore_stack_secondary = self.prim.uuid
+        self.node.create_secondary_hublvol = MagicMock(return_value="nqn-p-hub")
+        # Focus on the reconnect phase: no leadership failback in play.
+        self.sec_rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": False}]
+
+    def _get_node(self, uuid):
+        if uuid == self.prim.uuid:
+            return self.prim
+        if uuid == self.tert.uuid:
+            return self.tert
+        return super()._get_node(uuid)
+
+    def _run_with_verify(self, verify_side_effect):
+        from simplyblock_core.services.tasks_runner_port_allow import exec_port_allow_task
+        with patch(
+            "simplyblock_core.services.tasks_runner_port_allow._verify_or_reconnect_peer_hublvol",
+            side_effect=verify_side_effect,
+        ) as verify_mock:
+            exec_port_allow_task(self.task)
+        return verify_mock
+
+
+class TestOwnSecTertHublvolReconnect(_SecRoleReconnectBase):
+    """The recovering node's OWN follower-side hublvols (lvstores it serves
+    as secondary/tertiary of OTHER primaries) must be wired before the
+    port opens — outbound to the primary, plus (secondary role) the
+    inbound shared-NQN exposure the tertiary multipaths to."""
+
+    def test_outbound_reconnect_driven_before_port_allow(self):
+        def _record(peer, primary):
+            self.calls.append(("verify_hublvol", peer.uuid, primary.uuid))
+            return True
+        self._run_with_verify(_record)
+
+        i_outbound = next(
+            i for i, c in enumerate(self.calls)
+            if c[0] == "verify_hublvol" and c[1] == self.node.uuid
+            and c[2] == self.prim.uuid)
+        i_allow = next(
+            i for i, c in enumerate(self.calls)
+            if c[0] == "firewall_set_port" and c[1] == self.node.uuid
+            and c[3] == "allow")
+        self.assertLess(
+            i_outbound, i_allow,
+            "the node's own hublvol to its primary must be verified/reconnected "
+            "BEFORE the port opens — not left to the 30s health loop after")
+
+    def test_inbound_secondary_hublvol_recreated_when_missing(self):
+        self.node_rpc.subsystem_list.return_value = []
+        self._run_with_verify(lambda *a: True)
+        self.node.create_secondary_hublvol.assert_called_once()
+        self.assertIs(self.node.create_secondary_hublvol.call_args.args[0], self.prim)
+
+    def test_inbound_exposure_skipped_when_present(self):
+        self.node_rpc.subsystem_list.return_value = [{"nqn": "nqn-p-hub"}]
+        self._run_with_verify(lambda *a: True)
+        self.node.create_secondary_hublvol.assert_not_called()
+
+    def test_tertiary_failover_path_topped_up(self):
+        self.node_rpc.subsystem_list.return_value = [{"nqn": "nqn-p-hub"}]
+        self._run_with_verify(lambda *a: True)
+        self.tert.add_hublvol_failover_path.assert_called_once()
+        args = self.tert.add_hublvol_failover_path.call_args.args
+        self.assertIs(args[0], self.prim)
+        self.assertIs(args[1], self.node)
+
+    def test_tertiary_path_failure_is_best_effort(self):
+        # A failed tertiary top-up must not gate the node's recovery.
+        self.node_rpc.subsystem_list.return_value = [{"nqn": "nqn-p-hub"}]
+        self.tert.add_hublvol_failover_path = MagicMock(return_value=False)
+        self._run_with_verify(lambda *a: True)
+        node_allows = [
+            c for c in self.calls
+            if c[0] == "firewall_set_port" and c[1] == self.node.uuid and c[3] == "allow"
+        ]
+        self.assertEqual(len(node_allows), 1)
+        self.assertEqual(self.task.status, JobSchedule.STATUS_DONE)
+
+    def test_outbound_failure_suspends_task(self):
+        def _fail_only_own(peer, primary):
+            # Fail the node->prim direction; pass the peer-gate direction.
+            return not (peer is self.node and primary is self.prim)
+        self._run_with_verify(_fail_only_own)
+        self.assertEqual(self.task.status, JobSchedule.STATUS_SUSPENDED)
+        node_allows = [
+            c for c in self.calls
+            if c[0] == "firewall_set_port" and c[1] == self.node.uuid and c[3] == "allow"
+        ]
+        self.assertEqual(node_allows, [],
+                         "the port must not open with a broken follower redirect")
+
+    def test_offline_primary_outbound_skipped(self):
+        self.prim.status = StorageNode.STATUS_OFFLINE
+        self.node_rpc.subsystem_list.return_value = [{"nqn": "nqn-p-hub"}]
+        verify_mock = self._run_with_verify(lambda *a: True)
+        own_calls = [
+            c for c in verify_mock.call_args_list
+            if c.args and c.args[0] is self.node and c.args[1] is self.prim
+        ]
+        self.assertEqual(own_calls, [],
+                         "no OUTBOUND reconnect toward a non-ONLINE primary — "
+                         "its own recovery path re-drives that leg")
+        self.assertEqual(self.task.status, JobSchedule.STATUS_DONE)
+
+
+class TestOfflinePrimarySwitchback(_SecRoleReconnectBase):
+    """Primary went OFFLINE while the secondary was partitioned: the
+    tertiary is acting leader and the secondary's ANA promotion was
+    skipped (trigger_ana_failover_for_node requires first_sec ONLINE).
+    The recovering secondary's port_allow must complete the deferred
+    failover — tertiary->secondary hublvol FIRST (hard gate), THEN
+    promote the secondary's listeners to optimized — so clients switch
+    back from the tertiary. Tertiary ANA is never touched."""
+
+    def setUp(self):
+        super().setUp()
+        self.prim.status = StorageNode.STATUS_OFFLINE
+        self.node_rpc.subsystem_list.return_value = [{"nqn": "nqn-p-hub"}]
+        self.lvol = MagicMock(name="lvol")
+        self.lvol.nqn = "nqn-lvol-1"
+        from simplyblock_core.models.lvol_model import LVol
+        self.lvol.status = LVol.STATUS_ONLINE
+        self.db_mock.get_lvols_by_node_id.return_value = [self.lvol]
+
+        def _tert_path(primary, failover):
+            self.calls.append(("tert_path", primary.uuid, failover.uuid))
+            return True
+        self.tert.add_hublvol_failover_path = MagicMock(side_effect=_tert_path)
+
+    def test_tertiary_path_gated_then_ana_promoted_then_allow(self):
+        self._run_with_verify(lambda *a: True)
+        i_tert_path = next(
+            i for i, c in enumerate(self.calls)
+            if c[0] == "tert_path" and c[1] == self.prim.uuid and c[2] == self.node.uuid)
+        i_promote = next(
+            i for i, c in enumerate(self.calls)
+            if c[0] == "ana_set" and c[1] == self.lvol.nqn
+            and c[2] == self.node.uuid and c[3] == "optimized")
+        i_allow = next(
+            i for i, c in enumerate(self.calls)
+            if c[0] == "firewall_set_port" and c[1] == self.node.uuid and c[3] == "allow")
+        self.assertLess(i_tert_path, i_promote,
+                        "the tertiary->secondary hublvol must be connected "
+                        "BEFORE the ANA switch-back moves clients here")
+        self.assertLess(i_promote, i_allow,
+                        "the promotion happens before the port opens so clients "
+                        "switch back the moment it is allowed")
+        self.assertEqual(self.task.status, JobSchedule.STATUS_DONE)
+
+    def test_tertiary_path_failure_blocks_switchback(self):
+        self.tert.add_hublvol_failover_path = MagicMock(return_value=False)
+        self._run_with_verify(lambda *a: True)
+        self.assertEqual(self.task.status, JobSchedule.STATUS_SUSPENDED)
+        promotes = [c for c in self.calls if c[0] == "ana_set"]
+        self.assertEqual(promotes, [],
+                         "no ANA switch-back while the tertiary cannot redirect "
+                         "to this node — that would open a dual-writer window")
+        node_allows = [
+            c for c in self.calls
+            if c[0] == "firewall_set_port" and c[1] == self.node.uuid and c[3] == "allow"
+        ]
+        self.assertEqual(node_allows, [])
+
+    def test_down_primary_gates_tertiary_path_but_no_promote(self):
+        # DOWN is not OFFLINE: the primary may still be serving, so the
+        # deferred ANA failover must NOT fire (dual-optimized risk); the
+        # tertiary path is still a hard gate while the primary is out.
+        self.prim.status = StorageNode.STATUS_DOWN
+        self._run_with_verify(lambda *a: True)
+        promotes = [c for c in self.calls if c[0] == "ana_set"]
+        self.assertEqual(promotes, [],
+                         "ANA promotion is tied to primary OFFLINE only")
+        self.assertEqual(self.task.status, JobSchedule.STATUS_DONE)
+
+
+class TestTertiaryFollowsActingLeader(_BasePortAllowTest):
+    """Recovering TERTIARY with its primary out and the secondary acting
+    as leader: the tertiary's redirect must be re-wired toward the
+    secondary (attach target sec_1, LVS metadata from the configured
+    primary) before the port opens."""
+
+    def setUp(self):
+        super().setUp()
+        self.prim2 = _make_node("node-p2", "10.0.0.14",
+                                status=StorageNode.STATUS_OFFLINE)
+        self.prim2.hublvol = MagicMock(name="p2_hublvol")
+        self.prim2.hublvol.nqn = "nqn-p2-hub"
+        self.sec1 = _make_node("node-s1", "10.0.0.15")
+        self.prim2.secondary_node_id = self.sec1.uuid
+        self.prim2.tertiary_node_id = self.node.uuid
+        self.node.lvstore_stack_tertiary = self.prim2.uuid
+        self.node.connect_to_hublvol = MagicMock(return_value=True)
+        self.sec_rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": False}]
+
+    def _get_node(self, uuid):
+        if uuid == self.prim2.uuid:
+            return self.prim2
+        if uuid == self.sec1.uuid:
+            return self.sec1
+        return super()._get_node(uuid)
+
+    def _run(self):
+        from simplyblock_core.services.tasks_runner_port_allow import exec_port_allow_task
+        exec_port_allow_task(self.task)
+
+    def test_redirect_rewired_toward_acting_leader(self):
+        self._run()
+        self.node.connect_to_hublvol.assert_called_once()
+        call = self.node.connect_to_hublvol.call_args
+        self.assertIs(call.args[0], self.sec1)
+        self.assertEqual(call.kwargs.get("role"), "tertiary")
+        self.assertIs(call.kwargs.get("lvs_node"), self.prim2)
+        self.assertEqual(self.task.status, JobSchedule.STATUS_DONE)
+
+    def test_failure_suspends_before_port_opens(self):
+        self.node.connect_to_hublvol = MagicMock(return_value=False)
+        self._run()
+        self.assertEqual(self.task.status, JobSchedule.STATUS_SUSPENDED)
+        node_allows = [
+            c for c in self.calls
+            if c[0] == "firewall_set_port" and c[1] == self.node.uuid and c[3] == "allow"
+        ]
+        self.assertEqual(node_allows, [])
 
 
 if __name__ == "__main__":

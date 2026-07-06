@@ -965,19 +965,21 @@ class TestSequentialFailbackScenario(unittest.TestCase):
 # TasksRunnerPortAllow Tests
 # ===========================================================================
 
-class TestPortAllowTaskNoForceFailback(unittest.TestCase):
-    """Regression guard for commit 59d51049 ("port_allow: remove
-    force-failback").
+class TestPortAllowFencedFailback(unittest.TestCase):
+    """Source guards for port_allow's leadership failback.
 
-    Incident 2026-05-02 (k8s_native_failover_ha-20260502-101452): the
-    port_allow runner used to demote a peer that had legitimately taken
-    leadership during failover, blocking the new leader's port and force-
-    demoting it before allowing the recovering node's port. That cut
-    client IO and opened a fresh writer-conflict window.
+    History: an unfenced force-failback caused incident 2026-05-02
+    (k8s_native_failover_ha-20260502-101452) — it demoted the
+    legitimately-elected new leader with unverified hublvols and no
+    drain, cutting client IO. Commit 59d51049 removed it entirely; but
+    leaving leadership on the peer proved equally wrong: nothing on the
+    no-restart recovery path reconciled the ex-leader's redirect state
+    afterwards, so it went DOWN unable to redirect IO to the primary.
 
-    The fix removed the entire force-failback block: no peer port-block,
-    no secondary set_leader, no force_to_non_leader. Pin those removals
-    so they don't sneak back in.
+    The failback is reinstated (2026-07-06) WITH fencing. Pin the fencing,
+    not the absence: the demote must sit behind the hublvol gates, inside
+    a port-blocked window with a bounded drain, and the node's port opens
+    only after.
     """
 
     def _read_source(self):
@@ -988,26 +990,41 @@ class TestPortAllowTaskNoForceFailback(unittest.TestCase):
         with open(src_path, "r") as f:
             return f.read()
 
-    def test_no_force_to_non_leader(self):
+    def test_failback_sits_behind_the_gates_and_before_unblock(self):
         src = self._read_source()
-        self.assertNotIn(
-            "bdev_distrib_force_to_non_leader", src,
-            "port_allow must not force-demote peers (incident 2026-05-02)")
+        i_peer_gate = src.find("_verify_or_reconnect_peer_hublvol(sec_node, node)")
+        i_own_gate = src.find("_reconnect_own_sec_tert_hublvols(node)")
+        i_failback = src.find(
+            "failback_ok, failback_msg = _failback_leadership_to_primary(")
+        i_unblock = src.find("port_block.set_port(node, port_number, block=False")
+        self.assertGreater(i_own_gate, 0, "own-hublvol gate must exist")
+        self.assertGreater(i_peer_gate, 0, "peer hublvol gate must exist")
+        self.assertGreater(
+            i_failback, i_peer_gate,
+            "the demote may run only AFTER the peer hublvol gate proved every "
+            "follower can redirect (the fencing whose absence caused 2026-05-02)")
+        self.assertGreater(
+            i_unblock, i_failback,
+            "the recovering node's port opens only after the failback")
 
-    def test_no_peer_set_leader(self):
+    def test_demote_is_drained_and_port_blocked(self):
         src = self._read_source()
-        self.assertNotIn(
-            "bdev_lvol_set_leader", src,
-            "port_allow must not flip leadership; that is the JM heartbeat's job")
+        fn_start = src.find("def _failback_leadership_to_primary")
+        self.assertGreater(fn_start, 0)
+        fn = src[fn_start:src.find("def _recommit_follower_and_unblock")]
+        i_block = fn.find("block=True")
+        i_drain = fn.find("leader_rpc.bdev_distrib_check_inflight_io")
+        i_demote = fn.find("leader_rpc.bdev_lvol_set_leader")
+        self.assertTrue(
+            0 < i_block < i_drain < i_demote,
+            "demote must run inside the port-blocked window, after the drain")
 
-    def test_no_peer_port_block(self):
+    def test_failed_take_repromotes_old_leader(self):
         src = self._read_source()
-        # The old code did `firewall_set_port(..., "block", ...)` on a peer
-        # before allowing the recovering node's port. The current code only
-        # ever issues "allow" — never "block".
-        self.assertNotIn(
-            '"block"', src,
-            "port_allow must not block any peer's port; only allow on the recovering node")
+        self.assertIn(
+            "re-promote", src,
+            "a failed leadership take must re-promote the old leader — the "
+            "LVS may never be left with zero leaders")
 
 
 # ===========================================================================

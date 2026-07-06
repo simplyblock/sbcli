@@ -176,31 +176,44 @@ class NonLeaderPath_KeepsFixedSleep(unittest.TestCase):
         )
 
 
-class PortAllowPath_NoPoll(unittest.TestCase):
-    """tasks_runner_port_allow must not poll bdev_distrib_check_inflight_io.
+class PortAllowPath_BoundedFailbackDrain(unittest.TestCase):
+    """tasks_runner_port_allow's leadership failback (reinstated 2026-07-06
+    with fencing) drains in-flight IO with a HARD BOUND before demoting the
+    acting leader, inside the port-blocked window.
 
-    The leadership-manipulation block in port_allow was removed entirely
-    in commit ec34de64 (the runner now only allows the port on the
-    recovering node; leadership belongs to the JM heartbeat).
+    The original 10s-drain regression was on the
+    recreate_lvstore_on_non_leader path (the blocked node runs data
+    migration, so the poll never settles). The port_allow failback blocks a
+    secondary/tertiary acting leader — migration never runs there, so the
+    drain genuinely settles — but it must stay bounded so a slow JM/distrib
+    completion cannot hold the leader's port blocked beyond client
+    max_latency.
     """
 
-    def test_no_inflight_poll(self):
+    def test_drain_present_and_bounded(self):
         src = _read("simplyblock_core/services/tasks_runner_port_allow.py")
-        self.assertNotIn(
-            ".bdev_distrib_check_inflight_io(",
-            src,
-            "tasks_runner_port_allow must not poll inflight IO — the entire "
-            "leadership-manipulation block was removed; port_allow now only "
-            "allows the recovering node's port.",
-        )
+        self.assertIn(
+            ".bdev_distrib_check_inflight_io(", src,
+            "the failback must drain in-flight IO before the demote "
+            "(incident 2026-05-02: 123 state-9 IOs in flight at "
+            "set_leader=False -> ENODEV + qpair floods)")
+        self.assertIn(
+            "_FAILBACK_DRAIN_BOUND_SEC = 2.0", src,
+            "the drain must carry the same 2s hard bound as recreate_lvstore")
 
-    def test_no_set_leader(self):
+    def test_drain_runs_inside_block_window_before_demote(self):
         src = _read("simplyblock_core/services/tasks_runner_port_allow.py")
-        self.assertNotIn(
-            "bdev_lvol_set_leader",
-            src,
-            "tasks_runner_port_allow must not manipulate leadership state",
-        )
+        fn_start = src.find("def _failback_leadership_to_primary")
+        fn_end = src.find("def _recommit_follower_and_unblock")
+        self.assertGreater(fn_start, 0)
+        fn = src[fn_start:fn_end]
+        i_block = fn.find("block=True")
+        i_drain = fn.find("leader_rpc.bdev_distrib_check_inflight_io")
+        i_demote = fn.find("leader_rpc.bdev_lvol_set_leader")
+        self.assertTrue(
+            0 < i_block < i_drain < i_demote,
+            "failback order must be: block leader port -> bounded drain -> "
+            f"demote (got block={i_block}, drain={i_drain}, demote={i_demote})")
 
 
 if __name__ == "__main__":
