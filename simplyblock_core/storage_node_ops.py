@@ -4702,6 +4702,85 @@ def _detach_remote_controllers_from_peers(snode, db_controller):
     return detached[0]
 
 
+def check_node_shutdown_preconditions(node_id, force=False):
+    """Read-only validation of everything that can refuse a graceful node
+    shutdown. Returns (allowed, reason).
+
+    Exists so API endpoints can evaluate the guards SYNCHRONOUSLY and return
+    an actionable error (409) to the caller. Previously these checks only ran
+    inside shutdown_storage_node in the endpoint's fire-and-forget background
+    thread: the API had already answered 202, so a refusal (e.g. active
+    migration tasks) was invisible to the caller — the k8s operator polled
+    for the node to go offline forever and node drains stalled even after
+    the blocking condition cleared (2026-07-06 MCO rollout incident).
+
+    With force=True the refusals downgrade to warnings and the shutdown is
+    allowed, mirroring shutdown_storage_node's historical behavior.
+    """
+    try:
+        snode = db_controller.get_storage_node_by_id(node_id)
+    except KeyError:
+        return False, f"Storage node not found: {node_id}"
+
+    # Guard: no concurrent shutdown + restart (design: mutual exclusion)
+    for peer in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
+        if peer.get_id() != node_id and peer.status == StorageNode.STATUS_RESTARTING:
+            reason = (f"Node {peer.get_id()} is restarting in this cluster, "
+                      f"cannot shutdown {node_id} concurrently")
+            if force is False:
+                logger.error(reason)
+                return False, reason
+            logger.warning("%s — proceeding with force", reason)
+        if peer.get_id() != node_id and peer.status == StorageNode.STATUS_IN_SHUTDOWN:
+            reason = (f"Node {peer.get_id()} is already shutting down in this cluster, "
+                      f"cannot shutdown {node_id} concurrently")
+            if force is False:
+                logger.error(reason)
+                return False, reason
+            logger.warning("%s — proceeding with force", reason)
+
+    task_id = tasks_controller.get_active_node_restart_task(snode.cluster_id, snode.get_id())
+    if task_id:
+        reason = f"Restart task found: {task_id}, can not shutdown storage node"
+        if force is False:
+            logger.error(reason)
+            return False, reason
+        logger.warning("%s — proceeding with force", reason)
+
+    tasks = tasks_controller.get_active_node_tasks(snode.cluster_id, snode.get_id())
+    if tasks:
+        if not force and _allow_shutdown_with_migration_tasks(snode, db_controller):
+            logger.warning(
+                "Migration task found: %s, proceeding with shutdown because FTT=2 allows node outage",
+                len(tasks),
+            )
+        elif force:
+            logger.warning(
+                "Migration task found: %s, proceeding with forced shutdown",
+                len(tasks),
+            )
+        else:
+            reason = f"Migration task found: {len(tasks)}, can not shutdown storage node or use --force"
+            logger.error(reason)
+            return False, reason
+
+    if snode.status not in (
+            StorageNode.STATUS_ONLINE,
+            StorageNode.STATUS_SUSPENDED,
+            StorageNode.STATUS_DOWN,
+    ):
+        if force:
+            logger.warning(
+                "Node status is %s, proceeding with force", snode.status)
+        else:
+            reason = (f"Node is in {snode.status} state; only online/suspended/down "
+                      f"can be gracefully shut down. Use --force.")
+            logger.error(reason)
+            return False, reason
+
+    return True, ""
+
+
 def shutdown_storage_node(node_id, force=False, keep_auto_restart=False):
     """Gracefully terminate a storage node.
 
@@ -4783,56 +4862,9 @@ def shutdown_storage_node(node_id, force=False, keep_auto_restart=False):
     # this for its own non-force shutdown endpoint, where the policy
     # decision belongs.
 
-    # Guard: no concurrent shutdown + restart (design: mutual exclusion)
-    for peer in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
-        if peer.get_id() != node_id and peer.status == StorageNode.STATUS_RESTARTING:
-            logger.error(
-                f"Node {peer.get_id()} is restarting in this cluster, "
-                f"cannot shutdown {node_id} concurrently")
-            if force is False:
-                return False
-        if peer.get_id() != node_id and peer.status == StorageNode.STATUS_IN_SHUTDOWN:
-            logger.error(
-                f"Node {peer.get_id()} is already shutting down in this cluster, "
-                f"cannot shutdown {node_id} concurrently")
-            if force is False:
-                return False
-
-    task_id = tasks_controller.get_active_node_restart_task(snode.cluster_id, snode.get_id())
-    if task_id:
-        logger.error(f"Restart task found: {task_id}, can not shutdown storage node")
-        if force is False:
-            return False
-
-    tasks = tasks_controller.get_active_node_tasks(snode.cluster_id, snode.get_id())
-    if tasks:
-        if not force and _allow_shutdown_with_migration_tasks(snode, db_controller):
-            logger.warning(
-                "Migration task found: %s, proceeding with shutdown because FTT=2 allows node outage",
-                len(tasks),
-            )
-        elif force:
-            logger.warning(
-                "Migration task found: %s, proceeding with forced shutdown",
-                len(tasks),
-            )
-        else:
-            logger.error(f"Migration task found: {len(tasks)}, can not shutdown storage node or use --force")
-            return False
-
-    if snode.status not in (
-            StorageNode.STATUS_ONLINE,
-            StorageNode.STATUS_SUSPENDED,
-            StorageNode.STATUS_DOWN,
-    ):
-        if force:
-            logger.warning(
-                "Node status is %s, proceeding with force", snode.status)
-        else:
-            logger.error(
-                "Node is in %s state; only online/suspended/down can be "
-                "gracefully shut down. Use --force.", snode.status)
-            return False
+    allowed, _reason = check_node_shutdown_preconditions(node_id, force=force)
+    if not allowed:
+        return False
 
     for n in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
         if tasks_controller.get_active_lvol_migration(n.get_id()):
