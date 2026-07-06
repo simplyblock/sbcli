@@ -4717,6 +4717,7 @@ def check_node_shutdown_preconditions(node_id, force=False):
     With force=True the refusals downgrade to warnings and the shutdown is
     allowed, mirroring shutdown_storage_node's historical behavior.
     """
+    db_controller = DBController()
     try:
         snode = db_controller.get_storage_node_by_id(node_id)
     except KeyError:
