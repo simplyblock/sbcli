@@ -421,8 +421,14 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     max_r_mbytes = max_r_mbytes or 0
     max_w_mbytes = max_w_mbytes or 0
 
-    all_lvols = db_controller.get_mini_lvols()
-    all_snaps = db_controller.get_snapshots(cl.get_id())
+    # TTL-cached scans: these feed advisory capacity math and random-vuid
+    # dedup only — name uniqueness goes through the O(1) per-pool name index
+    # inside validate_add_lvol_func, so a few seconds of staleness here cannot
+    # admit a duplicate name. Uncached, these two full-DB reads cost seconds
+    # per create at a few thousand objects and dominate mass-create runs.
+    from simplyblock_core.utils.ttl_cache import cached_mini_lvols, cached_snapshots
+    all_lvols = cached_mini_lvols(db_controller)
+    all_snaps = cached_snapshots(db_controller, cl.get_id())
     result, error = validate_add_lvol_func(name, size, None, pool_id_or_name,
                                            max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, all_lvols, all_snaps)
 
@@ -697,6 +703,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
             lvol.remove(db_controller.kv_store)
             return False, msg
 
+        precheck_started = time.time()
         secondary_nodes = []
         for nl in non_leaders:
             action = check_non_leader_for_operation(
@@ -725,7 +732,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
             return lvol_bdev
 
         success, actual_leader, result = execute_on_leader_with_failover(
-            all_nodes, lvol.lvs_name, _create_on_leader)
+            all_nodes, lvol.lvs_name, _create_on_leader, known_leader=primary_node)
         if not success:
             logger.error(f"Failed to create lvol on leader: {result}")
             lvol.remove(db_controller.kv_store)
@@ -735,9 +742,16 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
         lvol.lvol_uuid = lvol_bdev['uuid']
         lvol.blobid = lvol_bdev['driver_specific']['lvol']['blobid']
 
-        # Step 3: Execute registration on non-leaders that passed pre-check
+        # Step 3: Execute registration on non-leaders that passed pre-check.
+        # The Step-1 verdict is reused while fresh: re-sweeping the data-plane
+        # quorum seconds after the pre-check re-verifies unchanged state and
+        # doubled the probe cost of every create. Only when the leader op took
+        # long enough for connectivity to plausibly have moved do we re-check
+        # (and then with leader_op_completed=True, which unlocks the
+        # kill_and_wait handling the second pass exists for).
+        stale_precheck = (time.time() - precheck_started) > 30
         for sec_idx, sec in enumerate(secondary_nodes):
-            action = check_non_leader_for_operation(
+            action = "proceed" if not stale_precheck else check_non_leader_for_operation(
                 sec.get_id(), lvol.lvs_name, operation_type="create",
                 leader_op_completed=True, all_nodes=all_nodes)
             if action == "proceed":
@@ -781,19 +795,18 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
 def _create_bdev_stack(lvol, snode, is_primary=True):
     rpc_client = snode.rpc_client()
 
-    node_bdevs = rpc_client.get_bdevs()
-    node_bdev_names = []
-    if node_bdevs:
-        for bdev in node_bdevs:
-            node_bdev_names.append(bdev['name'])
-            node_bdev_names.extend(bdev['aliases'])
-
     created_bdevs = []
     for bdev in lvol.bdev_stack:
         type = bdev['type']
         name = bdev['name']
         params = bdev['params']
-        if name in node_bdev_names:
+        # Idempotency probe per stack bdev. A by-name bdev_get_bdevs resolves
+        # names, aliases and uuids server-side and returns [] / an -ENODEV
+        # error (→ None) when absent — equivalent to the previous full-dump
+        # membership test, but O(1) instead of serializing every bdev on the
+        # node into the response (the dump grows with lvol count and was the
+        # single largest cost of mass creates).
+        if rpc_client.get_bdevs(name):
             continue
 
         ret = None
@@ -846,52 +859,18 @@ def _resolve_namespaced_subsystem(lvol, rpc_client, snode):
     path (i.e. ``lvol.namespace`` ends up empty), False if it should attach to
     the pre-existing subsystem named by ``lvol.nqn``.
 
-    Closes the race between ``snapshot_controller.clone()`` picking a free
-    namespaced subsystem via ``get_next_available_subsystem_on_node`` and a
-    concurrent lvol-delete tearing that subsystem down before
-    ``nvmf_subsystem_add_ns`` runs. If the target subsystem is gone, we
-    downgrade this lvol to its own subsystem rather than failing the add_ns
-    RPC with "Unable to find subsystem with NQN ..." and leaving an orphan
-    bdev_lvol_clone blob behind.
+    The gone-or-full cases (a concurrent lvol-delete tore the subsystem down
+    after ``snapshot_controller.clone()`` picked it via
+    ``get_next_available_subsystem_on_node``, or it filled up meanwhile) are
+    handled where they surface: ``nvmf_subsystem_add_ns`` rejects the add and
+    the -32602 fallback in ``add_lvol_on_node`` re-resolves to another
+    subsystem (or downgrades to standalone) and retries. This function used to
+    pre-verify via ``subsystem_list`` — a full ``nvmf_get_subsystems`` dump
+    whose response grows with total lvol count, paid on EVERY create to catch
+    a race that occurs at most once per max_namespaces creates. Trust the CP's
+    own record and let the error path pay the dump only when it actually fires.
     """
-    db_ctrl = DBController()
-
-    if not lvol.namespace:
-        return True
-
-    look_for_another_ns = False
-    if lvol.node_id == snode.get_id():
-        subsys = rpc_client.subsystem_list(lvol.nqn)
-        if not subsys:
-            logger.warning(f"LVol subsystem {lvol.nqn} not found on node {snode.get_id()}, looking for another one")
-            look_for_another_ns = True
-        else:
-            subsys_max_ns = subsys[0]["max_namespaces"]
-            subsys_ns = subsys[0]["namespaces"]
-            if subsys_max_ns == len(subsys_ns):
-                logger.info("Subsys is full, looking for another one")
-                look_for_another_ns = True
-
-    if look_for_another_ns:
-        result = get_next_available_subsystem_on_node(lvol.node_id)
-        if result:
-            lvol.nqn = result.nqn
-            lvol.namespace = result.uuid
-            lvol.max_namespace_per_subsys = result.max_namespace_per_subsys
-            return False
-        else:
-            subsys_count = count_lvol_subsystems(snode)
-            if subsys_count >= snode.max_lvol:
-                error = f"Too many subsystems on node: {snode.get_id()}, max subsystems reached: {snode.max_lvol}"
-                logger.error(error)
-                raise Exception(error)
-
-            cluster = db_ctrl.get_cluster_by_id(snode.cluster_id)
-            lvol.nqn = cluster.nqn + ":lvol:" + lvol.uuid
-            lvol.namespace = ""
-            return True
-    else:
-        return False
+    return not lvol.namespace
 
 
 def _fail_after_bdev(lvol, rpc_client, msg):
@@ -1056,6 +1035,14 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
                 lvol, rpc_client, "Failed to add bdev to subsystem")
 
     lvol.ns_id = int(ret)
+
+    if not is_primary:
+        # Replica registration: the bdev was registered with the uuid/blobid
+        # the primary already produced — the caller only checks for an error
+        # and never reads this dict's fields, so skip the verification RPC and
+        # echo back what was registered.
+        return {'uuid': lvol.lvol_uuid,
+                'driver_specific': {'lvol': {'blobid': lvol.blobid}}}, None
 
     ret = rpc_client.get_bdevs(f"{lvol.lvs_name}/{lvol.lvol_bdev}")
     if ret:
@@ -1310,7 +1297,7 @@ def _delete_lvol_from_all_nodes(lvol, snode, force_delete, lock=True) -> None:
 
     if lvol.ha_type == 'single':
         with snapshot_controller.lvstore_op_lock(
-                snode.cluster_id, lvol.lvs_name, enabled=_inner):
+                snode.cluster_id, lvol.lvs_name, node_id=lvol.node_id, enabled=_inner):
             ret = delete_lvol_from_node(lvol.get_id(), lvol.node_id, force=force_delete)
         if not ret and not force_delete:
             raise RuntimeError("Failed to delete lvol from node")
@@ -1352,7 +1339,7 @@ def _delete_lvol_from_all_nodes(lvol, snode, force_delete, lock=True) -> None:
             try:
                 peer_rpc = peer.rpc_client(timeout=5, retry=2)
                 with snapshot_controller.lvstore_op_lock(
-                        snode.cluster_id, lvol.lvs_name, enabled=_inner):
+                        snode.cluster_id, lvol.lvs_name, node_id=role_id, enabled=_inner):
                     ok = _remove_lvol_subsys_from_node(lvol, peer_rpc)
                 if ok:
                     logger.info(
@@ -1384,7 +1371,7 @@ def _delete_lvol_from_all_nodes(lvol, snode, force_delete, lock=True) -> None:
         # attempt is one single-node op, so it takes the inner lvstore lock.
         def _delete_on_leader(leader):
             with snapshot_controller.lvstore_op_lock(
-                    snode.cluster_id, lvol.lvs_name, enabled=_inner):
+                    snode.cluster_id, lvol.lvs_name, node_id=leader.get_id(), enabled=_inner):
                 ret = delete_lvol_from_node(lvol.get_id(), leader.get_id(), force=force_delete)
             return ret if ret else None
 
@@ -1413,7 +1400,7 @@ def _delete_lvol_from_all_nodes(lvol, snode, force_delete, lock=True) -> None:
             elif action == "proceed":
                 try:
                     with snapshot_controller.lvstore_op_lock(
-                            snode.cluster_id, lvol.lvs_name, enabled=_inner):
+                            snode.cluster_id, lvol.lvs_name, node_id=nl.get_id(), enabled=_inner):
                         _remove_lvol_subsys_from_node(lvol, nl.rpc_client())
                 except Exception as e:
                     logger.warning(f"Failed sync delete on {nl.get_id()}: {e}")
@@ -1985,7 +1972,8 @@ def _resize_lvol_on_all_nodes(lvol, snode, size_in_mib, lock=True) -> None:
 
     if lvol.ha_type == "single":
         rpc_client = snode.rpc_client()
-        with snapshot_controller.lvstore_op_lock(snode.cluster_id, lvol.lvs_name, enabled=lock):
+        with snapshot_controller.lvstore_op_lock(snode.cluster_id, lvol.lvs_name,
+                                                 node_id=snode.get_id(), enabled=lock):
             ret = rpc_client.bdev_lvol_resize(f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib)
         if not ret:
             raise RuntimeError(f"Error resizing lvol on node: {snode.get_id()}")
@@ -2038,7 +2026,8 @@ def _resize_lvol_on_all_nodes(lvol, snode, size_in_mib, lock=True) -> None:
         if primary_node:
             logger.info(f"Resizing LVol: {lvol.get_id()} on node: {primary_node.get_id()}")
             rpc_client = primary_node.rpc_client()
-            with snapshot_controller.lvstore_op_lock(snode.cluster_id, lvol.lvs_name, enabled=lock):
+            with snapshot_controller.lvstore_op_lock(snode.cluster_id, lvol.lvs_name,
+                                                     node_id=primary_node.get_id(), enabled=lock):
                 ret = rpc_client.bdev_lvol_resize(f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib)
             if not ret:
                 raise RuntimeError(f"Error resizing lvol on node: {primary_node.get_id()}")
@@ -2046,7 +2035,8 @@ def _resize_lvol_on_all_nodes(lvol, snode, size_in_mib, lock=True) -> None:
         for sec in secondary_nodes:
             logger.info(f"Resizing LVol: {lvol.get_id()} on node: {sec.get_id()}")
             sec_rpc_client = sec.rpc_client()
-            with snapshot_controller.lvstore_op_lock(snode.cluster_id, lvol.lvs_name, enabled=lock):
+            with snapshot_controller.lvstore_op_lock(snode.cluster_id, lvol.lvs_name,
+                                                     node_id=sec.get_id(), enabled=lock):
                 ret = sec_rpc_client.bdev_lvol_resize(f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib)
             if not ret:
                 raise RuntimeError(f"Error resizing lvol on node: {sec.get_id()}")

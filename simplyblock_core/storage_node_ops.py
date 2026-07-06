@@ -4941,6 +4941,11 @@ def _count_fabric_disconnected_nodes(all_nodes, lvs_peer_ids=None):
 def find_leader_with_failover(all_nodes, lvs_name):
     """Detect the current leader and failover if needed.
 
+    0. Cached fast path: if a leader for this lvstore was confirmed within
+       LEADER_TTL_SEC, probe ONLY that node (one RPC). Leadership rarely moves,
+       so this replaces the 3-node scan on the hot create paths; the probe
+       itself is a fresh confirmation, so a moved leadership simply misses and
+       falls through to the full scan below.
     1. Try each node as leader via bdev_lvol_get_lvstores (leadership field).
        A node that answers leadership=True is CONFIRMED (the query is itself a
        successful RPC to that node) → return it directly. A confirmed leader is
@@ -4957,10 +4962,27 @@ def find_leader_with_failover(all_nodes, lvs_name):
         (leader_node, non_leader_nodes) or (None, []) if no confirmable leader.
     """
     from simplyblock_core.controllers.lvol_controller import is_node_leader
+    from simplyblock_core.utils.ttl_cache import leader_cache, LEADER_TTL_SEC
 
     leader = None
     leader_confirmed = False
     non_leaders = []
+
+    cluster_id = all_nodes[0].cluster_id if all_nodes else ""
+    cache_key = (cluster_id, lvs_name)
+    cached_id = leader_cache.get(cache_key, LEADER_TTL_SEC)
+    if cached_id:
+        cached_node = next((n for n in all_nodes if n.get_id() == cached_id), None)
+        if cached_node is not None:
+            try:
+                if is_node_leader(cached_node, lvs_name):
+                    leader_cache.put(cache_key, cached_id)
+                    return cached_node, [n for n in all_nodes
+                                         if n.get_id() != cached_id]
+            except Exception:
+                pass
+        # Cached leader moved or stopped answering — do the full scan.
+        leader_cache.invalidate(cache_key)
 
     # Find current leader
     for node in all_nodes:
@@ -4997,6 +5019,7 @@ def find_leader_with_failover(all_nodes, lvs_name):
     # leadership could NOT be confirmed by RPC (the fabric-connected fallback,
     # i.e. the leader's mgmt RPC genuinely failed so is_node_leader raised).
     if leader_confirmed:
+        leader_cache.put(cache_key, leader.get_id())
         return leader, non_leaders
 
     # Unconfirmed-leader fallback: `leader` is only a fabric-connected guess —
@@ -5006,6 +5029,7 @@ def find_leader_with_failover(all_nodes, lvs_name):
     # otherwise fall through to the failover logic.
     try:
         if is_node_leader(leader, lvs_name):
+            leader_cache.put(cache_key, leader.get_id())
             return leader, non_leaders
     except Exception:
         pass
@@ -5025,6 +5049,7 @@ def find_leader_with_failover(all_nodes, lvs_name):
                 logger.info("Leader %s fabric disconnected, failed over to %s",
                             leader.get_id(), nl.get_id())
                 new_non_leaders = [n for n in all_nodes if n.get_id() != nl.get_id()]
+                leader_cache.put(cache_key, nl.get_id())
                 return nl, new_non_leaders
         return None, []
 
@@ -5076,6 +5101,7 @@ def find_leader_with_failover(all_nodes, lvs_name):
         return None, []
 
     new_non_leaders = [n for n in all_nodes if n.get_id() != failover_target.get_id()]
+    leader_cache.put(cache_key, failover_target.get_id())
     return failover_target, new_non_leaders
 
 
@@ -5162,10 +5188,15 @@ def check_non_leader_for_operation(node_id, lvs_name, operation_type="create",
     return "queue"
 
 
-def execute_on_leader_with_failover(all_nodes, lvs_name, operation_fn):
+def execute_on_leader_with_failover(all_nodes, lvs_name, operation_fn,
+                                    known_leader=None):
     """Execute an operation on the current leader with failover support.
 
-    1. Find leader (with failover if needed)
+    1. Find leader (with failover if needed) — skipped when the caller passes
+       ``known_leader`` from a just-completed find_leader_with_failover, so the
+       leadership scan is not paid twice per operation. Failure handling below
+       still re-detects, so a leadership flip between the caller's detect and
+       the operation is covered by the retry, exactly as before.
     2. Execute operation_fn(leader_node)
     3. If operation fails, re-check leadership and retry on new leader
     4. Return (success, leader_node, result)
@@ -5174,12 +5205,16 @@ def execute_on_leader_with_failover(all_nodes, lvs_name, operation_fn):
         all_nodes: list of all StorageNode objects in the LVS group
         lvs_name: LVS name
         operation_fn: callable(leader_node) → result. Returns None/False on failure.
+        known_leader: leader StorageNode already confirmed by the caller.
 
     Returns:
         (True, leader_node, result) on success
         (False, None, error_msg) on failure
     """
-    leader, non_leaders = find_leader_with_failover(all_nodes, lvs_name)
+    if known_leader is not None:
+        leader = known_leader
+    else:
+        leader, _ = find_leader_with_failover(all_nodes, lvs_name)
     if leader is None:
         return False, None, "No leader available"
 
@@ -5265,7 +5300,19 @@ def _check_peer_disconnected(peer_node, lvs_peer_ids=None):
                     peer_node.get_id(), peer_node.status)
         return True
 
-    if is_node_data_plane_disconnected_quorum(peer_node, lvs_peer_ids=lvs_peer_ids):
+    # The NVMe-ctrlr quorum sweep costs ~10 RPCs across the cluster and is
+    # re-run for every peer on every create/clone/snapshot. Its verdict is
+    # connectivity state that moves on node-failure timescales, so cache it
+    # briefly per process; the FDB-status short-circuit above stays uncached
+    # and still catches mgmt-observed transitions immediately. A stale
+    # "connected" is bounded by the TTL and by the operation itself failing
+    # and re-checking; a stale "disconnected" only delays inclusion of a
+    # just-recovered peer by the same window.
+    from simplyblock_core.utils.ttl_cache import quorum_verdict_cache, QUORUM_VERDICT_TTL_SEC
+    verdict = quorum_verdict_cache.get_or_compute(
+        (peer_node.get_id(), tuple(lvs_peer_ids or ())), QUORUM_VERDICT_TTL_SEC,
+        lambda: is_node_data_plane_disconnected_quorum(peer_node, lvs_peer_ids=lvs_peer_ids))
+    if verdict:
         logger.info("Peer %s is data-plane disconnected (NVMe-ctrlr quorum confirmed), will skip",
                      peer_node.get_id())
         return True

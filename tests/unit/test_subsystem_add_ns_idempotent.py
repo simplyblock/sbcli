@@ -6,9 +6,12 @@ behavior of ``RPCClient.nvmf_subsystem_add_ns``.
 Regression target: 2026-05-14 cluster_activate observation on cluster
 3d4914e7-... emitted two identical ``nvmf_subsystem_add_ns`` requests
 12 s apart for the same lvol (same nqn, bdev_name, uuid, nguid,
-nsid=1). With idempotency folded into the RPC method, the second call
-short-circuits and returns the existing nsid rather than firing a
-duplicate JSON-RPC that SPDK would reject with -EEXIST.
+nsid=1). Idempotency is folded into the RPC method on the ERROR path:
+the add fires directly (the duplicate re-entry is the rare case), and
+only a rejected add triggers the ``nvmf_get_subsystems`` probe — whose
+unfiltered response grows with total lvol count and used to be paid
+before every single add. A rejected duplicate resolves to the existing
+nsid; any other rejection propagates unchanged.
 """
 
 import unittest
@@ -24,10 +27,14 @@ def _client():
         return RPCClient("127.0.0.1", 8081, "user", SecretStr("pass"), timeout=1, retry=0)
 
 
+_DUP_ERR = {"code": -32602, "message": "Invalid parameters"}
+
+
 class TestAddNsIdempotent(unittest.TestCase):
 
-    def test_existing_namespace_short_circuits_rpc(self):
-        """When the subsystem already has a matching bdev/nsid/uuid, no RPC fires."""
+    def test_rejected_duplicate_resolves_to_existing_nsid(self):
+        """A rejected add whose subsystem already holds a matching
+        bdev/nsid/uuid is a duplicate re-entry: return the existing nsid."""
         c = _client()
         nqn = "nqn.test:lvol:abc"
         bdev = "LVS_345/LVOL_8403"
@@ -39,13 +46,25 @@ class TestAddNsIdempotent(unittest.TestCase):
                     "nsid": 1, "bdev_name": bdev, "uuid": uuid,
                 }],
             }]) as mock_list, \
-             patch.object(c, "_request2") as mock_req:
+             patch.object(c, "_request2", return_value=(None, _DUP_ERR)) as mock_req:
             ret = c.nvmf_subsystem_add_ns(nqn, bdev, uuid=uuid, nsid=1)
 
         self.assertEqual(ret, 1)
+        # The add fires first; the probe runs only after the rejection.
+        mock_req.assert_called_once()
+        self.assertEqual(mock_req.call_args.args[0], "nvmf_subsystem_add_ns")
         mock_list.assert_called_once_with(nqn_name=nqn)
-        # The real add_ns RPC must not fire.
-        mock_req.assert_not_called()
+
+    def test_successful_add_never_probes(self):
+        """The happy path pays no nvmf_get_subsystems dump at all."""
+        c = _client()
+        with patch.object(c, "subsystem_list") as mock_list, \
+             patch.object(c, "_request2", return_value=(1, None)) as mock_req:
+            ret = c.nvmf_subsystem_add_ns("nqn.test:lvol:abc", "bdev0", uuid="u1", nsid=1)
+
+        self.assertEqual(ret, 1)
+        mock_req.assert_called_once()
+        mock_list.assert_not_called()
 
     def test_missing_namespace_fires_rpc(self):
         """When the bdev is not yet in the subsystem, the real RPC fires."""
@@ -65,18 +84,20 @@ class TestAddNsIdempotent(unittest.TestCase):
         # Confirm the underlying method name.
         self.assertEqual(mock_req.call_args.args[0], "nvmf_subsystem_add_ns")
 
-    def test_subsystem_absent_fires_rpc(self):
-        """When the subsystem itself is missing from the list, the real RPC fires."""
+    def test_rejection_without_match_propagates_error(self):
+        """A rejected add with no matching namespace is a real failure — the
+        original error must reach the caller (subsystem gone / full)."""
         c = _client()
         with patch.object(c, "subsystem_list", return_value=[]), \
-             patch.object(c, "_request2", return_value=(1, None)) as mock_req:
-            c.nvmf_subsystem_add_ns("nqn.test", "bdev0", uuid="u1")
+             patch.object(c, "_request2", return_value=(None, _DUP_ERR)) as mock_req:
+            ret, err = c.nvmf_subsystem_add_ns2("nqn.test", "bdev0", uuid="u1")
         mock_req.assert_called_once()
+        self.assertIsNone(ret)
+        self.assertEqual(err, _DUP_ERR)
 
-    def test_uuid_mismatch_falls_through(self):
+    def test_uuid_mismatch_keeps_error(self):
         """A bdev present at the same nsid but with a DIFFERENT uuid is a real
-        conflict, not a duplicate; let SPDK reject it rather than swallow it.
-        """
+        conflict, not a duplicate; the rejection must not be swallowed."""
         c = _client()
         nqn = "nqn.test:lvol:abc"
         bdev = "LVS_345/LVOL_8403"
@@ -87,41 +108,42 @@ class TestAddNsIdempotent(unittest.TestCase):
                     "nsid": 1, "bdev_name": bdev, "uuid": "old-uuid",
                 }],
             }]), \
-             patch.object(c, "_request2", return_value=(False, None)) as mock_req:
-            c.nvmf_subsystem_add_ns(nqn, bdev, uuid="new-uuid", nsid=1)
+             patch.object(c, "_request2", return_value=(None, _DUP_ERR)) as mock_req:
+            ret, err = c.nvmf_subsystem_add_ns2(nqn, bdev, uuid="new-uuid", nsid=1)
 
         mock_req.assert_called_once()
+        self.assertIsNone(ret)
+        self.assertEqual(err, _DUP_ERR)
 
-    def test_idempotent_false_always_fires_rpc(self):
-        """Callers can opt out of the precheck with ``idempotent=False``."""
+    def test_idempotent_false_never_probes(self):
+        """Callers can opt out: a rejected add returns the error directly."""
         c = _client()
         nqn = "nqn.test:lvol:abc"
         bdev = "LVS_345/LVOL_8403"
 
-        with patch.object(c, "subsystem_list", return_value=[{
-                "nqn": nqn,
-                "namespaces": [{"nsid": 1, "bdev_name": bdev, "uuid": "u1"}],
-            }]) as mock_list, \
-             patch.object(c, "_request2", return_value=(False, None)) as mock_req:
-            c.nvmf_subsystem_add_ns(nqn, bdev, uuid="u1", nsid=1, idempotent=False)
+        with patch.object(c, "subsystem_list") as mock_list, \
+             patch.object(c, "_request2", return_value=(None, _DUP_ERR)) as mock_req:
+            ret, err = c.nvmf_subsystem_add_ns2(nqn, bdev, uuid="u1", nsid=1,
+                                                idempotent=False)
 
-        # No precheck, real RPC fires regardless.
         mock_list.assert_not_called()
         mock_req.assert_called_once()
+        self.assertEqual(err, _DUP_ERR)
 
-    def test_probe_failure_does_not_block_add(self):
-        """If the idempotency probe itself raises, fall back to the real RPC."""
+    def test_probe_failure_returns_original_error(self):
+        """If the error-path probe itself raises, the original rejection is
+        returned rather than the probe's exception."""
         c = _client()
         with patch.object(c, "subsystem_list", side_effect=RuntimeError("rpc down")), \
-             patch.object(c, "_request2", return_value=(1, None)) as mock_req:
-            ret = c.nvmf_subsystem_add_ns("nqn.test", "bdev0")
-        self.assertEqual(ret, 1)
+             patch.object(c, "_request2", return_value=(None, _DUP_ERR)) as mock_req:
+            ret, err = c.nvmf_subsystem_add_ns2("nqn.test", "bdev0")
         mock_req.assert_called_once()
+        self.assertIsNone(ret)
+        self.assertEqual(err, _DUP_ERR)
 
-    def test_same_bdev_different_nsid_skips(self):
-        """If the bdev is already attached at a different nsid (caller didn't pin
-        nsid), treat as already-present and return that nsid.
-        """
+    def test_rejected_same_bdev_different_nsid_resolves(self):
+        """If the bdev is already attached at a different nsid (caller didn't
+        pin nsid), a rejected add resolves to that nsid."""
         c = _client()
         nqn = "nqn.test:lvol:abc"
         bdev = "LVS_345/LVOL_8403"
@@ -130,11 +152,11 @@ class TestAddNsIdempotent(unittest.TestCase):
                 "nqn": nqn,
                 "namespaces": [{"nsid": 2, "bdev_name": bdev, "uuid": "u1"}],
             }]), \
-             patch.object(c, "_request2") as mock_req:
+             patch.object(c, "_request2", return_value=(None, _DUP_ERR)) as mock_req:
             ret = c.nvmf_subsystem_add_ns(nqn, bdev, uuid="u1")  # no nsid pinned
 
         self.assertEqual(ret, 2)
-        mock_req.assert_not_called()
+        mock_req.assert_called_once()
 
 
 if __name__ == "__main__":

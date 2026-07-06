@@ -608,6 +608,25 @@ class DBController(metaclass=Singleton):
         transactional = fdb.transactional(DBController._release_lvstore_lock_tx)
         transactional(self, self.kv_store, cluster_id, lvs_name, owner)
 
+    def watch_lvstore_lock(self, cluster_id, lvs_name):
+        """Return an FDB watch future that fires when the lock key changes
+        (release, reclaim, heartbeat), or None when no DB connection exists.
+
+        Lets lock waiters block on the actual release instead of sleeping a
+        fixed poll interval: the future's ``is_ready()`` is a local check (no
+        FDB round-trip), so waiters can spin on it cheaply and re-attempt the
+        acquire the moment the holder releases."""
+        if not self.kv_store:
+            return None
+        lock = LVStoreMutationLock()
+        lock.cluster_id = cluster_id
+        lock.lvs_name = lvs_name
+        key = lock.get_db_id().encode()
+        tr = self.kv_store.create_transaction()
+        watch = tr.watch(key)
+        tr.commit().wait()
+        return watch
+
     # ---- Node-add port reservation (Single FDB Transaction) ----
 
     def _reserve_next_nvmf_port_tx(self, tr, cluster_id, base_port, node_used, owner, now):
