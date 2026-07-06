@@ -3463,6 +3463,17 @@ def _restart_storage_node_impl(
         except Exception as ana_e:
             logger.error("ANA failback during restart of %s failed: %s", snode.get_id(), ana_e)
 
+        # Start data migration
+        online_devices_list = []
+        for dev in snode.nvme_devices:
+            if dev.status in [NVMeDevice.STATUS_ONLINE,
+                              NVMeDevice.STATUS_CANNOT_ALLOCATE,
+                              NVMeDevice.STATUS_FAILED_AND_MIGRATED]:
+                online_devices_list.append(dev.get_id())
+        if online_devices_list:
+            logger.info(f"Starting migration task for node {snode.get_id()}")
+            tasks_controller.add_device_mig_task_for_node(snode.get_id())
+
         logger.info("Setting node status to Online")
         if not set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE, caused_by="restart"):
             # See twin call site above (single-leader restart path) for
@@ -3485,16 +3496,6 @@ def _restart_storage_node_impl(
         lvol_list = db_controller.get_lvols_by_node_id(snode.get_id())
         logger.info(f"Found {len(lvol_list)} lvols")
 
-        # Phase 10: start data migration, set node online
-        online_devices_list = []
-        for dev in snode.nvme_devices:
-            if dev.status in [NVMeDevice.STATUS_ONLINE,
-                              NVMeDevice.STATUS_CANNOT_ALLOCATE,
-                              NVMeDevice.STATUS_FAILED_AND_MIGRATED]:
-                online_devices_list.append(dev.get_id())
-        if online_devices_list:
-            logger.info(f"Starting migration task for node {snode.get_id()}")
-            tasks_controller.add_device_mig_task_for_node(snode.get_id())
         return True
 
 
