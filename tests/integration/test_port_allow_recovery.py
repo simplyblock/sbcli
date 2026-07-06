@@ -1302,6 +1302,68 @@ class TestOfflinePrimarySwitchback(_SecRoleReconnectBase):
         self.assertEqual(self.task.status, JobSchedule.STATUS_DONE)
 
 
+class TestDeferredAnaFailback(_SecRoleReconnectBase):
+    """Gap-A fix: a secondary that missed the primary's failback while
+    partitioned returns with its listeners still optimized. Once the
+    ONLINE primary provably leads, the recovering secondary demotes its
+    own listeners for that lvstore back to non_optimized (idempotent in
+    the normal case, best-effort on RPC failure). Tertiary ANA is never
+    touched."""
+
+    def setUp(self):
+        super().setUp()
+        self.node_rpc.subsystem_list.return_value = [{"nqn": "nqn-p-hub"}]
+        self.lvol = MagicMock(name="lvol")
+        self.lvol.nqn = "nqn-lvol-p1"
+        from simplyblock_core.models.lvol_model import LVol
+        self.lvol.status = LVol.STATUS_ONLINE
+        self.db_mock.get_lvols_by_node_id.return_value = [self.lvol]
+
+    def _run(self):
+        from simplyblock_core.services.tasks_runner_port_allow import exec_port_allow_task
+        with patch(
+            "simplyblock_core.services.tasks_runner_port_allow._verify_or_reconnect_peer_hublvol",
+            return_value=True,
+        ):
+            exec_port_allow_task(self.task)
+
+    def _demotes(self):
+        return [c for c in self.calls
+                if c[0] == "ana_set" and c[1] == self.lvol.nqn
+                and c[2] == self.node.uuid and c[3] == "non_optimized"]
+
+    def test_demoted_when_primary_leads(self):
+        self._run()
+        self.assertEqual(len(self._demotes()), 1,
+                         f"expected the deferred ANA failback; calls={self.calls}")
+        # Only this node's listeners; nothing for the tertiary.
+        others = [c for c in self.calls if c[0] == "ana_set" and c[2] != self.node.uuid]
+        self.assertEqual(others, [])
+        self.assertEqual(self.task.status, JobSchedule.STATUS_DONE)
+
+    def test_not_demoted_when_primary_not_leading(self):
+        self.prim_rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": False}]
+        self._run()
+        self.assertEqual(self._demotes(), [],
+                         "no ANA demote unless the primary provably leads")
+        self.assertEqual(self.task.status, JobSchedule.STATUS_DONE)
+
+    def test_ana_failure_is_best_effort(self):
+        with patch(
+            "simplyblock_core.services.tasks_runner_port_allow."
+            "storage_node_ops._set_lvol_ana_on_node",
+            side_effect=Exception("rpc down"),
+        ):
+            self._run()
+        self.assertEqual(self.task.status, JobSchedule.STATUS_DONE,
+                         "a failed ANA demote must not wedge recovery")
+        node_allows = [
+            c for c in self.calls
+            if c[0] == "firewall_set_port" and c[1] == self.node.uuid and c[3] == "allow"
+        ]
+        self.assertEqual(len(node_allows), 1)
+
+
 class TestTertiaryFollowsActingLeader(_BasePortAllowTest):
     """Recovering TERTIARY with its primary out and the secondary acting
     as leader: the tertiary's redirect must be re-wired toward the

@@ -412,6 +412,28 @@ def _reconnect_own_sec_tert_hublvols(node):
                         f"{primary.lvstore} not connected; refusing ANA "
                         f"switch-back until it is")
 
+            # Deferred ANA FAILBACK — the mirror of the deferred failover
+            # below: if the primary failed back while this secondary was
+            # partitioned, both _failback_primary_ana (requires first_sec
+            # ONLINE) and recreate_lvstore step 11 (skips disconnected_peers)
+            # missed it, so it returns with its listeners still optimized —
+            # dual-optimized with the primary, stealing the client path.
+            # Demote back to non_optimized once the primary provably leads.
+            # Best-effort: dual-optimized is functional (the redirect works),
+            # so a failed ANA RPC must not wedge recovery — the health loop
+            # and the primary's next failback re-assert it.
+            if primary_online and _read_lvs_leadership(primary, primary.lvstore):
+                for lvol in db.get_lvols_by_node_id(primary.get_id()):
+                    if lvol.status not in (LVol.STATUS_ONLINE, LVol.STATUS_OFFLINE):
+                        continue
+                    try:
+                        storage_node_ops._set_lvol_ana_on_node(
+                            lvol, node, "non_optimized")
+                    except Exception as e:
+                        logger.warning(
+                            "Deferred ANA failback of %s on %s failed: %s",
+                            lvol.nqn, node.get_id()[:8], e)
+
             # Deferred ANA failover: the primary went OFFLINE while this node
             # was unreachable, so trigger_ana_failover_for_node skipped the
             # promotion (it requires first_sec to be ONLINE). Complete it now,
