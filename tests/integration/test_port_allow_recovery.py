@@ -1066,6 +1066,78 @@ class TestOwnSecTertHublvolReconnect(_SecRoleReconnectBase):
         self.assertEqual(self.task.status, JobSchedule.STATUS_DONE)
 
 
+class TestFenceOnFirstContact(_SecRoleReconnectBase):
+    """Gap-C fix: a DOWN node's follower redirect-listener ports must be
+    nvmf-blocked at first contact (before any reconnect work) and released
+    only after every gate passed, strictly before the node's own client
+    port opens. Ports blocked by someone else are never claimed."""
+
+    def setUp(self):
+        super().setUp()
+        self.node.status = StorageNode.STATUS_DOWN
+        self.fport = 4444
+        self.prim.get_lvol_subsys_port = MagicMock(return_value=self.fport)
+        self.node_rpc.subsystem_list.return_value = [{"nqn": "nqn-p-hub"}]
+
+    def _fence_blocks(self):
+        return [c for c in self.calls
+                if c[0] == "firewall_set_port" and c[1] == self.node.uuid
+                and c[2] == self.fport and c[3] == "block"]
+
+    def _fence_releases(self):
+        return [c for c in self.calls
+                if c[0] == "firewall_set_port" and c[1] == self.node.uuid
+                and c[2] == self.fport and c[3] == "allow"]
+
+    def test_fenced_before_work_released_before_own_port(self):
+        def _record(peer, primary):
+            self.calls.append(("verify_hublvol", peer.uuid, primary.uuid))
+            return True
+        self._run_with_verify(_record)
+
+        i_fence = next(i for i, c in enumerate(self.calls)
+                       if c[0] == "firewall_set_port" and c[1] == self.node.uuid
+                       and c[2] == self.fport and c[3] == "block")
+        i_work = next(i for i, c in enumerate(self.calls)
+                      if c[0] == "verify_hublvol")
+        i_release = next(i for i, c in enumerate(self.calls)
+                         if c[0] == "firewall_set_port" and c[1] == self.node.uuid
+                         and c[2] == self.fport and c[3] == "allow")
+        i_own = next(i for i, c in enumerate(self.calls)
+                     if c[0] == "firewall_set_port" and c[1] == self.node.uuid
+                     and c[2] == self.port and c[3] == "allow")
+        self.assertLess(i_fence, i_work,
+                        "follower port must be fenced before any reconnect work")
+        self.assertLess(i_release, i_own,
+                        "fenced ports release before the node's own client port")
+        self.assertEqual(self.task.function_params.get("fenced_ports"), [],
+                         "the fence record must be cleared after release")
+
+    def test_online_node_not_fenced(self):
+        self.node.status = StorageNode.STATUS_ONLINE
+        self._run_with_verify(lambda *a: True)
+        self.assertEqual(self._fence_blocks(), [],
+                         "an ONLINE node's serving listeners must never be fenced")
+
+    def test_preblocked_port_not_claimed(self):
+        with patch("simplyblock_core.port_block.is_port_blocked", return_value=True):
+            self._run_with_verify(lambda *a: True)
+        self.assertEqual(self._fence_blocks(), [])
+        self.assertEqual(self._fence_releases(), [],
+                         "a port blocked by another flow must not be released here")
+
+    def test_suspension_keeps_the_fence(self):
+        def _fail_own(peer, primary):
+            return not (peer is self.node and primary is self.prim)
+        self._run_with_verify(_fail_own)
+        self.assertEqual(self.task.status, JobSchedule.STATUS_SUSPENDED)
+        self.assertEqual(len(self._fence_blocks()), 1)
+        self.assertEqual(self._fence_releases(), [],
+                         "a suspended task keeps its fence — the safe state")
+        self.assertEqual(self.task.function_params.get("fenced_ports"), [self.fport],
+                         "the fence record must survive for the retry pass")
+
+
 class TestOfflinePrimarySwitchback(_SecRoleReconnectBase):
     """Primary went OFFLINE while the secondary was partitioned: the
     tertiary is acting leader and the secondary's ANA promotion was

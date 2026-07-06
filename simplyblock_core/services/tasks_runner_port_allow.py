@@ -700,6 +700,91 @@ def _recommit_followers_for_leader(node, peers):
     return True, ""
 
 
+def _fence_follower_ports_on_first_contact(node, task):
+    """Fence-on-first-contact: nvmf-block the recovering node's follower
+    redirect-listener ports the moment the CP can reach its SPDK again.
+
+    A follower's redirect-listener port for an lvstore whose primary is
+    not ONLINE is never health-checked (and a partitioned node cannot be
+    port-denied at outage time anyway), so at NIC-heal that listener
+    starts serving client IO against a stale hublvol/leadership state
+    until this task converges it. Blocking those ports here — right after
+    the mgmt + data-NIC gates, before any reconnect work — closes that
+    window for the rest of the recovery; the epilogue unblocks exactly
+    the ports this task fenced.
+
+    Rules:
+      - Only for a DOWN node (an ONLINE node's listeners are serving
+        legitimately; fencing them would cut client IO).
+      - A port that is ALREADY blocked is not claimed — a peer's restart
+        flow or a failback may own it, and unblocking someone else's
+        fence re-opens the very window it guards.
+      - The fenced set is persisted in ``task.function_params`` BEFORE
+        each block RPC, so a runner crash or task retry still knows what
+        to release (an unblock of a never-blocked port is harmless; a
+        blocked port with no record is a leak).
+
+    Returns ``(ok, msg)``; failure suspends the task (the ports already
+    fenced stay fenced — the safe state — and the retry pass continues).
+    """
+    if node.status != StorageNode.STATUS_DOWN:
+        return True, ""
+
+    fenced = list(task.function_params.get("fenced_ports") or [])
+    for pid in [node.lvstore_stack_secondary, node.lvstore_stack_tertiary]:
+        if not pid:
+            continue
+        try:
+            primary = db.get_storage_node_by_id(pid)
+        except KeyError:
+            continue
+        if not primary.lvstore or primary.lvstore_status != "ready":
+            continue
+        port = primary.get_lvol_subsys_port(primary.lvstore)
+        if not port or port in fenced:
+            continue
+        try:
+            if port_block.is_port_blocked(node, port):
+                logger.info(
+                    "Follower port %s on %s already blocked (owned by another "
+                    "flow); not claiming it", port, node.get_id()[:8])
+                continue
+            fenced.append(port)
+            task.function_params["fenced_ports"] = fenced
+            task.write_to_db(db.kv_store)
+            port_block.set_port(node, port, block=True, timeout=5, retry=2)
+            tcp_ports_events.port_deny(node, port)
+            logger.info(
+                "Fenced follower port %s on recovering node %s for %s",
+                port, node.get_id()[:8], primary.lvstore)
+        except Exception as e:
+            return False, f"fencing follower port {port} failed: {e}"
+    return True, ""
+
+
+def _release_fenced_ports(node, task):
+    """Unblock the ports this task fenced. Returns True when the record
+    is empty afterwards; ports that fail to unblock stay recorded so the
+    retry pass releases them (leaving them silently blocked would keep
+    the node DOWN forever with no owner)."""
+    fenced = list(task.function_params.get("fenced_ports") or [])
+    if not fenced:
+        return True
+    still_fenced = []
+    for fport in fenced:
+        try:
+            port_block.set_port(node, fport, block=False, timeout=5, retry=2)
+            tcp_ports_events.port_allowed(node, fport)
+        except Exception as e:
+            logger.error(
+                "Failed to release fenced follower port %s on %s: %s",
+                fport, node.get_id()[:8], e)
+            still_fenced.append(fport)
+    task.function_params["fenced_ports"] = still_fenced
+    task.write_to_db(db.kv_store)
+    return not still_fenced
+
+
 def _abort_recovering_node(node, reason):
     """Abort port-allow: kill SPDK on the recovering node, mark OFFLINE,
     do NOT issue port_allowed. Used when one or more online peers cannot
@@ -739,6 +824,13 @@ def exec_port_allow_task(task):
     task = db.get_task_by_id(task.uuid)
 
     if task.canceled:
+        # Best-effort release of any follower ports a prior pass fenced —
+        # a canceled task must not leave ownerless blocked ports behind.
+        if task.function_params.get("fenced_ports"):
+            try:
+                _release_fenced_ports(db.get_storage_node_by_id(task.node_id), task)
+            except KeyError:
+                pass
         task.function_result = "canceled"
         task.status = JobSchedule.STATUS_DONE
         task.write_to_db(db.kv_store)
@@ -800,6 +892,17 @@ def exec_port_allow_task(task):
     if data_results and not any(r is True for r in data_results):
         msg = "Node data NIC not confirmed reachable, retry task"
         logger.info(msg)
+        task.function_result = msg
+        task.status = JobSchedule.STATUS_SUSPENDED
+        task.write_to_db(db.kv_store)
+        return
+
+    # First contact with a reachable SPDK: fence the follower listener
+    # ports BEFORE any reconnect work (see helper docstring).
+    fence_ok, fence_msg = _fence_follower_ports_on_first_contact(node, task)
+    if not fence_ok:
+        msg = f"Follower-port fencing failed: {fence_msg}, retry task"
+        logger.warning(msg)
         task.function_result = msg
         task.status = JobSchedule.STATUS_SUSPENDED
         task.write_to_db(db.kv_store)
@@ -1092,6 +1195,18 @@ def exec_port_allow_task(task):
             task.status = JobSchedule.STATUS_SUSPENDED
             task.write_to_db(db.kv_store)
             return
+
+    # Release the follower ports fenced at first contact — every gate has
+    # passed, so the follower-side hublvols/leadership for those lvstores
+    # are converged. Released strictly BEFORE the node's own client port
+    # so redirects are reachable the moment client IO returns.
+    if not _release_fenced_ports(node, task):
+        msg = "Failed to release fenced follower port(s), retry task"
+        logger.warning(msg)
+        task.function_result = msg
+        task.status = JobSchedule.STATUS_SUSPENDED
+        task.write_to_db(db.kv_store)
+        return
 
     logger.info(f"Allow port {port_number} on node {node.get_id()}")
     port_block.set_port(node, port_number, block=False, timeout=5, retry=2)
