@@ -205,7 +205,7 @@ def resume(cluster: Cluster, storage_node: StorageNode) -> Response:
     return Response(status_code=204)
 
 
-@instance_api.post('/shutdown', name='clusters:storage-nodes:shutdown', status_code=202, responses={202: {"content": None}})
+@instance_api.post('/shutdown', name='clusters:storage-nodes:shutdown', status_code=202, responses={202: {"content": None}, 409: {"description": "Shutdown preconditions not met; retry later or use force"}})
 def shutdown(cluster: Cluster, storage_node: StorageNode, force: bool = False) -> Response:
     if not force:
         from simplyblock_core.storage_node_ops import _check_ftt_allows_node_removal
@@ -213,6 +213,16 @@ def shutdown(cluster: Cluster, storage_node: StorageNode, force: bool = False) -
         allowed, reason = _check_ftt_allows_node_removal(storage_node.get_id(), DBController())
         if not allowed:
             raise ValueError(reason)
+
+    # Evaluate every condition that would make the background shutdown bail
+    # BEFORE answering: a refusal after 202 is invisible to the caller (the
+    # k8s operator polled forever for a shutdown that had already been
+    # rejected because migration tasks were running — 2026-07-06 node-drain
+    # stall). 409 tells the caller "not now, retry later or use force".
+    allowed, reason = storage_node_ops.check_node_shutdown_preconditions(
+        storage_node.get_id(), force=force)
+    if not allowed:
+        raise HTTPException(409, reason)
 
     Thread(
         target=storage_node_ops.shutdown_storage_node,
