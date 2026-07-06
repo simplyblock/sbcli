@@ -306,7 +306,8 @@ def main():
                         if not tasks_controller.claim_task(task):
                             logger.info(f"Migration task {task.uuid} owned by another runner host; skipping")
                             continue
-                        res = task_runner(task)
+                        with tasks_controller.task_lease_heartbeat(task):
+                            res = task_runner(task)
                         update_master_task(task, cl)
                         if res:
                             node_task = tasks_controller.get_active_node_tasks(task.cluster_id, task.node_id)
