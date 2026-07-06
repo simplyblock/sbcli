@@ -776,7 +776,35 @@ def exec_port_allow_task(task):
         task.write_to_db(db.kv_store)
         return
 
-    # check node ping
+    # Data-NIC gate: mgmt reachability alone is not recovery — after a
+    # partial partition the mgmt plane often returns first while the
+    # storage network is still dark. Everything this task does next
+    # (remote-dev reconnects, hublvol wiring, leadership failback, the
+    # port unblock itself) rides on the data network, and a still-dark
+    # data NIC would surface in the peer hublvol gate as retry-exhaustion
+    # -> node ABORT (SPDK kill) — a destructive outcome for a condition
+    # that just needs more waiting. Require the node itself to positively
+    # confirm at least one data NIC (SnodeAPI ping_ip from the node over
+    # the data interface). _check_ping_from_node is tri-state: True (up),
+    # False (agent ran the ping, it failed / carrier down), None (SnodeAPI
+    # timed out -> inconclusive). Unlike the monitor's DOWN-flip, which
+    # merely ignores inconclusive results, recovery needs positive
+    # confirmation: anything but at least one True suspends and retries.
+    data_results = []
+    for data_nic in node.data_nics:
+        if data_nic.ip4_address:
+            data_ping = health_controller._check_ping_from_node(
+                data_nic.ip4_address, ifname=data_nic.if_name, node=node)
+            logger.info(f"Check: ping data nic {data_nic.ip4_address} ... {data_ping}")
+            data_results.append(data_ping)
+    if data_results and not any(r is True for r in data_results):
+        msg = "Node data NIC not confirmed reachable, retry task"
+        logger.info(msg)
+        task.function_result = msg
+        task.status = JobSchedule.STATUS_SUSPENDED
+        task.write_to_db(db.kv_store)
+        return
+
     logger.info("connect to remote devices")
     # connect to remote devs
     try:

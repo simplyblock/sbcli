@@ -301,6 +301,56 @@ class TestClusterMapBeforeUnblock(_BasePortAllowTest):
                          "no firewall allow may fire when cluster map push failed")
 
 
+class TestDataNicGate(_BasePortAllowTest):
+    """Mgmt reachability alone must not drive recovery: the node itself
+    must positively confirm at least one data NIC via SnodeAPI ping_ip
+    (partial partitions often restore the mgmt plane first, and a dark
+    data NIC would otherwise surface as peer-gate exhaustion -> node
+    abort). False AND inconclusive (None) both suspend — recovery needs
+    positive confirmation, unlike the monitor's DOWN-flip which ignores
+    inconclusive results."""
+
+    def setUp(self):
+        super().setUp()
+        nic = MagicMock(name="data_nic")
+        nic.ip4_address = "10.10.0.10"
+        nic.if_name = "eth1"
+        self.node.data_nics = [nic]
+
+    def _run_with_data_ping(self, result):
+        from simplyblock_core.services.tasks_runner_port_allow import exec_port_allow_task
+        with patch(
+            "simplyblock_core.services.tasks_runner_port_allow."
+            "health_controller._check_ping_from_node",
+            return_value=result,
+        ):
+            exec_port_allow_task(self.task)
+
+    def _node_allows(self):
+        return [
+            c for c in self.calls
+            if c[0] == "firewall_set_port" and c[1] == self.node.uuid and c[3] == "allow"
+        ]
+
+    def test_data_nic_down_suspends(self):
+        self._run_with_data_ping(False)
+        self.assertEqual(self.task.status, JobSchedule.STATUS_SUSPENDED)
+        self.assertEqual(self._node_allows(), [],
+                         "the port must not open while the node's data NIC is down")
+
+    def test_data_nic_inconclusive_suspends(self):
+        self._run_with_data_ping(None)
+        self.assertEqual(self.task.status, JobSchedule.STATUS_SUSPENDED)
+        self.assertEqual(self._node_allows(), [],
+                         "an inconclusive data-NIC ping must not allow the port — "
+                         "recovery requires positive confirmation")
+
+    def test_data_nic_up_proceeds(self):
+        self._run_with_data_ping(True)
+        self.assertEqual(self.task.status, JobSchedule.STATUS_DONE)
+        self.assertEqual(len(self._node_allows()), 1)
+
+
 class TestLeadershipFailback(_BasePortAllowTest):
     """Fenced leadership failback (reinstated 2026-07-06): when a peer is
     acting leader at port_allow time, demote it and hand leadership back
