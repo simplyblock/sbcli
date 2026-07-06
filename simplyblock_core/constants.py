@@ -100,12 +100,19 @@ RESTART_TASK_EXEC_INTERVAL_MAX_SEC = 3600
 
 # A JobSchedule's lease is held by the runner host (by hostname) that last
 # touched it. Another host may only take over a task whose lease is older than
-# this — i.e. the owning runner is presumed dead. Must exceed the longest
-# single task_runner() invocation that does not write the task back (the
-# restart runner can block on RPCs for several minutes), so a live owner is
-# never falsely preempted. A runner restarting on the SAME host re-claims its
-# own tasks immediately regardless of this value (owner id is the hostname).
-TASK_LEASE_TTL_SEC = 1200
+# this — i.e. the owning runner is presumed dead. A live owner refreshes the
+# lease every TASK_LEASE_HEARTBEAT_SEC from a background thread while driving
+# a restart (restart_storage_node wrapper), so the TTL no longer needs to
+# exceed the longest blocking RPC — it only needs to be several heartbeats
+# wide so a momentarily slow (but alive) owner is never falsely preempted.
+# Keeping it short is what makes ownership transfer fast: when the driving
+# process dies (pod evicted while its host drains, CLI killed), a live
+# tasks-runner claims the stale lease and resumes the restart instead of the
+# node staying orphaned in RESTARTING (2026-07-04 MCO rollout deadlock).
+# A runner restarting on the SAME host re-claims its own tasks immediately
+# regardless of this value (owner id is the hostname).
+TASK_LEASE_HEARTBEAT_SEC = 30
+TASK_LEASE_TTL_SEC = 180
 
 # Node-add concurrency: the cross-node mesh section of add_node is serialized
 # per cluster behind a ClusterAddNodeLock. The holder refreshes the lock every
