@@ -1,7 +1,9 @@
 # coding=utf-8
+import contextlib
 import datetime
 import logging
 import socket
+import threading
 import time
 import uuid
 
@@ -90,6 +92,40 @@ def refresh_task_lease(task, owner=None):
     if db.atomic_update(task, _mutate) is None:
         return False
     return refreshed["ok"]
+
+
+@contextlib.contextmanager
+def task_lease_heartbeat(task, owner=None):
+    """Refresh this host's lease on `task` every TASK_LEASE_HEARTBEAT_SEC for
+    the duration of the with-block.
+
+    Every runner that executes long-blocking work under a claimed lease MUST
+    wrap that work in this: since TASK_LEASE_TTL_SEC (180s) is far shorter
+    than a node add / restart / migration, a lease that is only refreshed on
+    task writes goes stale mid-execution, and a second runner host (e.g. the
+    new pod during a rolling update) would claim the task and double-drive
+    it — for node-add that means killing the in-flight add's SPDK and
+    deleting its half-created node record.
+
+    The heartbeat stops on its own if the lease is lost to another host
+    (refresh_task_lease returns False) — the takeover is authoritative.
+    """
+    stop = threading.Event()
+
+    def _beat():
+        while not stop.wait(constants.TASK_LEASE_HEARTBEAT_SEC):
+            try:
+                if not refresh_task_lease(task, owner):
+                    return
+            except Exception as e:
+                logger.debug(f"Lease heartbeat failed for task {task.uuid}: {e}")
+
+    thread = threading.Thread(target=_beat, daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
 
 
 def ensure_node_restart_task(node):

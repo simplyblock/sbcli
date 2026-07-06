@@ -92,7 +92,10 @@ def _run_task(task_uuid, cluster_id):
             if not tasks_controller.claim_task(task):
                 logger.info(f"Node-add task {task_uuid} owned by another runner host; skipping")
                 break
-            res = process_task(task, cl)
+            # add_node blocks for many minutes with no task writes; heartbeat
+            # the lease so another runner host never sees it stale mid-add.
+            with tasks_controller.task_lease_heartbeat(task):
+                res = process_task(task, cl)
             if res:
                 if task.status == JobSchedule.STATUS_DONE:
                     break

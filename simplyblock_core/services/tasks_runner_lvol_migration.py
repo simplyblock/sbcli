@@ -2258,6 +2258,7 @@ if __name__ == "__main__":
                     if not tasks_controller.claim_task(task):
                         logger.info(f"LVol-migration task {task.uuid} owned by another runner host; skipping")
                         continue
-                    task_runner(task)
+                    with tasks_controller.task_lease_heartbeat(task):
+                        task_runner(task)
 
         time.sleep(3)

@@ -620,7 +620,11 @@ while True:
                         logger.info(f"Restart task {task.uuid} owned by another runner host; skipping")
                         continue
                     retry_before = task.retry
-                    res = task_runner(task)
+                    # Device restarts (and parts of node restarts outside the
+                    # restart_storage_node wrapper) block without task writes;
+                    # heartbeat the lease so it never goes stale mid-execution.
+                    with tasks_controller.task_lease_heartbeat(task):
+                        res = task_runner(task)
                     task = db.get_task_by_id(task.uuid)
                     if res or task.status == JobSchedule.STATUS_DONE:
                         _restart_next_attempt.pop(task.uuid, None)
