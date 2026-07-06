@@ -118,7 +118,7 @@ _INTERMEDIATE_POLL_MAX = 300           # max iterations ≈ 5 min
 
 _SKIP_CLEANUP_SOURCE = False
 _SKIP_INTERMEDIATE_SNAP_DELETE = False
-_SKIP_RENAME_BDEVS = True
+_SKIP_RENAME_BDEVS = False
 
 
 def _now_ms():
@@ -1826,9 +1826,9 @@ def _rename_migrated_bdevs(migration, tgt_node, tgt_rpc, tgt_sec_rpc=None, tgt_t
     their canonical names (without the suffix).  This prevents suffix accumulation
     on repeated migrations of the same volume.
 
-    A pre-check ensures we only rename when the canonical name is free on the
-    target.  If the canonical name already exists the 'm' name is kept as-is so
-    both snapshots can coexist without conflict.
+    bdev_lvol_rename returns "EXISTS" when the target name is already taken;
+    we use that signal to try the fallback (_MIGRATION_BDEV_SUFFIX_DONE) instead
+    of doing a pre-query of all bdevs.
 
     Must be called AFTER _apply_migration_to_db() — snap.snap_bdev and
     lvol.lvol_bdev already point to the 'm'-suffixed target paths at that point.
@@ -1840,26 +1840,53 @@ def _rename_migrated_bdevs(migration, tgt_node, tgt_rpc, tgt_sec_rpc=None, tgt_t
     lvstore = tgt_node.lvstore
     preexisting = set(migration.snaps_preexisting_on_target or [])
 
-    try:
-        existing_bdevs = {
-            e.get('name', '').split('/')[-1]
-            for e in (tgt_rpc.bdev_lvol_get_lvols(lvstore) or [])
-        }
-    except Exception as exc:
-        logger.warning(f"_rename_migrated_bdevs: could not query target bdevs: {exc}")
-        return
+    _EXISTS = "EXISTS"
 
     def _do_rename(old_composite, new_composite, label):
-        tgt_rpc.bdev_lvol_rename(old_composite, new_composite)
+        """Rename on prim + sec + ter.  Returns 'EXISTS' if any node reports the
+        target name is already taken, True on success.  Raises on hard failure."""
+        ret = tgt_rpc.bdev_lvol_rename(old_composite, new_composite)
+        exists = (ret == _EXISTS)
         for role, rpc in [("sec", tgt_sec_rpc), ("ter", tgt_ter_rpc)]:
             if rpc:
                 try:
-                    rpc.bdev_lvol_rename(old_composite, new_composite)
+                    r = rpc.bdev_lvol_rename(old_composite, new_composite)
+                    if r == _EXISTS:
+                        exists = True
                 except Exception as exc:
                     logger.warning(
                         f"_rename_migrated_bdevs: {role} rename {label} (non-fatal): {exc}")
+        if exists:
+            return _EXISTS
+        if not ret:
+            raise RuntimeError(f"bdev_lvol_rename {label}: ret={ret!r}")
+        return True
 
-    # --- Snapshots ---
+    def _rename_with_fallback(current_short, label):
+        """Try canonical name; on EXISTS try the _done fallback.
+        Returns the target short name on success, None if skipped."""
+        canonical = current_short[:-len(_MIGRATION_BDEV_SUFFIX)]
+        old = f"{lvstore}/{current_short}"
+
+        ret = _do_rename(old, f"{lvstore}/{canonical}", label)
+        if ret == _EXISTS:
+            fallback = canonical + _MIGRATION_BDEV_SUFFIX_DONE
+            logger.info(
+                f"_rename_migrated_bdevs: {canonical} exists — trying fallback {fallback}")
+            ret2 = _do_rename(old, f"{lvstore}/{fallback}", label)
+            if ret2 == _EXISTS:
+                logger.warning(
+                    f"_rename_migrated_bdevs: both {canonical} and {fallback} "
+                    f"exist — leaving {current_short} as-is")
+                return None
+            target = fallback
+        else:
+            target = canonical
+
+        logger.info(f"_rename_migrated_bdevs: {current_short} → {target}")
+        return target
+
+    # --- Snapshots (owned) ---
     for snap_uuid in migration.snaps_migrated:
         if snap_uuid in preexisting:
             continue
@@ -1868,42 +1895,28 @@ def _rename_migrated_bdevs(migration, tgt_node, tgt_rpc, tgt_sec_rpc=None, tgt_t
         except KeyError:
             continue
 
-        snap_bdev = snap.snap_bdev  # e.g. LVS_TGT/SNAP_Xm
+        snap_bdev = snap.snap_bdev
         if '/' not in snap_bdev:
             continue
         current_short = snap_bdev.split('/', 1)[1]
         if not current_short.endswith(_MIGRATION_BDEV_SUFFIX):
-            continue  # already canonical
+            continue
 
-        canonical_short = current_short[:-len(_MIGRATION_BDEV_SUFFIX)]
-        if canonical_short in existing_bdevs:
-            fallback_short = canonical_short + _MIGRATION_BDEV_SUFFIX_DONE
-            if fallback_short in existing_bdevs:
-                logger.warning(
-                    f"_rename_migrated_bdevs: both {canonical_short} and {fallback_short} "
-                    f"exist — cannot rename {current_short}, leaving as-is")
-                continue
-            target_short = fallback_short
-            logger.info(
-                f"_rename_migrated_bdevs: {canonical_short} taken — renaming {current_short} → {fallback_short}")
-        else:
-            target_short = canonical_short
+        if snap.lvol.uuid != migration.lvol_id:
+            continue  # ancestor snap — handled below
 
         try:
-            _do_rename(f"{lvstore}/{current_short}", f"{lvstore}/{target_short}", current_short)
-            snap.snap_bdev = f"{lvstore}/{target_short}"
-            snap.write_to_db(db.kv_store)
-            existing_bdevs.discard(current_short)
-            existing_bdevs.add(target_short)
-            logger.info(f"_rename_migrated_bdevs: snap {current_short} → {target_short}")
+            target = _rename_with_fallback(current_short, current_short)
         except Exception as exc:
-            logger.warning(
-                f"_rename_migrated_bdevs: snap rename {current_short} failed: {exc}")
+            logger.warning(f"_rename_migrated_bdevs: snap {current_short} failed: {exc}")
+            continue
+        if target:
+            snap.snap_bdev = f"{lvstore}/{target}"
+            snap.write_to_db(db.kv_store)
 
     # --- Ancestor chain blobs (non-owned snaps) ---
-    # These belong to another lvol's chain; _apply_migration_to_db did NOT update
-    # snap.snap_bdev for them — it only added an instances entry with the _m name.
-    # Find the _m bdev via instances, rename it on TGT, and update the entry.
+    # _apply_migration_to_db added an instances entry with the _m bdev name.
+    # Rename it and update the entry in place.
     for snap_uuid in migration.snaps_migrated:
         if snap_uuid in preexisting:
             continue
@@ -1921,32 +1934,19 @@ def _rename_migrated_bdevs(migration, tgt_node, tgt_rpc, tgt_sec_rpc=None, tgt_t
                 continue
             inst_lvstore, inst_short = inst_bdev.split('/', 1)
             if inst_lvstore != lvstore:
-                continue  # not on this migration's TGT lvstore
+                continue
             if not inst_short.endswith(_MIGRATION_BDEV_SUFFIX):
-                continue  # already renamed by a previous call
-
-            canonical_short = inst_short[:-len(_MIGRATION_BDEV_SUFFIX)]
-            if canonical_short in existing_bdevs:
-                fallback_short = canonical_short + _MIGRATION_BDEV_SUFFIX_DONE
-                if fallback_short in existing_bdevs:
-                    logger.warning(
-                        f"_rename_migrated_bdevs: ancestor {inst_short} — both "
-                        f"{canonical_short} and {fallback_short} exist, leaving as-is")
-                    continue
-                target_short = fallback_short
-            else:
-                target_short = canonical_short
+                continue
 
             try:
-                _do_rename(f"{lvstore}/{inst_short}", f"{lvstore}/{target_short}", inst_short)
-                inst['snap_bdev'] = f"{lvstore}/{target_short}"
-                existing_bdevs.discard(inst_short)
-                existing_bdevs.add(target_short)
-                updated = True
-                logger.info(f"_rename_migrated_bdevs: ancestor snap {inst_short} → {target_short}")
+                target = _rename_with_fallback(inst_short, inst_short)
             except Exception as exc:
                 logger.warning(
-                    f"_rename_migrated_bdevs: ancestor snap rename {inst_short} failed: {exc}")
+                    f"_rename_migrated_bdevs: ancestor {inst_short} failed: {exc}")
+                continue
+            if target:
+                inst['snap_bdev'] = f"{lvstore}/{target}"
+                updated = True
 
         if updated:
             snap.write_to_db(db.kv_store)
@@ -1960,38 +1960,21 @@ def _rename_migrated_bdevs(migration, tgt_node, tgt_rpc, tgt_sec_rpc=None, tgt_t
 
     current_lvol_short = lvol.lvol_bdev
     if not current_lvol_short.endswith(_MIGRATION_BDEV_SUFFIX):
-        return  # already canonical
-
-    canonical_lvol_short = current_lvol_short[:-len(_MIGRATION_BDEV_SUFFIX)]
-    if canonical_lvol_short in existing_bdevs:
-        fallback_lvol_short = canonical_lvol_short + _MIGRATION_BDEV_SUFFIX_DONE
-        if fallback_lvol_short in existing_bdevs:
-            logger.warning(
-                f"_rename_migrated_bdevs: both {canonical_lvol_short} and {fallback_lvol_short} "
-                f"exist — cannot rename {current_lvol_short}, leaving as-is")
-            return
-        target_lvol_short = fallback_lvol_short
-        logger.info(
-            f"_rename_migrated_bdevs: {canonical_lvol_short} taken — renaming {current_lvol_short} → {fallback_lvol_short}")
-    else:
-        target_lvol_short = canonical_lvol_short
+        return
 
     try:
-        _do_rename(
-            f"{lvstore}/{current_lvol_short}",
-            f"{lvstore}/{target_lvol_short}",
-            current_lvol_short)
-        lvol.lvol_bdev = target_lvol_short
-        lvol.top_bdev = f"{lvstore}/{target_lvol_short}"
+        target = _rename_with_fallback(current_lvol_short, current_lvol_short)
+    except Exception as exc:
+        logger.warning(f"_rename_migrated_bdevs: lvol rename failed: {exc}")
+        return
+    if target:
+        lvol.lvol_bdev = target
+        lvol.top_bdev = f"{lvstore}/{target}"
         for entry in lvol.bdev_stack:
             if (entry.get('type') == 'bdev_lvol'
                     and entry.get('params', {}).get('name') == current_lvol_short):
-                entry['params']['name'] = target_lvol_short
+                entry['params']['name'] = target
         lvol.write_to_db(db.kv_store)
-        logger.info(f"_rename_migrated_bdevs: lvol {current_lvol_short} → {target_lvol_short}")
-    except Exception as exc:
-        logger.warning(
-            f"_rename_migrated_bdevs: lvol rename failed: {exc}")
 
 
 def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
