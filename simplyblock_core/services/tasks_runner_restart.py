@@ -532,7 +532,12 @@ def _process_restart_task(task_uuid):
             logger.info(f"Restart task {task_uuid} owned by another runner host; skipping")
             return
         retry_before = task.retry
-        res = task_runner(task)
+        # Device restarts (and parts of node restarts outside the
+        # restart_storage_node wrapper) block without task writes; heartbeat
+        # the lease so it never goes stale mid-execution and gets stolen by
+        # another runner host.
+        with tasks_controller.task_lease_heartbeat(task):
+            res = task_runner(task)
         task = db.get_task_by_id(task_uuid)
         if res or task.status == JobSchedule.STATUS_DONE:
             _restart_next_attempt.pop(task_uuid, None)
