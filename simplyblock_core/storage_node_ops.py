@@ -2642,6 +2642,10 @@ def restart_storage_node(
                 post_node.status = StorageNode.STATUS_OFFLINE
                 post_node.updated_at = str(datetime.datetime.now(datetime.timezone.utc))
                 post_node.online_since = ""
+                # This would disable adding further node restart tasks.
+                # if this restart was because of a restart task, then the same task would continue,
+                # but if the restart because of manual restart, then no task restart would be created.
+                post_node.auto_restart_disabled = True
                 post_node.write_to_db(db_ctrl.kv_store)
                 storage_events.snode_status_change(
                     post_node, StorageNode.STATUS_OFFLINE, post_node.status,
