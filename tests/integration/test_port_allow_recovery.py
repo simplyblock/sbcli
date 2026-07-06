@@ -966,6 +966,19 @@ class _SecRoleReconnectBase(_BasePortAllowTest):
         # Focus on the reconnect phase: no leadership failback in play.
         self.sec_rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": False}]
 
+        # P owns a DIFFERENT lvstore than the node's own, and leadership
+        # reads are per-lvstore: the node leads its own LVS_TEST (so the
+        # own-lvstore failback is a no-op) and by default does NOT claim
+        # P's LVS_P; P itself reports leading LVS_P.
+        self.prim.lvstore = "LVS_P"
+        self.lvs_leadership_on_node = {"LVS_TEST": True, "LVS_P": False}
+        self.node_rpc.bdev_lvol_get_lvstores.side_effect = (
+            lambda lvs=None, *a, **kw: [
+                {"lvs leadership": self.lvs_leadership_on_node.get(lvs, False)}])
+        self.prim_rpc = MagicMock(name="prim_rpc")
+        self.prim_rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": True}]
+        self.prim.rpc_client = MagicMock(return_value=self.prim_rpc)
+
     def _get_node(self, uuid):
         if uuid == self.prim.uuid:
             return self.prim
@@ -1063,6 +1076,87 @@ class TestOwnSecTertHublvolReconnect(_SecRoleReconnectBase):
         self.assertEqual(own_calls, [],
                          "no OUTBOUND reconnect toward a non-ONLINE primary — "
                          "its own recovery path re-drives that leg")
+        self.assertEqual(self.task.status, JobSchedule.STATUS_DONE)
+
+
+class TestStaleLeaderConvergence(_SecRoleReconnectBase):
+    """Gap-B fix: a recovering follower that still claims leadership for a
+    lvstore whose ONLINE primary actually leads (the primary failed back
+    while this node was partitioned) must be demoted (leader=False,
+    bs_nonleadership) + follower-re-committed before the port opens —
+    covering the short-blip case where the surviving hublvol controller
+    lets the verify pass without a re-commit."""
+
+    def setUp(self):
+        super().setUp()
+        self.node_rpc.subsystem_list.return_value = [{"nqn": "nqn-p-hub"}]
+        self.lvs_leadership_on_node["LVS_P"] = True  # the stale claim
+
+        # The demote flips the node's claim, mirroring the data plane;
+        # keep recording into self.calls like the base recorder does.
+        def _set_leader(lvs, *a, **kw):
+            self.calls.append(("bdev_lvol_set_leader", "node", kw))
+            if kw.get("leader") is False:
+                self.lvs_leadership_on_node[lvs] = False
+            return True
+        self.node_rpc.bdev_lvol_set_leader.side_effect = _set_leader
+
+    def _run(self, recommit=True):
+        from simplyblock_core.services.tasks_runner_port_allow import exec_port_allow_task
+        with patch(
+            "simplyblock_core.services.tasks_runner_port_allow._verify_or_reconnect_peer_hublvol",
+            return_value=True,
+        ), patch(
+            "simplyblock_core.services.tasks_runner_port_allow._reconnect_peer_hublvol_once",
+            return_value=recommit,
+        ) as recommit_mock:
+            exec_port_allow_task(self.task)
+        return recommit_mock
+
+    def _node_demotes(self):
+        return [c for c in self.calls
+                if c[0] == "bdev_lvol_set_leader" and c[1] == "node"
+                and c[2].get("leader") is False
+                and c[2].get("bs_nonleadership") is True]
+
+    def test_stale_claim_demoted_and_recommitted(self):
+        recommit_mock = self._run()
+        self.assertEqual(len(self._node_demotes()), 1,
+                         f"expected one stale-leader demote; calls={self.calls}")
+        forces = [c for c in self.calls
+                  if c[0] == "bdev_distrib_force_to_non_leader" and c[1] == "node"]
+        self.assertEqual(len(forces), 1)
+        recommit_mock.assert_called_once()
+        self.assertEqual(self.task.status, JobSchedule.STATUS_DONE)
+
+    def test_no_demote_when_primary_not_leading(self):
+        # The node is then the legitimate acting leader; demoting it would
+        # leave the LVS with zero writers. The primary's own recovery
+        # performs that failback.
+        self.prim_rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": False}]
+        self._run()
+        self.assertEqual(self._node_demotes(), [])
+        self.assertEqual(self.task.status, JobSchedule.STATUS_DONE)
+
+    def test_persisting_claim_suspends(self):
+        # Demote RPC "succeeds" but the claim does not clear -> the port
+        # must not open on a contested writer.
+        def _set_leader_noop(lvs, *a, **kw):
+            self.calls.append(("bdev_lvol_set_leader", "node", kw))
+            return True
+        self.node_rpc.bdev_lvol_set_leader.side_effect = _set_leader_noop
+        self._run()
+        self.assertEqual(self.task.status, JobSchedule.STATUS_SUSPENDED)
+        node_allows = [
+            c for c in self.calls
+            if c[0] == "firewall_set_port" and c[1] == self.node.uuid and c[3] == "allow"
+        ]
+        self.assertEqual(node_allows, [])
+
+    def test_no_action_without_stale_claim(self):
+        self.lvs_leadership_on_node["LVS_P"] = False
+        self._run()
+        self.assertEqual(self._node_demotes(), [])
         self.assertEqual(self.task.status, JobSchedule.STATUS_DONE)
 
 

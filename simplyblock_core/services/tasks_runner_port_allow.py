@@ -301,6 +301,58 @@ def _reconnect_own_sec_tert_hublvols(node):
                 return False, (
                     f"own hublvol to primary {pid[:8]} not verified-open after "
                     f"{_HUBLVOL_MAX_ATTEMPTS} attempts")
+
+            # Stale-leadership convergence: if this node was the acting
+            # leader when it got partitioned and the primary failed back
+            # WITHOUT it (this node was in disconnected_peers: not demoted,
+            # not re-committed), it comes back still claiming leadership.
+            # When the hublvol controller was destroyed during the outage
+            # the verify above already forced a connect_to_hublvol
+            # re-commit; but after a short blip the controller survives,
+            # the verify passes untouched, and the stale claim would ride
+            # into a dual-leader writer conflict the moment IO returns.
+            # Converge explicitly: demote (leader=False, bs_nonleadership)
+            # + force_to_non_leader, re-commit the follower role, and
+            # verify the claim is gone — all while the follower listener
+            # is still fenced, so it is a quiet-window transition. Only
+            # when the primary actually leads: if the primary is up but
+            # NOT leading, this node is the legitimate acting leader and
+            # demoting it would leave the LVS with zero writers (the
+            # primary's own recovery performs that failback).
+            node_claims = _read_lvs_leadership(node, primary.lvstore)
+            if node_claims is None:
+                return False, f"own leadership read for {primary.lvstore} failed"
+            if node_claims:
+                primary_leads = _read_lvs_leadership(primary, primary.lvstore)
+                if primary_leads is None:
+                    return False, f"leadership read on primary {pid[:8]} failed"
+                if primary_leads:
+                    logger.warning(
+                        "Recovering follower %s still claims leadership of %s "
+                        "while primary %s leads; demoting by re-commit",
+                        node.get_id()[:8], primary.lvstore, pid[:8])
+                    try:
+                        node_rpc = node.rpc_client(timeout=5, retry=1)
+                        node_rpc.bdev_lvol_set_leader(
+                            primary.lvstore, leader=False, bs_nonleadership=True)
+                        node_rpc.bdev_distrib_force_to_non_leader(primary.jm_vuid)
+                    except Exception as e:
+                        return False, (
+                            f"stale-leader demote for {primary.lvstore} failed: {e}")
+                    if not _reconnect_peer_hublvol_once(node, primary):
+                        return False, (
+                            f"follower re-commit after stale-leader demote failed "
+                            f"for {primary.lvstore}")
+                    if _read_lvs_leadership(node, primary.lvstore):
+                        return False, (
+                            f"stale leadership claim for {primary.lvstore} "
+                            f"persists after demote")
+                else:
+                    logger.info(
+                        "Node %s leads %s and primary %s does not — leaving "
+                        "leadership in place; the primary's own recovery "
+                        "performs the failback",
+                        node.get_id()[:8], primary.lvstore, pid[:8])
         else:
             logger.info(
                 "Primary %s is %s; skipping outbound reconnect (its own "
@@ -698,6 +750,24 @@ def _recommit_followers_for_leader(node, peers):
     if failed_peers:
         return False, f"follower re-commit still failing on {', '.join(failed_peers)}"
     return True, ""
+
+
+def _read_lvs_leadership(target_node, lvs_name):
+    """Read ``lvs leadership`` for ``lvs_name`` on ``target_node``.
+
+    Returns True/False from the lvstore state (an absent lvstore reads as
+    False — not a leader), or ``None`` when the RPC failed. Callers must
+    treat ``None`` as "unknown" and retry, never as "not leader".
+    """
+    try:
+        ret = target_node.rpc_client(timeout=5, retry=1).bdev_lvol_get_lvstores(lvs_name)
+        if not ret or len(ret) == 0:
+            return False
+        return bool(ret[0].get("lvs leadership"))
+    except Exception as e:
+        logger.warning("Leadership read for %s on %s failed: %s",
+                       lvs_name, target_node.get_id()[:8], e)
+        return None
 
 
 def _fence_follower_ports_on_first_contact(node, task):
