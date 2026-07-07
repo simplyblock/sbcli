@@ -113,7 +113,10 @@ class HubControllerManager:
                         )
                         return entry.ctrl_name, entry.hub_bdev, None
                 except Exception:
-                    pass
+                    logger.exception(
+                        f"[HubMgr] failed to validate cached hub entry {entry.ctrl_name}; "
+                        "treating as stale and re-attaching"
+                    )
                 logger.info(f"[HubMgr] stale entry for {entry.ctrl_name}; re-attaching")
                 del self._entries[key]
 
@@ -142,11 +145,17 @@ class HubControllerManager:
                         existing.src_rpc = src_rpc
                         try:
                             src_rpc.bdev_nvme_detach_controller(ctrl_name)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.warning(
+                                f"[HubMgr] best-effort detach of duplicate controller failed "
+                                f"(ctrl={ctrl_name}, src={src_node_id[:8]} tgt={tgt_node.get_id()[:8]}): {e}"
+                            )
                         return existing.ctrl_name, existing.hub_bdev, None
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug(
+                        f"[HubMgr] failed to validate concurrently attached controller "
+                        f"{existing.ctrl_name}: {exc}"
+                    )
 
             entry = _HubEntry(ctrl_name, hub_bdev, src_rpc, tgt_node)
             self._entries[key] = entry

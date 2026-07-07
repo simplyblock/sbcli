@@ -1812,7 +1812,12 @@ def _get_tertiary_rpc(node):
         if ter.status == StorageNode.STATUS_ONLINE:
             return _make_rpc(ter)
     except KeyError:
-        pass
+        # Tertiary reference may be stale (node removed/not found); treat as unavailable.
+        logger.debug(
+            "Tertiary node not found for node_id=%s tertiary_node_id=%s",
+            getattr(node, "id", None),
+            node.tertiary_node_id,
+        )
     return None
 
 
