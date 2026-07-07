@@ -821,6 +821,31 @@ class CLIWrapperBase:
         print(f"Migration {args.migration_id} cancelled")
         return True
 
+    def volume__migrate_cleanup(self, sub_command, args):
+        try:
+            result = migration_controller.cleanup_migration_target(args.migration_id)
+        except ValueError as e:
+            print(f"Error: {e}")
+            return False
+        deleted   = result.get("deleted", [])
+        not_found = result.get("not_found", [])
+        errs      = result.get("errors", [])
+        if deleted:
+            print(f"Deleted ({len(deleted)}):")
+            for item in deleted:
+                print(f"  {item}")
+        if not_found:
+            print(f"Already gone ({len(not_found)}):")
+            for item in not_found:
+                print(f"  {item}")
+        if errs:
+            print(f"Errors ({len(errs)}):")
+            for item in errs:
+                print(f"  {item}")
+        if not deleted and not errs:
+            print("Nothing left to clean up on target.")
+        return not errs
+
     def control_plane__add(self, sub_command, args):
         cluster_id = args.cluster_id
         cluster_ip = args.cluster_ip

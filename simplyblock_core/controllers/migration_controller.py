@@ -551,6 +551,122 @@ def _collect_snap_ancestry(snap_uuid) -> set:
 
 
 # ---------------------------------------------------------------------------
+# Target cleanup endpoint
+# ---------------------------------------------------------------------------
+
+_MIG_SUFFIX  = constants.LVOL_MIG_BDEV_SUFFIX  # 'm'
+_DONE_SUFFIX = 'am'
+
+
+def cleanup_migration_target(migration_id):
+    """
+    Idempotently remove every object this migration created on the target node(s).
+
+    Reads the target_lvol_bdev, target_subsystem_nqn/node_ids, and
+    target_snap_uuids fields that are recorded incrementally during
+    create_migration() and the task runner.  Safe to call at any state
+    (including after the migration is done/failed) — "not found" is treated
+    as already cleaned up.
+
+    Returns {"deleted": [...], "not_found": [...], "errors": [...]}.
+    Raises ValueError when the migration or its target node cannot be found.
+    """
+    try:
+        migration = db.get_migration_by_id(migration_id)
+    except KeyError:
+        raise ValueError(f"Migration {migration_id} not found")
+
+    try:
+        tgt_node = db.get_storage_node_by_id(migration.target_node_id)
+    except KeyError:
+        raise ValueError(f"Target node {migration.target_node_id} not found")
+
+    deleted = []
+    not_found = []
+    errors = []
+
+    def _try_delete_bdev(rpc, bdev_path, tag):
+        try:
+            if rpc.get_bdevs(bdev_path):
+                rpc.bdev_lvol_delete(bdev_path)
+                deleted.append({**tag, "bdev": bdev_path})
+            else:
+                not_found.append({**tag, "bdev": bdev_path})
+        except Exception as exc:
+            errors.append({**tag, "bdev": bdev_path, "error": str(exc)})
+
+    # Build RPC clients for primary + HA peers.
+    rpc_clients = []
+    try:
+        rpc_clients.append((tgt_node.get_id(), tgt_node.rpc_client(), "primary"))
+    except Exception as exc:
+        errors.append({"type": "rpc_connect", "node": migration.target_node_id[:8],
+                       "error": str(exc)})
+
+    for attr, label in [("secondary_node_id", "secondary"),
+                         ("tertiary_node_id",  "tertiary")]:
+        peer_id = getattr(tgt_node, attr, None)
+        if not peer_id:
+            continue
+        try:
+            peer = db.get_storage_node_by_id(peer_id)
+            rpc_clients.append((peer.get_id(), peer.rpc_client(), label))
+        except Exception:
+            pass  # peer unreachable — skip gracefully
+
+    # ── 1. Migration lvol bdev ────────────────────────────────────────────────
+    if migration.target_lvol_bdev:
+        for _, rpc, label in rpc_clients:
+            _try_delete_bdev(rpc, migration.target_lvol_bdev,
+                             {"type": "lvol_bdev", "node": label})
+
+    # ── 2. Snapshot bdevs (reverse order: children before parents) ────────────
+    # target_snap_bdevs stores the exact path at creation time ("LVS_TGT/SNAP_xxx_m").
+    # The bdev may have been renamed by the time cleanup runs, so we also probe the
+    # canonical name (strip _m) and the post-done interim name (_am).
+    for stored_path in reversed(migration.target_snap_bdevs):
+        lvstore, short_m = stored_path.rsplit('/', 1)
+        short_base = short_m[:-len(_MIG_SUFFIX)] if short_m.endswith(_MIG_SUFFIX) else short_m
+
+        for _, rpc, label in rpc_clients:
+            bdev_name = next(
+                (f"{lvstore}/{n}"
+                 for n in (short_m, short_base, short_base + _DONE_SUFFIX)
+                 if rpc.get_bdevs(f"{lvstore}/{n}")),
+                None,
+            )
+            if bdev_name:
+                _try_delete_bdev(rpc, bdev_name,
+                                 {"type": "snap_bdev", "stored_path": stored_path,
+                                  "node": label})
+            else:
+                not_found.append({"type": "snap_bdev", "stored_path": stored_path,
+                                   "node": label})
+
+    # ── 3. Subsystems — only on nodes where we called subsystem_create ─────────
+    if migration.target_subsystem_nqn and migration.target_subsystem_node_ids:
+        for node_id in migration.target_subsystem_node_ids:
+            try:
+                node = db.get_storage_node_by_id(node_id)
+                rpc = node.rpc_client()
+                if rpc.subsystem_list(migration.target_subsystem_nqn):
+                    rpc.subsystem_delete(migration.target_subsystem_nqn)
+                    deleted.append({"type": "subsystem",
+                                    "nqn": migration.target_subsystem_nqn,
+                                    "node": node_id[:8]})
+                else:
+                    not_found.append({"type": "subsystem",
+                                      "nqn": migration.target_subsystem_nqn,
+                                      "node": node_id[:8]})
+            except Exception as exc:
+                errors.append({"type": "subsystem",
+                                "nqn": migration.target_subsystem_nqn,
+                                "node": node_id[:8], "error": str(exc)})
+
+    return {"deleted": deleted, "not_found": not_found, "errors": errors}
+
+
+# ---------------------------------------------------------------------------
 # Post-migration DB updates
 # ---------------------------------------------------------------------------
 
@@ -794,6 +910,7 @@ def create_migration(lvol_id, target_node_id,
     # TGT uses random cntlid values within non-overlapping ranges to avoid kernel-side
     # duplicate-cntlid rejection across consecutive migrations.  SRC occupies 1/1000/2000;
     # TGT uses 3-500 / 1003-1500 / 2003-2500 so ranges never collide.
+    _subsystem_created_node_ids = []  # nodes where we call subsystem_create below
     tgt_entries = [(tgt_node, tgt_rpc, tgt_port, random.randint(3, 500))]
     if tgt_sec_node is not None:
         _sec_rpc2  = tgt_sec_node.rpc_client()
@@ -874,6 +991,7 @@ def create_migration(lvol_id, target_node_id,
                 _rpc.subsystem_create(
                     nqn, lvol.ha_type, lvol.uuid, min_cntlid=_min_cntlid,
                     max_namespaces=constants.LVO_MAX_NAMESPACES_PER_SUBSYS)
+                _subsystem_created_node_ids.append(_node_id)
 
             if lvol.allowed_hosts:
                 try:
@@ -942,6 +1060,9 @@ def create_migration(lvol_id, target_node_id,
     migration.intermediate_snaps = []
     migration.started_at = int(time.time())
     migration.create_dt = str(datetime.now())
+    migration.target_lvol_bdev = composite
+    migration.target_subsystem_nqn = nqn if _subsystem_created_node_ids else ""
+    migration.target_subsystem_node_ids = _subsystem_created_node_ids
     migration.write_to_db(db.kv_store)
 
     logger.info(

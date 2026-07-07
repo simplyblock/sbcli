@@ -880,6 +880,10 @@ def _post_process_snap(snap: SnapShot, tgt_node: StorageNode, tgt_rpc: RPCClient
         logger.warning(f"Snapshot {snap_uuid} not found in DB for early node update")
 
     migration.snaps_migrated.append(snap_uuid)
+    if snap_uuid not in migration.snaps_preexisting_on_target:
+        tgt_bdev_path = f"{tgt_node.lvstore}/{_snap_tgt_short_name(snap)}"
+        if tgt_bdev_path not in migration.target_snap_bdevs:
+            migration.target_snap_bdevs.append(tgt_bdev_path)
     migration_events.migration_snap_copied(migration, snap_uuid)
     logger.info(f"Snapshot {snap_uuid} migrated successfully")
     return True, None
@@ -2281,6 +2285,10 @@ def _handle_cleanup_target(migration, tgt_node, tgt_rpc, src_rpc=None):
             logger.warning(f"Target snapshot {snap_uuid} not found in DB; skipping")
 
     migration.transfer_context = {}
+    migration.target_lvol_bdev = ""
+    migration.target_subsystem_nqn = ""
+    migration.target_subsystem_node_ids = []
+    migration.target_snap_bdevs = []
     migration.write_to_db(db.kv_store)
     return True, False, None
 

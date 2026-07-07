@@ -91,4 +91,20 @@ def cancel_migration(cluster: Cluster, migration: Migration):
     return {"status": "cancelled"}
 
 
+@instance_api.post('/cleanup-target', name='cluster:storage-pools:volumes:migrations:cleanup-target', status_code=200)
+def cleanup_migration_target(_cluster: Cluster, migration: Migration):
+    """
+    Idempotently remove every object this migration created on the target node(s).
+
+    Safe to call at any migration state — objects not found are reported as
+    already cleaned up rather than as errors.  Returns a report of what was
+    deleted, what was already gone, and any RPC errors encountered.
+    """
+    try:
+        result = migration_controller.cleanup_migration_target(migration.uuid)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return result
+
+
 api.include_router(instance_api)

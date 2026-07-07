@@ -2064,6 +2064,14 @@ commands:
             help: "The migration id."
             dest: migration_id
             type: str
+      - name: migrate-cleanup
+        help: "Idempotently remove all objects a migration created on the target. Safe to run at any time; already-removed objects are reported as not_found."
+        private: true
+        arguments:
+          - name: "migration_id"
+            help: "The migration id."
+            dest: migration_id
+            type: str
   - name: "control-plane"
     help: "Control Plane Commands"
     aliases:

@@ -648,6 +648,8 @@ class CLIWrapper(CLIWrapperBase):
             self.init_volume__migrate_list(subparser)
         if self.developer_mode:
             self.init_volume__migrate_cancel(subparser)
+        if self.developer_mode:
+            self.init_volume__migrate_cleanup(subparser)
 
 
     def init_volume__add(self, subparser):
@@ -818,6 +820,10 @@ class CLIWrapper(CLIWrapperBase):
 
     def init_volume__migrate_cancel(self, subparser):
         subcommand = self.add_sub_command(subparser, 'migrate-cancel', 'Cancel an active volume migration.')
+        subcommand.add_argument('migration_id', help='The migration id.', type=str)
+
+    def init_volume__migrate_cleanup(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'migrate-cleanup', 'Idempotently remove all objects a migration created on the target. Safe to run at any time; already-removed objects are reported as not_found.')
         subcommand.add_argument('migration_id', help='The migration id.', type=str)
 
 
@@ -1476,6 +1482,12 @@ class CLIWrapper(CLIWrapperBase):
                         ret = False
                     else:
                         ret = self.volume__migrate_cancel(sub_command, args)
+                elif sub_command in ['migrate-cleanup']:
+                    if not self.developer_mode:
+                        print("This command is private.")
+                        ret = False
+                    else:
+                        ret = self.volume__migrate_cleanup(sub_command, args)
                 else:
                     self.parser.print_help()
 

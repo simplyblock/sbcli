@@ -77,6 +77,28 @@ class LVolMigration(BaseModel):
     # created by the migration process itself and must be cleaned up afterward.
     intermediate_snaps: List[str] = []
 
+    # ── Target inventory: objects created on the target by this migration ───
+    # Populated incrementally as objects are created so that the cleanup
+    # endpoint can remove them even if the migration ends in terminal state.
+
+    # Composite bdev path created on the target (e.g. "LVS_TGT/LVOL_xxx_m").
+    target_lvol_bdev: str = ""
+
+    # NQN of the subsystem created on non-overlap target nodes.
+    # Empty when the subsystem was pre-existing (overlap or shared).
+    target_subsystem_nqn: str = ""
+
+    # Node IDs (get_id() form) where we called subsystem_create during
+    # create_migration().  Overlap nodes are excluded — their subsystem
+    # belongs to the source role and must NOT be deleted on cleanup.
+    target_subsystem_node_ids: List[str] = []
+
+    # Full composite bdev paths created on the target by this migration
+    # (e.g. "LVS_TGT/SNAP_xxx_m").  Excludes pre-existing bdevs so the
+    # cleanup endpoint knows exactly what this migration created.
+    # Cleared to [] after cleanup (normal CLEANUP_TARGET or manual endpoint).
+    target_snap_bdevs: List[str] = []
+
     # In-progress RPC job ID for the currently executing data-plane operation
     # (either a snapshot copy or the final lvol migrate). Empty when idle.
     current_job_id: str = ""
