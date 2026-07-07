@@ -143,16 +143,27 @@ def _run_task(task_uuid, cluster_id):
                 break
             # add_node blocks for many minutes with no task writes; heartbeat
             # the lease so another runner host never sees it stale mid-add.
+            retry_before = task.retry
             with tasks_controller.task_lease_heartbeat(task):
                 res = process_task(task, cl)
             if res:
                 if task.status == JobSchedule.STATUS_DONE:
                     break
-            # Reboot-aware wait: an attempt that failed because the node went
-            # down (topology reboot) neither burns the backoff nor retries
-            # blindly — wait for the agent to answer, then retry promptly on
-            # a fresh schedule.
+            # Reboot-aware handling: an attempt that failed because the node
+            # went down (CPU-topology reboot) is expected, not a real failure.
+            # add_node catches the interrupted spdk_process_start and RETURNS
+            # False, so process_task already consumed a retry — roll it back so
+            # the one guaranteed topology reboot per node doesn't eat the
+            # retry budget. Then wait for the agent to answer and retry
+            # promptly on a fresh schedule (no blind fast-retry, no runaway
+            # backoff). The re-run is idempotent: add_node cleans up its own
+            # stale IN_CREATION record on re-entry.
             if _wait_node_reachable(task, task_uuid):
+                if task.retry > retry_before:
+                    task.retry = retry_before
+                    if task.status != JobSchedule.STATUS_DONE:
+                        task.status = JobSchedule.STATUS_SUSPENDED
+                    task.write_to_db(db.kv_store)
                 delay_seconds = constants.TASK_EXEC_INTERVAL_SEC
                 continue
             if not res:
