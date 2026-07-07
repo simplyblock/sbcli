@@ -839,7 +839,15 @@ def check_node(node_id, with_devices=True):
                         logger.error("Error checking/recreating secondary hublvol on sec_1: %s", e)
                 if second_node_1.status == StorageNode.STATUS_ONLINE:
                     print("*" * 100)
-                    lvstore_check &= _check_sec_node_hublvol(second_node_1, auto_fix=True)
+                    # Pass the primary explicitly (as the tertiary callsite
+                    # below does): without it the check resolves the primary
+                    # from sec_1's own back-refs, and for a node that is
+                    # secondary of one lvstore and tertiary of another a
+                    # stale/empty lvstore_stack_secondary silently falls
+                    # through to the tertiary relationship — verifying and
+                    # auto-fixing the hublvol toward the WRONG primary.
+                    lvstore_check &= _check_sec_node_hublvol(
+                        second_node_1, auto_fix=True, primary_node_id=snode.get_id())
                 # Check tertiary's hublvol paths (optimized to primary + non-optimized to sec_1)
                 if snode.tertiary_node_id:
                     tert_node = db_controller.get_storage_node_by_id(snode.tertiary_node_id)

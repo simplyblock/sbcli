@@ -139,7 +139,10 @@ class TestNamespacedAttachRace(unittest.TestCase):
 
         self.assertIsNone(err)
         self.assertEqual(bdev["uuid"], "lvol-bdev-uuid")
-        rpc.subsystem_list.assert_called_with(original_nqn)
+        # Ask-forgiveness contract: the happy path pays NO subsystem_list
+        # probe at all (nvmf_get_subsystems is an O(total-lvols) dump); the
+        # add_ns fires directly against the pre-chosen subsystem.
+        rpc.subsystem_list.assert_not_called()
         rpc.subsystem_create.assert_not_called()
         rpc.nvmf_subsystem_add_listener.assert_not_called()
         rpc.nvmf_subsystem_add_ns2.assert_called_once()
@@ -153,8 +156,11 @@ class TestNamespacedAttachRace(unittest.TestCase):
     def test_namespaced_attach_subsystem_missing_falls_back_to_standalone(
             self, mock_db_cls):
         """When the target subsystem was torn down between the DB lookup
-        and the add_ns RPC, downgrade the lvol to its own subsystem and
-        run the standalone subsystem_create+listener+add_ns path."""
+        and the add_ns RPC, the add_ns is REJECTED (-32602) and the
+        fallback in add_lvol_on_node downgrades the lvol to its own
+        subsystem and re-runs the standalone
+        subsystem_create+listener+add_ns path (ask-forgiveness: no
+        subsystem pre-check happens anymore)."""
         from simplyblock_core.controllers import lvol_controller
 
         original_nqn = "nqn.test:cluster-1:lvol:OTHER"
@@ -163,7 +169,13 @@ class TestNamespacedAttachRace(unittest.TestCase):
 
         node = _node()
         rpc = _rpc_client()
-        rpc.subsystem_list.return_value = []  # subsystem gone
+        # First add_ns (against the torn-down subsystem) is rejected the way
+        # SPDK rejects an unknown NQN; the retry after the downgrade succeeds.
+        rpc.nvmf_subsystem_add_ns2.side_effect = [
+            (None, {"code": -32602,
+                    "message": "Unable to find subsystem with NQN"}),
+            (7, None),
+        ]
         node.rpc_client = MagicMock(return_value=rpc)
 
         db = MagicMock()
@@ -191,6 +203,11 @@ class TestNamespacedAttachRace(unittest.TestCase):
         self.assertEqual(rpc.subsystem_create.call_args[0][0],
                          "nqn.test:cluster-1:lvol:u2")
         rpc.nvmf_subsystem_add_listener.assert_called()
+        # Two add_ns calls: the rejected one against the gone subsystem,
+        # then the successful one against the lvol's own subsystem.
+        self.assertEqual(rpc.nvmf_subsystem_add_ns2.call_count, 2)
+        self.assertEqual(rpc.nvmf_subsystem_add_ns2.call_args_list[0][0][0],
+                         original_nqn)
         self.assertEqual(rpc.nvmf_subsystem_add_ns2.call_args[0][0],
                          "nqn.test:cluster-1:lvol:u2")
 

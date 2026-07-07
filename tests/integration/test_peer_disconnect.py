@@ -38,6 +38,16 @@ def _node(uuid="peer-1", status=StorageNode.STATUS_ONLINE):
 
 class TestCheckPeerDisconnected(unittest.TestCase):
 
+    def setUp(self):
+        # _check_peer_disconnected caches the quorum verdict per peer for a
+        # few seconds (create-path TTL cache). Tests here assert on the probe
+        # call count, so a verdict cached by a previous test (same node id)
+        # would swallow the call. The shared conftest also clears these, but
+        # this class must stay correct when run standalone (--noconftest).
+        from simplyblock_core.utils.ttl_cache import quorum_verdict_cache
+        quorum_verdict_cache.invalidate()
+        self.addCleanup(quorum_verdict_cache.invalidate)
+
     def _run(self, status, quorum_result=False):
         # _check_peer_disconnected refreshes peer_node from FDB at entry, then
         # imports ``is_node_data_plane_disconnected_quorum`` locally from the

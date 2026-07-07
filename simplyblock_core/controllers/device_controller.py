@@ -62,6 +62,13 @@ CAUSE_OTHER = "other"
 CAUSE_LOCAL_FAILURE = "local_failure"
 CAUSE_DEVICE_RESTART = "device_restart"
 CAUSE_FAILURE_MIGRATION = "failure_migration"
+# Network-outage recovery (tasks_runner_port_allow): the node is provably
+# reachable again (mgmt + data-NIC gates passed) but its FDB status flips
+# ONLINE only after the port unblock — re-admitting its devices must happen
+# BEFORE the unblock so every distrib in the cluster sees them serviceable
+# when IO resumes (2026-07-06 failback incident: placement failures because
+# peers still saw the recovering node's devices UNAVAILABLE).
+CAUSE_NODE_RECOVERY = "node_recovery"
 
 
 def _atomic_device_set(db_controller, node_id, device_id, apply_fields):
@@ -128,7 +135,7 @@ def device_set_state(device_id, state, cause=CAUSE_OTHER):
     # ONLINE node, so it is unaffected.
     if (state == NVMeDevice.STATUS_ONLINE
             and snode.status != StorageNode.STATUS_ONLINE
-            and cause != CAUSE_DEVICE_RESTART):
+            and cause not in (CAUSE_DEVICE_RESTART, CAUSE_NODE_RECOVERY)):
         logger.warning(
             f"Refusing to set device {device_id} ONLINE while node "
             f"{snode.get_id()} is {snode.status} (cause={cause}); "

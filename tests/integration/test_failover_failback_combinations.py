@@ -965,19 +965,26 @@ class TestSequentialFailbackScenario(unittest.TestCase):
 # TasksRunnerPortAllow Tests
 # ===========================================================================
 
-class TestPortAllowTaskNoForceFailback(unittest.TestCase):
-    """Regression guard for commit 59d51049 ("port_allow: remove
-    force-failback").
+class TestPortAllowMinimalFailback(unittest.TestCase):
+    """Source guards for port_allow's leadership failback.
 
-    Incident 2026-05-02 (k8s_native_failover_ha-20260502-101452): the
-    port_allow runner used to demote a peer that had legitimately taken
-    leadership during failover, blocking the new leader's port and force-
-    demoting it before allowing the recovering node's port. That cut
-    client IO and opened a fresh writer-conflict window.
+    History: an unfenced force-failback caused incident 2026-05-02
+    (k8s_native_failover_ha-20260502-101452) — it demoted the
+    legitimately-elected new leader with unverified hublvols and no
+    drain, cutting client IO. Commit 59d51049 removed it entirely; the
+    2026-07-06 reinstatement added fencing (peer port-block window,
+    bounded drain, forced leader=True take) — and caused the 2026-07-06
+    cascade: the port blocks severed hublvol/redirect and journal traffic
+    (DISTRIBD n_unavail_read, JC history_append n_success=0), and the
+    management-forced leader=True skipped the primary's LVS update and
+    served stale blob metadata (18:23 extent-metadata corruption on LVS 13).
 
-    The fix removed the entire force-failback block: no peer port-block,
-    no secondary set_leader, no force_to_non_leader. Pin those removals
-    so they don't sneak back in.
+    The 2026-07-07 rework made the failback MINIMAL: quiesce +
+    jc_disable_replication on the acting leader (bounded local loop),
+    verified-open hublvols from every reachable peer to the primary, then
+    exactly one plain ``bdev_lvol_set_leader(leader=False)`` demote. The CP
+    never assigns leadership and never blocks a port; the primary promotes
+    itself on the first redirected IO.
     """
 
     def _read_source(self):
@@ -988,26 +995,68 @@ class TestPortAllowTaskNoForceFailback(unittest.TestCase):
         with open(src_path, "r") as f:
             return f.read()
 
-    def test_no_force_to_non_leader(self):
-        src = self._read_source()
-        self.assertNotIn(
-            "bdev_distrib_force_to_non_leader", src,
-            "port_allow must not force-demote peers (incident 2026-05-02)")
+    def _failback_fn(self, src):
+        fn_start = src.find("def _failback_leadership_to_primary")
+        self.assertGreater(fn_start, 0, "the minimal failback helper must exist")
+        fn_end = src.find("\ndef ", fn_start + 1)
+        return src[fn_start:fn_end]
 
-    def test_no_peer_set_leader(self):
+    def test_failback_sits_behind_the_gates_and_before_unblock(self):
         src = self._read_source()
-        self.assertNotIn(
-            "bdev_lvol_set_leader", src,
-            "port_allow must not flip leadership; that is the JM heartbeat's job")
+        i_peer_gate = src.find("_verify_or_reconnect_peer_hublvol(sec_node, node)")
+        i_own_gate = src.find("_reconnect_own_sec_tert_hublvols(node)")
+        i_failback = src.find(
+            "failback_ok, failback_msg = _failback_leadership_to_primary(")
+        i_unblock = src.find("port_block.set_port(node, port_number, block=False")
+        self.assertGreater(i_own_gate, 0, "own-hublvol gate must exist")
+        self.assertGreater(i_peer_gate, 0, "peer hublvol gate must exist")
+        self.assertGreater(
+            i_failback, i_peer_gate,
+            "the demote may run only AFTER the peer hublvol gate proved every "
+            "follower can redirect (the fencing whose absence caused 2026-05-02)")
+        self.assertGreater(
+            i_unblock, i_failback,
+            "the recovering node's port opens only after the failback")
 
-    def test_no_peer_port_block(self):
+    def test_demote_is_minimal_no_blocks_no_drain(self):
         src = self._read_source()
-        # The old code did `firewall_set_port(..., "block", ...)` on a peer
-        # before allowing the recovering node's port. The current code only
-        # ever issues "allow" — never "block".
+        fn = self._failback_fn(src)
         self.assertNotIn(
-            '"block"', src,
-            "port_allow must not block any peer's port; only allow on the recovering node")
+            "block=True", fn,
+            "the failback must NOT port-block the acting leader or peers — "
+            "LVS ports carry hublvol/redirect and journal traffic (2026-07-06)")
+        self.assertNotIn(
+            "bdev_distrib_check_inflight_io", fn,
+            "no blocked-window drain: with hublvols verified first, the "
+            "demoted leader redirects its in-flight IO to the primary")
+        self.assertNotIn("bs_nonleadership", fn)
+        self.assertNotIn("bdev_distrib_force_to_non_leader", fn)
+        self.assertEqual(
+            fn.count(".bdev_lvol_set_leader("), 1,
+            "exactly one leadership mutation in the failback: the plain "
+            "demote of the acting leader")
+        i_jc = fn.find(".jc_disable_replication(")
+        i_hub = fn.find("_verify_or_reconnect_peer_hublvol(")
+        i_demote = fn.find(".bdev_lvol_set_leader(")
+        self.assertTrue(
+            0 < i_jc < i_hub < i_demote,
+            f"failback order must be jc_disable_replication -> hublvol "
+            f"verify -> demote (got jc={i_jc}, hub={i_hub}, demote={i_demote})")
+        self.assertIn(
+            "_REPL_SUSPEND_MAX_ATTEMPTS", fn,
+            "the quiesce+disable loop is bounded locally (re-quiesce and "
+            "retry in the loop, not via task suspension)")
+
+    def test_runner_never_assigns_leadership(self):
+        src = self._read_source()
+        self.assertNotIn(
+            "leader=True)", src,
+            "the port-allow runner must NEVER assign leadership: a "
+            "management-forced leader=True skips the primary's LVS update "
+            "and serves stale blob metadata (2026-07-06 corruption)")
+        self.assertNotIn("def _take_leadership_on_primary", src)
+        self.assertNotIn("_recommit_follower_and_unblock", src)
+        self.assertNotIn("_recommit_followers_for_leader", src)
 
 
 # ===========================================================================

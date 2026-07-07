@@ -361,34 +361,41 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names:
 
     ret = rpc_client.bdev_nvme_controller_list(name)
     if ret:
-        counter = 0
-        while (counter < 5):
-            waiting = False
-            for controller in ret[0]["ctrlrs"]:
-                controller_state = controller["state"]
-                logger.info(f"Controller found: {name}, status: {controller_state}")
-                if controller_state== "failed":
-                    # we can remove the controller only for certain, if its failed. other states are intermediate and require retry.
-                    rpc_client.bdev_nvme_detach_controller(name)
-                    time.sleep(2)
-                    break
-                elif controller_state == "resetting" or controller_state == "deleting" or controller_state == "reconnect_is_delayed":
-                    if counter < 5:
-                        time.sleep(2)
-                        waiting = True
-                        break
-                    else:  # this should never happen. It means controller is "hanging" in an intermediate state for more than 10 seconds. usually if some io is hanging.
-                        raise RuntimeError(f"Controller: {name}, status is {controller_state}")
-            if not waiting:
-                counter = 5
-            else:
-                counter += 1
+        # "failed" is transient here, NOT a terminal state to act on: the
+        # state string reports is_failed BEFORE resetting /
+        # reconnect_is_delayed (nvme_ctrlr_get_state_str), so a controller
+        # mid reset/reconnect cycle reads "failed" in the window between a
+        # reset failure and its disposition. With the cluster-wide
+        # bdev_nvme options (reconnect_delay_sec=1, ctrlr_loss_timeout_sec=1,
+        # set at node bring-up before any attach) the module self-resolves
+        # every failure to either "enabled" or destruct within ~1s — a
+        # persistently parked "failed" controller (only possible with
+        # reconnect_delay=0) cannot arise. The previous code issued a
+        # controller detach RPC on "failed", which raced the module's own
+        # destruct/reconnect machinery and — with only a fixed sleep, no
+        # detach-and-wait-gone — set up the attach-during-destroy race
+        # ("cntlid N are duplicated" class) on the immediate re-attach.
+        # Wait transients out; on a controller that stays transient past
+        # the budget, raise so the calling task suspends and retries.
+        _TRANSIENT_STATES = ("failed", "resetting", "deleting", "reconnect_is_delayed")
+        states: List[str] = []
+        for _attempt in range(5):
+            if not ret:
+                # The module destructed the controller on its own; the
+                # fresh-attach path below takes over.
+                break
+            states = [c.get("state") for c in ret[0].get("ctrlrs", [])]
+            logger.info(f"Controller found: {name}, states: {states}")
+            if not any(s in _TRANSIENT_STATES for s in states):
+                break  # settled (enabled/disabled) — reuse/repair below
+            time.sleep(2)
             # Refresh on retry so we don't loop on a stale snapshot.
             ret = rpc_client.bdev_nvme_controller_list(name) or []
-
-        # if reattach:
-        #    rpc_client.bdev_nvme_detach_controller(name)
-        #    time.sleep(1)
+        else:
+            # Still transient after the full budget: something is genuinely
+            # hanging (usually stuck IO). Never detach here — surface it.
+            device.release_device_connection()
+            raise RuntimeError(f"Controller: {name}, status is {states}")
 
     db_ctrl = DBController()
     target_node = db_ctrl.get_storage_node_by_id(device.node_id)
@@ -1362,6 +1369,94 @@ def sync_remote_devices_from_spdk(this_node: StorageNode, node_bdev_names=None):
     if changed:
         fresh_node.write_to_db(db_controller.kv_store)
     return changed
+
+
+def reconnect_dropped_remote_devs(this_node: StorageNode, node_bdev_names=None):
+    """Topology-driven repair for remote data-device connections.
+
+    ``node.remote_devices`` is rebuilt as "whatever was reachable at that
+    moment" by the restart / port-allow paths (via ``_connect_to_remote_devs``),
+    so a peer that is unreachable while this node restarts is silently dropped
+    from the list. The health-check repair loop iterates only the persisted
+    list, which makes the dropped connection invisible: it is never checked
+    and never re-established. Observed after restarting a node during another
+    node's network outage — the cross connections stayed down long after the
+    outage ended, because the outage node recovered via port-unblock (DOWN →
+    port_allow), not a restart, and therefore never fanned out reconnects to
+    its peers.
+
+    Derive the *expected* remote-device set from cluster topology instead:
+    every relevant peer's usable devices. Reconnect any device missing from
+    ``this_node.remote_devices`` and append it to the persisted list, so the
+    regular list-driven health check covers it from the next cycle on.
+
+    The peer gate mirrors ``health_controller._peer_connections_relevant``
+    (ONLINE/DOWN/UNREACHABLE — inlined here to avoid a circular import):
+    connections to those peers are expected to exist, so a failed reconnect
+    counts as a fault, exactly like a failed reconnect of a listed entry.
+    Peers in transitional states are skipped — a RESTARTING peer's own
+    restart fans out reconnects to all online nodes when it completes.
+
+    Returns ``(changed, all_ok)``: ``changed`` is True when entries were
+    appended (callers holding a stale node object should re-read it);
+    ``all_ok`` is False when at least one expected device could not be
+    connected.
+    """
+    db_controller = DBController()
+    if node_bdev_names is None:
+        node_bdevs = this_node.rpc_client(timeout=5, retry=1).get_bdevs()
+        node_bdev_names = [b["name"] for b in node_bdevs] if node_bdevs else []
+    elif isinstance(node_bdev_names, dict):
+        node_bdev_names = list(node_bdev_names.keys())
+
+    fresh_node = db_controller.get_storage_node_by_id(this_node.get_id())
+    known_ids = {dev.get_id() for dev in fresh_node.remote_devices}
+    changed = False
+    all_ok = True
+
+    for peer in db_controller.get_storage_nodes_by_cluster_id(fresh_node.cluster_id):
+        if peer.get_id() == fresh_node.get_id():
+            continue
+        if peer.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN,
+                               StorageNode.STATUS_UNREACHABLE]:
+            continue
+        for dev in peer.nvme_devices:
+            if dev.get_id() in known_ids:
+                continue
+            if dev.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY,
+                                  NVMeDevice.STATUS_CANNOT_ALLOCATE]:
+                continue
+            if not dev.alceml_bdev:
+                logger.error(f"device alceml bdev not found!, {dev.get_id()}")
+                continue
+            logger.info(
+                "Remote device %s on peer %s missing from remote_devices; reconnecting",
+                dev.get_id(), peer.get_id())
+            try:
+                remote_bdev = connect_device(
+                    f"remote_{dev.alceml_bdev}", dev, fresh_node,
+                    bdev_names=node_bdev_names, reattach=False)
+            except Exception as e:
+                logger.error(
+                    "Failed to reconnect dropped remote device %s on peer %s: %s",
+                    dev.get_id(), peer.get_id(), e)
+                all_ok = False
+                continue
+            remote_dev = RemoteDevice()
+            remote_dev.uuid = dev.uuid
+            remote_dev.alceml_name = dev.alceml_name
+            remote_dev.node_id = dev.node_id
+            remote_dev.size = dev.size
+            remote_dev.status = NVMeDevice.STATUS_ONLINE
+            remote_dev.nvmf_multipath = dev.nvmf_multipath
+            remote_dev.remote_bdev = remote_bdev or f"remote_{dev.alceml_bdev}n1"
+            fresh_node.remote_devices.append(remote_dev)
+            known_ids.add(dev.get_id())
+            changed = True
+
+    if changed:
+        fresh_node.write_to_db(db_controller.kv_store)
+    return changed, all_ok
 
 
 def _peer_reachable_via_jm_quorum(target_node_id, this_node, peer_probe_timeout=1):
@@ -2544,6 +2639,10 @@ def restart_storage_node(
                 post_node.status = StorageNode.STATUS_OFFLINE
                 post_node.updated_at = str(datetime.datetime.now(datetime.timezone.utc))
                 post_node.online_since = ""
+                # This would disable adding further node restart tasks.
+                # if this restart was because of a restart task, then the same task would continue,
+                # but if the restart because of manual restart, then no task restart would be created.
+                post_node.auto_restart_disabled = True
                 post_node.write_to_db(db_ctrl.kv_store)
                 storage_events.snode_status_change(
                     post_node, StorageNode.STATUS_OFFLINE, post_node.status,
@@ -2703,7 +2802,8 @@ def _restart_storage_node_impl(
 
     logger.info("Restarting SPDK")
 
-    if max_lvol:
+    lvol_changed = bool(max_lvol) and max_lvol != snode.max_lvol
+    if lvol_changed:
         snode.max_lvol = max_lvol
     if max_snap:
         snode.max_snap = max_snap
@@ -2801,6 +2901,8 @@ def _restart_storage_node_impl(
                     snode.ssd_pcie.append(new_ssd)
 
         fdb_connection = cluster.db_connection
+        if lvol_changed:
+            snode_api.persist_node_config(snode.max_lvol, minimum_hp_memory, snode.socket, snode.ssd_pcie)
         snode_api.set_hugepages()
         results, err = snode_api.spdk_process_start(
             snode.l_cores, snode.spdk_mem, snode.spdk_image, spdk_debug, cluster_ip, fdb_connection,
@@ -4313,7 +4415,7 @@ def start_storage_node_api_container(node_ip, cluster_ip=None):
             # has to fall through to dockerd, which can stall for 60-80s
             # during post-outage Swarm reconciliation (incident 2026-04-24).
             '/mnt/ramdisk:/mnt/ramdisk',
-            '/tmp/simplyblock:/tmp/simplyblock'],
+            '/var/run/simplyblock:/var/run/simplyblock'],
         restart_policy={"Name": "always"},
         environment=[
             f"DOCKER_IP={node_ip}",
@@ -4829,6 +4931,11 @@ def _count_fabric_disconnected_nodes(all_nodes, lvs_peer_ids=None):
 def find_leader_with_failover(all_nodes, lvs_name):
     """Detect the current leader and failover if needed.
 
+    0. Cached fast path: if a leader for this lvstore was confirmed within
+       LEADER_TTL_SEC, probe ONLY that node (one RPC). Leadership rarely moves,
+       so this replaces the 3-node scan on the hot create paths; the probe
+       itself is a fresh confirmation, so a moved leadership simply misses and
+       falls through to the full scan below.
     1. Try each node as leader via bdev_lvol_get_lvstores (leadership field).
        A node that answers leadership=True is CONFIRMED (the query is itself a
        successful RPC to that node) → return it directly. A confirmed leader is
@@ -4845,10 +4952,27 @@ def find_leader_with_failover(all_nodes, lvs_name):
         (leader_node, non_leader_nodes) or (None, []) if no confirmable leader.
     """
     from simplyblock_core.controllers.lvol_controller import is_node_leader
+    from simplyblock_core.utils.ttl_cache import leader_cache, LEADER_TTL_SEC
 
     leader = None
     leader_confirmed = False
     non_leaders = []
+
+    cluster_id = all_nodes[0].cluster_id if all_nodes else ""
+    cache_key = (cluster_id, lvs_name)
+    cached_id = leader_cache.get(cache_key, LEADER_TTL_SEC)
+    if cached_id:
+        cached_node = next((n for n in all_nodes if n.get_id() == cached_id), None)
+        if cached_node is not None:
+            try:
+                if is_node_leader(cached_node, lvs_name):
+                    leader_cache.put(cache_key, cached_id)
+                    return cached_node, [n for n in all_nodes
+                                         if n.get_id() != cached_id]
+            except Exception:
+                pass
+        # Cached leader moved or stopped answering — do the full scan.
+        leader_cache.invalidate(cache_key)
 
     # Find current leader
     for node in all_nodes:
@@ -4885,6 +5009,7 @@ def find_leader_with_failover(all_nodes, lvs_name):
     # leadership could NOT be confirmed by RPC (the fabric-connected fallback,
     # i.e. the leader's mgmt RPC genuinely failed so is_node_leader raised).
     if leader_confirmed:
+        leader_cache.put(cache_key, leader.get_id())
         return leader, non_leaders
 
     # Unconfirmed-leader fallback: `leader` is only a fabric-connected guess —
@@ -4894,6 +5019,7 @@ def find_leader_with_failover(all_nodes, lvs_name):
     # otherwise fall through to the failover logic.
     try:
         if is_node_leader(leader, lvs_name):
+            leader_cache.put(cache_key, leader.get_id())
             return leader, non_leaders
     except Exception:
         pass
@@ -4913,6 +5039,7 @@ def find_leader_with_failover(all_nodes, lvs_name):
                 logger.info("Leader %s fabric disconnected, failed over to %s",
                             leader.get_id(), nl.get_id())
                 new_non_leaders = [n for n in all_nodes if n.get_id() != nl.get_id()]
+                leader_cache.put(cache_key, nl.get_id())
                 return nl, new_non_leaders
         return None, []
 
@@ -4964,6 +5091,7 @@ def find_leader_with_failover(all_nodes, lvs_name):
         return None, []
 
     new_non_leaders = [n for n in all_nodes if n.get_id() != failover_target.get_id()]
+    leader_cache.put(cache_key, failover_target.get_id())
     return failover_target, new_non_leaders
 
 
@@ -5050,10 +5178,15 @@ def check_non_leader_for_operation(node_id, lvs_name, operation_type="create",
     return "queue"
 
 
-def execute_on_leader_with_failover(all_nodes, lvs_name, operation_fn):
+def execute_on_leader_with_failover(all_nodes, lvs_name, operation_fn,
+                                    known_leader=None):
     """Execute an operation on the current leader with failover support.
 
-    1. Find leader (with failover if needed)
+    1. Find leader (with failover if needed) — skipped when the caller passes
+       ``known_leader`` from a just-completed find_leader_with_failover, so the
+       leadership scan is not paid twice per operation. Failure handling below
+       still re-detects, so a leadership flip between the caller's detect and
+       the operation is covered by the retry, exactly as before.
     2. Execute operation_fn(leader_node)
     3. If operation fails, re-check leadership and retry on new leader
     4. Return (success, leader_node, result)
@@ -5062,12 +5195,16 @@ def execute_on_leader_with_failover(all_nodes, lvs_name, operation_fn):
         all_nodes: list of all StorageNode objects in the LVS group
         lvs_name: LVS name
         operation_fn: callable(leader_node) → result. Returns None/False on failure.
+        known_leader: leader StorageNode already confirmed by the caller.
 
     Returns:
         (True, leader_node, result) on success
         (False, None, error_msg) on failure
     """
-    leader, non_leaders = find_leader_with_failover(all_nodes, lvs_name)
+    if known_leader is not None:
+        leader = known_leader
+    else:
+        leader, _ = find_leader_with_failover(all_nodes, lvs_name)
     if leader is None:
         return False, None, "No leader available"
 
@@ -5153,7 +5290,19 @@ def _check_peer_disconnected(peer_node, lvs_peer_ids=None):
                     peer_node.get_id(), peer_node.status)
         return True
 
-    if is_node_data_plane_disconnected_quorum(peer_node, lvs_peer_ids=lvs_peer_ids):
+    # The NVMe-ctrlr quorum sweep costs ~10 RPCs across the cluster and is
+    # re-run for every peer on every create/clone/snapshot. Its verdict is
+    # connectivity state that moves on node-failure timescales, so cache it
+    # briefly per process; the FDB-status short-circuit above stays uncached
+    # and still catches mgmt-observed transitions immediately. A stale
+    # "connected" is bounded by the TTL and by the operation itself failing
+    # and re-checking; a stale "disconnected" only delays inclusion of a
+    # just-recovered peer by the same window.
+    from simplyblock_core.utils.ttl_cache import quorum_verdict_cache, QUORUM_VERDICT_TTL_SEC
+    verdict = quorum_verdict_cache.get_or_compute(
+        (peer_node.get_id(), tuple(lvs_peer_ids or ())), QUORUM_VERDICT_TTL_SEC,
+        lambda: is_node_data_plane_disconnected_quorum(peer_node, lvs_peer_ids=lvs_peer_ids))
+    if verdict:
         logger.info("Peer %s is data-plane disconnected (NVMe-ctrlr quorum confirmed), will skip",
                      peer_node.get_id())
         return True

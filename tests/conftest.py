@@ -36,6 +36,27 @@ def pytest_configure(config):
 
 
 @pytest.fixture(autouse=True)
+def _clear_ttl_caches():
+    """Clear the create-path TTL caches (leader / quorum-verdict /
+    capacity-scan) around every test. They are module-level and keyed by ids
+    tests reuse across cases ('node-1', 'LVS_1', ...), so a verdict cached in
+    one test would leak into the next (e.g. a cached quorum verdict makes
+    _check_peer_disconnected skip the probe a later test asserts on)."""
+    try:
+        from simplyblock_core.utils import ttl_cache
+    except Exception:
+        yield
+        return
+    caches = (ttl_cache.capacity_scan_cache, ttl_cache.leader_cache,
+              ttl_cache.quorum_verdict_cache)
+    for c in caches:
+        c.invalidate()
+    yield
+    for c in caches:
+        c.invalidate()
+
+
+@pytest.fixture(autouse=True)
 def _clear_singleton_cache():
     """Clear DBController Singleton cache before and after each test."""
     from simplyblock_core.db_controller import Singleton

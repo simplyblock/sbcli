@@ -956,7 +956,7 @@ class CLIWrapperBase:
     def backup__restore(self, sub_command, args):
         result, error = backup_controller.restore_backup(
             args.backup_id, args.lvol_name, args.pool,
-            cluster_id=getattr(args, 'cluster_id', None),
+            cluster_id=args.cluster_id,
             target_node_id=getattr(args, 'node', None))
         if error:
             print(f"Error: {error}")
@@ -1099,7 +1099,7 @@ class CLIWrapperBase:
         strict_node_anti_affinity = args.strict_node_anti_affinity
         is_single_node = args.is_single_node
         client_data_nic = args.client_data_nic
-        enable_failure_domain = args.enable_failure_domain
+        enable_failure_domain = getattr(args, 'enable_failure_domain', False)
 
         max_fault_tolerance = min(distr_npcs, 2) if distr_npcs >= 1 else 1
 
@@ -1152,7 +1152,7 @@ class CLIWrapperBase:
         is_single_node = args.is_single_node
         fabric = args.fabric
         client_data_nic = args.client_data_nic
-        enable_failure_domain = args.enable_failure_domain
+        enable_failure_domain = getattr(args, 'enable_failure_domain', False)
         # Private (developer-mode-only) arg: absent unless sbctl was run with --dev.
         enable_hang_device = getattr(args, "enable_hang_device", False)
 

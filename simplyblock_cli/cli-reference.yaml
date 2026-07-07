@@ -2466,9 +2466,10 @@ commands:
             dest: node
             type: str
           - name: "--cluster-id"
-            help: "The cluster id."
+            help: "The target cluster id."
             dest: cluster_id
             type: str
+            required: true
       - name: export
         help: "Export backup metadata to a JSON file for cross-cluster restore."
         arguments:

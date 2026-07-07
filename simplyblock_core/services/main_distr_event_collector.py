@@ -38,10 +38,27 @@ REMOTE_IO_TIMEOUT_DEBOUNCE_SEC = 6.0
 REMOTE_IO_VOTE_VALIDITY_SEC = 300.0  # 5 min
 _REMOTE_IO_TIMEOUT_MESSAGES = ('error_read', 'error_write', 'error_unmap')
 
+# Two devices on the SAME home node reach IO-error quorum a few seconds apart:
+# their events are processed on independent per-node collector threads, and the
+# first device to trip clears its own votes on force (below). So the raw
+# "does a sibling also have quorum right now" check is racy -- when device A trips
+# it may not yet see device B's quorum, and once A forces+clears, B (tripping a
+# moment later) can no longer see A's. To recognize the node outage regardless of
+# ordering, we ALSO remember which devices were just quorum-forced: if a sibling
+# was force-marked within this window, the current trip is node-wide, not a bad
+# device. Must comfortably exceed the inter-sibling trip gap (observed ~2s).
+SIBLING_FORCE_EVIDENCE_SEC = 30.0
+
 # Shared across the per-node collector threads (one process). Keyed by
 # (event_node_id, device_id) -> (count, last_io_error_ts).
 _remote_timeout_lock = threading.Lock()
 _remote_timeout_votes: dict = {}
+
+# device_id -> wall-clock ts of the last remote-IO-quorum force. Lets a sibling
+# tripping shortly after recognize a node-wide outage even though the first
+# device's votes were cleared on force.
+_recent_quorum_force_lock = threading.Lock()
+_recent_quorum_forced: dict = {}
 
 
 def _record_remote_timeout(event_node_id, device_id):
@@ -97,6 +114,48 @@ def _clear_remote_timeout_votes(device_id):
     with _remote_timeout_lock:
         for key in [k for k in _remote_timeout_votes if k[1] == device_id]:
             del _remote_timeout_votes[key]
+
+
+def _record_quorum_force(device_id):
+    with _recent_quorum_force_lock:
+        _recent_quorum_forced[device_id] = time.time()
+
+
+def _recently_quorum_forced(device_id):
+    """True if this device was force-marked unavailable by the remote-IO quorum
+    within the recent evidence window (used as node-outage evidence for a sibling
+    tripping shortly after)."""
+    with _recent_quorum_force_lock:
+        ts = _recent_quorum_forced.get(device_id, 0.0)
+        return (time.time() - ts) <= SIBLING_FORCE_EVIDENCE_SEC
+
+
+def _clear_quorum_force(device_id):
+    with _recent_quorum_force_lock:
+        _recent_quorum_forced.pop(device_id, None)
+
+
+def _readmit_racing_forced_siblings(siblings, logger):
+    """Undo a quorum-force on a sibling that tripped moments earlier: once we know
+    the outage is node-wide, a sibling force-marked in the race was wrong. Only
+    re-admit devices forced by the quorum (status=UNAVAILABLE, io_error=False,
+    not retries_exhausted) -- a genuine local failure sets io_error and is left to
+    the device-restart/removal path."""
+    for d in siblings:
+        if not _recently_quorum_forced(d.get_id()):
+            continue
+        try:
+            fresh = db.get_storage_device_by_id(d.get_id())
+        except KeyError:
+            _clear_quorum_force(d.get_id())
+            continue
+        if (fresh.status == NVMeDevice.STATUS_UNAVAILABLE
+                and not fresh.io_error and not fresh.retries_exhausted):
+            logger.warning(
+                f"Re-admitting sibling device {d.get_id()} that was quorum-forced "
+                f"in the node-outage race")
+            device_controller.device_set_online(d.get_id())
+        _clear_quorum_force(d.get_id())
 
 
 def _get_target_remote_device(node_obj, device_id):
@@ -213,14 +272,61 @@ def process_device_event(event, logger):
                 if n.get_id() != device_node_obj.get_id() and n.status != StorageNode.STATUS_REMOVED
             ]
             if _remote_timeout_quorum_reached(device_obj.get_id(), other_nodes):
-                # A quorum of nodes report this device failing => the device itself
-                # is bad: set it GLOBALLY unavailable, independent of what the
-                # remote NVMe controller's state reports. Erasure coding
-                # compensates; re-admitted on device/node restart.
+                # Node-outage vs. bad-device disambiguation. During ANY node outage
+                # (graceful / forced / container_kill / host_reboot / network) the
+                # peers time out on EVERY one of that node's devices in the same
+                # IO-timeout cycle -- so a sibling device on the same home node also
+                # reaches quorum. A genuine single-device fault trips only its own
+                # device. This signal is evaluated from the SAME in-memory vote
+                # store that just tripped, so it is true at the instant of the trip
+                # (unlike node.status or the peers' JM-controller state, both of
+                # which lag the device IO-error quorum by a second or more and left
+                # the earlier guard firing 0/N times). If a sibling also reached
+                # quorum, treat this as a node outage and do NOT force the device
+                # globally unavailable -- the node-status paths handle exclusion and
+                # the device is re-admitted when the node recovers/restarts.
+                # The two siblings do NOT trip simultaneously: their events are
+                # processed on independent per-node collector threads and cross the
+                # quorum threshold a few seconds apart, and the first to trip clears
+                # its own votes on force (below). So checking only "does a sibling
+                # have quorum right now" is racy and misses the node outage in both
+                # directions -- the first tripper doesn't yet see the second's
+                # quorum, and once it forces+clears, the second can't see the first's
+                # (this is why the guard fired 0/N while both siblings were forced).
+                # We therefore also treat a sibling that was quorum-FORCED within the
+                # recent window as node-outage evidence, and re-admit it: whichever
+                # sibling tripped first was wrongly forced and must be undone now that
+                # we know the outage is node-wide.
+                siblings = [
+                    d for d in device_node_obj.nvme_devices
+                    if d.get_id() != device_obj.get_id()
+                ]
+                node_outage_sibling = next(
+                    (d for d in siblings
+                     if _remote_timeout_quorum_reached(d.get_id(), other_nodes)
+                     or _recently_quorum_forced(d.get_id())),
+                    None,
+                )
+                if node_outage_sibling is not None:
+                    logger.warning(
+                        f"IO-error quorum for storage_id {storage_id}, but sibling "
+                        f"device {node_outage_sibling.get_id()} on home node "
+                        f"{device_node_obj.get_id()} also reached quorum / was just "
+                        f"force-marked -- treating as a NODE outage, NOT forcing "
+                        f"device globally unavailable")
+                    event.status = 'skipped:node_wide_io_quorum'
+                    _readmit_racing_forced_siblings(siblings, logger)
+                    device_obj.release_device_connection()
+                    return
+                # Only THIS device is failing across the cluster => the device itself
+                # is bad: set it GLOBALLY unavailable, independent of what the remote
+                # NVMe controller's state reports. Erasure coding compensates;
+                # re-admitted on device/node restart or port_allow recovery.
                 logger.warning(
                     f"IO-error quorum reached for storage_id {storage_id}; "
                     f"forcing device globally UNAVAILABLE")
                 device_controller.device_set_unavailable(device_obj.get_id())
+                _record_quorum_force(device_obj.get_id())
                 _clear_remote_timeout_votes(device_obj.get_id())
                 event.status = 'forced_unavailable:remote_io_quorum'
                 device_obj.release_device_connection()
