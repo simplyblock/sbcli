@@ -2591,8 +2591,10 @@ def restart_storage_node(
     failed — that's the case the cleanup is for."""
     db_ctrl = DBController()
     pre_status = None
+    _snode_pre = None
     try:
-        pre_status = db_ctrl.get_storage_node_by_id(node_id).status
+        _snode_pre = db_ctrl.get_storage_node_by_id(node_id)
+        pre_status = _snode_pre.status
     except Exception:
         logger.warning(f"Could not read pre-call status for {node_id}; "
                        f"skipping orphan-RESTARTING cleanup as a precaution")
@@ -2611,7 +2613,11 @@ def restart_storage_node(
     if pre_status not in (StorageNode.STATUS_RESTARTING, StorageNode.STATUS_IN_SHUTDOWN, None):
         try:
             from simplyblock_core.controllers import tasks_controller
-            _snode_pre = db_ctrl.get_storage_node_by_id(node_id)
+            # Reuse the node read for pre_status above — pre_status is only
+            # non-None (and thus inside this block) when that read succeeded,
+            # so _snode_pre is populated. Re-fetching here would be a wasted
+            # FDB round-trip and, more subtly, breaks callers/tests that count
+            # get_storage_node_by_id calls against the wrapper's contract.
             _task_id = tasks_controller.ensure_node_restart_task(_snode_pre)
             _hb_task = db_ctrl.get_task_by_id(_task_id) if _task_id else None
             if _hb_task and tasks_controller.claim_task(_hb_task):

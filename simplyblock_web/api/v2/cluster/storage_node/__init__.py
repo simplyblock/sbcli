@@ -214,15 +214,18 @@ def shutdown(cluster: Cluster, storage_node: StorageNode, force: bool = False) -
         if not allowed:
             raise ValueError(reason)
 
-    # Evaluate every condition that would make the background shutdown bail
-    # BEFORE answering: a refusal after 202 is invisible to the caller (the
-    # k8s operator polled forever for a shutdown that had already been
-    # rejected because migration tasks were running — 2026-07-06 node-drain
-    # stall). 409 tells the caller "not now, retry later or use force".
-    allowed, reason = storage_node_ops.check_node_shutdown_preconditions(
-        storage_node.get_id(), force=force)
-    if not allowed:
-        raise HTTPException(409, reason)
+        # Evaluate every condition that would make the background shutdown bail
+        # BEFORE answering: a refusal after 202 is invisible to the caller (the
+        # k8s operator polled forever for a shutdown that had already been
+        # rejected because migration tasks were running — 2026-07-06 node-drain
+        # stall). 409 tells the caller "not now, retry later or use force".
+        # Only meaningful on the graceful path: with force=True every guard in
+        # check_node_shutdown_preconditions downgrades to a warning and returns
+        # allowed, so there is nothing to synchronously refuse.
+        allowed, reason = storage_node_ops.check_node_shutdown_preconditions(
+            storage_node.get_id())
+        if not allowed:
+            raise HTTPException(409, reason)
 
     Thread(
         target=storage_node_ops.shutdown_storage_node,
