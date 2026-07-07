@@ -706,6 +706,210 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
 
     # ── FIO fallback helpers ─────────────────────────────────────────────
 
+    def _lsblk_nvme_devices(self, client: str) -> set[str]:
+        """Return set of NVMe block-device paths on *client* via lsblk."""
+        cmd = "lsblk -dpno NAME,TYPE"
+        out, _ = self.ssh_obj.exec_command(
+            node=client, command=cmd, supress_logs=True,
+        )
+        devices = set()
+        for line in (out or "").splitlines():
+            parts = line.split()
+            if (
+                len(parts) >= 2
+                and parts[1] == "disk"
+                and parts[0].startswith("/dev/nvme")
+            ):
+                devices.add(parts[0])
+        return devices
+
+    def _connect_subsystems_for_lvols(
+        self, lvol_names: list[str], label: str,
+    ) -> dict[str, set[str]]:
+        """Connect all unique subsystems for the given lvols/clones.
+
+        For namespaced lvols, only the parent subsystem needs an explicit
+        ``nvme connect`` — child namespaces appear automatically.
+
+        Returns ``{client: set_of_new_devices}`` — the diff between
+        pre-connect and post-connect lsblk on each client.
+        """
+        # ── 1. Assign lvols to clients round-robin ──
+        client_lvols: dict[str, list[str]] = {}
+        for i, name in enumerate(lvol_names):
+            client = self.fio_node[i % len(self.fio_node)]
+            client_lvols.setdefault(client, []).append(name)
+
+        # ── 2. Pre-connect lsblk snapshot ──
+        pre_devices: dict[str, set[str]] = {}
+        for client in client_lvols:
+            pre_devices[client] = self._lsblk_nvme_devices(client)
+        self.logger.info(
+            f"[{label}] Pre-connect device counts: "
+            + ", ".join(
+                f"{c}={len(d)}" for c, d in pre_devices.items()
+            )
+        )
+
+        # ── 3. Connect all subsystems (deduplicate by NQN per client) ──
+        connected_nqns: dict[str, set[str]] = {
+            c: set() for c in client_lvols
+        }
+        for client, names in client_lvols.items():
+            for name in names:
+                # Get connect info from API
+                is_clone = name in self._clone_registry
+                if is_clone:
+                    lvol_id = self.sbcli_utils.get_lvol_id(
+                        lvol_name=name
+                    )
+                else:
+                    info = self._lvol_registry.get(name, {})
+                    lvol_id = info.get("id")
+                    if not lvol_id:
+                        lvol_id = self.sbcli_utils.get_lvol_id(
+                            lvol_name=name
+                        )
+                if not lvol_id:
+                    self.logger.warning(
+                        f"[{label}] {name}: no lvol ID, skipping"
+                    )
+                    continue
+
+                connect_data = self.sbcli_utils.get_request(
+                    api_url=f"/lvol/connect/{lvol_id}"
+                )
+                results = connect_data.get("results", [])
+                if not results:
+                    self.logger.warning(
+                        f"[{label}] {name}: connect API empty"
+                    )
+                    continue
+
+                nqn = results[0].get("nqn", "")
+                if nqn in connected_nqns[client]:
+                    # Subsystem already connected on this client —
+                    # child namespace is auto-discovered
+                    continue
+
+                for entry in results:
+                    cmd = entry.get("connect")
+                    if cmd:
+                        self.ssh_obj.exec_command(
+                            node=client, command=cmd
+                        )
+                connected_nqns[client].add(nqn)
+
+        # ── 4. Rescan + retry until devices appear ──
+        expected_total = len(lvol_names)
+        new_devices: dict[str, set[str]] = {}
+        total_new = 0
+        for attempt in range(20):
+            sleep_n_sec(10)
+
+            # Rescan all NVMe controllers on each client
+            for client in client_lvols:
+                self.ssh_obj.exec_command(
+                    node=client,
+                    command=(
+                        "for c in /dev/nvme*; do "
+                        "[ -c \"$c\" ] && nvme ns-rescan \"$c\" 2>/dev/null; "
+                        "done; true"
+                    ),
+                    supress_logs=True,
+                )
+
+            sleep_n_sec(5)
+
+            total_new = 0
+            for client in client_lvols:
+                post = self._lsblk_nvme_devices(client)
+                new_devices[client] = post - pre_devices[client]
+                total_new += len(new_devices[client])
+
+            self.logger.info(
+                f"[{label}] Attempt {attempt + 1}: {total_new}/"
+                f"{expected_total} devices visible ("
+                + ", ".join(
+                    f"{c}=+{len(d)}" for c, d in new_devices.items()
+                )
+                + ")"
+            )
+            if total_new >= expected_total:
+                break
+
+        self.logger.info(
+            f"[{label}] Post-connect: {total_new} new devices across "
+            f"{len(client_lvols)} clients"
+        )
+        return new_devices
+
+    def _fio_on_lsblk_devices(
+        self,
+        new_devices: dict[str, set[str]],
+        sample_count: int,
+        label: str,
+    ) -> list[threading.Thread]:
+        """Pick *sample_count* random devices from the new-device sets,
+        format, mount, and run FIO on each.  Returns list of FIO threads.
+        """
+        # Flatten into (client, device) pairs
+        all_pairs = []
+        for client, devs in new_devices.items():
+            for dev in devs:
+                all_pairs.append((client, dev))
+
+        if not all_pairs:
+            self.logger.warning(f"[{label}] No new devices found — skipping FIO")
+            return []
+
+        pick_count = min(sample_count, len(all_pairs))
+        selected = random.sample(all_pairs, pick_count)
+        self.logger.info(
+            f"[{label}] Running FIO on {pick_count} devices "
+            f"(out of {len(all_pairs)} available)"
+        )
+
+        threads = []
+        for i, (client, device) in enumerate(selected):
+            try:
+                self.ssh_obj.format_disk(
+                    node=client, device=device, fs_type="ext4"
+                )
+                mount_path = f"/mnt/mcd_{label}_{i}"
+                self.ssh_obj.mount_path(
+                    node=client, device=device, mount_path=mount_path
+                )
+                log_file = f"/tmp/fio_{label}_{i}.log"
+                randseed = random.randint(1, 2**63)
+                fio_thread = threading.Thread(
+                    target=self.ssh_obj.run_fio_test,
+                    args=(client, None, mount_path, log_file),
+                    kwargs={
+                        "size": self.FIO_SIZE,
+                        "name": f"mcd_{label}_{i}_fio",
+                        "rw": "randrw",
+                        "bs": "4K",
+                        "iodepth": self.FIO_IODEPTH,
+                        "numjobs": self.FIO_NUMJOBS,
+                        "time_based": True,
+                        "runtime": self.FIO_RUNTIME,
+                        "randseed": randseed,
+                    },
+                )
+                fio_thread.start()
+                threads.append(fio_thread)
+                self.logger.info(
+                    f"[{label}] FIO started on {device} @ {client} "
+                    f"({i + 1}/{pick_count})"
+                )
+            except Exception as exc:
+                self.logger.error(
+                    f"[{label}] FIO setup failed on {device} @ "
+                    f"{client}: {exc}"
+                )
+        return threads
+
     def _fallback_fio_from_lsblk(self, client: str) -> tuple[str, str]:
         """Pick a random unmounted NVMe block device on *client* via lsblk.
 
@@ -1077,88 +1281,33 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
     # ── Phase 2: FIO on 10% of lvols ──────────────────────────────────────
 
     def _phase_2_fio_on_lvols(self):
+        all_lvol_names = list(self._lvol_registry.keys())
         sample_size = min(
             max(1, math.ceil(
-                len(self._lvol_registry) * self.FIO_SAMPLE_PERCENT / 100
+                len(all_lvol_names) * self.FIO_SAMPLE_PERCENT / 100
             )),
             self.FIO_SAMPLE_MAX,
         )
-        sample = random.sample(
-            list(self._lvol_registry.keys()),
-            min(sample_size, len(self._lvol_registry)),
-        )
-        self._fio_lvol_sample = set(sample)
         self.logger.info(
-            f"=== Phase 2: FIO on {len(sample)} lvols "
-            f"({self.FIO_SAMPLE_PERCENT}% of "
-            f"{len(self._lvol_registry)}) ==="
+            f"=== Phase 2: Connect all {len(all_lvol_names)} lvols, "
+            f"then FIO on {sample_size} "
+            f"({self.FIO_SAMPLE_PERCENT}% sample) ==="
         )
 
-        phase_start = time.time()
-        phase_timeout = 3600  # 1 hour
-        last_progress_count = 0
-        last_progress_time = phase_start
-        stall_timeout = 600  # abort if no new success in 10 min
+        # 1. Connect all lvol subsystems, get new devices via lsblk diff
+        new_devices = self._connect_subsystems_for_lvols(
+            all_lvol_names, label="Phase 2",
+        )
 
-        for i, lvol_name in enumerate(sample):
-            elapsed = time.time() - phase_start
-            if elapsed > phase_timeout:
-                self.logger.error(
-                    f"[Phase 2] Aborting — phase timeout {phase_timeout}s "
-                    f"exceeded after {self._metrics['fio_lvol_started']}/"
-                    f"{len(sample)} lvols started"
-                )
-                break
-
-            current_ok = self._metrics["fio_lvol_started"]
-            if current_ok > last_progress_count:
-                last_progress_count = current_ok
-                last_progress_time = time.time()
-            elif time.time() - last_progress_time > stall_timeout:
-                self.logger.error(
-                    f"[Phase 2] Aborting — no progress for "
-                    f"{stall_timeout}s, stuck at "
-                    f"{current_ok}/{len(sample)} lvols"
-                )
-                break
-
-            try:
-                self._connect_format_fio_lvol(lvol_name)
-                self._metrics["fio_lvol_started"] += 1
-            except Exception as exc:
-                self.logger.warning(
-                    f"[Phase 2] Normal FIO setup failed for {lvol_name}: "
-                    f"{exc}; trying lsblk fallback"
-                )
-                try:
-                    client = self.fio_node[
-                        hash(lvol_name) % len(self.fio_node)
-                    ]
-                    fb_client, fb_device = self._fallback_fio_from_lsblk(
-                        client
-                    )
-                    fio_thread = self._run_fallback_fio(
-                        fb_client, fb_device, f"lvol_{i}"
-                    )
-                    self._fio_lvol_threads.append(fio_thread)
-                    self._metrics["fio_lvol_started"] += 1
-                    self.logger.info(
-                        f"[Phase 2] Fallback FIO started on {fb_device} "
-                        f"(for {lvol_name})"
-                    )
-                except Exception as fb_exc:
-                    self.logger.error(
-                        f"[Phase 2] Fallback also failed for "
-                        f"{lvol_name}: {fb_exc}"
-                    )
-                    self._metrics["fio_lvol_failures"] += 1
-
-            if (i + 1) % 10 == 0:
-                self.logger.info(
-                    f"[Phase 2] Progress: {i + 1}/{len(sample)} "
-                    f"attempted, {self._metrics['fio_lvol_started']} ok, "
-                    f"{self._metrics['fio_lvol_failures']} failed"
-                )
+        # 2. Pick random devices and run FIO
+        self._fio_lvol_threads = self._fio_on_lsblk_devices(
+            new_devices, sample_count=sample_size, label="Phase 2",
+        )
+        self._metrics["fio_lvol_started"] = len(self._fio_lvol_threads)
+        self.logger.info(
+            f"[Phase 2] FIO started on "
+            f"{self._metrics['fio_lvol_started']} lvols"
+        )
 
     def _connect_format_fio_lvol(self, lvol_name: str):
         info = self._lvol_registry[lvol_name]
@@ -1635,52 +1784,32 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
             self.logger.info("[Phase 6] No clones — skipping")
             return
 
+        all_clone_names = list(self._clone_registry.keys())
         sample_size = min(
             max(1, math.ceil(
-                len(self._clone_registry) * self.FIO_SAMPLE_PERCENT / 100
+                len(all_clone_names) * self.FIO_SAMPLE_PERCENT / 100
             )),
             self.FIO_SAMPLE_MAX,
         )
-        sample = random.sample(
-            list(self._clone_registry.keys()),
-            min(sample_size, len(self._clone_registry)),
-        )
-        self._fio_clone_sample = set(sample)
         self.logger.info(
-            f"=== Phase 6: FIO on {len(sample)} clones ==="
+            f"=== Phase 6: Connect all {len(all_clone_names)} clones, "
+            f"then FIO on {sample_size} ==="
         )
 
-        for i, clone_name in enumerate(sample):
-            try:
-                self._connect_format_fio_clone(clone_name)
-                self._metrics["fio_clone_started"] += 1
-            except Exception as exc:
-                self.logger.warning(
-                    f"[Phase 6] Normal FIO setup failed for {clone_name}: "
-                    f"{exc}; trying lsblk fallback"
-                )
-                try:
-                    client = self.fio_node[
-                        hash(clone_name) % len(self.fio_node)
-                    ]
-                    fb_client, fb_device = self._fallback_fio_from_lsblk(
-                        client
-                    )
-                    fio_thread = self._run_fallback_fio(
-                        fb_client, fb_device, f"clone_{i}"
-                    )
-                    self._fio_clone_threads.append(fio_thread)
-                    self._metrics["fio_clone_started"] += 1
-                    self.logger.info(
-                        f"[Phase 6] Fallback FIO started on {fb_device} "
-                        f"(for {clone_name})"
-                    )
-                except Exception as fb_exc:
-                    self.logger.error(
-                        f"[Phase 6] Fallback also failed for "
-                        f"{clone_name}: {fb_exc}"
-                    )
-                    self._metrics["fio_clone_failures"] += 1
+        # 1. Connect all clone subsystems, get new devices via lsblk diff
+        new_devices = self._connect_subsystems_for_lvols(
+            all_clone_names, label="Phase 6",
+        )
+
+        # 2. Pick random devices and run FIO
+        self._fio_clone_threads = self._fio_on_lsblk_devices(
+            new_devices, sample_count=sample_size, label="Phase 6",
+        )
+        self._metrics["fio_clone_started"] = len(self._fio_clone_threads)
+        self.logger.info(
+            f"[Phase 6] FIO started on "
+            f"{self._metrics['fio_clone_started']} clones"
+        )
 
         # Wait for FIO to finish
         self.logger.info(
@@ -1689,59 +1818,6 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
         )
         for t in self._fio_clone_threads:
             t.join(timeout=self.FIO_RUNTIME + 120)
-
-    def _connect_format_fio_clone(self, clone_name: str):
-        clone_id = self._clone_registry[clone_name].get("clone_id")
-        client = self.fio_node[hash(clone_name) % len(self.fio_node)]
-
-        connect_cmds = self.sbcli_utils.get_lvol_connect_str(
-            lvol_name=clone_name
-        )
-        for cmd in connect_cmds:
-            self.ssh_obj.exec_command(node=client, command=cmd)
-        sleep_n_sec(3)
-
-        device = None
-        for _ in range(120):
-            device = self.ssh_obj.get_lvol_vs_device(
-                node=client, lvol_id=clone_id
-            )
-            if device:
-                break
-            sleep_n_sec(30)
-        if not device:
-            raise RuntimeError(f"{clone_name}: device not found")
-
-        self._connected_lvols[clone_name] = {
-            "client": client, "device": device,
-        }
-
-        # Format the clone (parent may not have been formatted)
-        self.ssh_obj.format_disk(node=client, device=device, fs_type="ext4")
-        mount_path = f"/mnt/mcd_clone_{clone_name}"
-        self.ssh_obj.mount_path(
-            node=client, device=device, mount_path=mount_path
-        )
-
-        log_file = f"/tmp/fio_clone_{clone_name}.log"
-        randseed = random.randint(1, 2**63)
-        fio_thread = threading.Thread(
-            target=self.ssh_obj.run_fio_test,
-            args=(client, None, mount_path, log_file),
-            kwargs={
-                "size": self.FIO_SIZE,
-                "name": f"mcd_clone_{clone_name}_fio",
-                "rw": "randrw",
-                "bs": "4K",
-                "iodepth": self.FIO_IODEPTH,
-                "numjobs": self.FIO_NUMJOBS,
-                "time_based": True,
-                "runtime": self.FIO_RUNTIME,
-                "randseed": randseed,
-            },
-        )
-        fio_thread.start()
-        self._fio_clone_threads.append(fio_thread)
 
     # ── Phase 7: Mass-delete clones ────────────────────────────────────────
 
