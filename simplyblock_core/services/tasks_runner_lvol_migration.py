@@ -1826,9 +1826,9 @@ def _rename_migrated_bdevs(migration, tgt_node, tgt_rpc, tgt_sec_rpc=None, tgt_t
     their canonical names (without the suffix).  This prevents suffix accumulation
     on repeated migrations of the same volume.
 
-    bdev_lvol_rename returns "EXISTS" when the target name is already taken;
-    we use that signal to try the fallback (_MIGRATION_BDEV_SUFFIX_DONE) instead
-    of doing a pre-query of all bdevs.
+    bdev_lvol_rename returns JSON-RPC error -32602 "File exists" (None to caller)
+    when the target name is already taken; we use that to try the fallback
+    (_MIGRATION_BDEV_SUFFIX_DONE) instead of doing a pre-query of all bdevs.
 
     Must be called AFTER _apply_migration_to_db() — snap.snap_bdev and
     lvol.lvol_bdev already point to the 'm'-suffixed target paths at that point.
@@ -1842,24 +1842,26 @@ def _rename_migrated_bdevs(migration, tgt_node, tgt_rpc, tgt_sec_rpc=None, tgt_t
 
     _EXISTS = "EXISTS"
 
-    def _do_rename(old_composite, new_composite, label):
-        """Rename on prim + sec + ter.  Returns 'EXISTS' if any node reports the
-        target name is already taken, True on success.  Raises on hard failure."""
-        ret = tgt_rpc.bdev_lvol_rename(old_composite, new_composite)
-        exists = (ret == _EXISTS)
+    def _do_rename(old_composite, new_short, label):
+        """Rename on prim + sec + ter.  Returns 'EXISTS' if the target name is
+        already taken (SPDK returns JSON-RPC error -32602 'File exists' -> None),
+        True on success.  new_short must be the short name only (no lvstore prefix)."""
+        ret = tgt_rpc.bdev_lvol_rename(old_composite, new_short)
+        logger.debug(f"_do_rename prim: {old_composite!r} -> {new_short!r}: ret={ret!r}")
+        # SPDK returns None on name collision (-32602 "File exists"); treat any falsy as collision.
+        exists = (not ret) or (ret == _EXISTS)
         for role, rpc in [("sec", tgt_sec_rpc), ("ter", tgt_ter_rpc)]:
             if rpc:
                 try:
-                    r = rpc.bdev_lvol_rename(old_composite, new_composite)
-                    if r == _EXISTS:
+                    r = rpc.bdev_lvol_rename(old_composite, new_short)
+                    logger.debug(f"_do_rename {role}: {old_composite!r} -> {new_short!r}: ret={r!r}")
+                    if (not r) or r == _EXISTS:
                         exists = True
                 except Exception as exc:
                     logger.warning(
                         f"_rename_migrated_bdevs: {role} rename {label} (non-fatal): {exc}")
         if exists:
             return _EXISTS
-        if not ret:
-            raise RuntimeError(f"bdev_lvol_rename {label}: ret={ret!r}")
         return True
 
     def _rename_with_fallback(current_short, label):
@@ -1868,22 +1870,22 @@ def _rename_migrated_bdevs(migration, tgt_node, tgt_rpc, tgt_sec_rpc=None, tgt_t
         canonical = current_short[:-len(_MIGRATION_BDEV_SUFFIX)]
         old = f"{lvstore}/{current_short}"
 
-        ret = _do_rename(old, f"{lvstore}/{canonical}", label)
+        ret = _do_rename(old, canonical, label)
         if ret == _EXISTS:
             fallback = canonical + _MIGRATION_BDEV_SUFFIX_DONE
             logger.info(
-                f"_rename_migrated_bdevs: {canonical} exists — trying fallback {fallback}")
-            ret2 = _do_rename(old, f"{lvstore}/{fallback}", label)
+                f"_rename_migrated_bdevs: {canonical} exists - trying fallback {fallback}")
+            ret2 = _do_rename(old, fallback, label)
             if ret2 == _EXISTS:
                 logger.warning(
                     f"_rename_migrated_bdevs: both {canonical} and {fallback} "
-                    f"exist — leaving {current_short} as-is")
+                    f"exist - leaving {current_short} as-is")
                 return None
             target = fallback
         else:
             target = canonical
 
-        logger.info(f"_rename_migrated_bdevs: {current_short} → {target}")
+        logger.info(f"_rename_migrated_bdevs: {current_short} -> {target}")
         return target
 
     # --- Snapshots (owned) ---
