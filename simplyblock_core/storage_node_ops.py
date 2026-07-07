@@ -420,7 +420,7 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names:
     final = rpc_client.bdev_nvme_controller_list(name)
     if not final:
         # Controller is fully gone — do a full multi-path attach.
-        bdev_name = None
+        bdev_name = ""
         for ip in (expected_ips or [device.nvmf_ip]):
             try:
                 resp = attach_rpc_client.bdev_nvme_attach_controller(
@@ -1569,10 +1569,10 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=None):
         remote_device.nvmf_multipath = org_dev.nvmf_multipath
         expected_bdev = f"remote_{org_dev.jm_bdev}n1"
         try:
-            remote_device.remote_bdev = connect_device(
+            remote_device.remote_bdev = str(connect_device(
                 f"remote_{org_dev.jm_bdev}", org_dev, this_node,
-                reattach=True, attach_timeout=1,
-            )
+                reattach=True, bdev_names=[],attach_timeout=1,
+            ))
         except RuntimeError:
             logger.error(f'Failed to connect to {org_dev.get_id()}')
         for _ in range(10):
