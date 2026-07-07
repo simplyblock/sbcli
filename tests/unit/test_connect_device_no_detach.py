@@ -81,7 +81,7 @@ class TestConnectDeviceNoDetach(unittest.TestCase):
     def test_transient_failed_waits_then_attaches_without_detach(self):
         # failed -> failed -> gone (the module destructed it on its own) ->
         # fresh attach. No detach may ever be issued.
-        rpc = _make_rpc(["failed", "failed", "failed", None, None])
+        rpc = _make_rpc(["failed", "failed", None, None])
         bdev = self._connect(rpc)
         rpc.bdev_nvme_detach_controller.assert_not_called()
         self.assertEqual(bdev, "ctrl-bdev")
@@ -97,7 +97,7 @@ class TestConnectDeviceNoDetach(unittest.TestCase):
         self.assertEqual(bdev, "remote_jm_xn1")
 
     def test_persistent_failed_raises_instead_of_detaching(self):
-        rpc = _make_rpc(["failed", "failed"])
+        rpc = _make_rpc(["failed"])
         with self.assertRaises(RuntimeError):
             self._connect(rpc)
         rpc.bdev_nvme_detach_controller.assert_not_called()

@@ -222,7 +222,7 @@ def check_node(snode, all_lvols):
             for bdev in node_bdevs:
                 if "aliases" in bdev and bdev["aliases"]:
                     node_bdev_names.extend(bdev['aliases'])
-        ret = snode.rpc_client().subsystem_list()
+        # ret = snode.rpc_client().subsystem_list()
         if ret:
             for sub in ret:
                 node_lvols_nqns[sub['nqn']] = sub
@@ -244,7 +244,7 @@ def check_node(snode, all_lvols):
                 for bdev in ret:
                     sec_node_bdev_names[bdev['name']] = bdev
 
-            ret = sec_rpc_client.subsystem_list()
+            # ret = sec_rpc_client.subsystem_list()
             if ret:
                 for sub in ret:
                     sec_node_lvols_nqns[sub['nqn']] = sub

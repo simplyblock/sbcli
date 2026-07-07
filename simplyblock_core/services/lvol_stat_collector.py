@@ -240,7 +240,7 @@ while True:
                     if snode.get_id() in all_node_lvols_nqns and all_node_lvols_nqns[snode.get_id()]:
                         node_lvols_nqns = all_node_lvols_nqns[snode.get_id()]
                     else:
-                        ret = rpc_client.subsystem_list()
+                        # ret = rpc_client.subsystem_list()
                         if ret:
                             node_lvols_nqns = {}
                             for sub in ret:
@@ -275,7 +275,7 @@ while True:
                                     node_bdev_names = {b['name']: b for b in ret}
                                     all_node_bdev_names[sec_node.get_id()] = node_bdev_names
                         if sec_node.get_id() not in all_node_lvols_nqns or not all_node_lvols_nqns[sec_node.get_id()]:
-                            ret = sec_rpc_client.subsystem_list()
+                            # ret = sec_rpc_client.subsystem_list()
                             if ret:
                                 node_lvols_nqns = {}
                                 for sub in ret:

@@ -240,7 +240,7 @@ def _check_node_hublvol(node: StorageNode, node_bdev_names=None, node_lvols_nqns
 
         if not node_lvols_nqns:
             node_lvols_nqns = {}
-            ret = rpc_client.subsystem_list()
+            ret = rpc_client.subsystem_list(node.hublvol.nqn)
             for sub in ret:
                 node_lvols_nqns[sub['nqn']] = sub
 
@@ -320,13 +320,6 @@ def _check_sec_node_hublvol(node: StorageNode, node_bdev=None, node_lvols_nqns=N
                         node_bdev[al]= b
             else:
                 node_bdev = []
-
-        if not node_lvols_nqns:
-            node_lvols_nqns = {}
-            ret = rpc_client.subsystem_list()
-            for sub in ret:
-                node_lvols_nqns[sub['nqn']] = sub
-
 
         ret = rpc_client.bdev_nvme_controller_list(primary_node.hublvol.bdev_name)
         passed = bool(ret)
@@ -991,7 +984,7 @@ def check_lvol_on_node(lvol_id, node_id, node_bdev_names=None, node_lvols_nqns=N
     if not node_bdev_names:
         node_bdev_names = {}
         try:
-            ret = rpc_client.get_bdevs()
+            ret = rpc_client.get_bdevs(lvol.lvol_uuid)
             if ret:
                 for bdev in ret:
                     node_bdev_names[bdev['name']] = bdev
@@ -1005,7 +998,7 @@ def check_lvol_on_node(lvol_id, node_id, node_bdev_names=None, node_lvols_nqns=N
     if not node_lvols_nqns:
         node_lvols_nqns = {}
         try:
-            ret = rpc_client.subsystem_list()
+            ret = rpc_client.subsystem_list(lvol.nqn)
             if ret:
                 for sub in ret:
                     node_lvols_nqns[sub['nqn']] = sub

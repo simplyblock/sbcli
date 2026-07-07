@@ -1320,14 +1320,14 @@ def _connect_to_remote_devs(
 def sync_remote_devices_from_spdk(this_node: StorageNode, node_bdev_names=None):
     """Persist remote data bdevs that already exist in SPDK for this node."""
     db_controller = DBController()
-    if node_bdev_names is None:
-        rpc_client = this_node.rpc_client(timeout=5, retry=1)
-        node_bdevs = rpc_client.get_bdevs()
-        node_bdev_names = [b["name"] for b in node_bdevs] if node_bdevs else []
-    elif isinstance(node_bdev_names, dict):
-        node_bdev_names = list(node_bdev_names.keys())
-
-    node_bdev_names = set(node_bdev_names)
+    # if node_bdev_names is None:
+    #     rpc_client = this_node.rpc_client(timeout=5, retry=1)
+    #     node_bdevs = rpc_client.get_bdevs()
+    #     node_bdev_names = [b["name"] for b in node_bdevs] if node_bdevs else []
+    # elif isinstance(node_bdev_names, dict):
+    #     node_bdev_names = list(node_bdev_names.keys())
+    #
+    # node_bdev_names = set(node_bdev_names)
     fresh_node = db_controller.get_storage_node_by_id(this_node.get_id())
     remote_by_id = {dev.get_id(): dev for dev in fresh_node.remote_devices}
     changed = False
