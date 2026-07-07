@@ -1412,19 +1412,20 @@ jobs:
             echo "- **Total:** ${total_cases} | **Passed:** ${passed_cnt} | **Failed:** ${failed_cnt} | **Skipped:** ${skipped_cnt}"
             echo ""
             if [[ -n "${test_wise}" ]]; then
-              echo "| Status | Test Case | NFS Log Path |"
-              echo "|--------|-----------|--------------|"
+              echo "### Test Case Details"
+              echo "| Test | Result | NFS Log Path |"
+              echo "|------|--------|--------------|"
               while IFS= read -r result_line; do
                 tc_name="$(echo "$result_line" | sed 's/ \(PASSED\|FAILED\|SKIPPED\) CASE\.$//')"
                 if echo "$result_line" | grep -q "PASSED"; then
-                  status_icon="PASSED"
+                  status_icon="✅ PASSED"
                 elif echo "$result_line" | grep -q "FAILED"; then
-                  status_icon="FAILED"
+                  status_icon="❌ FAILED"
                 else
-                  status_icon="SKIPPED"
+                  status_icon="⏭ SKIPPED"
                 fi
                 log_dir="${test_log_paths[$tc_name]:-—}"
-                echo "| ${status_icon} | \`${tc_name}\` | \`${log_dir}\` |"
+                echo "| \`${tc_name}\` | ${status_icon} | \`${log_dir}\` |"
               done <<< "${test_wise}"
             fi
             echo ""
@@ -1532,6 +1533,30 @@ jobs:
               ]
           else:
               lines.append("_(test counts not found in log)_")
+
+          # --- Per-test results ---
+          if os.path.isfile(out_log):
+              ansi = re.compile(r'\x1b\[[0-9;]*m')
+              test_results = []
+              for line in content.splitlines():
+                  clean = ansi.sub('', line)
+                  if not re.search(r'(PASSED|FAILED|SKIPPED) CASE', clean):
+                      continue
+                  m = re.search(r'Test[A-Za-z0-9_]+', clean)
+                  if not m:
+                      continue
+                  name = m.group(0)
+                  if   'PASSED CASE'  in clean: test_results.append(('PASSED',  name))
+                  elif 'FAILED CASE'  in clean: test_results.append(('FAILED',  name))
+                  elif 'SKIPPED CASE' in clean: test_results.append(('SKIPPED', name))
+
+              if test_results:
+                  lines.append("")
+                  lines.append("*Test Results:*")
+                  icons = {'PASSED': ':white_check_mark:', 'FAILED': ':x:', 'SKIPPED': ':fast_forward:'}
+                  for st, nm in test_results:
+                      lines.append(f"{icons.get(st, ':grey_question:')} `{nm}`")
+
           lines += [
               "",
               f":link: *Run:* <{run_url}|View on GitHub>",
@@ -1551,6 +1576,39 @@ jobs:
               print(f"WARN: Slack notification failed: {exc}", file=sys.stderr)
           PYEOF
 
+
+      - name: Collect K8s pod logs into RUN_BASE_DIR
+        if: '!cancelled()'
+        timeout-minutes: 15
+        run: |
+          set +e
+          echo "=== Collecting K8s pod logs ==="
+          NAMESPACE=simplyblock
+          LOG_DIR="${RUN_BASE_DIR}/k8s_pod_logs"
+          mkdir -p "${LOG_DIR}"
+
+          # Collect logs from all simplyblock pods
+          PODS=$(kubectl get pods -n "${NAMESPACE}" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true)
+          for POD in ${PODS}; do
+            echo "  Collecting logs from pod: ${POD}"
+            kubectl logs -n "${NAMESPACE}" "${POD}" --all-containers --timestamps \
+              > "${LOG_DIR}/${POD}.log" 2>&1 || true
+            # Also collect previous container logs if available
+            kubectl logs -n "${NAMESPACE}" "${POD}" --all-containers --timestamps --previous \
+              > "${LOG_DIR}/${POD}_previous.log" 2>/dev/null || true
+            # Remove empty previous log files
+            [ ! -s "${LOG_DIR}/${POD}_previous.log" ] && rm -f "${LOG_DIR}/${POD}_previous.log"
+          done
+
+          # Collect pod descriptions
+          kubectl describe pods -n "${NAMESPACE}" > "${LOG_DIR}/pod_descriptions.txt" 2>&1 || true
+
+          # Collect events
+          kubectl get events -n "${NAMESPACE}" --sort-by=.lastTimestamp \
+            > "${LOG_DIR}/events.txt" 2>&1 || true
+
+          echo "=== Pod logs collected: ${LOG_DIR} ==="
+          ls -la "${LOG_DIR}/" 2>/dev/null || true
 
       - name: Collect Graylog/OpenSearch logs
         if: '!cancelled()'
@@ -1787,6 +1845,15 @@ jobs:
         env:
           CLUSTER_ID: ${{ env.CLUSTER_ID }}
           MON_SECRET: ${{ secrets.MON_SECRET }}
+      - name: Upload logs (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: simplyblock-k8s-native-e2e-logs-${{ github.run_id }}
+          path: |
+            e2e/output.log
+          if-no-files-found: warn
+
       - name: Cleanup MinIO namespace (if deployed)
         if: always()
         run: kubectl delete namespace minio --wait=false 2>/dev/null || true

@@ -643,11 +643,16 @@ class BackupTestBase(TestClusterBase):
         raise TimeoutError(
             f"No completed backup for snapshot {snap_name} within {timeout}s")
 
-    def _restore_backup(self, backup_id: str, lvol_name: str, pool_name: str = None) -> str:
+    def _restore_backup(self, backup_id: str, lvol_name: str, pool_name: str = None,
+                         restore_size: str = None) -> str:
         """Restore a backup to a new lvol; return the new lvol name.
 
         In k8s mode: creates a BackupRestore CRD that provisions a new PVC
         from the StorageBackup.
+
+        Args:
+            restore_size: PVC size for the restored volume (e.g. "20G").
+                          Defaults to self.lvol_size if not provided.
         """
         if self.k8s_test:
             k8s = self._ensure_k8s_utils()
@@ -656,7 +661,7 @@ class BackupTestBase(TestClusterBase):
             sleep_n_sec(60)
             pvc_name = self._k8s_normalize_name(lvol_name)
             restore_name = f"rst-{pvc_name}"
-            pvc_size = self.lvol_size
+            pvc_size = restore_size or self.lvol_size
             if "Gi" not in pvc_size:
                 pvc_size = pvc_size.replace("G", "Gi")
             k8s.create_backup_restore(
@@ -1857,12 +1862,28 @@ class TestBackupRestoreDataIntegrity(BackupTestBase):
 
         tc18_snap_name = f"tc18_snap_{_rand_suffix()}"
         tc18_snap_id = self._create_snapshot(tc18_lvol_id, tc18_snap_name, backup=True)
-        self.logger.info(f"TC-BCK-018: snapshot {tc18_snap_id} + backup triggered — deleting lvol immediately")
+        self.logger.info(f"TC-BCK-018: snapshot {tc18_snap_id} + backup triggered — deleting lvol after backup source resolved")
 
-        # Delete lvol before backup completes (backup reads from snapshot, not live lvol)
+        # Delete lvol before backup completes (backup reads from snapshot, not live lvol).
+        # In K8s mode we must wait for the StorageBackup to leave Pending phase,
+        # otherwise the backup controller can't resolve the source PVC.
         if self.k8s_test:
             k8s = self._ensure_k8s_utils()
             pvc_name = self._k8s_normalize_name(tc18_lvol_name)
+            # tc18_snap_id is the StorageBackup CRD name (bck-tc18-snap-xxx)
+            bck_name = tc18_snap_id
+            # Wait up to 120s for backup to move past Pending
+            for _ in range(24):
+                try:
+                    res = k8s.get_resource_json("storagebackup", bck_name)
+                    phase = (res.get("status", {}).get("phase") or "").lower()
+                    if phase and phase != "pending":
+                        self.logger.info(
+                            f"TC-BCK-018: StorageBackup {bck_name} reached phase={phase}, safe to delete PVC")
+                        break
+                except Exception:
+                    pass
+                sleep_n_sec(5)
             k8s.delete_pvc(pvc_name)
             if pvc_name in self.created_pvcs:
                 self.created_pvcs.remove(pvc_name)
@@ -2860,9 +2881,17 @@ class TestBackupMultipleRestores(BackupTestBase):
         self.logger.info("TC-BCK-106: verify all 3 restored lvols are visible")
         for rname in restored_names:
             self._wait_for_restore(rname)
-        out, _ = self._sbcli("lvol list")
-        for rname in restored_names:
-            assert rname in out, f"TC-BCK-106: {rname} not found in lvol list"
+        if self.k8s_test:
+            # In K8s mode, restored lvols are named restore-<UUID> in sbctl,
+            # but _wait_for_restore already verified PVC is Bound.  Verify
+            # via _get_lvol_id which returns the normalised PVC name.
+            for rname in restored_names:
+                rid = self._get_lvol_id(rname)
+                assert rid, f"TC-BCK-106: {rname} not found via _get_lvol_id"
+        else:
+            out, _ = self._sbcli("lvol list")
+            for rname in restored_names:
+                assert rname in out, f"TC-BCK-106: {rname} not found in lvol list"
         self.logger.info("TC-BCK-106: all 3 restored lvols in lvol list ✓")
 
         # TC-BCK-107: checksums match on all 3
@@ -3468,7 +3497,7 @@ class TestBackupLargeLvol(BackupTestBase):
         # TC-BCK-137: restore with extended timeout
         self.logger.info("TC-BCK-137: restore large lvol (extended timeout 1200s)")
         restored_name = f"large_rest_{_rand_suffix()}"
-        self._restore_backup(bk_id, restored_name)
+        self._restore_backup(bk_id, restored_name, restore_size="20G")
         self._wait_for_restore(restored_name, timeout=1200)
         self.logger.info(f"TC-BCK-137: large lvol restore {restored_name} complete ✓")
 
@@ -3714,7 +3743,7 @@ class TestBackupSecurityLvol(BackupTestBase):
 
         # TC-BCK-154: connect and verify data
         self.logger.info("TC-BCK-154: Verifying restored lvol data …")
-        restored_id = self.sbcli_utils.get_lvol_id(restored_name)
+        restored_id = self._get_lvol_id(restored_name)
         assert restored_id, f"Could not find ID for {restored_name}"
         _, r_mount = self._connect_and_mount(restored_name, restored_id,
                                               mount=f"{self.mount_path}/r{restored_name[-8:]}",
@@ -4070,7 +4099,7 @@ class TestBackupResizedLvol(BackupTestBase):
         rst_v1 = f"rszrst1{_rand_suffix()}"
         self._restore_backup(bk_v1, rst_v1)
         self._wait_for_restore(rst_v1)
-        rst_v1_id = self.sbcli_utils.get_lvol_id(rst_v1)
+        rst_v1_id = self._get_lvol_id(rst_v1)
         assert rst_v1_id
         _, rst_v1_mnt = self._connect_and_mount(
             rst_v1, rst_v1_id,
@@ -4084,7 +4113,7 @@ class TestBackupResizedLvol(BackupTestBase):
         rst_v2 = f"rszrst2{_rand_suffix()}"
         self._restore_backup(bk_v2, rst_v2)
         self._wait_for_restore(rst_v2)
-        rst_v2_id = self.sbcli_utils.get_lvol_id(rst_v2)
+        rst_v2_id = self._get_lvol_id(rst_v2)
         assert rst_v2_id
         _, rst_v2_mnt = self._connect_and_mount(
             rst_v2, rst_v2_id,
@@ -4236,7 +4265,7 @@ class TestBackupUpgradeCompatibility(BackupTestBase):
         rst_name = f"rstupg{_rand_suffix()}"
         self._restore_backup(bk_id, rst_name)
         self._wait_for_restore(rst_name)
-        rst_id = self.sbcli_utils.get_lvol_id(rst_name)
+        rst_id = self._get_lvol_id(rst_name)
         assert rst_id
         _, rst_mnt = self._connect_and_mount(
             rst_name, rst_id,
@@ -4493,7 +4522,7 @@ class TestBackupSourceSwitch(BackupTestBase):
         rst_1 = f"rstsw1{_rand_suffix()}"
         self._restore_backup(bk_id_1, rst_1)
         self._wait_for_restore(rst_1)
-        rst_1_id = self.sbcli_utils.get_lvol_id(rst_1)
+        rst_1_id = self._get_lvol_id(rst_1)
         assert rst_1_id
         _, rst_1_mnt = self._connect_and_mount(
             rst_1, rst_1_id,
@@ -4507,7 +4536,7 @@ class TestBackupSourceSwitch(BackupTestBase):
         rst_2 = f"rstsw2{_rand_suffix()}"
         self._restore_backup(bk_id_2, rst_2)
         self._wait_for_restore(rst_2)
-        rst_2_id = self.sbcli_utils.get_lvol_id(rst_2)
+        rst_2_id = self._get_lvol_id(rst_2)
         assert rst_2_id
         _, rst_2_mnt = self._connect_and_mount(
             rst_2, rst_2_id,
