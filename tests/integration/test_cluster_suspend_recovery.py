@@ -194,8 +194,12 @@ class TestGetNextClusterStatusCountsNonOnline(unittest.TestCase):
         self.assertEqual(self._run(nodes, c), Cluster.STATUS_DEGRADED)
 
     def test_unreachable_node_counts_as_affected(self):
-        # Same story for UNREACHABLE — mgmt-plane gone, data records
-        # may still claim ONLINE because escalation hasn't fired yet.
+        # UNREACHABLE is a mgmt-plane verdict; since the data-plane gating
+        # (fix(suspend): gate mgmt-unreachable on data-plane loss) it counts
+        # toward suspension only once a peer quorum confirms the node's data
+        # plane is gone. With the quorum confirming, 3 unreachable > k=2
+        # -> SUSPENDED.
+        from simplyblock_core.services import storage_node_monitor as mod
         nodes = [
             _node("n0", status=StorageNode.STATUS_UNREACHABLE),
             _node("n1", status=StorageNode.STATUS_UNREACHABLE),
@@ -203,12 +207,30 @@ class TestGetNextClusterStatusCountsNonOnline(unittest.TestCase):
             _node("n3", status=StorageNode.STATUS_ONLINE),
         ]
         c = _cluster(distr_ndcs=1, distr_npcs=2)
-        # 3 unreachable > k=2 -> SUSPENDED
-        self.assertEqual(self._run(nodes, c), Cluster.STATUS_SUSPENDED)
+        with patch.object(mod, "is_node_data_plane_disconnected_quorum",
+                          return_value=True):
+            self.assertEqual(self._run(nodes, c), Cluster.STATUS_SUSPENDED)
+
+    def test_unreachable_without_data_plane_loss_not_counted(self):
+        # The gate itself: mgmt-unreachable with the data plane still serving
+        # (quorum says connected) must NOT suspend — an API blip or mgmt-NIC
+        # flap leaves clients unaffected.
+        from simplyblock_core.services import storage_node_monitor as mod
+        nodes = [
+            _node("n0", status=StorageNode.STATUS_UNREACHABLE),
+            _node("n1", status=StorageNode.STATUS_UNREACHABLE),
+            _node("n2", status=StorageNode.STATUS_UNREACHABLE),
+            _node("n3", status=StorageNode.STATUS_ONLINE),
+        ]
+        c = _cluster(distr_ndcs=1, distr_npcs=2)
+        with patch.object(mod, "is_node_data_plane_disconnected_quorum",
+                          return_value=False):
+            self.assertEqual(self._run(nodes, c), Cluster.STATUS_ACTIVE)
 
     def test_schedulable_node_counts_as_affected(self):
-        # SCHEDULABLE means SPDK RPC double-timed-out — SPDK is sick.
-        # Treat as affected.
+        # SCHEDULABLE means SPDK RPC double-timed-out — SPDK is sick. Counts
+        # once the data-plane quorum confirms (same gate as UNREACHABLE).
+        from simplyblock_core.services import storage_node_monitor as mod
         nodes = [
             _node("n0", status=StorageNode.STATUS_SCHEDULABLE),
             _node("n1", status=StorageNode.STATUS_SCHEDULABLE),
@@ -216,7 +238,9 @@ class TestGetNextClusterStatusCountsNonOnline(unittest.TestCase):
             _node("n3", status=StorageNode.STATUS_ONLINE),
         ]
         c = _cluster(distr_ndcs=1, distr_npcs=2)
-        self.assertEqual(self._run(nodes, c), Cluster.STATUS_SUSPENDED)
+        with patch.object(mod, "is_node_data_plane_disconnected_quorum",
+                          return_value=True):
+            self.assertEqual(self._run(nodes, c), Cluster.STATUS_SUSPENDED)
 
     def test_removed_node_does_not_count_as_affected(self):
         # REMOVED nodes are excluded from the cluster — they should not

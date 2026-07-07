@@ -220,6 +220,18 @@ def get_next_cluster_status(cluster_id):
             affected_nodes += 1
             if node.mgmt_ip not in affected_physical_nodes:
                 affected_physical_nodes.append(node.mgmt_ip)
+        elif node.status == StorageNode.STATUS_OFFLINE:
+            # OFFLINE is a terminal mgmt escalation: data-plane loss was
+            # already confirmed (_check_data_plane_and_escalate), the node
+            # aborted, or an operator shut it down. Its device records may
+            # still read ONLINE (host_reboot flips node status first), but
+            # nothing is serving — count it unconditionally. Re-running the
+            # peer quorum here (as the branch below does for the transient
+            # states) gates suspension on RPC probes against a node that is
+            # already declared gone, and returns ACTIVE for whole-domain
+            # outages (2026-07 failure-domain suspend regressions).
+            if node.mgmt_ip not in affected_physical_nodes:
+                affected_physical_nodes.append(node.mgmt_ip)
         elif node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_REMOVED,
                                  StorageNode.STATUS_DOWN]:
             # Non-ONLINE (UNREACHABLE / SCHEDULABLE / IN_SHUTDOWN / RESTARTING)
