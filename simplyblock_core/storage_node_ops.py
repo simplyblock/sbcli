@@ -6053,6 +6053,28 @@ def _release_lvs_subsys_port_on_peers(lvs_node, exclude_node_id, db_controller):
                          port, pid, e)
 
 
+def _restore_peer_lvstore_status_ready(node_id, db_controller):
+    """Clear an ``in_creation`` lvstore_status leaked onto a peer primary by a
+    FAILED replica-rebuild phase (restart Step 2/3 sets it up front; only the
+    success path restores it). The marker is a window flag, not state — while
+    it lingers, the storage-node monitor skips ALL checks of that peer
+    (check_node's in_creation skip), so a peer whose SPDK dies inside the
+    window stays 'online/health True' forever and every dependent recovery
+    keeps routing to a dead node (incident 2026-07-07 13:52: d277d436 SPDK
+    segfault mid-window -> zombie-online for 1.5h+, 7 failed restarts of the
+    node that set the marker)."""
+    try:
+        fresh = db_controller.get_storage_node_by_id(node_id)
+    except KeyError:
+        return
+    if fresh.lvstore_status == "in_creation":
+        logger.warning(
+            "Restoring lvstore_status of peer %s to 'ready' after failed "
+            "replica-rebuild phase (was left 'in_creation')", node_id)
+        fresh.lvstore_status = "ready"
+        fresh.write_to_db()
+
+
 def recreate_all_lvstores(snode, force=False):
     """Recreate all LVS stacks on a restarting node: primary, secondary, tertiary.
 
@@ -6110,12 +6132,16 @@ def recreate_all_lvstores(snode, force=False):
             if not ret:
                 non_leader_ok = False
                 logger.error(f"Failed to recreate secondary LVS {secondary_primary_node.lvstore}")
+                _restore_peer_lvstore_status_ready(
+                    secondary_primary_node.get_id(), db_controller)
         except Exception as e:
             non_leader_ok = False
             logger.error("Secondary LVS recreation failed: %s", e)
             if secondary_primary_node is not None:
                 _release_lvs_subsys_port_on_peers(
                     secondary_primary_node, snode.get_id(), db_controller)
+                _restore_peer_lvstore_status_ready(
+                    secondary_primary_node.get_id(), db_controller)
 
     # --- Step 3: Tertiary LVS ---
     if snode.lvstore_stack_tertiary:
@@ -6155,12 +6181,16 @@ def recreate_all_lvstores(snode, force=False):
             if not ret:
                 non_leader_ok = False
                 logger.error(f"Failed to recreate tertiary LVS {tertiary_primary_node.lvstore}")
+                _restore_peer_lvstore_status_ready(
+                    tertiary_primary_node.get_id(), db_controller)
         except Exception as e:
             non_leader_ok = False
             logger.error("Tertiary LVS recreation failed: %s", e)
             if tertiary_primary_node is not None:
                 _release_lvs_subsys_port_on_peers(
                     tertiary_primary_node, snode.get_id(), db_controller)
+                _restore_peer_lvstore_status_ready(
+                    tertiary_primary_node.get_id(), db_controller)
 
     # Fail the restart if any non-leader replica did not come up, so the
     # restart task runner retries (the node must not go online advertising a

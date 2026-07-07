@@ -1112,6 +1112,18 @@ def _spdk_is_dead(snode):
         return True
 
 
+# Leaked-"in_creation" backstop: lvstore_status == "in_creation" suppresses
+# ALL monitor checks of a node. Legitimate windows are owned by a restart task
+# or a manual `sn restart` and last minutes; anything older with no active
+# restart task is a leak (a failed replica-rebuild phase that never restored
+# the peer's marker) and must be reclaimed or the node is never monitored
+# again.
+LVSTORE_IN_CREATION_STALE_SEC = 600
+
+# node_id -> monotonic-ish first time this monitor saw the marker set.
+_lvstore_in_creation_first_seen: dict = {}
+
+
 def check_node(snode):
     snode = db.get_storage_node_by_id(snode.get_id())
 
@@ -1143,8 +1155,40 @@ def check_node(snode):
         return False
 
     if snode.status == StorageNode.STATUS_ONLINE and snode.lvstore_status == "in_creation":
-        logger.info(f"Node lvstore is in creation: {snode.get_id()}, skipping")
-        return False
+        # Bounded skip. "in_creation" is a restart-window marker owned by a
+        # (possibly remote) restart flow; while it is set the monitor runs no
+        # checks at all, so a leaked marker turns into a permanent monitoring
+        # blackout: the node stays 'online/health True' even with SPDK dead
+        # (incident 2026-07-07 13:52 — peer d277d436 segfaulted inside the
+        # window of a failed replica-rebuild, marker never restored, node
+        # zombie-online for 1.5h while every dependent restart kept failing
+        # against it). Skip only while a restart task owns the node or the
+        # marker is younger than the grace window; past that, reclaim it and
+        # resume checking.
+        node_id = snode.get_id()
+        first_seen = _lvstore_in_creation_first_seen.setdefault(node_id, time.time())
+        owned = None
+        try:
+            owned = tasks_controller.get_active_node_restart_task(
+                snode.cluster_id, node_id)
+        except Exception as e:
+            logger.debug("Restart-task lookup for %s failed: %s", node_id, e)
+        if owned or (time.time() - first_seen) < LVSTORE_IN_CREATION_STALE_SEC:
+            logger.info(f"Node lvstore is in creation: {snode.get_id()}, skipping")
+            return False
+        logger.error(
+            "Node %s lvstore_status has been 'in_creation' for >%ss with no "
+            "active restart task — reclaiming to 'ready' and resuming checks "
+            "(leaked restart-window marker)",
+            node_id, LVSTORE_IN_CREATION_STALE_SEC)
+        _lvstore_in_creation_first_seen.pop(node_id, None)
+        fresh = db.get_storage_node_by_id(node_id)
+        if fresh.lvstore_status == "in_creation":
+            fresh.lvstore_status = "ready"
+            fresh.write_to_db()
+            snode = fresh
+    else:
+        _lvstore_in_creation_first_seen.pop(snode.get_id(), None)
 
     # A restart task already owns this node's full lifecycle (shutdown ->
     # IN_RESTART -> recreate_lvstore -> ONLINE). The monitor must not run its
