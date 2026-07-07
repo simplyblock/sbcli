@@ -44,7 +44,7 @@ import uuid
 from datetime import datetime
 
 from simplyblock_core import constants
-from simplyblock_core.controllers import migration_events, tasks_controller, snapshot_controller
+from simplyblock_core.controllers import migration_events, tasks_controller
 from simplyblock_core.exceptions import MigrationConflictError, PreconditionError
 from simplyblock_core.controllers.host_auth import _reapply_allowed_hosts
 from simplyblock_core.kms import create_kms_connection, lvol_dek_path, pool_kek_name

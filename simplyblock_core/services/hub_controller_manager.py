@@ -41,6 +41,7 @@ Public API (called by tasks_runner_lvol_migration)
 
 import threading
 import time
+from typing import Optional
 
 from simplyblock_core import utils
 
@@ -82,7 +83,7 @@ class HubControllerManager:
         self._lock = threading.Lock()
         self._entries: dict = {}     # (src_node_id, tgt_node_id) → _HubEntry
         self._detach_ts: dict = {}   # (src_node_id, tgt_node_id) → monotonic ts of last detach
-        self._gc_thread: threading.Thread | None = None
+        self._gc_thread: Optional[threading.Thread] = None
 
     # ------------------------------------------------------------------
     # Public API
