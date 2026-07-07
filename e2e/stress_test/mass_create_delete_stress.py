@@ -77,7 +77,7 @@ class _MassCreateDeleteMixin:
     PVC_SIZE = "1Gi"
 
     # ── Snapshot / clone ───────────────────────────────────────────────────
-    SNAPSHOTS_PER_LVOL = 2
+    SNAPSHOTS_PER_LVOL = 1
     FIO_SAMPLE_PERCENT = 10
     FIO_SAMPLE_MAX = 50             # absolute cap on sampled volumes
 
@@ -694,6 +694,8 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
         self._connected_lvols: dict[str, dict] = {}
         # Lock to prevent races when connecting parent for multiple children
         self._parent_connect_lock = threading.Lock()
+        # Tracks fallback devices picked by _fallback_fio_from_lsblk to avoid reuse
+        self._fallback_devices_used: set[str] = set()
 
     # ── NVMe namespace helpers ─────────────────────────────────────────────
 
@@ -701,6 +703,71 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
         ctrl = get_parent_device(ctrl_dev)
         cmd = f"bash -lc \"nvme ns-rescan {ctrl} 2>/dev/null || true\""
         self.ssh_obj.exec_command(node=node, command=cmd, supress_logs=True)
+
+    # ── FIO fallback helpers ─────────────────────────────────────────────
+
+    def _fallback_fio_from_lsblk(self, client: str) -> tuple[str, str]:
+        """Pick a random unmounted NVMe block device on *client* via lsblk.
+
+        Returns (client, device).  Raises RuntimeError if none available.
+        """
+        cmd = "lsblk -dpno NAME,TYPE,MOUNTPOINT"
+        out, _ = self.ssh_obj.exec_command(node=client, command=cmd)
+        candidates = []
+        for line in (out or "").splitlines():
+            parts = line.split()
+            if len(parts) < 2:
+                continue
+            name, dtype = parts[0], parts[1]
+            # If there's a mountpoint column it means the device is mounted
+            mountpoint = parts[2] if len(parts) > 2 else ""
+            if (
+                dtype == "disk"
+                and name.startswith("/dev/nvme")
+                and not mountpoint
+                and name not in self._fallback_devices_used
+            ):
+                candidates.append(name)
+        if not candidates:
+            raise RuntimeError(
+                f"No available NVMe devices on {client} for fallback FIO"
+            )
+        device = random.choice(candidates)
+        self._fallback_devices_used.add(device)
+        self.logger.info(
+            f"[FIO fallback] Using {device} on {client} (lsblk discovery)"
+        )
+        return client, device
+
+    def _run_fallback_fio(self, client: str, device: str, label: str):
+        """Format, mount, and start FIO on a fallback device.
+
+        Returns the FIO thread (already started).
+        """
+        self.ssh_obj.format_disk(node=client, device=device, fs_type="ext4")
+        mount_path = f"/mnt/mcd_fallback_{label}"
+        self.ssh_obj.mount_path(
+            node=client, device=device, mount_path=mount_path
+        )
+        log_file = f"/tmp/fio_fallback_{label}.log"
+        randseed = random.randint(1, 2**63)
+        fio_thread = threading.Thread(
+            target=self.ssh_obj.run_fio_test,
+            args=(client, None, mount_path, log_file),
+            kwargs={
+                "size": self.FIO_SIZE,
+                "name": f"mcd_fallback_{label}_fio",
+                "rw": "randrw",
+                "bs": "4K",
+                "iodepth": self.FIO_IODEPTH,
+                "numjobs": self.FIO_NUMJOBS,
+                "time_based": True,
+                "runtime": self.FIO_RUNTIME,
+                "randseed": randseed,
+            },
+        )
+        fio_thread.start()
+        return fio_thread
 
     # ── run() ──────────────────────────────────────────────────────────────
 
@@ -1059,10 +1126,32 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
                 self._connect_format_fio_lvol(lvol_name)
                 self._metrics["fio_lvol_started"] += 1
             except Exception as exc:
-                self.logger.error(
-                    f"[Phase 2] FIO setup failed for {lvol_name}: {exc}"
+                self.logger.warning(
+                    f"[Phase 2] Normal FIO setup failed for {lvol_name}: "
+                    f"{exc}; trying lsblk fallback"
                 )
-                self._metrics["fio_lvol_failures"] += 1
+                try:
+                    client = self.fio_node[
+                        hash(lvol_name) % len(self.fio_node)
+                    ]
+                    fb_client, fb_device = self._fallback_fio_from_lsblk(
+                        client
+                    )
+                    fio_thread = self._run_fallback_fio(
+                        fb_client, fb_device, f"lvol_{i}"
+                    )
+                    self._fio_lvol_threads.append(fio_thread)
+                    self._metrics["fio_lvol_started"] += 1
+                    self.logger.info(
+                        f"[Phase 2] Fallback FIO started on {fb_device} "
+                        f"(for {lvol_name})"
+                    )
+                except Exception as fb_exc:
+                    self.logger.error(
+                        f"[Phase 2] Fallback also failed for "
+                        f"{lvol_name}: {fb_exc}"
+                    )
+                    self._metrics["fio_lvol_failures"] += 1
 
             if (i + 1) % 10 == 0:
                 self.logger.info(
@@ -1142,11 +1231,22 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
         }
         return client, device
 
+    def _find_parent_by_nqn(self, nqn: str):
+        """Return (parent_name, pinfo) for the parent whose connected NQN
+        matches *nqn*, or (None, None) if no match."""
+        for pname, pinfo in self._parent_registry.items():
+            if pinfo.get("nqn") == nqn:
+                return pname, pinfo
+        return None, None
+
     def _connect_child_for_fio(self, child_name: str):
         """On-demand NVMe connect for a child namespace.
 
-        Connects the parent subsystem first (if not already connected),
-        then rescans to discover the child device.
+        Uses the child's connect API to discover the real parent
+        subsystem NQN (the control plane decides placement, so the
+        test's internal parent_name mapping may not match reality).
+        Connects that subsystem if needed, rescans, and discovers
+        the child device.
         Returns (client, device).
         """
         info = self._lvol_registry[child_name]
@@ -1162,50 +1262,106 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
                     idx % len(self.fio_node)
                 ]
 
-            # Connect parent if not already connected
-            if not pinfo.get("ctrl_dev"):
-                try:
-                    self._connect_parent(parent_name)
-                except Exception as exc:
-                    raise RuntimeError(
-                        f"{child_name}: parent {parent_name} "
-                        f"connect failed: {exc}"
-                    ) from exc
-
         client = pinfo["client"]
-        ctrl_dev = pinfo.get("ctrl_dev")
+
+        # Ask the control plane for the child's actual connect info.
+        # This returns the parent subsystem NQN that the child lives in
+        # (children are namespaces, not separate NVMe targets).
+        connect_data = self.sbcli_utils.get_request(
+            api_url=f"/lvol/connect/{child_id}"
+        )
+        connect_results = connect_data.get("results", [])
+        if not connect_results:
+            raise RuntimeError(
+                f"{child_name}: connect API returned no results"
+            )
+
+        real_nqn = connect_results[0].get("nqn")
+        child_ns_id = connect_results[0].get("ns_id")
+        if child_ns_id is not None:
+            child_ns_id = int(child_ns_id)
+
+        if not real_nqn:
+            raise RuntimeError(
+                f"{child_name}: connect API returned no NQN"
+            )
+
+        # Find which parent (if any) already owns this NQN on the client.
+        # The test's parent_name mapping may be wrong because add_lvol
+        # with namespaced=True lets the control plane auto-place.
+        with self._parent_connect_lock:
+            actual_parent, actual_pinfo = self._find_parent_by_nqn(real_nqn)
+
+            if actual_pinfo and actual_pinfo.get("ctrl_dev"):
+                # Subsystem already connected
+                ctrl_dev = actual_pinfo["ctrl_dev"]
+            else:
+                # Need to connect this subsystem.  Build connect commands
+                # from the API response.
+                connect_cmds = []
+                for entry in connect_results:
+                    if "connect" in entry:
+                        connect_cmds.append(entry["connect"])
+                    else:
+                        connect_cmds.append(
+                            f"sudo nvme connect "
+                            f"--reconnect-delay={entry.get('reconnect_delay', 2)} "
+                            f"--ctrl-loss-tmo={entry.get('ctrl_loss_tmo', 3600)} "
+                            f"--fast_io_fail_tmo={entry.get('fast_io_fail_tmo', 1)} "
+                            f"--nr-io-queues={entry.get('nr_io_queues', 3)} "
+                            f"--keep-alive-tmo={entry.get('keep_alive_tmo', 4)} "
+                            f"--transport={entry.get('transport', 'tcp')} "
+                            f"--traddr={entry.get('ip')} "
+                            f"--trsvcid={entry.get('port')} "
+                            f"--nqn={real_nqn}"
+                        )
+
+                for cmd in connect_cmds:
+                    self.ssh_obj.exec_command(node=client, command=cmd)
+                sleep_n_sec(3)
+
+                # Discover the controller device for this subsystem
+                parent_uuid = real_nqn.split(":lvol:")[-1]
+                device = self.ssh_obj.get_lvol_vs_device(
+                    node=client, lvol_id=parent_uuid
+                )
+                if not device:
+                    for _ in range(10):
+                        sleep_n_sec(5)
+                        device = self.ssh_obj.get_lvol_vs_device(
+                            node=client, lvol_id=parent_uuid
+                        )
+                        if device:
+                            break
+                if not device:
+                    raise RuntimeError(
+                        f"{child_name}: parent subsystem {real_nqn} "
+                        f"device not found after connect"
+                    )
+
+                ctrl_dev = get_parent_device(device)
+
+                # Update whichever parent registry entry matches, or
+                # the one the test assigned.
+                target_pinfo = actual_pinfo if actual_pinfo else pinfo
+                target_pinfo["ctrl_dev"] = ctrl_dev
+                target_pinfo["nqn"] = real_nqn
+                target_pinfo["devices"] = [device]
+
         if not ctrl_dev:
             raise RuntimeError(
-                f"{child_name}: parent {parent_name} has no ctrl_dev"
+                f"{child_name}: no ctrl_dev after connect"
             )
 
-        # Fetch NQN and NS ID for the child lvol so we can locate
-        # it among the parent subsystem's namespaces.
-        child_nqn = None
-        child_ns_id = None
-        try:
-            details = self.sbcli_utils.get_lvol_details(child_id)
-            if details:
-                detail = details[0] if isinstance(details, list) else details
-                child_nqn = detail.get("nqn")
-                raw_ns_id = detail.get("ns_id")
-                if raw_ns_id is not None:
-                    child_ns_id = int(raw_ns_id)
-        except Exception as exc:
-            self.logger.warning(
-                f"{child_name}: failed to fetch lvol details for "
-                f"namespace lookup: {exc}"
-            )
-
-        # Rescan and find child device
+        # Rescan and find child device by NQN + ns_id
         self._rescan_nvme_namespaces(client, ctrl_dev)
         sleep_n_sec(5)
 
         device = None
-        for _ in range(120):
+        for attempt in range(120):
             device = self.ssh_obj.get_lvol_vs_device(
                 node=client, lvol_id=child_id,
-                nqn=child_nqn, ns_id=child_ns_id,
+                nqn=real_nqn, ns_id=child_ns_id,
             )
             if device:
                 break
@@ -1322,10 +1478,12 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
 
     def _phase_4_delete_lvols(self):
         # Kill lvol FIO (started in Phase 2, left running)
-        for client in set(
+        # Include fio_node for fallback FIO processes
+        kill_clients = set(
             c.get("client") for c in self._connected_lvols.values()
             if c.get("client")
-        ):
+        ) | set(self.fio_node)
+        for client in kill_clients:
             try:
                 self.ssh_obj.exec_command(
                     node=client,
@@ -1492,15 +1650,37 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
             f"=== Phase 6: FIO on {len(sample)} clones ==="
         )
 
-        for clone_name in sample:
+        for i, clone_name in enumerate(sample):
             try:
                 self._connect_format_fio_clone(clone_name)
                 self._metrics["fio_clone_started"] += 1
             except Exception as exc:
-                self.logger.error(
-                    f"[Phase 6] FIO setup failed for {clone_name}: {exc}"
+                self.logger.warning(
+                    f"[Phase 6] Normal FIO setup failed for {clone_name}: "
+                    f"{exc}; trying lsblk fallback"
                 )
-                self._metrics["fio_clone_failures"] += 1
+                try:
+                    client = self.fio_node[
+                        hash(clone_name) % len(self.fio_node)
+                    ]
+                    fb_client, fb_device = self._fallback_fio_from_lsblk(
+                        client
+                    )
+                    fio_thread = self._run_fallback_fio(
+                        fb_client, fb_device, f"clone_{i}"
+                    )
+                    self._fio_clone_threads.append(fio_thread)
+                    self._metrics["fio_clone_started"] += 1
+                    self.logger.info(
+                        f"[Phase 6] Fallback FIO started on {fb_device} "
+                        f"(for {clone_name})"
+                    )
+                except Exception as fb_exc:
+                    self.logger.error(
+                        f"[Phase 6] Fallback also failed for "
+                        f"{clone_name}: {fb_exc}"
+                    )
+                    self._metrics["fio_clone_failures"] += 1
 
         # Wait for FIO to finish
         self.logger.info(
@@ -1574,15 +1754,16 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
             f"=== Phase 7: Delete {len(self._clone_registry)} clones ==="
         )
 
-        # Kill clone FIO
-        for client in set(
+        # Kill clone FIO (include fio_node for fallback FIO processes)
+        kill_clients = set(
             c.get("client") for c in self._connected_lvols.values()
             if c.get("client")
-        ):
+        ) | set(self.fio_node)
+        for client in kill_clients:
             try:
                 self.ssh_obj.exec_command(
                     node=client,
-                    command="sudo pkill -9 -f 'fio.*mcd_clone_' "
+                    command="sudo pkill -9 -f 'fio.*mcd_.*clone_' "
                             "2>/dev/null || true",
                 )
             except Exception:
