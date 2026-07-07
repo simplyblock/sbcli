@@ -1901,6 +1901,34 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 start_storage_node_api_container(mgmt_ip, cluster_ip)
         node_socket = node_config.get("socket")
 
+        # Idempotent re-entry. A prior add attempt for this (node, socket) may
+        # have been interrupted — most commonly because the node rebooted for
+        # the CPU-topology change and killed the agent serving the add, or
+        # because the tasks-runner pod driving the add was itself co-located on
+        # a rebooting storage node and died mid-flight. That leaves a
+        # StorageNode stuck in IN_CREATION. The lease-based takeover re-runs the
+        # add, so this must start from a clean slate: kill any half-started
+        # SPDK and drop the stale record. Without this the retry builds a
+        # DUPLICATE node (observed 2026-07-06) and the total_mem loop below
+        # double-counts the orphan's hugepages. This matches on
+        # api_endpoint+socket — unlike the SSD-overlap cleanup above, which
+        # misses an attempt interrupted before SSD assignment (empty ssd_pcie).
+        for n in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+            if (n.api_endpoint == node_addr and n.socket == node_socket
+                    and n.status == StorageNode.STATUS_IN_CREATION):
+                logger.warning(
+                    f"Found stale IN_CREATION node {n.get_id()} for {node_addr} "
+                    f"socket {node_socket} from an interrupted add; cleaning up before retry")
+                try:
+                    n.client(timeout=20).spdk_process_kill(n.rpc_port, n.cluster_id)
+                except Exception:
+                    logger.warning("Failed to kill SPDK for stale in_creation node", exc_info=True)
+                try:
+                    storage_events.snode_delete(n)
+                except Exception:
+                    logger.warning("snode_delete event failed for stale node", exc_info=True)
+                n.remove(db_controller.kv_store)
+
         total_mem = minimum_hp_memory
         for n in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
             if n.api_endpoint == node_addr and n.socket == node_socket:
